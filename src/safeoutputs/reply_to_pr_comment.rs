@@ -83,7 +83,7 @@ impl SanitizeContent for ReplyToPrCommentResult {
 /// ```
 #[derive(Debug, Clone, Default, SanitizeConfig, Serialize, Deserialize)]
 pub struct ReplyToPrCommentConfig {
-    /// Prefix prepended to all replies (e.g., "[Agent] ")
+    /// Prefix prepended to all replies (e.g., `"[Agent] "`)
     #[serde(default, rename = "comment-prefix")]
     pub comment_prefix: Option<String>,
 

@@ -40,12 +40,22 @@ executed with a separate, scoped write token.
 
 ### 1. Install
 
-Download a release binary from [GitHub Releases](https://github.com/githubnext/ado-aw/releases),
-or build from source:
+Run the first-time installer for your platform:
 
 ```bash
-cargo build --release
+# Linux (x64)
+curl -fsSL https://github.com/githubnext/ado-aw/releases/latest/download/install-linux.sh | sh
+
+# macOS (Apple Silicon)
+curl -fsSL https://github.com/githubnext/ado-aw/releases/latest/download/install-macos.sh | sh
 ```
+
+```powershell
+# Windows (x64)
+powershell -ExecutionPolicy Bypass -NoProfile -Command "iwr https://github.com/githubnext/ado-aw/releases/latest/download/install-windows.ps1 -UseBasicParsing | iex"
+```
+
+The installers download the release binary, verify it against `checksums.txt`, install it to a standard path (`/usr/local/bin` when writable, otherwise a user-local path), and update your PATH when needed.
 
 ### 2. Initialize Your Repository
 
@@ -591,6 +601,8 @@ index to jump to the right page.
 
 **Compiler internals & operations**
 
+- [`docs/ir.md`](docs/ir.md) — typed Azure DevOps pipeline IR (`Pipeline`,
+  jobs/stages/steps, output refs, graph pass, lowering, and target builders).
 - [`docs/cli.md`](docs/cli.md) — `ado-aw` CLI command and flag reference.
 - [`docs/mcp.md`](docs/mcp.md) — MCP server configuration (stdio containers,
   HTTP servers, env passthrough).
@@ -599,16 +611,15 @@ index to jump to the right page.
 - [`docs/network.md`](docs/network.md) — AWF network isolation, default
   allowed domains, ecosystem identifiers, blocking, and ADO `permissions:`
   service-connection model.
-- [`docs/template-markers.md`](docs/template-markers.md) — every `{{ marker }}`
-  in the base templates and how it is replaced.
 - [`docs/filter-ir.md`](docs/filter-ir.md) — filter expression IR for PR
   trigger filters and gate-step generation.
 - [`docs/codemods.md`](docs/codemods.md) — front-matter codemod framework
   (detection-based source rewrites on breaking-change updates).
 - [`docs/ado-script.md`](docs/ado-script.md) — `scripts/ado-script/` workspace
-  (bundled TypeScript runtime helpers: `gate.js`, `import.js`).
+  (bundled TypeScript runtime helpers: `gate.js`, `import.js`,
+  `exec-context-pr.js`, `exec-context-pr-synth.js`).
 - [`docs/extending.md`](docs/extending.md) — adding new CLI commands, compile
-  targets, front-matter fields, template markers, safe-output tools,
+  targets, front-matter fields, typed IR extensions, safe-output tools,
   first-class tools, and runtimes.
 - [`docs/local-development.md`](docs/local-development.md) — local development
   setup notes.

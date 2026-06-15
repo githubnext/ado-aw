@@ -1,132 +1,15 @@
 use std::fs;
 use std::path::PathBuf;
 
-
-/// Asserts that all required `{{ marker }}` placeholders are present in the template.
-fn assert_required_markers(content: &str) {
-    let required = [
-        "{{ repositories }}",
-        "{{ schedule }}",
-        "{{ checkout_self }}",
-        "{{ checkout_repositories }}",
-        "{{ allowed_domains }}",
-        "{{ source_path }}",
-        "{{ pipeline_agent_name }}",
-        "{{ engine_run }}",
-        "{{ compiler_version }}",
-        "{{ integrity_check }}",
-        "{{ firewall_version }}",
-        "{{ mcpg_config }}",
-        "{{ mcpg_version }}",
-    ];
-    for marker in &required {
-        assert!(
-            content.contains(marker),
-            "Template should contain marker: {marker}"
-        );
-    }
-    // Sanity-check that at least 6 replacement markers exist in total.
-    // (${{ }} is valid ADO pipeline syntax and must be preserved.)
-    let marker_count = content.matches("{{ ").count();
-    assert!(
-        marker_count >= 6,
-        "Template should have at least 6 replacement markers"
-    );
-}
-
-/// Asserts that the pool configuration uses the `{{ pool }}` marker everywhere
-/// and that no hardcoded pool name leaks into the template.
-fn assert_pool_config(content: &str) {
-    // Must appear once per job: Agent, Detection, SafeOutputs.
-    let pool_marker_count = content.matches("{{ pool }}").count();
-    assert_eq!(
-        pool_marker_count, 3,
-        "Template should use '{{ pool }}' marker exactly three times (once for each job)"
-    );
-    assert!(
-        !content.contains("name: AZS-1ES-L-MMS-ubuntu-22.04"),
-        "Template should not contain hardcoded pool name 'AZS-1ES-L-MMS-ubuntu-22.04'"
-    );
-}
-
-/// Asserts that the `ado-aw` compiler binary is fetched from GitHub Releases
-/// with a correct, targeted checksum verification.
-fn assert_compiler_download(content: &str) {
-    assert!(
-        !content.contains("pipeline: 2437"),
-        "Template should not reference ADO pipeline 2437 for the compiler"
-    );
-    assert!(
-        content.contains("github.com/githubnext/ado-aw/releases"),
-        "Template should download the compiler from GitHub Releases"
-    );
-    // --ignore-missing silently passes when the binary is absent from checksums.txt.
-    assert!(
-        !content.contains("sha256sum -c checksums.txt --ignore-missing"),
-        "Template should not use --ignore-missing in checksum verification"
-    );
-    assert!(
-        content.contains(r#"grep "ado-aw-linux-x64" checksums.txt | sha256sum -c -"#),
-        "Template should verify ado-aw checksum using targeted grep to ensure binary entry exists"
-    );
-    assert!(
-        !content.contains("grep -q"),
-        "Checksum verification should not pipe through grep -q"
-    );
-}
-
-/// Asserts that the AWF binary is fetched from GitHub Releases, not ADO
-/// pipeline artifacts, and that no legacy artifact tasks remain.
-fn assert_awf_download(content: &str) {
-    assert!(
-        !content.contains("pipeline: 2450"),
-        "Template should not reference ADO pipeline 2450 for the firewall"
-    );
-    assert!(
-        !content.contains("DownloadPipelineArtifact"),
-        "Template should not use DownloadPipelineArtifact task"
-    );
-    assert!(
-        content.contains("github.com/github/gh-aw-firewall/releases"),
-        "Template should download AWF from GitHub Releases"
-    );
-}
-
-/// Asserts that MCPG is integrated correctly and that no legacy mcp-firewall
-/// artefacts remain in the template.
-fn assert_mcpg_integration(content: &str) {
-    assert!(
-        content.contains("--enable-host-access"),
-        "Template should include --enable-host-access for MCPG"
-    );
-    assert!(
-        !content.contains("mcp-firewall-config"),
-        "Template should not reference legacy mcp-firewall config"
-    );
-    assert!(
-        !content.contains("MCP_FIREWALL_EOF"),
-        "Template should not contain legacy firewall heredoc"
-    );
-}
-
-/// Test that verifies the expected structure of the compiled YAML output
-#[test]
-fn test_compiled_yaml_structure() {
-    let template_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("data")
-        .join("base.yml");
-
-    assert!(template_path.exists(), "Base template should exist");
-
-    let content = fs::read_to_string(&template_path).expect("Should be able to read base template");
-
-    assert_required_markers(&content);
-    assert_pool_config(&content);
-    assert_compiler_download(&content);
-    assert_awf_download(&content);
-    assert_mcpg_integration(&content);
-}
+// `assert_required_markers`, `assert_pool_config`, `assert_compiler_download`,
+// `assert_awf_download`, `assert_mcpg_integration`, and `test_compiled_yaml_structure`
+// validated the legacy `src/data/base.yml` template. The standalone target
+// now builds its YAML programmatically via `src/compile/agentic_pipeline.rs`
+// (see `feat(compile): standalone target builds Pipeline IR; delete base.yml`,
+// then `refactor(compile): extract canonical agentic-pipeline shape into
+// agentic_pipeline.rs`); the template is gone, so these template-shape
+// assertions no longer apply. The shape tests in
+// `src/compile/agentic_pipeline.rs` and the bash-lint suite take over coverage.
 
 /// Test that the example file is valid and can be parsed
 #[test]
@@ -157,7 +40,6 @@ fn test_example_file_structure() {
         "Example should have closing front matter"
     );
 }
-
 
 /// Test that validates the presence of required dependencies
 #[test]
@@ -633,8 +515,7 @@ Do something.
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let compiled =
-        fs::read_to_string(&output_path).expect("Compiled YAML should exist on success");
+    let compiled = fs::read_to_string(&output_path).expect("Compiled YAML should exist on success");
     assert!(
         compiled.contains("SYSTEM_ACCESSTOKEN: $(System.AccessToken)"),
         "Executor must map SYSTEM_ACCESSTOKEN from $(System.AccessToken) by default. \
@@ -2768,7 +2649,7 @@ safe-outputs:
         "should have Python install step"
     );
     assert!(
-        compiled.contains("versionSpec: '3.x'"),
+        compiled.contains("versionSpec: 3.x"),
         "should default to Python 3.x"
     );
 
@@ -2873,7 +2754,7 @@ safe-outputs:
         "should have Node install step"
     );
     assert!(
-        compiled.contains("versionSpec: '22.x'"),
+        compiled.contains("versionSpec: 22.x"),
         "should default to Node 22.x"
     );
 
@@ -3267,6 +3148,101 @@ fn assert_valid_yaml(compiled: &str, fixture_name: &str) {
     );
 }
 
+/// Assert that no step's `env:` block contains a `$[ ... ]` ADO runtime
+/// expression. ADO ONLY evaluates `$[ ... ]` inside `variables:` mappings
+/// and `condition:` fields — putting one in step `env:` passes the
+/// literal expression string verbatim to the step. This caused
+/// msazuresphere/4x4 build #612528 where downstream PR-identifier
+/// validation rejected a `PR_ID='$[ coalesce(variables['System.Pull…'`
+/// literal as "not a positive integer".
+///
+/// Walks every step under every job (`extends.parameters.stages[*].jobs[*]`,
+/// `jobs[*]`, `stages[*].jobs[*]`) and inspects the `env:` map at the
+/// step level. Job-level `variables:` and `condition:` are correctly
+/// skipped — those are the legitimate places for `$[ ... ]`.
+fn assert_no_dollar_bracket_in_step_env(compiled: &str) {
+    let yaml_content: String = compiled
+        .lines()
+        .skip_while(|line| line.starts_with('#') || line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let doc: serde_yaml::Value =
+        serde_yaml::from_str(&yaml_content).expect("compiled YAML must parse");
+
+    let mut findings: Vec<String> = Vec::new();
+    walk_steps(&doc, "$", &mut |step, path| {
+        let env = step
+            .as_mapping()
+            .and_then(|m| m.get(serde_yaml::Value::String("env".into())))
+            .and_then(|v| v.as_mapping());
+        let Some(env) = env else {
+            return;
+        };
+        for (k, v) in env {
+            let value_str = match v {
+                serde_yaml::Value::String(s) => s.clone(),
+                _ => continue,
+            };
+            if value_str.contains("$[") {
+                let key_str = k.as_str().unwrap_or("<non-string>");
+                let display = step
+                    .as_mapping()
+                    .and_then(|m| m.get(serde_yaml::Value::String("displayName".into())))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("<no displayName>");
+                findings.push(format!(
+                    "  at {path} (step '{display}'): env.{key_str} = {value_str:?}"
+                ));
+            }
+        }
+    });
+    assert!(
+        findings.is_empty(),
+        "Found `$[ ... ]` ADO runtime expressions inside step env blocks. \
+         ADO only evaluates these in `variables:` mappings and `condition:` \
+         fields, NOT in step env values — the literal expression string is \
+         passed verbatim to the step (msazuresphere/4x4 build #612528). \
+         Use a job-level `variables:` hoist + `$(name)` macro instead.\n{}",
+        findings.join("\n")
+    );
+}
+
+/// Helper: walk every step in the YAML document, invoking `f` with each
+/// step mapping and a slash-delimited path describing where it was found.
+fn walk_steps<F: FnMut(&serde_yaml::Value, &str)>(
+    doc: &serde_yaml::Value,
+    path: &str,
+    f: &mut F,
+) {
+    use serde_yaml::Value;
+    match doc {
+        Value::Mapping(m) => {
+            // If this is a job with `steps:`, visit each step.
+            if let Some(Value::Sequence(steps)) =
+                m.get(Value::String("steps".into()))
+            {
+                for (i, step) in steps.iter().enumerate() {
+                    let step_path = format!("{path}/steps[{i}]");
+                    f(step, &step_path);
+                }
+            }
+            // Recurse into common containers that might hold further jobs.
+            for (k, v) in m {
+                let key = k.as_str().unwrap_or("?");
+                let child_path = format!("{path}/{key}");
+                walk_steps(v, &child_path, f);
+            }
+        }
+        Value::Sequence(s) => {
+            for (i, v) in s.iter().enumerate() {
+                let child_path = format!("{path}[{i}]");
+                walk_steps(v, &child_path, f);
+            }
+        }
+        _ => {}
+    }
+}
+
 // ─── ado-aw marker step (always-on extension) ───────────────────────────────
 
 /// Assert that compiled YAML carries exactly one `# ado-aw-metadata: {…}`
@@ -3311,10 +3287,10 @@ fn assert_marker_step_present(
         compiled.contains("ado-aw metadata: source="),
         "{fixture_name}: compiled YAML missing runtime echo line for ado-aw marker"
     );
-    // displayName: "ado-aw" identifies the injected step uniquely.
+    // displayName: ado-aw identifies the injected step uniquely.
     assert!(
-        compiled.contains("displayName: \"ado-aw\""),
-        "{fixture_name}: compiled YAML missing displayName: \"ado-aw\" on injected step"
+        compiled.contains("displayName: ado-aw"),
+        "{fixture_name}: compiled YAML missing displayName: ado-aw on injected step"
     );
 }
 
@@ -3326,7 +3302,7 @@ fn assert_aw_info_step_present(
     fixture_name: &str,
 ) {
     assert!(
-        compiled.contains("displayName: \"Emit aw_info.json\""),
+        compiled.contains("displayName: Emit aw_info.json"),
         "{fixture_name}: compiled YAML missing Emit aw_info.json step"
     );
     assert!(
@@ -3809,7 +3785,7 @@ fn test_compiled_yaml_survives_tricky_agent_name_standalone() {
 
     // Build-number names must strip invalid characters such as `"` and `:`.
     assert!(
-        compiled.contains(r#"name: "My special agent with quotes-$(BuildID)""#),
+        compiled.contains("name: My special agent with quotes-$(BuildID)"),
         "standalone output should contain sanitized pipeline name; got:\n{compiled}"
     );
 }
@@ -3823,11 +3799,14 @@ fn test_compiled_yaml_survives_tricky_agent_name_1es() {
     // the ADO build-number format needs a varying token; the stage
     // displayName does NOT carry the suffix (stage labels are static).
     assert!(
-        compiled.contains(r#"name: "My special agent with quotes (1ES)-$(BuildID)""#),
+        compiled.contains("name: My special agent with quotes (1ES)-$(BuildID)"),
         "1ES output should contain sanitized pipeline name; got:\n{compiled}"
     );
+    // serde_yaml's prep-PR normalisation chooses single-quoted style for
+    // scalars containing both `"` and `:` (avoids needing backslash
+    // escapes). The string content is identical to the pre-prep form.
     assert!(
-        compiled.contains(r#"displayName: "My \"special\": agent with quotes (1ES)""#),
+        compiled.contains(r#"displayName: 'My "special": agent with quotes (1ES)'"#),
         "1ES output should contain escaped stage displayName; got:\n{compiled}"
     );
 }
@@ -3851,19 +3830,13 @@ fn test_standalone_minimal_compiled_output_is_valid_yaml() {
     );
 }
 
-/// Test that the complete standalone fixture produces valid YAML
-#[test]
-fn test_standalone_complete_compiled_output_is_valid_yaml() {
-    let compiled = compile_fixture("complete-agent.md");
-    assert_valid_yaml(&compiled, "complete-agent.md");
-}
-
 /// Test that the complete standalone fixture emits Setup/Teardown jobs and
 /// that the agentic task waits on Setup. The fixture has `setup:`,
 /// `teardown:`, and `post-steps:` sections so all three should appear.
 #[test]
 fn test_standalone_complete_agent_has_setup_and_teardown_jobs() {
     let compiled = compile_fixture("complete-agent.md");
+    assert_valid_yaml(&compiled, "complete-agent.md");
     assert!(
         compiled.contains("- job: Setup"),
         "Should generate Setup job: {compiled}"
@@ -4061,19 +4034,18 @@ fn test_debug_pipeline_probe_step_indentation_standalone() {
     let compiled = compile_fixture_with_flags("minimal-agent.md", &["--debug-pipeline"]);
 
     // The probe step should be a proper YAML step at the same indent level as
-    // other steps in the Agent job. Find the "- bash:" line and check indent.
-    for line in compiled.lines() {
-        if line.contains("displayName: \"Verify MCP backends\"") {
-            let indent = line.len() - line.trim_start().len();
-            // Standalone jobs use 8 spaces for step properties
-            assert_eq!(
-                indent, 8,
-                "Verify MCP backends displayName should be at 8 spaces indent in standalone, got {}",
-                indent
-            );
-            break;
-        }
-    }
+    // other steps in the Agent job. Find the displayName line and check indent.
+    // Standalone jobs use 4 spaces for step properties.
+    let line = compiled
+        .lines()
+        .find(|l| l.contains("displayName: Verify MCP backends"))
+        .expect("Should find 'Verify MCP backends' displayName in compiled output");
+    let indent = line.len() - line.trim_start().len();
+    assert_eq!(
+        indent, 4,
+        "Verify MCP backends displayName should be at 4 spaces indent in standalone, got {}",
+        indent
+    );
 }
 
 /// Test that debug probe step indentation is correct in 1ES output
@@ -4081,33 +4053,27 @@ fn test_debug_pipeline_probe_step_indentation_standalone() {
 fn test_debug_pipeline_probe_step_indentation_1es() {
     let compiled = compile_fixture_with_flags("1es-test-agent.md", &["--debug-pipeline"]);
 
-    for line in compiled.lines() {
-        if line.contains("displayName: \"Verify MCP backends\"") {
-            let indent = line.len() - line.trim_start().len();
-            // 1ES uses 18 spaces for step properties inside templateContext
-            assert_eq!(
-                indent, 18,
-                "Verify MCP backends displayName should be at 18 spaces indent in 1ES, got {}",
-                indent
-            );
-            break;
-        }
-    }
+    // 1ES uses 12 spaces for step properties inside templateContext.
+    let line = compiled
+        .lines()
+        .find(|l| l.contains("displayName: Verify MCP backends"))
+        .expect("Should find 'Verify MCP backends' displayName in 1ES compiled output");
+    let indent = line.len() - line.trim_start().len();
+    assert_eq!(
+        indent, 12,
+        "Verify MCP backends displayName should be at 12 spaces indent in 1ES, got {}",
+        indent
+    );
 }
 
 // ─── PR Filter Integration Tests ────────────────────────────────────────────
 
-/// Tier 1 PR filter fixture produces valid YAML with inline gate step.
-#[test]
-fn test_pr_filter_tier1_compiled_output_is_valid_yaml() {
-    let compiled = compile_fixture("pr-filter-tier1-agent.md");
-    assert_valid_yaml(&compiled, "pr-filter-tier1-agent.md");
-}
-
 /// Tier 1 PR filters use the bundled Node evaluator via extension.
+/// Also verifies the compiled output is valid YAML.
 #[test]
 fn test_pr_filter_tier1_has_evaluator_gate() {
     let compiled = compile_fixture("pr-filter-tier1-agent.md");
+    assert_valid_yaml(&compiled, "pr-filter-tier1-agent.md");
 
     assert!(
         compiled.contains("- job: Setup"),
@@ -4232,14 +4198,18 @@ fn test_neither_feature_active_emits_no_node_or_download_anywhere() {
 }
 
 /// Per-job download placement: when the gate is inactive AND runtime imports
-/// are inlined, but `on.pr` is configured and execution-context PR is not
-/// disabled, the `exec-context-pr.js` bundle is the only consumer — the
-/// download must land in the Agent job only.
+/// are inlined, but `on.pr` is configured (default `mode: synthetic`) and
+/// execution-context PR is not disabled, two bundle consumers are active:
+///
+///   * `synthPr` (Setup job) — emitted by the synthetic-from-ci path
+///   * `exec-context-pr.js` (Agent job) — staged by the PR contributor
+///
+/// so the script bundle download MUST land in BOTH jobs.
 ///
 /// Closes a coverage gap that `dedupe_gate_only.md` previously left by
 /// pinning `execution-context.pr.enabled: false`.
 #[test]
-fn test_exec_context_pr_only_downloads_bundle_in_agent_job_not_setup() {
+fn test_exec_context_pr_downloads_bundle_in_both_jobs_with_synth_mode() {
     let yaml = compile_fixture("dedupe_exec_context_pr_only.md");
     let agent = extract_job_block(&yaml, "Agent").expect("Agent job should exist");
     assert!(
@@ -4251,10 +4221,14 @@ fn test_exec_context_pr_only_downloads_bundle_in_agent_job_not_setup() {
         "Agent job is missing the exec-context-pr prepare step (the consumer of the download)"
     );
     if let Some(setup) = extract_job_block(&yaml, "Setup") {
+        // Setup-job script bundle download IS expected when on.pr is
+        // configured (default `mode: synthetic` emits the synthPr
+        // step, which is a bundle consumer). Only assert the Agent
+        // job has the bundle download; the Setup-job download is the
+        // synth feature's correct behaviour.
         assert!(
-            !setup.contains("Download ado-aw scripts"),
-            "Setup job should NOT have the script bundle download when the only consumer is the Agent-job exec-context-pr step. \
-             Setup block contents: {}",
+            setup.contains("Download ado-aw scripts"),
+            "Setup job SHOULD have the script bundle download when mode: synthetic is on (the synthPr step is a bundle consumer). Setup block: {}",
             setup
         );
     }
@@ -4275,10 +4249,10 @@ fn test_node_runtime_install_orders_after_ado_script_so_user_version_wins() {
     // is identifiable by its displayName; the user's runtime install
     // carries the explicit user-pinned versionSpec.
     let ado_script_install_idx = agent
-        .find("displayName: \"Install Node.js 20.x\"")
+        .find("displayName: Install Node.js 20.x")
         .expect("ado-script Node 20.x install step missing from Agent job");
     let user_runtime_install_idx = agent
-        .find("'Install Node.js 22.x'")
+        .find("displayName: Install Node.js 22.x")
         .expect("user runtime Node 22.x install step missing from Agent job");
 
     assert!(
@@ -4297,17 +4271,12 @@ fn test_node_runtime_install_orders_after_ado_script_so_user_version_wins() {
     );
 }
 
-/// Tier 2 PR filter fixture produces valid YAML.
-#[test]
-fn test_pr_filter_tier2_compiled_output_is_valid_yaml() {
-    let compiled = compile_fixture("pr-filter-tier2-agent.md");
-    assert_valid_yaml(&compiled, "pr-filter-tier2-agent.md");
-}
-
 /// Tier 2 PR filters produce a Setup job with extension-based gate step.
+/// Also verifies the compiled output is valid YAML.
 #[test]
 fn test_pr_filter_tier2_has_extension_gate() {
     let compiled = compile_fixture("pr-filter-tier2-agent.md");
+    assert_valid_yaml(&compiled, "pr-filter-tier2-agent.md");
 
     assert!(
         compiled.contains("- job: Setup"),
@@ -4367,6 +4336,176 @@ fn test_pr_filter_agent_depends_on_setup() {
     assert!(
         compiled.contains("prGate.SHOULD_RUN"),
         "Agent job condition should reference gate output"
+    );
+}
+
+/// Regression guard for the synth-mode gate-bypass bug: with `mode:
+/// synthetic` (the default) AND `on.pr.filters` present, the Agent-job
+/// condition must REQUIRE the gate to pass for real-PR and synth-PR
+/// builds. Earlier iterations emitted `or(eq(Build.Reason, 'PullRequest'),
+/// eq(synthPr.AW_SYNTHETIC_PR, 'true'), ...)` which silently bypassed the
+/// gate for any PR build — defeating the purpose of `pr.filters`.
+#[test]
+fn test_pr_filter_synth_mode_agent_condition_enforces_gate() {
+    let compiled = compile_fixture("pr-filter-tier1-agent.md");
+
+    // Extract the Agent-job dependsOn condition body so the assertions
+    // target only that section (the same strings can appear elsewhere —
+    // e.g. the exec-context-pr.js step's condition — and would create
+    // false positives if we matched the whole compiled output).
+    //
+    // Supports both legacy multi-line `condition: |\n  and(...)` form
+    // and the newer single-line `condition: and(...)` form emitted by
+    // the typed-IR pipeline builder.
+    let agent_block = extract_job_block(&compiled, "Agent").expect("Agent job present");
+    let condition_section: String = if let Some(tail) = agent_block.split("condition: |").nth(1) {
+        // Multi-line block scalar — stop at the next top-level field.
+        let stop_at = [
+            "\n    pool:",
+            "\n    steps:",
+            "\n    variables:",
+            "\n    workspace:",
+        ];
+        let end = stop_at
+            .iter()
+            .filter_map(|needle| tail.find(needle))
+            .min()
+            .unwrap_or(tail.len());
+        tail[..end].to_string()
+    } else if let Some(tail) = agent_block.split("condition: ").nth(1) {
+        // Single-line — terminate at the next newline.
+        tail.split_once('\n').map(|(line, _)| line.to_string()).unwrap_or_else(|| tail.to_string())
+    } else {
+        String::new()
+    };
+    let condition_section = condition_section.as_str();
+
+    // Correct shape: the AND-NOT clause requiring (not real PR) AND
+    // (not synth PR) before the unconditional-run branch is taken.
+    // Whitespace-agnostic substring matches.
+    assert!(
+        condition_section.contains("ne(variables['Build.Reason'], 'PullRequest')")
+            && condition_section
+                .contains("ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true')"),
+        "Agent-job dependsOn condition must contain the AND-NOT arms \
+         `ne(Build.Reason, 'PullRequest')` and `ne(synthPr.AW_SYNTHETIC_PR, 'true')` \
+         so the gate is enforced for PR builds (real or synth). \
+         Condition section: {condition_section}"
+    );
+    assert!(
+        condition_section.contains("eq(dependencies.Setup.outputs['prGate.SHOULD_RUN'], 'true')"),
+        "Agent-job dependsOn condition must keep the gate-passed activation arm: \
+         {condition_section}"
+    );
+
+    // Defensive: the old permissive bypass arms that bypassed the gate
+    // for any PR build MUST NOT appear inside the Agent-job dependsOn
+    // condition.
+    assert!(
+        !condition_section.contains("eq(variables['Build.Reason'], 'PullRequest')"),
+        "Agent-job dependsOn condition must NOT contain the buggy \
+         `eq(Build.Reason, 'PullRequest')` bypass arm (would auto-run on \
+         every real PR build regardless of gate): {condition_section}"
+    );
+    assert!(
+        !condition_section
+            .contains("eq(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'], 'true')"),
+        "Agent-job dependsOn condition must NOT contain the buggy \
+         `eq(synthPr.AW_SYNTHETIC_PR, 'true')` bypass arm (would auto-run on \
+         every synth-promoted build regardless of gate): {condition_section}"
+    );
+}
+
+/// Regression guard for the synth-mode gate-step same-job ref bug: the
+/// gate step lives in the **Setup** job (same job as `synthPr`), so its
+/// env block must reference the synth outputs with the **macro** form
+/// `$(synthPr.X)`. The same-job runtime-expression form
+/// `$[ variables['synthPr.X'] ]` resolves to empty (step outputs are not
+/// exposed to runtime expressions in the producing job), and the
+/// cross-job form `dependencies.Setup.outputs[...]` is undefined inside
+/// the producing job — both silently coalesce to empty, leaving
+/// `AW_SYNTHETIC_PR` empty and causing the gate bypass to misfire.
+#[test]
+fn test_pr_filter_synth_mode_gate_step_uses_same_job_synth_ref() {
+    let compiled = compile_fixture("pr-filter-tier1-agent.md");
+
+    // Gate step reads `AW_SYNTHETIC_PR` via plain `$(...)` macro — the
+    // `synthPr` step (in the same Setup job) emits this name via
+    // `setVar`, registering it in the regular variable namespace. ADO
+    // `$[ ... ]` runtime expressions are NOT evaluated inside step
+    // `env:` values, so the previous `$[ coalesce(...) ]` form passed
+    // the literal expression string through to gate/facts.ts and
+    // caused `Missing ADO env vars` errors (msazuresphere/4x4
+    // build #612528).
+    assert!(
+        compiled.contains("AW_SYNTHETIC_PR: $(AW_SYNTHETIC_PR)"),
+        "Gate step env must reference the same-job synthPr value via the plain \
+         `$(AW_SYNTHETIC_PR)` macro — exec-context-pr-synth's `setVar` emits \
+         the regular variable, and `$( )` macros work in step env (whereas \
+         `$[ ... ]` runtime expressions don't)."
+    );
+    // The fixture exercises source-branch and target-branch filters,
+    // so the gate-step env vars must reference the canonical `AW_PR_*`
+    // names that synthPr always emits (resolved real-or-synth values).
+    // (ADO_PR_ID is not exported by this fixture's filter set, so we
+    // don't assert it here.)
+    assert!(
+        compiled.contains("ADO_SOURCE_BRANCH: $(AW_PR_SOURCEBRANCH)"),
+        "ADO_SOURCE_BRANCH must reference the canonical AW_PR_SOURCEBRANCH variable \
+         (emitted by exec-context-pr-synth via setVar — real on PR builds, \
+         discovered on synth-promoted CI builds)."
+    );
+    assert!(
+        compiled.contains("ADO_TARGET_BRANCH: $(AW_PR_TARGETBRANCH)"),
+        "ADO_TARGET_BRANCH must reference the canonical AW_PR_TARGETBRANCH variable."
+    );
+
+    // Defensive: NO `$[ ... ]` runtime expressions in step env anywhere
+    // in this compiled output. ADO only evaluates them inside
+    // `variables:` mappings and `condition:` fields. (The Agent job's
+    // `variables:` hoist legitimately uses `$[ ... ]` — that's fine
+    // because it's inside `variables:`, not step env.)
+    assert_no_dollar_bracket_in_step_env(&compiled);
+
+    // The same-job gate step MUST NOT use the broken same-job runtime
+    // expression form `variables['synthPr.X']` (resolves empty) nor the
+    // cross-job `dependencies.Setup.outputs[...]` form (undefined in the
+    // producing job) for synthPr references. (Both are fine elsewhere —
+    // e.g. the Agent-job dependsOn condition — but not inside the Setup
+    // job's own steps.) Bound the gate-step section by the start of the
+    // next top-level job (`\n  - job: `), since extract_job_block's
+    // `\n- job: ` boundary doesn't match the 2-space-indented job list
+    // items produced for this target.
+    let setup_block = extract_job_block(&compiled, "Setup").expect("Setup job present");
+    let gate_section = setup_block
+        .split("name: prGate")
+        .nth(1)
+        .map(|tail| {
+            let stop_at = [
+                "\n      - bash:",
+                "\n      - task:",
+                "\n      - script:",
+                "\n  - job: ",
+            ];
+            let end = stop_at
+                .iter()
+                .filter_map(|needle| tail.find(needle))
+                .min()
+                .unwrap_or(tail.len());
+            &tail[..end]
+        })
+        .unwrap_or("");
+    assert!(
+        !gate_section.contains("dependencies.Setup.outputs['synthPr."),
+        "Gate step (inside Setup job) must NOT reference `dependencies.Setup.outputs['synthPr.X']` — \
+         that is cross-job syntax and is undefined within the producing job. \
+         Gate section: {gate_section}"
+    );
+    assert!(
+        !gate_section.contains("variables['synthPr."),
+        "Gate step (inside Setup job) must NOT reference `variables['synthPr.X']` — \
+         step outputs are not exposed to runtime expressions in the producing job \
+         and resolve to empty. Gate section: {gate_section}"
     );
 }
 
@@ -4592,7 +4731,7 @@ fn test_default_pipeline_mounts_az_and_allows_azure_hosts() {
     // ADO log; if it changes the documentation in docs/network.md and
     // docs/tools.md should be updated too.
     assert!(
-        compiled.contains(r#"displayName: "Detect Azure CLI on host (for AWF mount)""#),
+        compiled.contains("displayName: Detect Azure CLI on host (for AWF mount)"),
         "compiled YAML must contain the Azure CLI detection prepare step. \
          Compiled:\n{compiled}"
     );
@@ -4631,7 +4770,7 @@ fn test_default_pipeline_mounts_az_and_allows_azure_hosts() {
     // so agents on runners WITHOUT az never see the advisory and
     // never try to call az.
     assert!(
-        compiled.contains(r#"displayName: "Append Azure CLI prompt""#),
+        compiled.contains("displayName: Append Azure CLI prompt"),
         "compiled YAML must contain the 'Append Azure CLI prompt' step \
          emitted by AzureCliExtension::prepare_steps. Compiled:\n{compiled}"
     );
@@ -4646,7 +4785,7 @@ fn test_default_pipeline_mounts_az_and_allows_azure_hosts() {
     // wrong step. Find the displayName index, then check the next ~200
     // chars for the condition line.
     let display_idx = compiled
-        .find(r#"displayName: "Append Azure CLI prompt""#)
+        .find("displayName: Append Azure CLI prompt")
         .expect("displayName already asserted to be present");
     let window_end = (display_idx + 300).min(compiled.len());
     let window = &compiled[display_idx..window_end];
@@ -4657,7 +4796,12 @@ fn test_default_pipeline_mounts_az_and_allows_azure_hosts() {
          chars after the displayName). Window:\n{window}"
     );
     // Anchor strings: lock the load-bearing parts of the advisory.
-    for anchor in ["/usr/bin/az", "az devops", "AZURE_DEVOPS_EXT_PAT", "missing-tool"] {
+    for anchor in [
+        "/usr/bin/az",
+        "az devops",
+        "AZURE_DEVOPS_EXT_PAT",
+        "missing-tool",
+    ] {
         assert!(
             compiled.contains(anchor),
             "compiled YAML must contain advisory anchor `{anchor}`. \
@@ -4790,89 +4934,6 @@ fn test_example_dogfood_failure_reporter_structure() {
         content.contains("target-repo: githubnext/ado-aw"),
         "Example should target githubnext/ado-aw"
     );
-}
-
-/// Test that every `{{ marker }}` used in `src/data/*.yml` has a corresponding
-/// `## {{ marker }}` heading in `docs/template-markers.md`.
-///
-/// This is the CI/docs marker-drift guard: if a marker is added to a template
-/// without updating the docs, this test fails.
-#[test]
-fn test_template_marker_docs_coverage() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let data_dir = manifest_dir.join("src").join("data");
-    let docs_file = manifest_dir.join("docs").join("template-markers.md");
-
-    // --- collect markers from src/data/*.yml ---
-    let yml_entries = fs::read_dir(&data_dir)
-        .unwrap_or_else(|e| panic!("Cannot read {}: {e}", data_dir.display()));
-
-    let mut yml_markers: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for entry in yml_entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("yml") {
-            continue;
-        }
-        let content = fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("Cannot read {}: {e}", path.display()));
-        for cap in regex_captures_markers(&content) {
-            yml_markers.insert(cap);
-        }
-    }
-
-    // --- collect documented marker headings from docs/template-markers.md ---
-    let docs = fs::read_to_string(&docs_file)
-        .unwrap_or_else(|e| panic!("Cannot read {}: {e}", docs_file.display()));
-
-    let mut documented: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for line in docs.lines() {
-        // Match lines like: ## {{ marker_name }}
-        if let Some(rest) = line.strip_prefix("## {{ ")
-            && let Some(name) = rest.split("}}").next()
-        {
-            documented.insert(name.trim().to_string());
-        }
-    }
-
-    // Every marker that appears in the yml files must have a docs heading.
-    let mut missing: Vec<String> = Vec::new();
-    for marker in &yml_markers {
-        if !documented.contains(marker.as_str()) {
-            missing.push(format!("{{{{ {marker} }}}}"));
-        }
-    }
-
-    assert!(
-        missing.is_empty(),
-        "The following template markers appear in src/data/*.yml but have no \
-         '## {{{{ marker }}}}' heading in docs/template-markers.md — add docs or \
-         update the marker name:\n  {}",
-        missing.join("\n  ")
-    );
-}
-
-/// Extract all `{{ name }}` marker names from `content` (excluding `${{ }}` ADO expressions).
-fn regex_captures_markers(content: &str) -> Vec<String> {
-    let mut results = Vec::new();
-    let mut s: &str = content;
-    while let Some(start) = s.find("{{ ") {
-        // Skip ADO ${{ }} expressions
-        if start > 0 && s.as_bytes().get(start - 1) == Some(&b'$') {
-            s = &s[start + 3..];
-            continue;
-        }
-        let after = &s[start + 3..];
-        if let Some(end) = after.find("}}") {
-            let name = after[..end].trim().to_string();
-            if !name.is_empty() {
-                results.push(name);
-            }
-            s = &after[end + 2..];
-        } else {
-            break;
-        }
-    }
-    results
 }
 
 // =====================================================================
@@ -5150,8 +5211,6 @@ fn test_job_target_with_setup_emits_dual_branch_dependson_with_each() {
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
-
-
 // ============================================================================
 // Execution-context extension (issue #860)
 // ============================================================================
@@ -5181,9 +5240,55 @@ fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
         compiled.contains("Stage PR execution context (aw-context/pr/*)"),
         "Should emit the PR context prepare step displayName"
     );
+    // The synth-active prepare step uses `condition: succeeded()` and
+    // gates in bash (cross-job `dependencies.Setup.outputs[...]` refs
+    // are ILLEGAL in step-level `condition:` — ADO rejects them with
+    // "Unrecognized value: 'dependencies'"). `synthPr` now always runs
+    // and emits a single resolved `AW_PR_ID` (real on PR builds,
+    // discovered on synth-promoted CI builds, empty otherwise), so the
+    // gate collapses to a single empty-check.
     assert!(
-        compiled.contains("condition: eq(variables['Build.Reason'], 'PullRequest')"),
-        "Prepare step must be gated on PR builds at the ADO condition layer"
+        compiled.contains("if [ -z \"$AW_PR_ID\" ]; then"),
+        "Prepare step must include the bash gate on empty AW_PR_ID (replaces the previous \
+         BUILD_REASON + AW_SYNTHETIC_PR pair — the merge now happens inside synthPr)"
+    );
+    // The Stage step's own env block must NOT contain a direct
+    // `dependencies.Setup.outputs[...]` reference. (The same expression
+    // IS expected at Agent-job-level `variables:` scope, the documented
+    // safe location — that hoist is asserted separately.) Scope this
+    // check by isolating the Stage step's bash + env body.
+    let stage_step = compiled
+        .split("Stage PR execution context")
+        .nth(1)
+        .map(|tail| {
+            // Stop at the next step (`- bash:` / `- task:` / `- script:`)
+            // or end of the job (a less-indented key).
+            let stop_at = ["\n      - bash:", "\n      - task:", "\n      - script:"];
+            let end = stop_at
+                .iter()
+                .filter_map(|needle| tail.find(needle))
+                .min()
+                .unwrap_or(tail.len());
+            &tail[..end]
+        })
+        .unwrap_or("");
+    assert!(
+        !stage_step.contains("dependencies.Setup.outputs['synthPr."),
+        "Stage step's own env block must NOT reference \
+         `dependencies.Setup.outputs[...]` — that is cross-job syntax. The cross-job \
+         output is hoisted into Agent-job-level `variables:` (see \
+         `generate_agent_job_variables`) and the Stage step reads it via the \
+         `$(AW_PR_*)` macros. Stage step body: {stage_step}"
+    );
+    // ADO does NOT evaluate `$[ ... ]` runtime expressions inside step
+    // `env:` values — only inside `variables:` mappings and
+    // `condition:` fields. Any `$[ ` in this step's env block would be
+    // passed through to bash as a literal string (the bug fixed here).
+    assert!(
+        !stage_step.contains("$["),
+        "Stage step's env block must not contain `$[ ` runtime expressions \
+         (ADO doesn't evaluate them at step-env scope). Use the Agent-job-level \
+         `variables:` hoist + `$(name)` macros instead. Stage step body: {stage_step}"
     );
     assert!(
         compiled.contains("SYSTEM_ACCESSTOKEN: $(System.AccessToken)"),
@@ -5219,15 +5324,19 @@ fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
         "v7: the git_fetch wrapper moved into the bundle"
     );
 
-    // v7: env passthrough — Node reads the ADO predefined vars from
-    // `process.env` (see `index.ts::main` and `validate.ts`).
+    // v7 + mode: synthetic (the default): env passthrough — the bundle
+    // reads ADO predefined vars from `process.env`. The compiler emits
+    // plain `$(AW_PR_*)` macros that read the Agent-job-level hoisted
+    // variables (populated from the `synthPr` Setup-job outputs which
+    // hold the resolved real-or-synth PR identifiers). No `$[ ... ]`
+    // in step env — see `generate_agent_job_variables` for the hoist.
     assert!(
-        compiled.contains("SYSTEM_PULLREQUEST_PULLREQUESTID: $(System.PullRequest.PullRequestId)"),
-        "Prepare step must pass the PR id through to the bundle"
+        compiled.contains("SYSTEM_PULLREQUEST_PULLREQUESTID: $(AW_PR_ID)"),
+        "Prepare step must pass the PR id via the hoisted AW_PR_ID job-variable"
     );
     assert!(
-        compiled.contains("SYSTEM_PULLREQUEST_TARGETBRANCH: $(System.PullRequest.TargetBranch)"),
-        "Prepare step must pass the PR target branch through to the bundle"
+        compiled.contains("SYSTEM_PULLREQUEST_TARGETBRANCH: $(AW_PR_TARGETBRANCH)"),
+        "Prepare step must pass the PR target branch via the hoisted AW_PR_TARGETBRANCH job-variable"
     );
     assert!(
         compiled.contains("SYSTEM_TEAMPROJECT: $(System.TeamProject)"),
@@ -5302,9 +5411,9 @@ fn test_execution_context_pr_does_not_leak_system_accesstoken() {
                 // that contains SYSTEM_ACCESSTOKEN, capture the
                 // sibling `displayName` (if any).
                 if let Some(Value::Mapping(env_map)) = m.get(Value::String("env".to_string())) {
-                    let has_token = env_map.iter().any(|(k, _v)| {
-                        matches!(k, Value::String(s) if s == "SYSTEM_ACCESSTOKEN")
-                    });
+                    let has_token = env_map
+                        .iter()
+                        .any(|(k, _v)| matches!(k, Value::String(s) if s == "SYSTEM_ACCESSTOKEN"));
                     if has_token {
                         let display = m
                             .get(Value::String("displayName".to_string()))
@@ -5341,9 +5450,39 @@ fn test_execution_context_pr_does_not_leak_system_accesstoken() {
     const ALLOWED_DISPLAY_NAMES: &[&str] = &[
         // Owned by this extension.
         "Stage PR execution context (aw-context/pr/*)",
+        // Pipeline contributor (Stage 2 of plan.md). Activates on
+        // on.pipeline / Build.Reason == ResourceTrigger. Needs the
+        // token to call the Build REST API to fetch upstream
+        // metadata. Same trust-boundary posture as the PR
+        // contributor — token mapped only into this step's env.
+        "Stage pipeline execution context (aw-context/pipeline/*)",
+        // CI-push contributor (Stage 3 of plan.md). Opt-in,
+        // default OFF. Activates on IndividualCI / BatchedCI runs.
+        // Bearer for "last successful build" lookup + git fetch
+        // deepening.
+        "Stage ci-push execution context (aw-context/ci-push/*)",
+        // Workitem contributor (Stage 4 of plan.md). Activates whenever
+        // the PR contributor activates. Needs the token to call the
+        // ADO REST API to look up linked work items. Same trust-boundary
+        // posture as the PR contributor — token mapped only into this
+        // step's env, never reachable from the agent step.
+        "Stage workitem execution context (aw-context/workitem/*)",
+        // Schedule contributor (Stage 5 of plan.md). Opt-in, default
+        // OFF. Activates on Build.Reason == Schedule. Bearer for
+        // REST + git fetch — same posture as ci-push.
+        "Stage schedule execution context (aw-context/schedule/*)",
+        // PR-checks extension (Stage 6 of plan.md). Activates whenever
+        // the PR contributor activates AND `pr.checks.enabled: true`.
+        // Needs the token to call the Build REST API. Same posture.
+        "Stage PR-checks execution context (aw-context/pr/checks/*)",
         // Stage 3 SafeOutputs executor — separate non-agent job; needs
         // the token to apply safe outputs against ADO. See PR #873.
         "Execute safe outputs (Stage 3)",
+        // Setup-job synth-PR step. Needs the token to call the ADO REST
+        // API to look up the active PR for `Build.SourceBranch` on
+        // CI-triggered builds (issue #916). Runs in the Setup job, well
+        // before the AWF sandbox is provisioned for the Agent job.
+        "Resolve synthetic PR context",
     ];
 
     let mut saw_exec_context_step = false;
@@ -5370,6 +5509,113 @@ fn test_execution_context_pr_does_not_leak_system_accesstoken() {
          among the env blocks declaring SYSTEM_ACCESSTOKEN, but it was missing. \
          The PR contributor did not activate as expected."
     );
+}
+
+/// Regression trap for an entire bug class: ADO step-level `condition:`
+/// fields MUST NOT reference `dependencies.<Job>.outputs[...]`. That
+/// syntax is only legal in **job**-level conditions, in `variables:`
+/// mappings, and in step-level `env:` values (via `$[ ... ]`). Using
+/// it in a step condition produces a pipeline-validation error
+/// ("Unrecognized value: 'dependencies'") and the build fails before
+/// any job step runs.
+///
+/// This test walks compiled YAML for fixtures exercising both the
+/// synth-active (default-mode) and synth-inactive (no-synth) PR
+/// contributor paths AND a fixture with `mode: synthetic` + explicit
+/// `pr.filters`. If any step's `condition:` value contains the
+/// substring `dependencies.`, the test fails with a pointer to the
+/// offending step. This protects every extension that emits a step
+/// condition, not just `exec_context/pr`.
+///
+/// History: v6.x emitted `condition: or(eq(variables['Build.Reason'],
+/// 'PullRequest'), eq(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR'],
+/// 'true'))` on the "Stage PR execution context" step. ADO accepted
+/// the YAML at parse time (it IS valid YAML) but rejected the
+/// expression at expand time, breaking every synth-active pipeline.
+#[test]
+fn test_no_step_condition_references_cross_job_dependencies() {
+    use serde_yaml::Value;
+
+    /// Fixtures that should exercise different branches of step
+    /// `condition:` emission (synth-active, synth-inactive, with
+    /// filters, etc.). Add new fixtures here as we add new extensions
+    /// or new step-condition emission paths.
+    const FIXTURES: &[&str] = &[
+        "synthetic-pr-default.md",     // synth-active, no pr.filters
+        "execution-context-agent.md",  // exec_context_pr active, default config
+        "pr-mode-policy.md",           // synth-inactive, on.pr present
+        "minimal-agent.md",            // no on.pr at all
+    ];
+
+    /// Walk the YAML. For every mapping that has a `condition:` key,
+    /// if the value contains `dependencies.`, record the enclosing
+    /// `displayName` (or `job` / `stage` as fallback identifiers) so
+    /// the failure points at a specific step.
+    ///
+    /// Distinguishes step vs job/stage by the presence of sibling
+    /// keys that are step-exclusive (`bash`, `script`, `task`,
+    /// `displayName` is shared, but together with one of the
+    /// step keys it's clearly a step). Jobs/stages have their own
+    /// `condition:` and DO allow cross-job dep refs, so they must
+    /// be filtered OUT.
+    fn walk(v: &Value, hits: &mut Vec<String>) {
+        match v {
+            Value::Mapping(m) => {
+                if let Some(Value::String(cond)) = m.get(Value::String("condition".to_string()))
+                    && cond.contains("dependencies.")
+                {
+                    // Decide: step or job/stage? A mapping is a STEP if it
+                    // has any of the step-exclusive keys. Otherwise treat
+                    // as job/stage (legal location for the ref) and skip.
+                    let is_step = ["bash", "script", "task", "powershell", "pwsh", "checkout"]
+                        .iter()
+                        .any(|k| m.contains_key(Value::String((*k).to_string())));
+                    if is_step {
+                        let display = m
+                            .get(Value::String("displayName".to_string()))
+                            .and_then(|d| d.as_str())
+                            .unwrap_or("<no displayName>");
+                        hits.push(format!(
+                            "step `{display}` has illegal cross-job dep ref in condition: `{cond}`"
+                        ));
+                    }
+                }
+                for (_, vv) in m {
+                    walk(vv, hits);
+                }
+            }
+            Value::Sequence(seq) => {
+                for item in seq {
+                    walk(item, hits);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for fixture in FIXTURES {
+        let compiled = compile_fixture_with_flags(fixture, &["--skip-integrity"]);
+        let yaml_content: String = compiled
+            .lines()
+            .skip_while(|line| line.starts_with('#') || line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parsed: Value = serde_yaml::from_str(&yaml_content)
+            .unwrap_or_else(|e| panic!("{fixture}: compiled YAML must parse: {e}"));
+
+        let mut hits: Vec<String> = Vec::new();
+        walk(&parsed, &mut hits);
+
+        assert!(
+            hits.is_empty(),
+            "{fixture}: found {} step(s) with illegal cross-job `dependencies.X.outputs[...]` \
+             refs in `condition:`. ADO rejects these at pipeline-expansion time with \
+             \"Unrecognized value: 'dependencies'\". Project the value through step `env:` \
+             (legal via `$[ ... ]`) and gate in the script body instead. Offenders:\n  - {}",
+            hits.len(),
+            hits.join("\n  - ")
+        );
+    }
 }
 
 /// When the agent is not PR-triggered, the execution-context extension
@@ -5632,3 +5878,124 @@ Body.
 // (see `validate.ts::TARGET_BRANCH_RE`); the vitest tests under
 // `validate.test.ts` guard the regression there. This Rust-side
 // test is removed for the same reason.
+
+// ─── Synthetic-from-ci snapshot fixtures (issue #916) ────────────────────────
+
+/// Fixture A: agent with on.pr and default `mode: synthetic`.
+/// Compiled YAML must contain the full synth wiring (synthPr Setup step,
+/// PR_SYNTH_SPEC env, broadened exec-context-pr.js condition, agent-job
+/// AW_SYNTHETIC_PR_SKIP guard). The CI trigger must NOT be auto-narrowed
+/// to `pr.branches.include` — those are PR target branches, and narrowing
+/// would suppress CI on the feature branches synthPr actually needs.
+#[test]
+fn test_synthetic_pr_default_emits_full_synth_wiring() {
+    let compiled = compile_fixture_with_flags("synthetic-pr-default.md", &["--skip-integrity"]);
+    assert_valid_yaml(&compiled, "synthetic-pr-default.md");
+
+    // synthPr step in Setup job, before prGate.
+    assert!(
+        compiled.contains("name: synthPr"),
+        "Fixture A must emit the synthPr Setup-job step"
+    );
+    assert!(
+        compiled.contains("PR_SYNTH_SPEC:"),
+        "Fixture A must emit the PR_SYNTH_SPEC env var carrying the base64 spec"
+    );
+    assert!(
+        compiled.contains("exec-context-pr-synth.js"),
+        "Fixture A must reference the synth bundle path"
+    );
+
+    // Broadened exec-context-pr gate — now a bash guard rather than a
+    // step-level `condition:` (cross-job `dependencies.Setup.outputs[...]`
+    // refs are ILLEGAL in step `condition:`; ADO rejects them with
+    // "Unrecognized value: 'dependencies'"). `synthPr` now always runs
+    // and emits a single resolved `AW_PR_ID` (real on PR builds,
+    // discovered on synth-promoted CI builds), so the gate collapses
+    // to a single empty-check.
+    assert!(
+        compiled.contains("if [ -z \"$AW_PR_ID\" ]; then"),
+        "Fixture A must include the bash gate on empty AW_PR_ID (replaces the previous \
+         BUILD_REASON + AW_SYNTHETIC_PR pair — the merge now happens inside synthPr)"
+    );
+    assert!(
+        compiled.contains("SYSTEM_PULLREQUEST_PULLREQUESTID: $(AW_PR_ID)"),
+        "Fixture A's exec-context-pr step must read the hoisted Agent-job-level \
+         AW_PR_ID via the $() macro (NOT a $[ ... ] runtime expression in step env — \
+         ADO doesn't evaluate those there, see build #612528)"
+    );
+    // The Agent-job-level hoist itself must be present and pull from
+    // the cross-job synth outputs (legal scope for `dependencies.X.outputs[...]`).
+    for name in &["AW_PR_ID", "AW_PR_TARGETBRANCH", "AW_PR_SOURCEBRANCH", "AW_SYNTHETIC_PR"] {
+        let needle = format!(
+            "{name}: $[ coalesce(dependencies.Setup.outputs['synthPr.{name}'], '') ]"
+        );
+        assert!(
+            compiled.contains(&needle),
+            "Fixture A must hoist `synthPr.{name}` into Agent-job-level `variables:` \
+             so step-env consumers can read `$({name})` safely"
+        );
+    }
+
+    // Agent-job AW_SYNTHETIC_PR_SKIP guard.
+    assert!(
+        compiled.contains("ne(dependencies.Setup.outputs['synthPr.AW_SYNTHETIC_PR_SKIP'], 'true')"),
+        "Fixture A's Agent-job condition must honour the synth-skip flag"
+    );
+    // NOTE: this fixture does not declare `on.pr.filters`, so the
+    // Agent-job condition has only the skip guard (no AND-NOT gate
+    // clause). The `eq(synthPr.AW_SYNTHETIC_PR, 'true')` literal is
+    // therefore expected ONLY in the Agent-job-level `variables:` hoist
+    // and the cross-job condition arms — never as an Agent-job OR-arm
+    // in the dependsOn condition, which would silently bypass the gate
+    // for real-PR or synth-PR builds. A separate fixture covers the
+    // gate-enforced shape when `pr.filters` is present.
+
+    // No auto-narrowed CI trigger — `pr.branches.include` lists PR TARGET
+    // branches, and ADO `trigger:` fires on pushes TO listed branches, so
+    // narrowing would suppress CI on the feature branches synthPr needs.
+    assert!(
+        !compiled.contains("trigger:\n  branches:\n    include:\n      - 'main'"),
+        "Fixture A must NOT auto-narrow the top-level CI trigger to pr.branches.include — \
+         narrowing to PR target branches would defeat synthPr by suppressing CI on the \
+         feature branches it must react to"
+    );
+}
+
+/// Fixture B: agent with on.pr and `mode: policy`.
+/// The compiled YAML must contain NONE of the synthesis artefacts AND
+/// must emit `trigger: none` so feature-branch pushes do not queue
+/// duplicate CI builds alongside the operator's branch-policy-driven PR
+/// builds.
+#[test]
+fn test_pr_mode_policy_omits_synth_and_emits_trigger_none() {
+    let compiled = compile_fixture_with_flags("pr-mode-policy.md", &["--skip-integrity"]);
+    assert_valid_yaml(&compiled, "pr-mode-policy.md");
+
+    for needle in &[
+        "synthPr",
+        "AW_SYNTHETIC_PR",
+        "PR_SYNTH_SPEC",
+        "exec-context-pr-synth",
+    ] {
+        assert!(
+            !compiled.contains(needle),
+            "mode: policy must produce zero synth artefacts; \
+             found {needle} in compiled YAML"
+        );
+    }
+
+    // CI trigger must be suppressed so we don't double-queue with the
+    // policy-driven PR build.
+    assert!(
+        compiled.contains("trigger: none"),
+        "mode: policy must emit `trigger: none` so feature-branch pushes do not \
+         queue duplicate CI builds alongside the branch-policy-driven PR build"
+    );
+
+    // And of course must NOT auto-narrow either (defensive).
+    assert!(
+        !compiled.contains("trigger:\n  branches:\n    include:\n      - 'main'"),
+        "mode: policy must not emit a narrowed CI trigger"
+    );
+}

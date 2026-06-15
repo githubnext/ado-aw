@@ -6,6 +6,7 @@ permissions:
   contents: read
   issues: read
   pull-requests: read
+  copilot-requests: write
 tools:
   github:
     toolsets: [default]
@@ -17,6 +18,8 @@ safe-outputs:
     max: 1
     allowed-files:
       - "tests/**"
+max-ai-credits: -1
+max-daily-ai-credits: -1
 ---
 
 # Test Gap Finder

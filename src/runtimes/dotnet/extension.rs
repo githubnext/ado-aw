@@ -1,11 +1,9 @@
 // ─── .NET ──────────────────────────────────────────────────────────
 
-use crate::compile::extensions::{CompileContext, CompilerExtension, ExtensionPhase};
+use super::{DOTNET_BASH_COMMANDS, DotnetRuntimeConfig, GLOBAL_JSON_SENTINEL};
+use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
+use crate::compile::ir::step::{BashStep, Step, TaskStep};
 use crate::validate;
-use super::{
-    DOTNET_BASH_COMMANDS, DotnetRuntimeConfig, GLOBAL_JSON_SENTINEL, generate_dotnet_install,
-    generate_ensure_nuget_config, generate_nuget_authenticate,
-};
 use anyhow::Result;
 
 /// .NET runtime extension.
@@ -36,47 +34,17 @@ impl CompilerExtension for DotnetExtension {
         ExtensionPhase::Runtime
     }
 
-    fn required_hosts(&self) -> Vec<String> {
-        vec!["dotnet".to_string()]
-    }
-
-    fn required_bash_commands(&self) -> Vec<String> {
-        DOTNET_BASH_COMMANDS
-            .iter()
-            .map(|c| (*c).to_string())
-            .collect()
-    }
-
-    fn prompt_supplement(&self) -> Option<String> {
-        Some(
-            "\n\
----\n\
-\n\
-## .NET\n\
-\n\
-The .NET SDK is installed and available. Use `dotnet` to build, test, run, \
-and manage projects (e.g., `dotnet build`, `dotnet test`, `dotnet restore`, \
-`dotnet run`). NuGet package sources are configured via `nuget.config` files \
-in the repository.\n"
-                .to_string(),
-        )
-    }
-
-    fn prepare_steps(&self, _ctx: &CompileContext) -> Vec<String> {
-        let mut steps = vec![generate_dotnet_install(&self.config)];
-        // Emit ensure-nuget.config + NuGetAuthenticate when an internal feed
-        // is configured. When only `config:` is set, the user-checked-in
-        // nuget.config is assumed to exist — emit only the auth step.
-        if self.config.feed_url().is_some() {
-            steps.push(generate_ensure_nuget_config(&self.config));
-            steps.push(generate_nuget_authenticate());
-        } else if self.config.config().is_some() {
-            steps.push(generate_nuget_authenticate());
-        }
-        steps
-    }
-
-    fn validate(&self, ctx: &CompileContext) -> Result<Vec<String>> {
+    /// Typed-IR view. Returns:
+    ///
+    /// * a [`Step::Task`] for `UseDotNet@2` (either `useGlobalJson` or
+    ///   an explicit version),
+    /// * a [`Step::Bash`] for `Ensure nuget.config exists` when a
+    ///   `feed-url:` is configured,
+    /// * a [`Step::Task`] for `NuGetAuthenticate@1` when either
+    ///   `feed-url:` or `config:` is configured.
+    ///
+    /// Hosts, bash commands, prompt supplement also flow through.
+    fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
         let mut warnings = Vec::new();
 
         // Warn if bash is disabled
@@ -143,8 +111,90 @@ in the repository.\n"
             validate::reject_pipeline_injection(config, "runtimes.dotnet.config")?;
         }
 
-        Ok(warnings)
+        let mut agent_prepare_steps: Vec<Step> = Vec::with_capacity(3);
+        agent_prepare_steps.push(Step::Task(dotnet_install_task_step(&self.config)));
+        if self.config.feed_url().is_some() {
+            agent_prepare_steps.push(Step::Bash(ensure_nuget_config_bash_step(&self.config)));
+            agent_prepare_steps.push(Step::Task(nuget_authenticate_task_step()));
+        } else if self.config.config().is_some() {
+            agent_prepare_steps.push(Step::Task(nuget_authenticate_task_step()));
+        }
+        Ok(Declarations {
+            agent_prepare_steps,
+            network_hosts: vec!["dotnet".to_string()],
+            bash_commands: DOTNET_BASH_COMMANDS
+                .iter()
+                .map(|c| (*c).to_string())
+                .collect(),
+            prompt_supplement: Some(
+                "\n\
+---\n\
+\n\
+## .NET\n\
+\n\
+The .NET SDK is installed and available. Use `dotnet` to build, test, run, \
+and manage projects (e.g., `dotnet build`, `dotnet test`, `dotnet restore`, \
+`dotnet run`). NuGet package sources are configured via `nuget.config` files \
+in the repository.\n"
+                    .to_string(),
+            ),
+            warnings,
+            ..Declarations::default()
+        })
     }
+}
+
+/// Build the typed [`TaskStep`] for installing .NET. Three
+/// shapes, matching the legacy emitter:
+///
+/// * `version: "global.json"` → `useGlobalJson: true`,
+/// * explicit version → `version: '<v>'`,
+/// * no version → `version: '8.0.x'` (compiler default).
+fn dotnet_install_task_step(config: &DotnetRuntimeConfig) -> TaskStep {
+    if config.use_global_json() {
+        return TaskStep::new("UseDotNet@2", "Install .NET SDK (from global.json)")
+            .with_input("packageType", "sdk")
+            .with_input("useGlobalJson", "true");
+    }
+    let version = config.version().unwrap_or("8.0.x");
+    TaskStep::new("UseDotNet@2", format!("Install .NET SDK {version}"))
+        .with_input("packageType", "sdk")
+        .with_input("version", version)
+}
+
+/// Build the typed [`TaskStep`] for NuGet authentication.
+fn nuget_authenticate_task_step() -> TaskStep {
+    TaskStep::new(
+        "NuGetAuthenticate@1",
+        "Authenticate NuGet (build service identity)",
+    )
+}
+
+/// Build the typed [`BashStep`] that ensures `nuget.config`. Same
+/// case-variation-aware existence check; same minimal `nuget.config`
+/// content when the file is missing.
+fn ensure_nuget_config_bash_step(config: &DotnetRuntimeConfig) -> BashStep {
+    let feed_url = config
+        .feed_url()
+        .unwrap_or("https://api.nuget.org/v3/index.json");
+    let script = format!(
+        "set -eo pipefail\n\
+         if [ ! -f nuget.config ] && [ ! -f NuGet.config ] && [ ! -f NuGet.Config ]; then\n  \
+           cat > nuget.config <<'EOF'\n\
+         <?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+         <configuration>\n  \
+           <packageSources>\n    \
+             <clear />\n    \
+             <add key=\"internal\" value=\"{feed_url}\" />\n  \
+           </packageSources>\n\
+         </configuration>\n\
+         EOF\n  \
+           echo 'Created nuget.config with source={feed_url}'\n\
+         else\n  \
+           echo 'nuget.config already exists, skipping creation'\n\
+         fi\n"
+    );
+    BashStep::new("Ensure nuget.config exists", script)
 }
 
 #[cfg(test)]
@@ -162,7 +212,7 @@ mod tests {
             parse_markdown("---\nname: test\ndescription: test\ntools:\n  bash: []\n---\n")
                 .unwrap();
         let ext = DotnetExtension::new(DotnetRuntimeConfig::Enabled(true));
-        let warnings = ext.validate(&ctx_from(&fm)).unwrap();
+        let warnings = ext.declarations(&ctx_from(&fm)).unwrap().warnings;
         assert!(!warnings.is_empty());
         assert!(warnings[0].contains("tools.bash is empty"));
     }
@@ -175,7 +225,7 @@ mod tests {
         .unwrap();
         let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
         let ext = DotnetExtension::new(dotnet.clone());
-        let err = ext.validate(&ctx_from(&fm)).unwrap_err();
+        let err = ext.declarations(&ctx_from(&fm)).unwrap_err();
         assert!(err.to_string().contains("mutually exclusive"));
     }
 
@@ -187,7 +237,7 @@ mod tests {
         .unwrap();
         let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
         let ext = DotnetExtension::new(dotnet.clone());
-        assert!(ext.validate(&ctx_from(&fm)).is_err());
+        assert!(ext.declarations(&ctx_from(&fm)).is_err());
     }
 
     #[test]
@@ -198,13 +248,17 @@ mod tests {
         .unwrap();
         let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
         let ext = DotnetExtension::new(dotnet.clone());
-        assert!(ext.validate(&ctx_from(&fm)).is_err());
+        assert!(ext.declarations(&ctx_from(&fm)).is_err());
     }
 
     #[test]
     fn test_validate_global_json_conflict_bails() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("global.json"), r#"{"sdk":{"version":"8.0.100"}}"#).unwrap();
+        std::fs::write(
+            tmp.path().join("global.json"),
+            r#"{"sdk":{"version":"8.0.100"}}"#,
+        )
+        .unwrap();
 
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: '9.0.x'\n---\n",
@@ -213,14 +267,18 @@ mod tests {
         let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
         let ext = DotnetExtension::new(dotnet.clone());
         let ctx = CompileContext::for_test_with_compile_dir(&fm, tmp.path());
-        let err = ext.validate(&ctx).unwrap_err();
+        let err = ext.declarations(&ctx).unwrap_err();
         assert!(err.to_string().contains("global.json"));
     }
 
     #[test]
     fn test_validate_global_json_sentinel_accepted_with_file_present() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("global.json"), r#"{"sdk":{"version":"8.0.100"}}"#).unwrap();
+        std::fs::write(
+            tmp.path().join("global.json"),
+            r#"{"sdk":{"version":"8.0.100"}}"#,
+        )
+        .unwrap();
 
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: 'global.json'\n---\n",
@@ -229,7 +287,7 @@ mod tests {
         let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
         let ext = DotnetExtension::new(dotnet.clone());
         let ctx = CompileContext::for_test_with_compile_dir(&fm, tmp.path());
-        assert!(ext.validate(&ctx).is_ok());
+        assert!(ext.declarations(&ctx).is_ok());
     }
 
     #[test]
@@ -240,6 +298,93 @@ mod tests {
         .unwrap();
         let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
         let ext = DotnetExtension::new(dotnet.clone());
-        assert!(ext.validate(&ctx_from(&fm)).is_err());
+        assert!(ext.declarations(&ctx_from(&fm)).is_err());
+    }
+
+    /// Default config — only `UseDotNet@2` with the compiler default
+    /// version surfaces. No nuget steps.
+    #[test]
+    fn declarations_returns_typed_task_for_default_dotnet() {
+        let (fm, _) = parse_markdown("---\nname: t\ndescription: x\n---\n").unwrap();
+        let ext = DotnetExtension::new(DotnetRuntimeConfig::Enabled(true));
+        let decl = ext.declarations(&ctx_from(&fm)).unwrap();
+        assert_eq!(decl.agent_prepare_steps.len(), 1);
+        match &decl.agent_prepare_steps[0] {
+            Step::Task(t) => {
+                assert_eq!(t.task, "UseDotNet@2");
+                assert_eq!(t.display_name, "Install .NET SDK 8.0.x");
+                assert_eq!(t.inputs.get("packageType").map(String::as_str), Some("sdk"));
+                assert_eq!(t.inputs.get("version").map(String::as_str), Some("8.0.x"));
+                assert!(!t.inputs.contains_key("useGlobalJson"));
+            }
+            other => panic!("expected Step::Task, got {other:?}"),
+        }
+    }
+
+    /// `version: "global.json"` → `useGlobalJson: true`; no explicit
+    /// version input on the task.
+    #[test]
+    fn declarations_with_global_json_sentinel_uses_use_global_json_input() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: x\nruntimes:\n  dotnet:\n    version: 'global.json'\n---\n",
+        )
+        .unwrap();
+        let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+        let ext = DotnetExtension::new(dotnet.clone());
+        let decl = ext.declarations(&ctx_from(&fm)).unwrap();
+        match &decl.agent_prepare_steps[0] {
+            Step::Task(t) => {
+                assert_eq!(t.display_name, "Install .NET SDK (from global.json)");
+                assert_eq!(
+                    t.inputs.get("useGlobalJson").map(String::as_str),
+                    Some("true")
+                );
+                assert!(!t.inputs.contains_key("version"));
+            }
+            other => panic!("expected Step::Task, got {other:?}"),
+        }
+    }
+
+    /// `feed-url:` triggers the ensure-nuget-config Bash step plus
+    /// `NuGetAuthenticate@1`. Three steps total, in that order.
+    #[test]
+    fn declarations_with_feed_url_adds_ensure_and_auth_steps() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: x\nruntimes:\n  dotnet:\n    feed-url: 'https://pkgs.dev.azure.com/myorg/_packaging/myfeed/nuget/v3/index.json'\n---\n",
+        )
+        .unwrap();
+        let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+        let ext = DotnetExtension::new(dotnet.clone());
+        let decl = ext.declarations(&ctx_from(&fm)).unwrap();
+        assert_eq!(decl.agent_prepare_steps.len(), 3);
+        match &decl.agent_prepare_steps[1] {
+            Step::Bash(b) => {
+                assert_eq!(b.display_name, "Ensure nuget.config exists");
+                assert!(b.script.contains("pkgs.dev.azure.com"));
+            }
+            other => panic!("expected Step::Bash for ensure-nuget, got {other:?}"),
+        }
+        match &decl.agent_prepare_steps[2] {
+            Step::Task(t) => assert_eq!(t.task, "NuGetAuthenticate@1"),
+            other => panic!("expected Step::Task for NuGetAuthenticate@1, got {other:?}"),
+        }
+    }
+
+    /// `config:` (without `feed-url:`) skips the ensure step but still
+    /// emits `NuGetAuthenticate@1`. Two steps total.
+    #[test]
+    fn declarations_with_config_only_skips_ensure_keeps_auth() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: x\nruntimes:\n  dotnet:\n    config: 'nuget.config'\n---\n",
+        )
+        .unwrap();
+        let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+        let ext = DotnetExtension::new(dotnet.clone());
+        let decl = ext.declarations(&ctx_from(&fm)).unwrap();
+        assert_eq!(decl.agent_prepare_steps.len(), 2);
+        match &decl.agent_prepare_steps[1] {
+            Step::Task(t) => assert_eq!(t.task, "NuGetAuthenticate@1"),
+            other => panic!("expected Step::Task, got {other:?}"),
+        }
     }
 }

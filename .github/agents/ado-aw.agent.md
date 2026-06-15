@@ -11,26 +11,22 @@ ado-aw compiles human-friendly markdown files with YAML front matter into secure
 
 ## Setup
 
-Before creating or compiling workflows, ensure the ado-aw compiler is available. Download the latest release and verify its checksum:
+Before creating or compiling workflows, ensure the ado-aw compiler is available. Use the first-time installer for your platform:
 
 ```bash
 # Linux
-curl -fsSL -o /tmp/ado-aw "https://github.com/githubnext/ado-aw/releases/latest/download/ado-aw-linux-x64"
-curl -fsSL -o /tmp/checksums.txt "https://github.com/githubnext/ado-aw/releases/latest/download/checksums.txt"
-cd /tmp && grep "ado-aw-linux-x64" checksums.txt | sha256sum -c - && chmod +x /tmp/ado-aw
+curl -fsSL https://github.com/githubnext/ado-aw/releases/latest/download/install-linux.sh | sh
 
 # macOS (Apple Silicon)
-curl -fsSL -o /tmp/ado-aw "https://github.com/githubnext/ado-aw/releases/latest/download/ado-aw-darwin-arm64"
-curl -fsSL -o /tmp/checksums.txt "https://github.com/githubnext/ado-aw/releases/latest/download/checksums.txt"
-cd /tmp && grep "ado-aw-darwin-arm64" checksums.txt | shasum -a 256 -c - && chmod +x /tmp/ado-aw
+curl -fsSL https://github.com/githubnext/ado-aw/releases/latest/download/install-macos.sh | sh
 
 # Windows (PowerShell)
-Invoke-WebRequest -Uri "https://github.com/githubnext/ado-aw/releases/latest/download/ado-aw-windows-x64.exe" -OutFile "$env:TEMP\ado-aw.exe"
-Invoke-WebRequest -Uri "https://github.com/githubnext/ado-aw/releases/latest/download/checksums.txt" -OutFile "$env:TEMP\checksums.txt"
-# Verify: compare the SHA256 hash of ado-aw-windows-x64.exe against checksums.txt
+powershell -ExecutionPolicy Bypass -NoProfile -Command "iwr https://github.com/githubnext/ado-aw/releases/latest/download/install-windows.ps1 -UseBasicParsing | iex"
 ```
 
-Verify: `/tmp/ado-aw --version`
+These scripts validate release checksums, install `ado-aw`, and update PATH when needed.
+
+Verify: `ado-aw --version`
 
 ## What This Agent Does
 
@@ -85,13 +81,13 @@ When a user interacts with you:
 
 ```bash
 # Compile an agent file to pipeline YAML
-/tmp/ado-aw compile <agent-file.md>
+ado-aw compile <agent-file.md>
 
 # Recompile all detected pipelines
-/tmp/ado-aw compile
+ado-aw compile
 
 # Verify pipeline matches source
-/tmp/ado-aw check <pipeline.yml>
+ado-aw check <pipeline.yml>
 ```
 
 ## Key Features

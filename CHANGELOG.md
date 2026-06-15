@@ -1,5 +1,72 @@
 # Changelog
 
+## [0.35.3](https://github.com/githubnext/ado-aw/compare/v0.35.2...v0.35.3) (2026-06-11)
+
+
+### Bug Fixes
+
+* **ado-script:** treat unsubstituted ADO macros as empty in synthPr ([#975](https://github.com/githubnext/ado-aw/issues/975)) ([1164c5f](https://github.com/githubnext/ado-aw/commit/1164c5fefbd2d06d46d46e8c64d869f29a6452a2))
+
+## [0.35.2](https://github.com/githubnext/ado-aw/compare/v0.35.1...v0.35.2) (2026-06-11)
+
+
+### Bug Fixes
+
+* **compile:** unify synthetic-PR variable namespace via ado-script ([#972](https://github.com/githubnext/ado-aw/issues/972)) ([0e05b3a](https://github.com/githubnext/ado-aw/commit/0e05b3a01975d23363d65122cd724174f5c1d329))
+
+## [0.35.1](https://github.com/githubnext/ado-aw/compare/v0.35.0...v0.35.1) (2026-06-11)
+
+
+### Bug Fixes
+
+* **compile:** repair synthetic-PR gate + Stage step env var plumbing ([#956](https://github.com/githubnext/ado-aw/issues/956)) ([79919bd](https://github.com/githubnext/ado-aw/commit/79919bd2280f0fb17a118df17f824a0e9e504691))
+* **workflows:** allow github-actions[bot] to trigger recompile-safe-output-fixtures ([#958](https://github.com/githubnext/ado-aw/issues/958)) ([5d36dfd](https://github.com/githubnext/ado-aw/commit/5d36dfdc4e214b7b056fa5f9c94586941ced7d8a))
+
+## [0.35.0](https://github.com/githubnext/ado-aw/compare/v0.34.3...v0.35.0) (2026-06-10)
+
+
+### Features
+
+* **install:** add checksum-verified one-line first-time installers ([#942](https://github.com/githubnext/ado-aw/issues/942)) ([040cdad](https://github.com/githubnext/ado-aw/commit/040cdad14f90dd44767dcb84e15a0c9d48fe8a55))
+
+## [0.34.3](https://github.com/githubnext/ado-aw/compare/v0.34.2...v0.34.3) (2026-06-10)
+
+
+### Bug Fixes
+
+* **compile:** use macro form for same-job synthPr gate refs ([#944](https://github.com/githubnext/ado-aw/issues/944)) ([51ae40e](https://github.com/githubnext/ado-aw/commit/51ae40ee4a63f1ae99faee9d47bda158811b5069))
+* **workflows:** lower min-integrity for issue-plan-maker /plan command ([#952](https://github.com/githubnext/ado-aw/issues/952)) ([2808e8a](https://github.com/githubnext/ado-aw/commit/2808e8acd14cf729b2dbd6aeb6b37e287ec3db80))
+
+## [0.34.2](https://github.com/githubnext/ado-aw/compare/v0.34.1...v0.34.2) (2026-06-09)
+
+
+### Bug Fixes
+
+* **compile:** gate exec-context-pr synth path in bash, not step condition ([#937](https://github.com/githubnext/ado-aw/issues/937)) ([6e67699](https://github.com/githubnext/ado-aw/commit/6e6769974ee56b7b840d8f104a789093cdf00743))
+
+## [0.34.1](https://github.com/githubnext/ado-aw/compare/v0.34.0...v0.34.1) (2026-06-09)
+
+
+### Bug Fixes
+
+* **ado-script:** inline azure-devops-node-api to avoid missing ncc chunk ([#935](https://github.com/githubnext/ado-aw/issues/935)) ([7a568fa](https://github.com/githubnext/ado-aw/commit/7a568fae8e42710d7905979060a2c20de3ad7982))
+
+## [0.34.0](https://github.com/githubnext/ado-aw/compare/v0.33.1...v0.34.0) (2026-06-09)
+
+
+### ⚠ BREAKING CHANGES
+
+* **compile:** record on.pr.mode (synthetic|policy) trigger model ([#933](https://github.com/githubnext/ado-aw/issues/933))
+
+### Features
+
+* **compile:** record on.pr.mode (synthetic|policy) trigger model ([#933](https://github.com/githubnext/ado-aw/issues/933)) ([925e3ee](https://github.com/githubnext/ado-aw/commit/925e3eeb8c9f41693a1408981dd0435398888aef))
+
+
+### Bug Fixes
+
+* **release:** use built-in GITHUB_TOKEN to dispatch recompile workflow ([#923](https://github.com/githubnext/ado-aw/issues/923)) ([ce617a7](https://github.com/githubnext/ado-aw/commit/ce617a7b019f85b7860733fd33dc4fe59bb78831))
+
 ## [0.33.1](https://github.com/githubnext/ado-aw/compare/v0.33.0...v0.33.1) (2026-06-09)
 
 

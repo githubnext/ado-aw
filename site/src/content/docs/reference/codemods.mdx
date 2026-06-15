@@ -81,9 +81,9 @@ codemods") rather than clobbering whoever wrote the file.
 
 `ado-aw check` exits non-zero when codemods would fire -- there is no
 opt-in flag and no warning-only mode. Rationale: compiled pipelines
-download the **same** `ado-aw` version that produced them
-(`src/data/base.yml`, `src/data/1es-base.yml`), so the in-pipeline
-integrity check is internally consistent by construction. The only
+download the **same** `ado-aw` version that produced them (recorded in
+compiled YAML metadata), so the in-pipeline integrity check is internally
+consistent by construction. The only
 time `check` sees pending codemods is when a developer runs a newer
 `ado-aw` locally against an older source -- exactly when we want to
 fail loudly. The fix is `ado-aw compile`, which applies the codemods

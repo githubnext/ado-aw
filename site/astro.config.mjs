@@ -65,7 +65,7 @@ export default defineConfig({
             { label: 'Network', slug: 'reference/network' },
             { label: 'MCP', slug: 'reference/mcp' },
             { label: 'MCP Gateway', slug: 'reference/mcpg' },
-            { label: 'Template Markers', slug: 'reference/template-markers' },
+            { label: 'Pipeline IR', slug: 'reference/ir' },
             { label: 'Runtime Imports', slug: 'reference/runtime-imports' },
             { label: 'Execution Context', slug: 'reference/execution-context' },
             { label: 'Filter IR', slug: 'reference/filter-ir' },

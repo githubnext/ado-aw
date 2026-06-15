@@ -34,7 +34,7 @@
 //!   passed in argv, and never written to `.git/config`.
 //! - The wrapping `GIT_CONFIG_*` env vars that actually carry the
 //!   bearer into `git`'s `http.extraheader` config (see
-//!   `scripts/ado-script/src/exec-context-pr/git.ts::bearerEnv`) are
+//!   `scripts/ado-script/src/shared/git.ts::bearerEnv`) are
 //!   only ever set in the *spawned `git` child's* environment — not
 //!   in Node's global `process.env`. This is a strict improvement
 //!   over the v6.2 bash implementation, where the bearer also lived
@@ -48,10 +48,10 @@
 //! ## Wiring
 //!
 //! The bundle's install + download is owned by `AdoScriptExtension`'s
-//! Agent-job `prepare_steps`. It fires whenever EITHER the
+//! Agent-job prepare declarations. It fires whenever EITHER the
 //! runtime-import resolver (`import.js`) OR the PR contributor
 //! (this module) is active. See
-//! `src/compile/extensions/ado_script.rs::prepare_steps` for the gate.
+//! `src/compile/extensions/ado_script.rs::declarations` for the gate.
 //!
 //! `AdoScriptExtension` runs at `ExtensionPhase::System` and
 //! `ExecContextExtension` runs at `ExtensionPhase::Tool`, so the
@@ -60,6 +60,9 @@
 
 use crate::compile::extensions::CompileContext;
 use crate::compile::extensions::ado_script::EXEC_CONTEXT_PR_PATH;
+use crate::compile::ir::condition::{Condition, Expr};
+use crate::compile::ir::env::EnvValue;
+use crate::compile::ir::step::{BashStep, Step};
 use crate::compile::types::PrContextConfig;
 
 use super::contributor::ContextContributor;
@@ -68,11 +71,19 @@ use super::contributor::ContextContributor;
 /// (unless explicitly disabled via `execution-context.pr.enabled: false`).
 pub(super) struct PrContextContributor {
     config: PrContextConfig,
+    /// Whether `on.pr.mode == Synthetic` for this agent. Drives
+    /// emission of the coalesced `SYSTEM_PULLREQUEST_*` env vars so the
+    /// bundle reads either real PR identifiers (true PR builds) or the
+    /// `synthPr` Setup-job outputs (CI builds promoted via synth).
+    synthetic_pr_active: bool,
 }
 
 impl PrContextContributor {
-    pub(super) fn new(config: PrContextConfig) -> Self {
-        Self { config }
+    pub(super) fn new(config: PrContextConfig, synthetic_pr_active: bool) -> Self {
+        Self {
+            config,
+            synthetic_pr_active,
+        }
     }
 }
 
@@ -87,8 +98,8 @@ impl ContextContributor for PrContextContributor {
         // by `collect_extensions` to populate
         // `AdoScriptExtension::exec_context_pr_active`). The divergence-
         // trap tests in `super::tests` exercise the helper path; this
-        // method is the runtime-context-aware version that
-        // `prepare_steps` calls.
+        // method is the runtime-context-aware version used by the
+        // declarations path.
         if ctx.front_matter.pr_trigger().is_none() {
             return false;
         }
@@ -98,42 +109,69 @@ impl ContextContributor for PrContextContributor {
         }
     }
 
-    fn prepare_step(&self, _ctx: &CompileContext) -> String {
-        // Slim node-invocation wrapper. The actual logic (identifier
-        // validation, fetch/merge-base, prompt fragment generation)
-        // lives in the `exec-context-pr.js` bundle.
+    fn prepare_step_typed(&self, _ctx: &CompileContext) -> anyhow::Result<Option<Step>> {
+        // Synth-active path reads the Agent-job-level hoisted
+        // variables `AW_PR_ID` / `AW_PR_TARGETBRANCH` (populated by
+        // `agentic_pipeline::agent_job_variables_hoist` from the
+        // `synthPr` Setup-job step outputs) via the same-job `$(name)`
+        // macro form. Step-level `env:` does NOT reliably evaluate
+        // cross-job `$[ dependencies.<Job>.outputs[...] ]` runtime
+        // expressions (see PR #956 — empirically broken in
+        // msazuresphere/4x4 build #612528); the job-level
+        // `variables:` mapping is the only safe location for those
+        // refs.
         //
-        // `set -euo pipefail` is intentional here: the bundle exits 0
-        // on every soft failure (validation, merge-base) and reserves
-        // non-zero exits for true infra failures (e.g. could not
-        // create the output directory) — those SHOULD propagate as a
-        // hard pipeline failure.
+        // The bash gate collapses to a single `[ -z "$AW_PR_ID" ]`
+        // check: `synthPr` always runs and unifies real-PR
+        // `SYSTEM_PULLREQUEST_*` and synth-discovered PR identifiers
+        // into the `AW_PR_*` namespace, so an empty `AW_PR_ID` means
+        // "neither a real PR build nor a synth-promoted CI build" —
+        // which is exactly when this step should skip.
         //
-        // `SYSTEM_ACCESSTOKEN` is mapped only into this step's `env:`
-        // block. Node receives it on `process.env` and passes it to
-        // the spawned `git` subprocess via `GIT_CONFIG_*` env vars
-        // (never argv). It is NEVER visible to the agent step.
-        format!(
-            r#"- bash: |
-    set -euo pipefail
-    node '{EXEC_CONTEXT_PR_PATH}'
-  env:
-    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
-    SYSTEM_PULLREQUEST_PULLREQUESTID: $(System.PullRequest.PullRequestId)
-    SYSTEM_PULLREQUEST_TARGETBRANCH: $(System.PullRequest.TargetBranch)
-    SYSTEM_TEAMPROJECT: $(System.TeamProject)
-    BUILD_REPOSITORY_NAME: $(Build.Repository.Name)
-    BUILD_SOURCESDIRECTORY: $(Build.SourcesDirectory)
-  displayName: "Stage PR execution context (aw-context/pr/*)"
-  condition: eq(variables['Build.Reason'], 'PullRequest')"#
-        )
+        // Coexists with `prepare_step` until production callers switch.
+        let (pr_id, target_branch, prelude, condition) = if self.synthetic_pr_active {
+            (
+                EnvValue::pipeline_var("AW_PR_ID"),
+                EnvValue::pipeline_var("AW_PR_TARGETBRANCH"),
+                "    if [ -z \"$AW_PR_ID\" ]; then\n      echo \"[aw-context] No PR identifier resolved (not a PR build and not synth-promoted); skipping exec-context-pr.\"\n      exit 0\n    fi\n",
+                Condition::Succeeded,
+            )
+        } else {
+            (
+                EnvValue::ado_macro("System.PullRequest.PullRequestId")?,
+                EnvValue::ado_macro("System.PullRequest.TargetBranch")?,
+                "",
+                Condition::Eq(
+                    Expr::Variable("Build.Reason".to_string()),
+                    Expr::Literal("PullRequest".to_string()),
+                ),
+            )
+        };
+        let script = format!("set -euo pipefail\n{prelude}node '{EXEC_CONTEXT_PR_PATH}'\n");
+        let step = BashStep::new("Stage PR execution context (aw-context/pr/*)", script)
+            .with_condition(condition)
+            .with_env(
+                "SYSTEM_ACCESSTOKEN",
+                EnvValue::ado_macro("System.AccessToken")?,
+            )
+            .with_env("SYSTEM_PULLREQUEST_PULLREQUESTID", pr_id)
+            .with_env("SYSTEM_PULLREQUEST_TARGETBRANCH", target_branch)
+            .with_env(
+                "SYSTEM_TEAMPROJECT",
+                EnvValue::ado_macro("System.TeamProject")?,
+            )
+            .with_env(
+                "BUILD_REPOSITORY_NAME",
+                EnvValue::ado_macro("Build.Repository.Name")?,
+            )
+            .with_env(
+                "BUILD_SOURCESDIRECTORY",
+                EnvValue::ado_macro("Build.SourcesDirectory")?,
+            );
+        Ok(Some(Step::Bash(step)))
     }
 
-    fn agent_env_vars(&self) -> Vec<(String, String)> {
-        vec![]
-    }
-
-    fn required_bash_commands(&self) -> Vec<String> {
+    fn bash_commands(&self) -> Vec<String> {
         // Read-only git commands the agent needs to inspect the PR diff
         // locally. Added unconditionally when this contributor activates
         // (matches the runtime-extension pattern in
@@ -147,5 +185,139 @@ impl ContextContributor for PrContextContributor {
             "git rev-parse".to_string(),
             "git symbolic-ref".to_string(),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Direct unit tests for `PrContextContributor::prepare_step` —
+    //! pins both the `mode: synthetic` (default) and `mode: policy`
+    //! emitted YAML shapes for the env-coalesce macros and the
+    //! step-level `condition:`. Catches accidental regressions of the
+    //! coalesce wiring without round-tripping through a full snapshot
+    //! fixture.
+    use super::*;
+    use crate::compile::extensions::CompileContext;
+    use crate::compile::types::{FrontMatter, PrContextConfig};
+
+    fn parse_fm(src: &str) -> FrontMatter {
+        let (fm, _) = crate::compile::common::parse_markdown(src).unwrap();
+        fm
+    }
+
+    fn pr_fm() -> FrontMatter {
+        parse_fm(
+            "---\nname: test\ndescription: test\non:\n  pr:\n    branches:\n      include: [main]\n---\n",
+        )
+    }
+
+    // ── Typed-IR `prepare_step_typed` shape tests ──
+
+    /// Synth-active: the typed prepare step's env block consumes the
+    /// Agent-job-level unified pipeline variables populated from the
+    /// Setup-job synthPr outputs. This keeps step env in macro form —
+    /// no [`Step::RawYaml`], no hand-written `$[ coalesce(...) ]`
+    /// strings.
+    #[test]
+    fn prepare_step_typed_synth_active_consumes_unified_pipeline_vars() {
+        let contributor = PrContextContributor::new(PrContextConfig::default(), true);
+        let fm = pr_fm();
+        let ctx = CompileContext::for_test(&fm);
+        let step = contributor
+            .prepare_step_typed(&ctx)
+            .expect("typed prepare_step succeeds")
+            .expect("contributor activates");
+
+        let bash = match &step {
+            Step::Bash(b) => b,
+            other => panic!("expected Step::Bash, got {other:?}"),
+        };
+
+        // Condition: succeeded() — cross-job dep refs are illegal at
+        // step level, so the synth-active path gates in bash and
+        // keeps the step condition trivial.
+        assert!(
+            matches!(bash.condition, Some(Condition::Succeeded)),
+            "synth-active condition must be Succeeded; got {:?}",
+            bash.condition
+        );
+
+        // PR id env: PipelineVar reading the Agent-job-level hoisted
+        // `AW_PR_ID` variable (populated from synthPr Setup-job step
+        // output by `agentic_pipeline::agent_job_variables_hoist`). The
+        // step env reads the resolved variable via the same-job
+        // `$(name)` macro form — runtime `$[ ... ]` expressions are
+        // NOT evaluated inside step env (PR #956).
+        match bash.env.get("SYSTEM_PULLREQUEST_PULLREQUESTID") {
+            Some(EnvValue::PipelineVar(name)) => assert_eq!(name, "AW_PR_ID"),
+            other => panic!("expected PipelineVar(AW_PR_ID), got {other:?}"),
+        }
+
+        // Target branch env: same shape reading AW_PR_TARGETBRANCH.
+        match bash.env.get("SYSTEM_PULLREQUEST_TARGETBRANCH") {
+            Some(EnvValue::PipelineVar(name)) => assert_eq!(name, "AW_PR_TARGETBRANCH"),
+            other => panic!("expected PipelineVar(AW_PR_TARGETBRANCH), got {other:?}"),
+        }
+
+        // The synth-active path no longer projects AW_SYNTHETIC_PR
+        // or BUILD_REASON through the step env — the bash gate
+        // checks `[ -z "$AW_PR_ID" ]` instead (single empty-check
+        // that covers both "not a PR build" AND "not synth-promoted").
+        assert!(
+            !bash.env.contains_key("AW_SYNTHETIC_PR"),
+            "synth-active prepare step must not project AW_SYNTHETIC_PR (new gate uses AW_PR_ID empty-check)"
+        );
+        assert!(
+            !bash.env.contains_key("BUILD_REASON"),
+            "synth-active prepare step must not project BUILD_REASON (new gate uses AW_PR_ID empty-check)"
+        );
+
+        // SYSTEM_ACCESSTOKEN must still be in the step's env (the
+        // trust boundary that the bundle relies on).
+        assert!(matches!(
+            bash.env.get("SYSTEM_ACCESSTOKEN"),
+            Some(EnvValue::AdoMacro("System.AccessToken"))
+        ));
+    }
+
+    /// Synth-inactive: PR id / target branch are plain
+    /// `EnvValue::AdoMacro` values, no Coalesce; condition is the
+    /// typed `Eq(Variable("Build.Reason"), Literal("PullRequest"))`.
+    #[test]
+    fn prepare_step_typed_synth_inactive_uses_plain_macros_and_narrow_condition() {
+        let contributor = PrContextContributor::new(PrContextConfig::default(), false);
+        let fm = pr_fm();
+        let ctx = CompileContext::for_test(&fm);
+        let step = contributor
+            .prepare_step_typed(&ctx)
+            .expect("typed prepare_step succeeds")
+            .expect("contributor activates");
+
+        let bash = match &step {
+            Step::Bash(b) => b,
+            other => panic!("expected Step::Bash, got {other:?}"),
+        };
+
+        assert!(matches!(
+            bash.env.get("SYSTEM_PULLREQUEST_PULLREQUESTID"),
+            Some(EnvValue::AdoMacro("System.PullRequest.PullRequestId"))
+        ));
+        assert!(matches!(
+            bash.env.get("SYSTEM_PULLREQUEST_TARGETBRANCH"),
+            Some(EnvValue::AdoMacro("System.PullRequest.TargetBranch"))
+        ));
+
+        // No BUILD_REASON / AW_SYNTHETIC_PR env entries (the bash
+        // guard isn't emitted on the synth-inactive path).
+        assert!(!bash.env.contains_key("BUILD_REASON"));
+        assert!(!bash.env.contains_key("AW_SYNTHETIC_PR"));
+
+        match bash.condition.as_ref().expect("condition required") {
+            Condition::Eq(Expr::Variable(name), Expr::Literal(lit)) => {
+                assert_eq!(name, "Build.Reason");
+                assert_eq!(lit, "PullRequest");
+            }
+            other => panic!("expected Condition::Eq(Variable, Literal), got {other:?}"),
+        }
     }
 }

@@ -734,11 +734,6 @@ impl FrontMatter {
         self.on_config.as_ref().and_then(|o| o.schedule.as_ref())
     }
 
-    /// Check if a schedule is configured.
-    pub fn has_schedule(&self) -> bool {
-        self.schedule().is_some()
-    }
-
     /// Get the pipeline trigger configuration (if any).
     pub fn pipeline_trigger(&self) -> Option<&PipelineTrigger> {
         self.on_config.as_ref().and_then(|o| o.pipeline.as_ref())
@@ -747,6 +742,17 @@ impl FrontMatter {
     /// Get the PR trigger configuration (if any).
     pub fn pr_trigger(&self) -> Option<&PrTriggerConfig> {
         self.on_config.as_ref().and_then(|o| o.pr.as_ref())
+    }
+
+    /// Whether the synthetic-from-ci path is active for this agent —
+    /// i.e. `on.pr` is configured AND `on.pr.mode == PrMode::Synthetic`
+    /// (the default). Centralised here so the three compile-time call
+    /// sites (`collect_extensions`, `ExecContextExtension::new`,
+    /// `compile_shared`) cannot drift on the predicate if a future
+    /// `PrMode` variant is added.
+    pub fn is_synthetic_pr(&self) -> bool {
+        self.pr_trigger()
+            .is_some_and(|p| matches!(p.mode, PrMode::Synthetic))
     }
 
     /// Get the PR runtime filters (if any).
@@ -1198,6 +1204,47 @@ pub struct ExecutionContextConfig {
     /// PR-context contributor configuration.
     #[serde(default)]
     pub pr: Option<PrContextConfig>,
+    /// Manual-context contributor configuration. Activates whenever the
+    /// agent declares any `parameters:` block (Stage 1 of the
+    /// execution-context contributor build-out — see
+    /// `docs/execution-context.md`).
+    #[serde(default)]
+    pub manual: Option<ManualContextConfig>,
+    /// Pipeline-context contributor configuration. Activates whenever
+    /// the agent declares an `on.pipeline` trigger (Stage 2 of the
+    /// execution-context contributor build-out — see
+    /// `docs/execution-context.md`).
+    #[serde(default)]
+    pub pipeline: Option<PipelineContextConfig>,
+    /// CI-push contributor configuration. Stages "since last green
+    /// build" diff context on non-PR push builds (Stage 3 of the
+    /// execution-context contributor build-out — see
+    /// `docs/execution-context.md`). Defaults to OFF — opt in via
+    /// `ci-push.enabled: true`.
+    #[serde(rename = "ci-push", default)]
+    pub ci_push: Option<CiPushContextConfig>,
+    /// Workitem-context contributor configuration. PR-linked mode only
+    /// in this iteration — activates on PR builds and fetches the
+    /// linked WI(s) so a reviewer agent can verify acceptance
+    /// criteria. Stage 4 of the build-out — see
+    /// `docs/execution-context.md`. **Crosses an untrusted-prose
+    /// boundary** (WI bodies are user-authored).
+    #[serde(default)]
+    pub workitem: Option<WorkitemContextConfig>,
+    /// Schedule-context contributor configuration. Stages "since last
+    /// run of this pipeline" diff context for scheduled builds.
+    /// Stage 5 of the build-out — see `docs/execution-context.md`.
+    /// Defaults to OFF (opt-in) — many scheduled agents are
+    /// operational (not repo-aware) and don't need diff context.
+    #[serde(default)]
+    pub schedule: Option<ScheduleContextConfig>,
+    /// Repo-context contributor configuration. Always-on capability
+    /// (Stage 7 of the build-out — see `docs/execution-context.md`).
+    /// Stages repository identity info (branch, SHA, last release
+    /// tag, commits-since-tag). Defaults to OFF to avoid
+    /// prompt-clutter regression.
+    #[serde(default)]
+    pub repo: Option<RepoContextConfig>,
 }
 
 impl ExecutionContextConfig {
@@ -1211,6 +1258,24 @@ impl SanitizeConfigTrait for ExecutionContextConfig {
     fn sanitize_config_fields(&mut self) {
         if let Some(ref mut p) = self.pr {
             p.sanitize_config_fields();
+        }
+        if let Some(ref mut m) = self.manual {
+            m.sanitize_config_fields();
+        }
+        if let Some(ref mut p) = self.pipeline {
+            p.sanitize_config_fields();
+        }
+        if let Some(ref mut c) = self.ci_push {
+            c.sanitize_config_fields();
+        }
+        if let Some(ref mut w) = self.workitem {
+            w.sanitize_config_fields();
+        }
+        if let Some(ref mut s) = self.schedule {
+            s.sanitize_config_fields();
+        }
+        if let Some(ref mut r) = self.repo {
+            r.sanitize_config_fields();
         }
     }
 }
@@ -1227,6 +1292,13 @@ pub struct PrContextConfig {
     /// `on.pr` is configured. Set `false` to opt out.
     #[serde(default)]
     pub enabled: Option<bool>,
+    /// PR-checks (build validation) extension (Stage 6 of the
+    /// build-out — see plan.md). Stages a list of failing /
+    /// succeeded build-validation runs on the PR so a remediation
+    /// agent can read the failing logs and propose a fix.
+    /// Default OFF — opt in via `pr.checks.enabled: true`.
+    #[serde(default)]
+    pub checks: Option<PrChecksContextConfig>,
 }
 
 impl PrContextConfig {
@@ -1238,7 +1310,258 @@ impl PrContextConfig {
 
 impl SanitizeConfigTrait for PrContextConfig {
     fn sanitize_config_fields(&mut self) {
-        // No string fields to sanitise after the v6.2 collapse.
+        if let Some(ref mut c) = self.checks {
+            c.sanitize_config_fields();
+        }
+    }
+}
+
+/// Configuration for the `pr.checks` extension of the PR contributor.
+/// Default OFF. When enabled, stages
+/// `aw-context/pr/checks/{failing,succeeded}.json` listing Build
+/// Validation runs whose source matches the PR.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct PrChecksContextConfig {
+    /// Default OFF.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+impl PrChecksContextConfig {
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.unwrap_or(false)
+    }
+}
+
+impl SanitizeConfigTrait for PrChecksContextConfig {
+    fn sanitize_config_fields(&mut self) {
+        // No free-form string fields — booleans only.
+    }
+}
+
+/// Configuration for the `manual` execution-context contributor.
+///
+/// Activates whenever the agent declares any `parameters:` block (and
+/// the execution-context master switch is on). Runtime gate:
+/// `eq(variables['Build.Reason'], 'Manual')`. Stages requestor
+/// identity and a snapshot of parameter values under
+/// `aw-context/manual/` so manually-queued agents can surface intent
+/// (selected options, free-text reasons) without the markdown body
+/// having to restate them.
+///
+/// No bearer, no network — pure ADO predefined-variable + template
+/// expansion. See `docs/execution-context.md` for the staged layout.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ManualContextConfig {
+    /// Whether the manual contributor is active. Defaults to `true`
+    /// when any `parameters:` block is declared. Set `false` to opt
+    /// out.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Whether to surface `Build.RequestedForEmail` in the staged
+    /// metadata + prompt fragment. Defaults to `false` (hygiene
+    /// posture; ADO already exposes the address to the build but
+    /// we don't want it appearing in agent prompts by default).
+    #[serde(rename = "include-email", default)]
+    pub include_email: Option<bool>,
+}
+
+impl ManualContextConfig {
+    /// Resolved-enabled value; `None` means "depends on whether any
+    /// `parameters:` are declared".
+    pub fn explicit_enabled(&self) -> Option<bool> {
+        self.enabled
+    }
+
+    /// Whether the staged `requested-for-email` file and prompt-fragment
+    /// line should be populated. Defaults to `false`.
+    pub fn include_email_resolved(&self) -> bool {
+        self.include_email.unwrap_or(false)
+    }
+}
+
+impl SanitizeConfigTrait for ManualContextConfig {
+    fn sanitize_config_fields(&mut self) {
+        // No free-form string fields — booleans only.
+    }
+}
+
+/// Configuration for the `pipeline` execution-context contributor.
+///
+/// Activates whenever the agent declares an `on.pipeline` trigger
+/// (and the execution-context master switch is on). Runtime gate:
+/// `eq(variables['Build.Reason'], 'ResourceTrigger')`. Stages
+/// upstream-build metadata (id, status, source SHA/branch, artifact
+/// list) under `aw-context/pipeline/` so the agent can decide what
+/// to do based on the run that triggered it.
+///
+/// Bearer required — fetches via the ADO Build REST API. See
+/// `docs/execution-context.md` for the staged layout.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct PipelineContextConfig {
+    /// Whether the pipeline contributor is active. Defaults to `true`
+    /// when `on.pipeline` is configured. Set `false` to opt out.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+impl PipelineContextConfig {
+    /// Resolved-enabled value; `None` means "depends on whether
+    /// `on.pipeline` is configured".
+    pub fn explicit_enabled(&self) -> Option<bool> {
+        self.enabled
+    }
+}
+
+impl SanitizeConfigTrait for PipelineContextConfig {
+    fn sanitize_config_fields(&mut self) {
+        // No free-form string fields — booleans only.
+    }
+}
+
+/// Configuration for the `ci-push` execution-context contributor.
+///
+/// Stages "since last green build" diff context for non-PR push
+/// builds. Defaults to OFF (opt-in) — most agents don't need this,
+/// and the helper does ADO REST + git fetch work that adds startup
+/// latency. Activates only when `enabled: true` is set explicitly.
+/// Runtime gate: `in(variables['Build.Reason'], 'IndividualCI',
+/// 'BatchedCI')`. Bearer required for both REST lookup and git fetch
+/// deepening.
+///
+/// See `docs/execution-context.md` for the staged layout.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct CiPushContextConfig {
+    /// Whether the ci-push contributor is active. **Defaults to
+    /// `false`** (opposite of PR / manual / pipeline contributors).
+    /// Set `true` to opt in.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+impl CiPushContextConfig {
+    /// Resolved-enabled value; default is `false`.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.unwrap_or(false)
+    }
+}
+
+impl SanitizeConfigTrait for CiPushContextConfig {
+    fn sanitize_config_fields(&mut self) {
+        // No free-form string fields — booleans only.
+    }
+}
+
+/// Configuration for the `workitem` execution-context contributor.
+///
+/// PR-linked mode only in this iteration (Stage 4 of the build-out —
+/// see plan.md). Activates whenever the PR contributor activates and
+/// the workitem contributor isn't explicitly disabled. Fetches the
+/// linked WI(s) via the ADO REST API and stages per-WI directories
+/// with description / acceptance criteria / repro / comments /
+/// links / attachment-metadata.
+///
+/// **Crosses an untrusted-prose boundary** — WI body fields are
+/// user-authored and may contain arbitrary content. All staged
+/// prose is wrapped via `shared/untrusted.ts::wrapAgentReadableUntrusted`
+/// before being written, and the agent prompt fragment explicitly
+/// flags this. See `docs/execution-context.md` for the full guidance.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct WorkitemContextConfig {
+    /// Whether the workitem contributor is active. Defaults to
+    /// `true` when the PR contributor activates.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Cap on the number of linked WIs staged per build. Defaults to
+    /// 5 — additional WIs are listed in
+    /// `aw-context/workitem/truncated.txt` for visibility but their
+    /// bodies are NOT fetched.
+    #[serde(rename = "max-items", default)]
+    pub max_items: Option<usize>,
+    /// Cap on the size of each WI body field (description / acceptance /
+    /// repro), in kilobytes. Defaults to 32 KB. Bodies larger than the
+    /// cap are truncated with a trailing marker.
+    #[serde(rename = "max-body-kb", default)]
+    pub max_body_kb: Option<usize>,
+}
+
+impl WorkitemContextConfig {
+    pub fn explicit_enabled(&self) -> Option<bool> {
+        self.enabled
+    }
+    pub fn max_items_resolved(&self) -> usize {
+        self.max_items.unwrap_or(5)
+    }
+    pub fn max_body_kb_resolved(&self) -> usize {
+        self.max_body_kb.unwrap_or(32)
+    }
+}
+
+impl SanitizeConfigTrait for WorkitemContextConfig {
+    fn sanitize_config_fields(&mut self) {
+        // No free-form string fields — booleans + numbers only.
+    }
+}
+
+/// Configuration for the `schedule` execution-context contributor.
+///
+/// Stages "since last run of this pipeline on this branch" diff
+/// context for scheduled builds (Stage 5 of the build-out — see
+/// plan.md). Defaults to OFF (opt-in) — many scheduled agents are
+/// operational (e.g. "every morning, summarize open work items")
+/// and don't need diff context. Runtime gate:
+/// `eq(variables['Build.Reason'], 'Schedule')`.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ScheduleContextConfig {
+    /// Whether the schedule contributor is active. **Default OFF**.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+impl ScheduleContextConfig {
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.unwrap_or(false)
+    }
+}
+
+impl SanitizeConfigTrait for ScheduleContextConfig {
+    fn sanitize_config_fields(&mut self) {
+        // No free-form string fields — booleans only.
+    }
+}
+
+/// Configuration for the `repo` execution-context contributor.
+///
+/// Always-on capability (Stage 7 of the build-out — see plan.md):
+/// stages repository identity info (branch, SHA, last release tag,
+/// commits-since-tag). Pure git — no REST, no bearer. Defaults to
+/// OFF to avoid prompt-clutter regression for the agents that
+/// already get sufficient repo identity from PR / ci-push / pipeline
+/// contributors.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct RepoContextConfig {
+    /// Whether the repo contributor is active. **Default OFF**.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Whether to additionally stage `conventions.json` — a probe of
+    /// CODEOWNERS / CONTRIBUTING.md / .editorconfig / AGENTS.md
+    /// presence + first 50 lines of each found. Defaults to `false`.
+    #[serde(default)]
+    pub conventions: Option<bool>,
+}
+
+impl RepoContextConfig {
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.unwrap_or(false)
+    }
+    pub fn conventions_enabled(&self) -> bool {
+        self.conventions.unwrap_or(false)
+    }
+}
+
+impl SanitizeConfigTrait for RepoContextConfig {
+    fn sanitize_config_fields(&mut self) {
+        // No free-form string fields — booleans only.
     }
 }
 
@@ -1256,10 +1579,53 @@ pub struct PrTriggerConfig {
     /// Runtime filters evaluated via gate steps in the Setup job
     #[serde(default)]
     pub filters: Option<PrFilters>,
+    /// Determines how `on.pr` builds reach the pipeline; see
+    /// [`PrMode`] for the two supported strategies (`synthetic`,
+    /// `policy`). Defaults to [`PrMode::Synthetic`].
+    #[serde(default, rename = "mode")]
+    pub mode: PrMode,
+}
+
+/// How `on.pr` builds reach the pipeline.
+///
+/// Azure DevOps Services ignores the YAML `pr:` block unless a
+/// per-branch Build Validation policy is registered server-side. This
+/// enum lets the agent author pick one of two coherent strategies:
+///
+/// * [`PrMode::Synthetic`] (default) — the compiler emits a Setup-job
+///   script (`exec-context-pr-synth.js`) that calls the ADO REST API
+///   on CI-triggered builds, finds the open PR for `Build.SourceBranch`,
+///   and exposes PR identifiers as `dependencies.Setup.outputs['synthPr.*']`
+///   so the gate and `exec-context-pr.js` behave as if
+///   `Build.Reason == PullRequest`. The top-level `trigger:` stays at
+///   ADO's "trigger on every branch" default. **No branch policy
+///   required.** This is the right choice for the vast majority of
+///   agents.
+///
+/// * [`PrMode::Policy`] — the compiler omits all synth wiring AND
+///   emits `trigger: none` at the top level, so the pipeline only
+///   queues when ADO's Build Validation branch policy fires a real
+///   `Build.Reason == PullRequest` build. Choose this when the
+///   operator has explicitly installed a branch policy and wants to
+///   avoid duplicate CI builds firing on every push.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrMode {
+    /// Synthesise PR context from the ADO REST API on CI-triggered
+    /// builds. Top-level `trigger:` left at ADO default.
+    #[default]
+    Synthetic,
+    /// Operator-installed Build Validation branch policy drives PR
+    /// builds; CI trigger is suppressed via `trigger: none`.
+    Policy,
 }
 
 impl SanitizeConfigTrait for PrTriggerConfig {
     fn sanitize_config_fields(&mut self) {
+        // `mode` (PrMode enum, `Copy`) has no string content to
+        // sanitize — it's a closed kebab-case-deserialised enum, so
+        // any malformed input is already rejected at deserialisation
+        // time. Intentionally absent here.
         if let Some(ref mut b) = self.branches {
             b.sanitize_config_fields();
         }
@@ -1600,8 +1966,6 @@ timeout-minutes: 60
         assert_eq!(env.get("AWS_REGION").unwrap(), "us-west-2");
     }
 
-
-
     // ─── PermissionsConfig deserialization ───────────────────────────────
 
     #[test]
@@ -1742,6 +2106,7 @@ Body
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
         let cm = fm.tools.as_ref().unwrap().cache_memory.as_ref().unwrap();
         assert!(!cm.is_enabled());
+        assert!(cm.allowed_extensions().is_empty());
     }
 
     #[test]
@@ -2220,6 +2585,60 @@ triggers:
     }
 
     #[test]
+    fn test_pr_trigger_config_mode_default_synthetic() {
+        let yaml = r#"
+triggers:
+  pr:
+    branches:
+      include: [main]
+"#;
+        let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
+        assert_eq!(
+            tc.pr.unwrap().mode,
+            PrMode::Synthetic,
+            "mode must default to synthetic when omitted"
+        );
+    }
+
+    #[test]
+    fn test_pr_trigger_config_mode_explicit_policy() {
+        let yaml = r#"
+triggers:
+  pr:
+    branches:
+      include: [main]
+    mode: policy
+"#;
+        let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
+        assert_eq!(
+            tc.pr.unwrap().mode,
+            PrMode::Policy,
+            "mode: policy must deserialise correctly"
+        );
+    }
+
+    #[test]
+    fn test_pr_trigger_config_mode_invalid_value_errors() {
+        let yaml = r#"
+triggers:
+  pr:
+    branches:
+      include: [main]
+    mode: bananas
+"#;
+        let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let err = serde_yaml::from_value::<OnConfig>(val["triggers"].clone())
+            .expect_err("mode: bananas must be rejected at deserialisation");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("bananas") || msg.contains("variant") || msg.contains("unknown"),
+            "error must mention the bad variant; got: {msg}"
+        );
+    }
+
+    #[test]
     fn test_pr_trigger_config_paths_only() {
         let yaml = r#"
 triggers:
@@ -2246,10 +2665,7 @@ triggers:
 "#;
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
-        assert_eq!(
-            tc.pipeline.as_ref().unwrap().name,
-            "Build Pipeline"
-        );
+        assert_eq!(tc.pipeline.as_ref().unwrap().name, "Build Pipeline");
         assert_eq!(
             tc.pr.unwrap().filters.unwrap().title.unwrap().pattern,
             "*[review]*"
@@ -2265,10 +2681,21 @@ triggers:
 "#;
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let tc: OnConfig = serde_yaml::from_value(val["triggers"].clone()).unwrap();
+        // `filters: {}` must produce a Some with every optional field defaulting to None
         let filters = tc.pr.unwrap().filters.unwrap();
         assert!(filters.title.is_none());
         assert!(filters.author.is_none());
+        assert!(filters.source_branch.is_none());
+        assert!(filters.target_branch.is_none());
+        assert!(filters.commit_message.is_none());
+        assert!(filters.labels.is_none());
         assert!(filters.draft.is_none());
+        assert!(filters.changed_files.is_none());
+        assert!(filters.time_window.is_none());
+        assert!(filters.min_changes.is_none());
+        assert!(filters.max_changes.is_none());
+        assert!(filters.build_reason.is_none());
+        assert!(filters.expression.is_none());
     }
 
     #[test]

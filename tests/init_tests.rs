@@ -71,37 +71,31 @@ fn test_init_overwrites_by_default() {
     );
 }
 
-/// Test that `init --force` also overwrites an existing agent file
+/// Test that `--force` is advertised in `init --help` and describes its
+/// actual purpose: bypassing the GitHub-remote guard so maintainers can run
+/// `ado-aw init` inside a GitHub-hosted fork of `ado-aw` itself.
+///
+/// NOTE: `--force` has nothing to do with overwriting (init always overwrites).
+/// It skips `ensure_non_github_remote_for_ado_aw`. We cannot trigger that
+/// guard from within a `cargo test` run because `CARGO_BIN_EXE_ado-aw` being
+/// set already bypasses it, so the meaningful check is the CLI surface test.
 #[test]
-fn test_init_force_overwrites() {
-    let temp_dir = tempfile::tempdir().expect("Failed to create temp directory");
-
-    // First run
+fn test_init_force_flag_is_advertised_in_help() {
     let output = ado_aw_bin()
-        .args(["init", "--path", temp_dir.path().to_str().unwrap()])
+        .args(["init", "--help"])
         .output()
-        .expect("Failed to run ado-aw init");
-    assert!(output.status.success(), "First init should succeed");
+        .expect("Failed to run ado-aw init --help");
+    assert!(output.status.success(), "init --help should exit 0");
 
-    let agent_path = temp_dir.path().join(".github/agents/ado-aw.agent.md");
-
-    // Tamper with the file
-    fs::write(&agent_path, "tampered content").expect("Should write tampered content");
-
-    // Re-run with --force should succeed and restore the template
-    let output = ado_aw_bin()
-        .args(["init", "--path", temp_dir.path().to_str().unwrap(), "--force"])
-        .output()
-        .expect("Failed to run ado-aw init --force");
-    assert!(output.status.success(), "Init with --force should succeed");
-
-    let content = fs::read_to_string(&agent_path).expect("Should read agent file");
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        content.contains("ADO Agentic Pipelines Agent"),
-        "Force should restore the template content"
+        stdout.contains("--force"),
+        "init --help should document the --force flag, got:\n{stdout}"
     );
+    // The help text must explain the flag's purpose (GitHub-remote guard bypass),
+    // not merely say it exists.
     assert!(
-        !content.contains("tampered"),
-        "Tampered content should be overwritten"
+        stdout.contains("GitHub") || stdout.contains("bypass"),
+        "init --help should explain that --force bypasses the GitHub-remote guard, got:\n{stdout}"
     );
 }

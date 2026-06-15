@@ -6,6 +6,7 @@ permissions:
   contents: read
   pull-requests: read
   issues: read
+  copilot-requests: write
 tools:
   github:
     toolsets: [default]
@@ -24,6 +25,8 @@ safe-outputs:
       - "ado-aw-derive/**"
       - "Cargo.toml"
       - "Cargo.lock"
+max-ai-credits: -1
+max-daily-ai-credits: -1
 ---
 
 # Clippy Fixer

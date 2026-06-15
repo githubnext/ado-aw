@@ -1,5 +1,6 @@
 ---
 on:
+  bots: ["github-actions[bot]"]
   release:
     types: [published]
   workflow_dispatch:
@@ -13,6 +14,7 @@ permissions:
   contents: read
   pull-requests: read
   issues: read
+  copilot-requests: write
 tools:
   github:
     toolsets: [default]
@@ -30,6 +32,8 @@ safe-outputs:
     required-title-prefix: "chore(workflows): recompile safe-output fixtures"
     target: "*"
     max: 5
+max-ai-credits: -1
+max-daily-ai-credits: -1
 ---
 
 # Recompile safe-output fixtures

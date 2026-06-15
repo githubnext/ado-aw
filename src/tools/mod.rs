@@ -1,7 +1,7 @@
 //! First-class tool implementations for the ado-aw compiler.
 //!
 //! Each tool is colocated in its own subdirectory containing both
-//! compile-time (`extension.rs` — [`CompilerExtension`] impl) and
+//! compile-time (`extension.rs` — [`crate::compile::extensions::CompilerExtension`] impl) and
 //! runtime (`execute.rs` — Stage 3 logic) code where applicable.
 //!
 //! Tools are configured via the `tools:` front-matter section and provide

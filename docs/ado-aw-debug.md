@@ -191,5 +191,5 @@ on the compiler and re-compiling frequently.
 - [`docs/safe-outputs.md`](safe-outputs.md) — regular safe-outputs
   surface (`create-issue` is **not** in it).
 - [`docs/cli.md`](cli.md) — `--skip-integrity` CLI flag.
-- [`docs/template-markers.md`](template-markers.md) — `{{ executor_ado_env }}`
-  and `{{ integrity_check }}` markers and their conditional behaviour.
+- [`docs/ir.md`](ir.md) — typed pipeline IR and how debug-only choices such as
+  integrity-check omission are represented in generated steps.

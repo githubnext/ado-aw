@@ -29,7 +29,7 @@ URL-encoded project segments are decoded automatically. Both `t=` and `s=` are a
 
 | Flag | Default | Behavior |
 |---|---|---|
-| `-o, --output <dir>` | `./logs` | Directory under which `<dir>/build-<id>/` is written. |
+| `-o, --output <dir>` | `./logs` | Directory under which `<dir>/build-<id>/` is written. Non-CLI entry points (`ado-aw trace` and the mcp-author tools) default to the shared `${TEMP}/ado-aw/audit` cache root so they do not scatter `./logs/` directories under arbitrary working directories. |
 | `--json` | off | Emit the full `AuditData` as JSON to stdout. Suppresses the trailing `Audit complete` stderr line. |
 | `--org <url>` | auto | ADO organization override for bare build IDs. Full build URLs supply this directly. |
 | `--project <name>` | auto | ADO project override for bare build IDs. Full build URLs supply this directly. |

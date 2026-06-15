@@ -669,44 +669,6 @@ fn generate_weekly_cron(hash: u32, day: Option<Weekday>, constraint: &TimeConstr
     format!("{} * * {}", time_cron, day_of_week)
 }
 
-/// Generate full schedule YAML block for Azure DevOps pipelines.
-///
-/// When `branches` is empty, no branch filter is emitted — the schedule fires on
-/// any branch where the YAML exists. When `branches` is non-empty, a
-/// `branches.include` block is generated to restrict which branches trigger the schedule.
-pub fn generate_schedule_yaml(
-    schedule_str: &str,
-    workflow_id: &str,
-    branches: &[String],
-) -> Result<String> {
-    debug!(
-        "Generating schedule YAML for '{}' (workflow: {})",
-        schedule_str, workflow_id
-    );
-    let schedule = parse_fuzzy_schedule(schedule_str)?;
-    let cron = generate_cron(&schedule, workflow_id);
-    debug!("Generated cron expression: '{}'", cron);
-
-    let branches_block = if branches.is_empty() {
-        String::new()
-    } else {
-        let entries: Vec<String> = branches.iter().map(|b| format!("        - {}", b)).collect();
-        format!(
-            "\n    branches:\n      include:\n{}",
-            entries.join("\n")
-        )
-    };
-
-    Ok(format!(
-        r#"schedules:
-  - cron: "{}"
-    displayName: "Scheduled run"{}
-    always: true
-"#,
-        cron, branches_block
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -994,32 +956,6 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_schedule_yaml() {
-        let yaml = generate_schedule_yaml("daily", "test/agent", &[]).unwrap();
-        assert!(yaml.contains("schedules:"));
-        assert!(yaml.contains("cron:"));
-        // `always: true` is load-bearing — without it ADO only fires the schedule
-        // when the target branch has changed since the last run, turning a
-        // "run unconditionally on schedule" pipeline into one that silently skips.
-        assert!(yaml.contains("always: true"), "schedule YAML must include always: true");
-        // No branches filter by default
-        assert!(!yaml.contains("branches:"));
-    }
-
-    #[test]
-    fn test_generate_schedule_yaml_with_branches() {
-        let branches = vec!["main".to_string(), "release/*".to_string()];
-        let yaml = generate_schedule_yaml("daily", "test/agent", &branches).unwrap();
-        assert!(yaml.contains("schedules:"));
-        assert!(yaml.contains("cron:"));
-        assert!(yaml.contains("always: true"), "schedule YAML must include always: true");
-        assert!(yaml.contains("branches:"));
-        assert!(yaml.contains("include:"));
-        assert!(yaml.contains("- main"));
-        assert!(yaml.contains("- release/*"));
-    }
-
-    #[test]
     fn test_error_messages() {
         let err = parse_fuzzy_schedule("monthly").unwrap_err();
         assert!(err.to_string().contains("Unknown schedule type"));
@@ -1062,30 +998,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_backward_compatibility_hourly() {
-        // "hourly" should produce a cron where only the minute varies (all other fields are `*`)
-        let yaml = generate_schedule_yaml("hourly", "test", &[]).unwrap();
-        assert!(yaml.contains("cron:"));
-        // Extract the cron expression from the YAML: `  - cron: "N * * * *"`
-        let cron_line = yaml
-            .lines()
-            .find(|l| l.trim_start().starts_with("- cron:"))
-            .expect("YAML should contain a `- cron:` line");
-        let cron = cron_line
-            .trim()
-            .trim_start_matches("- cron:")
-            .trim()
-            .trim_matches('"');
-        let parts: Vec<&str> = cron.split_whitespace().collect();
-        assert_eq!(parts.len(), 5, "Hourly cron should have 5 fields");
-        // Hour, day-of-month, month, day-of-week must all be `*`
-        assert_eq!(parts[1], "*", "Hour field should be * for hourly");
-        assert_eq!(parts[2], "*", "Day-of-month field should be * for hourly");
-        assert_eq!(parts[3], "*", "Month field should be * for hourly");
-        assert_eq!(parts[4], "*", "Day-of-week field should be * for hourly");
-        // Minute must be a valid 0-59 integer
-        let minute: u32 = parts[0].parse().expect("Minute field should be a number");
-        assert!(minute < 60, "Minute should be 0-59");
-    }
 }

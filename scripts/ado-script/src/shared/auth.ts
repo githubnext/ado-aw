@@ -5,15 +5,17 @@
  * `SYSTEM_ACCESSTOKEN` and `ADO_COLLECTION_URI` pipeline env vars via
  * `getPersonalAccessTokenHandler`.
  *
- * The `azure-devops-node-api` package is heavy (~1 MB; includes
- * `typed-rest-client` and `tunnel` transitive deps). Loading it eagerly
- * adds ~50–100 ms of startup latency that is wasted whenever the gate
- * is invoked for a code path that never touches the ADO REST API
- * (e.g. a manual build that hits the bypass branch in `bypass.ts`, or
- * a pipeline whose facts are all pipeline variables). The dynamic
- * `import()` below is statically analysable by ncc, so the SDK is
- * still bundled into `gate.js` — only its module-evaluation
- * cost is deferred until the first `getWebApi()` call.
+ * Import shape: the SDK is imported statically. An earlier revision
+ * deferred it via `await import(...)` to save ~50–100 ms of
+ * module-evaluation time on bypass paths, but ncc compiles dynamic
+ * `import()` into a separate webpack chunk file (`<id>.index.js`)
+ * that lives alongside the main bundle in `.ado-build/<name>/`. The
+ * release pipeline ships only the flat `<name>.js` files
+ * (see `scripts/ado-script/package.json`'s `build:*` targets, plus
+ * `src/compile/extensions/ado_script.rs`'s per-file download list),
+ * so at runtime the chunk was missing and `getWebApi()` failed with
+ * `Cannot find module '/tmp/ado-aw-scripts/ado-script/<id>.index.js'`.
+ * A static import keeps everything in a single self-contained bundle.
  *
  * Env-var contract (set by the compiler in
  * `src/compile/filter_ir.rs::compile_gate_step_external` /
@@ -21,6 +23,7 @@
  *   - `SYSTEM_ACCESSTOKEN` ← `$(System.AccessToken)`
  *   - `ADO_COLLECTION_URI` ← `$(System.CollectionUri)`
  */
+import * as azdev from "azure-devops-node-api";
 import type { WebApi } from "azure-devops-node-api";
 import { logError } from "./vso-logger.js";
 
@@ -47,7 +50,6 @@ export async function getWebApi(): Promise<WebApi> {
     throw new Error(msg);
   }
 
-  const azdev = await import("azure-devops-node-api");
   const handler = azdev.getPersonalAccessTokenHandler(token);
   cached = new azdev.WebApi(orgUrl, handler);
   return cached;

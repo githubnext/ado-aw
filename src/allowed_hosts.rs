@@ -63,7 +63,8 @@ pub static CORE_ALLOWED_HOSTS: &[&str] = &[
 /// Returns empty slice for unknown MCPs - they must specify their own hosts.
 pub fn mcp_required_hosts(mcp_name: &str) -> &'static [&'static str] {
     match mcp_name {
-        // Azure DevOps MCP
+        // Azure DevOps MCP (consumed by the always-on azure-devops tool
+        // extension, not a user-facing `mcp-servers:` key).
         "ado" | "ado-ext" => &[
             // Already covered by core, but explicit for clarity
             "dev.azure.com",
@@ -72,47 +73,8 @@ pub fn mcp_required_hosts(mcp_name: &str) -> &'static [&'static str] {
             "vssps.dev.azure.com",
         ],
 
-        // Kusto (Azure Data Explorer) MCP
-        "kusto" => &[
-            "*.kusto.windows.net",
-            "*.kusto.azure.com",
-            "*.kustomfa.windows.net",
-            "kusto.azure.com",
-        ],
-
-        // IcM (Incident Management) MCP
-        "icm" => &[
-            "icm.ad.msft.net",
-            "prod.microsofticm.com",
-            "*.microsofticm.com",
-        ],
-
-        // Bluebird MCP (internal Microsoft service)
-        "bluebird" => &["bluebird.microsoft.com", "*.bluebird.microsoft.com"],
-
-        // ES Chat MCP (internal Microsoft service)
-        "es-chat" => &["es-chat.microsoft.com", "*.es-chat.microsoft.com"],
-
-        // Microsoft Learn / Docs MCP
-        "msft-learn" => &[
-            "learn.microsoft.com",
-            "docs.microsoft.com",
-            "*.learn.microsoft.com",
-        ],
-
-        // ASA (Azure Stream Analytics / internal service) MCP
-        "asa" => &["*.azure.com", "asa.azure.com"],
-
-        // Stack MCP (internal)
-        "stack" => &["stack.microsoft.com", "*.stack.microsoft.com"],
-
-        // Calculator MCP - no network needed
-        "calculator" => &[],
-
-        // GitHub MCP (for non-Copilot GitHub access)
-        "github" => &["api.github.com", "github.com", "*.githubusercontent.com"],
-
-        // Unknown MCP - return empty, user must specify hosts
+        // Unknown MCP - return empty, user must specify hosts via
+        // `network.allowed`.
         _ => &[],
     }
 }
@@ -129,9 +91,25 @@ mod tests {
     }
 
     #[test]
-    fn test_mcp_hosts_kusto() {
-        let hosts = mcp_required_hosts("kusto");
-        assert!(hosts.contains(&"*.kusto.windows.net"));
+    fn test_mcp_hosts_ado() {
+        let hosts = mcp_required_hosts("ado");
+        assert!(hosts.contains(&"dev.azure.com"));
+    }
+
+    #[test]
+    fn test_mcp_hosts_internal_services_removed() {
+        // Internal Microsoft service identifiers (kusto, icm, bluebird,
+        // es-chat, msft-learn, asa, stack, calculator, github) are no longer
+        // special-cased — they must declare hosts via `network.allowed`.
+        for name in [
+            "kusto", "icm", "bluebird", "es-chat", "msft-learn", "asa", "stack",
+            "calculator", "github",
+        ] {
+            assert!(
+                mcp_required_hosts(name).is_empty(),
+                "{name} should no longer auto-add hosts"
+            );
+        }
     }
 
     #[test]

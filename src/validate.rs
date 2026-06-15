@@ -16,9 +16,12 @@ use std::collections::HashMap;
 // ── Character allowlist validators ──────────────────────────────────────────
 
 /// Validate that a string is safe to embed as a single path segment (e.g. a
-/// repository alias appended to `$(Build.SourcesDirectory)`). Rejects empty
-/// strings, anything containing `..`, path separators (`/`, `\`), or leading
-/// `.` to prevent path traversal / hidden-directory escapes.
+/// repository alias appended to `$(Build.SourcesDirectory)`).
+///
+/// Rejects empty strings, traversal/path-separator patterns (`..`, `/`, `\`),
+/// leading `.`, control newlines, and any character outside `[A-Za-z0-9._-]`.
+/// This strict allowlist blocks shell metacharacters when the segment is
+/// interpolated into generated bash steps.
 pub fn is_safe_path_segment(s: &str) -> bool {
     !s.is_empty()
         && !s.contains("..")
@@ -27,6 +30,8 @@ pub fn is_safe_path_segment(s: &str) -> bool {
         && !s.starts_with('.')
         && !s.contains('\n')
         && !s.contains('\r')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 /// Characters allowed in engine.command paths (absolute path chars only).
@@ -455,6 +460,7 @@ mod tests {
         assert!(is_safe_path_segment("my-repo"));
         assert!(is_safe_path_segment("exp23-a7-nw"));
         assert!(is_safe_path_segment("repo_v2"));
+        assert!(is_safe_path_segment("repo.v2"));
         assert!(!is_safe_path_segment(""));
         assert!(!is_safe_path_segment(".."));
         assert!(!is_safe_path_segment("../sibling"));
@@ -464,6 +470,10 @@ mod tests {
         assert!(!is_safe_path_segment("foo..bar"));
         assert!(!is_safe_path_segment("foo\nbar"));
         assert!(!is_safe_path_segment("foo\rbar"));
+        assert!(!is_safe_path_segment("evil`env|base64>creds`"));
+        assert!(!is_safe_path_segment("repo;whoami"));
+        assert!(!is_safe_path_segment("repo\"x"));
+        assert!(!is_safe_path_segment("repo$token"));
     }
 
     #[test]

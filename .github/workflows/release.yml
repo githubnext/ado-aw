@@ -1,5 +1,9 @@
 name: Release
 
+# Note: the v0.34.0 entry re-records the on.pr.mode change from #922,
+# whose squash-merge body broke release-please's commit parser and was
+# silently dropped from the v0.33.2 release PR (#924).
+
 on:
   push:
     branches:
@@ -73,7 +77,7 @@ jobs:
         run: |
           set -euo pipefail
           cd scripts
-          zip -r ../ado-script.zip ado-script/gate.js ado-script/import.js ado-script/exec-context-pr.js
+          zip -r ../ado-script.zip ado-script/gate.js ado-script/import.js ado-script/exec-context-pr.js ado-script/exec-context-pr-synth.js ado-script/exec-context-manual.js ado-script/exec-context-pipeline.js ado-script/exec-context-ci-push.js ado-script/exec-context-workitem.js ado-script/exec-context-schedule.js ado-script/exec-context-pr-checks.js ado-script/exec-context-repo.js
 
       - name: Upload release assets
         env:
@@ -83,6 +87,9 @@ jobs:
           gh release upload "$TAG" \
             target/release/ado-aw-linux-x64 \
             ado-script.zip \
+            scripts/install/install-linux.sh \
+            scripts/install/install-macos.sh \
+            scripts/install/install-windows.ps1 \
             --clobber
 
   build-windows:
@@ -173,12 +180,26 @@ jobs:
           gh release download "$TAG" \
             --pattern "ado-aw-*" \
             --pattern "ado-script.zip" \
+            --pattern "install-linux.sh" \
+            --pattern "install-macos.sh" \
+            --pattern "install-windows.ps1" \
             --repo "${{ github.repository }}"
           test -f ado-aw-linux-x64 || { echo "Missing ado-aw-linux-x64"; exit 1; }
           test -f ado-aw-windows-x64.exe || { echo "Missing ado-aw-windows-x64.exe"; exit 1; }
           test -f ado-aw-darwin-arm64 || { echo "Missing ado-aw-darwin-arm64"; exit 1; }
           test -f ado-script.zip || { echo "Missing ado-script.zip"; exit 1; }
-          sha256sum ado-aw-linux-x64 ado-aw-windows-x64.exe ado-aw-darwin-arm64 ado-script.zip > checksums.txt
+          test -f install-linux.sh || { echo "Missing install-linux.sh"; exit 1; }
+          test -f install-macos.sh || { echo "Missing install-macos.sh"; exit 1; }
+          test -f install-windows.ps1 || { echo "Missing install-windows.ps1"; exit 1; }
+          sha256sum \
+            ado-aw-linux-x64 \
+            ado-aw-windows-x64.exe \
+            ado-aw-darwin-arm64 \
+            ado-script.zip \
+            install-linux.sh \
+            install-macos.sh \
+            install-windows.ps1 \
+            > checksums.txt
 
       - name: Upload checksums
         env:

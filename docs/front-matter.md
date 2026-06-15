@@ -104,6 +104,24 @@ on:                            # trigger configuration (unified under on: key)
       include: [main]
     paths:
       include: [src/*]
+    mode: synthetic            # synthetic (default) | policy. Controls how
+                               # `on.pr` builds reach the pipeline.
+                               #   - synthetic: a Setup-job script calls the
+                               #     ADO REST API on every CI build, finds the
+                               #     open PR for `Build.SourceBranch`, and
+                               #     promotes the build to PR semantics if it
+                               #     matches `branches`/`paths`. No Build
+                               #     Validation branch policy required. Zero
+                               #     or multiple matches → Agent job
+                               #     self-skips cleanly. CI trigger stays at
+                               #     the ADO default (all branches).
+                               #   - policy: the operator has installed a
+                               #     Build Validation branch policy. Compiler
+                               #     omits all synth wiring AND emits
+                               #     `trigger: none` so feature-branch pushes
+                               #     do not queue duplicate CI builds. Real
+                               #     PR-typed builds drive everything.
+                               # See "PR Triggering in Azure Repos" below.
     filters:                   # runtime PR filters (compiled to gate step)
       title: "*[review]*"
       author:
@@ -312,7 +330,7 @@ The `expression` field on `pr.filters` and `pipeline.filters` is an
 **advanced, unsafe escape hatch**. Its value is inserted verbatim into
 the Agent job's ADO `condition:` field. It can reference any ADO
 pipeline variable, including secrets. The compiler validates against
-`##vso[` injection and `${{` template markers, but otherwise trusts the
+`##vso[` injection and ADO compile-time template expressions (`${{`), but otherwise trusts the
 value. Only use this if the built-in filters are insufficient.
 
 ### Pipeline Requirements
@@ -328,3 +346,78 @@ The filter gate step uses `System.AccessToken` for self-cancellation
 If the token is unavailable, the gate step logs a warning and the build
 completes as "Succeeded" (with the agent job skipped via condition)
 rather than "Cancelled".
+
+## PR Triggering in Azure Repos
+
+Azure DevOps Services **ignores the YAML `pr:` block unless a per-branch
+Build Validation branch policy is registered server-side**. Without that
+policy, a `git push` to a feature branch fires the compiled pipeline as
+`Build.Reason = IndividualCI` even when an open PR exists — the gate
+evaluator's "not a PR build" bypass triggers and `exec-context-pr.js`
+is skipped. PR-aware agents (e.g. PR reviewers) silently degrade.
+
+`ado-aw` lets the agent author pick one of two coherent strategies via
+`on.pr.mode`:
+
+| `on.pr.mode` | Synthesis wiring | Top-level `trigger:` | Use when |
+|---|---|---|---|
+| `synthetic` (default) | emitted (synthPr Setup step, coalesced env, broadened conditions) | ADO default (all branches) | No branch policy. **The vast majority of agents.** |
+| `policy` | omitted | `trigger: none` | Operator has installed a Build Validation branch policy and wants real PR-typed builds only, no duplicate CI builds. |
+
+### `mode: synthetic` — how it works under the hood
+
+On every CI build:
+
+1. **Real PR build?** If `Build.Reason == PullRequest` (a branch policy
+   is configured), the synth step no-ops and the existing PR path
+   handles everything.
+2. **GitHub-typed repo resource?** GitHub repos already get correct
+   `pr:` semantics from ADO. The synth step no-ops.
+3. **Look up the PR.** Otherwise, the script calls
+   `GET /{project}/_apis/git/repositories/{repoId}/pullrequests`
+   filtered by `sourceRefName == Build.SourceBranch` and
+   `status = active`.
+4. **Filter by target branch.** PRs whose `targetRefName` does not match
+   `on.pr.branches.include` (respecting `exclude`) are dropped.
+5. **Exactly one match.** Zero or multiple matches → emit
+   `AW_SYNTHETIC_PR_SKIP=true`; the Agent job self-skips cleanly with a
+   single info log line. Never noisy, never red.
+6. **Path filter.** If `on.pr.paths` is configured, the script enforces
+   it against the PR's changed-file list (which ADO's CI trigger
+   ignores). Empty intersection → skip.
+7. **Promote.** Otherwise, emit `AW_SYNTHETIC_PR=true` plus the PR
+   identifiers as Setup-job outputs. Downstream `gate.js` and
+   `exec-context-pr.js` env blocks coalesce these with the real
+   `System.PullRequest.*` variables, so the gate evaluator runs the
+   full PR-spec predicates and `aw-context/pr/{base.sha,head.sha}` is
+   staged for the agent.
+
+### Why the CI trigger is not auto-narrowed in `mode: synthetic`
+
+`pr.branches.include` lists PR **target** branches (e.g. `main`), but
+ADO `trigger:` fires on pushes **to** the listed branches. Narrowing
+`trigger:` to `pr.branches.include` would suppress CI on the feature
+branches synthPr actually needs to react to (pushing to `feature/x`
+with an open PR `feature/x → main` would never queue a build). The
+compiler therefore leaves the top-level `trigger:` at the ADO default
+("trigger on every branch") in synth mode, and relies on the synthPr
+Setup step's fast-exit for cost control: a single
+`listActivePullRequestsBySourceRef` call returns `[]` on branches
+without a matching PR and the Agent job self-skips cleanly via
+`AW_SYNTHETIC_PR_SKIP=true`.
+
+### `mode: policy` — when to choose it
+
+Choose `mode: policy` when the operator has explicitly installed an
+Azure DevOps Build Validation branch policy targeting the compiled
+pipeline. In this mode the compiler:
+
+- Omits all synth wiring (`synthPr` step, `PR_SYNTH_SPEC` env,
+  `AW_SYNTHETIC_PR_SKIP` guard, coalesced env macros, broadened
+  `exec-context-pr.js` condition).
+- Emits `trigger: none` so feature-branch pushes do not queue
+  duplicate CI builds alongside the policy-driven PR build.
+
+Result: every PR update fires exactly one PR-typed build (`Build.Reason
+== PullRequest`); commit-driven CI is fully silenced.
+

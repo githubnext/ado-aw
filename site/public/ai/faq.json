@@ -6,7 +6,7 @@
     },
     {
       "q": "How do I install ado-aw?",
-      "a": "Build from source with `cargo build` or install with `cargo install --path .` from the repository root."
+      "a": "Use the first-time installer scripts: Linux `curl -fsSL https://github.com/githubnext/ado-aw/releases/latest/download/install-linux.sh | sh`, macOS `curl -fsSL https://github.com/githubnext/ado-aw/releases/latest/download/install-macos.sh | sh`, or Windows `powershell -ExecutionPolicy Bypass -NoProfile -Command \"iwr https://github.com/githubnext/ado-aw/releases/latest/download/install-windows.ps1 -UseBasicParsing | iex\"`. These verify checksums before installing."
     },
     {
       "q": "How do I compile an agent file?",

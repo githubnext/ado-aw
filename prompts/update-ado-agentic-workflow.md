@@ -44,9 +44,39 @@ triggers → steps → post-steps → setup → teardown → network →
 permissions → parameters
 ```
 
+> **`on.pr` knob update**: when changing `on.pr.branches` or
+> `on.pr.paths`, also confirm whether `mode` (default `synthetic`) is
+> appropriate. In `synthetic` mode the compiler emits a Setup-job ADO
+> REST call to discover the open PR for `Build.SourceBranch` and
+> leaves the top-level `trigger:` at the ADO default. Switch to
+> `mode: policy` only if the operator has explicitly installed a
+> Build Validation branch policy — that mode emits `trigger: none`
+> and drops the synth wiring. Reference:
+> [`docs/front-matter.md#pr-triggering-in-azure-repos`](../docs/front-matter.md#pr-triggering-in-azure-repos).
+
 ### Step 3 — Validate the Changes
 
 Run through the validation checklist (see below) before finalizing. Fix any issues and inform the user of corrections made.
+
+When you have local CLI access, two read-only commands give a quick
+structural sanity check **before** you recompile or hand off to the
+user:
+
+```bash
+# Compact summary of jobs, stages, steps, output decls, derived dependsOn
+ado-aw inspect path/to/agent.md
+
+# Resolved dependency graph (text by default; --format dot pipes to Graphviz)
+ado-aw graph dump path/to/agent.md
+```
+
+These build the typed IR from the source and answer "did my change
+add/remove the expected jobs?" and "did the output / dependency wiring
+end up where I expected?" without writing any YAML to disk. The audit
+docs in [`docs/audit.md`](../docs/audit.md) and the IR JSON contract
+in [`docs/ir.md`](../docs/ir.md#public-json-summary-irsummary) cover
+the underlying `PipelineSummary` schema if you want to script against
+the JSON form.
 
 ### Step 4 — Recompile (if needed)
 

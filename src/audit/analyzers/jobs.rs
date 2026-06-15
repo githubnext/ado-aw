@@ -82,6 +82,7 @@ fn record_to_job(record: &Value) -> Option<JobData> {
         started_at,
         finished_at,
         status,
+        ..Default::default()
     })
 }
 

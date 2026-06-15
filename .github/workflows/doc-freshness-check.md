@@ -6,6 +6,7 @@ permissions:
   contents: read
   issues: read
   pull-requests: read
+  copilot-requests: write
 tools:
   github:
     toolsets: [default]
@@ -22,6 +23,8 @@ safe-outputs:
       - prompts/**
       - src/safeoutputs/create_work_item.rs
       - src/safeoutputs/update_work_item.rs
+max-ai-credits: -1
+max-daily-ai-credits: -1
 ---
 
 # Documentation Freshness Check

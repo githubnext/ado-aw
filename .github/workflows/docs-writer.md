@@ -6,6 +6,7 @@ permissions:
   contents: read
   issues: read
   pull-requests: read
+  copilot-requests: write
 tools:
   github:
     toolsets: [default]
@@ -23,6 +24,8 @@ safe-outputs:
       - "site/src/styles/**"
       - "site/src/content.config.ts"
       - "site/astro.config.mjs"
+max-ai-credits: -1
+max-daily-ai-credits: -1
 ---
 
 # Docs Writer

@@ -32,7 +32,7 @@ Agent             →  Detection          →  SafeOutputs
 | **SafeOutputs** | Executes approved safe outputs (create PRs, work items, wiki pages, etc.) | Write (`permissions.write`) | Standard ADO agent |
 
 Additional optional jobs:
-- **Setup** — runs before `Agent` (from `setup:` front matter)
+- **Setup** — runs before `Agent` (from `setup:` front matter). When `on.pr` is set with the default `mode: synthetic`, this job also runs a `synthPr` step that calls the ADO REST API to promote CI-triggered builds to PR semantics when an open PR matches; if it sets `AW_SYNTHETIC_PR_SKIP=true`, the Agent job is skipped cleanly. With `mode: policy` there is no synthPr step (and `trigger: none` is emitted so the operator's Build Validation branch policy is the sole source of PR builds). See [`docs/front-matter.md#pr-triggering-in-azure-repos`](../docs/front-matter.md#pr-triggering-in-azure-repos).
 - **Teardown** — runs after `SafeOutputs` (from `teardown:` front matter)
 
 ---
@@ -78,6 +78,37 @@ The output JSON contains the full `AuditData` (see [What `ado-aw audit` extracts
 - `key_findings` / `recommendations` → heuristic summaries (severity high/critical findings are usually the root-cause signal)
 
 If the CLI is not available, fall through to the MCP-based steps below.
+
+#### 2a-prime-bis. Pair `audit` with the IR (when you have local CLI access)
+
+`ado-aw audit` answers "what happened at runtime?". `ado-aw inspect` /
+`graph` / `whatif` answer "what *should* happen, and what depends on
+what?". Pair them when an audit finding points at a specific job /
+step:
+
+```bash
+# Get the typed-IR summary for the source the build came from
+ado-aw inspect path/to/agent.md --json > ir.json
+
+# Print the resolved dependency graph (text, JSON, or Graphviz DOT)
+ado-aw graph dump path/to/agent.md --format text
+ado-aw graph dump path/to/agent.md --format dot | dot -Tsvg -o pipeline.svg
+```
+
+Use these to answer questions the audit alone cannot:
+
+- "Detection failed — which jobs were going to consume its output?"
+  → `ado-aw inspect <source> --json | jq '.graph.job_edges[] | select(.producer == "Detection")'`
+- "If `synthPr` failed, what skips downstream?"
+  → (when wired) `ado-aw whatif <source> --fail synthPr`
+- "Which step produced the empty output the agent step couldn't read?"
+  → `ado-aw inspect <source> --json` then locate the `env_refs` /
+    `outputs_needing_is_output` entry that matches.
+
+The IR view is **statically derived from the agent source**, so it
+reflects the pipeline shape the build was supposed to take. If the
+build's compiled `.lock.yml` diverged from what the current source
+would compile to, `ado-aw check <pipeline.lock.yml>` will catch it.
 
 #### 2a. Find the Pipeline Definition
 
@@ -361,16 +392,33 @@ This job executes the approved safe outputs using the write token. Failures here
 
 **Symptoms**: API calls return 401/403. The executor can't authenticate to Azure DevOps.
 
+**Decode the error first.** The body of an ADO 403 usually contains a structured `TF401027` message:
+
+```text
+TF401027: You need the Git '<PermissionName>' permission to perform
+this action. Details: identity 'Build\<guid>', scope '<scope>'.
+```
+
+| Field | What it tells you |
+|---|---|
+| `<PermissionName>` | The exact permission ADO denied. `PullRequestContribute` covers `add-pr-comment` / `submit-pr-review` / `reply-to-pr-comment` / `resolve-pr-thread` / `update-pr`. `GenericContribute` + `CreateBranch` + `PullRequestContribute` are what `create-pull-request` needs. `CreateBranch` alone is what `create-branch` needs. `CreateTag` is what `create-git-tag` needs. |
+| `Build\<guid>` | The Stage 3 identity. If the guid matches the **project ID**, the pipeline is running as the project-scoped `<ProjectName> Build Service (<org>)`. If it does not, it is the org-wide `Project Collection Build Service (<org>)` and "Limit job authorization scope to current project" is OFF. |
+| `<scope>` | `repository` = per-repo ACE, `project` = project-wide, `branch` = `refs/heads/<name>`. |
+
 **Common causes**:
 
-- **`permissions.write` not set**: The front matter is missing the write ARM service connection:
+- **No `permissions.write:` set, and the default build identity lacks the permission on the target repo.** The Stage 3 executor uses `$(System.AccessToken)` by default; the identity behind that token (PCBS or per-project Build Service) needs the right permission bit on the repo. An **explicit Deny** at the repo ACE on the failing identity will beat any group-level Allow. This is the most common Stage 3 failure mode; see [`docs/safe-output-permissions.md`](../docs/safe-output-permissions.md) for the full diagnosis flow, including a REST recipe for dumping the ACL and a decoder for the permission bitmask.
+- **`permissions.write` not set when the ADO admin has hardened the default build identity:**
   ```yaml
   permissions:
     write: my-write-arm-connection
   ```
 - **ARM service connection not authorized**: The pipeline needs explicit authorization for the service connection. Go to the pipeline's settings in ADO and authorize the service connection.
 - **Token scope insufficient**: The ARM service connection may not have the required permissions on the ADO project. Verify the connection's role assignments.
+- **Cross-project failure (`VS800075`)**: The pipeline is trying to act on a resource in a different project than where it runs and "Limit job authorization scope to current project" is ON. Either turn the toggle off (broader scope) or use a write service connection whose identity has explicit rights in the target project.
 - **Compile-time validation**: The compiler should catch missing `permissions.write` when write-requiring safe outputs are configured. If you're seeing this at runtime, the front matter may have been edited without recompiling.
+
+**Diagnosis hint when reporting**: include the full `TF401027` line (with `<PermissionName>` and the `Build\<guid>` value), the failing safe-output `name`, the target repo / PR / work item id, and — if you have it — whether the build identity has an explicit Deny vs missing Allow on the target. The [`safe-output-permissions.md`](../docs/safe-output-permissions.md) reference page has the REST recipe to pull this in one curl.
 
 ### PR Creation Failures
 

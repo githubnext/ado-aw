@@ -198,6 +198,9 @@ on:
     name: "Build Pipeline"       # source pipeline name (required)
     project: "OtherProject"      # only when in a different ADO project
     branches: [main, release/*]  # omit to trigger on any branch
+    filters:                     # optional runtime gate — evaluated inside the Setup job
+      source-pipeline: "Build*"  # glob on Build.TriggeredBy.DefinitionName
+      branch: "refs/heads/main"  # glob on Build.SourceBranch
 ```
 
 | Field | Required | Description |
@@ -205,7 +208,18 @@ on:
 | `name` | **Yes** | Source pipeline name; maps to `source:` in the generated `pipelines:` resource block |
 | `project` | No | ADO project that owns the source pipeline; omit when both pipelines are in the same project |
 | `branches` | No | Branch filter; empty list triggers on any branch completing |
-| `filters` | No | Runtime gate filters evaluated inside the Setup job (see [Filter IR](/ado-aw/reference/filter-ir/)) |
+| `filters` | No | Runtime gate filters evaluated inside the Setup job (see table below) |
+
+**`on.pipeline.filters` fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `source-pipeline` | glob | Upstream pipeline name must match (`Build.TriggeredBy.DefinitionName`). Use `"Build*"` to match any pipeline whose name starts with `Build`. |
+| `branch` | glob | Triggering branch ref must match (`Build.SourceBranch`). |
+| `time-window.start` / `.end` | `HH:MM` | Only run during this UTC time window. |
+| `build-reason.include` | list | Build reason must be in this list. Common values: `ResourceTrigger`, `Manual`. |
+| `build-reason.exclude` | list | Build reason must NOT be in this list. |
+| `expression` | ADO condition | Raw ADO condition applied to the Agent job `condition:` (not compiled to a gate step). |
 
 When `pipeline` is set and `on.pr` is not configured, CI push triggers and
 PR triggers are suppressed (`trigger: none`, `pr: none`).
@@ -228,6 +242,7 @@ changed-file globs, time windows, draft status, and more.
 ```yaml
 on:
   pr:
+    mode: synthetic              # synthetic (default) or policy — see below
     branches:
       include: [main, release/*]  # native ADO — only PRs targeting these branches
     paths:
@@ -240,8 +255,51 @@ on:
       source-branch: "feature/*"
 ```
 
-See the [Filter IR reference](/ado-aw/reference/filter-ir/) for the full
-catalog of runtime filter types, validation rules, and compilation details.
+**`on.pr.filters` fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `title` | glob | PR title must match this glob pattern (e.g. `"*[run-agent]*"`). |
+| `source-branch` | glob | Source branch ref must match (e.g. `"refs/heads/feature/*"` or `"feature/*"`). |
+| `target-branch` | glob | Target branch ref must match (e.g. `"refs/heads/main"`). |
+| `commit-message` | glob | Last commit message must match. |
+| `draft` | boolean | `true` = only draft PRs; `false` = only non-draft PRs. |
+| `author.include` | list | Author email must appear in this list. |
+| `author.exclude` | list | Author email must NOT appear in this list. |
+| `labels.any-of` | list | PR must have at least one of these labels. |
+| `labels.all-of` | list | PR must have all of these labels. |
+| `labels.none-of` | list | PR must NOT have any of these labels. |
+| `changed-files.include` | list of globs | At least one changed file must match any pattern. |
+| `changed-files.exclude` | list of globs | No changed file may match any pattern. |
+| `min-changes` | integer | Minimum number of changed files (inclusive). |
+| `max-changes` | integer | Maximum number of changed files (inclusive). |
+| `time-window.start` / `.end` | `HH:MM` | Only run during this UTC time window. |
+| `build-reason.include` | list | Build reason must be in this list. Common values: `PullRequest`, `BatchedCI`, `IndividualCI`, `Manual`. |
+| `build-reason.exclude` | list | Build reason must NOT be in this list. |
+| `expression` | ADO condition | Raw ADO condition applied to the Agent job `condition:` (not compiled to a gate step). |
+
+All filter fields are optional and combined with AND semantics — every configured field must pass. `author`, `labels`, and `changed-files` require a REST API call to the ADO PR endpoint; use native ADO `branches:` / `paths:` for broad exclusions that don't need runtime context.
+
+See the [Filter IR reference](/ado-aw/reference/filter-ir/) for compilation details and validation rules.
+
+**`on.pr.mode`** — Controls how the pipeline queues PR builds:
+
+| `mode` | CI `trigger:` | Use when |
+|--------|---------------|----------|
+| `synthetic` (default) | ADO default (all branches) | No Build Validation branch policy is installed. Setup synthesizes PR context from the ADO API. **Recommended for most agents.** |
+| `policy` | `trigger: none` | Operator has installed an ADO Build Validation branch policy. Prevents duplicate CI builds. |
+
+:::note[ADO Azure Repos behavior]
+Azure DevOps ignores the YAML `pr:` block for **Azure Repos** repositories unless a [Build Validation branch policy](https://learn.microsoft.com/en-us/azure/devops/repos/git/branch-policies?view=azure-devops#build-validation) is registered server-side. Without one, every push fires as `Build.Reason = IndividualCI` even when a PR is open — PR-aware agents silently degrade.
+
+`ado-aw` offers two strategies:
+
+**`mode: synthetic` (default)** — fires the pipeline on every push (ADO `trigger:` at its default). A Setup-job step calls the ADO REST API to find an open PR for the pushed branch:
+- **PR found** → promotes the build to PR semantics (`AW_SYNTHETIC_PR=true`), evaluates `filters:`, and stages `aw-context/pr/` context for the agent.
+- **No PR found** → sets `AW_SYNTHETIC_PR_SKIP=true` and the Agent job self-skips cleanly — no noise, no red builds.
+
+**`mode: policy`** — for when the operator has explicitly installed a Build Validation branch policy targeting this pipeline. The compiler emits `trigger: none` so pushes no longer queue duplicate CI builds alongside the policy-driven PR build. Every PR update fires exactly one `Build.Reason = PullRequest` build.
+:::
 
 ### Trigger suppression
 
@@ -562,7 +620,7 @@ The `expression` field on `pr.filters` and `pipeline.filters` is an
 **advanced, unsafe escape hatch**. Its value is inserted verbatim into
 the Agent job's ADO `condition:` field. It can reference any ADO
 pipeline variable, including secrets. The compiler validates against
-`##vso[` injection and `${{` template markers, but otherwise trusts the
+`##vso[` injection and ADO compile-time template expressions (`${{`), but otherwise trusts the
 value. Only use this if the built-in filters are insufficient.
 
 ### Pipeline Requirements

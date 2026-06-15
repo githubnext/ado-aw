@@ -1,7 +1,7 @@
-mod agent_stats;
-mod audit;
-mod allowed_hosts;
 pub mod ado;
+mod agent_stats;
+mod allowed_hosts;
+mod audit;
 mod compile;
 mod configure;
 mod detect;
@@ -13,9 +13,11 @@ mod execute;
 mod fuzzy_schedule;
 mod hash;
 mod init;
+mod inspect;
 mod list;
 mod logging;
 mod mcp;
+mod mcp_author;
 mod ndjson;
 mod remove;
 mod run;
@@ -158,6 +160,45 @@ enum SecretsCmd {
 }
 
 #[derive(Subcommand, Debug)]
+enum GraphCmd {
+    /// Dump the resolved graph (`ado-aw graph dump <source>` replaces the old bare form).
+    Dump {
+        /// Path to the agent markdown source.
+        source: PathBuf,
+        /// Output format: `text` (default), `json`, or `dot` (Graphviz).
+        #[arg(long, value_enum, default_value_t = inspect::GraphFormat::Text)]
+        format: inspect::GraphFormat,
+    },
+    /// Traverse dependencies for one named step.
+    Deps {
+        /// Path to the agent markdown source.
+        source: PathBuf,
+        /// Step id to traverse from.
+        step: String,
+        /// Traversal direction: `upstream` (default) or `downstream`.
+        #[arg(long, value_enum, default_value_t = inspect::GraphDepsDirection::Upstream)]
+        direction: inspect::GraphDepsDirection,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print declared outputs and their consumers.
+    Outputs {
+        /// Path to the agent markdown source.
+        source: PathBuf,
+        /// Filter to outputs declared by this producer step id.
+        #[arg(long)]
+        producer: Option<String>,
+        /// Filter to outputs read by this consumer step id.
+        #[arg(long)]
+        consumer: Option<String>,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum Commands {
     /// Compile markdown to pipeline definition (or recompile all detected pipelines)
     Compile {
@@ -201,6 +242,8 @@ enum Commands {
         #[arg(long = "enabled-tools")]
         enabled_tools: Vec<String>,
     },
+    /// Run the author-facing MCP server over stdio (IDE/Copilot Chat integration)
+    McpAuthor {},
     /// Execute safe outputs from Stage 1 (Stage 3 of the pipeline)
     Execute {
         /// Path to the source markdown file (used to read tool configs from front matter)
@@ -463,7 +506,13 @@ enum Commands {
         /// Build ID, or full ADO build URL.
         build_id_or_url: String,
         /// Output directory for downloaded artifacts and reports.
-        /// Default: ./logs (matches gh-aw operator muscle memory).
+        /// Defaults to `./logs` (preserved for operator muscle
+        /// memory and pre-existing scripts). Non-CLI callers — the
+        /// mcp-author tools and the `ado-aw trace` command — route
+        /// through `${TEMP}/ado-aw/audit` via
+        /// `crate::audit::default_cache_root` instead, so they do
+        /// not silently scatter `./logs/` directories under
+        /// arbitrary IDE working directories.
         #[arg(short, long, default_value = "./logs")]
         output: PathBuf,
         /// Emit the report as JSON to stdout instead of console text.
@@ -484,6 +533,24 @@ enum Commands {
         #[arg(long)]
         no_cache: bool,
     },
+    /// Trace a build's failing-job chain using audit data plus the local IR graph.
+    Trace {
+        /// Build ID, or full ADO build URL.
+        build_id_or_url: String,
+        /// Optional typed-IR step id to focus on.
+        #[arg(long)]
+        step: Option<String>,
+        /// Emit a structured TraceReport as JSON.
+        #[arg(long)]
+        json: bool,
+        /// ADO context overrides (auto-detected from git remote if omitted).
+        #[arg(long)]
+        org: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long, env = "AZURE_DEVOPS_EXT_PAT")]
+        pat: Option<String>,
+    },
     /// Export the gate spec JSON Schema (build-time tool for the
     /// scripts/ado-script TypeScript workspace).
     #[command(hide = true)]
@@ -491,6 +558,47 @@ enum Commands {
         /// Output path; if omitted, prints to stdout.
         #[arg(short, long)]
         output: Option<std::path::PathBuf>,
+    },
+    /// Inspect an agent source file's typed IR: jobs, stages, steps, outputs, derived `dependsOn`.
+    Inspect {
+        /// Path to the agent markdown source.
+        source: PathBuf,
+        /// Emit the full [`PipelineSummary`] as JSON instead of a terse human summary.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Query the resolved dependency graph for an agent source file.
+    Graph {
+        #[command(subcommand)]
+        subcommand: GraphCmd,
+    },
+    /// Static reachability: classify jobs skipped if a step or job fails.
+    Whatif {
+        /// Path to the agent markdown source.
+        source: PathBuf,
+        /// Step id or job id to treat as failing.
+        #[arg(long)]
+        fail: String,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run structural lint checks over an agent source file.
+    Lint {
+        /// Path to the agent markdown source.
+        source: PathBuf,
+        /// Emit lint findings as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List safe-outputs, runtimes, tools, engines, and models.
+    Catalog {
+        /// Category to emit: safe-outputs, runtimes, tools, engines, or models.
+        #[arg(long)]
+        kind: Option<String>,
+        /// Emit the catalog as JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -713,9 +821,7 @@ async fn build_execution_context(
                 ctx.tool_configs.insert("create-issue".to_string(), v);
                 ctx.debug_enabled_tools.insert("create-issue".to_string());
             }
-            Err(e) => log::warn!(
-                "Failed to serialize ado-aw-debug.create-issue config: {e}"
-            ),
+            Err(e) => log::warn!("Failed to serialize ado-aw-debug.create-issue config: {e}"),
         }
     }
     ctx.allowed_repositories = allowed_repositories;
@@ -845,6 +951,7 @@ async fn main() -> Result<()> {
         Some(Commands::Compile { .. }) => "compile",
         Some(Commands::Check { .. }) => "check",
         Some(Commands::Mcp { .. }) => "mcp",
+        Some(Commands::McpAuthor { .. }) => "mcp-author",
         Some(Commands::Execute { .. }) => "execute",
         Some(Commands::McpHttp { .. }) => "mcp-http",
         Some(Commands::Init { .. }) => "init",
@@ -857,7 +964,13 @@ async fn main() -> Result<()> {
         Some(Commands::Status { .. }) => "status",
         Some(Commands::Run { .. }) => "run",
         Some(Commands::Audit { .. }) => "audit",
+        Some(Commands::Trace { .. }) => "trace",
         Some(Commands::ExportGateSchema { .. }) => "export-gate-schema",
+        Some(Commands::Inspect { .. }) => "inspect",
+        Some(Commands::Graph { .. }) => "graph",
+        Some(Commands::Whatif { .. }) => "whatif",
+        Some(Commands::Lint { .. }) => "lint",
+        Some(Commands::Catalog { .. }) => "catalog",
         None => "ado-aw",
     };
 
@@ -880,7 +993,10 @@ async fn main() -> Result<()> {
     // Also skipped in CI environments to avoid unnecessary outbound calls.
     let is_pipeline_internal = matches!(
         command,
-        Commands::Execute { .. } | Commands::Mcp { .. } | Commands::McpHttp { .. }
+        Commands::Execute { .. }
+            | Commands::Mcp { .. }
+            | Commands::McpAuthor { .. }
+            | Commands::McpHttp { .. }
     );
     let update_handle = if !is_pipeline_internal && std::env::var_os("CI").is_none() {
         Some(tokio::spawn(update_check::check_for_update()))
@@ -925,6 +1041,9 @@ async fn main() -> Result<()> {
                 Some(enabled_tools)
             };
             mcp::run(&output_directory, &bounding_directory, filter.as_deref()).await?;
+        }
+        Commands::McpAuthor {} => {
+            mcp_author::run_stdio().await?;
         }
         Commands::Execute {
             source,
@@ -1225,6 +1344,29 @@ async fn main() -> Result<()> {
             })
             .await?;
         }
+        Commands::Trace {
+            build_id_or_url,
+            step,
+            json,
+            org,
+            project,
+            pat,
+        } => {
+            inspect::dispatch_trace(inspect::TraceOptions {
+                build_id_or_url: &build_id_or_url,
+                step: step.as_deref(),
+                json,
+                org: org.as_deref(),
+                project: project.as_deref(),
+                pat: pat.as_deref(),
+                // Default cache root (`${TEMP}/ado-aw/audit`). Keep this
+                // `None` so CLI and MCP invocations share one cache; pass
+                // `Some(Path::new(...))` here only if a future flag adds
+                // a user-configurable override.
+                output: None,
+            })
+            .await?;
+        }
         Commands::ExportGateSchema { output } => {
             let schema = compile::filter_ir::generate_gate_spec_schema();
             match output {
@@ -1239,6 +1381,80 @@ async fn main() -> Result<()> {
                 }
                 None => print!("{}", schema),
             }
+        }
+        Commands::Inspect { source, json } => {
+            inspect::dispatch_inspect(inspect::InspectOptions {
+                source: &source,
+                json,
+            })
+            .await?;
+        }
+        Commands::Graph { subcommand } => match subcommand {
+            GraphCmd::Dump { source, format } => {
+                inspect::dispatch_graph(inspect::GraphOptions {
+                    source: &source,
+                    format,
+                })
+                .await?;
+            }
+            GraphCmd::Deps {
+                source,
+                step,
+                direction,
+                json,
+            } => {
+                inspect::dispatch_graph_deps(inspect::GraphDepsOptions {
+                    source: &source,
+                    step: &step,
+                    direction,
+                    json,
+                })
+                .await?;
+            }
+            GraphCmd::Outputs {
+                source,
+                producer,
+                consumer,
+                json,
+            } => {
+                inspect::dispatch_graph_outputs(inspect::GraphOutputsOptions {
+                    source: &source,
+                    producer: producer.as_deref(),
+                    consumer: consumer.as_deref(),
+                    json,
+                })
+                .await?;
+            }
+        },
+        Commands::Whatif { source, fail, json } => {
+            inspect::dispatch_whatif(inspect::WhatIfOptions {
+                source: &source,
+                fail: &fail,
+                json,
+            })
+            .await?;
+        }
+        Commands::Lint { source, json } => {
+            let had_errors = inspect::dispatch_lint(inspect::LintOptions {
+                source: &source,
+                json,
+            })
+            .await?;
+            if had_errors {
+                // Intentional `exit(1)` (not a returned `Err`): mirrors
+                // how `tsc --noEmit` / `eslint` signal lint failure to
+                // CI, so callers can fail a pipeline step on the exit
+                // code without having to parse stderr. The async I/O
+                // resources used by `dispatch_lint` are runtime-managed
+                // and do not leak when we bypass `Drop` here.
+                std::process::exit(1);
+            }
+        }
+        Commands::Catalog { kind, json } => {
+            inspect::dispatch_catalog(inspect::CatalogOptions {
+                kind: kind.as_deref(),
+                json,
+            })?;
         }
     }
 
