@@ -15,6 +15,7 @@ use crate::audit::analyzers::{
 use crate::audit::cache::{RunSummary, load_run_summary, save_run_summary};
 use crate::audit::findings;
 use crate::audit::model::{AuditData, ErrorInfo, FileInfo, OverviewData};
+use crate::audit::pipeline_graph;
 use crate::audit::render;
 use crate::audit::url::{ParsedBuildRef, parse_build_ref};
 
@@ -29,7 +30,47 @@ pub struct AuditOptions<'a> {
     pub no_cache: bool,
 }
 
+/// Canonical cache root for downloaded audit artifacts and the
+/// `run-summary.json` cache files.
+///
+/// Returns `${TEMP}/ado-aw/audit` on every platform. All entry points
+/// — the `ado-aw audit` CLI, `ado-aw trace`, the mcp-author
+/// `audit_build` and `trace_failure` tools — go through this helper so
+/// that runs invoked from different contexts share a single cache
+/// location and never silently scatter `./logs/` directories under
+/// whatever working directory the caller happened to inherit (most
+/// often the IDE's current project when the MCP server is started).
+///
+/// The audit layer creates a per-build subdirectory (`build-<id>`)
+/// under this root, keyed on the build id, so concurrent runs against
+/// different builds are isolated. Callers that need full per-invocation
+/// isolation (e.g. `no_cache: true` audits run concurrently against
+/// the same build) should layer a unique tempdir on top of this root.
+pub fn default_cache_root() -> PathBuf {
+    std::env::temp_dir().join("ado-aw").join("audit")
+}
+
 pub async fn dispatch(opts: AuditOptions<'_>) -> Result<()> {
+    let result = fetch_audit_data_inner(opts).await?;
+    render_audit(&result.audit, result.json)?;
+    if !result.json && !result.from_cache {
+        eprintln!("✓ Audit complete. Reports in {}", result.run_dir.display());
+    }
+    Ok(())
+}
+
+pub async fn fetch_audit_data(opts: AuditOptions<'_>) -> Result<AuditData> {
+    Ok(fetch_audit_data_inner(opts).await?.audit)
+}
+
+struct FetchAuditDataResult {
+    audit: AuditData,
+    run_dir: PathBuf,
+    json: bool,
+    from_cache: bool,
+}
+
+async fn fetch_audit_data_inner(opts: AuditOptions<'_>) -> Result<FetchAuditDataResult> {
     let parsed = parse_build_ref(opts.build_id_or_url)?;
     let artifact_filters = normalize_artifact_filters(opts.artifacts)?;
     let cwd = tokio::fs::canonicalize(".")
@@ -52,8 +93,48 @@ pub async fn dispatch(opts: AuditOptions<'_>) -> Result<()> {
                 summary.processed_at.to_rfc3339()
             );
         }
-        render_audit(&summary.audit_data, opts.json)?;
-        return Ok(());
+        let mut audit = summary.audit_data;
+        let cached_audit_before_postprocess = audit.clone();
+        derive_post_processing(&mut audit, &run_dir).await;
+        // Persist recomputed pipeline_graph + findings back to the
+        // cached snapshot so subsequent runs see the same canonical
+        // AuditData shape; tooling that diffs successive outputs would
+        // otherwise observe drift between the saved file and the
+        // in-memory result.
+        //
+        // NOTE on concurrency: two concurrent `ado-aw audit` runs for
+        // the same build id can race on this `save_run_summary` write.
+        // We do not take a filesystem lock — the failure path is
+        // recorded as a warning (see below) rather than aborting the
+        // audit, and the worst case is that one writer's recomputed
+        // snapshot overwrites the other's. Both writers derive from
+        // the same on-disk artifacts, so the resulting summary is
+        // still internally consistent; only the `processed_at`
+        // timestamp may flip between them.
+        if audit != cached_audit_before_postprocess
+            && let Err(error) = save_run_summary(
+                &run_dir,
+                &RunSummary {
+                    ado_aw_version: env!("CARGO_PKG_VERSION").to_string(),
+                    build_id: parsed.build_id,
+                    processed_at: Utc::now(),
+                    audit_data: audit.clone(),
+                },
+            )
+            .await
+        {
+            warn_and_record(
+                &mut audit,
+                "audit::cli",
+                format!("failed to refresh cached run-summary.json: {error:#}"),
+            );
+        }
+        return Ok(FetchAuditDataResult {
+            audit,
+            run_dir,
+            json: opts.json,
+            from_cache: true,
+        });
     }
 
     let client = reqwest::Client::builder()
@@ -68,9 +149,16 @@ pub async fn dispatch(opts: AuditOptions<'_>) -> Result<()> {
     };
 
     let filters = artifact_filters.as_deref();
-    let saw_artifact_auth_error =
-        fetch_and_record_artifacts(&client, &ctx, &auth, parsed.build_id, filters, &run_dir, &mut audit)
-            .await?;
+    let saw_artifact_auth_error = fetch_and_record_artifacts(
+        &client,
+        &ctx,
+        &auth,
+        parsed.build_id,
+        filters,
+        &run_dir,
+        &mut audit,
+    )
+    .await?;
 
     if saw_artifact_auth_error && !has_any_local_artifacts(&run_dir).await {
         anyhow::bail!(
@@ -79,12 +167,20 @@ pub async fn dispatch(opts: AuditOptions<'_>) -> Result<()> {
         );
     }
 
-    run_analyzers(&client, &ctx, &auth, parsed.build_id, filters, &run_dir, &mut audit).await;
+    run_analyzers(
+        &client,
+        &ctx,
+        &auth,
+        parsed.build_id,
+        filters,
+        &run_dir,
+        &mut audit,
+    )
+    .await;
     populate_performance_metrics(&mut audit);
 
     audit.metrics.error_count = audit.errors.len() as u64;
-    audit.metrics.warning_count = audit.warnings.len() as u64;
-    findings::derive_findings(&mut audit);
+    derive_post_processing(&mut audit, &run_dir).await;
 
     save_run_summary(
         &run_dir,
@@ -97,11 +193,43 @@ pub async fn dispatch(opts: AuditOptions<'_>) -> Result<()> {
     )
     .await?;
 
-    render_audit(&audit, opts.json)?;
-    if !opts.json {
-        eprintln!("✓ Audit complete. Reports in {}", run_dir.display());
+    Ok(FetchAuditDataResult {
+        audit,
+        run_dir,
+        json: opts.json,
+        from_cache: false,
+    })
+}
+
+/// Re-run the audit-time enrichment passes that depend on local state
+/// (pipeline-graph correlation, metric counters, derived findings).
+///
+/// Called both after a fresh download and after a cache load so that
+/// both code paths produce a structurally identical `AuditData`.
+/// `populate_pipeline_graph` failures are downgraded to warnings rather
+/// than aborting the audit.
+///
+/// ## Cache-hit behaviour
+///
+/// When invoked after a cache load this function correlates against
+/// the **current local source markdown**, not the source that was on
+/// disk when the build originally ran. That is intentional: the
+/// `pipeline_graph` section is meant to answer "how does this build's
+/// timeline map onto today's typed IR?", which is what an operator
+/// debugging an old failure with newly-rebased code actually wants.
+/// Do not "fix" this into using a cached graph snapshot — the
+/// downstream `findings::derive_findings` rules (e.g.
+/// downstream-impact) rely on the freshly-correlated graph.
+async fn derive_post_processing(audit: &mut AuditData, run_dir: &Path) {
+    if let Err(error) = pipeline_graph::populate_pipeline_graph(audit, run_dir).await {
+        warn_and_record(
+            audit,
+            "audit::pipeline_graph",
+            format!("pipeline graph correlation failed: {error:#}"),
+        );
     }
-    Ok(())
+    audit.metrics.warning_count = audit.warnings.len() as u64;
+    findings::derive_findings(audit);
 }
 
 /// Download all selected artifacts for the build, recording auth errors and
@@ -152,7 +280,10 @@ async fn fetch_and_record_artifacts(
                         warn_and_record(
                             audit,
                             "audit::artifacts",
-                            format!("failed to download artifact '{}': {:#}", artifact.name, error),
+                            format!(
+                                "failed to download artifact '{}': {:#}",
+                                artifact.name, error
+                            ),
                         );
                     }
                 }
@@ -170,8 +301,7 @@ async fn fetch_and_record_artifacts(
             );
         }
         Err(error) => {
-            return Err(error)
-                .context(format!("failed to list artifacts for build {}", build_id));
+            return Err(error).context(format!("failed to list artifacts for build {}", build_id));
         }
     }
     Ok(saw_artifact_auth_error)
@@ -891,7 +1021,8 @@ mod tests {
 
     #[test]
     fn validate_host_accepts_dev_azure_com_case_insensitively() {
-        validate_audit_url_host("Dev.Azure.Com", None).expect("cloud host match is case-insensitive");
+        validate_audit_url_host("Dev.Azure.Com", None)
+            .expect("cloud host match is case-insensitive");
     }
 
     #[test]

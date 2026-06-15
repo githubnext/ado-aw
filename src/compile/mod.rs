@@ -8,17 +8,24 @@
 
 mod common;
 pub(crate) use common::resolve_repos;
+pub(crate) mod agentic_pipeline;
 #[cfg(test)]
 mod codemod_integration_test;
 pub(crate) mod codemods;
 pub mod extensions;
 pub(crate) mod filter_ir;
 mod gitattributes;
+pub(crate) mod ir;
 mod job;
+mod job_ir;
 mod onees;
+mod onees_ir;
 pub(crate) mod pr_filters;
+pub mod source_path_guard;
 mod stage;
+mod stage_ir;
 mod standalone;
+mod standalone_ir;
 pub mod types;
 
 use anyhow::{Context, Result};
@@ -149,22 +156,10 @@ async fn compile_pipeline_inner(
     use crate::sanitize::SanitizeConfig;
     front_matter.sanitize_config_fields();
 
-    info!("Parsed agent: '{}'", front_matter.name);
-    debug!("Description: {}", front_matter.description);
-    debug!("Target: {:?}", front_matter.target);
-    debug!(
-        "Engine: {} (model: {})",
-        front_matter.engine.engine_id(),
-        front_matter.engine.model().unwrap_or("default")
-    );
-    debug!("Schedule: {:?}", front_matter.schedule());
-    debug!("MCP servers configured: {}", front_matter.mcp_servers.len());
-
     // Resolve repos: new compact syntax or legacy repositories: + checkout:
     let (resolved_repos, resolved_checkout) = common::resolve_repos(&front_matter)?;
     front_matter.repositories = resolved_repos;
     front_matter.checkout = resolved_checkout;
-    debug!("Repositories: {}", front_matter.repositories.len());
 
     // Validate checkout list against repositories
     common::validate_checkout_list(&front_matter.repositories, &front_matter.checkout)?;
@@ -178,13 +173,10 @@ async fn compile_pipeline_inner(
     let yaml_output_path = resolve_output_path(input_path, output_path)?;
 
     // Select compiler based on target
-    let compiler: Box<dyn Compiler> = match front_matter.target {
-        CompileTarget::OneES => Box::new(onees::OneESCompiler),
-        CompileTarget::Standalone => Box::new(standalone::StandaloneCompiler),
-        CompileTarget::Job => Box::new(job::JobCompiler),
-        CompileTarget::Stage => Box::new(stage::StageCompiler),
-    };
+    let compiler = select_compiler(&front_matter.target);
     info!("Using {} compiler", compiler.target_name());
+
+    log_pipeline_metadata(&front_matter);
 
     // Snapshot the version in the existing output file before overwriting it.
     // Used below to emit an upgrade note when the compiler version changes.
@@ -212,19 +204,16 @@ async fn compile_pipeline_inner(
     // state (rewritten source + stale lock file, or rewritten lock file
     // pointing at unmigrated source) cannot escape: if rewrite fails,
     // we abort before the lock file ever gets touched.
-    let mut rewrote = false;
-    if codemod_report.changed() {
-        rewrote = perform_source_rewrite_if_needed(
-            input_path,
-            &content,
-            &leading_whitespace,
-            &front_matter_mapping,
-            &body_raw,
-            &source_sha256,
-            &codemod_report,
-        )
-        .await?;
-    }
+    let rewrote = perform_source_rewrite_if_needed(
+        input_path,
+        &content,
+        &leading_whitespace,
+        &front_matter_mapping,
+        &body_raw,
+        &source_sha256,
+        &codemod_report,
+    )
+    .await?;
 
     // Write output via atomic_write so a crash mid-write cannot leave a
     // half-written .lock.yml on disk.
@@ -242,28 +231,14 @@ async fn compile_pipeline_inner(
     // Emit an upgrade note when an existing compiled file was produced by
     // a different compiler version. This makes version bumps visible in the
     // terminal and in CI logs without requiring the user to diff the output.
-    let current_version = env!("CARGO_PKG_VERSION");
-    if let Some(ref old_version) = existing_version
-        && old_version != current_version
-    {
-        println!(
-            "note: upgraded {} (was v{}, now v{})",
-            yaml_output_path.display(),
-            old_version,
-            current_version,
-        );
-    }
+    maybe_print_upgrade_note(&yaml_output_path, existing_version);
 
     // Update .gitattributes at the repo root so every compiled pipeline is
     // marked as a generated file with `merge=ours`. Best-effort: skip with a
     // debug-level log when the output is not inside a git repository, since
     // a non-git workspace is a valid use case (e.g. ad-hoc compilation).
     // Skipped during batch compilation (callers do one sync at the end).
-    if sync_gitattributes
-        && let Err(e) = sync_gitattributes_for_output(&yaml_output_path).await
-    {
-        debug!("Skipped .gitattributes update: {}", e);
-    }
+    maybe_sync_gitattributes_for_output(sync_gitattributes, &yaml_output_path).await;
 
     Ok(rewrote)
 }
@@ -310,6 +285,9 @@ fn print_compile_success(compiler: &dyn Compiler, target: CompileTarget, output_
 /// guard, and atomically rewrite the source `.md` if the content
 /// actually changed. Returns whether a write happened.
 ///
+/// Returns `Ok(false)` immediately when no codemods fired (`!report.changed()`),
+/// so callers do not need an outer guard.
+///
 /// On success, emits the documented stderr warning so users always
 /// see when codemods were applied. This warning is *not* gated by
 /// `--verbose`/`--debug`.
@@ -322,6 +300,9 @@ async fn perform_source_rewrite_if_needed(
     source_sha256: &[u8; 32],
     report: &codemods::CodemodReport,
 ) -> Result<bool> {
+    if !report.changed() {
+        return Ok(false);
+    }
     let new_content =
         common::reconstruct_source(leading_whitespace, front_matter_mapping, body_raw)?;
     if new_content == original_content {
@@ -371,6 +352,21 @@ async fn perform_source_rewrite_if_needed(
     Ok(true)
 }
 
+/// Conditionally sync `.gitattributes` for `output_path`.
+///
+/// When `sync` is `false` (batch mode), this is a no-op; batch callers
+/// perform a single sync themselves after the whole batch completes.
+/// When `sync` is `true`, any error is logged at debug level and swallowed —
+/// the sync is best-effort and a non-git workspace is a valid use case.
+async fn maybe_sync_gitattributes_for_output(sync: bool, output_path: &Path) {
+    if !sync {
+        return;
+    }
+    if let Err(e) = sync_gitattributes_for_output(output_path).await {
+        debug!("Skipped .gitattributes update: {}", e);
+    }
+}
+
 /// Locate the repo root containing `output_path`, scan it for all compiled
 /// pipelines, and write the managed block of `.gitattributes`.
 async fn sync_gitattributes_for_output(output_path: &Path) -> Result<()> {
@@ -416,18 +412,11 @@ pub async fn compile_all_pipelines(skip_integrity: bool, debug_pipeline: bool) -
 
     println!("Found {} agentic pipeline(s):", detected.len());
     for p in &detected {
-        let version_status = if p.version.is_empty() {
-            "(version unknown)".to_string()
-        } else if p.version == current_version {
-            "(up to date)".to_string()
-        } else {
-            format!("(out of date, compiled by v{})", p.version)
-        };
         println!(
             "  {} (source: {}) {}",
             p.yaml_path.display(),
             p.source,
-            version_status,
+            format_pipeline_version_status(&p.version, current_version),
         );
     }
 
@@ -446,16 +435,7 @@ pub async fn compile_all_pipelines(skip_integrity: bool, debug_pipeline: bool) -
 
     for pipeline in &detected {
         let yaml_output_path = root.join(&pipeline.yaml_path);
-        let source_candidate_from_yaml_dir = yaml_output_path
-            .parent()
-            .unwrap_or(root)
-            .join(&pipeline.source);
-        let source_candidate_from_root = root.join(&pipeline.source);
-        let source_path = if source_candidate_from_yaml_dir.exists() {
-            source_candidate_from_yaml_dir
-        } else {
-            source_candidate_from_root
-        };
+        let source_path = resolve_pipeline_source_path(&yaml_output_path, &pipeline.source, root);
 
         if !source_path.exists() {
             eprintln!(
@@ -497,27 +477,10 @@ pub async fn compile_all_pipelines(skip_integrity: bool, debug_pipeline: bool) -
     // that would happen if each pipeline triggered its own
     // `sync_gitattributes_for_output` call. We reuse the already-detected
     // pipeline list rather than re-scanning the tree.
-    if let Some(repo_root) =
-        find_repo_root(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-    {
-        let paths: Vec<PathBuf> = detected.iter().map(|p| p.yaml_path.clone()).collect();
-        if let Err(e) = gitattributes::update_gitattributes(&repo_root, paths).await {
-            debug!("Skipped .gitattributes update: {}", e);
-        }
-    }
+    batch_sync_gitattributes(&detected).await;
 
     println!();
-    if rewrote_count > 0 {
-        println!(
-            "Done: {} compiled, {} skipped, {} failed; {} source file(s) rewritten by codemods.",
-            success_count, skip_count, fail_count, rewrote_count
-        );
-    } else {
-        println!(
-            "Done: {} compiled, {} skipped, {} failed.",
-            success_count, skip_count, fail_count
-        );
-    }
+    print_batch_compile_summary(success_count, skip_count, fail_count, rewrote_count);
 
     if fail_count > 0 {
         anyhow::bail!("{} pipeline(s) failed to compile", fail_count);
@@ -627,12 +590,7 @@ pub async fn check_pipeline(pipeline_path: &str) -> Result<()> {
 
     common::validate_checkout_list(&front_matter.repositories, &front_matter.checkout)?;
 
-    let compiler: Box<dyn Compiler> = match front_matter.target {
-        CompileTarget::OneES => Box::new(onees::OneESCompiler),
-        CompileTarget::Standalone => Box::new(standalone::StandaloneCompiler),
-        CompileTarget::Job => Box::new(job::JobCompiler),
-        CompileTarget::Stage => Box::new(stage::StageCompiler),
-    };
+    let compiler = select_compiler(&front_matter.target);
 
     // Pass the header's relative source path to compile so the generated
     // header embeds the same path that was used during the original compilation.
@@ -774,7 +732,115 @@ async fn read_existing_pipeline_version(path: &Path) -> Option<String> {
         .map(|meta| meta.version)
 }
 
-/// Walk up from `start` to find the nearest directory containing `.git`.
+/// Map a [`CompileTarget`] to the corresponding boxed [`Compiler`] implementation.
+fn select_compiler(target: &CompileTarget) -> Box<dyn Compiler> {
+    match target {
+        CompileTarget::OneES => Box::new(onees::OneESCompiler),
+        CompileTarget::Standalone => Box::new(standalone::StandaloneCompiler),
+        CompileTarget::Job => Box::new(job::JobCompiler),
+        CompileTarget::Stage => Box::new(stage::StageCompiler),
+    }
+}
+
+/// Print a version upgrade note when the existing compiled file was produced
+/// by a different compiler version than the one currently running.
+fn maybe_print_upgrade_note(yaml_output_path: &Path, existing_version: Option<String>) {
+    let current_version = env!("CARGO_PKG_VERSION");
+    if let Some(old_version) = existing_version
+        && old_version != current_version
+    {
+        println!(
+            "note: upgraded {} (was v{}, now v{})",
+            yaml_output_path.display(),
+            old_version,
+            current_version,
+        );
+    }
+}
+
+/// Format the version status label for a detected pipeline.
+///
+/// Returns one of:
+/// - `"(version unknown)"` — no version recorded in the header
+/// - `"(up to date)"` — header version matches `current_version`
+/// - `"(out of date, compiled by v<N>)"` — version mismatch
+fn format_pipeline_version_status(version: &str, current_version: &str) -> String {
+    if version.is_empty() {
+        "(version unknown)".to_string()
+    } else if version == current_version {
+        "(up to date)".to_string()
+    } else {
+        format!("(out of date, compiled by v{})", version)
+    }
+}
+
+/// Resolve the source markdown path for a detected pipeline.
+///
+/// Tries the path relative to the YAML file's directory first, then relative
+/// to the scan root. This mirrors the lookup the ADO pipeline itself uses.
+fn resolve_pipeline_source_path(yaml_output_path: &Path, source: &str, root: &Path) -> PathBuf {
+    let candidate_from_yaml_dir = yaml_output_path.parent().unwrap_or(root).join(source);
+    if candidate_from_yaml_dir.exists() {
+        candidate_from_yaml_dir
+    } else {
+        root.join(source)
+    }
+}
+
+/// Perform the post-batch `.gitattributes` sync.
+///
+/// Looks up the git repo root from the current directory and rewrites the
+/// managed `.gitattributes` block for all detected pipeline paths. Errors
+/// are logged at debug level and swallowed — this step is best-effort.
+async fn batch_sync_gitattributes(detected: &[crate::detect::DetectedPipeline]) {
+    if let Some(repo_root) =
+        find_repo_root(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    {
+        let paths: Vec<PathBuf> = detected.iter().map(|p| p.yaml_path.clone()).collect();
+        if let Err(e) = gitattributes::update_gitattributes(&repo_root, paths).await {
+            debug!("Skipped .gitattributes update: {}", e);
+        }
+    }
+}
+
+/// Print the compile-batch summary line.
+fn print_batch_compile_summary(
+    success_count: u32,
+    skip_count: u32,
+    fail_count: u32,
+    rewrote_count: u32,
+) {
+    if rewrote_count > 0 {
+        println!(
+            "Done: {} compiled, {} skipped, {} failed; {} source file(s) rewritten by codemods.",
+            success_count, skip_count, fail_count, rewrote_count
+        );
+    } else {
+        println!(
+            "Done: {} compiled, {} skipped, {} failed.",
+            success_count, skip_count, fail_count
+        );
+    }
+}
+
+/// Log front-matter metadata fields at the appropriate levels after parsing.
+///
+/// Called once per compilation after repos are resolved so the repository
+/// count reflects the final (post-resolution) value.
+fn log_pipeline_metadata(front_matter: &FrontMatter) {
+    info!("Parsed agent: '{}'", front_matter.name);
+    debug!("Description: {}", front_matter.description);
+    debug!("Target: {:?}", front_matter.target);
+    debug!(
+        "Engine: {} (model: {})",
+        front_matter.engine.engine_id(),
+        front_matter.engine.model().unwrap_or("default")
+    );
+    debug!("Schedule: {:?}", front_matter.schedule());
+    debug!("MCP servers configured: {}", front_matter.mcp_servers.len());
+    debug!("Repositories: {}", front_matter.repositories.len());
+}
+
 /// Walk up from `start` looking for the nearest ancestor containing a
 /// `.git` directory or file.
 ///
@@ -797,6 +863,91 @@ pub fn find_repo_root(start: &Path) -> Option<PathBuf> {
             return None;
         }
     }
+}
+
+/// Public, read-only entry point that returns the typed [`ir::Pipeline`]
+/// for an agent source file **without** writing any YAML.
+///
+/// Mirrors [`compile_pipeline`]'s parse/sanitize/resolve-repos flow,
+/// then dispatches to the appropriate `build_*_pipeline` IR builder
+/// for the front-matter target. Used by commands that need to reason
+/// about a pipeline's structure (e.g. `ado-aw inspect`, `ado-aw graph`)
+/// rather than rebuild it.
+///
+/// Returns both the sanitized front matter and the typed pipeline so
+/// callers do not need to re-parse the source to get at high-level
+/// fields like `front_matter.target`.
+///
+/// **Codemods are applied in memory only**, matching `check_pipeline`'s
+/// behavior: this function never rewrites the source on disk.
+pub async fn build_pipeline_ir(input_path: &Path) -> Result<(FrontMatter, ir::Pipeline)> {
+    let content = tokio::fs::read_to_string(input_path)
+        .await
+        .with_context(|| format!("Failed to read input file: {}", input_path.display()))?;
+
+    let parsed = common::parse_markdown_detailed(&content)?;
+    let mut front_matter = parsed.front_matter;
+    let markdown_body = parsed.markdown_body;
+
+    use crate::sanitize::SanitizeConfig;
+    front_matter.sanitize_config_fields();
+
+    let (resolved_repos, resolved_checkout) = common::resolve_repos(&front_matter)?;
+    front_matter.repositories = resolved_repos;
+    front_matter.checkout = resolved_checkout;
+    common::validate_checkout_list(&front_matter.repositories, &front_matter.checkout)?;
+
+    // Inferred output path for the marker step. Defaults to
+    // `<stem>.lock.yml` next to the source, same default as
+    // `compile_pipeline` when `--output` is omitted.
+    let output_path = input_path.with_extension("lock.yml");
+
+    let extensions = extensions::collect_extensions(&front_matter);
+    let ctx = extensions::CompileContext::new(&front_matter, input_path).await?;
+
+    let pipeline = match front_matter.target {
+        CompileTarget::Standalone => standalone_ir::build_standalone_pipeline(
+            &front_matter,
+            &extensions,
+            &ctx,
+            input_path,
+            &output_path,
+            &markdown_body,
+            /* skip_integrity */ true,
+            /* debug_pipeline  */ false,
+        )?,
+        CompileTarget::OneES => onees_ir::build_onees_pipeline(
+            &front_matter,
+            &extensions,
+            &ctx,
+            input_path,
+            &output_path,
+            &markdown_body,
+            /* skip_integrity */ true,
+            /* debug_pipeline  */ false,
+        )?,
+        CompileTarget::Job => job_ir::build_job_pipeline(
+            &front_matter,
+            &extensions,
+            &ctx,
+            input_path,
+            &output_path,
+            &markdown_body,
+            /* skip_integrity */ true,
+            /* debug_pipeline  */ false,
+        )?,
+        CompileTarget::Stage => stage_ir::build_stage_pipeline(
+            &front_matter,
+            &extensions,
+            &ctx,
+            input_path,
+            &output_path,
+            &markdown_body,
+            /* skip_integrity */ true,
+            /* debug_pipeline  */ false,
+        )?,
+    };
+    Ok((front_matter, pipeline))
 }
 
 /// Clean up spacing artifacts in generated YAML.
@@ -959,12 +1110,6 @@ Body
     }
 
     #[test]
-    fn test_generate_checkout_self_no_branch() {
-        let result = common::generate_checkout_self();
-        assert_eq!(result, "- checkout: self");
-    }
-
-    #[test]
     fn test_clean_generated_yaml_strips_trailing_whitespace() {
         let a = clean_generated_yaml("key: value\nother: data\n");
         let b = clean_generated_yaml("key: value  \nother: data  \n");
@@ -1120,7 +1265,8 @@ description: "A test agent for directory output"
 
     #[tokio::test]
     async fn read_existing_pipeline_version_returns_none_for_missing_file() {
-        let version = read_existing_pipeline_version(Path::new("/tmp/does-not-exist.lock.yml")).await;
+        let version =
+            read_existing_pipeline_version(Path::new("/tmp/does-not-exist.lock.yml")).await;
         assert!(version.is_none(), "expected None for a non-existent file");
     }
 
@@ -1136,7 +1282,10 @@ description: "A test agent for directory output"
         ));
         std::fs::write(&temp, "# plain yaml\nname: foo\n").unwrap();
         let version = read_existing_pipeline_version(&temp).await;
-        assert!(version.is_none(), "expected None when file has no @ado-aw header");
+        assert!(
+            version.is_none(),
+            "expected None when file has no @ado-aw header"
+        );
         let _ = std::fs::remove_file(&temp);
     }
 

@@ -6,6 +6,7 @@ permissions:
   contents: read
   issues: read
   pull-requests: read
+  copilot-requests: write
 tools:
   github:
     toolsets: [default]
@@ -15,6 +16,8 @@ network:
 safe-outputs:
   create-issue:
     max: 1
+max-ai-credits: -1
+max-daily-ai-credits: -1
 ---
 
 # Red Team Security Auditor

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::audit::model::{AuditData, Finding, Recommendation, Severity};
+use crate::audit::model::{AuditData, Finding, JobData, Recommendation, Severity};
 
 /// Aggregate findings + recommendations from every populated section
 /// of `AuditData`. Pure function; does not mutate the input.
@@ -21,6 +21,7 @@ pub fn derive_findings(audit: &mut AuditData) {
     add_missing_data_cluster(audit, &mut findings, &mut recommendations);
     add_no_safe_outputs_proposed(audit, &mut findings, &mut recommendations);
     add_error_count_findings(audit, &mut findings, &mut recommendations);
+    add_downstream_impact_findings(audit, &mut findings, &mut recommendations);
 
     audit.key_findings = findings;
     audit.recommendations = recommendations;
@@ -363,6 +364,98 @@ fn add_error_count_findings(
     );
 }
 
+fn add_downstream_impact_findings(
+    audit: &AuditData,
+    findings: &mut Vec<Finding>,
+    recommendations: &mut Vec<Recommendation>,
+) {
+    for job in &audit.jobs {
+        if !job.failed() || job.downstream_jobs.is_empty() {
+            continue;
+        }
+
+        // Filter to downstream jobs that actually skipped (or were
+        // absent from the timeline, which also signals an expected
+        // skip). Jobs with bypass conditions like `always()` would
+        // still appear in `job.downstream_jobs` because that field is
+        // populated from typed-IR edges; without this gate we would
+        // emit "Downstream jobs skipped" findings even for cleanup
+        // jobs that successfully ran through the failure.
+        let any_actually_skipped = job.downstream_jobs.iter().any(|downstream_id| {
+            audit
+                .jobs
+                .iter()
+                .find(|candidate| candidate.matches_ir_id(downstream_id))
+                .map(is_skipped_or_cancelled)
+                // Absent from runtime timeline → typed-IR expected it
+                // to skip after the upstream failure.
+                .unwrap_or(true)
+        });
+        if !any_actually_skipped {
+            continue;
+        }
+
+        let downstream = job
+            .downstream_jobs
+            .iter()
+            .map(|downstream_job| {
+                let classification = audit
+                    .jobs
+                    .iter()
+                    .find(|candidate| candidate.matches_ir_id(downstream_job))
+                    .map(JobData::classification)
+                    .unwrap_or_else(|| String::from("expected to skip"));
+                format!("{downstream_job}: {classification}")
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+
+        push_finding(
+            findings,
+            Finding {
+                category: String::from("pipeline_graph"),
+                severity: Severity::Medium,
+                // Title intentionally says "potentially impacted" rather
+                // than "skipped": even with the `any_actually_skipped`
+                // gate above, some downstream jobs in this set may have
+                // bypassed the failure (e.g. via `always()`). The
+                // description embeds the real per-job classification.
+                title: format!("Downstream jobs potentially impacted by {} failure", job.name),
+                description: format!(
+                    "The typed pipeline graph shows downstream impact from {}: {}.",
+                    job.name, downstream
+                ),
+                impact: None,
+            },
+        );
+
+        push_recommendation(
+            recommendations,
+            Recommendation {
+                priority: String::from("high"),
+                action: format!(
+                    "Inspect the {} job logs to identify the root cause; downstream jobs cannot succeed until this is resolved.",
+                    job.name
+                ),
+                reason: format!(
+                    "{} failed, which impacted {} downstream job(s).",
+                    job.name,
+                    job.downstream_jobs.len()
+                ),
+                example: None,
+            },
+        );
+    }
+}
+
+fn is_skipped_or_cancelled(job: &JobData) -> bool {
+    let result = job.result.as_deref().unwrap_or_default();
+    result.eq_ignore_ascii_case("skipped")
+        || result.eq_ignore_ascii_case("canceled")
+        || result.eq_ignore_ascii_case("cancelled")
+        || job.status.eq_ignore_ascii_case("skipped")
+}
+
 fn push_finding(findings: &mut Vec<Finding>, finding: Finding) {
     if !findings.contains(&finding) {
         findings.push(finding);
@@ -379,7 +472,7 @@ fn push_recommendation(recommendations: &mut Vec<Recommendation>, recommendation
 mod tests {
     use super::derive_findings;
     use crate::audit::model::{
-        AuditData, DomainStat, Finding, FirewallAnalysis, MCPServerHealth, MCPServerStats,
+        AuditData, DomainStat, Finding, FirewallAnalysis, JobData, MCPServerHealth, MCPServerStats,
         MetricsData, MissingDataReport, MissingToolReport, NoopReport, Recommendation,
         SafeOutputSummary, Severity,
     };
@@ -659,6 +752,78 @@ mod tests {
             "Audit detected 2 error event(s) in the run logs."
         );
         assert!(audit.recommendations.is_empty());
+    }
+
+    #[test]
+    fn downstream_impact_rule_emits_finding_for_failed_job() {
+        let mut audit = AuditData {
+            jobs: vec![
+                JobData {
+                    name: String::from("Agent"),
+                    status: String::from("completed"),
+                    result: Some(String::from("failed")),
+                    downstream_jobs: vec![String::from("Detection"), String::from("SafeOutputs")],
+                    ..Default::default()
+                },
+                JobData {
+                    name: String::from("Detection"),
+                    status: String::from("completed"),
+                    result: Some(String::from("skipped")),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        derive_findings(&mut audit);
+
+        let finding =
+            finding_by_title(&audit, "Downstream jobs potentially impacted by Agent failure");
+        assert_eq!(finding.severity, Severity::Medium);
+        assert!(finding.description.contains("Detection: skipped"));
+        assert!(
+            finding
+                .description
+                .contains("SafeOutputs: expected to skip")
+        );
+    }
+
+    #[test]
+    fn downstream_impact_rule_suppresses_when_all_downstream_jobs_ran_via_bypass() {
+        // Regression: previously the rule fired whenever an upstream
+        // job failed and had any IR-derived downstream — even when
+        // every downstream job successfully ran via an always()
+        // bypass. The "skipped" wording was then a lie. With the
+        // any_actually_skipped gate the finding is suppressed.
+        let mut audit = AuditData {
+            jobs: vec![
+                JobData {
+                    name: String::from("Agent"),
+                    status: String::from("completed"),
+                    result: Some(String::from("failed")),
+                    downstream_jobs: vec![String::from("Cleanup")],
+                    ..Default::default()
+                },
+                JobData {
+                    name: String::from("Cleanup"),
+                    status: String::from("completed"),
+                    result: Some(String::from("succeeded")),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        derive_findings(&mut audit);
+
+        assert!(
+            !audit
+                .key_findings
+                .iter()
+                .any(|f| f.title.contains("Downstream jobs potentially impacted")),
+            "must not emit downstream-impact finding when every downstream succeeded, got {:?}",
+            audit.key_findings
+        );
     }
 
     #[test]

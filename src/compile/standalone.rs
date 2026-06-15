@@ -6,22 +6,13 @@
 //! - MCP firewall with tool-level filtering and custom MCP server support
 //! - Setup/teardown job support
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use log::info;
 use std::path::Path;
 
 use super::Compiler;
-use super::common::{
-    AWF_VERSION, MCPG_VERSION, MCPG_IMAGE, MCPG_PORT, MCPG_DOMAIN,
-    CompileConfig, compile_shared,
-    generate_allowed_domains,
-    generate_awf_mounts,
-    generate_awf_path_step,
-    collect_awf_path_prepends,
-    generate_enabled_tools_args,
-    generate_mcpg_config, generate_mcpg_docker_env, generate_mcpg_step_env,
-};
+use super::common;
 use super::types::FrontMatter;
 
 /// Standalone pipeline compiler.
@@ -42,61 +33,57 @@ impl Compiler for StandaloneCompiler {
         skip_integrity: bool,
         debug_pipeline: bool,
     ) -> Result<String> {
-        info!("Compiling for standalone target");
+        info!("Compiling for standalone target (typed IR)");
 
-        // Collect extensions (needed before compile_shared for MCPG config)
         let extensions = super::extensions::collect_extensions(front_matter);
-
-        // Build compile context for MCPG config generation
         let ctx = super::extensions::CompileContext::new(front_matter, input_path).await?;
 
-        // Standalone-specific values
-        let allowed_domains = generate_allowed_domains(front_matter, &extensions)?;
-        let awf_mounts = generate_awf_mounts(&extensions);
-        let awf_paths = collect_awf_path_prepends(&extensions);
-        let awf_path_step = generate_awf_path_step(&awf_paths);
-        let enabled_tools_args = generate_enabled_tools_args(front_matter);
-
-        let config_obj = generate_mcpg_config(front_matter, &ctx, &extensions)?;
-        let mcpg_config_json =
-            serde_json::to_string_pretty(&config_obj).context("Failed to serialize MCPG config")?;
-        let mcpg_docker_env = generate_mcpg_docker_env(front_matter, &extensions);
-        let mcpg_step_env = generate_mcpg_step_env(&extensions);
-
-        let config = CompileConfig {
-            template: include_str!("../data/base.yml").to_string(),
-            extra_replacements: vec![
-                ("{{ firewall_version }}".into(), AWF_VERSION.into()),
-                ("{{ mcpg_version }}".into(), MCPG_VERSION.into()),
-                ("{{ mcpg_image }}".into(), MCPG_IMAGE.into()),
-                ("{{ mcpg_port }}".into(), MCPG_PORT.to_string()),
-                ("{{ mcpg_domain }}".into(), MCPG_DOMAIN.into()),
-                ("{{ allowed_domains }}".into(), allowed_domains),
-                ("{{ awf_mounts }}".into(), awf_mounts),
-                ("{{ awf_path_step }}".into(), awf_path_step),
-                ("{{ enabled_tools_args }}".into(), enabled_tools_args),
-                ("{{ mcpg_config }}".into(), mcpg_config_json),
-                ("{{ mcpg_docker_env }}".into(), mcpg_docker_env),
-                ("{{ mcpg_step_env }}".into(), mcpg_step_env),
-            ],
+        let pipeline = super::standalone_ir::build_standalone_pipeline(
+            front_matter,
+            &extensions,
+            &ctx,
+            input_path,
+            output_path,
+            markdown_body,
             skip_integrity,
             debug_pipeline,
-            has_awf_paths: !awf_paths.is_empty(),
-            skip_header: false,
-        };
+        )?;
 
-        compile_shared(input_path, output_path, front_matter, markdown_body, &extensions, &ctx, config).await
+        let yaml = super::ir::emit::emit(&pipeline)?;
+        let yaml = common::normalize_yaml(&yaml)?;
+        let header = common::generate_header_comment(input_path);
+        // Legacy emitter inserts a blank line between the header
+        // comment block and the first `name:` key — preserve it so
+        // committed lock files stay byte-identical.
+        let full = format!("{}\n{}", header, yaml);
+
+        common::atomic_write(output_path, &full).await?;
+        Ok(full)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compile::common::parse_markdown;
+    use crate::compile::common::{generate_allowed_domains, parse_markdown};
+    use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations, Extension};
 
     fn minimal_front_matter() -> FrontMatter {
         let (fm, _) = parse_markdown("---\nname: test-agent\ndescription: test\n---\n").unwrap();
         fm
+    }
+
+    fn extension_declarations(extensions: &[Extension], fm: &FrontMatter) -> Vec<Declarations> {
+        let ctx = CompileContext::for_test(fm);
+        extensions
+            .iter()
+            .map(|ext| ext.declarations(&ctx).unwrap())
+            .collect()
+    }
+
+    fn allowed_domains(fm: &FrontMatter, extensions: &[Extension]) -> anyhow::Result<String> {
+        let declarations = extension_declarations(extensions, fm);
+        generate_allowed_domains(fm, extensions, &declarations)
     }
 
     // ─── generate_allowed_domains ────────────────────────────────────────────
@@ -109,7 +96,7 @@ mod tests {
             blocked: vec!["evil.example.com".to_string()],
         });
         let exts = super::super::extensions::collect_extensions(&fm);
-        let domains = generate_allowed_domains(&fm, &exts).unwrap();
+        let domains = allowed_domains(&fm, &exts).unwrap();
         assert!(
             !domains.contains("evil.example.com"),
             "blocked host must be excluded even if also in allow"
@@ -120,7 +107,7 @@ mod tests {
     fn test_generate_allowed_domains_host_docker_internal_always_present() {
         let fm = minimal_front_matter();
         let exts = super::super::extensions::collect_extensions(&fm);
-        let domains = generate_allowed_domains(&fm, &exts).unwrap();
+        let domains = allowed_domains(&fm, &exts).unwrap();
         assert!(
             domains.contains("host.docker.internal"),
             "host.docker.internal must always be in the allowlist"
@@ -135,7 +122,7 @@ mod tests {
             blocked: vec![],
         });
         let exts = super::super::extensions::collect_extensions(&fm);
-        let domains = generate_allowed_domains(&fm, &exts).unwrap();
+        let domains = allowed_domains(&fm, &exts).unwrap();
         assert!(
             domains.contains("api.mycompany.com"),
             "user-specified allow host must be present in the allowlist"
@@ -153,7 +140,7 @@ mod tests {
             blocked: vec!["github.com".to_string()],
         });
         let exts = super::super::extensions::collect_extensions(&fm);
-        let domains = generate_allowed_domains(&fm, &exts).unwrap();
+        let domains = allowed_domains(&fm, &exts).unwrap();
         let domain_list: Vec<&str> = domains.split(',').collect();
         assert!(
             !domain_list.contains(&"github.com"),
@@ -169,8 +156,11 @@ mod tests {
             blocked: vec![],
         });
         let exts = super::super::extensions::collect_extensions(&fm);
-        let result = generate_allowed_domains(&fm, &exts);
-        assert!(result.is_err(), "invalid DNS characters should return an error");
+        let result = allowed_domains(&fm, &exts);
+        assert!(
+            result.is_err(),
+            "invalid DNS characters should return an error"
+        );
     }
 
     #[test]
@@ -183,10 +173,19 @@ mod tests {
             dotnet: None,
         });
         let exts = super::super::extensions::collect_extensions(&fm);
-        let domains = generate_allowed_domains(&fm, &exts).unwrap();
-        assert!(domains.contains("elan.lean-lang.org"), "should include elan domain");
-        assert!(domains.contains("leanprover.github.io"), "should include leanprover domain");
-        assert!(domains.contains("lean-lang.org"), "should include lean-lang domain");
+        let domains = allowed_domains(&fm, &exts).unwrap();
+        assert!(
+            domains.contains("elan.lean-lang.org"),
+            "should include elan domain"
+        );
+        assert!(
+            domains.contains("leanprover.github.io"),
+            "should include leanprover domain"
+        );
+        assert!(
+            domains.contains("lean-lang.org"),
+            "should include lean-lang domain"
+        );
     }
 
     #[test]
@@ -199,8 +198,11 @@ mod tests {
             dotnet: None,
         });
         let exts = super::super::extensions::collect_extensions(&fm);
-        let domains = generate_allowed_domains(&fm, &exts).unwrap();
-        assert!(!domains.contains("elan.lean-lang.org"), "lean disabled should not add lean hosts");
+        let domains = allowed_domains(&fm, &exts).unwrap();
+        assert!(
+            !domains.contains("elan.lean-lang.org"),
+            "lean disabled should not add lean hosts"
+        );
     }
 
     // ─── ecosystem identifier tests ──────────────────────────────────────────
@@ -213,9 +215,15 @@ mod tests {
             blocked: vec![],
         });
         let exts = super::super::extensions::collect_extensions(&fm);
-        let domains = generate_allowed_domains(&fm, &exts).unwrap();
-        assert!(domains.contains("pypi.org"), "python ecosystem should include pypi.org");
-        assert!(domains.contains("pip.pypa.io"), "python ecosystem should include pip.pypa.io");
+        let domains = allowed_domains(&fm, &exts).unwrap();
+        assert!(
+            domains.contains("pypi.org"),
+            "python ecosystem should include pypi.org"
+        );
+        assert!(
+            domains.contains("pip.pypa.io"),
+            "python ecosystem should include pip.pypa.io"
+        );
     }
 
     #[test]
@@ -226,9 +234,15 @@ mod tests {
             blocked: vec![],
         });
         let exts = super::super::extensions::collect_extensions(&fm);
-        let domains = generate_allowed_domains(&fm, &exts).unwrap();
-        assert!(domains.contains("crates.io"), "rust ecosystem should include crates.io");
-        assert!(domains.contains("static.rust-lang.org"), "rust ecosystem should include static.rust-lang.org");
+        let domains = allowed_domains(&fm, &exts).unwrap();
+        assert!(
+            domains.contains("crates.io"),
+            "rust ecosystem should include crates.io"
+        );
+        assert!(
+            domains.contains("static.rust-lang.org"),
+            "rust ecosystem should include static.rust-lang.org"
+        );
     }
 
     #[test]
@@ -239,9 +253,15 @@ mod tests {
             blocked: vec![],
         });
         let exts = super::super::extensions::collect_extensions(&fm);
-        let domains = generate_allowed_domains(&fm, &exts).unwrap();
-        assert!(domains.contains("pypi.org"), "ecosystem domains should be present");
-        assert!(domains.contains("api.custom.com"), "raw domains should be present");
+        let domains = allowed_domains(&fm, &exts).unwrap();
+        assert!(
+            domains.contains("pypi.org"),
+            "ecosystem domains should be present"
+        );
+        assert!(
+            domains.contains("api.custom.com"),
+            "raw domains should be present"
+        );
     }
 
     #[test]
@@ -252,9 +272,15 @@ mod tests {
             blocked: vec!["python".to_string()],
         });
         let exts = super::super::extensions::collect_extensions(&fm);
-        let domains = generate_allowed_domains(&fm, &exts).unwrap();
-        assert!(!domains.contains("pypi.org"), "blocked ecosystem should remove its domains");
-        assert!(!domains.contains("pip.pypa.io"), "blocked ecosystem should remove all its domains");
+        let domains = allowed_domains(&fm, &exts).unwrap();
+        assert!(
+            !domains.contains("pypi.org"),
+            "blocked ecosystem should remove its domains"
+        );
+        assert!(
+            !domains.contains("pip.pypa.io"),
+            "blocked ecosystem should remove all its domains"
+        );
     }
 
     #[test]
@@ -265,9 +291,12 @@ mod tests {
             blocked: vec![],
         });
         let exts = super::super::extensions::collect_extensions(&fm);
-        let domains = generate_allowed_domains(&fm, &exts).unwrap();
+        let domains = allowed_domains(&fm, &exts).unwrap();
         assert!(domains.contains("pypi.org"), "python domains present");
-        assert!(domains.contains("registry.npmjs.org"), "node domains present");
+        assert!(
+            domains.contains("registry.npmjs.org"),
+            "node domains present"
+        );
         assert!(domains.contains("crates.io"), "rust domains present");
     }
 
@@ -278,7 +307,7 @@ mod tests {
         ).unwrap();
         fm.network = None;
         let exts = super::super::extensions::collect_extensions(&fm);
-        let domains = generate_allowed_domains(&fm, &exts).unwrap();
+        let domains = allowed_domains(&fm, &exts).unwrap();
         assert!(
             domains.contains("api.acme.ghe.com"),
             "api-target hostname must be in the allowlist"

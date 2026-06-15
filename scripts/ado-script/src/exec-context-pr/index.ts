@@ -19,8 +19,8 @@
  *     agent step.
  *   - The bearer is then passed to the spawned `git` child process via
  *     `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_0` / `GIT_CONFIG_VALUE_0`
- *     env vars (see `git.ts::bearerEnv`). It never appears in argv and
- *     is never written to `.git/config`.
+ *     env vars (see `../shared/git.ts::bearerEnv`). It never appears
+ *     in argv and is never written to `.git/config`.
  *   - This is a strict improvement over the v6.2 bash implementation
  *     where the bearer lived in the wrapping shell's env (shared with
  *     `fail()`, regex validation, etc.); here it is confined to the
@@ -29,10 +29,10 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { bearerEnv } from "./git.js";
-import { resolveMergeBase } from "./merge-base.js";
-import { appendToAgentPrompt, failureFragment, successFragment } from "./prompt.js";
-import { isIdentifierError, validateIdentifiers } from "./validate.js";
+import { bearerEnv } from "../shared/git.js";
+import { resolveMergeBase } from "../shared/merge-base.js";
+import { appendToAgentPrompt, failureFragment, successFragment } from "../shared/prompt.js";
+import { isIdentifierError, validateIdentifiers } from "../shared/validate.js";
 
 const DEFAULT_AGENT_PROMPT_PATH = "/tmp/awf-tools/agent-prompt.md";
 

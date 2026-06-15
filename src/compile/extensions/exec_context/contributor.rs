@@ -45,67 +45,83 @@ pub(super) trait ContextContributor {
     /// Whether this contributor activates for the given compile context.
     fn should_activate(&self, ctx: &CompileContext) -> bool;
 
-    /// Generate the prepare-step YAML (a single `- bash:` block or
-    /// equivalent). Must include its own ADO `condition:` so the step
-    /// no-ops on non-matching trigger types. Empty string = no step.
-    ///
-    /// Contributors that want to surface a prompt fragment to the
-    /// agent append it directly to `/tmp/awf-tools/agent-prompt.md`
-    /// from this step's bash (the file is created by base.yml's
-    /// "Prepare agent prompt" step before any prepare_steps run).
-    fn prepare_step(&self, ctx: &CompileContext) -> String;
-
-    /// Agent env vars this contributor exposes. Defaults to none —
-    /// the ado-aw env-var channel rejects ADO `$(...)` expressions, so
-    /// all per-trigger metadata currently flows through files. Kept
-    /// on the trait so a future contributor that only needs literal
-    /// values can opt in without changing the wiring.
-    #[allow(dead_code)]
-    fn agent_env_vars(&self) -> Vec<(String, String)> {
-        Vec::new()
-    }
+    /// Generate the prepare step as a typed
+    /// [`crate::compile::ir::step::Step`].
+    fn prepare_step_typed(
+        &self,
+        ctx: &CompileContext,
+    ) -> anyhow::Result<Option<crate::compile::ir::step::Step>>;
 
     /// Bash commands the agent must have on its allow-list to inspect
     /// the staged context (e.g. `git diff`, `git show`). Aggregated by
-    /// `ExecContextExtension::required_bash_commands` and forwarded
+    /// `ExecContextExtension` and forwarded
     /// through `src/engine.rs::args` to the agent's `shell(...)`
     /// allow-list.
-    fn required_bash_commands(&self) -> Vec<String>;
+    fn bash_commands(&self) -> Vec<String>;
 }
 
 /// Static-dispatch enum over all known contributors.
-///
-/// Mirrors the `Extension` enum pattern in `extensions/mod.rs`. v1
-/// ships `Pr`; adding a future variant requires only a new arm here
-/// and a registration in `ExecContextExtension::contributors()`.
 pub(super) enum Contributor {
     Pr(super::pr::PrContextContributor),
+    Manual(super::manual::ManualContextContributor),
+    Pipeline(super::pipeline::PipelineContextContributor),
+    CiPush(super::ci_push::CiPushContextContributor),
+    Workitem(super::workitem::WorkitemContextContributor),
+    Schedule(super::schedule::ScheduleContextContributor),
+    PrChecks(super::pr_checks::PrChecksContextContributor),
+    Repo(super::repo::RepoContextContributor),
 }
 
 impl ContextContributor for Contributor {
     fn name(&self) -> &str {
         match self {
             Contributor::Pr(c) => c.name(),
+            Contributor::Manual(c) => c.name(),
+            Contributor::Pipeline(c) => c.name(),
+            Contributor::CiPush(c) => c.name(),
+            Contributor::Workitem(c) => c.name(),
+            Contributor::Schedule(c) => c.name(),
+            Contributor::PrChecks(c) => c.name(),
+            Contributor::Repo(c) => c.name(),
         }
     }
     fn should_activate(&self, ctx: &CompileContext) -> bool {
         match self {
             Contributor::Pr(c) => c.should_activate(ctx),
+            Contributor::Manual(c) => c.should_activate(ctx),
+            Contributor::Pipeline(c) => c.should_activate(ctx),
+            Contributor::CiPush(c) => c.should_activate(ctx),
+            Contributor::Workitem(c) => c.should_activate(ctx),
+            Contributor::Schedule(c) => c.should_activate(ctx),
+            Contributor::PrChecks(c) => c.should_activate(ctx),
+            Contributor::Repo(c) => c.should_activate(ctx),
         }
     }
-    fn prepare_step(&self, ctx: &CompileContext) -> String {
+    fn prepare_step_typed(
+        &self,
+        ctx: &CompileContext,
+    ) -> anyhow::Result<Option<crate::compile::ir::step::Step>> {
         match self {
-            Contributor::Pr(c) => c.prepare_step(ctx),
+            Contributor::Pr(c) => c.prepare_step_typed(ctx),
+            Contributor::Manual(c) => c.prepare_step_typed(ctx),
+            Contributor::Pipeline(c) => c.prepare_step_typed(ctx),
+            Contributor::CiPush(c) => c.prepare_step_typed(ctx),
+            Contributor::Workitem(c) => c.prepare_step_typed(ctx),
+            Contributor::Schedule(c) => c.prepare_step_typed(ctx),
+            Contributor::PrChecks(c) => c.prepare_step_typed(ctx),
+            Contributor::Repo(c) => c.prepare_step_typed(ctx),
         }
     }
-    fn agent_env_vars(&self) -> Vec<(String, String)> {
+    fn bash_commands(&self) -> Vec<String> {
         match self {
-            Contributor::Pr(c) => c.agent_env_vars(),
-        }
-    }
-    fn required_bash_commands(&self) -> Vec<String> {
-        match self {
-            Contributor::Pr(c) => c.required_bash_commands(),
+            Contributor::Pr(c) => c.bash_commands(),
+            Contributor::Manual(c) => c.bash_commands(),
+            Contributor::Pipeline(c) => c.bash_commands(),
+            Contributor::CiPush(c) => c.bash_commands(),
+            Contributor::Workitem(c) => c.bash_commands(),
+            Contributor::Schedule(c) => c.bash_commands(),
+            Contributor::PrChecks(c) => c.bash_commands(),
+            Contributor::Repo(c) => c.bash_commands(),
         }
     }
 }

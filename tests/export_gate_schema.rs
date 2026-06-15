@@ -23,7 +23,7 @@ fn export_gate_schema_writes_valid_json() {
         serde_json::from_str(&content).expect("schema is not valid JSON");
     let stringified = serde_json::to_string(&parsed).unwrap();
     assert!(
-        stringified.contains("GateSpec") || stringified.contains("PredicateSpec"),
+        stringified.contains("GateSpec") && stringified.contains("PredicateSpec"),
         "schema does not mention expected type names: {}",
         &stringified[..stringified.len().min(500)]
     );

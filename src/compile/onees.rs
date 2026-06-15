@@ -1,22 +1,23 @@
-//! 1ES Pipeline Template compiler.
+//! 1ES Pipeline Templates compiler.
 //!
-//! This compiler generates a pipeline that extends the 1ES Unofficial Pipeline Template
-//! with Copilot CLI, AWF network isolation, and MCP Gateway — matching the standalone
-//! pipeline model while maintaining 1ES SDL compliance.
+//! This compiler generates a pipeline that extends the 1ES Unofficial
+//! Pipeline Template with Copilot CLI, AWF network isolation, and MCP
+//! Gateway — matching the standalone pipeline model while maintaining
+//! 1ES SDL compliance.
+//!
+//! Thin entry-point that delegates to
+//! [`crate::compile::onees_ir::build_onees_pipeline`] for IR
+//! construction and [`crate::compile::ir::emit::emit`] for YAML
+//! serialisation; mirrors the `standalone.rs` / `stage.rs` / `job.rs`
+//! shape.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use log::info;
 use std::path::Path;
 
 use super::Compiler;
-use super::common::{
-    AWF_VERSION, CompileConfig, MCPG_DOMAIN, MCPG_IMAGE, MCPG_PORT, MCPG_VERSION,
-    collect_awf_path_prepends, compile_shared, format_steps_yaml_indented,
-    generate_allowed_domains, generate_awf_mounts, generate_awf_path_step,
-    generate_enabled_tools_args, generate_mcpg_config, generate_mcpg_docker_env,
-    generate_mcpg_step_env,
-};
+use super::common;
 use super::types::FrontMatter;
 
 /// 1ES Pipeline Template compiler.
@@ -37,251 +38,31 @@ impl Compiler for OneESCompiler {
         skip_integrity: bool,
         debug_pipeline: bool,
     ) -> Result<String> {
-        info!("Compiling for 1ES target");
+        info!("Compiling for 1ES target (typed IR)");
 
-        // Collect extensions (needed for MCPG config and allowed domains)
         let extensions = super::extensions::collect_extensions(front_matter);
-
-        // Build compile context for MCPG config generation
         let ctx = super::extensions::CompileContext::new(front_matter, input_path).await?;
 
-        // Generate values shared with standalone that are passed as extra replacements
-        let allowed_domains = generate_allowed_domains(front_matter, &extensions)?;
-        let awf_mounts = generate_awf_mounts(&extensions);
-        let awf_paths = collect_awf_path_prepends(&extensions);
-        let awf_path_step = generate_awf_path_step(&awf_paths);
-        let enabled_tools_args = generate_enabled_tools_args(front_matter);
-
-        let mcpg_config = generate_mcpg_config(front_matter, &ctx, &extensions)?;
-        let mcpg_config_json = serde_json::to_string_pretty(&mcpg_config)
-            .context("Failed to serialize MCPG config")?;
-        let mcpg_docker_env = generate_mcpg_docker_env(front_matter, &extensions);
-        let mcpg_step_env = generate_mcpg_step_env(&extensions);
-
-        // Generate 1ES-specific setup/teardown jobs(no per-job pool, uses templateContext).
-        // These override the shared {{ setup_job }} / {{ teardown_job }} markers via
-        // extra_replacements, which are applied before the shared replacements.
-        // compile_shared detects that `{{ setup_job }}` is already bound in
-        // extra_replacements and skips its own redundant `setup_steps()`
-        // aggregation, so each extension's `setup_steps()` is invoked
-        // exactly once per pipeline.
-        let setup_job = generate_setup_job(&front_matter.setup, &extensions, &ctx)?;
-        let teardown_job = generate_teardown_job(&front_matter.teardown);
-
-        let config = CompileConfig {
-            template: include_str!("../data/1es-base.yml").to_string(),
-            extra_replacements: vec![
-                ("{{ firewall_version }}".into(), AWF_VERSION.into()),
-                ("{{ mcpg_version }}".into(), MCPG_VERSION.into()),
-                ("{{ mcpg_image }}".into(), MCPG_IMAGE.into()),
-                ("{{ mcpg_port }}".into(), MCPG_PORT.to_string()),
-                ("{{ mcpg_domain }}".into(), MCPG_DOMAIN.into()),
-                ("{{ allowed_domains }}".into(), allowed_domains),
-                ("{{ awf_mounts }}".into(), awf_mounts),
-                ("{{ awf_path_step }}".into(), awf_path_step),
-                ("{{ enabled_tools_args }}".into(), enabled_tools_args),
-                ("{{ mcpg_config }}".into(), mcpg_config_json),
-                ("{{ mcpg_docker_env }}".into(), mcpg_docker_env),
-                ("{{ mcpg_step_env }}".into(), mcpg_step_env),
-                ("{{ setup_job }}".into(), setup_job),
-                ("{{ teardown_job }}".into(), teardown_job),
-            ],
-            skip_integrity,
-            debug_pipeline,
-            has_awf_paths: !awf_paths.is_empty(),
-            skip_header: false,
-        };
-
-        compile_shared(
-            input_path,
-            output_path,
+        let pipeline = super::onees_ir::build_onees_pipeline(
             front_matter,
-            markdown_body,
             &extensions,
             &ctx,
-            config,
-        )
-        .await
-    }
-}
+            input_path,
+            output_path,
+            markdown_body,
+            skip_integrity,
+            debug_pipeline,
+        )?;
 
-// ==================== 1ES-specific helpers ====================
+        let yaml = super::ir::emit::emit(&pipeline)?;
+        let yaml = common::normalize_yaml(&yaml)?;
+        let header = common::generate_header_comment(input_path);
+        // Mirror standalone.rs: legacy emitter inserts a blank line
+        // between the header comment block and the first `name:` key —
+        // preserve it so committed lock files stay byte-identical.
+        let full = format!("{}\n{}", header, yaml);
 
-/// Generate setup job for 1ES template.
-/// Unlike standalone, 1ES jobs don't have per-job `pool:` — the pool is at
-/// the top-level `parameters.pool`. Jobs use `templateContext: type: buildJob`.
-///
-/// Extension `setup_steps()` are injected before user setup steps (mirrors the
-/// shared `generate_setup_job` in common.rs). The always-on ado-aw-marker
-/// extension is the primary contributor; user setup_steps are appended after.
-///
-/// `compile_shared` detects when `{{ setup_job }}` is already bound via
-/// `extra_replacements` (the 1ES path does this) and skips its own
-/// `generate_setup_job` call, so each extension's `setup_steps()` is
-/// invoked exactly once per pipeline despite both paths owning a
-/// `generate_setup_job`.
-fn generate_setup_job(
-    setup_steps: &[serde_yaml::Value],
-    extensions: &[super::extensions::Extension],
-    ctx: &super::extensions::CompileContext,
-) -> anyhow::Result<String> {
-    use super::extensions::CompilerExtension;
-
-    // Collect setup_steps from ALL extensions
-    let mut ext_setup_steps: Vec<String> = Vec::new();
-    for ext in extensions {
-        ext_setup_steps.extend(ext.setup_steps(ctx)?);
-    }
-
-    if setup_steps.is_empty() && ext_setup_steps.is_empty() {
-        return Ok(String::new());
-    }
-
-    // Steps in the 1ES templateContext.steps block are indented 6 spaces.
-    let mut body = String::new();
-
-    if !ext_setup_steps.is_empty() {
-        let ext_steps_combined = ext_setup_steps.join("\n\n");
-        let indented = indent_block(&ext_steps_combined, "      ");
-        body.push_str(&indented);
-        if !body.ends_with('\n') {
-            body.push('\n');
-        }
-    }
-
-    if !setup_steps.is_empty() {
-        let user_steps_yaml = format_steps_yaml_indented(setup_steps, 6);
-        body.push_str(&user_steps_yaml);
-    }
-
-    Ok(format!(
-        r#"- job: Setup
-  displayName: "Setup"
-  templateContext:
-    type: buildJob
-    steps:
-      - checkout: self
-{}
-"#,
-        body.trim_end_matches('\n')
-    ))
-}
-
-/// Indent every non-empty line in `block` with `prefix`.
-fn indent_block(block: &str, prefix: &str) -> String {
-    block
-        .lines()
-        .map(|line| {
-            if line.is_empty() {
-                String::new()
-            } else {
-                format!("{prefix}{line}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Generate teardown job for 1ES template.
-/// Unlike standalone, 1ES jobs don't have per-job `pool:`.
-fn generate_teardown_job(teardown_steps: &[serde_yaml::Value]) -> String {
-    if teardown_steps.is_empty() {
-        return String::new();
-    }
-
-    let steps_yaml = format_steps_yaml_indented(teardown_steps, 6);
-
-    format!(
-        r#"- job: Teardown
-  displayName: "Teardown"
-  dependsOn: SafeOutputs
-  templateContext:
-    type: buildJob
-    steps:
-      - checkout: self
-{}
-"#,
-        steps_yaml
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // ─── generate_setup_job ──────────────────────────────────────────────────
-
-    #[test]
-    fn test_generate_setup_job_empty_steps() {
-        let fm = parse_test_fm("name: t\ndescription: x\n");
-        let ctx = super::super::extensions::CompileContext::for_test(&fm);
-        let result = generate_setup_job(&[], &[], &ctx).expect("call ok");
-        assert!(
-            result.is_empty(),
-            "Empty setup steps with no extensions should return empty string"
-        );
-    }
-
-    #[test]
-    fn test_generate_setup_job_with_steps() {
-        let step: serde_yaml::Value =
-            serde_yaml::from_str("bash: echo setup").expect("valid yaml");
-        let fm = parse_test_fm("name: t\ndescription: x\n");
-        let ctx = super::super::extensions::CompileContext::for_test(&fm);
-        let result = generate_setup_job(&[step], &[], &ctx).expect("call ok");
-        assert!(result.contains("Setup"), "Should define a Setup job");
-        assert!(
-            result.contains("displayName: \"Setup\""),
-            "Should use simple display name"
-        );
-        assert!(result.contains("checkout: self"), "Should include self checkout");
-        assert!(result.contains("echo setup"), "Should include the step content");
-        assert!(result.contains("templateContext"), "Should include templateContext");
-        assert!(result.contains("type: buildJob"), "Should use buildJob type");
-        assert!(!result.contains("pool:"), "Should not include per-job pool");
-    }
-
-    fn parse_test_fm(yaml: &str) -> crate::compile::types::FrontMatter {
-        serde_yaml::from_str(yaml).expect("parse fm")
-    }
-
-    // ─── generate_teardown_job ───────────────────────────────────────────────
-
-    #[test]
-    fn test_generate_teardown_job_empty_steps() {
-        let result = generate_teardown_job(&[]);
-        assert!(
-            result.is_empty(),
-            "Empty teardown steps should return empty string"
-        );
-    }
-
-    #[test]
-    fn test_generate_teardown_job_with_steps() {
-        let step: serde_yaml::Value =
-            serde_yaml::from_str("bash: echo teardown").expect("valid yaml");
-        let result = generate_teardown_job(&[step]);
-        assert!(result.contains("Teardown"), "Should define a Teardown job");
-        assert!(
-            result.contains("displayName: \"Teardown\""),
-            "Should use simple display name"
-        );
-        assert!(
-            result.contains("dependsOn: SafeOutputs"),
-            "Should depend on SafeOutputs"
-        );
-        assert!(
-            result.contains("checkout: self"),
-            "Should include self checkout"
-        );
-        assert!(
-            result.contains("echo teardown"),
-            "Should include the step content"
-        );
-        assert!(
-            result.contains("templateContext"),
-            "Should include templateContext"
-        );
-        assert!(!result.contains("pool:"), "Should not include per-job pool");
+        common::atomic_write(output_path, &full).await?;
+        Ok(full)
     }
 }

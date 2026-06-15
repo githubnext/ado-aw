@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::compile::extensions::{CompilerExtension, Extension};
+use crate::compile::extensions::Declarations;
 use crate::compile::types::{CompileTarget, EngineConfig, FrontMatter, McpConfig};
 use crate::validate::{
     contains_ado_expression, contains_newline, contains_pipeline_command, is_valid_arg,
@@ -42,7 +42,7 @@ pub const DEFAULT_COPILOT_MODEL: &str = "claude-opus-4.7";
 
 /// Default pinned version of the Copilot CLI.
 /// Override per-agent via `engine: { id: copilot, version: "1.0.35" }` in front matter.
-pub const COPILOT_CLI_VERSION: &str = "1.0.60";
+pub const COPILOT_CLI_VERSION: &str = "1.0.62";
 const COPILOT_CLI_RELEASES_BASE: &str = "https://github.com/github/copilot-cli/releases";
 
 /// Resolved engine — enum dispatch over supported engine identifiers.
@@ -87,10 +87,10 @@ impl Engine {
     pub fn args(
         &self,
         front_matter: &FrontMatter,
-        extensions: &[Extension],
+        extension_declarations: &[Declarations],
     ) -> Result<String> {
         match self {
-            Engine::Copilot => copilot_args(front_matter, extensions),
+            Engine::Copilot => copilot_args(front_matter, extension_declarations),
         }
     }
 
@@ -139,7 +139,12 @@ impl Engine {
     /// `ado_org` is the ADO organization name inferred from the git remote at
     /// compile time. For 1ES targets it is embedded directly into the NuGet
     /// feed URL; when `None` a runtime extraction step is emitted instead.
-    pub fn install_steps(&self, engine_config: &EngineConfig, target: &CompileTarget, ado_org: Option<&str>) -> Result<String> {
+    pub fn install_steps(
+        &self,
+        engine_config: &EngineConfig,
+        target: &CompileTarget,
+        ado_org: Option<&str>,
+    ) -> Result<String> {
         match self {
             Engine::Copilot => copilot_install_steps(engine_config, target, ado_org),
         }
@@ -158,11 +163,11 @@ impl Engine {
     pub fn invocation(
         &self,
         front_matter: &FrontMatter,
-        extensions: &[Extension],
+        extension_declarations: &[Declarations],
         prompt_path: &str,
         mcp_config_path: Option<&str>,
     ) -> Result<String> {
-        let args = self.args(front_matter, extensions)?;
+        let args = self.args(front_matter, extension_declarations)?;
         match self {
             Engine::Copilot => {
                 let command_path = match front_matter.engine.command() {
@@ -178,7 +183,12 @@ impl Engine {
                     }
                     None => "/tmp/awf-tools/copilot".to_string(),
                 };
-                Ok(copilot_invocation(&command_path, prompt_path, mcp_config_path, &args))
+                Ok(copilot_invocation(
+                    &command_path,
+                    prompt_path,
+                    mcp_config_path,
+                    &args,
+                ))
             }
         }
     }
@@ -191,16 +201,16 @@ impl Engine {
 /// `false`; the caller upholds that invariant.
 fn collect_allowed_tools(
     front_matter: &FrontMatter,
-    extensions: &[Extension],
+    extension_declarations: &[Declarations],
     edit_enabled: bool,
 ) -> Result<Vec<String>> {
     let mut allowed_tools: Vec<String> = Vec::new();
 
     // Tools from compiler extensions (github, safeoutputs, azure-devops, etc.)
-    for ext in extensions {
-        for tool in ext.allowed_copilot_tools() {
-            if !allowed_tools.contains(&tool) {
-                allowed_tools.push(tool);
+    for decl in extension_declarations {
+        for tool in &decl.copilot_allow_tools {
+            if !allowed_tools.contains(tool) {
+                allowed_tools.push(tool.clone());
             }
         }
     }
@@ -257,10 +267,10 @@ fn collect_allowed_tools(
         };
 
     // Auto-add extension-declared bash commands (runtimes + first-party tools)
-    for ext in extensions {
-        for cmd in ext.required_bash_commands() {
-            if !bash_commands.contains(&cmd) {
-                bash_commands.push(cmd);
+    for decl in extension_declarations {
+        for cmd in &decl.bash_commands {
+            if !bash_commands.contains(cmd) {
+                bash_commands.push(cmd.clone());
             }
         }
     }
@@ -309,7 +319,7 @@ fn validate_user_arg(arg: &str) -> Result<()> {
 
 fn copilot_args(
     front_matter: &FrontMatter,
-    extensions: &[Extension],
+    extension_declarations: &[Declarations],
 ) -> Result<String> {
     // Check if bash triggers --allow-all-tools. This happens when:
     // 1. Bash has an explicit wildcard entry (":*" or "*"), OR
@@ -338,7 +348,7 @@ fn copilot_args(
     let allowed_tools: Vec<String> = if use_allow_all_tools {
         Vec::new()
     } else {
-        collect_allowed_tools(front_matter, extensions, edit_enabled)?
+        collect_allowed_tools(front_matter, extension_declarations, edit_enabled)?
     };
 
     let mut params = Vec::new();
@@ -462,7 +472,10 @@ fn copilot_env(engine_config: &EngineConfig) -> Result<String> {
             // blocking both "GITHUB_TOKEN" and "github_token" prevents accidental
             // shadowing and confusion. The trade-off is that a legitimate custom var
             // whose name collides case-insensitively with a blocked key is rejected.
-            if BLOCKED_ENV_KEYS.iter().any(|blocked| key.eq_ignore_ascii_case(blocked)) {
+            if BLOCKED_ENV_KEYS
+                .iter()
+                .any(|blocked| key.eq_ignore_ascii_case(blocked))
+            {
                 anyhow::bail!(
                     "engine.env key '{}' conflicts with a compiler-controlled environment variable. \
                      These variables are managed by the compiler and cannot be overridden.",
@@ -494,7 +507,11 @@ fn copilot_env(engine_config: &EngineConfig) -> Result<String> {
             }
 
             // YAML-quote the value to prevent injection
-            lines.push(format!("{}: \"{}\"", key, value.replace('\\', "\\\\").replace('"', "\\\"")));
+            lines.push(format!(
+                "{}: \"{}\"",
+                key,
+                value.replace('\\', "\\\\").replace('"', "\\\"")
+            ));
         }
     }
 
@@ -513,15 +530,17 @@ fn copilot_env(engine_config: &EngineConfig) -> Result<String> {
 /// compile time. For 1ES it is used to construct the NuGet feed URL; when
 /// `None` a runtime extraction step is emitted that derives the org from
 /// `$(System.CollectionUri)`.
-fn copilot_install_steps(engine_config: &EngineConfig, target: &CompileTarget, ado_org: Option<&str>) -> Result<String> {
+fn copilot_install_steps(
+    engine_config: &EngineConfig,
+    target: &CompileTarget,
+    ado_org: Option<&str>,
+) -> Result<String> {
     // Custom binary path → skip NuGet install entirely
     if engine_config.command().is_some() {
         return Ok(String::new());
     }
 
-    let version = engine_config
-        .version()
-        .unwrap_or(COPILOT_CLI_VERSION);
+    let version = engine_config.version().unwrap_or(COPILOT_CLI_VERSION);
 
     // Validate version to prevent injection — this value is used in NuGet
     // command arguments for 1ES and in GitHub Releases URL construction for
@@ -553,8 +572,8 @@ fn copilot_install_steps(engine_config: &EngineConfig, target: &CompileTarget, a
                 // Validate the org name against ADO organization naming rules to
                 // prevent injection.  ADO org names are composed of ASCII
                 // alphanumerics and hyphens only (no dots, no underscores).
-                let org_valid = !org.is_empty()
-                    && org.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+                let org_valid =
+                    !org.is_empty() && org.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
                 if !org_valid {
                     anyhow::bail!(
                         "ADO organization '{}' contains invalid characters. \
@@ -628,10 +647,7 @@ fn copilot_install_steps(engine_config: &EngineConfig, target: &CompileTarget, a
 
     let version_tag = normalize_version_tag(version);
     let base_url = format!("{COPILOT_CLI_RELEASES_BASE}/download/{version_tag}");
-    copilot_install_from_github_release(
-        &base_url,
-        &format!("Install Copilot CLI ({version_tag})"),
-    )
+    copilot_install_from_github_release(&base_url, &format!("Install Copilot CLI ({version_tag})"))
 }
 
 fn normalize_version_tag(version: &str) -> String {
@@ -722,8 +738,20 @@ fn copilot_invocation(
 
 #[cfg(test)]
 mod tests {
-    use super::{get_engine, normalize_version_tag, Engine};
-    use crate::compile::{extensions::collect_extensions, parse_markdown};
+    use super::{Engine, get_engine, normalize_version_tag};
+    use crate::compile::{
+        extensions::{CompileContext, CompilerExtension, Declarations, collect_extensions},
+        parse_markdown,
+    };
+
+    fn declarations_for(fm: &crate::compile::types::FrontMatter) -> Vec<Declarations> {
+        let extensions = collect_extensions(fm);
+        let ctx = CompileContext::for_test(fm);
+        extensions
+            .iter()
+            .map(|ext| ext.declarations(&ctx).unwrap())
+            .collect()
+    }
 
     #[test]
     fn copilot_engine_command() {
@@ -732,9 +760,10 @@ mod tests {
 
     #[test]
     fn copilot_engine_args() {
-        let (front_matter, _) = parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
+        let (front_matter, _) =
+            parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
         let params = Engine::Copilot
-            .args(&front_matter, &collect_extensions(&front_matter))
+            .args(&front_matter, &declarations_for(&front_matter))
             .unwrap();
         // Default engine (copilot) uses default model (claude-opus-4.7)
         assert!(params.contains("--model claude-opus-4.7"));
@@ -748,14 +777,15 @@ mod tests {
         )
         .unwrap();
         let params = Engine::Copilot
-            .args(&front_matter, &collect_extensions(&front_matter))
+            .args(&front_matter, &declarations_for(&front_matter))
             .unwrap();
         assert!(params.contains("--model gpt-5"));
     }
 
     #[test]
     fn copilot_engine_env() {
-        let (front_matter, _) = parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
+        let (front_matter, _) =
+            parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
         let env = Engine::Copilot.env(&front_matter.engine).unwrap();
         assert!(env.contains("GITHUB_TOKEN: $(GITHUB_TOKEN)"));
         assert!(env.contains("GITHUB_READ_ONLY: 1"));
@@ -768,9 +798,10 @@ mod tests {
     fn get_engine_resolves_copilot() {
         let engine = get_engine("copilot").unwrap();
         assert_eq!(engine.command(), "copilot");
-        let (front_matter, _) = parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
+        let (front_matter, _) =
+            parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
         let params = engine
-            .args(&front_matter, &collect_extensions(&front_matter))
+            .args(&front_matter, &declarations_for(&front_matter))
             .unwrap();
         assert!(params.contains("--model claude-opus-4.7"));
     }
@@ -791,7 +822,12 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  command: /usr/local/bin/my-copilot\n---\n",
         ).unwrap();
         let result = Engine::Copilot
-            .invocation(&fm, &collect_extensions(&fm), "/tmp/prompt.md", Some("/tmp/mcp.json"))
+            .invocation(
+                &fm,
+                &declarations_for(&fm),
+                "/tmp/prompt.md",
+                Some("/tmp/mcp.json"),
+            )
             .unwrap();
         assert!(result.starts_with("/usr/local/bin/my-copilot "));
         assert!(!result.contains("/tmp/awf-tools/copilot"));
@@ -801,7 +837,12 @@ mod tests {
     fn engine_command_default_uses_awf_path() {
         let (fm, _) = parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
         let result = Engine::Copilot
-            .invocation(&fm, &collect_extensions(&fm), "/tmp/prompt.md", Some("/tmp/mcp.json"))
+            .invocation(
+                &fm,
+                &declarations_for(&fm),
+                "/tmp/prompt.md",
+                Some("/tmp/mcp.json"),
+            )
             .unwrap();
         assert!(result.starts_with("/tmp/awf-tools/copilot "));
     }
@@ -811,9 +852,15 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  command: \"/tmp/copilot; rm -rf /\"\n---\n",
         ).unwrap();
-        let result = Engine::Copilot.invocation(&fm, &collect_extensions(&fm), "/tmp/prompt.md", None);
+        let result =
+            Engine::Copilot.invocation(&fm, &declarations_for(&fm), "/tmp/prompt.md", None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid characters"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid characters")
+        );
     }
 
     #[test]
@@ -821,7 +868,8 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  command: \"/tmp/co'pilot\"\n---\n",
         ).unwrap();
-        let result = Engine::Copilot.invocation(&fm, &collect_extensions(&fm), "/tmp/prompt.md", None);
+        let result =
+            Engine::Copilot.invocation(&fm, &declarations_for(&fm), "/tmp/prompt.md", None);
         assert!(result.is_err());
     }
 
@@ -832,7 +880,7 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  agent: my-custom-agent\n---\n",
         ).unwrap();
-        let params = Engine::Copilot.args(&fm, &collect_extensions(&fm)).unwrap();
+        let params = Engine::Copilot.args(&fm, &declarations_for(&fm)).unwrap();
         assert!(params.contains("--agent my-custom-agent"));
     }
 
@@ -841,9 +889,14 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  agent: \"bad agent!\"\n---\n",
         ).unwrap();
-        let result = Engine::Copilot.args(&fm, &collect_extensions(&fm));
+        let result = Engine::Copilot.args(&fm, &declarations_for(&fm));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid characters"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid characters")
+        );
     }
 
     // ─── engine.api-target tests ──────────────────────────────────────────
@@ -853,7 +906,7 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  api-target: api.acme.ghe.com\n---\n",
         ).unwrap();
-        let params = Engine::Copilot.args(&fm, &collect_extensions(&fm)).unwrap();
+        let params = Engine::Copilot.args(&fm, &declarations_for(&fm)).unwrap();
         assert!(params.contains("--api-target api.acme.ghe.com"));
     }
 
@@ -862,9 +915,14 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  api-target: \"bad host/path\"\n---\n",
         ).unwrap();
-        let result = Engine::Copilot.args(&fm, &collect_extensions(&fm));
+        let result = Engine::Copilot.args(&fm, &declarations_for(&fm));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid characters"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid characters")
+        );
     }
 
     #[test]
@@ -890,14 +948,17 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  args:\n    - --verbose\n    - --debug\n---\n",
         ).unwrap();
-        let params = Engine::Copilot.args(&fm, &collect_extensions(&fm)).unwrap();
+        let params = Engine::Copilot.args(&fm, &declarations_for(&fm)).unwrap();
         // Compiler args come first
         assert!(params.contains("--disable-builtin-mcps"));
         assert!(params.contains("--no-ask-user"));
         // User args come after
         let disable_pos = params.find("--disable-builtin-mcps").unwrap();
         let verbose_pos = params.find("--verbose").unwrap();
-        assert!(verbose_pos > disable_pos, "User args must come after compiler args");
+        assert!(
+            verbose_pos > disable_pos,
+            "User args must come after compiler args"
+        );
         assert!(params.contains("--debug"));
     }
 
@@ -906,9 +967,14 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  args:\n    - \"--flag; rm -rf /\"\n---\n",
         ).unwrap();
-        let result = Engine::Copilot.args(&fm, &collect_extensions(&fm));
+        let result = Engine::Copilot.args(&fm, &declarations_for(&fm));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid characters"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid characters")
+        );
     }
 
     #[test]
@@ -916,9 +982,14 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  args:\n    - --prompt=evil\n---\n",
         ).unwrap();
-        let result = Engine::Copilot.args(&fm, &collect_extensions(&fm));
+        let result = Engine::Copilot.args(&fm, &declarations_for(&fm));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("compiler-controlled"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("compiler-controlled")
+        );
     }
 
     #[test]
@@ -926,7 +997,7 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  args:\n    - --allow-tool=evil\n---\n",
         ).unwrap();
-        let result = Engine::Copilot.args(&fm, &collect_extensions(&fm));
+        let result = Engine::Copilot.args(&fm, &declarations_for(&fm));
         assert!(result.is_err());
     }
 
@@ -935,7 +1006,7 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  args:\n    - --ask-user\n---\n",
         ).unwrap();
-        let result = Engine::Copilot.args(&fm, &collect_extensions(&fm));
+        let result = Engine::Copilot.args(&fm, &declarations_for(&fm));
         assert!(result.is_err());
     }
 
@@ -944,7 +1015,7 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  args:\n    - --additional-mcp-config=@evil.json\n---\n",
         ).unwrap();
-        let result = Engine::Copilot.args(&fm, &collect_extensions(&fm));
+        let result = Engine::Copilot.args(&fm, &declarations_for(&fm));
         assert!(result.is_err());
     }
 
@@ -956,7 +1027,10 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    MY_VAR: hello\n---\n",
         ).unwrap();
         let env = Engine::Copilot.env(&fm.engine).unwrap();
-        assert!(env.contains("GITHUB_TOKEN: $(GITHUB_TOKEN)"), "compiler vars preserved");
+        assert!(
+            env.contains("GITHUB_TOKEN: $(GITHUB_TOKEN)"),
+            "compiler vars preserved"
+        );
         assert!(env.contains("MY_VAR: \"hello\""), "user var included");
     }
 
@@ -967,7 +1041,12 @@ mod tests {
         ).unwrap();
         let result = Engine::Copilot.env(&fm.engine);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("compiler-controlled"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("compiler-controlled")
+        );
     }
 
     #[test]
@@ -1004,7 +1083,12 @@ mod tests {
         ).unwrap();
         let result = Engine::Copilot.env(&fm.engine);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("ADO pipeline command injection"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("ADO pipeline command injection")
+        );
     }
 
     #[test]
@@ -1014,7 +1098,12 @@ mod tests {
         ).unwrap();
         let result = Engine::Copilot.env(&fm.engine);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("ADO expression syntax"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("ADO expression syntax")
+        );
     }
 
     #[test]
@@ -1025,7 +1114,12 @@ mod tests {
         // YAML double-quoted strings interpret \n as an actual newline
         let result = Engine::Copilot.env(&fm.engine);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("newline characters"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("newline characters")
+        );
     }
 
     #[test]
@@ -1035,7 +1129,12 @@ mod tests {
         ).unwrap();
         let result = Engine::Copilot.env(&fm.engine);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not a valid environment variable name"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("not a valid environment variable name")
+        );
     }
 
     #[test]
@@ -1056,7 +1155,12 @@ mod tests {
         ).unwrap();
         let result = Engine::Copilot.install_steps(&fm.engine, &fm.target, None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid characters"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid characters")
+        );
     }
 
     #[test]
@@ -1073,7 +1177,9 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  version: '1.0.34'\n---\n",
         ).unwrap();
-        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target, None).unwrap();
+        let result = Engine::Copilot
+            .install_steps(&fm.engine, &fm.target, None)
+            .unwrap();
         assert!(result.contains("releases/download/v1.0.34"));
         assert!(result.contains("Install Copilot CLI (v1.0.34)"));
     }
@@ -1083,7 +1189,9 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  version: 'v1.0.34'\n---\n",
         ).unwrap();
-        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target, None).unwrap();
+        let result = Engine::Copilot
+            .install_steps(&fm.engine, &fm.target, None)
+            .unwrap();
         assert!(result.contains("releases/download/v1.0.34"));
         assert!(result.contains("Install Copilot CLI (v1.0.34)"));
     }
@@ -1092,9 +1200,15 @@ mod tests {
     fn engine_version_accepts_latest() {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  version: latest\n---\n",
-        ).unwrap();
-        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target, None).unwrap();
-        assert!(result.contains("releases/latest/download"), "latest should resolve via latest release URL");
+        )
+        .unwrap();
+        let result = Engine::Copilot
+            .install_steps(&fm.engine, &fm.target, None)
+            .unwrap();
+        assert!(
+            result.contains("releases/latest/download"),
+            "latest should resolve via latest release URL"
+        );
         assert!(result.contains("Install Copilot CLI (latest)"));
     }
 
@@ -1103,7 +1217,9 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\ntarget: 1es\nengine:\n  id: copilot\n  version: latest\n---\n",
         ).unwrap();
-        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target, Some("myorg")).unwrap();
+        let result = Engine::Copilot
+            .install_steps(&fm.engine, &fm.target, Some("myorg"))
+            .unwrap();
         assert!(result.contains("NuGetCommand@2"));
         assert!(result.contains("Guardian1ESPTUpstreamOrgFeed"));
         assert!(result.contains("pkgs.dev.azure.com/myorg/"));
@@ -1115,7 +1231,9 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\ntarget: 1es\nengine:\n  id: copilot\n  version: '1.0.34'\n---\n",
         ).unwrap();
-        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target, Some("myorg")).unwrap();
+        let result = Engine::Copilot
+            .install_steps(&fm.engine, &fm.target, Some("myorg"))
+            .unwrap();
         assert!(result.contains("NuGetCommand@2"));
         assert!(result.contains("Guardian1ESPTUpstreamOrgFeed"));
         assert!(result.contains("pkgs.dev.azure.com/myorg/"));
@@ -1127,7 +1245,9 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\ntarget: 1es\nengine:\n  id: copilot\n  version: '1.0.34'\n---\n",
         ).unwrap();
-        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target, Some("contoso")).unwrap();
+        let result = Engine::Copilot
+            .install_steps(&fm.engine, &fm.target, Some("contoso"))
+            .unwrap();
         assert!(result.contains("pkgs.dev.azure.com/contoso/"));
         assert!(!result.contains("msazuresphere"));
     }
@@ -1137,7 +1257,9 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\ntarget: 1es\nengine:\n  id: copilot\n  version: '1.0.34'\n---\n",
         ).unwrap();
-        let result = Engine::Copilot.install_steps(&fm.engine, &fm.target, None).unwrap();
+        let result = Engine::Copilot
+            .install_steps(&fm.engine, &fm.target, None)
+            .unwrap();
         assert!(result.contains("NuGetCommand@2"));
         assert!(result.contains("Guardian1ESPTUpstreamOrgFeed"));
         // Runtime fallback: org extracted from $(System.CollectionUri)
@@ -1154,7 +1276,12 @@ mod tests {
         ).unwrap();
         let result = Engine::Copilot.install_steps(&fm.engine, &fm.target, Some("evil; rm -rf /"));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid characters"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid characters")
+        );
     }
 
     #[test]

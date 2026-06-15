@@ -2,7 +2,7 @@
 //!
 //! The [`CompilerExtension`] trait provides a unified interface for runtimes
 //! and first-party tools to declare their compilation requirements (network
-//! hosts, bash commands, prompt supplements, prepare steps, MCPG entries).
+//! hosts, bash commands, prompt supplements, typed pipeline steps, MCPG entries).
 //!
 //! Instead of scattering special-case `if` blocks across the compiler,
 //! each runtime/tool implements this trait and the compiler collects
@@ -92,7 +92,7 @@ use std::path::Path;
 ///
 /// Built once via [`CompileContext::new`] and passed to all extension
 /// methods. Follows the same pattern as
-/// [`ExecutionContext`](crate::safeoutputs::result::ExecutionContext)
+/// [`ExecutionContext`](crate::safeoutputs::ExecutionContext)
 /// for Stage 3 — a single context struct with all resolved metadata.
 pub struct CompileContext<'a> {
     /// The agent name from front matter.
@@ -271,8 +271,8 @@ pub enum ExtensionPhase {
 /// ## Ordering policy
 ///
 /// Extensions declare their [`phase`](CompilerExtension::phase) which
-/// controls the order in which `prepare_steps` and `prompt_supplement`
-/// are emitted. Runtimes ([`ExtensionPhase::Runtime`]) always run
+/// controls the order in which typed step declarations and
+/// `prompt_supplement` are emitted. Runtimes ([`ExtensionPhase::Runtime`]) always run
 /// before tools ([`ExtensionPhase::Tool`]) because tools may depend on
 /// runtimes being installed (e.g., a Python-based tool needs the Python
 /// runtime first).
@@ -283,118 +283,87 @@ pub trait CompilerExtension {
     /// The execution phase of this extension, controlling ordering.
     fn phase(&self) -> ExtensionPhase;
 
-    /// Network hosts this extension requires (added to AWF allowlist).
-    fn required_hosts(&self) -> Vec<String> {
-        vec![]
+    /// Return every compile-time signal this extension contributes.
+    fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
+        let _ = ctx;
+        Ok(Declarations::default())
     }
+}
 
-    /// Bash commands this extension needs in the agent's allow-list.
-    fn required_bash_commands(&self) -> Vec<String> {
-        vec![]
-    }
-
-    /// Markdown prompt content to append to the agent prompt.
+/// Aggregate of every compile-time signal an extension contributes.
+///
+/// Returned by [`CompilerExtension::declarations`]. Extensions that
+/// contribute pipeline steps return typed
+/// [`crate::compile::ir::step::Step`] values directly.
+#[derive(Debug, Default)]
+pub struct Declarations {
+    /// Steps injected into the Agent job's `prepare` phase
+    /// (before the agent invocation).
+    pub agent_prepare_steps: Vec<crate::compile::ir::step::Step>,
+    /// Steps injected into the Setup job (runs before the Agent job).
+    pub setup_steps: Vec<crate::compile::ir::step::Step>,
+    /// Steps injected into the Agent job's `finalize` phase (after
+    /// the agent invocation; conditioned on `always()` typically).
     ///
-    /// The compiler wraps the returned content in a `cat >>` pipeline
-    /// step so it is appended to the agent prompt file.
-    fn prompt_supplement(&self) -> Option<String> {
-        None
-    }
-
-    /// Pipeline steps (YAML strings) to run before the agent.
+    /// **Reserved for future use** — no extension contributes here
+    /// today and no compile-target reads this field. Kept as a
+    /// declared surface so the contract is visible when an
+    /// extension does want to plug into this phase.
+    #[allow(dead_code)]
+    pub agent_finalize_steps: Vec<crate::compile::ir::step::Step>,
+    /// Steps injected into the Detection job's `prepare` phase.
     ///
-    /// Each element is a complete YAML step (e.g., `- bash: |...`).
-    /// These are injected into the Agent job's `{{ prepare_steps }}`
-    /// block — no new job/stage is created, so always-on extensions
-    /// (like `ado-aw-marker`) can emit metadata steps with zero impact
-    /// on pipeline structure.
-    fn prepare_steps(&self, _ctx: &CompileContext) -> Vec<String> {
-        vec![]
-    }
-
-    /// Pipeline steps (YAML strings) to inject into the Setup job.
+    /// **Reserved for future use** — no extension contributes here
+    /// today and no compile-target reads this field.
+    #[allow(dead_code)]
+    pub detection_prepare_steps: Vec<crate::compile::ir::step::Step>,
+    /// Steps injected into the SafeOutputs job.
     ///
-    /// Unlike `prepare_steps()` which injects into the Execution job,
-    /// these steps run in the Setup job (before the Execution job starts).
-    /// Used by extensions that need to run gate logic or pre-activation
-    /// checks before the agent is launched.
-    fn setup_steps(&self, _ctx: &CompileContext) -> Result<Vec<String>> {
-        Ok(vec![])
-    }
-
-    /// MCPG server entries this extension contributes.
+    /// **Reserved for future use** — no extension contributes here
+    /// today and no compile-target reads this field.
+    #[allow(dead_code)]
+    pub safe_outputs_steps: Vec<crate::compile::ir::step::Step>,
+    /// AWF network-allowlist domains.
+    pub network_hosts: Vec<String>,
+    /// Bash commands required in the agent's allow-list.
+    pub bash_commands: Vec<String>,
+    /// Markdown to append to the agent prompt.
+    pub prompt_supplement: Option<String>,
+    /// MCPG `(name, config)` entries.
+    pub mcpg_servers: Vec<(String, McpgServerConfig)>,
+    /// Copilot CLI `--allow-tool` values.
+    pub copilot_allow_tools: Vec<String>,
+    /// Container-env → pipeline-var mappings for MCP container processes.
+    pub pipeline_env: Vec<PipelineEnvMapping>,
+    /// AWF bind mounts.
+    pub awf_mounts: Vec<AwfMount>,
+    /// Directories prepended to PATH inside the AWF chroot.
+    pub awf_path_prepends: Vec<String>,
+    /// Agent execution-environment variables (`KEY: "value"` in the
+    /// emitted YAML `env:` block).
+    pub agent_env_vars: Vec<(String, String)>,
+    /// Non-fatal warnings to print at compile time.
+    pub warnings: Vec<String>,
+    /// Clauses to AND into the canonical Agent job's `condition:`.
     ///
-    /// Returns `(server_name, config)` pairs inserted into the MCPG
-    /// JSON configuration. Only consumed by the standalone compiler.
-    fn mcpg_servers(&self, _ctx: &CompileContext) -> Result<Vec<(String, McpgServerConfig)>> {
-        Ok(vec![])
-    }
-
-    /// Copilot CLI `--allow-tool` values this extension requires.
+    /// The canonical-jobs builder folds every extension's contribution
+    /// into a single `Condition::And([Condition::Succeeded, ...])`
+    /// before emitting (an empty fold leaves the Agent job
+    /// unconditional, matching today's behaviour). This lets an
+    /// extension declaratively gate the Agent job — for example the
+    /// `ado-script` extension contributes the synth-PR-skip clause,
+    /// the PR-filter and pipeline-filter `SHOULD_RUN` checks, and the
+    /// user `expression:` escape hatches — without
+    /// [`crate::compile::agentic_pipeline`] hard-coding knowledge of
+    /// each extension's step IDs (`synthPr`, `prGate`,
+    /// `pipelineGate`) or signals.
     ///
-    /// Returns tool names (e.g., `"github"`, `"safeoutputs"`, `"azure-devops"`)
-    /// that are emitted as `--allow-tool <name>` in the Copilot CLI invocation.
-    fn allowed_copilot_tools(&self) -> Vec<String> {
-        vec![]
-    }
-
-    /// Compile-time warnings to emit. Errors in the `Result` abort
-    /// compilation; the inner `Vec<String>` contains non-fatal warnings
-    /// printed to stderr.
-    fn validate(&self, _ctx: &CompileContext) -> Result<Vec<String>> {
-        Ok(vec![])
-    }
-
-    /// Pipeline variable mappings needed by this extension's MCP containers.
-    ///
-    /// Each mapping declares that a container env var (e.g., `AZURE_DEVOPS_EXT_PAT`)
-    /// should be populated from a pipeline variable (e.g., `SC_READ_TOKEN`).
-    /// The compiler uses these to generate:
-    /// 1. `env:` block on the MCPG step (maps ADO secret → bash var)
-    /// 2. `-e` flags on the MCPG docker run (passes bash var → MCPG process)
-    /// 3. MCPG config keeps `""` (MCPG passthrough from its env → child container)
-    fn required_pipeline_vars(&self) -> Vec<PipelineEnvMapping> {
-        vec![]
-    }
-
-    /// AWF volume mounts this extension requires inside the chroot.
-    ///
-    /// AWF replaces `$HOME` with an empty directory overlay for security,
-    /// only mounting specific known subdirectories. Extensions that install
-    /// toolchains under `$HOME` (e.g., elan for Lean 4) must declare mounts
-    /// here so the toolchain is accessible inside the chroot.
-    ///
-    /// Shell variables like `$HOME` are expanded at runtime by bash, not at
-    /// compile time. AWF auto-adjusts container paths for chroot by prefixing
-    /// `/host`.
-    fn required_awf_mounts(&self) -> Vec<AwfMount> {
-        vec![]
-    }
-
-    /// Directories to prepend to `PATH` inside the AWF chroot.
-    ///
-    /// Extensions that install toolchains outside standard system paths
-    /// (e.g., elan installs Lean to `$HOME/.elan/bin`) should declare their
-    /// bin directories here. The compiler collects these and generates a
-    /// `GITHUB_PATH` file that AWF reads at startup to merge into the chroot
-    /// PATH — bypassing the `sudo` PATH reset.
-    ///
-    /// Shell variables like `$HOME` are expanded at runtime by bash, not at
-    /// compile time.
-    fn awf_path_prepends(&self) -> Vec<String> {
-        vec![]
-    }
-
-    /// Environment variables to inject into the agent execution environment.
-    ///
-    /// Returns `(key, value)` pairs that are emitted as `KEY: "value"` in
-    /// the `{{ engine_env }}` YAML block. Used by runtimes to configure
-    /// package managers via env vars (e.g., `PIP_INDEX_URL`, `NPM_CONFIG_REGISTRY`).
-    ///
-    /// Keys are validated against `BLOCKED_ENV_KEYS` at collection time.
-    fn agent_env_vars(&self) -> Vec<(String, String)> {
-        vec![]
-    }
+    /// Clauses use typed [`crate::compile::ir::output::OutputRef`]
+    /// over the producing extension's declared
+    /// [`crate::compile::ir::output::OutputDecl`]s, so a future rename
+    /// of a producer step ID becomes a graph-validation compile
+    /// error rather than a silently broken runtime condition.
+    pub agent_conditions: Vec<crate::compile::ir::condition::Condition>,
 }
 
 /// Mount access mode for an AWF bind mount.
@@ -583,41 +552,8 @@ macro_rules! extension_enum {
             fn phase(&self) -> ExtensionPhase {
                 match self { $( $Enum::$Variant(e) => e.phase(), )+ }
             }
-            fn required_hosts(&self) -> Vec<String> {
-                match self { $( $Enum::$Variant(e) => e.required_hosts(), )+ }
-            }
-            fn required_bash_commands(&self) -> Vec<String> {
-                match self { $( $Enum::$Variant(e) => e.required_bash_commands(), )+ }
-            }
-            fn prompt_supplement(&self) -> Option<String> {
-                match self { $( $Enum::$Variant(e) => e.prompt_supplement(), )+ }
-            }
-            fn prepare_steps(&self, ctx: &CompileContext) -> Vec<String> {
-                match self { $( $Enum::$Variant(e) => e.prepare_steps(ctx), )+ }
-            }
-            fn setup_steps(&self, ctx: &CompileContext) -> Result<Vec<String>> {
-                match self { $( $Enum::$Variant(e) => e.setup_steps(ctx), )+ }
-            }
-            fn mcpg_servers(&self, ctx: &CompileContext) -> Result<Vec<(String, McpgServerConfig)>> {
-                match self { $( $Enum::$Variant(e) => e.mcpg_servers(ctx), )+ }
-            }
-            fn allowed_copilot_tools(&self) -> Vec<String> {
-                match self { $( $Enum::$Variant(e) => e.allowed_copilot_tools(), )+ }
-            }
-            fn validate(&self, ctx: &CompileContext) -> Result<Vec<String>> {
-                match self { $( $Enum::$Variant(e) => e.validate(ctx), )+ }
-            }
-            fn required_pipeline_vars(&self) -> Vec<PipelineEnvMapping> {
-                match self { $( $Enum::$Variant(e) => e.required_pipeline_vars(), )+ }
-            }
-            fn required_awf_mounts(&self) -> Vec<AwfMount> {
-                match self { $( $Enum::$Variant(e) => e.required_awf_mounts(), )+ }
-            }
-            fn awf_path_prepends(&self) -> Vec<String> {
-                match self { $( $Enum::$Variant(e) => e.awf_path_prepends(), )+ }
-            }
-            fn agent_env_vars(&self) -> Vec<(String, String)> {
-                match self { $( $Enum::$Variant(e) => e.agent_env_vars(), )+ }
+            fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
+                match self { $( $Enum::$Variant(e) => e.declarations(ctx), )+ }
             }
         }
     };
@@ -640,7 +576,13 @@ pub use crate::tools::cache_memory::CacheMemoryExtension;
 pub use ado_aw_marker::AdoAwMarkerExtension;
 pub use ado_script::AdoScriptExtension;
 pub use azure_cli::AzureCliExtension;
-pub use exec_context::{ExecContextExtension, pr_contributor_will_activate};
+pub use exec_context::{
+    ExecContextExtension, ci_push_contributor_will_activate,
+    manual_contributor_will_activate, pipeline_contributor_will_activate,
+    pr_checks_contributor_will_activate, pr_contributor_will_activate,
+    repo_contributor_will_activate, schedule_contributor_will_activate,
+    workitem_contributor_will_activate,
+};
 pub use github::GitHubExtension;
 pub use safe_outputs::SafeOutputsExtension;
 
@@ -728,6 +670,33 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
                 // AdoScriptExtension owns installing it. Shared helper
                 // keeps the activation predicate in lock-step.
                 exec_context_pr_active: pr_contributor_will_activate(front_matter),
+                // Same loose-coupling pattern for the Manual contributor
+                // (Stage 1 of the exec-context contributor build-out —
+                // see plan.md). Activates whenever any `parameters:`
+                // block is declared and the contributor isn't explicitly
+                // disabled.
+                exec_context_manual_active: manual_contributor_will_activate(front_matter),
+                // Same loose-coupling pattern for the Pipeline contributor
+                // (Stage 2 of the exec-context contributor build-out —
+                // see plan.md). Activates whenever `on.pipeline` is
+                // configured and the contributor isn't explicitly
+                // disabled.
+                exec_context_pipeline_active: pipeline_contributor_will_activate(front_matter),
+                // CI-push contributor (Stage 3 — opt-in, default OFF).
+                exec_context_ci_push_active: ci_push_contributor_will_activate(front_matter),
+                // Workitem contributor (Stage 4 — PR-linked mode only).
+                // Activates whenever the PR contributor activates and
+                // workitem isn't explicitly disabled.
+                exec_context_workitem_active: workitem_contributor_will_activate(front_matter),
+                // Schedule contributor (Stage 5 — opt-in, default OFF).
+                exec_context_schedule_active: schedule_contributor_will_activate(front_matter),
+                // PR-checks extension (Stage 6 — opt-in, default OFF).
+                exec_context_pr_checks_active: pr_checks_contributor_will_activate(
+                    front_matter,
+                ),
+                // Repo contributor (Stage 7 — opt-in, default OFF, no
+                // bearer / no REST, pure git).
+                exec_context_repo_active: repo_contributor_will_activate(front_matter),
                 pr_trigger_for_synth,
             }
         })),

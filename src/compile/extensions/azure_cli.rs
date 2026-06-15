@@ -1,4 +1,6 @@
-use super::{AwfMount, CompilerExtension, CompileContext, ExtensionPhase};
+use super::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
+use crate::compile::ir::condition::{Condition, Expr};
+use crate::compile::ir::step::{BashStep, Step};
 
 // ─── Azure CLI (always-on, install-free, gh-aw parity) ────────────────
 
@@ -19,7 +21,7 @@ use super::{AwfMount, CompilerExtension, CompileContext, ExtensionPhase};
 /// **Graceful runtime detection.** Instead of declaring static AWF
 /// mounts (which would crash `docker run` with "bind source path does
 /// not exist" on runners without azure-cli), this extension contributes
-/// a [`prepare_steps`] bash step that runs in the Agent job *before*
+/// a typed Agent-job prepare bash step that runs *before*
 /// the AWF invocation:
 ///
 /// * If both `/usr/bin/az` and `/opt/az` exist on the host, the step
@@ -66,142 +68,73 @@ impl CompilerExtension for AzureCliExtension {
         ExtensionPhase::Tool
     }
 
-    fn required_hosts(&self) -> Vec<String> {
-        vec![
-            // OAuth + sign-in
-            "login.microsoftonline.com".to_string(),
-            "login.windows.net".to_string(),
-            // ARM (resource management)
-            "management.azure.com".to_string(),
-            // Microsoft Graph
-            "graph.microsoft.com".to_string(),
-            // Microsoft's link shortener used by az subcommand help / metadata
-            "aka.ms".to_string(),
-        ]
-    }
-
-    fn required_bash_commands(&self) -> Vec<String> {
-        vec!["az".to_string()]
-    }
-
-    fn required_awf_mounts(&self) -> Vec<AwfMount> {
-        // Intentionally empty — declaring static mounts here would cause
-        // `docker run` to fail with "bind source path does not exist" on
-        // runners that don't have azure-cli pre-installed (e.g. some 1ES
-        // self-hosted pools). The mounts are decided at pipeline time
-        // by `prepare_steps` below, which sets the `AW_AZ_MOUNTS`
-        // pipeline variable; `generate_awf_mounts` then injects a
-        // `$(AW_AZ_MOUNTS) \` line into the AWF invocation that expands
-        // to the mounts when az is present and to nothing when it isn't.
-        vec![]
-    }
-
-    fn prepare_steps(&self, _ctx: &CompileContext) -> Vec<String> {
-        // Returns two YAML steps, in order:
-        //
-        // 1. Detection — runs in the Agent job's prepare phase (NOT a
-        //    separate Setup job) so it shares the same pipeline-variable
-        //    scope as the later AWF bash step. Sets `AW_AZ_MOUNTS` to
-        //    either the two `--mount` args or empty string, depending
-        //    on whether the host has azure-cli installed.
-        //
-        // 2. Conditional prompt append — appends an "Azure CLI" section
-        //    to `/tmp/awf-tools/agent-prompt.md` so the agent knows
-        //    `az` is on PATH inside the sandbox, what it's good for,
-        //    and the auth model. Gated by
-        //    `condition: ne(variables['AW_AZ_MOUNTS'], '')` so the
-        //    agent only sees the advisory on runners where az was
-        //    actually detected. The detection step above is the source
-        //    of truth for that variable and MUST run first.
-        //
-        // We do not implement `prompt_supplement()` because the
-        // existing `wrap_prompt_append` helper doesn't emit a
-        // `condition:` field. Emitting our own step here keeps the
-        // trait API unchanged and confines the conditionality entirely
-        // to this extension.
-        vec![self.detection_step(), self.prompt_append_step()]
+    /// The two Agent-job prepare steps. The
+    /// detection step exports `AW_AZ_MOUNTS` via
+    /// `##vso[task.setvariable]` (a *pipeline variable*, not a step
+    /// output, so it's referenced via `variables['AW_AZ_MOUNTS']`,
+    /// not `$(detect.AW_AZ_MOUNTS)`). The conditional prompt-append
+    /// step uses [`Condition::Ne`] of that pipeline variable against
+    /// the empty-string literal — same wire shape as today's
+    /// `condition: ne(variables['AW_AZ_MOUNTS'], '')`.
+    fn declarations(&self, _ctx: &CompileContext) -> anyhow::Result<Declarations> {
+        Ok(Declarations {
+            network_hosts: vec![
+                // OAuth + sign-in
+                "login.microsoftonline.com".to_string(),
+                "login.windows.net".to_string(),
+                // ARM (resource management)
+                "management.azure.com".to_string(),
+                // Microsoft Graph
+                "graph.microsoft.com".to_string(),
+                // Microsoft's link shortener used by az subcommand help / metadata
+                "aka.ms".to_string(),
+            ],
+            bash_commands: vec!["az".to_string()],
+            agent_prepare_steps: vec![
+                Step::Bash(detection_bash_step()),
+                Step::Bash(prompt_append_bash_step()),
+            ],
+            ..Declarations::default()
+        })
     }
 }
 
-impl AzureCliExtension {
-    /// Bash step that detects azure-cli on the host and sets the
-    /// `AW_AZ_MOUNTS` pipeline variable. Always runs.
-    ///
-    /// Detection checks BOTH `/usr/bin/az` (the launcher shim) and
-    /// `/opt/az` (the Python venv that az actually runs in). Mounting
-    /// only one of the two would leave az partially available and
-    /// produce confusing errors inside the sandbox.
-    ///
-    /// The setvariable value uses spaces between args so bash
-    /// word-splits the unquoted `$(AW_AZ_MOUNTS)` expansion in the
-    /// AWF invocation into clean `--mount <spec>` tokens. The value
-    /// contains only path chars, `:`, and spaces — no shell
-    /// metachars — so unquoted expansion is safe.
-    ///
-    /// Both branches MUST set the variable (the else branch sets it
-    /// to empty string). If left undefined, ADO leaves the literal
-    /// `$(AW_AZ_MOUNTS)` in subsequent bash steps, where bash
-    /// interprets it as a `$(...)` command substitution, tries to
-    /// run a program named `AW_AZ_MOUNTS`, gets exit 127, and the
-    /// AWF invocation step dies under `set -e` — the opposite of
-    /// graceful degradation. Defining the variable as empty makes
-    /// ADO expand it to nothing, leaving a harmless `\`-continuation.
-    fn detection_step(&self) -> String {
-        r###"- bash: |
-    set -eo pipefail
-    if [ -f /usr/bin/az ] && [ -d /opt/az ]; then
-      echo "##vso[task.setvariable variable=AW_AZ_MOUNTS]--mount /opt/az:/opt/az:ro --mount /usr/bin/az:/usr/bin/az:ro"
-      echo "Azure CLI detected on host; mounting /opt/az and /usr/bin/az into AWF sandbox."
-    else
-      echo "##vso[task.setvariable variable=AW_AZ_MOUNTS]"
-      echo "##vso[task.logissue type=warning]Azure CLI not detected on this runner (missing /usr/bin/az or /opt/az). The az command will not be available inside the agent sandbox. Install azure-cli on the runner image to enable it."
-    fi
-  displayName: "Detect Azure CLI on host (for AWF mount)"
-"###
-        .to_string()
-    }
+/// Detect azure-cli on the host and set the `AW_AZ_MOUNTS` pipeline
+/// variable for the later AWF invocation.
+fn detection_bash_step() -> BashStep {
+    let script = "set -eo pipefail\n\
+        if [ -f /usr/bin/az ] && [ -d /opt/az ]; then\n  \
+          echo \"##vso[task.setvariable variable=AW_AZ_MOUNTS]--mount /opt/az:/opt/az:ro --mount /usr/bin/az:/usr/bin/az:ro\"\n  \
+          echo \"Azure CLI detected on host; mounting /opt/az and /usr/bin/az into AWF sandbox.\"\n\
+        else\n  \
+          echo \"##vso[task.setvariable variable=AW_AZ_MOUNTS]\"\n  \
+          echo \"##vso[task.logissue type=warning]Azure CLI not detected on this runner (missing /usr/bin/az or /opt/az). The az command will not be available inside the agent sandbox. Install azure-cli on the runner image to enable it.\"\n\
+        fi\n";
+    BashStep::new("Detect Azure CLI on host (for AWF mount)", script)
+}
 
-    /// Conditional `cat >>` step that appends an Azure CLI advisory
-    /// section to the agent prompt file at pipeline time, only when
-    /// the detection step above set `AW_AZ_MOUNTS` to non-empty.
-    ///
-    /// Uses a SINGLE-QUOTED heredoc delimiter (`<< 'AZURE_CLI_PROMPT_EOF'`)
-    /// so `$AZURE_DEVOPS_EXT_PAT` and any other dollar references inside
-    /// the prompt body are appended literally rather than expanded by
-    /// bash. The closing delimiter is indented to match the bash block
-    /// scalar style used by `wrap_prompt_append`.
-    ///
-    /// The `condition:` clause uses an ADO runtime expression. ADO
-    /// evaluates it at step start against the variables visible at
-    /// that moment — the detection step above has already run by
-    /// then (steps execute sequentially within a job), so the
-    /// expression sees the value just written by `setvariable`.
-    ///
-    /// displayName must stay in sync with the entry in
-    /// `tests/bash_lint_tests.rs::REQUIRED_STEP_DISPLAY_NAMES`.
-    fn prompt_append_step(&self) -> String {
-        r#"- bash: |
-    cat >> "/tmp/awf-tools/agent-prompt.md" << 'AZURE_CLI_PROMPT_EOF'
-
-    ---
-
-    ## Azure CLI (`az`)
-
-    The Azure CLI is available inside this sandbox at `/usr/bin/az`. Prefer it over hand-rolled curl calls when it covers what you need:
-
-    - **Azure DevOps management** — `az devops`, `az pipelines`, `az repos`, `az boards`. These are authenticated automatically from `$AZURE_DEVOPS_EXT_PAT` when the pipeline declares `permissions: read:`. List/inspect operations Just Work; write operations honour the PAT's scopes.
-    - **Azure Resource Manager** — `az resource`, `az account`, `az group`. These require a separate Azure identity that ado-aw does not provision out of the box; sign in with `az login` using credentials supplied by another mechanism (e.g. a service connection writing them into your sandbox env) before invoking them.
-    - **Microsoft Graph** — `az ad`, `az rest`. Same caveat as ARM.
-
-    If a command you need isn't covered above, file a `missing-tool` safe output naming `azure-cli` so the operator can extend coverage rather than blocking on it silently.
-    AZURE_CLI_PROMPT_EOF
-
-    echo "Azure CLI prompt appended"
-  displayName: "Append Azure CLI prompt"
-  condition: ne(variables['AW_AZ_MOUNTS'], '')
-"#
-        .to_string()
-    }
+/// Append an Azure CLI advisory when the detection step found `az`.
+fn prompt_append_bash_step() -> BashStep {
+    let script = "cat >> \"/tmp/awf-tools/agent-prompt.md\" << 'AZURE_CLI_PROMPT_EOF'\n\
+\n\
+---\n\
+\n\
+## Azure CLI (`az`)\n\
+\n\
+The Azure CLI is available inside this sandbox at `/usr/bin/az`. Prefer it over hand-rolled curl calls when it covers what you need:\n\
+\n\
+- **Azure DevOps management** \u{2014} `az devops`, `az pipelines`, `az repos`, `az boards`. These are authenticated automatically from `$AZURE_DEVOPS_EXT_PAT` when the pipeline declares `permissions: read:`. List/inspect operations Just Work; write operations honour the PAT's scopes.\n\
+- **Azure Resource Manager** \u{2014} `az resource`, `az account`, `az group`. These require a separate Azure identity that ado-aw does not provision out of the box; sign in with `az login` using credentials supplied by another mechanism (e.g. a service connection writing them into your sandbox env) before invoking them.\n\
+- **Microsoft Graph** \u{2014} `az ad`, `az rest`. Same caveat as ARM.\n\
+\n\
+If a command you need isn't covered above, file a `missing-tool` safe output naming `azure-cli` so the operator can extend coverage rather than blocking on it silently.\n\
+AZURE_CLI_PROMPT_EOF\n\
+\n\
+echo \"Azure CLI prompt appended\"\n";
+    BashStep::new("Append Azure CLI prompt", script).with_condition(Condition::Ne(
+        Expr::Variable("AW_AZ_MOUNTS".to_string()),
+        Expr::Literal(String::new()),
+    ))
 }
 
 #[cfg(test)]
@@ -214,10 +147,23 @@ mod tests {
         serde_yaml::from_str("name: t\ndescription: x\n").expect("front matter parses")
     }
 
+    fn agent_prepare_steps(ext: &AzureCliExtension, ctx: &CompileContext<'_>) -> Vec<Step> {
+        ext.declarations(ctx).unwrap().agent_prepare_steps
+    }
+
+    fn bash_step(step: &Step) -> &BashStep {
+        match step {
+            Step::Bash(b) => b,
+            other => panic!("expected Step::Bash, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_azure_cli_required_hosts_includes_login_microsoft() {
         let ext = AzureCliExtension;
-        let hosts = ext.required_hosts();
+        let fm = fm();
+        let ctx = CompileContext::for_test(&fm);
+        let hosts = ext.declarations(&ctx).unwrap().network_hosts;
         assert!(
             hosts.iter().any(|h| h == "login.microsoftonline.com"),
             "required_hosts must include login.microsoftonline.com so the agent can OAuth: {hosts:?}"
@@ -237,21 +183,23 @@ mod tests {
         // The static mount list must stay empty so `docker run` does not
         // fail with "bind source path does not exist" on runners without
         // azure-cli. Mounts are contributed via the pipeline variable
-        // `AW_AZ_MOUNTS` set by `prepare_steps` below and injected into
+        // `AW_AZ_MOUNTS` set by the typed prepare declaration and injected into
         // the AWF chain by `generate_awf_mounts`.
         let ext = AzureCliExtension;
+        let fm = fm();
+        let ctx = CompileContext::for_test(&fm);
         assert!(
-            ext.required_awf_mounts().is_empty(),
+            ext.declarations(&ctx).unwrap().awf_mounts.is_empty(),
             "AzureCli must not contribute STATIC AWF mounts — the runner may not have az installed"
         );
     }
 
     #[test]
-    fn test_azure_cli_prepare_steps_detects_az_before_setting_var() {
+    fn test_azure_cli_declarations_detects_az_before_setting_var() {
         let ext = AzureCliExtension;
         let fm = fm();
         let ctx = CompileContext::for_test(&fm);
-        let steps = ext.prepare_steps(&ctx);
+        let steps = agent_prepare_steps(&ext, &ctx);
         // Two prepare steps: [0] detection (always runs), [1] conditional
         // prompt-append (skipped when AW_AZ_MOUNTS is empty). The
         // detection step MUST stay at index 0 — it is what sets the
@@ -262,71 +210,82 @@ mod tests {
             2,
             "expected two prepare steps (detection, conditional prompt-append), got: {steps:?}"
         );
-        let step = &steps[0];
+        let step = bash_step(&steps[0]);
         // Detection must check both the launcher shim and the venv
         // directory — mounting only one would leave az partially
         // available and produce confusing errors inside the sandbox.
         assert!(
-            step.contains("[ -f /usr/bin/az ]"),
-            "first prepare step (detection) must test for /usr/bin/az launcher: {step}"
+            step.script.contains("[ -f /usr/bin/az ]"),
+            "first prepare step (detection) must test for /usr/bin/az launcher: {}",
+            step.script
         );
         assert!(
-            step.contains("[ -d /opt/az ]"),
-            "first prepare step (detection) must test for /opt/az venv directory: {step}"
+            step.script.contains("[ -d /opt/az ]"),
+            "first prepare step (detection) must test for /opt/az venv directory: {}",
+            step.script
         );
     }
 
     #[test]
-    fn test_azure_cli_prepare_steps_sets_aw_az_mounts_pipeline_var() {
+    fn test_azure_cli_declarations_sets_aw_az_mounts_pipeline_var() {
         let ext = AzureCliExtension;
         let fm = fm();
         let ctx = CompileContext::for_test(&fm);
-        let step = ext.prepare_steps(&ctx).into_iter().next().unwrap();
+        let steps = agent_prepare_steps(&ext, &ctx);
+        let step = bash_step(&steps[0]);
         // Must use ##vso[task.setvariable] to make the value visible as
         // $(AW_AZ_MOUNTS) in the subsequent AWF bash step.
         assert!(
-            step.contains("##vso[task.setvariable variable=AW_AZ_MOUNTS]"),
-            "must set AW_AZ_MOUNTS pipeline variable: {step}"
+            step.script
+                .contains("##vso[task.setvariable variable=AW_AZ_MOUNTS]"),
+            "must set AW_AZ_MOUNTS pipeline variable: {}",
+            step.script
         );
         // The value must contain both --mount args so the AWF
         // invocation gets both /opt/az and /usr/bin/az.
         assert!(
-            step.contains("--mount /opt/az:/opt/az:ro"),
-            "must include /opt/az mount in the setvariable value: {step}"
+            step.script.contains("--mount /opt/az:/opt/az:ro"),
+            "must include /opt/az mount in the setvariable value: {}",
+            step.script
         );
         assert!(
-            step.contains("--mount /usr/bin/az:/usr/bin/az:ro"),
-            "must include /usr/bin/az mount in the setvariable value: {step}"
+            step.script.contains("--mount /usr/bin/az:/usr/bin/az:ro"),
+            "must include /usr/bin/az mount in the setvariable value: {}",
+            step.script
         );
     }
 
     #[test]
-    fn test_azure_cli_prepare_steps_warns_when_az_missing() {
+    fn test_azure_cli_declarations_warns_when_az_missing() {
         let ext = AzureCliExtension;
         let fm = fm();
         let ctx = CompileContext::for_test(&fm);
-        let step = ext.prepare_steps(&ctx).into_iter().next().unwrap();
+        let steps = agent_prepare_steps(&ext, &ctx);
+        let step = bash_step(&steps[0]);
         // Must surface a visible ADO warning so operators can see why
         // `az` isn't available inside their sandbox instead of silently
         // failing later with "command not found".
         assert!(
-            step.contains("##vso[task.logissue type=warning]"),
-            "must emit an ADO warning when az is not detected: {step}"
+            step.script.contains("##vso[task.logissue type=warning]"),
+            "must emit an ADO warning when az is not detected: {}",
+            step.script
         );
         assert!(
-            step.contains("Azure CLI not detected"),
-            "warning text must explain the cause: {step}"
+            step.script.contains("Azure CLI not detected"),
+            "warning text must explain the cause: {}",
+            step.script
         );
         // The `else` branch of the `if` must be the warning branch — so
         // the warning is the missing-az path, not the detected-az path.
         assert!(
-            step.contains("else") && step.contains("fi"),
-            "must use a proper if/else/fi structure: {step}"
+            step.script.contains("else") && step.script.contains("fi"),
+            "must use a proper if/else/fi structure: {}",
+            step.script
         );
     }
 
     #[test]
-    fn test_azure_cli_prepare_steps_defines_aw_az_mounts_in_else_branch() {
+    fn test_azure_cli_declarations_defines_aw_az_mounts_in_else_branch() {
         // Regression guard for the graceful-degradation bug:
         // if the `else` branch doesn't explicitly setvariable on
         // AW_AZ_MOUNTS, ADO leaves the literal `$(AW_AZ_MOUNTS)` in
@@ -337,10 +296,12 @@ mod tests {
         let ext = AzureCliExtension;
         let fm = fm();
         let ctx = CompileContext::for_test(&fm);
-        let step = ext.prepare_steps(&ctx).into_iter().next().unwrap();
+        let steps = agent_prepare_steps(&ext, &ctx);
+        let step = bash_step(&steps[0]);
 
         // Count setvariable occurrences — must be 2 (one per branch).
         let setvar_count = step
+            .script
             .matches("##vso[task.setvariable variable=AW_AZ_MOUNTS]")
             .count();
         assert_eq!(
@@ -348,16 +309,17 @@ mod tests {
             "AW_AZ_MOUNTS must be set in BOTH branches of the if/else (got {setvar_count}); \
              leaving it undefined in the missing-az branch causes bash to interpret \
              the literal `$(AW_AZ_MOUNTS)` as command substitution and fail under set -e. \
-             Step:\n{step}"
+             Step:\n{}",
+            step.script
         );
 
         // Verify the else branch sets it to empty (no `--mount` chars
         // after the `]`). We slice the step from "else" to "fi" and
         // assert the else block contains a setvariable line that ends
         // with `]"` (closing-bracket-then-quote = empty value).
-        let else_start = step.find("else").expect("must have else branch");
-        let fi_end = step[else_start..].find("fi").expect("must have fi");
-        let else_block = &step[else_start..else_start + fi_end];
+        let else_start = step.script.find("else").expect("must have else branch");
+        let fi_end = step.script[else_start..].find("fi").expect("must have fi");
+        let else_block = &step.script[else_start..else_start + fi_end];
         assert!(
             else_block.contains("##vso[task.setvariable variable=AW_AZ_MOUNTS]\""),
             "else branch must set AW_AZ_MOUNTS to empty string (line must end with `]\"`), got:\n{else_block}"
@@ -371,16 +333,18 @@ mod tests {
     }
 
     #[test]
-    fn test_azure_cli_prepare_steps_uses_pipefail() {
+    fn test_azure_cli_declarations_uses_pipefail() {
         // Bash steps in this repo's lint policy require `set -eo
         // pipefail` to avoid silent failure of any intermediate command.
         let ext = AzureCliExtension;
         let fm = fm();
         let ctx = CompileContext::for_test(&fm);
-        let step = ext.prepare_steps(&ctx).into_iter().next().unwrap();
+        let steps = agent_prepare_steps(&ext, &ctx);
+        let step = bash_step(&steps[0]);
         assert!(
-            step.contains("set -eo pipefail"),
-            "detection bash step must use set -eo pipefail: {step}"
+            step.script.contains("set -eo pipefail"),
+            "detection bash step must use set -eo pipefail: {}",
+            step.script
         );
     }
 
@@ -396,14 +360,15 @@ mod tests {
         let ext = AzureCliExtension;
         let fm = fm();
         let ctx = CompileContext::for_test(&fm);
-        let steps = ext.prepare_steps(&ctx);
-        let append = &steps[1];
-        assert!(
-            append.contains("condition: ne(variables['AW_AZ_MOUNTS'], '')"),
-            "prompt-append step must be gated by condition: \
-             ne(variables['AW_AZ_MOUNTS'], '') so it is skipped when \
-             az is not detected on the host. Step:\n{append}"
-        );
+        let steps = agent_prepare_steps(&ext, &ctx);
+        let append = bash_step(&steps[1]);
+        assert!(matches!(
+            append.condition,
+            Some(Condition::Ne(
+                Expr::Variable(ref var),
+                Expr::Literal(ref literal)
+            )) if var == "AW_AZ_MOUNTS" && literal.is_empty()
+        ));
     }
 
     #[test]
@@ -414,11 +379,15 @@ mod tests {
         let ext = AzureCliExtension;
         let fm = fm();
         let ctx = CompileContext::for_test(&fm);
-        let append = &ext.prepare_steps(&ctx)[1];
+        let steps = agent_prepare_steps(&ext, &ctx);
+        let append = bash_step(&steps[1]);
         assert!(
-            append.contains(r#"cat >> "/tmp/awf-tools/agent-prompt.md""#),
+            append
+                .script
+                .contains(r#"cat >> "/tmp/awf-tools/agent-prompt.md""#),
             "prompt-append step must append to /tmp/awf-tools/agent-prompt.md \
-             (matching wrap_prompt_append). Step:\n{append}"
+             (matching wrap_prompt_append). Step:\n{}",
+            append.script
         );
     }
 
@@ -430,7 +399,8 @@ mod tests {
         let ext = AzureCliExtension;
         let fm = fm();
         let ctx = CompileContext::for_test(&fm);
-        let append = &ext.prepare_steps(&ctx)[1];
+        let steps = agent_prepare_steps(&ext, &ctx);
+        let append = bash_step(&steps[1]);
         for anchor in [
             "Azure CLI",
             "/usr/bin/az",
@@ -439,8 +409,9 @@ mod tests {
             "missing-tool",
         ] {
             assert!(
-                append.contains(anchor),
-                "prompt-append step must contain anchor `{anchor}`. Step:\n{append}"
+                append.script.contains(anchor),
+                "prompt-append step must contain anchor `{anchor}`. Step:\n{}",
+                append.script
             );
         }
     }
@@ -457,12 +428,14 @@ mod tests {
         let ext = AzureCliExtension;
         let fm = fm();
         let ctx = CompileContext::for_test(&fm);
-        let append = &ext.prepare_steps(&ctx)[1];
+        let steps = agent_prepare_steps(&ext, &ctx);
+        let append = bash_step(&steps[1]);
         assert!(
-            append.contains("<< 'AZURE_CLI_PROMPT_EOF'"),
+            append.script.contains("<< 'AZURE_CLI_PROMPT_EOF'"),
             "prompt-append heredoc delimiter must be single-quoted to \
              prevent expansion of $AZURE_DEVOPS_EXT_PAT and similar \
-             literals inside the prompt body. Step:\n{append}"
+             literals inside the prompt body. Step:\n{}",
+            append.script
         );
     }
 
@@ -476,20 +449,17 @@ mod tests {
         let ext = AzureCliExtension;
         let fm = fm();
         let ctx = CompileContext::for_test(&fm);
-        let append = &ext.prepare_steps(&ctx)[1];
-        assert!(
-            append.contains(r#"displayName: "Append Azure CLI prompt""#),
-            "prompt-append step displayName must be exactly \
-             \"Append Azure CLI prompt\" to match the coverage entry \
-             in tests/bash_lint_tests.rs::REQUIRED_STEP_DISPLAY_NAMES. \
-             Step:\n{append}"
-        );
+        let steps = agent_prepare_steps(&ext, &ctx);
+        let append = bash_step(&steps[1]);
+        assert_eq!(append.display_name, "Append Azure CLI prompt");
     }
 
     #[test]
     fn test_azure_cli_required_bash_commands_includes_az() {
         let ext = AzureCliExtension;
-        let cmds = ext.required_bash_commands();
+        let fm = fm();
+        let ctx = CompileContext::for_test(&fm);
+        let cmds = ext.declarations(&ctx).unwrap().bash_commands;
         assert!(
             cmds.iter().any(|c| c == "az"),
             "required_bash_commands must include `az`: {cmds:?}"
@@ -511,8 +481,10 @@ mod tests {
         // Sanity check that the install-free posture isn't accidentally
         // regressed by a future edit that adds a PATH munge.
         let ext = AzureCliExtension;
+        let fm = fm();
+        let ctx = CompileContext::for_test(&fm);
         assert!(
-            ext.awf_path_prepends().is_empty(),
+            ext.declarations(&ctx).unwrap().awf_path_prepends.is_empty(),
             "must not prepend any PATH entry — /usr/bin is already on PATH inside AWF"
         );
     }

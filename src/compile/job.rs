@@ -9,13 +9,11 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use log::warn;
+use log::info;
 use std::path::Path;
 
 use super::Compiler;
-use super::common::{
-    compile_template_target, generate_header_comment, TemplateTargetConfig,
-};
+use super::common::{self, generate_header_comment};
 use super::types::FrontMatter;
 
 /// Job-level template compiler.
@@ -36,23 +34,29 @@ impl Compiler for JobCompiler {
         skip_integrity: bool,
         debug_pipeline: bool,
     ) -> Result<String> {
-        if front_matter.on_config.is_some() {
-            warn!("on: trigger configuration is ignored for target: job (triggers are the parent pipeline's concern)");
-        }
+        info!("Compiling for job target (typed IR)");
 
-        compile_template_target(
+        let extensions = super::extensions::collect_extensions(front_matter);
+        let ctx = super::extensions::CompileContext::new(front_matter, input_path).await?;
+
+        let pipeline = super::job_ir::build_job_pipeline(
+            front_matter,
+            &extensions,
+            &ctx,
             input_path,
             output_path,
-            front_matter,
             markdown_body,
-            TemplateTargetConfig {
-                template: include_str!("../data/job-base.yml"),
-                skip_integrity,
-                debug_pipeline,
-            },
-            generate_job_header,
-        )
-        .await
+            skip_integrity,
+            debug_pipeline,
+        )?;
+
+        let yaml = super::ir::emit::emit(&pipeline)?;
+        let yaml = common::normalize_yaml(&yaml)?;
+        let header = generate_job_header(input_path, output_path, front_matter);
+        let full = format!("{}{}", header, yaml);
+
+        common::atomic_write(output_path, &full).await?;
+        Ok(full)
     }
 }
 

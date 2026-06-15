@@ -196,9 +196,13 @@ Maps each field of `PrFilters` to a `FilterCheck`:
 ### The `expression` Escape Hatch
 
 The `expression` field on both `PrFilters` and `PipelineFilters` is **not**
-part of the IR. It is a raw ADO condition string applied directly to the Agent
-job's `condition:` field (not the bash gate step). It is handled by
-`generate_agentic_depends_on()` in `common.rs`.
+part of the filter IR. It is a raw ADO condition string contributed to the
+Agent job's typed `Condition` by `AdoScriptExtension` via
+`Declarations::agent_conditions` (see
+`src/compile/extensions/ado_script.rs::build_agent_conditions`); the
+agentic-pipeline builder folds it into the Agent job's `condition:` along
+with the typed gate-passed clauses. The `expression` is **not** wired into
+the bash gate step.
 
 ## Pass 2: Validation
 
@@ -354,8 +358,8 @@ The bash shim exports only the ADO macros needed by the spec's facts:
 
 When `filters:` is configured (and lowers to non-empty checks), the
 always-on `AdoScriptExtension`
-(`src/compile/extensions/ado_script.rs`) emits the gate-side steps via
-the `setup_steps()` trait hook. The extension also owns the unrelated
+(`src/compile/extensions/ado_script.rs`) emits the gate-side steps through
+`Declarations::setup_steps`. The extension also owns the unrelated
 runtime-import resolver — see [`runtime-imports.md`](runtime-imports.md).
 
 For the gate path it controls:
@@ -368,12 +372,12 @@ For the gate path it controls:
 3. **Gate step** — calls `compile_gate_step_external()` to generate a step
    that runs `node /tmp/ado-aw-scripts/ado-script/gate.js` (no inline heredoc).
 4. **Validation** — runs `validate_pr_filters()` / `validate_pipeline_filters()`
-   during compilation via the `validate()` trait method.
+   during compilation before returning declarations.
 
-The gate-side steps use `setup_steps()` (not `prepare_steps()`)
-because the gate must run in the **Setup job**, before the Agent job.
-Runtime-import resolver steps for the agent body use `prepare_steps()` and
-land in the Agent job — see [`runtime-imports.md`](runtime-imports.md).
+The gate-side steps are `Declarations::setup_steps` because the gate must run
+in the **Setup job**, before the Agent job. Runtime-import resolver steps for
+the agent body are `Declarations::agent_prepare_steps` and land in the Agent
+job — see [`runtime-imports.md`](runtime-imports.md).
 
 ### Tier 1 Inline Path
 
@@ -384,18 +388,18 @@ no Node evaluator and no download step.
 
 ### Gate Step Injection
 
-Gate steps are injected into the Setup job by `generate_setup_job()` in
-`common.rs`. When the `AdoScriptExtension` is active, its
-`setup_steps()` are collected and injected first (download + gate). When
-only Tier 1 filters are present, the inline gate step is injected directly.
+Gate steps are injected into the Setup job by the target IR builders from
+`Declarations::setup_steps`. When `AdoScriptExtension` is active, the Node
+install, bundle download, and gate steps are emitted before user-authored setup
+steps.
 
 User setup steps are conditioned on the gate output:
 `condition: eq(variables['{stepName}.SHOULD_RUN'], 'true')`
 
 ### Agent Job Condition
 
-`generate_agentic_depends_on()` in `common.rs` generates the Agent job's
-`dependsOn` and `condition` clauses:
+The target IR builder generates the Agent job's `dependsOn` and `condition`
+clauses from typed jobs plus gate outputs. A representative standalone shape is:
 
 ```yaml
 dependsOn: Setup

@@ -1,7 +1,7 @@
 //! Execution-context compiler extension.
 //!
 //! Always-on extension that owns the `aw-context/` precompute pipeline:
-//! a fan-out over per-trigger [`ContextContributor`](contributor::ContextContributor)s
+//! a fan-out over per-trigger [`ContextContributor`]s
 //! that materialise context (changed-files, diffs, snapshots, metadata)
 //! on disk + supplement the agent prompt so the agent can read it
 //! without rolling its own git plumbing.
@@ -32,14 +32,28 @@
 //! container's env and never persisted to `.git/config`. See
 //! `pr.rs` for the in-step bearer wrapper.
 
+mod ci_push;
 mod contributor;
+mod manual;
+mod pipeline;
 mod pr;
+mod pr_checks;
+mod repo;
+mod schedule;
+mod workitem;
 
-use crate::compile::extensions::{CompileContext, CompilerExtension, ExtensionPhase};
+use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
 use crate::compile::types::{ExecutionContextConfig, FrontMatter};
 
+use ci_push::CiPushContextContributor;
 use contributor::{ContextContributor, Contributor};
+use manual::ManualContextContributor;
+use pipeline::PipelineContextContributor;
 use pr::PrContextContributor;
+use pr_checks::PrChecksContextContributor;
+use repo::RepoContextContributor;
+use schedule::ScheduleContextContributor;
+use workitem::WorkitemContextContributor;
 
 /// Returns `true` iff the PR-context contributor will activate for the
 /// given front matter. Shared between `ExecContextExtension::new` (for
@@ -65,6 +79,94 @@ pub fn pr_contributor_will_activate(front_matter: &FrontMatter) -> bool {
     pr_contributor_will_activate_with_cfg(cfg, front_matter)
 }
 
+/// Returns `true` iff the Manual-context contributor will activate
+/// for the given front matter. Shared between `ExecContextExtension::new`
+/// (for its own `any_contributor_active` aggregate) and
+/// `collect_extensions` (which passes it to `AdoScriptExtension` so
+/// the Agent-job install/download fires whenever the bundle is needed).
+///
+/// MAINTENANCE: this MUST match
+/// `ManualContextContributor::should_activate` (in `manual.rs`).
+/// Tests in `tests::manual` exercise both paths.
+pub fn manual_contributor_will_activate(front_matter: &FrontMatter) -> bool {
+    let default_cfg = ExecutionContextConfig::default();
+    let cfg = front_matter
+        .execution_context
+        .as_ref()
+        .unwrap_or(&default_cfg);
+    manual_contributor_will_activate_with_cfg(cfg, front_matter)
+}
+
+/// Returns `true` iff the Pipeline-context contributor will activate
+/// for the given front matter. Same pattern as the helpers above.
+///
+/// MAINTENANCE: this MUST match
+/// `PipelineContextContributor::should_activate` (in `pipeline.rs`).
+pub fn pipeline_contributor_will_activate(front_matter: &FrontMatter) -> bool {
+    let default_cfg = ExecutionContextConfig::default();
+    let cfg = front_matter
+        .execution_context
+        .as_ref()
+        .unwrap_or(&default_cfg);
+    pipeline_contributor_will_activate_with_cfg(cfg, front_matter)
+}
+
+/// Returns `true` iff the CI-push-context contributor will activate
+/// for the given front matter. Purely config-driven (opt-in,
+/// default OFF).
+pub fn ci_push_contributor_will_activate(front_matter: &FrontMatter) -> bool {
+    let default_cfg = ExecutionContextConfig::default();
+    let cfg = front_matter
+        .execution_context
+        .as_ref()
+        .unwrap_or(&default_cfg);
+    ci_push_contributor_will_activate_with_cfg(cfg, front_matter)
+}
+
+/// Returns `true` iff the Workitem contributor will activate.
+/// PR-linked mode only — depends on the PR trigger being configured.
+pub fn workitem_contributor_will_activate(front_matter: &FrontMatter) -> bool {
+    let default_cfg = ExecutionContextConfig::default();
+    let cfg = front_matter
+        .execution_context
+        .as_ref()
+        .unwrap_or(&default_cfg);
+    workitem_contributor_will_activate_with_cfg(cfg, front_matter)
+}
+
+/// Returns `true` iff the Schedule contributor will activate. Opt-in
+/// (default OFF) AND requires `on.schedule` to be declared.
+pub fn schedule_contributor_will_activate(front_matter: &FrontMatter) -> bool {
+    let default_cfg = ExecutionContextConfig::default();
+    let cfg = front_matter
+        .execution_context
+        .as_ref()
+        .unwrap_or(&default_cfg);
+    schedule_contributor_will_activate_with_cfg(cfg, front_matter)
+}
+
+/// Returns `true` iff the PR-checks extension will activate. Opt-in
+/// (default OFF) AND requires the PR contributor to activate.
+pub fn pr_checks_contributor_will_activate(front_matter: &FrontMatter) -> bool {
+    let default_cfg = ExecutionContextConfig::default();
+    let cfg = front_matter
+        .execution_context
+        .as_ref()
+        .unwrap_or(&default_cfg);
+    pr_checks_contributor_will_activate_with_cfg(cfg, front_matter)
+}
+
+/// Returns `true` iff the Repo contributor will activate. Pure
+/// config-driven (opt-in, default OFF).
+pub fn repo_contributor_will_activate(front_matter: &FrontMatter) -> bool {
+    let default_cfg = ExecutionContextConfig::default();
+    let cfg = front_matter
+        .execution_context
+        .as_ref()
+        .unwrap_or(&default_cfg);
+    repo_contributor_will_activate_with_cfg(cfg, front_matter)
+}
+
 /// Variant that takes the resolved `ExecutionContextConfig` explicitly.
 /// Used by [`ExecContextExtension::new`] so its internal
 /// `any_contributor_active` precomputation tracks the config it was
@@ -84,6 +186,147 @@ fn pr_contributor_will_activate_with_cfg(
     !matches!(pr_enabled, Some(false))
 }
 
+/// Whether the manual contributor will activate for the given front
+/// matter. Used by [`ExecContextExtension::new`] to populate its
+/// `any_contributor_active` aggregate flag.
+///
+/// MAINTENANCE: this MUST stay in lock-step with
+/// `ManualContextContributor::should_activate` (in `manual.rs`). The
+/// divergence-trap tests in the test module exercise both paths so
+/// a future contributor author cannot silently diverge them.
+fn manual_contributor_will_activate_with_cfg(
+    cfg: &ExecutionContextConfig,
+    front_matter: &FrontMatter,
+) -> bool {
+    if front_matter.parameters.is_empty() {
+        return false;
+    }
+    if !cfg.is_enabled() {
+        return false;
+    }
+    let manual_enabled = cfg.manual.as_ref().and_then(|m| m.enabled);
+    !matches!(manual_enabled, Some(false))
+}
+
+/// Whether the pipeline contributor will activate for the given front
+/// matter. Used by [`ExecContextExtension::new`] to populate its
+/// `any_contributor_active` aggregate flag.
+///
+/// MAINTENANCE: this MUST stay in lock-step with
+/// `PipelineContextContributor::should_activate` (in `pipeline.rs`).
+fn pipeline_contributor_will_activate_with_cfg(
+    cfg: &ExecutionContextConfig,
+    front_matter: &FrontMatter,
+) -> bool {
+    if front_matter.pipeline_trigger().is_none() {
+        return false;
+    }
+    if !cfg.is_enabled() {
+        return false;
+    }
+    let pipeline_enabled = cfg.pipeline.as_ref().and_then(|p| p.enabled);
+    !matches!(pipeline_enabled, Some(false))
+}
+
+/// Whether the ci-push contributor will activate. Purely
+/// config-driven (opt-in, default OFF).
+///
+/// MAINTENANCE: this MUST stay in lock-step with
+/// `CiPushContextContributor::should_activate` (in `ci_push.rs`).
+fn ci_push_contributor_will_activate_with_cfg(
+    cfg: &ExecutionContextConfig,
+    _front_matter: &FrontMatter,
+) -> bool {
+    if !cfg.is_enabled() {
+        return false;
+    }
+    let ci_push_enabled = cfg.ci_push.as_ref().and_then(|c| c.enabled);
+    matches!(ci_push_enabled, Some(true))
+}
+
+/// Whether the workitem contributor will activate. PR-linked mode:
+/// activates whenever the PR contributor would activate and the
+/// workitem contributor isn't explicitly disabled.
+///
+/// MAINTENANCE: this MUST stay in lock-step with
+/// `WorkitemContextContributor::should_activate` (in `workitem.rs`).
+fn workitem_contributor_will_activate_with_cfg(
+    cfg: &ExecutionContextConfig,
+    front_matter: &FrontMatter,
+) -> bool {
+    // Workitem activation tracks PR-contributor activation: the
+    // plan's contract is "activates whenever the pr contributor
+    // activates AND workitem isn't explicitly disabled". Without
+    // this we'd activate on PR builds where pr.enabled: false has
+    // explicitly opted out of PR context (and consequently of
+    // workitem context too, since workitem is a PR-context extension).
+    //
+    // `pr_contributor_will_activate_with_cfg` already enforces the
+    // master switch (`cfg.is_enabled()`) and the `on.pr`-configured
+    // check, so we only need the per-contributor enabled-flag check
+    // here.
+    if !pr_contributor_will_activate_with_cfg(cfg, front_matter) {
+        return false;
+    }
+    let workitem_enabled = cfg.workitem.as_ref().and_then(|w| w.enabled);
+    !matches!(workitem_enabled, Some(false))
+}
+
+/// Whether the schedule contributor will activate. Opt-in (default
+/// OFF) AND requires `on.schedule` to be declared.
+///
+/// MAINTENANCE: this MUST stay in lock-step with
+/// `ScheduleContextContributor::should_activate` (in `schedule.rs`).
+fn schedule_contributor_will_activate_with_cfg(
+    cfg: &ExecutionContextConfig,
+    front_matter: &FrontMatter,
+) -> bool {
+    if front_matter.schedule().is_none() {
+        return false;
+    }
+    if !cfg.is_enabled() {
+        return false;
+    }
+    let schedule_enabled = cfg.schedule.as_ref().and_then(|s| s.enabled);
+    matches!(schedule_enabled, Some(true))
+}
+
+/// Whether the PR-checks extension will activate. Opt-in (default
+/// OFF), tracks PR contributor activation.
+///
+/// MAINTENANCE: this MUST stay in lock-step with
+/// `PrChecksContextContributor::should_activate` (in `pr_checks.rs`).
+fn pr_checks_contributor_will_activate_with_cfg(
+    cfg: &ExecutionContextConfig,
+    front_matter: &FrontMatter,
+) -> bool {
+    if !pr_contributor_will_activate_with_cfg(cfg, front_matter) {
+        return false;
+    }
+    let checks_enabled = cfg
+        .pr
+        .as_ref()
+        .and_then(|p| p.checks.as_ref())
+        .and_then(|c| c.enabled);
+    matches!(checks_enabled, Some(true))
+}
+
+/// Whether the repo contributor will activate. Pure config-driven
+/// (opt-in, default OFF).
+///
+/// MAINTENANCE: this MUST stay in lock-step with
+/// `RepoContextContributor::should_activate` (in `repo.rs`).
+fn repo_contributor_will_activate_with_cfg(
+    cfg: &ExecutionContextConfig,
+    _front_matter: &FrontMatter,
+) -> bool {
+    if !cfg.is_enabled() {
+        return false;
+    }
+    let repo_enabled = cfg.repo.as_ref().and_then(|r| r.enabled);
+    matches!(repo_enabled, Some(true))
+}
+
 /// Always-on execution-context extension.
 ///
 /// Owns the `aw-context/` precompute pipeline. Registered
@@ -95,17 +338,31 @@ pub struct ExecContextExtension {
     config: ExecutionContextConfig,
     /// Whether the front matter configures any trigger that a context
     /// contributor activates on. Captured at construction time so
-    /// `required_bash_commands()` (which receives no `CompileContext`)
+    /// the compile-time bash-command declaration
     /// can suppress the contributor's bash allow-list contributions on
-    /// agents whose triggers no contributor cares about. Today that
-    /// means "is `on.pr` configured" — future trigger contributors
-    /// will OR in their own checks here.
+    /// agents whose triggers no contributor cares about.
+    ///
+    /// MAINTENANCE: every new contributor must OR its
+    /// `<name>_contributor_will_activate_with_cfg(...)` call into the
+    /// expression in [`Self::new`]. The divergence-trap tests in the
+    /// test module fail when this aggregate flag falls out of sync
+    /// with any contributor's `should_activate`.
     any_contributor_active: bool,
     /// Whether `on.pr.mode == Synthetic` for this agent. Passed through
     /// to the PR contributor so it can emit coalesced
     /// `SYSTEM_PULLREQUEST_*` env vars (real value preferred, synthPr
     /// Setup-job output as fallback).
     synthetic_pr_active: bool,
+    /// User-declared parameter names captured at construction time
+    /// for the [`ManualContextContributor`]. Cloned from
+    /// `front_matter.parameters` so the extension can construct the
+    /// contributor on every `contributors()` call without holding a
+    /// reference to the front matter (which would force a lifetime
+    /// parameter on the extension).
+    ///
+    /// Empty means "no parameters declared" and the manual
+    /// contributor does not activate.
+    parameter_names: Vec<String>,
 }
 
 impl ExecContextExtension {
@@ -117,18 +374,36 @@ impl ExecContextExtension {
         config: ExecutionContextConfig,
         front_matter: &crate::compile::types::FrontMatter,
     ) -> Self {
-        // Use the shared activation predicate so this stays in
+        // Use the shared activation predicates so this stays in
         // lock-step with `collect_extensions` (which passes the same
-        // signal to `AdoScriptExtension`). Use the cfg-aware variant
+        // signal to `AdoScriptExtension`). Use the cfg-aware variants
         // so unit tests that construct a custom `config` (separate
         // from `front_matter.execution_context`) still see the right
         // activation answer.
-        let any_contributor_active = pr_contributor_will_activate_with_cfg(&config, front_matter);
+        //
+        // MAINTENANCE: every new contributor adds an `|| <its>_will_activate_with_cfg(...)`
+        // clause here. The divergence-trap tests in `tests` enforce
+        // this by failing when a new contributor's `should_activate`
+        // returns true but `any_contributor_active` is false (which
+        // would silently suppress the contributor's bash allow-list).
+        let any_contributor_active = pr_contributor_will_activate_with_cfg(&config, front_matter)
+            || manual_contributor_will_activate_with_cfg(&config, front_matter)
+            || pipeline_contributor_will_activate_with_cfg(&config, front_matter)
+            || ci_push_contributor_will_activate_with_cfg(&config, front_matter)
+            || workitem_contributor_will_activate_with_cfg(&config, front_matter)
+            || schedule_contributor_will_activate_with_cfg(&config, front_matter)
+            || pr_checks_contributor_will_activate_with_cfg(&config, front_matter)
+            || repo_contributor_will_activate_with_cfg(&config, front_matter);
         let synthetic_pr_active = front_matter.is_synthetic_pr();
         Self {
             config,
             any_contributor_active,
             synthetic_pr_active,
+            parameter_names: front_matter
+                .parameters
+                .iter()
+                .map(|p| p.name.clone())
+                .collect(),
         }
     }
 
@@ -140,43 +415,47 @@ impl ExecContextExtension {
         // "on by default when on.pr is configured" behaviour without
         // the user having to write `execution-context.pr: {}`.
         let pr_cfg = self.config.pr.clone().unwrap_or_default();
-        // The PR contributor needs to know whether `mode: synthetic`
-        // is on so it can emit coalesced SYSTEM_PULLREQUEST_* env vars
-        // (real value preferred, synthPr output as fallback).
+        let manual_cfg = self.config.manual.clone().unwrap_or_default();
+        let pipeline_cfg = self.config.pipeline.clone().unwrap_or_default();
+        let ci_push_cfg = self.config.ci_push.clone().unwrap_or_default();
+        let workitem_cfg = self.config.workitem.clone().unwrap_or_default();
+        let schedule_cfg = self.config.schedule.clone().unwrap_or_default();
+        let pr_checks_cfg = pr_cfg.checks.clone().unwrap_or_default();
+        let repo_cfg = self.config.repo.clone().unwrap_or_default();
         let synthetic_pr_active = self.synthetic_pr_active;
-        vec![Contributor::Pr(PrContextContributor::new(
-            pr_cfg,
-            synthetic_pr_active,
-        ))]
+        let pr_enabled = !matches!(pr_cfg.enabled, Some(false));
+        // Stable prompt-fragment ordering (Stage 8 cleanup — plan.md):
+        // `repo` → trigger-specific (pr / pipeline / ci-push / schedule) →
+        // `workitem` → `pr.checks` (PR extension) → `manual`. This order
+        // gives the agent identity context first, then trigger-specific
+        // diff/build context, then linked-WI context (which depends on
+        // PR context being established), then PR-checks (which depends
+        // on `workitem` framing), and finally `manual` (a free-form
+        // parameter snapshot that doesn't fit the diff/identity narrative).
+        vec![
+            Contributor::Repo(RepoContextContributor::new(repo_cfg)),
+            Contributor::Pr(PrContextContributor::new(pr_cfg, synthetic_pr_active)),
+            Contributor::Pipeline(PipelineContextContributor::new(pipeline_cfg)),
+            Contributor::CiPush(CiPushContextContributor::new(ci_push_cfg)),
+            Contributor::Schedule(ScheduleContextContributor::new(schedule_cfg)),
+            Contributor::Workitem(WorkitemContextContributor::new(
+                workitem_cfg,
+                synthetic_pr_active,
+                pr_enabled,
+            )),
+            Contributor::PrChecks(PrChecksContextContributor::new(
+                pr_checks_cfg,
+                synthetic_pr_active,
+                pr_enabled,
+            )),
+            Contributor::Manual(ManualContextContributor::new_from_parts(
+                manual_cfg,
+                self.parameter_names.clone(),
+            )),
+        ]
     }
-}
 
-impl CompilerExtension for ExecContextExtension {
-    fn name(&self) -> &str {
-        "Execution Context"
-    }
-
-    fn phase(&self) -> ExtensionPhase {
-        // Tool phase: runs after Runtime so any runtime-installed git
-        // (none today, but defensive) is on PATH; before user `steps:`
-        // so they can read `aw-context/`.
-        ExtensionPhase::Tool
-    }
-
-    fn prepare_steps(&self, ctx: &CompileContext) -> Vec<String> {
-        // Master switch off → no steps, no `aw-context/`.
-        if !self.config.is_enabled() {
-            return vec![];
-        }
-        self.contributors()
-            .into_iter()
-            .filter(|c| c.should_activate(ctx))
-            .map(|c| c.prepare_step(ctx))
-            .filter(|s| !s.is_empty())
-            .collect()
-    }
-
-    fn required_bash_commands(&self) -> Vec<String> {
+    fn bash_commands(&self) -> Vec<String> {
         // No bash contributions when the extension is off or when no
         // contributor will activate (avoids quietly widening the agent
         // bash allow-list on agents with no PR trigger configured).
@@ -193,11 +472,52 @@ impl CompilerExtension for ExecContextExtension {
         let mut out: Vec<String> = self
             .contributors()
             .into_iter()
-            .flat_map(|c| c.required_bash_commands())
+            .flat_map(|c| c.bash_commands())
             .collect();
         out.sort();
         out.dedup();
         out
+    }
+}
+
+impl CompilerExtension for ExecContextExtension {
+    fn name(&self) -> &str {
+        "Execution Context"
+    }
+
+    fn phase(&self) -> ExtensionPhase {
+        // Tool phase: runs after Runtime so any runtime-installed git
+        // (none today, but defensive) is on PATH; before user `steps:`
+        // so they can read `aw-context/`.
+        ExtensionPhase::Tool
+    }
+
+    /// For each active contributor, emit the typed `Step` from its
+    /// `prepare_step_typed`. The PR contributor's synth-active path
+    /// now uses typed [`crate::compile::ir::env::EnvValue::Coalesce`]
+    /// plus [`crate::compile::ir::env::EnvValue::StepOutput`]
+    /// references instead of hand-written `$[ coalesce(...) ]`
+    /// strings — the lowering pass selects the cross-job
+    /// `dependencies.Setup.outputs[...]` form since the Agent-job
+    /// consumer is in a different job from the Setup-job `synthPr`
+    /// producer.
+    fn declarations(&self, ctx: &CompileContext) -> anyhow::Result<Declarations> {
+        let mut agent_prepare_steps = Vec::new();
+        if self.config.is_enabled() {
+            for c in self.contributors() {
+                if !c.should_activate(ctx) {
+                    continue;
+                }
+                if let Some(step) = c.prepare_step_typed(ctx)? {
+                    agent_prepare_steps.push(step);
+                }
+            }
+        }
+        Ok(Declarations {
+            agent_prepare_steps,
+            bash_commands: self.bash_commands(),
+            ..Declarations::default()
+        })
     }
 }
 
@@ -214,7 +534,7 @@ mod tests {
     //! contributions.
     //!
     //! These tests exercise the `new()` → `required_bash_commands()`
-    //! path independently (no fixture-compile, no `prepare_steps`,
+    //! path independently (no fixture-compile, no step declarations,
     //! no `CompileContext`) so a future divergence trips here at
     //! unit-test time rather than at E2E time.
 
@@ -239,17 +559,20 @@ mod tests {
         parse_fm("---\nname: test\ndescription: test\n---\n")
     }
 
+    fn declared_bash_commands(ext: &ExecContextExtension, fm: &FrontMatter) -> Vec<String> {
+        let ctx = CompileContext::for_test(fm);
+        ext.declarations(&ctx).unwrap().bash_commands
+    }
+
     /// When `on.pr` is configured (default `pr.enabled`),
     /// `required_bash_commands` MUST yield the PR contributor's
     /// git commands. If a future contributor diverges this from
     /// `should_activate`, this assertion trips.
     #[test]
     fn required_bash_commands_matches_pr_contributor_active_default() {
-        let ext = ExecContextExtension::new(
-            ExecutionContextConfig::default(),
-            &pr_triggered_front_matter(),
-        );
-        let cmds = ext.required_bash_commands();
+        let fm = pr_triggered_front_matter();
+        let ext = ExecContextExtension::new(ExecutionContextConfig::default(), &fm);
+        let cmds = declared_bash_commands(&ext, &fm);
         assert!(
             !cmds.is_empty(),
             "PR contributor is active (on.pr configured, default pr.enabled) \
@@ -268,13 +591,18 @@ mod tests {
     fn required_bash_commands_matches_pr_contributor_active_explicit_enabled() {
         let cfg = ExecutionContextConfig {
             enabled: None,
-            pr: Some(PrContextConfig {
-                enabled: Some(true),
-            }),
+            pr: Some(PrContextConfig { enabled: Some(true), checks: None }),
+            manual: None,
+                    pipeline: None,
+                    ci_push: None,
+                    workitem: None,
+                    schedule: None,
+                    repo: None,
         };
-        let ext = ExecContextExtension::new(cfg, &pr_triggered_front_matter());
+        let fm = pr_triggered_front_matter();
+        let ext = ExecContextExtension::new(cfg, &fm);
         assert!(
-            !ext.required_bash_commands().is_empty(),
+            !declared_bash_commands(&ext, &fm).is_empty(),
             "explicit pr.enabled: true + on.pr configured must yield bash commands"
         );
     }
@@ -286,13 +614,18 @@ mod tests {
     fn required_bash_commands_suppressed_when_pr_disabled() {
         let cfg = ExecutionContextConfig {
             enabled: None,
-            pr: Some(PrContextConfig {
-                enabled: Some(false),
-            }),
+            pr: Some(PrContextConfig { enabled: Some(false), checks: None }),
+            manual: None,
+                    pipeline: None,
+                    ci_push: None,
+                    workitem: None,
+                    schedule: None,
+                    repo: None,
         };
-        let ext = ExecContextExtension::new(cfg, &pr_triggered_front_matter());
+        let fm = pr_triggered_front_matter();
+        let ext = ExecContextExtension::new(cfg, &fm);
         assert!(
-            ext.required_bash_commands().is_empty(),
+            declared_bash_commands(&ext, &fm).is_empty(),
             "pr.enabled: false must suppress required_bash_commands"
         );
     }
@@ -301,12 +634,10 @@ mod tests {
     /// no commands. Mirrors `should_activate`'s `on.pr` gate.
     #[test]
     fn required_bash_commands_suppressed_without_on_pr() {
-        let ext = ExecContextExtension::new(
-            ExecutionContextConfig::default(),
-            &no_trigger_front_matter(),
-        );
+        let fm = no_trigger_front_matter();
+        let ext = ExecContextExtension::new(ExecutionContextConfig::default(), &fm);
         assert!(
-            ext.required_bash_commands().is_empty(),
+            declared_bash_commands(&ext, &fm).is_empty(),
             "without on.pr configured, required_bash_commands must be empty"
         );
     }
@@ -318,13 +649,18 @@ mod tests {
     fn required_bash_commands_suppressed_when_enabled_without_on_pr() {
         let cfg = ExecutionContextConfig {
             enabled: None,
-            pr: Some(PrContextConfig {
-                enabled: Some(true),
-            }),
+            pr: Some(PrContextConfig { enabled: Some(true), checks: None }),
+            manual: None,
+                    pipeline: None,
+                    ci_push: None,
+                    workitem: None,
+                    schedule: None,
+                    repo: None,
         };
-        let ext = ExecContextExtension::new(cfg, &no_trigger_front_matter());
+        let fm = no_trigger_front_matter();
+        let ext = ExecContextExtension::new(cfg, &fm);
         assert!(
-            ext.required_bash_commands().is_empty(),
+            declared_bash_commands(&ext, &fm).is_empty(),
             "pr.enabled: true without on.pr must NOT widen the agent bash allow-list"
         );
     }
@@ -336,11 +672,361 @@ mod tests {
         let cfg = ExecutionContextConfig {
             enabled: Some(false),
             pr: None,
+            manual: None,
+                    pipeline: None,
+                    ci_push: None,
+                    workitem: None,
+                    schedule: None,
+                    repo: None,
         };
-        let ext = ExecContextExtension::new(cfg, &pr_triggered_front_matter());
+        let fm = pr_triggered_front_matter();
+        let ext = ExecContextExtension::new(cfg, &fm);
         assert!(
-            ext.required_bash_commands().is_empty(),
+            declared_bash_commands(&ext, &fm).is_empty(),
             "execution-context.enabled: false must suppress required_bash_commands"
+        );
+    }
+
+    // ── Manual contributor divergence-trap tests ──
+
+    /// Front matter with `parameters:` only (no `on.pr`). The manual
+    /// contributor activates; the PR contributor does not. The
+    /// aggregate `any_contributor_active` flag MUST be true. Without
+    /// this flag being correctly populated, the `manual` contributor
+    /// would still activate at runtime (its own `should_activate`
+    /// returns true) but the AdoScriptExtension wouldn't fire the
+    /// bundle install/download — silently breaking the contributor.
+    ///
+    /// This test exists to trip if a future contributor author forgets
+    /// to OR-in `manual_contributor_will_activate_with_cfg` into the
+    /// aggregate expression in `ExecContextExtension::new`.
+    #[test]
+    fn manual_contributor_activates_when_parameters_declared() {
+        let fm = parse_fm(
+            "---\nname: test\ndescription: test\nparameters:\n  - name: topic\n    type: string\n    default: foo\n---\n",
+        );
+        let ext = ExecContextExtension::new(ExecutionContextConfig::default(), &fm);
+        // Aggregate flag must reflect that *some* contributor is active.
+        // We check this indirectly: `bash_commands()` short-circuits to
+        // empty when `any_contributor_active` is false, so even when the
+        // active contributor (manual) declares no bash commands of its
+        // own, the FACT that the early-return was NOT taken is what
+        // matters. We can't directly inspect `any_contributor_active`
+        // because it's private; the public observable surface is the
+        // `declarations()` output, which contains the manual step only
+        // when the contributor activated.
+        let ctx = CompileContext::for_test(&fm);
+        let decl = ext.declarations(&ctx).unwrap();
+        assert!(
+            decl.agent_prepare_steps
+                .iter()
+                .any(|s| matches!(s, crate::compile::ir::step::Step::Bash(b)
+                    if b.display_name == "Stage manual execution context (aw-context/manual/*)")),
+            "manual contributor must emit a prepare step when parameters \
+             are declared; got steps: {:?}",
+            decl.agent_prepare_steps
+                .iter()
+                .map(|s| match s {
+                    crate::compile::ir::step::Step::Bash(b) => b.display_name.clone(),
+                    _ => "<non-bash>".to_string(),
+                })
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    /// Mirror test: front matter with no `parameters:` and no `on.pr`.
+    /// Both contributors inactive → no prepare steps.
+    #[test]
+    fn no_contributors_active_when_no_parameters_and_no_on_pr() {
+        let fm = no_trigger_front_matter();
+        let ext = ExecContextExtension::new(ExecutionContextConfig::default(), &fm);
+        let ctx = CompileContext::for_test(&fm);
+        let decl = ext.declarations(&ctx).unwrap();
+        assert!(
+            decl.agent_prepare_steps.is_empty(),
+            "with no triggers and no parameters, no contributor must \
+             emit a prepare step; got {} steps",
+            decl.agent_prepare_steps.len()
+        );
+    }
+
+    /// `manual.enabled: false` explicitly disables the manual
+    /// contributor even when parameters are declared.
+    #[test]
+    fn manual_contributor_suppressed_when_explicitly_disabled() {
+        use crate::compile::types::ManualContextConfig;
+        let fm = parse_fm(
+            "---\nname: test\ndescription: test\nparameters:\n  - name: topic\n    type: string\n    default: foo\n---\n",
+        );
+        let cfg = ExecutionContextConfig {
+            enabled: None,
+            pr: None,
+            manual: Some(ManualContextConfig { enabled: Some(false), include_email: None }),
+            pipeline: None,
+            ci_push: None,
+            workitem: None,
+            schedule: None,
+            repo: None,
+        };
+        let ext = ExecContextExtension::new(cfg, &fm);
+        let ctx = CompileContext::for_test(&fm);
+        let decl = ext.declarations(&ctx).unwrap();
+        assert!(
+            !decl.agent_prepare_steps.iter().any(|s| matches!(s,
+                crate::compile::ir::step::Step::Bash(b) if b.display_name == "Stage manual execution context (aw-context/manual/*)")),
+            "manual.enabled: false must suppress the manual prepare step"
+        );
+    }
+
+    /// Stage 8 cleanup test: bash_commands() across multiple active
+    /// contributors must be deduped. Today PR + ci-push + workitem +
+    /// schedule + repo could all activate together; each declares
+    /// overlapping read-only `git` commands. The aggregate output
+    /// MUST contain each command exactly once.
+    #[test]
+    fn bash_commands_are_deduped_across_active_contributors() {
+        use crate::compile::types::{
+            CiPushContextConfig, PrContextConfig, RepoContextConfig, ScheduleContextConfig,
+            WorkitemContextConfig,
+        };
+        let fm = parse_fm(
+            "---\nname: test\ndescription: test\non:\n  pr:\n    branches:\n      include: [main]\n  schedule: 'daily around 09:00'\n---\n",
+        );
+        let cfg = ExecutionContextConfig {
+            enabled: None,
+            pr: Some(PrContextConfig { enabled: Some(true), checks: None }),
+            manual: None,
+            pipeline: None,
+            ci_push: Some(CiPushContextConfig { enabled: Some(true) }),
+            workitem: Some(WorkitemContextConfig {
+                enabled: Some(true),
+                max_items: None,
+                max_body_kb: None,
+            }),
+            schedule: Some(ScheduleContextConfig { enabled: Some(true) }),
+            repo: Some(RepoContextConfig {
+                enabled: Some(true),
+                conventions: None,
+            }),
+        };
+        let ext = ExecContextExtension::new(cfg, &fm);
+        let cmds = declared_bash_commands(&ext, &fm);
+        let mut deduped = cmds.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(
+            cmds.len(),
+            deduped.len(),
+            "bash_commands() output contained duplicates: {cmds:?}"
+        );
+        for expected in &["git", "git diff", "git log", "git describe"] {
+            assert!(
+                cmds.iter().any(|c| c == expected),
+                "expected '{expected}' in bash_commands, got {cmds:?}"
+            );
+        }
+    }
+
+    /// Stage 8 cleanup test: when all contributors activate, the
+    /// emitted prepare-step ordering matches the canonical
+    /// `repo → pr → pipeline → ci-push → schedule → workitem →
+    /// pr.checks → manual` order documented in `contributors()`.
+    #[test]
+    fn prepare_step_ordering_is_stable_and_canonical() {
+        use crate::compile::types::{
+            CiPushContextConfig, ManualContextConfig, PipelineContextConfig,
+            PrChecksContextConfig, PrContextConfig, RepoContextConfig,
+            ScheduleContextConfig, WorkitemContextConfig,
+        };
+        // Front matter that triggers as many contributors as possible.
+        let fm = parse_fm(
+            "---\nname: test\ndescription: test\nparameters:\n  - name: topic\n    type: string\n    default: foo\non:\n  pr:\n    branches:\n      include: [main]\n  pipeline:\n    name: upstream\n  schedule: 'daily around 09:00'\n---\n",
+        );
+        let cfg = ExecutionContextConfig {
+            enabled: None,
+            pr: Some(PrContextConfig {
+                enabled: Some(true),
+                checks: Some(PrChecksContextConfig { enabled: Some(true) }),
+            }),
+            manual: Some(ManualContextConfig {
+                enabled: Some(true),
+                include_email: None,
+            }),
+            pipeline: Some(PipelineContextConfig { enabled: Some(true) }),
+            ci_push: Some(CiPushContextConfig { enabled: Some(true) }),
+            workitem: Some(WorkitemContextConfig {
+                enabled: Some(true),
+                max_items: None,
+                max_body_kb: None,
+            }),
+            schedule: Some(ScheduleContextConfig { enabled: Some(true) }),
+            repo: Some(RepoContextConfig {
+                enabled: Some(true),
+                conventions: None,
+            }),
+        };
+        let ext = ExecContextExtension::new(cfg, &fm);
+        let ctx = CompileContext::for_test(&fm);
+        let decl = ext.declarations(&ctx).unwrap();
+        let names: Vec<String> = decl
+            .agent_prepare_steps
+            .iter()
+            .filter_map(|s| match s {
+                crate::compile::ir::step::Step::Bash(b) => Some(b.display_name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "Stage repo execution context (aw-context/repo/*)".to_string(),
+                "Stage PR execution context (aw-context/pr/*)".to_string(),
+                "Stage pipeline execution context (aw-context/pipeline/*)".to_string(),
+                "Stage ci-push execution context (aw-context/ci-push/*)".to_string(),
+                "Stage schedule execution context (aw-context/schedule/*)".to_string(),
+                "Stage workitem execution context (aw-context/workitem/*)".to_string(),
+                "Stage PR-checks execution context (aw-context/pr/checks/*)".to_string(),
+                "Stage manual execution context (aw-context/manual/*)".to_string(),
+            ],
+        );
+    }
+
+    /// **Marquee end-to-end test (post-merge update)**: assemble a
+    /// real Pipeline with `synthPr` in Setup, the Agent job carrying
+    /// the typed `agent_job_variables_hoist` (cross-job
+    /// `dependencies.Setup.outputs['synthPr.AW_PR_*']`
+    /// references lifted to job-level variables), and the typed
+    /// exec-context-pr step reading those variables via the
+    /// same-job `$(name)` macro form. Locks the post-PR-#956
+    /// architecture: cross-job refs live in `variables:` (the only
+    /// scope ADO reliably evaluates `$[ ... ]` runtime expressions),
+    /// and step env reads them via `$(AW_PR_*)`.
+    #[test]
+    fn exec_context_pr_step_lowers_to_cross_job_dep_form_in_agent_job() {
+        use crate::compile::extensions::ado_script::synthetic_pr_step_typed;
+        use crate::compile::ir::env::EnvValue;
+        use crate::compile::ir::graph::build_graph;
+        use crate::compile::ir::ids::{JobId, StepId};
+        use crate::compile::ir::job::{Job, JobVariable, Pool};
+        use crate::compile::ir::lower::{LoweringContext, lower_step};
+        use crate::compile::ir::output::OutputRef;
+        use crate::compile::ir::step::Step;
+        use crate::compile::ir::{Pipeline, PipelineBody, PipelineShape, Resources, Triggers};
+
+        let fm = pr_triggered_front_matter();
+        let ctx = CompileContext::for_test(&fm);
+
+        // Disable the workitem contributor for this test — it also
+        // activates on PR builds (Stage 4 of plan.md) but this test
+        // is focused on the PR contributor's typed-IR lowering, not
+        // on the multi-contributor fan-out.
+        let cfg = ExecutionContextConfig {
+            enabled: None,
+            pr: None,
+            manual: None,
+            pipeline: None,
+            ci_push: None,
+            workitem: Some(crate::compile::types::WorkitemContextConfig {
+                enabled: Some(false),
+                max_items: None,
+                max_body_kb: None,
+            }),
+        schedule: None,
+                    repo: None,
+        };
+        let ext = ExecContextExtension::new(cfg, &fm);
+        // Force synthetic_pr_active so the unified `AW_PR_*` macros
+        // are emitted in the prepare step's env (the path that needs
+        // the Agent-job-level hoist to resolve at runtime).
+        let ext = ExecContextExtension {
+            synthetic_pr_active: true,
+            ..ext
+        };
+
+        let decl = ext.declarations(&ctx).unwrap();
+        assert_eq!(decl.agent_prepare_steps.len(), 1);
+        let pr_step = decl.agent_prepare_steps.into_iter().next().unwrap();
+
+        // Pair the Agent step with a Setup-job `synthPr` producer so
+        // the graph can resolve the OutputRef inside the Agent-job
+        // variables hoist. The Pipeline only needs to be a valid
+        // skeleton for lowering — no SafeOutputs / Detection jobs
+        // required.
+        let synth = synthetic_pr_step_typed("AAAA").unwrap();
+        let mut setup_job = Job::new(
+            JobId::new("Setup").unwrap(),
+            "Setup",
+            Pool::VmImage("u".into()),
+        );
+        setup_job.push_step(Step::Bash(synth));
+
+        let mut agent_job = Job::new(
+            JobId::new("Agent").unwrap(),
+            "Agent",
+            Pool::VmImage("u".into()),
+        );
+        // The Agent job hoists the synthPr step outputs to
+        // job-level variables — this is what
+        // `agentic_pipeline::agent_job_variables_hoist` populates in
+        // production builds. Reproduce a minimal subset here.
+        let synth_id = StepId::new("synthPr").unwrap();
+        for name in &["AW_PR_ID", "AW_PR_TARGETBRANCH", "AW_SYNTHETIC_PR"] {
+            agent_job.variables.push(JobVariable {
+                name: (*name).into(),
+                value: EnvValue::coalesce(vec![EnvValue::step_output(OutputRef::new(
+                    synth_id.clone(),
+                    *name,
+                ))]),
+            });
+        }
+        agent_job.push_step(pr_step);
+
+        let p = Pipeline {
+            name: "t".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers::default(),
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(vec![setup_job, agent_job]),
+            shape: PipelineShape::Standalone,
+        };
+
+        let g = build_graph(&p).unwrap();
+        let agent_id = JobId::new("Agent").unwrap();
+        let ctx = LoweringContext {
+            graph: &g,
+            stage: None,
+            job: &agent_id,
+        };
+        let jobs = match &p.body {
+            PipelineBody::Jobs(j) => j,
+            _ => unreachable!(),
+        };
+        let lowered = lower_step(&jobs[1].steps[0], &ctx).unwrap();
+        let yaml = serde_yaml::to_string(&lowered).unwrap();
+
+        // The Agent step's env reads the hoisted `AW_PR_*`
+        // variables via the same-job `$(name)` macro form.
+        assert!(
+            yaml.contains("SYSTEM_PULLREQUEST_PULLREQUESTID: $(AW_PR_ID)"),
+            "PR id env must read hoisted AW_PR_ID via $(...) macro; got:\n{yaml}"
+        );
+        assert!(
+            yaml.contains("SYSTEM_PULLREQUEST_TARGETBRANCH: $(AW_PR_TARGETBRANCH)"),
+            "target branch env must read hoisted AW_PR_TARGETBRANCH; got:\n{yaml}"
+        );
+        // Negative assertion: no cross-job `dependencies.<Job>.outputs[...]`
+        // ref must appear in the step's env block — that runtime
+        // expression form is illegal at step-env scope (PR #956). The
+        // hoist lives in the Agent job's `variables:` mapping, NOT
+        // in this step's env.
+        assert!(
+            !yaml.contains("dependencies.Setup.outputs"),
+            "Agent-job step env must NOT contain cross-job dep refs (use the job-variable hoist); got:\n{yaml}"
+        );
+        assert!(
+            !yaml.contains("$["),
+            "Agent-job step env must NOT contain $[ ... ] runtime expressions (ADO doesn't evaluate them at step env scope); got:\n{yaml}"
         );
     }
 }
