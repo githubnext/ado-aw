@@ -11,6 +11,27 @@
 
 use super::step::TaskStep;
 
+/// Returns a [`TaskStep`] for `DockerInstaller@0`.
+///
+/// Installs a specific version of Docker Engine on the agent.
+///
+/// - `docker_version` — the Docker Engine version to install (e.g.
+///   `"26.1.4"`). Maps to the `dockerVersion` ADO task input, which
+///   is **required** by the task.
+///
+/// Optional inputs (applied with `.with_input(…)` on the returned
+/// value):
+///
+/// | Input key | Type | Default | Description |
+/// |---|---|---|---|
+/// | `releaseType` | string | `"stable"` | Release channel: `"stable"`, `"edge"`, `"test"`, or `"nightly"`. |
+///
+/// ADO task reference:
+/// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/docker-installer-v0>
+pub fn docker_installer_step(docker_version: impl Into<String>) -> TaskStep {
+    TaskStep::new("DockerInstaller@0", "Install Docker").with_input("dockerVersion", docker_version)
+}
+
 /// Returns a [`TaskStep`] for `PublishTestResults@2`.
 ///
 /// Publishes test results to the ADO build summary and timeline.
@@ -97,5 +118,44 @@ mod tests {
             Some("$(System.DefaultWorkingDirectory)")
         );
         assert_eq!(t.inputs.len(), 5);
+    }
+
+    #[test]
+    fn docker_installer_step_sets_task_and_required_input() {
+        let t = docker_installer_step("26.1.4");
+        assert_eq!(t.task, "DockerInstaller@0");
+        assert_eq!(t.display_name, "Install Docker");
+        assert_eq!(
+            t.inputs.get("dockerVersion").map(|s| s.as_str()),
+            Some("26.1.4")
+        );
+        // only the required input is set by default
+        assert_eq!(t.inputs.len(), 1);
+    }
+
+    #[test]
+    fn docker_installer_step_optional_release_type_via_with_input() {
+        let t = docker_installer_step("26.1.4").with_input("releaseType", "edge");
+        assert_eq!(t.task, "DockerInstaller@0");
+        assert_eq!(
+            t.inputs.get("dockerVersion").map(|s| s.as_str()),
+            Some("26.1.4")
+        );
+        assert_eq!(
+            t.inputs.get("releaseType").map(|s| s.as_str()),
+            Some("edge")
+        );
+        assert_eq!(t.inputs.len(), 2);
+    }
+
+    #[test]
+    fn docker_installer_step_accepts_different_versions() {
+        for version in &["17.09.0-ce", "20.10.0", "26.1.4"] {
+            let t = docker_installer_step(*version);
+            assert_eq!(
+                t.inputs.get("dockerVersion").map(|s| s.as_str()),
+                Some(*version)
+            );
+        }
     }
 }
