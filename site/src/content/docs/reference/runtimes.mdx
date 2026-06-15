@@ -72,7 +72,7 @@ When enabled, the compiler:
 
 ### Node.js (`node:`)
 
-Node.js runtime. Auto-installs Node.js via `NodeTool@0`, emits `npmAuthenticate@0` for internal feed access, adds Node ecosystem domains to the AWF network allowlist, extends the bash command allow-list, and optionally injects feed URL env vars for npm.
+Node.js runtime. Auto-installs Node.js via `UseNode@1`, emits `npmAuthenticate@0` for internal feed access, adds Node ecosystem domains to the AWF network allowlist, extends the bash command allow-list, and optionally injects feed URL env vars for npm.
 
 ```yaml
 # Simple enablement (installs default Node LTS)
@@ -90,18 +90,18 @@ runtimes:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `version` | string | Node.js version to install (e.g., `"22.x"`, `"20.x"`). Passed to `NodeTool@0` `versionSpec`. Defaults to `"22.x"`. |
+| `version` | string | Node.js version to install (e.g., `"22.x"`, `"20.x"`). Passed to `UseNode@1` `version`. Defaults to `"22.x"`. |
 | `feed-url` | string | Internal npm registry URL. Injects `NPM_CONFIG_REGISTRY` env var into the agent environment. |
 | `config` | string | Path to an .npmrc config file. Accepted with a warning -- the file will not be available inside the AWF agent environment until proxy-auth support lands. Mutually exclusive with `feed-url` (compile error if both are set). |
 
 When enabled, the compiler:
-- Contributes a `NodeTool@0` task to `Declarations::agent_prepare_steps` (runs before AWF)
+- Contributes a `UseNode@1` task to `Declarations::agent_prepare_steps` (runs before AWF)
 - If `feed-url` or `config` is set, also injects `npmAuthenticate@0` (and an ensure-`.npmrc` step) to authenticate the ADO build service identity for internal feeds
 - Auto-adds `node`, `npm`, `npx` to the bash command allow-list
 - Adds Node ecosystem domains to the network allowlist (npmjs.org, nodejs.org, etc.)
 - If `feed-url` is set, injects `NPM_CONFIG_REGISTRY` env var into the agent environment
 - Appends a prompt supplement informing the agent about Node.js availability
-- No AWF mounts or PATH prepends needed -- `NodeTool@0` installs to `/opt/hostedtoolcache` (auto-mounted by AWF) and publishes PATH entries that AWF merges via `$GITHUB_PATH`
+- No AWF mounts or PATH prepends needed -- `UseNode@1` installs to `/opt/hostedtoolcache` (auto-mounted by AWF) and publishes PATH entries that AWF merges via `$GITHUB_PATH`
 - Note: AWF overlays `~/.npmrc` with `/dev/null` for credential security -- the `NPM_CONFIG_REGISTRY` env var approach avoids conflicting with this overlay
 
 ### .NET (`dotnet:`)

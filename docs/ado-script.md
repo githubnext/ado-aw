@@ -251,7 +251,7 @@ GitHub-typed repos return before any SDK load.
        ┌──────────────────────┐
        │  Generated pipeline  │
        │  Setup job:          │
-       │   1. NodeTool@0      │
+       │   1. UseNode@1       │
        │   2. curl + sha256   │     downloads ado-script.zip
        │      + unzip         │     from the matching ado-aw release
        │   3. node gate/index │     reads GATE_SPEC env var
@@ -449,7 +449,7 @@ bundle**:
 When `filters:` lowers to non-empty checks, `AdoScriptExtension::declarations()`
 returns three typed `Declarations::setup_steps` entries for the Setup job:
 
-1. **`NodeTool@0`** — installs Node 20.x LTS, capped at
+1. **`UseNode@1`** — installs Node 20.x LTS, capped at
    `timeoutInMinutes: 5`.
 2. **`curl` download + verify + extract** — fetches `checksums.txt`
    and `ado-script.zip` from the `githubnext/ado-aw` release matching
@@ -467,7 +467,7 @@ PR contributor activates (`on.pr` configured and not disabled),
 `AdoScriptExtension::declarations()` returns the install + download pair in
 `Declarations::agent_prepare_steps` for the Agent job:
 
-1. **`NodeTool@0`** — same shape as above.
+1. **`UseNode@1`** — same shape as above.
 2. **`curl` download + verify + extract** — same artefact, same
    verification.
 3. **`bash: node '/tmp/ado-aw-scripts/ado-script/import.js'`** —
@@ -619,7 +619,7 @@ If a future bundle blows the budget:
   Node. Stage 3 keeps a Rust-only execution path.
 - Migrating the agent-stats parser. It runs in-pipeline as part of
   Stage 1 wrap-up and has no TypeScript dependency need.
-- Bundling Node itself. Pipelines install Node via `NodeTool@0`.
+- Bundling Node itself. Pipelines install Node via `UseNode@1`.
 
 ## See also
 

@@ -122,12 +122,12 @@ let step = Step::Bash(
 use crate::compile::ir::step::{Step, TaskStep};
 
 let step = Step::Task(
-    TaskStep::new("NodeTool@0", "Install Node.js")
-        .with_input("versionSpec", "20.x"),
+    TaskStep::new("UseNode@1", "Install Node.js")
+        .with_input("version", "20.x"),
 );
 ```
 
-Use `TaskStep` for Azure DevOps built-in tasks such as `NodeTool@0`, `UsePythonVersion@0`, and `UseDotNet@2`.
+Use `TaskStep` for Azure DevOps built-in tasks such as `UseNode@1`, `UsePythonVersion@0`, and `UseDotNet@2`.
 
 ### Download and publish steps
 

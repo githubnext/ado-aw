@@ -365,7 +365,7 @@ runtime-import resolver — see [Runtime Imports](/ado-aw/reference/runtime-impo
 
 For the gate path it controls:
 
-1. **Node install step** -- emits a `NodeTool@0` step pinned to Node 20.x
+1. **Node install step** -- emits a `UseNode@1` step pinned to Node 20.x
    LTS so the gate evaluator has a runtime.
 2. **Download step** -- fetches `ado-script.zip` from the ado-aw release
    artifacts, verifies its SHA256 checksum via `checksums.txt`, then
