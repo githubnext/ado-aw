@@ -13,24 +13,30 @@ engine:
 permissions:
   read: agent-playground-read
   write: agent-playground-write
+repos:
+  - agent-definitions=agent-definitions
 safe-outputs:
   update-pr:
     allowed-operations:
       - update-description
+    allowed-repositories:
+      - agent-definitions
     max: 1
 ---
 
 ## Daily smoke for update-pr
 
 You are a smoke test. The variable group `ado-aw-daily-smoke` provides
-the perma PR at `$(permaPullRequestId)`. Call exactly one safe-output
-tool: `update-pr`. Use the `update-description` operation only — vote /
-add-reviewers / add-labels are not enabled in this fixture. Use these
-literal values (no improvisation):
+the perma PR at `$(permaPullRequestId)` in the AgentPlayground ADO repo
+`agent-definitions` (the YAML lives in GitHub, so address the ADO repo
+explicitly). Call exactly one safe-output tool: `update-pr`. Use the
+`update-description` operation only — vote / add-reviewers / add-labels
+are not enabled in this fixture. Use these literal values (no
+improvisation):
 
 - pull_request_id: $(permaPullRequestId)
 - operation: "update-description"
 - description: "ado-aw-smoke-$(Build.BuildId)-update-pr — perma-PR description last refreshed by build $(Build.BuildId) exercising the update-pr safe output."
-- repository: "self"
+- repository: "agent-definitions"
 
 Do not call any other tool. After the safe output is emitted, stop.

@@ -13,6 +13,8 @@ engine:
 permissions:
   read: agent-playground-read
   write: agent-playground-write
+repos:
+  - agent-definitions=agent-definitions
 safe-outputs:
   resolve-pr-thread:
     allowed-statuses:
@@ -20,6 +22,8 @@ safe-outputs:
       - closed
       - wontFix
       - byDesign
+    allowed-repositories:
+      - agent-definitions
     max: 1
 setup:
   - bash: |
@@ -38,12 +42,14 @@ setup:
 
 You are a smoke test. The variable group `ado-aw-daily-smoke` provides
 the perma PR at `$(permaPullRequestId)` and a thread to resolve at
-`$(permaThreadId)`. Call exactly one safe-output tool:
-`resolve-pr-thread`. Use these literal values (no improvisation):
+`$(permaThreadId)`, both in the AgentPlayground ADO repo
+`agent-definitions` (the YAML lives in GitHub, so address the ADO repo
+explicitly). Call exactly one safe-output tool: `resolve-pr-thread`.
+Use these literal values (no improvisation):
 
 - pull_request_id: $(permaPullRequestId)
 - thread_id: $(permaThreadId)
 - status: "fixed"
-- repository: "self"
+- repository: "agent-definitions"
 
 Do not call any other tool. After the safe output is emitted, stop.

@@ -13,9 +13,13 @@ engine:
 permissions:
   read: agent-playground-read
   write: agent-playground-write
+repos:
+  - agent-definitions=agent-definitions
 safe-outputs:
   reply-to-pr-comment:
     comment-prefix: "ado-aw-smoke: "
+    allowed-repositories:
+      - agent-definitions
     max: 1
 ---
 
@@ -23,12 +27,14 @@ safe-outputs:
 
 You are a smoke test. The variable group `ado-aw-daily-smoke` provides
 the perma PR at `$(permaPullRequestId)` and a perma thread on that PR
-at `$(permaThreadId)`. Call exactly one safe-output tool:
-`reply-to-pr-comment`. Use these literal values (no improvisation):
+at `$(permaThreadId)`, both in the AgentPlayground ADO repo
+`agent-definitions` (the YAML lives in GitHub, so address the ADO repo
+explicitly). Call exactly one safe-output tool: `reply-to-pr-comment`.
+Use these literal values (no improvisation):
 
 - pull_request_id: $(permaPullRequestId)
 - thread_id: $(permaThreadId)
 - content: "ado-aw-smoke-$(Build.BuildId)-reply-to-pr-comment exercising the reply-to-pr-comment safe output for build $(Build.BuildId)."
-- repository: "self"
+- repository: "agent-definitions"
 
 Do not call any other tool. After the safe output is emitted, stop.

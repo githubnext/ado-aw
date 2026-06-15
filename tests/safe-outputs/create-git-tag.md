@@ -13,20 +13,26 @@ engine:
 permissions:
   read: agent-playground-read
   write: agent-playground-write
+repos:
+  - agent-definitions=agent-definitions
 safe-outputs:
   create-git-tag:
     tag-pattern: "ado-aw-smoke-*"
     message-prefix: "ado-aw daily smoke: "
+    allowed-repositories:
+      - agent-definitions
     max: 1
 ---
 
 ## Daily smoke for create-git-tag
 
-You are a smoke test. Call exactly one safe-output tool: `create-git-tag`.
-Use these literal values (no improvisation):
+You are a smoke test. The smoke targets the AgentPlayground ADO repo
+`agent-definitions` (the YAML lives in GitHub, so address the ADO repo
+explicitly). Call exactly one safe-output tool: `create-git-tag`. Use
+these literal values (no improvisation):
 
 - tag_name: "ado-aw-smoke-$(Build.BuildId)-create-git-tag"
 - message: "ado-aw daily smoke exercising the create-git-tag safe output for build $(Build.BuildId)"
-- repository: "self"
+- repository: "agent-definitions"
 
 Do not call any other tool. After the safe output is emitted, stop.
