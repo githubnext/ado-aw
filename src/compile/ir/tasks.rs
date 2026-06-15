@@ -122,6 +122,39 @@ pub fn archive_files_step(
         .with_input("archiveFile", archive_file)
 }
 
+/// Returns a [`TaskStep`] for `ExtractFiles@1`.
+///
+/// Extracts archives matching `archive_file_patterns` into `destination_folder`.
+/// Supports `.zip`, `.tar.gz`, `.tar.bz2`, and 7-Zip formats (`.7z`, `.tar`,
+/// `.rar`, etc.) via the 7z utility bundled with the task on Windows agents,
+/// or the system 7z on Linux/macOS.
+///
+/// - `archive_file_patterns` — glob pattern(s) that match the archives to
+///   extract. Patterns are evaluated from the root of the repository
+///   (equivalent to `$(Build.SourcesDirectory)`). Multiple patterns can be
+///   separated by newlines. Default: `**/*.zip`.
+/// - `destination_folder` — path to the folder where files will be extracted.
+///   **Required** — the task has no default for this input.
+///
+/// Optional inputs (applied with `.with_input(…)` on the returned value):
+///
+/// | Input key | Type | Default | Description |
+/// |---|---|---|---|
+/// | `cleanDestinationFolder` | bool string | `"true"` | Delete destination folder contents before extracting. |
+/// | `overwriteExistingFiles` | bool string | `"false"` | Overwrite files that already exist in the destination. |
+/// | `pathToSevenZipTool` | string | — | Absolute path to a custom `7z` binary (e.g. `/usr/local/bin/7z`). |
+///
+/// ADO task reference:
+/// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/extract-files-v1>
+pub fn extract_files_step(
+    archive_file_patterns: impl Into<String>,
+    destination_folder: impl Into<String>,
+) -> TaskStep {
+    TaskStep::new("ExtractFiles@1", "Extract Files")
+        .with_input("archiveFilePatterns", archive_file_patterns)
+        .with_input("destinationFolder", destination_folder)
+}
+
 /// Returns a [`TaskStep`] for `PublishTestResults@2`.
 ///
 /// Publishes test results to the ADO build summary and timeline.
@@ -445,5 +478,63 @@ mod tests {
             Some("maximum")
         );
         assert_eq!(t.inputs.len(), 4);
+    }
+
+    // ── ExtractFiles@1 ───────────────────────────────────────────────────
+
+    #[test]
+    fn extract_files_step_sets_task_and_required_inputs() {
+        let t = extract_files_step("**/*.zip", "$(Build.BinariesDirectory)");
+        assert_eq!(t.task, "ExtractFiles@1");
+        assert_eq!(t.display_name, "Extract Files");
+        assert_eq!(
+            t.inputs.get("archiveFilePatterns").map(|s| s.as_str()),
+            Some("**/*.zip")
+        );
+        assert_eq!(
+            t.inputs.get("destinationFolder").map(|s| s.as_str()),
+            Some("$(Build.BinariesDirectory)")
+        );
+        // no optional inputs by default
+        assert_eq!(t.inputs.len(), 2);
+    }
+
+    #[test]
+    fn extract_files_step_accepts_optional_clean_and_overwrite() {
+        let t = extract_files_step("**/*.tar.gz", "$(Agent.TempDirectory)/extracted")
+            .with_input("cleanDestinationFolder", "false")
+            .with_input("overwriteExistingFiles", "true");
+        assert_eq!(t.task, "ExtractFiles@1");
+        assert_eq!(
+            t.inputs.get("cleanDestinationFolder").map(|s| s.as_str()),
+            Some("false")
+        );
+        assert_eq!(
+            t.inputs.get("overwriteExistingFiles").map(|s| s.as_str()),
+            Some("true")
+        );
+        assert_eq!(t.inputs.len(), 4);
+    }
+
+    #[test]
+    fn extract_files_step_accepts_custom_seven_zip_path() {
+        let t = extract_files_step("artifacts/**/*.7z", "$(Build.BinariesDirectory)")
+            .with_input("pathToSevenZipTool", "/usr/local/bin/7z");
+        assert_eq!(t.task, "ExtractFiles@1");
+        assert_eq!(
+            t.inputs.get("pathToSevenZipTool").map(|s| s.as_str()),
+            Some("/usr/local/bin/7z")
+        );
+        assert_eq!(t.inputs.len(), 3);
+    }
+
+    #[test]
+    fn extract_files_step_multiline_patterns() {
+        let patterns = "**/*.zip\n**/*.tar.gz";
+        let t = extract_files_step(patterns, "$(Build.BinariesDirectory)");
+        assert_eq!(
+            t.inputs.get("archiveFilePatterns").map(|s| s.as_str()),
+            Some("**/*.zip\n**/*.tar.gz")
+        );
     }
 }
