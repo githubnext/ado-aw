@@ -753,6 +753,23 @@ async fn run_execute(
         log::info!("Agent source last author: {}", email);
     }
 
+    // Compute the agent source file's relative path within the repo for
+    // propose-step-optimization live mode (needs to push an edit to the
+    // correct file). Try stripping BUILD_SOURCESDIRECTORY; fall back to the
+    // bare filename.
+    ctx.source_file_relative_path = source
+        .strip_prefix(&ctx.source_directory)
+        .ok()
+        .and_then(|p| p.to_str().map(|s| s.replace('\\', "/")))
+        .or_else(|| {
+            source
+                .file_name()
+                .and_then(|f| f.to_str().map(String::from))
+        });
+    if let Some(ref rel) = ctx.source_file_relative_path {
+        log::info!("Agent source relative path: {}", rel);
+    }
+
     let results = execute::execute_safe_outputs(&safe_output_dir, &ctx).await?;
 
     // Process agent memory if cache-memory tool is enabled

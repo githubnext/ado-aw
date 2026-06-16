@@ -150,6 +150,12 @@ pub struct ExecutionContext {
     /// configured.
     pub agent_last_author: Option<String>,
 
+    /// Relative path of the agent source `.md` file within the
+    /// repository (e.g. `agents/my-agent.md`). Used by
+    /// `propose-step-optimization` (live mode) to open a PR that
+    /// edits the correct file.
+    pub source_file_relative_path: Option<String>,
+
     /// Per-run dedupe set for `upload-pipeline-artifact` when the
     /// `require-unique-names` config is set. Stores `format!("{}/{}",
     /// effective_build_id, final_name)` keys; the executor checks-and-inserts
@@ -261,6 +267,9 @@ impl ExecutionContext {
 
             // Populated later by run_execute via git log on the source file
             agent_last_author: None,
+
+            // Populated later by run_execute from the --source CLI arg
+            source_file_relative_path: None,
 
             // Per-run state for upload-pipeline-artifact dedupe.
             uploaded_pipeline_artifact_keys: Arc::new(Mutex::new(HashSet::new())),

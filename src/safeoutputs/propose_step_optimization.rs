@@ -34,6 +34,7 @@
 //! `--enabled-tools propose-step-optimization`, which only happens
 //! when `self-optimization.enabled: true` is in the front matter.
 
+use anyhow::Context as _;
 use log::{debug, info, warn};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -329,22 +330,307 @@ impl Executor for ProposeStepOptimizationResult {
                     .to_string(),
             ))
         } else {
-            // Live mode: open a PR against the source .md.
-            // This path is not yet implemented — it lands in
-            // todo `stage3-live-pr-path`.
-            warn!(
-                "propose-step-optimization: live mode (staged: false) is not yet \
-                 implemented; the proposal passed IR validation but no PR was opened."
-            );
-            Ok(ExecutionResult::failure(
-                "Live mode (staged: false) for propose-step-optimization is not \
-                 yet implemented. The proposal passed IR validation. Set \
-                 `self-optimization.staged: true` to see the staged preview, or \
-                 wait for the live-PR path to land in a future release."
-                    .to_string(),
-            ))
+            // Live mode: read the source .md, patch the front matter to
+            // include the proposed steps, push a commit to a new branch
+            // via ADO REST, and open a PR.
+            self.execute_live_pr(ctx, section_wire, &proposed_yaml)
+                .await
         }
     }
+}
+
+impl ProposeStepOptimizationResult {
+    /// Live-mode execution: patch the source .md and open a PR.
+    async fn execute_live_pr(
+        &self,
+        ctx: &ExecutionContext,
+        section_wire: &str,
+        proposed_yaml: &str,
+    ) -> anyhow::Result<ExecutionResult> {
+        use anyhow::Context;
+        use percent_encoding::utf8_percent_encode;
+
+        let org_url = ctx
+            .ado_org_url
+            .as_ref()
+            .context("AZURE_DEVOPS_ORG_URL not set")?;
+        let project = ctx
+            .ado_project
+            .as_ref()
+            .context("SYSTEM_TEAMPROJECT not set")?;
+        let token = ctx
+            .access_token
+            .as_ref()
+            .context("No access token available")?;
+        let repo_id = ctx
+            .repository_id
+            .as_ref()
+            .context("BUILD_REPOSITORY_ID not set")?;
+        let source_rel_path = ctx
+            .source_file_relative_path
+            .as_ref()
+            .context(
+                "source_file_relative_path not set — cannot determine which \
+                 file to edit for the live PR",
+            )?;
+
+        // Read the current source .md from the checked-out repo.
+        let source_full_path = ctx.source_directory.join(source_rel_path);
+        let original_content = tokio::fs::read_to_string(&source_full_path)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to read source file for live-mode PR: {}",
+                    source_full_path.display()
+                )
+            })?;
+
+        // Patch the front matter: insert the proposed steps into the target section.
+        let new_content = match patch_front_matter(&original_content, section_wire, proposed_yaml)
+        {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(ExecutionResult::failure(format!(
+                    "Failed to patch front matter for live-mode PR: {e}"
+                )));
+            }
+        };
+
+        if new_content == original_content {
+            return Ok(ExecutionResult::success(
+                "Proposed steps are already present in the front matter — no PR needed."
+                    .to_string(),
+            ));
+        }
+
+        let client = reqwest::Client::new();
+
+        // Resolve the HEAD commit of the default branch (target for the PR).
+        let default_branch = ctx
+            .source_branch_name
+            .as_deref()
+            .unwrap_or("main");
+        let refs_url = format!(
+            "{}{}/_apis/git/repositories/{}/refs?filter=heads/{}&api-version=7.1",
+            org_url.trim_end_matches('/'),
+            format!("/{}", utf8_percent_encode(project, super::PATH_SEGMENT)),
+            repo_id,
+            default_branch,
+        );
+        let refs_resp = client
+            .get(&refs_url)
+            .basic_auth("", Some(token))
+            .send()
+            .await
+            .context("Failed to resolve HEAD ref")?;
+        if !refs_resp.status().is_success() {
+            let status = refs_resp.status();
+            let body = refs_resp.text().await.unwrap_or_default();
+            return Ok(ExecutionResult::failure(format!(
+                "Failed to resolve HEAD of {default_branch}: HTTP {status} — {body}"
+            )));
+        }
+        let refs_body: serde_json::Value = refs_resp.json().await?;
+        let base_commit = refs_body["value"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|r| r["objectId"].as_str())
+            .context("Could not parse HEAD objectId from refs response")?
+            .to_string();
+
+        // Generate a branch name for the PR.
+        let short_id = {
+            use rand::RngExt;
+            let v: u32 = rand::rng().random();
+            format!("{:08x}", v)
+        };
+        let source_branch = format!("ado-aw/self-opt-{}-{}", section_wire, short_id);
+        let source_ref = format!("refs/heads/{}", source_branch);
+
+        // Build the single-file edit change.
+        let file_path = format!("/{}", source_rel_path);
+        let change = serde_json::json!({
+            "changeType": "edit",
+            "item": { "path": file_path },
+            "newContent": {
+                "content": new_content,
+                "contentType": "rawtext"
+            }
+        });
+
+        let commit_message = format!(
+            "chore(ado-aw): self-optimize `{}` steps\n\n{}",
+            section_wire,
+            truncate(&self.rationale, 200)
+        );
+
+        // Push the commit to the new branch.
+        let push_url = format!(
+            "{}{}/_apis/git/repositories/{}/pushes?api-version=7.1",
+            org_url.trim_end_matches('/'),
+            format!("/{}", utf8_percent_encode(project, super::PATH_SEGMENT)),
+            repo_id,
+        );
+        let push_body = serde_json::json!({
+            "refUpdates": [{
+                "name": source_ref,
+                "oldObjectId": "0000000000000000000000000000000000000000"
+            }],
+            "commits": [{
+                "comment": commit_message,
+                "changes": [change],
+                "parents": [base_commit]
+            }]
+        });
+
+        let push_resp = client
+            .post(&push_url)
+            .basic_auth("", Some(token))
+            .json(&push_body)
+            .send()
+            .await
+            .context("Failed to push commit")?;
+
+        if !push_resp.status().is_success() {
+            let status = push_resp.status();
+            let body = push_resp.text().await.unwrap_or_default();
+            return Ok(ExecutionResult::failure(format!(
+                "Failed to push self-optimization commit: HTTP {status} — {body}"
+            )));
+        }
+        info!("propose-step-optimization: pushed branch {source_branch}");
+
+        // Create the PR.
+        let pr_title = format!(
+            "chore(ado-aw): self-optimize `{}` steps",
+            section_wire
+        );
+        let savings_note = match self.estimated_token_savings {
+            Some(n) => format!("\n\nEstimated token savings: ~{n} tokens/build."),
+            None => String::new(),
+        };
+        let pr_body = format!(
+            "## Self-Optimization Proposal\n\n\
+             **Section:** `{section_wire}`\n\
+             **Rationale:** {}{savings_note}\n\n\
+             This PR was automatically opened by the `propose-step-optimization` \
+             safe-output (self-optimization live mode). The proposed steps passed \
+             IR validation (Curated allow-list: bash + typed-factory tasks only) \
+             and the Stage 2 detection cross-check.\n\n\
+             Review the YAML changes and merge if they look correct.",
+            self.rationale
+        );
+
+        let target_ref = format!("refs/heads/{}", default_branch);
+        let pr_url = format!(
+            "{}{}/_apis/git/repositories/{}/pullrequests?api-version=7.1",
+            org_url.trim_end_matches('/'),
+            format!("/{}", utf8_percent_encode(project, super::PATH_SEGMENT)),
+            repo_id,
+        );
+        let pr_payload = serde_json::json!({
+            "sourceRefName": source_ref,
+            "targetRefName": target_ref,
+            "title": pr_title,
+            "description": pr_body,
+        });
+
+        let pr_resp = client
+            .post(&pr_url)
+            .basic_auth("", Some(token))
+            .json(&pr_payload)
+            .send()
+            .await
+            .context("Failed to create PR")?;
+
+        if !pr_resp.status().is_success() {
+            let status = pr_resp.status();
+            let body = pr_resp.text().await.unwrap_or_default();
+            return Ok(ExecutionResult::failure(format!(
+                "Pushed branch {source_branch} but failed to create PR: HTTP {status} — {body}"
+            )));
+        }
+
+        let pr_data: serde_json::Value = pr_resp.json().await.unwrap_or_default();
+        let pr_id = pr_data["pullRequestId"].as_u64().unwrap_or(0);
+        let pr_url_human = pr_data["url"]
+            .as_str()
+            .unwrap_or("<url unavailable>");
+
+        info!(
+            "propose-step-optimization: opened PR #{} on branch {}",
+            pr_id, source_branch
+        );
+
+        Ok(ExecutionResult::success_with_data(
+            format!(
+                "Self-optimization PR #{pr_id} opened on branch `{source_branch}` \
+                 targeting `{default_branch}`. Review and merge to apply the \
+                 proposed `{section_wire}` steps."
+            ),
+            serde_json::json!({
+                "pull_request_id": pr_id,
+                "source_branch": source_branch,
+                "target_branch": default_branch,
+                "url": pr_url_human,
+                "section": section_wire,
+            }),
+        ))
+    }
+}
+
+/// Patch the front matter of an agent `.md` file to insert proposed
+/// steps into the target section.
+///
+/// Strategy: parse the YAML, insert/append steps under the target key,
+/// re-serialize. This loses comments (acceptable for machine-generated
+/// PRs — the author reviews and can format to taste).
+fn patch_front_matter(
+    original: &str,
+    section_key: &str,
+    proposed_yaml: &str,
+) -> anyhow::Result<String> {
+    // Split on front-matter fences: ---\n<yaml>\n---\n<body>
+    let trimmed = original.strip_prefix("---\n").or_else(|| original.strip_prefix("---\r\n"));
+    let Some(after_first_fence) = trimmed else {
+        anyhow::bail!("source file does not start with a `---` front-matter fence");
+    };
+    let Some(fence_end) = after_first_fence.find("\n---") else {
+        anyhow::bail!("source file does not have a closing `---` front-matter fence");
+    };
+    let yaml_str = &after_first_fence[..fence_end];
+    let body_with_fence = &after_first_fence[fence_end..]; // includes "\n---\n<body>"
+
+    // Parse the YAML front matter as a mapping.
+    let mut fm: serde_yaml::Value = serde_yaml::from_str(yaml_str)
+        .context("failed to parse front matter YAML")?;
+    let mapping = fm
+        .as_mapping_mut()
+        .context("front matter is not a YAML mapping")?;
+
+    // Parse the proposed steps.
+    let proposed: serde_yaml::Value = serde_yaml::from_str(proposed_yaml)
+        .context("failed to parse proposed YAML")?;
+    let proposed_seq = proposed
+        .as_sequence()
+        .context("proposed YAML is not a sequence")?;
+
+    // Insert or extend the target section.
+    let key = serde_yaml::Value::String(section_key.to_string());
+    if let Some(existing) = mapping.get_mut(&key) {
+        if let Some(seq) = existing.as_sequence_mut() {
+            seq.extend(proposed_seq.iter().cloned());
+        } else {
+            // Section exists but is not a sequence — overwrite with the proposed
+            *existing = serde_yaml::Value::Sequence(proposed_seq.clone());
+        }
+    } else {
+        mapping.insert(key, serde_yaml::Value::Sequence(proposed_seq.clone()));
+    }
+
+    // Re-serialize.
+    let new_yaml = serde_yaml::to_string(&fm).context("failed to re-serialize front matter")?;
+    Ok(format!("---\n{new_yaml}{body_with_fence}"))
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -522,5 +808,34 @@ mod tests {
             r.source_command_evidence, evidence_before,
             "evidence list must pass through sanitize unchanged"
         );
+    }
+
+
+    // ── patch_front_matter tests ──────────────────────────────────────────
+
+    #[test]
+    fn patch_inserts_steps_into_existing_section() {
+        let original = "---\nname: test\nsteps:\n  - bash: echo existing\n---\n\nBody\n";
+        let proposed = "- bash: echo new\n  displayName: New\n";
+        let patched = patch_front_matter(original, "steps", proposed).unwrap();
+        assert!(patched.contains("echo existing"), "must keep existing");
+        assert!(patched.contains("echo new"), "must add new");
+        assert!(patched.contains("\n---\n"), "must preserve body fence");
+        assert!(patched.contains("Body"), "must preserve body");
+    }
+
+    #[test]
+    fn patch_creates_section_when_absent() {
+        let original = "---\nname: test\ndescription: x\n---\n\nBody\n";
+        let proposed = "- bash: echo hi\n";
+        let patched = patch_front_matter(original, "post-steps", proposed).unwrap();
+        assert!(patched.contains("post-steps"), "must create section");
+        assert!(patched.contains("echo hi"), "must add step");
+    }
+
+    #[test]
+    fn patch_returns_error_for_missing_fences() {
+        let no_fence = "name: test\ndescription: x\n";
+        assert!(patch_front_matter(no_fence, "steps", "- bash: echo hi\n").is_err());
     }
 }
