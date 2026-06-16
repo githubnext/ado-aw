@@ -825,6 +825,24 @@ async fn build_execution_context(
             Err(e) => log::warn!("Failed to serialize ado-aw-debug.create-issue config: {e}"),
         }
     }
+    // Merge self-optimization config under tool_configs so Stage 3's
+    // executor can read `staged` and `allowed_sections` via
+    // get_tool_config. Not under safe-outputs (that's forbidden by
+    // validate_self_optimization_config); this injection is the sole
+    // compile-time → Stage 3 config bridge.
+    if let Some(so) = front_matter.self_optimization.as_ref() {
+        if so.enabled {
+            match serde_json::to_value(so) {
+                Ok(v) => {
+                    ctx.tool_configs
+                        .insert("propose-step-optimization".to_string(), v);
+                }
+                Err(e) => {
+                    log::warn!("Failed to serialize self-optimization config: {e}");
+                }
+            }
+        }
+    }
     ctx.allowed_repositories = allowed_repositories;
     ctx.dry_run = dry_run;
 

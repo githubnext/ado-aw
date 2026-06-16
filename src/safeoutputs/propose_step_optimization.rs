@@ -213,7 +213,7 @@ impl Executor for ProposeStepOptimizationResult {
         )
     }
 
-    async fn execute_impl(&self, _ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
+    async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!(
             "propose-step-optimization: agent proposed {} entries for section `{}`",
             self.steps.as_array().map(Vec::len).unwrap_or(0),
@@ -226,25 +226,124 @@ impl Executor for ProposeStepOptimizationResult {
             self.source_command_evidence.len()
         );
 
-        // PLACEHOLDER — the Stage 3 staged-preview renderer and
-        // live-mode PR opener land in subsequent commits (todos
-        // stage3-staged-preview and stage3-live-pr-path). For now
-        // we record the proposal in safe_outputs.ndjson so audit
-        // tooling can see the proposed payload, and report success
-        // with a message that the executor is not yet active.
-        warn!(
-            "propose-step-optimization: Stage 3 executor is not yet active; \
-             the proposal was recorded in safe_outputs.ndjson but no \
-             preview or PR has been emitted."
+        // 1. Read the self-optimization config injected by main.rs into
+        //    tool_configs["propose-step-optimization"].
+        let config: crate::compile::types::SelfOptimizationConfig =
+            ctx.get_tool_config("propose-step-optimization");
+
+        // 2. Validate section against allowed_sections.
+        let section_wire = self.section.as_wire_str();
+        let section_allowed = config.allowed_sections.iter().any(|s| {
+            serde_yaml::to_string(s)
+                .unwrap_or_default()
+                .trim()
+                == section_wire
+        });
+        if !section_allowed {
+            let allowed_names: Vec<String> = config
+                .allowed_sections
+                .iter()
+                .map(|s| {
+                    serde_yaml::to_string(s)
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string()
+                })
+                .collect();
+            return Ok(ExecutionResult::failure(format!(
+                "Section `{section_wire}` is not in the self-optimization \
+                 allowed-sections list. Allowed: {allowed_names:?}. \
+                 Add it to `self-optimization.allowed-sections` in the \
+                 front matter to enable proposals targeting this section.",
+            )));
+        }
+
+        // 3. IR-validate the proposed steps via the shared structural validator.
+        //    Convert JSON -> YAML (lossless for JSON-shaped inputs).
+        let json_text = serde_json::to_string(&self.steps)
+            .map_err(|e| anyhow::anyhow!("Failed to re-serialize steps: {e}"))?;
+        let yaml_value: serde_yaml::Value = serde_yaml::from_str(&json_text)
+            .map_err(|e| anyhow::anyhow!("steps JSON is not valid YAML: {e}"))?;
+
+        let validation = crate::compile::ir::validate_step_block(
+            &yaml_value,
+            crate::compile::ir::StepKindAllow::Curated,
         );
 
-        Ok(ExecutionResult::success(
-            "Step-optimization proposal recorded. The Stage 3 executor \
-             (staged preview / PR opener) lands in a follow-up commit; \
-             this run only persists the proposal to safe_outputs.ndjson \
-             for audit visibility."
-                .to_string(),
-        ))
+        if let Err(errors) = validation {
+            let error_summary: Vec<String> = errors
+                .iter()
+                .map(|e| format!("  [{}] {}: {}", e.step_index, e.path, e.message))
+                .collect();
+            warn!(
+                "propose-step-optimization IR validation failed ({} error(s))",
+                errors.len()
+            );
+            return Ok(ExecutionResult::failure(format!(
+                "Proposed steps failed IR validation ({} error(s)):\n{}",
+                errors.len(),
+                error_summary.join("\n")
+            )));
+        }
+
+        // 4. Render the proposed block as canonical YAML for display.
+        let proposed_yaml = serde_yaml::to_string(&yaml_value)
+            .unwrap_or_else(|_| "<failed to render YAML>".to_string());
+
+        // 5. Staged preview or live mode.
+        if config.staged {
+            // Staged mode: print a 🎭-marked preview to the Stage 3 step log.
+            // Authors reviewing the build log see exactly what would land
+            // in their front matter if they flipped `staged: false`.
+            let savings_line = match self.estimated_token_savings {
+                Some(n) => format!("Estimated token savings: ~{n} tokens/build\n"),
+                None => String::new(),
+            };
+            let preview = format!(
+                "\n\
+                 ═══════════════════════════════════════════════════════════════════\n\
+                 🎭 Proposed Step Optimization (staged preview — no changes applied)\n\
+                 ═══════════════════════════════════════════════════════════════════\n\
+                 \n\
+                 Section: `{section_wire}`\n\
+                 Rationale: {}\n\
+                 {savings_line}\
+                 \n\
+                 Proposed YAML (add to `{section_wire}:` in your agent .md):\n\
+                 ```yaml\n\
+                 {proposed_yaml}\
+                 ```\n\
+                 \n\
+                 To apply this optimization, set `self-optimization.staged: false`\n\
+                 in your front matter and the next build will open a PR.\n\
+                 ═══════════════════════════════════════════════════════════════════\n",
+                self.rationale
+            );
+            println!("{preview}");
+            info!("propose-step-optimization: staged preview rendered to build log");
+
+            Ok(ExecutionResult::success(
+                "Step-optimization proposal staged (preview only). \
+                 The proposed YAML is visible in the build log above. \
+                 Set `self-optimization.staged: false` to enable live PRs."
+                    .to_string(),
+            ))
+        } else {
+            // Live mode: open a PR against the source .md.
+            // This path is not yet implemented — it lands in
+            // todo `stage3-live-pr-path`.
+            warn!(
+                "propose-step-optimization: live mode (staged: false) is not yet \
+                 implemented; the proposal passed IR validation but no PR was opened."
+            );
+            Ok(ExecutionResult::failure(
+                "Live mode (staged: false) for propose-step-optimization is not \
+                 yet implemented. The proposal passed IR validation. Set \
+                 `self-optimization.staged: true` to see the staged preview, or \
+                 wait for the live-PR path to land in a future release."
+                    .to_string(),
+            ))
+        }
     }
 }
 

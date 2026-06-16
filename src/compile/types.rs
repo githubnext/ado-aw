@@ -1385,7 +1385,7 @@ impl SanitizeConfigTrait for PrChecksContextConfig {
 /// scrutiny.
 ///
 /// See `docs/self-optimization.md`.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SelfOptimizationConfig {
     /// Master switch. Defaults to `false` — this is opt-in.
     #[serde(default)]
