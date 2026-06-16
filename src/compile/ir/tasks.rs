@@ -244,6 +244,53 @@ pub fn nuget_command_step(command: impl Into<String>) -> TaskStep {
     TaskStep::new("NuGetCommand@2", format!("NuGet {cmd}")).with_input("command", cmd)
 }
 
+/// Returns a [`TaskStep`] for `PowerShell@2` in file-path mode.
+///
+/// Runs the PowerShell script at `file_path` on Linux, macOS, or Windows.
+/// `file_path` must be a fully qualified path or relative to
+/// `$(System.DefaultWorkingDirectory)`.
+///
+/// Optional inputs (applied via `.with_input(…)` on the returned value):
+///
+/// | Input key | Type | Default | Description |
+/// |---|---|---|---|
+/// | `arguments` | string | — | Arguments passed to the script. |
+/// | `errorActionPreference` | string | `"stop"` | Non-terminating error behaviour: `"stop"`, `"continue"`, `"silentlyContinue"`. |
+/// | `failOnStderr` | bool string | `"false"` | Fail the step if anything is written to stderr. |
+/// | `ignoreLASTEXITCODE` | bool string | `"false"` | Do not fail when `$LASTEXITCODE` is non-zero. |
+/// | `pwsh` | bool string | `"false"` | Use PowerShell Core (`pwsh`) instead of Windows PowerShell. |
+/// | `workingDirectory` | string | — | Working directory for the script. |
+///
+/// ADO task reference:
+/// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/powershell-v2>
+pub fn powershell_file_step(file_path: impl Into<String>) -> TaskStep {
+    TaskStep::new("PowerShell@2", "PowerShell Script")
+        .with_input("targetType", "filePath")
+        .with_input("filePath", file_path)
+}
+
+/// Returns a [`TaskStep`] for `PowerShell@2` in inline mode.
+///
+/// Runs `script` as an inline PowerShell block on Linux, macOS, or Windows.
+///
+/// Optional inputs (applied via `.with_input(…)` on the returned value):
+///
+/// | Input key | Type | Default | Description |
+/// |---|---|---|---|
+/// | `errorActionPreference` | string | `"stop"` | Non-terminating error behaviour: `"stop"`, `"continue"`, `"silentlyContinue"`. |
+/// | `failOnStderr` | bool string | `"false"` | Fail the step if anything is written to stderr. |
+/// | `ignoreLASTEXITCODE` | bool string | `"false"` | Do not fail when `$LASTEXITCODE` is non-zero. |
+/// | `pwsh` | bool string | `"false"` | Use PowerShell Core (`pwsh`) instead of Windows PowerShell. |
+/// | `workingDirectory` | string | — | Working directory for the script. |
+///
+/// ADO task reference:
+/// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/powershell-v2>
+pub fn powershell_inline_step(script: impl Into<String>) -> TaskStep {
+    TaskStep::new("PowerShell@2", "PowerShell Script")
+        .with_input("targetType", "inline")
+        .with_input("script", script)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -681,5 +728,117 @@ mod tests {
             assert_eq!(t.display_name, format!("NuGet {cmd}"));
             assert_eq!(t.inputs.get("command").map(|s| s.as_str()), Some(*cmd));
         }
+    }
+
+    // ── PowerShell@2 ─────────────────────────────────────────────────────
+
+    #[test]
+    fn powershell_file_step_sets_task_and_required_inputs() {
+        let t = powershell_file_step("scripts/deploy.ps1");
+        assert_eq!(t.task, "PowerShell@2");
+        assert_eq!(t.display_name, "PowerShell Script");
+        assert_eq!(
+            t.inputs.get("targetType").map(|s| s.as_str()),
+            Some("filePath")
+        );
+        assert_eq!(
+            t.inputs.get("filePath").map(|s| s.as_str()),
+            Some("scripts/deploy.ps1")
+        );
+        // only the required inputs are set by default
+        assert_eq!(t.inputs.len(), 2);
+    }
+
+    #[test]
+    fn powershell_file_step_accepts_optional_arguments() {
+        let t = powershell_file_step("$(System.DefaultWorkingDirectory)/scripts/build.ps1")
+            .with_input("arguments", "-Configuration Release -OutputDir $(Build.ArtifactStagingDirectory)")
+            .with_input("workingDirectory", "$(Build.SourcesDirectory)");
+        assert_eq!(t.task, "PowerShell@2");
+        assert_eq!(
+            t.inputs.get("filePath").map(|s| s.as_str()),
+            Some("$(System.DefaultWorkingDirectory)/scripts/build.ps1")
+        );
+        assert_eq!(
+            t.inputs.get("arguments").map(|s| s.as_str()),
+            Some("-Configuration Release -OutputDir $(Build.ArtifactStagingDirectory)")
+        );
+        assert_eq!(
+            t.inputs.get("workingDirectory").map(|s| s.as_str()),
+            Some("$(Build.SourcesDirectory)")
+        );
+        assert_eq!(t.inputs.len(), 4);
+    }
+
+    #[test]
+    fn powershell_file_step_accepts_error_and_exit_flags() {
+        let t = powershell_file_step("scripts/test.ps1")
+            .with_input("errorActionPreference", "continue")
+            .with_input("failOnStderr", "true")
+            .with_input("ignoreLASTEXITCODE", "true")
+            .with_input("pwsh", "true");
+        assert_eq!(t.task, "PowerShell@2");
+        assert_eq!(
+            t.inputs.get("errorActionPreference").map(|s| s.as_str()),
+            Some("continue")
+        );
+        assert_eq!(
+            t.inputs.get("failOnStderr").map(|s| s.as_str()),
+            Some("true")
+        );
+        assert_eq!(
+            t.inputs.get("ignoreLASTEXITCODE").map(|s| s.as_str()),
+            Some("true")
+        );
+        assert_eq!(t.inputs.get("pwsh").map(|s| s.as_str()), Some("true"));
+        assert_eq!(t.inputs.len(), 6);
+    }
+
+    #[test]
+    fn powershell_inline_step_sets_task_and_required_inputs() {
+        let script = "Write-Host 'Hello, World!'";
+        let t = powershell_inline_step(script);
+        assert_eq!(t.task, "PowerShell@2");
+        assert_eq!(t.display_name, "PowerShell Script");
+        assert_eq!(
+            t.inputs.get("targetType").map(|s| s.as_str()),
+            Some("inline")
+        );
+        assert_eq!(
+            t.inputs.get("script").map(|s| s.as_str()),
+            Some("Write-Host 'Hello, World!'")
+        );
+        // only the required inputs are set by default
+        assert_eq!(t.inputs.len(), 2);
+    }
+
+    #[test]
+    fn powershell_inline_step_accepts_optional_flags() {
+        let t = powershell_inline_step("Get-Date")
+            .with_input("pwsh", "true")
+            .with_input("errorActionPreference", "silentlyContinue")
+            .with_input("workingDirectory", "$(Build.SourcesDirectory)");
+        assert_eq!(t.task, "PowerShell@2");
+        assert_eq!(t.inputs.get("pwsh").map(|s| s.as_str()), Some("true"));
+        assert_eq!(
+            t.inputs.get("errorActionPreference").map(|s| s.as_str()),
+            Some("silentlyContinue")
+        );
+        assert_eq!(
+            t.inputs.get("workingDirectory").map(|s| s.as_str()),
+            Some("$(Build.SourcesDirectory)")
+        );
+        assert_eq!(t.inputs.len(), 5);
+    }
+
+    #[test]
+    fn powershell_inline_step_multiline_script() {
+        let script = "$version = Get-Content VERSION\nWrite-Host \"Building version $version\"";
+        let t = powershell_inline_step(script);
+        assert_eq!(t.task, "PowerShell@2");
+        assert_eq!(
+            t.inputs.get("script").map(|s| s.as_str()),
+            Some("$version = Get-Content VERSION\nWrite-Host \"Building version $version\"")
+        );
     }
 }
