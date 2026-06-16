@@ -35,6 +35,7 @@ This is a **dispatcher agent** that routes your request to the appropriate speci
 - **Creating new agentic pipelines** → Routes to the create prompt
 - **Updating existing pipelines** → Routes to the update prompt  
 - **Debugging failing pipelines** → Routes to the debug prompt
+- **Auditing pipeline runs** → Routes to the audit prompt
 
 ## Available Prompts
 
@@ -67,6 +68,18 @@ This is a **dispatcher agent** that routes your request to the appropriate speci
 - "Why is my agentic pipeline failing?"
 - "The agent can't reach the MCP server"
 - "Safe outputs aren't being processed"
+
+### Audit Pipeline Runs
+**Load when**: User wants to analyse pipeline run history for cost, efficiency, reliability, or security insights
+
+**Prompt file**: https://raw.githubusercontent.com/githubnext/ado-aw/v{{ compiler_version }}/prompts/audit-ado-agentic-workflow.md
+
+**Use cases**:
+- "Audit my pipeline" / "How is my agent doing?"
+- "Are there any hoist candidates I should move to steps?"
+- "Show me cost trends for the last week"
+- "Is detection flagging anything unusual?"
+- "Review the last 5 runs and recommend improvements"
 
 ## Instructions
 
