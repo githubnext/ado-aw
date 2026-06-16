@@ -140,11 +140,24 @@ mod tests {
 
     #[test]
     fn distinct_kinds_do_not_share_address_space() {
-        // Compile-time check: a StageId and a JobId with the same inner
-        // string are not interchangeable. This won't even compile if
-        // it isn't true, so the assertion is documentary.
-        let _stage = StageId::new("Foo").unwrap();
-        let _job = JobId::new("Foo").unwrap();
-        // (no assertion needed; the test compiles iff the types are distinct)
+        use std::any::TypeId;
+        // Runtime verification that the three ID newtypes are distinct Rust
+        // types. A coalescing refactor that accidentally unified any two of
+        // them would be caught here.
+        assert_ne!(
+            TypeId::of::<StageId>(),
+            TypeId::of::<JobId>(),
+            "StageId and JobId must be distinct types"
+        );
+        assert_ne!(
+            TypeId::of::<StageId>(),
+            TypeId::of::<StepId>(),
+            "StageId and StepId must be distinct types"
+        );
+        assert_ne!(
+            TypeId::of::<JobId>(),
+            TypeId::of::<StepId>(),
+            "JobId and StepId must be distinct types"
+        );
     }
 }

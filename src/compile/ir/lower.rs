@@ -1958,7 +1958,7 @@ mod tests {
         let g = Graph::default();
         let yaml = serde_yaml::to_string(&lower_with_graph(&p, &g).unwrap()).unwrap();
         assert!(
-            !yaml.contains("name:") || !yaml.contains("should-not-appear"),
+            !yaml.contains("name:"),
             "template shape must not emit top-level `name:`, got: {yaml}"
         );
         assert!(
@@ -2004,7 +2004,7 @@ mod tests {
         let g = Graph::default();
         let yaml = serde_yaml::to_string(&lower_with_graph(&p, &g).unwrap()).unwrap();
         assert!(
-            !yaml.starts_with("name:"),
+            !yaml.contains("name:"),
             "must skip top-level name, got: {yaml}"
         );
         assert!(yaml.contains("jobs:"), "must emit jobs:, got: {yaml}");

@@ -348,7 +348,10 @@ pub mod codegen {
                 "eq(dependencies.Setup.outputs['x.y'], 'true')"
             );
             let c = Condition::Custom("eq(variables['X'], '${{ parameters.y }}')".to_string());
-            assert!(lower_condition(&ctx, &c).is_ok());
+            assert_eq!(
+                lower_condition(&ctx, &c).unwrap(),
+                "eq(variables['X'], '${{ parameters.y }}')"
+            );
         }
 
         #[test]
@@ -403,6 +406,13 @@ mod tests {
     #[test]
     fn not_boxes_inner() {
         let c = Condition::not(Condition::Succeeded);
-        assert!(matches!(c, Condition::Not(_)));
+        if let Condition::Not(inner) = c {
+            assert!(
+                matches!(*inner, Condition::Succeeded),
+                "not() must box the supplied inner condition"
+            );
+        } else {
+            panic!("expected Condition::Not");
+        }
     }
 }
