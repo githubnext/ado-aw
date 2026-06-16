@@ -266,3 +266,156 @@ The production target wrappers are:
 The canonical 5-job Setup → Agent → Detection → SafeOutputs → Teardown shape itself lives in `agentic_pipeline.rs` and is reused unchanged by every wrapper above; extensions plug into it via `Declarations` (steps, env, hosts, MCPG entries, and Agent-job condition clauses — see `Declarations::agent_conditions`).
 
 When adding a target, follow the same pattern: parse and validate front matter, collect extension `Declarations`, build typed jobs/stages/steps, set the correct `PipelineShape`, and call the shared emit path.
+
+## Public JSON summary
+
+The internal IR types (`Pipeline`, `Job`, `Step`, `Graph`, …) are intentionally tied to the compiler's lowering needs and are **not** public API. `src/compile/ir/summary.rs` defines a parallel **summary tree** with `#[derive(Serialize)]` that provides agent-facing tooling with a stable JSON view of a compiled pipeline.
+
+This is the schema consumed by:
+
+- `ado-aw inspect <source> --json` — returns a full `PipelineSummary`
+- `ado-aw graph dump <source> --format json` — returns a `GraphSummary` subset
+- `ado-aw graph deps` / `ado-aw graph outputs` — focused graph queries
+- `ado-aw whatif` — static downstream skip analysis built on graph reachability
+- `ado-aw audit --json` — the `pipeline_graph` field in `AuditData`
+- The [author MCP server](/ado-aw/reference/mcp-author/) tools (`inspect_workflow`, `graph_summary`, `graph_dump`)
+
+### Stability contract
+
+`PipelineSummary::schema_version` (currently `1`) is the public schema version. It is bumped when the JSON shape changes in a backwards-incompatible way — renamed field, removed variant, or changed semantics. Additive changes (new optional fields) do not require a bump. New enum variants do require a bump because the serialized enums have no catch-all `Unknown` variants.
+
+Internal IR types may change freely without bumping the summary version, as long as the `summary.rs` lowering keeps the existing field set populated correctly.
+
+### Top-level shape
+
+```jsonc
+{
+  "schema_version": 1,
+  "name": "<pipeline name>",                           // ADO build-number format string
+  "shape": "standalone" | "1es" | "job-template" | "stage-template",
+  "body": { "kind": "jobs",   "jobs": [...] },
+        // OR
+           { "kind": "stages", "stages": [...] },
+  "graph": { ... }                                     // see GraphSummary below
+}
+```
+
+The `body` discriminant (`kind`) mirrors `PipelineBody`: flat pipelines (`standalone`, `job-template`) use `"jobs"`, stage-wrapped pipelines (`1es`, `stage-template`) use `"stages"`.
+
+### `JobSummary`
+
+Each entry in `body.jobs` (or inside a stage's `jobs` array):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | ADO job identifier (`name:` in YAML) |
+| `stage` | string or null | Stage id this job belongs to; `null` for flat (non-stage) pipelines |
+| `display_name` | string | Human-readable `displayName:` |
+| `depends_on` | string[] | `dependsOn:` entries — both explicitly declared and graph-derived |
+| `condition` | string or null | Lowered ADO condition expression, e.g. `"succeeded()"` |
+| `pool` | object | Pool summary — see `PoolSummary` below |
+| `steps` | object[] | Ordered list of step summaries — see `StepSummary` below |
+
+`PoolSummary` has one of two shapes depending on pool type:
+
+```jsonc
+// Microsoft-hosted
+{ "kind": "vm_image", "image": "ubuntu-22.04" }
+
+// Self-hosted or 1ES
+{ "kind": "named", "name": "MyPool", "image": null, "os": "linux" }
+```
+
+### `StepSummary`
+
+Each entry in `job.steps`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string or null | ADO step `name:` — present when other steps read this step's outputs |
+| `kind` | string | Step variant: `"bash"`, `"task"`, `"checkout"`, `"download"`, `"publish"`, `"raw_yaml"` |
+| `display_name` | string or null | Human-readable `displayName:` |
+| `task` | string or null | For `task` steps only: ADO task identifier, e.g. `"UseNode@1"` |
+| `condition` | string or null | Lowered ADO condition expression |
+| `outputs` | object[] | Output variables declared by this step |
+| `env_refs` | object[] | Other steps' outputs read via this step's `env:` block |
+| `condition_refs` | object[] | Other steps' outputs read via this step's `condition:` |
+
+Each entry in `outputs`:
+
+```jsonc
+{
+  "name": "AW_SYNTHETIC_PR_ID",   // ##vso[task.setvariable variable=...] name
+  "is_secret": false,              // true → value is masked in logs
+  "auto_is_output": true           // true → at least one cross-step consumer → emit isOutput=true
+}
+```
+
+Each entry in `env_refs` / `condition_refs`:
+
+```jsonc
+{ "step": "synthPr", "name": "AW_SYNTHETIC_PR_ID" }
+```
+
+### `GraphSummary`
+
+The `graph` field is a JSON-friendly view of the typed `Graph` built during lowering:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `step_locations` | object[] | Every named step with its job/stage location and declared outputs |
+| `job_edges` | object[] | Derived job-level `dependsOn` edges |
+| `stage_edges` | object[] | Derived stage-level `dependsOn` edges |
+| `outputs_needing_is_output` | object[] | Producer steps whose outputs are read cross-step (need `isOutput=true`) |
+
+Each `job_edges` / `stage_edges` entry:
+
+```jsonc
+{ "consumer": "Agent", "producer": "Setup" }
+// means: Agent dependsOn Setup
+```
+
+Each `step_locations` entry:
+
+```jsonc
+{ "step": "synthPr", "stage": null, "job": "Setup", "outputs": ["AW_SYNTHETIC_PR_ID"] }
+```
+
+Each `outputs_needing_is_output` entry:
+
+```jsonc
+{ "step": "synthPr", "outputs": ["AW_SYNTHETIC_PR_ID"] }
+```
+
+### Example: inspect output
+
+Running `ado-aw inspect examples/sample-agent.md --json` for a simple PR-triggered pipeline returns a summary like:
+
+```jsonc
+{
+  "schema_version": 1,
+  "name": "sample-agent",
+  "shape": "standalone",
+  "body": {
+    "kind": "jobs",
+    "jobs": [
+      { "id": "Setup",       "stage": null, "depends_on": [], ... },
+      { "id": "Agent",       "stage": null, "depends_on": ["Setup"], ... },
+      { "id": "Detection",   "stage": null, "depends_on": ["Agent"], ... },
+      { "id": "SafeOutputs", "stage": null, "depends_on": ["Detection"], ... },
+      { "id": "Teardown",    "stage": null, "depends_on": ["SafeOutputs"], ... }
+    ]
+  },
+  "graph": {
+    "job_edges": [
+      { "consumer": "Agent",       "producer": "Setup" },
+      { "consumer": "Detection",   "producer": "Agent" },
+      { "consumer": "SafeOutputs", "producer": "Detection" },
+      { "consumer": "Teardown",    "producer": "SafeOutputs" }
+    ],
+    ...
+  }
+}
+```
+
+The five jobs reflect the canonical Setup → Agent → Detection → SafeOutputs → Teardown shape for every compiled pipeline.
