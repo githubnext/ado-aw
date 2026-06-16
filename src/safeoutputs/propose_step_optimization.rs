@@ -405,6 +405,46 @@ impl ProposeStepOptimizationResult {
 
         let client = reqwest::Client::new();
 
+        // ── Idempotency / dedup: check for an existing open PR that
+        // already proposes steps for this section. If found, add a
+        // comment instead of opening a duplicate.
+        let search_prefix = format!("ado-aw/self-opt-{}-", section_wire);
+        let pr_search_url = format!(
+            "{}{}/_apis/git/repositories/{}/pullrequests?searchCriteria.status=active&searchCriteria.sourceRefName=refs/heads/{}&api-version=7.1",
+            org_url.trim_end_matches('/'),
+            format!("/{}", utf8_percent_encode(project, super::PATH_SEGMENT)),
+            repo_id,
+            utf8_percent_encode(&search_prefix, super::PATH_SEGMENT),
+        );
+        // ADO's sourceRefName filter is prefix-based, so this finds
+        // any branch starting with our section-specific prefix.
+        if let Ok(search_resp) = client
+            .get(&pr_search_url)
+            .basic_auth("", Some(token))
+            .send()
+            .await
+        {
+            if search_resp.status().is_success() {
+                if let Ok(body) = search_resp.json::<serde_json::Value>().await {
+                    if let Some(prs) = body["value"].as_array() {
+                        if let Some(existing_pr) = prs.first() {
+                            let pr_id = existing_pr["pullRequestId"].as_u64().unwrap_or(0);
+                            info!(
+                                "propose-step-optimization: found existing open PR #{} \
+                                 for section `{section_wire}` — skipping duplicate",
+                                pr_id
+                            );
+                            return Ok(ExecutionResult::success(format!(
+                                "An open self-optimization PR (#{pr_id}) already targets \
+                                 the `{section_wire}` section. No duplicate PR was created. \
+                                 Review and merge (or close) the existing PR first."
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+
         // Resolve the HEAD commit of the default branch (target for the PR).
         let default_branch = ctx
             .source_branch_name

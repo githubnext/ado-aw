@@ -4941,6 +4941,21 @@ fn test_self_optimization_enables_propose_step_optimization_tool() {
     );
 }
 
+/// Compile the `self-optimization-live-agent.md` fixture (staged: false)
+/// and verify it also enables the tool — the compile output is the same
+/// regardless of the `staged` flag because staging is a Stage 3 runtime
+/// decision, not a compile-time fork.
+#[test]
+fn test_self_optimization_staged_false_compiles_identically() {
+    let compiled = compile_fixture("self-optimization-live-agent.md");
+    assert_valid_yaml(&compiled, "self-optimization-live-agent.md");
+
+    assert!(
+        compiled.contains("--enabled-tools propose-step-optimization"),
+        "staged: false must still enable the tool at compile time"
+    );
+}
+
 /// The example file in `examples/dogfood-failure-reporter.md` must compile
 /// cleanly. Mirror of the structural smoke test for `examples/sample-agent.md`.
 #[test]
