@@ -72,6 +72,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   ├── job_ir.rs     # Job target typed-IR builder
 │   │   ├── stage.rs      # Stage-level ADO template compiler (target: stage)
 │   │   ├── stage_ir.rs   # Stage target typed-IR builder
+│   │   ├── source_path_guard.rs # Validation guard for untrusted workflow source-path inputs used by audit + mcp_author
 │   │   ├── gitattributes.rs # .gitattributes management for compiled pipelines
 │   │   ├── filter_ir.rs  # Filter expression IR: Fact/Predicate types, lowering, validation, codegen
 │   │   ├── pr_filters.rs # PR trigger filter generation (native ADO + gate steps)
@@ -84,7 +85,14 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   │   ├── exec_context/ # Always-on execution-context extension (issue #860)
 │   │   │   │   ├── mod.rs    # ExecContextExtension; CompilerExtension impl; contributor fan-out
 │   │   │   │   ├── contributor.rs # Internal ContextContributor trait + Contributor enum
-│   │   │   │   └── pr.rs     # PrContextContributor — stages aw-context/pr/* for PR builds
+│   │   │   │   ├── ci_push.rs # CiPushContextContributor — push-build context facts for CI runs
+│   │   │   │   ├── manual.rs # ManualContextContributor — manually queued build context facts
+│   │   │   │   ├── pipeline.rs # PipelineContextContributor — shared pipeline/run metadata facts
+│   │   │   │   ├── pr.rs     # PrContextContributor — stages aw-context/pr/* for PR builds
+│   │   │   │   ├── pr_checks.rs # PrChecksContextContributor — PR validation / policy-check facts
+│   │   │   │   ├── repo.rs   # RepoContextContributor — repository identity / remote facts
+│   │   │   │   ├── schedule.rs # ScheduleContextContributor — scheduled-run context facts
+│   │   │   │   └── workitem.rs # WorkItemContextContributor — linked work-item context facts
 │   │   │   ├── azure_cli.rs # Always-on Azure CLI extension (runtime detection, AWF mounts, az allowlist)
 │   │   │   └── tests.rs  # Extension integration tests
 │   │   ├── codemods/     # Front-matter codemods (one file per transformation)
@@ -112,6 +120,9 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── fuzzy_schedule.rs # Fuzzy schedule parsing
 │   ├── logging.rs        # File-based logging infrastructure
 │   ├── mcp.rs            # SafeOutputs MCP server (stdio + HTTP)
+│   ├── mcp_author/       # Author-facing read-only MCP server for local IDE/Copilot Chat integrations
+│   │   ├── mod.rs        # Tool router + handlers for inspect/graph/whatif/lint/catalog/trace/audit
+│   │   └── tests.rs      # MCP-author integration / contract tests
 │   ├── configure.rs      # `configure` CLI command (deprecated) — hidden alias forwarding to `secrets set GITHUB_TOKEN`
 │   ├── secrets.rs        # `secrets set/list/delete` subcommand group — manages pipeline variables (never prints values from `list`)
 │   ├── enable.rs         # `enable` CLI command — registers ADO build definitions for compiled pipelines and ensures they are enabled
@@ -129,6 +140,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   ├── model.rs      # AuditData and supporting report structs
 │   │   ├── findings.rs   # Finding severity levels and structured finding types
 │   │   ├── cache.rs      # Artifact download cache (keyed on build-id)
+│   │   ├── pipeline_graph.rs # IR/runtime graph correlation that populates AuditData.pipeline_graph
 │   │   ├── url.rs        # Build-reference parsing (bare ID, full ADO URL)
 │   │   ├── analyzers/    # Per-signal analyzers that populate AuditData sections
 │   │   │   ├── mod.rs
@@ -144,10 +156,16 @@ Every compiled pipeline runs as three sequential jobs:
 │   │       ├── mod.rs
 │   │       ├── console.rs # Human-readable console report
 │   │       └── json.rs    # Machine-readable AuditData JSON
-│   ├── inspect/          # `ado-aw inspect` / `graph` / (planned) `trace` / `whatif` / `lint` / `catalog` — read-only IR queries
+│   ├── inspect/          # `ado-aw inspect` / `graph` / `trace` / `whatif` / `lint` / `catalog` — read-only IR queries
 │   │   ├── mod.rs        # Module entry; public re-exports of every dispatcher
 │   │   ├── cli.rs        # Dispatchers (`dispatch_inspect`, `dispatch_graph`, …) and option structs
-│   │   └── graph_query.rs # Text/DOT renderers for the resolved dependency graph
+│   │   ├── graph_query.rs # Text/DOT renderers for the resolved dependency graph
+│   │   ├── graph_deps.rs # `ado-aw graph deps`: upstream/downstream dependency traversal
+│   │   ├── graph_outputs.rs # `ado-aw graph outputs`: producer/consumer output-reference table
+│   │   ├── trace.rs      # `ado-aw trace`: correlate audit telemetry with the local IR graph
+│   │   ├── whatif.rs     # `ado-aw whatif`: static downstream skip classification for failures
+│   │   ├── lint.rs       # `ado-aw lint`: structural workflow lint checks
+│   │   └── catalog.rs    # `ado-aw catalog`: list in-tree registries (tools, runtimes, models, etc.)
 │   ├── detect.rs         # Agentic pipeline detection — discovers compiled pipelines; used by all lifecycle commands
 │   ├── update_check.rs   # Version update check — queries GitHub Releases and prints advisory when newer version is available
 │   ├── ndjson.rs         # NDJSON parsing utilities

@@ -166,6 +166,14 @@ Both `--all-repos` and `--source` route through `ado-aw`'s `discover_ado_aw_pipe
 
 - `whatif <source> --fail <step-id-or-job-id> [--json]` - Statically classify downstream jobs that would be skipped, or would run anyway, if a step or job failed.
 
+- `lint <source> [--json]` - Run structural lint checks over an agent source file without writing YAML.
+  - `<source>` - Path to the agent markdown file.
+  - `--json` - Emit lint findings as structured JSON instead of the human-readable report.
+
+- `catalog [--kind <safe-outputs|runtimes|tools|engines|models>] [--json]` - List the compiler's in-tree registries for scripting or discovery.
+  - `--kind <...>` - Restrict output to one category. When omitted, emits every category.
+  - `--json` - Emit the catalog as structured JSON instead of the human-readable report.
+
 ### Hidden Build-Time Tools
 
 These commands are not shown in `--help` but are available for contributors working on the ado-aw compiler itself:
