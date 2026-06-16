@@ -57,6 +57,113 @@ ado-aw check <pipeline>
 
 The source markdown path is auto-detected from the `@ado-aw` header inside the compiled YAML.
 
+## IR analysis commands
+
+These commands work entirely offline against a local agent source file — no ADO connection required. They compile the source into the typed IR and then answer questions about it.
+
+### `inspect <source>`
+
+Print a human summary (or full JSON) of the typed IR for an agent markdown source: stages, jobs, steps, output declarations, and derived `dependsOn` edges.
+
+```bash
+ado-aw inspect <source> [--json]
+```
+
+Options:
+
+- `--json` -- emit the full [`PipelineSummary`](/ado-aw/reference/ir/) as JSON instead of the terse human summary
+
+### `graph dump <source>`
+
+Dump the resolved dependency graph in text, JSON, or Graphviz DOT format.
+
+```bash
+ado-aw graph dump <source> [--format text|json|dot]
+```
+
+Options:
+
+- `--format text|json|dot` -- output format (default: `text`)
+
+### `graph deps <source> <step>`
+
+Traverse the dependency chain upstream or downstream from one named step.
+
+```bash
+ado-aw graph deps <source> <step> [--direction upstream|downstream] [--json]
+```
+
+Options:
+
+- `--direction upstream|downstream` -- traversal direction (default: `upstream`)
+- `--json` -- emit machine-readable JSON
+
+### `graph outputs <source>`
+
+Print every declared step output and the steps that consume it.
+
+```bash
+ado-aw graph outputs <source> [--producer <step-id>] [--consumer <step-id>] [--json]
+```
+
+Options:
+
+- `--producer <step-id>` -- filter to outputs declared by this step
+- `--consumer <step-id>` -- filter to outputs consumed by this step
+- `--json` -- emit machine-readable JSON
+
+### `whatif <source> --fail <id>`
+
+Static reachability: given a step or job ID that is treated as failing, classify every downstream job as either `skipped` or `runs_anyway` based on their compiled ADO condition strings.
+
+```bash
+ado-aw whatif <source> --fail <step-or-job-id> [--json]
+```
+
+Options:
+
+- `--fail <id>` -- **(required)** step or job ID to treat as failing
+- `--json` -- emit a `WhatIfReport` as JSON
+
+### `lint <source>`
+
+Run structural lint checks over an agent source file and print findings (errors, warnings, info). Exits with a non-zero code when any errors are found.
+
+```bash
+ado-aw lint <source> [--json]
+```
+
+Options:
+
+- `--json` -- emit a `LintReport` as JSON
+
+### `catalog`
+
+List the in-tree registries of safe-output tools, runtimes, first-class tools, engines, and models.
+
+```bash
+ado-aw catalog [--kind <category>] [--json]
+```
+
+Options:
+
+- `--kind safe-outputs|runtimes|tools|engines|models` -- restrict output to one category; omit to see all
+- `--json` -- emit the catalog as JSON
+
+### `trace <build-id-or-url>`
+
+Trace a build's failing-job chain by joining live audit data (downloaded from ADO) with the local typed-IR graph. Requires that the source markdown is available locally.
+
+```bash
+ado-aw trace <build-id-or-url> [--step <id>] [--json] [--org <url>] [--project <name>] [--pat <token>]
+```
+
+Options:
+
+- `--step <id>` -- typed-IR step ID to focus the trace on
+- `--json` -- emit a `TraceReport` as JSON
+- `--org`, `--project`, `--pat` -- ADO context overrides (same as `audit`)
+
 ## Pipeline lifecycle commands
 
 These commands interact with Azure DevOps build definitions and require ADO API access. They infer the ADO organization and project from the local git remote by default; pass `--org` and `--project` to override.
@@ -323,6 +430,33 @@ ado-aw compile
 
 # Verify a generated pipeline
 ado-aw check agent.lock.yml
+
+# Inspect the typed IR for a source file (human summary)
+ado-aw inspect agents/my-agent.md
+
+# Inspect as machine-readable JSON (matches ado-aw audit pipeline_graph.summary)
+ado-aw inspect agents/my-agent.md --json
+
+# Dump the resolved dependency graph as Graphviz DOT
+ado-aw graph dump agents/my-agent.md --format dot
+
+# Trace which steps flow into a named step
+ado-aw graph deps agents/my-agent.md my-step-id
+
+# List all declared outputs and their consumers
+ado-aw graph outputs agents/my-agent.md
+
+# Simulate a failure: classify every downstream job as skipped or runs_anyway
+ado-aw whatif agents/my-agent.md --fail agent_step_id
+
+# Run structural lint checks
+ado-aw lint agents/my-agent.md
+
+# List all available safe-output tools
+ado-aw catalog --kind safe-outputs
+
+# Trace a failing build's job chain using ADO audit data + local IR
+ado-aw trace 12345
 
 # Set GITHUB_TOKEN on all matched pipelines (local lock files)
 ado-aw secrets set GITHUB_TOKEN
