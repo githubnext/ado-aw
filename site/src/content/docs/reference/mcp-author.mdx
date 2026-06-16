@@ -1,0 +1,225 @@
+---
+title: "Author MCP Server"
+description: "Local read-only MCP server for IDE and Copilot Chat integrations. Exposes workflow inspection, graph traversal, lint, what-if, trace, and audit tools over the standard Model Context Protocol."
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+`ado-aw mcp-author` runs a **local, read-only MCP server over stdio** for IDE and Copilot Chat integrations. It exposes the full set of IR analysis commands — inspect, graph traversal, lint, what-if, trace, and audit — as MCP tools so your IDE agent can reason about ado-aw workflows without you running CLI commands by hand.
+
+<Aside type="caution" title="Not the SafeOutputs MCP server">
+  `mcp-author` is a **local developer tool**. It is completely separate from the `ado-aw mcp` / `ado-aw mcp-http` servers that compiled pipelines run in Stage 1 to record safe-output proposals.
+  
+  | Server | Purpose | Who runs it |
+  |--------|---------|-------------|
+  | `ado-aw mcp-author` | Local IR queries for IDE agents | You, on your laptop |
+  | `ado-aw mcp` | Stage 1 safe-output recording | Compiled pipeline (Stage 1) |
+  | `ado-aw mcp-http` | Same, over HTTP for MCPG routing | Compiled pipeline (Stage 1) |
+</Aside>
+
+## When to use it
+
+Connect `mcp-author` to your IDE agent when you want to:
+
+- **Inspect compiled workflow structure** — stages, jobs, steps, outputs, `dependsOn` edges — without reading raw YAML.
+- **Trace a failing build** to see which jobs were skipped because of an upstream failure.
+- **Lint a workflow** before opening a PR.
+- **Ask "what if this step fails?"** to understand blast radius.
+- **Audit a build** to get the full `AuditData` JSON for post-mortem analysis.
+
+## Tools
+
+Every tool maps directly to an equivalent `ado-aw` CLI command. The `source_path` parameter accepts any relative path to a `.md` workflow file — `..` traversal, `~` prefixes, and non-`.md` targets are rejected.
+
+| Tool | CLI equivalent | Description |
+|------|----------------|-------------|
+| `inspect_workflow` | `ado-aw inspect <source>` | Build and return the public [`PipelineSummary`](/ado-aw/reference/ir/) |
+| `graph_summary` | `ado-aw graph dump --format json` | Return the resolved `GraphSummary` as a structured object |
+| `graph_dump` | `ado-aw graph dump [--format text\|dot]` | Render the dependency graph as plain text or Graphviz DOT |
+| `step_dependencies` | `ado-aw graph deps <source> <step>` | Traverse upstream or downstream dependencies from one step |
+| `step_outputs` | `ado-aw graph outputs <source>` | List declared outputs and the steps that consume them |
+| `whatif` | `ado-aw whatif <source> --fail <id>` | Classify downstream jobs as `skipped` or `runs_anyway` if a step fails |
+| `lint_workflow` | `ado-aw lint <source>` | Run structural lint checks; returns findings with severity |
+| `catalog` | `ado-aw catalog [--kind]` | List safe-output tools, runtimes, first-class tools, engines, and models |
+| `trace_failure` | `ado-aw trace <build-id-or-url>` | Trace a build's failing-job chain using audit data + local IR graph |
+| `audit_build` | `ado-aw audit <build-id-or-url> --json` | Download and analyze a completed build; same JSON shape as `--json` output |
+
+### `inspect_workflow`
+
+Returns the public [`PipelineSummary`](/ado-aw/reference/ir/) for a workflow source file — stages, jobs, steps, output declarations, and derived `dependsOn` edges.
+
+```json
+{ "source_path": "agents/my-agent.md" }
+```
+
+### `graph_summary`
+
+Returns the resolved `GraphSummary` as a structured JSON object. Use this when you want machine-readable graph data rather than a text rendering.
+
+```json
+{ "source_path": "agents/my-agent.md" }
+```
+
+### `graph_dump`
+
+Renders the dependency graph as plain text or Graphviz DOT. Useful for generating diagrams.
+
+```json
+{ "source_path": "agents/my-agent.md", "format": "text" }
+```
+
+`format` accepts `"text"` (default) or `"dot"`. Passing `"json"` returns a `GraphSummary` object (same as `graph_summary`).
+
+### `step_dependencies`
+
+Traverses upstream or downstream dependencies from a given step or job ID.
+
+```json
+{ "source_path": "agents/my-agent.md", "step_id": "Agent", "direction": "upstream" }
+```
+
+`direction` accepts `"upstream"` (default) or `"downstream"`.
+
+### `step_outputs`
+
+Lists every declared step output and the steps that reference it. Both filters are optional.
+
+```json
+{ "source_path": "agents/my-agent.md", "producer": "Agent", "consumer": null }
+```
+
+### `whatif`
+
+Treats `failing_id` as the failing step or job and classifies every downstream job as `skipped` or `runs_anyway` based on compiled ADO condition strings.
+
+```json
+{ "source_path": "agents/my-agent.md", "failing_id": "Agent" }
+```
+
+### `lint_workflow`
+
+Runs structural lint checks over the workflow. Returns a `LintReport` with findings at `error`, `warning`, and `info` severity levels.
+
+```json
+{ "source_path": "agents/my-agent.md" }
+```
+
+### `catalog`
+
+Lists the in-tree registries. `kind` is optional; omit it to see all categories.
+
+```json
+{ "kind": "safe-outputs" }
+```
+
+`kind` accepts `"safe-outputs"`, `"runtimes"`, `"tools"`, `"engines"`, `"models"`, or `null` (all).
+
+### `trace_failure`
+
+Downloads audit artifacts for a completed build and correlates the failing-job chain with the local typed IR. Returns a `TraceReport`. See the [Audit reference](/ado-aw/reference/audit/) for accepted build-ID / URL forms.
+
+```json
+{
+  "build_id_or_url": "12345",
+  "step": null,
+  "org": null,
+  "project": null,
+  "pat": null
+}
+```
+
+- `step` — optional typed-IR step ID to focus the trace on.
+- `org`, `project` — ADO overrides for bare build IDs; inferred from the git remote when omitted.
+- `pat` — explicit PAT; uses `AZURE_DEVOPS_EXT_PAT` or the Azure CLI auth chain when omitted.
+
+### `audit_build`
+
+Downloads and analyzes a completed build. Returns the full `AuditData` JSON — same shape as `ado-aw audit --json`. See the [Audit reference](/ado-aw/reference/audit/) for the report structure.
+
+Artifact downloads are cached under `${TEMP}/ado-aw/audit/<build-id>/` and reused on subsequent calls unless `no_cache` is set.
+
+```json
+{
+  "build_id_or_url": "12345",
+  "org": null,
+  "project": null,
+  "pat": null,
+  "artifacts": null,
+  "no_cache": false
+}
+```
+
+- `artifacts` — optional array of `"agent"`, `"detection"`, and/or `"safe-outputs"` to download only a subset.
+- `no_cache` — when `true`, forces re-download even if a cached `run-summary.json` exists.
+
+## Trust model
+
+`mcp-author` runs as the invoking local user with no bounding directory or sandbox. It has full read access to your local filesystem (within the path-safety rules described above). ADO-facing tools (`audit_build`, `trace_failure`) use the same auth chain as `ado-aw audit`:
+
+1. Explicit `pat` parameter
+2. `AZURE_DEVOPS_EXT_PAT` environment variable
+3. Azure CLI (`az`) interactive login
+
+## IDE configuration
+
+`ado-aw` must be on your `PATH`. Install it via the [Quick Start](/ado-aw/setup/quick-start/) guide.
+
+<Tabs>
+  <TabItem label="VS Code">
+
+Add to your `.vscode/mcp.json` (workspace) or VS Code user settings:
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "ado-aw-author": {
+        "command": "ado-aw",
+        "args": ["mcp-author"]
+      }
+    }
+  }
+}
+```
+
+  </TabItem>
+  <TabItem label="Claude Desktop">
+
+Add to `claude_desktop_config.json` (usually at `~/Library/Application Support/Claude/` on macOS):
+
+```json
+{
+  "mcpServers": {
+    "ado-aw-author": {
+      "command": "ado-aw",
+      "args": ["mcp-author"]
+    }
+  }
+}
+```
+
+  </TabItem>
+  <TabItem label="Cursor">
+
+Add to your Cursor MCP settings (`~/.cursor/mcp.json` or the project-level `.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "ado-aw-author": {
+      "command": "ado-aw",
+      "args": ["mcp-author"]
+    }
+  }
+}
+```
+
+  </TabItem>
+</Tabs>
+
+## See also
+
+- [CLI Commands](/ado-aw/setup/cli/) — the equivalent CLI commands for every `mcp-author` tool.
+- [Pipeline IR](/ado-aw/reference/ir/) — `PipelineSummary` and `GraphSummary` schema reference.
+- [Audit reference](/ado-aw/reference/audit/) — `AuditData` report shape, accepted URL forms, and cache behavior.
+- [MCP Gateway](/ado-aw/reference/mcpg/) — the MCPG that routes MCP calls inside compiled pipelines (a separate concern).

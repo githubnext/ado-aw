@@ -164,6 +164,22 @@ Options:
 - `--json` -- emit a `TraceReport` as JSON
 - `--org`, `--project`, `--pat` -- ADO context overrides (same as `audit`)
 
+## IDE / MCP integration
+
+### `mcp-author`
+
+Run a local read-only MCP server over stdio for IDE and Copilot Chat integrations. Exposes all IR analysis tools — `inspect_workflow`, `graph_dump`, `step_dependencies`, `step_outputs`, `whatif`, `lint_workflow`, `catalog`, `trace_failure`, and `audit_build` — over the standard [Model Context Protocol](https://modelcontextprotocol.io/) so your IDE agent can reason about workflows without manual CLI invocations.
+
+```bash
+ado-aw mcp-author
+```
+
+No flags; add the server to your IDE's MCP config pointing to the `ado-aw mcp-author` command. See the [Author MCP Server reference](/ado-aw/reference/mcp-author/) for tool parameters, IDE configuration snippets (VS Code, Claude Desktop, Cursor), and trust model.
+
+:::note[Not the SafeOutputs server]
+`mcp-author` is a local developer tool. The `ado-aw mcp` and `ado-aw mcp-http` commands are the SafeOutputs servers used by compiled pipelines at Stage 1. They are documented in the [Internal / pipeline runtime commands](#internal--pipeline-runtime-commands) section below.
+:::
+
 ## Pipeline lifecycle commands
 
 These commands interact with Azure DevOps build definitions and require ADO API access. They infer the ADO organization and project from the local git remote by default; pass `--org` and `--project` to override.
