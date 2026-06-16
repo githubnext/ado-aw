@@ -672,3 +672,35 @@ safe-outputs:
 Note: `wiki-name` is required. If it is not set, execution fails with an explicit error message.
 
 **Code wikis vs project wikis:** The executor automatically detects code wikis (type 1) and resolves the published branch from the wiki metadata. You only need to set `branch` explicitly to override the auto-detected value (e.g. targeting a non-default branch). Project wikis (type 0) need no branch configuration.
+
+## Self-modification
+
+### `propose-step-optimization` (opt-in)
+
+A structured safe-output for runtime self-optimization. When
+`self-optimization.enabled: true` is set in the front matter, the
+Stage-1 agent gets access to this tool to propose lifting deterministic
+bash work into front-matter `steps:` / `post-steps:`.
+
+Unlike regular safe-output tools (configured via `safe-outputs.<name>:`),
+`propose-step-optimization` is activated by the top-level
+`self-optimization:` front-matter section and is NOT accepted under
+`safe-outputs:` (the compiler rejects it with a helpful message).
+
+**Stage 3 behaviour:**
+- When `staged: true` (default): IR-validates the proposed step block
+  (Curated allow-list — bash + typed-factory tasks only) and renders a
+  `🎭`-marked preview to the Stage 3 build log showing section,
+  rationale, estimated token savings, and the proposed YAML.
+- When `staged: false`: opens a PR against the source `.md` adding the
+  new steps (not yet implemented; lands in a follow-up release).
+
+**Stage 2 cross-check:** The detection agent verifies that every bash
+command in the proposal's `steps` appears in
+`source_command_evidence` (the bash the agent actually ran). Proposals
+containing commands the agent didn't demonstrably execute are flagged as
+prompt-injection candidates.
+
+See [Self-optimization (opt-in)](front-matter.md#self-optimization-opt-in)
+for configuration and [docs/self-optimization.md](self-optimization.md)
+for the full feature reference (lands with the live-PR path).

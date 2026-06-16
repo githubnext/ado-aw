@@ -83,6 +83,8 @@ pub async fn analyze_safe_outputs(
         build_execution_items(&proposals, &executions)
     };
 
+    // Count every proposal NDJSON entry generically, including
+    // `propose-step-optimization`, so audit rollups stay tool-agnostic.
     let proposed_count = proposals.len() as u64;
     let executed_count = items
         .iter()
