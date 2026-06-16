@@ -21,65 +21,31 @@ pub fn render_console(audit: &crate::audit::model::AuditData) -> String {
         render_metrics_section(&audit.metrics, audit.performance_metrics.as_ref()),
     ];
 
-    if let Some(section) = render_key_findings_section(&audit.key_findings) {
-        sections.push(section);
-    }
-    if let Some(section) = render_recommendations_section(&audit.recommendations) {
-        sections.push(section);
-    }
-    if let Some(section) = render_safe_output_summary_section(audit.safe_output_summary.as_ref()) {
-        sections.push(section);
-    }
-    if let Some(section) =
-        render_rejected_safe_outputs_section(audit.rejected_safe_outputs.as_ref())
-    {
-        sections.push(section);
-    }
-    if let Some(section) = render_mcp_server_health_section(audit.mcp_server_health.as_ref()) {
-        sections.push(section);
-    }
-    if let Some(section) = render_firewall_analysis_section(audit.firewall_analysis.as_ref()) {
-        sections.push(section);
-    }
-    if let Some(section) = render_policy_analysis_section(audit.policy_analysis.as_ref()) {
-        sections.push(section);
-    }
-    if let Some(section) = render_detection_analysis_section(audit.detection_analysis.as_ref()) {
-        sections.push(section);
-    }
-    if let Some(section) = render_jobs_section(&audit.jobs) {
-        sections.push(section);
-    }
-    if let Some(section) = render_downloaded_files_section(&audit.downloaded_files) {
-        sections.push(section);
-    }
-    if let Some(section) = render_missing_tools_section(&audit.missing_tools) {
-        sections.push(section);
-    }
-    if let Some(section) = render_missing_data_section(&audit.missing_data) {
-        sections.push(section);
-    }
-    if let Some(section) = render_noops_section(&audit.noops) {
-        sections.push(section);
-    }
-    if let Some(section) = render_mcp_failures_section(&audit.mcp_failures) {
-        sections.push(section);
-    }
-    if let Some(section) = render_errors_section(&audit.errors) {
-        sections.push(section);
-    }
-    if let Some(section) = render_warnings_section(&audit.warnings) {
-        sections.push(section);
-    }
-    if let Some(section) = render_tool_usage_section(&audit.tool_usage) {
-        sections.push(section);
-    }
-    if let Some(section) = render_mcp_tool_usage_section(audit.mcp_tool_usage.as_ref()) {
-        sections.push(section);
-    }
-    if let Some(section) = render_created_items_section(&audit.created_items) {
-        sections.push(section);
-    }
+    sections.extend(
+        [
+            render_key_findings_section(&audit.key_findings),
+            render_recommendations_section(&audit.recommendations),
+            render_safe_output_summary_section(audit.safe_output_summary.as_ref()),
+            render_rejected_safe_outputs_section(audit.rejected_safe_outputs.as_ref()),
+            render_mcp_server_health_section(audit.mcp_server_health.as_ref()),
+            render_firewall_analysis_section(audit.firewall_analysis.as_ref()),
+            render_policy_analysis_section(audit.policy_analysis.as_ref()),
+            render_detection_analysis_section(audit.detection_analysis.as_ref()),
+            render_jobs_section(&audit.jobs),
+            render_downloaded_files_section(&audit.downloaded_files),
+            render_missing_tools_section(&audit.missing_tools),
+            render_missing_data_section(&audit.missing_data),
+            render_noops_section(&audit.noops),
+            render_mcp_failures_section(&audit.mcp_failures),
+            render_errors_section(&audit.errors),
+            render_warnings_section(&audit.warnings),
+            render_tool_usage_section(&audit.tool_usage),
+            render_mcp_tool_usage_section(audit.mcp_tool_usage.as_ref()),
+            render_created_items_section(&audit.created_items),
+        ]
+        .into_iter()
+        .flatten(),
+    );
 
     let mut out = sections.join("\n\n");
     out.push('\n');
