@@ -280,6 +280,8 @@ index to jump to the right page.
   fragment with pre-filled ADO MCP identifiers, auto-extension of the
   agent's bash allow-list with read-only git commands; configured via
   the `execution-context:` front-matter block.
+- [`docs/self-optimization.md`](docs/self-optimization.md) — self-optimization:
+  opt-in runtime step-proposal feature (staged preview, live PR, security model).
 - [`docs/safe-outputs.md`](docs/safe-outputs.md) — full reference for every
   safe-output tool agents can use to propose actions (PRs, work items, wiki
   pages, comments, etc.) plus their per-agent configuration.
