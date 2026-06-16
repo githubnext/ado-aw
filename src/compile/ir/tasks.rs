@@ -187,6 +187,63 @@ pub fn publish_test_results_step(
         .with_input("testResultsFiles", test_results_files)
 }
 
+/// Returns a [`TaskStep`] for `NuGetCommand@2`.
+///
+/// Runs a NuGet command. The `command` parameter selects the operation mode;
+/// each mode exposes a different set of optional inputs.
+///
+/// - `command` — the NuGet operation: `"restore"`, `"push"`, `"pack"`, or
+///   `"custom"`. This is the only required input.
+///
+/// **`restore` optional inputs** (applied with `.with_input(…)`):
+///
+/// | Input key | Default | Description |
+/// |---|---|---|
+/// | `solution` | `"**/*.sln"` | Path to solution, `packages.config`, or `project.json`. |
+/// | `feedsToUse` | `"select"` | `"select"` (dropdown) or `"config"` (NuGet.config). |
+/// | `vstsFeed` | — | Azure Artifacts feed name or ID (when `feedsToUse = select`). |
+/// | `includeNuGetOrg` | `"true"` | Include NuGet.org as a package source. |
+/// | `nugetConfigPath` | — | Path to `NuGet.config` (when `feedsToUse = config`). |
+/// | `externalFeedCredentials` | — | Credentials for external feeds outside the org. |
+/// | `noCache` | `"false"` | Disable the local NuGet cache. |
+/// | `disableParallelProcessing` | `"false"` | Disable parallel package restore. |
+/// | `restoreDirectory` | — | Destination directory for restored packages. |
+/// | `verbosityRestore` | `"Detailed"` | Verbosity: `"Quiet"`, `"Normal"`, or `"Detailed"`. |
+///
+/// **`push` optional inputs**:
+///
+/// | Input key | Default | Description |
+/// |---|---|---|
+/// | `packagesToPush` | `"$(Build.ArtifactStagingDirectory)/**/*.nupkg;…"` | Glob for `.nupkg` files to publish. |
+/// | `nuGetFeedType` | `"internal"` | Feed location: `"internal"` (Azure Artifacts) or `"external"`. |
+/// | `publishVstsFeed` | — | Target Azure Artifacts feed (when `nuGetFeedType = internal`). |
+/// | `allowPackageConflicts` | `"false"` | Skip duplicate packages instead of failing. |
+/// | `publishFeedCredentials` | — | External NuGet server endpoint (when `nuGetFeedType = external`). |
+/// | `publishPackageMetadata` | `"true"` | Publish pipeline metadata alongside the package. |
+/// | `verbosityPush` | `"Detailed"` | Verbosity: `"Quiet"`, `"Normal"`, or `"Detailed"`. |
+///
+/// **`pack` optional inputs**:
+///
+/// | Input key | Default | Description |
+/// |---|---|---|
+/// | `packagesToPack` | `"**/*.csproj"` | Glob for `.csproj` or `.nuspec` files to pack. |
+/// | `configuration` | — | Build configuration (e.g. `"Release"`). |
+/// | `versioningScheme` | `"off"` | Version strategy: `"off"`, `"byPrereleaseNumber"`, `"byEnvVar"`, `"byBuildNumber"`. |
+/// | `verbosityPack` | `"Detailed"` | Verbosity: `"Quiet"`, `"Normal"`, or `"Detailed"`. |
+///
+/// **`custom` optional inputs**:
+///
+/// | Input key | Default | Description |
+/// |---|---|---|
+/// | `arguments` | — | Full NuGet command-line arguments (e.g. `"install Foo -Version 1.0 -Source ..."`). **Required** for `custom`. |
+///
+/// ADO task reference:
+/// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/nuget-command-v2>
+pub fn nuget_command_step(command: impl Into<String>) -> TaskStep {
+    let cmd: String = command.into();
+    TaskStep::new("NuGetCommand@2", format!("NuGet {cmd}")).with_input("command", cmd)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -536,5 +593,93 @@ mod tests {
             t.inputs.get("archiveFilePatterns").map(|s| s.as_str()),
             Some("**/*.zip\n**/*.tar.gz")
         );
+    }
+
+    // ── NuGetCommand@2 ───────────────────────────────────────────────────
+
+    #[test]
+    fn nuget_command_step_restore_sets_task_and_command() {
+        let t = nuget_command_step("restore");
+        assert_eq!(t.task, "NuGetCommand@2");
+        assert_eq!(t.display_name, "NuGet restore");
+        assert_eq!(t.inputs.get("command").map(|s| s.as_str()), Some("restore"));
+        // only the required input is set by default
+        assert_eq!(t.inputs.len(), 1);
+    }
+
+    #[test]
+    fn nuget_command_step_custom_with_arguments() {
+        let t = nuget_command_step("custom").with_input(
+            "arguments",
+            "install My.Package -Version 1.0.0 -Source https://example.com/nuget -NonInteractive",
+        );
+        assert_eq!(t.task, "NuGetCommand@2");
+        assert_eq!(t.display_name, "NuGet custom");
+        assert_eq!(t.inputs.get("command").map(|s| s.as_str()), Some("custom"));
+        assert_eq!(
+            t.inputs.get("arguments").map(|s| s.as_str()),
+            Some("install My.Package -Version 1.0.0 -Source https://example.com/nuget -NonInteractive")
+        );
+        assert_eq!(t.inputs.len(), 2);
+    }
+
+    #[test]
+    fn nuget_command_step_push_with_feed() {
+        let t = nuget_command_step("push")
+            .with_input("nuGetFeedType", "internal")
+            .with_input(
+                "packagesToPush",
+                "$(Build.ArtifactStagingDirectory)/**/*.nupkg",
+            )
+            .with_input("publishVstsFeed", "myorg/myfeed")
+            .with_input("allowPackageConflicts", "true");
+        assert_eq!(t.task, "NuGetCommand@2");
+        assert_eq!(t.inputs.get("command").map(|s| s.as_str()), Some("push"));
+        assert_eq!(
+            t.inputs.get("nuGetFeedType").map(|s| s.as_str()),
+            Some("internal")
+        );
+        assert_eq!(
+            t.inputs.get("publishVstsFeed").map(|s| s.as_str()),
+            Some("myorg/myfeed")
+        );
+        assert_eq!(
+            t.inputs.get("allowPackageConflicts").map(|s| s.as_str()),
+            Some("true")
+        );
+        assert_eq!(t.inputs.len(), 5);
+    }
+
+    #[test]
+    fn nuget_command_step_restore_with_vsts_feed() {
+        let t = nuget_command_step("restore")
+            .with_input("solution", "src/MyApp.sln")
+            .with_input("feedsToUse", "select")
+            .with_input("vstsFeed", "myorg/myproject/myfeed")
+            .with_input("includeNuGetOrg", "false");
+        assert_eq!(t.task, "NuGetCommand@2");
+        assert_eq!(
+            t.inputs.get("solution").map(|s| s.as_str()),
+            Some("src/MyApp.sln")
+        );
+        assert_eq!(
+            t.inputs.get("vstsFeed").map(|s| s.as_str()),
+            Some("myorg/myproject/myfeed")
+        );
+        assert_eq!(
+            t.inputs.get("includeNuGetOrg").map(|s| s.as_str()),
+            Some("false")
+        );
+        assert_eq!(t.inputs.len(), 5);
+    }
+
+    #[test]
+    fn nuget_command_step_accepts_all_supported_commands() {
+        for cmd in &["restore", "push", "pack", "custom"] {
+            let t = nuget_command_step(*cmd);
+            assert_eq!(t.task, "NuGetCommand@2");
+            assert_eq!(t.display_name, format!("NuGet {cmd}"));
+            assert_eq!(t.inputs.get("command").map(|s| s.as_str()), Some(*cmd));
+        }
     }
 }
