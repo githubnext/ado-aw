@@ -68,9 +68,13 @@ fn apply_codemod(fm: &mut Mapping, _ctx: &CodemodContext) -> Result<bool> {
         let Some(wi_val) = tool_map.remove(&wi_key) else {
             continue;
         };
-        let Value::Mapping(wi_map) = wi_val else {
-            // work-item was present but not a mapping — put it back as-is
-            continue;
+        let wi_map = match wi_val {
+            Value::Mapping(m) => m,
+            other => {
+                // work-item was present but not a mapping — restore it unchanged.
+                tool_map.insert(wi_key, other);
+                continue;
+            }
         };
 
         // Check for conflict: if flat fields already exist alongside work-item:

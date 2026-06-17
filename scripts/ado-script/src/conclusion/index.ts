@@ -47,6 +47,16 @@ interface RuntimeConfig {
   buildUri?: string;
   buildId?: string;
   jobs: JobStatus[];
+  toolConfigs: Record<string, PerToolConfig>;
+}
+
+interface PerToolConfig {
+  reportAsWorkItem: boolean;
+  titlePrefix?: string;
+  workItemType?: string;
+  areaPath?: string;
+  iterationPath?: string;
+  tags?: string[];
 }
 
 interface SignalReport {
@@ -107,11 +117,36 @@ function readTags(env: NodeJS.ProcessEnv): string[] {
   }
 }
 
+function parsePerToolConfig(env: NodeJS.ProcessEnv, envKey: string): PerToolConfig {
+  const defaults: PerToolConfig = { reportAsWorkItem: true };
+  const raw = readOptionalEnv(env, envKey);
+  if (!raw) return defaults;
+
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    // Handle `false` — tool entirely disabled (agent can't call it)
+    if (parsed === false) return { reportAsWorkItem: false };
+    if (!isRecord(parsed)) return defaults;
+
+    return {
+      reportAsWorkItem: parsed["report-as-work-item"] !== false,
+      titlePrefix: typeof parsed["title-prefix"] === "string" ? parsed["title-prefix"] : undefined,
+      workItemType: typeof parsed["work-item-type"] === "string" ? parsed["work-item-type"] : undefined,
+      areaPath: typeof parsed["area-path"] === "string" ? parsed["area-path"] : undefined,
+      iterationPath: typeof parsed["iteration-path"] === "string" ? parsed["iteration-path"] : undefined,
+      tags: Array.isArray(parsed["tags"]) ? (parsed["tags"] as unknown[]).filter((t): t is string => typeof t === "string") : undefined,
+    };
+  } catch (error) {
+    logWarning(`Failed to parse ${envKey}: ${(error as Error).message}`);
+    return defaults;
+  }
+}
+
 function loadConfig(env: NodeJS.ProcessEnv): RuntimeConfig {
   return {
     reportFailureAsWorkItem: readBooleanEnv(env, "AW_REPORT_FAILURE_AS_WORK_ITEM", true),
     workItemTitleTemplate: readOptionalEnv(env, "AW_WORK_ITEM_TITLE"),
-    workItemType: readOptionalEnv(env, "AW_WORK_ITEM_TYPE") ?? "Bug",
+    workItemType: readOptionalEnv(env, "AW_WORK_ITEM_TYPE") ?? "Task",
     areaPath: readOptionalEnv(env, "AW_WORK_ITEM_AREA_PATH"),
     iterationPath: readOptionalEnv(env, "AW_WORK_ITEM_ITERATION_PATH"),
     tags: readTags(env),
@@ -126,6 +161,11 @@ function loadConfig(env: NodeJS.ProcessEnv): RuntimeConfig {
       { name: "Detection", result: readJobResult(env, "AW_DETECTION_RESULT") },
       { name: "SafeOutputs", result: readJobResult(env, "AW_SAFEOUTPUTS_RESULT") },
     ],
+    toolConfigs: {
+      noop: parsePerToolConfig(env, "AW_NOOP_CONFIG"),
+      missing_tool: parsePerToolConfig(env, "AW_MISSING_TOOL_CONFIG"),
+      missing_data: parsePerToolConfig(env, "AW_MISSING_DATA_CONFIG"),
+    },
   };
 }
 
@@ -379,22 +419,33 @@ function renderTitle(
   return rendered || defaultTitle;
 }
 
+function getToolConfigKey(kind: SignalKind): string {
+  switch (kind) {
+    case "pipeline_failure": return "pipeline_failure";
+    case "noop": return "noop";
+    case "missing_tool": return "missing_tool";
+    case "missing_data": return "missing_data";
+  }
+}
+
 function buildWorkItemConfig(
   config: RuntimeConfig,
   signal: SignalReport,
 ): WorkItemReportConfig {
+  const toolConfig = config.toolConfigs[getToolConfigKey(signal.kind)];
   return {
     enabled: config.reportFailureAsWorkItem,
-    title: renderTitle(
-      config.workItemTitleTemplate,
-      config.pipelineName,
-      signal.kind,
-      signal.defaultTitle,
-    ),
-    workItemType: config.workItemType,
-    areaPath: config.areaPath,
-    iterationPath: config.iterationPath,
-    tags: config.tags,
+    title: toolConfig?.titlePrefix ??
+      renderTitle(
+        config.workItemTitleTemplate,
+        config.pipelineName,
+        signal.kind,
+        signal.defaultTitle,
+      ),
+    workItemType: toolConfig?.workItemType ?? config.workItemType,
+    areaPath: toolConfig?.areaPath ?? config.areaPath,
+    iterationPath: toolConfig?.iterationPath ?? config.iterationPath,
+    tags: toolConfig?.tags ?? config.tags,
     includeStats: config.includeStats,
   };
 }
@@ -405,6 +456,13 @@ async function fileSignal(
 ): Promise<void> {
   if (!config.project) {
     logWarning(`SYSTEM_TEAMPROJECT is not set; skipping ${signal.kind} work-item filing`);
+    return;
+  }
+
+  // Per-tool opt-out: report-as-work-item: false
+  const toolConfig = config.toolConfigs[getToolConfigKey(signal.kind)];
+  if (toolConfig && !toolConfig.reportAsWorkItem) {
+    logInfo(`${signal.kind}: per-tool report-as-work-item is false, skipping`);
     return;
   }
 

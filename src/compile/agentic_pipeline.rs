@@ -1207,24 +1207,48 @@ fn build_conclusion_job(
         }
     }
 
-    // Pass upstream job results
+    // Pass upstream job results via job-level variables hoist.
+    // ADO only evaluates $[...] runtime expressions inside `variables:` and
+    // `condition:` — NOT in step env blocks. We hoist to job variables and
+    // reference them as $(name) macros in the step env.
     let agent_id = prefix.id("Agent")?;
     let detection_id = prefix.id("Detection")?;
     let safeoutputs_id = prefix.id("SafeOutputs")?;
-    let agent_result = format!("$[dependencies.{}.result]", agent_id.as_str());
-    let detection_result = format!("$[dependencies.{}.result]", detection_id.as_str());
-    let safeoutputs_result = format!("$[dependencies.{}.result]", safeoutputs_id.as_str());
+
+    use crate::compile::ir::job::JobVariable;
+    let conclusion_variables = vec![
+        JobVariable {
+            name: "AW_AGENT_RESULT".to_string(),
+            value: EnvValue::Literal(format!("$[dependencies.{}.result]", agent_id.as_str())),
+        },
+        JobVariable {
+            name: "AW_DETECTION_RESULT".to_string(),
+            value: EnvValue::Literal(format!("$[dependencies.{}.result]", detection_id.as_str())),
+        },
+        JobVariable {
+            name: "AW_SAFEOUTPUTS_RESULT".to_string(),
+            value: EnvValue::Literal(format!(
+                "$[dependencies.{}.result]",
+                safeoutputs_id.as_str()
+            )),
+        },
+    ];
+
     conclusion_step = conclusion_step
-        .with_env("AW_AGENT_RESULT", EnvValue::Literal(agent_result))
-        .with_env("AW_DETECTION_RESULT", EnvValue::Literal(detection_result))
+        .with_env("AW_AGENT_RESULT", EnvValue::PipelineVar("AW_AGENT_RESULT".to_string()))
+        .with_env(
+            "AW_DETECTION_RESULT",
+            EnvValue::PipelineVar("AW_DETECTION_RESULT".to_string()),
+        )
         .with_env(
             "AW_SAFEOUTPUTS_RESULT",
-            EnvValue::Literal(safeoutputs_result),
+            EnvValue::PipelineVar("AW_SAFEOUTPUTS_RESULT".to_string()),
         );
 
     steps.push(Step::Bash(conclusion_step));
 
     let mut job = Job::new(prefix.id("Conclusion")?, "Conclusion", cfg.pool.clone());
+    job.variables = conclusion_variables;
     job.steps = steps;
     job.condition = Some(Condition::Always);
     Ok(Some(job))
