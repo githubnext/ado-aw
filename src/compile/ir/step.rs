@@ -238,8 +238,14 @@ mod tests {
         assert_eq!(s.display_name, "ado-aw");
         assert_eq!(s.script, "echo hi");
         assert_eq!(s.id.as_ref().map(|i| i.as_str()), Some("marker"));
-        assert_eq!(s.env.len(), 1);
-        assert_eq!(s.outputs.len(), 1);
+        // Verify the actual key and value were stored, not just the count.
+        assert_eq!(
+            s.env.get("FOO"),
+            Some(&EnvValue::literal("bar")),
+            "env should map FOO -> literal(\"bar\")"
+        );
+        assert_eq!(s.outputs.len(), 1, "should have exactly one output");
+        assert_eq!(s.outputs[0].name, "AW_OUT", "output name should be AW_OUT");
     }
 
     #[test]

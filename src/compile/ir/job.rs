@@ -211,14 +211,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pool_variants_are_distinct() {
+    fn pool_same_variant_different_values_are_not_equal() {
+        // Equality semantics for same-variant: fields must match.
         let a = Pool::VmImage("ubuntu-22.04".into());
-        let b = Pool::Named {
-            name: "AZS-1ES-L".into(),
+        let b = Pool::VmImage("windows-2022".into());
+        assert_ne!(a, b, "different vmImage values should not be equal");
+
+        let c = Pool::Named {
+            name: "Pool-A".into(),
             image: None,
             os: None,
         };
-        assert_ne!(a, b);
+        let d = Pool::Named {
+            name: "Pool-B".into(),
+            image: None,
+            os: None,
+        };
+        assert_ne!(c, d, "different pool names should not be equal");
+
+        // Same values → equal.
+        let e = Pool::VmImage("ubuntu-22.04".into());
+        assert_eq!(a, e, "identical VmImage values should be equal");
     }
 
     #[test]
@@ -228,8 +241,18 @@ mod tests {
             "Agent",
             Pool::VmImage("ubuntu-22.04".into()),
         );
-        assert!(j.depends_on.is_empty());
-        assert!(j.steps.is_empty());
+        assert!(j.depends_on.is_empty(), "depends_on should start empty");
+        assert!(j.steps.is_empty(), "steps should start empty");
+        assert!(j.condition.is_none(), "condition should start as None");
+        assert!(j.variables.is_empty(), "variables should start empty");
+        assert!(
+            j.template_dependson_wrap.is_none(),
+            "template_dependson_wrap should start as None"
+        );
+        assert!(
+            j.template_context.is_none(),
+            "template_context should start as None"
+        );
     }
 
     #[test]
