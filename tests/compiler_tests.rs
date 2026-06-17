@@ -6009,3 +6009,205 @@ fn test_pr_mode_policy_omits_synth_and_emits_trigger_none() {
         "mode: policy must not emit a narrowed CI trigger"
     );
 }
+
+// ─── Internal supply-chain (feed + registry mirror) tests ───────────────────
+
+/// Compile a small inline agent body and return (success, stdout, stderr).
+fn compile_inline_source(name: &str, source: &str) -> (bool, String, String) {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-supply-chain-{name}-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+    let input_path = temp_dir.join(format!("{name}.md"));
+    let output_path = temp_dir.join(format!("{name}.yml"));
+    fs::write(&input_path, source).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+    let compiled = fs::read_to_string(&output_path).unwrap_or_default();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let _ = fs::remove_dir_all(&temp_dir);
+    (output.status.success(), compiled, stderr)
+}
+
+/// With `supply-chain.feed` + `supply-chain.registry` configured, every
+/// GitHub/GHCR fetch is rerouted to the internal feed + registry while
+/// checksum verification is preserved.
+#[test]
+fn test_supply_chain_full_reroutes_all_artifacts() {
+    let compiled = compile_fixture("supply-chain-agent.md");
+    assert_valid_yaml(&compiled, "supply-chain-agent.md");
+
+    // (a) No GitHub release-download URLs remain.
+    assert!(
+        !compiled.contains("github.com/githubnext/ado-aw/releases"),
+        "ado-aw/ado-script GitHub release URLs must be gone in feed mode"
+    );
+    assert!(
+        !compiled.contains("github.com/github/gh-aw-firewall/releases"),
+        "AWF GitHub release URLs must be gone in feed mode"
+    );
+    // (b) No GHCR image references remain.
+    assert!(
+        !compiled.contains("ghcr.io"),
+        "GHCR image references must be gone in registry mode"
+    );
+
+    // (c) Standard ADO tasks are present for the binary mirror.
+    assert!(
+        compiled.contains("- task: NuGetAuthenticate@1"),
+        "NuGetAuthenticate@1 must be emitted for the feed mirror"
+    );
+    assert!(
+        compiled.contains("nuGetServiceConnections: feed-conn"),
+        "feed's resolved service connection must be passed to NuGetAuthenticate@1"
+    );
+    for definition in ["definition: ado-aw", "definition: awf", "definition: ado-script"] {
+        assert!(
+            compiled.contains(definition),
+            "DownloadPackage@1 must pull {definition}"
+        );
+    }
+    assert!(
+        compiled.contains("feed: my-project/my-internal-feed"),
+        "DownloadPackage@1 must target the configured feed"
+    );
+
+    // (d) Internal registry rewrite + ACR auth for images.
+    assert!(
+        compiled.contains("- task: AzureCLI@2") && compiled.contains("az acr login --name myacr"),
+        "ACR login must be emitted before docker pull in registry mode"
+    );
+    assert!(
+        compiled.contains("docker pull myacr.azurecr.io/github/gh-aw-firewall/squid:"),
+        "AWF images must be pulled from the internal registry"
+    );
+    assert!(
+        compiled.contains("myacr.azurecr.io/github/gh-aw-mcpg:"),
+        "MCPG image must be rewritten onto the internal registry (pull + docker run)"
+    );
+
+    // (e) Checksum verification is retained.
+    assert!(
+        compiled.contains("sha256sum -c"),
+        "checksum verification must be preserved on the internal branch"
+    );
+}
+
+/// Absent `supply-chain:` leaves the default GitHub/GHCR fetch path intact.
+#[test]
+fn test_supply_chain_absent_uses_github_and_ghcr() {
+    let compiled = compile_fixture("minimal-agent.md");
+    assert!(
+        compiled.contains("github.com/githubnext/ado-aw/releases"),
+        "default path must fetch the compiler from GitHub Releases"
+    );
+    assert!(
+        compiled.contains("ghcr.io/github/gh-aw-firewall/squid:"),
+        "default path must pull AWF images from GHCR"
+    );
+    assert!(
+        !compiled.contains("DownloadPackage@1"),
+        "default path must not emit DownloadPackage@1"
+    );
+    assert!(
+        !compiled.contains("az acr login"),
+        "default path must not emit ACR login"
+    );
+}
+
+/// `feed` only (scalar, same-org) mirrors binaries via `$(System.AccessToken)`
+/// — no `nuGetServiceConnections` — and leaves images on GHCR.
+#[test]
+fn test_supply_chain_feed_only_keeps_ghcr_and_uses_system_token() {
+    let source = r#"---
+name: "Feed Only"
+description: "feed scalar, same-org System.AccessToken"
+supply-chain:
+  feed: my-internal-feed
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("feed-only", source);
+    assert!(ok, "feed-only config should compile: {stderr}");
+
+    assert!(
+        compiled.contains("- task: NuGetAuthenticate@1"),
+        "feed mirror must authenticate"
+    );
+    assert!(
+        !compiled.contains("nuGetServiceConnections"),
+        "same-org feed with no connection must use System.AccessToken (no nuGetServiceConnections)"
+    );
+    assert!(
+        compiled.contains("definition: ado-script"),
+        "ado-script bundle must come from the feed"
+    );
+    // Registry not configured → images stay on GHCR, no ACR login.
+    assert!(
+        compiled.contains("ghcr.io/github/gh-aw-firewall/squid:"),
+        "images must stay on GHCR when registry is unset"
+    );
+    assert!(
+        !compiled.contains("az acr login"),
+        "no ACR login when registry is unset"
+    );
+}
+
+/// `registry` without any resolvable service connection is rejected at compile
+/// time (ACR has no `$(System.AccessToken)` path).
+#[test]
+fn test_supply_chain_registry_without_connection_fails() {
+    let source = r#"---
+name: "Bad Registry"
+description: "registry without a connection"
+supply-chain:
+  registry: myacr.azurecr.io
+---
+
+## Body
+"#;
+    let (ok, _compiled, stderr) = compile_inline_source("bad-registry", source);
+    assert!(!ok, "registry without a connection must fail to compile");
+    assert!(
+        stderr.contains("supply-chain.registry requires a service connection"),
+        "error must explain the missing registry connection: {stderr}"
+    );
+}
+
+/// A top-level `service-connection` is used as the fallback for both targets
+/// when neither declares its own.
+#[test]
+fn test_supply_chain_top_level_connection_fallback() {
+    let source = r#"---
+name: "Shared Conn"
+description: "shared fallback connection"
+supply-chain:
+  feed: my-project/my-internal-feed
+  registry: myacr.azurecr.io
+  service-connection: shared-conn
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("shared-conn", source);
+    assert!(ok, "shared-connection config should compile: {stderr}");
+    assert!(
+        compiled.contains("nuGetServiceConnections: shared-conn"),
+        "feed must fall back to the top-level connection"
+    );
+    assert!(
+        compiled.contains("azureSubscription: shared-conn"),
+        "registry ACR login must fall back to the top-level connection"
+    );
+}

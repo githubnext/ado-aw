@@ -726,6 +726,12 @@ pub struct FrontMatter {
     /// PR context is on when `on.pr` is set.
     #[serde(default, rename = "execution-context")]
     pub execution_context: Option<ExecutionContextConfig>,
+    /// Internal supply-chain configuration — when present, mirrors the
+    /// GitHub/GHCR artifacts (compiler, AWF binary, ado-script bundle, AWF/MCPG
+    /// images) from an internal Azure DevOps Artifacts feed and/or container
+    /// registry. See `docs/supply-chain.md`.
+    #[serde(default, rename = "supply-chain")]
+    pub supply_chain: Option<SupplyChainConfig>,
 }
 
 impl FrontMatter {
@@ -763,6 +769,11 @@ impl FrontMatter {
     /// Get the pipeline runtime filters (if any).
     pub fn pipeline_filters(&self) -> Option<&PipelineFilters> {
         self.pipeline_trigger().and_then(|pt| pt.filters.as_ref())
+    }
+
+    /// Get the internal supply-chain configuration (if any).
+    pub fn supply_chain(&self) -> Option<&SupplyChainConfig> {
+        self.supply_chain.as_ref()
     }
 }
 
@@ -822,6 +833,9 @@ impl SanitizeConfigTrait for FrontMatter {
         }
         if let Some(ref mut ec) = self.execution_context {
             ec.sanitize_config_fields();
+        }
+        if let Some(ref mut sc) = self.supply_chain {
+            sc.sanitize_config_fields();
         }
     }
 }
@@ -912,6 +926,164 @@ impl SanitizeConfigTrait for AdoAwDebugConfig {
         if let Some(ref mut ci) = self.create_issue {
             ci.sanitize_config_fields();
         }
+    }
+}
+
+/// Internal supply-chain configuration.
+///
+/// Lives under the optional `supply-chain:` top-level front-matter key. When
+/// present, the compiler mirrors the artifacts it normally fetches from
+/// GitHub Releases / GHCR from an internal Azure DevOps Artifacts feed and/or
+/// an internal container registry instead. `feed` and `registry` are
+/// independent — a user may set either, both, or neither.
+///
+/// See `docs/supply-chain.md`.
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct SupplyChainConfig {
+    /// Internal Azure DevOps Artifacts feed for the binary artifacts
+    /// (`ado-aw`, `awf`, `ado-script`). When omitted those binaries are
+    /// fetched from GitHub Releases as today.
+    #[serde(default)]
+    pub feed: Option<FeedConfig>,
+    /// Internal container registry (ACR login server) for the AWF and MCPG
+    /// images. When omitted images are pulled from GHCR as today.
+    #[serde(default)]
+    pub registry: Option<RegistryConfig>,
+    /// Shared fallback service connection used by whichever target does not
+    /// declare its own `service-connection`.
+    #[serde(default, rename = "service-connection")]
+    pub service_connection: Option<crate::secure::ServiceConnection>,
+}
+
+/// A feed target. Accepts either a bare scalar (the feed reference) or an
+/// object `{ name, service-connection }`. The scalar form is sugar for an
+/// object with no per-target connection.
+#[derive(Debug, Clone)]
+pub struct FeedConfig {
+    /// Feed reference: a bare feed name or `project/feed`.
+    pub name: crate::secure::FeedRef,
+    /// Optional per-target service connection (overrides the top-level one).
+    pub service_connection: Option<crate::secure::ServiceConnection>,
+}
+
+/// A registry target. Accepts either a bare scalar (the ACR login server) or
+/// an object `{ name, service-connection }`.
+#[derive(Debug, Clone)]
+pub struct RegistryConfig {
+    /// ACR login server, e.g. `myacr.azurecr.io`.
+    pub name: crate::secure::HostName,
+    /// Optional per-target service connection (overrides the top-level one).
+    pub service_connection: Option<crate::secure::ServiceConnection>,
+}
+
+impl<'de> Deserialize<'de> for FeedConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Obj {
+            name: crate::secure::FeedRef,
+            #[serde(default, rename = "service-connection")]
+            service_connection: Option<crate::secure::ServiceConnection>,
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Scalar(crate::secure::FeedRef),
+            Obj(Obj),
+        }
+        Ok(match Repr::deserialize(deserializer)? {
+            Repr::Scalar(name) => FeedConfig {
+                name,
+                service_connection: None,
+            },
+            Repr::Obj(o) => FeedConfig {
+                name: o.name,
+                service_connection: o.service_connection,
+            },
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for RegistryConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Obj {
+            name: crate::secure::HostName,
+            #[serde(default, rename = "service-connection")]
+            service_connection: Option<crate::secure::ServiceConnection>,
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Scalar(crate::secure::HostName),
+            Obj(Obj),
+        }
+        Ok(match Repr::deserialize(deserializer)? {
+            Repr::Scalar(name) => RegistryConfig {
+                name,
+                service_connection: None,
+            },
+            Repr::Obj(o) => RegistryConfig {
+                name: o.name,
+                service_connection: o.service_connection,
+            },
+        })
+    }
+}
+
+impl SupplyChainConfig {
+    /// Effective service connection for the feed (binary) mirror.
+    ///
+    /// Resolution: the feed's own `service-connection` → the top-level
+    /// `service-connection`. `None` means "authenticate with
+    /// `$(System.AccessToken)`" (valid for same-org feeds).
+    pub fn feed_connection(&self) -> Option<&str> {
+        self.feed
+            .as_ref()
+            .and_then(|f| f.service_connection.as_deref())
+            .or(self.service_connection.as_deref())
+    }
+
+    /// Effective service connection for the registry (image) mirror.
+    ///
+    /// Resolution: the registry's own `service-connection` → the top-level
+    /// `service-connection`. `None` is invalid when `registry` is set (ACR has
+    /// no `System.AccessToken` path) — see [`SupplyChainConfig::validate`].
+    pub fn registry_connection(&self) -> Option<&str> {
+        self.registry
+            .as_ref()
+            .and_then(|r| r.service_connection.as_deref())
+            .or(self.service_connection.as_deref())
+    }
+
+    /// Validate cross-field rules. Errors when `registry` is configured but no
+    /// service connection resolves for it.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.registry.is_some() && self.registry_connection().is_none() {
+            anyhow::bail!(
+                "supply-chain.registry requires a service connection: set \
+                 `registry.service-connection` or a top-level \
+                 `supply-chain.service-connection`. A container registry (ACR) \
+                 cannot be accessed with $(System.AccessToken)."
+            );
+        }
+        Ok(())
+    }
+}
+
+impl SanitizeConfigTrait for SupplyChainConfig {
+    fn sanitize_config_fields(&mut self) {
+        // All fields are validated newtypes (FeedRef / HostName /
+        // ServiceConnection) constrained at deserialization time; there is
+        // nothing further to sanitize.
     }
 }
 
@@ -1814,6 +1986,79 @@ impl SanitizeConfigTrait for LabelFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── SupplyChainConfig deserialization + resolution ──────────────────────
+
+    fn parse_supply_chain(yaml: &str) -> SupplyChainConfig {
+        let v: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        serde_yaml::from_value(v["supply-chain"].clone()).unwrap()
+    }
+
+    #[test]
+    fn test_supply_chain_scalar_feed_shorthand() {
+        let sc = parse_supply_chain("supply-chain:\n  feed: my-feed");
+        let feed = sc.feed.as_ref().unwrap();
+        assert_eq!(feed.name.as_str(), "my-feed");
+        assert!(feed.service_connection.is_none());
+        // No connection resolves → System.AccessToken (None).
+        assert_eq!(sc.feed_connection(), None);
+    }
+
+    #[test]
+    fn test_supply_chain_object_feed_with_connection() {
+        let sc = parse_supply_chain(
+            "supply-chain:\n  feed:\n    name: proj/my-feed\n    service-connection: feed-conn",
+        );
+        let feed = sc.feed.as_ref().unwrap();
+        assert_eq!(feed.name.as_str(), "proj/my-feed");
+        assert_eq!(sc.feed_connection(), Some("feed-conn"));
+    }
+
+    #[test]
+    fn test_supply_chain_top_level_connection_is_fallback() {
+        let sc = parse_supply_chain(
+            "supply-chain:\n  feed: my-feed\n  registry: myacr.azurecr.io\n  service-connection: shared",
+        );
+        assert_eq!(sc.feed_connection(), Some("shared"));
+        assert_eq!(sc.registry_connection(), Some("shared"));
+    }
+
+    #[test]
+    fn test_supply_chain_per_target_overrides_top_level() {
+        let sc = parse_supply_chain(
+            "supply-chain:\n  \
+             feed:\n    name: my-feed\n    service-connection: feed-conn\n  \
+             registry:\n    name: myacr.azurecr.io\n    service-connection: acr-conn\n  \
+             service-connection: shared",
+        );
+        assert_eq!(sc.feed_connection(), Some("feed-conn"));
+        assert_eq!(sc.registry_connection(), Some("acr-conn"));
+    }
+
+    #[test]
+    fn test_supply_chain_validate_registry_requires_connection() {
+        let sc = parse_supply_chain("supply-chain:\n  registry: myacr.azurecr.io");
+        assert!(sc.validate().is_err());
+
+        let ok = parse_supply_chain(
+            "supply-chain:\n  registry:\n    name: myacr.azurecr.io\n    service-connection: acr-conn",
+        );
+        assert!(ok.validate().is_ok());
+    }
+
+    #[test]
+    fn test_supply_chain_feed_only_validates() {
+        let sc = parse_supply_chain("supply-chain:\n  feed: my-feed");
+        assert!(sc.validate().is_ok());
+    }
+
+    #[test]
+    fn test_supply_chain_rejects_unknown_fields() {
+        let v: serde_yaml::Value =
+            serde_yaml::from_str("supply-chain:\n  feed: my-feed\n  bogus: x").unwrap();
+        let res: Result<SupplyChainConfig, _> = serde_yaml::from_value(v["supply-chain"].clone());
+        assert!(res.is_err(), "deny_unknown_fields must reject unknown keys");
+    }
 
     // ─── PoolConfig deserialization ──────────────────────────────────────────
 

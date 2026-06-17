@@ -1,0 +1,105 @@
+---
+title: "Supply Chain reference"
+description: "Mirror the compiler, AWF binary, ado-script bundle, and container images from an internal Azure DevOps Artifacts feed and registry."
+---
+
+By default a compiled agentic pipeline fetches four kinds of artifact from
+GitHub / GHCR at run time:
+
+| # | Artifact | Default source |
+| --- | --- | --- |
+| 1 | `ado-aw` compiler (`ado-aw-linux-x64`) | `github.com/githubnext/ado-aw` releases |
+| 2 | AWF firewall (`awf-linux-x64`) | `github.com/github/gh-aw-firewall` releases |
+| 3 | `ado-script.zip` bundle | `github.com/githubnext/ado-aw` releases |
+| 4 | AWF + MCPG container images | `ghcr.io/github/...` |
+
+The optional `supply-chain:` front-matter section reroutes these fetches to an
+**internal Azure DevOps Artifacts feed** (binaries #1–#3) and/or an **internal
+container registry** (images #4). It is intended for supply-chain-hardened
+environments where the build agent pool cannot reach GitHub / GHCR.
+
+When `supply-chain:` is omitted, the generated pipeline is byte-for-byte
+identical to before.
+
+## Configuration
+
+```yaml
+supply-chain:
+  feed:                          # mirrors binaries #1, #2, #3
+    name: my-project/my-feed     # feed name or "project/feed"
+    service-connection: feed-conn  # optional (see Authentication)
+  registry:                      # mirrors images #4
+    name: myacr.azurecr.io       # ACR login server
+    service-connection: acr-conn   # required when registry is set
+  service-connection: shared-conn  # optional shared fallback for both targets
+```
+
+| Field | Type | Required | Purpose |
+| --- | --- | --- | --- |
+| `feed` | scalar **or** `{ name, service-connection }` | optional | Enables the binary mirror. A bare string is shorthand for `{ name: <string> }`. |
+| `registry` | scalar **or** `{ name, service-connection }` | optional | Enables the image mirror. |
+| `service-connection` | string | optional | Shared fallback connection for whichever target omits its own. |
+
+`feed` and `registry` are **independent** — set either, both, or neither.
+
+## Authentication
+
+Authentication is **asymmetric**.
+
+### Feed (binaries)
+
+Uses `NuGetAuthenticate@1` + `DownloadPackage@1`. The effective connection
+resolves as: the feed's own `service-connection` → the top-level
+`service-connection` → `$(System.AccessToken)`.
+
+For a **same-organization** feed no service connection is required: grant the
+pipeline's build identity the **Feed Reader** role and `NuGetAuthenticate@1`
+authenticates automatically via `$(System.AccessToken)`. Set a
+`service-connection` only for cross-org or external feeds.
+
+### Registry (images)
+
+Uses `az acr login` (`AzureCLI@2`) then `docker pull`.
+`$(System.AccessToken)` **cannot** authenticate to a container registry, so a
+service connection **must** resolve when `registry` is set — otherwise
+compilation fails:
+
+```
+supply-chain.registry requires a service connection: set
+`registry.service-connection` or a top-level `supply-chain.service-connection`.
+A container registry (ACR) cannot be accessed with $(System.AccessToken).
+```
+
+## What the mirror must contain
+
+Versions stay **pinned by the generating compiler**; the mirror must host the
+exact pinned versions. Use the matching `ado-aw` compiler version against a
+mirror that is a few days behind.
+
+NuGet packages (same base names, **bare semver** versions, no leading `v`):
+
+| Package id | Version | Must contain |
+| --- | --- | --- |
+| `ado-aw` | compiler version | `ado-aw-linux-x64`, `checksums.txt` |
+| `awf` | AWF version | `awf-linux-x64`, `checksums.txt` |
+| `ado-script` | compiler version | `ado-script.zip`, `checksums.txt` |
+
+Container images (same repository paths and tags, registry host swapped):
+
+| Internal reference |
+| --- |
+| `<registry>/github/gh-aw-firewall/squid:<awf-version>` |
+| `<registry>/github/gh-aw-firewall/agent:<awf-version>` |
+| `<registry>/github/gh-aw-mcpg:v<mcpg-version>` |
+
+`sha256sum -c checksums.txt` verification is preserved on the internal branch,
+so the mirror must ship the matching `checksums.txt`.
+
+## Network isolation note
+
+The mirror fetches run as ordinary ADO steps on the build agent — **outside**
+the AWF network-isolation sandbox, which wraps only the copilot agent command.
+The feed/registry hosts are therefore **not** added to the agent's AWF
+allowlist. Isolating the build agent from GitHub / GHCR is enforced by the
+agent pool's own network policy; the `supply-chain:` rerouting is what lets such
+a locked-down pool succeed.

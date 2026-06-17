@@ -81,6 +81,7 @@ const FIXTURES: &[&str] = &[
     "job-agent.md",
     "stage-agent.md",
     "execution-context-agent.md",
+    "supply-chain-agent.md",
 ];
 
 /// Step display names that the lint expects to find at least once across all

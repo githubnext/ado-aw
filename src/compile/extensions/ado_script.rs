@@ -20,6 +20,7 @@
 use anyhow::Result;
 
 use super::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
+use crate::compile::agentic_pipeline::{download_package_step, nuget_authenticate_step};
 use crate::compile::filter_ir::{
     GateContext, Severity, build_gate_step_typed, lower_pipeline_filters, lower_pr_filters,
     validate_pipeline_filters, validate_pr_filters,
@@ -29,7 +30,7 @@ use crate::compile::ir::env::EnvValue;
 use crate::compile::ir::ids::StepId;
 use crate::compile::ir::output::OutputDecl;
 use crate::compile::ir::step::{BashStep, Step, TaskStep};
-use crate::compile::types::{PipelineFilters, PrFilters};
+use crate::compile::types::{PipelineFilters, PrFilters, SupplyChainConfig};
 
 const GATE_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/gate.js";
 pub(crate) const IMPORT_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/import.js";
@@ -153,6 +154,10 @@ pub struct AdoScriptExtension {
     /// Cloned from the front-matter because the extension outlives the
     /// borrow of `FrontMatter` in `collect_extensions`.
     pub pr_trigger_for_synth: Option<crate::compile::types::PrTriggerConfig>,
+    /// Internal supply-chain configuration. When the `feed` mirror is
+    /// configured, the `ado-script.zip` bundle is pulled from the internal
+    /// Azure DevOps Artifacts feed instead of GitHub Releases.
+    pub supply_chain: Option<crate::compile::types::SupplyChainConfig>,
 }
 
 impl AdoScriptExtension {
@@ -326,9 +331,12 @@ impl AdoScriptExtension {
 }
 
 /// Returns the two-step bundle as typed `Step`s: a
-/// `Step::Task(UseNode@1)` plus a `Step::Bash` for the curl + sha256
-/// + unzip pipeline.
-fn install_and_download_steps_typed() -> Vec<Step> {
+/// `Step::Task(UseNode@1)` plus a `Step::Bash` for the curl, sha256,
+/// and unzip pipeline. When an internal feed is configured the bundle is
+/// pulled from the Azure DevOps Artifacts feed (NuGet) instead of GitHub
+/// Releases; the `.nupkg` is unzipped and `ado-script.zip` relocated, then
+/// verified and unpacked exactly as in the GitHub path.
+fn install_and_download_steps_typed(supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
     let version = env!("CARGO_PKG_VERSION");
     let install = {
         let mut t =
@@ -337,6 +345,58 @@ fn install_and_download_steps_typed() -> Vec<Step> {
         t.condition = Some(Condition::Succeeded);
         t
     };
+
+    if let Some(feed) = supply_chain.and_then(|sc| sc.feed.as_ref()) {
+        let connection = supply_chain.and_then(|sc| sc.feed_connection());
+        let mut auth = nuget_authenticate_step(connection);
+        auth.condition = Some(Condition::Succeeded);
+        let download_pkg = {
+            let mut t = download_package_step(
+                format!("Download ado-aw scripts (v{version})"),
+                feed.name.as_str(),
+                "ado-script",
+                version,
+                "/tmp/ado-aw-scripts/_pkg",
+            );
+            t.timeout = Some(std::time::Duration::from_secs(300));
+            t.condition = Some(Condition::Succeeded);
+            t
+        };
+        // Locate ado-script.zip + checksums.txt within the package staging
+        // dir (handling both extracted-tree and raw-.nupkg delivery),
+        // verify, then unzip the bundle into /tmp/ado-aw-scripts/.
+        let script = "\
+             set -eo pipefail\n\
+             mkdir -p /tmp/ado-aw-scripts\n\
+             STAGING=/tmp/ado-aw-scripts/_pkg\n\
+             if [ -z \"$(find \"$STAGING\" -name 'ado-script.zip' -print -quit)\" ]; then\n  \
+               NUPKG=\"$(find \"$STAGING\" -name '*.nupkg' -print -quit)\"\n  \
+               if [ -n \"$NUPKG\" ]; then\n    \
+                 unzip -o \"$NUPKG\" -d \"$STAGING\" >/dev/null\n  \
+               fi\n\
+             fi\n\
+             ZIP=\"$(find \"$STAGING\" -name 'ado-script.zip' -print -quit)\"\n\
+             CHK=\"$(find \"$STAGING\" -name 'checksums.txt' -print -quit)\"\n\
+             if [ -z \"$ZIP\" ] || [ -z \"$CHK\" ]; then\n  \
+               echo \"##vso[task.complete result=Failed]ado-script.zip or checksums.txt not found in package\"\n  \
+               exit 1\n\
+             fi\n\
+             cp \"$ZIP\" /tmp/ado-aw-scripts/ado-script.zip\n\
+             cp \"$CHK\" /tmp/ado-aw-scripts/checksums.txt\n\
+             cd /tmp/ado-aw-scripts && grep \"ado-script.zip\" checksums.txt | sha256sum -c -\n\
+             unzip -o /tmp/ado-aw-scripts/ado-script.zip -d /tmp/ado-aw-scripts/\n"
+            .to_string();
+        let mut b = BashStep::new(format!("Stage ado-aw scripts (v{version})"), script)
+            .with_condition(Condition::Succeeded);
+        b.timeout = Some(std::time::Duration::from_secs(300));
+        return vec![
+            Step::Task(install),
+            Step::Task(auth),
+            Step::Task(download_pkg),
+            Step::Bash(b),
+        ];
+    }
+
     let download = {
         let script = format!(
             "set -eo pipefail\n\
@@ -524,7 +584,7 @@ impl CompilerExtension for AdoScriptExtension {
         // ─── Setup job ─────────────────────────────────────────
         let mut setup_steps: Vec<Step> = Vec::new();
         if !pr_checks.is_empty() || !pipeline_checks.is_empty() || self.synthetic_pr_active() {
-            setup_steps.extend(install_and_download_steps_typed());
+            setup_steps.extend(install_and_download_steps_typed(self.supply_chain.as_ref()));
             if let Some(pr) = self.pr_trigger_for_synth.as_ref() {
                 let spec_b64 = crate::compile::filter_ir::build_pr_synth_spec(pr)?;
                 setup_steps.push(Step::Bash(synthetic_pr_step_typed(&spec_b64)?));
@@ -562,7 +622,7 @@ impl CompilerExtension for AdoScriptExtension {
             || self.exec_context_pr_checks_active
             || self.exec_context_repo_active
         {
-            agent_prepare_steps.extend(install_and_download_steps_typed());
+            agent_prepare_steps.extend(install_and_download_steps_typed(self.supply_chain.as_ref()));
             if import_active {
                 agent_prepare_steps.push(resolver_step_typed());
             }
@@ -765,6 +825,7 @@ mod tests {
             exec_context_pr_checks_active: false,
             exec_context_repo_active: false,
             pr_trigger_for_synth: None,
+            supply_chain: None,
         }
     }
 
@@ -849,6 +910,7 @@ mod tests {
                 filters: None,
                 ..Default::default()
             }),
+            supply_chain: None,
         };
         let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
         let ctx = CompileContext::for_test(&fm);
@@ -904,6 +966,7 @@ mod tests {
                 filters: None,
                 ..Default::default()
             }),
+            supply_chain: None,
         };
         let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
         let ctx = CompileContext::for_test(&fm);
@@ -943,7 +1006,7 @@ mod tests {
                 .starts_with(zip_prefix),
             "IMPORT_EVAL_PATH suffix must match zip internal path prefix used in release.yml"
         );
-        let steps = install_and_download_steps_typed();
+        let steps = install_and_download_steps_typed(None);
         match &steps[1] {
             Step::Bash(download) => assert!(
                 download.script.contains("-d /tmp/ado-aw-scripts/"),
@@ -1076,6 +1139,7 @@ mod tests {
                 filters: None,
                 ..Default::default()
             }),
+            supply_chain: None,
         }
     }
 
@@ -1593,6 +1657,7 @@ mod tests {
                 filters: None,
                 ..Default::default()
             }),
+            supply_chain: None,
         };
         let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
         let ctx = CompileContext::for_test(&fm);

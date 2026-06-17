@@ -85,6 +85,39 @@ pub fn is_valid_artifact_name(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
+/// Validate an Azure DevOps Artifacts feed reference.
+///
+/// Permits a bare feed name or a single `project/feed` form. Allowlist is
+/// `[A-Za-z0-9._/-]`; rejects empty strings, `..` traversal, leading/trailing
+/// `/`, and more than one `/` separator. The strict charset blocks shell
+/// metacharacters in case the value is interpolated into a generated step.
+pub fn is_valid_feed_ref(s: &str) -> bool {
+    !s.is_empty()
+        && !s.contains("..")
+        && !s.starts_with('/')
+        && !s.ends_with('/')
+        && s.matches('/').count() <= 1
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
+}
+
+/// Validate an Azure DevOps service-connection name or GUID.
+///
+/// Connection display names legitimately contain spaces and assorted
+/// punctuation, so this is a deny-list rather than an allowlist: it rejects
+/// empty strings, anything over 256 characters, control characters
+/// (including newlines), and quote characters. Values flow into YAML task
+/// inputs (`azureSubscription`, `nuGetServiceConnections`,
+/// `containerRegistry`) where these characters could break out of the scalar.
+pub fn is_valid_service_connection(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 256
+        && !s.contains('\'')
+        && !s.contains('"')
+        && !s.contains('`')
+        && !s.chars().any(|c| c.is_control())
+}
+
 /// Characters allowed in individual engine.args entries.
 /// Strict allowlist to prevent shell injection inside AWF single-quoted commands.
 pub fn is_valid_arg(s: &str) -> bool {
@@ -620,6 +653,33 @@ mod tests {
     use super::*;
 
     // ── Character allowlist validators ──────────────────────────────────
+
+    #[test]
+    fn test_is_valid_feed_ref() {
+        assert!(is_valid_feed_ref("my-feed"));
+        assert!(is_valid_feed_ref("project/feed"));
+        assert!(is_valid_feed_ref("my.feed_v2"));
+        assert!(!is_valid_feed_ref(""));
+        assert!(!is_valid_feed_ref("a/b/c")); // more than one separator
+        assert!(!is_valid_feed_ref("/leading"));
+        assert!(!is_valid_feed_ref("trailing/"));
+        assert!(!is_valid_feed_ref("../escape"));
+        assert!(!is_valid_feed_ref("has space"));
+        assert!(!is_valid_feed_ref("inject;rm"));
+    }
+
+    #[test]
+    fn test_is_valid_service_connection() {
+        assert!(is_valid_service_connection("acr-conn"));
+        assert!(is_valid_service_connection("My ACR Connection")); // spaces allowed
+        assert!(is_valid_service_connection("11112222-3333-4444-5555-666677778888"));
+        assert!(!is_valid_service_connection(""));
+        assert!(!is_valid_service_connection("with\nnewline"));
+        assert!(!is_valid_service_connection("with'quote"));
+        assert!(!is_valid_service_connection("with\"quote"));
+        assert!(!is_valid_service_connection("with`tick"));
+        assert!(!is_valid_service_connection(&"x".repeat(257)));
+    }
 
     #[test]
     fn test_is_safe_path_segment() {
