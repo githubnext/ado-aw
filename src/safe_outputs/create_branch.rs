@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{PATH_SEGMENT, validate_git_ref_name};
-use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize_config};
 use crate::tool_result;
 use crate::validate::reject_pipeline_injection;
@@ -257,7 +257,7 @@ impl Executor for CreateBranchResult {
                 .context("BUILD_REPOSITORY_NAME not set")?
                 .to_string()
         } else {
-            crate::safeoutputs::lookup_allowed_repository(repo_alias, &ctx.allowed_repositories)
+            crate::safe_outputs::lookup_allowed_repository(repo_alias, &ctx.allowed_repositories)
                 .cloned()
                 .context(format!(
                     "Repository alias '{}' is not in the allowed checkout list",
@@ -389,7 +389,7 @@ impl Executor for CreateBranchResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safeoutputs::ToolResult;
+    use crate::safe_outputs::ToolResult;
 
     #[test]
     fn test_result_has_correct_name() {

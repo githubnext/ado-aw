@@ -214,30 +214,18 @@ When `workspace: root` and multiple repositories are checked out, agents can cre
 ```
 The `repository` value must be `"self"`, an alias from the `checkout:` list in the front matter, the full Azure DevOps repository name (e.g. `project/repo`), or the bare repository name (case-insensitive, e.g. `sdk-FtdiDeviceControl` for an entry whose ADO name is `4x4/sdk-FtdiDeviceControl`).
 
+### Diagnostic signals
+
+`noop`, `missing-tool`, and `missing-data` are diagnostic safe outputs.
+When `conclusion:` is configured, the always-running Conclusion job
+handles Azure DevOps work-item filing/commenting for these signals. See
+[docs/conclusion.md](conclusion.md).
+
 ### noop
 Reports that no action was needed. Use this to provide visibility when analysis is complete but no changes or outputs are required.
 
-The executor always files an Azure DevOps work item or appends a comment to an existing one. Override the defaults in front matter to customise the title, type, or area path. If ADO credentials are not available the tool succeeds with a warning.
-
 **Agent parameters:**
 - `context` - Optional context about why no action was taken
-
-**Configuration options (front matter):**
-```yaml
-safe-outputs:
-  noop:
-    work-item:                                  # Work item config — always active with these defaults
-      enabled: true                             # Set to false to disable work-item filing entirely
-      title: "[ado-aw] Agent reported no operation"  # Default title (used to find existing items too)
-      work-item-type: Task                      # Work item type (default: "Task")
-      area-path: "MyProject\\MyTeam"            # Optional — area path
-      iteration-path: "MyProject\\Sprint 1"     # Optional — iteration path
-      tags:                                     # Optional — tags to apply
-        - agent-noop
-      include-stats: true                       # Append agent stats to description/comment (default: true)
-```
-
-The executor searches for a non-closed work item with the same `title` in the project. If one is found, a comment is appended; otherwise a new work item is created.
 
 ### missing-data
 Reports that data or information needed to complete the task is not available.
@@ -250,28 +238,9 @@ Reports that data or information needed to complete the task is not available.
 ### missing-tool
 Reports that a tool or capability needed to complete the task is not available.
 
-The executor always files an Azure DevOps work item or appends a comment to an existing one. Override the defaults in front matter to customise the title, type, or area path. If ADO credentials are not available the tool succeeds with a warning.
-
 **Agent parameters:**
 - `tool_name` - Name of the tool that was expected but not found
 - `context` - Optional context about why the tool was needed
-
-**Configuration options (front matter):**
-```yaml
-safe-outputs:
-  missing-tool:
-    work-item:                                     # Work item config — always active with these defaults
-      enabled: true                                # Set to false to disable work-item filing entirely
-      title: "[ado-aw] Agent encountered missing tool"  # Default title (used to find existing items too)
-      work-item-type: Task                         # Work item type (default: "Task")
-      area-path: "MyProject\\MyTeam"               # Optional — area path
-      iteration-path: "MyProject\\Sprint 1"        # Optional — iteration path
-      tags:                                        # Optional — tags to apply
-        - agent-missing-tool
-      include-stats: true                          # Append agent stats to description/comment (default: true)
-```
-
-The executor searches for a non-closed work item with the same `title` in the project. If one is found, a comment is appended; otherwise a new work item is created.
 
 ### report-incomplete
 Reports that a task could not be completed.

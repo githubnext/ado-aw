@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
-use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
 use crate::validate::reject_pipeline_injection;
@@ -286,7 +286,7 @@ impl Executor for AddPrCommentResult {
                 .context("BUILD_REPOSITORY_NAME not set and repository is 'self'")?
                 .clone()
         } else {
-            match crate::safeoutputs::lookup_allowed_repository(
+            match crate::safe_outputs::lookup_allowed_repository(
                 &self.repository,
                 &ctx.allowed_repositories,
             ) {
@@ -397,7 +397,7 @@ impl Executor for AddPrCommentResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safeoutputs::ToolResult;
+    use crate::safe_outputs::ToolResult;
 
     #[test]
     fn test_result_has_correct_name() {

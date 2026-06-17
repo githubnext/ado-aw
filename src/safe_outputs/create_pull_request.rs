@@ -5,7 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
-use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
 use crate::validate::reject_pipeline_injection;
@@ -568,7 +568,7 @@ impl Executor for CreatePrResult {
             "Validating repository '{}' against allowed list",
             self.repository
         );
-        let repo_id = if crate::safeoutputs::input_refers_to_self(&self.repository, ctx) {
+        let repo_id = if crate::safe_outputs::input_refers_to_self(&self.repository, ctx) {
             // "self" or a name match against the pipeline's own repository
             debug!("Using 'self' repository (matched '{}')", self.repository);
             ctx.repository_id
@@ -576,7 +576,7 @@ impl Executor for CreatePrResult {
                 .or(ctx.repository_name.as_ref())
                 .context("Repository ID not configured for 'self'")?
                 .clone()
-        } else if let Some(ado_repo_name) = crate::safeoutputs::lookup_allowed_repository(
+        } else if let Some(ado_repo_name) = crate::safe_outputs::lookup_allowed_repository(
             &self.repository,
             &ctx.allowed_repositories,
         ) {
@@ -2288,7 +2288,7 @@ fn generate_pr_footer() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safeoutputs::ToolResult;
+    use crate::safe_outputs::ToolResult;
 
     #[test]
     fn test_validate_params_valid() {
@@ -2618,8 +2618,8 @@ index 0000000..abcdefg
 
     #[test]
     fn test_sanitize_path_for_markdown_passthrough_normal() {
-        let out = sanitize_path_for_markdown("src/safeoutputs/create_pull_request.rs");
-        assert_eq!(out, "src/safeoutputs/create_pull_request.rs");
+        let out = sanitize_path_for_markdown("src/safe_outputs/create_pull_request.rs");
+        assert_eq!(out, "src/safe_outputs/create_pull_request.rs");
     }
 
     #[test]

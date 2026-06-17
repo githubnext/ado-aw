@@ -160,6 +160,8 @@ setup:                         # separate job BEFORE agentic task
 teardown:                      # separate job AFTER safe outputs processing
   - bash: echo "Teardown job step"
     displayName: "Teardown step"
+conclusion:                    # optional always-running housekeeping job
+  work-item-type: Bug          # see docs/conclusion.md
 network:                       # optional network policy (standalone target only)
   allowed:                       # allowed host patterns and/or ecosystem identifiers
     - python                   # ecosystem identifier — expands to Python/PyPI domains
@@ -187,6 +189,10 @@ parameters:                    # optional ADO runtime parameters (surfaced in UI
     default: false
 ---
 
+Additional top-level field reference:
+
+- `conclusion:` — configures the always-running post-pipeline
+  housekeeping job. See [docs/conclusion.md](conclusion.md).
 
 ## Build and Test
 
@@ -428,4 +434,3 @@ pipeline. In this mode the compiler:
 
 Result: every PR update fires exactly one PR-typed build (`Build.Reason
 == PullRequest`); commit-driven CI is fully silenced.
-

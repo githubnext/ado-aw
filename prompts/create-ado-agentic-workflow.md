@@ -329,9 +329,9 @@ tools:
 | `create-wiki-page` | Create a new ADO wiki page (requires `wiki-name`) | ✅ |
 | `update-wiki-page` | Update an existing ADO wiki page (requires `wiki-name`) | ✅ |
 | **Diagnostics** | | |
-| `noop` | Report no action needed; also files an ADO work item (configurable, gracefully skipped without write perms) | — |
+| `noop` | Report no action needed | — |
 | `missing-data` | Report missing data/information | — |
-| `missing-tool` | Report a missing tool or capability; also files an ADO work item (configurable, gracefully skipped without write perms) | — |
+| `missing-tool` | Report a missing tool or capability | — |
 | `report-incomplete` | Report that a task could not be completed | — |
 
 Example configuration for additional tools:
@@ -350,24 +350,13 @@ safe-outputs:
   queue-build:
     allowed-pipelines: [42, 99]       # Required — pipeline definition IDs that can be triggered
     max: 1
-  # noop and missing-tool auto-file ADO work items (enabled by default, optional customisation):
-  noop:
-    work-item:
-      enabled: true                   # Set to false to disable work-item filing
-      title: "[ado-aw] Agent reported no operation"
-      work-item-type: Task
-      area-path: "MyProject\\MyTeam"  # Optional
-  missing-tool:
-    work-item:
-      enabled: true                   # Set to false to disable work-item filing
-      title: "[ado-aw] Agent encountered missing tool"
-      work-item-type: Task
-      area-path: "MyProject\\MyTeam"  # Optional
+  noop: {}
+  missing-tool: {}
 ```
 
 > See `docs/safe-outputs.md` → "Available Safe Output Tools" for full configuration reference of every tool.
 
-Diagnostic tools (`noop`, `missing-data`, `missing-tool`, `report-incomplete`) are always available and require no required configuration. `noop` and `missing-tool` automatically file ADO work items by default using the executor's token (sourced from `$(System.AccessToken)` by default, or from an ARM SC when `permissions.write` is set); if the token lacks work-item write permission, the call gracefully skips with a warning.
+Diagnostic tools (`noop`, `missing-data`, `missing-tool`, `report-incomplete`) are always available and require no required configuration.
 
 > **Note**: The compiler no longer requires `permissions.write` for write-bearing safe outputs — the executor defaults to `$(System.AccessToken)`. Set `permissions.write` only when you need cross-org writes or a named identity instead of `Project Collection Build Service`.
 
@@ -757,9 +746,7 @@ permissions:
 safe-outputs:
   add-pr-comment:
     max: 5
-  noop:
-    work-item:
-      enabled: false
+  noop: {}
 ```
 
 ### Repository Maintenance with PRs

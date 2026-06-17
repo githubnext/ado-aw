@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
-use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
 use ado_aw_derive::SanitizeConfig;
@@ -583,7 +583,7 @@ impl Executor for UpdateWorkItemResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safeoutputs::ToolResult;
+    use crate::safe_outputs::ToolResult;
 
     #[test]
     fn test_result_has_correct_name() {
@@ -785,7 +785,7 @@ target: 42
 
     #[tokio::test]
     async fn test_execute_requires_ado_context() {
-        use crate::safeoutputs::Executor;
+        use crate::safe_outputs::Executor;
         use std::collections::HashMap;
         use std::path::PathBuf;
 

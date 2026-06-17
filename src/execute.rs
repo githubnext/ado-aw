@@ -14,7 +14,7 @@ use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 
 use crate::ndjson::{self, EXECUTED_NDJSON_FILENAME, SAFE_OUTPUT_FILENAME};
-use crate::safeoutputs::{
+use crate::safe_outputs::{
     AddBuildTagResult, AddPrCommentResult, CommentOnWorkItemResult, CreateBranchResult,
     CreateGitTagResult, CreateIssueResult, CreatePrResult, CreateWikiPageResult,
     CreateWorkItemResult, ExecutionContext, ExecutionResult, Executor, LinkWorkItemsResult,

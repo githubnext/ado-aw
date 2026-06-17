@@ -782,14 +782,14 @@ mod tests {
 
     #[test]
     fn archive_files_step_accepts_archive_type_override() {
-        let t = archive_files_step("$(Build.BinariesDirectory)", "$(Build.ArtifactStagingDirectory)/output.tar.gz")
-            .with_input("archiveType", "tar")
-            .with_input("tarCompression", "gz");
+        let t = archive_files_step(
+            "$(Build.BinariesDirectory)",
+            "$(Build.ArtifactStagingDirectory)/output.tar.gz",
+        )
+        .with_input("archiveType", "tar")
+        .with_input("tarCompression", "gz");
         assert_eq!(t.task, "ArchiveFiles@2");
-        assert_eq!(
-            t.inputs.get("archiveType").map(|s| s.as_str()),
-            Some("tar")
-        );
+        assert_eq!(t.inputs.get("archiveType").map(|s| s.as_str()), Some("tar"));
         assert_eq!(
             t.inputs.get("tarCompression").map(|s| s.as_str()),
             Some("gz")
@@ -799,9 +799,12 @@ mod tests {
 
     #[test]
     fn archive_files_step_accepts_optional_flags() {
-        let t = archive_files_step("$(Build.SourcesDirectory)", "$(Build.ArtifactStagingDirectory)/src.zip")
-            .with_input("includeRootFolder", "false")
-            .with_input("replaceExistingArchive", "true");
+        let t = archive_files_step(
+            "$(Build.SourcesDirectory)",
+            "$(Build.ArtifactStagingDirectory)/src.zip",
+        )
+        .with_input("includeRootFolder", "false")
+        .with_input("replaceExistingArchive", "true");
         assert_eq!(
             t.inputs.get("includeRootFolder").map(|s| s.as_str()),
             Some("false")
@@ -815,14 +818,14 @@ mod tests {
 
     #[test]
     fn archive_files_step_seven_zip_compression() {
-        let t = archive_files_step("$(Build.BinariesDirectory)", "$(Build.ArtifactStagingDirectory)/output.7z")
-            .with_input("archiveType", "7z")
-            .with_input("sevenZipCompression", "maximum");
+        let t = archive_files_step(
+            "$(Build.BinariesDirectory)",
+            "$(Build.ArtifactStagingDirectory)/output.7z",
+        )
+        .with_input("archiveType", "7z")
+        .with_input("sevenZipCompression", "maximum");
         assert_eq!(t.task, "ArchiveFiles@2");
-        assert_eq!(
-            t.inputs.get("archiveType").map(|s| s.as_str()),
-            Some("7z")
-        );
+        assert_eq!(t.inputs.get("archiveType").map(|s| s.as_str()), Some("7z"));
         assert_eq!(
             t.inputs.get("sevenZipCompression").map(|s| s.as_str()),
             Some("maximum")
@@ -911,7 +914,9 @@ mod tests {
         assert_eq!(t.inputs.get("command").map(|s| s.as_str()), Some("custom"));
         assert_eq!(
             t.inputs.get("arguments").map(|s| s.as_str()),
-            Some("install My.Package -Version 1.0.0 -Source https://example.com/nuget -NonInteractive")
+            Some(
+                "install My.Package -Version 1.0.0 -Source https://example.com/nuget -NonInteractive"
+            )
         );
         assert_eq!(t.inputs.len(), 2);
     }
@@ -998,7 +1003,10 @@ mod tests {
     #[test]
     fn powershell_file_step_accepts_optional_arguments() {
         let t = powershell_file_step("$(System.DefaultWorkingDirectory)/scripts/build.ps1")
-            .with_input("arguments", "-Configuration Release -OutputDir $(Build.ArtifactStagingDirectory)")
+            .with_input(
+                "arguments",
+                "-Configuration Release -OutputDir $(Build.ArtifactStagingDirectory)",
+            )
             .with_input("workingDirectory", "$(Build.SourcesDirectory)");
         assert_eq!(t.task, "PowerShell@2");
         assert_eq!(
@@ -1243,10 +1251,7 @@ mod tests {
         let t = download_pipeline_artifact_step("$(Agent.TempDirectory)/out")
             .with_input("artifact", "drop");
         assert_eq!(t.task, "DownloadPipelineArtifact@2");
-        assert_eq!(
-            t.inputs.get("artifact").map(|s| s.as_str()),
-            Some("drop")
-        );
+        assert_eq!(t.inputs.get("artifact").map(|s| s.as_str()), Some("drop"));
         assert_eq!(
             t.inputs.get("targetPath").map(|s| s.as_str()),
             Some("$(Agent.TempDirectory)/out")
@@ -1295,10 +1300,7 @@ mod tests {
             .with_input("artifact", "safe_outputs")
             .with_input("allowPartiallySucceededBuilds", "true");
         assert_eq!(t.task, "DownloadPipelineArtifact@2");
-        assert_eq!(
-            t.inputs.get("source").map(|s| s.as_str()),
-            Some("specific")
-        );
+        assert_eq!(t.inputs.get("source").map(|s| s.as_str()), Some("specific"));
         assert_eq!(
             t.inputs.get("runVersion").map(|s| s.as_str()),
             Some("latestFromBranch")
@@ -1308,7 +1310,9 @@ mod tests {
             Some("$(Build.SourceBranch)")
         );
         assert_eq!(
-            t.inputs.get("allowPartiallySucceededBuilds").map(|s| s.as_str()),
+            t.inputs
+                .get("allowPartiallySucceededBuilds")
+                .map(|s| s.as_str()),
             Some("true")
         );
         assert_eq!(t.inputs.len(), 8);

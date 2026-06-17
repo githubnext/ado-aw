@@ -184,6 +184,6 @@ These commands are not shown in `--help` but are available for contributors work
 
 ## Pipeline IR Reference
 
-The compiler builds typed Azure DevOps pipeline IR and lowers it through one YAML emitter. The canonical Setup → Agent → Detection → SafeOutputs → Teardown shape lives in `agentic_pipeline.rs` (shared by every target); target-specific builders (`standalone_ir.rs`, `onees_ir.rs`, `job_ir.rs`, and `stage_ir.rs`) own only the per-target envelope (pipeline shape, template parameters, 1ES wrapping).
+The compiler builds typed Azure DevOps pipeline IR and lowers it through one YAML emitter. The canonical Setup → Agent → Detection → SafeOutputs → Teardown shape, plus the optional always-running Conclusion job when `conclusion:` is configured, lives in `agentic_pipeline.rs` (shared by every target); target-specific builders (`standalone_ir.rs`, `onees_ir.rs`, `job_ir.rs`, and `stage_ir.rs`) own only the per-target envelope (pipeline shape, template parameters, 1ES wrapping).
 
 See [`docs/ir.md`](ir.md) for the complete IR reference.

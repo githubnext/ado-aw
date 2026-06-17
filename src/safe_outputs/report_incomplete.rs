@@ -3,7 +3,7 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
 use anyhow::ensure;
@@ -77,7 +77,7 @@ impl Executor for ReportIncompleteResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safeoutputs::{Executor, ToolResult};
+    use crate::safe_outputs::{Executor, ToolResult};
 
     #[test]
     fn test_result_has_correct_name() {
@@ -138,7 +138,7 @@ mod tests {
         .unwrap();
 
         let exec = result
-            .execute_sanitized(&crate::safeoutputs::ExecutionContext::default())
+            .execute_sanitized(&crate::safe_outputs::ExecutionContext::default())
             .await
             .unwrap();
         assert!(!exec.success);

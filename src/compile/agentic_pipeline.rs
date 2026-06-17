@@ -1,6 +1,7 @@
 //! Typed-IR builder for the canonical agentic-pipeline shape.
 //!
-//! Owns the Setup → Agent → Detection → SafeOutputs → Teardown
+//! Owns the Setup → Agent → Detection → SafeOutputs → Teardown →
+//! Conclusion
 //! shape consumed by **every** compile target (`standalone`, `1es`,
 //! `job`, `stage`). Each target's wrapper module (`standalone_ir.rs`,
 //! `onees_ir.rs`, `job_ir.rs`, `stage_ir.rs`) is a one-screen
@@ -48,6 +49,7 @@
 //!   — first production use of typed cross-job OutputRef in a
 //!   condition.
 //! - `Teardown` (optional): user `teardown:` steps.
+//! - `Conclusion` (optional): post-run reporting / work-item filing.
 
 use anyhow::Result;
 use std::path::Path;
@@ -58,6 +60,7 @@ use super::common::{
 };
 use super::extensions::{CompileContext, CompilerExtension, Declarations, Extension, McpgConfig};
 use super::ir::condition::{Condition, Expr};
+use super::ir::env::EnvValue;
 use super::ir::ids::{JobId, StepId};
 use super::ir::job::{Job, Pool};
 use super::ir::output::{OutputDecl, OutputRef};
@@ -314,8 +317,8 @@ pub(crate) fn build_pipeline_context(
     })
 }
 
-/// Build the canonical 5-job graph (Setup?, Agent, Detection,
-/// SafeOutputs, Teardown?) used by every target. The optional
+/// Build the canonical job graph (Setup?, Agent, Detection,
+/// SafeOutputs, Teardown?, Conclusion?) used by every target. The optional
 /// `prefix` is applied to Agent / Detection / SafeOutputs job IDs
 /// (matches the legacy template behaviour: Setup and Teardown stay
 /// unprefixed even in `target: job|stage`, see `src/data/job-base.yml`
@@ -356,6 +359,9 @@ pub(crate) fn build_canonical_jobs(
     if let Some(teardown) = build_teardown_job(front_matter, cfg, &p)? {
         jobs.push(teardown);
     }
+    if let Some(conclusion) = build_conclusion_job(front_matter, cfg, &p)? {
+        jobs.push(conclusion);
+    }
 
     // Wire dependsOn between jobs (graph pass also derives but
     // explicit edges make the YAML match committed lock files).
@@ -370,9 +376,10 @@ pub(crate) struct JobPrefix<'a>(pub Option<&'a str>);
 
 impl<'a> JobPrefix<'a> {
     /// Produce the `JobId` for a canonical job (`Setup` / `Agent` /
-    /// `Detection` / `SafeOutputs` / `Teardown`). Setup and Teardown
-    /// are always unprefixed; the other three are prefixed when a
-    /// prefix is provided.
+    /// `Detection` / `SafeOutputs` / `Teardown` / `Conclusion`).
+    /// Setup, Teardown, and Conclusion are always unprefixed; Agent,
+    /// Detection, and SafeOutputs are prefixed when a prefix is
+    /// provided.
     pub(crate) fn id(&self, base: &str) -> Result<JobId> {
         match (self.0, base) {
             (Some(prefix), "Agent" | "Detection" | "SafeOutputs") => {
@@ -1098,6 +1105,122 @@ fn build_teardown_job(
     Ok(Some(job))
 }
 
+fn build_conclusion_job(
+    front_matter: &FrontMatter,
+    cfg: &StandaloneCtx,
+    prefix: &JobPrefix<'_>,
+) -> Result<Option<Job>> {
+    let conclusion_config = match &front_matter.conclusion {
+        Some(c) => c,
+        None => return Ok(None),
+    };
+
+    let mut steps: Vec<Step> = Vec::new();
+
+    steps.push(checkout_self_step());
+
+    steps.push(Step::Task(
+        TaskStep::new("UseNode@1", "Install Node.js 22.x").with_input("version", "22.x"),
+    ));
+
+    let download_script = format!(
+        "set -eo pipefail\n\
+         COMPILER_VERSION=\"{version}\"\n\
+         DOWNLOAD_DIR=\"/tmp/ado-aw-scripts\"\n\
+         SCRIPTS_URL=\"https://github.com/githubnext/ado-aw/releases/download/v${{COMPILER_VERSION}}/ado-script.zip\"\n\
+         CHECKSUM_URL=\"https://github.com/githubnext/ado-aw/releases/download/v${{COMPILER_VERSION}}/checksums.txt\"\n\
+         mkdir -p \"$DOWNLOAD_DIR\"\n\
+         curl -fsSL -o \"$DOWNLOAD_DIR/ado-script.zip\" \"$SCRIPTS_URL\"\n\
+         curl -fsSL -o \"$DOWNLOAD_DIR/checksums.txt\" \"$CHECKSUM_URL\"\n\
+         cd \"$DOWNLOAD_DIR\" || exit 1\n\
+         grep \"ado-script.zip\" checksums.txt | sha256sum -c -\n\
+         unzip -o ado-script.zip -d \"$DOWNLOAD_DIR/ado-script\"\n",
+        version = cfg.compiler_version,
+    );
+    steps.push(Step::Bash(bash(
+        "Download ado-script bundle",
+        download_script,
+    )));
+
+    let mut download_artifact = TaskStep::new(
+        "DownloadPipelineArtifact@2",
+        "Download SafeOutputs artifact",
+    )
+    .with_input("artifact", "safe_outputs")
+    .with_input("path", "$(Pipeline.Workspace)/conclusion_inputs");
+    download_artifact.condition = Some(Condition::SucceededOrFailed);
+    steps.push(Step::Task(download_artifact));
+
+    let conclusion_script = "node /tmp/ado-aw-scripts/ado-script/conclusion.js\n";
+    let mut conclusion_step = bash("Report pipeline conclusion", conclusion_script);
+    conclusion_step = conclusion_step.with_condition(Condition::Always);
+    conclusion_step = conclusion_step
+        .with_env(
+            "AW_REPORT_FAILURE_AS_WORK_ITEM",
+            EnvValue::Literal(conclusion_config.report_failure_as_work_item.to_string()),
+        )
+        .with_env(
+            "AW_WORK_ITEM_TYPE",
+            EnvValue::Literal(conclusion_config.work_item_type.clone()),
+        )
+        .with_env(
+            "AW_INCLUDE_STATS",
+            EnvValue::Literal(conclusion_config.include_stats.to_string()),
+        )
+        .with_env(
+            "AW_PIPELINE_NAME",
+            EnvValue::Literal(front_matter.name.clone()),
+        )
+        .with_env(
+            "AW_SAFE_OUTPUT_DIR",
+            EnvValue::Literal("$(Pipeline.Workspace)/conclusion_inputs".to_string()),
+        )
+        .with_env("SYSTEM_ACCESSTOKEN", EnvValue::secret("System.AccessToken"));
+
+    if let Some(ref title) = conclusion_config.work_item_title {
+        conclusion_step =
+            conclusion_step.with_env("AW_WORK_ITEM_TITLE", EnvValue::Literal(title.clone()));
+    }
+    if let Some(ref area_path) = conclusion_config.area_path {
+        conclusion_step = conclusion_step.with_env(
+            "AW_WORK_ITEM_AREA_PATH",
+            EnvValue::Literal(area_path.clone()),
+        );
+    }
+    if let Some(ref iteration_path) = conclusion_config.iteration_path {
+        conclusion_step = conclusion_step.with_env(
+            "AW_WORK_ITEM_ITERATION_PATH",
+            EnvValue::Literal(iteration_path.clone()),
+        );
+    }
+    if !conclusion_config.tags.is_empty() {
+        let tags_json = serde_json::to_string(&conclusion_config.tags).unwrap_or_default();
+        conclusion_step =
+            conclusion_step.with_env("AW_WORK_ITEM_TAGS", EnvValue::Literal(tags_json));
+    }
+
+    let agent_id = prefix.id("Agent")?;
+    let detection_id = prefix.id("Detection")?;
+    let safeoutputs_id = prefix.id("SafeOutputs")?;
+    let agent_result = format!("$[dependencies.{}.result]", agent_id.as_str());
+    let detection_result = format!("$[dependencies.{}.result]", detection_id.as_str());
+    let safeoutputs_result = format!("$[dependencies.{}.result]", safeoutputs_id.as_str());
+    conclusion_step = conclusion_step
+        .with_env("AW_AGENT_RESULT", EnvValue::Literal(agent_result))
+        .with_env("AW_DETECTION_RESULT", EnvValue::Literal(detection_result))
+        .with_env(
+            "AW_SAFEOUTPUTS_RESULT",
+            EnvValue::Literal(safeoutputs_result),
+        );
+
+    steps.push(Step::Bash(conclusion_step));
+
+    let mut job = Job::new(prefix.id("Conclusion")?, "Conclusion", cfg.pool.clone());
+    job.steps = steps;
+    job.condition = Some(Condition::Always);
+    Ok(Some(job))
+}
+
 /// Wire explicit `depends_on` between the canonical jobs. The graph
 /// pass also derives these from OutputRefs but explicit edges make
 /// the emitted YAML match committed lock-file shapes exactly.
@@ -1118,7 +1241,9 @@ fn wire_explicit_dependencies(jobs: &mut [Job], prefix: &JobPrefix<'_>) -> Resul
     let detection_id = prefix.id("Detection")?;
     let safeoutputs_id = prefix.id("SafeOutputs")?;
     let teardown_id = prefix.id("Teardown")?;
+    let conclusion_id = prefix.id("Conclusion")?;
     let has_setup = jobs.iter().any(|j| j.id == setup_id);
+    let has_teardown = jobs.iter().any(|j| j.id == teardown_id);
     for j in jobs.iter_mut() {
         if j.id == agent_id && has_setup {
             j.depends_on = vec![setup_id.clone()];
@@ -1128,6 +1253,16 @@ fn wire_explicit_dependencies(jobs: &mut [Job], prefix: &JobPrefix<'_>) -> Resul
             j.depends_on = vec![agent_id.clone(), detection_id.clone()];
         } else if j.id == teardown_id {
             j.depends_on = vec![safeoutputs_id.clone()];
+        } else if j.id == conclusion_id {
+            let mut deps = vec![
+                agent_id.clone(),
+                detection_id.clone(),
+                safeoutputs_id.clone(),
+            ];
+            if has_teardown {
+                deps.push(teardown_id.clone());
+            }
+            j.depends_on = deps;
         }
     }
     Ok(())
@@ -1603,10 +1738,7 @@ fn start_mcpg_step(
             // another ` \` (doing so would emit a stray `\ \` that bash reads
             // as a one-character " " argument, corrupting the `docker run`
             // image reference — see issue #1034).
-            mcpg_docker_env
-                .lines()
-                .collect::<Vec<_>>()
-                .join("\n  ")
+            mcpg_docker_env.lines().collect::<Vec<_>>().join("\n  ")
         };
     // `--debug-pipeline` injects an extra `-e DEBUG="*" \` continuation
     // line into the `docker run …` invocation so MCPG (and the stdio

@@ -50,7 +50,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── compile/          # Pipeline compilation module
 │   │   ├── mod.rs        # Module entry point and Compiler trait
 │   │   ├── common.rs     # Shared helpers across targets
-│   │   ├── agentic_pipeline.rs # Canonical Setup → Agent → Detection → SafeOutputs → Teardown shape (shared by every target); BuiltPipelineContext, build_pipeline_context, build_canonical_jobs, per-job builders, fold_agent_conditions, agent_job_variables_hoist
+│   │   ├── agentic_pipeline.rs # Canonical Setup → Agent → Detection → SafeOutputs → Teardown → Conclusion shape (Conclusion emitted when configured; shared by every target); BuiltPipelineContext, build_pipeline_context, build_canonical_jobs, per-job builders, fold_agent_conditions, agent_job_variables_hoist
 │   │   ├── ir/            # Typed Azure DevOps pipeline IR
 │   │   │   ├── mod.rs     # IR module entry point and shared types
 │   │   │   ├── ids.rs     # Stable IDs for jobs/steps/outputs in the IR
@@ -235,12 +235,15 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── update-ado-agentic-workflow.md # Guide for modifying an existing agentic pipeline
 │   └── debug-ado-agentic-workflow.md  # Guide for troubleshooting a failing agentic pipeline
 ├── scripts/              # Supporting scripts shipped as release artifacts
-│   └── ado-script/       # TypeScript workspace for bundled gate.js, import.js, exec-context-pr.js, exec-context-pr-synth.js
+│   └── ado-script/       # TypeScript workspace for bundled runtime helpers (gate.js, import.js, exec-context-*.js, conclusion.js)
 │       └── src/
 │           ├── gate/     # Gate evaluator source (bundled to gate.js)
 │           ├── import/   # Runtime prompt resolver source (bundled to import.js)
 │           ├── exec-context-pr/ # PR-context precompute source (bundled to exec-context-pr.js)
 │           ├── exec-context-pr-synth/ # Synthetic-PR resolver source (bundled to exec-context-pr-synth.js)
+│           ├── exec-context-manual/ # Manual-run context source (bundled to exec-context-manual.js)
+│           ├── exec-context-pipeline/ # Pipeline-completion context source (bundled to exec-context-pipeline.js)
+│           ├── conclusion/ # Conclusion-job reporter source (bundled to conclusion.js)
 │           └── shared/   # Shared modules across bundles (auth, ado-client, env-facts, types.gen.ts)
 ├── tests/                # Integration tests and fixtures
 ├── docs/                 # Per-concept reference documentation (see index below)
@@ -286,6 +289,9 @@ index to jump to the right page.
   `command`).
 - [`docs/parameters.md`](docs/parameters.md) — ADO runtime parameters surfaced
   in the pipeline UI, including the auto-injected `clearMemory` parameter.
+- [`docs/conclusion.md`](docs/conclusion.md) — `conclusion:` configuration for
+  the always-running post-pipeline housekeeping job that files work-item
+  reports for failures and diagnostic signals.
 - [`docs/tools.md`](docs/tools.md) — `tools:` configuration (bash allow-list,
   `edit`, `cache-memory`, `azure-devops` MCP).
 - [`docs/runtimes.md`](docs/runtimes.md) — `runtimes:` configuration (Lean 4,
@@ -348,7 +354,9 @@ index to jump to the right page.
   adding codemods.
 - [`docs/ado-script.md`](docs/ado-script.md) — `ado-script` workspace
   (`scripts/ado-script/`): the bundled TypeScript runtime helpers (today:
-  `gate.js`, `import.js`, `exec-context-pr.js`, `exec-context-pr-synth.js`), schemars-driven type codegen, and the A2 design decision.
+  `gate.js`, `import.js`, `exec-context-pr.js`, `exec-context-pr-synth.js`,
+  `exec-context-manual.js`, `exec-context-pipeline.js`, `conclusion.js`),
+  schemars-driven type codegen, and the A2 design decision.
 - [`docs/local-development.md`](docs/local-development.md) — local development
   setup notes.
 

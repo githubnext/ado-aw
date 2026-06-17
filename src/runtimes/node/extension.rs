@@ -125,8 +125,7 @@ Node.js is installed and available. Use `node` to run scripts, \
 /// default ("22.x") matches the legacy emitter.
 fn node_install_task_step(config: &NodeRuntimeConfig) -> TaskStep {
     let version = config.version().unwrap_or("22.x");
-    TaskStep::new("UseNode@1", format!("Install Node.js {version}"))
-        .with_input("version", version)
+    TaskStep::new("UseNode@1", format!("Install Node.js {version}")).with_input("version", version)
 }
 
 /// Build the typed [`TaskStep`] for npm authentication.
@@ -234,10 +233,7 @@ mod tests {
             Step::Task(t) => {
                 assert_eq!(t.task, "UseNode@1");
                 assert_eq!(t.display_name, "Install Node.js 22.x");
-                assert_eq!(
-                    t.inputs.get("version").map(String::as_str),
-                    Some("22.x")
-                );
+                assert_eq!(t.inputs.get("version").map(String::as_str), Some("22.x"));
             }
             other => panic!("expected Step::Task, got {other:?}"),
         }

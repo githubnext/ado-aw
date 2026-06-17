@@ -92,7 +92,7 @@ use std::path::Path;
 ///
 /// Built once via [`CompileContext::new`] and passed to all extension
 /// methods. Follows the same pattern as
-/// [`ExecutionContext`](crate::safeoutputs::ExecutionContext)
+/// [`ExecutionContext`](crate::safe_outputs::ExecutionContext)
 /// for Stage 3 — a single context struct with all resolved metadata.
 pub struct CompileContext<'a> {
     /// The agent name from front matter.

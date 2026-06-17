@@ -732,6 +732,11 @@ pub struct FrontMatter {
     /// registry. See `docs/supply-chain.md`.
     #[serde(default, rename = "supply-chain")]
     pub supply_chain: Option<SupplyChainConfig>,
+    /// Conclusion job configuration — always-running housekeeping job that
+    /// files work items on pipeline failure or diagnostic signals (noop,
+    /// missing-tool, missing-data). See `docs/conclusion.md`.
+    #[serde(default)]
+    pub conclusion: Option<ConclusionConfig>,
 }
 
 impl FrontMatter {
@@ -837,6 +842,9 @@ impl SanitizeConfigTrait for FrontMatter {
         if let Some(ref mut sc) = self.supply_chain {
             sc.sanitize_config_fields();
         }
+        if let Some(ref mut c) = self.conclusion {
+            c.sanitize_config_fields();
+        }
     }
 }
 
@@ -893,6 +901,80 @@ pub struct PermissionsConfig {
     pub write: Option<String>,
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Conclusion job configuration
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Configuration for the Conclusion job — an always-running housekeeping job
+/// that files (or appends to) an Azure DevOps work item when the pipeline
+/// fails, or when diagnostic signals (noop, missing-tool, missing-data) are
+/// detected in the safe-outputs NDJSON manifest.
+///
+/// Lives under the `conclusion:` top-level front-matter key.
+///
+/// Example:
+/// ```yaml
+/// conclusion:
+///   work-item-type: Bug
+///   area-path: "MyProject\\MyTeam"
+///   tags:
+///     - pipeline-failure
+///     - automated
+/// ```
+#[derive(Debug, Deserialize, Clone, SanitizeConfig)]
+#[serde(deny_unknown_fields)]
+pub struct ConclusionConfig {
+    /// Whether failure work-item filing is enabled (default: `true`).
+    /// Set to `false` to emit the Conclusion job without work-item filing
+    /// (useful if you only want future conclusion steps).
+    #[serde(
+        default = "conclusion_default_enabled",
+        rename = "report-failure-as-work-item"
+    )]
+    pub report_failure_as_work_item: bool,
+
+    /// Title of the work item to file or append a comment to.
+    /// If a non-closed work item with this exact title already exists,
+    /// a comment is appended rather than creating a new work item.
+    /// Default: `"[ado-aw] Pipeline failure: {pipeline-name}"` (substituted at runtime).
+    #[serde(default, rename = "work-item-title")]
+    pub work_item_title: Option<String>,
+
+    /// Work item type to create (default: "Bug").
+    #[serde(
+        default = "conclusion_default_work_item_type",
+        rename = "work-item-type"
+    )]
+    pub work_item_type: String,
+
+    /// Area path for the work item.
+    #[serde(default, rename = "area-path")]
+    pub area_path: Option<String>,
+
+    /// Iteration path for the work item.
+    #[serde(default, rename = "iteration-path")]
+    pub iteration_path: Option<String>,
+
+    /// Tags to apply to the work item.
+    #[serde(default)]
+    pub tags: Vec<String>,
+
+    /// Whether to include agent execution stats in the work item body (default: true).
+    #[serde(
+        default = "crate::agent_stats::default_include_stats",
+        rename = "include-stats"
+    )]
+    pub include_stats: bool,
+}
+
+fn conclusion_default_enabled() -> bool {
+    true
+}
+
+fn conclusion_default_work_item_type() -> String {
+    "Bug".to_string()
+}
+
 /// Debug-only configuration block.
 ///
 /// Lives under the `ado-aw-debug:` top-level front-matter key. Holds knobs
@@ -902,7 +984,7 @@ pub struct PermissionsConfig {
 ///
 /// Adding a new field: pair the front-matter knob with a corresponding
 /// compile-side hook (e.g., a debug-only safe output should also be added
-/// to `crate::safeoutputs::DEBUG_ONLY_TOOLS` so the MCP layer enforces a
+/// to `crate::safe_outputs::DEBUG_ONLY_TOOLS` so the MCP layer enforces a
 /// matching default-deny gate).
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
@@ -917,7 +999,7 @@ pub struct AdoAwDebugConfig {
     /// Presence of this field is what enables the tool — when omitted
     /// the SafeOutputs MCP layer hides it via `DEBUG_ONLY_TOOLS`.
     #[serde(default, rename = "create-issue")]
-    pub create_issue: Option<crate::safeoutputs::CreateIssueConfig>,
+    pub create_issue: Option<crate::safe_outputs::CreateIssueConfig>,
 }
 
 impl SanitizeConfigTrait for AdoAwDebugConfig {
@@ -2980,5 +3062,61 @@ Body
         let filters = pr.filters.unwrap();
         assert_eq!(filters.title.unwrap().pattern, "*[agent]*");
         assert_eq!(filters.draft, Some(false));
+    }
+
+    #[test]
+    fn test_front_matter_accepts_conclusion_config() {
+        let content = r#"---
+name: "Test Agent"
+description: "Test"
+conclusion:
+  work-item-type: Bug
+  area-path: "MyProject\\MyTeam"
+  tags:
+    - pipeline-failure
+    - automated
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let conclusion = fm.conclusion.expect("conclusion should parse");
+        assert!(conclusion.report_failure_as_work_item);
+        assert_eq!(conclusion.work_item_type, "Bug");
+        assert_eq!(conclusion.area_path.as_deref(), Some("MyProject\\MyTeam"));
+        assert_eq!(conclusion.tags, vec!["pipeline-failure", "automated"]);
+        assert!(conclusion.include_stats);
+        assert!(conclusion.work_item_title.is_none());
+    }
+
+    #[test]
+    fn test_front_matter_conclusion_defaults() {
+        let content = r#"---
+name: "Test Agent"
+description: "Test"
+conclusion: {}
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let conclusion = fm.conclusion.expect("conclusion should parse");
+        assert!(conclusion.report_failure_as_work_item);
+        assert_eq!(conclusion.work_item_type, "Bug");
+        assert!(conclusion.area_path.is_none());
+        assert!(conclusion.tags.is_empty());
+    }
+
+    #[test]
+    fn test_front_matter_without_conclusion() {
+        let content = r#"---
+name: "Test Agent"
+description: "Test"
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        assert!(fm.conclusion.is_none());
     }
 }

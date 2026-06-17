@@ -14,9 +14,7 @@ permissions:
   read: agent-playground-read
   write: agent-playground-write
 safe-outputs:
-  missing-tool:
-    work-item:
-      enabled: false
+  missing-tool: {}
 ---
 
 ## Daily smoke for missing-tool

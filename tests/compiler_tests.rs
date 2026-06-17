@@ -3158,6 +3158,155 @@ fn assert_valid_yaml(compiled: &str, fixture_name: &str) {
     );
 }
 
+fn parse_compiled_yaml(compiled: &str) -> serde_yaml::Value {
+    let yaml_content: String = compiled
+        .lines()
+        .skip_while(|line| line.starts_with('#') || line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    serde_yaml::from_str(&yaml_content).expect("compiled YAML must parse")
+}
+
+fn yaml_key(key: &str) -> serde_yaml::Value {
+    serde_yaml::Value::String(key.to_string())
+}
+
+fn find_job_mapping<'a>(
+    value: &'a serde_yaml::Value,
+    job_id: &str,
+) -> Option<&'a serde_yaml::Mapping> {
+    match value {
+        serde_yaml::Value::Mapping(map) => {
+            if map.get(yaml_key("job")).and_then(|v| v.as_str()) == Some(job_id) {
+                return Some(map);
+            }
+            map.values()
+                .find_map(|child| find_job_mapping(child, job_id))
+        }
+        serde_yaml::Value::Sequence(items) => items
+            .iter()
+            .find_map(|child| find_job_mapping(child, job_id)),
+        _ => None,
+    }
+}
+
+fn find_bash_step_containing<'a>(
+    job: &'a serde_yaml::Mapping,
+    needle: &str,
+) -> Option<&'a serde_yaml::Mapping> {
+    job.get(yaml_key("steps"))
+        .and_then(|v| v.as_sequence())
+        .and_then(|steps| {
+            steps.iter().find_map(|step| {
+                let map = step.as_mapping()?;
+                let bash = map.get(yaml_key("bash")).and_then(|v| v.as_str())?;
+                if bash.contains(needle) {
+                    Some(map)
+                } else {
+                    None
+                }
+            })
+        })
+}
+
+#[test]
+fn test_conclusion_job_is_emitted_with_expected_condition_and_dependencies() {
+    let compiled = compile_fixture("conclusion_basic.md");
+    let doc = parse_compiled_yaml(&compiled);
+
+    let conclusion_job =
+        find_job_mapping(&doc, "Conclusion").expect("compiled YAML should contain Conclusion job");
+
+    assert_eq!(
+        conclusion_job
+            .get(yaml_key("condition"))
+            .and_then(|v| v.as_str()),
+        Some("always()"),
+        "Conclusion job should have condition: always()"
+    );
+
+    let depends_on = conclusion_job
+        .get(yaml_key("dependsOn"))
+        .and_then(|v| v.as_sequence())
+        .expect("Conclusion job should have a dependsOn sequence");
+    let deps: Vec<&str> = depends_on
+        .iter()
+        .map(|v| v.as_str().expect("dependsOn entries should be strings"))
+        .collect();
+
+    assert_eq!(
+        deps,
+        vec!["Agent", "Detection", "SafeOutputs"],
+        "Conclusion job should depend on Agent, Detection, and SafeOutputs"
+    );
+}
+
+#[test]
+fn test_conclusion_job_emits_expected_env_vars_for_conclusion_script() {
+    let compiled = compile_fixture("conclusion_basic.md");
+    let doc = parse_compiled_yaml(&compiled);
+
+    let conclusion_job =
+        find_job_mapping(&doc, "Conclusion").expect("compiled YAML should contain Conclusion job");
+    let conclusion_step = find_bash_step_containing(conclusion_job, "conclusion.js")
+        .expect("Conclusion job should include the conclusion.js bash step");
+    let env = conclusion_step
+        .get(yaml_key("env"))
+        .and_then(|v| v.as_mapping())
+        .expect("conclusion.js step should have an env block");
+
+    assert_eq!(
+        env.get(yaml_key("AW_REPORT_FAILURE_AS_WORK_ITEM"))
+            .and_then(|v| v.as_str()),
+        Some("true")
+    );
+    assert_eq!(
+        env.get(yaml_key("AW_WORK_ITEM_TYPE"))
+            .and_then(|v| v.as_str()),
+        Some("Bug")
+    );
+    assert_eq!(
+        env.get(yaml_key("AW_PIPELINE_NAME"))
+            .and_then(|v| v.as_str()),
+        Some("Conclusion Test Agent")
+    );
+    assert_eq!(
+        env.get(yaml_key("AW_WORK_ITEM_AREA_PATH"))
+            .and_then(|v| v.as_str()),
+        Some(r#"TestProject\TestTeam"#)
+    );
+    assert_eq!(
+        env.get(yaml_key("AW_WORK_ITEM_TAGS"))
+            .and_then(|v| v.as_str()),
+        Some(r#"["pipeline-failure","automated"]"#)
+    );
+    assert_eq!(
+        env.get(yaml_key("AW_INCLUDE_STATS"))
+            .and_then(|v| v.as_str()),
+        Some("true")
+    );
+    assert_eq!(
+        env.get(yaml_key("AW_SAFE_OUTPUT_DIR"))
+            .and_then(|v| v.as_str()),
+        Some("$(Pipeline.Workspace)/conclusion_inputs")
+    );
+    assert!(
+        env.contains_key(yaml_key("SYSTEM_ACCESSTOKEN")),
+        "conclusion.js step should include SYSTEM_ACCESSTOKEN"
+    );
+}
+
+#[test]
+fn test_conclusion_job_is_not_emitted_without_conclusion_config() {
+    let compiled = compile_fixture("minimal-agent.md");
+    let doc = parse_compiled_yaml(&compiled);
+
+    assert!(
+        find_job_mapping(&doc, "Conclusion").is_none(),
+        "pipelines without conclusion config must not emit a Conclusion job"
+    );
+}
+
 /// Assert that no step's `env:` block contains a `$[ ... ]` ADO runtime
 /// expression. ADO ONLY evaluates `$[ ... ]` inside `variables:` mappings
 /// and `condition:` fields — putting one in step `env:` passes the

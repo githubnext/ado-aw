@@ -7,6 +7,9 @@ const { mockGitApi, mockWitApi, mockWebApi, mockGetWebApi } = vi.hoisted(() => {
   const mockWitApi = {
     getWorkItem: vi.fn(),
     getComments: vi.fn(),
+    queryByWiql: vi.fn(),
+    createWorkItem: vi.fn(),
+    addComment: vi.fn(),
   };
   const mockWebApi = {
     getGitApi: vi.fn().mockResolvedValue(mockGitApi),
@@ -22,6 +25,10 @@ vi.mock("../auth.js", () => ({
 }));
 
 import {
+  addWorkItemComment,
+  createWorkItem,
+  fileOrAppendWorkItem,
+  findWorkItemByTitle,
   getWorkItem,
   getWorkItemComments,
   listPullRequestWorkItems,
@@ -33,6 +40,9 @@ describe("shared/wit", () => {
     mockGitApi.getPullRequestWorkItemRefs.mockReset();
     mockWitApi.getWorkItem.mockReset();
     mockWitApi.getComments.mockReset();
+    mockWitApi.queryByWiql.mockReset();
+    mockWitApi.createWorkItem.mockReset();
+    mockWitApi.addComment.mockReset();
     mockWebApi.getGitApi.mockReset().mockResolvedValue(mockGitApi);
     mockWebApi.getWorkItemTrackingApi.mockReset().mockResolvedValue(mockWitApi);
     mockGetWebApi.mockReset().mockResolvedValue(mockWebApi);
@@ -116,5 +126,177 @@ describe("shared/wit", () => {
 
   it("summariseRelations handles undefined relations", () => {
     expect(summariseRelations(undefined)).toEqual([]);
+  });
+
+  it("findWorkItemByTitle runs WIQL with escaped quotes and returns the first id", async () => {
+    mockWitApi.queryByWiql.mockResolvedValue({
+      workItems: [{ id: 123 }, { id: 456 }],
+    });
+
+    const result = await findWorkItemByTitle("MyProject", "Bob's bug");
+
+    expect(mockWitApi.queryByWiql).toHaveBeenCalledWith(
+      {
+        query:
+          "SELECT [System.Id] FROM WorkItems " +
+          "WHERE [System.Title] = 'Bob''s bug' " +
+          "AND [System.TeamProject] = @project " +
+          "AND [System.State] NOT IN ('Closed', 'Resolved', 'Done') " +
+          "ORDER BY [System.ChangedDate] DESC",
+      },
+      { project: "MyProject" },
+    );
+    expect(result).toBe(123);
+  });
+
+  it("findWorkItemByTitle returns null when no matches exist", async () => {
+    mockWitApi.queryByWiql.mockResolvedValue({ workItems: [] });
+    await expect(findWorkItemByTitle("p", "title")).resolves.toBeNull();
+  });
+
+  it("createWorkItem builds a JsonPatch document and prefixes the type with $", async () => {
+    mockWitApi.createWorkItem.mockResolvedValue({
+      id: 99,
+      _links: { html: { href: "https://example.test/wit/99" } },
+    });
+
+    const result = await createWorkItem("MyProject", "Task", {
+      "System.Title": "Hello",
+      "System.Description": "Body",
+      "System.Tags": "one; two",
+    });
+
+    expect(mockWitApi.createWorkItem).toHaveBeenCalledWith(
+      { "Content-Type": "application/json-patch+json" },
+      [
+        { op: "add", path: "/fields/System.Title", value: "Hello" },
+        { op: "add", path: "/fields/System.Description", value: "Body" },
+        { op: "add", path: "/fields/System.Tags", value: "one; two" },
+        {
+          op: "add",
+          path: "/multilineFieldsFormat/System.Description",
+          value: "Markdown",
+        },
+      ],
+      "MyProject",
+      "$Task",
+    );
+    expect(result).toEqual({ id: 99, url: "https://example.test/wit/99" });
+  });
+
+  it("addWorkItemComment posts a comment and returns its id", async () => {
+    mockWitApi.addComment.mockResolvedValue({ id: 777 });
+
+    const result = await addWorkItemComment("MyProject", 42, "hello");
+
+    expect(mockWitApi.addComment).toHaveBeenCalledWith(
+      { text: "hello" },
+      "MyProject",
+      42,
+    );
+    expect(result).toEqual({ commentId: 777 });
+  });
+
+  it("fileOrAppendWorkItem skips when disabled", async () => {
+    const result = await fileOrAppendWorkItem(
+      "MyProject",
+      {
+        enabled: false,
+        workItemType: "Task",
+        tags: [],
+        includeStats: true,
+      },
+      "Default title",
+      "Body",
+    );
+
+    expect(result).toEqual({
+      action: "skipped",
+      message: "Work-item filing disabled via enabled: false",
+    });
+  });
+
+  it("fileOrAppendWorkItem appends to an existing active work item", async () => {
+    mockWitApi.queryByWiql.mockResolvedValue({ workItems: [{ id: 51 }] });
+    mockWitApi.addComment.mockResolvedValue({ id: 88 });
+
+    const result = await fileOrAppendWorkItem(
+      "MyProject",
+      {
+        enabled: true,
+        title: "Existing title",
+        workItemType: "Task",
+        tags: [],
+        includeStats: true,
+      },
+      "Default title",
+      "Comment body",
+    );
+
+    expect(mockWitApi.createWorkItem).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      action: "appended",
+      workItemId: 51,
+      commentId: 88,
+      message: "Appended comment #88 to existing work item #51: Existing title",
+    });
+  });
+
+  it("fileOrAppendWorkItem creates a new work item when no active title match exists", async () => {
+    mockWitApi.queryByWiql.mockResolvedValue({ workItems: [] });
+    mockWitApi.createWorkItem.mockResolvedValue({
+      id: 64,
+      _links: { html: { href: "https://example.test/wit/64" } },
+    });
+
+    const result = await fileOrAppendWorkItem(
+      "MyProject",
+      {
+        enabled: true,
+        workItemType: "Bug",
+        areaPath: "Proj\\Area",
+        iterationPath: "Proj\\Iteration",
+        tags: ["tag-one", "tag-two"],
+        includeStats: false,
+      },
+      "Default title",
+      "Description body",
+    );
+
+    expect(mockWitApi.addComment).not.toHaveBeenCalled();
+    expect(mockWitApi.createWorkItem).toHaveBeenCalledWith(
+      { "Content-Type": "application/json-patch+json" },
+      [
+        { op: "add", path: "/fields/System.Title", value: "Default title" },
+        {
+          op: "add",
+          path: "/fields/System.Description",
+          value: "Description body",
+        },
+        { op: "add", path: "/fields/System.AreaPath", value: "Proj\\Area" },
+        {
+          op: "add",
+          path: "/fields/System.IterationPath",
+          value: "Proj\\Iteration",
+        },
+        {
+          op: "add",
+          path: "/fields/System.Tags",
+          value: "tag-one; tag-two",
+        },
+        {
+          op: "add",
+          path: "/multilineFieldsFormat/System.Description",
+          value: "Markdown",
+        },
+      ],
+      "MyProject",
+      "$Bug",
+    );
+    expect(result).toEqual({
+      action: "created",
+      workItemId: 64,
+      message: "Created work item #64: Default title",
+    });
   });
 });

@@ -3,7 +3,7 @@
 `ado-script` is the umbrella name for the TypeScript workspace at
 [`scripts/ado-script/`](../scripts/ado-script/). It produces small,
 ncc-bundled Node programs that the **compiler injects into every emitted
-pipeline** as runtime helpers. Today it produces four bundles:
+pipeline** as runtime helpers. Today it produces seven bundles:
 
 - `gate.js` — trigger-filter gate evaluator (Setup job).
 - `import.js` — runtime prompt resolver described in
@@ -26,6 +26,10 @@ pipeline** as runtime helpers. Today it produces four bundles:
   `aw-context/pipeline/upstream-*` files plus a `## Pipeline-completion
   context` prompt fragment (Agent job; see
   [`execution-context.md`](execution-context.md)).
+- `conclusion.js` — Conclusion job work-item reporter: reads the
+  safe-outputs execution manifest and upstream job results,
+  files/comments ADO work items for pipeline failures and diagnostic
+  signals (Conclusion job).
 
 > **Internal-only.** `ado-script` is not a user-facing front-matter
 > feature. Authors never write an `ado-script:` block in their agent
@@ -381,16 +385,20 @@ scripts/ado-script/
 │   ├── exec-context-manual/     # exec-context-manual.js entry point + manual-context precompute
 │   │   ├── index.ts             # main(): collect PARAM_* env vars → JSON snapshot → prompt fragment
 │   │   └── __tests__/           # unit tests for success / failure / sanitisation paths
-│   └── exec-context-pipeline/   # exec-context-pipeline.js entry point + pipeline-completion precompute
-│       ├── index.ts             # main(): validate TriggeredBy ids → fetch upstream Build via REST → stage + prompt
-│       └── __tests__/           # unit tests for validate / success / failure / sanitisation paths
+│   ├── exec-context-pipeline/   # exec-context-pipeline.js entry point + pipeline-completion precompute
+│   │   ├── index.ts             # main(): validate TriggeredBy ids → fetch upstream Build via REST → stage + prompt
+│   │   └── __tests__/           # unit tests for validate / success / failure / sanitisation paths
+│   └── conclusion/              # conclusion.js entry point + Conclusion-job reporter
+│       ├── index.ts             # main(): inspect upstream results + safe-outputs manifest → file/append work items
+│       └── __tests__/           # unit tests for signal detection and work-item filing behaviour
 ├── test/                        # End-to-end smoke tests (gate, import, exec-context-pr)
 ├── gate.js                      # ncc bundle output (gitignored)
 ├── import.js                    # ncc bundle output (gitignored)
 ├── exec-context-pr.js           # ncc bundle output (gitignored)
 ├── exec-context-pr-synth.js     # ncc bundle output (gitignored)
 ├── exec-context-manual.js       # ncc bundle output (gitignored)
-└── exec-context-pipeline.js     # ncc bundle output (gitignored)
+├── exec-context-pipeline.js     # ncc bundle output (gitignored)
+└── conclusion.js                # ncc bundle output (gitignored)
 ```
 
 The release workflow (`.github/workflows/release.yml`) runs
@@ -399,7 +407,8 @@ The release workflow (`.github/workflows/release.yml`) runs
 `scripts/ado-script/exec-context-pr.js`,
 `scripts/ado-script/exec-context-pr-synth.js`,
 `scripts/ado-script/exec-context-manual.js`, and
-`scripts/ado-script/exec-context-pipeline.js` into the
+`scripts/ado-script/exec-context-pipeline.js`, and
+`scripts/ado-script/conclusion.js` into the
 `ado-script.zip` release asset. Pipelines download that asset at
 runtime by URL pinned to the compiler's `CARGO_PKG_VERSION`, verify
 its SHA-256 against the `checksums.txt` asset, then extract.
