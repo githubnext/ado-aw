@@ -592,10 +592,24 @@ fn lower_job(job: &Job, stage: Option<&StageId>, graph: &Graph) -> Result<Value>
     if let Some(t) = job.timeout {
         m.insert(s("timeoutInMinutes"), Value::from(minutes_ceil(t)));
     }
-    if !job.variables.is_empty() {
+    // Merge any explicit job-level variables with compiler-generated
+    // hoists for `EnvValue::RuntimeExpression` values found in step
+    // env blocks (ADO does not evaluate `$[ ... ]` inside step env, so
+    // each one is hoisted to a job-level variable here and read back
+    // via a `$(name)` macro in the step env).
+    let hoisted = collect_runtime_expr_hoists(&job.steps);
+    if !job.variables.is_empty() || !hoisted.is_empty() {
         let mut vars = Mapping::new();
         for v in &job.variables {
             vars.insert(s(&v.name), s(&lower_env_value(&ctx, &v.value)?));
+        }
+        for v in &hoisted {
+            // An explicit job variable of the same name wins — never
+            // clobber an author-declared variable with a hoist.
+            let key = s(&v.name);
+            if !vars.contains_key(&key) {
+                vars.insert(key, s(&lower_env_value(&ctx, &v.value)?));
+            }
         }
         m.insert(s("variables"), Value::Mapping(vars));
     }
@@ -899,6 +913,7 @@ fn lower_bash(b: &BashStep, ctx: &LoweringContext<'_>) -> Result<Value> {
     if !b.env.is_empty() {
         let mut env_map = Mapping::new();
         for (k, v) in &b.env {
+            reject_runtime_expr_literal_in_step_env(k, v)?;
             // RawYamlScalar bypasses string lowering — its inner value
             // is inserted into the env mapping directly so serde_yaml's
             // emitter sees the original scalar type (e.g. number vs
@@ -943,6 +958,7 @@ fn lower_task(t: &TaskStep, ctx: &LoweringContext<'_>) -> Result<Value> {
     if !t.env.is_empty() {
         let mut env_map = Mapping::new();
         for (k, v) in &t.env {
+            reject_runtime_expr_literal_in_step_env(k, v)?;
             let value = match v {
                 EnvValue::RawYamlScalar(raw) => raw.clone(),
                 other => s(&lower_env_value(ctx, other)?),
@@ -1034,6 +1050,7 @@ fn lower_env_value(ctx: &LoweringContext<'_>, v: &EnvValue) -> Result<String> {
             }
             Ok(out)
         }
+        EnvValue::RuntimeExpression(body) => Ok(format!("$({})", runtime_expr_var_name(body))),
         EnvValue::RawYamlScalar(raw) => {
             // String fallback for callers that still go through
             // `lower_env_value`; the env-mapping insertion path in
@@ -1119,10 +1136,18 @@ fn lower_env_value_as_expr_atom(ctx: &LoweringContext<'_>, v: &EnvValue) -> Resu
                  level of an env value only"
             )
         }
+        EnvValue::RuntimeExpression(_) => {
+            // A `$[ ... ]` runtime expression cannot be nested inside
+            // another runtime expression (`coalesce(...)`). Authors
+            // should fold the inner logic into the surrounding
+            // expression body directly.
+            anyhow::bail!(
+                "ir::lower: EnvValue::RuntimeExpression is not valid inside a Coalesce \
+                 (or other expression-atom context); a `$[ ... ]` expression cannot be \
+                 nested inside another — inline the expression body instead"
+            )
+        }
         EnvValue::RawYamlScalar(raw) => {
-            // Inside an ADO expression, render the raw scalar as a
-            // single-quoted literal (numbers / booleans → literal
-            // text without quotes).
             match raw {
                 serde_yaml::Value::String(s) => Ok(format!("'{}'", s.replace('\'', "''"))),
                 serde_yaml::Value::Number(n) => Ok(n.to_string()),
@@ -1185,6 +1210,76 @@ fn minutes_ceil(d: Duration) -> u64 {
     secs.div_ceil(60)
 }
 
+/// Deterministic job-level variable name for a hoisted
+/// [`EnvValue::RuntimeExpression`] body.
+///
+/// The name is derived from a hash of the expression body so the
+/// variables-hoist pass in [`lower_job`] and the env-value lowering in
+/// [`lower_env_value`] independently compute the **same** name without
+/// threading a shared map — identical expressions collapse to a single
+/// hoisted variable, distinct ones get distinct names.
+fn runtime_expr_var_name(body: &str) -> String {
+    let digest = crate::hash::sha256_hex(body.as_bytes());
+    format!("AwRtExpr_{}", &digest[..12])
+}
+
+/// Collect job-level `variables:` hoists for every distinct
+/// [`EnvValue::RuntimeExpression`] appearing in the job's step `env:`
+/// blocks, in first-appearance order.
+///
+/// ADO does not evaluate `$[ ... ]` runtime expressions inside step
+/// `env:`, so each one is hoisted to a compiler-generated job variable
+/// (`AwRtExpr_<hash>`) whose value is the wrapped `$[ <body> ]`
+/// expression; the step `env:` then reads it via the `$(name)` macro
+/// form (see [`lower_env_value`]).
+fn collect_runtime_expr_hoists(steps: &[Step]) -> Vec<crate::compile::ir::job::JobVariable> {
+    use crate::compile::ir::job::JobVariable;
+    use std::collections::HashSet;
+
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out: Vec<JobVariable> = Vec::new();
+    for step in steps {
+        let env = match step {
+            Step::Bash(b) => &b.env,
+            Step::Task(t) => &t.env,
+            _ => continue,
+        };
+        for v in env.values() {
+            if let EnvValue::RuntimeExpression(body) = v {
+                let name = runtime_expr_var_name(body);
+                if seen.insert(name.clone()) {
+                    out.push(JobVariable {
+                        name,
+                        value: EnvValue::literal(format!("$[ {body} ]")),
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Reject an [`EnvValue::Literal`] that smuggles a `$[ ... ]` ADO
+/// runtime expression into a step `env:` value. ADO evaluates these
+/// only in job-level `variables:` and `condition:` fields, so a literal
+/// here would be passed verbatim — use [`EnvValue::RuntimeExpression`]
+/// (which hoists to a job variable) instead.
+fn reject_runtime_expr_literal_in_step_env(key: &str, v: &EnvValue) -> Result<()> {
+    if let EnvValue::Literal(lit) = v
+        && lit.contains("$[")
+    {
+        anyhow::bail!(
+            "ir::lower: step env var {key:?} is an EnvValue::Literal carrying a \
+             `$[ ... ]` ADO runtime expression ({lit:?}). ADO does NOT evaluate runtime \
+             expressions inside step env (the literal string is passed verbatim — \
+             msazuresphere/4x4 build #612528, githubnext/ado-aw#1076). Use \
+             EnvValue::RuntimeExpression, which hoists the expression to a job-level \
+             variable and emits a $(name) macro reference, instead."
+        );
+    }
+    Ok(())
+}
+
 fn s(v: impl Into<String>) -> Value {
     Value::String(v.into())
 }
@@ -1204,6 +1299,127 @@ mod tests {
             stage: None,
             job,
         }
+    }
+
+    #[test]
+    fn lower_env_value_runtime_expression_emits_hoisted_macro() {
+        let g = Graph::default();
+        let job = JobId::new("J").unwrap();
+        let ctx = ctx_for(&g, &job);
+        let body = "coalesce(dependencies.Agent.result, '')";
+        let expected = format!("$({})", runtime_expr_var_name(body));
+        assert_eq!(
+            lower_env_value(&ctx, &EnvValue::runtime_expression(body)).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn lower_job_hoists_runtime_expression_to_job_variable() {
+        let body = "dependencies.Agent.result";
+        let step = Step::Bash(
+            BashStep::new("Conclusion", "echo hi")
+                .with_env("AGENT_RESULT", EnvValue::runtime_expression(body)),
+        );
+        let mut job = Job::new(
+            JobId::new("Conclusion").unwrap(),
+            "Conclusion",
+            Pool::VmImage("u".into()),
+        );
+        job.push_step(step);
+        let p = Pipeline {
+            name: "t".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers::default(),
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(vec![job]),
+            shape: PipelineShape::Standalone,
+        };
+        let v = super::lower(&p).unwrap();
+        let yaml = serde_yaml::to_string(&v).unwrap();
+
+        let name = runtime_expr_var_name(body);
+        // The job carries a hoisted variable whose value is the
+        // wrapped `$[ ... ]` runtime expression.
+        assert!(
+            yaml.contains(&format!("{name}: $[ {body} ]")),
+            "expected hoisted variable `{name}: $[ {body} ]` in:\n{yaml}"
+        );
+        // The step env references the hoisted variable via the macro
+        // form — never the raw `$[ ... ]` expression.
+        assert!(
+            yaml.contains(&format!("AGENT_RESULT: $({name})")),
+            "expected step env `AGENT_RESULT: $({name})` in:\n{yaml}"
+        );
+        // Structural guarantee: no `$[` survives inside any step env.
+        assert!(
+            !yaml.contains("AGENT_RESULT: $["),
+            "step env must not carry a raw `$[ ... ]` expression:\n{yaml}"
+        );
+    }
+
+    #[test]
+    fn lower_job_deduplicates_identical_runtime_expressions() {
+        let body = "dependencies.Agent.result";
+        let job_steps = vec![
+            Step::Bash(
+                BashStep::new("A", "echo a")
+                    .with_env("R1", EnvValue::runtime_expression(body)),
+            ),
+            Step::Bash(
+                BashStep::new("B", "echo b")
+                    .with_env("R2", EnvValue::runtime_expression(body)),
+            ),
+        ];
+        let mut job = Job::new(JobId::new("J").unwrap(), "J", Pool::VmImage("u".into()));
+        for st in job_steps {
+            job.push_step(st);
+        }
+        let p = Pipeline {
+            name: "t".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers::default(),
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(vec![job]),
+            shape: PipelineShape::Standalone,
+        };
+        let v = super::lower(&p).unwrap();
+        let yaml = serde_yaml::to_string(&v).unwrap();
+        let name = runtime_expr_var_name(body);
+        // Two distinct env vars share one identical expression → a
+        // single hoisted job variable.
+        assert_eq!(
+            yaml.matches(&format!("{name}: $[ {body} ]")).count(),
+            1,
+            "identical runtime expressions must hoist to a single variable:\n{yaml}"
+        );
+    }
+
+    #[test]
+    fn lower_bash_rejects_dollar_bracket_literal_in_step_env() {
+        let step = Step::Bash(
+            BashStep::new("Bad", "echo hi")
+                .with_env("X", EnvValue::literal("$[ dependencies.Agent.result ]")),
+        );
+        let mut job = Job::new(JobId::new("J").unwrap(), "J", Pool::VmImage("u".into()));
+        job.push_step(step);
+        let p = Pipeline {
+            name: "t".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers::default(),
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(vec![job]),
+            shape: PipelineShape::Standalone,
+        };
+        let err = super::lower(&p).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("EnvValue::RuntimeExpression"),
+            "error must point to the RuntimeExpression variant; got: {msg}"
+        );
     }
 
     #[test]

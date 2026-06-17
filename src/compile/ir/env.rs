@@ -36,6 +36,11 @@
 //!   same-job consumers, where macro form is the only form that
 //!   resolves correctly (see `src/compile/filter_ir.rs` for the
 //!   underlying bug history).
+//! - [`EnvValue::RuntimeExpression`] — a hand-written ADO `$[ ... ]`
+//!   runtime expression. ADO does not evaluate these inside step
+//!   `env:`, so the lowering pass hoists each one to a
+//!   compiler-generated job-level `variables:` entry and emits a
+//!   `$(name)` macro reference in the step `env:`.
 
 use super::output::OutputRef;
 
@@ -86,6 +91,25 @@ pub enum EnvValue {
     /// yields the live value — the `prGate` step's
     /// `$(System.PullRequest.X)$(synthPr.X)` exclusive-OR.
     Concat(Vec<EnvValue>),
+    /// A hand-written ADO **runtime expression** (`$[ ... ]`), carried
+    /// as a distinct type so it can never be confused with a
+    /// [`EnvValue::Literal`].
+    ///
+    /// The stored string is the expression **body** only — the
+    /// `$[ ` / ` ]` wrapper is added during lowering. For example
+    /// `RuntimeExpression("coalesce(dependencies.Agent.result, '')")`
+    /// lowers to the variable value `$[ coalesce(dependencies.Agent.result, '') ]`.
+    ///
+    /// ADO only evaluates `$[ ... ]` runtime expressions inside
+    /// job-level `variables:` mappings and `condition:` fields — **not**
+    /// inside step `env:` values, where the literal expression string is
+    /// passed verbatim (msazuresphere/4x4 build #612528,
+    /// githubnext/ado-aw#1076). To make that mistake structurally
+    /// impossible, the lowering pass automatically **hoists** every
+    /// `RuntimeExpression` in a step's `env:` to a compiler-generated
+    /// job-level `variables:` entry and rewrites the step `env:` value
+    /// to a `$(generated_name)` macro reference pointing at it.
+    RuntimeExpression(String),
     /// Pre-built YAML scalar emitted verbatim into the value position.
     ///
     /// Used by [`crate::compile::agentic_pipeline`] when a legacy YAML
@@ -210,6 +234,18 @@ impl EnvValue {
     pub fn concat(values: Vec<EnvValue>) -> Self {
         EnvValue::Concat(values)
     }
+
+    /// Construct an [`EnvValue::RuntimeExpression`] from an ADO
+    /// runtime-expression **body** (without the `$[ ]` wrapper).
+    ///
+    /// Use this instead of [`EnvValue::literal`] whenever a step
+    /// `env:` value needs an ADO `$[ ... ]` runtime expression: the
+    /// lowering pass hoists it to a job-level `variables:` entry and
+    /// emits a `$(name)` macro reference, because ADO does not
+    /// evaluate `$[ ... ]` inside step `env:`.
+    pub fn runtime_expression(body: impl Into<String>) -> Self {
+        EnvValue::RuntimeExpression(body.into())
+    }
 }
 
 #[cfg(test)]
@@ -267,6 +303,17 @@ mod tests {
         match v {
             EnvValue::Concat(parts) => assert_eq!(parts.len(), 2),
             _ => panic!("expected Concat"),
+        }
+    }
+
+    #[test]
+    fn runtime_expression_stores_body_verbatim() {
+        let v = EnvValue::runtime_expression("coalesce(dependencies.Agent.result, '')");
+        match v {
+            EnvValue::RuntimeExpression(body) => {
+                assert_eq!(body, "coalesce(dependencies.Agent.result, '')");
+            }
+            _ => panic!("expected RuntimeExpression"),
         }
     }
 }

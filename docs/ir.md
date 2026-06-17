@@ -22,7 +22,7 @@ Those wrappers are the only place per-target shape (top-level `PipelineShape`, t
 - `tasks.rs` — typed factory helpers for built-in ADO tasks that return preconfigured `TaskStep` values with required inputs set. Prefer extending these helpers for compiler-generated tasks rather than open-coding `TaskStep::new(...)` with raw string keys at each call site.
 - `job.rs` — `Job`, `Pool`, job variables, 1ES `templateContext` support, and target-job external `dependsOn` / `condition` wrapping.
 - `stage.rs` — `Stage` plus target-stage external `dependsOn` / `condition` wrapping.
-- `env.rs` — typed environment values (`EnvValue`) including ADO macros, pipeline variables, secrets, `OutputRef`s, `Coalesce`, and macro-form `Concat`.
+- `env.rs` — typed environment values (`EnvValue`) including ADO macros, pipeline variables, secrets, `OutputRef`s, `Coalesce`, macro-form `Concat`, and `RuntimeExpression` (a `$[ ... ]` ADO runtime expression that the lowering pass auto-hoists to a job-level `variables:` entry — ADO does not evaluate `$[ ... ]` inside step `env:`).
 - `condition.rs` — the `Condition` / `Expr` AST and code generation to ADO condition syntax.
 - `output.rs` — `OutputDecl`, `OutputRef`, and the output-reference lowering rules.
 - `graph.rs` — graph construction, `dependsOn` derivation, output validation, `isOutput=true` promotion, and cycle detection.
