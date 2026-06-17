@@ -291,6 +291,42 @@ pub fn powershell_inline_step(script: impl Into<String>) -> TaskStep {
         .with_input("script", script)
 }
 
+/// Returns a [`TaskStep`] for `DownloadPipelineArtifact@2`.
+///
+/// Downloads artifacts produced by a pipeline run into `target_path`.
+/// By default the step downloads from the **current** run; set
+/// `source = "specific"` via `.with_input(…)` to pull from a
+/// different run or pipeline.
+///
+/// - `target_path` — local filesystem path where the artifact will be
+///   downloaded. Maps to the `targetPath` ADO task input, which is
+///   **required** by the task.
+///
+/// Optional inputs (applied with `.with_input(…)` on the returned value):
+///
+/// | Input key | Type | Default | Description |
+/// |---|---|---|---|
+/// | `artifact` | string | — | Name of the artifact to download. Omit to download all artifacts. |
+/// | `patterns` | string | `"**"` | Newline-separated glob patterns that filter which files inside the artifact are downloaded. |
+/// | `source` | string | `"current"` | `"current"` (this run) or `"specific"` (another run). |
+/// | `project` | string | — | ADO project name or ID (`source = "specific"` only). |
+/// | `pipeline` | string | — | Pipeline definition ID or name (`source = "specific"` only). |
+/// | `runVersion` | string | `"latest"` | Which run to download from: `"latest"`, `"latestFromBranch"`, or `"specific"` (`source = "specific"` only). |
+/// | `branchName` | string | — | Branch filter, e.g. `"refs/heads/main"` (`runVersion = "latestFromBranch"` only). |
+/// | `runId` | string | — | The build ID to download from (`runVersion = "specific"` only). |
+/// | `tags` | string | — | Comma-separated build tags used to filter candidate runs. |
+/// | `allowPartiallySucceededBuilds` | bool string | `"false"` | Also consider partially-succeeded runs as download candidates. |
+/// | `allowFailedBuilds` | bool string | `"false"` | Also consider failed runs as download candidates. |
+/// | `preferTriggeringPipeline` | bool string | `"false"` | Prefer the run that triggered the current pipeline. |
+/// | `itemPattern` | string | `"**"` | Minimatch pattern applied after download to select a subset of files. |
+///
+/// ADO task reference:
+/// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/download-pipeline-artifact-v2>
+pub fn download_pipeline_artifact_step(target_path: impl Into<String>) -> TaskStep {
+    TaskStep::new("DownloadPipelineArtifact@2", "Download Pipeline Artifact")
+        .with_input("targetPath", target_path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -840,5 +876,78 @@ mod tests {
             t.inputs.get("script").map(|s| s.as_str()),
             Some("$version = Get-Content VERSION\nWrite-Host \"Building version $version\"")
         );
+    }
+
+    // ── DownloadPipelineArtifact@2 ───────────────────────────────────────
+
+    #[test]
+    fn download_pipeline_artifact_step_sets_task_and_required_input() {
+        let t = download_pipeline_artifact_step("$(Pipeline.Workspace)/drop");
+        assert_eq!(t.task, "DownloadPipelineArtifact@2");
+        assert_eq!(t.display_name, "Download Pipeline Artifact");
+        assert_eq!(
+            t.inputs.get("targetPath").map(|s| s.as_str()),
+            Some("$(Pipeline.Workspace)/drop")
+        );
+        // only the required input is set by default
+        assert_eq!(t.inputs.len(), 1);
+    }
+
+    #[test]
+    fn download_pipeline_artifact_step_filters_by_artifact_name() {
+        let t = download_pipeline_artifact_step("$(Agent.TempDirectory)/out")
+            .with_input("artifact", "drop");
+        assert_eq!(t.task, "DownloadPipelineArtifact@2");
+        assert_eq!(
+            t.inputs.get("artifact").map(|s| s.as_str()),
+            Some("drop")
+        );
+        assert_eq!(
+            t.inputs.get("targetPath").map(|s| s.as_str()),
+            Some("$(Agent.TempDirectory)/out")
+        );
+        assert_eq!(t.inputs.len(), 2);
+    }
+
+    #[test]
+    fn download_pipeline_artifact_step_specific_source_with_branch() {
+        let t = download_pipeline_artifact_step("$(Agent.TempDirectory)/prev")
+            .with_input("source", "specific")
+            .with_input("project", "$(System.TeamProject)")
+            .with_input("pipeline", "$(System.DefinitionId)")
+            .with_input("runVersion", "latestFromBranch")
+            .with_input("branchName", "$(Build.SourceBranch)")
+            .with_input("artifact", "safe_outputs")
+            .with_input("allowPartiallySucceededBuilds", "true");
+        assert_eq!(t.task, "DownloadPipelineArtifact@2");
+        assert_eq!(
+            t.inputs.get("source").map(|s| s.as_str()),
+            Some("specific")
+        );
+        assert_eq!(
+            t.inputs.get("runVersion").map(|s| s.as_str()),
+            Some("latestFromBranch")
+        );
+        assert_eq!(
+            t.inputs.get("branchName").map(|s| s.as_str()),
+            Some("$(Build.SourceBranch)")
+        );
+        assert_eq!(
+            t.inputs.get("allowPartiallySucceededBuilds").map(|s| s.as_str()),
+            Some("true")
+        );
+        assert_eq!(t.inputs.len(), 8);
+    }
+
+    #[test]
+    fn download_pipeline_artifact_step_accepts_glob_patterns() {
+        let t = download_pipeline_artifact_step("$(Build.ArtifactStagingDirectory)")
+            .with_input("patterns", "**/*.zip\n**/*.tar.gz");
+        assert_eq!(t.task, "DownloadPipelineArtifact@2");
+        assert_eq!(
+            t.inputs.get("patterns").map(|s| s.as_str()),
+            Some("**/*.zip\n**/*.tar.gz")
+        );
+        assert_eq!(t.inputs.len(), 2);
     }
 }
