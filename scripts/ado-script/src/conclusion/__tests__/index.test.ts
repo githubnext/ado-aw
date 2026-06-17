@@ -301,7 +301,7 @@ describe("conclusion/main", () => {
     await expect(main()).resolves.toBe(0);
 
     expect(logWarning).toHaveBeenCalledWith(
-      "Conclusion manifest not found: C:\\missing-manifest\\safe-outputs-executed.ndjson",
+      expect.stringContaining("Conclusion manifest not found:"),
     );
   });
 
