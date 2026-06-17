@@ -237,10 +237,22 @@ mod tests {
         let step = StepId::new("synthPr").unwrap();
         let v = EnvValue::coalesce(vec![
             EnvValue::ado_macro("System.PullRequest.PullRequestId").unwrap(),
-            EnvValue::step_output(OutputRef::new(step, "AW_SYNTHETIC_PR_ID")),
+            EnvValue::step_output(OutputRef::new(step.clone(), "AW_SYNTHETIC_PR_ID")),
         ]);
         match v {
-            EnvValue::Coalesce(parts) => assert_eq!(parts.len(), 2),
+            EnvValue::Coalesce(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(
+                    parts[0],
+                    EnvValue::AdoMacro("System.PullRequest.PullRequestId"),
+                    "first child must be the AdoMacro"
+                );
+                assert_eq!(
+                    parts[1],
+                    EnvValue::StepOutput(OutputRef::new(step, "AW_SYNTHETIC_PR_ID")),
+                    "second child must be the StepOutput"
+                );
+            }
             _ => panic!("expected Coalesce"),
         }
     }

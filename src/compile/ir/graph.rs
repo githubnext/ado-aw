@@ -745,6 +745,8 @@ mod tests {
             } else {
                 panic!();
             }
+        } else {
+            panic!("expected Jobs body");
         }
     }
 
@@ -959,6 +961,8 @@ mod tests {
         let err = build_graph(&p).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("duplicate StepId 'marker'"), "got: {msg}");
+        assert!(msg.contains("previously declared in"), "got: {msg}");
+        assert!(msg.contains("pipeline-wide unique"), "got: {msg}");
     }
 
     #[test]
@@ -1013,6 +1017,8 @@ mod tests {
             let agent = jobs.iter().find(|j| j.id.as_str() == "Agent").unwrap();
             assert_eq!(agent.depends_on.len(), 1);
             assert_eq!(agent.depends_on[0].as_str(), "Setup");
+        } else {
+            panic!("expected Jobs body");
         }
     }
 

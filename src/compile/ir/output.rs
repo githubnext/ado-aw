@@ -210,7 +210,9 @@ mod tests {
     #[test]
     fn outputdecl_secret_marks_secret() {
         let d = OutputDecl::secret("MCP_GATEWAY_API_KEY");
+        assert_eq!(d.name, "MCP_GATEWAY_API_KEY");
         assert!(d.is_secret);
+        assert!(!d.auto_is_output);
     }
 
     #[test]
