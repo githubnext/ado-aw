@@ -542,142 +542,159 @@ pub(crate) async fn file_or_append_work_item(
     let body_with_stats = crate::agent_stats::append_stats_to_body(body, ctx, config.include_stats);
 
     if let Some(work_item_id) = existing_id {
-        // Append a comment to the existing work item
         debug!(
             "Found existing work item #{}, appending comment",
             work_item_id
         );
-        let comment_payload = serde_json::json!({ "text": body_with_stats });
-
-        let url = format!(
-            "{}/{}/_apis/wit/workItems/{}/comments?api-version=7.1-preview.4",
-            org_url.trim_end_matches('/'),
-            utf8_percent_encode(project, PATH_SEGMENT),
-            work_item_id,
-        );
-
-        let resp = client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .basic_auth("", Some(token))
-            .json(&comment_payload)
-            .send()
-            .await
-            .context("Failed to add comment to work item")?;
-
-        if resp.status().is_success() {
-            let resp_body: serde_json::Value = resp
-                .json()
-                .await
-                .context("Failed to parse comment response")?;
-            let comment_id = resp_body.get("id").and_then(|v| v.as_i64());
-            let message = match comment_id {
-                Some(id) => format!(
-                    "Appended comment #{} to existing work item #{}: {}",
-                    id, work_item_id, title
-                ),
-                None => format!(
-                    "Appended comment to existing work item #{}: {}",
-                    work_item_id, title
-                ),
-            };
-            Ok(ExecutionResult::success_with_data(
-                message,
-                serde_json::json!({
-                    "action": "appended",
-                    "work_item_id": work_item_id,
-                    "comment_id": comment_id,
-                }),
-            ))
-        } else {
-            let status = resp.status();
-            let error_body = resp
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            Ok(ExecutionResult::failure(format!(
-                "Failed to append comment to work item #{} (HTTP {}): {}",
-                work_item_id, status, error_body
-            )))
-        }
+        append_comment_to_work_item(&client, org_url, project, token, title, work_item_id, &body_with_stats).await
     } else {
-        // Create a new work item
         debug!("No existing work item found, creating new one");
+        create_new_work_item(&client, org_url, project, token, title, &body_with_stats, config).await
+    }
+}
 
-        let mut patch_doc = vec![
-            serde_json::json!({"op": "add", "path": "/fields/System.Title",       "value": title}),
-            serde_json::json!({"op": "add", "path": "/fields/System.Description", "value": body_with_stats}),
-            serde_json::json!({"op": "add", "path": "/multilineFieldsFormat/System.Description", "value": "Markdown"}),
-        ];
+/// POST a comment to an existing Azure DevOps work item.
+async fn append_comment_to_work_item(
+    client: &reqwest::Client,
+    org_url: &str,
+    project: &str,
+    token: &str,
+    title: &str,
+    work_item_id: i64,
+    body: &str,
+) -> anyhow::Result<ExecutionResult> {
+    let url = format!(
+        "{}/{}/_apis/wit/workItems/{}/comments?api-version=7.1-preview.4",
+        org_url.trim_end_matches('/'),
+        utf8_percent_encode(project, PATH_SEGMENT),
+        work_item_id,
+    );
+    let resp = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .basic_auth("", Some(token))
+        .json(&serde_json::json!({ "text": body }))
+        .send()
+        .await
+        .context("Failed to add comment to work item")?;
 
-        if let Some(area_path) = &config.area_path {
-            patch_doc.push(
-                serde_json::json!({"op": "add", "path": "/fields/System.AreaPath", "value": area_path}),
-            );
-        }
-        if let Some(iteration_path) = &config.iteration_path {
-            patch_doc.push(
-                serde_json::json!({"op": "add", "path": "/fields/System.IterationPath", "value": iteration_path}),
-            );
-        }
-        if !config.tags.is_empty() {
-            patch_doc.push(
-                serde_json::json!({"op": "add", "path": "/fields/System.Tags", "value": config.tags.join("; ")}),
-            );
-        }
-
-        let url = format!(
-            "{}/{}/_apis/wit/workitems/${}?api-version=7.0",
-            org_url.trim_end_matches('/'),
-            utf8_percent_encode(project, PATH_SEGMENT),
-            utf8_percent_encode(&config.work_item_type, PATH_SEGMENT),
-        );
-
-        let resp = client
-            .post(&url)
-            .header("Content-Type", "application/json-patch+json")
-            .basic_auth("", Some(token))
-            .json(&patch_doc)
-            .send()
+    if resp.status().is_success() {
+        let resp_body: serde_json::Value = resp
+            .json()
             .await
-            .context("Failed to create work item")?;
+            .context("Failed to parse comment response")?;
+        let comment_id = resp_body.get("id").and_then(|v| v.as_i64());
+        let message = match comment_id {
+            Some(id) => format!(
+                "Appended comment #{} to existing work item #{}: {}",
+                id, work_item_id, title
+            ),
+            None => format!(
+                "Appended comment to existing work item #{}: {}",
+                work_item_id, title
+            ),
+        };
+        Ok(ExecutionResult::success_with_data(
+            message,
+            serde_json::json!({
+                "action": "appended",
+                "work_item_id": work_item_id,
+                "comment_id": comment_id,
+            }),
+        ))
+    } else {
+        let status = resp.status();
+        let error_body = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        Ok(ExecutionResult::failure(format!(
+            "Failed to append comment to work item #{} (HTTP {}): {}",
+            work_item_id, status, error_body
+        )))
+    }
+}
 
-        if resp.status().is_success() {
-            let resp_body: serde_json::Value = resp
-                .json()
-                .await
-                .context("Failed to parse work item response")?;
-            let work_item_id = resp_body.get("id").and_then(|v| v.as_i64());
-            let work_item_url = resp_body
-                .get("_links")
-                .and_then(|l| l.get("html"))
-                .and_then(|h| h.get("href"))
-                .and_then(|h| h.as_str())
-                .unwrap_or("")
-                .to_string();
-            let message = match work_item_id {
-                Some(id) => format!("Created work item #{}: {}", id, title),
-                None => format!("Created work item: {}", title),
-            };
-            Ok(ExecutionResult::success_with_data(
-                message,
-                serde_json::json!({
-                    "action": "created",
-                    "work_item_id": work_item_id,
-                    "url": work_item_url,
-                }),
-            ))
-        } else {
-            let status = resp.status();
-            let error_body = resp
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            Ok(ExecutionResult::failure(format!(
-                "Failed to create work item (HTTP {}): {}",
-                status, error_body
-            )))
-        }
+/// POST a new Azure DevOps work item using the patch-document API.
+async fn create_new_work_item(
+    client: &reqwest::Client,
+    org_url: &str,
+    project: &str,
+    token: &str,
+    title: &str,
+    body: &str,
+    config: &WorkItemReportConfig,
+) -> anyhow::Result<ExecutionResult> {
+    let mut patch_doc = vec![
+        serde_json::json!({"op": "add", "path": "/fields/System.Title",       "value": title}),
+        serde_json::json!({"op": "add", "path": "/fields/System.Description", "value": body}),
+        serde_json::json!({"op": "add", "path": "/multilineFieldsFormat/System.Description", "value": "Markdown"}),
+    ];
+    if let Some(area_path) = &config.area_path {
+        patch_doc.push(
+            serde_json::json!({"op": "add", "path": "/fields/System.AreaPath", "value": area_path}),
+        );
+    }
+    if let Some(iteration_path) = &config.iteration_path {
+        patch_doc.push(
+            serde_json::json!({"op": "add", "path": "/fields/System.IterationPath", "value": iteration_path}),
+        );
+    }
+    if !config.tags.is_empty() {
+        patch_doc.push(
+            serde_json::json!({"op": "add", "path": "/fields/System.Tags", "value": config.tags.join("; ")}),
+        );
+    }
+    let url = format!(
+        "{}/{}/_apis/wit/workitems/${}?api-version=7.0",
+        org_url.trim_end_matches('/'),
+        utf8_percent_encode(project, PATH_SEGMENT),
+        utf8_percent_encode(&config.work_item_type, PATH_SEGMENT),
+    );
+    let resp = client
+        .post(&url)
+        .header("Content-Type", "application/json-patch+json")
+        .basic_auth("", Some(token))
+        .json(&patch_doc)
+        .send()
+        .await
+        .context("Failed to create work item")?;
+
+    if resp.status().is_success() {
+        let resp_body: serde_json::Value = resp
+            .json()
+            .await
+            .context("Failed to parse work item response")?;
+        let work_item_id = resp_body.get("id").and_then(|v| v.as_i64());
+        let work_item_url = resp_body
+            .get("_links")
+            .and_then(|l| l.get("html"))
+            .and_then(|h| h.get("href"))
+            .and_then(|h| h.as_str())
+            .unwrap_or("")
+            .to_string();
+        let message = match work_item_id {
+            Some(id) => format!("Created work item #{}: {}", id, title),
+            None => format!("Created work item: {}", title),
+        };
+        Ok(ExecutionResult::success_with_data(
+            message,
+            serde_json::json!({
+                "action": "created",
+                "work_item_id": work_item_id,
+                "url": work_item_url,
+            }),
+        ))
+    } else {
+        let status = resp.status();
+        let error_body = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        Ok(ExecutionResult::failure(format!(
+            "Failed to create work item (HTTP {}): {}",
+            status, error_body
+        )))
     }
 }
 
