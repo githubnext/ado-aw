@@ -291,6 +291,37 @@ pub fn powershell_inline_step(script: impl Into<String>) -> TaskStep {
         .with_input("script", script)
 }
 
+/// Returns a [`TaskStep`] for `PublishPipelineArtifact@1`.
+///
+/// Publishes (uploads) a file or directory as a named artifact for the
+/// current pipeline run. The artifact is stored in Azure Pipelines and
+/// can be downloaded by subsequent jobs or pipelines via
+/// `DownloadPipelineArtifact@2`.
+///
+/// - `target_path` — path of the file or directory to publish. Can be
+///   absolute or relative to the default working directory. Supports
+///   ADO macro variables (e.g. `$(Build.ArtifactStagingDirectory)`),
+///   but wildcards are **not** supported.
+///
+/// Optional inputs (applied with `.with_input(…)` on the returned
+/// value):
+///
+/// | Input key | Alias | Type | Default | Description |
+/// |---|---|---|---|---|
+/// | `artifact` | `artifactName` | string | *(unique job-scoped ID)* | Name of the published artifact (e.g. `"drop"`). May not contain `\`, `/`, `"`, `:`, `<`, `>`, `\|`, `*`, or `?`. |
+/// | `publishLocation` | `artifactType` | string | `"pipeline"` | Where to store the artifact: `"pipeline"` (Azure Pipelines) or `"filepath"` (a UNC file share). |
+/// | `fileSharePath` | — | string | — | Required when `publishLocation = filepath`. UNC path of the file share. |
+/// | `parallel` | — | bool string | `"false"` | Enable multi-threaded copy when `publishLocation = filepath`. |
+/// | `parallelCount` | — | string | `"8"` | Thread count for parallel copy (1–128). Applies when `parallel = true`. |
+/// | `properties` | — | string | — | JSON string of custom properties to associate with the artifact (keys must start with `user-`). |
+///
+/// ADO task reference:
+/// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/publish-pipeline-artifact-v1>
+pub fn publish_pipeline_artifact_step(target_path: impl Into<String>) -> TaskStep {
+    TaskStep::new("PublishPipelineArtifact@1", "Publish Pipeline Artifact")
+        .with_input("targetPath", target_path)
+}
+
 /// Returns a [`TaskStep`] for `DownloadPipelineArtifact@2`.
 ///
 /// Downloads artifacts produced by a pipeline run into `target_path`.
@@ -305,7 +336,7 @@ pub fn powershell_inline_step(script: impl Into<String>) -> TaskStep {
 /// Optional inputs (applied with `.with_input(…)` on the returned value):
 ///
 /// | Input key | Type | Default | Description |
-/// |---|---|---|---|
+/// |---|---|---|
 /// | `artifact` | string | — | Name of the artifact to download. Omit to download all artifacts. |
 /// | `patterns` | string | `"**"` | Newline-separated glob patterns that filter which files inside the artifact are downloaded. |
 /// | `source` | string | `"current"` | `"current"` (this run) or `"specific"` (another run). |
@@ -878,6 +909,21 @@ mod tests {
         );
     }
 
+    // ── PublishPipelineArtifact@1 ─────────────────────────────────────────
+
+    #[test]
+    fn publish_pipeline_artifact_step_sets_task_and_target_path() {
+        let t = publish_pipeline_artifact_step("$(Build.ArtifactStagingDirectory)");
+        assert_eq!(t.task, "PublishPipelineArtifact@1");
+        assert_eq!(t.display_name, "Publish Pipeline Artifact");
+        assert_eq!(
+            t.inputs.get("targetPath").map(|s| s.as_str()),
+            Some("$(Build.ArtifactStagingDirectory)")
+        );
+        // only the required input is set by default
+        assert_eq!(t.inputs.len(), 1);
+    }
+
     // ── DownloadPipelineArtifact@2 ───────────────────────────────────────
 
     #[test]
@@ -894,6 +940,18 @@ mod tests {
     }
 
     #[test]
+    fn publish_pipeline_artifact_step_accepts_artifact_name() {
+        let t = publish_pipeline_artifact_step("$(Build.ArtifactStagingDirectory)/output")
+            .with_input("artifact", "drop");
+        assert_eq!(t.task, "PublishPipelineArtifact@1");
+        assert_eq!(
+            t.inputs.get("artifact").map(|s| s.as_str()),
+            Some("drop")
+        );
+        assert_eq!(t.inputs.len(), 2);
+    }
+
+    #[test]
     fn download_pipeline_artifact_step_filters_by_artifact_name() {
         let t = download_pipeline_artifact_step("$(Agent.TempDirectory)/out")
             .with_input("artifact", "drop");
@@ -907,6 +965,36 @@ mod tests {
             Some("$(Agent.TempDirectory)/out")
         );
         assert_eq!(t.inputs.len(), 2);
+    }
+
+    #[test]
+    fn publish_pipeline_artifact_step_accepts_publish_location() {
+        let t = publish_pipeline_artifact_step("$(Build.ArtifactStagingDirectory)")
+            .with_input("artifact", "binaries")
+            .with_input("publishLocation", "pipeline");
+        assert_eq!(t.task, "PublishPipelineArtifact@1");
+        assert_eq!(
+            t.inputs.get("publishLocation").map(|s| s.as_str()),
+            Some("pipeline")
+        );
+        assert_eq!(t.inputs.len(), 3);
+    }
+
+    #[test]
+    fn publish_pipeline_artifact_step_accepts_file_share_path() {
+        let t = publish_pipeline_artifact_step("$(Build.ArtifactStagingDirectory)")
+            .with_input("publishLocation", "filepath")
+            .with_input("fileSharePath", "\\\\myserver\\share\\$(Build.DefinitionName)");
+        assert_eq!(t.task, "PublishPipelineArtifact@1");
+        assert_eq!(
+            t.inputs.get("publishLocation").map(|s| s.as_str()),
+            Some("filepath")
+        );
+        assert_eq!(
+            t.inputs.get("fileSharePath").map(|s| s.as_str()),
+            Some("\\\\myserver\\share\\$(Build.DefinitionName)")
+        );
+        assert_eq!(t.inputs.len(), 3);
     }
 
     #[test]
