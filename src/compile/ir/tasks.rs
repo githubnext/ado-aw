@@ -291,6 +291,29 @@ pub fn powershell_inline_step(script: impl Into<String>) -> TaskStep {
         .with_input("script", script)
 }
 
+/// Returns a [`TaskStep`] for `DeleteFiles@1`.
+///
+/// Deletes files or folders matching one or more patterns from a source folder.
+///
+/// - `contents` — newline-separated glob patterns identifying the files or
+///   folders to remove (e.g. `"**/*.tmp"` or `"dist\n*.log"`). This is the
+///   only required input.
+///
+/// Optional inputs (applied with `.with_input(…)` on the returned value):
+///
+/// | Input key | Type | Default | Description |
+/// |---|---|---|---|
+/// | `SourceFolder` | string | working directory | Root folder to delete from. Use `$(Build.ArtifactStagingDirectory)` to clean staging. |
+/// | `RemoveSourceFolder` | bool string | `"false"` | Remove the `SourceFolder` itself after deleting its contents. Set to `"true"` and `contents` to `"*"` to wipe the whole folder. |
+/// | `RemoveDotFiles` | bool string | `"false"` | Also delete files whose name starts with a dot. Defaults to `"false"` (dot files are preserved). |
+///
+/// ADO task reference:
+/// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/delete-files-v1>
+pub fn delete_files_step(contents: impl Into<String>) -> TaskStep {
+    TaskStep::new("DeleteFiles@1", "Delete Files")
+        .with_input("Contents", contents)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -839,6 +862,68 @@ mod tests {
         assert_eq!(
             t.inputs.get("script").map(|s| s.as_str()),
             Some("$version = Get-Content VERSION\nWrite-Host \"Building version $version\"")
+        );
+    }
+
+    // ── DeleteFiles@1 ────────────────────────────────────────────────────
+
+    #[test]
+    fn delete_files_step_sets_task_and_required_input() {
+        let t = delete_files_step("**/*.tmp");
+        assert_eq!(t.task, "DeleteFiles@1");
+        assert_eq!(t.display_name, "Delete Files");
+        assert_eq!(
+            t.inputs.get("Contents").map(|s| s.as_str()),
+            Some("**/*.tmp")
+        );
+        // only the required input is set by default
+        assert_eq!(t.inputs.len(), 1);
+    }
+
+    #[test]
+    fn delete_files_step_accepts_source_folder() {
+        let t = delete_files_step("**/*.log")
+            .with_input("SourceFolder", "$(Build.ArtifactStagingDirectory)");
+        assert_eq!(t.task, "DeleteFiles@1");
+        assert_eq!(
+            t.inputs.get("SourceFolder").map(|s| s.as_str()),
+            Some("$(Build.ArtifactStagingDirectory)")
+        );
+        assert_eq!(t.inputs.len(), 2);
+    }
+
+    #[test]
+    fn delete_files_step_accepts_remove_source_folder_flag() {
+        let t = delete_files_step("*")
+            .with_input("SourceFolder", "$(Build.ArtifactStagingDirectory)")
+            .with_input("RemoveSourceFolder", "true");
+        assert_eq!(t.task, "DeleteFiles@1");
+        assert_eq!(
+            t.inputs.get("RemoveSourceFolder").map(|s| s.as_str()),
+            Some("true")
+        );
+        assert_eq!(t.inputs.len(), 3);
+    }
+
+    #[test]
+    fn delete_files_step_accepts_remove_dot_files_flag() {
+        let t = delete_files_step("**")
+            .with_input("RemoveDotFiles", "true");
+        assert_eq!(t.task, "DeleteFiles@1");
+        assert_eq!(
+            t.inputs.get("RemoveDotFiles").map(|s| s.as_str()),
+            Some("true")
+        );
+        assert_eq!(t.inputs.len(), 2);
+    }
+
+    #[test]
+    fn delete_files_step_multiline_contents() {
+        let t = delete_files_step("**/*.tmp\n**/*.log\ndist/");
+        assert_eq!(t.task, "DeleteFiles@1");
+        assert_eq!(
+            t.inputs.get("Contents").map(|s| s.as_str()),
+            Some("**/*.tmp\n**/*.log\ndist/")
         );
     }
 }
