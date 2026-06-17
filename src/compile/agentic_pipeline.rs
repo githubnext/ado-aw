@@ -1110,10 +1110,10 @@ fn build_conclusion_job(
     cfg: &StandaloneCtx,
     prefix: &JobPrefix<'_>,
 ) -> Result<Option<Job>> {
-    let conclusion_config = match &front_matter.conclusion {
-        Some(c) => c,
-        None => return Ok(None),
-    };
+    // Conclusion job is always emitted when safe-outputs exist (gh-aw pattern).
+    if front_matter.safe_outputs.is_empty() {
+        return Ok(None);
+    }
 
     let mut steps: Vec<Step> = Vec::new();
 
@@ -1155,18 +1155,17 @@ fn build_conclusion_job(
     let conclusion_script = "node /tmp/ado-aw-scripts/ado-script/conclusion.js\n";
     let mut conclusion_step = bash("Report pipeline conclusion", conclusion_script);
     conclusion_step = conclusion_step.with_condition(Condition::Always);
+
+    // Global opt-out: safe-outputs.report-failure-as-work-item (default: true)
+    let report_failure = front_matter
+        .safe_outputs
+        .get("report-failure-as-work-item")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
     conclusion_step = conclusion_step
         .with_env(
             "AW_REPORT_FAILURE_AS_WORK_ITEM",
-            EnvValue::Literal(conclusion_config.report_failure_as_work_item.to_string()),
-        )
-        .with_env(
-            "AW_WORK_ITEM_TYPE",
-            EnvValue::Literal(conclusion_config.work_item_type.clone()),
-        )
-        .with_env(
-            "AW_INCLUDE_STATS",
-            EnvValue::Literal(conclusion_config.include_stats.to_string()),
+            EnvValue::Literal(report_failure.to_string()),
         )
         .with_env(
             "AW_PIPELINE_NAME",
@@ -1178,29 +1177,21 @@ fn build_conclusion_job(
         )
         .with_env("SYSTEM_ACCESSTOKEN", EnvValue::secret("System.AccessToken"));
 
-    if let Some(ref title) = conclusion_config.work_item_title {
-        conclusion_step =
-            conclusion_step.with_env("AW_WORK_ITEM_TITLE", EnvValue::Literal(title.clone()));
-    }
-    if let Some(ref area_path) = conclusion_config.area_path {
-        conclusion_step = conclusion_step.with_env(
-            "AW_WORK_ITEM_AREA_PATH",
-            EnvValue::Literal(area_path.clone()),
-        );
-    }
-    if let Some(ref iteration_path) = conclusion_config.iteration_path {
-        conclusion_step = conclusion_step.with_env(
-            "AW_WORK_ITEM_ITERATION_PATH",
-            EnvValue::Literal(iteration_path.clone()),
-        );
-    }
-    if !conclusion_config.tags.is_empty() {
-        let tags_json = serde_json::to_string(&conclusion_config.tags)
-            .context("failed to serialize conclusion tags")?;
-        conclusion_step =
-            conclusion_step.with_env("AW_WORK_ITEM_TAGS", EnvValue::Literal(tags_json));
+    // Pass per-tool configs as JSON env vars so conclusion.js can read them
+    for tool_key in &["noop", "missing-tool", "missing-data"] {
+        if let Some(tool_config) = front_matter.safe_outputs.get(*tool_key) {
+            let env_key = format!(
+                "AW_{}_CONFIG",
+                tool_key.to_uppercase().replace('-', "_")
+            );
+            let config_json = serde_json::to_string(tool_config)
+                .with_context(|| format!("failed to serialize safe-outputs.{} config", tool_key))?;
+            conclusion_step =
+                conclusion_step.with_env(env_key, EnvValue::Literal(config_json));
+        }
     }
 
+    // Pass upstream job results
     let agent_id = prefix.id("Agent")?;
     let detection_id = prefix.id("Detection")?;
     let safeoutputs_id = prefix.id("SafeOutputs")?;

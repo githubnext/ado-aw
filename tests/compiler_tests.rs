@@ -1,3 +1,4 @@
+use serde_json;
 use std::fs;
 use std::path::PathBuf;
 
@@ -3258,32 +3259,13 @@ fn test_conclusion_job_emits_expected_env_vars_for_conclusion_script() {
     assert_eq!(
         env.get(yaml_key("AW_REPORT_FAILURE_AS_WORK_ITEM"))
             .and_then(|v| v.as_str()),
-        Some("true")
-    );
-    assert_eq!(
-        env.get(yaml_key("AW_WORK_ITEM_TYPE"))
-            .and_then(|v| v.as_str()),
-        Some("Bug")
+        Some("true"),
+        "default report-failure-as-work-item should be true"
     );
     assert_eq!(
         env.get(yaml_key("AW_PIPELINE_NAME"))
             .and_then(|v| v.as_str()),
         Some("Conclusion Test Agent")
-    );
-    assert_eq!(
-        env.get(yaml_key("AW_WORK_ITEM_AREA_PATH"))
-            .and_then(|v| v.as_str()),
-        Some(r#"TestProject\TestTeam"#)
-    );
-    assert_eq!(
-        env.get(yaml_key("AW_WORK_ITEM_TAGS"))
-            .and_then(|v| v.as_str()),
-        Some(r#"["pipeline-failure","automated"]"#)
-    );
-    assert_eq!(
-        env.get(yaml_key("AW_INCLUDE_STATS"))
-            .and_then(|v| v.as_str()),
-        Some("true")
     );
     assert_eq!(
         env.get(yaml_key("AW_SAFE_OUTPUT_DIR"))
@@ -3294,16 +3276,31 @@ fn test_conclusion_job_emits_expected_env_vars_for_conclusion_script() {
         env.contains_key(yaml_key("SYSTEM_ACCESSTOKEN")),
         "conclusion.js step should include SYSTEM_ACCESSTOKEN"
     );
+    // Per-tool config is passed as JSON via AW_NOOP_CONFIG
+    let noop_config = env
+        .get(yaml_key("AW_NOOP_CONFIG"))
+        .and_then(|v| v.as_str())
+        .expect("AW_NOOP_CONFIG should be present");
+    let noop_json: serde_json::Value = serde_json::from_str(noop_config)
+        .expect("AW_NOOP_CONFIG should be valid JSON");
+    assert_eq!(
+        noop_json.get("title-prefix").and_then(|v| v.as_str()),
+        Some("[ado-aw] Agent noop")
+    );
+    assert_eq!(
+        noop_json.get("area-path").and_then(|v| v.as_str()),
+        Some(r#"TestProject\TestTeam"#)
+    );
 }
 
 #[test]
-fn test_conclusion_job_is_not_emitted_without_conclusion_config() {
+fn test_conclusion_job_is_not_emitted_without_safe_outputs() {
     let compiled = compile_fixture("minimal-agent.md");
     let doc = parse_compiled_yaml(&compiled);
 
     assert!(
         find_job_mapping(&doc, "Conclusion").is_none(),
-        "pipelines without conclusion config must not emit a Conclusion job"
+        "pipelines without safe-outputs must not emit a Conclusion job"
     );
 }
 

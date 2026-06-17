@@ -732,11 +732,6 @@ pub struct FrontMatter {
     /// registry. See `docs/supply-chain.md`.
     #[serde(default, rename = "supply-chain")]
     pub supply_chain: Option<SupplyChainConfig>,
-    /// Conclusion job configuration — always-running housekeeping job that
-    /// files work items on pipeline failure or diagnostic signals (noop,
-    /// missing-tool, missing-data). See `docs/conclusion.md`.
-    #[serde(default)]
-    pub conclusion: Option<ConclusionConfig>,
 }
 
 impl FrontMatter {
@@ -842,9 +837,6 @@ impl SanitizeConfigTrait for FrontMatter {
         if let Some(ref mut sc) = self.supply_chain {
             sc.sanitize_config_fields();
         }
-        if let Some(ref mut c) = self.conclusion {
-            c.sanitize_config_fields();
-        }
     }
 }
 
@@ -899,80 +891,6 @@ pub struct PermissionsConfig {
     /// This token is never exposed to the agent.
     #[serde(default)]
     pub write: Option<String>,
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Conclusion job configuration
-// ──────────────────────────────────────────────────────────────────────────────
-
-/// Configuration for the Conclusion job — an always-running housekeeping job
-/// that files (or appends to) an Azure DevOps work item when the pipeline
-/// fails, or when diagnostic signals (noop, missing-tool, missing-data) are
-/// detected in the safe-outputs NDJSON manifest.
-///
-/// Lives under the `conclusion:` top-level front-matter key.
-///
-/// Example:
-/// ```yaml
-/// conclusion:
-///   work-item-type: Bug
-///   area-path: "MyProject\\MyTeam"
-///   tags:
-///     - pipeline-failure
-///     - automated
-/// ```
-#[derive(Debug, Deserialize, Clone, SanitizeConfig)]
-#[serde(deny_unknown_fields)]
-pub struct ConclusionConfig {
-    /// Whether failure work-item filing is enabled (default: `true`).
-    /// Set to `false` to emit the Conclusion job without work-item filing
-    /// (useful if you only want future conclusion steps).
-    #[serde(
-        default = "conclusion_default_enabled",
-        rename = "report-failure-as-work-item"
-    )]
-    pub report_failure_as_work_item: bool,
-
-    /// Title of the work item to file or append a comment to.
-    /// If a non-closed work item with this exact title already exists,
-    /// a comment is appended rather than creating a new work item.
-    /// Default: `"[ado-aw] Pipeline failure: {pipeline-name}"` (substituted at runtime).
-    #[serde(default, rename = "work-item-title")]
-    pub work_item_title: Option<String>,
-
-    /// Work item type to create (default: "Bug").
-    #[serde(
-        default = "conclusion_default_work_item_type",
-        rename = "work-item-type"
-    )]
-    pub work_item_type: String,
-
-    /// Area path for the work item.
-    #[serde(default, rename = "area-path")]
-    pub area_path: Option<String>,
-
-    /// Iteration path for the work item.
-    #[serde(default, rename = "iteration-path")]
-    pub iteration_path: Option<String>,
-
-    /// Tags to apply to the work item.
-    #[serde(default)]
-    pub tags: Vec<String>,
-
-    /// Whether to include agent execution stats in the work item body (default: true).
-    #[serde(
-        default = "crate::agent_stats::default_include_stats",
-        rename = "include-stats"
-    )]
-    pub include_stats: bool,
-}
-
-fn conclusion_default_enabled() -> bool {
-    true
-}
-
-fn conclusion_default_work_item_type() -> String {
-    "Bug".to_string()
 }
 
 /// Debug-only configuration block.
@@ -3065,58 +2983,64 @@ Body
     }
 
     #[test]
-    fn test_front_matter_accepts_conclusion_config() {
+    fn test_front_matter_safe_outputs_report_failure_config() {
         let content = r#"---
 name: "Test Agent"
 description: "Test"
-conclusion:
-  work-item-type: Bug
-  area-path: "MyProject\\MyTeam"
-  tags:
-    - pipeline-failure
-    - automated
+safe-outputs:
+  report-failure-as-work-item: false
+  noop:
+    title-prefix: "[ado-aw] Agent noop"
+    work-item-type: Task
+    area-path: "MyProject\\MyTeam"
+    tags:
+      - agent-noop
 ---
 
 Body
 "#;
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
-        let conclusion = fm.conclusion.expect("conclusion should parse");
-        assert!(conclusion.report_failure_as_work_item);
-        assert_eq!(conclusion.work_item_type, "Bug");
-        assert_eq!(conclusion.area_path.as_deref(), Some("MyProject\\MyTeam"));
-        assert_eq!(conclusion.tags, vec!["pipeline-failure", "automated"]);
-        assert!(conclusion.include_stats);
-        assert!(conclusion.work_item_title.is_none());
+        // report-failure-as-work-item is stored as opaque JSON in safe_outputs HashMap
+        let report_flag = fm
+            .safe_outputs
+            .get("report-failure-as-work-item")
+            .and_then(|v| v.as_bool());
+        assert_eq!(report_flag, Some(false));
+        // noop config with flat fields
+        let noop = fm.safe_outputs.get("noop").unwrap();
+        assert_eq!(noop.get("title-prefix").and_then(|v| v.as_str()), Some("[ado-aw] Agent noop"));
+        assert_eq!(noop.get("area-path").and_then(|v| v.as_str()), Some("MyProject\\MyTeam"));
     }
 
     #[test]
-    fn test_front_matter_conclusion_defaults() {
+    fn test_front_matter_safe_outputs_noop_disabled() {
         let content = r#"---
 name: "Test Agent"
 description: "Test"
-conclusion: {}
+safe-outputs:
+  noop: false
 ---
 
 Body
 "#;
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
-        let conclusion = fm.conclusion.expect("conclusion should parse");
-        assert!(conclusion.report_failure_as_work_item);
-        assert_eq!(conclusion.work_item_type, "Bug");
-        assert!(conclusion.area_path.is_none());
-        assert!(conclusion.tags.is_empty());
+        let noop = fm.safe_outputs.get("noop").unwrap();
+        assert_eq!(noop.as_bool(), Some(false));
     }
 
     #[test]
-    fn test_front_matter_without_conclusion() {
+    fn test_front_matter_safe_outputs_triggers_conclusion_job() {
+        // Any non-empty safe-outputs triggers the conclusion job
         let content = r#"---
 name: "Test Agent"
 description: "Test"
+safe-outputs:
+  noop: {}
 ---
 
 Body
 "#;
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
-        assert!(fm.conclusion.is_none());
+        assert!(!fm.safe_outputs.is_empty(), "safe_outputs should be non-empty");
     }
 }

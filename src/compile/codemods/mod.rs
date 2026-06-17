@@ -37,6 +37,8 @@ mod helpers;
 mod m0001_repos_unified;
 #[path = "0002_pool_object_form.rs"]
 mod m0002_pool_object_form;
+#[path = "0003_flatten_work_item_config.rs"]
+mod m0003_flatten_work_item_config;
 
 #[allow(unused_imports)] // Re-exported for future codemods; only `take_key` is in-tree use.
 pub use helpers::{ConflictPolicy, insert_no_overwrite, rename_key, take_key};
@@ -102,6 +104,7 @@ pub struct Codemod {
 pub static CODEMODS: &[&Codemod] = &[
     &m0001_repos_unified::CODEMOD,
     &m0002_pool_object_form::CODEMOD,
+    &m0003_flatten_work_item_config::CODEMOD,
 ];
 
 /// Result of running the codemod registry on a single front-matter
