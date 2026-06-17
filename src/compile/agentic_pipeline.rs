@@ -2222,7 +2222,7 @@ mod tests {
         ];
         let cond = fold_agent_conditions(&clauses).unwrap();
         let Condition::And(parts) = cond else {
-            panic!()
+            panic!("expected And, got {cond:?}")
         };
         assert_eq!(parts.len(), 4);
         assert!(matches!(parts[0], Condition::Succeeded));
@@ -2255,9 +2255,10 @@ mod tests {
 
     #[test]
     fn parse_env_block_bails_on_malformed_yaml() {
-        // Stray `:` inside a bare key would make this fail to parse as
-        // a mapping. The previous silent `return Vec::new()` swallowed
-        // this — the typed Result surface should bail loudly.
+        // `KEY: : value` is ambiguous/invalid YAML: the bare value
+        // starts with `: `, which the YAML parser cannot interpret as
+        // a plain scalar.  Callers should never produce such a block,
+        // so the typed Result surface should bail loudly.
         let err = parse_env_block("env:\n  KEY: : value\n").unwrap_err();
         let msg = format!("{err:#}");
         assert!(
@@ -2303,6 +2304,8 @@ mod tests {
         let yaml = "- bash: echo first\n  displayName: First\n- bash: echo second\n  displayName: Second\n";
         let chunks = split_yaml_step_sequence(yaml).unwrap();
         assert_eq!(chunks.len(), 2, "got chunks: {chunks:?}");
+        assert!(chunks[0].starts_with("- bash:"), "chunk[0]: {}", chunks[0]);
+        assert!(chunks[1].starts_with("- bash:"), "chunk[1]: {}", chunks[1]);
         assert!(chunks[0].contains("First"));
         assert!(chunks[1].contains("Second"));
     }
