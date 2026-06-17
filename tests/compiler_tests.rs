@@ -6056,10 +6056,12 @@ fn test_supply_chain_full_reroutes_all_artifacts() {
         !compiled.contains("github.com/github/gh-aw-firewall/releases"),
         "AWF GitHub release URLs must be gone in feed mode"
     );
-    // (b) No GHCR image references remain.
+    // (b) No GHCR image *pulls* remain — every pull comes from the internal
+    // registry. The local `:latest` aliases intentionally keep the GHCR names
+    // that AWF resolves by default with `--skip-pull` (see (d2) below).
     assert!(
-        !compiled.contains("ghcr.io"),
-        "GHCR image references must be gone in registry mode"
+        !compiled.contains("docker pull ghcr.io"),
+        "no image may be pulled from GHCR in registry mode"
     );
 
     // (c) Standard ADO tasks are present for the binary mirror.
@@ -6081,6 +6083,14 @@ fn test_supply_chain_full_reroutes_all_artifacts() {
         compiled.contains("feed: my-project/my-internal-feed"),
         "DownloadPackage@1 must target the configured feed"
     );
+    // Auth is hoisted to one NuGetAuthenticate@1 per job, not per artifact, so
+    // there are strictly fewer auth steps than DownloadPackage@1 steps.
+    let auth_count = compiled.matches("- task: NuGetAuthenticate@1").count();
+    let download_count = compiled.matches("- task: DownloadPackage@1").count();
+    assert!(
+        auth_count < download_count,
+        "NuGetAuthenticate@1 should be hoisted per-job (got {auth_count} auth vs {download_count} downloads)"
+    );
 
     // (d) Internal registry rewrite + ACR auth for images.
     assert!(
@@ -6094,6 +6104,23 @@ fn test_supply_chain_full_reroutes_all_artifacts() {
     assert!(
         compiled.contains("myacr.azurecr.io/github/gh-aw-mcpg:"),
         "MCPG image must be rewritten onto the internal registry (pull + docker run)"
+    );
+
+    // (d2) The local `:latest` aliases must be tagged under the GHCR names AWF
+    // resolves by default with `--skip-pull` — tagged from the internally
+    // pulled image, never pulled from GHCR. Regression guard for the firewall
+    // failing to find its images at runtime.
+    assert!(
+        compiled.contains(
+            "docker tag myacr.azurecr.io/github/gh-aw-firewall/squid:0.27.3 ghcr.io/github/gh-aw-firewall/squid:latest"
+        ),
+        "AWF squid image must be re-tagged to the GHCR :latest name AWF expects"
+    );
+    assert!(
+        compiled.contains(
+            "docker tag myacr.azurecr.io/github/gh-aw-firewall/agent:0.27.3 ghcr.io/github/gh-aw-firewall/agent:latest"
+        ),
+        "AWF agent image must be re-tagged to the GHCR :latest name AWF expects"
     );
 
     // (e) Checksum verification is retained.

@@ -742,6 +742,11 @@ fn build_agent_job(
     push_raw_yaml_if_nonempty(&mut steps, &cfg.engine_install_steps_yaml)?;
 
     // 5. Download agentic pipeline compiler
+    //    Hoist one NuGetAuthenticate@1 for the whole job when the feed mirror
+    //    is active, ahead of the compiler/AWF DownloadPackage@1 steps.
+    if let Some(auth) = feed_auth_step(front_matter.supply_chain()) {
+        steps.push(auth);
+    }
     steps.extend(download_compiler_step(
         &cfg.compiler_version,
         front_matter.supply_chain(),
@@ -944,6 +949,10 @@ fn build_detection_job(
 
     // Engine install
     push_raw_yaml_if_nonempty(&mut steps, &cfg.engine_install_steps_yaml)?;
+    // One NuGetAuthenticate@1 for the whole Detection job (feed mirror).
+    if let Some(auth) = feed_auth_step(front_matter.supply_chain()) {
+        steps.push(auth);
+    }
     // Download compiler
     steps.extend(download_compiler_step(
         &cfg.compiler_version,
@@ -1017,6 +1026,10 @@ fn build_safeoutputs_job(
         condition: None,
     }));
     // Download compiler
+    //    One NuGetAuthenticate@1 for the whole SafeOutputs job (feed mirror).
+    if let Some(auth) = feed_auth_step(front_matter.supply_chain()) {
+        steps.push(auth);
+    }
     steps.extend(download_compiler_step(
         &cfg.compiler_version,
         front_matter.supply_chain(),
@@ -1207,6 +1220,12 @@ pub(crate) fn download_package_step(
 /// caller-supplied verify/relocate tail. `payload` is the artifact file name
 /// (e.g. `ado-aw-linux-x64`); `tail` is appended after the files are staged in
 /// `dest_dir` (the working directory is `dest_dir`).
+///
+/// SAFETY: every parameter is interpolated verbatim into a `format!()` shell
+/// body with no escaping. All callers MUST pass compile-time-constant,
+/// trusted strings only (today: hardcoded ADO macro paths and literal payload
+/// names). Never pass user/front-matter-controlled data here — doing so would
+/// introduce shell-command injection into the generated pipeline.
 fn extract_package_payload_bash(staging: &str, dest_dir: &str, payload: &str, tail: &str) -> String {
     format!(
         "set -eo pipefail\n\
@@ -1239,16 +1258,28 @@ fn extract_package_payload_bash(staging: &str, dest_dir: &str, payload: &str, ta
     )
 }
 
+/// `NuGetAuthenticate@1` step to emit **once per job** when the feed mirror is
+/// active. Hoisting a single auth step (keyed on the resolved feed connection)
+/// keeps the per-artifact `DownloadPackage@1` calls authenticated without
+/// repeating the (idempotent) auth task for every binary. Returns `None` when
+/// no feed is configured.
+fn feed_auth_step(supply_chain: Option<&SupplyChainConfig>) -> Option<Step> {
+    let sc = supply_chain?;
+    sc.feed
+        .as_ref()
+        .map(|_| Step::Task(nuget_authenticate_step(sc.feed_connection())))
+}
+
 fn download_compiler_step(compiler_version: &str, supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
     if let Some(feed) = supply_chain.and_then(|sc| sc.feed.as_ref()) {
         let dest = "$(Pipeline.Workspace)/agentic-pipeline-compiler";
         let staging = "$(Pipeline.Workspace)/agentic-pipeline-compiler/_pkg";
-        let connection = supply_chain.and_then(|sc| sc.feed_connection());
         let tail = "mv ado-aw-linux-x64 ado-aw\n\
                     chmod +x ado-aw\n";
         let body = extract_package_payload_bash(staging, dest, "ado-aw-linux-x64", tail);
+        // Auth is hoisted to the job builder via `feed_auth_step` (one
+        // NuGetAuthenticate@1 per job, not per artifact).
         return vec![
-            Step::Task(nuget_authenticate_step(connection)),
             Step::Task(download_package_step(
                 format!("Download agentic pipeline compiler (v{compiler_version})"),
                 feed.name.as_str(),
@@ -1381,14 +1412,13 @@ fn download_awf_step(supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
     if let Some(feed) = supply_chain.and_then(|sc| sc.feed.as_ref()) {
         let dest = "$(Pipeline.Workspace)/awf";
         let staging = "$(Pipeline.Workspace)/awf/_pkg";
-        let connection = supply_chain.and_then(|sc| sc.feed_connection());
         let tail = "mv awf-linux-x64 awf\n\
                     chmod +x awf\n\
                     echo \"##vso[task.prependpath]$(Pipeline.Workspace)/awf\"\n\
                     ./awf --version\n";
         let body = extract_package_payload_bash(staging, dest, "awf-linux-x64", tail);
+        // Auth is hoisted to the job builder via `feed_auth_step`.
         return vec![
-            Step::Task(nuget_authenticate_step(connection)),
             Step::Task(download_package_step(
                 format!("Download AWF (Agentic Workflow Firewall) v{AWF_VERSION}"),
                 feed.name.as_str(),
@@ -1436,8 +1466,14 @@ fn prepull_images_step(include_mcpg: bool, supply_chain: Option<&SupplyChainConf
 
     let squid = image_ref("ghcr.io/github/gh-aw-firewall/squid", AWF_VERSION, registry_host);
     let agent = image_ref("ghcr.io/github/gh-aw-firewall/agent", AWF_VERSION, registry_host);
-    let squid_latest = image_ref("ghcr.io/github/gh-aw-firewall/squid", "latest", registry_host);
-    let agent_latest = image_ref("ghcr.io/github/gh-aw-firewall/agent", "latest", registry_host);
+    // The local `:latest` aliases must ALWAYS carry the GHCR image names that
+    // AWF resolves by default when invoked with `--skip-pull` (run_agent_step
+    // passes no `--awf-*-image` flags). Tagging them onto the internal
+    // registry would leave AWF's expected `ghcr.io/.../{squid,agent}:latest`
+    // names absent from the local Docker cache, so the firewall containers
+    // would fail to start. Hence `None` here regardless of pull source.
+    let squid_latest = image_ref("ghcr.io/github/gh-aw-firewall/squid", "latest", None);
+    let agent_latest = image_ref("ghcr.io/github/gh-aw-firewall/agent", "latest", None);
 
     let mut script = format!(
         "set -eo pipefail\n\
