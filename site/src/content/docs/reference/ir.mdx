@@ -22,6 +22,7 @@ Those wrappers are the only place per-target shape (top-level `PipelineShape`, t
 
 - `ids.rs` — typed `StageId`, `JobId`, and `StepId` newtypes. Constructors validate the ADO identifier grammar (`^[A-Za-z_][A-Za-z0-9_]*$`) so invalid names fail at compile time.
 - `step.rs` — `Step` and concrete step structs: `BashStep`, `TaskStep`, `CheckoutStep`, `DownloadStep`, and `PublishStep`.
+- `tasks.rs` — typed factory helpers for built-in ADO task steps (`CopyFiles@2`, `DockerInstaller@0`, `DotNetCoreCLI@2`, `ArchiveFiles@2`, `ExtractFiles@1`, `PublishTestResults@2`, `NuGetCommand@2`, `PowerShell@2`). Prefer these over hand-crafted `TaskStep::new()` calls — see [Typed task helpers](#typed-task-helpers) below.
 - `job.rs` — `Job`, `Pool`, job variables, 1ES `templateContext` support, and target-job external `dependsOn` / `condition` wrapping.
 - `stage.rs` — `Stage` plus target-stage external `dependsOn` / `condition` wrapping.
 - `env.rs` — typed environment values (`EnvValue`) including ADO macros, pipeline variables, secrets, `OutputRef`s, `Coalesce`, and macro-form `Concat`.
@@ -113,6 +114,69 @@ let synth = Step::Bash(
         .with_env("BUILD_REASON", EnvValue::ado_macro("Build.Reason")?),
 );
 ```
+
+## Typed task helpers
+
+`src/compile/ir/tasks.rs` contains typed factory functions for common ADO built-in tasks. Each function returns a pre-configured `TaskStep` with required inputs already set; optional inputs are layered on with `.with_input("key", "value")` chaining.
+
+These helpers eliminate hand-crafted `TaskStep::new(…)` + raw string inputs at every call site, making task usage self-documenting and the required/optional input boundary explicit.
+
+### Available helpers
+
+| Function | ADO task | Required parameters |
+|----------|----------|---------------------|
+| `copy_files_step(contents, target_folder)` | `CopyFiles@2` | glob pattern; destination folder |
+| `docker_installer_step(docker_version)` | `DockerInstaller@0` | engine version (e.g. `"26.1.4"`) |
+| `dot_net_core_cli_step(command)` | `DotNetCoreCLI@2` | sub-command (`"build"`, `"test"`, `"publish"`, …) |
+| `archive_files_step(root_folder_or_file, archive_file)` | `ArchiveFiles@2` | source path; output archive path |
+| `extract_files_step(archive_file_patterns, destination_folder)` | `ExtractFiles@1` | archive glob; destination folder |
+| `publish_test_results_step(test_results_format, test_results_files)` | `PublishTestResults@2` | format (`"JUnit"`, `"NUnit"`, `"VSTest"`, `"XUnit"`, `"CTest"`); result file glob |
+| `nuget_command_step(command)` | `NuGetCommand@2` | operation (`"restore"`, `"push"`, `"pack"`, `"custom"`) |
+| `powershell_file_step(file_path)` | `PowerShell@2` (file mode) | path to `.ps1` script |
+| `powershell_inline_step(script)` | `PowerShell@2` (inline mode) | inline script body |
+
+### Usage example
+
+```rust
+use crate::compile::ir::step::Step;
+use crate::compile::ir::tasks::{
+    dot_net_core_cli_step, powershell_inline_step, publish_test_results_step,
+};
+
+// Build a .NET project — required input only
+let build = Step::Task(dot_net_core_cli_step("build"));
+
+// Run tests with optional inputs chained on
+let test = Step::Task(
+    dot_net_core_cli_step("test")
+        .with_input("projects", "**/*Tests.csproj")
+        .with_input("arguments", "--no-build --configuration Release")
+        .with_input("publishTestResults", "true"),
+);
+
+// Publish test results (required inputs set; no optional inputs needed)
+let publish = Step::Task(
+    publish_test_results_step("VSTest", "**/*.trx")
+        .with_input("failTaskOnFailedTests", "true"),
+);
+
+// Inline PowerShell (cross-platform)
+let ps = Step::Task(
+    powershell_inline_step("Write-Output 'hello'")
+        .with_input("pwsh", "true"),
+);
+```
+
+### Adding a new helper
+
+When you need an ADO task that doesn't have a typed helper yet, add one to `tasks.rs`:
+
+1. Write a `pub fn <name>_step(…) -> TaskStep` that sets the ADO task identifier and all **required** inputs as positional parameters.
+2. Document required vs. optional inputs with the `/// | Input key | Type | Default | Description |` table pattern used by existing helpers.
+3. Add a link to the ADO task reference at `learn.microsoft.com`.
+4. Write a unit test that asserts the task name, display name, and that required inputs are set with the correct keys.
+
+Do **not** use `Step::RawYaml` for tasks that the IR can model. Typed helpers preserve all compiler-owned fields (`condition`, `env`, `timeout`, `continue_on_error`) and participate correctly in the graph pass.
 
 ## Output declarations and references
 
@@ -266,3 +330,156 @@ The production target wrappers are:
 The canonical 5-job Setup → Agent → Detection → SafeOutputs → Teardown shape itself lives in `agentic_pipeline.rs` and is reused unchanged by every wrapper above; extensions plug into it via `Declarations` (steps, env, hosts, MCPG entries, and Agent-job condition clauses — see `Declarations::agent_conditions`).
 
 When adding a target, follow the same pattern: parse and validate front matter, collect extension `Declarations`, build typed jobs/stages/steps, set the correct `PipelineShape`, and call the shared emit path.
+
+## Public JSON summary
+
+The internal IR types (`Pipeline`, `Job`, `Step`, `Graph`, …) are intentionally tied to the compiler's lowering needs and are **not** public API. `src/compile/ir/summary.rs` defines a parallel **summary tree** with `#[derive(Serialize)]` that provides agent-facing tooling with a stable JSON view of a compiled pipeline.
+
+This is the schema consumed by:
+
+- `ado-aw inspect <source> --json` — returns a full `PipelineSummary`
+- `ado-aw graph dump <source> --format json` — returns a `GraphSummary` subset
+- `ado-aw graph deps` / `ado-aw graph outputs` — focused graph queries
+- `ado-aw whatif` — static downstream skip analysis built on graph reachability
+- `ado-aw audit --json` — the `pipeline_graph` field in `AuditData`
+- The [author MCP server](/ado-aw/reference/mcp-author/) tools (`inspect_workflow`, `graph_summary`, `graph_dump`)
+
+### Stability contract
+
+`PipelineSummary::schema_version` (currently `1`) is the public schema version. It is bumped when the JSON shape changes in a backwards-incompatible way — renamed field, removed variant, or changed semantics. Additive changes (new optional fields) do not require a bump. New enum variants do require a bump because the serialized enums have no catch-all `Unknown` variants.
+
+Internal IR types may change freely without bumping the summary version, as long as the `summary.rs` lowering keeps the existing field set populated correctly.
+
+### Top-level shape
+
+```jsonc
+{
+  "schema_version": 1,
+  "name": "<pipeline name>",                           // ADO build-number format string
+  "shape": "standalone" | "1es" | "job-template" | "stage-template",
+  "body": { "kind": "jobs",   "jobs": [...] },
+        // OR
+           { "kind": "stages", "stages": [...] },
+  "graph": { ... }                                     // see GraphSummary below
+}
+```
+
+The `body` discriminant (`kind`) mirrors `PipelineBody`: flat pipelines (`standalone`, `job-template`) use `"jobs"`, stage-wrapped pipelines (`1es`, `stage-template`) use `"stages"`.
+
+### `JobSummary`
+
+Each entry in `body.jobs` (or inside a stage's `jobs` array):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | ADO job identifier (`name:` in YAML) |
+| `stage` | string or null | Stage id this job belongs to; `null` for flat (non-stage) pipelines |
+| `display_name` | string | Human-readable `displayName:` |
+| `depends_on` | string[] | `dependsOn:` entries — both explicitly declared and graph-derived |
+| `condition` | string or null | Lowered ADO condition expression, e.g. `"succeeded()"` |
+| `pool` | object | Pool summary — see `PoolSummary` below |
+| `steps` | object[] | Ordered list of step summaries — see `StepSummary` below |
+
+`PoolSummary` has one of two shapes depending on pool type:
+
+```jsonc
+// Microsoft-hosted
+{ "kind": "vm_image", "image": "ubuntu-22.04" }
+
+// Self-hosted or 1ES
+{ "kind": "named", "name": "MyPool", "image": null, "os": "linux" }
+```
+
+### `StepSummary`
+
+Each entry in `job.steps`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string or null | ADO step `name:` — present when other steps read this step's outputs |
+| `kind` | string | Step variant: `"bash"`, `"task"`, `"checkout"`, `"download"`, `"publish"`, `"raw_yaml"` |
+| `display_name` | string or null | Human-readable `displayName:` |
+| `task` | string or null | For `task` steps only: ADO task identifier, e.g. `"UseNode@1"` |
+| `condition` | string or null | Lowered ADO condition expression |
+| `outputs` | object[] | Output variables declared by this step |
+| `env_refs` | object[] | Other steps' outputs read via this step's `env:` block |
+| `condition_refs` | object[] | Other steps' outputs read via this step's `condition:` |
+
+Each entry in `outputs`:
+
+```jsonc
+{
+  "name": "AW_SYNTHETIC_PR_ID",   // ##vso[task.setvariable variable=...] name
+  "is_secret": false,              // true → value is masked in logs
+  "auto_is_output": true           // true → at least one cross-step consumer → emit isOutput=true
+}
+```
+
+Each entry in `env_refs` / `condition_refs`:
+
+```jsonc
+{ "step": "synthPr", "name": "AW_SYNTHETIC_PR_ID" }
+```
+
+### `GraphSummary`
+
+The `graph` field is a JSON-friendly view of the typed `Graph` built during lowering:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `step_locations` | object[] | Every named step with its job/stage location and declared outputs |
+| `job_edges` | object[] | Derived job-level `dependsOn` edges |
+| `stage_edges` | object[] | Derived stage-level `dependsOn` edges |
+| `outputs_needing_is_output` | object[] | Producer steps whose outputs are read cross-step (need `isOutput=true`) |
+
+Each `job_edges` / `stage_edges` entry:
+
+```jsonc
+{ "consumer": "Agent", "producer": "Setup" }
+// means: Agent dependsOn Setup
+```
+
+Each `step_locations` entry:
+
+```jsonc
+{ "step": "synthPr", "stage": null, "job": "Setup", "outputs": ["AW_SYNTHETIC_PR_ID"] }
+```
+
+Each `outputs_needing_is_output` entry:
+
+```jsonc
+{ "step": "synthPr", "outputs": ["AW_SYNTHETIC_PR_ID"] }
+```
+
+### Example: inspect output
+
+Running `ado-aw inspect examples/sample-agent.md --json` for a simple PR-triggered pipeline returns a summary like:
+
+```jsonc
+{
+  "schema_version": 1,
+  "name": "sample-agent",
+  "shape": "standalone",
+  "body": {
+    "kind": "jobs",
+    "jobs": [
+      { "id": "Setup",       "stage": null, "depends_on": [], ... },
+      { "id": "Agent",       "stage": null, "depends_on": ["Setup"], ... },
+      { "id": "Detection",   "stage": null, "depends_on": ["Agent"], ... },
+      { "id": "SafeOutputs", "stage": null, "depends_on": ["Detection"], ... },
+      { "id": "Teardown",    "stage": null, "depends_on": ["SafeOutputs"], ... }
+    ]
+  },
+  "graph": {
+    "job_edges": [
+      { "consumer": "Agent",       "producer": "Setup" },
+      { "consumer": "Detection",   "producer": "Agent" },
+      { "consumer": "SafeOutputs", "producer": "Detection" },
+      { "consumer": "Teardown",    "producer": "SafeOutputs" }
+    ],
+    ...
+  }
+}
+```
+
+The five jobs reflect the canonical Setup → Agent → Detection → SafeOutputs → Teardown shape for every compiled pipeline.
