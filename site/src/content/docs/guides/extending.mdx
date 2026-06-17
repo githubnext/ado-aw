@@ -118,6 +118,29 @@ let step = Step::Bash(
 
 ### Task steps
 
+When a typed factory helper exists for the ADO task you need, use it — it sets the required inputs and makes the call site self-documenting:
+
+```rust
+use crate::compile::ir::step::Step;
+use crate::compile::ir::tasks::{copy_files_step, dot_net_core_cli_step};
+
+// Use a typed helper — required inputs are positional, optional inputs chain on
+let build = Step::Task(
+    dot_net_core_cli_step("build")
+        .with_input("projects", "**/*.csproj")
+        .with_input("arguments", "--configuration Release"),
+);
+
+let copy = Step::Task(
+    copy_files_step("**/*.nupkg", "$(Build.ArtifactStagingDirectory)")
+        .with_input("SourceFolder", "$(Build.SourcesDirectory)/out"),
+);
+```
+
+The full set of typed helpers lives in `src/compile/ir/tasks.rs` and is documented in the [IR reference](/ado-aw/reference/ir/#typed-task-helpers). Helpers cover: `CopyFiles@2`, `DockerInstaller@0`, `DotNetCoreCLI@2`, `ArchiveFiles@2`, `ExtractFiles@1`, `PublishTestResults@2`, `NuGetCommand@2`, and `PowerShell@2` (file and inline modes).
+
+When no typed helper exists for your task, fall back to `TaskStep::new`:
+
 ```rust
 use crate::compile::ir::step::{Step, TaskStep};
 
