@@ -121,6 +121,7 @@ const REQUIRED_STEP_DISPLAY_NAMES: &[&str] = &[
     "ado-aw",                  // src/compile/extensions/ado_aw_marker.rs metadata marker step
     "Stage PR execution context (aw-context/pr/*)", // src/compile/extensions/exec_context/pr.rs
     "Stage workitem execution context (aw-context/workitem/*)", // src/compile/extensions/exec_context/workitem.rs (activated by PR trigger)
+    "Stage manual execution context (aw-context/manual/*)", // src/compile/extensions/exec_context/manual.rs (activated by parameters: block)
     "Resolve synthetic PR context", // src/compile/extensions/ado_script.rs synthetic_pr_step()
 ];
 

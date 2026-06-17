@@ -291,6 +291,73 @@ pub fn powershell_inline_step(script: impl Into<String>) -> TaskStep {
         .with_input("script", script)
 }
 
+/// Returns a [`TaskStep`] for `PublishPipelineArtifact@1`.
+///
+/// Publishes (uploads) a file or directory as a named artifact for the
+/// current pipeline run. The artifact is stored in Azure Pipelines and
+/// can be downloaded by subsequent jobs or pipelines via
+/// `DownloadPipelineArtifact@2`.
+///
+/// - `target_path` — path of the file or directory to publish. Can be
+///   absolute or relative to the default working directory. Supports
+///   ADO macro variables (e.g. `$(Build.ArtifactStagingDirectory)`),
+///   but wildcards are **not** supported.
+///
+/// Optional inputs (applied with `.with_input(…)` on the returned
+/// value):
+///
+/// | Input key | Alias | Type | Default | Description |
+/// |---|---|---|---|---|
+/// | `artifact` | `artifactName` | string | *(unique job-scoped ID)* | Name of the published artifact (e.g. `"drop"`). May not contain `\`, `/`, `"`, `:`, `<`, `>`, `\|`, `*`, or `?`. |
+/// | `publishLocation` | `artifactType` | string | `"pipeline"` | Where to store the artifact: `"pipeline"` (Azure Pipelines) or `"filepath"` (a UNC file share). |
+/// | `fileSharePath` | — | string | — | Required when `publishLocation = filepath`. UNC path of the file share. |
+/// | `parallel` | — | bool string | `"false"` | Enable multi-threaded copy when `publishLocation = filepath`. |
+/// | `parallelCount` | — | string | `"8"` | Thread count for parallel copy (1–128). Applies when `parallel = true`. |
+/// | `properties` | — | string | — | JSON string of custom properties to associate with the artifact (keys must start with `user-`). |
+///
+/// ADO task reference:
+/// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/publish-pipeline-artifact-v1>
+pub fn publish_pipeline_artifact_step(target_path: impl Into<String>) -> TaskStep {
+    TaskStep::new("PublishPipelineArtifact@1", "Publish Pipeline Artifact")
+        .with_input("targetPath", target_path)
+}
+
+/// Returns a [`TaskStep`] for `DownloadPipelineArtifact@2`.
+///
+/// Downloads artifacts produced by a pipeline run into `target_path`.
+/// By default the step downloads from the **current** run; set
+/// `source = "specific"` via `.with_input(…)` to pull from a
+/// different run or pipeline.
+///
+/// - `target_path` — local filesystem path where the artifact will be
+///   downloaded. Maps to the `targetPath` ADO task input, which is
+///   **required** by the task.
+///
+/// Optional inputs (applied with `.with_input(…)` on the returned value):
+///
+/// | Input key | Type | Default | Description |
+/// |---|---|---|
+/// | `artifact` | string | — | Name of the artifact to download. Omit to download all artifacts. |
+/// | `patterns` | string | `"**"` | Newline-separated glob patterns that filter which files inside the artifact are downloaded. |
+/// | `source` | string | `"current"` | `"current"` (this run) or `"specific"` (another run). |
+/// | `project` | string | — | ADO project name or ID (`source = "specific"` only). |
+/// | `pipeline` | string | — | Pipeline definition ID or name (`source = "specific"` only). |
+/// | `runVersion` | string | `"latest"` | Which run to download from: `"latest"`, `"latestFromBranch"`, or `"specific"` (`source = "specific"` only). |
+/// | `branchName` | string | — | Branch filter, e.g. `"refs/heads/main"` (`runVersion = "latestFromBranch"` only). |
+/// | `runId` | string | — | The build ID to download from (`runVersion = "specific"` only). |
+/// | `tags` | string | — | Comma-separated build tags used to filter candidate runs. |
+/// | `allowPartiallySucceededBuilds` | bool string | `"false"` | Also consider partially-succeeded runs as download candidates. |
+/// | `allowFailedBuilds` | bool string | `"false"` | Also consider failed runs as download candidates. |
+/// | `preferTriggeringPipeline` | bool string | `"false"` | Prefer the run that triggered the current pipeline. |
+/// | `itemPattern` | string | `"**"` | Minimatch pattern applied after download to select a subset of files. |
+///
+/// ADO task reference:
+/// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/download-pipeline-artifact-v2>
+pub fn download_pipeline_artifact_step(target_path: impl Into<String>) -> TaskStep {
+    TaskStep::new("DownloadPipelineArtifact@2", "Download Pipeline Artifact")
+        .with_input("targetPath", target_path)
+}
+
 /// Returns a [`TaskStep`] for `DeleteFiles@1`.
 ///
 /// Deletes files or folders matching one or more patterns from a source folder.
@@ -882,8 +949,8 @@ mod tests {
 
     #[test]
     fn delete_files_step_accepts_source_folder() {
-        let t = delete_files_step("**/*.log")
-            .with_input("SourceFolder", "$(Build.ArtifactStagingDirectory)");
+        let t =
+            delete_files_step("**/*.log").with_input("SourceFolder", "$(Build.ArtifactStagingDirectory)");
         assert_eq!(t.task, "DeleteFiles@1");
         assert_eq!(
             t.inputs.get("SourceFolder").map(|s| s.as_str()),
@@ -907,8 +974,7 @@ mod tests {
 
     #[test]
     fn delete_files_step_accepts_remove_dot_files_flag() {
-        let t = delete_files_step("**")
-            .with_input("RemoveDotFiles", "true");
+        let t = delete_files_step("**").with_input("RemoveDotFiles", "true");
         assert_eq!(t.task, "DeleteFiles@1");
         assert_eq!(
             t.inputs.get("RemoveDotFiles").map(|s| s.as_str()),
@@ -925,5 +991,135 @@ mod tests {
             t.inputs.get("Contents").map(|s| s.as_str()),
             Some("**/*.tmp\n**/*.log\ndist/")
         );
+    }
+
+    // ── PublishPipelineArtifact@1 ─────────────────────────────────────────
+
+    #[test]
+    fn publish_pipeline_artifact_step_sets_task_and_target_path() {
+        let t = publish_pipeline_artifact_step("$(Build.ArtifactStagingDirectory)");
+        assert_eq!(t.task, "PublishPipelineArtifact@1");
+        assert_eq!(t.display_name, "Publish Pipeline Artifact");
+        assert_eq!(
+            t.inputs.get("targetPath").map(|s| s.as_str()),
+            Some("$(Build.ArtifactStagingDirectory)")
+        );
+        // only the required input is set by default
+        assert_eq!(t.inputs.len(), 1);
+    }
+
+    // ── DownloadPipelineArtifact@2 ───────────────────────────────────────
+
+    #[test]
+    fn download_pipeline_artifact_step_sets_task_and_required_input() {
+        let t = download_pipeline_artifact_step("$(Pipeline.Workspace)/drop");
+        assert_eq!(t.task, "DownloadPipelineArtifact@2");
+        assert_eq!(t.display_name, "Download Pipeline Artifact");
+        assert_eq!(
+            t.inputs.get("targetPath").map(|s| s.as_str()),
+            Some("$(Pipeline.Workspace)/drop")
+        );
+        // only the required input is set by default
+        assert_eq!(t.inputs.len(), 1);
+    }
+
+    #[test]
+    fn publish_pipeline_artifact_step_accepts_artifact_name() {
+        let t = publish_pipeline_artifact_step("$(Build.ArtifactStagingDirectory)/output")
+            .with_input("artifact", "drop");
+        assert_eq!(t.task, "PublishPipelineArtifact@1");
+        assert_eq!(
+            t.inputs.get("artifact").map(|s| s.as_str()),
+            Some("drop")
+        );
+        assert_eq!(t.inputs.len(), 2);
+    }
+
+    #[test]
+    fn download_pipeline_artifact_step_filters_by_artifact_name() {
+        let t = download_pipeline_artifact_step("$(Agent.TempDirectory)/out")
+            .with_input("artifact", "drop");
+        assert_eq!(t.task, "DownloadPipelineArtifact@2");
+        assert_eq!(
+            t.inputs.get("artifact").map(|s| s.as_str()),
+            Some("drop")
+        );
+        assert_eq!(
+            t.inputs.get("targetPath").map(|s| s.as_str()),
+            Some("$(Agent.TempDirectory)/out")
+        );
+        assert_eq!(t.inputs.len(), 2);
+    }
+
+    #[test]
+    fn publish_pipeline_artifact_step_accepts_publish_location() {
+        let t = publish_pipeline_artifact_step("$(Build.ArtifactStagingDirectory)")
+            .with_input("artifact", "binaries")
+            .with_input("publishLocation", "pipeline");
+        assert_eq!(t.task, "PublishPipelineArtifact@1");
+        assert_eq!(
+            t.inputs.get("publishLocation").map(|s| s.as_str()),
+            Some("pipeline")
+        );
+        assert_eq!(t.inputs.len(), 3);
+    }
+
+    #[test]
+    fn publish_pipeline_artifact_step_accepts_file_share_path() {
+        let t = publish_pipeline_artifact_step("$(Build.ArtifactStagingDirectory)")
+            .with_input("publishLocation", "filepath")
+            .with_input("fileSharePath", "\\\\myserver\\share\\$(Build.DefinitionName)");
+        assert_eq!(t.task, "PublishPipelineArtifact@1");
+        assert_eq!(
+            t.inputs.get("publishLocation").map(|s| s.as_str()),
+            Some("filepath")
+        );
+        assert_eq!(
+            t.inputs.get("fileSharePath").map(|s| s.as_str()),
+            Some("\\\\myserver\\share\\$(Build.DefinitionName)")
+        );
+        assert_eq!(t.inputs.len(), 3);
+    }
+
+    #[test]
+    fn download_pipeline_artifact_step_specific_source_with_branch() {
+        let t = download_pipeline_artifact_step("$(Agent.TempDirectory)/prev")
+            .with_input("source", "specific")
+            .with_input("project", "$(System.TeamProject)")
+            .with_input("pipeline", "$(System.DefinitionId)")
+            .with_input("runVersion", "latestFromBranch")
+            .with_input("branchName", "$(Build.SourceBranch)")
+            .with_input("artifact", "safe_outputs")
+            .with_input("allowPartiallySucceededBuilds", "true");
+        assert_eq!(t.task, "DownloadPipelineArtifact@2");
+        assert_eq!(
+            t.inputs.get("source").map(|s| s.as_str()),
+            Some("specific")
+        );
+        assert_eq!(
+            t.inputs.get("runVersion").map(|s| s.as_str()),
+            Some("latestFromBranch")
+        );
+        assert_eq!(
+            t.inputs.get("branchName").map(|s| s.as_str()),
+            Some("$(Build.SourceBranch)")
+        );
+        assert_eq!(
+            t.inputs.get("allowPartiallySucceededBuilds").map(|s| s.as_str()),
+            Some("true")
+        );
+        assert_eq!(t.inputs.len(), 8);
+    }
+
+    #[test]
+    fn download_pipeline_artifact_step_accepts_glob_patterns() {
+        let t = download_pipeline_artifact_step("$(Build.ArtifactStagingDirectory)")
+            .with_input("patterns", "**/*.zip\n**/*.tar.gz");
+        assert_eq!(t.task, "DownloadPipelineArtifact@2");
+        assert_eq!(
+            t.inputs.get("patterns").map(|s| s.as_str()),
+            Some("**/*.zip\n**/*.tar.gz")
+        );
+        assert_eq!(t.inputs.len(), 2);
     }
 }

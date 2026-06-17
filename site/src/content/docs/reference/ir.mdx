@@ -22,6 +22,7 @@ Those wrappers are the only place per-target shape (top-level `PipelineShape`, t
 
 - `ids.rs` — typed `StageId`, `JobId`, and `StepId` newtypes. Constructors validate the ADO identifier grammar (`^[A-Za-z_][A-Za-z0-9_]*$`) so invalid names fail at compile time.
 - `step.rs` — `Step` and concrete step structs: `BashStep`, `TaskStep`, `CheckoutStep`, `DownloadStep`, and `PublishStep`.
+- `tasks.rs` — typed factory helpers for built-in ADO task steps (`CopyFiles@2`, `DockerInstaller@0`, `DotNetCoreCLI@2`, `ArchiveFiles@2`, `ExtractFiles@1`, `PublishTestResults@2`, `NuGetCommand@2`, `PowerShell@2`). Prefer these over hand-crafted `TaskStep::new()` calls — see [Typed task helpers](#typed-task-helpers) below.
 - `job.rs` — `Job`, `Pool`, job variables, 1ES `templateContext` support, and target-job external `dependsOn` / `condition` wrapping.
 - `stage.rs` — `Stage` plus target-stage external `dependsOn` / `condition` wrapping.
 - `env.rs` — typed environment values (`EnvValue`) including ADO macros, pipeline variables, secrets, `OutputRef`s, `Coalesce`, and macro-form `Concat`.
@@ -113,6 +114,69 @@ let synth = Step::Bash(
         .with_env("BUILD_REASON", EnvValue::ado_macro("Build.Reason")?),
 );
 ```
+
+## Typed task helpers
+
+`src/compile/ir/tasks.rs` contains typed factory functions for common ADO built-in tasks. Each function returns a pre-configured `TaskStep` with required inputs already set; optional inputs are layered on with `.with_input("key", "value")` chaining.
+
+These helpers eliminate hand-crafted `TaskStep::new(…)` + raw string inputs at every call site, making task usage self-documenting and the required/optional input boundary explicit.
+
+### Available helpers
+
+| Function | ADO task | Required parameters |
+|----------|----------|---------------------|
+| `copy_files_step(contents, target_folder)` | `CopyFiles@2` | glob pattern; destination folder |
+| `docker_installer_step(docker_version)` | `DockerInstaller@0` | engine version (e.g. `"26.1.4"`) |
+| `dot_net_core_cli_step(command)` | `DotNetCoreCLI@2` | sub-command (`"build"`, `"test"`, `"publish"`, …) |
+| `archive_files_step(root_folder_or_file, archive_file)` | `ArchiveFiles@2` | source path; output archive path |
+| `extract_files_step(archive_file_patterns, destination_folder)` | `ExtractFiles@1` | archive glob; destination folder |
+| `publish_test_results_step(test_results_format, test_results_files)` | `PublishTestResults@2` | format (`"JUnit"`, `"NUnit"`, `"VSTest"`, `"XUnit"`, `"CTest"`); result file glob |
+| `nuget_command_step(command)` | `NuGetCommand@2` | operation (`"restore"`, `"push"`, `"pack"`, `"custom"`) |
+| `powershell_file_step(file_path)` | `PowerShell@2` (file mode) | path to `.ps1` script |
+| `powershell_inline_step(script)` | `PowerShell@2` (inline mode) | inline script body |
+
+### Usage example
+
+```rust
+use crate::compile::ir::step::Step;
+use crate::compile::ir::tasks::{
+    dot_net_core_cli_step, powershell_inline_step, publish_test_results_step,
+};
+
+// Build a .NET project — required input only
+let build = Step::Task(dot_net_core_cli_step("build"));
+
+// Run tests with optional inputs chained on
+let test = Step::Task(
+    dot_net_core_cli_step("test")
+        .with_input("projects", "**/*Tests.csproj")
+        .with_input("arguments", "--no-build --configuration Release")
+        .with_input("publishTestResults", "true"),
+);
+
+// Publish test results (required inputs set; no optional inputs needed)
+let publish = Step::Task(
+    publish_test_results_step("VSTest", "**/*.trx")
+        .with_input("failTaskOnFailedTests", "true"),
+);
+
+// Inline PowerShell (cross-platform)
+let ps = Step::Task(
+    powershell_inline_step("Write-Output 'hello'")
+        .with_input("pwsh", "true"),
+);
+```
+
+### Adding a new helper
+
+When you need an ADO task that doesn't have a typed helper yet, add one to `tasks.rs`:
+
+1. Write a `pub fn <name>_step(…) -> TaskStep` that sets the ADO task identifier and all **required** inputs as positional parameters.
+2. Document required vs. optional inputs with the `/// | Input key | Type | Default | Description |` table pattern used by existing helpers.
+3. Add a link to the ADO task reference at `learn.microsoft.com`.
+4. Write a unit test that asserts the task name, display name, and that required inputs are set with the correct keys.
+
+Do **not** use `Step::RawYaml` for tasks that the IR can model. Typed helpers preserve all compiler-owned fields (`condition`, `env`, `timeout`, `continue_on_error`) and participate correctly in the graph pass.
 
 ## Output declarations and references
 
