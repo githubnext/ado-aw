@@ -1216,6 +1216,20 @@ pub(crate) fn debug_create_issue_enabled(front_matter: &FrontMatter) -> bool {
         .is_some()
 }
 
+/// Returns `true` when the agent's front matter sets
+/// `self-optimization.enabled: true` — the gate that activates the
+/// opt-in `propose-step-optimization` safe-output. The MCP layer
+/// strips the tool by default (see
+/// [`crate::safeoutputs::OPT_IN_GATED_TOOLS`]); this predicate is
+/// the compiler's authoritative source of whether to add it to the
+/// `--enabled-tools` list.
+pub(crate) fn self_optimization_enabled(front_matter: &FrontMatter) -> bool {
+    front_matter
+        .self_optimization
+        .as_ref()
+        .is_some_and(|s| s.enabled)
+}
+
 /// Validate the `ado-aw-debug:` section.
 ///
 /// When `create-issue:` is present:
@@ -1282,6 +1296,53 @@ pub fn validate_ado_aw_debug_config(front_matter: &FrontMatter) -> Result<()> {
             assignee,
             "ado-aw-debug.create-issue.assignees",
         )?;
+    }
+    Ok(())
+}
+
+/// Validate the `self-optimization:` section.
+///
+/// Defence-in-depth: reject any `OPT_IN_GATED_TOOLS` key (today only
+/// `propose-step-optimization`) appearing under the regular
+/// `safe-outputs:` surface. The MCP layer hides the route by default
+/// (see `OPT_IN_GATED_TOOLS` in `crate::safeoutputs`); allowing a
+/// stray `safe-outputs.propose-step-optimization:` block would
+/// otherwise let its config flow into `ctx.tool_configs` and create
+/// a path for forged NDJSON to bypass the `self-optimization.enabled`
+/// gate at Stage 3.
+///
+/// Also validates the `allowed-sections` list is non-empty when the
+/// feature is enabled — an empty list means "no proposals at all",
+/// which is the same as `enabled: false`. Surface that as an error
+/// so the operator's intent stays explicit.
+///
+/// Pure config check — no I/O, runs at compile time.
+pub fn validate_self_optimization_config(front_matter: &FrontMatter) -> Result<()> {
+    use crate::safeoutputs::OPT_IN_GATED_TOOLS;
+
+    for tool in OPT_IN_GATED_TOOLS {
+        if front_matter.safe_outputs.contains_key(*tool) {
+            anyhow::bail!(
+                "safe-outputs.{0} is an opt-in gated tool and must be activated \
+                 via `self-optimization.enabled: true` instead of \
+                 `safe-outputs.{0}`. The MCP layer hides opt-in gated tools by \
+                 default; the `self-optimization:` section is the only place to \
+                 enable them.",
+                tool
+            );
+        }
+    }
+
+    let Some(self_opt) = front_matter.self_optimization.as_ref() else {
+        return Ok(());
+    };
+    if self_opt.enabled && self_opt.allowed_sections.is_empty() {
+        anyhow::bail!(
+            "self-optimization.allowed-sections is empty while \
+             self-optimization.enabled is true. Either set \
+             `enabled: false` (off) or list at least one section \
+             (e.g. `allowed-sections: [steps, post-steps]`)."
+        );
     }
     Ok(())
 }
@@ -1480,8 +1541,12 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
     use std::collections::HashSet;
 
     let debug_create_issue = debug_create_issue_enabled(front_matter);
+    let propose_step_optimization = self_optimization_enabled(front_matter);
 
-    if front_matter.safe_outputs.is_empty() && !debug_create_issue {
+    if front_matter.safe_outputs.is_empty()
+        && !debug_create_issue
+        && !propose_step_optimization
+    {
         return String::new();
     }
 
@@ -1526,6 +1591,15 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
     // MCP layer by default and only become reachable when listed here.
     if debug_create_issue && seen.insert("create-issue".to_string()) {
         tools.push("create-issue".to_string());
+        effective_mcp_tool_count += 1;
+    }
+
+    // Opt-in gated tools (parallel mechanism to debug-only) — exposed
+    // only when the matching front-matter section opts in.
+    if propose_step_optimization
+        && seen.insert("propose-step-optimization".to_string())
+    {
+        tools.push("propose-step-optimization".to_string());
         effective_mcp_tool_count += 1;
     }
 
@@ -1739,8 +1813,12 @@ pub fn validate_resolve_pr_thread_statuses(front_matter: &FrontMatter) -> Result
 /// `DEBUG_ONLY_TOOLS` keys are independently rejected by
 /// `validate_ado_aw_debug_config` with a more specific error message;
 /// this validator skips them so the operator gets that better message.
+/// `OPT_IN_GATED_TOOLS` keys (e.g. `propose-step-optimization`) are
+/// independently rejected by [`validate_self_optimization_config`].
 pub fn validate_safe_outputs_keys(front_matter: &FrontMatter) -> Result<()> {
-    use crate::safeoutputs::{ALL_KNOWN_SAFE_OUTPUTS, DEBUG_ONLY_TOOLS, NON_MCP_SAFE_OUTPUT_KEYS};
+    use crate::safeoutputs::{
+        ALL_KNOWN_SAFE_OUTPUTS, DEBUG_ONLY_TOOLS, NON_MCP_SAFE_OUTPUT_KEYS, OPT_IN_GATED_TOOLS,
+    };
 
     let mut unknown: Vec<(String, Vec<&'static str>)> = Vec::new();
     let mut invalid_names: Vec<String> = Vec::new();
@@ -1761,6 +1839,11 @@ pub fn validate_safe_outputs_keys(front_matter: &FrontMatter) -> Result<()> {
         // Debug-only tools get a more specific error from
         // validate_ado_aw_debug_config, so skip them here.
         if DEBUG_ONLY_TOOLS.contains(&key.as_str()) {
+            continue;
+        }
+        // Opt-in gated tools get a more specific error from
+        // validate_self_optimization_config, so skip them here.
+        if OPT_IN_GATED_TOOLS.contains(&key.as_str()) {
             continue;
         }
         if !ALL_KNOWN_SAFE_OUTPUTS.contains(&key.as_str()) {
@@ -6366,5 +6449,123 @@ repos:
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].repository, "tools");
         assert_eq!(checkout, vec!["tools"]);
+    }
+
+    // ─── self-optimization wiring ───────────────────────────────────────────
+
+    #[test]
+    fn test_self_optimization_enabled_returns_false_when_section_absent() {
+        let (fm, _) = parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
+        assert!(!self_optimization_enabled(&fm));
+    }
+
+    #[test]
+    fn test_self_optimization_enabled_returns_false_when_enabled_is_false() {
+        let yaml = "---\nname: test\ndescription: test\nself-optimization:\n  enabled: false\n---\n";
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        assert!(!self_optimization_enabled(&fm));
+    }
+
+    #[test]
+    fn test_self_optimization_enabled_returns_true_when_enabled() {
+        let yaml = "---\nname: test\ndescription: test\nself-optimization:\n  enabled: true\n---\n";
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        assert!(self_optimization_enabled(&fm));
+    }
+
+    #[test]
+    fn test_generate_enabled_tools_args_self_optimization_alone() {
+        let yaml = "---\nname: test\ndescription: test\nself-optimization:\n  enabled: true\n---\n";
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let args = generate_enabled_tools_args(&fm);
+        assert!(
+            args.contains("--enabled-tools propose-step-optimization"),
+            "self-optimization.enabled: true must add propose-step-optimization to --enabled-tools, got: {}",
+            args
+        );
+        // Always-on tools should also be present so the filter activates.
+        assert!(args.contains("--enabled-tools noop"));
+    }
+
+    #[test]
+    fn test_generate_enabled_tools_args_no_self_optimization_omits_tool() {
+        let yaml = "---\nname: test\ndescription: test\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n";
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let args = generate_enabled_tools_args(&fm);
+        assert!(
+            !args.contains("propose-step-optimization"),
+            "propose-step-optimization must NOT be listed when self-optimization is absent, got: {}",
+            args
+        );
+    }
+
+    #[test]
+    fn test_generate_enabled_tools_args_self_optimization_plus_safe_outputs() {
+        let yaml = "---\nname: test\ndescription: test\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\nself-optimization:\n  enabled: true\n---\n";
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let args = generate_enabled_tools_args(&fm);
+        assert!(args.contains("--enabled-tools create-pull-request"));
+        assert!(args.contains("--enabled-tools propose-step-optimization"));
+        assert!(args.contains("--enabled-tools noop"));
+    }
+
+    // ─── validate_self_optimization_config ──────────────────────────────────
+
+    #[test]
+    fn test_validate_self_optimization_config_passes_when_section_absent() {
+        let (fm, _) = parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
+        assert!(validate_self_optimization_config(&fm).is_ok());
+    }
+
+    #[test]
+    fn test_validate_self_optimization_config_passes_with_defaults() {
+        let yaml = "---\nname: test\ndescription: test\nself-optimization:\n  enabled: true\n---\n";
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        assert!(validate_self_optimization_config(&fm).is_ok());
+    }
+
+    #[test]
+    fn test_validate_self_optimization_config_rejects_empty_allowed_sections_when_enabled() {
+        let yaml = "---\nname: test\ndescription: test\nself-optimization:\n  enabled: true\n  allowed-sections: []\n---\n";
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let result = validate_self_optimization_config(&fm);
+        let err = result.expect_err("empty allowed-sections with enabled must be rejected");
+        assert!(
+            format!("{err}").contains("allowed-sections is empty"),
+            "expected helpful error; got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_self_optimization_config_allows_empty_allowed_sections_when_disabled() {
+        let yaml = "---\nname: test\ndescription: test\nself-optimization:\n  enabled: false\n  allowed-sections: []\n---\n";
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        assert!(
+            validate_self_optimization_config(&fm).is_ok(),
+            "empty allowed-sections when disabled is fine (feature is off anyway)"
+        );
+    }
+
+    #[test]
+    fn test_validate_self_optimization_config_rejects_propose_under_safe_outputs() {
+        let yaml = "---\nname: test\ndescription: test\nsafe-outputs:\n  propose-step-optimization: {}\n---\n";
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let result = validate_self_optimization_config(&fm);
+        let err = result.expect_err("propose-step-optimization under safe-outputs must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("opt-in gated") || msg.contains("self-optimization"),
+            "expected error pointing operator at self-optimization: section; got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_safe_outputs_keys_does_not_double_report_opt_in_gated_tool() {
+        let yaml = "---\nname: test\ndescription: test\nsafe-outputs:\n  propose-step-optimization: {}\n---\n";
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        // propose-step-optimization is in OPT_IN_GATED_TOOLS; the generic
+        // safe-outputs validator should skip it so the operator gets the
+        // better message from validate_self_optimization_config.
+        assert!(validate_safe_outputs_keys(&fm).is_ok());
     }
 }

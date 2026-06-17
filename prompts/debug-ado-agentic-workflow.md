@@ -77,6 +77,15 @@ The output JSON contains the full `AuditData` (see [What `ado-aw audit` extracts
 - `jobs` → ADO build timeline (use this to see which stage failed)
 - `key_findings` / `recommendations` → heuristic summaries (severity high/critical findings are usually the root-cause signal)
 
+**Slow-run diagnostic**: audit also surfaces the agent's command/tool
+history. If a slow build is dominated by deterministic shell setup the
+agent ran every time (clone, install, cache restore), check whether
+those commands are hoist candidates: they could be lifted into `steps:`
+/ `post-steps:` so they run as native ADO steps before the agent boots,
+saving token cost and elapsed time. Use the hoist-candidate heuristic in
+[`create-ado-agentic-workflow.md` Step 13](create-ado-agentic-workflow.md#step-13--inline-steps-optional):
+deterministic across runs, every invocation, fixed inputs.
+
 If the CLI is not available, fall through to the MCP-based steps below.
 
 #### 2a-prime-bis. Pair `audit` with the IR (when you have local CLI access)

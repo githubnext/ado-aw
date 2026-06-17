@@ -753,6 +753,23 @@ async fn run_execute(
         log::info!("Agent source last author: {}", email);
     }
 
+    // Compute the agent source file's relative path within the repo for
+    // propose-step-optimization live mode (needs to push an edit to the
+    // correct file). Try stripping BUILD_SOURCESDIRECTORY; fall back to the
+    // bare filename.
+    ctx.source_file_relative_path = source
+        .strip_prefix(&ctx.source_directory)
+        .ok()
+        .and_then(|p| p.to_str().map(|s| s.replace('\\', "/")))
+        .or_else(|| {
+            source
+                .file_name()
+                .and_then(|f| f.to_str().map(String::from))
+        });
+    if let Some(ref rel) = ctx.source_file_relative_path {
+        log::info!("Agent source relative path: {}", rel);
+    }
+
     let results = execute::execute_safe_outputs(&safe_output_dir, &ctx).await?;
 
     // Process agent memory if cache-memory tool is enabled
@@ -823,6 +840,24 @@ async fn build_execution_context(
                 ctx.debug_enabled_tools.insert("create-issue".to_string());
             }
             Err(e) => log::warn!("Failed to serialize ado-aw-debug.create-issue config: {e}"),
+        }
+    }
+    // Merge self-optimization config under tool_configs so Stage 3's
+    // executor can read `staged` and `allowed_sections` via
+    // get_tool_config. Not under safe-outputs (that's forbidden by
+    // validate_self_optimization_config); this injection is the sole
+    // compile-time → Stage 3 config bridge.
+    if let Some(so) = front_matter.self_optimization.as_ref() {
+        if so.enabled {
+            match serde_json::to_value(so) {
+                Ok(v) => {
+                    ctx.tool_configs
+                        .insert("propose-step-optimization".to_string(), v);
+                }
+                Err(e) => {
+                    log::warn!("Failed to serialize self-optimization config: {e}");
+                }
+            }
         }
     }
     ctx.allowed_repositories = allowed_repositories;

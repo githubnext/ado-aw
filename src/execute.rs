@@ -18,10 +18,11 @@ use crate::safeoutputs::{
     AddBuildTagResult, AddPrCommentResult, CommentOnWorkItemResult, CreateBranchResult,
     CreateGitTagResult, CreateIssueResult, CreatePrResult, CreateWikiPageResult,
     CreateWorkItemResult, ExecutionContext, ExecutionResult, Executor, LinkWorkItemsResult,
-    MissingDataResult, MissingToolResult, NoopResult, QueueBuildResult, ReplyToPrCommentResult,
-    ReportIncompleteResult, ResolvePrThreadResult, SubmitPrReviewResult, ToolResult,
-    UpdatePrResult, UpdateWikiPageResult, UpdateWorkItemResult, UploadBuildAttachmentResult,
-    UploadPipelineArtifactResult, UploadWorkitemAttachmentResult,
+    MissingDataResult, MissingToolResult, NoopResult, ProposeStepOptimizationResult,
+    QueueBuildResult, ReplyToPrCommentResult, ReportIncompleteResult, ResolvePrThreadResult,
+    SubmitPrReviewResult, ToolResult, UpdatePrResult, UpdateWikiPageResult,
+    UpdateWorkItemResult, UploadBuildAttachmentResult, UploadPipelineArtifactResult,
+    UploadWorkitemAttachmentResult,
 };
 use crate::sanitize::neutralize_pipeline_commands;
 
@@ -103,6 +104,7 @@ pub async fn execute_safe_outputs(
         ReplyToPrCommentResult,
         ResolvePrThreadResult,
         CreateIssueResult,
+        ProposeStepOptimizationResult,
     );
 
     let mut results = Vec::new();
@@ -463,6 +465,9 @@ async fn find_tool_executor(
     if let Some(r) = dispatch_debug_tools(tool_name, entry, ctx).await? {
         return Ok(Some(r));
     }
+    if let Some(r) = dispatch_opt_in_tools(tool_name, entry, ctx).await? {
+        return Ok(Some(r));
+    }
     Ok(None)
 }
 
@@ -538,6 +543,18 @@ async fn dispatch_debug_tools(
 ) -> Result<Option<ExecutionResult>> {
     dispatch_executor_tools!(tool_name, entry, ctx, {
         "create-issue" => CreateIssueResult,
+    })
+}
+
+/// Dispatch opt-in gated tools (activated by front-matter sections like
+/// `self-optimization:` — see `OPT_IN_GATED_TOOLS` in safeoutputs).
+async fn dispatch_opt_in_tools(
+    tool_name: &str,
+    entry: &Value,
+    ctx: &ExecutionContext,
+) -> Result<Option<ExecutionResult>> {
+    dispatch_executor_tools!(tool_name, entry, ctx, {
+        "propose-step-optimization" => ProposeStepOptimizationResult,
     })
 }
 

@@ -45,8 +45,19 @@ pub mod lower;
 pub mod output;
 pub mod stage;
 pub mod step;
+pub mod step_validation;
 pub mod summary;
 pub mod tasks;
+
+// Re-exports are API surface for downstream layers (the Flow A
+// `validate_steps` MCP tool and the Flow B `propose-step-optimization`
+// Stage 3 executor) that land in subsequent commits. The
+// `#[allow(unused_imports)]` keeps the build warning-free until those
+// consumers exist.
+#[allow(unused_imports)]
+pub use step_validation::{
+    StepKind, StepKindAllow, StepValidationError, ValidatedStepBlock, validate_step_block,
+};
 
 use ids::StageId;
 use job::{Job, Pool};

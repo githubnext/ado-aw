@@ -35,6 +35,7 @@ fn list_tools_contains_expected_author_surface() {
         "trace_failure",
         "whatif",
         "lint_workflow",
+        "validate_steps",
         "catalog",
         "audit_build",
     ] {
@@ -156,4 +157,84 @@ async fn graph_dump_json_returns_structured_graph_not_escaped_string() {
         .into_typed::<GraphSummary>()
         .expect("graph_dump(json) must return GraphSummary, not GraphDumpResult");
     assert!(!graph.step_locations.is_empty());
+}
+
+
+// ── validate_steps ──────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn validate_steps_accepts_valid_bash_in_full_mode() {
+    let server = AuthorMcp::new();
+    let result = server
+        .validate_steps(Parameters(ValidateStepsParams {
+            steps: serde_json::json!([{"bash": "echo hi", "displayName": "Greet"}]),
+            allow_list: None,
+        }))
+        .await
+        .expect("validate_steps succeeds");
+
+    let value = result
+        .structured_content
+        .expect("validate_steps returns structured content");
+    let ok = value
+        .get("ok")
+        .and_then(serde_json::Value::as_str)
+        .expect("response has ok flag");
+    assert_eq!(ok, "true", "expected success response, got: {value:?}");
+    let kinds = value
+        .get("kinds")
+        .and_then(serde_json::Value::as_array)
+        .expect("response has kinds array");
+    assert_eq!(kinds.len(), 1);
+    assert_eq!(kinds[0]["kind"], "bash");
+}
+
+#[tokio::test]
+async fn validate_steps_curated_mode_rejects_arbitrary_task() {
+    let server = AuthorMcp::new();
+    let result = server
+        .validate_steps(Parameters(ValidateStepsParams {
+            steps: serde_json::json!([
+                {"task": "AzureCLI@2", "displayName": "shouldnt-pass-curated"}
+            ]),
+            allow_list: Some("curated".into()),
+        }))
+        .await
+        .expect("validate_steps succeeds");
+
+    let value = result
+        .structured_content
+        .expect("validate_steps returns structured content");
+    let ok = value
+        .get("ok")
+        .and_then(serde_json::Value::as_str)
+        .expect("response has ok flag");
+    assert_eq!(
+        ok, "false",
+        "curated mode must reject AzureCLI@2; got: {value:?}"
+    );
+    let errors = value
+        .get("errors")
+        .and_then(serde_json::Value::as_array)
+        .expect("response has errors array");
+    assert!(errors.iter().any(|e| e["message"]
+        .as_str()
+        .is_some_and(|m| m.contains("curated allow-list"))));
+}
+
+#[tokio::test]
+async fn validate_steps_rejects_invalid_allow_list_value() {
+    let server = AuthorMcp::new();
+    let err = server
+        .validate_steps(Parameters(ValidateStepsParams {
+            steps: serde_json::json!([{"bash": "echo hi"}]),
+            allow_list: Some("permissive".into()),
+        }))
+        .await
+        .expect_err("invalid allow_list must be rejected");
+    assert!(
+        format!("{err}").contains("full")
+            && format!("{err}").contains("curated"),
+        "expected error message to mention valid values; got: {err}"
+    );
 }

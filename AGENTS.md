@@ -233,7 +233,8 @@ Every compiled pipeline runs as three sequential jobs:
 ├── prompts/              # AI agent prompt files for workflow authoring tasks
 │   ├── create-ado-agentic-workflow.md # Step-by-step guide for creating a new agentic pipeline
 │   ├── update-ado-agentic-workflow.md # Guide for modifying an existing agentic pipeline
-│   └── debug-ado-agentic-workflow.md  # Guide for troubleshooting a failing agentic pipeline
+│   ├── debug-ado-agentic-workflow.md  # Guide for troubleshooting a failing agentic pipeline
+│   └── audit-ado-agentic-workflow.md  # Guide for auditing pipeline runs (cost, efficiency, security)
 ├── scripts/              # Supporting scripts shipped as release artifacts
 │   └── ado-script/       # TypeScript workspace for bundled gate.js, import.js, exec-context-pr.js, exec-context-pr-synth.js
 │       └── src/
@@ -272,6 +273,9 @@ index to jump to the right page.
   modifying an existing agentic pipeline (read-then-update workflow with validation).
 - [`prompts/debug-ado-agentic-workflow.md`](prompts/debug-ado-agentic-workflow.md) — guide for
   troubleshooting a failing agentic pipeline and filing a diagnostic report.
+- [`prompts/audit-ado-agentic-workflow.md`](prompts/audit-ado-agentic-workflow.md) — guide for
+  auditing pipeline runs: cost/token analysis, hoist-candidate detection, reliability patterns,
+  safe-output quality, and security posture review.
 
 ### Authoring agent files
 
@@ -298,6 +302,8 @@ index to jump to the right page.
   fragment with pre-filled ADO MCP identifiers, auto-extension of the
   agent's bash allow-list with read-only git commands; configured via
   the `execution-context:` front-matter block.
+- [`docs/self-optimization.md`](docs/self-optimization.md) — self-optimization:
+  opt-in runtime step-proposal feature (staged preview, live PR, security model).
 - [`docs/safe-outputs.md`](docs/safe-outputs.md) — full reference for every
   safe-output tool agents can use to propose actions (PRs, work items, wiki
   pages, comments, etc.) plus their per-agent configuration.

@@ -26,6 +26,13 @@ pub struct AgentStats {
     pub tool_calls: u64,
     /// Number of LLM round-trips (turns).
     pub turns: u64,
+    /// Number of `propose-step-optimization` safe-output calls the
+    /// agent made during this build. Tracks adoption of the
+    /// self-optimization opt-in feature so authors and operators can
+    /// see, at a glance, how often the agent is finding hoist
+    /// candidates. Counts every call — Stage 3 may IR-reject or
+    /// dedup some of them; this is the raw "offered" number.
+    pub propose_step_optimization_calls: u64,
 }
 
 /// OTel JSONL filename written by Copilot CLI.
@@ -62,6 +69,7 @@ impl AgentStats {
             duration_seconds: 0.0,
             tool_calls: 0,
             turns: 0,
+            propose_step_optimization_calls: 0,
         };
 
         // Find the last invoke_agent span (contains aggregated totals)
@@ -106,6 +114,23 @@ impl AgentStats {
                 e.get("type").and_then(|t| t.as_str()) == Some("span")
                     && e.get("name").and_then(|n| n.as_str()).is_some_and(|n| {
                         n.starts_with("execute_tool") && !INTERNAL_TOOL_NAMES.contains(&n)
+                    })
+            })
+            .count() as u64;
+
+        // Count self-optimization proposals separately. The Copilot
+        // CLI labels MCP tool calls in different shapes across
+        // versions (`execute_tool propose-step-optimization` vs
+        // `execute_tool safeoutputs__propose-step-optimization` vs
+        // dotted variants), so match defensively on substring rather
+        // than locking ourselves to a single span-name format.
+        stats.propose_step_optimization_calls = entries
+            .iter()
+            .filter(|e| {
+                e.get("type").and_then(|t| t.as_str()) == Some("span")
+                    && e.get("name").and_then(|n| n.as_str()).is_some_and(|n| {
+                        n.starts_with("execute_tool")
+                            && n.contains("propose-step-optimization")
                     })
             })
             .count() as u64;
@@ -298,6 +323,7 @@ mod tests {
             duration_seconds: 272.0,
             tool_calls: 23,
             turns: 8,
+            propose_step_optimization_calls: 0,
         };
         let md = stats.to_markdown();
         assert!(md.contains("Daily Code Review"));
@@ -370,6 +396,7 @@ mod tests {
                 duration_seconds: 10.0,
                 tool_calls: 1,
                 turns: 1,
+                propose_step_optimization_calls: 0,
             }),
             ..Default::default()
         };
@@ -393,6 +420,7 @@ mod tests {
                 duration_seconds: 10.0,
                 tool_calls: 1,
                 turns: 1,
+                propose_step_optimization_calls: 0,
             }),
             ..Default::default()
         };
@@ -400,5 +428,24 @@ mod tests {
         assert!(result.starts_with("body"));
         assert!(result.contains("test"));
         assert!(result.contains("model"));
+    }
+
+    #[test]
+    fn test_propose_step_optimization_calls_counted_separately() {
+        // Defensive matching: the Copilot CLI may emit MCP-tool span
+        // names in several shapes across versions; the counter
+        // matches any execute_tool span containing the substring.
+        let entries = vec![
+            serde_json::json!({"type": "span", "name": "execute_tool bash"}),
+            serde_json::json!({"type": "span", "name": "execute_tool propose-step-optimization"}),
+            serde_json::json!({"type": "span", "name": "execute_tool safeoutputs__propose-step-optimization"}),
+            serde_json::json!({"type": "span", "name": "execute_tool grep"}),
+        ];
+        let stats = AgentStats::from_otel_entries(&entries, "test").unwrap();
+        assert_eq!(stats.tool_calls, 4, "all four execute_tool spans count as tool_calls");
+        assert_eq!(
+            stats.propose_step_optimization_calls, 2,
+            "two propose-step-optimization spans should be counted separately, regardless of MCP-tool name shape"
+        );
     }
 }

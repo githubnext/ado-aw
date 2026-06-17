@@ -44,6 +44,20 @@ triggers → steps → post-steps → setup → teardown → network →
 permissions → parameters
 ```
 
+Before changing the markdown body, re-examine the existing `steps:` /
+`post-steps:` blocks and ask whether the requested behavior is a
+hoist candidate:
+
+- Is the work deterministic across runs (no agent reasoning needed)?
+- Does it happen on every invocation (clone, cache restore, runtime install, artifact download)?
+- Are the inputs fixed at compile time (repo URL, branch, tool versions)?
+- → If yes to all three, hoist into `steps:` (pre-agent) or `post-steps:` (after-agent).
+
+If the requested change is a hoist candidate, add it to the front
+matter steps block rather than the prompt body. Draft the updated block,
+call `validate_steps` with `allow_list: "full"`, and fix any returned
+errors before writing the file.
+
 > **`on.pr` knob update**: when changing `on.pr.branches` or
 > `on.pr.paths`, also confirm whether `mode` (default `synthetic`) is
 > appropriate. In `synthetic` mode the compiler emits a Setup-job ADO
@@ -226,6 +240,26 @@ permissions:
 If adding write-requiring safe outputs (`create-pull-request`, `create-work-item`, `comment-on-work-item`, `update-work-item`, `create-wiki-page`, `update-wiki-page`, `link-work-items`, `upload-workitem-attachment`, `create-branch`, `create-git-tag`, `add-build-tag`, `add-pr-comment`, `reply-to-pr-comment`, `resolve-pr-thread`, `submit-pr-review`, `update-pr`, `queue-build`), you **must** also add `permissions.write`. The compiler will error otherwise.
 
 ### Adding Pre/Post Steps
+
+When a behavior change is deterministic, happens on every run, and has
+compile-time-fixed inputs, prefer `steps:` / `post-steps:` over adding
+more instructions for the agent to execute with bash. Validate every
+updated block with the author MCP server's `validate_steps` tool before
+writing it:
+
+```json
+{
+  "steps": [
+    {
+      "bash": "echo \"Preparing context...\"",
+      "displayName": "Prepare context"
+    }
+  ],
+  "allow_list": "full"
+}
+```
+
+If the tool returns errors, fix the block and validate again.
 
 **Inline steps** run inside the `Agent` job:
 

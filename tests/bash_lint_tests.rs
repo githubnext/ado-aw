@@ -69,18 +69,19 @@ const SHELLCHECK_EXCLUDE: &str = "";
 /// are byte-identical, but a future target-specific divergence in a generator
 /// would only be caught with both fixtures in the harness.
 const FIXTURES: &[&str] = &[
-    "minimal-agent.md",
-    "complete-agent.md",
     "1es-test-agent.md",
     "azure-devops-mcp-agent.md",
-    "pipeline-trigger-agent.md",
-    "pipeline-filter-agent.md",
-    "pr-filter-tier1-agent.md",
-    "runtime-coverage-agent.md",
-    "runtime-coverage-1es-agent.md",
-    "job-agent.md",
-    "stage-agent.md",
+    "complete-agent.md",
     "execution-context-agent.md",
+    "job-agent.md",
+    "minimal-agent.md",
+    "pipeline-filter-agent.md",
+    "pipeline-trigger-agent.md",
+    "pr-filter-tier1-agent.md",
+    "runtime-coverage-1es-agent.md",
+    "runtime-coverage-agent.md",
+    "self-optimization-agent.md",
+    "stage-agent.md",
 ];
 
 /// Step display names that the lint expects to find at least once across all

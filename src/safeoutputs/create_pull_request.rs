@@ -2954,6 +2954,7 @@ index 0000000..abcdefg
                 std::collections::HashSet::new(),
             )),
             agent_last_author: None,
+            source_file_relative_path: None,
         };
         let outcome = result.execute_impl(&ctx).await.unwrap();
         assert!(!outcome.success);

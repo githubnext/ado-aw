@@ -390,6 +390,8 @@ permissions:
 
 ### Step 12 — Triggers (optional)
 
+> Authoring order: consider hoist candidates from Step 13 before finalising the prompt body; hoist decisions affect what the agent instructions need to do.
+
 #### PR Triggers (`on.pr`)
 
 Trigger on pull request events. Use `branches:` and `paths:` for native ADO filtering; use `filters:` for runtime gate conditions evaluated in the Setup job.
@@ -460,6 +462,21 @@ When `on.pipeline` is set: `trigger: none` and `pr: none` are generated automati
 
 ### Step 13 — Inline Steps (optional)
 
+Use inline steps for deterministic work that can run as Azure DevOps steps instead of spending agent tokens on it. Ask these hoist-candidate questions before you finalise the prompt body:
+
+- Is the work deterministic across runs (no agent reasoning needed)?
+- Does it happen on every invocation (clone, cache restore, runtime install, artifact download)?
+- Are the inputs fixed at compile time (repo URL, branch, tool versions)?
+- → If yes to all three, hoist into `steps:` (pre-agent) or `post-steps:` (after-agent).
+
+Work that **should** hoist:
+
+- Cloning an additional repo whose location never changes
+- Restoring a known cache, such as `~/.cache/pip`
+- Installing a fixed CLI version, such as `azd` at a pinned version
+
+Work that should **not** hoist: anything that depends on what the agent decides to do, such as branch selection based on the issue being processed.
+
 Steps that run inside the `Agent` job:
 
 ```yaml
@@ -482,6 +499,24 @@ teardown:          # Separate job AFTER SafeOutputs
   - bash: echo "Cleanup..."
     displayName: "Teardown"
 ```
+
+#### Validate before committing
+
+When you propose any `steps:`, `post-steps:`, `setup:`, or `teardown:` block, call the author MCP server's `validate_steps` tool before writing it to the file:
+
+```json
+{
+  "steps": [
+    {
+      "bash": "echo \"Fetching context...\"",
+      "displayName": "Prepare context"
+    }
+  ],
+  "allow_list": "full"
+}
+```
+
+Use `allow_list: "full"` because the author is supervising the generated workflow. If `validate_steps` returns errors, fix the block and validate again before committing it to the agent file.
 
 ### Step 14 — Runtimes (optional)
 
