@@ -1174,8 +1174,24 @@ fn build_conclusion_job(
         .with_env(
             "AW_SAFE_OUTPUT_DIR",
             EnvValue::Literal("$(Pipeline.Workspace)/conclusion_inputs".to_string()),
-        )
-        .with_env("SYSTEM_ACCESSTOKEN", EnvValue::secret("System.AccessToken"));
+        );
+
+    // Use SC_WRITE_TOKEN when a write service connection is configured;
+    // fall back to System.AccessToken otherwise.
+    let has_write_sc = front_matter
+        .permissions
+        .as_ref()
+        .and_then(|p| p.write.as_ref())
+        .is_some();
+    if has_write_sc {
+        conclusion_step = conclusion_step.with_env(
+            "SYSTEM_ACCESSTOKEN",
+            EnvValue::AdoMacro("$(SC_WRITE_TOKEN)"),
+        );
+    } else {
+        conclusion_step =
+            conclusion_step.with_env("SYSTEM_ACCESSTOKEN", EnvValue::secret("System.AccessToken"));
+    }
 
     // Pass per-tool configs as JSON env vars so conclusion.js can read them
     for tool_key in &["noop", "missing-tool", "missing-data"] {
