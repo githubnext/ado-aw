@@ -51,7 +51,7 @@
 //! - `Teardown` (optional): user `teardown:` steps.
 //! - `Conclusion` (optional): post-run reporting / work-item filing.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::Path;
 
 use super::common::{
@@ -1148,7 +1148,8 @@ fn build_conclusion_job(
     )
     .with_input("artifact", "safe_outputs")
     .with_input("path", "$(Pipeline.Workspace)/conclusion_inputs");
-    download_artifact.condition = Some(Condition::SucceededOrFailed);
+    download_artifact.condition = Some(Condition::Always);
+    download_artifact.continue_on_error = true;
     steps.push(Step::Task(download_artifact));
 
     let conclusion_script = "node /tmp/ado-aw-scripts/ado-script/conclusion.js\n";
@@ -1194,7 +1195,8 @@ fn build_conclusion_job(
         );
     }
     if !conclusion_config.tags.is_empty() {
-        let tags_json = serde_json::to_string(&conclusion_config.tags).unwrap_or_default();
+        let tags_json = serde_json::to_string(&conclusion_config.tags)
+            .context("failed to serialize conclusion tags")?;
         conclusion_step =
             conclusion_step.with_env("AW_WORK_ITEM_TAGS", EnvValue::Literal(tags_json));
     }
