@@ -137,7 +137,7 @@ let copy = Step::Task(
 );
 ```
 
-The full set of typed helpers lives in `src/compile/ir/tasks.rs` and is documented in the [IR reference](/ado-aw/reference/ir/#typed-task-helpers). Helpers cover: `CopyFiles@2`, `DockerInstaller@0`, `DotNetCoreCLI@2`, `ArchiveFiles@2`, `ExtractFiles@1`, `PublishTestResults@2`, `NuGetCommand@2`, and `PowerShell@2` (file and inline modes).
+The full set of typed helpers lives in `src/compile/ir/tasks.rs` and is documented in the [IR reference](/ado-aw/reference/ir/#typed-task-helpers). Helpers cover: `CopyFiles@2`, `DockerInstaller@0`, `DotNetCoreCLI@2`, `ArchiveFiles@2`, `ExtractFiles@1`, `PublishTestResults@2`, `NuGetCommand@2`, `PowerShell@2` (file and inline modes), `PublishPipelineArtifact@1`, `DownloadPipelineArtifact@2`, and `DeleteFiles@1`.
 
 When no typed helper exists for your task, fall back to `TaskStep::new`:
 

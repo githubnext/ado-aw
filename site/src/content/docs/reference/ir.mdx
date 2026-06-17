@@ -22,7 +22,7 @@ Those wrappers are the only place per-target shape (top-level `PipelineShape`, t
 
 - `ids.rs` — typed `StageId`, `JobId`, and `StepId` newtypes. Constructors validate the ADO identifier grammar (`^[A-Za-z_][A-Za-z0-9_]*$`) so invalid names fail at compile time.
 - `step.rs` — `Step` and concrete step structs: `BashStep`, `TaskStep`, `CheckoutStep`, `DownloadStep`, and `PublishStep`.
-- `tasks.rs` — typed factory helpers for built-in ADO task steps (`CopyFiles@2`, `DockerInstaller@0`, `DotNetCoreCLI@2`, `ArchiveFiles@2`, `ExtractFiles@1`, `PublishTestResults@2`, `NuGetCommand@2`, `PowerShell@2`). Prefer these over hand-crafted `TaskStep::new()` calls — see [Typed task helpers](#typed-task-helpers) below.
+- `tasks.rs` — typed factory helpers for built-in ADO task steps (`CopyFiles@2`, `DockerInstaller@0`, `DotNetCoreCLI@2`, `ArchiveFiles@2`, `ExtractFiles@1`, `PublishTestResults@2`, `NuGetCommand@2`, `PowerShell@2`, `PublishPipelineArtifact@1`, `DownloadPipelineArtifact@2`, `DeleteFiles@1`). Prefer these over hand-crafted `TaskStep::new()` calls — see [Typed task helpers](#typed-task-helpers) below.
 - `job.rs` — `Job`, `Pool`, job variables, 1ES `templateContext` support, and target-job external `dependsOn` / `condition` wrapping.
 - `stage.rs` — `Stage` plus target-stage external `dependsOn` / `condition` wrapping.
 - `env.rs` — typed environment values (`EnvValue`) including ADO macros, pipeline variables, secrets, `OutputRef`s, `Coalesce`, and macro-form `Concat`.
@@ -134,6 +134,9 @@ These helpers eliminate hand-crafted `TaskStep::new(…)` + raw string inputs at
 | `nuget_command_step(command)` | `NuGetCommand@2` | operation (`"restore"`, `"push"`, `"pack"`, `"custom"`) |
 | `powershell_file_step(file_path)` | `PowerShell@2` (file mode) | path to `.ps1` script |
 | `powershell_inline_step(script)` | `PowerShell@2` (inline mode) | inline script body |
+| `publish_pipeline_artifact_step(target_path)` | `PublishPipelineArtifact@1` | path to the file or directory to publish (ADO macros OK; wildcards not supported) |
+| `download_pipeline_artifact_step(target_path)` | `DownloadPipelineArtifact@2` | local destination path for the downloaded artifact |
+| `delete_files_step(contents)` | `DeleteFiles@1` | newline-separated glob patterns identifying files/folders to remove |
 
 ### Usage example
 
