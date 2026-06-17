@@ -705,7 +705,10 @@ mod tests {
         let step = &agent.steps[0];
         assert_eq!(step.env_refs.len(), 1);
         assert_eq!(step.env_refs[0].step, "synthPr");
+        assert_eq!(step.env_refs[0].name, "AW_SYNTHETIC_PR_ID");
         assert_eq!(step.condition_refs.len(), 1);
+        assert_eq!(step.condition_refs[0].step, "synthPr");
+        assert_eq!(step.condition_refs[0].name, "AW_SYNTHETIC_PR_ID");
         // Graph derived a job edge Agent -> Setup
         assert!(
             s.graph
@@ -715,14 +718,15 @@ mod tests {
             "expected derived edge Agent -> Setup, got {:?}",
             s.graph.job_edges
         );
-        // Producer output is marked auto_is_output
+        // Producer output is marked auto_is_output — verify it's the right output
         let setup = jobs.iter().find(|j| j.id == "Setup").unwrap();
         let prod_step = &setup.steps[0];
+        assert_eq!(prod_step.outputs[0].name, "AW_SYNTHETIC_PR_ID");
         assert!(prod_step.outputs[0].auto_is_output);
     }
 
     #[test]
-    fn serializes_to_json_without_panicking() {
+    fn serialized_json_contains_schema_version_and_shape() {
         let p = fixture_pipeline();
         let s = PipelineSummary::from_pipeline(&p).unwrap();
         let json = serde_json::to_string(&s).unwrap();
