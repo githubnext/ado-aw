@@ -537,6 +537,40 @@ pub fn docker_logout_step() -> TaskStep {
     TaskStep::new("Docker@2", "Docker Logout").with_input("command", "logout")
 }
 
+/// Returns a [`TaskStep`] for `MSBuild@1`.
+///
+/// Builds a Visual Studio solution or MSBuild project file using the
+/// Microsoft Build Engine. Use this for .NET Framework projects and
+/// solutions; for cross-platform .NET (Core / 5+) prefer
+/// [`dot_net_core_cli_step`].
+///
+/// The `solution` parameter is the path or glob to the `.sln` or `.*proj`
+/// file (e.g. `"**/*.sln"`, `"src/MyApp/MyApp.csproj"`).
+///
+/// Optional inputs (applied via `.with_input(…)` on the returned value):
+///
+/// | Input key | Type | Default | Description |
+/// |---|---|---|---|
+/// | `platform` | string | — | Target platform, e.g. `"x64"`, `"x86"`, `"AnyCPU"`. |
+/// | `configuration` | string | — | Build configuration, e.g. `"Release"`, `"Debug"`. |
+/// | `msbuildArguments` | string | — | Additional MSBuild command-line arguments. |
+/// | `clean` | bool string | `"false"` | Run a clean build (`/target:clean`). |
+/// | `maximumCpuCount` | bool string | `"false"` | Enable parallel builds (`/m`). |
+/// | `restoreNugetPackages` | bool string | `"false"` | Restore NuGet packages before building. |
+/// | `msbuildLocationMethod` | string | `"version"` | `"version"` or `"location"`. |
+/// | `msbuildVersion` | string | `"latest"` | MSBuild version when `msbuildLocationMethod = version`. |
+/// | `msbuildArchitecture` | string | `"x86"` | MSBuild architecture when `msbuildLocationMethod = version`. |
+/// | `msbuildLocation` | string | — | Explicit MSBuild path when `msbuildLocationMethod = location`. |
+/// | `logProjectEvents` | bool string | `"false"` | Record detailed project events. |
+/// | `createLogFile` | bool string | `"false"` | Create a log file. |
+/// | `logFileVerbosity` | string | `"normal"` | Log verbosity when `createLogFile = true`. |
+///
+/// ADO task reference:
+/// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/msbuild-v1>
+pub fn msbuild_step(solution: impl Into<String>) -> TaskStep {
+    TaskStep::new("MSBuild@1", "Build Solution").with_input("solution", solution)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1587,5 +1621,107 @@ assert_eq!(t.inputs.len(), 1);
             logout.inputs.get("command"),
             "login and logout must use different command values"
         );
+    }
+
+    // ── MSBuild@1 ────────────────────────────────────────────────────────
+
+    #[test]
+    fn msbuild_step_sets_task_and_required_input() {
+        let t = msbuild_step("**/*.sln");
+        assert_eq!(t.task, "MSBuild@1");
+        assert_eq!(t.display_name, "Build Solution");
+        assert_eq!(
+            t.inputs.get("solution").map(|s| s.as_str()),
+            Some("**/*.sln")
+        );
+        // only the required input is set by default
+        assert_eq!(t.inputs.len(), 1);
+    }
+
+    #[test]
+    fn msbuild_step_accepts_platform_and_configuration() {
+        let t = msbuild_step("src/MyApp/MyApp.sln")
+            .with_input("platform", "x64")
+            .with_input("configuration", "Release");
+        assert_eq!(t.task, "MSBuild@1");
+        assert_eq!(
+            t.inputs.get("solution").map(|s| s.as_str()),
+            Some("src/MyApp/MyApp.sln")
+        );
+        assert_eq!(t.inputs.get("platform").map(|s| s.as_str()), Some("x64"));
+        assert_eq!(
+            t.inputs.get("configuration").map(|s| s.as_str()),
+            Some("Release")
+        );
+        assert_eq!(t.inputs.len(), 3);
+    }
+
+    #[test]
+    fn msbuild_step_accepts_msbuild_arguments() {
+        let t = msbuild_step("**/*.sln").with_input(
+            "msbuildArguments",
+            "/p:DeployOnBuild=true /p:WebPublishMethod=Package",
+        );
+        assert_eq!(t.task, "MSBuild@1");
+        assert_eq!(
+            t.inputs.get("msbuildArguments").map(|s| s.as_str()),
+            Some("/p:DeployOnBuild=true /p:WebPublishMethod=Package")
+        );
+        assert_eq!(t.inputs.len(), 2);
+    }
+
+    #[test]
+    fn msbuild_step_accepts_optional_flags() {
+        let t = msbuild_step("**/*.sln")
+            .with_input("clean", "true")
+            .with_input("maximumCpuCount", "true")
+            .with_input("restoreNugetPackages", "true");
+        assert_eq!(t.task, "MSBuild@1");
+        assert_eq!(t.inputs.get("clean").map(|s| s.as_str()), Some("true"));
+        assert_eq!(
+            t.inputs.get("maximumCpuCount").map(|s| s.as_str()),
+            Some("true")
+        );
+        assert_eq!(
+            t.inputs.get("restoreNugetPackages").map(|s| s.as_str()),
+            Some("true")
+        );
+        assert_eq!(t.inputs.len(), 4);
+    }
+
+    #[test]
+    fn msbuild_step_accepts_explicit_msbuild_location() {
+        let t = msbuild_step("**/*.sln")
+            .with_input("msbuildLocationMethod", "location")
+            .with_input("msbuildLocation", "C:\\Program Files\\MSBuild\\17.0\\Bin\\msbuild.exe");
+        assert_eq!(t.task, "MSBuild@1");
+        assert_eq!(
+            t.inputs.get("msbuildLocationMethod").map(|s| s.as_str()),
+            Some("location")
+        );
+        assert_eq!(
+            t.inputs
+                .get("msbuildLocation")
+                .map(|s| s.as_str()),
+            Some("C:\\Program Files\\MSBuild\\17.0\\Bin\\msbuild.exe")
+        );
+        assert_eq!(t.inputs.len(), 3);
+    }
+
+    #[test]
+    fn msbuild_step_accepts_csproj_target() {
+        let t = msbuild_step("src/MyLib/MyLib.csproj")
+            .with_input("platform", "AnyCPU")
+            .with_input("configuration", "Debug");
+        assert_eq!(t.task, "MSBuild@1");
+        assert_eq!(
+            t.inputs.get("solution").map(|s| s.as_str()),
+            Some("src/MyLib/MyLib.csproj")
+        );
+        assert_eq!(
+            t.inputs.get("platform").map(|s| s.as_str()),
+            Some("AnyCPU")
+        );
+        assert_eq!(t.inputs.len(), 3);
     }
 }
