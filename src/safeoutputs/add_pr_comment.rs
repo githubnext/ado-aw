@@ -215,7 +215,7 @@ fn build_inline_thread_context(
     end_line: i32,
 ) -> anyhow::Result<serde_json::Value> {
     ensure!(start_line > 0, "start_line must be positive");
-    ensure!(end_line > 0, "line must be positive");
+    ensure!(end_line > 0, "end_line must be positive");
     ensure!(
         start_line <= end_line,
         "start_line ({start_line}) must be less than or equal to line ({end_line})"
