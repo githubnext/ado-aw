@@ -243,6 +243,13 @@ impl EnvValue {
     /// lowering pass hoists it to a job-level `variables:` entry and
     /// emits a `$(name)` macro reference, because ADO does not
     /// evaluate `$[ ... ]` inside step `env:`.
+    ///
+    /// **Body is interpolated verbatim.** At hoist time the lowering
+    /// pass wraps `body` as `$[ {body} ]` without escaping, so this
+    /// constructor is intended for compiler-internal expressions only.
+    /// A `body` containing `]` would prematurely close the wrapper and
+    /// produce a malformed expression. If untrusted/user text is ever
+    /// routed here, validate it (reject `]`) before constructing.
     pub fn runtime_expression(body: impl Into<String>) -> Self {
         EnvValue::RuntimeExpression(body.into())
     }

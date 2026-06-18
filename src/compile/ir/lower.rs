@@ -1296,17 +1296,19 @@ fn s(v: impl Into<String>) -> Value {
 }
 
 /// Reject an [`EnvValue::RuntimeExpression`] (or a [`EnvValue::Literal`]
-/// smuggling a `$[ ... ]` runtime expression) nested inside an
-/// [`EnvValue::Concat`].
+/// or [`EnvValue::RawYamlScalar`] smuggling a `$[ ... ]` runtime
+/// expression) nested inside an [`EnvValue::Concat`].
 ///
 /// `Concat` is macro-form concatenation: its children lower verbatim
 /// into the step `env:` scalar (see [`lower_env_value`]). A
 /// `RuntimeExpression` child would emit a `$(AwRtExpr_<hash>)` macro
 /// whose backing job variable is never hoisted (the hoist pass walks
-/// only the top level of each step env), and a literal `$[ ... ]` would
-/// be passed verbatim — both leaving a runtime expression that ADO does
-/// not evaluate in step env. Mirrors the `RuntimeExpression`-in-`Coalesce`
-/// rejection in [`lower_env_value_as_expr_atom`]. Nested `Concat` children
+/// only the top level of each step env), and a literal `$[ ... ]` (in a
+/// `Literal` or a `RawYamlScalar(String)`) would be passed verbatim —
+/// both leaving a runtime expression that ADO does not evaluate in step
+/// env. Mirrors the `RuntimeExpression`-in-`Coalesce` rejection in
+/// [`lower_env_value_as_expr_atom`] and the top-level guard in
+/// [`reject_runtime_expr_literal_in_step_env`]. Nested `Concat` children
 /// are re-checked via the recursion in [`lower_env_value`].
 fn reject_runtime_expr_in_concat(v: &EnvValue) -> Result<()> {
     match v {
@@ -1321,6 +1323,12 @@ fn reject_runtime_expr_in_concat(v: &EnvValue) -> Result<()> {
             "ir::lower: EnvValue::Literal ({lit:?}) inside an EnvValue::Concat carries a \
              `$[ ... ]` ADO runtime expression. ADO does NOT evaluate runtime expressions \
              inside step env (the literal string is passed verbatim). Use \
+             EnvValue::RuntimeExpression at the top level of a step env value instead."
+        ),
+        EnvValue::RawYamlScalar(Value::String(lit)) if lit.contains("$[") => anyhow::bail!(
+            "ir::lower: EnvValue::RawYamlScalar ({lit:?}) inside an EnvValue::Concat carries \
+             a `$[ ... ]` ADO runtime expression. ADO does NOT evaluate runtime expressions \
+             inside step env (the scalar string is passed verbatim). Use \
              EnvValue::RuntimeExpression at the top level of a step env value instead."
         ),
         _ => Ok(()),
@@ -1421,6 +1429,29 @@ mod tests {
         );
     }
 
+    /// A `RawYamlScalar(String)` carrying `$[ ... ]` nested inside a
+    /// `Concat` is rejected too — the scalar would otherwise concatenate
+    /// verbatim into the step env (the same footgun the top-level guard
+    /// catches).
+    #[test]
+    fn lower_env_value_dollar_bracket_raw_yaml_scalar_inside_concat_errors() {
+        let g = Graph::default();
+        let job = JobId::new("J").unwrap();
+        let ctx = ctx_for(&g, &job);
+        let v = EnvValue::concat(vec![
+            EnvValue::literal("prefix-"),
+            EnvValue::RawYamlScalar(serde_yaml::Value::String(
+                "$[ dependencies.Agent.result ]".into(),
+            )),
+        ]);
+        let err = lower_env_value(&ctx, &v).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("EnvValue::RawYamlScalar") && msg.contains("EnvValue::Concat"),
+            "expected $[-RawYamlScalar-in-Concat error, got: {msg}"
+        );
+    }
+
     /// A `RuntimeExpression` nested inside a `Concat` inside another
     /// `Concat` is also rejected — the recursion in `lower_env_value`
     /// re-checks each nested level.
@@ -1485,6 +1516,44 @@ mod tests {
         assert!(
             !yaml.contains("AGENT_RESULT: $["),
             "step env must not carry a raw `$[ ... ]` expression:\n{yaml}"
+        );
+    }
+
+    #[test]
+    fn lower_job_hoists_runtime_expression_from_task_step_env() {
+        use crate::compile::ir::step::TaskStep;
+
+        // `collect_runtime_expr_hoists` walks Task step env identically
+        // to Bash — a RuntimeExpression in a TaskStep env must hoist too.
+        let body = "dependencies.Agent.result";
+        let mut task = TaskStep::new("Bash@3", "Run");
+        task.env
+            .insert("AGENT_RESULT".into(), EnvValue::runtime_expression(body));
+        let mut job = Job::new(JobId::new("J").unwrap(), "J", Pool::VmImage("u".into()));
+        job.push_step(Step::Task(task));
+        let p = Pipeline {
+            name: "t".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers::default(),
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(vec![job]),
+            shape: PipelineShape::Standalone,
+        };
+        let v = super::lower(&p).unwrap();
+        let yaml = serde_yaml::to_string(&v).unwrap();
+        let name = runtime_expr_var_name(body);
+        assert!(
+            yaml.contains(&format!("{name}: $[ {body} ]")),
+            "expected hoisted variable `{name}: $[ {body} ]` in:\n{yaml}"
+        );
+        assert!(
+            yaml.contains(&format!("AGENT_RESULT: $({name})")),
+            "expected task step env `AGENT_RESULT: $({name})` in:\n{yaml}"
+        );
+        assert!(
+            !yaml.contains("AGENT_RESULT: $["),
+            "task step env must not carry a raw `$[ ... ]` expression:\n{yaml}"
         );
     }
 
