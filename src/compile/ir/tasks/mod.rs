@@ -28,6 +28,7 @@ pub mod docker_installer;
 pub mod dotnet_core_cli;
 pub mod download_pipeline_artifact;
 pub mod extract_files;
+pub mod npm;
 pub mod nuget_command;
 pub mod powershell;
 pub mod publish_pipeline_artifact;

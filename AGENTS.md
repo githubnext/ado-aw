@@ -55,7 +55,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   │   ├── mod.rs     # IR module entry point and shared types
 │   │   │   ├── ids.rs     # Stable IDs for jobs/steps/outputs in the IR
 │   │   │   ├── step.rs    # Step declarations and typed step variants
-│   │   │   ├── tasks/     # Typed builder structs for built-in ADO tasks (one file per task; new()+typed setters+into_step(); command-enum dispatch for Docker/DotNet/NuGet/PowerShell; docker.rs canonical template)
+│   │   │   ├── tasks/     # Typed builder structs for built-in ADO tasks (one file per task; new()+typed setters+into_step(); command-enum dispatch for Docker/DotNet/NuGet/Npm/PowerShell; docker.rs canonical template)
 │   │   │   ├── job.rs     # Job declarations and typed job graph nodes
 │   │   │   ├── stage.rs   # Stage declarations and typed stage graph nodes
 │   │   │   ├── env.rs     # Typed environment and variable modeling
@@ -310,6 +310,12 @@ index to jump to the right page.
 - [`docs/ado-aw-debug.md`](docs/ado-aw-debug.md) — debug-only `ado-aw-debug:`
   front-matter section (`skip-integrity`, `create-issue` for filing GitHub
   issues from dogfood pipelines). NOT a regular safe-output.
+- [`docs/supply-chain.md`](docs/supply-chain.md) — optional `supply-chain:`
+  front-matter section that mirrors the compiler, AWF binary, ado-script
+  bundle, and AWF/MCPG images from an internal Azure DevOps Artifacts feed
+  and/or container registry (NuGet `DownloadPackage@1` + ACR `az acr login`),
+  with asymmetric auth (feed defaults to `$(System.AccessToken)`; registry
+  requires a service connection).
 
 ### Compiler internals & operations
 
@@ -389,7 +395,15 @@ Following the gh-aw security model:
 1. **Safe Outputs**: Only allow write operations through sanitized safe-output
    declarations — see [`docs/safe-outputs.md`](docs/safe-outputs.md).
 2. **Network Isolation**: Pipelines run in OneBranch's network-isolated
-   environment via AWF — see [`docs/network.md`](docs/network.md).
+   environment via AWF — see [`docs/network.md`](docs/network.md). **Scope
+   note:** AWF's L7 allowlist wraps *only* the agent's copilot command
+   (`awf … --allow-domains … -- '<engine_run>'` in
+   `src/compile/agentic_pipeline.rs::run_agent_step`). All other ADO steps —
+   binary/bundle downloads, `docker pull`, ACR/NuGet auth (including the
+   `supply-chain:` mirror fetches) — run *outside* the sandbox with the build
+   agent pool's normal network, so they do **not** need entries in the AWF
+   allowlist. Air-gapping the build agent itself from GitHub/GHCR is the agent
+   pool's network policy, not AWF.
 3. **Tool Allow-listing**: Agents have access to a limited, controlled set of
    tools — see [`docs/tools.md`](docs/tools.md) and
    [`docs/mcp.md`](docs/mcp.md).

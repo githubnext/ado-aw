@@ -61,6 +61,7 @@ export default defineConfig({
             { label: 'Runtimes', slug: 'reference/runtimes' },
             { label: 'Safe Outputs', slug: 'reference/safe-outputs' },
             { label: 'ado-aw-debug', slug: 'reference/ado-aw-debug' },
+            { label: 'Supply Chain', slug: 'reference/supply-chain' },
             { label: 'Targets', slug: 'reference/targets' },
             { label: 'Network', slug: 'reference/network' },
             { label: 'MCP', slug: 'reference/mcp' },

@@ -695,6 +695,7 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
                 // bearer / no REST, pure git).
                 exec_context_repo_active: repo_contributor_will_activate(front_matter),
                 pr_trigger_for_synth,
+                supply_chain: front_matter.supply_chain().cloned(),
             }
         })),
         // Always-on execution-context extension. Owns the `aw-context/`
