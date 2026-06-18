@@ -381,6 +381,36 @@ pub fn delete_files_step(contents: impl Into<String>) -> TaskStep {
         .with_input("Contents", contents)
 }
 
+/// Returns a [`TaskStep`] for `Npm@1`.
+///
+/// Runs an npm command against the package in the working directory.
+/// Supports `npmjs.com` and authenticated registries such as Azure Artifacts.
+///
+/// - `command` — the npm operation: `"install"`, `"ci"`, `"publish"`, or
+///   `"custom"`. The ADO task default is `"install"`.
+///
+/// Optional inputs (applied with `.with_input(…)` on the returned value):
+///
+/// | Input key | Type | Default | Description |
+/// |---|---|---|---|
+/// | `workingDir` | string | — | Working folder containing `package.json`. |
+/// | `verbose` | bool string | — | Enable verbose logging (for `install`, `ci`, `publish`). |
+/// | `customCommand` | string | — | Required when `command = "custom"`. The npm arguments to forward. |
+/// | `customRegistry` | string | `"useNpmrc"` | Registry for `install`/`ci`/`custom`: `"useNpmrc"` or `"useFeed"`. |
+/// | `customFeed` | string | — | Required when `customRegistry = "useFeed"`. Azure Artifacts feed ID or URL. |
+/// | `customEndpoint` | string | — | Service connection for registries outside the organisation. |
+/// | `publishRegistry` | string | `"useExternalRegistry"` | Registry for `publish`: `"useExternalRegistry"` or `"useFeed"`. |
+/// | `publishFeed` | string | — | Required when `publishRegistry = "useFeed"`. Target Azure Artifacts feed. |
+/// | `publishEndpoint` | string | — | Required when `publishRegistry = "useExternalRegistry"`. External registry service connection. |
+/// | `publishPackageMetadata` | bool string | `"true"` | Attach pipeline metadata to packages published via `useFeed`. |
+///
+/// ADO task reference:
+/// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/npm-v1>
+pub fn npm_step(command: impl Into<String>) -> TaskStep {
+    let cmd: String = command.into();
+    TaskStep::new("Npm@1", format!("npm {cmd}")).with_input("command", cmd)
+}
+
 /// Returns a [`TaskStep`] for `CmdLine@2`.
 ///
 /// Runs an inline command-line script. On Linux and macOS the script
@@ -1296,6 +1326,96 @@ mod tests {
         assert_eq!(t.inputs.len(), 2);
     }
 
+    // ── Npm@1 ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn npm_step_install_sets_task_and_command() {
+        let t = npm_step("install");
+        assert_eq!(t.task, "Npm@1");
+        assert_eq!(t.display_name, "npm install");
+        assert_eq!(t.inputs.get("command").map(|s| s.as_str()), Some("install"));
+        // only the required input is set by default
+        assert_eq!(t.inputs.len(), 1);
+    }
+
+    #[test]
+    fn npm_step_ci_command() {
+        let t = npm_step("ci");
+        assert_eq!(t.task, "Npm@1");
+        assert_eq!(t.display_name, "npm ci");
+        assert_eq!(t.inputs.get("command").map(|s| s.as_str()), Some("ci"));
+        assert_eq!(t.inputs.len(), 1);
+    }
+
+    #[test]
+    fn npm_step_publish_command() {
+        let t = npm_step("publish");
+        assert_eq!(t.task, "Npm@1");
+        assert_eq!(t.display_name, "npm publish");
+        assert_eq!(
+            t.inputs.get("command").map(|s| s.as_str()),
+            Some("publish")
+        );
+        assert_eq!(t.inputs.len(), 1);
+    }
+
+    #[test]
+    fn npm_step_custom_with_working_dir_and_command() {
+        let t = npm_step("custom")
+            .with_input("customCommand", "run build -- --production")
+            .with_input("workingDir", "$(Build.SourcesDirectory)/frontend");
+        assert_eq!(t.task, "Npm@1");
+        assert_eq!(t.display_name, "npm custom");
+        assert_eq!(t.inputs.get("command").map(|s| s.as_str()), Some("custom"));
+        assert_eq!(
+            t.inputs.get("customCommand").map(|s| s.as_str()),
+            Some("run build -- --production")
+        );
+        assert_eq!(
+            t.inputs.get("workingDir").map(|s| s.as_str()),
+            Some("$(Build.SourcesDirectory)/frontend")
+        );
+        assert_eq!(t.inputs.len(), 3);
+    }
+
+    #[test]
+    fn npm_step_publish_with_azure_artifacts_feed() {
+        let t = npm_step("publish")
+            .with_input("publishRegistry", "useFeed")
+            .with_input("publishFeed", "my-org/my-feed");
+        assert_eq!(t.task, "Npm@1");
+        assert_eq!(
+            t.inputs.get("command").map(|s| s.as_str()),
+            Some("publish")
+        );
+        assert_eq!(
+            t.inputs.get("publishRegistry").map(|s| s.as_str()),
+            Some("useFeed")
+        );
+        assert_eq!(
+            t.inputs.get("publishFeed").map(|s| s.as_str()),
+            Some("my-org/my-feed")
+        );
+        assert_eq!(t.inputs.len(), 3);
+    }
+
+    #[test]
+    fn npm_step_install_with_custom_feed() {
+        let t = npm_step("install")
+            .with_input("customRegistry", "useFeed")
+            .with_input("customFeed", "my-org/npm-feed");
+        assert_eq!(t.task, "Npm@1");
+        assert_eq!(
+            t.inputs.get("customRegistry").map(|s| s.as_str()),
+            Some("useFeed")
+        );
+        assert_eq!(
+            t.inputs.get("customFeed").map(|s| s.as_str()),
+            Some("my-org/npm-feed")
+        );
+        assert_eq!(t.inputs.len(), 3);
+    }
+
     // ── Docker@2 ─────────────────────────────────────────────────────────
 
     #[test]
@@ -1352,14 +1472,14 @@ mod tests {
 
     #[test]
     fn docker_build_step_sets_task_and_command() {
-        let t = docker_build_step();
-        assert_eq!(t.task, "Docker@2");
-        assert_eq!(t.display_name, "Build Docker Image");
-        assert_eq!(
-            t.inputs.get("command").map(|s| s.as_str()),
-            Some("build")
-        );
-        assert_eq!(t.inputs.len(), 1);
+let t = docker_build_step();
+assert_eq!(t.task, "Docker@2");
+assert_eq!(t.display_name, "Build Docker Image");
+assert_eq!(
+    t.inputs.get("command").map(|s| s.as_str()),
+    Some("build")
+);
+assert_eq!(t.inputs.len(), 1);
     }
 
     #[test]
