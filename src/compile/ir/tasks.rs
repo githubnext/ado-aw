@@ -537,6 +537,35 @@ pub fn docker_logout_step() -> TaskStep {
     TaskStep::new("Docker@2", "Docker Logout").with_input("command", "logout")
 }
 
+/// Returns a [`TaskStep`] for `Cache@2`.
+///
+/// Caches `path` between pipeline runs using `key` as the cache key.
+/// On a cache hit the folder is restored from a prior run, avoiding
+/// expensive downloads or builds. On a miss the cache is saved at the
+/// end of the job for use by future runs.
+///
+/// - `key` — a `|`-delimited string used to identify the cache entry.
+///   Typically includes a platform token, a lockfile hash, and a version
+///   discriminator, e.g.
+///   `"npm | \"$(Agent.OS)\" | package-lock.json"`.
+/// - `path` — the folder to cache. May be absolute or relative to
+///   `$(System.DefaultWorkingDirectory)`.  Wildcards are **not** supported.
+///
+/// Optional inputs (applied via `.with_input(…)` on the returned value):
+///
+/// | Input key | Type | Default | Description |
+/// |---|---|---|---|
+/// | `cacheHitVar` | string | — | Variable set to `"true"` (exact hit), `"inexact"` (restore-key hit), or `"false"` (miss). |
+/// | `restoreKeys` | string | — | Newline-delimited list of fallback key prefixes searched when the primary key misses. |
+///
+/// ADO task reference:
+/// <https://learn.microsoft.com/en-us/azure/devops/pipelines/release/caching>
+pub fn cache_step(key: impl Into<String>, path: impl Into<String>) -> TaskStep {
+    TaskStep::new("Cache@2", "Cache")
+        .with_input("key", key)
+        .with_input("path", path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1587,5 +1616,50 @@ assert_eq!(t.inputs.len(), 1);
             logout.inputs.get("command"),
             "login and logout must use different command values"
         );
+    }
+
+    // ── Cache@2 ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn cache_step_sets_task_and_required_inputs() {
+        let t = cache_step(
+            "npm | \"$(Agent.OS)\" | package-lock.json",
+            "$(Pipeline.Workspace)/.npm",
+        );
+        assert_eq!(t.task, "Cache@2");
+        assert_eq!(t.display_name, "Cache");
+        assert_eq!(
+            t.inputs.get("key").map(|s| s.as_str()),
+            Some("npm | \"$(Agent.OS)\" | package-lock.json")
+        );
+        assert_eq!(
+            t.inputs.get("path").map(|s| s.as_str()),
+            Some("$(Pipeline.Workspace)/.npm")
+        );
+        assert_eq!(t.inputs.len(), 2, "no optional inputs emitted by default");
+    }
+
+    #[test]
+    fn cache_step_accepts_cache_hit_var() {
+        let t = cache_step("nuget | packages.lock.json", "$(UserProfile)/.nuget/packages")
+            .with_input("cacheHitVar", "CACHE_RESTORED");
+        assert_eq!(t.task, "Cache@2");
+        assert_eq!(
+            t.inputs.get("cacheHitVar").map(|s| s.as_str()),
+            Some("CACHE_RESTORED")
+        );
+        assert_eq!(t.inputs.len(), 3);
+    }
+
+    #[test]
+    fn cache_step_accepts_restore_keys() {
+        let t = cache_step("pip | \"$(Agent.OS)\" | requirements.txt", ".venv")
+            .with_input("restoreKeys", "pip | \"$(Agent.OS)\"");
+        assert_eq!(t.task, "Cache@2");
+        assert_eq!(
+            t.inputs.get("restoreKeys").map(|s| s.as_str()),
+            Some("pip | \"$(Agent.OS)\"")
+        );
+        assert_eq!(t.inputs.len(), 3);
     }
 }
