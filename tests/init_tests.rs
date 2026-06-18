@@ -76,7 +76,7 @@ fn test_init_overwrites_by_default() {
 }
 
 /// Test that `init --agency` is additive: it produces the standard agent file
-/// AND the Agency / Claude Code plugin under the `.claude` default directory.
+/// AND the Agency / Claude Code plugin under the `.github/ado-aw` directory.
 #[test]
 fn test_init_agency_generates_plugin() {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp directory");
@@ -104,8 +104,8 @@ fn test_init_agency_generates_plugin() {
         "Standard agent file should still be created with --agency"
     );
 
-    // Claude Code plugin manifest + marketplace under the default `.claude` dir.
-    let plugin_root = temp_dir.path().join(".claude");
+    // Claude Code plugin manifest + marketplace under `.github/ado-aw`.
+    let plugin_root = temp_dir.path().join(".github/ado-aw");
     let plugin_json = plugin_root.join(".claude-plugin/plugin.json");
     let marketplace_json = plugin_root.join(".claude-plugin/marketplace.json");
     assert!(plugin_json.exists(), "plugin.json should be created");
@@ -158,7 +158,7 @@ fn test_init_without_agency_skips_plugin() {
     assert!(output.status.success(), "init should succeed");
 
     assert!(
-        !temp_dir.path().join(".claude").exists(),
+        !temp_dir.path().join(".github/ado-aw").exists(),
         "Plugin directory should not be created without --agency"
     );
 }

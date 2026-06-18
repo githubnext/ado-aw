@@ -292,7 +292,7 @@ enum Commands {
         #[arg(long)]
         force: bool,
         /// Additionally generate an Agency / Claude Code plugin under
-        /// `.claude` (additive to the standard agent file).
+        /// `.github/ado-aw` (additive to the standard agent file).
         #[arg(long)]
         agency: bool,
     },

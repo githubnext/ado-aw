@@ -8,9 +8,9 @@ const AGENT_DIR: &str = ".github/agents";
 const AGENT_FILENAME: &str = "ado-aw.agent.md";
 
 /// Root directory (relative to the target repo) for the generated Agency /
-/// Claude Code plugin. Uses the Claude Code default project-scoped
-/// configuration directory (`.claude`).
-const AGENCY_PLUGIN_DIR: &str = ".claude";
+/// Claude Code plugin. Placed under `.github/ado-aw` so it does not pollute
+/// the user's source tree like the conventional top-level plugin folder would.
+const AGENCY_PLUGIN_DIR: &str = ".github/ado-aw";
 
 /// Files that make up the Agency plugin, following the Claude Code plugin
 /// conventions (https://code.claude.com/docs/en/plugins-reference):
@@ -97,11 +97,11 @@ pub async fn run(path: Option<&std::path::Path>, agency: bool) -> Result<()> {
     Ok(())
 }
 
-/// Write the Agency / Claude Code plugin into `<base>/.claude`.
+/// Write the Agency / Claude Code plugin into `<base>/.github/ado-aw`.
 ///
 /// The plugin is additive to the standard agent file and follows the Claude
-/// Code plugin conventions, written to the Claude Code default project-scoped
-/// directory.
+/// Code plugin conventions, written under `.github/ado-aw` so it does not
+/// pollute the user's source tree.
 async fn write_agency_plugin(base: &Path, version: &str) -> Result<()> {
     let plugin_root = base.join(AGENCY_PLUGIN_DIR);
 

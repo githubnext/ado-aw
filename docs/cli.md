@@ -9,7 +9,7 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
 - `init` - Initialize a repository for AI-first agentic pipeline authoring
   - `--path <path>` - Target directory (defaults to current directory)
   - `--force` - Bypass the GitHub-remote guard (use when running inside a GitHub-hosted repository like `githubnext/ado-aw` itself)
-  - `--agency` - **Additive.** Also generate an Agency / [Claude Code plugin](https://code.claude.com/docs/en/plugins-reference) under the Claude Code default `.claude` directory (in addition to the standard Copilot agent file). Emits `.claude/.claude-plugin/plugin.json` (manifest) + `marketplace.json`, an `agents/ado-aw.md` dispatcher subagent, and `commands/{create,update,debug}-ado-agentic-workflow.md` slash commands.
+  - `--agency` - **Additive.** Also generate an Agency / [Claude Code plugin](https://code.claude.com/docs/en/plugins-reference) under `.github/ado-aw` (in addition to the standard Copilot agent file). Emits `.github/ado-aw/.claude-plugin/plugin.json` (manifest) + `marketplace.json`, an `agents/ado-aw.md` dispatcher subagent, and `commands/{create,update,debug}-ado-agentic-workflow.md` slash commands.
   - Creates `.github/agents/ado-aw.agent.md` — a Copilot dispatcher agent that routes to specialized prompts for creating, updating, and debugging agentic pipelines
   - The agent auto-downloads the ado-aw compiler and handles the full lifecycle (create → compile → check)
 - `compile [<path>]` - Compile a markdown file to Azure DevOps pipeline YAML. If no path is given, auto-discovers and recompiles all detected agentic pipelines in the current directory.
