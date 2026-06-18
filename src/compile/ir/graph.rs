@@ -334,6 +334,7 @@ fn collect_env_refs_into<'a>(v: &'a EnvValue, out: &mut Vec<&'a OutputRef>) {
         | EnvValue::AdoMacro(_)
         | EnvValue::PipelineVar(_)
         | EnvValue::Secret(_)
+        | EnvValue::RuntimeExpression(_)
         | EnvValue::RawYamlScalar(_) => {}
         EnvValue::StepOutput(r) => out.push(r),
         EnvValue::Coalesce(children) | EnvValue::Concat(children) => {
