@@ -27,7 +27,7 @@ supply-chain:
     name: my-project/my-feed     # feed name or "project/feed"
     service-connection: feed-conn  # optional (see Authentication)
   registry:                      # mirrors images #4
-    name: myacr.azurecr.io       # ACR login server
+    name: myacr.azurecr.io/mirror  # registry host or base path
     service-connection: acr-conn   # required when registry is set
   service-connection: shared-conn  # optional shared fallback for both targets
 ```
@@ -114,14 +114,23 @@ matching `checksums.txt`.
 
 ### Registry images
 
-The registry must host the AWF and MCPG images under the **same repository
-paths** (GHCR path minus the `ghcr.io/` host prefix), at the **same tags**:
+`registry.name` is a registry **host or base path** — teams generally cannot
+publish under GHCR's `github/...` namespace, so the original GHCR prefix is
+**not** preserved. Only the **artifact name** (the final image-name segment)
+is kept, placed directly under the configured base path at the **same tag**:
 
-| Internal reference |
-|--------------------|
-| `<registry>/github/gh-aw-firewall/squid:<awf-version>` |
-| `<registry>/github/gh-aw-firewall/agent:<awf-version>` |
-| `<registry>/github/gh-aw-mcpg:v<mcpg-version>` |
+| GHCR source | Internal reference (base path `<registry>`) |
+|-------------|---------------------------------------------|
+| `ghcr.io/github/gh-aw-firewall/squid:<awf-version>` | `<registry>/squid:<awf-version>` |
+| `ghcr.io/github/gh-aw-firewall/agent:<awf-version>` | `<registry>/agent:<awf-version>` |
+| `ghcr.io/github/gh-aw-mcpg:v<mcpg-version>` | `<registry>/gh-aw-mcpg:v<mcpg-version>` |
+
+`<registry>` may be a bare host (`myacr.azurecr.io`) or a host with an
+arbitrary namespace path (`myacr.azurecr.io/oss-mirror`,
+`contoso.azurecr.io/team/oss/mirror`). The contract is only that the artifact
+names (`squid`, `agent`, `gh-aw-mcpg`) and tags remain unchanged under that
+path. `az acr login` derives the ACR registry name from the host portion of
+the base path.
 
 ## Examples
 

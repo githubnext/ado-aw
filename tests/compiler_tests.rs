@@ -6092,18 +6092,26 @@ fn test_supply_chain_full_reroutes_all_artifacts() {
         "NuGetAuthenticate@1 should be hoisted per-job (got {auth_count} auth vs {download_count} downloads)"
     );
 
-    // (d) Internal registry rewrite + ACR auth for images.
+    // (d) Internal registry rewrite + ACR auth for images. The configured
+    // registry base path (`myacr.azurecr.io/oss-mirror`) is an arbitrary
+    // namespace — the original GHCR prefix (`github/...`) is NOT preserved;
+    // only the artifact name (`squid`/`agent`/`gh-aw-mcpg`) sits directly under
+    // the base path. ACR login derives the registry name from the host.
     assert!(
         compiled.contains("- task: AzureCLI@2") && compiled.contains("az acr login --name myacr"),
         "ACR login must be emitted before docker pull in registry mode"
     );
     assert!(
-        compiled.contains("docker pull myacr.azurecr.io/github/gh-aw-firewall/squid:"),
-        "AWF images must be pulled from the internal registry"
+        compiled.contains("docker pull myacr.azurecr.io/oss-mirror/squid:"),
+        "AWF images must be pulled from the internal registry base path (artifact name only)"
     );
     assert!(
-        compiled.contains("myacr.azurecr.io/github/gh-aw-mcpg:"),
-        "MCPG image must be rewritten onto the internal registry (pull + docker run)"
+        compiled.contains("myacr.azurecr.io/oss-mirror/gh-aw-mcpg:"),
+        "MCPG image must be rewritten onto the internal registry base path (pull + docker run)"
+    );
+    assert!(
+        !compiled.contains("myacr.azurecr.io/oss-mirror/github/"),
+        "the original GHCR `github/...` prefix must not be carried under the internal base path"
     );
 
     // (d2) The local `:latest` aliases must be tagged under the GHCR names AWF
@@ -6112,13 +6120,13 @@ fn test_supply_chain_full_reroutes_all_artifacts() {
     // failing to find its images at runtime.
     assert!(
         compiled.contains(
-            "docker tag myacr.azurecr.io/github/gh-aw-firewall/squid:0.27.3 ghcr.io/github/gh-aw-firewall/squid:latest"
+            "docker tag myacr.azurecr.io/oss-mirror/squid:0.27.3 ghcr.io/github/gh-aw-firewall/squid:latest"
         ),
         "AWF squid image must be re-tagged to the GHCR :latest name AWF expects"
     );
     assert!(
         compiled.contains(
-            "docker tag myacr.azurecr.io/github/gh-aw-firewall/agent:0.27.3 ghcr.io/github/gh-aw-firewall/agent:latest"
+            "docker tag myacr.azurecr.io/oss-mirror/agent:0.27.3 ghcr.io/github/gh-aw-firewall/agent:latest"
         ),
         "AWF agent image must be re-tagged to the GHCR :latest name AWF expects"
     );

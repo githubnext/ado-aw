@@ -6,7 +6,7 @@ supply-chain:
     name: my-project/my-internal-feed
     service-connection: feed-conn
   registry:
-    name: myacr.azurecr.io
+    name: myacr.azurecr.io/oss-mirror
     service-connection: acr-conn
 ---
 

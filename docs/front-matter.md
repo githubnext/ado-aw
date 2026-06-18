@@ -177,7 +177,7 @@ supply-chain:                  # optional internal supply-chain mirror (see docs
     name: my-project/my-feed     # feed name or project/feed; scalar `feed: my-feed` shorthand also works
     service-connection: feed-conn  # optional; omit for same-org feeds (uses $(System.AccessToken))
   registry:                      # mirror AWF/MCPG images from an internal ACR
-    name: myacr.azurecr.io       # ACR login server
+    name: myacr.azurecr.io/mirror  # registry host or base path (artifact names kept under it)
     service-connection: acr-conn   # REQUIRED when registry is set (ACR has no System.AccessToken path)
   service-connection: shared-conn  # optional shared fallback for whichever target omits its own
 parameters:                    # optional ADO runtime parameters (surfaced in UI when queuing a run)

@@ -1152,33 +1152,43 @@ fn checkout_self_step() -> Step {
 /// `ghcr.io/github/gh-aw-firewall/squid`), `tag` the image tag. When
 /// `registry` is `None` the GHCR reference is returned unchanged.
 ///
+/// The internal registry may have an entirely different namespace than GHCR
+/// (teams generally cannot publish under `github/...`), so only the original
+/// **artifact name** — the final path segment of `base` (`squid`, `agent`,
+/// `gh-aw-mcpg`) — is preserved directly under the configured registry base
+/// path. This is the contract: artifact names stay the same, the prefix is
+/// whatever the user provides.
+///
 /// Centralised so the pre-pull step and the `docker run` invocation in
 /// `start_mcpg_step` cannot drift on the rewritten reference.
 fn image_ref(base: &str, tag: &str, registry: Option<&str>) -> String {
     match registry {
         Some(reg) => {
-            let path = base.strip_prefix("ghcr.io/").unwrap_or(base);
-            format!("{reg}/{path}:{tag}")
+            let name = base.rsplit('/').next().unwrap_or(base);
+            format!("{reg}/{name}:{tag}")
         }
         None => format!("{base}:{tag}"),
     }
 }
 
-/// Derive the ACR registry name (used by `az acr login --name`) from a login
-/// server. Strips a trailing `.azurecr.io` when present; otherwise returns the
-/// portion before the first `.` (falling back to the whole value).
-fn acr_registry_name(login_server: &str) -> &str {
-    login_server
-        .strip_suffix(".azurecr.io")
-        .or_else(|| login_server.split('.').next())
-        .unwrap_or(login_server)
+/// Derive the ACR registry name (used by `az acr login --name`) from a
+/// registry base path. Takes the host portion (before the first `/`), then
+/// strips a trailing `.azurecr.io` when present; otherwise returns the portion
+/// before the first `.` (falling back to the whole host).
+fn acr_registry_name(registry_base: &str) -> &str {
+    let host = registry_base.split('/').next().unwrap_or(registry_base);
+    host.strip_suffix(".azurecr.io")
+        .or_else(|| host.split('.').next())
+        .unwrap_or(host)
 }
 
 /// `AzureCLI@2` step that runs `az acr login` against an internal registry so
 /// subsequent `docker pull` calls in the same job are authenticated. Uses the
 /// resolved registry service connection (an ARM/Azure service connection).
-fn acr_login_step(login_server: &str, connection: &str) -> TaskStep {
-    let name = acr_registry_name(login_server);
+/// `registry_base` is the configured registry host or base path; the ACR name
+/// is derived from its host portion.
+fn acr_login_step(registry_base: &str, connection: &str) -> TaskStep {
+    let name = acr_registry_name(registry_base);
     TaskStep::new("AzureCLI@2", "Authenticate to internal container registry")
         .with_input("azureSubscription", connection)
         .with_input("scriptType", "bash")
@@ -1462,10 +1472,10 @@ fn download_awf_step(supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
 
 fn prepull_images_step(include_mcpg: bool, supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
     let registry = supply_chain.and_then(|sc| sc.registry.as_ref());
-    let registry_host = registry.map(|r| r.name.as_str());
+    let registry_base = registry.map(|r| r.name.as_str());
 
-    let squid = image_ref("ghcr.io/github/gh-aw-firewall/squid", AWF_VERSION, registry_host);
-    let agent = image_ref("ghcr.io/github/gh-aw-firewall/agent", AWF_VERSION, registry_host);
+    let squid = image_ref("ghcr.io/github/gh-aw-firewall/squid", AWF_VERSION, registry_base);
+    let agent = image_ref("ghcr.io/github/gh-aw-firewall/agent", AWF_VERSION, registry_base);
     // The local `:latest` aliases must ALWAYS carry the GHCR image names that
     // AWF resolves by default when invoked with `--skip-pull` (run_agent_step
     // passes no `--awf-*-image` flags). Tagging them onto the internal
@@ -1484,7 +1494,7 @@ fn prepull_images_step(include_mcpg: bool, supply_chain: Option<&SupplyChainConf
          docker tag {agent} {agent_latest}\n"
     );
     let display = if include_mcpg {
-        let mcpg = image_ref(MCPG_IMAGE, &format!("v{MCPG_VERSION}"), registry_host);
+        let mcpg = image_ref(MCPG_IMAGE, &format!("v{MCPG_VERSION}"), registry_base);
         script.push_str(&format!("docker pull {mcpg}\n"));
         format!("Pre-pull AWF and MCPG container images (v{AWF_VERSION})")
     } else {
@@ -1495,11 +1505,11 @@ fn prepull_images_step(include_mcpg: bool, supply_chain: Option<&SupplyChainConf
     // When using an internal registry, authenticate before pulling so the
     // job's docker daemon (shared with the subsequent `docker run` of MCPG)
     // can reach the registry.
-    if let (Some(host), Some(conn)) = (
-        registry_host,
+    if let (Some(base), Some(conn)) = (
+        registry_base,
         supply_chain.and_then(|sc| sc.registry_connection()),
     ) {
-        steps.push(Step::Task(acr_login_step(host, conn)));
+        steps.push(Step::Task(acr_login_step(base, conn)));
     }
     steps.push(Step::Bash(bash(display, script)));
     steps
@@ -1554,10 +1564,10 @@ fn start_mcpg_step(
     debug_pipeline: bool,
     supply_chain: Option<&SupplyChainConfig>,
 ) -> Result<BashStep> {
-    let registry_host = supply_chain
+    let registry_base = supply_chain
         .and_then(|sc| sc.registry.as_ref())
         .map(|r| r.name.as_str());
-    let mcpg_image_v = image_ref(MCPG_IMAGE, &format!("v{MCPG_VERSION}"), registry_host);
+    let mcpg_image_v = image_ref(MCPG_IMAGE, &format!("v{MCPG_VERSION}"), registry_base);
     // Build the docker-env block as additional `-e VAR=...` lines, one per
     // line, joined with `\n  ` (newline + 2-space continuation indent to
     // match the surrounding `-e MCP_GATEWAY_*` lines). When no extensions

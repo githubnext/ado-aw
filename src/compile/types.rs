@@ -967,12 +967,15 @@ pub struct FeedConfig {
     pub service_connection: Option<crate::secure::ServiceConnection>,
 }
 
-/// A registry target. Accepts either a bare scalar (the ACR login server) or
-/// an object `{ name, service-connection }`.
+/// A registry target. Accepts either a bare scalar (the registry host or base
+/// path) or an object `{ name, service-connection }`.
 #[derive(Debug, Clone)]
 pub struct RegistryConfig {
-    /// ACR login server, e.g. `myacr.azurecr.io`.
-    pub name: crate::secure::HostName,
+    /// Internal container-registry host or base path, e.g.
+    /// `myacr.azurecr.io` or `myacr.azurecr.io/mirror`. The mirrored images
+    /// keep their original artifact names (`squid`, `agent`, `gh-aw-mcpg`)
+    /// directly under this path.
+    pub name: crate::secure::RegistryRef,
     /// Optional per-target service connection (overrides the top-level one).
     pub service_connection: Option<crate::secure::ServiceConnection>,
 }
@@ -1016,14 +1019,14 @@ impl<'de> Deserialize<'de> for RegistryConfig {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Obj {
-            name: crate::secure::HostName,
+            name: crate::secure::RegistryRef,
             #[serde(default, rename = "service-connection")]
             service_connection: Option<crate::secure::ServiceConnection>,
         }
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum Repr {
-            Scalar(crate::secure::HostName),
+            Scalar(crate::secure::RegistryRef),
             Obj(Obj),
         }
         Ok(match Repr::deserialize(deserializer)? {
@@ -2044,6 +2047,18 @@ mod tests {
             "supply-chain:\n  registry:\n    name: myacr.azurecr.io\n    service-connection: acr-conn",
         );
         assert!(ok.validate().is_ok());
+    }
+
+    #[test]
+    fn test_supply_chain_registry_accepts_base_path() {
+        // A registry may be a host with an arbitrary namespace path; the
+        // mirrored images keep their artifact names directly under it.
+        let sc = parse_supply_chain(
+            "supply-chain:\n  registry:\n    name: myacr.azurecr.io/oss-mirror\n    service-connection: acr-conn",
+        );
+        let registry = sc.registry.as_ref().unwrap();
+        assert_eq!(registry.name.as_str(), "myacr.azurecr.io/oss-mirror");
+        assert!(sc.validate().is_ok());
     }
 
     #[test]

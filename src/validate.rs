@@ -101,6 +101,25 @@ pub fn is_valid_feed_ref(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
 }
 
+/// Validate an internal container-registry base path.
+///
+/// Accepts a registry host optionally followed by one or more path segments
+/// (e.g. `myacr.azurecr.io`, `myacr.azurecr.io/mirror`,
+/// `contoso.azurecr.io/team/oss/mirror`). Unlike a feed reference this permits
+/// more than one `/` separator, because a registry namespace can be arbitrarily
+/// deep. Allowlist is `[A-Za-z0-9._/-]`; rejects empty strings, `..` traversal,
+/// leading/trailing `/`, and `//`. The strict charset blocks shell
+/// metacharacters in case the value is interpolated into a generated step.
+pub fn is_valid_registry_ref(s: &str) -> bool {
+    !s.is_empty()
+        && !s.contains("..")
+        && !s.contains("//")
+        && !s.starts_with('/')
+        && !s.ends_with('/')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
+}
+
 /// Validate an Azure DevOps service-connection name or GUID.
 ///
 /// Connection display names legitimately contain spaces and assorted
@@ -666,6 +685,22 @@ mod tests {
         assert!(!is_valid_feed_ref("../escape"));
         assert!(!is_valid_feed_ref("has space"));
         assert!(!is_valid_feed_ref("inject;rm"));
+    }
+
+    #[test]
+    fn test_is_valid_registry_ref() {
+        assert!(is_valid_registry_ref("myacr.azurecr.io"));
+        assert!(is_valid_registry_ref("myacr.azurecr.io/mirror"));
+        assert!(is_valid_registry_ref("contoso.azurecr.io/team/oss/mirror")); // multi-segment
+        assert!(is_valid_registry_ref("localhost"));
+        assert!(!is_valid_registry_ref(""));
+        assert!(!is_valid_registry_ref("/leading"));
+        assert!(!is_valid_registry_ref("trailing/"));
+        assert!(!is_valid_registry_ref("double//slash"));
+        assert!(!is_valid_registry_ref("../escape"));
+        assert!(!is_valid_registry_ref("has space"));
+        assert!(!is_valid_registry_ref("inject;rm"));
+        assert!(!is_valid_registry_ref("host:443")); // ports not allowed
     }
 
     #[test]
