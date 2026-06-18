@@ -62,7 +62,7 @@ use super::extensions::{CompileContext, CompilerExtension, Declarations, Extensi
 use super::ir::condition::{Condition, Expr};
 use super::ir::env::EnvValue;
 use super::ir::ids::{JobId, StepId};
-use super::ir::job::{Job, Pool};
+use super::ir::job::{Job, JobVariable, Pool};
 use super::ir::output::{OutputDecl, OutputRef};
 use super::ir::step::{
     BashStep, CheckoutRepo, CheckoutStep, DownloadStep, PublishStep, Step, SubmodulesOpt, TaskStep,
@@ -909,7 +909,6 @@ fn agent_job_variables_hoist(
     front_matter: &FrontMatter,
 ) -> Result<Vec<crate::compile::ir::job::JobVariable>> {
     use crate::compile::ir::env::EnvValue;
-    use crate::compile::ir::job::JobVariable;
     use crate::compile::ir::output::OutputRef;
 
     if !front_matter.is_synthetic_pr() {
@@ -1273,7 +1272,6 @@ fi\n";
     let detection_id = prefix.id("Detection")?;
     let safeoutputs_id = prefix.id("SafeOutputs")?;
 
-    use crate::compile::ir::job::JobVariable;
     let conclusion_variables = vec![
         JobVariable {
             name: "AW_AGENT_RESULT".to_string(),
@@ -2122,6 +2120,9 @@ fn copy_logs_safeoutputs_step(engine_log_dir: &str) -> BashStep {
          # Copy agent output log from analyzed_outputs for optimisation use\n\
          cp \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)/logs/agent-output.txt\" \\\n  \
            \"$(Agent.TempDirectory)/staging/logs/agent-output.txt\" 2>/dev/null || true\n\
+         # Copy executed NDJSON manifest so the Conclusion job can read diagnostic signals\n\
+         cp \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)/safe-outputs-executed.ndjson\" \\\n  \
+           \"$(Agent.TempDirectory)/staging/safe-outputs-executed.ndjson\" 2>/dev/null || true\n\
          if [ -d \"{engine_log_dir}\" ]; then\n  \
            mkdir -p \"$(Agent.TempDirectory)/staging/logs/copilot\"\n  \
            cp -r \"{engine_log_dir}\"/* \"$(Agent.TempDirectory)/staging/logs/copilot/\" 2>/dev/null || true\n\
