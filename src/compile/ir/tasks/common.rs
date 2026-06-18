@@ -31,3 +31,33 @@ pub(crate) fn push_bool(t: &mut TaskStep, key: &str, value: Option<bool>) {
         t.inputs.insert(key.to_string(), bool_input(v).to_string());
     }
 }
+
+/// Deserialize an optional ADO bool-string input, accepting either a native
+/// YAML boolean (`true`) or the ADO-canonical string form (`"true"` /
+/// `"false"`). Used by the front-matter validation path in [`super::parse`] so
+/// authored task inputs match ADO's accepted shapes.
+pub(crate) fn de_opt_bool_flex<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum BoolOrStr {
+        Bool(bool),
+        Str(String),
+    }
+
+    match Option::<BoolOrStr>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(BoolOrStr::Bool(b)) => Ok(Some(b)),
+        Some(BoolOrStr::Str(s)) => match s.as_str() {
+            "true" => Ok(Some(true)),
+            "false" => Ok(Some(false)),
+            other => Err(serde::de::Error::custom(format!(
+                "expected a boolean or \"true\"/\"false\", got {other:?}"
+            ))),
+        },
+    }
+}

@@ -1,27 +1,44 @@
 //! Typed builder for `CopyFiles@2`.
 
-use super::common::bool_input;
+use super::common::{bool_input, de_opt_bool_flex};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Builder for a [`TaskStep`] invoking `CopyFiles@2`.
 ///
 /// Copies files matching `contents` into `target_folder`. Optional inputs are
 /// applied through the typed setters; only those that are set are emitted.
 ///
+/// Also implements [`serde::Deserialize`] keyed on ADO input names so a
+/// front-matter task `inputs:` mapping can be parsed and validated via
+/// [`super::parse`] (required inputs enforced, unknown inputs rejected).
+///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/copy-files-v2>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CopyFiles {
+    #[serde(rename = "Contents")]
     contents: String,
+    #[serde(rename = "TargetFolder")]
     target_folder: String,
+    #[serde(rename = "SourceFolder", default)]
     source_folder: Option<String>,
+    #[serde(rename = "CleanTargetFolder", default, deserialize_with = "de_opt_bool_flex")]
     clean_target_folder: Option<bool>,
+    #[serde(rename = "OverWrite", default, deserialize_with = "de_opt_bool_flex")]
     over_write: Option<bool>,
+    #[serde(rename = "flattenFolders", default, deserialize_with = "de_opt_bool_flex")]
     flatten_folders: Option<bool>,
+    #[serde(rename = "preserveTimestamp", default, deserialize_with = "de_opt_bool_flex")]
     preserve_timestamp: Option<bool>,
+    #[serde(rename = "retryCount", default)]
     retry_count: Option<String>,
+    #[serde(rename = "delayBetweenRetries", default)]
     delay_between_retries: Option<String>,
+    #[serde(rename = "ignoreMakeDirErrors", default, deserialize_with = "de_opt_bool_flex")]
     ignore_make_dir_errors: Option<bool>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 

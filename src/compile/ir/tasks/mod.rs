@@ -50,6 +50,7 @@ pub mod npm;
 pub mod npm_authenticate;
 pub mod nuget_authenticate;
 pub mod nuget_command;
+pub mod parse;
 pub mod pip_authenticate;
 pub mod powershell;
 pub mod python_script;
