@@ -86,7 +86,7 @@ pub enum Step {
 Use the typed structs whenever the compiler owns the step:
 
 - `Step::Bash` for inline bash (`BashStep::script` is the raw body, not a YAML block).
-- `Step::Task` for ADO task invocations such as `UseNode@1`, `UsePythonVersion@0`, or `UseDotNet@2`. For compiler-generated built-in tasks, prefer the typed builder structs in `src/compile/ir/tasks/` (`<task>::Builder::new(...).into_step()`) over ad-hoc `TaskStep::new(...)` calls.
+- `Step::Task` for ADO task invocations such as `UseNode@1`, `UsePythonVersion@0`, or `UseDotNet@2`. For compiler-generated built-in tasks, prefer the typed builder structs in `src/compile/ir/tasks/` (e.g. `tasks::copy_files::CopyFiles::new(...).into_step()`) over ad-hoc `TaskStep::new(...)` calls.
 - `Step::Checkout` for `checkout:` steps.
 - `Step::Download` for pipeline-artifact downloads.
 - `Step::Publish` for pipeline-artifact publishes. Under 1ES, lowering moves publish steps into `templateContext.outputs` so artifacts are published by the 1ES template machinery exactly once.

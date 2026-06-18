@@ -95,45 +95,10 @@ impl NpmInstall {
 }
 
 /// Optionals for `npm ci`.
-#[derive(Debug, Clone, Default)]
-pub struct NpmCi {
-    working_dir: Option<String>,
-    verbose: Option<bool>,
-    custom_registry: Option<NpmCustomRegistry>,
-    custom_feed: Option<String>,
-    custom_endpoint: Option<String>,
-}
-
-impl NpmCi {
-    pub fn new() -> Self {
-        Self::default()
-    }
-    /// `workingDir` — folder containing `package.json`.
-    pub fn working_dir(mut self, value: impl Into<String>) -> Self {
-        self.working_dir = Some(value.into());
-        self
-    }
-    /// `verbose` — enable verbose logging.
-    pub fn verbose(mut self, value: bool) -> Self {
-        self.verbose = Some(value);
-        self
-    }
-    /// `customRegistry` — `useNpmrc` or `useFeed`.
-    pub fn custom_registry(mut self, value: NpmCustomRegistry) -> Self {
-        self.custom_registry = Some(value);
-        self
-    }
-    /// `customFeed` — Azure Artifacts feed (when `customRegistry = useFeed`).
-    pub fn custom_feed(mut self, value: impl Into<String>) -> Self {
-        self.custom_feed = Some(value.into());
-        self
-    }
-    /// `customEndpoint` — service connection for an external registry.
-    pub fn custom_endpoint(mut self, value: impl Into<String>) -> Self {
-        self.custom_endpoint = Some(value.into());
-        self
-    }
-}
+///
+/// `ci` accepts exactly the same inputs as `install`, so it reuses
+/// [`NpmInstall`] rather than duplicating the field/setter surface.
+pub type NpmCi = NpmInstall;
 
 /// Optionals for `npm publish`.
 #[derive(Debug, Clone, Default)]
@@ -279,18 +244,7 @@ impl Npm {
         )
         .with_input("command", command);
         match self.command {
-            NpmCommand::Install(s) => {
-                push_opt(&mut t, "workingDir", s.working_dir);
-                push_bool(&mut t, "verbose", s.verbose);
-                push_opt(
-                    &mut t,
-                    "customRegistry",
-                    s.custom_registry.map(|v| v.as_ado_str().to_string()),
-                );
-                push_opt(&mut t, "customFeed", s.custom_feed);
-                push_opt(&mut t, "customEndpoint", s.custom_endpoint);
-            }
-            NpmCommand::Ci(s) => {
+            NpmCommand::Install(s) | NpmCommand::Ci(s) => {
                 push_opt(&mut t, "workingDir", s.working_dir);
                 push_bool(&mut t, "verbose", s.verbose);
                 push_opt(

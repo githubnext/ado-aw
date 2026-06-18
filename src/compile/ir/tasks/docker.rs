@@ -7,9 +7,15 @@
 //! `arguments` to a `login`) is unrepresentable. Model new command/mode-dispatch
 //! tasks (e.g. `DotNetCoreCLI@2`, `NuGetCommand@2`) after this file.
 //!
+//! `into_step` lowers each optional with the [`super::common::push_opt`] /
+//! [`super::common::push_bool`] helpers (preferred over open-coded
+//! `if let Some(v) = … { t = t.with_input(…) }` once a task has more than a
+//! couple of optionals).
+//!
 //! ADO task reference:
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/docker-v2>
 
+use super::common::push_opt;
 use crate::compile::ir::step::TaskStep;
 
 /// `Docker@2` `command` selector, carrying the per-command optional inputs.
@@ -242,65 +248,31 @@ impl Docker {
         .with_input("command", command);
         match self.command {
             DockerCommand::BuildAndPush(s) => {
-                if let Some(v) = s.container_registry {
-                    t = t.with_input("containerRegistry", v);
-                }
-                if let Some(v) = s.repository {
-                    t = t.with_input("repository", v);
-                }
-                if let Some(v) = s.dockerfile {
-                    t = t.with_input("Dockerfile", v);
-                }
-                if let Some(v) = s.build_context {
-                    t = t.with_input("buildContext", v);
-                }
-                if let Some(v) = s.tags {
-                    t = t.with_input("tags", v);
-                }
+                push_opt(&mut t, "containerRegistry", s.container_registry);
+                push_opt(&mut t, "repository", s.repository);
+                push_opt(&mut t, "Dockerfile", s.dockerfile);
+                push_opt(&mut t, "buildContext", s.build_context);
+                push_opt(&mut t, "tags", s.tags);
             }
             DockerCommand::Build(s) => {
-                if let Some(v) = s.container_registry {
-                    t = t.with_input("containerRegistry", v);
-                }
-                if let Some(v) = s.repository {
-                    t = t.with_input("repository", v);
-                }
-                if let Some(v) = s.dockerfile {
-                    t = t.with_input("Dockerfile", v);
-                }
-                if let Some(v) = s.build_context {
-                    t = t.with_input("buildContext", v);
-                }
-                if let Some(v) = s.tags {
-                    t = t.with_input("tags", v);
-                }
-                if let Some(v) = s.arguments {
-                    t = t.with_input("arguments", v);
-                }
+                push_opt(&mut t, "containerRegistry", s.container_registry);
+                push_opt(&mut t, "repository", s.repository);
+                push_opt(&mut t, "Dockerfile", s.dockerfile);
+                push_opt(&mut t, "buildContext", s.build_context);
+                push_opt(&mut t, "tags", s.tags);
+                push_opt(&mut t, "arguments", s.arguments);
             }
             DockerCommand::Push(s) => {
-                if let Some(v) = s.container_registry {
-                    t = t.with_input("containerRegistry", v);
-                }
-                if let Some(v) = s.repository {
-                    t = t.with_input("repository", v);
-                }
-                if let Some(v) = s.tags {
-                    t = t.with_input("tags", v);
-                }
-                if let Some(v) = s.arguments {
-                    t = t.with_input("arguments", v);
-                }
+                push_opt(&mut t, "containerRegistry", s.container_registry);
+                push_opt(&mut t, "repository", s.repository);
+                push_opt(&mut t, "tags", s.tags);
+                push_opt(&mut t, "arguments", s.arguments);
             }
             DockerCommand::Login(s) => {
-                if let Some(v) = s.container_registry {
-                    t = t.with_input("containerRegistry", v);
-                }
+                push_opt(&mut t, "containerRegistry", s.container_registry);
             }
             DockerCommand::Logout(s) => {
-                if let Some(v) = s.container_registry {
-                    t = t.with_input("containerRegistry", v);
-                }
+                push_opt(&mut t, "containerRegistry", s.container_registry);
             }
         }
         t

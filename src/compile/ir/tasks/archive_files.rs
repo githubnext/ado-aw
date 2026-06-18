@@ -46,6 +46,32 @@ impl TarCompression {
     }
 }
 
+/// 7-Zip compression level for [`ArchiveFiles`] (`sevenZipCompression` input,
+/// only when `archiveType = 7z`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SevenZipCompression {
+    Ultra,
+    Maximum,
+    Normal,
+    Fast,
+    Fastest,
+    None,
+}
+
+impl SevenZipCompression {
+    /// The exact token the ADO task expects.
+    pub fn as_ado_str(self) -> &'static str {
+        match self {
+            SevenZipCompression::Ultra => "ultra",
+            SevenZipCompression::Maximum => "maximum",
+            SevenZipCompression::Normal => "normal",
+            SevenZipCompression::Fast => "fast",
+            SevenZipCompression::Fastest => "fastest",
+            SevenZipCompression::None => "none",
+        }
+    }
+}
+
 /// Builder for a [`TaskStep`] invoking `ArchiveFiles@2`.
 ///
 /// Creates an archive from `root_folder_or_file` and writes it to `archive_file`.
@@ -59,7 +85,7 @@ pub struct ArchiveFiles {
     archive_type: Option<ArchiveType>,
     include_root_folder: Option<bool>,
     replace_existing_archive: Option<bool>,
-    seven_zip_compression: Option<String>,
+    seven_zip_compression: Option<SevenZipCompression>,
     tar_compression: Option<TarCompression>,
     verbose: Option<bool>,
     quiet: Option<bool>,
@@ -105,8 +131,8 @@ impl ArchiveFiles {
     }
 
     /// `sevenZipCompression` — 7z compression level (when `archiveType = 7z`).
-    pub fn seven_zip_compression(mut self, value: impl Into<String>) -> Self {
-        self.seven_zip_compression = Some(value.into());
+    pub fn seven_zip_compression(mut self, value: SevenZipCompression) -> Self {
+        self.seven_zip_compression = Some(value);
         self
     }
 
@@ -152,7 +178,7 @@ impl ArchiveFiles {
             t = t.with_input("replaceExistingArchive", bool_input(v));
         }
         if let Some(v) = self.seven_zip_compression {
-            t = t.with_input("sevenZipCompression", v);
+            t = t.with_input("sevenZipCompression", v.as_ado_str());
         }
         if let Some(v) = self.tar_compression {
             t = t.with_input("tarCompression", v.as_ado_str());
@@ -203,7 +229,11 @@ mod tests {
 
     #[test]
     fn seven_zip_token() {
-        let t = ArchiveFiles::new("src", "out.7z").archive_type(ArchiveType::SevenZip).into_step();
+        let t = ArchiveFiles::new("src", "out.7z")
+            .archive_type(ArchiveType::SevenZip)
+            .seven_zip_compression(SevenZipCompression::Ultra)
+            .into_step();
         assert_eq!(t.inputs.get("archiveType").map(String::as_str), Some("7z"));
+        assert_eq!(t.inputs.get("sevenZipCompression").map(String::as_str), Some("ultra"));
     }
 }
