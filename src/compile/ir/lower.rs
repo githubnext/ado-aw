@@ -1347,6 +1347,26 @@ mod tests {
         );
     }
 
+    /// A `Concat` of ordinary (non-runtime-expression) children lowers
+    /// cleanly — the rejection guard must not reject valid macro-form
+    /// atoms like `AdoMacro` / `PipelineVar` / `Secret` / plain literals.
+    #[test]
+    fn lower_env_value_concat_accepts_valid_children() {
+        let g = Graph::default();
+        let job = JobId::new("J").unwrap();
+        let ctx = ctx_for(&g, &job);
+        let v = EnvValue::concat(vec![
+            EnvValue::literal("prefix-"),
+            EnvValue::ado_macro("Build.BuildId").unwrap(),
+            EnvValue::pipeline_var("MyVar"),
+            EnvValue::secret("MY_SECRET"),
+        ]);
+        assert_eq!(
+            lower_env_value(&ctx, &v).unwrap(),
+            "prefix-$(Build.BuildId)$(MyVar)$(MY_SECRET)"
+        );
+    }
+
     /// A `RuntimeExpression` nested inside a `Concat` is rejected — the
     /// hoist pass only walks the top level of each step env, so a nested
     /// occurrence would emit a `$(AwRtExpr_…)` macro with no backing job
