@@ -146,6 +146,11 @@ mod tests {
             !domain_list.contains(&"github.com"),
             "blocked host must be removed even if it is in the core allowlist"
         );
+        // Exact-string removal: *.github.com is a separate entry and must survive.
+        assert!(
+            domain_list.contains(&"*.github.com"),
+            "exact-string block of 'github.com' must not remove the distinct '*.github.com' entry"
+        );
     }
 
     #[test]

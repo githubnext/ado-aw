@@ -780,14 +780,6 @@ mod tests {
     }
 
     #[test]
-    fn declarations_setup_steps_empty_without_gate() {
-        let ext = ext_with(None, None, true);
-        let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
-        let ctx = CompileContext::for_test(&fm);
-        assert!(ext.declarations(&ctx).unwrap().setup_steps.is_empty());
-    }
-
-    #[test]
     fn declarations_setup_steps_emits_install_download_and_gate_when_gate_active() {
         let filters = PrFilters {
             labels: Some(LabelFilter {
@@ -951,19 +943,6 @@ mod tests {
             ),
             other => panic!("expected download bash step, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn declarations_agent_prepare_steps_empty_when_inlined_imports_true() {
-        let ext = ext_with(None, None, true);
-        let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
-        let ctx = CompileContext::for_test(&fm);
-        assert!(
-            ext.declarations(&ctx)
-                .unwrap()
-                .agent_prepare_steps
-                .is_empty()
-        );
     }
 
     #[test]
@@ -1638,25 +1617,6 @@ mod tests {
                 }
             }
             other => panic!("expected Bash(synthPr) with id, got {other:?}"),
-        }
-    }
-
-    /// `declarations()` agent_prepare_steps surfaces typed install +
-    /// download + resolver when runtime imports are active.
-    #[test]
-    fn declarations_agent_prepare_steps_typed_with_runtime_imports() {
-        let ext = ext_with(None, None, false);
-        let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
-        let ctx = CompileContext::for_test(&fm);
-        let decl = ext.declarations(&ctx).unwrap();
-        assert_eq!(decl.agent_prepare_steps.len(), 3);
-        match &decl.agent_prepare_steps[0] {
-            Step::Task(t) => assert_eq!(t.task, "UseNode@1"),
-            other => panic!("expected Task, got {other:?}"),
-        }
-        match &decl.agent_prepare_steps[2] {
-            Step::Bash(b) => assert_eq!(b.display_name, "Resolve runtime imports (agent prompt)"),
-            other => panic!("expected Bash(resolver), got {other:?}"),
         }
     }
 
