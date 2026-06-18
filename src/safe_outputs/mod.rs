@@ -28,6 +28,13 @@ pub const ALWAYS_ON_TOOLS: &[&str] = tool_names![
 /// filtered out (the router has no route for them).
 pub const NON_MCP_SAFE_OUTPUT_KEYS: &[&str] = &[];
 
+/// Global configuration keys accepted under `safe-outputs:` that are NOT tool
+/// names — they configure cross-cutting Conclusion-job behaviour rather than
+/// registering a tool. Unlike [`NON_MCP_SAFE_OUTPUT_KEYS`], these are
+/// deliberately absent from [`ALL_KNOWN_SAFE_OUTPUTS`] (they have no tool type)
+/// and must be explicitly allowed in `validate_safe_outputs_keys`.
+pub const SAFE_OUTPUT_CONFIG_KEYS: &[&str] = &["report-failure-as-work-item"];
+
 /// Tools that are gated behind `ado-aw-debug:` front-matter sections and must
 /// NOT be exposed to a regular pipeline. The SafeOutputs MCP filter strips
 /// these even when `enabled_tools` is `None`, so they only become reachable

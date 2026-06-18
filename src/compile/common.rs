@@ -1740,7 +1740,9 @@ pub fn validate_resolve_pr_thread_statuses(front_matter: &FrontMatter) -> Result
 /// `validate_ado_aw_debug_config` with a more specific error message;
 /// this validator skips them so the operator gets that better message.
 pub fn validate_safe_outputs_keys(front_matter: &FrontMatter) -> Result<()> {
-    use crate::safe_outputs::{ALL_KNOWN_SAFE_OUTPUTS, DEBUG_ONLY_TOOLS, NON_MCP_SAFE_OUTPUT_KEYS};
+    use crate::safe_outputs::{
+        ALL_KNOWN_SAFE_OUTPUTS, DEBUG_ONLY_TOOLS, NON_MCP_SAFE_OUTPUT_KEYS, SAFE_OUTPUT_CONFIG_KEYS,
+    };
 
     let mut unknown: Vec<(String, Vec<&'static str>)> = Vec::new();
     let mut invalid_names: Vec<String> = Vec::new();
@@ -1751,6 +1753,11 @@ pub fn validate_safe_outputs_keys(front_matter: &FrontMatter) -> Result<()> {
             continue;
         }
         if NON_MCP_SAFE_OUTPUT_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        // Global config keys (e.g. `report-failure-as-work-item`) configure the
+        // Conclusion job rather than registering a tool — accept them here.
+        if SAFE_OUTPUT_CONFIG_KEYS.contains(&key.as_str()) {
             continue;
         }
         // `memory` is a known migration path — left as a warning in
@@ -4175,6 +4182,25 @@ safe-outputs:
 "#;
         let (fm, _) = parse_markdown(yaml).unwrap();
         assert!(validate_safe_outputs_keys(&fm).is_ok());
+    }
+
+    #[test]
+    fn test_validate_safe_outputs_keys_accepts_global_config_key() {
+        // `report-failure-as-work-item` is a Conclusion-job config toggle, not
+        // a tool name. It must not trigger the "unrecognised tool name" error.
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  report-failure-as-work-item: false
+  noop: {}
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        assert!(
+            validate_safe_outputs_keys(&fm).is_ok(),
+            "report-failure-as-work-item should be accepted as a global config key"
+        );
     }
 
     #[test]
