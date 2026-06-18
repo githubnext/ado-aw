@@ -402,14 +402,17 @@ function buildWorkItemConfig(
 ): WorkItemReportConfig {
   const toolConfig = config.toolConfigs[getToolConfigKey(signal.kind)];
   return {
-    enabled: config.reportFailureAsWorkItem,
-    title: toolConfig?.titlePrefix ??
-      renderTitle(
-        undefined,
-        config.pipelineName,
-        signal.kind,
-        signal.defaultTitle,
-      ),
+    // Note: `enabled` is always true here — main() returns early when
+    // reportFailureAsWorkItem is false, and per-tool opt-out is handled
+    // in fileSignal(). The field exists in WorkItemReportConfig for
+    // callers outside conclusion.js (e.g. direct wit.ts consumers).
+    enabled: true,
+    title: renderTitle(
+      toolConfig?.titlePrefix,
+      config.pipelineName,
+      signal.kind,
+      signal.defaultTitle,
+    ),
     workItemType: toolConfig?.workItemType ?? "Task",
     areaPath: toolConfig?.areaPath,
     iterationPath: toolConfig?.iterationPath,

@@ -1193,6 +1193,12 @@ fn build_conclusion_job(
 
     // Pass per-tool configs as individual flat env vars (gh-aw pattern).
     // Each field gets its own env var — avoids JSON-in-env-var corruption in ADO.
+    // Pass per-tool configs as individual flat env vars (gh-aw pattern).
+    // Each field gets its own env var — avoids JSON-in-env-var corruption in ADO.
+    //
+    // Note: pipeline_failure has no per-tool config entry — it uses hardcoded
+    // defaults (type: Task, no area/iteration path). The global
+    // report-failure-as-work-item toggle controls whether it files at all.
     for tool_key in &["noop", "missing-tool", "missing-data"] {
         if let Some(tool_config) = front_matter.safe_outputs.get(*tool_key) {
             let env_prefix = format!("AW_{}", tool_key.to_uppercase().replace('-', "_"));
@@ -1209,11 +1215,22 @@ fn build_conclusion_job(
             }
 
             if let Some(obj) = tool_config.as_object() {
+                // report-as-work-item: accept both YAML bool and string forms.
+                // serde_json::Value::to_string() on String("false") would emit
+                // "\"false\"" (JSON-encoded with quotes), which the TypeScript
+                // readBooleanEnv would reject and default to true — silently
+                // inverting the opt-out. Use as_bool()/as_str() instead.
                 if let Some(v) = obj.get("report-as-work-item") {
-                    conclusion_step = conclusion_step.with_env(
-                        format!("{env_prefix}_REPORT_AS_WORK_ITEM"),
-                        EnvValue::Literal(v.to_string()),
-                    );
+                    let bool_str = v
+                        .as_bool()
+                        .map(|b| b.to_string())
+                        .or_else(|| v.as_str().map(|s| s.to_string()));
+                    if let Some(s) = bool_str {
+                        conclusion_step = conclusion_step.with_env(
+                            format!("{env_prefix}_REPORT_AS_WORK_ITEM"),
+                            EnvValue::Literal(s),
+                        );
+                    }
                 }
                 if let Some(v) = obj.get("title-prefix").and_then(|v| v.as_str()) {
                     conclusion_step = conclusion_step
