@@ -411,6 +411,132 @@ pub fn npm_step(command: impl Into<String>) -> TaskStep {
     TaskStep::new("Npm@1", format!("npm {cmd}")).with_input("command", cmd)
 }
 
+/// Returns a [`TaskStep`] for `CmdLine@2`.
+///
+/// Runs an inline command-line script. On Linux and macOS the script
+/// is executed with Bash; on Windows it runs in `cmd.exe`. This makes
+/// `CmdLine@2` the cross-platform sibling of the `bash:` step shorthand.
+///
+/// - `script` — the inline script text to execute (required). Maps to
+///   the `script` ADO task input.
+///
+/// Optional inputs (applied via `.with_input(…)` on the returned value):
+///
+/// | Input key | Type | Default | Description |
+/// |---|---|---|---|
+/// | `workingDirectory` | string | — | Working directory in which to run the script. |
+/// | `failOnStderr` | bool string | `"false"` | Fail the step if the script writes anything to stderr. |
+///
+/// ADO task reference:
+/// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/cmd-line-v2>
+pub fn cmd_line_step(script: impl Into<String>) -> TaskStep {
+    TaskStep::new("CmdLine@2", "Command Line Script").with_input("script", script)
+}
+
+/// Returns a [`TaskStep`] for `Docker@2` in `buildAndPush` mode.
+///
+/// Builds a Docker image and pushes it to a container registry in one step.
+/// This is the most common Docker@2 use case; it combines `docker build`
+/// and `docker push` into a single pipeline step and ensures the pushed image
+/// digest matches what was built.
+///
+/// All inputs are optional at the Rust API level because the ADO task ships
+/// sensible defaults (`Dockerfile = **/Dockerfile`, `tags = $(Build.BuildId)`).
+/// Apply them with `.with_input(…)`:
+///
+/// | Input key | Type | Default | Description |
+/// |---|---|---|---|
+/// | `containerRegistry` | string | — | Docker registry service connection name. Required in practice to push to a private registry. |
+/// | `repository` | string | — | Container repository name (e.g. `"myapp"` or `"username/myapp"` for Docker Hub). |
+/// | `Dockerfile` | string | `**/Dockerfile` | Path or glob to the Dockerfile. |
+/// | `buildContext` | string | `**` | Build context path relative to the repo root. |
+/// | `tags` | string | `$(Build.BuildId)` | Newline-separated list of image tags. |
+///
+/// ADO task reference:
+/// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/docker-v2>
+pub fn docker_build_and_push_step() -> TaskStep {
+    TaskStep::new("Docker@2", "Build and Push Docker Image").with_input("command", "buildAndPush")
+}
+
+/// Returns a [`TaskStep`] for `Docker@2` in `build` mode.
+///
+/// Builds a Docker image without pushing it to a registry. Use
+/// `docker_build_and_push_step()` when you want to build and push in one
+/// step; use this when you need to run a scan or test between build and push.
+///
+/// Optional inputs (applied via `.with_input(…)` on the returned value):
+///
+/// | Input key | Type | Default | Description |
+/// |---|---|---|---|
+/// | `containerRegistry` | string | — | Docker registry service connection for authentication. |
+/// | `repository` | string | — | Image name to tag the build as. |
+/// | `Dockerfile` | string | `**/Dockerfile` | Path or glob to the Dockerfile. |
+/// | `buildContext` | string | `**` | Build context path relative to the repo root. |
+/// | `tags` | string | `$(Build.BuildId)` | Newline-separated list of image tags. |
+/// | `arguments` | string | — | Extra arguments appended to the `docker build` command. |
+///
+/// ADO task reference:
+/// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/docker-v2>
+pub fn docker_build_step() -> TaskStep {
+    TaskStep::new("Docker@2", "Build Docker Image").with_input("command", "build")
+}
+
+/// Returns a [`TaskStep`] for `Docker@2` in `push` mode.
+///
+/// Pushes a previously-built Docker image to a container registry. Use after
+/// `docker_build_step()` when the build and push need to be separate steps
+/// (e.g. to run a security scan in between).
+///
+/// Optional inputs (applied via `.with_input(…)` on the returned value):
+///
+/// | Input key | Type | Default | Description |
+/// |---|---|---|---|
+/// | `containerRegistry` | string | — | Docker registry service connection name. |
+/// | `repository` | string | — | Container repository name to push to. |
+/// | `tags` | string | `$(Build.BuildId)` | Newline-separated list of tags to push. |
+/// | `arguments` | string | — | Extra arguments appended to the `docker push` command. |
+///
+/// ADO task reference:
+/// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/docker-v2>
+pub fn docker_push_step() -> TaskStep {
+    TaskStep::new("Docker@2", "Push Docker Image").with_input("command", "push")
+}
+
+/// Returns a [`TaskStep`] for `Docker@2` in `login` mode.
+///
+/// Logs in to a Docker container registry. Pair this with
+/// `docker_logout_step()` at the end of the job. The service connection is
+/// specified via `.with_input("containerRegistry", "<service-connection>")`.
+///
+/// Optional inputs (applied via `.with_input(…)` on the returned value):
+///
+/// | Input key | Type | Default | Description |
+/// |---|---|---|---|
+/// | `containerRegistry` | string | — | Docker registry service connection name. When omitted the task logs in to Docker Hub. |
+///
+/// ADO task reference:
+/// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/docker-v2>
+pub fn docker_login_step() -> TaskStep {
+    TaskStep::new("Docker@2", "Docker Login").with_input("command", "login")
+}
+
+/// Returns a [`TaskStep`] for `Docker@2` in `logout` mode.
+///
+/// Logs out from a Docker container registry. Use after a series of Docker
+/// steps to ensure credentials are not left on the agent.
+///
+/// Optional inputs (applied via `.with_input(…)` on the returned value):
+///
+/// | Input key | Type | Default | Description |
+/// |---|---|---|---|
+/// | `containerRegistry` | string | — | Docker registry service connection name. |
+///
+/// ADO task reference:
+/// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/docker-v2>
+pub fn docker_logout_step() -> TaskStep {
+    TaskStep::new("Docker@2", "Docker Logout").with_input("command", "logout")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1023,6 +1149,53 @@ mod tests {
         );
     }
 
+    // ── CmdLine@2 ────────────────────────────────────────────────────────
+
+    #[test]
+    fn cmd_line_step_sets_task_and_required_input() {
+        let t = cmd_line_step("echo hello");
+        assert_eq!(t.task, "CmdLine@2");
+        assert_eq!(t.display_name, "Command Line Script");
+        assert_eq!(
+            t.inputs.get("script").map(|s| s.as_str()),
+            Some("echo hello")
+        );
+        // only the required input is set by default
+        assert_eq!(t.inputs.len(), 1);
+    }
+
+    #[test]
+    fn cmd_line_step_accepts_working_directory() {
+        let t = cmd_line_step("dir /b")
+            .with_input("workingDirectory", "$(Build.SourcesDirectory)");
+        assert_eq!(t.task, "CmdLine@2");
+        assert_eq!(
+            t.inputs.get("workingDirectory").map(|s| s.as_str()),
+            Some("$(Build.SourcesDirectory)")
+        );
+        assert_eq!(t.inputs.len(), 2);
+    }
+
+    #[test]
+    fn cmd_line_step_accepts_fail_on_stderr() {
+        let t = cmd_line_step("my-tool --verbose").with_input("failOnStderr", "true");
+        assert_eq!(t.task, "CmdLine@2");
+        assert_eq!(
+            t.inputs.get("failOnStderr").map(|s| s.as_str()),
+            Some("true")
+        );
+        assert_eq!(t.inputs.len(), 2);
+    }
+
+    #[test]
+    fn cmd_line_step_accepts_multiline_script() {
+        let script = "echo step 1\necho step 2\necho step 3";
+        let t = cmd_line_step(script);
+        assert_eq!(t.task, "CmdLine@2");
+        assert_eq!(t.inputs.get("script").map(|s| s.as_str()), Some(script));
+        assert_eq!(t.inputs.len(), 1);
+    }
+
     // ── PublishPipelineArtifact@1 ─────────────────────────────────────────
 
     #[test]
@@ -1241,5 +1414,178 @@ mod tests {
             Some("my-org/npm-feed")
         );
         assert_eq!(t.inputs.len(), 3);
+    }
+
+    // ── Docker@2 ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn docker_build_and_push_step_sets_task_and_command() {
+        let t = docker_build_and_push_step();
+        assert_eq!(t.task, "Docker@2");
+        assert_eq!(t.display_name, "Build and Push Docker Image");
+        assert_eq!(
+            t.inputs.get("command").map(|s| s.as_str()),
+            Some("buildAndPush")
+        );
+        // only the command input is set by default
+        assert_eq!(t.inputs.len(), 1);
+    }
+
+    #[test]
+    fn docker_build_and_push_step_accepts_registry_and_repository() {
+        let t = docker_build_and_push_step()
+            .with_input("containerRegistry", "myRegistryServiceConnection")
+            .with_input("repository", "myapp");
+        assert_eq!(t.task, "Docker@2");
+        assert_eq!(
+            t.inputs.get("containerRegistry").map(|s| s.as_str()),
+            Some("myRegistryServiceConnection")
+        );
+        assert_eq!(
+            t.inputs.get("repository").map(|s| s.as_str()),
+            Some("myapp")
+        );
+        assert_eq!(t.inputs.len(), 3);
+    }
+
+    #[test]
+    fn docker_build_and_push_step_accepts_dockerfile_and_tags() {
+        let t = docker_build_and_push_step()
+            .with_input("Dockerfile", "src/Dockerfile")
+            .with_input("buildContext", "src/")
+            .with_input("tags", "latest\n$(Build.BuildId)");
+        assert_eq!(t.task, "Docker@2");
+        assert_eq!(
+            t.inputs.get("Dockerfile").map(|s| s.as_str()),
+            Some("src/Dockerfile")
+        );
+        assert_eq!(
+            t.inputs.get("buildContext").map(|s| s.as_str()),
+            Some("src/")
+        );
+        assert_eq!(
+            t.inputs.get("tags").map(|s| s.as_str()),
+            Some("latest\n$(Build.BuildId)")
+        );
+        assert_eq!(t.inputs.len(), 4);
+    }
+
+    #[test]
+    fn docker_build_step_sets_task_and_command() {
+let t = docker_build_step();
+assert_eq!(t.task, "Docker@2");
+assert_eq!(t.display_name, "Build Docker Image");
+assert_eq!(
+    t.inputs.get("command").map(|s| s.as_str()),
+    Some("build")
+);
+assert_eq!(t.inputs.len(), 1);
+    }
+
+    #[test]
+    fn docker_build_step_accepts_optional_inputs() {
+        let t = docker_build_step()
+            .with_input("repository", "myapp")
+            .with_input("Dockerfile", "Dockerfile.prod")
+            .with_input("arguments", "--no-cache --build-arg ENV=prod");
+        assert_eq!(t.task, "Docker@2");
+        assert_eq!(
+            t.inputs.get("repository").map(|s| s.as_str()),
+            Some("myapp")
+        );
+        assert_eq!(
+            t.inputs.get("Dockerfile").map(|s| s.as_str()),
+            Some("Dockerfile.prod")
+        );
+        assert_eq!(
+            t.inputs.get("arguments").map(|s| s.as_str()),
+            Some("--no-cache --build-arg ENV=prod")
+        );
+        assert_eq!(t.inputs.len(), 4);
+    }
+
+    #[test]
+    fn docker_push_step_sets_task_and_command() {
+        let t = docker_push_step();
+        assert_eq!(t.task, "Docker@2");
+        assert_eq!(t.display_name, "Push Docker Image");
+        assert_eq!(
+            t.inputs.get("command").map(|s| s.as_str()),
+            Some("push")
+        );
+        assert_eq!(t.inputs.len(), 1);
+    }
+
+    #[test]
+    fn docker_push_step_accepts_registry_repository_and_tags() {
+        let t = docker_push_step()
+            .with_input("containerRegistry", "myRegistry")
+            .with_input("repository", "myapp")
+            .with_input("tags", "$(Build.BuildId)");
+        assert_eq!(t.task, "Docker@2");
+        assert_eq!(
+            t.inputs.get("containerRegistry").map(|s| s.as_str()),
+            Some("myRegistry")
+        );
+        assert_eq!(t.inputs.len(), 4);
+    }
+
+    #[test]
+    fn docker_login_step_sets_task_and_command() {
+        let t = docker_login_step();
+        assert_eq!(t.task, "Docker@2");
+        assert_eq!(t.display_name, "Docker Login");
+        assert_eq!(
+            t.inputs.get("command").map(|s| s.as_str()),
+            Some("login")
+        );
+        assert_eq!(t.inputs.len(), 1);
+    }
+
+    #[test]
+    fn docker_login_step_accepts_container_registry() {
+        let t = docker_login_step().with_input("containerRegistry", "myPrivateRegistry");
+        assert_eq!(t.task, "Docker@2");
+        assert_eq!(
+            t.inputs.get("containerRegistry").map(|s| s.as_str()),
+            Some("myPrivateRegistry")
+        );
+        assert_eq!(t.inputs.len(), 2);
+    }
+
+    #[test]
+    fn docker_logout_step_sets_task_and_command() {
+        let t = docker_logout_step();
+        assert_eq!(t.task, "Docker@2");
+        assert_eq!(t.display_name, "Docker Logout");
+        assert_eq!(
+            t.inputs.get("command").map(|s| s.as_str()),
+            Some("logout")
+        );
+        assert_eq!(t.inputs.len(), 1);
+    }
+
+    #[test]
+    fn docker_logout_step_accepts_container_registry() {
+        let t = docker_logout_step().with_input("containerRegistry", "myPrivateRegistry");
+        assert_eq!(t.task, "Docker@2");
+        assert_eq!(
+            t.inputs.get("containerRegistry").map(|s| s.as_str()),
+            Some("myPrivateRegistry")
+        );
+        assert_eq!(t.inputs.len(), 2);
+    }
+
+    #[test]
+    fn docker_login_and_logout_use_same_task_name() {
+        let login = docker_login_step();
+        let logout = docker_logout_step();
+        assert_eq!(login.task, logout.task);
+        assert_eq!(login.task, "Docker@2");
+        assert_ne!(
+            login.inputs.get("command"),
+            logout.inputs.get("command"),
+            "login and logout must use different command values"
+        );
     }
 }
