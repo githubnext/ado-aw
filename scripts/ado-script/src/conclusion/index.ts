@@ -370,21 +370,18 @@ function buildMissingDataReport(
   };
 }
 
-function renderTitle(
-  template: string | undefined,
+/**
+ * Build the work-item title from the per-tool title-prefix.
+ * Mirrors gh-aw's convention: `${titlePrefix} ${pipelineName}`.
+ * When no prefix is configured, returns undefined so the caller
+ * can fall back to the signal's built-in default title.
+ */
+function buildTitle(
+  titlePrefix: string | undefined,
   pipelineName: string,
-  signal: SignalKind,
-  defaultTitle: string,
 ): string | undefined {
-  if (!template) return undefined;
-  const signalLabel = signal.replaceAll("_", " ");
-  const rendered = template
-    .replaceAll("{pipeline_name}", pipelineName)
-    .replaceAll("{pipeline-name}", pipelineName)
-    .replaceAll("{pipeline}", pipelineName)
-    .replaceAll("{signal}", signalLabel)
-    .trim();
-  return rendered || defaultTitle;
+  if (!titlePrefix) return undefined;
+  return `${titlePrefix} ${pipelineName}`.trim();
 }
 
 function getToolConfigKey(kind: SignalKind): string {
@@ -407,11 +404,9 @@ function buildWorkItemConfig(
     // in fileSignal(). The field exists in WorkItemReportConfig for
     // callers outside conclusion.js (e.g. direct wit.ts consumers).
     enabled: true,
-    title: renderTitle(
+    title: buildTitle(
       toolConfig?.titlePrefix,
       config.pipelineName,
-      signal.kind,
-      signal.defaultTitle,
     ),
     workItemType: toolConfig?.workItemType ?? "Task",
     areaPath: toolConfig?.areaPath,

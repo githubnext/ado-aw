@@ -257,7 +257,7 @@ describe("conclusion/main", () => {
       "MyProject",
       expect.objectContaining({
         enabled: true,
-        title: "[ado-aw] Agent noop",
+        title: "[ado-aw] Agent noop feature reporter",
         workItemType: "Bug",
         areaPath: "MyProject\\Automation",
         tags: ["pipeline-failure", "automated"],
