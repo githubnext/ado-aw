@@ -1046,6 +1046,7 @@ fn lower_env_value(ctx: &LoweringContext<'_>, v: &EnvValue) -> Result<String> {
             // for the bug history.
             let mut out = String::new();
             for c in children {
+                reject_runtime_expr_in_concat(c)?;
                 out.push_str(&lower_env_value(ctx, c)?);
             }
             Ok(out)
@@ -1284,6 +1285,38 @@ fn s(v: impl Into<String>) -> Value {
     Value::String(v.into())
 }
 
+/// Reject an [`EnvValue::RuntimeExpression`] (or a [`EnvValue::Literal`]
+/// smuggling a `$[ ... ]` runtime expression) nested inside an
+/// [`EnvValue::Concat`].
+///
+/// `Concat` is macro-form concatenation: its children lower verbatim
+/// into the step `env:` scalar (see [`lower_env_value`]). A
+/// `RuntimeExpression` child would emit a `$(AwRtExpr_<hash>)` macro
+/// whose backing job variable is never hoisted (the hoist pass walks
+/// only the top level of each step env), and a literal `$[ ... ]` would
+/// be passed verbatim — both leaving a runtime expression that ADO does
+/// not evaluate in step env. Mirrors the `RuntimeExpression`-in-`Coalesce`
+/// rejection in [`lower_env_value_as_expr_atom`]. Nested `Concat` children
+/// are re-checked via the recursion in [`lower_env_value`].
+fn reject_runtime_expr_in_concat(v: &EnvValue) -> Result<()> {
+    match v {
+        EnvValue::RuntimeExpression(body) => anyhow::bail!(
+            "ir::lower: EnvValue::RuntimeExpression ({body:?}) is not valid inside an \
+             EnvValue::Concat. Concat lowers its children verbatim into the step env \
+             scalar, so the hoist pass never creates the backing job variable, leaving \
+             a dangling $(AwRtExpr_…) macro. Use RuntimeExpression at the top level of \
+             a step env value only."
+        ),
+        EnvValue::Literal(lit) if lit.contains("$[") => anyhow::bail!(
+            "ir::lower: EnvValue::Literal ({lit:?}) inside an EnvValue::Concat carries a \
+             `$[ ... ]` ADO runtime expression. ADO does NOT evaluate runtime expressions \
+             inside step env (the literal string is passed verbatim). Use \
+             EnvValue::RuntimeExpression at the top level of a step env value instead."
+        ),
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1311,6 +1344,72 @@ mod tests {
         assert_eq!(
             lower_env_value(&ctx, &EnvValue::runtime_expression(body)).unwrap(),
             expected
+        );
+    }
+
+    /// A `RuntimeExpression` nested inside a `Concat` is rejected — the
+    /// hoist pass only walks the top level of each step env, so a nested
+    /// occurrence would emit a `$(AwRtExpr_…)` macro with no backing job
+    /// variable (a dangling reference). Mirrors the `RuntimeExpression`
+    /// -in-`Coalesce` rejection.
+    #[test]
+    fn lower_env_value_runtime_expression_inside_concat_errors() {
+        let g = Graph::default();
+        let job = JobId::new("J").unwrap();
+        let ctx = ctx_for(&g, &job);
+        let v = EnvValue::concat(vec![
+            EnvValue::literal("prefix-"),
+            EnvValue::runtime_expression("dependencies.Agent.result"),
+        ]);
+        let err = lower_env_value(&ctx, &v).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("EnvValue::RuntimeExpression")
+                && msg.contains("not valid inside an EnvValue::Concat"),
+            "expected RuntimeExpression-in-Concat error, got: {msg}"
+        );
+    }
+
+    /// A `Literal` smuggling a `$[ ... ]` runtime expression nested inside
+    /// a `Concat` is rejected — Concat lowers children verbatim, so the
+    /// literal would survive as an unevaluated runtime expression in step
+    /// env (the same footgun the top-level guard catches).
+    #[test]
+    fn lower_env_value_dollar_bracket_literal_inside_concat_errors() {
+        let g = Graph::default();
+        let job = JobId::new("J").unwrap();
+        let ctx = ctx_for(&g, &job);
+        let v = EnvValue::concat(vec![
+            EnvValue::literal("prefix-"),
+            EnvValue::literal("$[ dependencies.Agent.result ]"),
+        ]);
+        let err = lower_env_value(&ctx, &v).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("EnvValue::Literal") && msg.contains("EnvValue::Concat"),
+            "expected $[-literal-in-Concat error, got: {msg}"
+        );
+    }
+
+    /// A `RuntimeExpression` nested inside a `Concat` inside another
+    /// `Concat` is also rejected — the recursion in `lower_env_value`
+    /// re-checks each nested level.
+    #[test]
+    fn lower_env_value_runtime_expression_inside_nested_concat_errors() {
+        let g = Graph::default();
+        let job = JobId::new("J").unwrap();
+        let ctx = ctx_for(&g, &job);
+        let v = EnvValue::concat(vec![
+            EnvValue::literal("a-"),
+            EnvValue::concat(vec![EnvValue::runtime_expression(
+                "dependencies.Agent.result",
+            )]),
+        ]);
+        let err = lower_env_value(&ctx, &v).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("not valid inside an EnvValue::Concat"),
+            "expected nested RuntimeExpression-in-Concat error, got: {msg}"
         );
     }
 
