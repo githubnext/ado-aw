@@ -1150,7 +1150,12 @@ fn build_conclusion_job(
     download_artifact.continue_on_error = true;
     steps.push(Step::Task(download_artifact));
 
-    let conclusion_script = "node /tmp/ado-aw-scripts/ado-script/conclusion.js\n";
+    let conclusion_script = "\
+if command -v node >/dev/null 2>&1; then\n  \
+  node /tmp/ado-aw-scripts/ado-script/conclusion.js\n\
+else\n  \
+  echo \"##vso[task.logissue type=warning]Node.js not available; skipping conclusion reporting\"\n\
+fi\n";
     let mut conclusion_step = bash("Report pipeline conclusion", conclusion_script);
     conclusion_step = conclusion_step.with_condition(Condition::Always);
 
@@ -1191,8 +1196,6 @@ fn build_conclusion_job(
             conclusion_step.with_env("SYSTEM_ACCESSTOKEN", EnvValue::secret("System.AccessToken"));
     }
 
-    // Pass per-tool configs as individual flat env vars (gh-aw pattern).
-    // Each field gets its own env var — avoids JSON-in-env-var corruption in ADO.
     // Pass per-tool configs as individual flat env vars (gh-aw pattern).
     // Each field gets its own env var — avoids JSON-in-env-var corruption in ADO.
     //

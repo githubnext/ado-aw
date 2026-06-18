@@ -430,7 +430,10 @@ async function fileSignal(
     return;
   }
 
-  // Per-tool opt-out: report-as-work-item: false
+  // Per-tool opt-out: report-as-work-item: false.
+  // Note: pipeline_failure has no entry in toolConfigs (intentional — matches
+  // gh-aw, which has no per-tool config for pipeline failures). When toolConfig
+  // is undefined the guard is skipped and filing proceeds normally.
   const toolConfig = config.toolConfigs[getToolConfigKey(signal.kind)];
   if (toolConfig && !toolConfig.reportAsWorkItem) {
     logInfo(`${signal.kind}: per-tool report-as-work-item is false, skipping`);
