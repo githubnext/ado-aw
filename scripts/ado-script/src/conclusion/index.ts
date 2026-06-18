@@ -35,12 +35,6 @@ interface JobStatus {
 
 interface RuntimeConfig {
   reportFailureAsWorkItem: boolean;
-  workItemTitleTemplate?: string;
-  workItemType: string;
-  areaPath?: string;
-  iterationPath?: string;
-  tags: string[];
-  includeStats: boolean;
   pipelineName: string;
   safeOutputDir?: string;
   project?: string;
@@ -100,57 +94,33 @@ function readJobResult(env: NodeJS.ProcessEnv, name: string): JobResult {
   }
 }
 
-function readTags(env: NodeJS.ProcessEnv): string[] {
-  const raw = readOptionalEnv(env, "AW_WORK_ITEM_TAGS");
-  if (!raw) return [];
-
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed) || parsed.some((value) => typeof value !== "string")) {
-      logError("AW_WORK_ITEM_TAGS must be a JSON-encoded string array");
-      return [];
-    }
-    return parsed.map((value) => value.trim()).filter((value) => value.length > 0);
-  } catch (error) {
-    logError(`Failed to parse AW_WORK_ITEM_TAGS: ${(error as Error).message}`);
-    return [];
-  }
+function parsePerToolConfigFlat(env: NodeJS.ProcessEnv, prefix: string): PerToolConfig {
+  return {
+    reportAsWorkItem: readBooleanEnv(env, `${prefix}_REPORT_AS_WORK_ITEM`, true),
+    titlePrefix: readOptionalEnv(env, `${prefix}_TITLE_PREFIX`),
+    workItemType: readOptionalEnv(env, `${prefix}_WORK_ITEM_TYPE`),
+    areaPath: readOptionalEnv(env, `${prefix}_AREA_PATH`),
+    iterationPath: readOptionalEnv(env, `${prefix}_ITERATION_PATH`),
+    tags: readTagsFromEnv(env, `${prefix}_TAGS`),
+  };
 }
 
-function parsePerToolConfig(env: NodeJS.ProcessEnv, envKey: string): PerToolConfig {
-  const defaults: PerToolConfig = { reportAsWorkItem: true };
-  const raw = readOptionalEnv(env, envKey);
-  if (!raw) return defaults;
-
+function readTagsFromEnv(env: NodeJS.ProcessEnv, key: string): string[] | undefined {
+  const raw = readOptionalEnv(env, key);
+  if (!raw) return undefined;
   try {
     const parsed: unknown = JSON.parse(raw);
-    // Handle `false` — tool entirely disabled (agent can't call it)
-    if (parsed === false) return { reportAsWorkItem: false };
-    if (!isRecord(parsed)) return defaults;
-
-    return {
-      reportAsWorkItem: parsed["report-as-work-item"] !== false,
-      titlePrefix: typeof parsed["title-prefix"] === "string" ? parsed["title-prefix"] : undefined,
-      workItemType: typeof parsed["work-item-type"] === "string" ? parsed["work-item-type"] : undefined,
-      areaPath: typeof parsed["area-path"] === "string" ? parsed["area-path"] : undefined,
-      iterationPath: typeof parsed["iteration-path"] === "string" ? parsed["iteration-path"] : undefined,
-      tags: Array.isArray(parsed["tags"]) ? (parsed["tags"] as unknown[]).filter((t): t is string => typeof t === "string") : undefined,
-    };
-  } catch (error) {
-    logWarning(`Failed to parse ${envKey}: ${(error as Error).message}`);
-    return defaults;
+    if (!Array.isArray(parsed)) return undefined;
+    return parsed.filter((v): v is string => typeof v === "string");
+  } catch {
+    logWarning(`Failed to parse ${key} as JSON array`);
+    return undefined;
   }
 }
 
 function loadConfig(env: NodeJS.ProcessEnv): RuntimeConfig {
   return {
     reportFailureAsWorkItem: readBooleanEnv(env, "AW_REPORT_FAILURE_AS_WORK_ITEM", true),
-    workItemTitleTemplate: readOptionalEnv(env, "AW_WORK_ITEM_TITLE"),
-    workItemType: readOptionalEnv(env, "AW_WORK_ITEM_TYPE") ?? "Task",
-    areaPath: readOptionalEnv(env, "AW_WORK_ITEM_AREA_PATH"),
-    iterationPath: readOptionalEnv(env, "AW_WORK_ITEM_ITERATION_PATH"),
-    tags: readTags(env),
-    includeStats: readBooleanEnv(env, "AW_INCLUDE_STATS", true),
     pipelineName: readOptionalEnv(env, "AW_PIPELINE_NAME") ?? "unknown pipeline",
     safeOutputDir: readOptionalEnv(env, "AW_SAFE_OUTPUT_DIR"),
     project: readOptionalEnv(env, "SYSTEM_TEAMPROJECT"),
@@ -162,9 +132,9 @@ function loadConfig(env: NodeJS.ProcessEnv): RuntimeConfig {
       { name: "SafeOutputs", result: readJobResult(env, "AW_SAFEOUTPUTS_RESULT") },
     ],
     toolConfigs: {
-      noop: parsePerToolConfig(env, "AW_NOOP_CONFIG"),
-      missing_tool: parsePerToolConfig(env, "AW_MISSING_TOOL_CONFIG"),
-      missing_data: parsePerToolConfig(env, "AW_MISSING_DATA_CONFIG"),
+      noop: parsePerToolConfigFlat(env, "AW_NOOP"),
+      missing_tool: parsePerToolConfigFlat(env, "AW_MISSING_TOOL"),
+      missing_data: parsePerToolConfigFlat(env, "AW_MISSING_DATA"),
     },
   };
 }
@@ -262,8 +232,6 @@ function renderList(items: readonly string[], emptyMessage: string): string {
 }
 
 function appendStats(body: string, config: RuntimeConfig, extra: readonly string[] = []): string {
-  if (!config.includeStats) return body;
-
   const lines = [
     "## Conclusion stats",
     `- Pipeline: ${config.pipelineName}`,
@@ -437,16 +405,16 @@ function buildWorkItemConfig(
     enabled: config.reportFailureAsWorkItem,
     title: toolConfig?.titlePrefix ??
       renderTitle(
-        config.workItemTitleTemplate,
+        undefined,
         config.pipelineName,
         signal.kind,
         signal.defaultTitle,
       ),
-    workItemType: toolConfig?.workItemType ?? config.workItemType,
-    areaPath: toolConfig?.areaPath ?? config.areaPath,
-    iterationPath: toolConfig?.iterationPath ?? config.iterationPath,
-    tags: toolConfig?.tags ?? config.tags,
-    includeStats: config.includeStats,
+    workItemType: toolConfig?.workItemType ?? "Task",
+    areaPath: toolConfig?.areaPath,
+    iterationPath: toolConfig?.iterationPath,
+    tags: toolConfig?.tags ?? [],
+    includeStats: true,
   };
 }
 

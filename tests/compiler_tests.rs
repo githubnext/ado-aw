@@ -1,4 +1,3 @@
-use serde_json;
 use std::fs;
 use std::path::PathBuf;
 
@@ -3276,19 +3275,14 @@ fn test_conclusion_job_emits_expected_env_vars_for_conclusion_script() {
         env.contains_key(yaml_key("SYSTEM_ACCESSTOKEN")),
         "conclusion.js step should include SYSTEM_ACCESSTOKEN"
     );
-    // Per-tool config is passed as JSON via AW_NOOP_CONFIG
-    let noop_config = env
-        .get(yaml_key("AW_NOOP_CONFIG"))
-        .and_then(|v| v.as_str())
-        .expect("AW_NOOP_CONFIG should be present");
-    let noop_json: serde_json::Value = serde_json::from_str(noop_config)
-        .expect("AW_NOOP_CONFIG should be valid JSON");
     assert_eq!(
-        noop_json.get("title-prefix").and_then(|v| v.as_str()),
+        env.get(yaml_key("AW_NOOP_TITLE_PREFIX"))
+            .and_then(|v| v.as_str()),
         Some("[ado-aw] Agent noop")
     );
     assert_eq!(
-        noop_json.get("area-path").and_then(|v| v.as_str()),
+        env.get(yaml_key("AW_NOOP_AREA_PATH"))
+            .and_then(|v| v.as_str()),
         Some(r#"TestProject\TestTeam"#)
     );
 }
