@@ -11,6 +11,16 @@
 
 use super::step::TaskStep;
 
+macro_rules! impl_into_task_step {
+    ($task_ty:ty) => {
+        impl From<$task_ty> for TaskStep {
+            fn from(value: $task_ty) -> Self {
+                value.into_step()
+            }
+        }
+    };
+}
+
 /// Returns a [`TaskStep`] for `CopyFiles@2`.
 ///
 /// Copies files matching `contents` into `target_folder`. The optional
@@ -34,10 +44,30 @@ use super::step::TaskStep;
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/copy-files-v2>
 pub fn copy_files_step(contents: impl Into<String>, target_folder: impl Into<String>) -> TaskStep {
-    TaskStep::new("CopyFiles@2", "Copy Files")
-        .with_input("Contents", contents)
-        .with_input("TargetFolder", target_folder)
+    CopyFilesTask::new(contents, target_folder).into_step()
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopyFilesTask {
+    pub contents: String,
+    pub target_folder: String,
+}
+
+impl CopyFilesTask {
+    pub fn new(contents: impl Into<String>, target_folder: impl Into<String>) -> Self {
+        Self {
+            contents: contents.into(),
+            target_folder: target_folder.into(),
+        }
+    }
+
+    pub fn into_step(self) -> TaskStep {
+        TaskStep::new("CopyFiles@2", "Copy Files")
+            .with_input("Contents", self.contents)
+            .with_input("TargetFolder", self.target_folder)
+    }
+}
+impl_into_task_step!(CopyFilesTask);
 
 /// Returns a [`TaskStep`] for `DockerInstaller@0`.
 ///
@@ -57,8 +87,27 @@ pub fn copy_files_step(contents: impl Into<String>, target_folder: impl Into<Str
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/docker-installer-v0>
 pub fn docker_installer_step(docker_version: impl Into<String>) -> TaskStep {
-    TaskStep::new("DockerInstaller@0", "Install Docker").with_input("dockerVersion", docker_version)
+    DockerInstallerTask::new(docker_version).into_step()
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DockerInstallerTask {
+    pub docker_version: String,
+}
+
+impl DockerInstallerTask {
+    pub fn new(docker_version: impl Into<String>) -> Self {
+        Self {
+            docker_version: docker_version.into(),
+        }
+    }
+
+    pub fn into_step(self) -> TaskStep {
+        TaskStep::new("DockerInstaller@0", "Install Docker")
+            .with_input("dockerVersion", self.docker_version)
+    }
+}
+impl_into_task_step!(DockerInstallerTask);
 
 /// Returns a [`TaskStep`] for `DotNetCoreCLI@2`.
 ///
@@ -88,9 +137,27 @@ pub fn docker_installer_step(docker_version: impl Into<String>) -> TaskStep {
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/dotnet-core-cli-v2>
 pub fn dot_net_core_cli_step(command: impl Into<String>) -> TaskStep {
-    let cmd: String = command.into();
-    TaskStep::new("DotNetCoreCLI@2", format!("dotnet {}", cmd)).with_input("command", cmd)
+    DotNetCoreCliTask::new(command).into_step()
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DotNetCoreCliTask {
+    pub command: String,
+}
+
+impl DotNetCoreCliTask {
+    pub fn new(command: impl Into<String>) -> Self {
+        Self {
+            command: command.into(),
+        }
+    }
+
+    pub fn into_step(self) -> TaskStep {
+        TaskStep::new("DotNetCoreCLI@2", format!("dotnet {}", self.command))
+            .with_input("command", self.command)
+    }
+}
+impl_into_task_step!(DotNetCoreCliTask);
 
 /// Returns a [`TaskStep`] for `ArchiveFiles@2`.
 ///
@@ -117,10 +184,30 @@ pub fn archive_files_step(
     root_folder_or_file: impl Into<String>,
     archive_file: impl Into<String>,
 ) -> TaskStep {
-    TaskStep::new("ArchiveFiles@2", "Archive Files")
-        .with_input("rootFolderOrFile", root_folder_or_file)
-        .with_input("archiveFile", archive_file)
+    ArchiveFilesTask::new(root_folder_or_file, archive_file).into_step()
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveFilesTask {
+    pub root_folder_or_file: String,
+    pub archive_file: String,
+}
+
+impl ArchiveFilesTask {
+    pub fn new(root_folder_or_file: impl Into<String>, archive_file: impl Into<String>) -> Self {
+        Self {
+            root_folder_or_file: root_folder_or_file.into(),
+            archive_file: archive_file.into(),
+        }
+    }
+
+    pub fn into_step(self) -> TaskStep {
+        TaskStep::new("ArchiveFiles@2", "Archive Files")
+            .with_input("rootFolderOrFile", self.root_folder_or_file)
+            .with_input("archiveFile", self.archive_file)
+    }
+}
+impl_into_task_step!(ArchiveFilesTask);
 
 /// Returns a [`TaskStep`] for `ExtractFiles@1`.
 ///
@@ -150,10 +237,33 @@ pub fn extract_files_step(
     archive_file_patterns: impl Into<String>,
     destination_folder: impl Into<String>,
 ) -> TaskStep {
-    TaskStep::new("ExtractFiles@1", "Extract Files")
-        .with_input("archiveFilePatterns", archive_file_patterns)
-        .with_input("destinationFolder", destination_folder)
+    ExtractFilesTask::new(archive_file_patterns, destination_folder).into_step()
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractFilesTask {
+    pub archive_file_patterns: String,
+    pub destination_folder: String,
+}
+
+impl ExtractFilesTask {
+    pub fn new(
+        archive_file_patterns: impl Into<String>,
+        destination_folder: impl Into<String>,
+    ) -> Self {
+        Self {
+            archive_file_patterns: archive_file_patterns.into(),
+            destination_folder: destination_folder.into(),
+        }
+    }
+
+    pub fn into_step(self) -> TaskStep {
+        TaskStep::new("ExtractFiles@1", "Extract Files")
+            .with_input("archiveFilePatterns", self.archive_file_patterns)
+            .with_input("destinationFolder", self.destination_folder)
+    }
+}
+impl_into_task_step!(ExtractFilesTask);
 
 /// Returns a [`TaskStep`] for `PublishTestResults@2`.
 ///
@@ -182,10 +292,33 @@ pub fn publish_test_results_step(
     test_results_format: impl Into<String>,
     test_results_files: impl Into<String>,
 ) -> TaskStep {
-    TaskStep::new("PublishTestResults@2", "Publish Test Results")
-        .with_input("testResultsFormat", test_results_format)
-        .with_input("testResultsFiles", test_results_files)
+    PublishTestResultsTask::new(test_results_format, test_results_files).into_step()
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishTestResultsTask {
+    pub test_results_format: String,
+    pub test_results_files: String,
+}
+
+impl PublishTestResultsTask {
+    pub fn new(
+        test_results_format: impl Into<String>,
+        test_results_files: impl Into<String>,
+    ) -> Self {
+        Self {
+            test_results_format: test_results_format.into(),
+            test_results_files: test_results_files.into(),
+        }
+    }
+
+    pub fn into_step(self) -> TaskStep {
+        TaskStep::new("PublishTestResults@2", "Publish Test Results")
+            .with_input("testResultsFormat", self.test_results_format)
+            .with_input("testResultsFiles", self.test_results_files)
+    }
+}
+impl_into_task_step!(PublishTestResultsTask);
 
 /// Returns a [`TaskStep`] for `NuGetCommand@2`.
 ///
@@ -240,9 +373,27 @@ pub fn publish_test_results_step(
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/nuget-command-v2>
 pub fn nuget_command_step(command: impl Into<String>) -> TaskStep {
-    let cmd: String = command.into();
-    TaskStep::new("NuGetCommand@2", format!("NuGet {cmd}")).with_input("command", cmd)
+    NuGetCommandTask::new(command).into_step()
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NuGetCommandTask {
+    pub command: String,
+}
+
+impl NuGetCommandTask {
+    pub fn new(command: impl Into<String>) -> Self {
+        Self {
+            command: command.into(),
+        }
+    }
+
+    pub fn into_step(self) -> TaskStep {
+        TaskStep::new("NuGetCommand@2", format!("NuGet {}", self.command))
+            .with_input("command", self.command)
+    }
+}
+impl_into_task_step!(NuGetCommandTask);
 
 /// Returns a [`TaskStep`] for `PowerShell@2` in file-path mode.
 ///
@@ -264,10 +415,28 @@ pub fn nuget_command_step(command: impl Into<String>) -> TaskStep {
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/powershell-v2>
 pub fn powershell_file_step(file_path: impl Into<String>) -> TaskStep {
-    TaskStep::new("PowerShell@2", "PowerShell Script")
-        .with_input("targetType", "filePath")
-        .with_input("filePath", file_path)
+    PowerShellFileTask::new(file_path).into_step()
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PowerShellFileTask {
+    pub file_path: String,
+}
+
+impl PowerShellFileTask {
+    pub fn new(file_path: impl Into<String>) -> Self {
+        Self {
+            file_path: file_path.into(),
+        }
+    }
+
+    pub fn into_step(self) -> TaskStep {
+        TaskStep::new("PowerShell@2", "PowerShell Script")
+            .with_input("targetType", "filePath")
+            .with_input("filePath", self.file_path)
+    }
+}
+impl_into_task_step!(PowerShellFileTask);
 
 /// Returns a [`TaskStep`] for `PowerShell@2` in inline mode.
 ///
@@ -286,10 +455,28 @@ pub fn powershell_file_step(file_path: impl Into<String>) -> TaskStep {
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/powershell-v2>
 pub fn powershell_inline_step(script: impl Into<String>) -> TaskStep {
-    TaskStep::new("PowerShell@2", "PowerShell Script")
-        .with_input("targetType", "inline")
-        .with_input("script", script)
+    PowerShellInlineTask::new(script).into_step()
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PowerShellInlineTask {
+    pub script: String,
+}
+
+impl PowerShellInlineTask {
+    pub fn new(script: impl Into<String>) -> Self {
+        Self {
+            script: script.into(),
+        }
+    }
+
+    pub fn into_step(self) -> TaskStep {
+        TaskStep::new("PowerShell@2", "PowerShell Script")
+            .with_input("targetType", "inline")
+            .with_input("script", self.script)
+    }
+}
+impl_into_task_step!(PowerShellInlineTask);
 
 /// Returns a [`TaskStep`] for `PublishPipelineArtifact@1`.
 ///
@@ -318,9 +505,27 @@ pub fn powershell_inline_step(script: impl Into<String>) -> TaskStep {
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/publish-pipeline-artifact-v1>
 pub fn publish_pipeline_artifact_step(target_path: impl Into<String>) -> TaskStep {
-    TaskStep::new("PublishPipelineArtifact@1", "Publish Pipeline Artifact")
-        .with_input("targetPath", target_path)
+    PublishPipelineArtifactTask::new(target_path).into_step()
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishPipelineArtifactTask {
+    pub target_path: String,
+}
+
+impl PublishPipelineArtifactTask {
+    pub fn new(target_path: impl Into<String>) -> Self {
+        Self {
+            target_path: target_path.into(),
+        }
+    }
+
+    pub fn into_step(self) -> TaskStep {
+        TaskStep::new("PublishPipelineArtifact@1", "Publish Pipeline Artifact")
+            .with_input("targetPath", self.target_path)
+    }
+}
+impl_into_task_step!(PublishPipelineArtifactTask);
 
 /// Returns a [`TaskStep`] for `DownloadPipelineArtifact@2`.
 ///
@@ -354,9 +559,27 @@ pub fn publish_pipeline_artifact_step(target_path: impl Into<String>) -> TaskSte
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/download-pipeline-artifact-v2>
 pub fn download_pipeline_artifact_step(target_path: impl Into<String>) -> TaskStep {
-    TaskStep::new("DownloadPipelineArtifact@2", "Download Pipeline Artifact")
-        .with_input("targetPath", target_path)
+    DownloadPipelineArtifactTask::new(target_path).into_step()
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadPipelineArtifactTask {
+    pub target_path: String,
+}
+
+impl DownloadPipelineArtifactTask {
+    pub fn new(target_path: impl Into<String>) -> Self {
+        Self {
+            target_path: target_path.into(),
+        }
+    }
+
+    pub fn into_step(self) -> TaskStep {
+        TaskStep::new("DownloadPipelineArtifact@2", "Download Pipeline Artifact")
+            .with_input("targetPath", self.target_path)
+    }
+}
+impl_into_task_step!(DownloadPipelineArtifactTask);
 
 /// Returns a [`TaskStep`] for `DeleteFiles@1`.
 ///
@@ -377,9 +600,26 @@ pub fn download_pipeline_artifact_step(target_path: impl Into<String>) -> TaskSt
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/delete-files-v1>
 pub fn delete_files_step(contents: impl Into<String>) -> TaskStep {
-    TaskStep::new("DeleteFiles@1", "Delete Files")
-        .with_input("Contents", contents)
+    DeleteFilesTask::new(contents).into_step()
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteFilesTask {
+    pub contents: String,
+}
+
+impl DeleteFilesTask {
+    pub fn new(contents: impl Into<String>) -> Self {
+        Self {
+            contents: contents.into(),
+        }
+    }
+
+    pub fn into_step(self) -> TaskStep {
+        TaskStep::new("DeleteFiles@1", "Delete Files").with_input("Contents", self.contents)
+    }
+}
+impl_into_task_step!(DeleteFilesTask);
 
 /// Returns a [`TaskStep`] for `CmdLine@2`.
 ///
@@ -400,8 +640,26 @@ pub fn delete_files_step(contents: impl Into<String>) -> TaskStep {
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/cmd-line-v2>
 pub fn cmd_line_step(script: impl Into<String>) -> TaskStep {
-    TaskStep::new("CmdLine@2", "Command Line Script").with_input("script", script)
+    CmdLineTask::new(script).into_step()
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CmdLineTask {
+    pub script: String,
+}
+
+impl CmdLineTask {
+    pub fn new(script: impl Into<String>) -> Self {
+        Self {
+            script: script.into(),
+        }
+    }
+
+    pub fn into_step(self) -> TaskStep {
+        TaskStep::new("CmdLine@2", "Command Line Script").with_input("script", self.script)
+    }
+}
+impl_into_task_step!(CmdLineTask);
 
 /// `Docker@2` command values supported by this typed helper.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1440,5 +1698,63 @@ mod tests {
         assert_eq!(from_struct.task, from_helper.task);
         assert_eq!(from_struct.display_name, from_helper.display_name);
         assert_eq!(from_struct.inputs, from_helper.inputs);
+    }
+
+    #[test]
+    fn strict_task_structs_match_helper_functions() {
+        assert_eq!(
+            CopyFilesTask::new("**/*.rs", "out").into_step().inputs,
+            copy_files_step("**/*.rs", "out").inputs
+        );
+        assert_eq!(
+            DockerInstallerTask::new("26.1.4").into_step().inputs,
+            docker_installer_step("26.1.4").inputs
+        );
+        assert_eq!(
+            DotNetCoreCliTask::new("build").into_step().inputs,
+            dot_net_core_cli_step("build").inputs
+        );
+        assert_eq!(
+            ArchiveFilesTask::new("src", "out.zip").into_step().inputs,
+            archive_files_step("src", "out.zip").inputs
+        );
+        assert_eq!(
+            ExtractFilesTask::new("**/*.zip", "out").into_step().inputs,
+            extract_files_step("**/*.zip", "out").inputs
+        );
+        assert_eq!(
+            PublishTestResultsTask::new("JUnit", "**/TEST-*.xml")
+                .into_step()
+                .inputs,
+            publish_test_results_step("JUnit", "**/TEST-*.xml").inputs
+        );
+        assert_eq!(
+            NuGetCommandTask::new("restore").into_step().inputs,
+            nuget_command_step("restore").inputs
+        );
+        assert_eq!(
+            PowerShellFileTask::new("scripts/build.ps1").into_step().inputs,
+            powershell_file_step("scripts/build.ps1").inputs
+        );
+        assert_eq!(
+            PowerShellInlineTask::new("Write-Host hi").into_step().inputs,
+            powershell_inline_step("Write-Host hi").inputs
+        );
+        assert_eq!(
+            PublishPipelineArtifactTask::new("out").into_step().inputs,
+            publish_pipeline_artifact_step("out").inputs
+        );
+        assert_eq!(
+            DownloadPipelineArtifactTask::new("out").into_step().inputs,
+            download_pipeline_artifact_step("out").inputs
+        );
+        assert_eq!(
+            DeleteFilesTask::new("**/*.tmp").into_step().inputs,
+            delete_files_step("**/*.tmp").inputs
+        );
+        assert_eq!(
+            CmdLineTask::new("echo hi").into_step().inputs,
+            cmd_line_step("echo hi").inputs
+        );
     }
 }
