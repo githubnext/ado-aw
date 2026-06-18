@@ -243,6 +243,8 @@ fn build_inline_thread_context(
         .lines()
         .nth((end_line - 1) as usize)
         .with_context(|| format!("Inline comment line {} is out of range", end_line))?;
+    // Azure DevOps threadContext offsets are 1-based, so the end offset must point
+    // one UTF-16 code unit past the final character to span the whole target line.
     let end_offset = target_line.encode_utf16().count() as i32 + 1;
 
     Ok(serde_json::json!({

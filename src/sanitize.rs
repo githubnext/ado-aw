@@ -357,16 +357,17 @@ fn collect_inline_code_ranges(
         }
 
         let tick_count = count_repeated_byte(bytes, i, end, b'`');
-        let line_end = input[i..end]
+        let inline_code_boundary = input[i..end]
             .find('\n')
             .map(|offset| i + offset)
             .unwrap_or(end);
         let mut cursor = i + tick_count;
         let mut matched_end = None;
 
-        while cursor < line_end {
+        while cursor < inline_code_boundary {
             if bytes[cursor] == b'`' {
-                let candidate_count = count_repeated_byte(bytes, cursor, line_end, b'`');
+                let candidate_count =
+                    count_repeated_byte(bytes, cursor, inline_code_boundary, b'`');
                 if candidate_count == tick_count {
                     matched_end = Some(cursor + candidate_count);
                     break;
