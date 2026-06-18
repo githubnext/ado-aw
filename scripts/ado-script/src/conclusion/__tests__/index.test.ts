@@ -267,6 +267,23 @@ describe("conclusion/main", () => {
     );
   });
 
+  it("truncates the work-item title to ADO's 255-char limit", async () => {
+    // A very long prefix + pipeline name must not exceed System.Title's cap.
+    const longPrefix = "X".repeat(300);
+    applyEnv({ AW_NOOP_TITLE_PREFIX: longPrefix });
+    setManifestEntries([{ name: "noop", context: "nothing to do" }]);
+
+    await main();
+
+    expect(fileOrAppendWorkItem).toHaveBeenCalledTimes(1);
+    const firstCall = (fileOrAppendWorkItem as ReturnType<typeof vi.fn>).mock
+      .calls[0];
+    const titleArg = (firstCall?.[1] as { title?: string } | undefined)?.title;
+    expect(titleArg).toBeDefined();
+    expect(titleArg).toHaveLength(255);
+    expect(titleArg?.startsWith("XXX")).toBe(true);
+  });
+
   it("files a missing-tool work item when the manifest contains missing_tool", async () => {
     setManifestEntries([{ name: "missing_tool", tool_name: "gh", context: "tool_name: gh" }]);
 

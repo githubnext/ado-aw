@@ -370,18 +370,29 @@ function buildMissingDataReport(
   };
 }
 
+/** Azure DevOps work-item titles (System.Title) are capped at 255 chars. */
+const MAX_WORK_ITEM_TITLE_LEN = 255;
+
 /**
  * Build the work-item title from the per-tool title-prefix.
  * Mirrors gh-aw's convention: `${titlePrefix} ${pipelineName}`.
  * When no prefix is configured, returns undefined so the caller
  * can fall back to the signal's built-in default title.
+ *
+ * The result is truncated to ADO's 255-character System.Title limit so an
+ * over-long prefix + pipeline name can't make createWorkItem throw (which
+ * fileSignal would otherwise swallow as a warning, silently dropping the
+ * work item). Truncation preserves dedup stability because the same inputs
+ * always produce the same truncated title.
  */
 function buildTitle(
   titlePrefix: string | undefined,
   pipelineName: string,
 ): string | undefined {
   if (!titlePrefix) return undefined;
-  return `${titlePrefix} ${pipelineName}`.trim();
+  const title = `${titlePrefix} ${pipelineName}`.trim();
+  if (title.length <= MAX_WORK_ITEM_TITLE_LEN) return title;
+  return title.slice(0, MAX_WORK_ITEM_TITLE_LEN);
 }
 
 function getToolConfigKey(kind: SignalKind): string {

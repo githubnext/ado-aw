@@ -150,6 +150,14 @@ export async function findWorkItemByTitle(
 ): Promise<number | null> {
   return withRetry("findWorkItemByTitle", async () => {
     const wit = await (await getWebApi()).getWorkItemTrackingApi();
+    // WIQL string-literal escaping: doubling single quotes (' -> '') is the
+    // canonical WIQL escape (analogous to SQL). The title here is operator
+    // controlled — it is composed from the `title-prefix` front-matter field
+    // plus the pipeline name, both author-controlled compile-time values, NOT
+    // raw agent output. (Agent-supplied content is sanitized in Stage 3 before
+    // it reaches the executed manifest.) The dedup title is nonetheless
+    // agent-observable, so the escape is kept as defence-in-depth against a
+    // future caller that passes less-trusted input.
     const escapedTitle = title.replaceAll("'", "''");
     const wiql: Wiql = {
       query:

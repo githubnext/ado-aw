@@ -1116,28 +1116,14 @@ fn build_conclusion_job(
 
     let mut steps: Vec<Step> = Vec::new();
 
-    steps.push(Step::Task(
-        TaskStep::new("UseNode@1", "Install Node.js 22.x").with_input("version", "22.x"),
+    // Install Node + download/verify the ado-script bundle using the canonical
+    // helper. This keeps the supply-chain mirror handling and the unzip layout
+    // (`/tmp/ado-aw-scripts/ado-script/<bundle>.js`) consistent with the
+    // Agent/Setup jobs — a hand-rolled copy here previously double-nested the
+    // unzip path and bypassed the supply-chain feed.
+    steps.extend(super::extensions::ado_script::install_and_download_steps_typed(
+        front_matter.supply_chain.as_ref(),
     ));
-
-    let download_script = format!(
-        "set -eo pipefail\n\
-         COMPILER_VERSION=\"{version}\"\n\
-         DOWNLOAD_DIR=\"/tmp/ado-aw-scripts\"\n\
-         SCRIPTS_URL=\"https://github.com/githubnext/ado-aw/releases/download/v${{COMPILER_VERSION}}/ado-script.zip\"\n\
-         CHECKSUM_URL=\"https://github.com/githubnext/ado-aw/releases/download/v${{COMPILER_VERSION}}/checksums.txt\"\n\
-         mkdir -p \"$DOWNLOAD_DIR\"\n\
-         curl -fsSL -o \"$DOWNLOAD_DIR/ado-script.zip\" \"$SCRIPTS_URL\"\n\
-         curl -fsSL -o \"$DOWNLOAD_DIR/checksums.txt\" \"$CHECKSUM_URL\"\n\
-         cd \"$DOWNLOAD_DIR\" || exit 1\n\
-         grep \"ado-script.zip\" checksums.txt | sha256sum -c -\n\
-         unzip -o ado-script.zip -d \"$DOWNLOAD_DIR/ado-script\"\n",
-        version = cfg.compiler_version,
-    );
-    steps.push(Step::Bash(bash(
-        "Download ado-script bundle",
-        download_script,
-    )));
 
     let mut download_artifact = TaskStep::new(
         "DownloadPipelineArtifact@2",
