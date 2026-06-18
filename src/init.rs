@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // The agent template is embedded from src/data/init-agent.md
 const AGENT_TEMPLATE: &str = include_str!("data/init-agent.md");
@@ -7,7 +7,49 @@ const AGENT_TEMPLATE: &str = include_str!("data/init-agent.md");
 const AGENT_DIR: &str = ".github/agents";
 const AGENT_FILENAME: &str = "ado-aw.agent.md";
 
-pub async fn run(path: Option<&std::path::Path>) -> Result<()> {
+/// Root directory (relative to the target repo) for the generated Agency /
+/// Claude Code plugin. Uses the Claude Code default project-scoped
+/// configuration directory (`.claude`).
+const AGENCY_PLUGIN_DIR: &str = ".claude";
+
+/// Files that make up the Agency plugin, following the Claude Code plugin
+/// conventions (https://code.claude.com/docs/en/plugins-reference):
+///   - `.claude-plugin/plugin.json` — plugin manifest
+///   - `.claude-plugin/marketplace.json` — marketplace so the plugin is
+///     installable straight from this dir
+///   - `agents/ado-aw.md` — dispatcher subagent
+///   - `commands/*.md` — slash commands routing to prompts
+///
+/// Each entry is `(relative path within the plugin dir, embedded template)`.
+/// `{{ compiler_version }}` placeholders are substituted at write time.
+const AGENCY_PLUGIN_FILES: &[(&str, &str)] = &[
+    (
+        ".claude-plugin/plugin.json",
+        include_str!("data/agency-plugin/.claude-plugin/plugin.json"),
+    ),
+    (
+        ".claude-plugin/marketplace.json",
+        include_str!("data/agency-plugin/.claude-plugin/marketplace.json"),
+    ),
+    (
+        "agents/ado-aw.md",
+        include_str!("data/agency-plugin/agents/ado-aw.md"),
+    ),
+    (
+        "commands/create-ado-agentic-workflow.md",
+        include_str!("data/agency-plugin/commands/create-ado-agentic-workflow.md"),
+    ),
+    (
+        "commands/update-ado-agentic-workflow.md",
+        include_str!("data/agency-plugin/commands/update-ado-agentic-workflow.md"),
+    ),
+    (
+        "commands/debug-ado-agentic-workflow.md",
+        include_str!("data/agency-plugin/commands/debug-ado-agentic-workflow.md"),
+    ),
+];
+
+pub async fn run(path: Option<&std::path::Path>, agency: bool) -> Result<()> {
     let base = path
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
@@ -33,6 +75,13 @@ pub async fn run(path: Option<&std::path::Path>) -> Result<()> {
 
     // Print success message
     println!("✓ Created {}", agent_path.display());
+
+    // `--agency` is additive: keep the standard agent file above and also emit
+    // the Agency / Claude Code plugin.
+    if agency {
+        write_agency_plugin(&base, version).await?;
+    }
+
     println!();
     println!("This agent helps you create, update, and debug Azure DevOps agentic pipelines.");
     println!("It will automatically download the ado-aw compiler and handle compilation.");
@@ -44,6 +93,32 @@ pub async fn run(path: Option<&std::path::Path>) -> Result<()> {
     println!(
         "  https://raw.githubusercontent.com/githubnext/ado-aw/v{version}/prompts/create-ado-agentic-workflow.md"
     );
+
+    Ok(())
+}
+
+/// Write the Agency / Claude Code plugin into `<base>/.claude`.
+///
+/// The plugin is additive to the standard agent file and follows the Claude
+/// Code plugin conventions, written to the Claude Code default project-scoped
+/// directory.
+async fn write_agency_plugin(base: &Path, version: &str) -> Result<()> {
+    let plugin_root = base.join(AGENCY_PLUGIN_DIR);
+
+    for (rel_path, template) in AGENCY_PLUGIN_FILES {
+        let dest = plugin_root.join(rel_path);
+        if let Some(parent) = dest.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+        }
+        let content = template.replace("{{ compiler_version }}", version);
+        tokio::fs::write(&dest, content)
+            .await
+            .with_context(|| format!("Failed to write plugin file: {}", dest.display()))?;
+    }
+
+    println!("✓ Created Agency plugin in {}", plugin_root.display());
 
     Ok(())
 }

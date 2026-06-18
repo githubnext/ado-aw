@@ -1,0 +1,18 @@
+{
+  "name": "ado-aw",
+  "owner": {
+    "name": "githubnext",
+    "url": "https://github.com/githubnext/ado-aw"
+  },
+  "metadata": {
+    "description": "Azure DevOps Agentic Pipelines (ado-aw) plugin marketplace",
+    "version": "{{ compiler_version }}"
+  },
+  "plugins": [
+    {
+      "name": "ado-aw",
+      "source": "./",
+      "description": "Create, update, and debug Azure DevOps agentic pipelines with ado-aw"
+    }
+  ]
+}
