@@ -1117,8 +1117,6 @@ fn build_conclusion_job(
 
     let mut steps: Vec<Step> = Vec::new();
 
-    steps.push(checkout_self_step());
-
     steps.push(Step::Task(
         TaskStep::new("UseNode@1", "Install Node.js 22.x").with_input("version", "22.x"),
     ));
@@ -1186,7 +1184,7 @@ fn build_conclusion_job(
     if has_write_sc {
         conclusion_step = conclusion_step.with_env(
             "SYSTEM_ACCESSTOKEN",
-            EnvValue::AdoMacro("$(SC_WRITE_TOKEN)"),
+            EnvValue::secret("SC_WRITE_TOKEN"),
         );
     } else {
         conclusion_step =
@@ -1197,13 +1195,13 @@ fn build_conclusion_job(
     // Each field gets its own env var — avoids JSON-in-env-var corruption in ADO.
     for tool_key in &["noop", "missing-tool", "missing-data"] {
         if let Some(tool_config) = front_matter.safe_outputs.get(*tool_key) {
-            let prefix = format!("AW_{}", tool_key.to_uppercase().replace('-', "_"));
+            let env_prefix = format!("AW_{}", tool_key.to_uppercase().replace('-', "_"));
 
             // Tool disabled entirely (e.g. noop: false)
             if tool_config.is_boolean() {
                 if tool_config.as_bool() == Some(false) {
                     conclusion_step = conclusion_step.with_env(
-                        format!("{prefix}_REPORT_AS_WORK_ITEM"),
+                        format!("{env_prefix}_REPORT_AS_WORK_ITEM"),
                         EnvValue::Literal("false".to_string()),
                     );
                 }
@@ -1213,27 +1211,27 @@ fn build_conclusion_job(
             if let Some(obj) = tool_config.as_object() {
                 if let Some(v) = obj.get("report-as-work-item") {
                     conclusion_step = conclusion_step.with_env(
-                        format!("{prefix}_REPORT_AS_WORK_ITEM"),
+                        format!("{env_prefix}_REPORT_AS_WORK_ITEM"),
                         EnvValue::Literal(v.to_string()),
                     );
                 }
                 if let Some(v) = obj.get("title-prefix").and_then(|v| v.as_str()) {
                     conclusion_step = conclusion_step
-                        .with_env(format!("{prefix}_TITLE_PREFIX"), EnvValue::Literal(v.to_string()));
+                        .with_env(format!("{env_prefix}_TITLE_PREFIX"), EnvValue::Literal(v.to_string()));
                 }
                 if let Some(v) = obj.get("work-item-type").and_then(|v| v.as_str()) {
                     conclusion_step = conclusion_step.with_env(
-                        format!("{prefix}_WORK_ITEM_TYPE"),
+                        format!("{env_prefix}_WORK_ITEM_TYPE"),
                         EnvValue::Literal(v.to_string()),
                     );
                 }
                 if let Some(v) = obj.get("area-path").and_then(|v| v.as_str()) {
                     conclusion_step = conclusion_step
-                        .with_env(format!("{prefix}_AREA_PATH"), EnvValue::Literal(v.to_string()));
+                        .with_env(format!("{env_prefix}_AREA_PATH"), EnvValue::Literal(v.to_string()));
                 }
                 if let Some(v) = obj.get("iteration-path").and_then(|v| v.as_str()) {
                     conclusion_step = conclusion_step.with_env(
-                        format!("{prefix}_ITERATION_PATH"),
+                        format!("{env_prefix}_ITERATION_PATH"),
                         EnvValue::Literal(v.to_string()),
                     );
                 }
@@ -1241,7 +1239,7 @@ fn build_conclusion_job(
                     let tags_json =
                         serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string());
                     conclusion_step = conclusion_step
-                        .with_env(format!("{prefix}_TAGS"), EnvValue::Literal(tags_json));
+                        .with_env(format!("{env_prefix}_TAGS"), EnvValue::Literal(tags_json));
                 }
             }
         }

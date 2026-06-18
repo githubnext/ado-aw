@@ -8,9 +8,10 @@ pipeline failures and diagnostic signals (`noop`, `missing-tool`,
 
 ## When it runs
 
-The compiler emits the Conclusion job only when `conclusion:` is present
-in front matter. The job runs with `condition: always()`, so it still
-executes regardless of upstream job outcomes.
+The compiler emits the Conclusion job whenever `safe-outputs:` is
+configured in front matter (noop is always on, so the conclusion job
+runs for every pipeline that has safe outputs). The job runs with
+`condition: always()`, regardless of upstream job outcomes.
 
 ## Pipeline shape
 
@@ -20,27 +21,54 @@ Setup → Agent → Detection → SafeOutputs → Teardown → Conclusion
                                               condition: always()
 ```
 
-## Configuration (`conclusion:`)
+## Configuration
+
+All configuration lives under `safe-outputs:` in front matter.
+
+### Global toggle
+
+```yaml
+safe-outputs:
+  report-failure-as-work-item: false   # disable all failure work-item filing
+```
+
+### Per-tool configuration
+
+Each diagnostic tool (`noop`, `missing-tool`, `missing-data`) supports
+these fields under its `safe-outputs:` entry:
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `report-failure-as-work-item` | bool | `true` | Enables work-item filing/commenting. |
-| `work-item-title` | string | _built-in per signal_ | Optional title override; supports the `{pipeline_name}` placeholder. |
-| `work-item-type` | string | `"Bug"` | Work item type to create when no open title match exists. |
-| `area-path` | string | _none_ | Optional Azure DevOps area path. |
-| `iteration-path` | string | _none_ | Optional Azure DevOps iteration path. |
+| `report-as-work-item` | bool | `true` | Per-tool opt-out for work-item filing. |
+| `title-prefix` | string | _built-in per signal_ | Prefix for the work-item title. |
+| `work-item-type` | string | `"Task"` | Work item type to create. |
+| `area-path` | string | _none_ | Azure DevOps area path. |
+| `iteration-path` | string | _none_ | Azure DevOps iteration path. |
 | `tags` | list of strings | `[]` | Static tags applied to created work items. |
-| `include-stats` | bool | `true` | Appends build/job stats to the report body. |
 
 ### Example
 
 ```yaml
-conclusion:
-  work-item-type: Bug
-  area-path: "MyProject\\MyTeam"
-  tags:
-    - pipeline-failure
-    - automated
+safe-outputs:
+  noop:
+    title-prefix: "[ado-aw] Agent noop"
+    work-item-type: Task
+    area-path: "MyProject\\MyTeam"
+    tags:
+      - agent-noop
+  missing-tool:
+    report-as-work-item: false          # don't file WIs for missing tools
+  missing-data: {}                      # use defaults
+```
+
+### Disabling a tool entirely
+
+Setting a tool to `false` prevents the agent from calling it and
+disables work-item filing:
+
+```yaml
+safe-outputs:
+  noop: false
 ```
 
 ## What gets reported
@@ -58,6 +86,10 @@ The job downloads the `safe_outputs` artifact, reads
 SafeOutputs job results, and then files or comments on Azure DevOps
 work items using `SYSTEM_ACCESSTOKEN`.
 
+Per-tool config is passed from the compiler to `conclusion.js` as
+individual flat env vars per field (e.g. `AW_NOOP_TITLE_PREFIX`,
+`AW_NOOP_AREA_PATH`), matching gh-aw's pattern.
+
 ## Deduplication
 
 Conclusion reports deduplicate by rendered work-item title. The job
@@ -71,8 +103,9 @@ post-pipeline job handles housekeeping after the main agentic flow.
 
 ## Security
 
-The Conclusion job uses `SYSTEM_ACCESSTOKEN` only inside the
-post-pipeline reporter. It works from compiler-controlled `conclusion:`
+The Conclusion job uses `SYSTEM_ACCESSTOKEN` (or `SC_WRITE_TOKEN` when
+a write service connection is configured) only inside the post-pipeline
+reporter. It works from compiler-controlled `safe-outputs:`
 configuration plus the sanitized `safe-outputs-executed.ndjson`
 execution manifest rather than giving raw agent prompt content direct
 work-item API access.
