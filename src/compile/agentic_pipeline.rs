@@ -62,14 +62,14 @@ use super::ir::ids::{JobId, StepId};
 use super::ir::job::{Job, Pool};
 use super::ir::output::{OutputDecl, OutputRef};
 use super::ir::step::{
-    BashStep, CheckoutRepo, CheckoutStep, DownloadStep, PublishStep, Step, SubmodulesOpt,
+    BashStep, CheckoutRepo, CheckoutStep, DownloadStep, PublishStep, Step, SubmodulesOpt, TaskStep,
 };
 use super::ir::tasks::docker_installer_step;
 use super::ir::{
     CiTrigger, Parameter, ParameterDefault, ParameterKind, PipelineResource, PipelineVar,
     PrTrigger, RepositoryResource, Resources, Schedule, Triggers,
 };
-use super::types::{FrontMatter, OnConfig, PrMode, Repository as RepoCfg};
+use super::types::{FrontMatter, OnConfig, PrMode, Repository as RepoCfg, SupplyChainConfig};
 
 /// Built pipeline context — the result of running every validation,
 /// scalar computation, extension declaration fanout, and canonical-
@@ -115,6 +115,9 @@ pub(crate) fn build_pipeline_context(
     common::validate_update_pr_votes(front_matter)?;
     common::validate_resolve_pr_thread_statuses(front_matter)?;
     common::validate_ado_aw_debug_config(front_matter)?;
+    if let Some(sc) = front_matter.supply_chain() {
+        sc.validate()?;
+    }
 
     let mut extension_declarations = Vec::with_capacity(extensions.len());
     for ext in extensions {
@@ -739,7 +742,15 @@ fn build_agent_job(
     push_raw_yaml_if_nonempty(&mut steps, &cfg.engine_install_steps_yaml)?;
 
     // 5. Download agentic pipeline compiler
-    steps.push(Step::Bash(download_compiler_step(&cfg.compiler_version)));
+    //    Hoist one NuGetAuthenticate@1 for the whole job when the feed mirror
+    //    is active, ahead of the compiler/AWF DownloadPackage@1 steps.
+    if let Some(auth) = feed_auth_step(front_matter.supply_chain()) {
+        steps.push(auth);
+    }
+    steps.extend(download_compiler_step(
+        &cfg.compiler_version,
+        front_matter.supply_chain(),
+    ));
 
     // 6. Integrity check (when not skipped)
     push_raw_yaml_if_nonempty(
@@ -766,10 +777,10 @@ fn build_agent_job(
     steps.push(Step::Task(docker_installer_step("26.1.4")));
 
     // 11. Download AWF
-    steps.push(Step::Bash(download_awf_step()));
+    steps.extend(download_awf_step(front_matter.supply_chain()));
 
     // 12. Pre-pull AWF + MCPG container images
-    steps.push(Step::Bash(prepull_images_step(true)));
+    steps.extend(prepull_images_step(true, front_matter.supply_chain()));
 
     // 13. Extension prepare steps (typed) + user steps (RawYaml)
     steps.extend(ext_agent_prepare.iter().cloned());
@@ -791,6 +802,7 @@ fn build_agent_job(
         &cfg.mcpg_docker_env,
         &cfg.mcpg_step_env,
         cfg.debug_pipeline,
+        front_matter.supply_chain(),
     )?));
 
     // 17. Verify MCP backends (debug-only)
@@ -937,14 +949,21 @@ fn build_detection_job(
 
     // Engine install
     push_raw_yaml_if_nonempty(&mut steps, &cfg.engine_install_steps_yaml)?;
+    // One NuGetAuthenticate@1 for the whole Detection job (feed mirror).
+    if let Some(auth) = feed_auth_step(front_matter.supply_chain()) {
+        steps.push(auth);
+    }
     // Download compiler
-    steps.push(Step::Bash(download_compiler_step(&cfg.compiler_version)));
+    steps.extend(download_compiler_step(
+        &cfg.compiler_version,
+        front_matter.supply_chain(),
+    ));
     // DockerInstaller
     steps.push(Step::Task(docker_installer_step("26.1.4")));
     // Download AWF
-    steps.push(Step::Bash(download_awf_step()));
+    steps.extend(download_awf_step(front_matter.supply_chain()));
     // Pre-pull AWF (no MCPG image for detection)
-    steps.push(Step::Bash(prepull_images_step(false)));
+    steps.extend(prepull_images_step(false, front_matter.supply_chain()));
     // Prepare safe outputs for analysis
     steps.push(Step::Bash(prepare_safe_outputs_for_analysis(
         &cfg.working_directory,
@@ -992,7 +1011,7 @@ fn build_detection_job(
 }
 
 fn build_safeoutputs_job(
-    _front_matter: &FrontMatter,
+    front_matter: &FrontMatter,
     cfg: &StandaloneCtx,
     prefix: &JobPrefix<'_>,
 ) -> Result<Job> {
@@ -1007,7 +1026,14 @@ fn build_safeoutputs_job(
         condition: None,
     }));
     // Download compiler
-    steps.push(Step::Bash(download_compiler_step(&cfg.compiler_version)));
+    //    One NuGetAuthenticate@1 for the whole SafeOutputs job (feed mirror).
+    if let Some(auth) = feed_auth_step(front_matter.supply_chain()) {
+        steps.push(auth);
+    }
+    steps.extend(download_compiler_step(
+        &cfg.compiler_version,
+        front_matter.supply_chain(),
+    ));
     // Add compiler to path
     steps.push(Step::Bash(bash(
         "Add agentic compiler to path",
@@ -1121,7 +1147,169 @@ fn checkout_self_step() -> Step {
     })
 }
 
-fn download_compiler_step(compiler_version: &str) -> BashStep {
+/// Rewrite a GHCR image reference onto an internal registry when one is
+/// configured. `base` is the GHCR path (e.g.
+/// `ghcr.io/github/gh-aw-firewall/squid`), `tag` the image tag. When
+/// `registry` is `None` the GHCR reference is returned unchanged.
+///
+/// The internal registry may have an entirely different namespace than GHCR
+/// (teams generally cannot publish under `github/...`), so only the original
+/// **artifact name** — the final path segment of `base` (`squid`, `agent`,
+/// `gh-aw-mcpg`) — is preserved directly under the configured registry base
+/// path. This is the contract: artifact names stay the same, the prefix is
+/// whatever the user provides.
+///
+/// Centralised so the pre-pull step and the `docker run` invocation in
+/// `start_mcpg_step` cannot drift on the rewritten reference.
+fn image_ref(base: &str, tag: &str, registry: Option<&str>) -> String {
+    match registry {
+        Some(reg) => {
+            let name = base.rsplit('/').next().unwrap_or(base);
+            format!("{reg}/{name}:{tag}")
+        }
+        None => format!("{base}:{tag}"),
+    }
+}
+
+/// Derive the ACR registry name (used by `az acr login --name`) from a
+/// registry base path. Takes the host portion (before the first `/`), then
+/// strips a trailing `.azurecr.io` when present; otherwise returns the portion
+/// before the first `.` (falling back to the whole host).
+///
+/// NOTE: this assumes the standard `<name>.azurecr.io` login-server hostname.
+/// For ACR accessed over Azure Private Link with a custom domain (e.g.
+/// `myacr.internal.contoso.com`), the `.split('.').next()` fallback may not
+/// yield the registry name `az acr login --name` expects — configure
+/// `registry.name` with the canonical `*.azurecr.io` login server in that case.
+fn acr_registry_name(registry_base: &str) -> &str {
+    let host = registry_base.split('/').next().unwrap_or(registry_base);
+    host.strip_suffix(".azurecr.io")
+        .or_else(|| host.split('.').next())
+        .unwrap_or(host)
+}
+
+/// `AzureCLI@2` step that runs `az acr login` against an internal registry so
+/// subsequent `docker pull` calls in the same job are authenticated. Uses the
+/// resolved registry service connection (an ARM/Azure service connection).
+/// `registry_base` is the configured registry host or base path; the ACR name
+/// is derived from its host portion.
+fn acr_login_step(registry_base: &str, connection: &str) -> TaskStep {
+    let name = acr_registry_name(registry_base);
+    TaskStep::new("AzureCLI@2", "Authenticate to internal container registry")
+        .with_input("azureSubscription", connection)
+        .with_input("scriptType", "bash")
+        .with_input("scriptLocation", "inlineScript")
+        .with_input("inlineScript", format!("az acr login --name {name}\n"))
+}
+
+/// `NuGetAuthenticate@1` step. When a service connection is resolved it is
+/// passed via `nuGetServiceConnections` (cross-org/external feeds); otherwise
+/// the task authenticates the build identity with `$(System.AccessToken)`.
+pub(crate) fn nuget_authenticate_step(connection: Option<&str>) -> TaskStep {
+    let mut step = TaskStep::new("NuGetAuthenticate@1", "Authenticate to internal feed");
+    if let Some(conn) = connection {
+        step = step.with_input("nuGetServiceConnections", conn);
+    }
+    step
+}
+
+/// `DownloadPackage@1` step pulling a single NuGet package by name+version
+/// from the internal feed into `download_path`.
+pub(crate) fn download_package_step(
+    display: impl Into<String>,
+    feed: &str,
+    package: &str,
+    version: &str,
+    download_path: &str,
+) -> TaskStep {
+    TaskStep::new("DownloadPackage@1", display)
+        .with_input("packageType", "nuget")
+        .with_input("feed", feed)
+        .with_input("definition", package)
+        .with_input("version", version)
+        .with_input("downloadPath", download_path)
+}
+
+/// Bash body that locates a payload file inside a `DownloadPackage@1` staging
+/// directory — handling both the extracted-tree and raw-`.nupkg` delivery
+/// shapes — copies it (plus `checksums.txt`) into `dest_dir`, then runs the
+/// caller-supplied verify/relocate tail. `payload` is the artifact file name
+/// (e.g. `ado-aw-linux-x64`); `tail` is appended after the files are staged in
+/// `dest_dir` (the working directory is `dest_dir`).
+///
+/// SAFETY: every parameter is interpolated verbatim into a `format!()` shell
+/// body with no escaping. All callers MUST pass compile-time-constant,
+/// trusted strings only (today: hardcoded ADO macro paths and literal payload
+/// names). Never pass user/front-matter-controlled data here — doing so would
+/// introduce shell-command injection into the generated pipeline.
+fn extract_package_payload_bash(staging: &str, dest_dir: &str, payload: &str, tail: &str) -> String {
+    format!(
+        "set -eo pipefail\n\
+         STAGING=\"{staging}\"\n\
+         DEST=\"{dest_dir}\"\n\
+         mkdir -p \"$DEST\"\n\
+         \n\
+         # DownloadPackage@1 may deliver an extracted tree or a raw .nupkg;\n\
+         # handle both by unzipping any .nupkg when the payload is absent.\n\
+         if [ -z \"$(find \"$STAGING\" -name '{payload}' -print -quit)\" ]; then\n  \
+           NUPKG=\"$(find \"$STAGING\" -name '*.nupkg' -print -quit)\"\n  \
+           if [ -n \"$NUPKG\" ]; then\n    \
+             unzip -o \"$NUPKG\" -d \"$STAGING\" >/dev/null\n  \
+           fi\n\
+         fi\n\
+         \n\
+         BIN=\"$(find \"$STAGING\" -name '{payload}' -print -quit)\"\n\
+         CHK=\"$(find \"$STAGING\" -name 'checksums.txt' -print -quit)\"\n\
+         if [ -z \"$BIN\" ] || [ -z \"$CHK\" ]; then\n  \
+           echo \"##vso[task.complete result=Failed]{payload} or checksums.txt not found in package\"\n  \
+           exit 1\n\
+         fi\n\
+         cp \"$BIN\" \"$DEST/{payload}\"\n\
+         cp \"$CHK\" \"$DEST/checksums.txt\"\n\
+         \n\
+         echo \"Verifying checksum...\"\n\
+         cd \"$DEST\" || exit 1\n\
+         grep \"{payload}\" checksums.txt | sha256sum -c -\n\
+         {tail}"
+    )
+}
+
+/// `NuGetAuthenticate@1` step to emit **once per job** when the feed mirror is
+/// active. Hoisting a single auth step (keyed on the resolved feed connection)
+/// keeps the per-artifact `DownloadPackage@1` calls authenticated without
+/// repeating the (idempotent) auth task for every binary. Returns `None` when
+/// no feed is configured.
+fn feed_auth_step(supply_chain: Option<&SupplyChainConfig>) -> Option<Step> {
+    let sc = supply_chain?;
+    sc.feed
+        .as_ref()
+        .map(|_| Step::Task(nuget_authenticate_step(sc.feed_connection())))
+}
+
+fn download_compiler_step(compiler_version: &str, supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
+    if let Some(feed) = supply_chain.and_then(|sc| sc.feed.as_ref()) {
+        let dest = "$(Pipeline.Workspace)/agentic-pipeline-compiler";
+        let staging = "$(Pipeline.Workspace)/agentic-pipeline-compiler/_pkg";
+        let tail = "mv ado-aw-linux-x64 ado-aw\n\
+                    chmod +x ado-aw\n";
+        let body = extract_package_payload_bash(staging, dest, "ado-aw-linux-x64", tail);
+        // Auth is hoisted to the job builder via `feed_auth_step` (one
+        // NuGetAuthenticate@1 per job, not per artifact).
+        return vec![
+            Step::Task(download_package_step(
+                format!("Download agentic pipeline compiler (v{compiler_version})"),
+                feed.name.as_str(),
+                "ado-aw",
+                compiler_version,
+                staging,
+            )),
+            Step::Bash(bash(
+                format!("Stage agentic pipeline compiler (v{compiler_version})"),
+                body,
+            )),
+        ];
+    }
+
     let script = format!(
         "set -eo pipefail\n\
          COMPILER_VERSION=\"{compiler_version}\"\n\
@@ -1140,10 +1328,10 @@ fn download_compiler_step(compiler_version: &str) -> BashStep {
          mv ado-aw-linux-x64 ado-aw\n\
          chmod +x ado-aw\n"
     );
-    bash(
+    vec![Step::Bash(bash(
         format!("Download agentic pipeline compiler (v{compiler_version})"),
         script,
-    )
+    ))]
 }
 
 fn substitute_integrity_check(yaml: &str, pipeline_path: &str, trigger_repo_dir: &str) -> String {
@@ -1236,7 +1424,31 @@ fn prepare_agent_prompt_step(agent_content: &str) -> Result<BashStep> {
     Ok(bash("Prepare agent prompt", script))
 }
 
-fn download_awf_step() -> BashStep {
+fn download_awf_step(supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
+    if let Some(feed) = supply_chain.and_then(|sc| sc.feed.as_ref()) {
+        let dest = "$(Pipeline.Workspace)/awf";
+        let staging = "$(Pipeline.Workspace)/awf/_pkg";
+        let tail = "mv awf-linux-x64 awf\n\
+                    chmod +x awf\n\
+                    echo \"##vso[task.prependpath]$(Pipeline.Workspace)/awf\"\n\
+                    ./awf --version\n";
+        let body = extract_package_payload_bash(staging, dest, "awf-linux-x64", tail);
+        // Auth is hoisted to the job builder via `feed_auth_step`.
+        return vec![
+            Step::Task(download_package_step(
+                format!("Download AWF (Agentic Workflow Firewall) v{AWF_VERSION}"),
+                feed.name.as_str(),
+                "awf",
+                AWF_VERSION,
+                staging,
+            )),
+            Step::Bash(bash(
+                format!("Stage AWF (Agentic Workflow Firewall) v{AWF_VERSION}"),
+                body,
+            )),
+        ];
+    }
+
     let script = format!(
         "set -eo pipefail\n\
          \n\
@@ -1258,33 +1470,55 @@ fn download_awf_step() -> BashStep {
          echo \"##vso[task.prependpath]$(Pipeline.Workspace)/awf\"\n\
          ./awf --version\n"
     );
-    bash(
+    vec![Step::Bash(bash(
         format!("Download AWF (Agentic Workflow Firewall) v{AWF_VERSION}"),
         script,
-    )
+    ))]
 }
 
-fn prepull_images_step(include_mcpg: bool) -> BashStep {
+fn prepull_images_step(include_mcpg: bool, supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
+    let registry = supply_chain.and_then(|sc| sc.registry.as_ref());
+    let registry_base = registry.map(|r| r.name.as_str());
+
+    let squid = image_ref("ghcr.io/github/gh-aw-firewall/squid", AWF_VERSION, registry_base);
+    let agent = image_ref("ghcr.io/github/gh-aw-firewall/agent", AWF_VERSION, registry_base);
+    // The local `:latest` aliases must ALWAYS carry the GHCR image names that
+    // AWF resolves by default when invoked with `--skip-pull` (run_agent_step
+    // passes no `--awf-*-image` flags). Tagging them onto the internal
+    // registry would leave AWF's expected `ghcr.io/.../{squid,agent}:latest`
+    // names absent from the local Docker cache, so the firewall containers
+    // would fail to start. Hence `None` here regardless of pull source.
+    let squid_latest = image_ref("ghcr.io/github/gh-aw-firewall/squid", "latest", None);
+    let agent_latest = image_ref("ghcr.io/github/gh-aw-firewall/agent", "latest", None);
+
     let mut script = format!(
         "set -eo pipefail\n\
          \n\
-         docker pull ghcr.io/github/gh-aw-firewall/squid:{AWF_VERSION}\n\
-         docker pull ghcr.io/github/gh-aw-firewall/agent:{AWF_VERSION}\n\
-         docker tag ghcr.io/github/gh-aw-firewall/squid:{AWF_VERSION} ghcr.io/github/gh-aw-firewall/squid:latest\n\
-         docker tag ghcr.io/github/gh-aw-firewall/agent:{AWF_VERSION} ghcr.io/github/gh-aw-firewall/agent:latest\n"
+         docker pull {squid}\n\
+         docker pull {agent}\n\
+         docker tag {squid} {squid_latest}\n\
+         docker tag {agent} {agent_latest}\n"
     );
-    if include_mcpg {
-        script.push_str(&format!("docker pull {MCPG_IMAGE}:v{MCPG_VERSION}\n"));
-        bash(
-            format!("Pre-pull AWF and MCPG container images (v{AWF_VERSION})"),
-            script,
-        )
+    let display = if include_mcpg {
+        let mcpg = image_ref(MCPG_IMAGE, &format!("v{MCPG_VERSION}"), registry_base);
+        script.push_str(&format!("docker pull {mcpg}\n"));
+        format!("Pre-pull AWF and MCPG container images (v{AWF_VERSION})")
     } else {
-        bash(
-            format!("Pre-pull AWF container images (v{AWF_VERSION})"),
-            script,
-        )
+        format!("Pre-pull AWF container images (v{AWF_VERSION})")
+    };
+
+    let mut steps = Vec::new();
+    // When using an internal registry, authenticate before pulling so the
+    // job's docker daemon (shared with the subsequent `docker run` of MCPG)
+    // can reach the registry.
+    if let (Some(base), Some(conn)) = (
+        registry_base,
+        supply_chain.and_then(|sc| sc.registry_connection()),
+    ) {
+        steps.push(Step::Task(acr_login_step(base, conn)));
     }
+    steps.push(Step::Bash(bash(display, script)));
+    steps
 }
 
 fn start_safeoutputs_server_step(enabled_tools_args: &str, working_directory: &str) -> BashStep {
@@ -1334,8 +1568,12 @@ fn start_mcpg_step(
     mcpg_docker_env: &str,
     mcpg_step_env: &str,
     debug_pipeline: bool,
+    supply_chain: Option<&SupplyChainConfig>,
 ) -> Result<BashStep> {
-    let mcpg_image_v = format!("{MCPG_IMAGE}:v{MCPG_VERSION}");
+    let registry_base = supply_chain
+        .and_then(|sc| sc.registry.as_ref())
+        .map(|r| r.name.as_str());
+    let mcpg_image_v = image_ref(MCPG_IMAGE, &format!("v{MCPG_VERSION}"), registry_base);
     // Build the docker-env block as additional `-e VAR=...` lines, one per
     // line, joined with `\n  ` (newline + 2-space continuation indent to
     // match the surrounding `-e MCP_GATEWAY_*` lines). When no extensions

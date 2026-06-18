@@ -172,6 +172,14 @@ permissions:                   # optional ADO access token configuration
                                  # Default: executor uses $(System.AccessToken).
                                  # Set this only for cross-org writes or
                                  # named-identity attribution.
+supply-chain:                  # optional internal supply-chain mirror (see docs/supply-chain.md)
+  feed:                          # mirror binaries (compiler, AWF, ado-script) from an ADO Artifacts feed
+    name: my-project/my-feed     # feed name or project/feed; scalar `feed: my-feed` shorthand also works
+    service-connection: feed-conn  # optional; omit for same-org feeds (uses $(System.AccessToken))
+  registry:                      # mirror AWF/MCPG images from an internal ACR
+    name: myacr.azurecr.io/mirror  # registry host or base path (artifact names kept under it)
+    service-connection: acr-conn   # REQUIRED when registry is set (ACR has no System.AccessToken path)
+  service-connection: shared-conn  # optional shared fallback for whichever target omits its own
 parameters:                    # optional ADO runtime parameters (surfaced in UI when queuing a run)
   - name: clearMemory
     displayName: "Clear agent memory"

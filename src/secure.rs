@@ -31,6 +31,7 @@
 //! - [`ArtifactName`] — an ADO artifact / attachment name.
 //! - [`Identifier`] — an engine agent/model identifier.
 //! - [`HostName`] — a DNS-style hostname.
+//! - [`RegistryRef`] — a container-registry host or base path.
 //! - [`Version`] — a version string (`1.2.3`, `latest`).
 //!
 //! New safe-output tools that accept paths or identifiers should type those
@@ -275,6 +276,50 @@ validated_string! {
             Ok(())
         } else {
             anyhow::bail!("{label} '{value}' must be non-empty and contain only [A-Za-z0-9._-]")
+        }
+    }
+}
+
+validated_string! {
+    /// An Azure DevOps Artifacts feed reference (`feed` or `project/feed`).
+    FeedRef, "feed", |value: &str, label: &str| {
+        if validate::is_valid_feed_ref(value) {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "{label} '{value}' must be a feed name or 'project/feed' \
+                 containing only [A-Za-z0-9._/-] (no '..', no leading/trailing '/')"
+            )
+        }
+    }
+}
+
+validated_string! {
+    /// An internal container-registry base path (host plus optional
+    /// namespace path, e.g. `myacr.azurecr.io/mirror`).
+    RegistryRef, "registry", |value: &str, label: &str| {
+        if validate::is_valid_registry_ref(value) {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "{label} '{value}' must be a registry host or base path \
+                 containing only [A-Za-z0-9._/-] (no '..', no '//', no \
+                 leading/trailing '/')"
+            )
+        }
+    }
+}
+
+validated_string! {
+    /// An Azure DevOps service-connection name or GUID.
+    ServiceConnection, "service-connection", |value: &str, label: &str| {
+        if validate::is_valid_service_connection(value) {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "{label} '{value}' must be non-empty, at most 256 characters, \
+                 and free of quotes and control characters"
+            )
         }
     }
 }
