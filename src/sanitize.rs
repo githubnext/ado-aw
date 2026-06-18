@@ -16,6 +16,7 @@
 //!   identifiers like area paths, wiki names, or assignee emails.
 
 use log::debug;
+use std::ops::Range;
 
 /// Trait for types that contain untrusted agent-generated text fields.
 ///
@@ -260,6 +261,23 @@ fn remove_xml_comments(input: &str) -> String {
 
 /// Convert HTML/XML tags to safe HTML entities (IS-06).
 fn escape_html_tags(input: &str) -> String {
+    let protected = markdown_protected_ranges(input);
+    if protected.is_empty() {
+        return escape_html_fragment(input);
+    }
+
+    let mut result = String::with_capacity(input.len());
+    let mut cursor = 0;
+    for range in protected {
+        result.push_str(&escape_html_fragment(&input[cursor..range.start]));
+        result.push_str(&input[range.start..range.end]);
+        cursor = range.end;
+    }
+    result.push_str(&escape_html_fragment(&input[cursor..]));
+    result
+}
+
+fn escape_html_fragment(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let mut rest = input;
 
@@ -279,6 +297,155 @@ fn escape_html_tags(input: &str) -> String {
     }
     result.push_str(rest);
     result
+}
+
+fn markdown_protected_ranges(input: &str) -> Vec<Range<usize>> {
+    let fence_ranges = fenced_code_ranges(input);
+    let mut ranges = Vec::new();
+    let mut cursor = 0;
+
+    for fence in &fence_ranges {
+        if cursor < fence.start {
+            collect_inline_code_ranges(input, cursor, fence.start, &mut ranges);
+        }
+        ranges.push(fence.clone());
+        cursor = fence.end;
+    }
+
+    if cursor < input.len() {
+        collect_inline_code_ranges(input, cursor, input.len(), &mut ranges);
+    }
+
+    ranges
+}
+
+fn fenced_code_ranges(input: &str) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut line_start = 0;
+
+    while line_start < input.len() {
+        let (line_end, next_line_start) = line_bounds(input, line_start);
+        let line = &input[line_start..line_end];
+
+        if let Some((marker, count)) = parse_fence_opener(line)
+            && let Some(block_end) = find_matching_fence_end(input, next_line_start, marker, count)
+        {
+            ranges.push(line_start..block_end);
+            line_start = block_end;
+            continue;
+        }
+
+        line_start = next_line_start;
+    }
+
+    ranges
+}
+
+fn collect_inline_code_ranges(
+    input: &str,
+    start: usize,
+    end: usize,
+    ranges: &mut Vec<Range<usize>>,
+) {
+    let bytes = input.as_bytes();
+    let mut i = start;
+
+    while i < end {
+        if bytes[i] != b'`' {
+            i += 1;
+            continue;
+        }
+
+        let tick_count = count_repeated_byte(bytes, i, end, b'`');
+        let line_end = input[i..end]
+            .find('\n')
+            .map(|offset| i + offset)
+            .unwrap_or(end);
+        let mut cursor = i + tick_count;
+        let mut matched_end = None;
+
+        while cursor < line_end {
+            if bytes[cursor] == b'`' {
+                let candidate_count = count_repeated_byte(bytes, cursor, line_end, b'`');
+                if candidate_count == tick_count {
+                    matched_end = Some(cursor + candidate_count);
+                    break;
+                }
+                cursor += candidate_count;
+            } else {
+                cursor += 1;
+            }
+        }
+
+        if let Some(span_end) = matched_end {
+            ranges.push(i..span_end);
+            i = span_end;
+        } else {
+            i += tick_count;
+        }
+    }
+}
+
+fn line_bounds(input: &str, line_start: usize) -> (usize, usize) {
+    let line_end = input[line_start..]
+        .find('\n')
+        .map(|offset| line_start + offset)
+        .unwrap_or(input.len());
+    let next_line_start = if line_end < input.len() {
+        line_end + 1
+    } else {
+        input.len()
+    };
+    (line_end, next_line_start)
+}
+
+fn parse_fence_opener(line: &str) -> Option<(u8, usize)> {
+    let indent = line.bytes().take_while(|b| *b == b' ').count();
+    if indent > 3 {
+        return None;
+    }
+
+    let rest = &line.as_bytes()[indent..];
+    let marker = *rest.first()?;
+    if marker != b'`' && marker != b'~' {
+        return None;
+    }
+
+    let count = rest.iter().take_while(|&&b| b == marker).count();
+    (count >= 3).then_some((marker, count))
+}
+
+fn find_matching_fence_end(
+    input: &str,
+    mut line_start: usize,
+    marker: u8,
+    min_count: usize,
+) -> Option<usize> {
+    while line_start < input.len() {
+        let (line_end, next_line_start) = line_bounds(input, line_start);
+        let line = &input[line_start..line_end];
+        let indent = line.bytes().take_while(|b| *b == b' ').count();
+
+        if indent <= 3 {
+            let rest = &line.as_bytes()[indent..];
+            let count = rest.iter().take_while(|&&b| b == marker).count();
+            if count >= min_count && rest[count..].iter().all(|b| matches!(b, b' ' | b'\t')) {
+                return Some(next_line_start);
+            }
+        }
+
+        line_start = next_line_start;
+    }
+
+    None
+}
+
+fn count_repeated_byte(bytes: &[u8], start: usize, end: usize, byte: u8) -> usize {
+    let mut count = 0;
+    while start + count < end && bytes[start + count] == byte {
+        count += 1;
+    }
+    count
 }
 
 // ── IS-07b: URL protocol sanitization ──────────────────────────────────────
@@ -584,6 +751,33 @@ mod tests {
         // were wrapped, so we assert the exact output instead.
         let input = "# Heading\n## Sub-heading\nIssue #123";
         assert_eq!(sanitize(input), input);
+    }
+
+    #[test]
+    fn test_escape_html_tags_preserves_inline_code_spans() {
+        let input = "Use `<foo>` and <b>bold</b>.";
+        assert_eq!(
+            escape_html_tags(input),
+            "Use `<foo>` and &lt;b&gt;bold&lt;/b&gt;."
+        );
+    }
+
+    #[test]
+    fn test_escape_html_tags_preserves_fenced_code_blocks() {
+        let input = "```suggestion\nif (a < b) {\n    return;\n}\n```\n<div>tail</div>";
+        assert_eq!(
+            escape_html_tags(input),
+            "```suggestion\nif (a < b) {\n    return;\n}\n```\n&lt;div&gt;tail&lt;/div&gt;"
+        );
+    }
+
+    #[test]
+    fn test_escape_html_tags_unmatched_inline_backtick_does_not_disable_escaping() {
+        let input = "Unclosed `code <b>still escaped</b>";
+        assert_eq!(
+            escape_html_tags(input),
+            "Unclosed `code &lt;b&gt;still escaped&lt;/b&gt;"
+        );
     }
 
     // ── sanitize_config tests ─────────────────────────────────────────────

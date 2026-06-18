@@ -4,6 +4,7 @@ use log::{debug, info};
 use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 use super::PATH_SEGMENT;
 use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
@@ -199,6 +200,58 @@ fn validate_file_path(path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn repository_checkout_dir(repository: &str, ctx: &ExecutionContext) -> PathBuf {
+    if repository == "self" || repository.is_empty() {
+        ctx.source_directory.clone()
+    } else {
+        ctx.source_directory.join(repository)
+    }
+}
+
+fn build_inline_thread_context(
+    repo_root: &Path,
+    file_path: &str,
+    start_line: i32,
+    end_line: i32,
+) -> anyhow::Result<serde_json::Value> {
+    ensure!(start_line > 0, "start_line must be positive");
+    ensure!(end_line > 0, "line must be positive");
+    ensure!(
+        start_line <= end_line,
+        "start_line ({start_line}) must be less than or equal to line ({end_line})"
+    );
+
+    let resolved_path = repo_root.join(file_path);
+    let canonical = resolved_path.canonicalize().with_context(|| {
+        format!(
+            "Failed to canonicalize inline comment file '{}' — file may not exist",
+            file_path
+        )
+    })?;
+    let canonical_root = repo_root
+        .canonicalize()
+        .context("Failed to canonicalize repository checkout root")?;
+    ensure!(
+        canonical.starts_with(&canonical_root),
+        "Inline comment file '{}' resolves outside the repository checkout",
+        file_path
+    );
+
+    let contents = std::fs::read_to_string(&canonical)
+        .with_context(|| format!("Failed to read inline comment file '{}'", file_path))?;
+    let target_line = contents
+        .lines()
+        .nth((end_line - 1) as usize)
+        .with_context(|| format!("Inline comment line {} is out of range", end_line))?;
+    let end_offset = target_line.encode_utf16().count() as i32 + 1;
+
+    Ok(serde_json::json!({
+        "filePath": format!("/{}", file_path),
+        "rightFileStart": { "line": start_line, "offset": 1 },
+        "rightFileEnd": { "line": end_line, "offset": end_offset }
+    }))
+}
+
 #[async_trait::async_trait]
 impl Executor for AddPrCommentResult {
     fn dry_run_summary(&self) -> String {
@@ -334,11 +387,16 @@ impl Executor for AddPrCommentResult {
         if let Some(ref fp) = self.file_path {
             let end_line = self.line.unwrap_or(1);
             let start_line = self.start_line.unwrap_or(end_line);
-            thread_body["threadContext"] = serde_json::json!({
-                "filePath": format!("/{}", fp),
-                "rightFileStart": { "line": start_line, "offset": 1 },
-                "rightFileEnd": { "line": end_line, "offset": 1 }
-            });
+            let repo_root = repository_checkout_dir(&self.repository, ctx);
+            match build_inline_thread_context(&repo_root, fp, start_line, end_line) {
+                Ok(thread_context) => thread_body["threadContext"] = thread_context,
+                Err(err) => {
+                    return Ok(ExecutionResult::failure(format!(
+                        "Failed to anchor inline comment for '{}': {}",
+                        fp, err
+                    )));
+                }
+            }
         }
 
         let client = reqwest::Client::new();
@@ -398,6 +456,7 @@ impl Executor for AddPrCommentResult {
 mod tests {
     use super::*;
     use crate::safeoutputs::ToolResult;
+    use tempfile::tempdir;
 
     #[test]
     fn test_result_has_correct_name() {
@@ -663,5 +722,36 @@ allowed-statuses:
             "repository pipeline command should be neutralized with backticks: {}",
             result.repository
         );
+    }
+
+    #[test]
+    fn test_build_inline_thread_context_uses_utf16_end_offset() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("suggestion.rs"), "prefix\nab😀\n").unwrap();
+
+        let thread_context =
+            build_inline_thread_context(dir.path(), "suggestion.rs", 2, 2).unwrap();
+
+        assert_eq!(thread_context["rightFileStart"]["line"], 2);
+        assert_eq!(thread_context["rightFileStart"]["offset"], 1);
+        assert_eq!(thread_context["rightFileEnd"]["line"], 2);
+        assert_eq!(thread_context["rightFileEnd"]["offset"], 5);
+    }
+
+    #[test]
+    fn test_build_inline_thread_context_uses_last_line_for_multiline_span() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("suggestion.rs"),
+            "first line\nab😀\nthird\n",
+        )
+        .unwrap();
+
+        let thread_context =
+            build_inline_thread_context(dir.path(), "suggestion.rs", 1, 2).unwrap();
+
+        assert_eq!(thread_context["rightFileStart"]["line"], 1);
+        assert_eq!(thread_context["rightFileEnd"]["line"], 2);
+        assert_eq!(thread_context["rightFileEnd"]["offset"], 5);
     }
 }
