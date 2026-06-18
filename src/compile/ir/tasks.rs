@@ -381,6 +381,28 @@ pub fn delete_files_step(contents: impl Into<String>) -> TaskStep {
         .with_input("Contents", contents)
 }
 
+/// Returns a [`TaskStep`] for `CmdLine@2`.
+///
+/// Runs an inline command-line script. On Linux and macOS the script
+/// is executed with Bash; on Windows it runs in `cmd.exe`. This makes
+/// `CmdLine@2` the cross-platform sibling of the `bash:` step shorthand.
+///
+/// - `script` — the inline script text to execute (required). Maps to
+///   the `script` ADO task input.
+///
+/// Optional inputs (applied via `.with_input(…)` on the returned value):
+///
+/// | Input key | Type | Default | Description |
+/// |---|---|---|---|
+/// | `workingDirectory` | string | — | Working directory in which to run the script. |
+/// | `failOnStderr` | bool string | `"false"` | Fail the step if the script writes anything to stderr. |
+///
+/// ADO task reference:
+/// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/cmd-line-v2>
+pub fn cmd_line_step(script: impl Into<String>) -> TaskStep {
+    TaskStep::new("CmdLine@2", "Command Line Script").with_input("script", script)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -991,6 +1013,53 @@ mod tests {
             t.inputs.get("Contents").map(|s| s.as_str()),
             Some("**/*.tmp\n**/*.log\ndist/")
         );
+    }
+
+    // ── CmdLine@2 ────────────────────────────────────────────────────────
+
+    #[test]
+    fn cmd_line_step_sets_task_and_required_input() {
+        let t = cmd_line_step("echo hello");
+        assert_eq!(t.task, "CmdLine@2");
+        assert_eq!(t.display_name, "Command Line Script");
+        assert_eq!(
+            t.inputs.get("script").map(|s| s.as_str()),
+            Some("echo hello")
+        );
+        // only the required input is set by default
+        assert_eq!(t.inputs.len(), 1);
+    }
+
+    #[test]
+    fn cmd_line_step_accepts_working_directory() {
+        let t = cmd_line_step("dir /b")
+            .with_input("workingDirectory", "$(Build.SourcesDirectory)");
+        assert_eq!(t.task, "CmdLine@2");
+        assert_eq!(
+            t.inputs.get("workingDirectory").map(|s| s.as_str()),
+            Some("$(Build.SourcesDirectory)")
+        );
+        assert_eq!(t.inputs.len(), 2);
+    }
+
+    #[test]
+    fn cmd_line_step_accepts_fail_on_stderr() {
+        let t = cmd_line_step("my-tool --verbose").with_input("failOnStderr", "true");
+        assert_eq!(t.task, "CmdLine@2");
+        assert_eq!(
+            t.inputs.get("failOnStderr").map(|s| s.as_str()),
+            Some("true")
+        );
+        assert_eq!(t.inputs.len(), 2);
+    }
+
+    #[test]
+    fn cmd_line_step_accepts_multiline_script() {
+        let script = "echo step 1\necho step 2\necho step 3";
+        let t = cmd_line_step(script);
+        assert_eq!(t.task, "CmdLine@2");
+        assert_eq!(t.inputs.get("script").map(|s| s.as_str()), Some(script));
+        assert_eq!(t.inputs.len(), 1);
     }
 
     // ── PublishPipelineArtifact@1 ─────────────────────────────────────────
