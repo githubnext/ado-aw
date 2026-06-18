@@ -64,7 +64,7 @@ use super::ir::output::{OutputDecl, OutputRef};
 use super::ir::step::{
     BashStep, CheckoutRepo, CheckoutStep, DownloadStep, PublishStep, Step, SubmodulesOpt, TaskStep,
 };
-use super::ir::tasks::docker_installer_step;
+use super::ir::tasks::docker_installer::DockerInstaller;
 use super::ir::{
     CiTrigger, Parameter, ParameterDefault, ParameterKind, PipelineResource, PipelineVar,
     PrTrigger, RepositoryResource, Resources, Schedule, Triggers,
@@ -774,7 +774,7 @@ fn build_agent_job(
     )?));
 
     // 10. DockerInstaller@0
-    steps.push(Step::Task(docker_installer_step("26.1.4")));
+    steps.push(Step::Task(DockerInstaller::new("26.1.4").into_step()));
 
     // 11. Download AWF
     steps.extend(download_awf_step(front_matter.supply_chain()));
@@ -959,7 +959,7 @@ fn build_detection_job(
         front_matter.supply_chain(),
     ));
     // DockerInstaller
-    steps.push(Step::Task(docker_installer_step("26.1.4")));
+    steps.push(Step::Task(DockerInstaller::new("26.1.4").into_step()));
     // Download AWF
     steps.extend(download_awf_step(front_matter.supply_chain()));
     // Pre-pull AWF (no MCPG image for detection)

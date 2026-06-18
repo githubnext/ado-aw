@@ -19,7 +19,7 @@ Those wrappers are the only place per-target shape (top-level `PipelineShape`, t
 
 - `ids.rs` — typed `StageId`, `JobId`, and `StepId` newtypes. Constructors validate the ADO identifier grammar (`^[A-Za-z_][A-Za-z0-9_]*$`) so invalid names fail at compile time.
 - `step.rs` — `Step` and concrete step structs: `BashStep`, `TaskStep`, `CheckoutStep`, `DownloadStep`, and `PublishStep`.
-- `tasks.rs` — typed factory helpers for built-in ADO tasks that return preconfigured `TaskStep` values with required inputs set. Prefer extending these helpers for compiler-generated tasks rather than open-coding `TaskStep::new(...)` with raw string keys at each call site.
+- `tasks/` — typed **builder structs** for built-in ADO tasks (one submodule per task). Each builder exposes `new(<required>)`, typed chained setters for optional inputs (enums for constrained values, `bool` for bool-string inputs), and `into_step() -> TaskStep`; only set fields are emitted. Command/mode-dispatch tasks (`Docker@2`, `DotNetCoreCLI@2`, `NuGetCommand@2`, `PowerShell@2`) use a command enum with per-variant data so invalid input/command combos are unrepresentable (`tasks/docker.rs` is the canonical template). Prefer these builders for compiler-generated tasks rather than open-coding `TaskStep::new(...)` with raw string keys at each call site.
 - `job.rs` — `Job`, `Pool`, job variables, 1ES `templateContext` support, and target-job external `dependsOn` / `condition` wrapping.
 - `stage.rs` — `Stage` plus target-stage external `dependsOn` / `condition` wrapping.
 - `env.rs` — typed environment values (`EnvValue`) including ADO macros, pipeline variables, secrets, `OutputRef`s, `Coalesce`, macro-form `Concat`, and `RuntimeExpression` (a `$[ ... ]` ADO runtime expression that the lowering pass auto-hoists to a job-level `variables:` entry — ADO does not evaluate `$[ ... ]` inside step `env:`). `RuntimeExpression` is only valid at the top level of a step `env:` value: nesting it inside `Concat` or `Coalesce` is rejected at lower time (the hoist pass walks only the top level, so a nested occurrence would emit a dangling `$(AwRtExpr_…)` macro). A `Literal` or `RawYamlScalar(String)` smuggling a raw `$[ ... ]` into a step `env:` value (whether at the top level or nested inside a `Concat`) is likewise rejected at lower time — ADO passes such scalars verbatim, so the typed `RuntimeExpression` variant must be used instead.
@@ -86,7 +86,7 @@ pub enum Step {
 Use the typed structs whenever the compiler owns the step:
 
 - `Step::Bash` for inline bash (`BashStep::script` is the raw body, not a YAML block).
-- `Step::Task` for ADO task invocations such as `UseNode@1`, `UsePythonVersion@0`, or `UseDotNet@2`. For compiler-generated built-in tasks, prefer `src/compile/ir/tasks.rs` factory helpers over ad-hoc `TaskStep::new(...)` calls.
+- `Step::Task` for ADO task invocations such as `UseNode@1`, `UsePythonVersion@0`, or `UseDotNet@2`. For compiler-generated built-in tasks, prefer the typed builder structs in `src/compile/ir/tasks/` (e.g. `tasks::copy_files::CopyFiles::new(...).into_step()`) over ad-hoc `TaskStep::new(...)` calls.
 - `Step::Checkout` for `checkout:` steps.
 - `Step::Download` for pipeline-artifact downloads.
 - `Step::Publish` for pipeline-artifact publishes. Under 1ES, lowering moves publish steps into `templateContext.outputs` so artifacts are published by the 1ES template machinery exactly once.
