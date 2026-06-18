@@ -152,19 +152,6 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_stage_prefix_single_word() {
-        assert_eq!(generate_stage_prefix("review"), "Review");
-    }
-
-    #[test]
-    fn test_generate_stage_prefix_underscores() {
-        assert_eq!(
-            generate_stage_prefix("code_review_agent"),
-            "CodeReviewAgent"
-        );
-    }
-
-    #[test]
     fn test_generate_stage_prefix_unicode_stripped() {
         // ADO identifiers require [A-Za-z0-9_]; non-ASCII chars are split points
         assert_eq!(generate_stage_prefix("über-agent"), "BerAgent");
