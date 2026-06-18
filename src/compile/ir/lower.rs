@@ -1260,17 +1260,27 @@ fn collect_runtime_expr_hoists(steps: &[Step]) -> Vec<crate::compile::ir::job::J
     out
 }
 
-/// Reject an [`EnvValue::Literal`] that smuggles a `$[ ... ]` ADO
-/// runtime expression into a step `env:` value. ADO evaluates these
-/// only in job-level `variables:` and `condition:` fields, so a literal
-/// here would be passed verbatim — use [`EnvValue::RuntimeExpression`]
-/// (which hoists to a job variable) instead.
+/// Reject an [`EnvValue::Literal`] (or an [`EnvValue::RawYamlScalar`]
+/// wrapping a string) that smuggles a `$[ ... ]` ADO runtime expression
+/// into a step `env:` value. ADO evaluates these only in job-level
+/// `variables:` and `condition:` fields, so a literal here would be
+/// passed verbatim — use [`EnvValue::RuntimeExpression`] (which hoists to
+/// a job variable) instead.
+///
+/// `RawYamlScalar` bypasses string lowering (its inner value is inserted
+/// into the env mapping directly), so a `RawYamlScalar(Value::String("$[ ... ]"))`
+/// would otherwise slip past the `Literal` check — this guard covers both.
 fn reject_runtime_expr_literal_in_step_env(key: &str, v: &EnvValue) -> Result<()> {
-    if let EnvValue::Literal(lit) = v
+    let raw_str = match v {
+        EnvValue::Literal(lit) => Some(lit.as_str()),
+        EnvValue::RawYamlScalar(Value::String(lit)) => Some(lit.as_str()),
+        _ => None,
+    };
+    if let Some(lit) = raw_str
         && lit.contains("$[")
     {
         anyhow::bail!(
-            "ir::lower: step env var {key:?} is an EnvValue::Literal carrying a \
+            "ir::lower: step env var {key:?} is a literal scalar carrying a \
              `$[ ... ]` ADO runtime expression ({lit:?}). ADO does NOT evaluate runtime \
              expressions inside step env (the literal string is passed verbatim — \
              msazuresphere/4x4 build #612528, githubnext/ado-aw#1076). Use \
@@ -1538,6 +1548,81 @@ mod tests {
         assert!(
             msg.contains("EnvValue::RuntimeExpression"),
             "error must point to the RuntimeExpression variant; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn lower_bash_rejects_dollar_bracket_raw_yaml_scalar_in_step_env() {
+        // A RawYamlScalar wrapping a `$[ ... ]` string bypasses string
+        // lowering (its inner value is inserted verbatim), so it must be
+        // caught by the same guard as a plain Literal.
+        let step = Step::Bash(BashStep::new("Bad", "echo hi").with_env(
+            "X",
+            EnvValue::RawYamlScalar(serde_yaml::Value::String(
+                "$[ dependencies.Agent.result ]".into(),
+            )),
+        ));
+        let mut job = Job::new(JobId::new("J").unwrap(), "J", Pool::VmImage("u".into()));
+        job.push_step(step);
+        let p = Pipeline {
+            name: "t".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers::default(),
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(vec![job]),
+            shape: PipelineShape::Standalone,
+        };
+        let err = super::lower(&p).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("EnvValue::RuntimeExpression"),
+            "error must point to the RuntimeExpression variant; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn lower_job_explicit_variable_wins_over_runtime_expr_hoist() {
+        use crate::compile::ir::job::JobVariable;
+
+        // An author-declared job variable that happens to share the
+        // hash-derived hoist name must never be clobbered by the hoist.
+        let body = "dependencies.Agent.result";
+        let name = runtime_expr_var_name(body);
+        let step = Step::Bash(
+            BashStep::new("Conclusion", "echo hi")
+                .with_env("AGENT_RESULT", EnvValue::runtime_expression(body)),
+        );
+        let mut job = Job::new(
+            JobId::new("Conclusion").unwrap(),
+            "Conclusion",
+            Pool::VmImage("u".into()),
+        );
+        job.variables.push(JobVariable {
+            name: name.clone(),
+            value: EnvValue::literal("explicit-wins"),
+        });
+        job.push_step(step);
+        let p = Pipeline {
+            name: "t".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers::default(),
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(vec![job]),
+            shape: PipelineShape::Standalone,
+        };
+        let v = super::lower(&p).unwrap();
+        let yaml = serde_yaml::to_string(&v).unwrap();
+        // The explicit value is preserved; the hoist's `$[ ... ]` form
+        // never overwrites it.
+        assert!(
+            yaml.contains(&format!("{name}: explicit-wins")),
+            "explicit job variable must win over the hoist:\n{yaml}"
+        );
+        assert!(
+            !yaml.contains(&format!("{name}: $[ {body} ]")),
+            "hoist must not clobber the explicit job variable:\n{yaml}"
         );
     }
 
