@@ -65,6 +65,7 @@ use super::ir::step::{
     BashStep, CheckoutRepo, CheckoutStep, DownloadStep, PublishStep, Step, SubmodulesOpt, TaskStep,
 };
 use super::ir::tasks::docker_installer::DockerInstaller;
+use super::ir::tasks::download_package::DownloadPackage;
 use super::ir::{
     CiTrigger, Parameter, ParameterDefault, ParameterKind, PipelineResource, PipelineVar,
     PrTrigger, RepositoryResource, Resources, Schedule, Triggers,
@@ -1222,12 +1223,9 @@ pub(crate) fn download_package_step(
     version: &str,
     download_path: &str,
 ) -> TaskStep {
-    TaskStep::new("DownloadPackage@1", display)
-        .with_input("packageType", "nuget")
-        .with_input("feed", feed)
-        .with_input("definition", package)
-        .with_input("version", version)
-        .with_input("downloadPath", download_path)
+    DownloadPackage::nuget(feed, package, version, download_path)
+        .with_display_name(display)
+        .into_step()
 }
 
 /// Bash body that locates a payload file inside a `DownloadPackage@1` staging
