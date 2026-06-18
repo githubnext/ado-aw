@@ -1175,6 +1175,12 @@ fn image_ref(base: &str, tag: &str, registry: Option<&str>) -> String {
 /// registry base path. Takes the host portion (before the first `/`), then
 /// strips a trailing `.azurecr.io` when present; otherwise returns the portion
 /// before the first `.` (falling back to the whole host).
+///
+/// NOTE: this assumes the standard `<name>.azurecr.io` login-server hostname.
+/// For ACR accessed over Azure Private Link with a custom domain (e.g.
+/// `myacr.internal.contoso.com`), the `.split('.').next()` fallback may not
+/// yield the registry name `az acr login --name` expects — configure
+/// `registry.name` with the canonical `*.azurecr.io` login server in that case.
 fn acr_registry_name(registry_base: &str) -> &str {
     let host = registry_base.split('/').next().unwrap_or(registry_base);
     host.strip_suffix(".azurecr.io")

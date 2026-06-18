@@ -125,9 +125,11 @@ pub fn is_valid_registry_ref(s: &str) -> bool {
 /// Connection display names legitimately contain spaces and assorted
 /// punctuation, so this is a deny-list rather than an allowlist: it rejects
 /// empty strings, anything over 256 characters, control characters
-/// (including newlines), and quote characters. Values flow into YAML task
-/// inputs (`azureSubscription`, `nuGetServiceConnections`,
-/// `containerRegistry`) where these characters could break out of the scalar.
+/// (including newlines), quote characters, and ADO expression / pipeline-command
+/// sequences (`$(`, `${{`, `$[`, `##vso[`, `##[`). Values flow into YAML task
+/// inputs (`azureSubscription`, `nuGetServiceConnections`, `containerRegistry`)
+/// where these characters could break out of the scalar or be expanded as a
+/// pipeline variable at queue time.
 pub fn is_valid_service_connection(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 256
@@ -135,6 +137,8 @@ pub fn is_valid_service_connection(s: &str) -> bool {
         && !s.contains('"')
         && !s.contains('`')
         && !s.chars().any(|c| c.is_control())
+        && !contains_ado_expression(s)
+        && !contains_pipeline_command(s)
 }
 
 /// Characters allowed in individual engine.args entries.
@@ -714,6 +718,12 @@ mod tests {
         assert!(!is_valid_service_connection("with\"quote"));
         assert!(!is_valid_service_connection("with`tick"));
         assert!(!is_valid_service_connection(&"x".repeat(257)));
+        // ADO expressions / pipeline commands must be rejected so the value
+        // cannot be expanded as a pipeline variable at queue time.
+        assert!(!is_valid_service_connection("$(my.shared.conn)"));
+        assert!(!is_valid_service_connection("${{ variables.conn }}"));
+        assert!(!is_valid_service_connection("conn$[variables.x]"));
+        assert!(!is_valid_service_connection("##vso[task.setvariable]"));
     }
 
     #[test]

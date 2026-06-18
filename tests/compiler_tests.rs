@@ -6117,17 +6117,17 @@ fn test_supply_chain_full_reroutes_all_artifacts() {
     // (d2) The local `:latest` aliases must be tagged under the GHCR names AWF
     // resolves by default with `--skip-pull` — tagged from the internally
     // pulled image, never pulled from GHCR. Regression guard for the firewall
-    // failing to find its images at runtime.
+    // failing to find its images at runtime. Use version-agnostic split
+    // assertions so an AWF_VERSION bump (unimportable in a binary-only crate)
+    // does not break the test.
     assert!(
-        compiled.contains(
-            "docker tag myacr.azurecr.io/oss-mirror/squid:0.27.3 ghcr.io/github/gh-aw-firewall/squid:latest"
-        ),
+        compiled.contains("docker tag myacr.azurecr.io/oss-mirror/squid:")
+            && compiled.contains(" ghcr.io/github/gh-aw-firewall/squid:latest"),
         "AWF squid image must be re-tagged to the GHCR :latest name AWF expects"
     );
     assert!(
-        compiled.contains(
-            "docker tag myacr.azurecr.io/oss-mirror/agent:0.27.3 ghcr.io/github/gh-aw-firewall/agent:latest"
-        ),
+        compiled.contains("docker tag myacr.azurecr.io/oss-mirror/agent:")
+            && compiled.contains(" ghcr.io/github/gh-aw-firewall/agent:latest"),
         "AWF agent image must be re-tagged to the GHCR :latest name AWF expects"
     );
 

@@ -89,6 +89,13 @@ A container registry (ACR) cannot be accessed with $(System.AccessToken).
 The registry connection is an ARM / Azure service connection (the same kind
 used by `permissions:`), passed to `AzureCLI@2` as `azureSubscription`.
 
+> **Private Link note:** the ACR name passed to `az acr login --name` is derived
+> from the host portion of `registry.name`, assuming the standard
+> `<name>.azurecr.io` login server. If your ACR is reached over Azure Private
+> Link with a custom domain (e.g. `myacr.internal.contoso.com`), set
+> `registry.name` to the canonical `*.azurecr.io` login server so the derived
+> registry name is correct.
+
 ## What the feed and registry must contain
 
 Versions stay **pinned by the generating compiler** — the internal mirror must
