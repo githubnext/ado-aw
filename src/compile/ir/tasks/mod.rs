@@ -35,3 +35,4 @@ pub mod powershell;
 pub mod publish_build_artifacts;
 pub mod publish_pipeline_artifact;
 pub mod publish_test_results;
+pub mod vstest;
