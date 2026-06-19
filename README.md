@@ -265,6 +265,7 @@ the service connections. Approve the permissions and the pipeline is ready.
 | `inlined-imports` | boolean | `false` | When `true`, resolves all `{{#runtime-import …}}` markers at compile time; the generated YAML is self-contained but prompt-body edits require recompilation. See [runtime-imports.md](docs/runtime-imports.md). |
 | `env` | map | — | Workflow-level environment variables (reserved, not yet implemented) |
 | `execution-context` | object | — | Configuration for the always-on execution-context plugin (PR context precompute). See [execution-context.md](docs/execution-context.md). |
+| `supply-chain` | object | — | Mirror compiler, AWF binary, ado-script bundle, and container images from an internal feed/registry. See [supply-chain.md](docs/supply-chain.md). |
 
 ### Markdown Body
 
@@ -596,6 +597,15 @@ index to jump to the right page.
   `job`, and `stage`.
 - [`docs/safe-outputs.md`](docs/safe-outputs.md) — full reference for every
   safe-output tool plus their per-agent configuration.
+- [`docs/safe-output-permissions.md`](docs/safe-output-permissions.md) — diagnosis
+  and fix reference for Stage 3 401/403 failures (build identity, token semantics,
+  permission fixes).
+- [`docs/execution-context.md`](docs/execution-context.md) — built-in
+  `aw-context/` precompute: PR target-branch fetch, merge-base resolution,
+  `base.sha`/`head.sha` artefacts, and auto-extended bash allow-list.
+- [`docs/supply-chain.md`](docs/supply-chain.md) — optional `supply-chain:`
+  section for mirroring the compiler, AWF binary, ado-script bundle, and
+  container images from an internal feed/registry.
 - [`docs/ado-aw-debug.md`](docs/ado-aw-debug.md) — debug-only `ado-aw-debug:`
   front-matter section (`skip-integrity`, `create-issue`).
 
@@ -606,6 +616,9 @@ index to jump to the right page.
 - [`docs/cli.md`](docs/cli.md) — `ado-aw` CLI command and flag reference.
 - [`docs/mcp.md`](docs/mcp.md) — MCP server configuration (stdio containers,
   HTTP servers, env passthrough).
+- [`docs/mcp-author.md`](docs/mcp-author.md) — author-facing MCP server (stdio);
+  exposes `inspect`, `graph`, `whatif`, `lint`, `catalog`, `trace`, `audit_build`
+  over MCP for IDE/Copilot Chat agents.
 - [`docs/mcpg.md`](docs/mcpg.md) — MCP Gateway architecture and pipeline
   integration.
 - [`docs/network.md`](docs/network.md) — AWF network isolation, default
