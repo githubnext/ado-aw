@@ -56,6 +56,14 @@ fn default_status() -> String {
     "active".to_string()
 }
 
+fn validate_repository_selector(repository: &str) -> anyhow::Result<()> {
+    reject_pipeline_injection(repository, "repository")?;
+    if !repository.is_empty() {
+        crate::validate::validate_relative_safe_path(repository, "repository")?;
+    }
+    Ok(())
+}
+
 impl Validate for AddPrCommentParams {
     fn validate(&self) -> anyhow::Result<()> {
         ensure!(self.pull_request_id > 0, "pull_request_id must be positive");
@@ -88,7 +96,7 @@ impl Validate for AddPrCommentParams {
         if let Some(fp) = &self.file_path {
             validate_file_path(fp)?;
         }
-        reject_pipeline_injection(&self.repository, "repository")?;
+        validate_repository_selector(&self.repository)?;
         Ok(())
     }
 }
@@ -200,15 +208,40 @@ fn validate_file_path(path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn repository_checkout_dir(repository: &str, ctx: &ExecutionContext) -> PathBuf {
-    if repository == "self" || repository.is_empty() {
-        ctx.source_directory.clone()
-    } else {
-        ctx.source_directory.join(repository)
+fn repository_checkout_dir(repository: &str, ctx: &ExecutionContext) -> anyhow::Result<PathBuf> {
+    if crate::safeoutputs::input_refers_to_self(repository, ctx) {
+        return Ok(ctx.source_directory.clone());
     }
+
+    if let Some((alias, _)) = ctx.allowed_repositories.get_key_value(repository) {
+        return Ok(ctx.source_directory.join(alias));
+    }
+
+    if let Some((alias, _)) = ctx
+        .allowed_repositories
+        .iter()
+        .find(|(_, name)| name.eq_ignore_ascii_case(repository))
+    {
+        return Ok(ctx.source_directory.join(alias));
+    }
+
+    if let Some((alias, _)) = ctx.allowed_repositories.iter().find(|(_, name)| {
+        name.rsplit('/')
+            .next()
+            .unwrap_or(name.as_str())
+            .eq_ignore_ascii_case(repository)
+    }) {
+        return Ok(ctx.source_directory.join(alias));
+    }
+
+    anyhow::bail!(
+        "Repository alias '{}' not found in allowed repositories",
+        repository
+    )
 }
 
 fn build_inline_thread_context(
+    workspace_root: &Path,
     repo_root: &Path,
     file_path: &str,
     start_line: i32,
@@ -234,6 +267,14 @@ fn build_inline_thread_context(
     ensure!(
         canonical.starts_with(&canonical_root),
         "Inline comment file '{}' resolves outside the repository checkout",
+        file_path
+    );
+    let canonical_workspace = workspace_root
+        .canonicalize()
+        .context("Failed to canonicalize build workspace root")?;
+    ensure!(
+        canonical.starts_with(&canonical_workspace),
+        "Inline comment file '{}' resolves outside the build workspace",
         file_path
     );
 
@@ -389,8 +430,28 @@ impl Executor for AddPrCommentResult {
         if let Some(ref fp) = self.file_path {
             let end_line = self.line.unwrap_or(1);
             let start_line = self.start_line.unwrap_or(end_line);
-            let repo_root = repository_checkout_dir(&self.repository, ctx);
-            match build_inline_thread_context(&repo_root, fp, start_line, end_line) {
+            let repo_root = match repository_checkout_dir(&self.repository, ctx).and_then(|path| {
+                crate::validate::ensure_path_within_base(
+                    &path,
+                    &ctx.source_directory,
+                    "Repository checkout root",
+                )
+            }) {
+                Ok(path) => path,
+                Err(err) => {
+                    return Ok(ExecutionResult::failure(format!(
+                        "Failed to resolve repository checkout for '{}': {}",
+                        self.repository, err
+                    )));
+                }
+            };
+            match build_inline_thread_context(
+                &ctx.source_directory,
+                &repo_root,
+                fp,
+                start_line,
+                end_line,
+            ) {
                 Ok(thread_context) => thread_body["threadContext"] = thread_context,
                 Err(err) => {
                     return Ok(ExecutionResult::failure(format!(
@@ -537,6 +598,36 @@ mod tests {
         };
         let result: Result<AddPrCommentResult, _> = params.try_into();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validation_rejects_repository_traversal_selector() {
+        let params = AddPrCommentParams {
+            pull_request_id: 42,
+            content: "This is a valid comment body text.".to_string(),
+            repository: "../sibling-repo".to_string(),
+            file_path: None,
+            start_line: None,
+            line: None,
+            status: "active".to_string(),
+        };
+        let result: Result<AddPrCommentResult, _> = params.try_into();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validation_accepts_project_scoped_repository_selector() {
+        let params = AddPrCommentParams {
+            pull_request_id: 42,
+            content: "This is a valid comment body text.".to_string(),
+            repository: "4x4/sdk-FtdiDeviceControl".to_string(),
+            file_path: None,
+            start_line: None,
+            line: None,
+            status: "active".to_string(),
+        };
+        let result: Result<AddPrCommentResult, _> = params.try_into();
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -732,7 +823,7 @@ allowed-statuses:
         std::fs::write(dir.path().join("suggestion.rs"), "prefix\nab😀\n").unwrap();
 
         let thread_context =
-            build_inline_thread_context(dir.path(), "suggestion.rs", 2, 2).unwrap();
+            build_inline_thread_context(dir.path(), dir.path(), "suggestion.rs", 2, 2).unwrap();
 
         assert_eq!(thread_context["rightFileStart"]["line"], 2);
         assert_eq!(thread_context["rightFileStart"]["offset"], 1);
@@ -750,10 +841,53 @@ allowed-statuses:
         .unwrap();
 
         let thread_context =
-            build_inline_thread_context(dir.path(), "suggestion.rs", 1, 2).unwrap();
+            build_inline_thread_context(dir.path(), dir.path(), "suggestion.rs", 1, 2).unwrap();
 
         assert_eq!(thread_context["rightFileStart"]["line"], 1);
         assert_eq!(thread_context["rightFileEnd"]["line"], 2);
         assert_eq!(thread_context["rightFileEnd"]["offset"], 5);
+    }
+
+    #[test]
+    fn test_build_inline_thread_context_rejects_repo_root_outside_workspace() {
+        let workspace = tempdir().unwrap();
+        let outside_repo = tempdir().unwrap();
+        std::fs::write(outside_repo.path().join("suggestion.rs"), "line 1\n").unwrap();
+
+        let err = build_inline_thread_context(
+            workspace.path(),
+            outside_repo.path(),
+            "suggestion.rs",
+            1,
+            1,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("outside the build workspace"), "got: {err}");
+    }
+
+    #[test]
+    fn test_repository_checkout_dir_resolves_full_repository_name_to_alias_path() {
+        let workspace = tempdir().unwrap();
+        let alias_dir = workspace.path().join("repo-sdk-ftdidevicecontrol");
+        std::fs::create_dir(&alias_dir).unwrap();
+
+        let mut allowed_repositories = std::collections::HashMap::new();
+        allowed_repositories.insert(
+            "repo-sdk-ftdidevicecontrol".to_string(),
+            "4x4/sdk-FtdiDeviceControl".to_string(),
+        );
+
+        let ctx = ExecutionContext {
+            source_directory: workspace.path().to_path_buf(),
+            allowed_repositories,
+            repository_name: Some("4x4/current-repo".to_string()),
+            ..Default::default()
+        };
+
+        let resolved = repository_checkout_dir("4x4/sdk-ftdidevicecontrol", &ctx).unwrap();
+
+        assert_eq!(resolved, alias_dir);
     }
 }
