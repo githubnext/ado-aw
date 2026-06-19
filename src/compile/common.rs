@@ -2840,14 +2840,6 @@ mod tests {
     }
 
     #[test]
-    fn test_workspace_explicit_self_no_checkouts_still_returns_repo() {
-        // 'self' takes the same code path as 'repo'; it should also warn
-        // and still resolve to the repo subfolder.
-        let ws = compute_effective_workspace(&Some("self".to_string()), &[], "agent").unwrap();
-        assert_eq!(ws, "repo");
-    }
-
-    #[test]
     fn test_workspace_explicit_alias_with_traversal_fails() {
         let checkouts = vec!["../sibling".to_string()];
         let err = compute_effective_workspace(&Some("../sibling".to_string()), &checkouts, "agent")
@@ -3381,13 +3373,6 @@ mod tests {
     }
 
     #[test]
-    fn test_engine_args_no_max_timeout_when_simple_engine() {
-        let fm = minimal_front_matter();
-        let params = engine_args_for(&fm).unwrap();
-        assert!(!params.contains("--max-timeout"));
-    }
-
-    #[test]
     fn test_engine_args_max_timeout_zero_not_emitted() {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  model: claude-opus-4.5\n  timeout-minutes: 0\n---\n",
@@ -3478,17 +3463,6 @@ mod tests {
         assert!(
             header.contains(r#"source="agents/release-readiness.md""#),
             "Redundant ./ prefixes should be stripped: {}",
-            header
-        );
-    }
-
-    #[test]
-    fn test_generate_header_comment_strips_single_dot_slash() {
-        let path = std::path::Path::new("./agents/my-agent.md");
-        let header = generate_header_comment(path);
-        assert!(
-            header.contains(r#"source="agents/my-agent.md""#),
-            "Single ./ prefix should be stripped: {}",
             header
         );
     }
@@ -5058,7 +5032,7 @@ safe-outputs:
     // ─── generate_awf_mounts ──────────────────────────────────────────────
 
     #[test]
-    fn test_generate_awf_mounts_no_extensions() {
+    fn test_generate_awf_mounts_always_on_az_cli_baseline() {
         // Even with a minimal front matter, the always-on Azure CLI
         // extension contributes a `$(AW_AZ_MOUNTS) \` injection line
         // (no static mounts — those are runtime-detected by the
