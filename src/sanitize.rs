@@ -580,8 +580,10 @@ mod tests {
     fn test_sanitize_preserves_markdown_headings() {
         // Markdown headings and bare issue references must not be neutralized.
         // A bare "#123" (without a preceding bot keyword like "fixes") must NOT
-        // be wrapped in backticks — this assertion would pass even if "#123"
-        // were wrapped, so we assert the exact output instead.
+        // be wrapped in backticks. We use assert_eq! on the full output rather
+        // than a partial check like assert!(result.contains("#123")), which
+        // would pass even when "#123" is wrapped (since "`#123`" still contains
+        // the substring "#123").
         let input = "# Heading\n## Sub-heading\nIssue #123";
         assert_eq!(sanitize(input), input);
     }
