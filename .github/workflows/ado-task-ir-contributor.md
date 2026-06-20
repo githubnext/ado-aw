@@ -92,7 +92,22 @@ Ignore `push_raw_yaml_if_nonempty`, `step_to_raw_yaml_string`, and any function 
 
 Build the set of **already-typed tasks**: the union of the task identifiers covered by `src/compile/ir/tasks/` builder structs and the runtime/extension factories (e.g. `UseNode@1`, `UseDotNet@2`, `UsePythonVersion@0`, `NpmAuthenticate@0`, `PipAuthenticate@1`, `NuGetAuthenticate@1`).
 
-## Step 3 — Fetch ADO Built-In Task Catalog
+## Step 3 — Build an ado-aw-relevant candidate set
+
+Before using the global ADO catalog, derive candidates from the ado-aw codebase so work stays high-impact for this repo:
+
+```bash
+# Compiler/runtime usage that is still stringly-typed today
+grep -rnh "TaskStep::new(" src/compile src/runtimes src/compile/extensions --include="*.rs"
+
+# Existing emitted tasks in compiled fixtures (high-signal for real ado-aw usage)
+grep -rh "^- task:" tests --include="*.lock.yml" --include="*.yml" --include="*.yaml" 2>/dev/null \
+  | grep -oP '[A-Za-z][A-Za-z0-9\\-]+@[0-9]+' | sort | uniq -c | sort -nr
+```
+
+Use this repo-derived set as the primary source of truth for what to implement next.
+
+## Step 4 — Fetch ADO Built-In Task Catalog (Secondary Source)
 
 Retrieve the Azure DevOps built-in task reference page:
 
@@ -112,7 +127,7 @@ grep -oP '(?<=href=")[^"]*task-reference[^"]*(?=")' /tmp/gh-aw/agent/ado-tasks-r
 grep -oP '[A-Za-z][A-Za-z0-9\-]+@[0-9]+' /tmp/gh-aw/agent/ado-tasks-reference.html | sort -u
 ```
 
-If the HTML download fails, fall back to a curated list of high-value tasks from the compiler's own documentation and test fixtures:
+If the HTML download fails, continue using the repo-derived candidates from Step 3 (do not block on docs fetch):
 
 ```bash
 # Fallback: tasks already referenced in tests/fixtures and source
@@ -120,20 +135,23 @@ grep -rh "task:\|TaskStep::new" src tests --include="*.rs" --include="*.yml" --i
   | grep -oP '[A-Za-z][A-Za-z0-9\-]+@[0-9]+' | sort -u
 ```
 
-## Step 4 — Choose One Task to Contribute
+## Step 5 — Choose One Task to Contribute
 
-From the catalog, select **one** task that:
+From the repo-derived candidates (plus the catalog when needed), select **one** task that:
 1. Is **not** already in `completed_tasks` from state
 2. Is **not** already typed (no existing builder struct under `src/compile/ir/tasks/` and no runtime/extension factory)
-3. Has a stable, widely-used task identifier (prefer tasks in the `Utility`, `Build`, or `Test` categories)
+3. Has a concrete ado-aw impact today (appears in compiler/runtime code, tests/fixtures, or unlocks a nearby `Step::RawYaml` migration)
 4. Has clear documentation on `learn.microsoft.com`
 
 The chosen task will become a new submodule `src/compile/ir/tasks/<task_snake>.rs`.
 
 Priority order (highest first):
 1. A `Step::RawYaml` in compiler-generated code that maps to a known ADO task — converting it to `Step::Task` removes tech debt directly.
-2. A task used frequently in the `tests/` fixtures as raw YAML strings.
-3. A task from the ADO catalog that the project is likely to use (e.g. `CopyFiles@2`, `PublishTestResults@2`, `DotNetCoreCLI@2`, `ArchiveFiles@2`, `ExtractFiles@1`, `PowerShell@2`, `CmdLine@2`, `DownloadBuildArtifacts@1`, `PublishPipelineArtifact@1`).
+2. A task currently emitted from `src/compile/**`, `src/runtimes/**`, or `src/compile/extensions/**` via raw `TaskStep::new(...)`.
+3. A task used frequently in `tests/**/*.lock.yml` compiled fixtures (prefer high-count tasks).
+4. Only if no repo-derived candidates remain: a catalog task likely to support ado-aw compiler scenarios (artifacts, package/auth, build/test orchestration).
+
+Explicitly avoid low-signal tasks with no current ado-aw footprint (for example service-connection/deployment-specialized tasks) unless tied to an active ado-aw compiler path.
 
 Fetch the selected task's detail page to understand its inputs:
 
@@ -154,7 +172,7 @@ Document the task:
 - Optional inputs with defaults
 - Relevant use cases in ado-aw
 
-## Step 5 — Implement the Typed Builder
+## Step 6 — Implement the Typed Builder
 
 Decide where to place the builder:
 
@@ -242,7 +260,7 @@ Guidelines:
 
 ### Convert RawYaml if applicable
 
-If Step 4 identified a `Step::RawYaml` in compiler code that this task covers, replace it now:
+If Step 5 identified a `Step::RawYaml` in compiler code that this task covers, replace it now:
 
 ```rust
 // Before:
@@ -253,7 +271,7 @@ use crate::compile::ir::tasks::copy_files::CopyFiles;
 steps.push(Step::Task(CopyFiles::new("**", &dst).into_step()));
 ```
 
-## Step 6 — Add Tests
+## Step 7 — Add Tests
 
 Add at least one `#[cfg(test)] mod tests` unit test to the new task submodule (or `tests/compiler_tests.rs` for integration tests), building via the struct and asserting on `task` / `inputs`:
 
@@ -281,7 +299,7 @@ mod tests {
 }
 ```
 
-## Step 7 — Validate
+## Step 8 — Validate
 
 Run the full validation suite:
 
@@ -298,7 +316,7 @@ All three must pass. If anything fails:
 
 Do not open a PR with a failing CI baseline.
 
-## Step 8 — Save State
+## Step 9 — Save State
 
 Update cache memory using `jq` to avoid manual JSON construction errors:
 
@@ -323,7 +341,7 @@ jq \
   <<< "$CURRENT" > "$STATE_FILE"
 ```
 
-## Step 9 — Open the PR
+## Step 10 — Open the PR
 
 If changes were made, open a PR with:
 
