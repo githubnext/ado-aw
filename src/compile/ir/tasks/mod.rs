@@ -33,6 +33,7 @@ pub mod extract_files;
 pub mod npm;
 pub mod nuget_command;
 pub mod powershell;
+pub mod python_script;
 pub mod publish_build_artifacts;
 pub mod publish_code_coverage_results;
 pub mod publish_pipeline_artifact;
