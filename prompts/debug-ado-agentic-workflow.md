@@ -321,12 +321,11 @@ network:
 
 **Common causes**:
 
-- **Bash command not in allow-list**: The default allow-list is: `cat, date, echo, grep, head, ls, pwd, sort, tail, uniq, wc, yq`. If the agent needs additional commands:
+- **Bash command not in allow-list**: By default (when `tools.bash` is omitted), agents have unrestricted bash access. Bash is only restricted when an explicit allow-list is configured in `tools.bash`. If a specific command is unavailable, check whether the pipeline source uses an explicit list and add the required command:
   ```yaml
   tools:
-    bash: ["cat", "ls", "grep", "find", "jq"]   # explicit list
-    # or
-    bash: [":*"]   # unrestricted (use with caution)
+    bash: ["cat", "ls", "grep", "find", "jq"]   # explicit allow-list (restricts to named commands)
+    # or omit tools.bash entirely to keep the default unrestricted access
   ```
 - **Edit tool disabled**: File editing is enabled by default. If it's been explicitly disabled:
   ```yaml
