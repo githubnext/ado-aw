@@ -3,6 +3,7 @@
 use super::{DOTNET_BASH_COMMANDS, DotnetRuntimeConfig, GLOBAL_JSON_SENTINEL};
 use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
 use crate::compile::ir::step::{BashStep, Step, TaskStep};
+use crate::compile::ir::tasks::nuget_authenticate::NuGetAuthenticate;
 use crate::validate;
 use anyhow::Result;
 
@@ -164,10 +165,9 @@ fn dotnet_install_task_step(config: &DotnetRuntimeConfig) -> TaskStep {
 
 /// Build the typed [`TaskStep`] for NuGet authentication.
 fn nuget_authenticate_task_step() -> TaskStep {
-    TaskStep::new(
-        "NuGetAuthenticate@1",
-        "Authenticate NuGet (build service identity)",
-    )
+    NuGetAuthenticate::new()
+        .with_display_name("Authenticate NuGet (build service identity)")
+        .into_step()
 }
 
 /// Build the typed [`BashStep`] that ensures `nuget.config`. Same
