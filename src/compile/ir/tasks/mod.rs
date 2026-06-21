@@ -22,6 +22,7 @@ mod common;
 pub mod archive_files;
 pub mod azure_key_vault;
 pub mod azure_powershell;
+pub mod cargo_authenticate;
 pub mod cmd_line;
 pub mod copy_files;
 pub mod delete_files;
