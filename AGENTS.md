@@ -63,7 +63,8 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   │   ├── output.rs  # Output references and output dependency wiring
 │   │   │   ├── graph.rs   # Graph construction and validation passes
 │   │   │   ├── lower.rs   # IR lowering from front matter into typed nodes
-│   │   │   └── emit.rs    # YAML emission from typed IR
+│   │   │   ├── emit.rs    # YAML emission from typed IR
+│   │   │   └── summary.rs # Public, serializable PipelineSummary / GraphSummary for agent-facing tooling (see docs/ir.md Public JSON summary)
 │   │   ├── standalone.rs # Standalone pipeline compiler
 │   │   ├── standalone_ir.rs # Standalone target typed-IR builder
 │   │   ├── onees.rs      # 1ES Pipeline Template compiler
@@ -101,20 +102,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   │   ├── 0002_pool_object_form.rs # Legacy scalar pool → object form codemod
 │   │   │   └── helpers.rs # take_key, insert_no_overwrite, rename_key, ConflictPolicy
 │   │   ├── codemod_integration_test.rs # White-box rewrite-path tests (stub registry injection)
-│   │   ├── types.rs      # Front matter grammar and types
-│   │   └── ir/           # Typed Azure DevOps pipeline IR (see docs/ir.md)
-│   │       ├── mod.rs    # Pipeline / PipelineBody / PipelineShape root types
-│   │       ├── ids.rs    # Typed StageId / JobId / StepId newtypes
-│   │       ├── step.rs   # Step variants (Bash, Task, Checkout, Download, Publish, RawYaml)
-│   │       ├── job.rs    # Job, Pool, TemplateContext, JobVariable
-│   │       ├── stage.rs  # Stage + external-params wrap
-│   │       ├── env.rs    # Typed EnvValue (Literal, AdoMacro, PipelineVar, Secret, StepOutput, Coalesce, Concat)
-│   │       ├── condition.rs # Typed Condition / Expr AST + codegen to ADO condition syntax
-│   │       ├── output.rs # OutputDecl / OutputRef + location-aware lowering
-│   │       ├── graph.rs  # Dependency graph: validation, edge derivation, isOutput promotion, cycle detection
-│   │       ├── lower.rs  # IR → serde_yaml::Value lowering
-│   │       ├── emit.rs   # Thin `lower() + serde_yaml::to_string()` wrapper
-│   │       └── summary.rs # Public, serializable PipelineSummary / GraphSummary for agent-facing tooling (see docs/ir.md Public JSON summary)
+│   │   └── types.rs      # Front matter grammar and types
 │   ├── init.rs           # Repository initialization for AI-first authoring
 │   ├── execute.rs        # Stage 3 safe output execution
 │   ├── fuzzy_schedule.rs # Fuzzy schedule parsing
