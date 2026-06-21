@@ -897,9 +897,13 @@ mod tests {
     #[test]
     fn test_cron_generation_deterministic() {
         let schedule = FuzzySchedule::Daily(TimeConstraint::None);
+        // FNV-1a("test/workflow") = 718355327; total_minutes = 718355327 % 1440 = 1247
+        // → hour = 20, minute = 47
         let cron1 = generate_cron(&schedule, "test/workflow");
-        let cron2 = generate_cron(&schedule, "test/workflow");
-        assert_eq!(cron1, cron2, "Same workflow should produce same cron");
+        assert_eq!(
+            cron1, "47 20 * * *",
+            "Cron for test/workflow should be deterministically pinned"
+        );
 
         let cron3 = generate_cron(&schedule, "other/workflow");
         assert_ne!(
@@ -911,17 +915,23 @@ mod tests {
     #[test]
     fn test_cron_format() {
         let schedule = FuzzySchedule::Daily(TimeConstraint::None);
+        // FNV-1a("test") = 2949673445; total_minutes = 2949673445 % 1440 = 485
+        // → minute = 5, hour = 8
         let cron = generate_cron(&schedule, "test");
         let parts: Vec<&str> = cron.split_whitespace().collect();
         assert_eq!(parts.len(), 5, "Cron should have 5 fields");
 
-        // Validate minute field
         let minute: u32 = parts[0].parse().expect("Minute should be a number");
-        assert!(minute < 60, "Minute should be 0-59");
+        assert_eq!(
+            minute, 5,
+            "Minute should be 5 for \"test\" workflow (FNV-1a 2949673445 → 485 total_minutes)"
+        );
 
-        // Validate hour field
         let hour: u32 = parts[1].parse().expect("Hour should be a number");
-        assert!(hour < 24, "Hour should be 0-23");
+        assert_eq!(
+            hour, 8,
+            "Hour should be 8 for \"test\" workflow (FNV-1a 2949673445 → 485 total_minutes)"
+        );
 
         // Daily schedule must not restrict day-of-month, month, or day-of-week.
         // A regression that adds e.g. a day-of-week constraint would silently
