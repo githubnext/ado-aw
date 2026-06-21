@@ -265,6 +265,7 @@ the service connections. Approve the permissions and the pipeline is ready.
 | `inlined-imports` | boolean | `false` | When `true`, resolves all `{{#runtime-import …}}` markers at compile time; the generated YAML is self-contained but prompt-body edits require recompilation. See [runtime-imports.md](docs/runtime-imports.md). |
 | `env` | map | — | Workflow-level environment variables (reserved, not yet implemented) |
 | `execution-context` | object | — | Configuration for the always-on execution-context plugin (PR context precompute). See [execution-context.md](docs/execution-context.md). |
+| `supply-chain` | object | — | Internal feed/registry mirror settings for compiler/runtime artifacts. See [supply-chain.md](docs/supply-chain.md). |
 
 ### Markdown Body
 
@@ -516,6 +517,7 @@ Commands:
   compile       Compile markdown to pipeline definition
   check         Verify a compiled pipeline matches its source
   mcp           Run as an MCP server (safe outputs)
+  mcp-author    Run the author-facing MCP server over stdio (IDE/Copilot Chat integration)
   mcp-http      Run as an HTTP MCP server (for MCPG integration)
   execute       Execute safe outputs (Stage 3)
   secrets       Manage pipeline-variable secrets on matched ADO definitions (set/list/delete)
@@ -526,6 +528,12 @@ Commands:
   status        Per-pipeline status block for matched ADO definitions
   run           Queue builds for matched ADO definitions (optionally poll to completion)
   audit         Audit a single Azure DevOps build: download artifacts, analyze logs, render a report
+  trace         Trace a build's failing-job chain using audit data plus the local IR graph
+  inspect       Inspect an agent source file's typed IR: jobs, stages, steps, outputs, derived `dependsOn`
+  graph         Query the resolved dependency graph for an agent source file
+  whatif        Static reachability: classify jobs skipped if a step or job fails
+  lint          Run structural lint checks over an agent source file
+  catalog       List safe-outputs, runtimes, tools, engines, and models
 
 Options:
   -v, --verbose              Enable info-level logging
@@ -594,8 +602,14 @@ index to jump to the right page.
   in the pipeline UI.
 - [`docs/targets.md`](docs/targets.md) — target platforms: `standalone`, `1es`,
   `job`, and `stage`.
+- [`docs/execution-context.md`](docs/execution-context.md) — built-in
+  `aw-context/` precompute configuration (PR context staging + merge-base facts).
 - [`docs/safe-outputs.md`](docs/safe-outputs.md) — full reference for every
   safe-output tool plus their per-agent configuration.
+- [`docs/safe-output-permissions.md`](docs/safe-output-permissions.md) —
+  diagnosis and fix reference for Stage 3 permission failures (401/403).
+- [`docs/supply-chain.md`](docs/supply-chain.md) — optional `supply-chain:`
+  front-matter section for internal feed/registry mirrors.
 - [`docs/ado-aw-debug.md`](docs/ado-aw-debug.md) — debug-only `ado-aw-debug:`
   front-matter section (`skip-integrity`, `create-issue`).
 
@@ -606,6 +620,8 @@ index to jump to the right page.
 - [`docs/cli.md`](docs/cli.md) — `ado-aw` CLI command and flag reference.
 - [`docs/mcp.md`](docs/mcp.md) — MCP server configuration (stdio containers,
   HTTP servers, env passthrough).
+- [`docs/mcp-author.md`](docs/mcp-author.md) — author-facing MCP server
+  reference for local IDE/Copilot Chat integrations.
 - [`docs/mcpg.md`](docs/mcpg.md) — MCP Gateway architecture and pipeline
   integration.
 - [`docs/network.md`](docs/network.md) — AWF network isolation, default
