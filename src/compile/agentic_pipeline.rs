@@ -66,6 +66,7 @@ use super::ir::step::{
 };
 use super::ir::tasks::docker_installer::DockerInstaller;
 use super::ir::tasks::download_package::DownloadPackage;
+use super::ir::tasks::nuget_authenticate::NuGetAuthenticate;
 use super::ir::{
     CiTrigger, Parameter, ParameterDefault, ParameterKind, PipelineResource, PipelineVar,
     PrTrigger, RepositoryResource, Resources, Schedule, Triggers,
@@ -1207,11 +1208,11 @@ fn acr_login_step(registry_base: &str, connection: &str) -> TaskStep {
 /// passed via `nuGetServiceConnections` (cross-org/external feeds); otherwise
 /// the task authenticates the build identity with `$(System.AccessToken)`.
 pub(crate) fn nuget_authenticate_step(connection: Option<&str>) -> TaskStep {
-    let mut step = TaskStep::new("NuGetAuthenticate@1", "Authenticate to internal feed");
+    let mut auth = NuGetAuthenticate::new().with_display_name("Authenticate to internal feed");
     if let Some(conn) = connection {
-        step = step.with_input("nuGetServiceConnections", conn);
+        auth = auth.nuget_service_connections(conn);
     }
-    step
+    auth.into_step()
 }
 
 /// `DownloadPackage@1` step pulling a single NuGet package by name+version

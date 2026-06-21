@@ -32,6 +32,7 @@ pub mod download_pipeline_artifact;
 pub mod extract_files;
 pub mod java_tool_installer;
 pub mod npm;
+pub mod nuget_authenticate;
 pub mod nuget_command;
 pub mod powershell;
 pub mod python_script;
