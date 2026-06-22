@@ -1,0 +1,19 @@
+{
+  "name": "ado-aw-slides",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Short intro deck for ado-aw — Continuous AI for Azure DevOps",
+  "scripts": {
+    "dev": "slidev --open",
+    "build": "slidev build --base /ado-aw/slides/ --out ../public/slides",
+    "export": "slidev export --wait 1500 --wait-until networkidle --output dist/ado-aw-intro.pdf"
+  },
+  "dependencies": {
+    "@slidev/cli": "^52.16.0",
+    "@slidev/theme-default": "^0.25.0"
+  },
+  "devDependencies": {
+    "playwright-chromium": "^1.61.0"
+  }
+}

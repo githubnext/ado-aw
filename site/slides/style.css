@@ -1,0 +1,153 @@
+/* ado-aw deck — brand styling (mirrors the docs site palette) */
+
+:root {
+  --aw-bg: #0d1117;
+  --aw-bg-deep: #010409;
+  --aw-text: #f0f6fc;
+  --aw-muted: #9aa4b2;
+  --aw-accent: #d896ff;
+  --aw-purple: #a855f7;
+  --aw-violet: #7c3aed;
+  --aw-blue: #4361ee;
+  --aw-green: #2d9d78;
+  --aw-amber: #e6a817;
+  --aw-red: #e63946;
+  --aw-hairline: #30363d;
+}
+
+.slidev-layout {
+  background-color: var(--aw-bg);
+  color: var(--aw-text);
+}
+
+.slidev-layout h1,
+.slidev-layout h2 {
+  color: var(--aw-text);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.slidev-layout h2 {
+  border-bottom: 1px solid var(--aw-hairline);
+  padding-bottom: 0.4rem;
+  margin-bottom: 1.1rem;
+}
+
+.slidev-layout a {
+  color: var(--aw-accent);
+}
+
+/* Gradient brand text utility */
+.aw-gradient {
+  background: linear-gradient(120deg, var(--aw-accent) 0%, var(--aw-purple) 55%, var(--aw-blue) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Cover / section aurora background */
+.aw-aurora {
+  position: relative;
+  overflow: hidden;
+}
+.aw-aurora::before {
+  content: '';
+  position: absolute;
+  inset: -40%;
+  z-index: 0;
+  background:
+    radial-gradient(ellipse 40% 50% at 28% 22%, rgba(168, 85, 247, 0.28) 0%, transparent 60%),
+    radial-gradient(ellipse 50% 40% at 72% 14%, rgba(216, 150, 255, 0.18) 0%, transparent 55%),
+    radial-gradient(ellipse 45% 55% at 58% 60%, rgba(67, 97, 238, 0.20) 0%, transparent 60%);
+  filter: blur(46px);
+  pointer-events: none;
+}
+.aw-aurora > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* Pill / chip */
+.aw-pill {
+  display: inline-block;
+  padding: 0.18rem 0.7rem;
+  border: 1px solid var(--aw-violet);
+  border-radius: 999px;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--aw-accent);
+  background: rgba(124, 58, 237, 0.12);
+}
+
+/* Card grid */
+.aw-cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.9rem;
+  margin-top: 0.5rem;
+}
+.aw-card {
+  border: 1px solid var(--aw-hairline);
+  border-radius: 0.7rem;
+  background: #161b22;
+  padding: 0.85rem 1rem;
+}
+.aw-card .t {
+  font-weight: 700;
+  color: var(--aw-accent);
+  margin-bottom: 0.25rem;
+}
+.aw-card .d {
+  color: var(--aw-muted);
+  font-size: 0.86rem;
+  line-height: 1.35;
+}
+
+/* Mapping columns (CI/CD -> CAI) */
+.aw-map {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+  margin-top: 1.2rem;
+}
+.aw-map .col {
+  border: 1px solid var(--aw-hairline);
+  border-radius: 0.7rem;
+  background: #161b22;
+  padding: 1rem;
+  text-align: center;
+}
+.aw-map .col .ico {
+  font-size: 1.6rem;
+}
+.aw-map .col .k {
+  font-weight: 700;
+  margin: 0.35rem 0 0.2rem;
+  color: var(--aw-text);
+}
+.aw-map .col .v {
+  color: var(--aw-muted);
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.aw-muted { color: var(--aw-muted); }
+
+/* Small label above a code block */
+.aw-codelabel {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--aw-accent);
+  margin-bottom: 0.3rem;
+}
+.aw-codelabel .aw-muted {
+  font-weight: 400;
+}
+
+/* Code blocks a touch tighter */
+.slidev-layout pre {
+  border: 1px solid var(--aw-hairline);
+  border-radius: 0.5rem;
+  font-size: 0.78rem;
+}
