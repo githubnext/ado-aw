@@ -26,13 +26,21 @@ Run the first-time installer for your platform.
   </TabItem>
   <TabItem label="Windows (x64)">
     ```powershell
-    powershell -ExecutionPolicy Bypass -NoProfile -Command "iwr https://github.com/githubnext/ado-aw/releases/latest/download/install-windows.ps1 -UseBasicParsing | iex"
+    $script = Join-Path $env:TEMP "install-ado-aw.ps1"
+    Invoke-WebRequest "https://github.com/githubnext/ado-aw/releases/latest/download/install-windows.ps1" -UseBasicParsing -OutFile $script
+    Get-FileHash $script -Algorithm SHA256
+    Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+    & $script
     ```
   </TabItem>
 </Tabs>
 
 :::tip[What the installer does]
 Each installer downloads the latest release binary, validates the SHA-256 checksum from `checksums.txt`, installs to `/usr/local/bin` when writable (or a user-local path), and updates PATH if needed.
+:::
+
+:::note[Windows troubleshooting]
+If PowerShell returns `The Process object must have the UseShellExecute property set to false in order to use environment variables`, run the Windows commands above directly in your current PowerShell prompt instead of launching a nested `powershell -Command ...`.
 :::
 
 ---
