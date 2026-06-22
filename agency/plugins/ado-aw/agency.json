@@ -1,0 +1,26 @@
+{
+  "$schema": "https://github.com/agency-microsoft/.github-private/agency.schema.json",
+  "engines": ["claude", "copilot"],
+  "category": "developer-tools",
+  "platforms": ["windows", "macos", "linux"],
+  "governance": {
+    "layer": 4,
+    "certification": "draft",
+    "organization": "github-next"
+  },
+  "source": {
+    "source": "github",
+    "url": "https://github.com/githubnext/ado-aw.git",
+    "path": "agency/plugins/ado-aw"
+  },
+  "permissions": {
+    "mcpServers": ["ado-aw"],
+    "tools": ["*"],
+    "fileAccess": "read-write"
+  },
+  "requirements": {
+    "ado-aw": {
+      "description": "The ado-aw compiler binary must be on PATH. The local mcp-author stdio server (read-only inspect/graph/lint/whatif/trace/audit/catalog) is launched as `ado-aw mcp-author`. ADO-facing tools (trace, audit) reuse ado-aw's normal auth resolution (explicit PAT, environment, or Azure CLI)."
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "ado-aw": {
+      "command": "ado-aw",
+      "type": "local",
+      "args": ["mcp-author"],
+      "tools": ["*"]
+    }
+  }
+}

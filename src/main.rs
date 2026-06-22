@@ -282,7 +282,7 @@ enum Commands {
         #[arg(long = "enabled-tools")]
         enabled_tools: Vec<String>,
     },
-    /// Initialize a repository for AI-first agentic pipeline authoring
+    /// Initialize a repository for AI-first agentic workflow authoring
     Init {
         /// Target directory (defaults to current directory)
         #[arg(long)]
@@ -608,7 +608,7 @@ enum Commands {
 }
 
 #[derive(Parser, Debug)]
-#[command(version, about = "Compiler for Azure DevOps agentic pipelines")]
+#[command(version, about = "Compiler for Azure DevOps Agentic Workflows")]
 struct Args {
     /// Enable verbose logging (info level)
     #[arg(short, long, global = true)]

@@ -1,4 +1,4 @@
-# Copilot Instructions for Azure DevOps Agentic Pipelines
+# Copilot Instructions for Azure DevOps Agentic Workflows
 
 This repository contains a compiler for Azure DevOps pipelines that transforms
 natural language markdown files with YAML front matter into Azure DevOps
@@ -102,8 +102,21 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   │   ├── 0002_pool_object_form.rs # Legacy scalar pool → object form codemod
 │   │   │   └── helpers.rs # take_key, insert_no_overwrite, rename_key, ConflictPolicy
 │   │   ├── codemod_integration_test.rs # White-box rewrite-path tests (stub registry injection)
-│   │   └── types.rs      # Front matter grammar and types
-│   ├── init.rs           # Repository initialization for AI-first authoring
+│   │   ├── types.rs      # Front matter grammar and types
+│   │   └── ir/           # Typed Azure DevOps pipeline IR (see docs/ir.md)
+│   │       ├── mod.rs    # Pipeline / PipelineBody / PipelineShape root types
+│   │       ├── ids.rs    # Typed StageId / JobId / StepId newtypes
+│   │       ├── step.rs   # Step variants (Bash, Task, Checkout, Download, Publish, RawYaml)
+│   │       ├── job.rs    # Job, Pool, TemplateContext, JobVariable
+│   │       ├── stage.rs  # Stage + external-params wrap
+│   │       ├── env.rs    # Typed EnvValue (Literal, AdoMacro, PipelineVar, Secret, StepOutput, Coalesce, Concat)
+│   │       ├── condition.rs # Typed Condition / Expr AST + codegen to ADO condition syntax
+│   │       ├── output.rs # OutputDecl / OutputRef + location-aware lowering
+│   │       ├── graph.rs  # Dependency graph: validation, edge derivation, isOutput promotion, cycle detection
+│   │       ├── lower.rs  # IR → serde_yaml::Value lowering
+│   │       ├── emit.rs   # Thin `lower() + serde_yaml::to_string()` wrapper
+│   │       └── summary.rs # Public, serializable PipelineSummary / GraphSummary for agent-facing tooling (see docs/ir.md Public JSON summary)
+│   ├── init.rs           # Repository initialization for AI-first authoring (incl. `--agency` plugin scaffold, embeds agency/plugins/ado-aw/ via include_str!)
 │   ├── execute.rs        # Stage 3 safe output execution
 │   ├── fuzzy_schedule.rs # Fuzzy schedule parsing
 │   ├── logging.rs        # File-based logging infrastructure
@@ -154,7 +167,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   ├── whatif.rs     # `ado-aw whatif`: static downstream skip classification for failures
 │   │   ├── lint.rs       # `ado-aw lint`: structural workflow lint checks
 │   │   └── catalog.rs    # `ado-aw catalog`: list in-tree registries (tools, runtimes, models, etc.)
-│   ├── detect.rs         # Agentic pipeline detection — discovers compiled pipelines; used by all lifecycle commands
+│   ├── detect.rs         # Agentic workflow detection — discovers compiled pipelines; used by all lifecycle commands
 │   ├── update_check.rs   # Version update check — queries GitHub Releases and prints advisory when newer version is available
 │   ├── ndjson.rs         # NDJSON parsing utilities
 │   ├── sanitize.rs       # Input sanitization for safe outputs
@@ -217,11 +230,21 @@ Every compiled pipeline runs as three sequential jobs:
 │           ├── extension.rs # CompilerExtension impl (compile-time)
 │           └── execute.rs   # Stage 3 runtime (validate/copy)
 ├── ado-aw-derive/        # Proc-macro crate: #[derive(SanitizeConfig)], #[derive(SanitizeContent)]
+├── .claude-plugin/       # Root Claude marketplace catalog (makes the repo installable via `/plugin marketplace add`); release-please-versioned
+│   └── marketplace.json  # Lists the ado-aw plugin with source ./agency/plugins/ado-aw
+├── agency/               # Agency / Claude Code marketplace plugin (canonical source of truth)
+│   └── plugins/ado-aw/   # Version-locked plugin (release-please bumps version + pinned prompt URLs); listed in Agency marketplace via external `source`; scaffolded into consumer repos by `ado-aw init --agency`
+│       ├── .claude-plugin/ # plugin.json (manifest)
+│       ├── .mcp.json     # Wires read-only `ado-aw mcp-author` stdio server
+│       ├── agency.json   # Marketplace governance metadata + external source pointer
+│       ├── agents/ado-aw.md # Dispatcher subagent
+│       ├── skills/       # 6 SKILL.md playbooks (create/update/debug-workflow, compile-and-validate, manage-lifecycle, audit-build)
+│       └── scripts/      # doctor.{sh,ps1} prerequisite checks
 ├── examples/             # Example agent definitions
 ├── prompts/              # AI agent prompt files for workflow authoring tasks
-│   ├── create-ado-agentic-workflow.md # Step-by-step guide for creating a new agentic pipeline
-│   ├── update-ado-agentic-workflow.md # Guide for modifying an existing agentic pipeline
-│   └── debug-ado-agentic-workflow.md  # Guide for troubleshooting a failing agentic pipeline
+│   ├── create-ado-agentic-workflow.md # Step-by-step guide for creating a new agentic workflow
+│   ├── update-ado-agentic-workflow.md # Guide for modifying an existing agentic workflow
+│   └── debug-ado-agentic-workflow.md  # Guide for troubleshooting a failing agentic workflow
 ├── scripts/              # Supporting scripts shipped as release artifacts
 │   └── ado-script/       # TypeScript workspace for bundled gate/import helpers plus execution-context bundles
 │       └── src/
@@ -262,11 +285,11 @@ index to jump to the right page.
 ### Prompt files for workflow authoring
 
 - [`prompts/create-ado-agentic-workflow.md`](prompts/create-ado-agentic-workflow.md) — step-by-step
-  guide for creating a new agentic pipeline from scratch (interactive and non-interactive modes).
+  guide for creating a new agentic workflow from scratch (interactive and non-interactive modes).
 - [`prompts/update-ado-agentic-workflow.md`](prompts/update-ado-agentic-workflow.md) — guide for
-  modifying an existing agentic pipeline (read-then-update workflow with validation).
+  modifying an existing agentic workflow (read-then-update workflow with validation).
 - [`prompts/debug-ado-agentic-workflow.md`](prompts/debug-ado-agentic-workflow.md) — guide for
-  troubleshooting a failing agentic pipeline and filing a diagnostic report.
+  troubleshooting a failing agentic workflow and filing a diagnostic report.
 
 ### Authoring agent files
 
@@ -457,10 +480,10 @@ the bash body — shellcheck honours the directive and it's inert at runtime.
 cargo run -- compile ./path/to/agent.md
 ```
 
-### Recompile all agentic pipelines in the current directory
+### Recompile all agentic workflows in the current directory
 
 ```bash
-# Auto-discovers and recompiles all detected agentic pipelines
+# Auto-discovers and recompiles all detected agentic workflows
 cargo run -- compile
 ```
 

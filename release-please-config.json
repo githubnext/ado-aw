@@ -4,7 +4,38 @@
   "packages": {
     ".": {
       "release-type": "rust",
-      "bump-minor-pre-major": true
+      "bump-minor-pre-major": true,
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "agency/plugins/ado-aw/.claude-plugin/plugin.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": ".claude-plugin/marketplace.json",
+          "jsonpath": "$.metadata.version"
+        },
+        {
+          "type": "json",
+          "path": ".claude-plugin/marketplace.json",
+          "jsonpath": "$.plugins[0].version"
+        },
+        {
+          "type": "json",
+          "path": ".github/plugin/marketplace.json",
+          "jsonpath": "$.metadata.version"
+        },
+        {
+          "type": "json",
+          "path": ".github/plugin/marketplace.json",
+          "jsonpath": "$.plugins[0].version"
+        },
+        "agency/plugins/ado-aw/agents/ado-aw.md",
+        "agency/plugins/ado-aw/skills/create-workflow/SKILL.md",
+        "agency/plugins/ado-aw/skills/update-workflow/SKILL.md",
+        "agency/plugins/ado-aw/skills/debug-workflow/SKILL.md"
+      ]
     }
   }
 }
