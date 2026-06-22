@@ -4,6 +4,7 @@ use super::{PYTHON_BASH_COMMANDS, PythonRuntimeConfig};
 use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
 use crate::compile::ir::step::{Step, TaskStep};
 use crate::compile::ir::tasks::pip_authenticate::PipAuthenticate;
+use crate::compile::ir::tasks::use_python_version::UsePythonVersion;
 use crate::validate;
 use anyhow::Result;
 
@@ -125,8 +126,7 @@ management, install it first with `pip install uv`.\n"
 /// Build the typed [`TaskStep`] for installing Python.
 fn python_install_task_step(config: &PythonRuntimeConfig) -> TaskStep {
     let version = config.version().unwrap_or("3.x");
-    TaskStep::new("UsePythonVersion@0", format!("Install Python {version}"))
-        .with_input("versionSpec", version)
+    UsePythonVersion::new(version).into_step()
 }
 
 /// Build the typed [`TaskStep`] for pip authentication.
