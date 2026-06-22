@@ -221,7 +221,11 @@ fn test_init_agency_matches_canonical_source() {
         "README.md",
         "agents/ado-aw.md",
         "skills/create-workflow/SKILL.md",
+        "skills/update-workflow/SKILL.md",
+        "skills/debug-workflow/SKILL.md",
         "skills/compile-and-validate/SKILL.md",
+        "skills/manage-lifecycle/SKILL.md",
+        "skills/audit-build/SKILL.md",
         "scripts/doctor.sh",
         "scripts/doctor.ps1",
     ] {
