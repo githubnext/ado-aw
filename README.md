@@ -61,7 +61,9 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 The installers download the release binary, verify it against `checksums.txt`, install it to a standard path (`/usr/local/bin` when writable, otherwise a user-local path), and update your PATH when needed.
 
-If you see `The Process object must have the UseShellExecute property set to false in order to use environment variables`, run the four Windows commands above from an existing PowerShell prompt (not via a nested `powershell -Command ...` launch).
+Compare the `Get-FileHash` output with the `install-windows.ps1` entry in `checksums.txt` before running the script.
+
+If you see `The Process object must have the UseShellExecute property set to false in order to use environment variables`, run the five Windows commands above from an existing PowerShell prompt (not via a nested `powershell -Command ...` launch).
 
 ### 2. Initialize Your Repository
 
