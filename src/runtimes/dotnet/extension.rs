@@ -4,6 +4,7 @@ use super::{DOTNET_BASH_COMMANDS, DotnetRuntimeConfig, GLOBAL_JSON_SENTINEL};
 use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
 use crate::compile::ir::step::{BashStep, Step, TaskStep};
 use crate::compile::ir::tasks::nuget_authenticate::NuGetAuthenticate;
+use crate::compile::ir::tasks::use_dotnet::UseDotNet;
 use crate::validate;
 use anyhow::Result;
 
@@ -153,14 +154,14 @@ in the repository.\n"
 /// * no version → `version: '8.0.x'` (compiler default).
 fn dotnet_install_task_step(config: &DotnetRuntimeConfig) -> TaskStep {
     if config.use_global_json() {
-        return TaskStep::new("UseDotNet@2", "Install .NET SDK (from global.json)")
-            .with_input("packageType", "sdk")
-            .with_input("useGlobalJson", "true");
+        return UseDotNet::with_global_json()
+            .with_display_name("Install .NET SDK (from global.json)")
+            .into_step();
     }
     let version = config.version().unwrap_or("8.0.x");
-    TaskStep::new("UseDotNet@2", format!("Install .NET SDK {version}"))
-        .with_input("packageType", "sdk")
-        .with_input("version", version)
+    UseDotNet::with_version(version)
+        .with_display_name(format!("Install .NET SDK {version}"))
+        .into_step()
 }
 
 /// Build the typed [`TaskStep`] for NuGet authentication.
@@ -313,7 +314,8 @@ mod tests {
             Step::Task(t) => {
                 assert_eq!(t.task, "UseDotNet@2");
                 assert_eq!(t.display_name, "Install .NET SDK 8.0.x");
-                assert_eq!(t.inputs.get("packageType").map(String::as_str), Some("sdk"));
+                // packageType is the ADO default ("sdk") so the builder omits it
+                assert!(t.inputs.get("packageType").is_none());
                 assert_eq!(t.inputs.get("version").map(String::as_str), Some("8.0.x"));
                 assert!(!t.inputs.contains_key("useGlobalJson"));
             }
