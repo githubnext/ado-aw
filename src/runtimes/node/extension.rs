@@ -3,6 +3,7 @@
 use super::{NODE_BASH_COMMANDS, NodeRuntimeConfig};
 use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
 use crate::compile::ir::step::{BashStep, Step, TaskStep};
+use crate::compile::ir::tasks::use_node::UseNode;
 use crate::validate;
 use anyhow::Result;
 
@@ -125,8 +126,7 @@ Node.js is installed and available. Use `node` to run scripts, \
 /// default ("22.x") matches the legacy emitter.
 fn node_install_task_step(config: &NodeRuntimeConfig) -> TaskStep {
     let version = config.version().unwrap_or("22.x");
-    TaskStep::new("UseNode@1", format!("Install Node.js {version}"))
-        .with_input("version", version)
+    UseNode::new(version).into_step()
 }
 
 /// Build the typed [`TaskStep`] for npm authentication.

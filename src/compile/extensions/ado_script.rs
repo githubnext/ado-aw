@@ -29,7 +29,8 @@ use crate::compile::ir::condition::{Condition, Expr};
 use crate::compile::ir::env::EnvValue;
 use crate::compile::ir::ids::StepId;
 use crate::compile::ir::output::OutputDecl;
-use crate::compile::ir::step::{BashStep, Step, TaskStep};
+use crate::compile::ir::step::{BashStep, Step};
+use crate::compile::ir::tasks::use_node::UseNode;
 use crate::compile::types::{PipelineFilters, PrFilters, SupplyChainConfig};
 
 const GATE_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/gate.js";
@@ -339,8 +340,7 @@ impl AdoScriptExtension {
 fn install_and_download_steps_typed(supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
     let version = env!("CARGO_PKG_VERSION");
     let install = {
-        let mut t =
-            TaskStep::new("UseNode@1", "Install Node.js 22.x").with_input("version", "22.x");
+        let mut t = UseNode::new("22.x").into_step();
         t.timeout = Some(std::time::Duration::from_secs(300));
         t.condition = Some(Condition::Succeeded);
         t
