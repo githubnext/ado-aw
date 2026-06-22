@@ -3,6 +3,7 @@
 use super::{PYTHON_BASH_COMMANDS, PythonRuntimeConfig};
 use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
 use crate::compile::ir::step::{Step, TaskStep};
+use crate::compile::ir::tasks::pip_authenticate::PipAuthenticate;
 use crate::validate;
 use anyhow::Result;
 
@@ -130,11 +131,10 @@ fn python_install_task_step(config: &PythonRuntimeConfig) -> TaskStep {
 
 /// Build the typed [`TaskStep`] for pip authentication.
 fn pip_authenticate_task_step() -> TaskStep {
-    TaskStep::new(
-        "PipAuthenticate@1",
-        "Authenticate pip (build service identity)",
-    )
-    .with_input("artifactFeeds", "")
+    PipAuthenticate::new()
+        .artifact_feeds("")
+        .with_display_name("Authenticate pip (build service identity)")
+        .into_step()
 }
 
 #[cfg(test)]
