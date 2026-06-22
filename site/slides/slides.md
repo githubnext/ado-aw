@@ -6,6 +6,7 @@ info: |
   CI/CD is the rung we trust. Continuous AI is the next one.
 class: text-center
 colorSchema: dark
+routerMode: hash
 highlighter: shiki
 transition: slide-left
 mdc: true
