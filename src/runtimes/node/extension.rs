@@ -3,6 +3,7 @@
 use super::{NODE_BASH_COMMANDS, NodeRuntimeConfig};
 use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
 use crate::compile::ir::step::{BashStep, Step, TaskStep};
+use crate::compile::ir::tasks::npm_authenticate::NpmAuthenticate;
 use crate::compile::ir::tasks::use_node::UseNode;
 use crate::validate;
 use anyhow::Result;
@@ -131,11 +132,9 @@ fn node_install_task_step(config: &NodeRuntimeConfig) -> TaskStep {
 
 /// Build the typed [`TaskStep`] for npm authentication.
 fn npm_authenticate_task_step() -> TaskStep {
-    TaskStep::new(
-        "npmAuthenticate@0",
-        "Authenticate npm (build service identity)",
-    )
-    .with_input("workingFile", ".npmrc")
+    NpmAuthenticate::new(".npmrc")
+        .with_display_name("Authenticate npm (build service identity)")
+        .into_step()
 }
 
 /// Build the typed [`BashStep`] that ensures `.npmrc`. The script
