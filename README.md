@@ -52,10 +52,18 @@ curl -fsSL https://github.com/githubnext/ado-aw/releases/latest/download/install
 
 ```powershell
 # Windows (x64)
-powershell -ExecutionPolicy Bypass -NoProfile -Command "iwr https://github.com/githubnext/ado-aw/releases/latest/download/install-windows.ps1 -UseBasicParsing | iex"
+$script = Join-Path $env:TEMP "install-ado-aw.ps1"
+Invoke-WebRequest "https://github.com/githubnext/ado-aw/releases/latest/download/install-windows.ps1" -UseBasicParsing -OutFile $script
+Get-FileHash $script -Algorithm SHA256
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+& $script
 ```
 
 The installers download the release binary, verify it against `checksums.txt`, install it to a standard path (`/usr/local/bin` when writable, otherwise a user-local path), and update your PATH when needed.
+
+Compare the `Get-FileHash` output with the `install-windows.ps1` entry in `checksums.txt` before running the script.
+
+If you see `The Process object must have the UseShellExecute property set to false in order to use environment variables`, run the five Windows commands above from an existing PowerShell prompt (not via a nested `powershell -Command ...` launch).
 
 ### 2. Initialize Your Repository
 

@@ -21,10 +21,15 @@ curl -fsSL https://github.com/githubnext/ado-aw/releases/latest/download/install
 curl -fsSL https://github.com/githubnext/ado-aw/releases/latest/download/install-macos.sh | sh
 
 # Windows (PowerShell)
-powershell -ExecutionPolicy Bypass -NoProfile -Command "iwr https://github.com/githubnext/ado-aw/releases/latest/download/install-windows.ps1 -UseBasicParsing | iex"
+$script = Join-Path $env:TEMP "install-ado-aw.ps1"
+Invoke-WebRequest "https://github.com/githubnext/ado-aw/releases/latest/download/install-windows.ps1" -UseBasicParsing -OutFile $script
+Get-FileHash $script -Algorithm SHA256
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+& $script
 ```
 
 These scripts validate release checksums, install `ado-aw`, and update PATH when needed.
+If Windows reports a `UseShellExecute` environment-variable error, run these commands from your current PowerShell session instead of wrapping them in `powershell -Command`.
 
 Verify: `ado-aw --version`
 
