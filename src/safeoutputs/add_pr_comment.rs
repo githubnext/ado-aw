@@ -213,24 +213,9 @@ fn repository_checkout_dir(repository: &str, ctx: &ExecutionContext) -> anyhow::
         return Ok(ctx.source_directory.clone());
     }
 
-    if let Some((alias, _)) = ctx.allowed_repositories.get_key_value(repository) {
-        return Ok(ctx.source_directory.join(alias));
-    }
-
-    if let Some((alias, _)) = ctx
-        .allowed_repositories
-        .iter()
-        .find(|(_, name)| name.eq_ignore_ascii_case(repository))
+    if let Some(alias) =
+        crate::safeoutputs::lookup_allowed_repository_alias(repository, &ctx.allowed_repositories)
     {
-        return Ok(ctx.source_directory.join(alias));
-    }
-
-    if let Some((alias, _)) = ctx.allowed_repositories.iter().find(|(_, name)| {
-        name.rsplit('/')
-            .next()
-            .unwrap_or(name.as_str())
-            .eq_ignore_ascii_case(repository)
-    }) {
         return Ok(ctx.source_directory.join(alias));
     }
 
@@ -889,5 +874,43 @@ allowed-statuses:
         let resolved = repository_checkout_dir("4x4/sdk-ftdidevicecontrol", &ctx).unwrap();
 
         assert_eq!(resolved, alias_dir);
+    }
+
+    #[test]
+    fn test_repository_checkout_dir_resolves_alias_key_to_alias_path() {
+        let workspace = tempdir().unwrap();
+        let alias_dir = workspace.path().join("repo-sdk-ftdidevicecontrol");
+        std::fs::create_dir(&alias_dir).unwrap();
+
+        let mut allowed_repositories = std::collections::HashMap::new();
+        allowed_repositories.insert(
+            "repo-sdk-ftdidevicecontrol".to_string(),
+            "4x4/sdk-FtdiDeviceControl".to_string(),
+        );
+
+        let ctx = ExecutionContext {
+            source_directory: workspace.path().to_path_buf(),
+            allowed_repositories,
+            repository_name: Some("4x4/current-repo".to_string()),
+            ..Default::default()
+        };
+
+        let resolved = repository_checkout_dir("repo-sdk-ftdidevicecontrol", &ctx).unwrap();
+
+        assert_eq!(resolved, alias_dir);
+    }
+
+    #[test]
+    fn test_repository_checkout_dir_treats_empty_repository_as_self() {
+        let workspace = tempdir().unwrap();
+        let ctx = ExecutionContext {
+            source_directory: workspace.path().to_path_buf(),
+            repository_name: Some("4x4/current-repo".to_string()),
+            ..Default::default()
+        };
+
+        let resolved = repository_checkout_dir("", &ctx).unwrap();
+
+        assert_eq!(resolved, workspace.path());
     }
 }

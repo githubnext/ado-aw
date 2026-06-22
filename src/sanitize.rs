@@ -357,6 +357,9 @@ fn collect_inline_code_ranges(
         }
 
         let tick_count = count_repeated_byte(bytes, i, end, b'`');
+        // Be intentionally conservative here: we only preserve single-line inline code spans.
+        // CommonMark allows a code span to wrap a newline, but treating unmatched backticks as
+        // ordinary text keeps escaping active in ambiguous multi-line cases.
         let inline_code_boundary = input[i..end]
             .find('\n')
             .map(|offset| i + offset)
