@@ -1,3 +1,6 @@
 node_modules/
 dist/
 .astro/
+slides/node_modules/
+slides/dist/
+public/slides/
