@@ -109,6 +109,7 @@ on:
 | `daily around 14:00` | Within ±60 min of 2 PM UTC |
 | `daily around 3pm utc+9` | 3 PM JST → converted to UTC |
 | `daily between 9:00 and 17:00` | Business hours |
+| `weekly` | Any day of the week, time scattered |
 | `weekly on monday` | Every Monday, scattered time |
 | `weekly on friday around 17:00` | Friday ~5 PM |
 | `every 2 days` | Every N days, time scattered |
