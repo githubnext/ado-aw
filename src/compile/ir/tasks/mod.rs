@@ -31,6 +31,7 @@ pub mod docker_installer;
 pub mod dotnet_core_cli;
 pub mod download_package;
 pub mod download_pipeline_artifact;
+pub mod download_secure_file;
 pub mod extract_files;
 pub mod go_tool;
 pub mod java_tool_installer;
