@@ -44,6 +44,7 @@ pub mod publish_build_artifacts;
 pub mod publish_code_coverage_results;
 pub mod publish_pipeline_artifact;
 pub mod publish_test_results;
+pub mod twine_authenticate;
 pub mod use_dotnet;
 pub mod use_node;
 pub mod use_python_version;
