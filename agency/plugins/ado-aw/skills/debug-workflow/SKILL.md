@@ -21,7 +21,7 @@ You are troubleshooting a **failing** ado-aw agentic workflow.
 3. Load the **entire** content of the authoritative, version-pinned playbook and
    follow its instructions precisely:
 
-   https://raw.githubusercontent.com/githubnext/ado-aw/v0.37.0/prompts/debug-ado-agentic-workflow.md <!-- x-release-please-version -->
+   https://raw.githubusercontent.com/githubnext/ado-aw/v0.38.0/prompts/debug-ado-agentic-workflow.md <!-- x-release-please-version -->
 
 4. For Stage 3 (SafeOutputs) 401/403 failures, consult
    `docs/safe-output-permissions.md` and surface the auth/permission error
