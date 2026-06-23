@@ -179,6 +179,21 @@ fn test_init_agency_generates_plugin() {
         );
     }
 
+    // On Unix, the scaffolded doctor.sh must be executable so the documented
+    // `./scripts/doctor.sh` invocation works (not just `bash doctor.sh`).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(plugin_root.join("scripts/doctor.sh"))
+            .expect("doctor.sh metadata")
+            .permissions()
+            .mode();
+        assert!(
+            mode & 0o111 != 0,
+            "scaffolded doctor.sh should have the executable bit set, got mode {mode:o}"
+        );
+    }
+
     // The manifest is a verbatim copy of the canonical plugin: it must carry a
     // concrete version (no unresolved placeholder) and be valid JSON.
     let manifest = fs::read_to_string(&plugin_json).expect("Should be able to read plugin.json");

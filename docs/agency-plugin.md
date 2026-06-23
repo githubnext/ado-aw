@@ -101,6 +101,15 @@ release:
   create/update/debug skills (generic updater, keyed on the
   `<!-- x-release-please-version -->` marker).
 
+> **Maintainer note — adding a version reference to a skill.** Only files that
+> contain a version-pinned URL are listed in `release-please-config.json`
+> `extra-files`. The `compile-and-validate`, `manage-lifecycle`, and
+> `audit-build` skills are **intentionally omitted** because they are CLI/MCP-
+> driven and carry no pinned version. If you add a `v<version>/...` reference to
+> any of them, you **must** add a `<!-- x-release-please-version -->` marker on
+> that line **and** add the file to `extra-files`, or the bump will silently be
+> missed.
+
 ## Identity & governance
 
 `agency.json` declares `engines: ["claude", "copilot"]`, `category:

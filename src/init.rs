@@ -172,6 +172,18 @@ async fn write_agency_plugin(base: &Path) -> Result<()> {
         tokio::fs::write(&dest, contents)
             .await
             .with_context(|| format!("Failed to write plugin file: {}", dest.display()))?;
+
+        // `tokio::fs::write` creates files mode 0644 (minus umask); shell scripts
+        // need the executable bit so the documented `./scripts/doctor.sh` works.
+        #[cfg(unix)]
+        if rel_path.ends_with(".sh") {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))
+                .await
+                .with_context(|| {
+                    format!("Failed to set executable bit: {}", dest.display())
+                })?;
+        }
     }
 
     // Root marketplace catalogs (written relative to the repo root, not the
