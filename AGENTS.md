@@ -338,9 +338,15 @@ index to jump to the right page.
 - [`docs/ir.md`](docs/ir.md) — typed Azure DevOps pipeline IR (`Pipeline`, jobs/stages/steps, output refs, graph pass, lowering, target builders, and the public JSON summary consumed by agent-facing tooling).
 - [`docs/cli.md`](docs/cli.md) — `ado-aw` CLI commands (`init`, `compile`,
   `check`, `mcp`, `mcp-http`, `execute`, `secrets`, `enable`, `disable`,
+- [`docs/cli.md`](docs/cli.md) — `ado-aw` CLI commands (`init`, `compile`,
+  `check`, `mcp`, `mcp-http`, `execute`, `secrets`, `enable`, `disable`,
   `remove`, `list`, `status`, `run`, `audit`, `mcp-author`, `trace`,
   `inspect`, `graph`, `whatif`, `lint`, `catalog`; `configure` is a
   deprecated hidden alias and `export-gate-schema` is a hidden build-time tool).
+- [`docs/agency-plugin.md`](docs/agency-plugin.md) — the Agency / Claude Code
+  plugin (`agency/plugins/ado-aw/`): canonical layout, six skills, `mcp-author`
+  wiring, the self-contained root marketplace catalogs, `init --agency`
+  scaffolding, release-please version-locking, and shared-marketplace listing.
 - [`docs/audit.md`](docs/audit.md) — `ado-aw audit`: accepted build-id / URL
   forms, artifact layout, cache behavior, rejection tracing, and `AuditData`
   report shape.
