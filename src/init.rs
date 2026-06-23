@@ -163,11 +163,12 @@ async fn write_agency_plugin(base: &Path) -> Result<()> {
 
     for (rel_path, contents) in AGENCY_PLUGIN_FILES {
         let dest = plugin_root.join(rel_path);
-        if let Some(parent) = dest.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-        }
+        let parent = dest
+            .parent()
+            .with_context(|| format!("Plugin file has no parent directory: {}", dest.display()))?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
         tokio::fs::write(&dest, contents)
             .await
             .with_context(|| format!("Failed to write plugin file: {}", dest.display()))?;
@@ -177,11 +178,12 @@ async fn write_agency_plugin(base: &Path) -> Result<()> {
     // plugin dir) so `/plugin marketplace add <repo>` can detect the plugin.
     for (rel_path, contents) in AGENCY_MARKETPLACE_FILES {
         let dest = base.join(rel_path);
-        if let Some(parent) = dest.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-        }
+        let parent = dest.parent().with_context(|| {
+            format!("Marketplace catalog has no parent directory: {}", dest.display())
+        })?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
         tokio::fs::write(&dest, contents)
             .await
             .with_context(|| format!("Failed to write marketplace catalog: {}", dest.display()))?;

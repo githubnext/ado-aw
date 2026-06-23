@@ -15,7 +15,7 @@ network-isolated sandboxes (Agent → Threat Detection → Safe-Output Execution
 ## Prerequisites
 
 Before doing anything else, make sure the ado-aw compiler is available — run the
-**doctor** check (`scripts/doctor.sh` on macOS/Linux, `scripts/doctor.ps1` on
+**doctor** check (`bash scripts/doctor.sh` on macOS/Linux, `scripts/doctor.ps1` on
 Windows). It verifies `ado-aw` is on `PATH` and that `gh`/`az` auth is present
 where ADO calls are needed. If `ado-aw` is missing, install it:
 

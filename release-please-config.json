@@ -34,7 +34,8 @@
         "agency/plugins/ado-aw/agents/ado-aw.md",
         "agency/plugins/ado-aw/skills/create-workflow/SKILL.md",
         "agency/plugins/ado-aw/skills/update-workflow/SKILL.md",
-        "agency/plugins/ado-aw/skills/debug-workflow/SKILL.md"
+        "agency/plugins/ado-aw/skills/debug-workflow/SKILL.md",
+        ".github/agents/ado-aw.agent.md"
       ]
     }
   }

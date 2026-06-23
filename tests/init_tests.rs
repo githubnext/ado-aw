@@ -276,6 +276,7 @@ fn test_init_without_agency_skips_plugin() {
         "Root Copilot catalog should not be created without --agency"
     );
 }
+/// Test that `--force` is advertised in `init --help` and describes its
 /// actual purpose: bypassing the GitHub-remote guard so maintainers can run
 /// `ado-aw init` inside a GitHub-hosted fork of `ado-aw` itself.
 ///

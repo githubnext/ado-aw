@@ -49,10 +49,10 @@ so that repo becomes registerable the same way.
 The `ado-aw` compiler must be on `PATH`. Run the bundled doctor check first:
 
 ```bash
-./scripts/doctor.sh     # macOS / Linux
+bash ./scripts/doctor.sh    # macOS / Linux
 ```
 ```powershell
-.\scripts\doctor.ps1    # Windows
+.\scripts\doctor.ps1        # Windows
 ```
 
 If `ado-aw` is missing, install it from the
