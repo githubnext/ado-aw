@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "astro dev",
-    "build": "astro build",
+    "build": "npm run build:slides && astro build",
+    "build:astro": "astro build",
+    "build:slides": "npm --prefix slides ci --omit=dev --no-audit --no-fund && npm --prefix slides run build",
     "preview": "astro preview",
     "astro": "astro"
   },

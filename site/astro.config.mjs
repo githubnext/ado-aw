@@ -16,7 +16,9 @@ export default defineConfig({
       description: 'Compile natural-language markdown into Azure DevOps agentic pipelines',
       plugins: [
         starlightLlmsTxt(),
-        starlightLinksValidator(),
+        starlightLinksValidator({
+          exclude: ['/ado-aw/slides/', '/ado-aw/slides/**'],
+        }),
       ],
       customCss: ['./src/styles/custom.css'],
       components: {

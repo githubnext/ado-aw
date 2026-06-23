@@ -1613,6 +1613,8 @@ mod tests {
             Fact::TargetBranch,
             Fact::CommitMessage,
             Fact::BuildReason,
+            Fact::TriggeredByPipeline,
+            Fact::TriggeringBranch,
         ];
         for fact in &pipeline_facts {
             assert!(
@@ -1632,6 +1634,8 @@ mod tests {
     fn test_api_derived_facts_have_dependencies() {
         assert_eq!(Fact::PrIsDraft.dependencies(), &[Fact::PrMetadata]);
         assert_eq!(Fact::PrLabels.dependencies(), &[Fact::PrMetadata]);
+        // Iteration API: ChangedFileCount depends on ChangedFiles
+        assert_eq!(Fact::ChangedFileCount.dependencies(), &[Fact::ChangedFiles]);
     }
 
     #[test]
@@ -1733,8 +1737,8 @@ mod tests {
         assert!(
             matches!(
                 &checks[0].predicate,
-                Predicate::LabelSetMatch { any_of, none_of, .. }
-                    if any_of == &["run-agent"] && none_of == &["do-not-run"]
+                Predicate::LabelSetMatch { any_of, all_of, none_of }
+                    if any_of == &["run-agent"] && all_of.is_empty() && none_of == &["do-not-run"]
             ),
             "labels should lower to LabelSetMatch preserving any_of and none_of"
         );
@@ -1749,12 +1753,13 @@ mod tests {
         };
         let checks = lower_pr_filters(&filters);
         assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].name, "change-count");
         assert!(matches!(
             &checks[0].predicate,
             Predicate::NumericRange {
+                fact: Fact::ChangedFileCount,
                 min: Some(5),
                 max: Some(100),
-                ..
             }
         ));
     }
@@ -2116,6 +2121,7 @@ mod tests {
         assert_eq!(spec.context.step_name, "prGate");
         assert_eq!(spec.context.bypass_label, "PR");
         // Facts should include pr_title, pr_metadata (dep of pr_labels), pr_labels
+        assert_eq!(spec.facts.len(), 3, "exactly 3 facts required for title + labels checks");
         assert!(spec.facts.iter().any(|f| f.kind == "pr_title"));
         assert!(spec.facts.iter().any(|f| f.kind == "pr_metadata"));
         assert!(spec.facts.iter().any(|f| f.kind == "pr_labels"));

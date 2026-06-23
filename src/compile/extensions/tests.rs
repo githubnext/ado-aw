@@ -781,7 +781,7 @@ fn test_dotnet_declarations_prepare_steps() {
     let steps = ext.declarations(&ctx).unwrap().agent_prepare_steps;
     assert_eq!(steps.len(), 1, "no auth steps without feed-url/config");
     assert!(
-        matches!(&steps[0], Step::Task(t) if t.task == "UseDotNet@2" && t.inputs.get("packageType").map(String::as_str) == Some("sdk"))
+        matches!(&steps[0], Step::Task(t) if t.task == "UseDotNet@2" && t.inputs.get("packageType").is_none())
     );
 }
 

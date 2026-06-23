@@ -377,9 +377,11 @@ mod tests {
     #[test]
     fn no_legacy_fields_is_noop() {
         let after = run_noop("name: x\ndescription: y\n");
-        assert!(!after.contains_key(Value::String("repos".into())));
-        assert!(!after.contains_key(Value::String("repositories".into())));
-        assert!(!after.contains_key(Value::String("checkout".into())));
+        assert_eq!(
+            after,
+            serde_yaml::from_str::<Mapping>("name: x\ndescription: y\n").unwrap(),
+            "no-op must not modify the mapping"
+        );
     }
 
     #[test]
@@ -398,8 +400,14 @@ mod tests {
         // content — the codemod cleans up the stub key but reports
         // changed=false so the caller doesn't surface a rewrite
         // warning.
-        let after = run_noop("name: x\nrepositories: []\n");
-        assert!(!after.contains_key(Value::String("repos".into())));
+        let mut m: Mapping = serde_yaml::from_str("name: x\nrepositories: []\n").unwrap();
+        let changed = apply_codemod(&mut m, &CodemodContext::current()).expect("apply");
+        assert!(!changed, "empty repositories must not trigger a migration warning");
+        assert!(!m.contains_key(Value::String("repos".into())), "no repos key should be emitted");
+        assert!(
+            !m.contains_key(Value::String("repositories".into())),
+            "empty repositories stub should be cleaned up"
+        );
     }
 
     #[test]
