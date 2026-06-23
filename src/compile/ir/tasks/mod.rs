@@ -32,6 +32,7 @@ pub mod dotnet_core_cli;
 pub mod download_package;
 pub mod download_pipeline_artifact;
 pub mod extract_files;
+pub mod github_release;
 pub mod go_tool;
 pub mod java_tool_installer;
 pub mod maven_authenticate;
