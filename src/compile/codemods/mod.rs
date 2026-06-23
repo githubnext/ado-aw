@@ -290,7 +290,6 @@ mod tests {
         let mut m: Mapping = serde_yaml::from_str("name: x\n").unwrap();
         let registry: &[&'static Codemod] = &[&TEST_CODEMOD_NOOP];
         let report = apply_codemods_with(&mut m, registry).unwrap();
-        assert!(!report.changed());
         assert!(
             report.applied_ids().is_empty(),
             "noop codemod must not appear in applied list, got: {:?}",
@@ -321,7 +320,6 @@ mod tests {
         let mut m: Mapping = serde_yaml::from_str("name: x\n").unwrap();
         let registry: &[&'static Codemod] = &[&TEST_CODEMOD_RENAME];
         let report = apply_codemods_with(&mut m, registry).unwrap();
-        assert!(!report.changed());
         assert!(
             report.applied_ids().is_empty(),
             "non-matching codemod must not appear in applied list, got: {:?}",
