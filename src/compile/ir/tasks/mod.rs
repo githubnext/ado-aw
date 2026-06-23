@@ -34,6 +34,7 @@ pub mod download_pipeline_artifact;
 pub mod extract_files;
 pub mod go_tool;
 pub mod java_tool_installer;
+pub mod maven_authenticate;
 pub mod npm;
 pub mod npm_authenticate;
 pub mod nuget_authenticate;
