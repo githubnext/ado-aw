@@ -454,4 +454,26 @@ fn test_init_agency_does_not_clobber_existing_catalog() {
             .exists(),
         "plugin tree should still be scaffolded even when a root catalog pre-exists"
     );
+
+    // The other catalog (.github/plugin/) had no pre-existing file, so it IS
+    // written — this is the mixed (wrote one, skipped one) case. The user-facing
+    // output must reflect both: a skip warning on stderr and a summary line that
+    // does NOT falsely claim both catalogs were written.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Skipped .claude-plugin/marketplace.json"),
+        "stderr should warn about the skipped pre-existing catalog, got:\n{stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("left a pre-existing one untouched"),
+        "stdout summary must acknowledge the skipped catalog, not claim both were written, got:\n{stdout}"
+    );
+    assert!(
+        temp_dir
+            .path()
+            .join(".github/plugin/marketplace.json")
+            .exists(),
+        "the non-pre-existing catalog should still be written"
+    );
 }

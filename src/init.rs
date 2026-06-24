@@ -226,14 +226,19 @@ async fn write_agency_plugin(base: &Path) -> Result<()> {
     }
 
     println!("✓ Created Agency plugin in {}", plugin_root.display());
-    if wrote_catalog {
-        println!(
+    match (wrote_catalog, skipped_catalog) {
+        (true, false) => println!(
             "✓ Wrote marketplace catalogs (.claude-plugin/, .github/plugin/) — register with: /plugin marketplace add <this repo>"
-        );
-    } else if skipped_catalog {
-        println!(
+        ),
+        (true, true) => println!(
+            "✓ Wrote one marketplace catalog; left a pre-existing one untouched (see warning above) — merge the `ado-aw` plugin entry into it to register."
+        ),
+        (false, true) => println!(
             "ℹ Left existing marketplace catalogs untouched — add the `ado-aw` plugin entry manually to register it."
-        );
+        ),
+        // No catalogs written and none skipped means every catalog already
+        // matched ours exactly (idempotent re-run): nothing to report.
+        (false, false) => {}
     }
 
     Ok(())
