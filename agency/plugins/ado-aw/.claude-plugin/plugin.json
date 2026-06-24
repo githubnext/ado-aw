@@ -1,0 +1,23 @@
+{
+  "name": "ado-aw",
+  "version": "0.38.0",
+  "description": "Azure DevOps Agentic Workflows (ado-aw) — create, update, validate, operate, and debug AI-powered Azure DevOps agentic workflows: Markdown agent specs compiled into secure, network-isolated ADO pipelines.",
+  "author": {
+    "name": "GitHub Next",
+    "url": "https://github.com/githubnext/ado-aw"
+  },
+  "homepage": "https://github.com/githubnext/ado-aw",
+  "repository": "https://github.com/githubnext/ado-aw",
+  "license": "MIT",
+  "keywords": [
+    "azure-devops",
+    "ado",
+    "agentic",
+    "pipelines",
+    "ado-aw",
+    "safe-outputs",
+    "compiler",
+    "automation"
+  ],
+  "mcpServers": "./.mcp.json"
+}

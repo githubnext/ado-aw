@@ -282,7 +282,7 @@ enum Commands {
         #[arg(long = "enabled-tools")]
         enabled_tools: Vec<String>,
     },
-    /// Initialize a repository for AI-first agentic pipeline authoring
+    /// Initialize a repository for AI-first agentic workflow authoring
     Init {
         /// Target directory (defaults to current directory)
         #[arg(long)]
@@ -291,6 +291,11 @@ enum Commands {
         /// GitHub-hosted repository like `githubnext/ado-aw` itself)
         #[arg(long)]
         force: bool,
+        /// Additionally generate an Agency / Claude Code plugin under
+        /// `agency/plugins/ado-aw` plus repo-root marketplace catalogs
+        /// (additive to the standard agent file).
+        #[arg(long)]
+        agency: bool,
     },
     /// (Deprecated) Set GITHUB_TOKEN on every matched ADO definition.
     /// Use `secrets set GITHUB_TOKEN <value>` instead.
@@ -604,7 +609,7 @@ enum Commands {
 }
 
 #[derive(Parser, Debug)]
-#[command(version, about = "Compiler for Azure DevOps agentic pipelines")]
+#[command(version, about = "Compiler for Azure DevOps Agentic Workflows")]
 struct Args {
     /// Enable verbose logging (info level)
     #[arg(short, long, global = true)]
@@ -1085,7 +1090,11 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
-        Commands::Init { path, force } => {
+        Commands::Init {
+            path,
+            force,
+            agency,
+        } => {
             let init_path = path.as_deref().unwrap_or(Path::new("."));
             // `--force` bypasses the GitHub-remote guard so maintainers can
             // run `ado-aw init` inside this repository (or other GitHub-hosted
@@ -1093,7 +1102,7 @@ async fn main() -> Result<()> {
             if !force {
                 ensure_non_github_remote_for_ado_aw("init", init_path).await?;
             }
-            init::run(path.as_deref()).await?;
+            init::run(path.as_deref(), agency).await?;
         }
         Commands::Configure {
             token,
