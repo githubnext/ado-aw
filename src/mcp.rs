@@ -74,6 +74,172 @@ pub struct SafeOutputs {
     tool_router: ToolRouter<Self>,
 }
 
+/// Resolve which git directory to use for patch generation.
+///
+/// `repository` of `None` or `"self"` maps to `bounding_directory` directly;
+/// any other value is validated as a safe path segment and resolved as a
+/// subdirectory of `bounding_directory`.
+fn resolve_git_dir_for_patch(
+    bounding_directory: &std::path::Path,
+    repository: Option<&str>,
+) -> Result<std::path::PathBuf, McpError> {
+    match repository {
+        Some("self") | None => Ok(bounding_directory.to_owned()),
+        Some(repo_alias) => {
+            if !crate::validate::is_safe_path_segment(repo_alias) {
+                return Err(anyhow_to_mcp_error(anyhow::anyhow!(
+                    "Invalid repository alias: {}. Path traversal is not allowed.",
+                    repo_alias
+                )));
+            }
+            let repo_path = bounding_directory.join(repo_alias);
+            // `ensure_path_within_base` canonicalizes `repo_path` (which fails
+            // for a non-existent directory) and verifies containment, returning
+            // the symlink-resolved path we should hand to git.
+            crate::validate::ensure_path_within_base(
+                &repo_path,
+                bounding_directory,
+                "Repository path",
+            )
+            .map_err(anyhow_to_mcp_error)
+        }
+    }
+}
+
+/// Check whether the working tree has uncommitted changes (staged or unstaged).
+async fn check_uncommitted_changes(
+    git_dir: &std::path::Path,
+) -> Result<bool, McpError> {
+    use tokio::process::Command;
+    let status_output = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(git_dir)
+        .output()
+        .await
+        .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git status: {}", e)))?;
+    if !status_output.status.success() {
+        return Err(anyhow_to_mcp_error(anyhow::anyhow!(
+            "git status failed: {}",
+            String::from_utf8_lossy(&status_output.stderr)
+        )));
+    }
+    Ok(!String::from_utf8_lossy(&status_output.stdout)
+        .trim()
+        .is_empty())
+}
+
+/// Stage all changes and create a temporary "agent changes" commit so that
+/// uncommitted work is captured by `git format-patch`.
+///
+/// On any failure the staging area is reset before the error is returned,
+/// leaving the working tree in the same state as before the call.
+async fn make_synthetic_commit(git_dir: &std::path::Path) -> Result<(), McpError> {
+    use tokio::process::Command;
+
+    let add_output = Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(git_dir)
+        .output()
+        .await
+        .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git add -A: {}", e)))?;
+
+    if !add_output.status.success() {
+        // Reset index to clean state on failure
+        let _ = Command::new("git")
+            .args(["reset", "HEAD", "--quiet"])
+            .current_dir(git_dir)
+            .output()
+            .await;
+        return Err(anyhow_to_mcp_error(anyhow::anyhow!(
+            "git add -A failed: {}",
+            String::from_utf8_lossy(&add_output.stderr)
+        )));
+    }
+
+    // Create a temporary commit with git identity flags to avoid config dependency
+    let commit_output = Command::new("git")
+        .args([
+            "-c",
+            "user.email=agent@ado-aw",
+            "-c",
+            "user.name=ADO Agent",
+            "commit",
+            "-m",
+            "agent changes",
+            "--allow-empty",
+            "--no-verify",
+        ])
+        .current_dir(git_dir)
+        .output()
+        .await
+        .map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!("Failed to create temporary commit: {}", e))
+        })?;
+
+    if !commit_output.status.success() {
+        // Reset staging on failure
+        let _ = Command::new("git")
+            .args(["reset", "HEAD", "--quiet"])
+            .current_dir(git_dir)
+            .output()
+            .await;
+        return Err(anyhow_to_mcp_error(anyhow::anyhow!(
+            "Failed to create temporary commit: {}",
+            String::from_utf8_lossy(&commit_output.stderr)
+        )));
+    }
+
+    Ok(())
+}
+
+/// Undo the synthetic commit created by [`make_synthetic_commit`], restoring
+/// all changes to the working tree.
+///
+/// `git reset --mixed HEAD~1` resets the index to the parent tree, leaving
+/// modified files as unstaged changes and previously-untracked files as
+/// untracked again.
+async fn undo_synthetic_commit(git_dir: &std::path::Path) -> Result<(), McpError> {
+    use tokio::process::Command;
+
+    // Capture the synthetic commit SHA for diagnostics before resetting
+    let head_sha = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(git_dir)
+        .output()
+        .await
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "<unknown>".to_string());
+
+    let reset_output = Command::new("git")
+        .args(["reset", "HEAD~1", "--mixed", "--quiet"])
+        .current_dir(git_dir)
+        .output()
+        .await
+        .map_err(|e| {
+            anyhow_to_mcp_error(anyhow::anyhow!(
+                "Failed to run git reset (synthetic commit {} may remain): {}",
+                head_sha,
+                e
+            ))
+        })?;
+
+    if !reset_output.status.success() {
+        warn!(
+            "WARNING: synthetic commit {} was not cleaned up; \
+             run `git reset HEAD~1` to restore state",
+            head_sha
+        );
+        return Err(anyhow_to_mcp_error(anyhow::anyhow!(
+            "git reset HEAD~1 failed (synthetic commit {} may remain): {}",
+            head_sha,
+            String::from_utf8_lossy(&reset_output.stderr)
+        )));
+    }
+
+    Ok(())
+}
+
 #[tool_router]
 impl SafeOutputs {
     /// Get the full path to the safe output file
@@ -221,28 +387,7 @@ impl SafeOutputs {
     async fn generate_patch(&self, repository: Option<&str>) -> Result<(String, String), McpError> {
         use tokio::process::Command;
 
-        // Determine the git directory based on repository
-        let git_dir = match repository {
-            Some("self") | None => self.bounding_directory.clone(),
-            Some(repo_alias) => {
-                if !crate::validate::is_safe_path_segment(repo_alias) {
-                    return Err(anyhow_to_mcp_error(anyhow::anyhow!(
-                        "Invalid repository alias: {}. Path traversal is not allowed.",
-                        repo_alias
-                    )));
-                }
-                let repo_path = self.bounding_directory.join(repo_alias);
-                // `ensure_path_within_base` canonicalizes `repo_path` (which fails
-                // for a non-existent directory) and verifies containment, returning
-                // the symlink-resolved path we should hand to git.
-                crate::validate::ensure_path_within_base(
-                    &repo_path,
-                    &self.bounding_directory,
-                    "Repository path",
-                )
-                .map_err(anyhow_to_mcp_error)?
-            }
-        };
+        let git_dir = resolve_git_dir_for_patch(&self.bounding_directory, repository)?;
 
         // Generate patch using git format-patch for proper commit metadata,
         // rename detection, and binary file handling.
@@ -253,94 +398,19 @@ impl SafeOutputs {
         // 3. Generate format-patch from merge-base..HEAD to capture ALL changes
         // 4. If a temporary commit was created, reset it (preserving working tree)
 
-        // Find the merge-base to diff against
         let merge_base = Self::find_merge_base(&git_dir).await?;
         debug!("Using merge base: {}", merge_base);
 
-        // Check if there are uncommitted changes (staged or unstaged)
-        let status_output = Command::new("git")
-            .args(["status", "--porcelain"])
-            .current_dir(&git_dir)
-            .output()
-            .await
-            .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git status: {}", e)))?;
-
-        if !status_output.status.success() {
-            return Err(anyhow_to_mcp_error(anyhow::anyhow!(
-                "git status failed: {}",
-                String::from_utf8_lossy(&status_output.stderr)
-            )));
-        }
-
-        let has_uncommitted = !String::from_utf8_lossy(&status_output.stdout)
-            .trim()
-            .is_empty();
-        let mut made_synthetic_commit = false;
-
+        let has_uncommitted = check_uncommitted_changes(&git_dir).await?;
         if has_uncommitted {
             debug!("Uncommitted changes detected, creating synthetic commit");
-
-            // Stage all changes including untracked files
-            let add_output = Command::new("git")
-                .args(["add", "-A"])
-                .current_dir(&git_dir)
-                .output()
-                .await
-                .map_err(|e| {
-                    anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git add -A: {}", e))
-                })?;
-
-            if !add_output.status.success() {
-                // Reset index to clean state on failure
-                let _ = Command::new("git")
-                    .args(["reset", "HEAD", "--quiet"])
-                    .current_dir(&git_dir)
-                    .output()
-                    .await;
-                return Err(anyhow_to_mcp_error(anyhow::anyhow!(
-                    "git add -A failed: {}",
-                    String::from_utf8_lossy(&add_output.stderr)
-                )));
-            }
-
-            // Create a temporary commit with git identity flags to avoid config dependency
-            let commit_output = Command::new("git")
-                .args([
-                    "-c",
-                    "user.email=agent@ado-aw",
-                    "-c",
-                    "user.name=ADO Agent",
-                    "commit",
-                    "-m",
-                    "agent changes",
-                    "--allow-empty",
-                    "--no-verify",
-                ])
-                .current_dir(&git_dir)
-                .output()
-                .await
-                .map_err(|e| {
-                    anyhow_to_mcp_error(anyhow::anyhow!("Failed to create temporary commit: {}", e))
-                })?;
-
-            if !commit_output.status.success() {
-                // Reset staging on failure
-                let _ = Command::new("git")
-                    .args(["reset", "HEAD", "--quiet"])
-                    .current_dir(&git_dir)
-                    .output()
-                    .await;
-                return Err(anyhow_to_mcp_error(anyhow::anyhow!(
-                    "Failed to create temporary commit: {}",
-                    String::from_utf8_lossy(&commit_output.stderr)
-                )));
-            }
-            made_synthetic_commit = true;
+            make_synthetic_commit(&git_dir).await?;
         } else {
             debug!("No uncommitted changes — capturing committed changes only");
         }
 
-        // Generate format-patch from merge-base..HEAD to capture all changes
+        // Capture (don't propagate) the format-patch result so the synthetic commit
+        // is always undone first, even when format-patch fails.
         let format_patch_result = Command::new("git")
             .args([
                 "format-patch",
@@ -353,50 +423,13 @@ impl SafeOutputs {
             .await;
 
         // Always undo the temporary commit before propagating errors.
-        // Reset the synthetic commit, restoring changes to the working tree.
         // `git reset --mixed HEAD~1` undoes the commit and resets the index
         // to the parent tree, which leaves modified files as unstaged changes
         // and previously-untracked files as untracked again.
-        if made_synthetic_commit {
-            // Capture the synthetic commit SHA for diagnostics
-            let head_sha = Command::new("git")
-                .args(["rev-parse", "HEAD"])
-                .current_dir(&git_dir)
-                .output()
-                .await
-                .ok()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .unwrap_or_else(|| "<unknown>".to_string());
-
-            // Reset the synthetic commit, restoring changes to working tree
-            let reset_output = Command::new("git")
-                .args(["reset", "HEAD~1", "--mixed", "--quiet"])
-                .current_dir(&git_dir)
-                .output()
-                .await
-                .map_err(|e| {
-                    anyhow_to_mcp_error(anyhow::anyhow!(
-                        "Failed to run git reset (synthetic commit {} may remain): {}",
-                        head_sha,
-                        e
-                    ))
-                })?;
-
-            if !reset_output.status.success() {
-                warn!(
-                    "WARNING: synthetic commit {} was not cleaned up; \
-                     run `git reset HEAD~1` to restore state",
-                    head_sha
-                );
-                return Err(anyhow_to_mcp_error(anyhow::anyhow!(
-                    "git reset HEAD~1 failed (synthetic commit {} may remain): {}",
-                    head_sha,
-                    String::from_utf8_lossy(&reset_output.stderr)
-                )));
-            }
+        if has_uncommitted {
+            undo_synthetic_commit(&git_dir).await?;
         }
 
-        // Now check the format-patch result after cleanup
         let format_patch_output = format_patch_result.map_err(|e| {
             anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git format-patch: {}", e))
         })?;
@@ -409,7 +442,6 @@ impl SafeOutputs {
         }
 
         let patch = String::from_utf8_lossy(&format_patch_output.stdout).to_string();
-
         Ok((patch, merge_base))
     }
 
