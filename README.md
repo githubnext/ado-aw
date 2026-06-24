@@ -271,9 +271,10 @@ the service connections. Approve the permissions and the pipeline is ready.
 | `teardown` | list | — | Separate job after safe outputs |
 | `network` | object | — | Additional allowed/blocked hosts |
 | `inlined-imports` | boolean | `false` | When `true`, resolves all `{{#runtime-import …}}` markers at compile time; the generated YAML is self-contained but prompt-body edits require recompilation. See [runtime-imports.md](docs/runtime-imports.md). |
-| `env` | map | — | Workflow-level environment variables (reserved, not yet implemented) |
-| `execution-context` | object | — | Configuration for the always-on execution-context plugin (PR context precompute). See [execution-context.md](docs/execution-context.md). |
+| `env` | map | `{}` | Workflow-level environment variables (accepted by parser, not yet forwarded to compiled pipeline output) |
+| `execution-context` | object | — | Configuration for the always-on execution-context plugin (`aw-context/` contributors). See [execution-context.md](docs/execution-context.md). |
 | `supply-chain` | object | — | Internal feed/registry mirror settings for compiler/runtime artifacts. See [supply-chain.md](docs/supply-chain.md). |
+| `ado-aw-debug` | object | — | Debug-only knobs for local/dogfood diagnostics. See [ado-aw-debug.md](docs/ado-aw-debug.md). |
 
 ### Markdown Body
 
@@ -440,7 +441,7 @@ actions, and the executor processes them after threat analysis.
 | `reply-to-pr-comment` | Replies to an existing PR review comment thread |
 | `resolve-pr-thread` | Resolves or updates the status of a PR review thread |
 | `submit-pr-review` | Submits a review vote on a pull request |
-| `update-pr` | Updates pull request metadata (reviewers, labels, auto-complete, etc.) |
+| `update-pr` | Updates pull request metadata (reviewers, labels, auto-complete, vote, update-description) |
 | `link-work-items` | Links two ADO work items together |
 | `queue-build` | Queues a pipeline build by definition ID |
 | `create-git-tag` | Creates a git tag on a repository ref |
@@ -611,7 +612,8 @@ index to jump to the right page.
 - [`docs/targets.md`](docs/targets.md) — target platforms: `standalone`, `1es`,
   `job`, and `stage`.
 - [`docs/execution-context.md`](docs/execution-context.md) — built-in
-  `aw-context/` precompute configuration (PR context staging + merge-base facts).
+  `aw-context/` precompute contributors for PR, manual, pipeline, CI/push,
+  work-item, scheduled, PR-check, and repository context.
 - [`docs/safe-outputs.md`](docs/safe-outputs.md) — full reference for every
   safe-output tool plus their per-agent configuration.
 - [`docs/safe-output-permissions.md`](docs/safe-output-permissions.md) —
@@ -640,8 +642,8 @@ index to jump to the right page.
 - [`docs/codemods.md`](docs/codemods.md) — front-matter codemod framework
   (detection-based source rewrites on breaking-change updates).
 - [`docs/ado-script.md`](docs/ado-script.md) — `scripts/ado-script/` workspace
-  (bundled TypeScript runtime helpers: `gate.js`, `import.js`,
-  `exec-context-pr.js`, `exec-context-pr-synth.js`).
+  (bundled TypeScript runtime helpers: `gate.js`, `import.js`, and the
+  execution-context `exec-context-*.js` bundles).
 - [`docs/extending.md`](docs/extending.md) — adding new CLI commands, compile
   targets, front-matter fields, typed IR extensions, safe-output tools,
   first-class tools, and runtimes.

@@ -33,13 +33,16 @@ schedule: weekly on friday around 17:00       # Friday, within ±60 min of 5 PM
 schedule: weekly on wednesday between 9:00 and 12:00  # Wednesday morning
 ```
 
-Valid weekdays: `sunday`, `monday`, `tuesday`, `wednesday`, `thursday`, `friday`, `saturday`
+Valid weekdays: `sunday`, `monday`, `tuesday`, `wednesday`, `thursday`, `friday`, `saturday`.
+Short aliases are also accepted: `sun`, `mon`, `tue`/`tues`, `wed`, `thu`/`thurs`, `fri`, `sat`.
 
 ### Hourly Schedules
 
 ```yaml
 schedule: hourly       # Every hour at a scattered minute
+schedule: every 1h     # Equivalent to hourly
 schedule: every 2h     # Every 2 hours at scattered minute
+schedule: every 2 hours # Long form also supported
 schedule: every 6h     # Every 6 hours at scattered minute
 ```
 
@@ -49,20 +52,28 @@ Valid hour intervals: 1, 2, 3, 4, 6, 8, 12 (factors of 24 for even distribution)
 
 ```yaml
 schedule: every 5 minutes     # Every 5 minutes (minimum interval)
+schedule: every 5 min         # Singular/short forms also supported
 schedule: every 15 minutes    # Every 15 minutes
 schedule: every 30m           # Short form supported
 ```
 
 Note: Minimum interval is 5 minutes (GitHub Actions/Azure DevOps constraint).
+Accepted minute units: `minutes`, `minute`, `mins`, `min`, `m`.
 
 ### Special Periods
 
 ```yaml
 schedule: bi-weekly       # Every 14 days at scattered time
+schedule: biweekly        # No-hyphen alias
 schedule: tri-weekly      # Every 21 days at scattered time
+schedule: triweekly       # No-hyphen alias
 schedule: every 2 days    # Every N days at scattered time
+schedule: every 2d        # Short day form
 schedule: every 2 weeks   # Every N weeks (converted to N×7 days) at scattered time
+schedule: every 2w        # Short week form
 ```
+
+Accepted day/week units: `days`, `day`, `d`, `weeks`, `week`, `w`.
 
 ### Timezone Support
 
@@ -71,10 +82,11 @@ All time specifications support UTC offsets for timezone conversion:
 ```yaml
 schedule: daily around 14:00 utc+9      # 2 PM JST → 5 AM UTC
 schedule: daily around 3pm utc-5        # 3 PM EST → 8 PM UTC
+schedule: daily around 09:00 utc        # Bare UTC means UTC+0
 schedule: daily between 9am utc+05:30 and 5pm utc+05:30  # IST business hours
 ```
 
-Supported offset formats: `utc+9`, `utc-5`, `utc+05:30`, `utc-08:00`
+Supported offset formats: `utc`, `utc+9`, `utc-5`, `utc+05:30`, `utc-08:00`
 
 ### How Scattering Works
 

@@ -557,11 +557,16 @@ your own markdown body.
 - Always-on `ExecContextExtension` in
   `src/compile/extensions/exec_context/mod.rs`
   (`ExtensionPhase::Tool`).
-- Internal `ContextContributor` trait in `contributor.rs`. v1 ships
-  one contributor: `PrContextContributor` in `pr.rs`.
-- Front-matter types: `ExecutionContextConfig` and `PrContextConfig`
-  in `src/compile/types.rs` (`PrContextConfig` is just
-  `{ enabled: Option<bool> }`).
+- Internal `ContextContributor` trait in `contributor.rs`; concrete
+  contributors live alongside it (`pr.rs`, `manual.rs`, `pipeline.rs`,
+  `ci_push.rs`, `workitem.rs`, `schedule.rs`, `pr_checks.rs`, and
+  `repo.rs`).
+- Front-matter types: `ExecutionContextConfig` and the per-contributor
+  config structs (`PrContextConfig`, `ManualContextConfig`,
+  `PipelineContextConfig`, `CiPushContextConfig`,
+  `WorkitemContextConfig`, `ScheduleContextConfig`,
+  `PrChecksContextConfig`, and `RepoContextConfig`) in
+  `src/compile/types.rs`.
 - Compile tests live in `tests/compiler_tests.rs` (search for
   `test_execution_context_pr_*`).
 - The generated bash is shellchecked by `tests/bash_lint_tests.rs`
