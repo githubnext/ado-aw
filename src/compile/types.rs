@@ -2330,6 +2330,20 @@ Body
         assert!(fm.inlined_imports);
     }
 
+    #[test]
+    fn test_frontmatter_inlined_imports_false_explicit() {
+        let content = r#"---
+name: "Test Agent"
+description: "Test"
+inlined-imports: false
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        assert!(!fm.inlined_imports);
+    }
+
     // ─── CacheMemoryToolConfig deserialization ──────────────────────────────
 
     #[test]
@@ -2363,6 +2377,7 @@ Body
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
         let cm = fm.tools.as_ref().unwrap().cache_memory.as_ref().unwrap();
         assert!(!cm.is_enabled());
+        assert!(cm.allowed_extensions().is_empty());
     }
 
     #[test]
@@ -2481,8 +2496,7 @@ Body
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
         let lean = fm.runtimes.as_ref().unwrap().lean.as_ref().unwrap();
         assert!(!lean.is_enabled());
-        // toolchain() always returns None for the Enabled variant; the WithOptions
-        // case is covered by test_lean_with_toolchain.
+        assert!(lean.toolchain().is_none());
     }
 
     #[test]
