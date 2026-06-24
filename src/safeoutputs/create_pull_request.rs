@@ -97,6 +97,57 @@ const PROTECTED_PATH_PREFIXES: &[&str] = &[
 /// Exact filenames (at repo root) that are protected by default.
 const PROTECTED_EXACT_PATHS: &[&str] = &["CODEOWNERS", "docs/CODEOWNERS"];
 
+/// Returns `true` when `s` looks like an Azure DevOps GUID (36 chars, 4 hyphens, hex digits).
+fn is_reviewer_guid(s: &str) -> bool {
+    s.len() == 36
+        && s.chars().filter(|c| *c == '-').count() == 4
+        && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+}
+
+/// Navigate an Identity Picker API response and return the `localId` for the best match.
+///
+/// Tries an exact match (display name or mail) first, then falls back to the first result.
+/// Returns `None` if the response structure is missing or no identity was found.
+fn find_identity_in_response(data: &serde_json::Value, reviewer: &str) -> Option<String> {
+    let results = data.get("results")?.as_array()?;
+    let first_result = results.first()?;
+    let identities = first_result.get("identities")?.as_array()?;
+
+    let reviewer_lower = reviewer.to_lowercase();
+
+    // Try to find exact match first (by email or display name)
+    for identity in identities {
+        let display_name = identity
+            .get("displayName")
+            .and_then(|d| d.as_str())
+            .unwrap_or_default()
+            .to_lowercase();
+        let mail = identity
+            .get("mail")
+            .and_then(|m| m.as_str())
+            .unwrap_or_default()
+            .to_lowercase();
+
+        if (display_name == reviewer_lower || mail == reviewer_lower)
+            && let Some(local_id) = identity.get("localId").and_then(|id| id.as_str())
+        {
+            debug!("Resolved reviewer '{}' to ID '{}'", reviewer, local_id);
+            return Some(local_id.to_string());
+        }
+    }
+
+    // Fall back to first result if no exact match
+    let local_id = identities
+        .first()?
+        .get("localId")?
+        .as_str()?;
+    debug!(
+        "Resolved reviewer '{}' to first match ID '{}'",
+        reviewer, local_id
+    );
+    Some(local_id.to_string())
+}
+
 /// Resolve a reviewer identifier (email, display name, or ID) to an Azure DevOps identity ID.
 ///
 /// If the input is already a GUID, returns it directly. Otherwise, uses the Azure DevOps
@@ -107,11 +158,7 @@ async fn resolve_reviewer_identity(
     token: &str,
     reviewer: &str,
 ) -> Option<String> {
-    // Check if already a GUID (36 chars with 4 hyphens)
-    if reviewer.len() == 36
-        && reviewer.chars().filter(|c| *c == '-').count() == 4
-        && reviewer.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
-    {
+    if is_reviewer_guid(reviewer) {
         debug!("Reviewer '{}' is already a GUID", reviewer);
         return Some(reviewer.to_string());
     }
@@ -136,78 +183,42 @@ async fn resolve_reviewer_identity(
         }
     });
 
-    match client
+    let resp = match client
         .post(&identity_url)
         .basic_auth("", Some(token))
         .json(&query_body)
         .send()
         .await
     {
-        Ok(resp) if resp.status().is_success() => {
-            match resp.json::<serde_json::Value>().await {
-                Ok(data) => {
-                    // Navigate the response: results[0].identities[0].localId
-                    if let Some(results) = data.get("results").and_then(|r| r.as_array())
-                        && let Some(first_result) = results.first()
-                        && let Some(identities) =
-                            first_result.get("identities").and_then(|i| i.as_array())
-                    {
-                        // Try to find exact match first (by email or display name)
-                        let reviewer_lower = reviewer.to_lowercase();
-                        for identity in identities {
-                            let display_name = identity
-                                .get("displayName")
-                                .and_then(|d| d.as_str())
-                                .unwrap_or_default()
-                                .to_lowercase();
-                            let mail = identity
-                                .get("mail")
-                                .and_then(|m| m.as_str())
-                                .unwrap_or_default()
-                                .to_lowercase();
-
-                            if (display_name == reviewer_lower || mail == reviewer_lower)
-                                && let Some(local_id) =
-                                    identity.get("localId").and_then(|id| id.as_str())
-                            {
-                                debug!("Resolved reviewer '{}' to ID '{}'", reviewer, local_id);
-                                return Some(local_id.to_string());
-                            }
-                        }
-                        // Fall back to first result if no exact match
-                        if let Some(first_identity) = identities.first()
-                            && let Some(local_id) =
-                                first_identity.get("localId").and_then(|id| id.as_str())
-                        {
-                            debug!(
-                                "Resolved reviewer '{}' to first match ID '{}'",
-                                reviewer, local_id
-                            );
-                            return Some(local_id.to_string());
-                        }
-                    }
-                    warn!("No identity found for reviewer '{}'", reviewer);
-                    None
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to parse identity response for '{}': {}",
-                        reviewer, e
-                    );
-                    None
-                }
-            }
-        }
-        Ok(resp) => {
-            warn!(
-                "Identity lookup failed for '{}': {}",
-                reviewer,
-                resp.status()
-            );
-            None
-        }
+        Ok(resp) => resp,
         Err(e) => {
             warn!("Identity lookup request failed for '{}': {}", reviewer, e);
+            return None;
+        }
+    };
+
+    if !resp.status().is_success() {
+        warn!(
+            "Identity lookup failed for '{}': {}",
+            reviewer,
+            resp.status()
+        );
+        return None;
+    }
+
+    match resp.json::<serde_json::Value>().await {
+        Ok(data) => {
+            let result = find_identity_in_response(&data, reviewer);
+            if result.is_none() {
+                warn!("No identity found for reviewer '{}'", reviewer);
+            }
+            result
+        }
+        Err(e) => {
+            warn!(
+                "Failed to parse identity response for '{}': {}",
+                reviewer, e
+            );
             None
         }
     }
