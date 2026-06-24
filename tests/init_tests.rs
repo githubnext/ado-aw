@@ -207,9 +207,39 @@ fn test_init_agency_generates_plugin() {
     assert_eq!(parsed["name"], "ado-aw", "plugin.json name should be ado-aw");
 }
 
+/// Recursively collect file paths under `root`, returned relative to `root`
+/// (with forward-slash separators for stable comparison across platforms).
+fn collect_files_rel(root: &std::path::Path) -> Vec<String> {
+    fn walk(dir: &std::path::Path, base: &std::path::Path, out: &mut Vec<String>) {
+        let entries = fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("read_dir {} failed: {e}", dir.display()));
+        for entry in entries {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                walk(&path, base, out);
+            } else {
+                let rel = path
+                    .strip_prefix(base)
+                    .expect("strip_prefix")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.push(rel);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}
+
 /// Test that `init --agency` scaffolds a byte-for-byte copy of the canonical
 /// in-repo plugin (`agency/plugins/ado-aw/`). This guards the single-source-of-
 /// truth invariant: the embedded files and the checked-in files must not drift.
+///
+/// It walks the canonical directory rather than a hardcoded list, so a NEW file
+/// added to `agency/plugins/ado-aw/` that nobody wired into `init.rs`'s embed
+/// list is caught here (it would exist canonically but never be scaffolded).
 #[test]
 fn test_init_agency_matches_canonical_source() {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp directory");
@@ -229,25 +259,20 @@ fn test_init_agency_matches_canonical_source() {
     let canonical = repo_root.join("agency/plugins/ado-aw");
     let scaffolded = temp_dir.path().join("agency/plugins/ado-aw");
 
-    for rel in [
-        ".claude-plugin/plugin.json",
-        ".mcp.json",
-        "agency.json",
-        "README.md",
-        "agents/ado-aw.md",
-        "skills/create-workflow/SKILL.md",
-        "skills/update-workflow/SKILL.md",
-        "skills/debug-workflow/SKILL.md",
-        "skills/compile-and-validate/SKILL.md",
-        "skills/manage-lifecycle/SKILL.md",
-        "skills/audit-build/SKILL.md",
-        "scripts/doctor.sh",
-        "scripts/doctor.ps1",
-    ] {
+    // Every canonical plugin file must be scaffolded byte-for-byte. Walking the
+    // directory (not a fixed list) is what makes a newly-added-but-unwired file
+    // fail loudly instead of silently shipping un-scaffolded.
+    let canonical_files = collect_files_rel(&canonical);
+    assert!(
+        !canonical_files.is_empty(),
+        "canonical plugin dir should contain files"
+    );
+    for rel in &canonical_files {
         let want = fs::read_to_string(canonical.join(rel))
             .unwrap_or_else(|e| panic!("canonical {rel} should be readable: {e}"));
-        let got = fs::read_to_string(scaffolded.join(rel))
-            .unwrap_or_else(|e| panic!("scaffolded {rel} should be readable: {e}"));
+        let got = fs::read_to_string(scaffolded.join(rel)).unwrap_or_else(|e| {
+            panic!("canonical file {rel} was NOT scaffolded by `init --agency` (add it to AGENCY_PLUGIN_FILES in src/init.rs): {e}")
+        });
         assert_eq!(
             got, want,
             "scaffolded {rel} must match the canonical agency/plugins/ado-aw source"
@@ -317,5 +342,116 @@ fn test_init_force_flag_is_advertised_in_help() {
     assert!(
         stdout.contains("GitHub") || stdout.contains("bypass"),
         "init --help should explain that --force bypasses the GitHub-remote guard, got:\n{stdout}"
+    );
+}
+
+/// Guard the lock-step versioning invariant: the plugin manifest and both root
+/// marketplace catalogs must carry the same version as the compiler crate.
+///
+/// release-please bumps all of these together via `extra-files`, but if a
+/// release lands while a plugin-touching change is in flight (which has happened),
+/// the literals can desync. This asserts that never reaches `main`.
+#[test]
+fn test_plugin_version_matches_crate_version() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let crate_version = env!("CARGO_PKG_VERSION");
+
+    let read_json = |rel: &str| -> serde_json::Value {
+        let s = fs::read_to_string(repo_root.join(rel))
+            .unwrap_or_else(|e| panic!("{rel} should be readable: {e}"));
+        serde_json::from_str(&s).unwrap_or_else(|e| panic!("{rel} should be valid JSON: {e}"))
+    };
+
+    let plugin = read_json("agency/plugins/ado-aw/.claude-plugin/plugin.json");
+    assert_eq!(
+        plugin["version"], crate_version,
+        "plugin.json version must match Cargo.toml ({crate_version}); release-please \
+         bumps both — resync if a release landed mid-change"
+    );
+
+    for catalog in [
+        ".claude-plugin/marketplace.json",
+        ".github/plugin/marketplace.json",
+    ] {
+        let cat = read_json(catalog);
+        assert_eq!(
+            cat["metadata"]["version"], crate_version,
+            "{catalog} metadata.version must match Cargo.toml ({crate_version})"
+        );
+        assert_eq!(
+            cat["plugins"][0]["version"], crate_version,
+            "{catalog} plugins[0].version must match Cargo.toml ({crate_version})"
+        );
+    }
+}
+
+/// Guard that the committed `.github/agents/ado-aw.agent.md` stays in sync with
+/// its template `src/data/init-agent.md`: running `init` must reproduce the
+/// committed file byte-for-byte. This is what keeps the version-pinned URLs (and
+/// their release-please markers) in the committed file correct, since that file
+/// — not the placeholder-bearing template — is what release-please updates.
+#[test]
+fn test_committed_agent_file_matches_template_output() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let committed = fs::read_to_string(repo_root.join(".github/agents/ado-aw.agent.md"))
+        .expect("committed agent file should be readable");
+
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp directory");
+    let output = ado_aw_bin()
+        .args(["init", "--path", temp_dir.path().to_str().unwrap()])
+        .output()
+        .expect("Failed to run ado-aw init");
+    assert!(output.status.success(), "init should succeed");
+
+    let generated = fs::read_to_string(temp_dir.path().join(".github/agents/ado-aw.agent.md"))
+        .expect("generated agent file should be readable");
+
+    assert_eq!(
+        generated.replace("\r\n", "\n"),
+        committed.replace("\r\n", "\n"),
+        "committed .github/agents/ado-aw.agent.md is stale — regenerate it with \
+         `ado-aw init --force` after editing src/data/init-agent.md"
+    );
+}
+
+/// `init --agency` must NOT clobber a consumer's pre-existing, differing root
+/// marketplace catalog. It should leave the existing file untouched and still
+/// scaffold the plugin tree.
+#[test]
+fn test_init_agency_does_not_clobber_existing_catalog() {
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp directory");
+
+    // Simulate a consumer that already maintains a Claude marketplace catalog.
+    let catalog_dir = temp_dir.path().join(".claude-plugin");
+    fs::create_dir_all(&catalog_dir).expect("create .claude-plugin");
+    let catalog = catalog_dir.join("marketplace.json");
+    let sentinel = "{\n  \"name\": \"consumer-owned\",\n  \"plugins\": []\n}\n";
+    fs::write(&catalog, sentinel).expect("write pre-existing catalog");
+
+    let output = ado_aw_bin()
+        .args([
+            "init",
+            "--agency",
+            "--path",
+            temp_dir.path().to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run ado-aw init --agency");
+    assert!(output.status.success(), "init --agency should still succeed");
+
+    // The consumer's catalog must be left exactly as it was.
+    let after = fs::read_to_string(&catalog).expect("catalog should still be readable");
+    assert_eq!(
+        after, sentinel,
+        "existing root catalog must not be clobbered by init --agency"
+    );
+
+    // The plugin tree is still scaffolded regardless.
+    assert!(
+        temp_dir
+            .path()
+            .join("agency/plugins/ado-aw/.claude-plugin/plugin.json")
+            .exists(),
+        "plugin tree should still be scaffolded even when a root catalog pre-exists"
     );
 }

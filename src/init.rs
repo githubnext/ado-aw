@@ -188,8 +188,31 @@ async fn write_agency_plugin(base: &Path) -> Result<()> {
 
     // Root marketplace catalogs (written relative to the repo root, not the
     // plugin dir) so `/plugin marketplace add <repo>` can detect the plugin.
+    //
+    // Unlike the plugin files under `agency/plugins/ado-aw/` (which ado-aw owns
+    // and may freely re-scaffold), these root catalogs are shared repo-level
+    // files a consumer might already maintain — e.g. when running `init
+    // --agency` in a repo that is itself a plugin marketplace. Never silently
+    // clobber an existing, differing catalog: skip it with a warning so the
+    // user can merge by hand. Re-writing an identical catalog is a no-op, which
+    // keeps `init --agency` idempotent.
+    let mut wrote_catalog = false;
+    let mut skipped_catalog = false;
     for (rel_path, contents) in AGENCY_MARKETPLACE_FILES {
         let dest = base.join(rel_path);
+
+        if let Ok(existing) = tokio::fs::read_to_string(&dest).await {
+            if existing == *contents {
+                continue; // identical — idempotent no-op
+            }
+            eprintln!(
+                "⚠ Skipped {rel_path}: a different marketplace catalog already exists. \
+                 Merge the `ado-aw` plugin entry into it by hand (see docs/agency-plugin.md)."
+            );
+            skipped_catalog = true;
+            continue;
+        }
+
         let parent = dest.parent().with_context(|| {
             format!("Marketplace catalog has no parent directory: {}", dest.display())
         })?;
@@ -199,12 +222,19 @@ async fn write_agency_plugin(base: &Path) -> Result<()> {
         tokio::fs::write(&dest, contents)
             .await
             .with_context(|| format!("Failed to write marketplace catalog: {}", dest.display()))?;
+        wrote_catalog = true;
     }
 
     println!("✓ Created Agency plugin in {}", plugin_root.display());
-    println!(
-        "✓ Wrote marketplace catalogs (.claude-plugin/, .github/plugin/) — register with: /plugin marketplace add <this repo>"
-    );
+    if wrote_catalog {
+        println!(
+            "✓ Wrote marketplace catalogs (.claude-plugin/, .github/plugin/) — register with: /plugin marketplace add <this repo>"
+        );
+    } else if skipped_catalog {
+        println!(
+            "ℹ Left existing marketplace catalogs untouched — add the `ado-aw` plugin entry manually to register it."
+        );
+    }
 
     Ok(())
 }

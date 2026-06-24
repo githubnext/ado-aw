@@ -101,6 +101,16 @@ release:
   create/update/debug skills (generic updater, keyed on the
   `<!-- x-release-please-version -->` marker).
 
+The standard init agent file `.github/agents/ado-aw.agent.md` is also tracked.
+Note that its `<!-- x-release-please-version -->` markers originate in the
+template `src/data/init-agent.md` (where the version is a `{{ compiler_version }}`
+placeholder substituted at `init` time) and **propagate verbatim** into the
+generated, committed agent file — which is the file release-please actually
+updates. The markers in the template itself are inert (the template is not in
+`extra-files`); they exist solely to carry through to the generated file. A
+parity test (`tests/init_tests.rs`) asserts the generated file stays in sync
+with the template, so do not strip the markers from the template.
+
 > **Maintainer note — adding a version reference to a skill.** Only files that
 > contain a version-pinned URL are listed in `release-please-config.json`
 > `extra-files`. The `compile-and-validate`, `manage-lifecycle`, and
