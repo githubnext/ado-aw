@@ -16,7 +16,9 @@ export default defineConfig({
       description: 'Compile natural-language markdown into Azure DevOps agentic pipelines',
       plugins: [
         starlightLlmsTxt(),
-        starlightLinksValidator(),
+        starlightLinksValidator({
+          exclude: ['/ado-aw/slides/', '/ado-aw/slides/**'],
+        }),
       ],
       customCss: ['./src/styles/custom.css'],
       components: {
@@ -29,7 +31,7 @@ export default defineConfig({
       sidebar: [
         {
           label: 'Introduction',
-          autogenerate: { directory: 'introduction' },
+          items: [{ autogenerate: { directory: 'introduction' } }],
         },
         {
           label: 'Setup',
@@ -78,7 +80,7 @@ export default defineConfig({
         },
         {
           label: 'Troubleshooting',
-          autogenerate: { directory: 'troubleshooting' },
+          items: [{ autogenerate: { directory: 'troubleshooting' } }],
         },
       ],
     }),

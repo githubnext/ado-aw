@@ -82,6 +82,7 @@ fn apply_codemod(fm: &mut Mapping, ctx: &CodemodContext) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compile::common::DEFAULT_ONEES_POOL;
 
     /// Build a context with an explicit version for testing.
     fn ctx(version: &'static str) -> CodemodContext {
@@ -110,7 +111,7 @@ mod tests {
         assert!(changed);
         assert_eq!(
             fm.get(Value::String("pool".into())).cloned(),
-            Some(serde_yaml::from_str::<Value>("name: AZS-1ES-L-MMS-ubuntu-22.04").unwrap())
+            Some(serde_yaml::from_str::<Value>(&format!("name: {}", DEFAULT_ONEES_POOL)).unwrap())
         );
     }
 

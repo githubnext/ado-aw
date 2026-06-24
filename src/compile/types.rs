@@ -2063,8 +2063,14 @@ mod tests {
 
     #[test]
     fn test_supply_chain_feed_only_validates() {
+        // feed-only: registry is None, so validate() never errors regardless of feed.
         let sc = parse_supply_chain("supply-chain:\n  feed: my-feed");
         assert!(sc.validate().is_ok());
+        // combined feed + registry-with-connection must also validate OK.
+        let sc2 = parse_supply_chain(
+            "supply-chain:\n  feed: my-feed\n  registry:\n    name: myacr.azurecr.io\n    service-connection: acr-conn",
+        );
+        assert!(sc2.validate().is_ok());
     }
 
     #[test]
@@ -2254,7 +2260,12 @@ timeout-minutes: 60
 
     #[test]
     fn test_permissions_default() {
-        let pc = PermissionsConfig::default();
+        // Deserialising `permissions: {}` must produce None/None — guards against
+        // accidentally introducing a required field or a non-None serde default.
+        let yaml = "permissions: {}";
+        let fm: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let pc: PermissionsConfig =
+            serde_yaml::from_value(fm["permissions"].clone()).unwrap();
         assert!(pc.read.is_none());
         assert!(pc.write.is_none());
     }

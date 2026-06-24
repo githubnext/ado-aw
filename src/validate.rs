@@ -947,7 +947,9 @@ mod tests {
         let env = HashMap::from([("AZURE_DEVOPS_EXT_PAT".to_string(), "secret123".to_string())]);
         let warnings = warn_potential_secrets("mcp", &env, &HashMap::new());
         assert!(!warnings.is_empty());
-        assert!(warnings[0].contains("secret"));
+        // Verify the warning names the triggering variable, not just that the
+        // word "secret" appears (which is always true from the format string).
+        assert!(warnings[0].contains("AZURE_DEVOPS_EXT_PAT"));
 
         let empty_env = HashMap::from([("AZURE_DEVOPS_EXT_PAT".to_string(), String::new())]);
         let warnings = warn_potential_secrets("mcp", &empty_env, &HashMap::new());
@@ -1088,6 +1090,8 @@ mod tests {
         assert!(validate_git_ref_name("foo..bar", "b").is_err());
         assert!(validate_git_ref_name("foo@{bar", "b").is_err());
         assert!(validate_git_ref_name("foo.lock", "b").is_err());
+        // ends-with-dot is a separate rule from ends-with-".lock"
+        assert!(validate_git_ref_name("trailing.", "b").is_err());
         assert!(validate_git_ref_name("foo//bar", "b").is_err());
         assert!(validate_git_ref_name("foo:bar", "b").is_err());
         assert!(validate_git_ref_name("foo/.hidden", "b").is_err());

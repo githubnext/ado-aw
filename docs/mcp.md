@@ -45,9 +45,10 @@ mcp-servers:
 **Container stdio servers:**
 - `container:` - Docker image to run (e.g., `"node:20-slim"`, `"ghcr.io/org/tool:latest"`)
 - `entrypoint:` - Container entrypoint override (equivalent to `docker run --entrypoint`)
-- `entrypoint-args:` - Arguments passed to the entrypoint (after the image in `docker run`)
+- `entrypoint-args:` - Arguments passed to the container entrypoint
 - `args:` - Additional Docker runtime arguments (inserted before the image in `docker run`). **Security note**: dangerous flags like `--privileged`, `--network host` will trigger compile-time warnings.
 - `mounts:` - Volume mounts in `"source:dest:mode"` format (e.g., `["/host/data:/app/data:ro"]`)
+- `env:` - Environment variables for the MCP server process. Use `""` (empty string) for passthrough from the pipeline environment.
 
 **HTTP servers:**
 - `url:` - HTTP endpoint URL for the remote MCP server
@@ -56,7 +57,8 @@ mcp-servers:
 **Common (both types):**
 - `enabled:` - Whether this MCP server is active (default: `true`). Set to `false` to temporarily disable an entry without removing it from the front matter.
 - `allowed:` - Array of tool names the agent is permitted to call. Optional — when omitted or empty, all tools from that MCP server are accessible to the agent. **Strongly recommended for security**: restrict to only the tools the agent needs.
-- `env:` - Environment variables for the MCP server process. Use `""` (empty string) for passthrough from the pipeline environment.
+
+HTTP MCPs ignore `env:`; use `headers:` for HTTP authentication instead.
 
 ## Environment Variable Passthrough
 

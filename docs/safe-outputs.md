@@ -184,6 +184,7 @@ This hybrid approach combines:
 - `title` - PR title (required, 5-200 characters)
 - `description` - PR description in markdown (required, 10+ characters)
 - `repository` - Repository to create PR in: "self" for pipeline repo, or alias from `checkout:` list (default: "self")
+- `labels` - Labels to add to the PR (optional; validated against `allowed-labels` when configured)
 
 Note: The source branch name is auto-generated from a sanitized version of the PR title plus a unique suffix (e.g., `agent/fix-bug-in-parser-a1b2c3`). This format is human-readable while preventing injection attacks.
 

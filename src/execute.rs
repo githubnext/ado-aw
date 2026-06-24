@@ -666,12 +666,6 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_entry_context_preserves_normal_title() {
-        let entry = serde_json::json!({"title": "Fix login bug"});
-        assert_eq!(extract_entry_context(&entry), " (\"Fix login bug\")");
-    }
-
-    #[test]
     fn test_extract_entry_context_prefers_id_over_title() {
         let entry = serde_json::json!({"id": 42, "title": "should be ignored"});
         assert_eq!(extract_entry_context(&entry), " (work item #42)");

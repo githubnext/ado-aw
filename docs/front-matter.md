@@ -57,7 +57,7 @@ runtimes:                      # optional runtime configuration (language enviro
   # dotnet:                    # Alternative object format (pin version, configure internal feed via nuget.config)
   #   version: "8.0.x"          # use "global.json" to pin from the repo's global.json
   #   feed-url: "https://pkgs.dev.azure.com/myorg/_packaging/myfeed/nuget/v3/index.json"
-# env:                         # workflow-level environment variables (reserved, not yet implemented)
+# env:                         # workflow-level environment variables (accepted by parser, not yet forwarded to compiled pipeline output)
 #   CUSTOM_VAR: "value"
 # inlined-imports: false        # When true, resolve {{#runtime-import ...}} markers at compile time
 #                               # (default: false — markers are resolved at pipeline runtime, so
@@ -65,12 +65,22 @@ runtimes:                      # optional runtime configuration (language enviro
 #                               # See docs/runtime-imports.md for full details.
 mcp-servers:
   my-custom-tool:              # containerized MCP server (requires container field)
+    enabled: true
     container: "node:20-slim"
     entrypoint: "node"
     entrypoint-args: ["path/to/mcp-server.js"]
+    args: ["--pull=always"]     # Docker runtime args inserted before the image
+    mounts: ["$(Build.SourcesDirectory):/workspace:ro"]
+    env:
+      CUSTOM_TOKEN: ""          # empty string = pass through from pipeline env
     allowed:
       - custom_function_1
       - custom_function_2
+  remote-tool:                  # HTTP MCP server (see docs/mcp.md)
+    url: "https://mcp.example.com"
+    headers:
+      Authorization: "Bearer $(MCP_TOKEN)"
+    allowed: [search, fetch]
 safe-outputs:                  # optional per-tool configuration for safe outputs
   create-work-item:
     work-item-type: Task
@@ -148,6 +158,23 @@ execution-context:             # optional execution-context plugin (see docs/exe
     enabled: true              # defaults to true when on.pr is configured. Set false to opt out
                                # (also suppresses auto-adding the read-only git commands to the
                                # agent's bash allow-list).
+    checks:
+      enabled: true             # include PR Build Validation check results
+  manual:
+    enabled: true               # defaults to true when parameters are declared
+    include-email: false
+  pipeline:
+    enabled: true               # defaults to true when on.pipeline is configured
+  ci-push:
+    enabled: false              # opt-in "since last green build" CI/push context
+  workitem:
+    enabled: true               # defaults to true with PR context
+    max-items: 5
+    max-body-kb: 32
+  schedule:
+    enabled: true               # scheduled-run diff context (requires on.schedule)
+  repo:
+    enabled: false              # opt-in repository identity context
 steps:                         # inline steps before agent runs (same job, generate context)
   - bash: echo "Preparing context for agent"
     displayName: "Prepare context"
@@ -180,6 +207,9 @@ supply-chain:                  # optional internal supply-chain mirror (see docs
     name: myacr.azurecr.io/mirror  # registry host or base path (artifact names kept under it)
     service-connection: acr-conn   # REQUIRED when registry is set (ACR has no System.AccessToken path)
   service-connection: shared-conn  # optional shared fallback for whichever target omits its own
+# ado-aw-debug:                 # debug-only knobs; see docs/ado-aw-debug.md
+#   skip-integrity: false       # omit generated pipeline integrity verification
+#   create-issue: false         # dogfood-only GitHub issue filing for debug reports
 parameters:                    # optional ADO runtime parameters (surfaced in UI when queuing a run)
   - name: clearMemory
     displayName: "Clear agent memory"
@@ -192,6 +222,14 @@ parameters:                    # optional ADO runtime parameters (surfaced in UI
 
 Build the project and run all tests...
 ```
+
+## Debug-only `ado-aw-debug:`
+
+`ado-aw-debug:` is accepted in front matter for repository dogfooding and
+local diagnostics. It is **not** a regular safe-output tool. Use
+`skip-integrity` to omit generated pipeline integrity verification, or
+`create-issue` to file a GitHub issue from debug pipelines; see
+[`ado-aw-debug.md`](ado-aw-debug.md) for the full reference.
 
 ## Workspace Defaults
 
@@ -428,4 +466,3 @@ pipeline. In this mode the compiler:
 
 Result: every PR update fires exactly one PR-typed build (`Build.Reason
 == PullRequest`); commit-driven CI is fully silenced.
-

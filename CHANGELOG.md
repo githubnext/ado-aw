@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.38.0](https://github.com/githubnext/ado-aw/compare/v0.37.0...v0.38.0) (2026-06-22)
+
+
+### Features
+
+* **compile:** add internal supply-chain feed/registry mirror ([#1080](https://github.com/githubnext/ado-aw/issues/1080)) ([a4300e6](https://github.com/githubnext/ado-aw/commit/a4300e66e4af738a64916325223429c55e39d7e3))
+* **ir:** add EnvValue::RuntimeExpression variant to prevent $[] in step env ([#1082](https://github.com/githubnext/ado-aw/issues/1082)) ([17f314b](https://github.com/githubnext/ado-aw/commit/17f314b3472dedb10bdc434af0d29b52ce0bdddf))
+* **ir:** add typed builder for AzureKeyVault@2 ([#1132](https://github.com/githubnext/ado-aw/issues/1132)) ([f72849a](https://github.com/githubnext/ado-aw/commit/f72849ae4407b1d887d85b22a55c4951127ed086))
+* **ir:** add typed builder for AzurePowerShell@5 ([#1127](https://github.com/githubnext/ado-aw/issues/1127)) ([7a51798](https://github.com/githubnext/ado-aw/commit/7a517980bf83f1c6aabb1466e8aea159af89a24f))
+* **ir:** add typed builder for CargoAuthenticate@0 ([#1139](https://github.com/githubnext/ado-aw/issues/1139)) ([5e84b57](https://github.com/githubnext/ado-aw/commit/5e84b57498fe8ca7ad6319734b56606de2b3ceac))
+* **ir:** add typed builder for DownloadPackage@1 ([#1108](https://github.com/githubnext/ado-aw/issues/1108)) ([b690c5c](https://github.com/githubnext/ado-aw/commit/b690c5c2878c72d9e4ee651402061afda5b5c432))
+* **ir:** add typed builder for GoTool@0 ([#1145](https://github.com/githubnext/ado-aw/issues/1145)) ([c598ed2](https://github.com/githubnext/ado-aw/commit/c598ed24412d429f55d67186236796c2621730e6))
+* **ir:** add typed builder for JavaToolInstaller@0 ([#1125](https://github.com/githubnext/ado-aw/issues/1125)) ([f3ec497](https://github.com/githubnext/ado-aw/commit/f3ec4970ea824957aa9adb84cff93ebd11dd1410))
+* **ir:** add typed builder for NuGetAuthenticate@1 ([#1136](https://github.com/githubnext/ado-aw/issues/1136)) ([1f8c23c](https://github.com/githubnext/ado-aw/commit/1f8c23c7d90734d0b87c5ea4bcc8a5cebbf9b6bd))
+* **ir:** add typed builder for PipAuthenticate@1 ([#1142](https://github.com/githubnext/ado-aw/issues/1142)) ([0ec314d](https://github.com/githubnext/ado-aw/commit/0ec314d08eaf4261f1df4bb66c4f82312072c002))
+* **ir:** add typed builder for PublishBuildArtifacts@1 ([#1105](https://github.com/githubnext/ado-aw/issues/1105)) ([56cee37](https://github.com/githubnext/ado-aw/commit/56cee37a10cfb76939836165f33d7388b8a685b4))
+* **ir:** add typed builder for PublishCodeCoverageResults@2 ([#1131](https://github.com/githubnext/ado-aw/issues/1131)) ([2c2572c](https://github.com/githubnext/ado-aw/commit/2c2572ce5c424702db7819284b484ddad4bf2b02))
+* **ir:** add typed builder for PythonScript@0 ([#1128](https://github.com/githubnext/ado-aw/issues/1128)) ([6315119](https://github.com/githubnext/ado-aw/commit/63151196404aac9d0c80a8c828c70d8be1da725b))
+* **ir:** add typed builder for UseDotNet@2 ([#1150](https://github.com/githubnext/ado-aw/issues/1150)) ([da3c645](https://github.com/githubnext/ado-aw/commit/da3c645ef5a27d61c9ad9ec442e73e238f41149a))
+* **ir:** add typed builder for UseNode@1 ([#1148](https://github.com/githubnext/ado-aw/issues/1148)) ([90511fb](https://github.com/githubnext/ado-aw/commit/90511fb562b65fccfd0838c4c3b66c1808d84397))
+* **ir:** add typed builder for UsePythonVersion@0 ([#1154](https://github.com/githubnext/ado-aw/issues/1154)) ([5c635b6](https://github.com/githubnext/ado-aw/commit/5c635b6a90430f0b7cbfad9941ebdb186fef82bd))
+* **ir:** add typed builder for VSTest@2 ([#1110](https://github.com/githubnext/ado-aw/issues/1110)) ([d471541](https://github.com/githubnext/ado-aw/commit/d47154133e4967607690177cddc9b2511580624c))
+* **ir:** add typed helper for CmdLine@2 ([#1083](https://github.com/githubnext/ado-aw/issues/1083)) ([14ebe83](https://github.com/githubnext/ado-aw/commit/14ebe838443ee4fd8fef376f41ab334e8454fad5))
+* **ir:** add typed helper for DeleteFiles@1 ([#1071](https://github.com/githubnext/ado-aw/issues/1071)) ([8d8dbb2](https://github.com/githubnext/ado-aw/commit/8d8dbb2b4e4375dc093576d07cb4cf8b2e22b104))
+* **ir:** add typed helper for DownloadPipelineArtifact@2 ([#1063](https://github.com/githubnext/ado-aw/issues/1063)) ([a647fd9](https://github.com/githubnext/ado-aw/commit/a647fd933f08c42f7997870f781ab95764389636))
+* **ir:** add typed helper for ExtractFiles@1 ([#1042](https://github.com/githubnext/ado-aw/issues/1042)) ([33284df](https://github.com/githubnext/ado-aw/commit/33284dfe978f861da42a5e564a379a1051f0f0fd))
+* **ir:** add typed helper for Npm@1 ([#1077](https://github.com/githubnext/ado-aw/issues/1077)) ([19a8532](https://github.com/githubnext/ado-aw/commit/19a8532091546e7dd60ee2b866f5117cf1fa5b67))
+* **ir:** add typed helper for NuGetCommand@2 ([#1047](https://github.com/githubnext/ado-aw/issues/1047)) ([513643e](https://github.com/githubnext/ado-aw/commit/513643e3cb417711a7ebcd42806bdf63238afe75))
+* **ir:** add typed helper for PublishPipelineArtifact@1 ([#1065](https://github.com/githubnext/ado-aw/issues/1065)) ([9dc3176](https://github.com/githubnext/ado-aw/commit/9dc3176097c21c61337aeedc74187abc687fef64))
+* **ir:** add typed helpers for Docker@2 ([#1086](https://github.com/githubnext/ado-aw/issues/1086)) ([9f738c4](https://github.com/githubnext/ado-aw/commit/9f738c4da5252f72697403dacb5faec824b9328b))
+* **ir:** add typed helpers for PowerShell@2 ([#1051](https://github.com/githubnext/ado-aw/issues/1051)) ([c752f81](https://github.com/githubnext/ado-aw/commit/c752f81dd360c8cf9c7e4e9136756fbde105f313))
+
+
+### Bug Fixes
+
+* **ado:** detect ADO sign-in HTML response in list and report auth error ([#1044](https://github.com/githubnext/ado-aw/issues/1044)) ([77bee77](https://github.com/githubnext/ado-aw/commit/77bee7749fda54da38e3c739621b812e6b41007b))
+* **safeoutputs:** render applyable PR suggestions correctly ([#1104](https://github.com/githubnext/ado-aw/issues/1104)) ([6213b1c](https://github.com/githubnext/ado-aw/commit/6213b1cf37f24f1ee91fb9acff09c969fa1c0e60))
+* **smoke:** target ADO agent-definitions repo for PR/git-write smokes ([#1045](https://github.com/githubnext/ado-aw/issues/1045)) ([aae77f6](https://github.com/githubnext/ado-aw/commit/aae77f65e33b4bc32262cbda4c2faafd7580bde9))
+
 ## [0.37.0](https://github.com/githubnext/ado-aw/compare/v0.36.0...v0.37.0) (2026-06-15)
 
 

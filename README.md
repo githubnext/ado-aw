@@ -52,10 +52,18 @@ curl -fsSL https://github.com/githubnext/ado-aw/releases/latest/download/install
 
 ```powershell
 # Windows (x64)
-powershell -ExecutionPolicy Bypass -NoProfile -Command "iwr https://github.com/githubnext/ado-aw/releases/latest/download/install-windows.ps1 -UseBasicParsing | iex"
+$script = Join-Path $env:TEMP "install-ado-aw.ps1"
+Invoke-WebRequest "https://github.com/githubnext/ado-aw/releases/latest/download/install-windows.ps1" -UseBasicParsing -OutFile $script
+Get-FileHash $script -Algorithm SHA256
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+& $script
 ```
 
 The installers download the release binary, verify it against `checksums.txt`, install it to a standard path (`/usr/local/bin` when writable, otherwise a user-local path), and update your PATH when needed.
+
+Compare the `Get-FileHash` output with the `install-windows.ps1` entry in `checksums.txt` before running the script.
+
+If you see `The Process object must have the UseShellExecute property set to false in order to use environment variables`, run the five Windows commands above from an existing PowerShell prompt (not via a nested `powershell -Command ...` launch).
 
 ### 2. Initialize Your Repository
 
@@ -263,8 +271,10 @@ the service connections. Approve the permissions and the pipeline is ready.
 | `teardown` | list | — | Separate job after safe outputs |
 | `network` | object | — | Additional allowed/blocked hosts |
 | `inlined-imports` | boolean | `false` | When `true`, resolves all `{{#runtime-import …}}` markers at compile time; the generated YAML is self-contained but prompt-body edits require recompilation. See [runtime-imports.md](docs/runtime-imports.md). |
-| `env` | map | — | Workflow-level environment variables (reserved, not yet implemented) |
-| `execution-context` | object | — | Configuration for the always-on execution-context plugin (PR context precompute). See [execution-context.md](docs/execution-context.md). |
+| `env` | map | `{}` | Workflow-level environment variables (accepted by parser, not yet forwarded to compiled pipeline output) |
+| `execution-context` | object | — | Configuration for the always-on execution-context plugin (`aw-context/` contributors). See [execution-context.md](docs/execution-context.md). |
+| `supply-chain` | object | — | Internal feed/registry mirror settings for compiler/runtime artifacts. See [supply-chain.md](docs/supply-chain.md). |
+| `ado-aw-debug` | object | — | Debug-only knobs for local/dogfood diagnostics. See [ado-aw-debug.md](docs/ado-aw-debug.md). |
 
 ### Markdown Body
 
@@ -431,7 +441,7 @@ actions, and the executor processes them after threat analysis.
 | `reply-to-pr-comment` | Replies to an existing PR review comment thread |
 | `resolve-pr-thread` | Resolves or updates the status of a PR review thread |
 | `submit-pr-review` | Submits a review vote on a pull request |
-| `update-pr` | Updates pull request metadata (reviewers, labels, auto-complete, etc.) |
+| `update-pr` | Updates pull request metadata (reviewers, labels, auto-complete, vote, update-description) |
 | `link-work-items` | Links two ADO work items together |
 | `queue-build` | Queues a pipeline build by definition ID |
 | `create-git-tag` | Creates a git tag on a repository ref |
@@ -516,6 +526,7 @@ Commands:
   compile       Compile markdown to pipeline definition
   check         Verify a compiled pipeline matches its source
   mcp           Run as an MCP server (safe outputs)
+  mcp-author    Run the author-facing MCP server over stdio (IDE/Copilot Chat integration)
   mcp-http      Run as an HTTP MCP server (for MCPG integration)
   execute       Execute safe outputs (Stage 3)
   secrets       Manage pipeline-variable secrets on matched ADO definitions (set/list/delete)
@@ -526,6 +537,12 @@ Commands:
   status        Per-pipeline status block for matched ADO definitions
   run           Queue builds for matched ADO definitions (optionally poll to completion)
   audit         Audit a single Azure DevOps build: download artifacts, analyze logs, render a report
+  trace         Trace a build's failing-job chain using audit data plus the local IR graph
+  inspect       Inspect an agent source file's typed IR: jobs, stages, steps, outputs, derived `dependsOn`
+  graph         Query the resolved dependency graph for an agent source file
+  whatif        Static reachability: classify jobs skipped if a step or job fails
+  lint          Run structural lint checks over an agent source file
+  catalog       List safe-outputs, runtimes, tools, engines, and models
 
 Options:
   -v, --verbose              Enable info-level logging
@@ -594,8 +611,15 @@ index to jump to the right page.
   in the pipeline UI.
 - [`docs/targets.md`](docs/targets.md) — target platforms: `standalone`, `1es`,
   `job`, and `stage`.
+- [`docs/execution-context.md`](docs/execution-context.md) — built-in
+  `aw-context/` precompute contributors for PR, manual, pipeline, CI/push,
+  work-item, scheduled, PR-check, and repository context.
 - [`docs/safe-outputs.md`](docs/safe-outputs.md) — full reference for every
   safe-output tool plus their per-agent configuration.
+- [`docs/safe-output-permissions.md`](docs/safe-output-permissions.md) —
+  diagnosis and fix reference for Stage 3 permission failures (401/403).
+- [`docs/supply-chain.md`](docs/supply-chain.md) — optional `supply-chain:`
+  front-matter section for internal feed/registry mirrors.
 - [`docs/ado-aw-debug.md`](docs/ado-aw-debug.md) — debug-only `ado-aw-debug:`
   front-matter section (`skip-integrity`, `create-issue`).
 
@@ -606,6 +630,8 @@ index to jump to the right page.
 - [`docs/cli.md`](docs/cli.md) — `ado-aw` CLI command and flag reference.
 - [`docs/mcp.md`](docs/mcp.md) — MCP server configuration (stdio containers,
   HTTP servers, env passthrough).
+- [`docs/mcp-author.md`](docs/mcp-author.md) — author-facing MCP server
+  reference for local IDE/Copilot Chat integrations.
 - [`docs/mcpg.md`](docs/mcpg.md) — MCP Gateway architecture and pipeline
   integration.
 - [`docs/network.md`](docs/network.md) — AWF network isolation, default
@@ -616,8 +642,8 @@ index to jump to the right page.
 - [`docs/codemods.md`](docs/codemods.md) — front-matter codemod framework
   (detection-based source rewrites on breaking-change updates).
 - [`docs/ado-script.md`](docs/ado-script.md) — `scripts/ado-script/` workspace
-  (bundled TypeScript runtime helpers: `gate.js`, `import.js`,
-  `exec-context-pr.js`, `exec-context-pr-synth.js`).
+  (bundled TypeScript runtime helpers: `gate.js`, `import.js`, and the
+  execution-context `exec-context-*.js` bundles).
 - [`docs/extending.md`](docs/extending.md) — adding new CLI commands, compile
   targets, front-matter fields, typed IR extensions, safe-output tools,
   first-class tools, and runtimes.

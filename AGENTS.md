@@ -63,7 +63,8 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   │   ├── output.rs  # Output references and output dependency wiring
 │   │   │   ├── graph.rs   # Graph construction and validation passes
 │   │   │   ├── lower.rs   # IR lowering from front matter into typed nodes
-│   │   │   └── emit.rs    # YAML emission from typed IR
+│   │   │   ├── emit.rs    # YAML emission from typed IR
+│   │   │   └── summary.rs # Public, serializable PipelineSummary / GraphSummary for agent-facing tooling (see docs/ir.md Public JSON summary)
 │   │   ├── standalone.rs # Standalone pipeline compiler
 │   │   ├── standalone_ir.rs # Standalone target typed-IR builder
 │   │   ├── onees.rs      # 1ES Pipeline Template compiler
@@ -81,7 +82,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   │   ├── ado_aw_marker.rs # Always-on metadata marker extension (emits # ado-aw-metadata JSON)
 │   │   │   ├── github.rs # Always-on GitHub MCP extension
 │   │   │   ├── safe_outputs.rs # Always-on SafeOutputs MCP extension
-│   │   │   ├── ado_script.rs # Always-on ado-script extension (gate evaluator + runtime-import resolver + exec-context-pr precompute, per-job downloads)
+│   │   │   ├── ado_script.rs # Always-on ado-script extension (gate evaluator + runtime-import resolver + execution-context precomputes, per-job downloads)
 │   │   │   ├── exec_context/ # Always-on execution-context extension (issue #860)
 │   │   │   │   ├── mod.rs    # ExecContextExtension; CompilerExtension impl; contributor fan-out
 │   │   │   │   ├── contributor.rs # Internal ContextContributor trait + Contributor enum
@@ -101,20 +102,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   │   ├── 0002_pool_object_form.rs # Legacy scalar pool → object form codemod
 │   │   │   └── helpers.rs # take_key, insert_no_overwrite, rename_key, ConflictPolicy
 │   │   ├── codemod_integration_test.rs # White-box rewrite-path tests (stub registry injection)
-│   │   ├── types.rs      # Front matter grammar and types
-│   │   └── ir/           # Typed Azure DevOps pipeline IR (see docs/ir.md)
-│   │       ├── mod.rs    # Pipeline / PipelineBody / PipelineShape root types
-│   │       ├── ids.rs    # Typed StageId / JobId / StepId newtypes
-│   │       ├── step.rs   # Step variants (Bash, Task, Checkout, Download, Publish, RawYaml)
-│   │       ├── job.rs    # Job, Pool, TemplateContext, JobVariable
-│   │       ├── stage.rs  # Stage + external-params wrap
-│   │       ├── env.rs    # Typed EnvValue (Literal, AdoMacro, PipelineVar, Secret, StepOutput, Coalesce, Concat)
-│   │       ├── condition.rs # Typed Condition / Expr AST + codegen to ADO condition syntax
-│   │       ├── output.rs # OutputDecl / OutputRef + location-aware lowering
-│   │       ├── graph.rs  # Dependency graph: validation, edge derivation, isOutput promotion, cycle detection
-│   │       ├── lower.rs  # IR → serde_yaml::Value lowering
-│   │       ├── emit.rs   # Thin `lower() + serde_yaml::to_string()` wrapper
-│   │       └── summary.rs # Public, serializable PipelineSummary / GraphSummary for agent-facing tooling (see docs/ir.md Public JSON summary)
+│   │   └── types.rs      # Front matter grammar and types
 │   ├── init.rs           # Repository initialization for AI-first authoring
 │   ├── execute.rs        # Stage 3 safe output execution
 │   ├── fuzzy_schedule.rs # Fuzzy schedule parsing
@@ -235,12 +223,19 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── update-ado-agentic-workflow.md # Guide for modifying an existing agentic pipeline
 │   └── debug-ado-agentic-workflow.md  # Guide for troubleshooting a failing agentic pipeline
 ├── scripts/              # Supporting scripts shipped as release artifacts
-│   └── ado-script/       # TypeScript workspace for bundled gate.js, import.js, exec-context-pr.js, exec-context-pr-synth.js
+│   └── ado-script/       # TypeScript workspace for bundled gate/import helpers plus execution-context bundles
 │       └── src/
 │           ├── gate/     # Gate evaluator source (bundled to gate.js)
 │           ├── import/   # Runtime prompt resolver source (bundled to import.js)
 │           ├── exec-context-pr/ # PR-context precompute source (bundled to exec-context-pr.js)
 │           ├── exec-context-pr-synth/ # Synthetic-PR resolver source (bundled to exec-context-pr-synth.js)
+│           ├── exec-context-manual/ # Manual-run context source (bundled to exec-context-manual.js)
+│           ├── exec-context-pipeline/ # Pipeline-completion context source (bundled to exec-context-pipeline.js)
+│           ├── exec-context-ci-push/ # CI/push context source (bundled to exec-context-ci-push.js)
+│           ├── exec-context-workitem/ # Linked work-item context source (bundled to exec-context-workitem.js)
+│           ├── exec-context-schedule/ # Scheduled-run context source (bundled to exec-context-schedule.js)
+│           ├── exec-context-pr-checks/ # PR validation checks context source (bundled to exec-context-pr-checks.js)
+│           ├── exec-context-repo/ # Repository identity context source (bundled to exec-context-repo.js)
 │           └── shared/   # Shared modules across bundles (auth, ado-client, env-facts, types.gen.ts)
 ├── tests/                # Integration tests and fixtures
 ├── docs/                 # Per-concept reference documentation (see index below)
@@ -253,7 +248,7 @@ Every compiled pipeline runs as three sequential jobs:
 - **Language**: Rust (2024 edition) - Note: Rust 2024 edition exists and is the edition used by this project
 - **CLI Framework**: clap v4 with derive macros
 - **Error Handling**: anyhow for ergonomic error propagation
-- **Bundled scripts**: TypeScript + ncc (`scripts/ado-script/`) — compiled gate evaluator, runtime import resolver, PR-context precompute, and synthetic-PR resolver; see [`docs/ado-script.md`](docs/ado-script.md).
+- **Bundled scripts**: TypeScript + ncc (`scripts/ado-script/`) — compiled gate evaluator, runtime import resolver, and execution-context precompute helpers; see [`docs/ado-script.md`](docs/ado-script.md).
 - **Async Runtime**: tokio with full features
 - **YAML Parsing**: serde_yaml
 - **MCP Server**: rmcp with server and transport-io features
@@ -293,11 +288,9 @@ index to jump to the right page.
 - [`docs/targets.md`](docs/targets.md) — target platforms: `standalone`,
   `1es`, `job`, and `stage`.
 - [`docs/execution-context.md`](docs/execution-context.md) — built-in
-  `aw-context/` precompute (issue #860): PR target-branch fetch +
-  merge-base resolution, `base.sha`/`head.sha` artefacts, prompt
-  fragment with pre-filled ADO MCP identifiers, auto-extension of the
-  agent's bash allow-list with read-only git commands; configured via
-  the `execution-context:` front-matter block.
+  `aw-context/` precompute contributors for PR, manual, pipeline,
+  CI/push, work-item, scheduled, PR-check, and repository context;
+  configured via the `execution-context:` front-matter block.
 - [`docs/safe-outputs.md`](docs/safe-outputs.md) — full reference for every
   safe-output tool agents can use to propose actions (PRs, work items, wiki
   pages, comments, etc.) plus their per-agent configuration.
@@ -322,7 +315,9 @@ index to jump to the right page.
 - [`docs/ir.md`](docs/ir.md) — typed Azure DevOps pipeline IR (`Pipeline`, jobs/stages/steps, output refs, graph pass, lowering, target builders, and the public JSON summary consumed by agent-facing tooling).
 - [`docs/cli.md`](docs/cli.md) — `ado-aw` CLI commands (`init`, `compile`,
   `check`, `mcp`, `mcp-http`, `execute`, `secrets`, `enable`, `disable`,
-  `remove`, `list`, `status`, `run`, `audit`; `configure` is a deprecated hidden alias).
+  `remove`, `list`, `status`, `run`, `audit`, `mcp-author`, `trace`,
+  `inspect`, `graph`, `whatif`, `lint`, `catalog`; `configure` is a
+  deprecated hidden alias and `export-gate-schema` is a hidden build-time tool).
 - [`docs/audit.md`](docs/audit.md) — `ado-aw audit`: accepted build-id / URL
   forms, artifact layout, cache behavior, rejection tracing, and `AuditData`
   report shape.
@@ -347,8 +342,9 @@ index to jump to the right page.
   rewrite on breaking-change updates, contributor workflow for
   adding codemods.
 - [`docs/ado-script.md`](docs/ado-script.md) — `ado-script` workspace
-  (`scripts/ado-script/`): the bundled TypeScript runtime helpers (today:
-  `gate.js`, `import.js`, `exec-context-pr.js`, `exec-context-pr-synth.js`), schemars-driven type codegen, and the A2 design decision.
+  (`scripts/ado-script/`): the bundled TypeScript runtime helpers
+  (`gate.js`, `import.js`, and the execution-context `exec-context-*.js`
+  bundles), schemars-driven type codegen, and the A2 design decision.
 - [`docs/local-development.md`](docs/local-development.md) — local development
   setup notes.
 
