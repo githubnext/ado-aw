@@ -36,6 +36,7 @@ pub mod download_secure_file;
 pub mod extract_files;
 pub mod go_tool;
 pub mod java_tool_installer;
+pub mod maven;
 pub mod maven_authenticate;
 pub mod npm;
 pub mod npm_authenticate;
