@@ -37,6 +37,70 @@ safe-outputs:
 
 Safe output configurations are passed to Stage 3 execution and used when processing safe outputs.
 
+### Manual review (`require-approval`)
+
+High-impact safe outputs can be gated behind a human approval step
+(`ManualValidation@1`) that pauses the run until a reviewer approves or rejects
+in the Azure DevOps UI. This lets agents propose more consequential actions
+(PRs, branches, queued builds, work items) safely.
+
+Set `require-approval` at the **section level** for a pipeline-wide default,
+and/or inside an **individual tool** to override the default for that tool:
+
+```yaml
+safe-outputs:
+  require-approval: true          # global default: every output below needs review
+  create-pull-request:
+    target-branch: main
+  add-pr-comment:
+    require-approval: false       # …except low-impact comments, which auto-apply
+```
+
+`require-approval` accepts either a bare boolean or an object for finer control:
+
+```yaml
+safe-outputs:
+  create-pull-request:
+    require-approval:
+      approvers: ["[MyOrg]\\release-team"]   # who may approve (empty → anyone with run permission)
+      notify-users: ["ops@example.com"]      # who is emailed (empty → no email)
+      timeout-minutes: 120                    # pending period (omit → job/stage timeout)
+      on-timeout: reject                      # reject (default, fail-closed) | resume
+      instructions: "Verify the proposed PR before approving."
+```
+
+Resolution per tool: the tool's own `require-approval` wins; otherwise the
+section-level `require-approval` applies; otherwise the tool is **not** gated.
+
+**Defaults (bare `require-approval: true`)** — the run pauses on a Review panel;
+**anyone with run permission** can approve or reject; **no** notification emails
+are sent; and the validation **fails closed** on timeout (`on-timeout: reject`),
+so un-approved outputs are never applied.
+
+**Reviewer message** — set `instructions` to control the text shown in the
+Review panel and notification emails. It is plain text and supports pipeline
+variable (`$(...)`) interpolation. When omitted, ado-aw generates a default
+message listing the reviewed safe-output type(s) awaiting approval.
+
+**Execution shape** — manual review changes the compiled pipeline:
+
+- A new agentless `ManualReview` job (`pool: server`) runs `ManualValidation@1`
+  between Detection and the safe-output execution.
+- It only pauses when Detection cleared the run (no prompt-injection / secret
+  leak) **and** the agent actually proposed a reviewed-type output (a Detection
+  step sets a `HasReviewedProposals` flag) — so the run never pauses for
+  nothing.
+- When some tools are gated and others are not, execution **splits**: an
+  automatic `SafeOutputs` job applies the non-gated outputs immediately
+  (independent of the review outcome), while a separate `SafeOutputs_Reviewed`
+  job — gated behind `ManualReview` — applies the approved outputs and publishes
+  a distinct `safe_outputs_reviewed` artifact. A rejected or timed-out review
+  fails closed: the reviewed job is skipped while the automatic outputs are
+  unaffected.
+
+The Detection threat gate always runs first, so a flagged run applies nothing —
+automatic or reviewed.
+
 ### Executor authentication
 
 All write-bearing safe outputs (e.g. `create-pull-request`,

@@ -804,6 +804,10 @@ fn merge_condition_with_template_param(internal: &str, param_name: &str) -> Stri
 }
 
 fn lower_pool(pool: &Pool) -> Value {
+    if let Pool::Server = pool {
+        // Agentless/server job: ADO expects the scalar `pool: server`.
+        return s("server");
+    }
     let mut m = Mapping::new();
     match pool {
         Pool::VmImage(img) => {
@@ -818,6 +822,7 @@ fn lower_pool(pool: &Pool) -> Value {
                 m.insert(s("os"), s(os));
             }
         }
+        Pool::Server => unreachable!("handled above"),
     }
     Value::Mapping(m)
 }
@@ -1471,6 +1476,38 @@ mod tests {
         assert!(
             msg.contains("not valid inside an EnvValue::Concat"),
             "expected nested RuntimeExpression-in-Concat error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn lower_job_emits_agentless_server_pool_scalar() {
+        use crate::compile::ir::step::TaskStep;
+
+        let mut job = Job::new(
+            JobId::new("ManualReview").unwrap(),
+            "Manual Review",
+            Pool::Server,
+        );
+        job.push_step(Step::Task(TaskStep::new("ManualValidation@1", "Approve")));
+        let p = Pipeline {
+            name: "t".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers::default(),
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(vec![job]),
+            shape: PipelineShape::Standalone,
+        };
+        let v = super::lower(&p).unwrap();
+        let yaml = serde_yaml::to_string(&v).unwrap();
+        // Agentless job uses the scalar `pool: server`, never a mapping.
+        assert!(
+            yaml.contains("pool: server"),
+            "expected scalar `pool: server` in:\n{yaml}"
+        );
+        assert!(
+            !yaml.contains("vmImage"),
+            "server pool must not emit a vmImage mapping:\n{yaml}"
         );
     }
 

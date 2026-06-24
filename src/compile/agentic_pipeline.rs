@@ -1,7 +1,8 @@
 //! Typed-IR builder for the canonical agentic-pipeline shape.
 //!
-//! Owns the Setup → Agent → Detection → SafeOutputs → Teardown
-//! shape consumed by **every** compile target (`standalone`, `1es`,
+//! Owns the Setup → Agent → Detection → (ManualReview?) → SafeOutputs
+//! (+ SafeOutputs_Reviewed?) → Teardown shape consumed by **every**
+//! compile target (`standalone`, `1es`,
 //! `job`, `stage`). Each target's wrapper module (`standalone_ir.rs`,
 //! `onees_ir.rs`, `job_ir.rs`, `stage_ir.rs`) is a one-screen
 //! envelope that calls [`build_pipeline_context`] and lifts the
@@ -40,13 +41,22 @@
 //!   Emitted when filters / synthPr / user setup are present.
 //! - `Agent`: extensions + the static AWF / MCPG / agent-run scaffold.
 //! - `Detection`: threat-analysis pass that produces the
-//!   `threatAnalysis.SafeToProcess` output.
+//!   `threatAnalysis.SafeToProcess` output. When manual review is
+//!   configured it also produces `reviewedProposals.HasReviewedProposals`.
+//! - `ManualReview` (optional): an agentless (`pool: server`)
+//!   `ManualValidation@1` gate inserted when a safe output is configured
+//!   with `require-approval`. Pauses for human approval only when the run
+//!   is safe **and** the agent proposed a reviewed-type output. Fail-closed
+//!   on rejection/timeout.
 //! - `SafeOutputs`: gated on Detection's `SafeToProcess` output via
 //!   typed [`Condition::Eq`] over a typed
 //!   [`crate::compile::ir::output::OutputRef`]. The lowering pass
 //!   picks `dependencies.Detection.outputs['threatAnalysis.SafeToProcess']`
 //!   — first production use of typed cross-job OutputRef in a
-//!   condition.
+//!   condition. With mixed `require-approval`, execution splits into this
+//!   automatic job (excludes reviewed tools) plus a `SafeOutputs_Reviewed`
+//!   job gated behind `ManualReview` (runs only the reviewed tools,
+//!   publishes a distinct `safe_outputs_reviewed` artifact).
 //! - `Teardown` (optional): user `teardown:` steps.
 
 use anyhow::Result;
@@ -66,12 +76,16 @@ use super::ir::step::{
 };
 use super::ir::tasks::docker_installer::DockerInstaller;
 use super::ir::tasks::download_package::DownloadPackage;
+use super::ir::tasks::manual_validation::{ManualValidation, OnTimeout};
 use super::ir::tasks::nuget_authenticate::NuGetAuthenticate;
 use super::ir::{
     CiTrigger, Parameter, ParameterDefault, ParameterKind, PipelineResource, PipelineVar,
     PrTrigger, RepositoryResource, Resources, Schedule, Triggers,
 };
-use super::types::{FrontMatter, OnConfig, PrMode, Repository as RepoCfg, SupplyChainConfig};
+use super::types::{
+    ApprovalConfig, ApprovalOnTimeout, FrontMatter, OnConfig, PrMode, Repository as RepoCfg,
+    SupplyChainConfig,
+};
 
 /// Built pipeline context — the result of running every validation,
 /// scalar computation, extension declaration fanout, and canonical-
@@ -354,7 +368,37 @@ pub(crate) fn build_canonical_jobs(
         &p,
     )?);
     jobs.push(build_detection_job(front_matter, cfg, &p)?);
-    jobs.push(build_safeoutputs_job(front_matter, cfg, &p)?);
+    if let Some(review) = build_manual_review_job(front_matter, cfg, &p)? {
+        jobs.push(review);
+    }
+    // Safe-outputs execution. With manual review, execution may split into an
+    // automatic job (runs immediately) and a reviewed job (gated behind the
+    // ManualReview approval). Partition decides the shape:
+    //   - no reviewed tools           → single default job (unchanged)
+    //   - all reviewed tools          → single default job, gated by ManualReview
+    //   - mixed (auto + reviewed)     → auto job + reviewed job
+    let (auto, reviewed) = front_matter.partition_safe_outputs_by_approval();
+    if reviewed.is_empty() || auto.is_empty() {
+        jobs.push(build_safeoutputs_job(
+            front_matter,
+            cfg,
+            &p,
+            &SafeOutputsVariant::default_single(),
+        )?);
+    } else {
+        jobs.push(build_safeoutputs_job(
+            front_matter,
+            cfg,
+            &p,
+            &SafeOutputsVariant::automatic(&reviewed),
+        )?);
+        jobs.push(build_safeoutputs_job(
+            front_matter,
+            cfg,
+            &p,
+            &SafeOutputsVariant::reviewed(&reviewed),
+        )?);
+    }
     if let Some(teardown) = build_teardown_job(front_matter, cfg, &p)? {
         jobs.push(teardown);
     }
@@ -377,9 +421,10 @@ impl<'a> JobPrefix<'a> {
     /// prefix is provided.
     pub(crate) fn id(&self, base: &str) -> Result<JobId> {
         match (self.0, base) {
-            (Some(prefix), "Agent" | "Detection" | "SafeOutputs") => {
-                JobId::new(format!("{prefix}_{base}"))
-            }
+            (
+                Some(prefix),
+                "Agent" | "Detection" | "ManualReview" | "SafeOutputs" | "SafeOutputs_Reviewed",
+            ) => JobId::new(format!("{prefix}_{base}")),
             _ => JobId::new(base),
         }
     }
@@ -998,6 +1043,17 @@ fn build_detection_job(
     steps.push(Step::Bash(prepare_analyzed_outputs_step()));
     // Evaluate threat analysis — DECLARES TYPED OUTPUT
     steps.push(Step::Bash(evaluate_threat_analysis_step()));
+    // When manual review is configured, detect whether the agent actually
+    // proposed any approval-gated outputs — DECLARES TYPED OUTPUT. The
+    // ManualReview gate is conditioned on this so the run never pauses for a
+    // human when there is nothing to review.
+    let (_, reviewed_tools) = front_matter.partition_safe_outputs_by_approval();
+    if !reviewed_tools.is_empty() {
+        steps.push(Step::Bash(detect_reviewed_proposals_step(
+            &cfg.working_directory,
+            &reviewed_tools,
+        )));
+    }
     // Copy logs
     steps.push(Step::Bash(copy_logs_step(&cfg.engine_log_dir, true)));
     // Publish
@@ -1012,10 +1068,69 @@ fn build_detection_job(
     Ok(job)
 }
 
+/// Describes one safe-outputs execution job. The canonical graph emits a
+/// single default variant in the common case, or — when manual review splits
+/// execution — an automatic variant (`--exclude` the reviewed tools) plus a
+/// reviewed variant (`--only` the reviewed tools) gated behind ManualReview.
+struct SafeOutputsVariant {
+    /// Canonical job base name passed to `JobPrefix::id`.
+    base: &'static str,
+    /// Job `displayName`.
+    display: &'static str,
+    /// Published pipeline-artifact name (must be unique per run).
+    artifact: &'static str,
+    /// Trailing `--only`/`--exclude` flags for `ado-aw execute` (or empty).
+    filter_args: String,
+}
+
+impl SafeOutputsVariant {
+    /// The default single-job variant: no filter, canonical names.
+    fn default_single() -> Self {
+        Self {
+            base: "SafeOutputs",
+            display: "SafeOutputs",
+            artifact: "safe_outputs",
+            filter_args: String::new(),
+        }
+    }
+
+    /// The automatic variant in a split: excludes every reviewed tool.
+    fn automatic(reviewed: &[String]) -> Self {
+        Self {
+            base: "SafeOutputs",
+            display: "SafeOutputs",
+            artifact: "safe_outputs",
+            filter_args: filter_flags("--exclude", reviewed),
+        }
+    }
+
+    /// The reviewed variant in a split: runs only the reviewed tools.
+    fn reviewed(reviewed: &[String]) -> Self {
+        Self {
+            base: "SafeOutputs_Reviewed",
+            display: "SafeOutputs (reviewed)",
+            artifact: "safe_outputs_reviewed",
+            filter_args: filter_flags("--only", reviewed),
+        }
+    }
+}
+
+/// Build a ` --<flag> <tool>` run for `ado-aw execute` (leading space so it
+/// concatenates onto the fixed command). Tool names are compiler-controlled
+/// safe-output identifiers (ASCII alphanumeric/hyphen), so no quoting needed.
+fn filter_flags(flag: &str, tools: &[String]) -> String {
+    let mut s = String::new();
+    for t in tools {
+        s.push_str(&format!(" {flag} {t}"));
+    }
+    s
+}
+
 fn build_safeoutputs_job(
     front_matter: &FrontMatter,
     cfg: &StandaloneCtx,
     prefix: &JobPrefix<'_>,
+    variant: &SafeOutputsVariant,
 ) -> Result<Job> {
     let mut steps: Vec<Step> = Vec::new();
     steps.push(checkout_self_step());
@@ -1053,17 +1168,18 @@ fn build_safeoutputs_job(
         &cfg.source_path,
         &cfg.working_directory,
         &cfg.executor_ado_env,
+        &variant.filter_args,
     )?));
     // Copy logs
     steps.push(Step::Bash(copy_logs_safeoutputs_step(&cfg.engine_log_dir)));
     // Publish
     steps.push(Step::Publish(PublishStep {
         path: "$(Agent.TempDirectory)/staging".to_string(),
-        artifact: "safe_outputs".to_string(),
+        artifact: variant.artifact.to_string(),
         condition: Some(Condition::Always),
     }));
 
-    let mut job = Job::new(prefix.id("SafeOutputs")?, "SafeOutputs", cfg.pool.clone());
+    let mut job = Job::new(prefix.id(variant.base)?, variant.display, cfg.pool.clone());
     job.steps = steps;
     // **Marquee**: condition uses typed Expr::StepOutput on Detection's
     // threatAnalysis.SafeToProcess output. Lowering picks the cross-job
@@ -1080,6 +1196,129 @@ fn build_safeoutputs_job(
         ),
     ]));
     Ok(job)
+}
+
+/// Build the agentless **ManualReview** job (a `ManualValidation@1` server
+/// task) when any enabled safe-output tool resolves to require manual review.
+///
+/// Returns `Ok(None)` when no tool requires approval (the common case — the
+/// canonical graph is then unchanged). The gate sits between Detection and
+/// SafeOutputs; its condition reuses Detection's `threatAnalysis.SafeToProcess`
+/// output so a run flagged unsafe never pauses for a human, and a rejected
+/// validation fails the gate so SafeOutputs (which depends on it) is skipped —
+/// fail-closed by default.
+fn build_manual_review_job(
+    front_matter: &FrontMatter,
+    cfg: &StandaloneCtx,
+    prefix: &JobPrefix<'_>,
+) -> Result<Option<Job>> {
+    let (_, reviewed) = front_matter.partition_safe_outputs_by_approval();
+    if reviewed.is_empty() {
+        return Ok(None);
+    }
+    let approval = aggregate_approval_config(front_matter, &reviewed);
+
+    let mut job = Job::new(prefix.id("ManualReview")?, "Manual Review", Pool::Server);
+    job.steps = vec![Step::Task(build_manual_validation_step(&approval, &reviewed))];
+    // The validation's pending period is bounded by the agentless job timeout.
+    if let Some(mins) = approval.timeout_minutes {
+        job.timeout = Some(std::time::Duration::from_secs(60 * (mins as u64)));
+    }
+    let _ = cfg; // pool/compiler context not needed for an agentless gate
+    job.condition = Some(Condition::And(vec![
+        Condition::Succeeded,
+        Condition::Eq(
+            Expr::StepOutput(OutputRef::new(
+                StepId::new("threatAnalysis")?,
+                "SafeToProcess",
+            )),
+            Expr::Literal("true".to_string()),
+        ),
+        // Only pause for a human when the agent actually proposed an
+        // approval-gated output (set by Detection's reviewedProposals step).
+        Condition::Eq(
+            Expr::StepOutput(OutputRef::new(
+                StepId::new("reviewedProposals")?,
+                "HasReviewedProposals",
+            )),
+            Expr::Literal("true".to_string()),
+        ),
+    ]));
+    Ok(Some(job))
+}
+
+/// Fold the per-tool/global approval settings of every reviewed tool into the
+/// single settings object that drives the whole-pipeline `ManualValidation@1`
+/// gate. Lists are unioned; the timeout is the strictest (smallest) provided;
+/// `on-timeout` is fail-closed (`reject`) unless *every* contributing config
+/// explicitly asks to `resume`.
+fn aggregate_approval_config(front_matter: &FrontMatter, reviewed: &[String]) -> ApprovalConfig {
+    use std::collections::BTreeSet;
+    let mut approvers: BTreeSet<String> = BTreeSet::new();
+    let mut notify: BTreeSet<String> = BTreeSet::new();
+    let mut timeout_minutes: Option<u32> = None;
+    let mut all_resume = true;
+    let mut instructions: Option<String> = None;
+
+    for tool in reviewed {
+        let Some(cfg) = front_matter.tool_requires_approval(tool) else {
+            continue;
+        };
+        approvers.extend(cfg.approvers);
+        notify.extend(cfg.notify_users);
+        if let Some(t) = cfg.timeout_minutes {
+            timeout_minutes = Some(timeout_minutes.map_or(t, |existing| existing.min(t)));
+        }
+        match cfg.on_timeout {
+            Some(ApprovalOnTimeout::Resume) => {}
+            _ => all_resume = false,
+        }
+        if instructions.is_none() {
+            instructions = cfg.instructions;
+        }
+    }
+
+    ApprovalConfig {
+        approvers: approvers.into_iter().collect(),
+        notify_users: notify.into_iter().collect(),
+        timeout_minutes,
+        on_timeout: Some(if all_resume {
+            ApprovalOnTimeout::Resume
+        } else {
+            ApprovalOnTimeout::Reject
+        }),
+        instructions,
+    }
+}
+
+/// Build the `ManualValidation@1` step from the aggregated approval settings.
+fn build_manual_validation_step(approval: &ApprovalConfig, reviewed: &[String]) -> TaskStep {
+    let mut builder = ManualValidation::new(approval.notify_users.join(", "));
+    if !approval.approvers.is_empty() {
+        builder = builder.approvers(approval.approvers.join(", "));
+    }
+    let instructions = approval
+        .instructions
+        .clone()
+        .unwrap_or_else(|| default_review_instructions(reviewed));
+    builder = builder.instructions(instructions);
+    let on_timeout = match approval.on_timeout {
+        Some(ApprovalOnTimeout::Resume) => OnTimeout::Resume,
+        _ => OnTimeout::Reject,
+    };
+    builder = builder.on_timeout(on_timeout);
+    builder.into_step()
+}
+
+/// Default reviewer message when the author did not set `instructions`.
+fn default_review_instructions(reviewed: &[String]) -> String {
+    format!(
+        "This run is paused for manual review. The agent has proposed safe \
+         outputs of the following type(s) that require approval before they \
+         are applied: {}. Approve (Resume) to apply them, or Reject to discard \
+         them.",
+        reviewed.join(", ")
+    )
 }
 
 fn build_teardown_job(
@@ -1118,18 +1357,52 @@ fn wire_explicit_dependencies(jobs: &mut [Job], prefix: &JobPrefix<'_>) -> Resul
     let setup_id = prefix.id("Setup")?;
     let agent_id = prefix.id("Agent")?;
     let detection_id = prefix.id("Detection")?;
+    let manualreview_id = prefix.id("ManualReview")?;
     let safeoutputs_id = prefix.id("SafeOutputs")?;
+    let reviewed_id = prefix.id("SafeOutputs_Reviewed")?;
     let teardown_id = prefix.id("Teardown")?;
     let has_setup = jobs.iter().any(|j| j.id == setup_id);
+    let has_review = jobs.iter().any(|j| j.id == manualreview_id);
+    // The reviewed execution job only exists in the mixed (split) case.
+    let has_reviewed_job = jobs.iter().any(|j| j.id == reviewed_id);
     for j in jobs.iter_mut() {
         if j.id == agent_id && has_setup {
             j.depends_on = vec![setup_id.clone()];
         } else if j.id == detection_id {
             j.depends_on = vec![agent_id.clone()];
-        } else if j.id == safeoutputs_id {
+        } else if j.id == manualreview_id {
+            // Agentless gate: depends on Detection (its condition reads
+            // Detection's threatAnalysis.SafeToProcess output).
             j.depends_on = vec![agent_id.clone(), detection_id.clone()];
+        } else if j.id == safeoutputs_id {
+            // The "SafeOutputs" job is the automatic path. It is gated behind
+            // ManualReview only when it is the *sole* execution job (all tools
+            // reviewed); in the mixed split it runs immediately after Detection
+            // alongside the separate reviewed job.
+            j.depends_on = if has_review && !has_reviewed_job {
+                vec![
+                    agent_id.clone(),
+                    detection_id.clone(),
+                    manualreview_id.clone(),
+                ]
+            } else {
+                vec![agent_id.clone(), detection_id.clone()]
+            };
+        } else if j.id == reviewed_id {
+            // Reviewed execution runs only after the approval gate clears, so a
+            // rejected review fails closed (this job is skipped).
+            j.depends_on = vec![
+                agent_id.clone(),
+                detection_id.clone(),
+                manualreview_id.clone(),
+            ];
         } else if j.id == teardown_id {
-            j.depends_on = vec![safeoutputs_id.clone()];
+            // Teardown waits on every execution job that exists.
+            let mut deps = vec![safeoutputs_id.clone()];
+            if has_reviewed_job {
+                deps.push(reviewed_id.clone());
+            }
+            j.depends_on = deps;
         }
     }
     Ok(())
@@ -1808,9 +2081,12 @@ fn execute_safe_outputs_step(
     source_path: &str,
     working_directory: &str,
     executor_ado_env: &str,
+    filter_args: &str,
 ) -> Result<BashStep> {
+    // `filter_args` is either empty or a leading-space-prefixed run of
+    // `--only <tool>` / `--exclude <tool>` flags appended to the command.
     let script = format!(
-        "ado-aw execute --source \"{source_path}\" --safe-output-dir \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)\" --output-dir \"$(Agent.TempDirectory)/staging\"\n\
+        "ado-aw execute --source \"{source_path}\" --safe-output-dir \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)\" --output-dir \"$(Agent.TempDirectory)/staging\"{filter_args}\n\
          EXIT_CODE=$?\n\
          if [ $EXIT_CODE -eq 2 ]; then\n  \
            echo \"##vso[task.complete result=SucceededWithIssues;]Executor completed with warnings\"\n  \
@@ -2054,6 +2330,35 @@ fn evaluate_threat_analysis_step() -> BashStep {
                 .expect("threatAnalysis is a valid StepId — see StepId::new contract"),
         )
         .with_output(OutputDecl::new("SafeToProcess"))
+        .with_condition(Condition::Always)
+}
+
+/// Scan the agent's proposed safe-output NDJSON for any approval-gated tool
+/// and publish a `HasReviewedProposals` output variable. The ManualReview gate
+/// is conditioned on this so a run never pauses for a human when the agent did
+/// not propose anything that requires review.
+fn detect_reviewed_proposals_step(working_directory: &str, reviewed: &[String]) -> BashStep {
+    // `reviewed` are compiler-controlled safe-output names (ASCII
+    // alphanumeric/hyphen only — see `validate::is_safe_tool_name`), so they
+    // are safe to embed directly in a grep alternation.
+    let alternation = reviewed.join("|");
+    let script = format!(
+        "HAS_REVIEWED=\"false\"\n\
+         PROPOSALS=$(find \"{working_directory}/safe_outputs\" -name \"safe_outputs.ndjson\" 2>/dev/null | head -n 1)\n\
+         if [ -n \"$PROPOSALS\" ] && [ -f \"$PROPOSALS\" ]; then\n  \
+           if grep -Eq '\"name\"[[:space:]]*:[[:space:]]*\"({alternation})\"' \"$PROPOSALS\"; then\n    \
+             HAS_REVIEWED=\"true\"\n  \
+           fi\n\
+         fi\n\
+         echo \"##vso[task.setvariable variable=HasReviewedProposals;isOutput=true]$HAS_REVIEWED\"\n\
+         echo \"HasReviewedProposals set to: $HAS_REVIEWED\"\n"
+    );
+    bash("Detect reviewed proposals", script)
+        .with_id(
+            StepId::new("reviewedProposals")
+                .expect("reviewedProposals is a valid StepId — see StepId::new contract"),
+        )
+        .with_output(OutputDecl::new("HasReviewedProposals"))
         .with_condition(Condition::Always)
 }
 

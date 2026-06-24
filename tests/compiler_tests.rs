@@ -6246,3 +6246,168 @@ supply-chain:
         "registry ACR login must fall back to the top-level connection"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Manual review gate (ManualValidation@1 agentless job)
+// ─────────────────────────────────────────────────────────────────────
+
+/// A global `safe-outputs.require-approval: true` inserts a single agentless
+/// ManualReview gate between Detection and SafeOutputs, and SafeOutputs depends
+/// on it (fail-closed).
+#[test]
+fn test_require_approval_global_emits_manual_review_gate() {
+    let source = r#"---
+name: "Approval Agent"
+description: "Agent whose outputs require manual review"
+safe-outputs:
+  require-approval: true
+  create-pull-request:
+    target-branch: main
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("approval-global", source);
+    assert!(ok, "require-approval pipeline should compile: {stderr}");
+    assert!(
+        compiled.contains("job: ManualReview"),
+        "expected a ManualReview job:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("pool: server"),
+        "ManualReview must be an agentless server job:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("task: ManualValidation@1"),
+        "expected a ManualValidation@1 task:\n{compiled}"
+    );
+    // The gate only fires when the agent actually proposed a reviewed output.
+    assert!(
+        compiled.contains("HasReviewedProposals"),
+        "expected a HasReviewedProposals detection/gate:\n{compiled}"
+    );
+    // SafeOutputs is gated behind the review job.
+    let so_idx = compiled
+        .find("job: SafeOutputs")
+        .expect("SafeOutputs job present");
+    let so_tail = &compiled[so_idx..];
+    assert!(
+        so_tail.contains("ManualReview"),
+        "SafeOutputs dependsOn must include ManualReview:\n{so_tail}"
+    );
+}
+
+/// Without any `require-approval`, no ManualReview job or ManualValidation task
+/// is emitted (zero behavior change for existing pipelines).
+#[test]
+fn test_no_require_approval_omits_manual_review_gate() {
+    let source = r#"---
+name: "Plain Agent"
+description: "Agent with no manual review"
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("approval-none", source);
+    assert!(ok, "pipeline should compile: {stderr}");
+    assert!(
+        !compiled.contains("ManualReview"),
+        "no ManualReview job expected:\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("ManualValidation@1"),
+        "no ManualValidation task expected:\n{compiled}"
+    );
+}
+
+/// Mixed approval — one reviewed tool, one automatic — splits execution into
+/// an automatic SafeOutputs job (runs immediately) and a gated
+/// SafeOutputs_Reviewed job behind ManualReview, each with the right filter.
+#[test]
+fn test_mixed_approval_splits_execution_jobs() {
+    let source = r#"---
+name: "Mixed Agent"
+description: "Mixed approval split"
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+    require-approval: true
+  add-pr-comment: {}
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("approval-mixed", source);
+    assert!(ok, "mixed approval pipeline should compile: {stderr}");
+    // Two execution jobs exist.
+    assert!(
+        compiled.contains("job: SafeOutputs_Reviewed"),
+        "reviewed SafeOutputs job expected:\n{compiled}"
+    );
+    // Automatic job excludes the reviewed tool; reviewed job runs only it.
+    assert!(
+        compiled.contains("--exclude create-pull-request"),
+        "automatic job must exclude the reviewed tool:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("--only create-pull-request"),
+        "reviewed job must run only the reviewed tool:\n{compiled}"
+    );
+    // Distinct published artifacts (no collision).
+    assert!(
+        compiled.contains("artifact: safe_outputs_reviewed"),
+        "reviewed job must publish a distinct artifact:\n{compiled}"
+    );
+    // The reviewed job is gated behind ManualReview; the auto job is not.
+    let rev_idx = compiled
+        .find("job: SafeOutputs_Reviewed")
+        .expect("reviewed job present");
+    assert!(
+        compiled[rev_idx..].contains("ManualReview"),
+        "reviewed job must depend on ManualReview:\n{}",
+        &compiled[rev_idx..]
+    );
+}
+
+/// A detailed `require-approval` object propagates approvers, notify-users, and
+/// the author-supplied instructions message into the ManualValidation task.
+#[test]
+fn test_require_approval_object_propagates_settings() {
+    let source = r#"---
+name: "Detailed Approval Agent"
+description: "Agent with detailed approval settings"
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+    require-approval:
+      approvers: ["[MyOrg]\\release-team"]
+      notify-users: ["ops@example.com"]
+      instructions: "Please double-check the proposed PR before approving."
+      on-timeout: reject
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("approval-object", source);
+    assert!(ok, "detailed approval pipeline should compile: {stderr}");
+    assert!(
+        compiled.contains("task: ManualValidation@1"),
+        "expected ManualValidation@1:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("ops@example.com"),
+        "notifyUsers should carry the configured email:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("release-team"),
+        "approvers should carry the configured group:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("Please double-check the proposed PR before approving."),
+        "author instructions should be emitted:\n{compiled}"
+    );
+}
+

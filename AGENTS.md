@@ -39,6 +39,15 @@ Every compiled pipeline runs as three sequential jobs:
 3. **SafeOutputs (Stage 3)** — a non-agent executor applies approved safe outputs
    using a write-capable ADO token that the agent never sees.
 
+**Optional manual review.** When a safe output is configured with
+`require-approval` (see [`docs/safe-outputs.md`](docs/safe-outputs.md)), an
+agentless `ManualReview` job (`pool: server`, `ManualValidation@1`) is inserted
+between Detection and SafeOutputs to pause for human approval. With a mix of
+gated and non-gated outputs, Stage 3 splits into an automatic `SafeOutputs` job
+(applies non-gated outputs immediately) and a `SafeOutputs_Reviewed` job (gated
+behind `ManualReview`, publishes `safe_outputs_reviewed`). The gate is
+fail-closed and only pauses when the agent actually proposed a reviewed output.
+
 ### Architecture
 
 ```
@@ -50,7 +59,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── compile/          # Pipeline compilation module
 │   │   ├── mod.rs        # Module entry point and Compiler trait
 │   │   ├── common.rs     # Shared helpers across targets
-│   │   ├── agentic_pipeline.rs # Canonical Setup → Agent → Detection → SafeOutputs → Teardown shape (shared by every target); BuiltPipelineContext, build_pipeline_context, build_canonical_jobs, per-job builders, fold_agent_conditions, agent_job_variables_hoist
+│   │   ├── agentic_pipeline.rs # Canonical Setup → Agent → Detection → (ManualReview?) → SafeOutputs(+SafeOutputs_Reviewed?) → Teardown shape (shared by every target); BuiltPipelineContext, build_pipeline_context, build_canonical_jobs, per-job builders incl. build_manual_review_job + SafeOutputsVariant split, fold_agent_conditions, agent_job_variables_hoist
 │   │   ├── ir/            # Typed Azure DevOps pipeline IR
 │   │   │   ├── mod.rs     # IR module entry point and shared types
 │   │   │   ├── ids.rs     # Stable IDs for jobs/steps/outputs in the IR

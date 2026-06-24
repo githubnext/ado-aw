@@ -734,7 +734,131 @@ pub struct FrontMatter {
     pub supply_chain: Option<SupplyChainConfig>,
 }
 
+/// Reserved keys inside the `safe-outputs:` map that configure the section
+/// itself rather than naming a safe-output tool. These must never be treated
+/// as tool names (e.g. in `--enabled-tools`, Stage-3 budgets, or unknown-key
+/// validation).
+pub const SAFE_OUTPUT_RESERVED_KEYS: &[&str] = &["require-approval"];
+
+/// Automatic action a manual-validation gate takes when its pending period
+/// elapses with no human response. Mirrors `ManualValidation@1`'s `onTimeout`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApprovalOnTimeout {
+    /// Reject the run on timeout (fail-closed — the default).
+    Reject,
+    /// Resume (approve) the run on timeout.
+    Resume,
+}
+
+/// Detailed manual-review settings for a safe-output approval gate. Lowered
+/// into a `ManualValidation@1` agentless job. See `docs/safe-outputs.md`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ApprovalConfig {
+    /// Users/groups permitted to act on the validation. Empty → anyone with
+    /// run permission can approve or reject.
+    #[serde(default)]
+    pub approvers: Vec<String>,
+    /// Users/groups to email when the validation is pending. Empty → no email.
+    #[serde(default)]
+    pub notify_users: Vec<String>,
+    /// Pending-period timeout in minutes. None → ADO job/stage timeout applies.
+    #[serde(default)]
+    pub timeout_minutes: Option<u32>,
+    /// Automatic action on timeout. None → fail-closed (`reject`).
+    #[serde(default)]
+    pub on_timeout: Option<ApprovalOnTimeout>,
+    /// Free-text message shown to the reviewer (run "Review" panel + email).
+    /// None → an auto-generated summary of the proposed outputs is used.
+    #[serde(default)]
+    pub instructions: Option<String>,
+}
+
+/// The `require-approval` value, accepted either as a bare boolean toggle or a
+/// detailed [`ApprovalConfig`] object. Usable at the `safe-outputs:` section
+/// level (global default) or inside an individual tool's config (override).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum RequireApproval {
+    /// `require-approval: true|false`.
+    Bool(bool),
+    /// `require-approval: { approvers: …, on-timeout: …, … }`.
+    Detailed(ApprovalConfig),
+}
+
+impl RequireApproval {
+    /// Whether manual review is required by this setting.
+    pub fn is_required(&self) -> bool {
+        match self {
+            RequireApproval::Bool(b) => *b,
+            RequireApproval::Detailed(_) => true,
+        }
+    }
+
+    /// The reviewer settings (defaults for the bare-boolean form).
+    pub fn config(&self) -> ApprovalConfig {
+        match self {
+            RequireApproval::Bool(_) => ApprovalConfig::default(),
+            RequireApproval::Detailed(c) => c.clone(),
+        }
+    }
+}
+
 impl FrontMatter {
+    /// Iterator over enabled safe-output **tool** names, skipping reserved
+    /// section-level config keys (e.g. `require-approval`). Every consumer that
+    /// treats `safe-outputs:` keys as tool names MUST go through this so a
+    /// reserved key is never mistaken for a tool.
+    pub fn safe_output_tool_names(&self) -> impl Iterator<Item = &String> {
+        self.safe_outputs
+            .keys()
+            .filter(|k| !SAFE_OUTPUT_RESERVED_KEYS.contains(&k.as_str()))
+    }
+
+    /// Section-level (global) `require-approval` default, if configured.
+    pub fn global_require_approval(&self) -> Option<RequireApproval> {
+        self.safe_outputs
+            .get("require-approval")
+            .and_then(|v| serde_json::from_value::<RequireApproval>(v.clone()).ok())
+    }
+
+    /// Per-tool `require-approval` override for `tool`, if present.
+    fn tool_require_approval(&self, tool: &str) -> Option<RequireApproval> {
+        self.safe_outputs
+            .get(tool)
+            .and_then(|v| v.get("require-approval"))
+            .and_then(|v| serde_json::from_value::<RequireApproval>(v.clone()).ok())
+    }
+
+    /// Effective approval setting for `tool`: the per-tool override if present,
+    /// otherwise the section-level default. Returns `Some(config)` only when
+    /// the tool's outputs require manual review.
+    pub fn tool_requires_approval(&self, tool: &str) -> Option<ApprovalConfig> {
+        let setting = self
+            .tool_require_approval(tool)
+            .or_else(|| self.global_require_approval())?;
+        setting.is_required().then(|| setting.config())
+    }
+
+    /// Partition enabled safe-output tool names into `(auto, reviewed)` where
+    /// `reviewed` tools require manual approval and `auto` tools do not. Both
+    /// lists are sorted for deterministic emission.
+    pub fn partition_safe_outputs_by_approval(&self) -> (Vec<String>, Vec<String>) {
+        let mut auto = Vec::new();
+        let mut reviewed = Vec::new();
+        for tool in self.safe_output_tool_names() {
+            if self.tool_requires_approval(tool).is_some() {
+                reviewed.push(tool.clone());
+            } else {
+                auto.push(tool.clone());
+            }
+        }
+        auto.sort();
+        reviewed.sort();
+        (auto, reviewed)
+    }
+
     /// Get the schedule configuration (if any).
     pub fn schedule(&self) -> Option<&ScheduleConfig> {
         self.on_config.as_ref().and_then(|o| o.schedule.as_ref())
@@ -2675,6 +2799,101 @@ Body
 "#;
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
         assert!(fm.safe_outputs.contains_key("upload-pipeline-artifact"));
+    }
+
+    #[test]
+    fn test_require_approval_global_bool() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+safe-outputs:
+  require-approval: true
+  create-pull-request: {}
+  add-pr-comment: {}
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        // Reserved key is not surfaced as a tool name.
+        let tools: Vec<&String> = fm.safe_output_tool_names().collect();
+        assert!(!tools.iter().any(|t| t.as_str() == "require-approval"));
+        assert_eq!(tools.len(), 2);
+        // Global default makes every tool require approval.
+        assert!(fm.tool_requires_approval("create-pull-request").is_some());
+        assert!(fm.tool_requires_approval("add-pr-comment").is_some());
+        let (auto, reviewed) = fm.partition_safe_outputs_by_approval();
+        assert!(auto.is_empty());
+        assert_eq!(reviewed, vec!["add-pr-comment", "create-pull-request"]);
+    }
+
+    #[test]
+    fn test_require_approval_per_tool_override() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+safe-outputs:
+  require-approval: true
+  create-pull-request:
+    require-approval: false
+  add-pr-comment: {}
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        // Per-tool false overrides the global true.
+        assert!(fm.tool_requires_approval("create-pull-request").is_none());
+        assert!(fm.tool_requires_approval("add-pr-comment").is_some());
+        let (auto, reviewed) = fm.partition_safe_outputs_by_approval();
+        assert_eq!(auto, vec!["create-pull-request"]);
+        assert_eq!(reviewed, vec!["add-pr-comment"]);
+    }
+
+    #[test]
+    fn test_require_approval_detailed_object() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+safe-outputs:
+  create-pull-request:
+    require-approval:
+      approvers: ["[Org]\\release"]
+      notify-users: ["ops@example.com"]
+      timeout-minutes: 120
+      on-timeout: resume
+      instructions: "Review the proposed PR."
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let cfg = fm
+            .tool_requires_approval("create-pull-request")
+            .expect("approval required");
+        assert_eq!(cfg.approvers, vec!["[Org]\\release"]);
+        assert_eq!(cfg.notify_users, vec!["ops@example.com"]);
+        assert_eq!(cfg.timeout_minutes, Some(120));
+        assert_eq!(cfg.on_timeout, Some(ApprovalOnTimeout::Resume));
+        assert_eq!(cfg.instructions.as_deref(), Some("Review the proposed PR."));
+    }
+
+    #[test]
+    fn test_require_approval_absent_means_no_review() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+safe-outputs:
+  create-pull-request: {}
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        assert!(fm.tool_requires_approval("create-pull-request").is_none());
+        let (auto, reviewed) = fm.partition_safe_outputs_by_approval();
+        assert_eq!(auto, vec!["create-pull-request"]);
+        assert!(reviewed.is_empty());
     }
 
     #[test]

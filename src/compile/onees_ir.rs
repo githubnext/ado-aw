@@ -39,7 +39,7 @@ use super::agentic_pipeline::build_pipeline_context;
 use super::common;
 use super::extensions::{CompileContext, Extension};
 use super::ir::ids::StageId;
-use super::ir::job::JobTemplateContext;
+use super::ir::job::{JobTemplateContext, Pool};
 use super::ir::{OneEsSdlConfig, Pipeline, PipelineBody, PipelineShape, RepositoryResource};
 use super::types::FrontMatter;
 
@@ -86,6 +86,13 @@ pub fn build_onees_pipeline(
 
     let mut jobs = built.jobs;
     for job in jobs.iter_mut() {
+        // Agentless (server) jobs — e.g. the ManualReview `ManualValidation@1`
+        // gate — are not build jobs and must not be wrapped in a 1ES
+        // `templateContext:` (which would suppress `pool: server` and nest the
+        // server task under a build-job step list).
+        if job.pool == Pool::Server {
+            continue;
+        }
         job.template_context = Some(JobTemplateContext::default());
     }
 

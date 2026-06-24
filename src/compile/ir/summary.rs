@@ -149,6 +149,7 @@ pub enum PoolSummary {
         image: Option<String>,
         os: Option<String>,
     },
+    Server,
 }
 
 /// A single step's public summary.
@@ -344,6 +345,7 @@ fn summarize_pool(p: &super::job::Pool) -> PoolSummary {
             image: image.clone(),
             os: os.clone(),
         },
+        super::job::Pool::Server => PoolSummary::Server,
     }
 }
 
