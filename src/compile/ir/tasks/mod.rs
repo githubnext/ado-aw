@@ -59,4 +59,5 @@ pub mod use_dotnet;
 pub mod use_node;
 pub mod use_python_version;
 pub mod use_ruby_version;
+pub mod vs_build;
 pub mod vstest;
