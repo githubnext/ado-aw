@@ -21,6 +21,7 @@ mod common;
 
 pub mod archive_files;
 pub mod azure_cli;
+pub mod azure_container_apps;
 pub mod azure_key_vault;
 pub mod azure_powershell;
 pub mod azure_web_app;
