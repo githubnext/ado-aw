@@ -22,7 +22,7 @@ Those wrappers are the only place per-target shape (top-level `PipelineShape`, t
 
 - `ids.rs` — typed `StageId`, `JobId`, and `StepId` newtypes. Constructors validate the ADO identifier grammar (`^[A-Za-z_][A-Za-z0-9_]*$`) so invalid names fail at compile time.
 - `step.rs` — `Step` and concrete step structs: `BashStep`, `TaskStep`, `CheckoutStep`, `DownloadStep`, and `PublishStep`.
-- `tasks/` — typed builder structs for 37 built-in ADO task steps spanning toolchain setup, file operations, build/test, artifact publishing, scripting, containers, package auth, and Azure integrations. Each builder exposes `new(<required>)`, typed optional setters, and `into_step()`. Prefer these over hand-crafted `TaskStep::new()` calls — see [Typed task helpers](#typed-task-helpers) below.
+- `tasks/` — typed builder structs for 41 built-in ADO task steps spanning toolchain setup, file operations, build/test, artifact publishing, scripting, containers, package auth, Azure integrations, and pipeline control. Each builder exposes `new(<required>)`, typed optional setters, and `into_step()`. Prefer these over hand-crafted `TaskStep::new()` calls — see [Typed task helpers](#typed-task-helpers) below.
 - `job.rs` — `Job`, `Pool`, job variables, 1ES `templateContext` support, and target-job external `dependsOn` / `condition` wrapping.
 - `stage.rs` — `Stage` plus target-stage external `dependsOn` / `condition` wrapping.
 - `env.rs` — typed environment values (`EnvValue`) including ADO macros, pipeline variables, secrets, `OutputRef`s, `Coalesce`, and macro-form `Concat`.
@@ -117,7 +117,7 @@ let synth = Step::Bash(
 
 ## Typed task helpers
 
-`src/compile/ir/tasks/` contains typed **builder structs** for 37 ADO built-in tasks. Each follows the same pattern:
+`src/compile/ir/tasks/` contains typed **builder structs** for 41 ADO built-in tasks. Each follows the same pattern:
 
 ```rust
 Builder::new(required_params)   // required inputs as typed positional args
@@ -127,7 +127,7 @@ Builder::new(required_params)   // required inputs as typed positional args
 
 This eliminates hand-crafted `TaskStep::new(…)` + raw string inputs at every call site, makes the required/optional boundary explicit, and prevents invalid input combinations for command-dispatch tasks at compile time.
 
-**Command-dispatch tasks** (`Docker@2`, `DotNetCoreCLI@2`, `NuGetCommand@2`, `Npm@1`, `PowerShell@2`, `AzurePowerShell@5`, `PythonScript@0`, `VSTest@2`, `GitHubRelease@1`, `PublishBuildArtifacts@1`) take a typed command/mode enum rather than a plain string — applying an input to the wrong command variant is unrepresentable.
+**Command-dispatch tasks** (`Docker@2`, `DotNetCoreCLI@2`, `NuGetCommand@2`, `Npm@1`, `PowerShell@2`, `AzurePowerShell@5`, `AzureCLI@2`, `PythonScript@0`, `VSTest@2`, `GitHubRelease@1`, `PublishBuildArtifacts@1`) take a typed command/mode enum rather than a plain string — applying an input to the wrong command variant is unrepresentable.
 
 ### Available builders
 
@@ -158,6 +158,7 @@ This eliminates hand-crafted `TaskStep::new(…)` + raw string inputs at every c
 
 | Builder | ADO task | Constructor |
 |---------|----------|-------------|
+| `AzureCli::new(azure_subscription, ScriptType, ScriptLocation)` | `AzureCLI@2` | ARM service connection; `ScriptType::Bash \| Ps \| PsCore \| Batch` enum; `ScriptLocation::Inline(script) \| ScriptPath(path)` enum |
 | `AzurePowerShell::file(connection, script_path)` / `::inline(connection, script)` | `AzurePowerShell@5` | Azure RM service connection; `.ps1` path or inline script |
 | `CmdLine::new(script)` | `CmdLine@2` | inline script text |
 | `PowerShell::file(file_path)` / `::inline(script)` | `PowerShell@2` | `.ps1` path or inline script body |
@@ -178,6 +179,7 @@ This eliminates hand-crafted `TaskStep::new(…)` + raw string inputs at every c
 
 | Builder | ADO task | Constructor |
 |---------|----------|-------------|
+| `DownloadBuildArtifacts::new(download_path)` | `DownloadBuildArtifacts@1` | local download directory; `BuildType`, `DownloadType`, `BuildVersionToDownload` enums and all other inputs optional |
 | `DownloadPipelineArtifact::new(target_path)` | `DownloadPipelineArtifact@2` | local download path |
 | `PublishBuildArtifacts::new(path_to_publish, artifact_name, location)` | `PublishBuildArtifacts@1` | source path; artifact name; `PublishLocation` enum |
 | `PublishPipelineArtifact::new(target_path)` | `PublishPipelineArtifact@1` | path to publish |
@@ -203,6 +205,12 @@ This eliminates hand-crafted `TaskStep::new(…)` + raw string inputs at every c
 | `NuGetCommand::new(NuGetOp)` | `NuGetCommand@2` | `NuGetOp::Restore \| Push \| Pack \| Custom` |
 | `PipAuthenticate::new()` | `PipAuthenticate@1` | all inputs optional |
 | `TwineAuthenticate::new()` | `TwineAuthenticate@1` | all inputs optional |
+
+#### Pipeline control
+
+| Builder | ADO task | Constructor |
+|---------|----------|-------------|
+| `ManualValidation::new(notify_users)` | `ManualValidation@1` | comma-separated notification addresses; all approval settings (`.approvers()`, `.instructions()`, `.on_timeout(OnTimeout::Reject \| Resume)`) optional |
 
 ### Usage example
 
