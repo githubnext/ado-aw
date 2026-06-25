@@ -31,6 +31,7 @@ pub mod delete_files;
 pub mod docker;
 pub mod docker_installer;
 pub mod dotnet_core_cli;
+pub mod download_build_artifacts;
 pub mod download_package;
 pub mod download_pipeline_artifact;
 pub mod download_secure_file;
