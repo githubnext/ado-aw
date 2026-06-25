@@ -51,20 +51,6 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   ├── mod.rs        # Module entry point and Compiler trait
 │   │   ├── common.rs     # Shared helpers across targets
 │   │   ├── agentic_pipeline.rs # Canonical Setup → Agent → Detection → SafeOutputs → Teardown shape (shared by every target); BuiltPipelineContext, build_pipeline_context, build_canonical_jobs, per-job builders, fold_agent_conditions, agent_job_variables_hoist
-│   │   ├── ir/            # Typed Azure DevOps pipeline IR
-│   │   │   ├── mod.rs     # IR module entry point and shared types
-│   │   │   ├── ids.rs     # Stable IDs for jobs/steps/outputs in the IR
-│   │   │   ├── step.rs    # Step declarations and typed step variants
-│   │   │   ├── tasks/     # Typed builder structs for built-in ADO tasks (one file per task; new()+typed setters+into_step(); command-enum dispatch for Docker/DotNet/NuGet/Npm/PowerShell; docker.rs canonical template)
-│   │   │   ├── job.rs     # Job declarations and typed job graph nodes
-│   │   │   ├── stage.rs   # Stage declarations and typed stage graph nodes
-│   │   │   ├── env.rs     # Typed environment and variable modeling
-│   │   │   ├── condition.rs # Condition AST and expression helpers
-│   │   │   ├── output.rs  # Output references and output dependency wiring
-│   │   │   ├── graph.rs   # Graph construction and validation passes
-│   │   │   ├── lower.rs   # IR lowering from front matter into typed nodes
-│   │   │   ├── emit.rs    # YAML emission from typed IR
-│   │   │   └── summary.rs # Public, serializable PipelineSummary / GraphSummary for agent-facing tooling (see docs/ir.md Public JSON summary)
 │   │   ├── standalone.rs # Standalone pipeline compiler
 │   │   ├── standalone_ir.rs # Standalone target typed-IR builder
 │   │   ├── onees.rs      # 1ES Pipeline Template compiler
@@ -107,6 +93,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   │       ├── mod.rs    # Pipeline / PipelineBody / PipelineShape root types
 │   │       ├── ids.rs    # Typed StageId / JobId / StepId newtypes
 │   │       ├── step.rs   # Step variants (Bash, Task, Checkout, Download, Publish, RawYaml)
+│   │       ├── tasks/    # Typed builder structs for built-in ADO tasks (one file per task; new()+typed setters+into_step(); command-enum dispatch for Docker/DotNet/NuGet/Npm/PowerShell; docker.rs canonical template)
 │   │       ├── job.rs    # Job, Pool, TemplateContext, JobVariable
 │   │       ├── stage.rs  # Stage + external-params wrap
 │   │       ├── env.rs    # Typed EnvValue (Literal, AdoMacro, PipelineVar, Secret, StepOutput, Coalesce, Concat)
@@ -336,8 +323,6 @@ index to jump to the right page.
 ### Compiler internals & operations
 
 - [`docs/ir.md`](docs/ir.md) — typed Azure DevOps pipeline IR (`Pipeline`, jobs/stages/steps, output refs, graph pass, lowering, target builders, and the public JSON summary consumed by agent-facing tooling).
-- [`docs/cli.md`](docs/cli.md) — `ado-aw` CLI commands (`init`, `compile`,
-  `check`, `mcp`, `mcp-http`, `execute`, `secrets`, `enable`, `disable`,
 - [`docs/cli.md`](docs/cli.md) — `ado-aw` CLI commands (`init`, `compile`,
   `check`, `mcp`, `mcp-http`, `execute`, `secrets`, `enable`, `disable`,
   `remove`, `list`, `status`, `run`, `audit`, `mcp-author`, `trace`,
