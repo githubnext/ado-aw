@@ -93,7 +93,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   │       ├── mod.rs    # Pipeline / PipelineBody / PipelineShape root types
 │   │       ├── ids.rs    # Typed StageId / JobId / StepId newtypes
 │   │       ├── step.rs   # Step variants (Bash, Task, Checkout, Download, Publish, RawYaml)
-│   │       ├── tasks/    # Typed builder structs for built-in ADO tasks (one file per task; new()+typed setters+into_step(); command-enum dispatch for Docker/DotNet/NuGet/Npm/PowerShell; docker.rs canonical template)
+│   │       ├── tasks/    # Typed builder structs for built-in ADO tasks (one file per task; new()+typed setters+into_step(); command-enum dispatch for Docker/DotNet/NuGet/Npm/UniversalPackages; typestate builders for PowerShell; docker.rs canonical template)
 │   │       ├── job.rs    # Job, Pool, TemplateContext, JobVariable
 │   │       ├── stage.rs  # Stage + external-params wrap
 │   │       ├── env.rs    # Typed EnvValue (Literal, AdoMacro, PipelineVar, Secret, StepOutput, Coalesce, Concat)
