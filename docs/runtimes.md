@@ -165,6 +165,99 @@ When enabled, the compiler:
 - **`config:` is functional, not a deferred warning.** AWF only overlays files in `$HOME` (e.g., `~/.npmrc` → `/dev/null`); workspace files such as `nuget.config` are preserved inside the agent sandbox, so a checked-in `nuget.config` works today.
 - **`NuGetAuthenticate@1` requires no `workingFile:` input.** It auto-discovers `nuget.config` files anywhere in the workspace, unlike `npmAuthenticate@0` which needs an explicit path.
 
+### TLA+ (`tla:`)
+
+TLA+ / TLC formal model-checking runtime. Downloads a JRE from Eclipse Temurin (Adoptium) and `tla2tools.jar` from the TLA+ GitHub releases page, creates convenience shims (`tlc`, `pluscal`, `sany`), adds Java ecosystem domains to the AWF network allowlist, and extends the bash command allow-list.
+
+TLA+ is a natural complement to the `lean` runtime: **TLC discovers** liveness/safety gaps by exhaustively searching the state space and emitting counterexample traces, while **Lean proves** a fixed design. Agentic workflows that scan codebases for state-machine bugs — finding stuck states, deadlocks, and missing timeouts — are a primary use case.
+
+```yaml
+# Simple enablement (latest tla2tools.jar, JDK 21 LTS)
+runtimes:
+  tla: true
+
+# With options (pin tla2tools.jar and JDK versions)
+runtimes:
+  tla:
+    version: "1.8.0"   # tla2tools.jar version (omit for latest)
+    jdk: "21"          # JRE major version (default: 21)
+```
+
+**Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `version` | string | `tla2tools.jar` version to download from the TLA+ GitHub releases (e.g., `"1.8.0"`, `"1.7.3"`). When omitted, the latest release is downloaded via GitHub's `releases/latest/download/` redirect. |
+| `jdk` | string | JRE major version to download from Eclipse Temurin (Adoptium), e.g., `"21"`, `"17"`. Defaults to `"21"` (current LTS). A JRE (not a full JDK) is downloaded since TLC only requires a runtime. |
+
+When enabled, the compiler:
+- Contributes a bash install step to `Declarations::agent_prepare_steps` that:
+  1. Downloads a JRE from [Eclipse Temurin (Adoptium)](https://adoptium.net) into `$HOME/.tla/jre/`
+  2. Downloads `tla2tools.jar` from [TLA+ GitHub releases](https://github.com/tlaplus/tlaplus/releases) into `$HOME/.tla/`
+  3. Creates convenience shims (`tlc`, `pluscal`, `sany`) in `$HOME/.tla/bin/`
+- Auto-adds `java`, `tlc`, `pluscal`, `sany` to the bash command allow-list
+- Adds Java ecosystem domains to the network allowlist via the `java` ecosystem identifier (covers `api.adoptium.net` and related Temurin endpoints). GitHub is already in the built-in allowlist, so no extra entry is needed for `tla2tools.jar`.
+- Mounts `$HOME/.tla` into the AWF container via `--mount` (read-only) so the toolchain is accessible inside the agent sandbox
+- Prepends `$HOME/.tla/bin` to `PATH` inside the AWF sandbox
+- Sets `TLA_JAR` and `TLA_JAVA_HOME` as pipeline variables so downstream steps can reference the jar and JRE paths
+- Appends a prompt supplement informing the agent about TLA+ availability and invocation patterns
+
+**Shims:**
+
+| Command | Java main class | Description |
+|---------|----------------|-------------|
+| `tlc` | `tlc2.TLC` | Run the TLC model checker: `tlc -config M.cfg M.tla` |
+| `pluscal` | `pcal.trans` | Translate PlusCal to TLA+: `pluscal -nocfg M.tla` |
+| `sany` | `tla2sany.SANY` | Parse and syntax-check a spec: `sany M.tla` |
+
+You can also invoke the JVM directly: `java -XX:+UseParallelGC -cp "$TLA_JAR" tlc2.TLC -workers auto -config M.cfg M.tla`
+
+**Environment variables available inside the agent sandbox:**
+
+| Variable | Value |
+|----------|-------|
+| `TLA_JAR` | Absolute path to `tla2tools.jar` |
+| `TLA_JAVA_HOME` | JRE home directory (`$HOME/.tla/jre`) |
+
+**Example: TLA+ model-checking workflow**
+
+```yaml
+---
+name: tla-liveness-checker
+description: |
+  Scans the codebase for event-driven state machines, builds TLA+ models,
+  runs TLC to find liveness gaps, and proposes findings via safe-outputs.
+on:
+  schedule: "weekly on monday"
+runtimes:
+  tla: true
+tools:
+  bash:
+    - find
+    - grep
+    - tlc
+    - pluscal
+    - sany
+    - java
+safe-outputs:
+  create-pull-request: {}
+  create-work-item: {}
+---
+
+Scan the repository for state machine implementations (look for enums with
+state names, switch/match blocks on state, or explicit state transition maps).
+
+For each state machine found:
+1. Build a TLA+ model in a temp file capturing the states and transitions.
+2. Run `pluscal` to translate PlusCal if used, or write TLA+ directly.
+3. Run `tlc -config <cfg> <spec>.tla` to check for deadlocks and liveness.
+4. If TLC finds a counterexample trace, record the violation.
+
+If violations are found, propose:
+- A draft PR adding the TLA+ models under `formal/` in the repository.
+- A work item per liveness gap with the TLC counterexample trace attached.
+```
+
 ### Combining Runtimes
 
 Multiple runtimes can be enabled simultaneously:
@@ -178,6 +271,8 @@ runtimes:
   dotnet:
     version: "8.0.x"
   lean: true
+  tla:
+    version: "1.8.0"
 ```
 
 All runtime extensions are sorted into `ExtensionPhase::Runtime` and execute before tool extensions (`ExtensionPhase::Tool`), ensuring language toolchains are available before any tools that depend on them.

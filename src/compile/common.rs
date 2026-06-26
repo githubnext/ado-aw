@@ -3224,6 +3224,7 @@ mod tests {
             python: None,
             node: None,
             dotnet: None,
+            tla: None,
         });
         let params = engine_args_for(&fm).unwrap();
         assert!(
@@ -3259,6 +3260,7 @@ mod tests {
             python: None,
             node: None,
             dotnet: None,
+            tla: None,
         });
         let params = engine_args_for(&fm).unwrap();
         assert!(

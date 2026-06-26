@@ -495,6 +495,13 @@ runtimes:
   # lean:
   #   toolchain: "leanprover/lean4:v4.29.1"   # pin a specific version
 
+# TLA+ / TLC formal model checker
+runtimes:
+  tla: true
+  # tla:
+  #   version: "1.8.0"   # pin tla2tools.jar version (omit for latest)
+  #   jdk: "21"          # JRE major version (default: 21)
+
 # Python
 runtimes:
   python: true
@@ -529,7 +536,7 @@ runtimes:
     version: "8.0.x"
 ```
 
-> Each enabled runtime auto-adds its ecosystem's bash commands (e.g., `dotnet`, `python`, `node`, `npm`, `lean`, `lake`) and network domains to the allowlist. See `docs/runtimes.md` for full configuration reference.
+> Each enabled runtime auto-adds its ecosystem's bash commands (e.g., `dotnet`, `python`, `node`, `npm`, `lean`, `lake`, `tlc`, `java`) and network domains to the allowlist. See `docs/runtimes.md` for full configuration reference.
 
 ### Step 15 — Network (standalone target only)
 
@@ -544,7 +551,7 @@ network:
     - "evil.example.com"
 ```
 
-`allowed` accepts raw domain patterns (wildcards supported) or ecosystem identifiers (`python`, `node`, `rust`, `dotnet`, `lean`) that expand to the full set of package registry domains for that ecosystem. The built-in allowlist includes: Azure DevOps, GitHub, Microsoft identity, Azure services, Application Insights, and MCP-specific endpoints for each enabled server.
+`allowed` accepts raw domain patterns (wildcards supported) or ecosystem identifiers (`python`, `node`, `rust`, `dotnet`, `lean`, `java`) that expand to the full set of package registry domains for that ecosystem. The built-in allowlist includes: Azure DevOps, GitHub, Microsoft identity, Azure services, Application Insights, and MCP-specific endpoints for each enabled server.
 
 ### Step 16 — Parameters (optional)
 
