@@ -39,6 +39,7 @@ pub mod extract_files;
 pub mod github_release;
 pub mod go_tool;
 pub mod gradle;
+pub mod helm_installer;
 pub mod java_tool_installer;
 pub mod manual_validation;
 pub mod maven;
