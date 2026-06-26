@@ -500,7 +500,7 @@ runtimes:
   tla: true
   # tla:
   #   version: "1.8.0"   # pin tla2tools.jar version (omit for latest)
-  #   jdk: "21"          # JRE major version (default: 21)
+  #   jdk: "21"          # JDK major version for JavaToolInstaller@0 (default: 21)
 
 # Python
 runtimes:
@@ -536,7 +536,7 @@ runtimes:
     version: "8.0.x"
 ```
 
-> Each enabled runtime auto-adds its ecosystem's bash commands (e.g., `dotnet`, `python`, `node`, `npm`, `lean`, `lake`, `tlc`, `java`) and network domains to the allowlist. See `docs/runtimes.md` for full configuration reference.
+> Each enabled runtime auto-adds its ecosystem's bash commands (e.g., `dotnet`, `python`, `node`, `npm`, `lean`, `lake`, `tlc`, `java`) and network domains to the allowlist. The `tla:` runtime uses `JavaToolInstaller@0` (pre-installed JDK) and the built-in GitHub allowlist, so it requires no extra network entries. See `docs/runtimes.md` for full configuration reference.
 
 ### Step 15 — Network (standalone target only)
 

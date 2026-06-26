@@ -1,20 +1,21 @@
 //! TLA+ / TLC runtime support for the ado-aw compiler.
 //!
-//! When enabled via `runtimes: tla:`, the compiler auto-installs a JRE from
-//! Eclipse Temurin (Adoptium) and the `tla2tools.jar` from the TLA+ GitHub
-//! releases page, creates convenience shims (`tlc`, `pluscal`, `sany`),
-//! adds Java ecosystem domains to the AWF network allowlist, extends the bash
-//! command allow-list, and appends a prompt supplement informing the agent
-//! that TLA+ is available.
+//! When enabled via `runtimes: tla:`, the compiler emits a
+//! [`JavaToolInstaller@0`] task step (selecting a pre-installed JDK) followed
+//! by a bash step that downloads `tla2tools.jar` from the TLA+ GitHub releases
+//! page and creates convenience shims (`tlc`, `pluscal`, `sany`).
 //!
-//! The toolchain is installed into `$HOME/.tla/`, which is mounted read-only
-//! into the AWF chroot via the `required_awf_mounts()` mechanism (same pattern
-//! as `runtimes: lean` using `$HOME/.elan/`).
+//! [`JavaToolInstaller@0`]: crate::compile::ir::tasks::java_tool_installer::JavaToolInstaller
+//!
+//! The `tla2tools.jar` and shims are installed into `$HOME/.tla/`, which is
+//! mounted read-only into the AWF chroot via the `required_awf_mounts()`
+//! mechanism. The JDK itself is mounted via the `$(JAVA_HOME)` pipeline
+//! variable that `JavaToolInstaller@0` sets.
 //!
 //! ## Network requirements
 //!
-//! - **JRE download**: `api.adoptium.net` — covered by the `java` ecosystem
-//!   identifier, which is automatically added to the AWF allowlist.
+//! - **JDK**: provided by `JavaToolInstaller@0` (pre-installed on the build
+//!   agent — no network download required).
 //! - **`tla2tools.jar` download**: GitHub releases — covered by the built-in
 //!   GitHub allowlist that every pipeline includes by default.
 //!
@@ -125,18 +126,22 @@ pub const DEFAULT_JDK_VERSION: &str = "21";
 /// - `sany` — shim for the SANY parser / syntax checker
 pub const TLA_BASH_COMMANDS: &[&str] = &["java", "tlc", "pluscal", "sany"];
 
-/// Generate the TLA+ installation bash script body.
+/// Generate the TLA+ tools installation bash script body.
 ///
 /// Downloads and stages:
-/// 1. A JRE from Eclipse Temurin (Adoptium) into `$HOME/.tla/jre/`
-/// 2. `tla2tools.jar` from TLA+ GitHub releases into `$HOME/.tla/`
-/// 3. Shim scripts (`tlc`, `pluscal`, `sany`) in `$HOME/.tla/bin/`
+/// 1. `tla2tools.jar` from TLA+ GitHub releases into `$HOME/.tla/`
+/// 2. Shim scripts (`tlc`, `pluscal`, `sany`) in `$HOME/.tla/bin/`
 ///
-/// Sets `TLA_JAR` and `TLA_JAVA_HOME` via `##vso[task.setvariable]` so
-/// downstream steps can reference the jar and JRE paths. Also prepends
-/// `$HOME/.tla/bin` to PATH via `##vso[task.prependpath]`.
-pub fn generate_tla_install(config: &TlaRuntimeConfig) -> String {
-    let jdk_version = config.jdk().unwrap_or(DEFAULT_JDK_VERSION);
+/// The JDK is provided by a preceding [`JavaToolInstaller@0`] task step,
+/// which sets `JAVA_HOME` and adds it to `PATH`. The shims therefore invoke
+/// `java` directly from `PATH`.
+///
+/// Sets `TLA_JAR` via `##vso[task.setvariable]` so downstream steps can
+/// reference the jar path. Also prepends `$HOME/.tla/bin` to PATH via
+/// `##vso[task.prependpath]`.
+///
+/// [`JavaToolInstaller@0`]: crate::compile::ir::tasks::java_tool_installer::JavaToolInstaller
+pub fn generate_tla_tools_install(config: &TlaRuntimeConfig) -> String {
     let jar_url = match config.version() {
         Some(v) => format!(
             "https://github.com/tlaplus/tlaplus/releases/download/v{v}/tla2tools.jar"
@@ -151,16 +156,8 @@ pub fn generate_tla_install(config: &TlaRuntimeConfig) -> String {
         "\
 set -eo pipefail
 TLA_HOME=\"$HOME/.tla\"
-JRE_DIR=\"$TLA_HOME/jre\"
 BIN_DIR=\"$TLA_HOME/bin\"
-mkdir -p \"$JRE_DIR\" \"$BIN_DIR\"
-
-# Download JRE from Eclipse Temurin (Adoptium)
-JRE_URL=\"https://api.adoptium.net/v3/binary/latest/{jdk_version}/ga/linux/x64/jre/hotspot/normal/eclipse?project=jdk\"
-echo \"Downloading Temurin JRE {jdk_version} from Adoptium...\"
-curl -sSfL \"$JRE_URL\" -o \"$TLA_HOME/jre.tgz\"
-tar -xzf \"$TLA_HOME/jre.tgz\" -C \"$JRE_DIR\" --strip-components=1
-rm -f \"$TLA_HOME/jre.tgz\"
+mkdir -p \"$TLA_HOME\" \"$BIN_DIR\"
 
 # Download tla2tools.jar
 echo \"Downloading tla2tools.jar...\"
@@ -169,19 +166,19 @@ curl -sSfL \"{jar_url}\" -o \"$TLA_HOME/tla2tools.jar\"
 # Create shim: tlc (TLC model checker)
 cat > \"$BIN_DIR/tlc\" << 'TLA_SHIM_EOF'
 #!/usr/bin/env bash
-exec \"$HOME/.tla/jre/bin/java\" -XX:+UseParallelGC -cp \"$HOME/.tla/tla2tools.jar\" tlc2.TLC \"$@\"
+exec java -XX:+UseParallelGC -cp \"$HOME/.tla/tla2tools.jar\" tlc2.TLC \"$@\"
 TLA_SHIM_EOF
 
 # Create shim: pluscal (PlusCal -> TLA+ translator)
 cat > \"$BIN_DIR/pluscal\" << 'TLA_SHIM_EOF'
 #!/usr/bin/env bash
-exec \"$HOME/.tla/jre/bin/java\" -cp \"$HOME/.tla/tla2tools.jar\" pcal.trans \"$@\"
+exec java -cp \"$HOME/.tla/tla2tools.jar\" pcal.trans \"$@\"
 TLA_SHIM_EOF
 
 # Create shim: sany (SANY parser / syntax checker)
 cat > \"$BIN_DIR/sany\" << 'TLA_SHIM_EOF'
 #!/usr/bin/env bash
-exec \"$HOME/.tla/jre/bin/java\" -cp \"$HOME/.tla/tla2tools.jar\" tla2sany.SANY \"$@\"
+exec java -cp \"$HOME/.tla/tla2tools.jar\" tla2sany.SANY \"$@\"
 TLA_SHIM_EOF
 
 chmod +x \"$BIN_DIR/tlc\" \"$BIN_DIR/pluscal\" \"$BIN_DIR/sany\"
@@ -189,9 +186,6 @@ chmod +x \"$BIN_DIR/tlc\" \"$BIN_DIR/pluscal\" \"$BIN_DIR/sany\"
 # Expose environment
 echo \"##vso[task.prependpath]$HOME/.tla/bin\"
 echo \"##vso[task.setvariable variable=TLA_JAR]$HOME/.tla/tla2tools.jar\"
-echo \"##vso[task.setvariable variable=TLA_JAVA_HOME]$HOME/.tla/jre\"
-export PATH=\"$HOME/.tla/bin:$PATH\"
-\"$HOME/.tla/jre/bin/java\" -version
 echo \"TLA+ toolchain ready: $TLA_HOME\"\
 "
     )

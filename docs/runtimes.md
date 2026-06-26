@@ -167,7 +167,7 @@ When enabled, the compiler:
 
 ### TLA+ (`tla:`)
 
-TLA+ / TLC formal model-checking runtime. Downloads a JRE from Eclipse Temurin (Adoptium) and `tla2tools.jar` from the TLA+ GitHub releases page, creates convenience shims (`tlc`, `pluscal`, `sany`), adds Java ecosystem domains to the AWF network allowlist, and extends the bash command allow-list.
+TLA+ / TLC formal model-checking runtime. Uses `JavaToolInstaller@0` to select a pre-installed JDK and downloads `tla2tools.jar` from the TLA+ GitHub releases page, then creates convenience shims (`tlc`, `pluscal`, `sany`) and extends the bash command allow-list.
 
 TLA+ is a natural complement to the `lean` runtime: **TLC discovers** liveness/safety gaps by exhaustively searching the state space and emitting counterexample traces, while **Lean proves** a fixed design. Agentic workflows that scan codebases for state-machine bugs — finding stuck states, deadlocks, and missing timeouts — are a primary use case.
 
@@ -180,7 +180,7 @@ runtimes:
 runtimes:
   tla:
     version: "1.8.0"   # tla2tools.jar version (omit for latest)
-    jdk: "21"          # JRE major version (default: 21)
+    jdk: "21"          # JDK major version (default: 21)
 ```
 
 **Fields:**
@@ -188,18 +188,18 @@ runtimes:
 | Field | Type | Description |
 |-------|------|-------------|
 | `version` | string | `tla2tools.jar` version to download from the TLA+ GitHub releases (e.g., `"1.8.0"`, `"1.7.3"`). When omitted, the latest release is downloaded via GitHub's `releases/latest/download/` redirect. |
-| `jdk` | string | JRE major version to download from Eclipse Temurin (Adoptium), e.g., `"21"`, `"17"`. Defaults to `"21"` (current LTS). A JRE (not a full JDK) is downloaded since TLC only requires a runtime. |
+| `jdk` | string | JDK major version to pass to `JavaToolInstaller@0` (pre-installed on the build agent), e.g., `"21"`, `"17"`. Defaults to `"21"` (current LTS). |
 
 When enabled, the compiler:
-- Contributes a bash install step to `Declarations::agent_prepare_steps` that:
-  1. Downloads a JRE from [Eclipse Temurin (Adoptium)](https://adoptium.net) into `$HOME/.tla/jre/`
-  2. Downloads `tla2tools.jar` from [TLA+ GitHub releases](https://github.com/tlaplus/tlaplus/releases) into `$HOME/.tla/`
-  3. Creates convenience shims (`tlc`, `pluscal`, `sany`) in `$HOME/.tla/bin/`
+- Contributes a `JavaToolInstaller@0` task step (pre-installed mode) that selects the JDK matching `jdk:` and sets `JAVA_HOME`
+- Contributes a bash step to `Declarations::agent_prepare_steps` that:
+  1. Downloads `tla2tools.jar` from [TLA+ GitHub releases](https://github.com/tlaplus/tlaplus/releases) into `$HOME/.tla/`
+  2. Creates convenience shims (`tlc`, `pluscal`, `sany`) in `$HOME/.tla/bin/` that delegate to `java` from PATH
 - Auto-adds `java`, `tlc`, `pluscal`, `sany` to the bash command allow-list
-- Adds Java ecosystem domains to the network allowlist via the `java` ecosystem identifier (covers `api.adoptium.net` and related Temurin endpoints). GitHub is already in the built-in allowlist, so no extra entry is needed for `tla2tools.jar`.
-- Mounts `$HOME/.tla` into the AWF container via `--mount` (read-only) so the toolchain is accessible inside the agent sandbox
-- Prepends `$HOME/.tla/bin` to `PATH` inside the AWF sandbox
-- Sets `TLA_JAR` and `TLA_JAVA_HOME` as pipeline variables so downstream steps can reference the jar and JRE paths
+- GitHub is already in the built-in allowlist so no extra network host entry is needed for `tla2tools.jar`. The JDK is provided by `JavaToolInstaller@0` (pre-installed on the build agent) so no additional network access is needed for the JDK either.
+- Mounts `$HOME/.tla` and `$(JAVA_HOME)` into the AWF container via `--mount` (read-only) so the toolchain is accessible inside the agent sandbox
+- Prepends `$HOME/.tla/bin` and `$(JAVA_HOME)/bin` to `PATH` inside the AWF sandbox
+- Sets `TLA_JAR` as a pipeline variable so downstream steps can reference the jar path
 - Appends a prompt supplement informing the agent about TLA+ availability and invocation patterns
 
 **Shims:**
@@ -217,7 +217,7 @@ You can also invoke the JVM directly: `java -XX:+UseParallelGC -cp "$TLA_JAR" tl
 | Variable | Value |
 |----------|-------|
 | `TLA_JAR` | Absolute path to `tla2tools.jar` |
-| `TLA_JAVA_HOME` | JRE home directory (`$HOME/.tla/jre`) |
+| `JAVA_HOME` | JDK home directory (set by `JavaToolInstaller@0`) |
 
 **Example: TLA+ model-checking workflow**
 
