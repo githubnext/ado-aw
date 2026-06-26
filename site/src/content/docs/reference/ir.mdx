@@ -22,7 +22,7 @@ Those wrappers are the only place per-target shape (top-level `PipelineShape`, t
 
 - `ids.rs` — typed `StageId`, `JobId`, and `StepId` newtypes. Constructors validate the ADO identifier grammar (`^[A-Za-z_][A-Za-z0-9_]*$`) so invalid names fail at compile time.
 - `step.rs` — `Step` and concrete step structs: `BashStep`, `TaskStep`, `CheckoutStep`, `DownloadStep`, and `PublishStep`.
-- `tasks/` — typed builder structs for 41 built-in ADO task steps spanning toolchain setup, file operations, build/test, artifact publishing, scripting, containers, package auth, Azure integrations, and pipeline control. Each builder exposes `new(<required>)`, typed optional setters, and `into_step()`. Prefer these over hand-crafted `TaskStep::new()` calls — see [Typed task helpers](#typed-task-helpers) below.
+- `tasks/` — typed builder structs for 44 built-in ADO task steps spanning toolchain setup, file operations, build/test, artifact publishing, scripting, containers, package auth, Azure integrations, and pipeline control. Each builder exposes `new(<required>)`, typed optional setters, and `into_step()`. Prefer these over hand-crafted `TaskStep::new()` calls — see [Typed task helpers](#typed-task-helpers) below.
 - `job.rs` — `Job`, `Pool`, job variables, 1ES `templateContext` support, and target-job external `dependsOn` / `condition` wrapping.
 - `stage.rs` — `Stage` plus target-stage external `dependsOn` / `condition` wrapping.
 - `env.rs` — typed environment values (`EnvValue`) including ADO macros, pipeline variables, secrets, `OutputRef`s, `Coalesce`, and macro-form `Concat`.
@@ -117,7 +117,7 @@ let synth = Step::Bash(
 
 ## Typed task helpers
 
-`src/compile/ir/tasks/` contains typed **builder structs** for 41 ADO built-in tasks. Each follows the same pattern:
+`src/compile/ir/tasks/` contains typed **builder structs** for 44 ADO built-in tasks. Each follows the same pattern:
 
 ```rust
 Builder::new(required_params)   // required inputs as typed positional args
@@ -127,7 +127,7 @@ Builder::new(required_params)   // required inputs as typed positional args
 
 This eliminates hand-crafted `TaskStep::new(…)` + raw string inputs at every call site, makes the required/optional boundary explicit, and prevents invalid input combinations for command-dispatch tasks at compile time.
 
-**Command-dispatch tasks** (`Docker@2`, `DotNetCoreCLI@2`, `NuGetCommand@2`, `Npm@1`, `PowerShell@2`, `AzurePowerShell@5`, `AzureCLI@2`, `PythonScript@0`, `VSTest@2`, `GitHubRelease@1`, `PublishBuildArtifacts@1`) take a typed command/mode enum rather than a plain string — applying an input to the wrong command variant is unrepresentable.
+**Command-dispatch tasks** (`Docker@2`, `DotNetCoreCLI@2`, `NuGetCommand@2`, `Npm@1`, `PowerShell@2`, `AzurePowerShell@5`, `AzureCLI@2`, `PythonScript@0`, `VSTest@2`, `GitHubRelease@1`, `PublishBuildArtifacts@1`, `UniversalPackages@1`) take a typed command/mode enum rather than a plain string — applying an input to the wrong command variant is unrepresentable.
 
 ### Available builders
 
@@ -142,6 +142,7 @@ This eliminates hand-crafted `TaskStep::new(…)` + raw string inputs at every c
 | `UseNode::new(version)` | `UseNode@1` | Node.js version spec (e.g. `"22.x"`) |
 | `UsePythonVersion::new(version_spec)` | `UsePythonVersion@0` | Python version spec (e.g. `"3.x"`) |
 | `UseRubyVersion::new(version_spec)` | `UseRubyVersion@0` | Ruby version range (e.g. `">= 2.4"`) |
+| `HelmInstaller::new()` | `HelmInstaller@1` | All inputs optional — chain `.helm_version("3.x")` to pin a specific version |
 
 #### File operations
 
@@ -174,6 +175,7 @@ This eliminates hand-crafted `TaskStep::new(…)` + raw string inputs at every c
 | `PublishCodeCoverageResults::new(summary_file_location)` | `PublishCodeCoverageResults@2` | glob path to coverage summary file |
 | `PublishTestResults::new(format, files)` | `PublishTestResults@2` | `TestResultsFormat` enum; result files glob |
 | `VsTest::new(VsTestSelector)` | `VSTest@2` | `VsTestSelector::Assemblies \| Plan \| Run` |
+| `VsBuild::new(solution)` | `VSBuild@1` | path to `.sln` or glob; `VsVersion`, `MsBuildArchitecture`, `LogFileVerbosity` enums and all other inputs optional |
 
 #### Artifact publishing
 
@@ -205,6 +207,7 @@ This eliminates hand-crafted `TaskStep::new(…)` + raw string inputs at every c
 | `NuGetCommand::new(NuGetOp)` | `NuGetCommand@2` | `NuGetOp::Restore \| Push \| Pack \| Custom` |
 | `PipAuthenticate::new()` | `PipAuthenticate@1` | all inputs optional |
 | `TwineAuthenticate::new()` | `TwineAuthenticate@1` | all inputs optional |
+| `UniversalPackages::download(feed, package_name, spec)` / `::publish(…, spec)` | `UniversalPackages@1` | `UniversalPackagesDownload` / `UniversalPackagesPublish` carry per-command optionals; `.workload_identity_service_connection()` for cross-org feeds |
 
 #### Pipeline control
 
