@@ -126,6 +126,9 @@ const REQUIRED_STEP_DISPLAY_NAMES: &[&str] = &[
     "Stage pipeline execution context (aw-context/pipeline/*)", // src/compile/extensions/exec_context/pipeline.rs (activated by on.pipeline)
     "Resolve synthetic PR context", // src/compile/extensions/ado_script.rs synthetic_pr_step()
     "Stage repo execution context (aw-context/repo/*)", // src/compile/extensions/exec_context/repo.rs (activated by execution-context.repo.enabled: true)
+    "Stage ci-push execution context (aw-context/ci-push/*)", // src/compile/extensions/exec_context/ci_push.rs (activated by execution-context.ci-push.enabled: true)
+    "Stage schedule execution context (aw-context/schedule/*)", // src/compile/extensions/exec_context/schedule.rs (activated by on.schedule + execution-context.schedule.enabled: true)
+    "Stage PR-checks execution context (aw-context/pr/checks/*)", // src/compile/extensions/exec_context/pr_checks.rs (activated by on.pr + execution-context.pr.checks.enabled: true)
 ];
 
 fn ado_aw_binary() -> PathBuf {

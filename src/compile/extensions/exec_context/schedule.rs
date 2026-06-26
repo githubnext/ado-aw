@@ -191,7 +191,22 @@ mod tests {
     fn bash_commands_includes_read_only_git_set() {
         let c = ScheduleContextContributor::new(ScheduleContextConfig::default());
         let cmds = c.bash_commands();
-        assert!(cmds.contains(&"git diff".to_string()));
-        assert!(cmds.contains(&"git log".to_string()));
+        // The schedule contributor advertises the same seven read-only git
+        // commands as ci-push and PR contributors (per the code comment in
+        // bash_commands()). Verify all seven are present.
+        for expected in &[
+            "git",
+            "git diff",
+            "git log",
+            "git show",
+            "git status",
+            "git rev-parse",
+            "git symbolic-ref",
+        ] {
+            assert!(
+                cmds.contains(&expected.to_string()),
+                "'{expected}' missing from bash_commands: {cmds:?}"
+            );
+        }
     }
 }
