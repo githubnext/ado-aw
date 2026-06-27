@@ -1,5 +1,8 @@
 use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
 use crate::compile::ir::condition::Condition;
+use crate::compile::ir::tasks::download_pipeline_artifact::{
+    ArtifactSource, DownloadPipelineArtifact, RunVersion,
+};
 use crate::compile::ir::step::{BashStep, Step, TaskStep};
 use crate::compile::types::CacheMemoryToolConfig;
 use anyhow::Result;
@@ -76,18 +79,16 @@ You have persistent memory across runs. Your memory directory is located at `/tm
 /// safe_outputs artifact for the same pipeline+branch when
 /// `clearMemory=false`.
 fn download_previous_memory_task_step() -> TaskStep {
-    let mut t = TaskStep::new(
-        "DownloadPipelineArtifact@2",
-        "Download previous agent memory",
-    )
-    .with_input("source", "specific")
-    .with_input("project", "$(System.TeamProject)")
-    .with_input("pipeline", "$(System.DefinitionId)")
-    .with_input("runVersion", "latestFromBranch")
-    .with_input("branchName", "$(Build.SourceBranch)")
-    .with_input("artifact", "safe_outputs")
-    .with_input("targetPath", "$(Agent.TempDirectory)/previous_memory")
-    .with_input("allowPartiallySucceededBuilds", "true");
+    let mut t = DownloadPipelineArtifact::new("$(Agent.TempDirectory)/previous_memory")
+        .with_display_name("Download previous agent memory")
+        .source(ArtifactSource::Specific)
+        .project("$(System.TeamProject)")
+        .pipeline("$(System.DefinitionId)")
+        .run_version(RunVersion::LatestFromBranch)
+        .branch_name("$(Build.SourceBranch)")
+        .artifact("safe_outputs")
+        .allow_partially_succeeded_builds(true)
+        .into_step();
     t.condition = Some(Condition::Custom(
         "eq(${{ parameters.clearMemory }}, false)".to_string(),
     ));

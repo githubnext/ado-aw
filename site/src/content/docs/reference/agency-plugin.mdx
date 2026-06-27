@@ -1,0 +1,146 @@
+---
+title: "Agency / Claude Code Plugin"
+description: "Install and use the ado-aw Claude Code plugin to author, compile, validate, operate, and debug agentic workflows from your agent."
+---
+
+import { Steps } from '@astrojs/starlight/components';
+
+ado-aw ships a [Claude Code plugin](https://code.claude.com/docs/en/plugins-reference)
+that gives Claude Code (and other Agency-compatible agents) first-class support for
+authoring, compiling, validating, operating, and debugging Azure DevOps agentic
+workflows. It is also listed in the
+[Agency](https://github.com/agency-microsoft/playground) marketplace.
+
+The plugin is mostly **packaging + wiring**, not new behavior: it surfaces
+ado-aw's existing read-only [`mcp-author`](/ado-aw/reference/mcp-author/) server
+and the authoring playbooks as guided agent skills.
+
+## Getting started
+
+<Steps>
+
+1. **Install `ado-aw`** in the target repository (see [Quick Start](/ado-aw/setup/quick-start/)).
+
+2. **Scaffold the plugin** with one command:
+
+   ```bash
+   ado-aw init --agency
+   ```
+
+   This writes `.github/agents/ado-aw.agent.md` (the standard Copilot dispatcher)
+   **plus** the full Agency / Claude Code plugin under `agency/plugins/ado-aw/` and
+   two repo-root marketplace catalogs. Commit the generated files.
+
+3. **Register and install** the plugin in your agent:
+
+   ```text
+   /plugin marketplace add <your-org>/<your-repo>
+   /plugin install ado-aw@ado-aw
+   ```
+
+   Or point directly at `githubnext/ado-aw` to use the canonical upstream copy
+   before running `init --agency`:
+
+   ```text
+   /plugin marketplace add githubnext/ado-aw
+   /plugin install ado-aw@ado-aw
+   ```
+
+</Steps>
+
+## Plugin layout
+
+```text
+agency/plugins/ado-aw/
+├── .claude-plugin/
+│   └── plugin.json            # plugin manifest (name, version, mcpServers ref)
+├── .mcp.json                  # wires the read-only ado-aw mcp-author server
+├── agency.json                # Agency marketplace governance + external source pointer
+├── README.md                  # plugin landing page
+├── agents/
+│   └── ado-aw.md              # dispatcher subagent (routes to skills)
+├── skills/
+│   ├── create-workflow/SKILL.md
+│   ├── update-workflow/SKILL.md
+│   ├── debug-workflow/SKILL.md
+│   ├── compile-and-validate/SKILL.md
+│   ├── manage-lifecycle/SKILL.md
+│   └── audit-build/SKILL.md
+└── scripts/
+    ├── doctor.sh              # prerequisite check (POSIX)
+    └── doctor.ps1             # prerequisite check (Windows)
+```
+
+## Skills
+
+The plugin ships six skills:
+
+| Skill | What it does |
+| --- | --- |
+| `create-workflow` | Author a new agentic workflow from scratch; ends with `compile` + `lint`. |
+| `update-workflow` | Read an existing workflow, apply changes, recompile, and validate. |
+| `debug-workflow` | Diagnose a failing run via `trace_failure` + `audit_build`. |
+| `compile-and-validate` | Run `ado-aw compile`, `lint_workflow`, and IR/graph inspection. |
+| `manage-lifecycle` | Invoke `enable`/`disable`/`remove`/`run`/`list`/`status`/`secrets`. |
+| `audit-build` | Download and analyze a finished build's artifacts. |
+
+The `create-workflow`, `update-workflow`, and `debug-workflow` skills load their
+authoritative playbook from a **compiler-version-pinned**
+`raw.githubusercontent.com/.../v<version>/prompts/...` URL, so the instructions
+always match the installed binary.
+
+## MCP tool surface
+
+`.mcp.json` wires the local, read-only [`ado-aw mcp-author`](/ado-aw/reference/mcp-author/)
+stdio server. The ten tools it exposes are:
+
+| Tool | What it does |
+| --- | --- |
+| `inspect_workflow` | Build and return the public `PipelineSummary` |
+| `graph_summary` | Return the resolved `GraphSummary` as a structured object |
+| `graph_dump` | Render the dependency graph as plain text or Graphviz DOT |
+| `step_dependencies` | Traverse upstream / downstream dependencies from one step |
+| `step_outputs` | List declared outputs and the steps that consume them |
+| `whatif` | Classify downstream jobs as `skipped` or `runs_anyway` if a step fails |
+| `lint_workflow` | Run structural lint checks; returns findings with severity |
+| `catalog` | List safe-output tools, runtimes, first-class tools, engines, and models |
+| `trace_failure` | Trace a build's failing-job chain using audit data + local IR graph |
+| `audit_build` | Download and analyze a completed build; returns the same JSON as `ado-aw audit --json` |
+
+Mutating actions (`compile`, `enable`, `disable`, `remove`, `run`, `secrets`,
+`init`) are **not** in the MCP server — the skills invoke them via the agent's
+shell, preserving the read-only firebreak.
+
+## Self-contained marketplace catalogs
+
+`init --agency` also writes two root-level marketplace catalogs:
+
+| File | Engine |
+| --- | --- |
+| `.claude-plugin/marketplace.json` | Claude Code |
+| `.github/plugin/marketplace.json` | GitHub Copilot |
+
+Each catalog lists the `ado-aw` plugin with `source: "./agency/plugins/ado-aw"`.
+This makes the repository itself a directly-installable marketplace: anyone can
+`/plugin marketplace add <your-org>/<your-repo>` without any extra registry
+configuration.
+
+## Source of truth and versioning
+
+The canonical plugin lives at [`agency/plugins/ado-aw/`](https://github.com/githubnext/ado-aw/tree/main/agency/plugins/ado-aw)
+in this repository. `ado-aw init --agency` embeds these exact files via
+`include_str!` and writes them verbatim, so a consumer repo's plugin can never
+drift from the canonical copy. A parity test (`tests/init_tests.rs`) asserts
+byte-for-byte identity.
+
+The plugin is **version-locked to the compiler**. On every release,
+`release-please` bumps the plugin version in lock-step with `Cargo.toml`:
+
+- `plugin.json` `version` and both root catalog `metadata.version` / `plugins[0].version`
+- Version-pinned prompt URLs in `agents/ado-aw.md` and the `create`/`update`/`debug` skills
+
+## See also
+
+- [`ado-aw init`](/ado-aw/setup/cli/#init) — CLI reference for the `init` command
+- [Author MCP Server](/ado-aw/reference/mcp-author/) — the read-only MCP server the plugin wires
+- [Quick Start](/ado-aw/setup/quick-start/) — install and first compile walkthrough

@@ -78,6 +78,7 @@ use super::ir::tasks::docker_installer::DockerInstaller;
 use super::ir::tasks::download_package::DownloadPackage;
 use super::ir::tasks::manual_validation::{ManualValidation, OnTimeout};
 use super::ir::tasks::nuget_authenticate::NuGetAuthenticate;
+use super::ir::tasks::azure_cli::{AzureCli, ScriptLocation, ScriptType};
 use super::ir::{
     CiTrigger, Parameter, ParameterDefault, ParameterKind, PipelineResource, PipelineVar,
     PrTrigger, RepositoryResource, Resources, Schedule, Triggers,
@@ -1470,11 +1471,13 @@ fn acr_registry_name(registry_base: &str) -> &str {
 /// is derived from its host portion.
 fn acr_login_step(registry_base: &str, connection: &str) -> TaskStep {
     let name = acr_registry_name(registry_base);
-    TaskStep::new("AzureCLI@2", "Authenticate to internal container registry")
-        .with_input("azureSubscription", connection)
-        .with_input("scriptType", "bash")
-        .with_input("scriptLocation", "inlineScript")
-        .with_input("inlineScript", format!("az acr login --name {name}\n"))
+    AzureCli::new(
+        connection,
+        ScriptType::Bash,
+        ScriptLocation::Inline(format!("az acr login --name {name}\n")),
+    )
+    .with_display_name("Authenticate to internal container registry")
+    .into_step()
 }
 
 /// `NuGetAuthenticate@1` step. When a service connection is resolved it is

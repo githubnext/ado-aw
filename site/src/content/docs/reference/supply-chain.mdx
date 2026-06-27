@@ -37,10 +37,21 @@ supply-chain:
 | Field | Type | Required | Purpose |
 | --- | --- | --- | --- |
 | `feed` | scalar **or** `{ name, service-connection }` | optional | Enables the binary mirror. A bare string is shorthand for `{ name: <string> }`. |
-| `registry` | scalar **or** `{ name, service-connection }` | optional | Enables the image mirror. |
+| `registry` | scalar **or** `{ name, service-connection }` | optional | Enables the image mirror. A bare string is shorthand for `{ name: <string> }`. |
 | `service-connection` | string | optional | Shared fallback connection for whichever target omits its own. |
 
 `feed` and `registry` are **independent** — set either, both, or neither.
+
+### Scalar shorthand
+
+Both `feed` and `registry` accept a bare string as shorthand for an object with no per-target connection:
+
+```yaml
+supply-chain:
+  feed: my-internal-feed          # same as { name: my-internal-feed }
+  registry: myacr.azurecr.io      # same as { name: myacr.azurecr.io }
+  service-connection: shared-conn # used by both targets
+```
 
 ## Authentication
 
@@ -68,6 +79,55 @@ compilation fails:
 supply-chain.registry requires a service connection: set
 `registry.service-connection` or a top-level `supply-chain.service-connection`.
 A container registry (ACR) cannot be accessed with $(System.AccessToken).
+```
+
+:::note[Azure Private Link]
+The ACR registry name passed to `az acr login --name` is derived from the
+**host portion** of `registry.name` (everything before the first `/`). For a
+standard ACR login server (`myacr.azurecr.io`) this works automatically. If
+your ACR is reached over Azure Private Link with a custom domain (e.g.
+`myacr.internal.contoso.com`), set `registry.name` to the canonical
+`*.azurecr.io` login server so the derived registry name is correct for ACR
+authentication.
+:::
+
+## Examples
+
+Mirror everything with per-target service connections:
+
+```yaml
+supply-chain:
+  feed:
+    name: my-project/my-internal-feed
+    service-connection: feed-conn
+  registry:
+    name: myacr.azurecr.io
+    service-connection: acr-conn
+```
+
+Binaries only, same-org feed (authenticates via `$(System.AccessToken)` — no service connection needed):
+
+```yaml
+supply-chain:
+  feed: my-internal-feed
+```
+
+Images only:
+
+```yaml
+supply-chain:
+  registry:
+    name: myacr.azurecr.io
+    service-connection: acr-conn
+```
+
+Shared connection for both targets, registry under a namespace path:
+
+```yaml
+supply-chain:
+  feed: my-project/my-feed
+  registry: myacr.azurecr.io/oss-mirror
+  service-connection: shared-conn
 ```
 
 ## What the mirror must contain
@@ -103,9 +163,13 @@ so the mirror must ship the matching `checksums.txt`.
 
 ## Network isolation note
 
-The mirror fetches run as ordinary ADO steps on the build agent — **outside**
+The mirror fetches (`NuGetAuthenticate@1`, `DownloadPackage@1`, `docker pull`,
+`az acr login`) run as ordinary ADO steps on the build agent — **outside**
 the AWF network-isolation sandbox, which wraps only the copilot agent command.
-The feed/registry hosts are therefore **not** added to the agent's AWF
-allowlist. Isolating the build agent from GitHub / GHCR is enforced by the
-agent pool's own network policy; the `supply-chain:` rerouting is what lets such
-a locked-down pool succeed.
+Consequently:
+
+- The feed/registry hosts are **not** added to the agent's AWF `--allow-domains`
+  allowlist. The network-isolated agent never contacts them directly.
+- True isolation of the build agent from GitHub / GHCR is enforced by the agent
+  pool's own network policy; the `supply-chain:` rerouting is what lets such a
+  locked-down pool succeed.

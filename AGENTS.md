@@ -1,4 +1,4 @@
-# Copilot Instructions for Azure DevOps Agentic Pipelines
+# Copilot Instructions for Azure DevOps Agentic Workflows
 
 This repository contains a compiler for Azure DevOps pipelines that transforms
 natural language markdown files with YAML front matter into Azure DevOps
@@ -60,20 +60,6 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── mod.rs        # Module entry point and Compiler trait
 │   │   ├── common.rs     # Shared helpers across targets
 │   │   ├── agentic_pipeline.rs # Canonical Setup → Agent → Detection → (ManualReview?) → SafeOutputs(+SafeOutputs_Reviewed?) → Teardown shape (shared by every target); BuiltPipelineContext, build_pipeline_context, build_canonical_jobs, per-job builders incl. build_manual_review_job + SafeOutputsVariant split, fold_agent_conditions, agent_job_variables_hoist
-│   │   ├── ir/            # Typed Azure DevOps pipeline IR
-│   │   │   ├── mod.rs     # IR module entry point and shared types
-│   │   │   ├── ids.rs     # Stable IDs for jobs/steps/outputs in the IR
-│   │   │   ├── step.rs    # Step declarations and typed step variants
-│   │   │   ├── tasks/     # Typed builder structs for built-in ADO tasks (one file per task; new()+typed setters+into_step(); command-enum dispatch for Docker/DotNet/NuGet/Npm/PowerShell; docker.rs canonical template)
-│   │   │   ├── job.rs     # Job declarations and typed job graph nodes
-│   │   │   ├── stage.rs   # Stage declarations and typed stage graph nodes
-│   │   │   ├── env.rs     # Typed environment and variable modeling
-│   │   │   ├── condition.rs # Condition AST and expression helpers
-│   │   │   ├── output.rs  # Output references and output dependency wiring
-│   │   │   ├── graph.rs   # Graph construction and validation passes
-│   │   │   ├── lower.rs   # IR lowering from front matter into typed nodes
-│   │   │   ├── emit.rs    # YAML emission from typed IR
-│   │   │   └── summary.rs # Public, serializable PipelineSummary / GraphSummary for agent-facing tooling (see docs/ir.md Public JSON summary)
 │   │   ├── standalone.rs # Standalone pipeline compiler
 │   │   ├── standalone_ir.rs # Standalone target typed-IR builder
 │   │   ├── onees.rs      # 1ES Pipeline Template compiler
@@ -111,8 +97,22 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   │   ├── 0002_pool_object_form.rs # Legacy scalar pool → object form codemod
 │   │   │   └── helpers.rs # take_key, insert_no_overwrite, rename_key, ConflictPolicy
 │   │   ├── codemod_integration_test.rs # White-box rewrite-path tests (stub registry injection)
-│   │   └── types.rs      # Front matter grammar and types
-│   ├── init.rs           # Repository initialization for AI-first authoring
+│   │   ├── types.rs      # Front matter grammar and types
+│   │   └── ir/           # Typed Azure DevOps pipeline IR (see docs/ir.md)
+│   │       ├── mod.rs    # Pipeline / PipelineBody / PipelineShape root types
+│   │       ├── ids.rs    # Typed StageId / JobId / StepId newtypes
+│   │       ├── step.rs   # Step variants (Bash, Task, Checkout, Download, Publish, RawYaml)
+│   │       ├── tasks/    # Typed builder structs for built-in ADO tasks (one file per task; new()+typed setters+into_step(); command-enum dispatch for Docker/DotNet/NuGet/Npm/UniversalPackages; typestate builders for PowerShell; docker.rs canonical template)
+│   │       ├── job.rs    # Job, Pool, TemplateContext, JobVariable
+│   │       ├── stage.rs  # Stage + external-params wrap
+│   │       ├── env.rs    # Typed EnvValue (Literal, AdoMacro, PipelineVar, Secret, StepOutput, Coalesce, Concat)
+│   │       ├── condition.rs # Typed Condition / Expr AST + codegen to ADO condition syntax
+│   │       ├── output.rs # OutputDecl / OutputRef + location-aware lowering
+│   │       ├── graph.rs  # Dependency graph: validation, edge derivation, isOutput promotion, cycle detection
+│   │       ├── lower.rs  # IR → serde_yaml::Value lowering
+│   │       ├── emit.rs   # Thin `lower() + serde_yaml::to_string()` wrapper
+│   │       └── summary.rs # Public, serializable PipelineSummary / GraphSummary for agent-facing tooling (see docs/ir.md Public JSON summary)
+│   ├── init.rs           # Repository initialization for AI-first authoring (incl. `--agency` plugin scaffold, embeds agency/plugins/ado-aw/ via include_str!)
 │   ├── execute.rs        # Stage 3 safe output execution
 │   ├── fuzzy_schedule.rs # Fuzzy schedule parsing
 │   ├── logging.rs        # File-based logging infrastructure
@@ -163,7 +163,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── whatif.rs     # `ado-aw whatif`: static downstream skip classification for failures
 │   │   ├── lint.rs       # `ado-aw lint`: structural workflow lint checks
 │   │   └── catalog.rs    # `ado-aw catalog`: list in-tree registries (tools, runtimes, models, etc.)
-│   ├── detect.rs         # Agentic pipeline detection — discovers compiled pipelines; used by all lifecycle commands
+│   ├── detect.rs         # Agentic workflow detection — discovers compiled pipelines; used by all lifecycle commands
 │   ├── update_check.rs   # Version update check — queries GitHub Releases and prints advisory when newer version is available
 │   ├── ndjson.rs         # NDJSON parsing utilities
 │   ├── sanitize.rs       # Input sanitization for safe outputs
@@ -226,11 +226,24 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │           ├── extension.rs # CompilerExtension impl (compile-time)
 │           └── execute.rs   # Stage 3 runtime (validate/copy)
 ├── ado-aw-derive/        # Proc-macro crate: #[derive(SanitizeConfig)], #[derive(SanitizeContent)]
+├── .claude-plugin/       # Root Claude marketplace catalog (makes the repo installable via `/plugin marketplace add`); release-please-versioned
+│   └── marketplace.json  # Lists the ado-aw plugin with source ./agency/plugins/ado-aw
+├── .github/plugin/       # Copilot marketplace catalog (mirrors .claude-plugin/marketplace.json for Copilot); release-please-versioned
+│   └── marketplace.json  # Lists the ado-aw plugin with source ./agency/plugins/ado-aw
+├── agency/               # Agency / Claude Code marketplace plugin (canonical source of truth)
+│   └── plugins/ado-aw/   # Version-locked plugin (release-please bumps version + pinned prompt URLs); listed in Agency marketplace via external `source`; scaffolded into consumer repos by `ado-aw init --agency`
+│       ├── .claude-plugin/ # plugin.json (manifest)
+│       ├── .mcp.json     # Wires read-only `ado-aw mcp-author` stdio server
+│       ├── README.md     # Plugin readme
+│       ├── agency.json   # Marketplace governance metadata + external source pointer
+│       ├── agents/ado-aw.md # Dispatcher subagent
+│       ├── skills/       # 6 SKILL.md playbooks (create/update/debug-workflow, compile-and-validate, manage-lifecycle, audit-build)
+│       └── scripts/      # doctor.{sh,ps1} prerequisite checks
 ├── examples/             # Example agent definitions
 ├── prompts/              # AI agent prompt files for workflow authoring tasks
-│   ├── create-ado-agentic-workflow.md # Step-by-step guide for creating a new agentic pipeline
-│   ├── update-ado-agentic-workflow.md # Guide for modifying an existing agentic pipeline
-│   └── debug-ado-agentic-workflow.md  # Guide for troubleshooting a failing agentic pipeline
+│   ├── create-ado-agentic-workflow.md # Step-by-step guide for creating a new agentic workflow
+│   ├── update-ado-agentic-workflow.md # Guide for modifying an existing agentic workflow
+│   └── debug-ado-agentic-workflow.md  # Guide for troubleshooting a failing agentic workflow
 ├── scripts/              # Supporting scripts shipped as release artifacts
 │   └── ado-script/       # TypeScript workspace for bundled gate/import helpers plus execution-context bundles
 │       └── src/
@@ -271,11 +284,11 @@ index to jump to the right page.
 ### Prompt files for workflow authoring
 
 - [`prompts/create-ado-agentic-workflow.md`](prompts/create-ado-agentic-workflow.md) — step-by-step
-  guide for creating a new agentic pipeline from scratch (interactive and non-interactive modes).
+  guide for creating a new agentic workflow from scratch (interactive and non-interactive modes).
 - [`prompts/update-ado-agentic-workflow.md`](prompts/update-ado-agentic-workflow.md) — guide for
-  modifying an existing agentic pipeline (read-then-update workflow with validation).
+  modifying an existing agentic workflow (read-then-update workflow with validation).
 - [`prompts/debug-ado-agentic-workflow.md`](prompts/debug-ado-agentic-workflow.md) — guide for
-  troubleshooting a failing agentic pipeline and filing a diagnostic report.
+  troubleshooting a failing agentic workflow and filing a diagnostic report.
 
 ### Authoring agent files
 
@@ -327,6 +340,10 @@ index to jump to the right page.
   `remove`, `list`, `status`, `run`, `audit`, `mcp-author`, `trace`,
   `inspect`, `graph`, `whatif`, `lint`, `catalog`; `configure` is a
   deprecated hidden alias and `export-gate-schema` is a hidden build-time tool).
+- [`docs/agency-plugin.md`](docs/agency-plugin.md) — the Agency / Claude Code
+  plugin (`agency/plugins/ado-aw/`): canonical layout, six skills, `mcp-author`
+  wiring, the self-contained root marketplace catalogs, `init --agency`
+  scaffolding, release-please version-locking, and shared-marketplace listing.
 - [`docs/audit.md`](docs/audit.md) — `ado-aw audit`: accepted build-id / URL
   forms, artifact layout, cache behavior, rejection tracing, and `AuditData`
   report shape.
@@ -466,10 +483,10 @@ the bash body — shellcheck honours the directive and it's inert at runtime.
 cargo run -- compile ./path/to/agent.md
 ```
 
-### Recompile all agentic pipelines in the current directory
+### Recompile all agentic workflows in the current directory
 
 ```bash
-# Auto-discovers and recompiles all detected agentic pipelines
+# Auto-discovers and recompiles all detected agentic workflows
 cargo run -- compile
 ```
 

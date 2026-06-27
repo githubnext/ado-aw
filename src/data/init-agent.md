@@ -1,11 +1,11 @@
 ---
-description: Azure DevOps Agentic Pipelines (ado-aw) - Create, update, and debug AI-powered ADO pipelines
+description: Azure DevOps Agentic Workflows (ado-aw) - Create, update, and debug AI-powered Azure DevOps agentic workflows
 disable-model-invocation: true
 ---
 
-# ADO Agentic Pipelines Agent
+# Azure DevOps Agentic Workflows Agent
 
-This agent helps you create and manage Azure DevOps agentic pipelines using **ado-aw**.
+This agent helps you create and manage Azure DevOps agentic workflows using **ado-aw**.
 
 ado-aw compiles human-friendly markdown files with YAML front matter into secure, multi-stage Azure DevOps pipelines that run AI agents in network-isolated sandboxes.
 
@@ -37,39 +37,39 @@ Verify: `ado-aw --version`
 
 This is a **dispatcher agent** that routes your request to the appropriate specialized prompt:
 
-- **Creating new agentic pipelines** → Routes to the create prompt
-- **Updating existing pipelines** → Routes to the update prompt  
-- **Debugging failing pipelines** → Routes to the debug prompt
+- **Creating new agentic workflows** → Routes to the create prompt
+- **Updating existing workflows** → Routes to the update prompt  
+- **Debugging failing workflows** → Routes to the debug prompt
 
 ## Available Prompts
 
-### Create New Agentic Pipeline
-**Load when**: User wants to create a new agentic pipeline from scratch
+### Create New Agentic Workflow
+**Load when**: User wants to create a new agentic workflow from scratch
 
-**Prompt file**: https://raw.githubusercontent.com/githubnext/ado-aw/v{{ compiler_version }}/prompts/create-ado-agentic-workflow.md
+**Prompt file**: https://raw.githubusercontent.com/githubnext/ado-aw/v{{ compiler_version }}/prompts/create-ado-agentic-workflow.md <!-- x-release-please-version -->
 
 **Use cases**:
-- "Create an agentic pipeline that reviews PRs weekly"
-- "I need a pipeline that triages work items daily"
+- "Create an agentic workflow that reviews PRs weekly"
+- "I need a workflow that triages work items daily"
 - "Design a scheduled dependency updater"
 
-### Update Existing Pipeline
+### Update Existing Workflow
 **Load when**: User wants to modify an existing agent workflow file
 
-**Prompt file**: https://raw.githubusercontent.com/githubnext/ado-aw/v{{ compiler_version }}/prompts/update-ado-agentic-workflow.md
+**Prompt file**: https://raw.githubusercontent.com/githubnext/ado-aw/v{{ compiler_version }}/prompts/update-ado-agentic-workflow.md <!-- x-release-please-version -->
 
 **Use cases**:
-- "Add the Azure DevOps MCP to my pipeline"
+- "Add the Azure DevOps MCP to my workflow"
 - "Change the schedule from daily to weekly"
 - "Add work item creation as a safe output"
 
-### Debug Failing Pipeline
-**Load when**: User needs to troubleshoot a failing agentic pipeline
+### Debug Failing Workflow
+**Load when**: User needs to troubleshoot a failing agentic workflow
 
-**Prompt file**: https://raw.githubusercontent.com/githubnext/ado-aw/v{{ compiler_version }}/prompts/debug-ado-agentic-workflow.md
+**Prompt file**: https://raw.githubusercontent.com/githubnext/ado-aw/v{{ compiler_version }}/prompts/debug-ado-agentic-workflow.md <!-- x-release-please-version -->
 
 **Use cases**:
-- "Why is my agentic pipeline failing?"
+- "Why is my agentic workflow failing?"
 - "The agent can't reach the MCP server"
 - "Safe outputs aren't being processed"
 
@@ -97,7 +97,7 @@ ado-aw check <pipeline.lock.yml>
 
 ## Key Features
 
-- **Natural language pipelines**: Write in markdown with YAML frontmatter
+- **Natural language workflows**: Write in markdown with YAML frontmatter
 - **3-stage security**: Agent → Threat Analysis → Safe Output Execution
 - **Network isolation**: AWF (Agentic Workflow Firewall) with domain whitelisting
 - **MCP Gateway**: Tool routing for Azure DevOps, custom MCPs
@@ -109,4 +109,4 @@ ado-aw check <pipeline.lock.yml>
 - Agent files must be compiled with `ado-aw compile` after YAML frontmatter changes
 - Markdown body (agent instructions) changes do NOT require recompilation
 - The agent never has direct write access — all mutations go through safe outputs
-- Full reference: https://raw.githubusercontent.com/githubnext/ado-aw/v{{ compiler_version }}/AGENTS.md
+- Full reference: https://raw.githubusercontent.com/githubnext/ado-aw/v{{ compiler_version }}/AGENTS.md <!-- x-release-please-version -->

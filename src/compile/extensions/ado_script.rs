@@ -1058,7 +1058,11 @@ mod tests {
         let ext = ext_with(Some(filters), None, true);
         let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
         let ctx = CompileContext::for_test(&fm);
-        assert!(ext.declarations(&ctx).is_err());
+        let err = ext.declarations(&ctx).unwrap_err();
+        assert!(
+            err.to_string().contains("min-changes"),
+            "expected min-changes / max-changes error, got: {err}"
+        );
     }
 
     #[test]
@@ -1244,10 +1248,26 @@ mod tests {
             panic!("expected And inside Or, got {:?}", parts[0]);
         };
         assert_eq!(and_parts.len(), 2);
+        // and_parts[0]: Ne(Build.Reason, "PullRequest") — real PullRequest
+        // builds must still clear the PR gate even when synth is active.
+        assert!(matches!(
+            &and_parts[0],
+            Condition::Ne(Expr::Variable(name), Expr::Literal(lit))
+                if name == "Build.Reason" && lit == "PullRequest"
+        ));
+        // and_parts[1]: Ne(synthPr.AW_SYNTHETIC_PR, "true") — synth-promoted
+        // CI builds are also routed through the gate.
         assert!(matches!(
             &and_parts[1],
             Condition::Ne(Expr::StepOutput(out), Expr::Literal(lit))
                 if out.step.as_str() == "synthPr" && out.name == "AW_SYNTHETIC_PR" && lit == "true"
+        ));
+        // parts[1]: Eq(prGate.SHOULD_RUN, "true") — gate short-circuit for
+        // builds that cleared the PR filter.
+        assert!(matches!(
+            &parts[1],
+            Condition::Eq(Expr::StepOutput(out), Expr::Literal(lit))
+                if out.step.as_str() == "prGate" && out.name == "SHOULD_RUN" && lit == "true"
         ));
     }
 
@@ -1557,9 +1577,7 @@ mod tests {
 
     /// `declarations()` returns empty step lists when neither
     /// runtime-import nor exec-context-pr nor any gate / synth path
-    /// is active. Mirrors `setup_steps_empty_without_gate` /
-    /// `prepare_steps_empty_when_inlined_imports_true` for the typed
-    /// path.
+    /// is active.
     #[test]
     fn declarations_empty_when_nothing_active() {
         let ext = ext_with(None, None, true);

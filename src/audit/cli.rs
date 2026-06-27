@@ -318,137 +318,121 @@ async fn run_analyzers(
     run_dir: &Path,
     audit: &mut AuditData,
 ) {
-    match collect_downloaded_files(run_dir, artifact_filters).await {
-        Ok(files) => audit.downloaded_files = files,
-        Err(error) => warn_and_record(
-            audit,
-            "audit::artifacts",
-            format!("failed to enumerate downloaded files: {:#}", error),
-        ),
-    }
+    run_analyzer(
+        audit,
+        "audit::artifacts",
+        "failed to enumerate downloaded files",
+        collect_downloaded_files(run_dir, artifact_filters).await,
+        |a, files| a.downloaded_files = files,
+    );
 
     if let Some(agent_outputs_dir) = find_artifact_dir(run_dir, "agent_outputs").await {
         run_agent_output_analyzers(&agent_outputs_dir, audit).await;
     }
 
-    match safe_outputs::analyze_safe_outputs(run_dir).await {
-        Ok(result) => {
-            audit.safe_output_summary = result.summary;
-            audit.safe_output_execution = result.execution;
-            audit.rejected_safe_outputs = result.rollup;
-            audit.created_items = result.created_items;
-            audit.key_findings.extend(result.findings);
-        }
-        Err(error) => warn_and_record(
-            audit,
-            "audit::safe_outputs",
-            format!("safe-output analysis failed: {:#}", error),
-        ),
-    }
-
-    match detection::analyze_detection(run_dir).await {
-        Ok(result) => audit.detection_analysis = result,
-        Err(error) => warn_and_record(
-            audit,
-            "audit::detection",
-            format!("detection analysis failed: {:#}", error),
-        ),
-    }
-
-    match missing::extract_missing_tools(run_dir).await {
-        Ok(result) => audit.missing_tools = result,
-        Err(error) => warn_and_record(
-            audit,
-            "audit::missing_tools",
-            format!("missing-tool extraction failed: {:#}", error),
-        ),
-    }
-    match missing::extract_missing_data(run_dir).await {
-        Ok(result) => audit.missing_data = result,
-        Err(error) => warn_and_record(
-            audit,
-            "audit::missing_data",
-            format!("missing-data extraction failed: {:#}", error),
-        ),
-    }
-    match missing::extract_noops(run_dir).await {
-        Ok(result) => audit.noops = result,
-        Err(error) => warn_and_record(
-            audit,
-            "audit::noops",
-            format!("noop extraction failed: {:#}", error),
-        ),
-    }
-
-    match jobs::fetch_timeline(client, ctx, auth, build_id).await {
-        Ok(timeline) => audit.jobs = jobs::timeline_to_jobs(&timeline),
-        Err(error) => warn_and_record(
-            audit,
-            "audit::jobs",
-            format!("job timeline analysis failed: {:#}", error),
-        ),
-    }
+    run_analyzer(
+        audit,
+        "audit::safe_outputs",
+        "safe-output analysis failed",
+        safe_outputs::analyze_safe_outputs(run_dir).await,
+        |a, result| {
+            a.safe_output_summary = result.summary;
+            a.safe_output_execution = result.execution;
+            a.rejected_safe_outputs = result.rollup;
+            a.created_items = result.created_items;
+            a.key_findings.extend(result.findings);
+        },
+    );
+    run_analyzer(
+        audit,
+        "audit::detection",
+        "detection analysis failed",
+        detection::analyze_detection(run_dir).await,
+        |a, result| a.detection_analysis = result,
+    );
+    run_analyzer(
+        audit,
+        "audit::missing_tools",
+        "missing-tool extraction failed",
+        missing::extract_missing_tools(run_dir).await,
+        |a, result| a.missing_tools = result,
+    );
+    run_analyzer(
+        audit,
+        "audit::missing_data",
+        "missing-data extraction failed",
+        missing::extract_missing_data(run_dir).await,
+        |a, result| a.missing_data = result,
+    );
+    run_analyzer(
+        audit,
+        "audit::noops",
+        "noop extraction failed",
+        missing::extract_noops(run_dir).await,
+        |a, result| a.noops = result,
+    );
+    run_analyzer(
+        audit,
+        "audit::jobs",
+        "job timeline analysis failed",
+        jobs::fetch_timeline(client, ctx, auth, build_id).await,
+        |a, timeline| a.jobs = jobs::timeline_to_jobs(&timeline),
+    );
 }
 
 /// Run analyzers that operate on the `agent_outputs` artifact directory.
 async fn run_agent_output_analyzers(agent_outputs_dir: &Path, audit: &mut AuditData) {
     let firewall_dir = agent_outputs_dir.join("logs").join("firewall");
-    match firewall::analyze_firewall_logs(&firewall_dir).await {
-        Ok(result) => audit.firewall_analysis = result,
-        Err(error) => warn_and_record(
-            audit,
-            "audit::firewall",
-            format!("firewall analysis failed: {:#}", error),
-        ),
-    }
-    match policy::analyze_policy(&firewall_dir).await {
-        Ok(result) => audit.policy_analysis = result,
-        Err(error) => warn_and_record(
-            audit,
-            "audit::policy",
-            format!("policy analysis failed: {:#}", error),
-        ),
-    }
+    run_analyzer(
+        audit,
+        "audit::firewall",
+        "firewall analysis failed",
+        firewall::analyze_firewall_logs(&firewall_dir).await,
+        |a, result| a.firewall_analysis = result,
+    );
+    run_analyzer(
+        audit,
+        "audit::policy",
+        "policy analysis failed",
+        policy::analyze_policy(&firewall_dir).await,
+        |a, result| a.policy_analysis = result,
+    );
 
     let mcpg_dir = agent_outputs_dir.join("logs").join("mcpg");
-    match mcp::analyze_mcp_tool_usage(&mcpg_dir).await {
-        Ok(result) => audit.mcp_tool_usage = result,
-        Err(error) => warn_and_record(
-            audit,
-            "audit::mcp",
-            format!("MCP tool-usage analysis failed: {:#}", error),
-        ),
-    }
-    match mcp::analyze_mcp_server_health(&mcpg_dir).await {
-        Ok(result) => audit.mcp_server_health = result,
-        Err(error) => warn_and_record(
-            audit,
-            "audit::mcp",
-            format!("MCP server-health analysis failed: {:#}", error),
-        ),
-    }
-    match mcp::extract_mcp_failures(&mcpg_dir).await {
-        Ok(result) => audit.mcp_failures = result,
-        Err(error) => warn_and_record(
-            audit,
-            "audit::mcp",
-            format!("MCP failure extraction failed: {:#}", error),
-        ),
-    }
+    run_analyzer(
+        audit,
+        "audit::mcp",
+        "MCP tool-usage analysis failed",
+        mcp::analyze_mcp_tool_usage(&mcpg_dir).await,
+        |a, result| a.mcp_tool_usage = result,
+    );
+    run_analyzer(
+        audit,
+        "audit::mcp",
+        "MCP server-health analysis failed",
+        mcp::analyze_mcp_server_health(&mcpg_dir).await,
+        |a, result| a.mcp_server_health = result,
+    );
+    run_analyzer(
+        audit,
+        "audit::mcp",
+        "MCP failure extraction failed",
+        mcp::extract_mcp_failures(&mcpg_dir).await,
+        |a, result| a.mcp_failures = result,
+    );
 
-    match otel::analyze_otel(agent_outputs_dir).await {
-        Ok(result) => {
-            audit.metrics = result.metrics;
-            audit.engine_config = result.engine_config;
-            audit.performance_metrics = result.performance;
-            audit.overview.aw_info = result.aw_info;
-        }
-        Err(error) => warn_and_record(
-            audit,
-            "audit::otel",
-            format!("OTel analysis failed: {:#}", error),
-        ),
-    }
+    run_analyzer(
+        audit,
+        "audit::otel",
+        "OTel analysis failed",
+        otel::analyze_otel(agent_outputs_dir).await,
+        |a, result| {
+            a.metrics = result.metrics;
+            a.engine_config = result.engine_config;
+            a.performance_metrics = result.performance;
+            a.overview.aw_info = result.aw_info;
+        },
+    );
 }
 
 /// Backfill performance metric fields that can be derived from other already-populated
@@ -908,6 +892,24 @@ fn warn_and_record(audit: &mut AuditData, source: &str, message: String) {
         message,
         timestamp: None,
     });
+}
+
+/// Apply a fallible analyzer result to `audit`, recording any error as a
+/// warning rather than propagating it.  The `apply` closure is called only
+/// on success; on failure the error is forwarded to [`warn_and_record`].
+fn run_analyzer<T, F>(
+    audit: &mut AuditData,
+    source: &str,
+    error_msg: &str,
+    result: Result<T>,
+    apply: F,
+) where
+    F: FnOnce(&mut AuditData, T),
+{
+    match result {
+        Ok(val) => apply(audit, val),
+        Err(error) => warn_and_record(audit, source, format!("{error_msg}: {:#}", error)),
+    }
 }
 
 fn render_audit(audit: &AuditData, json: bool) -> Result<()> {

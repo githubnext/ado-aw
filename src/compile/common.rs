@@ -2132,6 +2132,83 @@ pub fn generate_mcpg_step_env(extension_declarations: &[Declarations]) -> String
 
 // ==================== Domain allowlist ====================
 
+/// Insert all network hosts declared by a single extension into `hosts`.
+///
+/// Ecosystem identifiers (e.g., `"lean"`) are expanded to the ecosystem's
+/// full domain list. Emits a diagnostic warning when an identifier resolves
+/// to an empty list (i.e., the ecosystem is unknown to this binary).
+fn add_extension_network_hosts(
+    ext: &super::extensions::Extension,
+    decl: &Declarations,
+    hosts: &mut HashSet<String>,
+) {
+    for host in &decl.network_hosts {
+        if is_ecosystem_identifier(host) {
+            let domains = get_ecosystem_domains(host);
+            if domains.is_empty() {
+                eprintln!(
+                    "warning: extension '{}' requires unknown ecosystem '{}'; \
+                     no domains added",
+                    ext.name(),
+                    host
+                );
+            }
+            for domain in domains {
+                hosts.insert(domain);
+            }
+        } else {
+            hosts.insert(host.clone());
+        }
+    }
+}
+
+/// Insert user-specified `network.allowed` entries into `hosts`.
+///
+/// Ecosystem identifiers (e.g., `"python"`) are expanded to their domain
+/// lists. Raw domain names are validated against DNS-safe characters before
+/// insertion; an invalid name causes this function to return an error.
+fn add_user_network_hosts(
+    user_hosts: &[String],
+    hosts: &mut HashSet<String>,
+) -> Result<()> {
+    for host in user_hosts {
+        if is_ecosystem_identifier(host) {
+            let domains = get_ecosystem_domains(host);
+            if domains.is_empty() && !is_known_ecosystem(host) {
+                eprintln!(
+                    "warning: network.allowed contains unknown ecosystem identifier '{}'. \
+                     Known ecosystems: python, rust, node, go, java, etc. \
+                     If this is a domain name, it should contain a dot.",
+                    host
+                );
+            }
+            for domain in domains {
+                hosts.insert(domain);
+            }
+        } else {
+            validate::validate_dns_domain(host)?;
+            hosts.insert(host.clone());
+        }
+    }
+    Ok(())
+}
+
+/// Remove `network.blocked` entries from `hosts`.
+///
+/// Ecosystem identifiers are expanded so that all domains in the ecosystem
+/// are removed in one call.
+fn remove_blocked_network_hosts(blocked_hosts: &[String], hosts: &mut HashSet<String>) {
+    for blocked in blocked_hosts {
+        if is_ecosystem_identifier(blocked) {
+            for domain in get_ecosystem_domains(blocked) {
+                hosts.remove(&domain);
+            }
+        } else {
+            hosts.remove(blocked);
+        }
+    }
+}
+
 /// Generate the allowed domains list for AWF network isolation.
 ///
 /// This generates a comma-separated list of domain patterns for AWF's
@@ -2157,14 +2234,19 @@ pub fn generate_allowed_domains(
         })
         .collect();
 
-    // Get user-specified hosts
+    // Get user-specified and blocked hosts from network config
     let user_hosts: Vec<String> = front_matter
         .network
         .as_ref()
         .map(|n| n.allowed.clone())
         .unwrap_or_default();
+    let blocked_hosts: Vec<String> = front_matter
+        .network
+        .as_ref()
+        .map(|n| n.blocked.clone())
+        .unwrap_or_default();
 
-    // Generate the allowlist by combining core + MCP + extension + user hosts
+    // Build the allowlist by combining core + MCP + extension + engine + user hosts
     let mut hosts: HashSet<String> = HashSet::new();
 
     // Add core hosts
@@ -2187,24 +2269,7 @@ pub fn generate_allowed_domains(
     // Extensions may return ecosystem identifiers (e.g., "lean") which are
     // expanded to their domain lists, or raw domain names.
     for (ext, decl) in extensions.iter().zip(extension_declarations.iter()) {
-        for host in &decl.network_hosts {
-            if is_ecosystem_identifier(host) {
-                let domains = get_ecosystem_domains(host);
-                if domains.is_empty() {
-                    eprintln!(
-                        "warning: extension '{}' requires unknown ecosystem '{}'; \
-                         no domains added",
-                        ext.name(),
-                        host
-                    );
-                }
-                for domain in domains {
-                    hosts.insert(domain);
-                }
-            } else {
-                hosts.insert(host.clone());
-            }
-        }
+        add_extension_network_hosts(ext, decl, &mut hosts);
     }
 
     // Add engine-required hosts (e.g., GHES/GHEC api-target hostname).
@@ -2214,44 +2279,13 @@ pub fn generate_allowed_domains(
         hosts.insert(host);
     }
 
-    // Add user-specified hosts (validated against DNS-safe characters)
+    // Add user-specified hosts (validated against DNS-safe characters).
     // Entries may be ecosystem identifiers (e.g., "python", "rust") which
     // expand to their domain lists, or raw domain names.
-    for host in &user_hosts {
-        if is_ecosystem_identifier(host) {
-            let domains = get_ecosystem_domains(host);
-            if domains.is_empty() && !is_known_ecosystem(host) {
-                eprintln!(
-                    "warning: network.allowed contains unknown ecosystem identifier '{}'. \
-                     Known ecosystems: python, rust, node, go, java, etc. \
-                     If this is a domain name, it should contain a dot.",
-                    host
-                );
-            }
-            for domain in domains {
-                hosts.insert(domain);
-            }
-        } else {
-            validate::validate_dns_domain(host)?;
-            hosts.insert(host.clone());
-        }
-    }
+    add_user_network_hosts(&user_hosts, &mut hosts)?;
 
     // Remove blocked hosts (supports both ecosystem identifiers and raw domains)
-    let blocked_hosts: Vec<String> = front_matter
-        .network
-        .as_ref()
-        .map(|n| n.blocked.clone())
-        .unwrap_or_default();
-    for blocked in &blocked_hosts {
-        if is_ecosystem_identifier(blocked) {
-            for domain in get_ecosystem_domains(blocked) {
-                hosts.remove(&domain);
-            }
-        } else {
-            hosts.remove(blocked);
-        }
-    }
+    remove_blocked_network_hosts(&blocked_hosts, &mut hosts);
 
     // Sort for deterministic output
     let mut allowlist: Vec<String> = hosts.into_iter().collect();
