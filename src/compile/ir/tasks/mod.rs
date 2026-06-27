@@ -20,6 +20,7 @@
 mod common;
 
 pub mod archive_files;
+pub mod arm_template_deployment;
 pub mod azure_cli;
 pub mod azure_container_apps;
 pub mod azure_file_copy;
