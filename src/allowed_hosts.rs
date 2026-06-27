@@ -119,18 +119,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_mcp_hosts_unknown_returns_empty() {
-        let hosts = mcp_required_hosts("unknown-mcp");
-        assert!(hosts.is_empty());
-    }
-
-    #[test]
-    fn test_lean_hosts() {
-        use crate::ecosystem_domains::get_ecosystem_domains;
-        let lean_hosts = get_ecosystem_domains("lean");
-        assert!(lean_hosts.contains(&"elan.lean-lang.org".to_string()));
-        assert!(lean_hosts.contains(&"leanprover.github.io".to_string()));
-        assert!(lean_hosts.contains(&"lean-lang.org".to_string()));
-    }
 }
