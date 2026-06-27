@@ -859,6 +859,39 @@ impl FrontMatter {
         (auto, reviewed)
     }
 
+    /// Eagerly validate every `require-approval` value (section-level and
+    /// per-tool) so a malformed config is surfaced as a compilation error
+    /// instead of being silently discarded by the `.ok()` paths in
+    /// [`global_require_approval`](Self::global_require_approval) /
+    /// [`tool_require_approval`](Self::tool_require_approval). Without this,
+    /// a typo like `on-timeout: rejec` (or any unknown field — `ApprovalConfig`
+    /// uses `deny_unknown_fields`) would make the affected tool silently fall
+    /// out of the reviewed list, emitting no `ManualReview` gate and letting a
+    /// high-impact output bypass the intended approval step.
+    pub fn validate_require_approval(&self) -> anyhow::Result<()> {
+        fn check(label: &str, v: &serde_json::Value) -> anyhow::Result<()> {
+            serde_json::from_value::<RequireApproval>(v.clone()).map_err(|e| {
+                anyhow::anyhow!(
+                    "{label} has an invalid `require-approval` value: {e}\n\n\
+                     `require-approval` must be a boolean or an object with the keys: \
+                     approvers, notify-users, timeout-minutes, on-timeout \
+                     (allow | reject), instructions. See docs/safe-outputs.md."
+                )
+            })?;
+            Ok(())
+        }
+
+        if let Some(v) = self.safe_outputs.get("require-approval") {
+            check("safe-outputs.require-approval", v)?;
+        }
+        for tool in self.safe_output_tool_names() {
+            if let Some(v) = self.safe_outputs.get(tool).and_then(|c| c.get("require-approval")) {
+                check(&format!("safe-outputs.{tool}.require-approval"), v)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Get the schedule configuration (if any).
     pub fn schedule(&self) -> Option<&ScheduleConfig> {
         self.on_config.as_ref().and_then(|o| o.schedule.as_ref())
@@ -2894,6 +2927,72 @@ Body
         let (auto, reviewed) = fm.partition_safe_outputs_by_approval();
         assert_eq!(auto, vec!["create-pull-request"]);
         assert!(reviewed.is_empty());
+    }
+
+    #[test]
+    fn test_validate_require_approval_accepts_valid() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+safe-outputs:
+  require-approval: true
+  create-pull-request:
+    require-approval:
+      on-timeout: reject
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        assert!(fm.validate_require_approval().is_ok());
+    }
+
+    #[test]
+    fn test_validate_require_approval_rejects_bad_on_timeout() {
+        // A typo in `on-timeout` must NOT silently disable the gate — it has
+        // to surface as a compilation error (regression test for the
+        // `.ok()`-swallowed-error bug).
+        let content = r#"---
+name: "Test"
+description: "Test"
+safe-outputs:
+  create-pull-request:
+    require-approval:
+      on-timeout: rejec
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let err = fm
+            .validate_require_approval()
+            .expect_err("malformed on-timeout must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("create-pull-request") && msg.contains("require-approval"),
+            "error should name the offending tool and field: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_require_approval_rejects_unknown_field() {
+        // `ApprovalConfig` uses deny_unknown_fields — a misspelled key must
+        // error rather than silently drop the tool from the reviewed list.
+        let content = r#"---
+name: "Test"
+description: "Test"
+safe-outputs:
+  require-approval:
+    approver: ["[Org]\\release"]
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        assert!(
+            fm.validate_require_approval().is_err(),
+            "unknown require-approval field must be rejected"
+        );
     }
 
     #[test]

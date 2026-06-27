@@ -82,6 +82,7 @@ const FIXTURES: &[&str] = &[
     "stage-agent.md",
     "execution-context-agent.md",
     "supply-chain-agent.md",
+    "manual-review-agent.md",
 ];
 
 /// Step display names that the lint expects to find at least once across all
@@ -129,6 +130,7 @@ const REQUIRED_STEP_DISPLAY_NAMES: &[&str] = &[
     "Stage ci-push execution context (aw-context/ci-push/*)", // src/compile/extensions/exec_context/ci_push.rs (activated by execution-context.ci-push.enabled: true)
     "Stage schedule execution context (aw-context/schedule/*)", // src/compile/extensions/exec_context/schedule.rs (activated by on.schedule + execution-context.schedule.enabled: true)
     "Stage PR-checks execution context (aw-context/pr/checks/*)", // src/compile/extensions/exec_context/pr_checks.rs (activated by on.pr + execution-context.pr.checks.enabled: true)
+    "Detect reviewed proposals", // src/compile/agentic_pipeline.rs detect_reviewed_proposals_step (activated by safe-outputs.require-approval)
 ];
 
 fn ado_aw_binary() -> PathBuf {

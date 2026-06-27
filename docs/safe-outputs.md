@@ -80,7 +80,11 @@ so un-approved outputs are never applied.
 **Reviewer message** — set `instructions` to control the text shown in the
 Review panel and notification emails. It is plain text and supports pipeline
 variable (`$(...)`) interpolation. When omitted, ado-aw generates a default
-message listing the reviewed safe-output type(s) awaiting approval.
+message listing the reviewed safe-output type(s) awaiting approval. A run uses a
+**single** `ManualReview` gate covering every reviewed tool, so if more than one
+reviewed tool sets `instructions`, only the first (in sorted tool-name order) is
+used; set `instructions` on the section-level `require-approval` to control the
+message for the whole run.
 
 **Execution shape** — manual review changes the compiled pipeline:
 

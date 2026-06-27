@@ -126,6 +126,7 @@ pub(crate) fn build_pipeline_context(
         ctx.ado_context.as_ref().map(|c| c.repo_name.as_str()),
     )?;
     common::validate_safe_outputs_keys(front_matter)?;
+    front_matter.validate_require_approval()?;
     common::validate_comment_target(front_matter)?;
     common::validate_update_work_item_target(front_matter)?;
     common::validate_submit_pr_review_events(front_matter)?;
@@ -1274,6 +1275,9 @@ fn aggregate_approval_config(front_matter: &FrontMatter, reviewed: &[String]) ->
             Some(ApprovalOnTimeout::Resume) => {}
             _ => all_resume = false,
         }
+        // A single ManualReview gate covers all reviewed tools, so only the
+        // first non-empty `instructions` wins (tools are iterated in sorted
+        // order). Documented in docs/safe-outputs.md.
         if instructions.is_none() {
             instructions = cfg.instructions;
         }
@@ -2343,13 +2347,21 @@ fn evaluate_threat_analysis_step() -> BashStep {
 fn detect_reviewed_proposals_step(working_directory: &str, reviewed: &[String]) -> BashStep {
     // `reviewed` are compiler-controlled safe-output names (ASCII
     // alphanumeric/hyphen only — see `validate::is_safe_tool_name`), so they
-    // are safe to embed directly in a grep alternation.
+    // are safe to embed directly in a jq/grep alternation.
     let alternation = reviewed.join("|");
     let script = format!(
         "HAS_REVIEWED=\"false\"\n\
          PROPOSALS=$(find \"{working_directory}/safe_outputs\" -name \"safe_outputs.ndjson\" 2>/dev/null | head -n 1)\n\
          if [ -n \"$PROPOSALS\" ] && [ -f \"$PROPOSALS\" ]; then\n  \
-           if grep -Eq '\"name\"[[:space:]]*:[[:space:]]*\"({alternation})\"' \"$PROPOSALS\"; then\n    \
+           if command -v jq >/dev/null 2>&1; then\n    \
+             # Match only the top-level \"name\" of each NDJSON object so a\n    \
+             # \"name\" key nested inside a tool's params can't false-positive.\n    \
+             if jq -r 'select(type==\"object\") | .name // empty' \"$PROPOSALS\" 2>/dev/null | grep -Eqx '({alternation})'; then\n      \
+               HAS_REVIEWED=\"true\"\n    \
+             fi\n  \
+           elif grep -Eq '\"name\"[[:space:]]*:[[:space:]]*\"({alternation})\"' \"$PROPOSALS\"; then\n    \
+             # jq unavailable: fall back to a broad scan. May over-match (pause\n    \
+             # unnecessarily) but never under-matches, so the gate stays fail-safe.\n    \
              HAS_REVIEWED=\"true\"\n  \
            fi\n\
          fi\n\
