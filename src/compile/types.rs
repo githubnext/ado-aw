@@ -875,7 +875,7 @@ impl FrontMatter {
                     "{label} has an invalid `require-approval` value: {e}\n\n\
                      `require-approval` must be a boolean or an object with the keys: \
                      approvers, notify-users, timeout-minutes, on-timeout \
-                     (allow | reject), instructions. See docs/safe-outputs.md."
+                     (resume | reject), instructions. See docs/safe-outputs.md."
                 )
             })?;
             Ok(())
