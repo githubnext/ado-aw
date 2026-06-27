@@ -1118,8 +1118,13 @@ impl SafeOutputsVariant {
 }
 
 /// Build a ` --<flag> <tool>` run for `ado-aw execute` (leading space so it
-/// concatenates onto the fixed command). Tool names are compiler-controlled
-/// safe-output identifiers (ASCII alphanumeric/hyphen), so no quoting needed.
+/// concatenates onto the fixed command). Tool names are spliced into the bash
+/// command without per-name shell quoting; this is safe because they are
+/// compiler-controlled safe-output identifiers restricted to ASCII
+/// alphanumeric/hyphen (no shell metacharacters). The invariant is enforced by
+/// `validate::is_safe_tool_name` via `common::validate_safe_outputs_keys`,
+/// which `build_pipeline_context` runs before `build_canonical_jobs` reaches
+/// this function.
 fn filter_flags(flag: &str, tools: &[String]) -> String {
     let mut s = String::new();
     for t in tools {
@@ -1264,6 +1269,11 @@ fn aggregate_approval_config(front_matter: &FrontMatter, reviewed: &[String]) ->
 
     for tool in reviewed {
         let Some(cfg) = front_matter.tool_requires_approval(tool) else {
+            // A tool in `reviewed` with no resolvable config should be
+            // impossible (the partition is built from the same predicate), but
+            // if a future regression produces one, fail closed rather than let
+            // the aggregated gate silently default to `on-timeout: resume`.
+            all_resume = false;
             continue;
         };
         approvers.extend(cfg.approvers);
@@ -1402,12 +1412,16 @@ fn wire_explicit_dependencies(jobs: &mut [Job], prefix: &JobPrefix<'_>) -> Resul
                 manualreview_id.clone(),
             ];
         } else if j.id == teardown_id {
-            // Teardown waits on every execution job that exists.
-            let mut deps = vec![safeoutputs_id.clone()];
-            if has_reviewed_job {
-                deps.push(reviewed_id.clone());
-            }
-            j.depends_on = deps;
+            // Teardown is cleanup paired with the *automatic* execution path.
+            // In the mixed split it deliberately does NOT depend on the
+            // human-gated `SafeOutputs_Reviewed` job: that job is routinely
+            // skipped (whenever the agent proposed no reviewed-type output) and
+            // can stay paused on the approval gate indefinitely. Depending on it
+            // under ADO's implicit `succeeded()` gate would skip Teardown on the
+            // common no-reviewed-proposal path (and block cleanup behind a human
+            // approval otherwise). Waiting only on the auto `SafeOutputs` job
+            // keeps Teardown's behaviour identical to the single-job case.
+            j.depends_on = vec![safeoutputs_id.clone()];
         }
     }
     Ok(())

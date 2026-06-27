@@ -6372,6 +6372,54 @@ safe-outputs:
     );
 }
 
+/// In the mixed split, the Teardown job depends only on the automatic
+/// `SafeOutputs` job — never on the human-gated `SafeOutputs_Reviewed` job —
+/// so cleanup still fires on the common no-reviewed-proposal path (where the
+/// reviewed job is skipped) and never blocks behind the approval gate.
+#[test]
+fn test_mixed_approval_teardown_skips_reviewed_dependency() {
+    let source = r#"---
+name: "Mixed Teardown Agent"
+description: "Mixed approval split with teardown"
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+    require-approval: true
+  add-pr-comment: {}
+teardown:
+  - script: echo "cleanup"
+    displayName: "Cleanup"
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("approval-mixed-teardown", source);
+    assert!(ok, "mixed approval + teardown should compile: {stderr}");
+    assert!(
+        compiled.contains("job: SafeOutputs_Reviewed"),
+        "reviewed SafeOutputs job expected:\n{compiled}"
+    );
+
+    // Isolate the Teardown job block (from its header to the next job header).
+    let td_idx = compiled
+        .find("job: Teardown")
+        .expect("Teardown job present");
+    let td_block = &compiled[td_idx..];
+    let td_block = match td_block[1..].find("- job: ") {
+        Some(rel) => &td_block[..rel + 1],
+        None => td_block,
+    };
+
+    assert!(
+        td_block.contains("SafeOutputs"),
+        "Teardown must depend on the automatic SafeOutputs job:\n{td_block}"
+    );
+    assert!(
+        !td_block.contains("SafeOutputs_Reviewed"),
+        "Teardown must NOT depend on the human-gated SafeOutputs_Reviewed job:\n{td_block}"
+    );
+}
+
 /// A detailed `require-approval` object propagates approvers, notify-users, and
 /// the author-supplied instructions message into the ManualValidation task.
 #[test]
