@@ -3,7 +3,7 @@
 `ado-script` is the umbrella name for the TypeScript workspace at
 [`scripts/ado-script/`](../scripts/ado-script/). It produces small,
 ncc-bundled Node programs that the **compiler injects into every emitted
-pipeline** as runtime helpers. Today it produces eleven bundles:
+pipeline** as runtime helpers. Today it produces twelve bundles:
 
 - `gate.js` — trigger-filter gate evaluator (Setup job).
 - `import.js` — runtime prompt resolver described in
@@ -45,6 +45,13 @@ pipeline** as runtime helpers. Today it produces eleven bundles:
   branch, SHA, last release tag, and commits-since-tag facts under
   `aw-context/repo/` (Agent job; see
   [`execution-context.md`](execution-context.md)).
+- `approval-summary.js` — Safe-outputs summary renderer that runs at the
+  **end of the Agent job** (after proposals are collected). It reads the
+  proposed safe outputs from `safe_outputs.ndjson`, renders a sanitized
+  per-tool markdown summary (pending-approval proposals first when manual
+  review is configured), and attaches it to the build's
+  `ado-aw-safe-outputs` summary tab via `##vso[task.uploadsummary]`. See
+  [`safe-outputs.md`](safe-outputs.md).
 
 > **Internal-only.** `ado-script` is not a user-facing front-matter
 > feature. Authors never write an `ado-script:` block in their agent

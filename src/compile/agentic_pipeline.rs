@@ -871,6 +871,16 @@ fn build_agent_job(
     // 19. Collect safe outputs from AWF container
     steps.push(Step::Bash(collect_safe_outputs_step()));
 
+    // 19a. Render the proposed safe outputs to the build summary tab. Always
+    // emitted when any safe-output tool is enabled (transparency for every
+    // run); when manual review is configured the reviewed proposals are listed
+    // first. The ado-script bundle was delivered earlier in this job by the
+    // ado-script extension (gated on safe_outputs_summary_active).
+    let (_, reviewed_summary_tools) = front_matter.partition_safe_outputs_by_approval();
+    if front_matter.safe_output_tool_names().next().is_some() {
+        steps.push(Step::Bash(safe_outputs_summary_step(&reviewed_summary_tools)));
+    }
+
     // 20. Stop MCPG and SafeOutputs
     steps.push(Step::Bash(stop_mcpg_step()));
 
@@ -1330,8 +1340,9 @@ fn default_review_instructions(reviewed: &[String]) -> String {
     format!(
         "This run is paused for manual review. The agent has proposed safe \
          outputs of the following type(s) that require approval before they \
-         are applied: {}. Approve (Resume) to apply them, or Reject to discard \
-         them.",
+         are applied: {}. Review the proposed content in the \
+         'ado-aw-safe-outputs' summary tab on this run, then Approve (Resume) \
+         to apply them, or Reject to discard them.",
         reviewed.join(", ")
     )
 }
@@ -2130,6 +2141,47 @@ fn collect_safe_outputs_step() -> BashStep {
                   echo \"Safe outputs copied to $(Agent.TempDirectory)/staging\"\n\
                   ls -la \"$(Agent.TempDirectory)/staging\" 2>/dev/null || echo \"No safe outputs found\"\n";
     bash("Collect safe outputs from AWF container", script).with_condition(Condition::Always)
+}
+
+/// Render the proposed safe outputs to a sanitized markdown file and attach it
+/// to the build summary tab (`##vso[task.uploadsummary]`), via the
+/// `approval-summary.js` ado-script bundle.
+///
+/// Emitted at the **end of the Agent job** (after `collect_safe_outputs_step`
+/// has staged `safe_outputs.ndjson`), never in the Detection/threat-analysis
+/// job. The ado-script bundle is delivered earlier in the same job by the
+/// ado-script extension's agent-prepare steps (gated on
+/// `safe_outputs_summary_active`).
+///
+/// `reviewed` is the compiler-resolved set of approval-gated tool names; when
+/// non-empty the bundle lists those proposals first under a "Pending approval"
+/// heading. It is passed through the typed env block (not spliced into the
+/// shell command), so tool names never reach a shell word-split.
+///
+/// Best-effort: a non-zero exit from the bundle is downgraded to a warning so
+/// rendering the summary can never fail the build or block the review gate.
+/// The output base name is namespaced (`ado-aw-safe-outputs.md`) so the
+/// ADO-derived summary-tab title never collides with a consumer/template-target
+/// `task.uploadsummary` tab.
+fn safe_outputs_summary_step(reviewed: &[String]) -> BashStep {
+    use super::ir::env::EnvValue;
+    let approval_summary_path =
+        super::extensions::ado_script::APPROVAL_SUMMARY_PATH;
+    let script = format!(
+        "node '{approval_summary_path}' \
+         || echo \"##vso[task.logissue type=warning]approval-summary step failed (non-fatal)\"\n"
+    );
+    bash("Render safe-outputs summary", script)
+        .with_env(
+            "AW_SAFE_OUTPUTS_NDJSON",
+            EnvValue::literal("$(Agent.TempDirectory)/staging/safe_outputs.ndjson"),
+        )
+        .with_env(
+            "AW_APPROVAL_SUMMARY_OUT",
+            EnvValue::literal("$(Agent.TempDirectory)/ado-aw-safe-outputs.md"),
+        )
+        .with_env("AW_REVIEWED_TOOLS", EnvValue::literal(reviewed.join(",")))
+        .with_condition(Condition::Always)
 }
 
 fn stop_mcpg_step() -> BashStep {

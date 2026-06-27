@@ -6039,6 +6039,22 @@ fn compile_inline_source(name: &str, source: &str) -> (bool, String, String) {
     (output.status.success(), compiled, stderr)
 }
 
+/// Extract a single `- job: <name>` block from compiled YAML, from its header
+/// up to (but not including) the next top-level job header. Used to assert that
+/// a step lands in the expected job.
+fn job_block<'a>(compiled: &'a str, job: &str) -> &'a str {
+    let header = format!("- job: {job}");
+    let start = compiled
+        .find(&header)
+        .unwrap_or_else(|| panic!("job '{job}' not found in:\n{compiled}"));
+    let rest = &compiled[start..];
+    // Skip past this header, then find the next top-level job header.
+    match rest[1..].find("\n- job: ") {
+        Some(rel) => &rest[..rel + 1],
+        None => rest,
+    }
+}
+
 /// With `supply-chain.feed` + `supply-chain.registry` configured, every
 /// GitHub/GHCR fetch is rerouted to the internal feed + registry while
 /// checksum verification is preserved.
@@ -6417,6 +6433,112 @@ teardown:
     assert!(
         !td_block.contains("SafeOutputs_Reviewed"),
         "Teardown must NOT depend on the human-gated SafeOutputs_Reviewed job:\n{td_block}"
+    );
+}
+
+/// The safe-outputs summary step is rendered at the END of the Agent job (and
+/// NOT in the Detection job) whenever a manual-review pipeline is compiled, and
+/// it passes the reviewed tool list to the bundle.
+#[test]
+fn test_safe_outputs_summary_step_emitted_for_review_pipeline() {
+    let source = r#"---
+name: "Summary Review Agent"
+description: "Manual review with summary"
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+    require-approval: true
+  add-pr-comment: {}
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("summary-review", source);
+    assert!(ok, "pipeline should compile: {stderr}");
+
+    // The render step + uploadsummary wiring is present.
+    assert!(
+        compiled.contains("Render safe-outputs summary"),
+        "expected the summary render step:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("approval-summary.js"),
+        "expected the approval-summary bundle invocation:\n{compiled}"
+    );
+    // Namespaced output base name (no tab-title collision with consumers).
+    assert!(
+        compiled.contains("ado-aw-safe-outputs.md"),
+        "expected the namespaced summary output path:\n{compiled}"
+    );
+    // The reviewed tool is passed; the automatic tool is not in the reviewed list.
+    assert!(
+        compiled.contains("AW_REVIEWED_TOOLS: create-pull-request"),
+        "expected the reviewed tool list passed via env:\n{compiled}"
+    );
+
+    // The step lives in the Agent job, not the Detection job.
+    let agent_block = job_block(&compiled, "Agent");
+    let detection_block = job_block(&compiled, "Detection");
+    assert!(
+        agent_block.contains("Render safe-outputs summary"),
+        "summary step must be in the Agent job:\n{agent_block}"
+    );
+    assert!(
+        !detection_block.contains("Render safe-outputs summary"),
+        "summary step must NOT be in the Detection job:\n{detection_block}"
+    );
+}
+
+/// The summary step is also emitted for a plain safe-outputs pipeline with no
+/// approval configured (always-on transparency), with an empty reviewed list.
+#[test]
+fn test_safe_outputs_summary_step_emitted_for_plain_pipeline() {
+    let source = r#"---
+name: "Summary Plain Agent"
+description: "Plain safe outputs with summary"
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("summary-plain", source);
+    assert!(ok, "pipeline should compile: {stderr}");
+    assert!(
+        compiled.contains("Render safe-outputs summary"),
+        "expected the summary render step for a plain pipeline:\n{compiled}"
+    );
+    // No reviewed tools → the env var is present but empty.
+    assert!(
+        compiled.contains("AW_REVIEWED_TOOLS:"),
+        "expected the reviewed-tools env var (empty):\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("AW_REVIEWED_TOOLS: create-pull-request"),
+        "no tool should be reviewed in a plain pipeline:\n{compiled}"
+    );
+}
+
+/// With no safe-output tools enabled at all, the summary step is not emitted.
+#[test]
+fn test_safe_outputs_summary_step_absent_without_safe_outputs() {
+    let source = r#"---
+name: "No Safe Outputs Agent"
+description: "Agent with no safe outputs"
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("summary-absent", source);
+    assert!(ok, "pipeline should compile: {stderr}");
+    assert!(
+        !compiled.contains("Render safe-outputs summary"),
+        "no summary step expected without safe outputs:\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("approval-summary.js"),
+        "no approval-summary bundle invocation expected:\n{compiled}"
     );
 }
 
