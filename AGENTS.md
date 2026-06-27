@@ -219,10 +219,13 @@ Every compiled pipeline runs as three sequential jobs:
 ├── ado-aw-derive/        # Proc-macro crate: #[derive(SanitizeConfig)], #[derive(SanitizeContent)]
 ├── .claude-plugin/       # Root Claude marketplace catalog (makes the repo installable via `/plugin marketplace add`); release-please-versioned
 │   └── marketplace.json  # Lists the ado-aw plugin with source ./agency/plugins/ado-aw
+├── .github/plugin/       # Copilot marketplace catalog (mirrors .claude-plugin/marketplace.json for Copilot); release-please-versioned
+│   └── marketplace.json  # Lists the ado-aw plugin with source ./agency/plugins/ado-aw
 ├── agency/               # Agency / Claude Code marketplace plugin (canonical source of truth)
 │   └── plugins/ado-aw/   # Version-locked plugin (release-please bumps version + pinned prompt URLs); listed in Agency marketplace via external `source`; scaffolded into consumer repos by `ado-aw init --agency`
 │       ├── .claude-plugin/ # plugin.json (manifest)
 │       ├── .mcp.json     # Wires read-only `ado-aw mcp-author` stdio server
+│       ├── README.md     # Plugin readme
 │       ├── agency.json   # Marketplace governance metadata + external source pointer
 │       ├── agents/ado-aw.md # Dispatcher subagent
 │       ├── skills/       # 6 SKILL.md playbooks (create/update/debug-workflow, compile-and-validate, manage-lifecycle, audit-build)

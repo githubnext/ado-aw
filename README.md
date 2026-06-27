@@ -628,6 +628,13 @@ index to jump to the right page.
 - [`docs/ir.md`](docs/ir.md) — typed Azure DevOps pipeline IR (`Pipeline`,
   jobs/stages/steps, output refs, graph pass, lowering, and target builders).
 - [`docs/cli.md`](docs/cli.md) — `ado-aw` CLI command and flag reference.
+- [`docs/agency-plugin.md`](docs/agency-plugin.md) — the Agency / Claude Code
+  plugin (`agency/plugins/ado-aw/`): canonical layout, six skills, `mcp-author`
+  wiring, the self-contained root marketplace catalogs, `init --agency`
+  scaffolding, release-please version-locking, and shared-marketplace listing.
+- [`docs/audit.md`](docs/audit.md) — `ado-aw audit`: accepted build-id / URL
+  forms, artifact layout, cache behavior, rejection tracing, and `AuditData`
+  report shape.
 - [`docs/mcp.md`](docs/mcp.md) — MCP server configuration (stdio containers,
   HTTP servers, env passthrough).
 - [`docs/mcp-author.md`](docs/mcp-author.md) — author-facing MCP server
