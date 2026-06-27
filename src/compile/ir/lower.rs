@@ -804,16 +804,16 @@ fn merge_condition_with_template_param(internal: &str, param_name: &str) -> Stri
 }
 
 fn lower_pool(pool: &Pool) -> Value {
-    if let Pool::Server = pool {
-        // Agentless/server job: ADO expects the scalar `pool: server`.
-        return s("server");
-    }
-    let mut m = Mapping::new();
     match pool {
+        // Agentless/server job: ADO expects the scalar `pool: server`.
+        Pool::Server => s("server"),
         Pool::VmImage(img) => {
+            let mut m = Mapping::new();
             m.insert(s("vmImage"), s(img));
+            Value::Mapping(m)
         }
         Pool::Named { name, image, os } => {
+            let mut m = Mapping::new();
             m.insert(s("name"), s(name));
             if let Some(img) = image {
                 m.insert(s("image"), s(img));
@@ -821,10 +821,9 @@ fn lower_pool(pool: &Pool) -> Value {
             if let Some(os) = os {
                 m.insert(s("os"), s(os));
             }
+            Value::Mapping(m)
         }
-        Pool::Server => unreachable!("handled above"),
     }
-    Value::Mapping(m)
 }
 
 pub(crate) fn lower_step(step: &Step, ctx: &LoweringContext<'_>) -> Result<Value> {

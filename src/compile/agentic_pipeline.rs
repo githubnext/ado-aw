@@ -1261,6 +1261,14 @@ fn build_manual_review_job(
 /// explicitly asks to `resume`.
 fn aggregate_approval_config(front_matter: &FrontMatter, reviewed: &[String]) -> ApprovalConfig {
     use std::collections::BTreeSet;
+    // The sole caller (`build_manual_review_job`) only invokes this when at
+    // least one tool requires approval. Calling it with an empty slice would
+    // return `on_timeout: Some(Resume)` (a fail-OPEN default), so pin the
+    // invariant to catch future misuse in debug/test builds.
+    debug_assert!(
+        !reviewed.is_empty(),
+        "aggregate_approval_config called with no reviewed tools (would default to fail-open resume)"
+    );
     let mut approvers: BTreeSet<String> = BTreeSet::new();
     let mut notify: BTreeSet<String> = BTreeSet::new();
     let mut timeout_minutes: Option<u32> = None;
@@ -2370,8 +2378,18 @@ fn detect_reviewed_proposals_step(working_directory: &str, reviewed: &[String]) 
            if command -v jq >/dev/null 2>&1; then\n    \
              # Match only the top-level \"name\" of each NDJSON object so a\n    \
              # \"name\" key nested inside a tool's params can't false-positive.\n    \
-             if jq -r 'select(type==\"object\") | .name // empty' \"$PROPOSALS\" 2>/dev/null | grep -Eqx '({alternation})'; then\n      \
-               HAS_REVIEWED=\"true\"\n    \
+             if NAMES=$(jq -r 'select(type==\"object\") | .name // empty' \"$PROPOSALS\" 2>/dev/null); then\n      \
+               if printf '%s\\n' \"$NAMES\" | grep -Eqx '({alternation})'; then\n        \
+                 HAS_REVIEWED=\"true\"\n      \
+               fi\n    \
+             else\n      \
+               # jq failed (e.g. corrupt/truncated proposals). Fall back to the\n      \
+               # broad raw scan so detection fails safe (over-match, never under-\n      \
+               # match) and record that detection was inconclusive.\n      \
+               echo \"##vso[task.logissue type=warning]approval-gate: jq failed to parse $PROPOSALS; using raw scan for reviewed-proposal detection\"\n      \
+               if grep -Eq '\"name\"[[:space:]]*:[[:space:]]*\"({alternation})\"' \"$PROPOSALS\"; then\n        \
+                 HAS_REVIEWED=\"true\"\n      \
+               fi\n    \
              fi\n  \
            elif grep -Eq '\"name\"[[:space:]]*:[[:space:]]*\"({alternation})\"' \"$PROPOSALS\"; then\n    \
              # jq unavailable: fall back to a broad scan. May over-match (pause\n    \

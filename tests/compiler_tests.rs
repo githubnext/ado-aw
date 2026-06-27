@@ -6297,6 +6297,60 @@ safe-outputs:
     );
 }
 
+/// 1ES-target variant: the agentless `ManualReview` server job must emit
+/// `pool: server` and must NOT be wrapped in a `templateContext` block (the
+/// 1ES path skips the wrap for server jobs — see `onees_ir.rs`).
+#[test]
+fn test_require_approval_emits_server_pool_on_1es_target() {
+    let source = r#"---
+name: "Approval Agent 1ES"
+description: "Manual review on the 1ES target"
+target: 1es
+safe-outputs:
+  require-approval: true
+  create-pull-request:
+    target-branch: main
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("approval-1es", source);
+    assert!(ok, "1ES require-approval pipeline should compile: {stderr}");
+
+    // Isolate the ManualReview job block (1ES nests jobs under stages, so the
+    // `- job:` header is indented — match on the bare "job: ManualReview" and
+    // slice to the next "- job: " header).
+    let review_idx = compiled
+        .find("job: ManualReview")
+        .expect("ManualReview job present on 1ES");
+    let review_block = &compiled[review_idx..];
+    let review_block = match review_block.find("- job: ") {
+        // Skip the current header, then find the following job header.
+        Some(_) => {
+            let after_header = &review_block["job: ManualReview".len()..];
+            match after_header.find("- job: ") {
+                Some(rel) => &review_block[.."job: ManualReview".len() + rel],
+                None => review_block,
+            }
+        }
+        None => review_block,
+    };
+
+    assert!(
+        review_block.contains("pool: server"),
+        "ManualReview must be an agentless server job on 1ES:\n{review_block}"
+    );
+    assert!(
+        review_block.contains("task: ManualValidation@1"),
+        "expected the ManualValidation@1 task on 1ES:\n{review_block}"
+    );
+    // The 1ES server job must not carry a templateContext wrapper.
+    assert!(
+        !review_block.contains("templateContext"),
+        "1ES ManualReview server job must NOT be wrapped in templateContext:\n{review_block}"
+    );
+}
+
 /// Without any `require-approval`, no ManualReview job or ManualValidation task
 /// is emitted (zero behavior change for existing pipelines).
 #[test]
