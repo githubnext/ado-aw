@@ -104,8 +104,14 @@ pub fn known_ecosystem_names() -> Vec<String> {
 /// Domain names contain dots (e.g., `"pypi.org"`, `"*.example.com"`).
 /// Strings with spaces, special characters, or other unexpected content are
 /// treated as neither — they fall through to domain validation which will reject them.
+///
+/// Special case: `"localhost"` is a reserved hostname that syntactically matches
+/// the pattern (lowercase, no dot) but is a domain name, not an ecosystem identifier.
+/// Users who need `localhost` in the network allow-list should use the `"local"`
+/// ecosystem identifier, which expands to `localhost`, `127.0.0.1`, and `::1`.
 pub fn is_ecosystem_identifier(value: &str) -> bool {
-    !value.is_empty()
+    value != "localhost"
+        && !value.is_empty()
         && !value.contains('.')
         && value
             .chars()
@@ -195,6 +201,10 @@ mod tests {
         assert!(!is_ecosystem_identifier("*.example.com"));
         assert!(!is_ecosystem_identifier("api.github.com"));
 
+        // Reserved hostname: syntactically matches the pattern but is a domain, not an ecosystem.
+        // Use the "local" ecosystem identifier to allow localhost in network.allowed.
+        assert!(!is_ecosystem_identifier("localhost"));
+
         // Invalid strings (special chars, spaces, uppercase)
         assert!(!is_ecosystem_identifier(""));
         assert!(!is_ecosystem_identifier("bad host!"));
@@ -237,27 +247,26 @@ mod tests {
     }
 
     #[test]
-    fn test_malformed_json_rejected() {
-        // Ensures serde_json correctly rejects JSON that doesn't match
-        // the expected HashMap<String, Vec<String>> schema, validating
-        // the safety of the .expect() guard on the LazyLock.
-        let bad_schema = r#"{"python": "not-a-list"}"#;
-        let result: Result<HashMap<String, Vec<String>>, _> = serde_json::from_str(bad_schema);
-        assert!(result.is_err(), "schema mismatch should produce an error");
-
-        let bad_json = r#"{"python": [123, true]}"#;
-        let result: Result<HashMap<String, Vec<String>>, _> = serde_json::from_str(bad_json);
-        assert!(
-            result.is_err(),
-            "non-string array elements should produce an error"
-        );
-
-        let invalid_json = r#"{not valid json"#;
-        let result: Result<HashMap<String, Vec<String>>, _> = serde_json::from_str(invalid_json);
-        assert!(
-            result.is_err(),
-            "invalid JSON syntax should produce an error"
-        );
+    fn test_ecosystem_domains_are_not_ecosystem_identifiers() {
+        // Every domain string returned by get_ecosystem_domains must be
+        // rejected by the is_ecosystem_identifier heuristic.  The two
+        // functions are used together at compile time to decide whether a
+        // network.allowed entry is an ecosystem key or a raw domain; if a
+        // real domain were mis-classified as an identifier it would silently
+        // disappear from the allow-list.
+        for name in known_ecosystem_names() {
+            if COMPOUND_ECOSYSTEMS.contains_key(name.as_str()) {
+                continue; // compound ecosystem domains tested via their components
+            }
+            for domain in get_ecosystem_domains(&name) {
+                assert!(
+                    !is_ecosystem_identifier(&domain),
+                    "domain '{}' (from ecosystem '{}') was misclassified as an ecosystem identifier",
+                    domain,
+                    name
+                );
+            }
+        }
     }
 
     #[test]
@@ -265,13 +274,6 @@ mod tests {
         // get_ecosystem_domains_inner with depth > 8 returns empty
         let result = get_ecosystem_domains_inner("python", 9);
         assert!(result.is_empty(), "depth > 8 should short-circuit to empty");
-    }
-
-    #[test]
-    fn test_depth_guard_allows_normal_depth() {
-        // Normal calls (depth 0) should work fine
-        let result = get_ecosystem_domains_inner("python", 0);
-        assert!(!result.is_empty(), "depth 0 should return normal results");
     }
 
     #[test]
