@@ -294,7 +294,16 @@ export function sanitizeBlock(value: unknown): string {
   s = s
     .replace(/\r\n?/g, "\n")
     .replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, "");
-  // Neutralise code-fence sequences so the body can't escape the ``` block.
+  // Neutralise code-fence sequences so the body can't break out of the
+  // enclosing ```text block. We substitute each backtick run with U+02BC
+  // (MODIFIER LETTER APOSTROPHE), which is *deliberately* near-identical to a
+  // backtick: it keeps the body visually faithful to the original while
+  // guaranteeing that NO real backtick run survives — so a closing fence is
+  // impossible regardless of how the (undocumented) ADO summary renderer
+  // tokenises fences. Approaches that keep real backticks (e.g. separating them
+  // with a zero-width space) would re-introduce a breakout if the renderer
+  // strips the separator before fence-scanning, so they are intentionally
+  // avoided on this security-sensitive path.
   s = s.replace(/```/g, "\u02bc\u02bc\u02bc");
   return truncate(s, BODY_MAX_CHARS);
 }

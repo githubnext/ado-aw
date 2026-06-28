@@ -30,11 +30,15 @@ import { fileURLToPath } from "node:url";
 import { logWarning, uploadSummary } from "../shared/vso-logger.js";
 import { parseProposals, renderSummary } from "./render.js";
 
-/** Parse the comma-separated reviewed-tool list into a Set. */
+/**
+ * Parse the reviewed-tool list (newline-delimited — see the compiler's
+ * `safe_outputs_summary_step`) into a Set. Newline is used rather than a comma
+ * because a comma can legally appear in a YAML map key but a newline cannot.
+ */
 export function parseReviewed(value: string | undefined): Set<string> {
   const out = new Set<string>();
   if (!value) return out;
-  for (const part of value.split(",")) {
+  for (const part of value.split("\n")) {
     const t = part.trim();
     if (t.length > 0) out.add(t);
   }

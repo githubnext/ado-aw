@@ -2244,7 +2244,12 @@ fn collect_safe_outputs_step() -> BashStep {
 /// `reviewed` is the compiler-resolved set of approval-gated tool names; when
 /// non-empty the bundle lists those proposals first under a "Pending approval"
 /// heading. It is passed through the typed env block (not spliced into the
-/// shell command), so tool names never reach a shell word-split.
+/// shell command), so tool names never reach a shell word-split. Tool names are
+/// joined with a newline (`\n`) rather than a comma: a `,` can legally appear in
+/// an unrestricted YAML map key, so a comma delimiter could misparse such a key,
+/// whereas a newline can never appear in a one-line map key. (`is_safe_tool_name`
+/// already rejects both via `validate_safe_outputs_keys`, so this is
+/// defense-in-depth.)
 ///
 /// Best-effort: a non-zero exit from the bundle is downgraded to a warning so
 /// rendering the summary can never fail the build or block the review gate.
@@ -2268,7 +2273,7 @@ fn safe_outputs_summary_step(reviewed: &[String]) -> BashStep {
             "AW_APPROVAL_SUMMARY_OUT",
             EnvValue::literal("$(Agent.TempDirectory)/ado-aw-safe-outputs.md"),
         )
-        .with_env("AW_REVIEWED_TOOLS", EnvValue::literal(reviewed.join(",")))
+        .with_env("AW_REVIEWED_TOOLS", EnvValue::literal(reviewed.join("\n")))
         .with_condition(Condition::Always)
 }
 

@@ -17,9 +17,14 @@ afterEach(() => {
 });
 
 describe("parseReviewed", () => {
-  it("splits a comma list, trims, and drops empties", () => {
-    const set = parseReviewed(" create-pull-request , , add-pr-comment ");
+  it("splits a newline-delimited list, trims, and drops empties", () => {
+    const set = parseReviewed(" create-pull-request \n \n add-pr-comment ");
     expect([...set].sort()).toEqual(["add-pr-comment", "create-pull-request"]);
+  });
+
+  it("does not split on commas (a comma may appear in a YAML map key)", () => {
+    const set = parseReviewed("weird,tool-name");
+    expect([...set]).toEqual(["weird,tool-name"]);
   });
 
   it("returns an empty set for undefined/empty", () => {
