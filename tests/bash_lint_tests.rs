@@ -131,6 +131,7 @@ const REQUIRED_STEP_DISPLAY_NAMES: &[&str] = &[
     "Stage schedule execution context (aw-context/schedule/*)", // src/compile/extensions/exec_context/schedule.rs (activated by on.schedule + execution-context.schedule.enabled: true)
     "Stage PR-checks execution context (aw-context/pr/checks/*)", // src/compile/extensions/exec_context/pr_checks.rs (activated by on.pr + execution-context.pr.checks.enabled: true)
     "Detect reviewed proposals", // src/compile/agentic_pipeline.rs detect_reviewed_proposals_step (activated by safe-outputs.require-approval)
+    "Render safe-outputs summary", // src/compile/agentic_pipeline.rs safe_outputs_summary_step (activated by any safe-output tool)
 ];
 
 fn ado_aw_binary() -> PathBuf {

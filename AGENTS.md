@@ -258,6 +258,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │           ├── exec-context-schedule/ # Scheduled-run context source (bundled to exec-context-schedule.js)
 │           ├── exec-context-pr-checks/ # PR validation checks context source (bundled to exec-context-pr-checks.js)
 │           ├── exec-context-repo/ # Repository identity context source (bundled to exec-context-repo.js)
+│           ├── approval-summary/ # Safe-outputs summary renderer (bundled to approval-summary.js; end-of-Agent-job summary tab)
 │           └── shared/   # Shared modules across bundles (auth, ado-client, env-facts, types.gen.ts)
 ├── tests/                # Integration tests and fixtures
 ├── docs/                 # Per-concept reference documentation (see index below)

@@ -83,6 +83,11 @@ pub(crate) const EXEC_CONTEXT_REPO_PATH: &str =
 /// by [`AdoScriptExtension::declarations`].
 pub(crate) const EXEC_CONTEXT_PR_SYNTH_PATH: &str =
     "/tmp/ado-aw-scripts/ado-script/exec-context-pr-synth.js";
+/// Path to the safe-outputs approval-summary bundle inside the unpacked
+/// `ado-script.zip`. Runs at the end of the Agent job to render the proposed
+/// safe outputs to a sanitized markdown summary tab.
+pub(crate) const APPROVAL_SUMMARY_PATH: &str =
+    "/tmp/ado-aw-scripts/ado-script/approval-summary.js";
 const RELEASE_BASE_URL: &str = "https://github.com/githubnext/ado-aw/releases/download";
 
 /// Single always-on extension that owns all `ado-script` bundle wiring.
@@ -142,6 +147,12 @@ pub struct AdoScriptExtension {
     /// build-out — see plan.md) will activate. Always-on capability,
     /// default OFF (opt-in).
     pub exec_context_repo_active: bool,
+    /// Whether the safe-outputs approval-summary step will run at the
+    /// end of the Agent job. True whenever the workflow enables any
+    /// safe-output tool. When true the Agent-job install/download must
+    /// fire so that `approval-summary.js` is present for the
+    /// end-of-job render step (emitted by `build_agent_job`).
+    pub safe_outputs_summary_active: bool,
     /// PR trigger config required to build `PR_SYNTH_SPEC`. `Some(_)`
     /// is the single source of truth for "synthetic-from-ci path is
     /// active for this agent" — `is_some()` replaces what used to be a
@@ -621,6 +632,7 @@ impl CompilerExtension for AdoScriptExtension {
             || self.exec_context_schedule_active
             || self.exec_context_pr_checks_active
             || self.exec_context_repo_active
+            || self.safe_outputs_summary_active
         {
             agent_prepare_steps.extend(install_and_download_steps_typed(self.supply_chain.as_ref()));
             if import_active {
@@ -824,6 +836,7 @@ mod tests {
             exec_context_schedule_active: false,
             exec_context_pr_checks_active: false,
             exec_context_repo_active: false,
+            safe_outputs_summary_active: false,
             pr_trigger_for_synth: None,
             supply_chain: None,
         }
@@ -893,6 +906,7 @@ mod tests {
             exec_context_schedule_active: false,
             exec_context_pr_checks_active: false,
             exec_context_repo_active: false,
+            safe_outputs_summary_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -949,6 +963,7 @@ mod tests {
             exec_context_schedule_active: false,
             exec_context_pr_checks_active: false,
             exec_context_repo_active: false,
+            safe_outputs_summary_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -1113,6 +1128,7 @@ mod tests {
             exec_context_schedule_active: false,
             exec_context_pr_checks_active: false,
             exec_context_repo_active: false,
+            safe_outputs_summary_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -1645,6 +1661,7 @@ mod tests {
             exec_context_schedule_active: false,
             exec_context_pr_checks_active: false,
             exec_context_repo_active: false,
+            safe_outputs_summary_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],

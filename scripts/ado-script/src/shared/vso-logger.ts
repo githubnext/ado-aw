@@ -75,6 +75,23 @@ export function addBuildTag(tag: string): void {
   emit(`##vso[build.addbuildtag]${escapeMessage(tag)}`);
 }
 
+/**
+ * Attach a file as a section in the run's **build summary** tab via
+ * `##vso[task.uploadsummary]<path>`. ADO derives the section title from the
+ * file's base name (no extension); multiple uploads each add a section and ADO
+ * does not de-duplicate identical base names. Callers must therefore pass a
+ * namespaced path (e.g. `.../ado-aw-safe-outputs.md`) so the section never
+ * collides with a consumer/template-target summary tab.
+ *
+ * The path is emitted as the command *body* (after the closing `]`), so it is
+ * escaped with the message escaper. A leading `#` is not a concern here because
+ * the value is a filesystem path, not free-form text, but we keep the same
+ * body-escaping contract as the other emitters for consistency.
+ */
+export function uploadSummary(path: string): void {
+  emit(`##vso[task.uploadsummary]${escapeMessage(path)}`);
+}
+
 export function logWarning(msg: string): void {
   emit(`##vso[task.logissue type=warning;]${escapeMessage(msg)}`);
 }

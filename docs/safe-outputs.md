@@ -123,6 +123,37 @@ apply one note to every tool.
 The Detection threat gate always runs first, so a flagged run applies nothing —
 automatic or reviewed.
 
+### Safe-outputs summary tab
+
+Every run that proposes safe outputs publishes a human-readable **build summary
+tab** titled **`ado-aw-safe-outputs`**, listing what the agent proposed. This is
+always on — it does **not** require `require-approval` — so non-elevated runs get
+the same transparency, and it is the panel a reviewer reads before approving a
+gated run.
+
+- The summary is rendered at the **end of the Agent job** (the job that produced
+  the proposals) by the `approval-summary` ado-script bundle, and attached via
+  `##vso[task.uploadsummary]`. It is **not** produced by the Detection
+  (threat-analysis) stage, whose only job is inspecting proposals for threats.
+- Each proposal is shown with per-tool key fields (e.g. PR title + target branch,
+  work-item title) plus a truncated excerpt of any long body. All content is
+  **agent-generated** and is sanitized for display (markdown/HTML escaped, code
+  fences neutralised, control characters stripped, long values truncated) so a
+  proposal cannot forge UI or break the layout.
+- When manual review is configured, the **pending-approval** proposals are listed
+  first (under a `⏳ Pending approval` heading), followed by the automatic ones.
+  With no approval configured, a single list is shown. The default review
+  message points approvers at this tab.
+- Rendering is best-effort: if it fails it is logged as a warning and never fails
+  the build or blocks the review gate.
+
+**Coexistence with your own summary tabs.** ADO derives a summary section's title
+from the uploaded file's base name and does not de-duplicate, so this feature uses
+a namespaced base name (`ado-aw-safe-outputs.md` → the `ado-aw-safe-outputs`
+section). It is additive and build-scoped: it appears as one extra section
+alongside any `task.uploadsummary` tabs your own steps publish (including under
+`target: job` / `target: stage`), and never collides with them.
+
 ### Executor authentication
 
 All write-bearing safe outputs (e.g. `create-pull-request`,
