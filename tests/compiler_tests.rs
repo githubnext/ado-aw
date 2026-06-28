@@ -6674,6 +6674,11 @@ safe-outputs:
         compiled.contains("Check the work-item priority and area path."),
         "second tool's instructions must also be present (not dropped):\n{compiled}"
     );
+    // On this branch the aggregated message points reviewers at the summary tab.
+    assert!(
+        compiled.contains("'ado-aw-safe-outputs' summary tab"),
+        "aggregated gate message must point at the summary tab:\n{compiled}"
+    );
 }
 
 /// `timeout-minutes` must bound the **task** (`ManualValidation@1`'s

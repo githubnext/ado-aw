@@ -1388,7 +1388,11 @@ fn compose_review_instructions(reviewed: &[String], per_tool: &[(String, String)
     for (instr, tools) in &grouped {
         msg.push_str(&format!("\n- {}: {}", tools.join(", "), instr));
     }
-    msg.push_str("\n\nApprove (Resume) to apply them, or Reject to discard them.");
+    msg.push_str(
+        "\n\nReview the proposed content in the 'ado-aw-safe-outputs' summary \
+         tab on this run, then Approve (Resume) to apply them, or Reject to \
+         discard them.",
+    );
     msg
 }
 
