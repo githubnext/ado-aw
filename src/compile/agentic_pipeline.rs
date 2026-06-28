@@ -876,8 +876,8 @@ fn build_agent_job(
     // run); when manual review is configured the reviewed proposals are listed
     // first. The ado-script bundle was delivered earlier in this job by the
     // ado-script extension (gated on safe_outputs_summary_active).
-    let (_, reviewed_summary_tools) = front_matter.partition_safe_outputs_by_approval();
     if front_matter.safe_output_tool_names().next().is_some() {
+        let (_, reviewed_summary_tools) = front_matter.partition_safe_outputs_by_approval();
         steps.push(Step::Bash(safe_outputs_summary_step(&reviewed_summary_tools)));
     }
 

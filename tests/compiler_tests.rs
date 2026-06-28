@@ -6043,7 +6043,9 @@ fn compile_inline_source(name: &str, source: &str) -> (bool, String, String) {
 /// up to (but not including) the next top-level job header. Used to assert that
 /// a step lands in the expected job.
 fn job_block<'a>(compiled: &'a str, job: &str) -> &'a str {
-    let header = format!("- job: {job}");
+    // Anchor with a trailing newline so e.g. job "Agent" does not match a
+    // hypothetical "Agent_Reviewed" header that happens to appear first.
+    let header = format!("- job: {job}\n");
     let start = compiled
         .find(&header)
         .unwrap_or_else(|| panic!("job '{job}' not found in:\n{compiled}"));

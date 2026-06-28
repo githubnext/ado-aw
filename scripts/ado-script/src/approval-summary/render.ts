@@ -200,6 +200,29 @@ const TOOL_SPECS: Record<string, ToolSpec> = {
       { label: "File", key: "file_path" },
     ],
   },
+  // Terminal / diagnostic signals. These are always-enabled (not write-gated)
+  // and surface in the summary's automatic section; their informative free-text
+  // field deserves a fenced body rather than a 300-char inline truncation.
+  noop: {
+    title: "No-op",
+    fields: [],
+    body: "context",
+  },
+  "report-incomplete": {
+    title: "Report incomplete",
+    fields: [],
+    body: "reason",
+  },
+  "missing-tool": {
+    title: "Missing tool",
+    fields: [{ label: "Tool", key: "tool_name" }],
+    body: "context",
+  },
+  "missing-data": {
+    title: "Missing data",
+    fields: [{ label: "Data type", key: "data_type" }],
+    body: "reason",
+  },
 };
 
 /** Title-case fallback for an unmapped tool name (kebab → "Kebab case"). */
@@ -242,6 +265,9 @@ export function sanitizeInline(value: unknown): string {
   // Single line: newlines/tabs → spaces; drop other control chars.
   s = s.replace(/[\t\r\n]+/g, " ").replace(/[\u0000-\u001f\u007f]/g, "");
   s = s.replace(/\s{2,}/g, " ").trim();
+  // HTML-entity-encode `&` first so an agent-supplied entity sequence
+  // (e.g. `&lt;`) is shown literally rather than decoded by the browser.
+  s = s.replace(/&/g, "&amp;");
   // Escape markdown + HTML + table metacharacters.
   s = s.replace(/([\\`*_{}\[\]()#+\-!|<>~])/g, "\\$1");
   return truncate(s, INLINE_MAX_CHARS);
@@ -298,10 +324,12 @@ function renderProposal(p: Proposal): string {
   const fields = spec ? spec.fields : genericFields(p.record);
 
   const lines: string[] = [];
-  // The tool name is a compiler-validated safe identifier ([a-z0-9-]); render
-  // it verbatim inside a code span (markdown is literal inside backticks).
-  // Strip backticks defensively so it can't break out of the span.
-  const safeName = p.name.replace(/`/g, "");
+  // The tool name is normally a compiler-validated safe identifier ([a-z0-9-]),
+  // but `parseProposals` accepts any non-empty string `name`, so a crafted
+  // record could carry backticks or control characters that break the heading's
+  // code span. Strip backticks AND control/newline characters defensively so
+  // the name always renders as a single, contained code span.
+  const safeName = p.name.replace(/[`\u0000-\u001f\u007f]/g, "");
   lines.push(`#### ${sanitizeInline(title)} \`${safeName}\``);
 
   const rows: string[] = [];

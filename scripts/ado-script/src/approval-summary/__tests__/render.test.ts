@@ -68,6 +68,14 @@ describe("sanitizeInline", () => {
     expect(out.length).toBeLessThan(5000);
     expect(out).toContain("(truncated)");
   });
+
+  it("entity-encodes & so agent-supplied entities are shown literally", () => {
+    const out = sanitizeInline("Tom &amp; Jerry &lt;tag&gt;");
+    // The ampersands are encoded, so a browser cannot decode `&lt;` back to `<`.
+    expect(out).toContain("&amp;amp;");
+    expect(out).toContain("&amp;lt;");
+    expect(out).not.toMatch(/&lt;tag/);
+  });
 });
 
 describe("sanitizeBlock", () => {
@@ -168,9 +176,48 @@ describe("renderSummary — per-tool detail", () => {
     expect(md).toContain("| zeta | 9 |");
     expect(md).not.toContain("obj");
   });
+
+  it("surfaces diagnostic-tool free-text in a fenced body", () => {
+    const md = renderSummary(
+      parseProposals(
+        ndjson(
+          { name: "noop", context: "Nothing to do.\nAll inputs were valid." },
+          { name: "report-incomplete", reason: "Ran out of API quota." },
+          { name: "missing-tool", tool_name: "kubectl", context: "needed for deploy" },
+          { name: "missing-data", data_type: "schema", reason: "not provided" },
+        ),
+      ),
+      new Set(),
+    );
+    expect(md).toContain("`noop`");
+    expect(md).toContain("```text");
+    // noop's multi-line context goes in a fenced body, not a truncated cell.
+    expect(md).toContain("Nothing to do.");
+    expect(md).toContain("All inputs were valid.");
+    // report-incomplete surfaces its reason.
+    expect(md).toContain("`report-incomplete`");
+    expect(md).toContain("Ran out of API quota.");
+    // missing-tool shows the tool field + context body.
+    expect(md).toContain("| Tool | kubectl |");
+    // missing-data shows the data-type field + reason body.
+    expect(md).toContain("| Data type | schema |");
+  });
 });
 
 describe("renderSummary — security", () => {
+  it("does not let a crafted tool name break the heading code span", () => {
+    const md = renderSummary(
+      parseProposals(ndjson({ name: "foo\nbar`baz", title: "x" })),
+      new Set(),
+    );
+    const heading = md.split("\n").find((l) => l.startsWith("#### "));
+    expect(heading).toBeDefined();
+    // Newline and backtick stripped from the name → it renders as a single
+    // clean code span on one line (if a newline survived, the heading would be
+    // split across lines and this exact span would not appear).
+    expect(heading).toContain("`foobarbaz`");
+  });
+
   it("does not let agent content forge UI or break out of the layout", () => {
     const hostile =
       "Looks fine | ✅ APPROVED | <script>alert(1)</script>\n```\n## Fake heading";
