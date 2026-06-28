@@ -64,7 +64,7 @@ safe-outputs:
     require-approval:
       approvers: ["[MyOrg]\\release-team"]   # who may approve (empty → anyone with run permission)
       notify-users: ["ops@example.com"]      # who is emailed (empty → no email)
-      timeout-minutes: 120                    # pending period (omit → job/stage timeout)
+      timeout-minutes: 120                    # pending period before on-timeout fires (omit → pipeline default)
       on-timeout: reject                      # reject (default, fail-closed) | resume
       instructions: "Verify the proposed PR before approving."
 ```
@@ -77,14 +77,24 @@ section-level `require-approval` applies; otherwise the tool is **not** gated.
 are sent; and the validation **fails closed** on timeout (`on-timeout: reject`),
 so un-approved outputs are never applied.
 
+**Timeout (`timeout-minutes` / `on-timeout`)** — `timeout-minutes` bounds the
+`ManualValidation@1` task's pending period; when it elapses the task applies
+`on-timeout` (`reject` by default, or `resume` to auto-approve). The agentless
+`ManualReview` job carries a slightly larger outer timeout as a hard bound, so a
+job-level cancellation never preempts the task's graceful `on-timeout` handling
+(in particular, `on-timeout: resume` reliably auto-approves rather than being
+cancelled). Omit `timeout-minutes` to inherit the pipeline default.
+
 **Reviewer message** — set `instructions` to control the text shown in the
 Review panel and notification emails. It is plain text and supports pipeline
 variable (`$(...)`) interpolation. When omitted, ado-aw generates a default
 message listing the reviewed safe-output type(s) awaiting approval. A run uses a
-**single** `ManualReview` gate covering every reviewed tool, so if more than one
-reviewed tool sets `instructions`, only the first (in sorted tool-name order) is
-used; set `instructions` on the section-level `require-approval` to control the
-message for the whole run.
+**single** `ManualReview` gate covering every reviewed tool: the gate message
+**lists every reviewed tool** and aggregates **all** author-supplied per-tool
+`instructions` (grouped when identical), so no tool's note is dropped when
+several are gated. A single reviewed tool with its own `instructions` shows that
+message verbatim; set `instructions` on the section-level `require-approval` to
+apply one note to every tool.
 
 **Execution shape** — manual review changes the compiled pipeline:
 
@@ -101,6 +111,14 @@ message for the whole run.
   a distinct `safe_outputs_reviewed` artifact. A rejected or timed-out review
   fails closed: the reviewed job is skipped while the automatic outputs are
   unaffected.
+- When **every** configured tool requires approval (no automatic tools),
+  execution is **not** split — the single `SafeOutputs` job is gated behind
+  `ManualReview` in its entirety. Note this also defers the always-enabled
+  diagnostic outputs (`noop`, `report_incomplete`, `missing-tool`,
+  `missing-data`) until after approval, since they share that one job. If you
+  want diagnostics to apply without waiting on a human, leave at least one
+  low-impact tool (e.g. `add-pr-comment`) non-gated so the automatic split job
+  is created.
 
 The Detection threat gate always runs first, so a flagged run applies nothing —
 automatic or reviewed.

@@ -1215,6 +1215,12 @@ fn build_safeoutputs_job(
     Ok(job)
 }
 
+/// Grace minutes added to the agentless `ManualReview` job-level timeout on top
+/// of the task's `timeoutInMinutes`. Keeps the job timeout strictly larger than
+/// the task timeout so the task's graceful `onTimeout` (reject/resume) always
+/// fires before any job-level cancellation could preempt it.
+const MANUAL_REVIEW_JOB_TIMEOUT_GRACE_MINUTES: u64 = 5;
+
 /// Build the agentless **ManualReview** job (a `ManualValidation@1` server
 /// task) when any enabled safe-output tool resolves to require manual review.
 ///
@@ -1237,9 +1243,16 @@ fn build_manual_review_job(
 
     let mut job = Job::new(prefix.id("ManualReview")?, "Manual Review", Pool::Server);
     job.steps = vec![Step::Task(build_manual_validation_step(&approval, &reviewed))];
-    // The validation's pending period is bounded by the agentless job timeout.
+    // The pending-period timeout is enforced on the TASK
+    // (`ManualValidation@1`'s step `timeoutInMinutes`, set in
+    // `build_manual_validation_step`) so that the task's `onTimeout`
+    // handler (reject/resume) fires gracefully. The job-level timeout is kept
+    // only as a strictly-larger outer hard bound: if it equalled the task
+    // timeout it would race with — and could preempt — the task's `onTimeout`,
+    // re-introducing the very cancellation that defeats `on-timeout: resume`.
     if let Some(mins) = approval.timeout_minutes {
-        job.timeout = Some(std::time::Duration::from_secs(60 * (mins as u64)));
+        let job_bound = (mins as u64) + MANUAL_REVIEW_JOB_TIMEOUT_GRACE_MINUTES;
+        job.timeout = Some(std::time::Duration::from_secs(60 * job_bound));
     }
     let _ = cfg; // pool/compiler context not needed for an agentless gate
     job.condition = Some(Condition::And(vec![
@@ -1269,13 +1282,32 @@ fn build_manual_review_job(
 /// gate. Lists are unioned; the timeout is the strictest (smallest) provided;
 /// `on-timeout` is fail-closed (`reject`) unless *every* contributing config
 /// explicitly asks to `resume`.
+///
+/// **Instructions:** every reviewed tool is listed and **all** author-supplied
+/// per-tool `instructions` are aggregated into the single gate message (grouped
+/// when identical) — no tool's note is dropped. See
+/// [`compose_review_instructions`].
 fn aggregate_approval_config(front_matter: &FrontMatter, reviewed: &[String]) -> ApprovalConfig {
     use std::collections::BTreeSet;
+    // The sole caller (`build_manual_review_job`) only invokes this when at
+    // least one tool requires approval. Calling it with an empty slice would
+    // return `on_timeout: Some(Resume)` (a fail-OPEN default), so enforce the
+    // invariant with a release-build `assert!` — this is a security boundary
+    // and the compiler is not a hot path, so the cost is irrelevant.
+    assert!(
+        !reviewed.is_empty(),
+        "aggregate_approval_config called with no reviewed tools (would default to fail-open resume)"
+    );
     let mut approvers: BTreeSet<String> = BTreeSet::new();
     let mut notify: BTreeSet<String> = BTreeSet::new();
     let mut timeout_minutes: Option<u32> = None;
     let mut all_resume = true;
-    let mut instructions: Option<String> = None;
+    // Per-tool author instructions, in sorted (reviewed) order. A single
+    // ManualReview gate covers every reviewed tool, so rather than silently
+    // dropping all but the first note (the old behaviour), we keep them all and
+    // compose a message that lists every tool and attaches its note — see
+    // `compose_review_instructions`.
+    let mut per_tool_instructions: Vec<(String, String)> = Vec::new();
 
     for tool in reviewed {
         let Some(cfg) = front_matter.tool_requires_approval(tool) else {
@@ -1295,11 +1327,11 @@ fn aggregate_approval_config(front_matter: &FrontMatter, reviewed: &[String]) ->
             Some(ApprovalOnTimeout::Resume) => {}
             _ => all_resume = false,
         }
-        // A single ManualReview gate covers all reviewed tools, so only the
-        // first non-empty `instructions` wins (tools are iterated in sorted
-        // order). Documented in docs/safe-outputs.md.
-        if instructions.is_none() {
-            instructions = cfg.instructions;
+        if let Some(instr) = cfg.instructions {
+            let instr = instr.trim();
+            if !instr.is_empty() {
+                per_tool_instructions.push((tool.clone(), instr.to_string()));
+            }
         }
     }
 
@@ -1312,8 +1344,52 @@ fn aggregate_approval_config(front_matter: &FrontMatter, reviewed: &[String]) ->
         } else {
             ApprovalOnTimeout::Reject
         }),
-        instructions,
+        instructions: Some(compose_review_instructions(reviewed, &per_tool_instructions)),
     }
+}
+
+/// Compose the single `ManualValidation@1` reviewer message for a run.
+///
+/// Because one gate covers every reviewed tool, this **lists every reviewed
+/// tool** (the actions pending approval) and attaches **all** author-supplied
+/// per-tool notes — none is silently dropped. `per_tool` holds the non-empty
+/// instructions in sorted reviewed order; tools sharing identical note text
+/// (e.g. inherited from a section-level `require-approval`) are grouped so the
+/// note appears once, attributed to every tool it covers.
+///
+/// - No author notes anywhere → the standard default listing every tool.
+/// - Exactly one reviewed tool with a note → that note verbatim (unchanged
+///   single-tool authoring experience).
+/// - Multiple reviewed tools with at least one note → enumerated message.
+fn compose_review_instructions(reviewed: &[String], per_tool: &[(String, String)]) -> String {
+    if per_tool.is_empty() {
+        return default_review_instructions(reviewed);
+    }
+    if reviewed.len() == 1 {
+        return per_tool[0].1.clone();
+    }
+
+    let mut msg = format!(
+        "This run is paused for manual review. The agent has proposed safe \
+         outputs of the following type(s) that require approval before they \
+         are applied: {}.",
+        reviewed.join(", ")
+    );
+    msg.push_str("\n\nReviewer notes by tool:");
+    // Group tools sharing identical note text, preserving first-seen order.
+    let mut grouped: Vec<(String, Vec<String>)> = Vec::new();
+    for (tool, instr) in per_tool {
+        if let Some(entry) = grouped.iter_mut().find(|(text, _)| text == instr) {
+            entry.1.push(tool.clone());
+        } else {
+            grouped.push((instr.clone(), vec![tool.clone()]));
+        }
+    }
+    for (instr, tools) in &grouped {
+        msg.push_str(&format!("\n- {}: {}", tools.join(", "), instr));
+    }
+    msg.push_str("\n\nApprove (Resume) to apply them, or Reject to discard them.");
+    msg
 }
 
 /// Build the `ManualValidation@1` step from the aggregated approval settings.
@@ -1332,6 +1408,12 @@ fn build_manual_validation_step(approval: &ApprovalConfig, reviewed: &[String]) 
         _ => OnTimeout::Reject,
     };
     builder = builder.on_timeout(on_timeout);
+    if let Some(mins) = approval.timeout_minutes {
+        // Bound the pending period on the TASK so its `onTimeout` handler
+        // (reject/resume) actually fires — a job-level timeout would instead
+        // cancel the job and never apply `on-timeout: resume`.
+        builder = builder.timeout_minutes(mins);
+    }
     builder.into_step()
 }
 
@@ -2422,8 +2504,18 @@ fn detect_reviewed_proposals_step(working_directory: &str, reviewed: &[String]) 
            if command -v jq >/dev/null 2>&1; then\n    \
              # Match only the top-level \"name\" of each NDJSON object so a\n    \
              # \"name\" key nested inside a tool's params can't false-positive.\n    \
-             if jq -r 'select(type==\"object\") | .name // empty' \"$PROPOSALS\" 2>/dev/null | grep -Eqx '({alternation})'; then\n      \
-               HAS_REVIEWED=\"true\"\n    \
+             if NAMES=$(jq -r 'select(type==\"object\") | .name // empty' \"$PROPOSALS\" 2>/dev/null); then\n      \
+               if printf '%s\\n' \"$NAMES\" | grep -Eqx '({alternation})'; then\n        \
+                 HAS_REVIEWED=\"true\"\n      \
+               fi\n    \
+             else\n      \
+               # jq failed (e.g. corrupt/truncated proposals). Fall back to the\n      \
+               # broad raw scan so detection fails safe (over-match, never under-\n      \
+               # match) and record that detection was inconclusive.\n      \
+               echo \"##vso[task.logissue type=warning]approval-gate: jq failed to parse $PROPOSALS; using raw scan for reviewed-proposal detection\"\n      \
+               if grep -Eq '\"name\"[[:space:]]*:[[:space:]]*\"({alternation})\"' \"$PROPOSALS\"; then\n        \
+                 HAS_REVIEWED=\"true\"\n      \
+               fi\n    \
              fi\n  \
            elif grep -Eq '\"name\"[[:space:]]*:[[:space:]]*\"({alternation})\"' \"$PROPOSALS\"; then\n    \
              # jq unavailable: fall back to a broad scan. May over-match (pause\n    \

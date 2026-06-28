@@ -6313,6 +6313,60 @@ safe-outputs:
     );
 }
 
+/// 1ES-target variant: the agentless `ManualReview` server job must emit
+/// `pool: server` and must NOT be wrapped in a `templateContext` block (the
+/// 1ES path skips the wrap for server jobs — see `onees_ir.rs`).
+#[test]
+fn test_require_approval_emits_server_pool_on_1es_target() {
+    let source = r#"---
+name: "Approval Agent 1ES"
+description: "Manual review on the 1ES target"
+target: 1es
+safe-outputs:
+  require-approval: true
+  create-pull-request:
+    target-branch: main
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("approval-1es", source);
+    assert!(ok, "1ES require-approval pipeline should compile: {stderr}");
+
+    // Isolate the ManualReview job block (1ES nests jobs under stages, so the
+    // `- job:` header is indented — match on the bare "job: ManualReview" and
+    // slice to the next "- job: " header).
+    let review_idx = compiled
+        .find("job: ManualReview")
+        .expect("ManualReview job present on 1ES");
+    let review_block = &compiled[review_idx..];
+    let review_block = match review_block.find("- job: ") {
+        // Skip the current header, then find the following job header.
+        Some(_) => {
+            let after_header = &review_block["job: ManualReview".len()..];
+            match after_header.find("- job: ") {
+                Some(rel) => &review_block[.."job: ManualReview".len() + rel],
+                None => review_block,
+            }
+        }
+        None => review_block,
+    };
+
+    assert!(
+        review_block.contains("pool: server"),
+        "ManualReview must be an agentless server job on 1ES:\n{review_block}"
+    );
+    assert!(
+        review_block.contains("task: ManualValidation@1"),
+        "expected the ManualValidation@1 task on 1ES:\n{review_block}"
+    );
+    // The 1ES server job must not carry a templateContext wrapper.
+    assert!(
+        !review_block.contains("templateContext"),
+        "1ES ManualReview server job must NOT be wrapped in templateContext:\n{review_block}"
+    );
+}
+
 /// Without any `require-approval`, no ManualReview job or ManualValidation task
 /// is emitted (zero behavior change for existing pipelines).
 #[test]
@@ -6578,6 +6632,99 @@ safe-outputs:
     assert!(
         compiled.contains("Please double-check the proposed PR before approving."),
         "author instructions should be emitted:\n{compiled}"
+    );
+}
+
+/// When multiple tools require approval and several carry their own
+/// `instructions`, the single gate message must list every reviewed tool and
+/// include ALL author notes — none silently dropped (regression test for the
+/// old "first tool wins" behaviour).
+#[test]
+fn test_require_approval_aggregates_all_tool_instructions() {
+    let source = r#"---
+name: "Multi Approval Agent"
+description: "Several reviewed tools with distinct instructions"
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+    require-approval:
+      instructions: "Verify the PR targets main and has tests."
+  create-work-item:
+    require-approval:
+      instructions: "Check the work-item priority and area path."
+  add-pr-comment:
+    require-approval: true
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("approval-multi-instr", source);
+    assert!(ok, "multi-tool approval pipeline should compile: {stderr}");
+    // Every reviewed tool is enumerated in the gate message.
+    assert!(
+        compiled.contains("add-pr-comment, create-pull-request, create-work-item"),
+        "gate message must list every reviewed tool:\n{compiled}"
+    );
+    // BOTH distinct author notes are present — not just the first.
+    assert!(
+        compiled.contains("Verify the PR targets main and has tests."),
+        "first tool's instructions must be present:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("Check the work-item priority and area path."),
+        "second tool's instructions must also be present (not dropped):\n{compiled}"
+    );
+}
+
+/// `timeout-minutes` must bound the **task** (`ManualValidation@1`'s
+/// `timeoutInMinutes`) — that is the timeout that fires the `onTimeout`
+/// handler. The agentless job carries a strictly-larger outer bound so a
+/// job-level cancellation never preempts the task's graceful `onTimeout`.
+#[test]
+fn test_require_approval_timeout_bounds_task_not_just_job() {
+    let source = r#"---
+name: "Timeout Approval Agent"
+description: "Approval with a pending-period timeout"
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+    require-approval:
+      timeout-minutes: 120
+      on-timeout: resume
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("approval-timeout", source);
+    assert!(ok, "timeout approval pipeline should compile: {stderr}");
+
+    // Isolate the ManualReview job block.
+    let idx = compiled
+        .find("- job: ManualReview")
+        .expect("ManualReview job present");
+    let block = &compiled[idx..];
+    let block = match block[1..].find("\n- job: ") {
+        Some(rel) => &block[..rel + 1],
+        None => block,
+    };
+
+    // The ManualValidation@1 task carries the configured timeout (the one that
+    // triggers onTimeout: resume).
+    let task_idx = block
+        .find("task: ManualValidation@1")
+        .expect("ManualValidation task present");
+    assert!(
+        block[task_idx..].contains("timeoutInMinutes: 120"),
+        "the ManualValidation task must carry timeoutInMinutes: 120:\n{block}"
+    );
+    // The job-level timeout is strictly larger so it can't preempt the task's
+    // graceful onTimeout (120 + 5 grace = 125).
+    let job_timeout_idx = block
+        .find("timeoutInMinutes:")
+        .expect("job timeout present");
+    assert!(
+        block[job_timeout_idx..].starts_with("timeoutInMinutes: 125"),
+        "the job-level timeout must be the strictly-larger outer bound (125):\n{block}"
     );
 }
 
