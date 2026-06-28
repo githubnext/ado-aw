@@ -1272,6 +1272,11 @@ fn build_manual_review_job(
 /// gate. Lists are unioned; the timeout is the strictest (smallest) provided;
 /// `on-timeout` is fail-closed (`reject`) unless *every* contributing config
 /// explicitly asks to `resume`.
+///
+/// **Instructions:** every reviewed tool is listed and **all** author-supplied
+/// per-tool `instructions` are aggregated into the single gate message (grouped
+/// when identical) — no tool's note is dropped. See
+/// [`compose_review_instructions`].
 fn aggregate_approval_config(front_matter: &FrontMatter, reviewed: &[String]) -> ApprovalConfig {
     use std::collections::BTreeSet;
     // The sole caller (`build_manual_review_job`) only invokes this when at
@@ -1287,7 +1292,12 @@ fn aggregate_approval_config(front_matter: &FrontMatter, reviewed: &[String]) ->
     let mut notify: BTreeSet<String> = BTreeSet::new();
     let mut timeout_minutes: Option<u32> = None;
     let mut all_resume = true;
-    let mut instructions: Option<String> = None;
+    // Per-tool author instructions, in sorted (reviewed) order. A single
+    // ManualReview gate covers every reviewed tool, so rather than silently
+    // dropping all but the first note (the old behaviour), we keep them all and
+    // compose a message that lists every tool and attaches its note — see
+    // `compose_review_instructions`.
+    let mut per_tool_instructions: Vec<(String, String)> = Vec::new();
 
     for tool in reviewed {
         let Some(cfg) = front_matter.tool_requires_approval(tool) else {
@@ -1307,11 +1317,11 @@ fn aggregate_approval_config(front_matter: &FrontMatter, reviewed: &[String]) ->
             Some(ApprovalOnTimeout::Resume) => {}
             _ => all_resume = false,
         }
-        // A single ManualReview gate covers all reviewed tools, so only the
-        // first non-empty `instructions` wins (tools are iterated in sorted
-        // order). Documented in docs/safe-outputs.md.
-        if instructions.is_none() {
-            instructions = cfg.instructions;
+        if let Some(instr) = cfg.instructions {
+            let instr = instr.trim();
+            if !instr.is_empty() {
+                per_tool_instructions.push((tool.clone(), instr.to_string()));
+            }
         }
     }
 
@@ -1324,8 +1334,52 @@ fn aggregate_approval_config(front_matter: &FrontMatter, reviewed: &[String]) ->
         } else {
             ApprovalOnTimeout::Reject
         }),
-        instructions,
+        instructions: Some(compose_review_instructions(reviewed, &per_tool_instructions)),
     }
+}
+
+/// Compose the single `ManualValidation@1` reviewer message for a run.
+///
+/// Because one gate covers every reviewed tool, this **lists every reviewed
+/// tool** (the actions pending approval) and attaches **all** author-supplied
+/// per-tool notes — none is silently dropped. `per_tool` holds the non-empty
+/// instructions in sorted reviewed order; tools sharing identical note text
+/// (e.g. inherited from a section-level `require-approval`) are grouped so the
+/// note appears once, attributed to every tool it covers.
+///
+/// - No author notes anywhere → the standard default listing every tool.
+/// - Exactly one reviewed tool with a note → that note verbatim (unchanged
+///   single-tool authoring experience).
+/// - Multiple reviewed tools with at least one note → enumerated message.
+fn compose_review_instructions(reviewed: &[String], per_tool: &[(String, String)]) -> String {
+    if per_tool.is_empty() {
+        return default_review_instructions(reviewed);
+    }
+    if reviewed.len() == 1 {
+        return per_tool[0].1.clone();
+    }
+
+    let mut msg = format!(
+        "This run is paused for manual review. The agent has proposed safe \
+         outputs of the following type(s) that require approval before they \
+         are applied: {}.",
+        reviewed.join(", ")
+    );
+    msg.push_str("\n\nReviewer notes by tool:");
+    // Group tools sharing identical note text, preserving first-seen order.
+    let mut grouped: Vec<(String, Vec<String>)> = Vec::new();
+    for (tool, instr) in per_tool {
+        if let Some(entry) = grouped.iter_mut().find(|(text, _)| text == instr) {
+            entry.1.push(tool.clone());
+        } else {
+            grouped.push((instr.clone(), vec![tool.clone()]));
+        }
+    }
+    for (instr, tools) in &grouped {
+        msg.push_str(&format!("\n- {}: {}", tools.join(", "), instr));
+    }
+    msg.push_str("\n\nApprove (Resume) to apply them, or Reject to discard them.");
+    msg
 }
 
 /// Build the `ManualValidation@1` step from the aggregated approval settings.

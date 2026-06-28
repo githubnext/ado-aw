@@ -6513,6 +6513,47 @@ safe-outputs:
     );
 }
 
+/// When multiple tools require approval and several carry their own
+/// `instructions`, the single gate message must list every reviewed tool and
+/// include ALL author notes — none silently dropped (regression test for the
+/// old "first tool wins" behaviour).
+#[test]
+fn test_require_approval_aggregates_all_tool_instructions() {
+    let source = r#"---
+name: "Multi Approval Agent"
+description: "Several reviewed tools with distinct instructions"
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+    require-approval:
+      instructions: "Verify the PR targets main and has tests."
+  create-work-item:
+    require-approval:
+      instructions: "Check the work-item priority and area path."
+  add-pr-comment:
+    require-approval: true
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("approval-multi-instr", source);
+    assert!(ok, "multi-tool approval pipeline should compile: {stderr}");
+    // Every reviewed tool is enumerated in the gate message.
+    assert!(
+        compiled.contains("add-pr-comment, create-pull-request, create-work-item"),
+        "gate message must list every reviewed tool:\n{compiled}"
+    );
+    // BOTH distinct author notes are present — not just the first.
+    assert!(
+        compiled.contains("Verify the PR targets main and has tests."),
+        "first tool's instructions must be present:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("Check the work-item priority and area path."),
+        "second tool's instructions must also be present (not dropped):\n{compiled}"
+    );
+}
+
 /// `timeout-minutes` must bound the **task** (`ManualValidation@1`'s
 /// `timeoutInMinutes`) — that is the timeout that fires the `onTimeout`
 /// handler. The agentless job carries a strictly-larger outer bound so a

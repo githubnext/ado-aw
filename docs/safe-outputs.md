@@ -89,10 +89,12 @@ cancelled). Omit `timeout-minutes` to inherit the pipeline default.
 Review panel and notification emails. It is plain text and supports pipeline
 variable (`$(...)`) interpolation. When omitted, ado-aw generates a default
 message listing the reviewed safe-output type(s) awaiting approval. A run uses a
-**single** `ManualReview` gate covering every reviewed tool, so if more than one
-reviewed tool sets `instructions`, only the first (in sorted tool-name order) is
-used; set `instructions` on the section-level `require-approval` to control the
-message for the whole run.
+**single** `ManualReview` gate covering every reviewed tool: the gate message
+**lists every reviewed tool** and aggregates **all** author-supplied per-tool
+`instructions` (grouped when identical), so no tool's note is dropped when
+several are gated. A single reviewed tool with its own `instructions` shows that
+message verbatim; set `instructions` on the section-level `require-approval` to
+apply one note to every tool.
 
 **Execution shape** — manual review changes the compiled pipeline:
 
