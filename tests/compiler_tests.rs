@@ -6050,9 +6050,12 @@ fn job_block<'a>(compiled: &'a str, job: &str) -> &'a str {
         .find(&header)
         .unwrap_or_else(|| panic!("job '{job}' not found in:\n{compiled}"));
     let rest = &compiled[start..];
-    // Skip past this header, then find the next top-level job header.
-    match rest[1..].find("\n- job: ") {
-        Some(rel) => &rest[..rel + 1],
+    // `rest` begins with this job's header (no leading newline), so the first
+    // "\n- job: " match is the NEXT top-level job header. Slicing at that
+    // newline's byte offset (always a valid UTF-8 boundary) yields this job's
+    // block — no fixed byte-width assumption about the leading character.
+    match rest.find("\n- job: ") {
+        Some(next) => &rest[..next],
         None => rest,
     }
 }

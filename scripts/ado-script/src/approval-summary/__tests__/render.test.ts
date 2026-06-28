@@ -49,7 +49,9 @@ describe("sanitizeInline", () => {
     expect(out).not.toContain("**bold**");
     expect(out).toContain("\\*\\*bold\\*\\*");
     expect(out).toContain("\\|");
-    expect(out).toContain("\\<img\\>");
+    // `<`/`>` are HTML-entity-encoded (renderer-agnostic), not backslash-escaped.
+    expect(out).toContain("&lt;img&gt;");
+    expect(out).not.toContain("\\<img");
     expect(out).toContain("\\[x\\]");
   });
 
@@ -235,7 +237,9 @@ describe("renderSummary — security", () => {
     const titleRow = md.split("\n").find((l) => l.startsWith("| Title |"));
     expect(titleRow).toBeDefined();
     expect(titleRow).toContain("\\|");
-    expect(titleRow).toContain("\\<script\\>");
+    // The tag is HTML-entity-encoded (renderer-agnostic), so no raw `<`/`>`.
+    expect(titleRow).toContain("&lt;script&gt;");
+    expect(titleRow).not.toMatch(/<script>/);
     // The fenced body must not contain a raw ``` that breaks the block.
     const bodyStart = md.indexOf("```text");
     const after = md.slice(bodyStart + "```text".length);

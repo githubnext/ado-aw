@@ -875,8 +875,10 @@ fn build_agent_job(
     // emitted when any safe-output tool is enabled (transparency for every
     // run); when manual review is configured the reviewed proposals are listed
     // first. The ado-script bundle was delivered earlier in this job by the
-    // ado-script extension (gated on safe_outputs_summary_active).
-    if front_matter.safe_output_tool_names().next().is_some() {
+    // ado-script extension, gated on the SAME predicate
+    // (`has_any_safe_output_tool` → `safe_outputs_summary_active`), so the
+    // bundle is downloaded iff this step is emitted.
+    if front_matter.has_any_safe_output_tool() {
         let (_, reviewed_summary_tools) = front_matter.partition_safe_outputs_by_approval();
         steps.push(Step::Bash(safe_outputs_summary_step(&reviewed_summary_tools)));
     }

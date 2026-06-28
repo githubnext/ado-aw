@@ -816,6 +816,20 @@ impl FrontMatter {
             .filter(|k| !SAFE_OUTPUT_RESERVED_KEYS.contains(&k.as_str()))
     }
 
+    /// Whether the workflow enables **any** safe-output tool.
+    ///
+    /// Single source of truth for the safe-outputs-summary feature gate: it
+    /// drives BOTH the ado-script bundle download
+    /// (`AdoScriptExtension::safe_outputs_summary_active`, set in
+    /// `collect_extensions`) and the end-of-Agent-job render step emission
+    /// (`build_agent_job`). Both call sites MUST go through this so the bundle
+    /// is downloaded iff the step that runs it is emitted — a drift between two
+    /// independent copies of this predicate would make the step invoke a bundle
+    /// that was never downloaded.
+    pub fn has_any_safe_output_tool(&self) -> bool {
+        self.safe_output_tool_names().next().is_some()
+    }
+
     /// Section-level (global) `require-approval` default, if configured.
     pub fn global_require_approval(&self) -> Option<RequireApproval> {
         self.safe_outputs

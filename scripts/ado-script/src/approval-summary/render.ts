@@ -265,11 +265,19 @@ export function sanitizeInline(value: unknown): string {
   // Single line: newlines/tabs → spaces; drop other control chars.
   s = s.replace(/[\t\r\n]+/g, " ").replace(/[\u0000-\u001f\u007f]/g, "");
   s = s.replace(/\s{2,}/g, " ").trim();
-  // HTML-entity-encode `&` first so an agent-supplied entity sequence
-  // (e.g. `&lt;`) is shown literally rather than decoded by the browser.
-  s = s.replace(/&/g, "&amp;");
-  // Escape markdown + HTML + table metacharacters.
-  s = s.replace(/([\\`*_{}\[\]()#+\-!|<>~])/g, "\\$1");
+  // HTML-entity-encode `&`, `<`, `>` so the value is inert regardless of how
+  // the host renders markdown (ADO's build-summary renderer is not documented
+  // as CommonMark-compliant, so a backslash escape like `\<` is not guaranteed
+  // to be neutralised). Order matters: encode `&` FIRST so a pre-existing
+  // ampersand becomes `&amp;`, then `<`/`>` — the `&` those insert is part of a
+  // valid entity and must not be re-encoded.
+  s = s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+  // Escape the remaining markdown / table metacharacters (no `<`/`>` here —
+  // they are entity-encoded above).
+  s = s.replace(/([\\`*_{}\[\]()#+\-!|~])/g, "\\$1");
   return truncate(s, INLINE_MAX_CHARS);
 }
 
