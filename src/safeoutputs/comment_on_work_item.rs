@@ -351,7 +351,7 @@ mod tests {
         let json = r#"{"work_item_id": 12345, "body": "This is a comment on the work item."}"#;
         let params: CommentOnWorkItemParams = serde_json::from_str(json).unwrap();
         assert_eq!(params.work_item_id, 12345);
-        assert!(params.body.contains("comment"));
+        assert_eq!(params.body, "This is a comment on the work item.");
     }
 
     #[test]

@@ -76,12 +76,15 @@ mod tests {
         let params = MissingDataParams {
             data_type: "API docs".to_string(),
             reason: "needed for integration".to_string(),
-            context: None,
+            context: Some("checked GitHub and internal wiki, neither had it".to_string()),
         };
         let result: MissingDataResult = params.try_into().unwrap();
         assert_eq!(result.name, "missing-data");
         assert_eq!(result.data_type, "API docs");
         assert_eq!(result.reason, "needed for integration");
-        assert_eq!(result.context, None);
+        assert_eq!(
+            result.context,
+            Some("checked GitHub and internal wiki, neither had it".to_string())
+        );
     }
 }
