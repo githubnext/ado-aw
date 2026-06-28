@@ -18,7 +18,10 @@
  *                              ado-aw-safe-outputs.md, so the auto-derived ADO
  *                              summary-tab title never collides with a
  *                              consumer/template-target tab)
- *   - AW_REVIEWED_TOOLS        comma-separated reviewed tool names (optional)
+ *   - AW_REVIEWED_TOOLS        newline-separated reviewed tool names (optional;
+ *                              newline, not comma, because a comma can legally
+ *                              appear in a YAML map key — see the Rust
+ *                              `safe_outputs_summary_step` doc comment)
  *
  * Failure policy: best-effort. Any error is logged as a warning and the
  * program exits 0 — rendering the summary must never fail the build or block
