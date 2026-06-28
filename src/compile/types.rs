@@ -734,7 +734,206 @@ pub struct FrontMatter {
     pub supply_chain: Option<SupplyChainConfig>,
 }
 
+/// Reserved keys inside the `safe-outputs:` map that configure the section
+/// itself rather than naming a safe-output tool. These must never be treated
+/// as tool names (e.g. in `--enabled-tools`, Stage-3 budgets, or unknown-key
+/// validation).
+pub const SAFE_OUTPUT_RESERVED_KEYS: &[&str] = &["require-approval"];
+
+/// Automatic action a manual-validation gate takes when its pending period
+/// elapses with no human response. Mirrors `ManualValidation@1`'s `onTimeout`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApprovalOnTimeout {
+    /// Reject the run on timeout (fail-closed — the default).
+    Reject,
+    /// Resume (approve) the run on timeout.
+    Resume,
+}
+
+/// Detailed manual-review settings for a safe-output approval gate. Lowered
+/// into a `ManualValidation@1` agentless job. See `docs/safe-outputs.md`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ApprovalConfig {
+    /// Users/groups permitted to act on the validation. Empty → anyone with
+    /// run permission can approve or reject.
+    #[serde(default)]
+    pub approvers: Vec<String>,
+    /// Users/groups to email when the validation is pending. Empty → no email.
+    #[serde(default)]
+    pub notify_users: Vec<String>,
+    /// Pending-period timeout in minutes. None → ADO job/stage timeout applies.
+    #[serde(default)]
+    pub timeout_minutes: Option<u32>,
+    /// Automatic action on timeout. None → fail-closed (`reject`).
+    #[serde(default)]
+    pub on_timeout: Option<ApprovalOnTimeout>,
+    /// Free-text message shown to the reviewer (run "Review" panel + email).
+    /// None → an auto-generated summary of the proposed outputs is used.
+    #[serde(default)]
+    pub instructions: Option<String>,
+}
+
+/// The `require-approval` value, accepted either as a bare boolean toggle or a
+/// detailed [`ApprovalConfig`] object. Usable at the `safe-outputs:` section
+/// level (global default) or inside an individual tool's config (override).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum RequireApproval {
+    /// `require-approval: true|false`.
+    Bool(bool),
+    /// `require-approval: { approvers: …, on-timeout: …, … }`.
+    Detailed(ApprovalConfig),
+}
+
+impl RequireApproval {
+    /// Whether manual review is required by this setting.
+    pub fn is_required(&self) -> bool {
+        match self {
+            RequireApproval::Bool(b) => *b,
+            RequireApproval::Detailed(_) => true,
+        }
+    }
+
+    /// The reviewer settings (defaults for the bare-boolean form).
+    pub fn config(&self) -> ApprovalConfig {
+        match self {
+            RequireApproval::Bool(_) => ApprovalConfig::default(),
+            RequireApproval::Detailed(c) => c.clone(),
+        }
+    }
+}
+
 impl FrontMatter {
+    /// Iterator over enabled safe-output **tool** names, skipping reserved
+    /// section-level config keys (e.g. `require-approval`). Every consumer that
+    /// treats `safe-outputs:` keys as tool names MUST go through this so a
+    /// reserved key is never mistaken for a tool.
+    pub fn safe_output_tool_names(&self) -> impl Iterator<Item = &String> {
+        self.safe_outputs
+            .keys()
+            .filter(|k| !SAFE_OUTPUT_RESERVED_KEYS.contains(&k.as_str()))
+    }
+
+    /// Whether the workflow enables **any** safe-output tool.
+    ///
+    /// Single source of truth for the safe-outputs-summary feature gate: it
+    /// drives BOTH the ado-script bundle download
+    /// (`AdoScriptExtension::safe_outputs_summary_active`, set in
+    /// `collect_extensions`) and the end-of-Agent-job render step emission
+    /// (`build_agent_job`). Both call sites MUST go through this so the bundle
+    /// is downloaded iff the step that runs it is emitted — a drift between two
+    /// independent copies of this predicate would make the step invoke a bundle
+    /// that was never downloaded.
+    pub fn has_any_safe_output_tool(&self) -> bool {
+        self.safe_output_tool_names().next().is_some()
+    }
+
+    /// Section-level (global) `require-approval` default, if configured.
+    pub fn global_require_approval(&self) -> Option<RequireApproval> {
+        self.safe_outputs
+            .get("require-approval")
+            .and_then(|v| serde_json::from_value::<RequireApproval>(v.clone()).ok())
+    }
+
+    /// Per-tool `require-approval` override for `tool`, if present.
+    fn tool_require_approval(&self, tool: &str) -> Option<RequireApproval> {
+        self.safe_outputs
+            .get(tool)
+            .and_then(|v| v.get("require-approval"))
+            .and_then(|v| serde_json::from_value::<RequireApproval>(v.clone()).ok())
+    }
+
+    /// Effective approval setting for `tool`: the per-tool override if present,
+    /// otherwise the section-level default. Returns `Some(config)` only when
+    /// the tool's outputs require manual review.
+    pub fn tool_requires_approval(&self, tool: &str) -> Option<ApprovalConfig> {
+        let setting = self
+            .tool_require_approval(tool)
+            .or_else(|| self.global_require_approval())?;
+        setting.is_required().then(|| setting.config())
+    }
+
+    /// Partition enabled safe-output tool names into `(auto, reviewed)` where
+    /// `reviewed` tools require manual approval and `auto` tools do not. Both
+    /// lists are sorted for deterministic emission.
+    pub fn partition_safe_outputs_by_approval(&self) -> (Vec<String>, Vec<String>) {
+        let mut auto = Vec::new();
+        let mut reviewed = Vec::new();
+        for tool in self.safe_output_tool_names() {
+            if self.tool_requires_approval(tool).is_some() {
+                reviewed.push(tool.clone());
+            } else {
+                auto.push(tool.clone());
+            }
+        }
+        auto.sort();
+        reviewed.sort();
+        (auto, reviewed)
+    }
+
+    /// Eagerly validate every `require-approval` value (section-level and
+    /// per-tool) so a malformed config is surfaced as a compilation error
+    /// instead of being silently discarded by the `.ok()` paths in
+    /// [`global_require_approval`](Self::global_require_approval) /
+    /// [`tool_require_approval`](Self::tool_require_approval). Without this,
+    /// a typo like `on-timeout: rejec` (or any unknown field — `ApprovalConfig`
+    /// uses `deny_unknown_fields`) would make the affected tool silently fall
+    /// out of the reviewed list, emitting no `ManualReview` gate and letting a
+    /// high-impact output bypass the intended approval step.
+    pub fn validate_require_approval(&self) -> anyhow::Result<()> {
+        fn check(label: &str, v: &serde_json::Value) -> anyhow::Result<()> {
+            let parsed = serde_json::from_value::<RequireApproval>(v.clone()).map_err(|e| {
+                anyhow::anyhow!(
+                    "{label} has an invalid `require-approval` value: {e}\n\n\
+                     `require-approval` must be a boolean or an object with the keys: \
+                     approvers, notify-users, timeout-minutes, on-timeout \
+                     (resume | reject), instructions. See docs/safe-outputs.md."
+                )
+            })?;
+            // Reject ADO **template** expressions (`${{ ... }}`) in the
+            // author-supplied string fields: these are expanded by ADO's YAML
+            // template engine at queue time before `ManualValidation@1` sees
+            // them, so e.g. `approvers: "${{ variables['secret-token'] }}"`
+            // would leak a pipeline value into the gate. Runtime macros
+            // (`$(...)`) are intentionally NOT rejected — `instructions`
+            // documents support for `$(...)` interpolation.
+            if let RequireApproval::Detailed(cfg) = &parsed {
+                let mut fields: Vec<(&str, &str)> = Vec::new();
+                for a in &cfg.approvers {
+                    fields.push(("approvers", a));
+                }
+                for n in &cfg.notify_users {
+                    fields.push(("notify-users", n));
+                }
+                if let Some(instr) = &cfg.instructions {
+                    fields.push(("instructions", instr));
+                }
+                for (field, value) in fields {
+                    if crate::validate::contains_ado_template_expression(value) {
+                        anyhow::bail!(
+                            "{label} field `{field}` contains an ADO template expression \
+                             (`${{{{ ... }}}}`), which is expanded at queue time and is not \
+                             allowed here. Use a literal value. See docs/safe-outputs.md."
+                        );
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        if let Some(v) = self.safe_outputs.get("require-approval") {
+            check("safe-outputs.require-approval", v)?;
+        }
+        for tool in self.safe_output_tool_names() {
+            if let Some(v) = self.safe_outputs.get(tool).and_then(|c| c.get("require-approval")) {
+                check(&format!("safe-outputs.{tool}.require-approval"), v)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Get the schedule configuration (if any).
     pub fn schedule(&self) -> Option<&ScheduleConfig> {
         self.on_config.as_ref().and_then(|o| o.schedule.as_ref())
@@ -2675,6 +2874,215 @@ Body
 "#;
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
         assert!(fm.safe_outputs.contains_key("upload-pipeline-artifact"));
+    }
+
+    #[test]
+    fn test_require_approval_global_bool() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+safe-outputs:
+  require-approval: true
+  create-pull-request: {}
+  add-pr-comment: {}
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        // Reserved key is not surfaced as a tool name.
+        let tools: Vec<&String> = fm.safe_output_tool_names().collect();
+        assert!(!tools.iter().any(|t| t.as_str() == "require-approval"));
+        assert_eq!(tools.len(), 2);
+        // Global default makes every tool require approval.
+        assert!(fm.tool_requires_approval("create-pull-request").is_some());
+        assert!(fm.tool_requires_approval("add-pr-comment").is_some());
+        let (auto, reviewed) = fm.partition_safe_outputs_by_approval();
+        assert!(auto.is_empty());
+        assert_eq!(reviewed, vec!["add-pr-comment", "create-pull-request"]);
+    }
+
+    #[test]
+    fn test_require_approval_per_tool_override() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+safe-outputs:
+  require-approval: true
+  create-pull-request:
+    require-approval: false
+  add-pr-comment: {}
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        // Per-tool false overrides the global true.
+        assert!(fm.tool_requires_approval("create-pull-request").is_none());
+        assert!(fm.tool_requires_approval("add-pr-comment").is_some());
+        let (auto, reviewed) = fm.partition_safe_outputs_by_approval();
+        assert_eq!(auto, vec!["create-pull-request"]);
+        assert_eq!(reviewed, vec!["add-pr-comment"]);
+    }
+
+    #[test]
+    fn test_require_approval_detailed_object() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+safe-outputs:
+  create-pull-request:
+    require-approval:
+      approvers: ["[Org]\\release"]
+      notify-users: ["ops@example.com"]
+      timeout-minutes: 120
+      on-timeout: resume
+      instructions: "Review the proposed PR."
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let cfg = fm
+            .tool_requires_approval("create-pull-request")
+            .expect("approval required");
+        assert_eq!(cfg.approvers, vec!["[Org]\\release"]);
+        assert_eq!(cfg.notify_users, vec!["ops@example.com"]);
+        assert_eq!(cfg.timeout_minutes, Some(120));
+        assert_eq!(cfg.on_timeout, Some(ApprovalOnTimeout::Resume));
+        assert_eq!(cfg.instructions.as_deref(), Some("Review the proposed PR."));
+    }
+
+    #[test]
+    fn test_require_approval_absent_means_no_review() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+safe-outputs:
+  create-pull-request: {}
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        assert!(fm.tool_requires_approval("create-pull-request").is_none());
+        let (auto, reviewed) = fm.partition_safe_outputs_by_approval();
+        assert_eq!(auto, vec!["create-pull-request"]);
+        assert!(reviewed.is_empty());
+    }
+
+    #[test]
+    fn test_validate_require_approval_accepts_valid() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+safe-outputs:
+  require-approval: true
+  create-pull-request:
+    require-approval:
+      on-timeout: reject
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        assert!(fm.validate_require_approval().is_ok());
+    }
+
+    #[test]
+    fn test_validate_require_approval_rejects_bad_on_timeout() {
+        // A typo in `on-timeout` must NOT silently disable the gate — it has
+        // to surface as a compilation error (regression test for the
+        // `.ok()`-swallowed-error bug).
+        let content = r#"---
+name: "Test"
+description: "Test"
+safe-outputs:
+  create-pull-request:
+    require-approval:
+      on-timeout: rejec
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let err = fm
+            .validate_require_approval()
+            .expect_err("malformed on-timeout must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("create-pull-request") && msg.contains("require-approval"),
+            "error should name the offending tool and field: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_require_approval_rejects_unknown_field() {
+        // `ApprovalConfig` uses deny_unknown_fields — a misspelled key must
+        // error rather than silently drop the tool from the reviewed list.
+        let content = r#"---
+name: "Test"
+description: "Test"
+safe-outputs:
+  require-approval:
+    approver: ["[Org]\\release"]
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        assert!(
+            fm.validate_require_approval().is_err(),
+            "unknown require-approval field must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_require_approval_rejects_ado_template_expression() {
+        // A `${{ ... }}` template expression in an approval identity field is
+        // expanded at queue time and could leak a pipeline value — it must be
+        // rejected at compile time.
+        let content = r#"---
+name: "Test"
+description: "Test"
+safe-outputs:
+  create-pull-request:
+    require-approval:
+      approvers: ["${{ variables['secret-token'] }}"]
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let err = fm
+            .validate_require_approval()
+            .expect_err("ADO template expression in approvers must be rejected");
+        assert!(
+            err.to_string().contains("template expression"),
+            "error should explain the template-expression rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_require_approval_allows_runtime_macro_in_instructions() {
+        // `instructions` documents support for `$(...)` runtime interpolation,
+        // so a macro (not a `${{ }}` template) must be allowed.
+        let content = r#"---
+name: "Test"
+description: "Test"
+safe-outputs:
+  create-pull-request:
+    require-approval:
+      instructions: "Review build $(Build.BuildId) before approving."
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        assert!(
+            fm.validate_require_approval().is_ok(),
+            "runtime macro $(...) in instructions must be allowed"
+        );
     }
 
     #[test]

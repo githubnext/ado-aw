@@ -1491,7 +1491,7 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
     let mut seen = HashSet::new();
     let mut tools: Vec<String> = Vec::new();
     let mut effective_mcp_tool_count = 0usize;
-    for key in front_matter.safe_outputs.keys() {
+    for key in front_matter.safe_output_tool_names() {
         if !validate::is_safe_tool_name(key) {
             eprintln!(
                 "Warning: skipping invalid safe-output tool name '{}' (must be ASCII alphanumeric/hyphens only)",
@@ -1745,7 +1745,7 @@ pub fn validate_safe_outputs_keys(front_matter: &FrontMatter) -> Result<()> {
     let mut unknown: Vec<(String, Vec<&'static str>)> = Vec::new();
     let mut invalid_names: Vec<String> = Vec::new();
 
-    for key in front_matter.safe_outputs.keys() {
+    for key in front_matter.safe_output_tool_names() {
         if !validate::is_safe_tool_name(key) {
             invalid_names.push(key.clone());
             continue;
@@ -3945,6 +3945,21 @@ ado-aw-debug:
         assert!(args.contains("--enabled-tools missing-data"));
         assert!(args.contains("--enabled-tools missing-tool"));
         assert!(args.contains("--enabled-tools report-incomplete"));
+    }
+
+    #[test]
+    fn test_generate_enabled_tools_args_skips_require_approval_reserved_key() {
+        // The reserved section-level `require-approval` key must never be
+        // treated as a tool name in `--enabled-tools`.
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  require-approval: true\n  create-pull-request:\n    target-branch: main\n---\n"
+        ).unwrap();
+        let args = generate_enabled_tools_args(&fm);
+        assert!(
+            !args.contains("require-approval"),
+            "reserved require-approval key must not be emitted as a tool: {args}"
+        );
+        assert!(args.contains("--enabled-tools create-pull-request"));
     }
 
     #[test]

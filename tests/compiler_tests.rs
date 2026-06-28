@@ -6039,6 +6039,27 @@ fn compile_inline_source(name: &str, source: &str) -> (bool, String, String) {
     (output.status.success(), compiled, stderr)
 }
 
+/// Extract a single `- job: <name>` block from compiled YAML, from its header
+/// up to (but not including) the next top-level job header. Used to assert that
+/// a step lands in the expected job.
+fn job_block<'a>(compiled: &'a str, job: &str) -> &'a str {
+    // Anchor with a trailing newline so e.g. job "Agent" does not match a
+    // hypothetical "Agent_Reviewed" header that happens to appear first.
+    let header = format!("- job: {job}\n");
+    let start = compiled
+        .find(&header)
+        .unwrap_or_else(|| panic!("job '{job}' not found in:\n{compiled}"));
+    let rest = &compiled[start..];
+    // `rest` begins with this job's header (no leading newline), so the first
+    // "\n- job: " match is the NEXT top-level job header. Slicing at that
+    // newline's byte offset (always a valid UTF-8 boundary) yields this job's
+    // block — no fixed byte-width assumption about the leading character.
+    match rest.find("\n- job: ") {
+        Some(next) => &rest[..next],
+        None => rest,
+    }
+}
+
 /// With `supply-chain.feed` + `supply-chain.registry` configured, every
 /// GitHub/GHCR fetch is rerouted to the internal feed + registry while
 /// checksum verification is preserved.
@@ -6246,3 +6267,474 @@ supply-chain:
         "registry ACR login must fall back to the top-level connection"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Manual review gate (ManualValidation@1 agentless job)
+// ─────────────────────────────────────────────────────────────────────
+
+/// A global `safe-outputs.require-approval: true` inserts a single agentless
+/// ManualReview gate between Detection and SafeOutputs, and SafeOutputs depends
+/// on it (fail-closed).
+#[test]
+fn test_require_approval_global_emits_manual_review_gate() {
+    let source = r#"---
+name: "Approval Agent"
+description: "Agent whose outputs require manual review"
+safe-outputs:
+  require-approval: true
+  create-pull-request:
+    target-branch: main
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("approval-global", source);
+    assert!(ok, "require-approval pipeline should compile: {stderr}");
+    assert!(
+        compiled.contains("job: ManualReview"),
+        "expected a ManualReview job:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("pool: server"),
+        "ManualReview must be an agentless server job:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("task: ManualValidation@1"),
+        "expected a ManualValidation@1 task:\n{compiled}"
+    );
+    // The gate only fires when the agent actually proposed a reviewed output.
+    assert!(
+        compiled.contains("HasReviewedProposals"),
+        "expected a HasReviewedProposals detection/gate:\n{compiled}"
+    );
+    // SafeOutputs is gated behind the review job.
+    let so_idx = compiled
+        .find("job: SafeOutputs")
+        .expect("SafeOutputs job present");
+    let so_tail = &compiled[so_idx..];
+    assert!(
+        so_tail.contains("ManualReview"),
+        "SafeOutputs dependsOn must include ManualReview:\n{so_tail}"
+    );
+}
+
+/// 1ES-target variant: the agentless `ManualReview` server job must emit
+/// `pool: server` and must NOT be wrapped in a `templateContext` block (the
+/// 1ES path skips the wrap for server jobs — see `onees_ir.rs`).
+#[test]
+fn test_require_approval_emits_server_pool_on_1es_target() {
+    let source = r#"---
+name: "Approval Agent 1ES"
+description: "Manual review on the 1ES target"
+target: 1es
+safe-outputs:
+  require-approval: true
+  create-pull-request:
+    target-branch: main
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("approval-1es", source);
+    assert!(ok, "1ES require-approval pipeline should compile: {stderr}");
+
+    // Isolate the ManualReview job block (1ES nests jobs under stages, so the
+    // `- job:` header is indented — match on the bare "job: ManualReview" and
+    // slice to the next "- job: " header).
+    let review_idx = compiled
+        .find("job: ManualReview")
+        .expect("ManualReview job present on 1ES");
+    let review_block = &compiled[review_idx..];
+    let review_block = match review_block.find("- job: ") {
+        // Skip the current header, then find the following job header.
+        Some(_) => {
+            let after_header = &review_block["job: ManualReview".len()..];
+            match after_header.find("- job: ") {
+                Some(rel) => &review_block[.."job: ManualReview".len() + rel],
+                None => review_block,
+            }
+        }
+        None => review_block,
+    };
+
+    assert!(
+        review_block.contains("pool: server"),
+        "ManualReview must be an agentless server job on 1ES:\n{review_block}"
+    );
+    assert!(
+        review_block.contains("task: ManualValidation@1"),
+        "expected the ManualValidation@1 task on 1ES:\n{review_block}"
+    );
+    // The 1ES server job must not carry a templateContext wrapper.
+    assert!(
+        !review_block.contains("templateContext"),
+        "1ES ManualReview server job must NOT be wrapped in templateContext:\n{review_block}"
+    );
+}
+
+/// Without any `require-approval`, no ManualReview job or ManualValidation task
+/// is emitted (zero behavior change for existing pipelines).
+#[test]
+fn test_no_require_approval_omits_manual_review_gate() {
+    let source = r#"---
+name: "Plain Agent"
+description: "Agent with no manual review"
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("approval-none", source);
+    assert!(ok, "pipeline should compile: {stderr}");
+    assert!(
+        !compiled.contains("ManualReview"),
+        "no ManualReview job expected:\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("ManualValidation@1"),
+        "no ManualValidation task expected:\n{compiled}"
+    );
+}
+
+/// Mixed approval — one reviewed tool, one automatic — splits execution into
+/// an automatic SafeOutputs job (runs immediately) and a gated
+/// SafeOutputs_Reviewed job behind ManualReview, each with the right filter.
+#[test]
+fn test_mixed_approval_splits_execution_jobs() {
+    let source = r#"---
+name: "Mixed Agent"
+description: "Mixed approval split"
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+    require-approval: true
+  add-pr-comment: {}
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("approval-mixed", source);
+    assert!(ok, "mixed approval pipeline should compile: {stderr}");
+    // Two execution jobs exist.
+    assert!(
+        compiled.contains("job: SafeOutputs_Reviewed"),
+        "reviewed SafeOutputs job expected:\n{compiled}"
+    );
+    // Automatic job excludes the reviewed tool; reviewed job runs only it.
+    assert!(
+        compiled.contains("--exclude create-pull-request"),
+        "automatic job must exclude the reviewed tool:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("--only create-pull-request"),
+        "reviewed job must run only the reviewed tool:\n{compiled}"
+    );
+    // Distinct published artifacts (no collision).
+    assert!(
+        compiled.contains("artifact: safe_outputs_reviewed"),
+        "reviewed job must publish a distinct artifact:\n{compiled}"
+    );
+    // The reviewed job is gated behind ManualReview; the auto job is not.
+    let rev_idx = compiled
+        .find("job: SafeOutputs_Reviewed")
+        .expect("reviewed job present");
+    assert!(
+        compiled[rev_idx..].contains("ManualReview"),
+        "reviewed job must depend on ManualReview:\n{}",
+        &compiled[rev_idx..]
+    );
+}
+
+/// In the mixed split, the Teardown job depends only on the automatic
+/// `SafeOutputs` job — never on the human-gated `SafeOutputs_Reviewed` job —
+/// so cleanup still fires on the common no-reviewed-proposal path (where the
+/// reviewed job is skipped) and never blocks behind the approval gate.
+#[test]
+fn test_mixed_approval_teardown_skips_reviewed_dependency() {
+    let source = r#"---
+name: "Mixed Teardown Agent"
+description: "Mixed approval split with teardown"
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+    require-approval: true
+  add-pr-comment: {}
+teardown:
+  - script: echo "cleanup"
+    displayName: "Cleanup"
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("approval-mixed-teardown", source);
+    assert!(ok, "mixed approval + teardown should compile: {stderr}");
+    assert!(
+        compiled.contains("job: SafeOutputs_Reviewed"),
+        "reviewed SafeOutputs job expected:\n{compiled}"
+    );
+
+    // Isolate the Teardown job block (from its header to the next job header).
+    let td_idx = compiled
+        .find("job: Teardown")
+        .expect("Teardown job present");
+    let td_block = &compiled[td_idx..];
+    let td_block = match td_block[1..].find("- job: ") {
+        Some(rel) => &td_block[..rel + 1],
+        None => td_block,
+    };
+
+    assert!(
+        td_block.contains("SafeOutputs"),
+        "Teardown must depend on the automatic SafeOutputs job:\n{td_block}"
+    );
+    assert!(
+        !td_block.contains("SafeOutputs_Reviewed"),
+        "Teardown must NOT depend on the human-gated SafeOutputs_Reviewed job:\n{td_block}"
+    );
+}
+
+/// The safe-outputs summary step is rendered at the END of the Agent job (and
+/// NOT in the Detection job) whenever a manual-review pipeline is compiled, and
+/// it passes the reviewed tool list to the bundle.
+#[test]
+fn test_safe_outputs_summary_step_emitted_for_review_pipeline() {
+    let source = r#"---
+name: "Summary Review Agent"
+description: "Manual review with summary"
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+    require-approval: true
+  add-pr-comment: {}
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("summary-review", source);
+    assert!(ok, "pipeline should compile: {stderr}");
+
+    // The render step + uploadsummary wiring is present.
+    assert!(
+        compiled.contains("Render safe-outputs summary"),
+        "expected the summary render step:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("approval-summary.js"),
+        "expected the approval-summary bundle invocation:\n{compiled}"
+    );
+    // Namespaced output base name (no tab-title collision with consumers).
+    assert!(
+        compiled.contains("ado-aw-safe-outputs.md"),
+        "expected the namespaced summary output path:\n{compiled}"
+    );
+    // The reviewed tool is passed; the automatic tool is not in the reviewed list.
+    assert!(
+        compiled.contains("AW_REVIEWED_TOOLS: create-pull-request"),
+        "expected the reviewed tool list passed via env:\n{compiled}"
+    );
+
+    // The step lives in the Agent job, not the Detection job.
+    let agent_block = job_block(&compiled, "Agent");
+    let detection_block = job_block(&compiled, "Detection");
+    assert!(
+        agent_block.contains("Render safe-outputs summary"),
+        "summary step must be in the Agent job:\n{agent_block}"
+    );
+    assert!(
+        !detection_block.contains("Render safe-outputs summary"),
+        "summary step must NOT be in the Detection job:\n{detection_block}"
+    );
+}
+
+/// The summary step is also emitted for a plain safe-outputs pipeline with no
+/// approval configured (always-on transparency), with an empty reviewed list.
+#[test]
+fn test_safe_outputs_summary_step_emitted_for_plain_pipeline() {
+    let source = r#"---
+name: "Summary Plain Agent"
+description: "Plain safe outputs with summary"
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("summary-plain", source);
+    assert!(ok, "pipeline should compile: {stderr}");
+    assert!(
+        compiled.contains("Render safe-outputs summary"),
+        "expected the summary render step for a plain pipeline:\n{compiled}"
+    );
+    // No reviewed tools → the env var is present but empty.
+    assert!(
+        compiled.contains("AW_REVIEWED_TOOLS:"),
+        "expected the reviewed-tools env var (empty):\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("AW_REVIEWED_TOOLS: create-pull-request"),
+        "no tool should be reviewed in a plain pipeline:\n{compiled}"
+    );
+}
+
+/// With no safe-output tools enabled at all, the summary step is not emitted.
+#[test]
+fn test_safe_outputs_summary_step_absent_without_safe_outputs() {
+    let source = r#"---
+name: "No Safe Outputs Agent"
+description: "Agent with no safe outputs"
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("summary-absent", source);
+    assert!(ok, "pipeline should compile: {stderr}");
+    assert!(
+        !compiled.contains("Render safe-outputs summary"),
+        "no summary step expected without safe outputs:\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("approval-summary.js"),
+        "no approval-summary bundle invocation expected:\n{compiled}"
+    );
+}
+
+/// A detailed `require-approval` object propagates approvers, notify-users, and
+/// the author-supplied instructions message into the ManualValidation task.
+#[test]
+fn test_require_approval_object_propagates_settings() {
+    let source = r#"---
+name: "Detailed Approval Agent"
+description: "Agent with detailed approval settings"
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+    require-approval:
+      approvers: ["[MyOrg]\\release-team"]
+      notify-users: ["ops@example.com"]
+      instructions: "Please double-check the proposed PR before approving."
+      on-timeout: reject
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("approval-object", source);
+    assert!(ok, "detailed approval pipeline should compile: {stderr}");
+    assert!(
+        compiled.contains("task: ManualValidation@1"),
+        "expected ManualValidation@1:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("ops@example.com"),
+        "notifyUsers should carry the configured email:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("release-team"),
+        "approvers should carry the configured group:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("Please double-check the proposed PR before approving."),
+        "author instructions should be emitted:\n{compiled}"
+    );
+}
+
+/// When multiple tools require approval and several carry their own
+/// `instructions`, the single gate message must list every reviewed tool and
+/// include ALL author notes — none silently dropped (regression test for the
+/// old "first tool wins" behaviour).
+#[test]
+fn test_require_approval_aggregates_all_tool_instructions() {
+    let source = r#"---
+name: "Multi Approval Agent"
+description: "Several reviewed tools with distinct instructions"
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+    require-approval:
+      instructions: "Verify the PR targets main and has tests."
+  create-work-item:
+    require-approval:
+      instructions: "Check the work-item priority and area path."
+  add-pr-comment:
+    require-approval: true
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("approval-multi-instr", source);
+    assert!(ok, "multi-tool approval pipeline should compile: {stderr}");
+    // Every reviewed tool is enumerated in the gate message.
+    assert!(
+        compiled.contains("add-pr-comment, create-pull-request, create-work-item"),
+        "gate message must list every reviewed tool:\n{compiled}"
+    );
+    // BOTH distinct author notes are present — not just the first.
+    assert!(
+        compiled.contains("Verify the PR targets main and has tests."),
+        "first tool's instructions must be present:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("Check the work-item priority and area path."),
+        "second tool's instructions must also be present (not dropped):\n{compiled}"
+    );
+    // On this branch the aggregated message points reviewers at the summary tab.
+    assert!(
+        compiled.contains("'ado-aw-safe-outputs' summary tab"),
+        "aggregated gate message must point at the summary tab:\n{compiled}"
+    );
+}
+
+/// `timeout-minutes` must bound the **task** (`ManualValidation@1`'s
+/// `timeoutInMinutes`) — that is the timeout that fires the `onTimeout`
+/// handler. The agentless job carries a strictly-larger outer bound so a
+/// job-level cancellation never preempts the task's graceful `onTimeout`.
+#[test]
+fn test_require_approval_timeout_bounds_task_not_just_job() {
+    let source = r#"---
+name: "Timeout Approval Agent"
+description: "Approval with a pending-period timeout"
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+    require-approval:
+      timeout-minutes: 120
+      on-timeout: resume
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("approval-timeout", source);
+    assert!(ok, "timeout approval pipeline should compile: {stderr}");
+
+    // Isolate the ManualReview job block.
+    let idx = compiled
+        .find("- job: ManualReview")
+        .expect("ManualReview job present");
+    let block = &compiled[idx..];
+    let block = match block[1..].find("\n- job: ") {
+        Some(rel) => &block[..rel + 1],
+        None => block,
+    };
+
+    // The ManualValidation@1 task carries the configured timeout (the one that
+    // triggers onTimeout: resume).
+    let task_idx = block
+        .find("task: ManualValidation@1")
+        .expect("ManualValidation task present");
+    assert!(
+        block[task_idx..].contains("timeoutInMinutes: 120"),
+        "the ManualValidation task must carry timeoutInMinutes: 120:\n{block}"
+    );
+    // The job-level timeout is strictly larger so it can't preempt the task's
+    // graceful onTimeout (120 + 5 grace = 125).
+    let job_timeout_idx = block
+        .find("timeoutInMinutes:")
+        .expect("job timeout present");
+    assert!(
+        block[job_timeout_idx..].starts_with("timeoutInMinutes: 125"),
+        "the job-level timeout must be the strictly-larger outer bound (125):\n{block}"
+    );
+}
+

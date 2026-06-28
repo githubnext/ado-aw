@@ -65,11 +65,11 @@ pub async fn analyze_safe_outputs(
 ) -> anyhow::Result<SafeOutputAnalysis> {
     let proposals_path = find_proposals_file(download_root).await?;
     let detection_path = find_detection_file(download_root).await?;
-    let executions_path = find_execution_file(download_root).await?;
+    let executions_paths = find_execution_files(download_root).await?;
 
     let proposals = load_proposals(proposals_path.as_deref()).await?;
     let detection = load_detection_verdict(detection_path.as_deref()).await?;
-    let executions = load_execution_records(executions_path.as_deref()).await?;
+    let executions = load_execution_records(&executions_paths).await?;
     let detection_gate_fired = detection.as_ref().is_some_and(DetectionVerdict::gate_fired);
 
     let items = if detection_gate_fired {
@@ -202,17 +202,15 @@ async fn load_detection_verdict(path: Option<&Path>) -> anyhow::Result<Option<De
 }
 
 async fn load_execution_records(
-    path: Option<&Path>,
+    paths: &[PathBuf],
 ) -> anyhow::Result<Vec<IndexedExecutionRecord>> {
-    let Some(path) = path else {
-        return Ok(Vec::new());
-    };
-
-    let values = read_ndjson_file(path).await?;
-    values
-        .into_iter()
-        .enumerate()
-        .map(|(index, value)| {
+    let mut records = Vec::new();
+    for path in paths {
+        let values = read_ndjson_file(path).await?;
+        for value in values {
+            // `index` is assigned across the merged set so records from
+            // multiple execution artifacts never collide during matching.
+            let index = records.len();
             let mut record =
                 serde_json::from_value::<ExecutionRecord>(value).with_context(|| {
                     format!(
@@ -225,9 +223,10 @@ async fn load_execution_records(
             record.status = record.status.trim().to_string();
             record.context = normalize_optional_string(record.context);
             record.error = normalize_optional_string(record.error);
-            Ok(IndexedExecutionRecord { index, record })
-        })
-        .collect()
+            records.push(IndexedExecutionRecord { index, record });
+        }
+    }
+    Ok(records)
 }
 
 fn build_execution_items(
@@ -564,22 +563,16 @@ async fn find_detection_file(download_root: &Path) -> anyhow::Result<Option<Path
     Ok(None)
 }
 
-async fn find_execution_file(download_root: &Path) -> anyhow::Result<Option<PathBuf>> {
-    let preferred = download_root
-        .join("safe_outputs")
-        .join(EXECUTED_NDJSON_FILENAME);
-    if fs::metadata(&preferred)
-        .await
-        .map(|m| m.is_file())
-        .unwrap_or(false)
-    {
-        return Ok(Some(preferred));
-    }
-
+async fn find_execution_files(download_root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    // With manual review, execution splits across multiple artifacts
+    // (`safe_outputs/` for the automatic path and `safe_outputs_reviewed/`
+    // for the approval-gated path), each with its own `executed.ndjson`.
+    // Collect them all so the audit reflects the complete set of actions.
     let mut matches = Vec::new();
     collect_named_files(download_root, EXECUTED_NDJSON_FILENAME, &mut matches).await?;
     matches.sort();
-    Ok(matches.into_iter().next())
+    matches.dedup();
+    Ok(matches)
 }
 
 async fn top_level_dirs_with_prefix(root: &Path, prefix: &str) -> anyhow::Result<Vec<PathBuf>> {
@@ -736,6 +729,57 @@ mod tests {
         );
         assert!(analysis.rollup.is_none());
         assert!(analysis.findings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn execution_records_aggregate_across_split_artifacts() {
+        // Manual-review split: automatic outputs land in `safe_outputs/`,
+        // reviewed (approval-gated) outputs in `safe_outputs_reviewed/`. The
+        // audit must reflect both.
+        let temp_dir = TempDir::new().expect("create temp dir");
+        write_ndjson(
+            &temp_dir
+                .path()
+                .join("agent_outputs_99")
+                .join("staging")
+                .join(SAFE_OUTPUT_FILENAME),
+            &[
+                json!({"name": "add_pr_comment", "context": "c-1"}),
+                json!({"name": "create_pull_request", "context": "pr-1"}),
+            ],
+        );
+        write_ndjson(
+            &temp_dir
+                .path()
+                .join("safe_outputs")
+                .join(EXECUTED_NDJSON_FILENAME),
+            &[json!({"name": "add_pr_comment", "status": "succeeded", "context": "c-1", "result": {"status": "ok"}})],
+        );
+        write_ndjson(
+            &temp_dir
+                .path()
+                .join("safe_outputs_reviewed")
+                .join(EXECUTED_NDJSON_FILENAME),
+            &[json!({"name": "create_pull_request", "status": "succeeded", "context": "pr-1", "result": {"number": 9}})],
+        );
+
+        let analysis = analyze_safe_outputs(temp_dir.path())
+            .await
+            .expect("analyze split safe outputs");
+
+        let summary = analysis.summary.expect("summary");
+        assert_eq!(summary.proposed_count, 2);
+        // Both the automatic and the reviewed execution are counted.
+        assert_eq!(summary.executed_count, 2);
+
+        let execution = analysis.execution.expect("execution");
+        assert_eq!(execution.items.len(), 2);
+        assert!(
+            execution
+                .items
+                .iter()
+                .all(|item| item.status == SafeOutputStatus::Executed)
+        );
     }
 
     #[tokio::test]
