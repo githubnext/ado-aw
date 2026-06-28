@@ -1205,6 +1205,12 @@ fn build_safeoutputs_job(
     Ok(job)
 }
 
+/// Grace minutes added to the agentless `ManualReview` job-level timeout on top
+/// of the task's `timeoutInMinutes`. Keeps the job timeout strictly larger than
+/// the task timeout so the task's graceful `onTimeout` (reject/resume) always
+/// fires before any job-level cancellation could preempt it.
+const MANUAL_REVIEW_JOB_TIMEOUT_GRACE_MINUTES: u64 = 5;
+
 /// Build the agentless **ManualReview** job (a `ManualValidation@1` server
 /// task) when any enabled safe-output tool resolves to require manual review.
 ///
@@ -1227,9 +1233,16 @@ fn build_manual_review_job(
 
     let mut job = Job::new(prefix.id("ManualReview")?, "Manual Review", Pool::Server);
     job.steps = vec![Step::Task(build_manual_validation_step(&approval, &reviewed))];
-    // The validation's pending period is bounded by the agentless job timeout.
+    // The pending-period timeout is enforced on the TASK
+    // (`ManualValidation@1`'s step `timeoutInMinutes`, set in
+    // `build_manual_validation_step`) so that the task's `onTimeout`
+    // handler (reject/resume) fires gracefully. The job-level timeout is kept
+    // only as a strictly-larger outer hard bound: if it equalled the task
+    // timeout it would race with — and could preempt — the task's `onTimeout`,
+    // re-introducing the very cancellation that defeats `on-timeout: resume`.
     if let Some(mins) = approval.timeout_minutes {
-        job.timeout = Some(std::time::Duration::from_secs(60 * (mins as u64)));
+        let job_bound = (mins as u64) + MANUAL_REVIEW_JOB_TIMEOUT_GRACE_MINUTES;
+        job.timeout = Some(std::time::Duration::from_secs(60 * job_bound));
     }
     let _ = cfg; // pool/compiler context not needed for an agentless gate
     job.condition = Some(Condition::And(vec![
@@ -1331,6 +1344,12 @@ fn build_manual_validation_step(approval: &ApprovalConfig, reviewed: &[String]) 
         _ => OnTimeout::Reject,
     };
     builder = builder.on_timeout(on_timeout);
+    if let Some(mins) = approval.timeout_minutes {
+        // Bound the pending period on the TASK so its `onTimeout` handler
+        // (reject/resume) actually fires — a job-level timeout would instead
+        // cancel the job and never apply `on-timeout: resume`.
+        builder = builder.timeout_minutes(mins);
+    }
     builder.into_step()
 }
 

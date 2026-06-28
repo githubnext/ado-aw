@@ -6513,3 +6513,55 @@ safe-outputs:
     );
 }
 
+/// `timeout-minutes` must bound the **task** (`ManualValidation@1`'s
+/// `timeoutInMinutes`) — that is the timeout that fires the `onTimeout`
+/// handler. The agentless job carries a strictly-larger outer bound so a
+/// job-level cancellation never preempts the task's graceful `onTimeout`.
+#[test]
+fn test_require_approval_timeout_bounds_task_not_just_job() {
+    let source = r#"---
+name: "Timeout Approval Agent"
+description: "Approval with a pending-period timeout"
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+    require-approval:
+      timeout-minutes: 120
+      on-timeout: resume
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("approval-timeout", source);
+    assert!(ok, "timeout approval pipeline should compile: {stderr}");
+
+    // Isolate the ManualReview job block.
+    let idx = compiled
+        .find("- job: ManualReview")
+        .expect("ManualReview job present");
+    let block = &compiled[idx..];
+    let block = match block[1..].find("\n- job: ") {
+        Some(rel) => &block[..rel + 1],
+        None => block,
+    };
+
+    // The ManualValidation@1 task carries the configured timeout (the one that
+    // triggers onTimeout: resume).
+    let task_idx = block
+        .find("task: ManualValidation@1")
+        .expect("ManualValidation task present");
+    assert!(
+        block[task_idx..].contains("timeoutInMinutes: 120"),
+        "the ManualValidation task must carry timeoutInMinutes: 120:\n{block}"
+    );
+    // The job-level timeout is strictly larger so it can't preempt the task's
+    // graceful onTimeout (120 + 5 grace = 125).
+    let job_timeout_idx = block
+        .find("timeoutInMinutes:")
+        .expect("job timeout present");
+    assert!(
+        block[job_timeout_idx..].starts_with("timeoutInMinutes: 125"),
+        "the job-level timeout must be the strictly-larger outer bound (125):\n{block}"
+    );
+}
+

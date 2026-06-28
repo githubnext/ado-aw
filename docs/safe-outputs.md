@@ -64,7 +64,7 @@ safe-outputs:
     require-approval:
       approvers: ["[MyOrg]\\release-team"]   # who may approve (empty → anyone with run permission)
       notify-users: ["ops@example.com"]      # who is emailed (empty → no email)
-      timeout-minutes: 120                    # pending period (omit → job/stage timeout)
+      timeout-minutes: 120                    # pending period before on-timeout fires (omit → pipeline default)
       on-timeout: reject                      # reject (default, fail-closed) | resume
       instructions: "Verify the proposed PR before approving."
 ```
@@ -76,6 +76,14 @@ section-level `require-approval` applies; otherwise the tool is **not** gated.
 **anyone with run permission** can approve or reject; **no** notification emails
 are sent; and the validation **fails closed** on timeout (`on-timeout: reject`),
 so un-approved outputs are never applied.
+
+**Timeout (`timeout-minutes` / `on-timeout`)** — `timeout-minutes` bounds the
+`ManualValidation@1` task's pending period; when it elapses the task applies
+`on-timeout` (`reject` by default, or `resume` to auto-approve). The agentless
+`ManualReview` job carries a slightly larger outer timeout as a hard bound, so a
+job-level cancellation never preempts the task's graceful `on-timeout` handling
+(in particular, `on-timeout: resume` reliably auto-approves rather than being
+cancelled). Omit `timeout-minutes` to inherit the pipeline default.
 
 **Reviewer message** — set `instructions` to control the text shown in the
 Review panel and notification emails. It is plain text and supports pipeline
