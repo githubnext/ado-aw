@@ -870,7 +870,7 @@ impl FrontMatter {
     /// high-impact output bypass the intended approval step.
     pub fn validate_require_approval(&self) -> anyhow::Result<()> {
         fn check(label: &str, v: &serde_json::Value) -> anyhow::Result<()> {
-            serde_json::from_value::<RequireApproval>(v.clone()).map_err(|e| {
+            let parsed = serde_json::from_value::<RequireApproval>(v.clone()).map_err(|e| {
                 anyhow::anyhow!(
                     "{label} has an invalid `require-approval` value: {e}\n\n\
                      `require-approval` must be a boolean or an object with the keys: \
@@ -878,6 +878,34 @@ impl FrontMatter {
                      (resume | reject), instructions. See docs/safe-outputs.md."
                 )
             })?;
+            // Reject ADO **template** expressions (`${{ ... }}`) in the
+            // author-supplied string fields: these are expanded by ADO's YAML
+            // template engine at queue time before `ManualValidation@1` sees
+            // them, so e.g. `approvers: "${{ variables['secret-token'] }}"`
+            // would leak a pipeline value into the gate. Runtime macros
+            // (`$(...)`) are intentionally NOT rejected — `instructions`
+            // documents support for `$(...)` interpolation.
+            if let RequireApproval::Detailed(cfg) = &parsed {
+                let mut fields: Vec<(&str, &str)> = Vec::new();
+                for a in &cfg.approvers {
+                    fields.push(("approvers", a));
+                }
+                for n in &cfg.notify_users {
+                    fields.push(("notify-users", n));
+                }
+                if let Some(instr) = &cfg.instructions {
+                    fields.push(("instructions", instr));
+                }
+                for (field, value) in fields {
+                    if crate::validate::contains_ado_template_expression(value) {
+                        anyhow::bail!(
+                            "{label} field `{field}` contains an ADO template expression \
+                             (`${{{{ ... }}}}`), which is expanded at queue time and is not \
+                             allowed here. Use a literal value. See docs/safe-outputs.md."
+                        );
+                    }
+                }
+            }
             Ok(())
         }
 
@@ -2992,6 +3020,54 @@ Body
         assert!(
             fm.validate_require_approval().is_err(),
             "unknown require-approval field must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_require_approval_rejects_ado_template_expression() {
+        // A `${{ ... }}` template expression in an approval identity field is
+        // expanded at queue time and could leak a pipeline value — it must be
+        // rejected at compile time.
+        let content = r#"---
+name: "Test"
+description: "Test"
+safe-outputs:
+  create-pull-request:
+    require-approval:
+      approvers: ["${{ variables['secret-token'] }}"]
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let err = fm
+            .validate_require_approval()
+            .expect_err("ADO template expression in approvers must be rejected");
+        assert!(
+            err.to_string().contains("template expression"),
+            "error should explain the template-expression rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_require_approval_allows_runtime_macro_in_instructions() {
+        // `instructions` documents support for `$(...)` runtime interpolation,
+        // so a macro (not a `${{ }}` template) must be allowed.
+        let content = r#"---
+name: "Test"
+description: "Test"
+safe-outputs:
+  create-pull-request:
+    require-approval:
+      instructions: "Review build $(Build.BuildId) before approving."
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        assert!(
+            fm.validate_require_approval().is_ok(),
+            "runtime macro $(...) in instructions must be allowed"
         );
     }
 

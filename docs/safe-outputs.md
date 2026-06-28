@@ -101,6 +101,14 @@ message for the whole run.
   a distinct `safe_outputs_reviewed` artifact. A rejected or timed-out review
   fails closed: the reviewed job is skipped while the automatic outputs are
   unaffected.
+- When **every** configured tool requires approval (no automatic tools),
+  execution is **not** split — the single `SafeOutputs` job is gated behind
+  `ManualReview` in its entirety. Note this also defers the always-enabled
+  diagnostic outputs (`noop`, `report_incomplete`, `missing-tool`,
+  `missing-data`) until after approval, since they share that one job. If you
+  want diagnostics to apply without waiting on a human, leave at least one
+  low-impact tool (e.g. `add-pr-comment`) non-gated so the automatic split job
+  is created.
 
 The Detection threat gate always runs first, so a flagged run applies nothing —
 automatic or reviewed.

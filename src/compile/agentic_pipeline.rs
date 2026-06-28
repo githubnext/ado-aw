@@ -1263,9 +1263,10 @@ fn aggregate_approval_config(front_matter: &FrontMatter, reviewed: &[String]) ->
     use std::collections::BTreeSet;
     // The sole caller (`build_manual_review_job`) only invokes this when at
     // least one tool requires approval. Calling it with an empty slice would
-    // return `on_timeout: Some(Resume)` (a fail-OPEN default), so pin the
-    // invariant to catch future misuse in debug/test builds.
-    debug_assert!(
+    // return `on_timeout: Some(Resume)` (a fail-OPEN default), so enforce the
+    // invariant with a release-build `assert!` — this is a security boundary
+    // and the compiler is not a hot path, so the cost is irrelevant.
+    assert!(
         !reviewed.is_empty(),
         "aggregate_approval_config called with no reviewed tools (would default to fail-open resume)"
     );
