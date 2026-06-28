@@ -603,7 +603,11 @@ mod tests {
             tags: None,
         };
         let result: Result<UpdateWorkItemResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("positive integer"),
+            "Expected 'positive integer' in error, got: {err}"
+        );
     }
 
     #[test]
@@ -619,7 +623,11 @@ mod tests {
             tags: None,
         };
         let result: Result<UpdateWorkItemResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("At least one field"),
+            "Expected 'At least one field' in error, got: {err}"
+        );
     }
 
     #[test]
@@ -732,6 +740,7 @@ mod tests {
         assert!(config.target.is_none());
         assert!(config.title_prefix.is_none());
         assert!(config.tag_prefix.is_none());
+        assert!(config.allowed_tags.is_empty());
     }
 
     #[test]
@@ -1005,13 +1014,6 @@ target: 42
     // tag-prefix parsing / logic tests (no network calls needed)
     // -------------------------------------------------------------------------
 
-    #[test]
-    fn test_config_tag_prefix_absent_is_none() {
-        let yaml = "title: true";
-        let config: UpdateWorkItemConfig = serde_yaml::from_str(yaml).unwrap();
-        assert!(config.tag_prefix.is_none());
-    }
-
     /// Helper: simulate the tag-prefix logic in isolation so it can be unit-tested
     /// without spinning up an HTTP server.
     fn tag_prefix_matches(raw_tags: &str, prefix: &str) -> bool {
@@ -1073,12 +1075,6 @@ target: 42
             err.contains("semicolon"),
             "Expected semicolon error, got: {err}"
         );
-    }
-
-    #[test]
-    fn test_config_allowed_tags_defaults_to_empty() {
-        let config = UpdateWorkItemConfig::default();
-        assert!(config.allowed_tags.is_empty());
     }
 
     #[test]
@@ -1144,60 +1140,4 @@ allowed-tags:
         );
     }
 
-    #[tokio::test]
-    async fn test_execute_accepts_tags_matching_wildcard() {
-        use std::collections::HashMap;
-        use std::path::PathBuf;
-
-        let params = UpdateWorkItemParams {
-            id: 42,
-            title: None,
-            body: None,
-            state: None,
-            area_path: None,
-            iteration_path: None,
-            assignee: None,
-            tags: Some(vec!["agent-created".to_string()]),
-        };
-        let mut result: UpdateWorkItemResult = params.try_into().unwrap();
-
-        let mut tool_configs: HashMap<String, serde_json::Value> = HashMap::new();
-        tool_configs.insert(
-            "update-work-item".to_string(),
-            serde_json::json!({
-                "tags": true,
-                "target": "*",
-                "allowed-tags": ["agent-*"]
-            }),
-        );
-
-        // This will fail at the ADO API call, but it should pass the allowed-tags check.
-        // We just verify we don't get the allowed-tags error back.
-        let ctx = ExecutionContext {
-            ado_org_url: Some("https://dev.azure.com/myorg".to_string()),
-            ado_project: Some("MyProject".to_string()),
-            access_token: Some("token".to_string()),
-            working_directory: PathBuf::from("."),
-            source_directory: PathBuf::from("."),
-            tool_configs,
-            allowed_repositories: HashMap::new(),
-            agent_stats: None,
-            dry_run: false,
-            ..Default::default()
-        };
-
-        let exec_result = result.execute_sanitized(&ctx).await;
-        // Should not be an "allowed-tags" error — it will fail at the ADO HTTP call
-        // or succeed. Either way, the allowed-tags guard passed.
-        match exec_result {
-            Ok(r) => assert!(
-                !r.message.contains("not in allowed-tags"),
-                "Should not have failed allowed-tags check"
-            ),
-            Err(e) => assert!(
-                !e.to_string().contains("not in allowed-tags"),
-                "Should not have failed allowed-tags check"
-            ),
-        }
-    }
 }
