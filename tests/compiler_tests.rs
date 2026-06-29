@@ -3285,6 +3285,16 @@ fn test_conclusion_job_emits_expected_env_vars_for_conclusion_script() {
             .and_then(|v| v.as_str()),
         Some(r#"TestProject\TestTeam"#)
     );
+
+    // The Conclusion job must never fail the pipeline (it reports OTHER jobs'
+    // failures), so the conclusion.js step is marked continueOnError: true.
+    assert_eq!(
+        conclusion_step
+            .get(yaml_key("continueOnError"))
+            .and_then(|v| v.as_bool()),
+        Some(true),
+        "conclusion.js step should set continueOnError so a non-zero node exit never fails the pipeline"
+    );
 }
 
 #[test]

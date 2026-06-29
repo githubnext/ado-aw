@@ -1493,12 +1493,20 @@ fn build_conclusion_job(
 
     let conclusion_script = "\
 if command -v node >/dev/null 2>&1 && [ -f /tmp/ado-aw-scripts/ado-script/conclusion.js ]; then\n  \
-  node /tmp/ado-aw-scripts/ado-script/conclusion.js || true\n\
+  node /tmp/ado-aw-scripts/ado-script/conclusion.js\n\
 else\n  \
   echo \"##vso[task.logissue type=warning]conclusion.js unavailable; skipping conclusion reporting\"\n\
 fi\n";
     let mut conclusion_step = bash("Report pipeline conclusion", conclusion_script);
     conclusion_step = conclusion_step.with_condition(Condition::Always);
+    // The Conclusion job's contract is "always runs, never fails": it exists to
+    // surface OTHER jobs' failures, so it must not turn a non-zero exit of its
+    // own (e.g. node OOM/SIGKILL, or an unhandled rejection escaping
+    // conclusion.js's top-level `.then`) into a pipeline failure that masks the
+    // real signal. Use ADO's `continueOnError` rather than a blanket `|| true`
+    // in the bash body: the failure still shows up in the timeline as a warning
+    // (preserving observability) instead of being silently swallowed.
+    conclusion_step.continue_on_error = true;
 
     // Global opt-out: safe-outputs.report-failure-as-work-item (default: true)
     let report_failure = front_matter
