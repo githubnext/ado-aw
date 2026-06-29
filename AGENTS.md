@@ -95,6 +95,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   │   ├── mod.rs    # Codemod struct, CODEMODS registry, runner
 │   │   │   ├── 0001_repos_unified.rs # Legacy repositories/checkout → repos codemod
 │   │   │   ├── 0002_pool_object_form.rs # Legacy scalar pool → object form codemod
+│   │   │   ├── 0003_flatten_work_item_config.rs # Nested work-item config → flat form codemod (noop/missing-tool/missing-data)
 │   │   │   └── helpers.rs # take_key, insert_no_overwrite, rename_key, ConflictPolicy
 │   │   ├── codemod_integration_test.rs # White-box rewrite-path tests (stub registry injection)
 │   │   ├── types.rs      # Front matter grammar and types
@@ -171,7 +172,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   ├── validate.rs       # Structural input validators (char allowlists, format checks, injection detectors)
 │   ├── agent_stats.rs    # OTel-based agent statistics parsing (token usage, duration, turns)
 │   ├── hash.rs           # SHA-256 utilities for safe-output file integrity
-│   ├── safeoutputs/      # Safe-output MCP tool implementations (Stage 1 → NDJSON → Stage 3)
+│   ├── safe_outputs/     # Safe-output MCP tool implementations (Stage 1 → NDJSON → Stage 3)
 │   │   ├── mod.rs
 │   │   ├── add_build_tag.rs
 │   │   ├── add_pr_comment.rs
@@ -305,9 +306,11 @@ index to jump to the right page.
   `command`).
 - [`docs/parameters.md`](docs/parameters.md) — ADO runtime parameters surfaced
   in the pipeline UI, including the auto-injected `clearMemory` parameter.
-- [`docs/conclusion.md`](docs/conclusion.md) — `conclusion:` configuration for
-  the always-running post-pipeline housekeeping job that files work-item
-  reports for failures and diagnostic signals.
+- [`docs/conclusion.md`](docs/conclusion.md) — Conclusion job reference — the
+  always-running post-pipeline housekeeping job that files work-item reports for
+  failures and diagnostic signals. Emitted automatically when `safe-outputs:` is
+  configured; tunable via `safe-outputs: report-failure-as-work-item:` and
+  per-tool `report-as-work-item:` / `title-prefix:` / `work-item-type:` etc.
 - [`docs/tools.md`](docs/tools.md) — `tools:` configuration (bash allow-list,
   `edit`, `cache-memory`, `azure-devops` MCP).
 - [`docs/runtimes.md`](docs/runtimes.md) — `runtimes:` configuration (Lean 4,
