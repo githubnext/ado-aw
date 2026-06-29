@@ -392,78 +392,88 @@ impl fmt::Display for Diagnostic {
 
 // ─── Lowering (Filters → IR) ───────────────────────────────────────────────
 
+/// Push a `GlobMatch` check for a `PatternFilter` field.
+fn push_glob_match(
+    checks: &mut Vec<FilterCheck>,
+    name: &'static str,
+    fact: Fact,
+    filter: &super::types::PatternFilter,
+    suffix: &'static str,
+) {
+    checks.push(FilterCheck {
+        name,
+        predicate: Predicate::GlobMatch { fact, pattern: filter.pattern.clone() },
+        build_tag_suffix: suffix,
+    });
+}
+
+/// Push include and/or exclude checks for an `IncludeExcludeFilter` against `fact`.
+///
+/// Only checks with non-empty value sets are emitted.
+fn push_value_set_checks(
+    checks: &mut Vec<FilterCheck>,
+    fact: Fact,
+    filter: &super::types::IncludeExcludeFilter,
+    include_name: &'static str,
+    include_suffix: &'static str,
+    exclude_name: &'static str,
+    exclude_suffix: &'static str,
+) {
+    if !filter.include.is_empty() {
+        checks.push(FilterCheck {
+            name: include_name,
+            predicate: Predicate::ValueInSet {
+                fact,
+                values: filter.include.clone(),
+                case_insensitive: true,
+            },
+            build_tag_suffix: include_suffix,
+        });
+    }
+    if !filter.exclude.is_empty() {
+        checks.push(FilterCheck {
+            name: exclude_name,
+            predicate: Predicate::ValueNotInSet {
+                fact,
+                values: filter.exclude.clone(),
+                case_insensitive: true,
+            },
+            build_tag_suffix: exclude_suffix,
+        });
+    }
+}
+
 /// Lower `PrFilters` into a list of `FilterCheck` IR nodes.
 pub fn lower_pr_filters(filters: &super::types::PrFilters) -> Vec<FilterCheck> {
     let mut checks = Vec::new();
 
     // Tier 1: Pipeline variables
     if let Some(title) = &filters.title {
-        checks.push(FilterCheck {
-            name: "title",
-            predicate: Predicate::GlobMatch {
-                fact: Fact::PrTitle,
-                pattern: title.pattern.clone(),
-            },
-            build_tag_suffix: "title-mismatch",
-        });
+        push_glob_match(&mut checks, "title", Fact::PrTitle, title, "title-mismatch");
     }
 
     if let Some(author) = &filters.author {
-        if !author.include.is_empty() {
-            checks.push(FilterCheck {
-                name: "author include",
-                predicate: Predicate::ValueInSet {
-                    fact: Fact::AuthorEmail,
-                    values: author.include.clone(),
-                    case_insensitive: true,
-                },
-                build_tag_suffix: "author-mismatch",
-            });
-        }
-        if !author.exclude.is_empty() {
-            checks.push(FilterCheck {
-                name: "author exclude",
-                predicate: Predicate::ValueNotInSet {
-                    fact: Fact::AuthorEmail,
-                    values: author.exclude.clone(),
-                    case_insensitive: true,
-                },
-                build_tag_suffix: "author-excluded",
-            });
-        }
+        push_value_set_checks(
+            &mut checks,
+            Fact::AuthorEmail,
+            author,
+            "author include",
+            "author-mismatch",
+            "author exclude",
+            "author-excluded",
+        );
     }
 
     if let Some(source) = &filters.source_branch {
-        checks.push(FilterCheck {
-            name: "source-branch",
-            predicate: Predicate::GlobMatch {
-                fact: Fact::SourceBranch,
-                pattern: source.pattern.clone(),
-            },
-            build_tag_suffix: "source-branch-mismatch",
-        });
+        push_glob_match(&mut checks, "source-branch", Fact::SourceBranch, source, "source-branch-mismatch");
     }
 
     if let Some(target) = &filters.target_branch {
-        checks.push(FilterCheck {
-            name: "target-branch",
-            predicate: Predicate::GlobMatch {
-                fact: Fact::TargetBranch,
-                pattern: target.pattern.clone(),
-            },
-            build_tag_suffix: "target-branch-mismatch",
-        });
+        push_glob_match(&mut checks, "target-branch", Fact::TargetBranch, target, "target-branch-mismatch");
     }
 
     if let Some(cm) = &filters.commit_message {
-        checks.push(FilterCheck {
-            name: "commit-message",
-            predicate: Predicate::GlobMatch {
-                fact: Fact::CommitMessage,
-                pattern: cm.pattern.clone(),
-            },
-            build_tag_suffix: "commit-message-mismatch",
-        });
+        push_glob_match(&mut checks, "commit-message", Fact::CommitMessage, cm, "commit-message-mismatch");
     }
 
     // Tier 2: REST API required
@@ -484,11 +494,7 @@ pub fn lower_pr_filters(filters: &super::types::PrFilters) -> Vec<FilterCheck> {
             name: "draft",
             predicate: Predicate::Equality {
                 fact: Fact::PrIsDraft,
-                value: if draft_expected {
-                    "true".into()
-                } else {
-                    "false".into()
-                },
+                value: if draft_expected { "true".into() } else { "false".into() },
             },
             build_tag_suffix: "draft-mismatch",
         });
@@ -509,10 +515,7 @@ pub fn lower_pr_filters(filters: &super::types::PrFilters) -> Vec<FilterCheck> {
     if let Some(tw) = &filters.time_window {
         checks.push(FilterCheck {
             name: "time-window",
-            predicate: Predicate::TimeWindow {
-                start: tw.start.clone(),
-                end: tw.end.clone(),
-            },
+            predicate: Predicate::TimeWindow { start: tw.start.clone(), end: tw.end.clone() },
             build_tag_suffix: "time-window-mismatch",
         });
     }
@@ -530,28 +533,15 @@ pub fn lower_pr_filters(filters: &super::types::PrFilters) -> Vec<FilterCheck> {
     }
 
     if let Some(br) = &filters.build_reason {
-        if !br.include.is_empty() {
-            checks.push(FilterCheck {
-                name: "build-reason include",
-                predicate: Predicate::ValueInSet {
-                    fact: Fact::BuildReason,
-                    values: br.include.clone(),
-                    case_insensitive: true,
-                },
-                build_tag_suffix: "build-reason-mismatch",
-            });
-        }
-        if !br.exclude.is_empty() {
-            checks.push(FilterCheck {
-                name: "build-reason exclude",
-                predicate: Predicate::ValueNotInSet {
-                    fact: Fact::BuildReason,
-                    values: br.exclude.clone(),
-                    case_insensitive: true,
-                },
-                build_tag_suffix: "build-reason-excluded",
-            });
-        }
+        push_value_set_checks(
+            &mut checks,
+            Fact::BuildReason,
+            br,
+            "build-reason include",
+            "build-reason-mismatch",
+            "build-reason exclude",
+            "build-reason-excluded",
+        );
     }
 
     checks
@@ -562,61 +552,31 @@ pub fn lower_pipeline_filters(filters: &super::types::PipelineFilters) -> Vec<Fi
     let mut checks = Vec::new();
 
     if let Some(sp) = &filters.source_pipeline {
-        checks.push(FilterCheck {
-            name: "source-pipeline",
-            predicate: Predicate::GlobMatch {
-                fact: Fact::TriggeredByPipeline,
-                pattern: sp.pattern.clone(),
-            },
-            build_tag_suffix: "source-pipeline-mismatch",
-        });
+        push_glob_match(&mut checks, "source-pipeline", Fact::TriggeredByPipeline, sp, "source-pipeline-mismatch");
     }
 
     if let Some(branch) = &filters.branch {
-        checks.push(FilterCheck {
-            name: "branch",
-            predicate: Predicate::GlobMatch {
-                fact: Fact::TriggeringBranch,
-                pattern: branch.pattern.clone(),
-            },
-            build_tag_suffix: "branch-mismatch",
-        });
+        push_glob_match(&mut checks, "branch", Fact::TriggeringBranch, branch, "branch-mismatch");
     }
 
     if let Some(tw) = &filters.time_window {
         checks.push(FilterCheck {
             name: "time-window",
-            predicate: Predicate::TimeWindow {
-                start: tw.start.clone(),
-                end: tw.end.clone(),
-            },
+            predicate: Predicate::TimeWindow { start: tw.start.clone(), end: tw.end.clone() },
             build_tag_suffix: "time-window-mismatch",
         });
     }
 
     if let Some(br) = &filters.build_reason {
-        if !br.include.is_empty() {
-            checks.push(FilterCheck {
-                name: "build-reason include",
-                predicate: Predicate::ValueInSet {
-                    fact: Fact::BuildReason,
-                    values: br.include.clone(),
-                    case_insensitive: true,
-                },
-                build_tag_suffix: "build-reason-mismatch",
-            });
-        }
-        if !br.exclude.is_empty() {
-            checks.push(FilterCheck {
-                name: "build-reason exclude",
-                predicate: Predicate::ValueNotInSet {
-                    fact: Fact::BuildReason,
-                    values: br.exclude.clone(),
-                    case_insensitive: true,
-                },
-                build_tag_suffix: "build-reason-excluded",
-            });
-        }
+        push_value_set_checks(
+            &mut checks,
+            Fact::BuildReason,
+            br,
+            "build-reason include",
+            "build-reason-mismatch",
+            "build-reason exclude",
+            "build-reason-excluded",
+        );
     }
 
     checks
