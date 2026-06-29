@@ -48,7 +48,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
-use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::SanitizeContent;
 use crate::secure::{ArtifactName, StrictRelativePath};
 use crate::tool_result;
@@ -148,7 +148,7 @@ impl UploadPipelineArtifactResult {
         staged_sha256: String,
     ) -> Self {
         Self {
-            name: <Self as crate::safeoutputs::ToolResult>::NAME.to_string(),
+            name: <Self as crate::safe_outputs::ToolResult>::NAME.to_string(),
             build_id,
             artifact_name,
             file_path,
@@ -643,7 +643,7 @@ impl Executor for UploadPipelineArtifactResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safeoutputs::ToolResult;
+    use crate::safe_outputs::ToolResult;
 
     #[test]
     fn test_result_has_correct_name() {

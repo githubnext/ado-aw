@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
 use super::resolve_wiki_branch;
-use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, neutralize_pipeline_commands, sanitize as sanitize_text};
 use crate::tool_result;
 use ado_aw_derive::SanitizeConfig;
@@ -397,7 +397,7 @@ impl Executor for UpdateWikiPageResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safeoutputs::ToolResult;
+    use crate::safe_outputs::ToolResult;
 
     // ── ToolResult / macro ────────────────────────────────────────────────────
 
@@ -666,7 +666,7 @@ wiki-name: "MyProject.wiki"
         let mut result: UpdateWikiPageResult = params.try_into().unwrap();
         result.sanitize_content_fields();
 
-        let ctx = crate::safeoutputs::ExecutionContext {
+        let ctx = crate::safe_outputs::ExecutionContext {
             ado_org_url: Some("https://dev.azure.com/myorg".to_string()),
             ado_organization: Some("myorg".to_string()),
             ado_project: Some("MyProject".to_string()),
@@ -698,7 +698,7 @@ wiki-name: "MyProject.wiki"
         let mut result: UpdateWikiPageResult = params.try_into().unwrap();
         result.sanitize_content_fields();
 
-        let ctx = crate::safeoutputs::ExecutionContext {
+        let ctx = crate::safe_outputs::ExecutionContext {
             ado_org_url: None,
             ..Default::default()
         };
@@ -732,7 +732,7 @@ wiki-name: "MyProject.wiki"
             comment: None,
         };
 
-        let ctx = crate::safeoutputs::ExecutionContext {
+        let ctx = crate::safe_outputs::ExecutionContext {
             ado_org_url: Some("https://dev.azure.com/myorg".to_string()),
             ado_organization: Some("myorg".to_string()),
             ado_project: Some("MyProject".to_string()),
@@ -773,7 +773,7 @@ wiki-name: "MyProject.wiki"
             comment: None,
         };
 
-        let ctx = crate::safeoutputs::ExecutionContext {
+        let ctx = crate::safe_outputs::ExecutionContext {
             ado_org_url: Some("https://dev.azure.com/myorg".to_string()),
             ado_organization: Some("myorg".to_string()),
             ado_project: Some("MyProject".to_string()),
@@ -814,7 +814,7 @@ wiki-name: "MyProject.wiki"
             comment: None,
         };
 
-        let ctx = crate::safeoutputs::ExecutionContext {
+        let ctx = crate::safe_outputs::ExecutionContext {
             ado_org_url: Some("https://dev.azure.com/myorg".to_string()),
             ado_organization: Some("myorg".to_string()),
             ado_project: Some("MyProject".to_string()),

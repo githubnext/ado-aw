@@ -59,7 +59,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   ├── compile/          # Pipeline compilation module
 │   │   ├── mod.rs        # Module entry point and Compiler trait
 │   │   ├── common.rs     # Shared helpers across targets
-│   │   ├── agentic_pipeline.rs # Canonical Setup → Agent → Detection → (ManualReview?) → SafeOutputs(+SafeOutputs_Reviewed?) → Teardown shape (shared by every target); BuiltPipelineContext, build_pipeline_context, build_canonical_jobs, per-job builders incl. build_manual_review_job + SafeOutputsVariant split, fold_agent_conditions, agent_job_variables_hoist
+│   │   ├── agentic_pipeline.rs # Canonical Setup → Agent → Detection → (ManualReview?) → SafeOutputs(+SafeOutputs_Reviewed?) → Teardown → Conclusion shape (Conclusion emitted when configured; shared by every target); BuiltPipelineContext, build_pipeline_context, build_canonical_jobs, per-job builders incl. build_manual_review_job + SafeOutputsVariant split, fold_agent_conditions, agent_job_variables_hoist
 │   │   ├── standalone.rs # Standalone pipeline compiler
 │   │   ├── standalone_ir.rs # Standalone target typed-IR builder
 │   │   ├── onees.rs      # 1ES Pipeline Template compiler
@@ -245,7 +245,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   ├── update-ado-agentic-workflow.md # Guide for modifying an existing agentic workflow
 │   └── debug-ado-agentic-workflow.md  # Guide for troubleshooting a failing agentic workflow
 ├── scripts/              # Supporting scripts shipped as release artifacts
-│   └── ado-script/       # TypeScript workspace for bundled gate/import helpers plus execution-context bundles
+│   └── ado-script/       # TypeScript workspace for bundled gate/import helpers plus execution-context, conclusion, and approval-summary bundles
 │       └── src/
 │           ├── gate/     # Gate evaluator source (bundled to gate.js)
 │           ├── import/   # Runtime prompt resolver source (bundled to import.js)
@@ -258,6 +258,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │           ├── exec-context-schedule/ # Scheduled-run context source (bundled to exec-context-schedule.js)
 │           ├── exec-context-pr-checks/ # PR validation checks context source (bundled to exec-context-pr-checks.js)
 │           ├── exec-context-repo/ # Repository identity context source (bundled to exec-context-repo.js)
+│           ├── conclusion/ # Conclusion-job reporter source (bundled to conclusion.js)
 │           ├── approval-summary/ # Safe-outputs summary renderer (bundled to approval-summary.js; end-of-Agent-job summary tab)
 │           └── shared/   # Shared modules across bundles (auth, ado-client, env-facts, types.gen.ts)
 ├── tests/                # Integration tests and fixtures
@@ -304,6 +305,9 @@ index to jump to the right page.
   `command`).
 - [`docs/parameters.md`](docs/parameters.md) — ADO runtime parameters surfaced
   in the pipeline UI, including the auto-injected `clearMemory` parameter.
+- [`docs/conclusion.md`](docs/conclusion.md) — `conclusion:` configuration for
+  the always-running post-pipeline housekeeping job that files work-item
+  reports for failures and diagnostic signals.
 - [`docs/tools.md`](docs/tools.md) — `tools:` configuration (bash allow-list,
   `edit`, `cache-memory`, `azure-devops` MCP).
 - [`docs/runtimes.md`](docs/runtimes.md) — `runtimes:` configuration (Lean 4,
@@ -370,8 +374,9 @@ index to jump to the right page.
   adding codemods.
 - [`docs/ado-script.md`](docs/ado-script.md) — `ado-script` workspace
   (`scripts/ado-script/`): the bundled TypeScript runtime helpers
-  (`gate.js`, `import.js`, and the execution-context `exec-context-*.js`
-  bundles), schemars-driven type codegen, and the A2 design decision.
+  (`gate.js`, `import.js`, the execution-context `exec-context-*.js`
+  bundles, `conclusion.js`, and `approval-summary.js`), schemars-driven
+  type codegen, and the A2 design decision.
 - [`docs/local-development.md`](docs/local-development.md) — local development
   setup notes.
 

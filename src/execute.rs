@@ -14,7 +14,7 @@ use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 
 use crate::ndjson::{self, EXECUTED_NDJSON_FILENAME, SAFE_OUTPUT_FILENAME};
-use crate::safeoutputs::{
+use crate::safe_outputs::{
     AddBuildTagResult, AddPrCommentResult, CommentOnWorkItemResult, CreateBranchResult,
     CreateGitTagResult, CreateIssueResult, CreatePrResult, CreateWikiPageResult,
     CreateWorkItemResult, ExecutionContext, ExecutionResult, Executor, LinkWorkItemsResult,
@@ -825,16 +825,13 @@ mod tests {
         assert!(result.is_ok());
         let (tool_name, result) = result.unwrap();
         assert_eq!(tool_name, "noop");
-        // noop always attempts to file a work item; without ADO credentials it
-        // returns a warning (success=true) rather than failing hard.
+        // noop is a pass-through diagnostic signal — work-item filing is now
+        // handled by the Conclusion job, so execute_impl returns plain success.
         assert!(result.success);
+        assert!(!result.is_warning());
         assert!(
-            result.is_warning(),
-            "noop without credentials should be a warning"
-        );
-        assert!(
-            result.message.contains("not set"),
-            "noop warning should mention missing config, got: {}",
+            result.message.contains("No operation needed"),
+            "noop should report no-op message, got: {}",
             result.message
         );
     }
@@ -848,16 +845,13 @@ mod tests {
         assert!(result.is_ok());
         let (tool_name, result) = result.unwrap();
         assert_eq!(tool_name, "missing-tool");
-        // missing-tool always attempts to file a work item; without ADO credentials
-        // it returns a warning (success=true) rather than failing hard.
+        // missing-tool is a pass-through diagnostic signal — work-item filing
+        // is now handled by the Conclusion job, so execute_impl returns plain success.
         assert!(result.success);
+        assert!(!result.is_warning());
         assert!(
-            result.is_warning(),
-            "missing-tool without credentials should be a warning"
-        );
-        assert!(
-            result.message.contains("not set"),
-            "missing-tool warning should mention missing config, got: {}",
+            result.message.contains("Missing tool reported"),
+            "missing-tool should report tool name, got: {}",
             result.message
         );
     }
@@ -891,9 +885,9 @@ mod tests {
 
         let manifest = read_executed_manifest(&temp_dir).await;
         assert_eq!(manifest.len(), 2);
-        assert_eq!(manifest[0]["status"], "warning");
+        assert_eq!(manifest[0]["status"], "succeeded");
         assert_eq!(manifest[0]["context"], "test1");
-        assert_eq!(manifest[1]["status"], "warning");
+        assert_eq!(manifest[1]["status"], "succeeded");
     }
 
     #[tokio::test]

@@ -4,7 +4,7 @@ _Part of the [ado-aw documentation](../AGENTS.md)._
 
 ado-aw no longer compiles pipelines by substituting strings into YAML template files. Every production target builds a typed Azure DevOps pipeline IR, resolves graph-level facts, lowers that IR to `serde_yaml::Value`, and serializes once with `serde_yaml::to_string`.
 
-The implementation lives under `src/compile/ir/`. The canonical 5-job agentic-pipeline shape (Setup → Agent → Detection → SafeOutputs → Teardown) lives in `src/compile/agentic_pipeline.rs` and is shared by every target. Per-target wrappers handle only the envelope:
+The implementation lives under `src/compile/ir/`. The canonical agentic-pipeline shape (Setup → Agent → Detection → SafeOutputs → Teardown, plus an optional always-running Conclusion job when `conclusion:` is configured) lives in `src/compile/agentic_pipeline.rs` and is shared by every target. Per-target wrappers handle only the envelope:
 
 - `src/compile/standalone_ir.rs`
 - `src/compile/onees_ir.rs`
@@ -261,7 +261,7 @@ The production target wrappers are:
 - `job_ir.rs` — wraps the canonical shape as a target-job template with external `dependsOn` / `condition` template parameters.
 - `stage_ir.rs` — wraps the canonical shape as a target-stage template with the stage-level external-parameter wrapper.
 
-The canonical 5-job Setup → Agent → Detection → SafeOutputs → Teardown shape itself lives in `agentic_pipeline.rs` and is reused unchanged by every wrapper above; extensions plug into it via `Declarations` (steps, env, hosts, MCPG entries, and Agent-job condition clauses — see `Declarations::agent_conditions`).
+The canonical Setup → Agent → Detection → SafeOutputs → Teardown shape, plus the optional Conclusion job, lives in `agentic_pipeline.rs` and is reused unchanged by every wrapper above; extensions plug into it via `Declarations` (steps, env, hosts, MCPG entries, and Agent-job condition clauses — see `Declarations::agent_conditions`).
 
 When adding a target, follow the same pattern: parse and validate front matter, collect extension `Declarations`, build typed jobs/stages/steps, set the correct `PipelineShape`, and call the shared emit path.
 

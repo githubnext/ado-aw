@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{PATH_SEGMENT, resolve_repo_name};
-use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
 use crate::validate::reject_pipeline_injection;
@@ -423,7 +423,7 @@ impl Executor for SubmitPrReviewResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safeoutputs::ToolResult;
+    use crate::safe_outputs::ToolResult;
 
     #[test]
     fn test_result_has_correct_name() {

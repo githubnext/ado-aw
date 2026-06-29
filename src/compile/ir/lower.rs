@@ -1030,7 +1030,23 @@ fn lower_publish(p: &PublishStep, ctx: &LoweringContext<'_>) -> Result<Value> {
 fn lower_env_value(ctx: &LoweringContext<'_>, v: &EnvValue) -> Result<String> {
     match v {
         EnvValue::Literal(s) => Ok(s.clone()),
-        EnvValue::AdoMacro(name) => Ok(format!("$({name})")),
+        EnvValue::AdoMacro(name) => {
+            // Guard: reject names that contain macro-expansion characters.
+            // AdoMacro values should be bare variable names like "Build.Reason";
+            // the $() wrapper is added here. Direct construction bypassing
+            // ado_macro() could pass "$(Already.Wrapped)" which would emit
+            // $($(Already.Wrapped)) — a double expansion that ADO silently
+            // drops to an empty string.
+            if name.contains('$') || name.contains('(') || name.contains(')') {
+                anyhow::bail!(
+                    "EnvValue::AdoMacro('{name}'): name must be a bare variable name \
+                     (e.g. 'Build.Reason'), not a macro expression. The $() wrapper is \
+                     added by lowering. Use EnvValue::PipelineVar or EnvValue::secret \
+                     for user-defined variables."
+                );
+            }
+            Ok(format!("$({name})"))
+        }
         EnvValue::PipelineVar(name) => Ok(format!("$({name})")),
         EnvValue::Secret(name) => Ok(format!("$({name})")),
         EnvValue::StepOutput(r) => Ok(lower_outputref_for(ctx, r)?),
@@ -1111,7 +1127,15 @@ fn yaml_value_to_scalar_string(v: &serde_yaml::Value) -> Result<String> {
 fn lower_env_value_as_expr_atom(ctx: &LoweringContext<'_>, v: &EnvValue) -> Result<String> {
     match v {
         EnvValue::Literal(s) => Ok(format!("'{}'", s.replace('\'', "''"))),
-        EnvValue::AdoMacro(name) => Ok(format!("variables['{name}']")),
+        EnvValue::AdoMacro(name) => {
+            if name.contains('$') || name.contains('(') || name.contains(')') {
+                anyhow::bail!(
+                    "EnvValue::AdoMacro('{name}'): name must be a bare variable name, \
+                     not a macro expression (see lower_env_value guard)"
+                );
+            }
+            Ok(format!("variables['{name}']"))
+        }
         EnvValue::PipelineVar(name) => Ok(format!("variables['{name}']")),
         EnvValue::Secret(name) => Ok(format!("variables['{name}']")),
         EnvValue::StepOutput(r) => Ok(lower_outputref_for_expr(ctx, r)?),
@@ -1762,6 +1786,30 @@ mod tests {
             lower_env_value(&ctx, &EnvValue::secret("MCP_API_KEY")).unwrap(),
             "$(MCP_API_KEY)"
         );
+    }
+
+    #[test]
+    fn lower_env_value_ado_macro_rejects_wrapped_names() {
+        let g = Graph::default();
+        let job = JobId::new("J").unwrap();
+        let ctx = ctx_for(&g, &job);
+
+        // Direct construction bypassing ado_macro() factory — the lowering
+        // guard must catch names that contain $, (, or ).
+        let double_wrapped = EnvValue::AdoMacro("$(SC_WRITE_TOKEN)");
+        let err = lower_env_value(&ctx, &double_wrapped).unwrap_err();
+        assert!(
+            format!("{err}").contains("bare variable name"),
+            "expected rejection message, got: {err}"
+        );
+
+        // Also reject partial wrapping
+        let partial = EnvValue::AdoMacro("$(Bad");
+        assert!(lower_env_value(&ctx, &partial).is_err());
+
+        // Bare name should still work
+        let bare = EnvValue::AdoMacro("Build.Reason");
+        assert_eq!(lower_env_value(&ctx, &bare).unwrap(), "$(Build.Reason)");
     }
 
     #[test]

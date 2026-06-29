@@ -1,8 +1,8 @@
 //! Typed-IR builder for the canonical agentic-pipeline shape.
 //!
 //! Owns the Setup → Agent → Detection → (ManualReview?) → SafeOutputs
-//! (+ SafeOutputs_Reviewed?) → Teardown shape consumed by **every**
-//! compile target (`standalone`, `1es`,
+//! (+ SafeOutputs_Reviewed?) → Teardown → Conclusion shape consumed by
+//! **every** compile target (`standalone`, `1es`,
 //! `job`, `stage`). Each target's wrapper module (`standalone_ir.rs`,
 //! `onees_ir.rs`, `job_ir.rs`, `stage_ir.rs`) is a one-screen
 //! envelope that calls [`build_pipeline_context`] and lifts the
@@ -58,6 +58,7 @@
 //!   job gated behind `ManualReview` (runs only the reviewed tools,
 //!   publishes a distinct `safe_outputs_reviewed` artifact).
 //! - `Teardown` (optional): user `teardown:` steps.
+//! - `Conclusion` (optional): post-run reporting / work-item filing.
 
 use anyhow::Result;
 use std::path::Path;
@@ -68,8 +69,9 @@ use super::common::{
 };
 use super::extensions::{CompileContext, CompilerExtension, Declarations, Extension, McpgConfig};
 use super::ir::condition::{Condition, Expr};
+use super::ir::env::EnvValue;
 use super::ir::ids::{JobId, StepId};
-use super::ir::job::{Job, Pool};
+use super::ir::job::{Job, JobVariable, Pool};
 use super::ir::output::{OutputDecl, OutputRef};
 use super::ir::step::{
     BashStep, CheckoutRepo, CheckoutStep, DownloadStep, PublishStep, Step, SubmodulesOpt, TaskStep,
@@ -332,8 +334,8 @@ pub(crate) fn build_pipeline_context(
     })
 }
 
-/// Build the canonical 5-job graph (Setup?, Agent, Detection,
-/// SafeOutputs, Teardown?) used by every target. The optional
+/// Build the canonical job graph (Setup?, Agent, Detection,
+/// SafeOutputs, Teardown?, Conclusion?) used by every target. The optional
 /// `prefix` is applied to Agent / Detection / SafeOutputs job IDs
 /// (matches the legacy template behaviour: Setup and Teardown stay
 /// unprefixed even in `target: job|stage`, see `src/data/job-base.yml`
@@ -404,6 +406,9 @@ pub(crate) fn build_canonical_jobs(
     if let Some(teardown) = build_teardown_job(front_matter, cfg, &p)? {
         jobs.push(teardown);
     }
+    if let Some(conclusion) = build_conclusion_job(front_matter, cfg, &p)? {
+        jobs.push(conclusion);
+    }
 
     // Wire dependsOn between jobs (graph pass also derives but
     // explicit edges make the YAML match committed lock files).
@@ -418,9 +423,10 @@ pub(crate) struct JobPrefix<'a>(pub Option<&'a str>);
 
 impl<'a> JobPrefix<'a> {
     /// Produce the `JobId` for a canonical job (`Setup` / `Agent` /
-    /// `Detection` / `SafeOutputs` / `Teardown`). Setup and Teardown
-    /// are always unprefixed; the other three are prefixed when a
-    /// prefix is provided.
+    /// `Detection` / `SafeOutputs` / `Teardown` / `Conclusion`).
+    /// Setup, Teardown, and Conclusion are always unprefixed; Agent,
+    /// Detection, and SafeOutputs are prefixed when a prefix is
+    /// provided.
     pub(crate) fn id(&self, base: &str) -> Result<JobId> {
         match (self.0, base) {
             (
@@ -963,7 +969,6 @@ fn agent_job_variables_hoist(
     front_matter: &FrontMatter,
 ) -> Result<Vec<crate::compile::ir::job::JobVariable>> {
     use crate::compile::ir::env::EnvValue;
-    use crate::compile::ir::job::JobVariable;
     use crate::compile::ir::output::OutputRef;
 
     if !front_matter.is_synthetic_pr() {
@@ -1453,6 +1458,239 @@ fn build_teardown_job(
     Ok(Some(job))
 }
 
+fn build_conclusion_job(
+    front_matter: &FrontMatter,
+    cfg: &StandaloneCtx,
+    prefix: &JobPrefix<'_>,
+) -> Result<Option<Job>> {
+    // Conclusion job is always emitted when safe-outputs exist (gh-aw pattern).
+    if front_matter.safe_outputs.is_empty() {
+        return Ok(None);
+    }
+
+    let mut steps: Vec<Step> = Vec::new();
+
+    // Install Node + download/verify the ado-script bundle using the canonical
+    // helper. This keeps the supply-chain mirror handling and the unzip layout
+    // (`/tmp/ado-aw-scripts/ado-script/<bundle>.js`) consistent with the
+    // Agent/Setup jobs — a hand-rolled copy here previously double-nested the
+    // unzip path and bypassed the supply-chain feed.
+    steps.extend(super::extensions::ado_script::install_and_download_steps_typed(
+        front_matter.supply_chain.as_ref(),
+    ));
+
+    let mut download_artifact = TaskStep::new(
+        "DownloadPipelineArtifact@2",
+        "Download SafeOutputs artifact",
+    )
+    .with_input("artifact", "safe_outputs")
+    .with_input("path", "$(Pipeline.Workspace)/conclusion_inputs");
+    download_artifact.condition = Some(Condition::Always);
+    // The safe_outputs artifact may not exist when SafeOutputs was skipped;
+    // ignore the download failure — conclusion.js handles a missing dir.
+    download_artifact.continue_on_error = true;
+    steps.push(Step::Task(download_artifact));
+
+    let conclusion_script = "\
+if command -v node >/dev/null 2>&1 && [ -f /tmp/ado-aw-scripts/ado-script/conclusion.js ]; then\n  \
+  node /tmp/ado-aw-scripts/ado-script/conclusion.js\n\
+else\n  \
+  echo \"##vso[task.logissue type=warning]conclusion.js unavailable; skipping conclusion reporting\"\n\
+fi\n";
+    let mut conclusion_step = bash("Report pipeline conclusion", conclusion_script);
+    conclusion_step = conclusion_step.with_condition(Condition::Always);
+    // The Conclusion job's contract is "always runs, never fails": it exists to
+    // surface OTHER jobs' failures, so it must not turn a non-zero exit of its
+    // own (e.g. node OOM/SIGKILL, or an unhandled rejection escaping
+    // conclusion.js's top-level `.then`) into a pipeline failure that masks the
+    // real signal. Use ADO's `continueOnError` rather than a blanket `|| true`
+    // in the bash body: the failure still shows up in the timeline as a warning
+    // (preserving observability) instead of being silently swallowed.
+    conclusion_step.continue_on_error = true;
+
+    // Global opt-out: safe-outputs.report-failure-as-work-item (default: true)
+    let report_failure = front_matter
+        .safe_outputs
+        .get("report-failure-as-work-item")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    conclusion_step = conclusion_step
+        .with_env(
+            "AW_REPORT_FAILURE_AS_WORK_ITEM",
+            EnvValue::Literal(report_failure.to_string()),
+        )
+        .with_env(
+            "AW_PIPELINE_NAME",
+            // Sanitize for consistency with the per-tool config fields below:
+            // the name flows verbatim into the ADO work-item title/body, and
+            // operator-controlled strings are sanitized everywhere else.
+            EnvValue::Literal(crate::sanitize::sanitize(&front_matter.name)),
+        )
+        .with_env(
+            "AW_SAFE_OUTPUT_DIR",
+            EnvValue::Literal("$(Pipeline.Workspace)/conclusion_inputs".to_string()),
+        );
+
+    // Use SC_WRITE_TOKEN when a write service connection is configured;
+    // fall back to System.AccessToken otherwise.
+    let has_write_sc = front_matter
+        .permissions
+        .as_ref()
+        .and_then(|p| p.write.as_ref())
+        .is_some();
+    if has_write_sc {
+        conclusion_step = conclusion_step.with_env(
+            "SYSTEM_ACCESSTOKEN",
+            EnvValue::secret("SC_WRITE_TOKEN"),
+        );
+    } else {
+        conclusion_step =
+            conclusion_step.with_env("SYSTEM_ACCESSTOKEN", EnvValue::secret("System.AccessToken"));
+    }
+
+    // Pass per-tool configs as individual flat env vars (gh-aw pattern).
+    // Each field gets its own env var — avoids JSON-in-env-var corruption in ADO.
+    //
+    // Note: pipeline_failure has no per-tool config entry — it uses hardcoded
+    // defaults (type: Task, no area/iteration path). The global
+    // report-failure-as-work-item toggle controls whether it files at all.
+    for tool_key in &["noop", "missing-tool", "missing-data"] {
+        if let Some(tool_config) = front_matter.safe_outputs.get(*tool_key) {
+            let env_prefix = format!("AW_{}", tool_key.to_uppercase().replace('-', "_"));
+
+            // Tool disabled entirely (e.g. noop: false)
+            if tool_config.is_boolean() {
+                if tool_config.as_bool() == Some(false) {
+                    conclusion_step = conclusion_step.with_env(
+                        format!("{env_prefix}_REPORT_AS_WORK_ITEM"),
+                        EnvValue::Literal("false".to_string()),
+                    );
+                }
+                continue;
+            }
+
+            if let Some(obj) = tool_config.as_object() {
+                // report-as-work-item: accept both YAML bool and string forms.
+                // serde_json::Value::to_string() on String("false") would emit
+                // "\"false\"" (JSON-encoded with quotes), which the TypeScript
+                // readBooleanEnv would reject and default to true — silently
+                // inverting the opt-out. Use as_bool()/as_str() instead.
+                if let Some(v) = obj.get("report-as-work-item") {
+                    let bool_str = v
+                        .as_bool()
+                        .map(|b| b.to_string())
+                        .or_else(|| v.as_str().map(|s| s.to_string()));
+                    if let Some(s) = bool_str {
+                        conclusion_step = conclusion_step.with_env(
+                            format!("{env_prefix}_REPORT_AS_WORK_ITEM"),
+                            EnvValue::Literal(s),
+                        );
+                    }
+                }
+                if let Some(v) = obj.get("title-prefix").and_then(|v| v.as_str()) {
+                    conclusion_step = conclusion_step.with_env(
+                        format!("{env_prefix}_TITLE_PREFIX"),
+                        EnvValue::Literal(crate::sanitize::sanitize(v)),
+                    );
+                }
+                if let Some(v) = obj.get("work-item-type").and_then(|v| v.as_str()) {
+                    conclusion_step = conclusion_step.with_env(
+                        format!("{env_prefix}_WORK_ITEM_TYPE"),
+                        EnvValue::Literal(crate::sanitize::sanitize(v)),
+                    );
+                }
+                if let Some(v) = obj.get("area-path").and_then(|v| v.as_str()) {
+                    conclusion_step = conclusion_step.with_env(
+                        format!("{env_prefix}_AREA_PATH"),
+                        EnvValue::Literal(crate::sanitize::sanitize(v)),
+                    );
+                }
+                if let Some(v) = obj.get("iteration-path").and_then(|v| v.as_str()) {
+                    conclusion_step = conclusion_step.with_env(
+                        format!("{env_prefix}_ITERATION_PATH"),
+                        EnvValue::Literal(crate::sanitize::sanitize(v)),
+                    );
+                }
+                if let Some(tags) = obj.get("tags").and_then(|v| v.as_array()) {
+                    let tags_json =
+                        serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string());
+                    conclusion_step = conclusion_step
+                        .with_env(format!("{env_prefix}_TAGS"), EnvValue::Literal(tags_json));
+                }
+            }
+        }
+    }
+
+    // Pass upstream job results via job-level variables hoist.
+    // ADO only evaluates $[...] runtime expressions inside `variables:` and
+    // `condition:` — NOT in step env blocks. We hoist to job variables and
+    // reference them as $(name) macros in the step env.
+    let agent_id = prefix.id("Agent")?;
+    let detection_id = prefix.id("Detection")?;
+    let safeoutputs_id = prefix.id("SafeOutputs")?;
+    let reviewed_id = prefix.id("SafeOutputs_Reviewed")?;
+
+    // In the mixed manual-review split both a SafeOutputs (automatic) and a
+    // SafeOutputs_Reviewed (gated) job exist. Surface the reviewed job's result
+    // too so a reviewer rejection (which fails SafeOutputs_Reviewed) is reported
+    // instead of silently lost.
+    let (auto, reviewed) = front_matter.partition_safe_outputs_by_approval();
+    let has_reviewed_job = !reviewed.is_empty() && !auto.is_empty();
+
+    let mut conclusion_variables = vec![
+        // EnvValue::Literal deliberately carries a raw `$[...]` runtime expression:
+        // ADO evaluates `$[...]` only in `variables:`/`condition:`, so the value is
+        // hoisted here and consumed as a `$(name)` macro in the step env below
+        // (not EnvValue::AdoMacro — the lower.rs guard rejects pre-wrapped macros).
+        JobVariable {
+            name: "AW_AGENT_RESULT".to_string(),
+            value: EnvValue::Literal(format!("$[dependencies.{}.result]", agent_id.as_str())),
+        },
+        JobVariable {
+            name: "AW_DETECTION_RESULT".to_string(),
+            value: EnvValue::Literal(format!("$[dependencies.{}.result]", detection_id.as_str())),
+        },
+        JobVariable {
+            name: "AW_SAFEOUTPUTS_RESULT".to_string(),
+            value: EnvValue::Literal(format!(
+                "$[dependencies.{}.result]",
+                safeoutputs_id.as_str()
+            )),
+        },
+    ];
+    if has_reviewed_job {
+        conclusion_variables.push(JobVariable {
+            name: "AW_SAFEOUTPUTS_REVIEWED_RESULT".to_string(),
+            value: EnvValue::Literal(format!("$[dependencies.{}.result]", reviewed_id.as_str())),
+        });
+    }
+
+    conclusion_step = conclusion_step
+        .with_env("AW_AGENT_RESULT", EnvValue::PipelineVar("AW_AGENT_RESULT".to_string()))
+        .with_env(
+            "AW_DETECTION_RESULT",
+            EnvValue::PipelineVar("AW_DETECTION_RESULT".to_string()),
+        )
+        .with_env(
+            "AW_SAFEOUTPUTS_RESULT",
+            EnvValue::PipelineVar("AW_SAFEOUTPUTS_RESULT".to_string()),
+        );
+    if has_reviewed_job {
+        conclusion_step = conclusion_step.with_env(
+            "AW_SAFEOUTPUTS_REVIEWED_RESULT",
+            EnvValue::PipelineVar("AW_SAFEOUTPUTS_REVIEWED_RESULT".to_string()),
+        );
+    }
+
+    steps.push(Step::Bash(conclusion_step));
+
+    let mut job = Job::new(prefix.id("Conclusion")?, "Conclusion", cfg.pool.clone());
+    job.variables = conclusion_variables;
+    job.steps = steps;
+    job.condition = Some(Condition::Always);
+    Ok(Some(job))
+}
+
 /// Wire explicit `depends_on` between the canonical jobs. The graph
 /// pass also derives these from OutputRefs but explicit edges make
 /// the emitted YAML match committed lock-file shapes exactly.
@@ -1475,7 +1713,9 @@ fn wire_explicit_dependencies(jobs: &mut [Job], prefix: &JobPrefix<'_>) -> Resul
     let safeoutputs_id = prefix.id("SafeOutputs")?;
     let reviewed_id = prefix.id("SafeOutputs_Reviewed")?;
     let teardown_id = prefix.id("Teardown")?;
+    let conclusion_id = prefix.id("Conclusion")?;
     let has_setup = jobs.iter().any(|j| j.id == setup_id);
+    let has_teardown = jobs.iter().any(|j| j.id == teardown_id);
     let has_review = jobs.iter().any(|j| j.id == manualreview_id);
     // The reviewed execution job only exists in the mixed (split) case.
     let has_reviewed_job = jobs.iter().any(|j| j.id == reviewed_id);
@@ -1521,6 +1761,25 @@ fn wire_explicit_dependencies(jobs: &mut [Job], prefix: &JobPrefix<'_>) -> Resul
             // approval otherwise). Waiting only on the auto `SafeOutputs` job
             // keeps Teardown's behaviour identical to the single-job case.
             j.depends_on = vec![safeoutputs_id.clone()];
+        } else if j.id == conclusion_id {
+            let mut deps = vec![
+                agent_id.clone(),
+                detection_id.clone(),
+                safeoutputs_id.clone(),
+            ];
+            if has_reviewed_job {
+                // Mixed split: depend on the reviewed execution job too so a
+                // reviewer rejection (which fails SafeOutputs_Reviewed) is
+                // detected by Conclusion. Accepted trade-off: in the mixed case
+                // Conclusion waits behind the manual-review gate. The job's
+                // always() condition still fires when the reviewed job is
+                // skipped or fails.
+                deps.push(reviewed_id.clone());
+            }
+            if has_teardown {
+                deps.push(teardown_id.clone());
+            }
+            j.depends_on = deps;
         }
     }
     Ok(())
@@ -1995,10 +2254,7 @@ fn start_mcpg_step(
             // another ` \` (doing so would emit a stray `\ \` that bash reads
             // as a one-character " " argument, corrupting the `docker run`
             // image reference — see issue #1034).
-            mcpg_docker_env
-                .lines()
-                .collect::<Vec<_>>()
-                .join("\n  ")
+            mcpg_docker_env.lines().collect::<Vec<_>>().join("\n  ")
         };
     // `--debug-pipeline` injects an extra `-e DEBUG="*" \` continuation
     // line into the `docker run …` invocation so MCPG (and the stdio
@@ -2340,6 +2596,9 @@ fn copy_logs_safeoutputs_step(engine_log_dir: &str) -> BashStep {
          # Copy agent output log from analyzed_outputs for optimisation use\n\
          cp \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)/logs/agent-output.txt\" \\\n  \
            \"$(Agent.TempDirectory)/staging/logs/agent-output.txt\" 2>/dev/null || true\n\
+         # Copy executed NDJSON manifest so the Conclusion job can read diagnostic signals\n\
+         cp \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)/safe-outputs-executed.ndjson\" \\\n  \
+           \"$(Agent.TempDirectory)/staging/safe-outputs-executed.ndjson\" 2>/dev/null || true\n\
          if [ -d \"{engine_log_dir}\" ]; then\n  \
            mkdir -p \"$(Agent.TempDirectory)/staging/logs/copilot\"\n  \
            cp -r \"{engine_log_dir}\"/* \"$(Agent.TempDirectory)/staging/logs/copilot/\" 2>/dev/null || true\n\

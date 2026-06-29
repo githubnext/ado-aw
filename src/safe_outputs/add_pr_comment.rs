@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use super::PATH_SEGMENT;
-use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
 use crate::validate::reject_pipeline_injection;
@@ -209,12 +209,12 @@ fn validate_file_path(path: &str) -> anyhow::Result<()> {
 }
 
 fn repository_checkout_dir(repository: &str, ctx: &ExecutionContext) -> anyhow::Result<PathBuf> {
-    if crate::safeoutputs::input_refers_to_self(repository, ctx) {
+    if crate::safe_outputs::input_refers_to_self(repository, ctx) {
         return Ok(ctx.source_directory.clone());
     }
 
     if let Some(alias) =
-        crate::safeoutputs::lookup_allowed_repository_alias(repository, &ctx.allowed_repositories)
+        crate::safe_outputs::lookup_allowed_repository_alias(repository, &ctx.allowed_repositories)
     {
         return Ok(ctx.source_directory.join(alias));
     }
@@ -367,7 +367,7 @@ impl Executor for AddPrCommentResult {
                 .context("BUILD_REPOSITORY_NAME not set and repository is 'self'")?
                 .clone()
         } else {
-            match crate::safeoutputs::lookup_allowed_repository(
+            match crate::safe_outputs::lookup_allowed_repository(
                 &self.repository,
                 &ctx.allowed_repositories,
             ) {
@@ -503,7 +503,7 @@ impl Executor for AddPrCommentResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safeoutputs::ToolResult;
+    use crate::safe_outputs::ToolResult;
     use tempfile::tempdir;
 
     #[test]

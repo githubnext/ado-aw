@@ -4,7 +4,7 @@
 //! This is **not** a regular safe output — it is gated entirely by the
 //! `ado-aw-debug.create-issue` front-matter section and stripped from the
 //! SafeOutputs MCP server unless explicitly enabled (see
-//! [`crate::safeoutputs::DEBUG_ONLY_TOOLS`]).
+//! [`crate::safe_outputs::DEBUG_ONLY_TOOLS`]).
 //!
 //! Intended use: dogfood pipelines compiled from `githubnext/ado-aw` that need
 //! to file failure reports back to GitHub for triage. Stage 3 authenticates
@@ -16,7 +16,7 @@
 //!   redirect issues to a different repo.
 //! * Labels are merged from a static operator-configured list and an
 //!   agent-supplied list. Agent labels are validated against `allowed-labels`
-//!   (wildcard-aware via [`crate::safeoutputs::tag_matches_pattern`]).
+//!   (wildcard-aware via [`crate::safe_outputs::tag_matches_pattern`]).
 //! * Assignees are merged the same way without an allowlist gate (out of
 //!   scope for v1).
 
@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
 use super::PATH_SEGMENT;
-use crate::safeoutputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
 use crate::validate::reject_pipeline_injection;
@@ -258,7 +258,7 @@ impl Executor for CreateIssueResult {
         // bypass the MCP-layer default-deny.
         if !ctx
             .debug_enabled_tools
-            .contains(<Self as crate::safeoutputs::ToolResult>::NAME)
+            .contains(<Self as crate::safe_outputs::ToolResult>::NAME)
         {
             return Ok(ExecutionResult::failure(
                 "create-issue is a debug-only tool and is not enabled for this \
@@ -420,7 +420,7 @@ impl Executor for CreateIssueResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safeoutputs::ToolResult;
+    use crate::safe_outputs::ToolResult;
     use std::collections::HashMap;
     use std::path::PathBuf;
 

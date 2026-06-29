@@ -13,9 +13,7 @@ engine:
 permissions:
   read: agent-playground-read
 safe-outputs:
-  noop:
-    work-item:
-      enabled: false
+  noop: {}
 ---
 
 ## Daily smoke for Azure CLI (az)

@@ -1231,7 +1231,7 @@ pub(crate) fn debug_create_issue_enabled(front_matter: &FrontMatter) -> bool {
 ///
 /// Pure config check — no I/O, runs at compile time.
 pub fn validate_ado_aw_debug_config(front_matter: &FrontMatter) -> Result<()> {
-    use crate::safeoutputs::DEBUG_ONLY_TOOLS;
+    use crate::safe_outputs::DEBUG_ONLY_TOOLS;
 
     // Defence-in-depth: reject any debug-only tool name appearing under the
     // regular safe-outputs surface. There is no legitimate reason for it to
@@ -1256,7 +1256,7 @@ pub fn validate_ado_aw_debug_config(front_matter: &FrontMatter) -> Result<()> {
         return Ok(());
     };
 
-    crate::safeoutputs::validate_target_repo(&ci.target_repo)?;
+    crate::safe_outputs::validate_target_repo(&ci.target_repo)?;
 
     crate::validate::reject_pipeline_injection(
         &ci.target_repo,
@@ -1476,7 +1476,7 @@ pub fn generate_executor_ado_env(
 /// to prevent shell injection when the args are embedded in bash commands.
 /// Unrecognized tool names emit a compile-time warning and are skipped.
 pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
-    use crate::safeoutputs::{ALL_KNOWN_SAFE_OUTPUTS, ALWAYS_ON_TOOLS, NON_MCP_SAFE_OUTPUT_KEYS};
+    use crate::safe_outputs::{ALL_KNOWN_SAFE_OUTPUTS, ALWAYS_ON_TOOLS, NON_MCP_SAFE_OUTPUT_KEYS};
     use std::collections::HashSet;
 
     let debug_create_issue = debug_create_issue_enabled(front_matter);
@@ -1740,7 +1740,9 @@ pub fn validate_resolve_pr_thread_statuses(front_matter: &FrontMatter) -> Result
 /// `validate_ado_aw_debug_config` with a more specific error message;
 /// this validator skips them so the operator gets that better message.
 pub fn validate_safe_outputs_keys(front_matter: &FrontMatter) -> Result<()> {
-    use crate::safeoutputs::{ALL_KNOWN_SAFE_OUTPUTS, DEBUG_ONLY_TOOLS, NON_MCP_SAFE_OUTPUT_KEYS};
+    use crate::safe_outputs::{
+        ALL_KNOWN_SAFE_OUTPUTS, DEBUG_ONLY_TOOLS, NON_MCP_SAFE_OUTPUT_KEYS, SAFE_OUTPUT_CONFIG_KEYS,
+    };
 
     let mut unknown: Vec<(String, Vec<&'static str>)> = Vec::new();
     let mut invalid_names: Vec<String> = Vec::new();
@@ -1751,6 +1753,11 @@ pub fn validate_safe_outputs_keys(front_matter: &FrontMatter) -> Result<()> {
             continue;
         }
         if NON_MCP_SAFE_OUTPUT_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        // Global config keys (e.g. `report-failure-as-work-item`) configure the
+        // Conclusion job rather than registering a tool — accept them here.
+        if SAFE_OUTPUT_CONFIG_KEYS.contains(&key.as_str()) {
             continue;
         }
         // `memory` is a known migration path — left as a warning in
@@ -1800,7 +1807,7 @@ pub fn validate_safe_outputs_keys(front_matter: &FrontMatter) -> Result<()> {
         msg.push_str(
             "\nValid safe-output keys are listed in docs/safe-outputs.md. \
              Each key must match exactly the kebab-case name registered by a \
-             tool in src/safeoutputs/ (e.g. `create-pull-request`, not \
+             tool in src/safe_outputs/ (e.g. `create-pull-request`, not \
              `create-pr`).",
         );
         anyhow::bail!("{}", msg);
@@ -1814,7 +1821,7 @@ pub fn validate_safe_outputs_keys(front_matter: &FrontMatter) -> Result<()> {
 /// If no candidate shares the head, returns an empty vec — better to give
 /// no suggestion than a misleading one (`update-pr` for `create-pr`).
 fn related_safe_output_names(key: &str) -> Vec<&'static str> {
-    use crate::safeoutputs::ALL_KNOWN_SAFE_OUTPUTS;
+    use crate::safe_outputs::ALL_KNOWN_SAFE_OUTPUTS;
 
     let head = key.split('-').next().unwrap_or_default();
     if head.is_empty() {
@@ -4198,6 +4205,25 @@ safe-outputs:
 "#;
         let (fm, _) = parse_markdown(yaml).unwrap();
         assert!(validate_safe_outputs_keys(&fm).is_ok());
+    }
+
+    #[test]
+    fn test_validate_safe_outputs_keys_accepts_global_config_key() {
+        // `report-failure-as-work-item` is a Conclusion-job config toggle, not
+        // a tool name. It must not trigger the "unrecognised tool name" error.
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  report-failure-as-work-item: false
+  noop: {}
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        assert!(
+            validate_safe_outputs_keys(&fm).is_ok(),
+            "report-failure-as-work-item should be accepted as a global config key"
+        );
     }
 
     #[test]

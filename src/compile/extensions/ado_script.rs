@@ -348,7 +348,15 @@ impl AdoScriptExtension {
 /// pulled from the Azure DevOps Artifacts feed (NuGet) instead of GitHub
 /// Releases; the `.nupkg` is unzipped and `ado-script.zip` relocated, then
 /// verified and unpacked exactly as in the GitHub path.
-fn install_and_download_steps_typed(supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
+///
+/// Bundles are unpacked into `/tmp/ado-aw-scripts/` so the consumer
+/// references `/tmp/ado-aw-scripts/ado-script/<bundle>.js`. Shared by the
+/// Agent/Setup jobs (via the extension's declarations) and the Conclusion
+/// job (via [`crate::compile::agentic_pipeline`]) so the supply-chain
+/// mirror and unzip layout stay consistent across every consumer.
+pub(crate) fn install_and_download_steps_typed(
+    supply_chain: Option<&SupplyChainConfig>,
+) -> Vec<Step> {
     let version = env!("CARGO_PKG_VERSION");
     let install = {
         let mut t = UseNode::new("22.x").into_step();

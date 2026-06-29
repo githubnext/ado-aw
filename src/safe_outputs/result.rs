@@ -71,7 +71,7 @@ pub struct ExecutionContext {
     pub tool_configs: HashMap<String, serde_json::Value>,
     /// Debug-only tools (e.g. `create-issue`) that the operator authorized
     /// via the `ado-aw-debug:` front-matter section. Stage 3 executors for
-    /// `crate::safeoutputs::DEBUG_ONLY_TOOLS` MUST reject NDJSON entries
+    /// `crate::safe_outputs::DEBUG_ONLY_TOOLS` MUST reject NDJSON entries
     /// whose tool name is absent from this set — otherwise a forged entry
     /// could bypass the MCP-layer default-deny gate. Empty by default.
     pub debug_enabled_tools: HashSet<String>,
@@ -504,7 +504,7 @@ macro_rules! tool_result {
             )*
         }
 
-        impl $crate::safeoutputs::ToolResult for $name {
+        impl $crate::safe_outputs::ToolResult for $name {
             const NAME: &'static str = $tool_name;
             const DEFAULT_MAX: u32 = $default_max;
             const REQUIRES_WRITE: bool = true;
@@ -514,10 +514,10 @@ macro_rules! tool_result {
             type Error = rmcp::ErrorData;
 
             fn try_from(params: $params) -> Result<Self, Self::Error> {
-                <$params as $crate::safeoutputs::Validate>::validate(&params)
-                    .map_err($crate::safeoutputs::anyhow_to_mcp_error)?;
+                <$params as $crate::safe_outputs::Validate>::validate(&params)
+                    .map_err($crate::safe_outputs::anyhow_to_mcp_error)?;
                 Ok(Self {
-                    name: <Self as $crate::safeoutputs::ToolResult>::NAME.to_string(),
+                    name: <Self as $crate::safe_outputs::ToolResult>::NAME.to_string(),
                     $($field: params.$field,)*
                 })
             }
@@ -547,7 +547,7 @@ macro_rules! tool_result {
             )*
         }
 
-        impl $crate::safeoutputs::ToolResult for $name {
+        impl $crate::safe_outputs::ToolResult for $name {
             const NAME: &'static str = $tool_name;
             const REQUIRES_WRITE: bool = true;
         }
@@ -556,10 +556,10 @@ macro_rules! tool_result {
             type Error = rmcp::ErrorData;
 
             fn try_from(params: $params) -> Result<Self, Self::Error> {
-                <$params as $crate::safeoutputs::Validate>::validate(&params)
-                    .map_err($crate::safeoutputs::anyhow_to_mcp_error)?;
+                <$params as $crate::safe_outputs::Validate>::validate(&params)
+                    .map_err($crate::safe_outputs::anyhow_to_mcp_error)?;
                 Ok(Self {
-                    name: <Self as $crate::safeoutputs::ToolResult>::NAME.to_string(),
+                    name: <Self as $crate::safe_outputs::ToolResult>::NAME.to_string(),
                     $($field: params.$field,)*
                 })
             }
@@ -589,7 +589,7 @@ macro_rules! tool_result {
             )*
         }
 
-        impl $crate::safeoutputs::ToolResult for $name {
+        impl $crate::safe_outputs::ToolResult for $name {
             const NAME: &'static str = $tool_name;
             const DEFAULT_MAX: u32 = $default_max;
         }
@@ -598,10 +598,10 @@ macro_rules! tool_result {
             type Error = rmcp::ErrorData;
 
             fn try_from(params: $params) -> Result<Self, Self::Error> {
-                <$params as $crate::safeoutputs::Validate>::validate(&params)
-                    .map_err($crate::safeoutputs::anyhow_to_mcp_error)?;
+                <$params as $crate::safe_outputs::Validate>::validate(&params)
+                    .map_err($crate::safe_outputs::anyhow_to_mcp_error)?;
                 Ok(Self {
-                    name: <Self as $crate::safeoutputs::ToolResult>::NAME.to_string(),
+                    name: <Self as $crate::safe_outputs::ToolResult>::NAME.to_string(),
                     $($field: params.$field,)*
                 })
             }
@@ -630,7 +630,7 @@ macro_rules! tool_result {
             )*
         }
 
-        impl $crate::safeoutputs::ToolResult for $name {
+        impl $crate::safe_outputs::ToolResult for $name {
             const NAME: &'static str = $tool_name;
         }
 
@@ -638,10 +638,10 @@ macro_rules! tool_result {
             type Error = rmcp::ErrorData;
 
             fn try_from(params: $params) -> Result<Self, Self::Error> {
-                <$params as $crate::safeoutputs::Validate>::validate(&params)
-                    .map_err($crate::safeoutputs::anyhow_to_mcp_error)?;
+                <$params as $crate::safe_outputs::Validate>::validate(&params)
+                    .map_err($crate::safe_outputs::anyhow_to_mcp_error)?;
                 Ok(Self {
-                    name: <Self as $crate::safeoutputs::ToolResult>::NAME.to_string(),
+                    name: <Self as $crate::safe_outputs::ToolResult>::NAME.to_string(),
                     $($field: params.$field,)*
                 })
             }
@@ -663,7 +663,7 @@ macro_rules! tool_result {
 #[macro_export]
 macro_rules! tool_names {
     ($($ty:ty),* $(,)?) => {
-        &[$(<$ty as $crate::safeoutputs::ToolResult>::NAME),*]
+        &[$(<$ty as $crate::safe_outputs::ToolResult>::NAME),*]
     };
 }
 
@@ -682,7 +682,7 @@ macro_rules! tool_names {
 #[macro_export]
 macro_rules! all_safe_output_names {
     ($($ty:ty),* $(,)?; $($extra:expr),* $(,)?) => {
-        &[$(<$ty as $crate::safeoutputs::ToolResult>::NAME),*, $($extra),*]
+        &[$(<$ty as $crate::safe_outputs::ToolResult>::NAME),*, $($extra),*]
     };
 }
 

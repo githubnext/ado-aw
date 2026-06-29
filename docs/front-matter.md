@@ -217,6 +217,11 @@ parameters:                    # optional ADO runtime parameters (surfaced in UI
     default: false
 ---
 
+Additional top-level field reference:
+
+- The always-running Conclusion job (pipeline failure / diagnostic
+  signal reporting) is triggered automatically when `safe-outputs:` is
+  configured. See [docs/conclusion.md](conclusion.md).
 
 ## Build and Test
 

@@ -77,7 +77,20 @@ jobs:
         run: |
           set -euo pipefail
           cd scripts
-          zip -r ../ado-script.zip ado-script/gate.js ado-script/import.js ado-script/exec-context-pr.js ado-script/exec-context-pr-synth.js ado-script/exec-context-manual.js ado-script/exec-context-pipeline.js ado-script/exec-context-ci-push.js ado-script/exec-context-workitem.js ado-script/exec-context-schedule.js ado-script/exec-context-pr-checks.js ado-script/exec-context-repo.js ado-script/approval-summary.js
+          # Auto-bundle every ncc output at the ado-script root. `npm run build`
+          # emits exactly one <name>.js per src/<name>/ bundle directory (all
+          # source is .ts under src/), so globbing *.js captures every bundle
+          # automatically — no manual per-bundle list to keep in sync. The
+          # ado-script-bundle-coverage test guards that every bundle dir is
+          # actually built.
+          shopt -s nullglob
+          bundles=(ado-script/*.js)
+          if [ ${#bundles[@]} -eq 0 ]; then
+            echo "ERROR: no ado-script bundles found — did 'npm run build' run?" >&2
+            exit 1
+          fi
+          echo "Bundling ${#bundles[@]} ado-script file(s): ${bundles[*]}"
+          zip -r ../ado-script.zip "${bundles[@]}"
 
       - name: Upload release assets
         env:

@@ -3,7 +3,7 @@
 `ado-script` is the umbrella name for the TypeScript workspace at
 [`scripts/ado-script/`](../scripts/ado-script/). It produces small,
 ncc-bundled Node programs that the **compiler injects into every emitted
-pipeline** as runtime helpers. Today it produces twelve bundles:
+pipeline** as runtime helpers. Today it produces thirteen bundles:
 
 - `gate.js` — trigger-filter gate evaluator (Setup job).
 - `import.js` — runtime prompt resolver described in
@@ -45,6 +45,10 @@ pipeline** as runtime helpers. Today it produces twelve bundles:
   branch, SHA, last release tag, and commits-since-tag facts under
   `aw-context/repo/` (Agent job; see
   [`execution-context.md`](execution-context.md)).
+- `conclusion.js` — Conclusion job work-item reporter: reads the
+  safe-outputs execution manifest and upstream job results,
+  files/comments ADO work items for pipeline failures and diagnostic
+  signals (Conclusion job).
 - `approval-summary.js` — Safe-outputs summary renderer that runs at the
   **end of the Agent job** (after proposals are collected). It reads the
   proposed safe outputs from `safe_outputs.ndjson`, renders a sanitized
@@ -421,9 +425,12 @@ scripts/ado-script/
 │   ├── exec-context-pr-checks/  # exec-context-pr-checks.js entry point + PR validation checks context
 │   │   ├── index.ts             # main(): fetch policy/build checks → stage failing/succeeded JSON → prompt
 │   │   └── __tests__/           # unit tests for checks filtering / sanitisation paths
-│   └── exec-context-repo/       # exec-context-repo.js entry point + repository identity context
-│       ├── index.ts             # main(): stage branch/SHA/tag/commits-since-tag facts → prompt
-│       └── __tests__/           # unit tests for identity / tag fallback / sanitisation paths
+│   ├── exec-context-repo/       # exec-context-repo.js entry point + repository identity context
+│   │   ├── index.ts             # main(): stage branch/SHA/tag/commits-since-tag facts → prompt
+│   │   └── __tests__/           # unit tests for identity / tag fallback / sanitisation paths
+│   └── conclusion/              # conclusion.js entry point + Conclusion-job reporter
+│       ├── index.ts             # main(): inspect upstream results + safe-outputs manifest → file/append work items
+│       └── __tests__/           # unit tests for signal detection and work-item filing behaviour
 ├── test/                        # End-to-end smoke tests (gate, import, exec-context-pr)
 ├── gate.js                      # ncc bundle output (gitignored)
 ├── import.js                    # ncc bundle output (gitignored)
@@ -435,7 +442,9 @@ scripts/ado-script/
 ├── exec-context-workitem.js     # ncc bundle output (gitignored)
 ├── exec-context-schedule.js     # ncc bundle output (gitignored)
 ├── exec-context-pr-checks.js    # ncc bundle output (gitignored)
-└── exec-context-repo.js         # ncc bundle output (gitignored)
+├── exec-context-repo.js         # ncc bundle output (gitignored)
+├── conclusion.js                # ncc bundle output (gitignored)
+└── approval-summary.js          # ncc bundle output (gitignored)
 ```
 
 The release workflow (`.github/workflows/release.yml`) runs
@@ -448,8 +457,10 @@ The release workflow (`.github/workflows/release.yml`) runs
 `scripts/ado-script/exec-context-ci-push.js`,
 `scripts/ado-script/exec-context-workitem.js`,
 `scripts/ado-script/exec-context-schedule.js`,
-`scripts/ado-script/exec-context-pr-checks.js`, and
-`scripts/ado-script/exec-context-repo.js` into the
+`scripts/ado-script/exec-context-pr-checks.js`,
+`scripts/ado-script/exec-context-repo.js`,
+`scripts/ado-script/conclusion.js`, and
+`scripts/ado-script/approval-summary.js` into the
 `ado-script.zip` release asset. Pipelines download that asset at
 runtime by URL pinned to the compiler's `CARGO_PKG_VERSION`, verify
 its SHA-256 against the `checksums.txt` asset, then extract.

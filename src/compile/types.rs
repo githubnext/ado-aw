@@ -1101,7 +1101,7 @@ pub struct PermissionsConfig {
 ///
 /// Adding a new field: pair the front-matter knob with a corresponding
 /// compile-side hook (e.g., a debug-only safe output should also be added
-/// to `crate::safeoutputs::DEBUG_ONLY_TOOLS` so the MCP layer enforces a
+/// to `crate::safe_outputs::DEBUG_ONLY_TOOLS` so the MCP layer enforces a
 /// matching default-deny gate).
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
@@ -1116,7 +1116,7 @@ pub struct AdoAwDebugConfig {
     /// Presence of this field is what enables the tool — when omitted
     /// the SafeOutputs MCP layer hides it via `DEBUG_ONLY_TOOLS`.
     #[serde(default, rename = "create-issue")]
-    pub create_issue: Option<crate::safeoutputs::CreateIssueConfig>,
+    pub create_issue: Option<crate::safe_outputs::CreateIssueConfig>,
 }
 
 impl SanitizeConfigTrait for AdoAwDebugConfig {
@@ -3399,5 +3399,67 @@ Body
         let filters = pr.filters.unwrap();
         assert_eq!(filters.title.unwrap().pattern, "*[agent]*");
         assert_eq!(filters.draft, Some(false));
+    }
+
+    #[test]
+    fn test_front_matter_safe_outputs_report_failure_config() {
+        let content = r#"---
+name: "Test Agent"
+description: "Test"
+safe-outputs:
+  report-failure-as-work-item: false
+  noop:
+    title-prefix: "[ado-aw] Agent noop"
+    work-item-type: Task
+    area-path: "MyProject\\MyTeam"
+    tags:
+      - agent-noop
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        // report-failure-as-work-item is stored as opaque JSON in safe_outputs HashMap
+        let report_flag = fm
+            .safe_outputs
+            .get("report-failure-as-work-item")
+            .and_then(|v| v.as_bool());
+        assert_eq!(report_flag, Some(false));
+        // noop config with flat fields
+        let noop = fm.safe_outputs.get("noop").unwrap();
+        assert_eq!(noop.get("title-prefix").and_then(|v| v.as_str()), Some("[ado-aw] Agent noop"));
+        assert_eq!(noop.get("area-path").and_then(|v| v.as_str()), Some("MyProject\\MyTeam"));
+    }
+
+    #[test]
+    fn test_front_matter_safe_outputs_noop_disabled() {
+        let content = r#"---
+name: "Test Agent"
+description: "Test"
+safe-outputs:
+  noop: false
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let noop = fm.safe_outputs.get("noop").unwrap();
+        assert_eq!(noop.as_bool(), Some(false));
+    }
+
+    #[test]
+    fn test_front_matter_safe_outputs_triggers_conclusion_job() {
+        // Any non-empty safe-outputs triggers the conclusion job
+        let content = r#"---
+name: "Test Agent"
+description: "Test"
+safe-outputs:
+  noop: {}
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        assert!(!fm.safe_outputs.is_empty(), "safe_outputs should be non-empty");
     }
 }
