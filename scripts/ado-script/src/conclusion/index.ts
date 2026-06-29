@@ -29,7 +29,7 @@ interface ManifestEntry {
 }
 
 interface JobStatus {
-  name: "Agent" | "Detection" | "SafeOutputs";
+  name: "Agent" | "Detection" | "SafeOutputs" | "SafeOutputs_Reviewed";
   result: JobResult;
 }
 
@@ -135,7 +135,7 @@ function loadConfig(env: NodeJS.ProcessEnv): RuntimeConfig {
       ...(readOptionalEnv(env, "AW_SAFEOUTPUTS_REVIEWED_RESULT") !== undefined
         ? [
             {
-              name: "SafeOutputs_Reviewed",
+              name: "SafeOutputs_Reviewed" as const,
               result: readJobResult(env, "AW_SAFEOUTPUTS_REVIEWED_RESULT"),
             },
           ]

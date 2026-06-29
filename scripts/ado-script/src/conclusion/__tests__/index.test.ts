@@ -121,6 +121,7 @@ function baseEnv(): Record<(typeof trackedEnvKeys)[number], string> {
     AW_AGENT_RESULT: "Succeeded",
     AW_DETECTION_RESULT: "Succeeded",
     AW_SAFEOUTPUTS_RESULT: "Succeeded",
+    AW_SAFEOUTPUTS_REVIEWED_RESULT: "",
     AW_REPORT_FAILURE_AS_WORK_ITEM: "true",
     AW_SAFE_OUTPUT_DIR: "C:\\software\\ado-aw-feature-reporter\\scripts\\ado-script\\src\\conclusion\\__tests__\\fixtures",
     AW_PIPELINE_NAME: "feature reporter",
