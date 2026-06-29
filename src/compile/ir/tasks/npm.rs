@@ -7,13 +7,41 @@
 //! ADO task reference:
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/npm-v1>
 
-use super::common::{push_bool, push_opt};
+use super::common::{de_opt_bool_flex, push_bool, push_opt};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
+use serde_yaml::Value;
+
+/// Validate an authored `Npm@1` `inputs:` mapping (advisory front-matter
+/// validation, see [`super::parse`]).
+pub(crate) fn validate_inputs(inputs: Value) -> Result<(), String> {
+    let mut map = match inputs {
+        Value::Mapping(m) => m,
+        Value::Null => Default::default(),
+        other => return Err(format!("`inputs` must be a mapping, got {other:?}")),
+    };
+    let command = map
+        .remove("command")
+        .and_then(|v| v.as_str().map(str::to_string))
+        .ok_or_else(|| "Npm@1 requires a `command` input".to_string())?;
+    let rest = Value::Mapping(map);
+
+    let result = match command.as_str() {
+        "install" => serde_yaml::from_value::<NpmInstall>(rest).map(drop),
+        "ci" => serde_yaml::from_value::<NpmCi>(rest).map(drop),
+        "publish" => serde_yaml::from_value::<NpmPublish>(rest).map(drop),
+        "custom" => serde_yaml::from_value::<NpmCustom>(rest).map(drop),
+        other => return Err(format!("Npm@1: unknown command `{other}`")),
+    };
+    result.map_err(|e| format!("command `{command}`: {e}"))
+}
 
 /// `customRegistry` selector for `npm install` / `ci` / `custom`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum NpmCustomRegistry {
+    #[serde(rename = "useNpmrc")]
     UseNpmrc,
+    #[serde(rename = "useFeed")]
     UseFeed,
 }
 
@@ -28,9 +56,11 @@ impl NpmCustomRegistry {
 }
 
 /// `publishRegistry` selector for `npm publish`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum NpmPublishRegistry {
+    #[serde(rename = "useExternalRegistry")]
     UseExternalRegistry,
+    #[serde(rename = "useFeed")]
     UseFeed,
 }
 
@@ -54,12 +84,18 @@ pub enum NpmCommand {
 }
 
 /// Optionals for `npm install`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NpmInstall {
+    #[serde(rename = "workingDir", default)]
     working_dir: Option<String>,
+    #[serde(rename = "verbose", default, deserialize_with = "de_opt_bool_flex")]
     verbose: Option<bool>,
+    #[serde(rename = "customRegistry", default)]
     custom_registry: Option<NpmCustomRegistry>,
+    #[serde(rename = "customFeed", default)]
     custom_feed: Option<String>,
+    #[serde(rename = "customEndpoint", default)]
     custom_endpoint: Option<String>,
 }
 
@@ -101,13 +137,24 @@ impl NpmInstall {
 pub type NpmCi = NpmInstall;
 
 /// Optionals for `npm publish`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NpmPublish {
+    #[serde(rename = "workingDir", default)]
     working_dir: Option<String>,
+    #[serde(rename = "verbose", default, deserialize_with = "de_opt_bool_flex")]
     verbose: Option<bool>,
+    #[serde(rename = "publishRegistry", default)]
     publish_registry: Option<NpmPublishRegistry>,
+    #[serde(rename = "publishFeed", default)]
     publish_feed: Option<String>,
+    #[serde(rename = "publishEndpoint", default)]
     publish_endpoint: Option<String>,
+    #[serde(
+        rename = "publishPackageMetadata",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     publish_package_metadata: Option<bool>,
 }
 
@@ -149,12 +196,18 @@ impl NpmPublish {
 }
 
 /// Inputs for `npm custom`. `customCommand` is required.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NpmCustom {
+    #[serde(rename = "customCommand")]
     custom_command: String,
+    #[serde(rename = "workingDir", default)]
     working_dir: Option<String>,
+    #[serde(rename = "customRegistry", default)]
     custom_registry: Option<NpmCustomRegistry>,
+    #[serde(rename = "customFeed", default)]
     custom_feed: Option<String>,
+    #[serde(rename = "customEndpoint", default)]
     custom_endpoint: Option<String>,
 }
 
@@ -240,7 +293,8 @@ impl Npm {
         };
         let mut t = TaskStep::new(
             "Npm@1",
-            self.display_name.unwrap_or_else(|| format!("npm {command}")),
+            self.display_name
+                .unwrap_or_else(|| format!("npm {command}")),
         )
         .with_input("command", command);
         match self.command {
@@ -315,9 +369,18 @@ mod tests {
         )
         .into_step();
         assert_eq!(t.inputs.get("command").map(String::as_str), Some("publish"));
-        assert_eq!(t.inputs.get("publishRegistry").map(String::as_str), Some("useFeed"));
-        assert_eq!(t.inputs.get("publishFeed").map(String::as_str), Some("myorg/myfeed"));
-        assert_eq!(t.inputs.get("publishPackageMetadata").map(String::as_str), Some("true"));
+        assert_eq!(
+            t.inputs.get("publishRegistry").map(String::as_str),
+            Some("useFeed")
+        );
+        assert_eq!(
+            t.inputs.get("publishFeed").map(String::as_str),
+            Some("myorg/myfeed")
+        );
+        assert_eq!(
+            t.inputs.get("publishPackageMetadata").map(String::as_str),
+            Some("true")
+        );
     }
 
     #[test]
@@ -347,8 +410,14 @@ mod tests {
                 .verbose(true),
         )
         .into_step();
-        assert_eq!(t.inputs.get("customRegistry").map(String::as_str), Some("useFeed"));
-        assert_eq!(t.inputs.get("customFeed").map(String::as_str), Some("myorg/myproject/myfeed"));
+        assert_eq!(
+            t.inputs.get("customRegistry").map(String::as_str),
+            Some("useFeed")
+        );
+        assert_eq!(
+            t.inputs.get("customFeed").map(String::as_str),
+            Some("myorg/myproject/myfeed")
+        );
         assert_eq!(t.inputs.get("verbose").map(String::as_str), Some("true"));
     }
 }

@@ -18,6 +18,39 @@
 use super::common::push_opt;
 use crate::compile::ir::step::TaskStep;
 use serde::Deserialize;
+use serde_yaml::Value;
+
+/// Validate an authored `Docker@2` `inputs:` mapping (advisory front-matter
+/// validation, see [`super::parse`]).
+///
+/// `Docker@2` selects the command via its `command` input; we dispatch on it
+/// and deserialize the remaining inputs into that command's variant struct.
+/// Each variant struct derives `#[serde(deny_unknown_fields)]`, so an input
+/// belonging to a different command (or an unknown input) is rejected. This is
+/// done with an explicit dispatch rather than a serde internally-tagged enum
+/// because serde silently ignores `deny_unknown_fields` on tagged enums.
+pub(crate) fn validate_inputs(inputs: Value) -> Result<(), String> {
+    let mut map = match inputs {
+        Value::Mapping(m) => m,
+        Value::Null => Default::default(),
+        other => return Err(format!("`inputs` must be a mapping, got {other:?}")),
+    };
+    let command = map
+        .remove("command")
+        .and_then(|v| v.as_str().map(str::to_string))
+        .ok_or_else(|| "Docker@2 requires a `command` input".to_string())?;
+    let rest = Value::Mapping(map);
+
+    let result = match command.as_str() {
+        "buildAndPush" => serde_yaml::from_value::<DockerBuildAndPush>(rest).map(drop),
+        "build" => serde_yaml::from_value::<DockerBuild>(rest).map(drop),
+        "push" => serde_yaml::from_value::<DockerPush>(rest).map(drop),
+        "login" => serde_yaml::from_value::<DockerLogin>(rest).map(drop),
+        "logout" => serde_yaml::from_value::<DockerLogout>(rest).map(drop),
+        other => return Err(format!("Docker@2: unknown command `{other}`")),
+    };
+    result.map_err(|e| format!("command `{command}`: {e}"))
+}
 
 /// `Docker@2` `command` selector, carrying the per-command optional inputs.
 #[derive(Debug, Clone)]

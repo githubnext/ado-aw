@@ -12,17 +12,75 @@
 //! ADO task reference:
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/universal-packages-v1>
 
-use super::common::{push_bool, push_opt};
+use super::common::{de_opt_bool_flex, push_bool, push_opt};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
+use serde_yaml::{Mapping, Value};
+
+/// Validate an authored `UniversalPackages@1` `inputs:` mapping (advisory
+/// front-matter validation, see [`super::parse`]).
+pub(crate) fn validate_inputs(inputs: Value) -> Result<(), String> {
+    let mut map = match inputs {
+        Value::Mapping(m) => m,
+        Value::Null => Default::default(),
+        other => return Err(format!("`inputs` must be a mapping, got {other:?}")),
+    };
+    let command = map
+        .remove("command")
+        .and_then(|v| v.as_str().map(str::to_string))
+        .ok_or_else(|| "UniversalPackages@1 requires a `command` input".to_string())?;
+    match command.as_str() {
+        "download" | "publish" => {}
+        other => return Err(format!("UniversalPackages@1: unknown command `{other}`")),
+    }
+
+    let mut common = Mapping::new();
+    for key in [
+        "feed",
+        "packageName",
+        "workloadIdentityServiceConnection",
+        "organization",
+    ] {
+        if let Some(value) = map.remove(key) {
+            common.insert(Value::String(key.to_owned()), value);
+        }
+    }
+    serde_yaml::from_value::<UniversalPackagesCommonInputs>(Value::Mapping(common))
+        .map_err(|e| format!("command `{command}`: {e}"))?;
+
+    let rest = Value::Mapping(map);
+    let result = match command.as_str() {
+        "download" => serde_yaml::from_value::<UniversalPackagesDownload>(rest).map(drop),
+        "publish" => serde_yaml::from_value::<UniversalPackagesPublish>(rest).map(drop),
+        _ => unreachable!("validated command discriminator above"),
+    };
+    result.map_err(|e| format!("command `{command}`: {e}"))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UniversalPackagesCommonInputs {
+    #[serde(rename = "feed")]
+    _feed: String,
+    #[serde(rename = "packageName")]
+    _package_name: String,
+    #[serde(rename = "workloadIdentityServiceConnection", default)]
+    _workload_identity_service_connection: Option<String>,
+    #[serde(rename = "organization", default)]
+    _organization: Option<String>,
+}
 
 /// `versionIncrement` value for the `publish` command.
 ///
 /// Automatically increments the specified component of the package version.
 /// Cannot be used together with an explicit `packageVersion`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum VersionIncrement {
+    #[serde(rename = "major")]
     Major,
+    #[serde(rename = "minor")]
     Minor,
+    #[serde(rename = "patch")]
     Patch,
 }
 
@@ -38,10 +96,14 @@ impl VersionIncrement {
 }
 
 /// Per-command optionals for `UniversalPackages@1` `command: download`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UniversalPackagesDownload {
+    #[serde(rename = "packageVersion", default)]
     package_version: Option<String>,
+    #[serde(rename = "directory", default)]
     directory: Option<String>,
+    #[serde(rename = "extract", default, deserialize_with = "de_opt_bool_flex")]
     extract: Option<bool>,
 }
 
@@ -71,11 +133,16 @@ impl UniversalPackagesDownload {
 }
 
 /// Per-command optionals for `UniversalPackages@1` `command: publish`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UniversalPackagesPublish {
+    #[serde(rename = "packageVersion", default)]
     package_version: Option<String>,
+    #[serde(rename = "versionIncrement", default)]
     version_increment: Option<VersionIncrement>,
+    #[serde(rename = "directory", default)]
     directory: Option<String>,
+    #[serde(rename = "packageDescription", default)]
     package_description: Option<String>,
 }
 
@@ -212,8 +279,7 @@ impl UniversalPackages {
         };
         let mut t = TaskStep::new(
             "UniversalPackages@1",
-            self.display_name
-                .unwrap_or_else(|| default_display.into()),
+            self.display_name.unwrap_or_else(|| default_display.into()),
         )
         .with_input("command", command_str)
         .with_input("feed", self.feed)
@@ -251,15 +317,15 @@ mod tests {
 
     #[test]
     fn download_minimal() {
-        let t = UniversalPackages::download(
-            "my-feed",
-            "my-package",
-            UniversalPackagesDownload::new(),
-        )
-        .into_step();
+        let t =
+            UniversalPackages::download("my-feed", "my-package", UniversalPackagesDownload::new())
+                .into_step();
         assert_eq!(t.task, "UniversalPackages@1");
         assert_eq!(t.display_name, "Download Universal Package");
-        assert_eq!(t.inputs.get("command").map(String::as_str), Some("download"));
+        assert_eq!(
+            t.inputs.get("command").map(String::as_str),
+            Some("download")
+        );
         assert_eq!(t.inputs.get("feed").map(String::as_str), Some("my-feed"));
         assert_eq!(
             t.inputs.get("packageName").map(String::as_str),
@@ -372,9 +438,6 @@ mod tests {
             UniversalPackagesDownload::new().extract(true),
         )
         .into_step();
-        assert_eq!(
-            t.inputs.get("extract").map(String::as_str),
-            Some("true")
-        );
+        assert_eq!(t.inputs.get("extract").map(String::as_str), Some("true"));
     }
 }

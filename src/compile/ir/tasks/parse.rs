@@ -1,113 +1,145 @@
-//! Front-matter task-step **validation** (prototype).
+//! Front-matter task-step **validation** (advisory).
 //!
 //! The builder structs in this module are normally used one-way
 //! (`Builder::new(...).into_step()`), but the ones that derive
 //! [`serde::Deserialize`] keyed on ADO input names can *also* parse and validate
-//! an authored task step. [`parse_task_step`] is the inverse direction of
-//! `into_step()` and is designed to sit in front of the front-matter `steps:`
-//! passthrough with **partial coverage**, so it has three outcomes:
+//! an authored task step. This follows the idiomatic Rust *parse, don't
+//! validate* pattern: the typed builder **is** the schema, a successful
+//! deserialization **is** the validation, and a serde error **is** the
+//! diagnostic.
 //!
-//! - `Ok(Some(step))` — the `task:` is one we model; its inputs were valid, and
-//!   a normalized [`TaskStep`] is returned.
-//! - `Ok(None)` — this step is **not** something we validate (a task with no
-//!   typed builder yet, or a non-task step like `bash:`/`script:`). The caller
-//!   should keep the original YAML untouched (today: `Step::RawYaml`). Coverage
-//!   is therefore additive: mapping a new task only ever *adds* validation and
-//!   never rejects a workflow that compiled before.
-//! - `Err(e)` — the `task:` is one we model but its inputs are wrong (missing a
-//!   required input, an unknown input key, a bad constrained value, or an input
-//!   supplied for the wrong command of a command-dispatch task). This is a real
-//!   authoring error worth surfacing.
+//! [`validate_task_step`] sits in front of the front-matter `steps:` passthrough
+//! with **partial coverage** and three outcomes:
 //!
-//! Only `CopyFiles@2` and `Docker@2` are wired up here as a proof of concept;
-//! extending coverage is a matter of deriving `Deserialize` on the remaining
-//! builders and adding a match arm.
+//! - `None` — the step is **not** something we validate (a task with no typed
+//!   builder yet, or a non-task step like `bash:`/`script:`). The caller keeps
+//!   the original YAML untouched. Coverage is additive: mapping a new task only
+//!   ever *adds* validation and never rejects a workflow that compiled before.
+//! - `Some(Ok(()))` — the `task:` is one we model and its inputs are valid.
+//! - `Some(Err(msg))` — the `task:` is one we model but its inputs are wrong
+//!   (missing a required input, an unknown input key, a bad constrained value,
+//!   or an input supplied for the wrong command of a command-dispatch task).
+//!
+//! The function **never** returns `anyhow::Err` / panics, so the compiler can
+//! treat every finding as an advisory **warning** rather than a hard failure.
+//!
+//! New tasks are wired up by deriving `Deserialize` on the builder (keyed on ADO
+//! input names) and adding one line to [`VALIDATORS`].
 
-use anyhow::{Context, Result, bail};
+use serde::de::DeserializeOwned;
 use serde_yaml::Value;
 
-use super::copy_files::CopyFiles;
-use super::docker::{Docker, DockerCommand};
-use crate::compile::ir::step::TaskStep;
+use super::{
+    archive_files, azure_cli, azure_container_apps, azure_file_copy, azure_key_vault,
+    azure_powershell, azure_web_app, cargo_authenticate, cmd_line, copy_files, delete_files, docker,
+    docker_installer, dotnet_core_cli, download_build_artifacts, download_package,
+    download_pipeline_artifact, download_secure_file, extract_files, github_release, go_tool, gradle,
+    helm_installer, java_tool_installer, manual_validation, maven, maven_authenticate, npm,
+    npm_authenticate, nuget_authenticate, nuget_command, pip_authenticate, powershell,
+    publish_build_artifacts, publish_code_coverage_results, publish_pipeline_artifact,
+    publish_test_results, python_script, twine_authenticate, universal_packages, use_dotnet,
+    use_node, use_python_version, use_ruby_version, vs_build, vstest,
+};
 
-/// Validate a single front-matter step. Returns `Ok(Some(_))` for a recognized
-/// and valid task step, `Ok(None)` for anything we don't model (pass it through
-/// unchanged), and `Err(_)` for a recognized task with invalid inputs.
-pub fn parse_task_step(step: &Value) -> Result<Option<TaskStep>> {
+/// Registry mapping an ADO task id (`"CopyFiles@2"`) to a validator that checks
+/// an authored `inputs:` mapping. Flat builders use
+/// [`validate_by_deserialize`]; command/mode-dispatch tasks supply a bespoke
+/// `validate_inputs` that dispatches on their discriminator input (e.g.
+/// `command`, `targetType`, `Destination`). One line per task — adding a new
+/// task is a `#[derive(Deserialize)]` on the builder plus one entry here.
+#[allow(clippy::type_complexity)]
+const VALIDATORS: &[(&str, fn(Value) -> Result<(), String>)] = &[
+    // ── Flat single-struct builders (validity == clean deserialization) ──
+    ("ArchiveFiles@2", validate_by_deserialize::<archive_files::ArchiveFiles>),
+    ("AzureCLI@2", validate_by_deserialize::<azure_cli::AzureCli>),
+    ("AzureContainerApps@1", validate_by_deserialize::<azure_container_apps::AzureContainerApps>),
+    ("AzureKeyVault@2", validate_by_deserialize::<azure_key_vault::AzureKeyVault>),
+    ("AzureWebApp@1", validate_by_deserialize::<azure_web_app::AzureWebApp>),
+    ("CargoAuthenticate@0", validate_by_deserialize::<cargo_authenticate::CargoAuthenticate>),
+    ("CmdLine@2", validate_by_deserialize::<cmd_line::CmdLine>),
+    ("CopyFiles@2", validate_by_deserialize::<copy_files::CopyFiles>),
+    ("DeleteFiles@1", validate_by_deserialize::<delete_files::DeleteFiles>),
+    ("DockerInstaller@0", validate_by_deserialize::<docker_installer::DockerInstaller>),
+    (
+        "DownloadBuildArtifacts@1",
+        validate_by_deserialize::<download_build_artifacts::DownloadBuildArtifacts>,
+    ),
+    ("DownloadPackage@1", validate_by_deserialize::<download_package::DownloadPackage>),
+    (
+        "DownloadPipelineArtifact@2",
+        validate_by_deserialize::<download_pipeline_artifact::DownloadPipelineArtifact>,
+    ),
+    ("DownloadSecureFile@1", validate_by_deserialize::<download_secure_file::DownloadSecureFile>),
+    ("ExtractFiles@1", validate_by_deserialize::<extract_files::ExtractFiles>),
+    ("GoTool@0", validate_by_deserialize::<go_tool::GoTool>),
+    ("Gradle@3", validate_by_deserialize::<gradle::Gradle>),
+    ("HelmInstaller@1", validate_by_deserialize::<helm_installer::HelmInstaller>),
+    ("ManualValidation@1", validate_by_deserialize::<manual_validation::ManualValidation>),
+    ("Maven@3", validate_by_deserialize::<maven::Maven>),
+    ("MavenAuthenticate@0", validate_by_deserialize::<maven_authenticate::MavenAuthenticate>),
+    ("NuGetAuthenticate@1", validate_by_deserialize::<nuget_authenticate::NuGetAuthenticate>),
+    ("PipAuthenticate@1", validate_by_deserialize::<pip_authenticate::PipAuthenticate>),
+    (
+        "PublishCodeCoverageResults@2",
+        validate_by_deserialize::<publish_code_coverage_results::PublishCodeCoverageResults>,
+    ),
+    (
+        "PublishPipelineArtifact@1",
+        validate_by_deserialize::<publish_pipeline_artifact::PublishPipelineArtifact>,
+    ),
+    ("PublishTestResults@2", validate_by_deserialize::<publish_test_results::PublishTestResults>),
+    ("TwineAuthenticate@1", validate_by_deserialize::<twine_authenticate::TwineAuthenticate>),
+    ("UseDotNet@2", validate_by_deserialize::<use_dotnet::UseDotNet>),
+    ("UseNode@1", validate_by_deserialize::<use_node::UseNode>),
+    ("UsePythonVersion@0", validate_by_deserialize::<use_python_version::UsePythonVersion>),
+    ("UseRubyVersion@0", validate_by_deserialize::<use_ruby_version::UseRubyVersion>),
+    ("VSBuild@1", validate_by_deserialize::<vs_build::VsBuild>),
+    ("npmAuthenticate@0", validate_by_deserialize::<npm_authenticate::NpmAuthenticate>),
+    // ── Command / mode-dispatch builders (custom discriminator dispatch) ──
+    ("AzureFileCopy@6", azure_file_copy::validate_inputs),
+    ("AzurePowerShell@5", azure_powershell::validate_inputs),
+    ("Docker@2", docker::validate_inputs),
+    ("DotNetCoreCLI@2", dotnet_core_cli::validate_inputs),
+    ("GitHubRelease@1", github_release::validate_inputs),
+    ("JavaToolInstaller@0", java_tool_installer::validate_inputs),
+    ("Npm@1", npm::validate_inputs),
+    ("NuGetCommand@2", nuget_command::validate_inputs),
+    ("PowerShell@2", powershell::validate_inputs),
+    ("PublishBuildArtifacts@1", publish_build_artifacts::validate_inputs),
+    ("PythonScript@0", python_script::validate_inputs),
+    ("UniversalPackages@1", universal_packages::validate_inputs),
+    ("VSTest@2", vstest::validate_inputs),
+];
+
+/// Validate one authored front-matter step.
+///
+/// Returns `None` for anything we don't model (pass it through unchanged),
+/// `Some(Ok(()))` for a recognized + valid task, and `Some(Err(msg))` for a
+/// recognized task with invalid inputs. Never returns an unrecoverable error.
+pub fn validate_task_step(step: &Value) -> Option<Result<(), String>> {
     // Not a mapping, or not a `task:` step (e.g. `bash:` / `script:` / a
-    // checkout) → nothing for us to validate; leave it to the existing
-    // passthrough.
-    let Some(map) = step.as_mapping() else {
-        return Ok(None);
-    };
-    let Some(task) = map.get("task").and_then(Value::as_str) else {
-        return Ok(None);
-    };
+    // checkout) → nothing for us to validate.
+    let map = step.as_mapping()?;
+    let task = map.get("task").and_then(Value::as_str)?;
 
-    let display_name = map
-        .get("displayName")
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    // No typed builder for this task (yet) → not validated.
+    let (_, validate) = VALIDATORS.iter().find(|(id, _)| *id == task)?;
+
     let inputs = map
         .get("inputs")
         .cloned()
         .unwrap_or_else(|| Value::Mapping(Default::default()));
 
-    let validated = match task {
-        "CopyFiles@2" => {
-            let mut builder: CopyFiles = serde_yaml::from_value(inputs)
-                .with_context(|| format!("invalid inputs for `{task}`"))?;
-            if let Some(dn) = display_name {
-                builder = builder.with_display_name(dn);
-            }
-            builder.into_step()
-        }
-        "Docker@2" => parse_docker(inputs, display_name)?,
-        // No typed builder for this task (yet) → not an error; the caller keeps
-        // the original YAML as an opaque passthrough step.
-        _ => return Ok(None),
-    };
-    Ok(Some(validated))
+    Some(validate(inputs).map_err(|e| format!("task `{task}`: {e}")))
 }
 
-/// `Docker@2` selects the command via the `command` input; dispatch on it and
-/// validate the remaining inputs against that command's allowed set.
-fn parse_docker(inputs: Value, display_name: Option<String>) -> Result<TaskStep> {
-    let mut map = match inputs {
-        Value::Mapping(m) => m,
-        Value::Null => Default::default(),
-        _ => bail!("`inputs` must be a mapping"),
-    };
-    let command = map
-        .remove("command")
-        .and_then(|v| v.as_str().map(str::to_string))
-        .context("Docker@2 requires a `command` input")?;
-    let rest = Value::Mapping(map);
-
-    let cmd = match command.as_str() {
-        "buildAndPush" => DockerCommand::BuildAndPush(
-            serde_yaml::from_value(rest).context("invalid inputs for command `buildAndPush`")?,
-        ),
-        "build" => DockerCommand::Build(
-            serde_yaml::from_value(rest).context("invalid inputs for command `build`")?,
-        ),
-        "push" => DockerCommand::Push(
-            serde_yaml::from_value(rest).context("invalid inputs for command `push`")?,
-        ),
-        "login" => DockerCommand::Login(
-            serde_yaml::from_value(rest).context("invalid inputs for command `login`")?,
-        ),
-        "logout" => DockerCommand::Logout(
-            serde_yaml::from_value(rest).context("invalid inputs for command `logout`")?,
-        ),
-        other => bail!("Docker@2: unknown command `{other}`"),
-    };
-
-    let mut docker = Docker::new(cmd);
-    if let Some(dn) = display_name {
-        docker = docker.with_display_name(dn);
-    }
-    Ok(docker.into_step())
+/// Validate an `inputs:` mapping by attempting to deserialize it into the typed
+/// builder `T`. `Ok(())` iff it deserializes cleanly (required inputs present,
+/// no unknown keys, constrained values valid).
+pub(crate) fn validate_by_deserialize<T: DeserializeOwned>(inputs: Value) -> Result<(), String> {
+    serde_yaml::from_value::<T>(inputs)
+        .map(drop)
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -121,7 +153,7 @@ mod tests {
     // ── CopyFiles@2 ──────────────────────────────────────────────────────
 
     #[test]
-    fn copy_files_valid_roundtrips_to_task_step() {
+    fn copy_files_valid_is_ok() {
         let step = yaml(
             r#"
             task: CopyFiles@2
@@ -134,27 +166,12 @@ mod tests {
               OverWrite: "true"
             "#,
         );
-        let t = parse_task_step(&step).expect("valid CopyFiles step").expect("recognized task");
-        assert_eq!(t.task, "CopyFiles@2");
-        assert_eq!(t.display_name, "Stage build output");
-        assert_eq!(t.inputs.get("Contents").map(String::as_str), Some("**/*.dll"));
-        assert_eq!(
-            t.inputs.get("TargetFolder").map(String::as_str),
-            Some("$(Build.ArtifactStagingDirectory)")
-        );
-        assert_eq!(
-            t.inputs.get("SourceFolder").map(String::as_str),
-            Some("$(Build.SourcesDirectory)/bin")
-        );
-        // Native YAML bool and ADO-style string bool both normalize to "true".
-        assert_eq!(t.inputs.get("CleanTargetFolder").map(String::as_str), Some("true"));
-        assert_eq!(t.inputs.get("OverWrite").map(String::as_str), Some("true"));
-        // Untouched optionals are absent.
-        assert!(t.inputs.get("flattenFolders").is_none());
+        let r = validate_task_step(&step).expect("recognized task");
+        assert!(r.is_ok(), "expected valid, got: {r:?}");
     }
 
     #[test]
-    fn copy_files_missing_required_input_is_rejected() {
+    fn copy_files_missing_required_input_warns() {
         let step = yaml(
             r#"
             task: CopyFiles@2
@@ -162,12 +179,12 @@ mod tests {
               Contents: "**"
             "#,
         );
-        let err = parse_task_step(&step).unwrap_err().to_string();
-        assert!(err.contains("invalid inputs for `CopyFiles@2`"), "got: {err}");
+        let err = validate_task_step(&step).expect("recognized").unwrap_err();
+        assert!(err.contains("CopyFiles@2"), "got: {err}");
     }
 
     #[test]
-    fn copy_files_unknown_input_is_rejected() {
+    fn copy_files_unknown_input_warns() {
         let step = yaml(
             r#"
             task: CopyFiles@2
@@ -177,12 +194,12 @@ mod tests {
               Bogus: nope
             "#,
         );
-        let err = parse_task_step(&step).unwrap_err().to_string();
-        assert!(err.contains("invalid inputs for `CopyFiles@2`"), "got: {err}");
+        let err = validate_task_step(&step).expect("recognized").unwrap_err();
+        assert!(err.contains("CopyFiles@2"), "got: {err}");
     }
 
     #[test]
-    fn copy_files_bad_bool_value_is_rejected() {
+    fn copy_files_bad_bool_value_warns() {
         let step = yaml(
             r#"
             task: CopyFiles@2
@@ -192,13 +209,13 @@ mod tests {
               CleanTargetFolder: yesplease
             "#,
         );
-        assert!(parse_task_step(&step).is_err());
+        assert!(validate_task_step(&step).expect("recognized").is_err());
     }
 
     // ── Docker@2 (command-dispatch) ──────────────────────────────────────
 
     #[test]
-    fn docker_build_and_push_valid() {
+    fn docker_build_and_push_valid_is_ok() {
         let step = yaml(
             r#"
             task: Docker@2
@@ -208,15 +225,11 @@ mod tests {
               tags: latest
             "#,
         );
-        let t = parse_task_step(&step).expect("valid Docker buildAndPush").expect("recognized");
-        assert_eq!(t.task, "Docker@2");
-        assert_eq!(t.inputs.get("command").map(String::as_str), Some("buildAndPush"));
-        assert_eq!(t.inputs.get("repository").map(String::as_str), Some("myapp"));
-        assert_eq!(t.inputs.get("tags").map(String::as_str), Some("latest"));
+        assert!(validate_task_step(&step).expect("recognized").is_ok());
     }
 
     #[test]
-    fn docker_login_valid() {
+    fn docker_login_valid_is_ok() {
         let step = yaml(
             r#"
             task: Docker@2
@@ -225,13 +238,11 @@ mod tests {
               containerRegistry: myRegistry
             "#,
         );
-        let t = parse_task_step(&step).expect("valid Docker login").expect("recognized");
-        assert_eq!(t.inputs.get("command").map(String::as_str), Some("login"));
-        assert_eq!(t.inputs.get("containerRegistry").map(String::as_str), Some("myRegistry"));
+        assert!(validate_task_step(&step).expect("recognized").is_ok());
     }
 
     #[test]
-    fn docker_input_for_wrong_command_is_rejected() {
+    fn docker_input_for_wrong_command_warns() {
         // `repository` is not valid for `command: login`.
         let step = yaml(
             r#"
@@ -241,12 +252,12 @@ mod tests {
               repository: myapp
             "#,
         );
-        let err = parse_task_step(&step).unwrap_err().to_string();
-        assert!(err.contains("command `login`"), "got: {err}");
+        let err = validate_task_step(&step).expect("recognized").unwrap_err();
+        assert!(err.contains("login"), "got: {err}");
     }
 
     #[test]
-    fn docker_missing_command_is_rejected() {
+    fn docker_missing_command_warns() {
         let step = yaml(
             r#"
             task: Docker@2
@@ -254,12 +265,12 @@ mod tests {
               repository: myapp
             "#,
         );
-        let err = parse_task_step(&step).unwrap_err().to_string();
-        assert!(err.contains("requires a `command`"), "got: {err}");
+        let err = validate_task_step(&step).expect("recognized").unwrap_err();
+        assert!(err.contains("command"), "got: {err}");
     }
 
     #[test]
-    fn docker_unknown_command_is_rejected() {
+    fn docker_unknown_command_warns() {
         let step = yaml(
             r#"
             task: Docker@2
@@ -267,17 +278,16 @@ mod tests {
               command: teleport
             "#,
         );
-        let err = parse_task_step(&step).unwrap_err().to_string();
-        assert!(err.contains("unknown command `teleport`"), "got: {err}");
+        let err = validate_task_step(&step).expect("recognized").unwrap_err();
+        assert!(err.contains("teleport"), "got: {err}");
     }
 
     // ── Dispatch / partial coverage ──────────────────────────────────────
 
     #[test]
-    fn unmapped_task_passes_through_unvalidated() {
-        // A task we don't model is NOT an error — it returns None so the caller
-        // keeps the original YAML (today: Step::RawYaml). Note the bogus input:
-        // we deliberately don't validate it.
+    fn unmapped_task_is_not_validated() {
+        // A task we don't model returns None so the caller keeps the original
+        // YAML. Note the bogus input: we deliberately don't validate it.
         let step = yaml(
             r#"
             task: SomeRandomTask@9
@@ -285,18 +295,105 @@ mod tests {
               whatever: 123
             "#,
         );
-        let result = parse_task_step(&step).expect("unmapped task is not an error");
-        assert!(result.is_none(), "unmapped task should pass through (None)");
+        assert!(validate_task_step(&step).is_none());
     }
 
     #[test]
-    fn non_task_step_passes_through() {
+    fn non_task_step_is_not_validated() {
         // A `bash:`/`script:`/checkout step has no `task:` key → None.
         let step = yaml("bash: echo hi\ndisplayName: greet");
-        assert!(parse_task_step(&step).expect("not an error").is_none());
+        assert!(validate_task_step(&step).is_none());
 
         // A scalar (malformed step) also just passes through rather than erroring.
         let scalar = yaml("\"- some weird string\"");
-        assert!(parse_task_step(&scalar).expect("not an error").is_none());
+        assert!(validate_task_step(&scalar).is_none());
+    }
+
+    // ── Round-trip coverage ──────────────────────────────────────────────
+    // `into_step()` output must re-validate. This proves the Deserialize side
+    // (field renames + enum tokens + discriminator dispatch) accepts exactly
+    // what the construction side emits, across a representative spread of
+    // flat-enum and command/mode-dispatch builders.
+
+    use crate::compile::ir::step::TaskStep;
+
+    /// Turn an `into_step()` result into a `{ task, inputs }` step value and
+    /// assert it re-validates cleanly through the registry.
+    fn assert_roundtrips(t: TaskStep) {
+        let mut inputs = serde_yaml::Mapping::new();
+        for (k, v) in &t.inputs {
+            inputs.insert(Value::String(k.clone()), Value::String(v.clone()));
+        }
+        let mut step = serde_yaml::Mapping::new();
+        step.insert(Value::String("task".into()), Value::String(t.task.clone()));
+        step.insert(Value::String("inputs".into()), Value::Mapping(inputs));
+
+        let result = validate_task_step(&Value::Mapping(step))
+            .unwrap_or_else(|| panic!("task `{}` is not registered", t.task));
+        assert!(
+            result.is_ok(),
+            "into_step() output for `{}` failed re-validation: {:?}",
+            t.task,
+            result
+        );
+    }
+
+    #[test]
+    fn roundtrip_archive_files_flat_enum() {
+        assert_roundtrips(archive_files::ArchiveFiles::new("src", "out.zip").into_step());
+    }
+
+    #[test]
+    fn roundtrip_gradle_flat_enum() {
+        assert_roundtrips(gradle::Gradle::new("gradlew", "build").into_step());
+    }
+
+    #[test]
+    fn roundtrip_powershell_file_dispatch() {
+        assert_roundtrips(powershell::PowerShell::file("scripts/build.ps1").into_step());
+    }
+
+    #[test]
+    fn roundtrip_powershell_inline_with_enum() {
+        assert_roundtrips(
+            powershell::PowerShell::inline("Write-Host hi")
+                .error_action_preference(powershell::ErrorActionPreference::Continue)
+                .into_step(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_dotnet_command_dispatch() {
+        assert_roundtrips(
+            dotnet_core_cli::DotNetCoreCli::build(dotnet_core_cli::DotNetBuild::new()).into_step(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_vstest_selector_dispatch() {
+        assert_roundtrips(
+            vstest::VsTest::assemblies(vstest::VsTestAssemblies::new("**/*tests.dll")).into_step(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_universal_packages_command_dispatch() {
+        assert_roundtrips(
+            universal_packages::UniversalPackages::download(
+                "my-feed",
+                "my-package",
+                universal_packages::UniversalPackagesDownload::new(),
+            )
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn registry_has_no_duplicate_task_ids() {
+        let mut ids: Vec<&str> = VALIDATORS.iter().map(|(id, _)| *id).collect();
+        ids.sort_unstable();
+        let mut deduped = ids.clone();
+        deduped.dedup();
+        assert_eq!(ids, deduped, "VALIDATORS must not contain duplicate task ids");
     }
 }

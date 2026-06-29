@@ -1,6 +1,7 @@
 //! Typed builder for `npmAuthenticate@0`.
 
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Builder for a [`TaskStep`] invoking `npmAuthenticate@0`.
 ///
@@ -17,12 +18,18 @@ use crate::compile::ir::step::TaskStep;
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/npm-authenticate-v0>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NpmAuthenticate {
+    #[serde(rename = "workingFile")]
     working_file: String,
+    #[serde(rename = "customEndpoint", default)]
     custom_endpoint: Option<String>,
+    #[serde(rename = "azureDevOpsServiceConnection", default)]
     azure_devops_service_connection: Option<String>,
+    #[serde(rename = "feedUrl", default)]
     feed_url: Option<String>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 

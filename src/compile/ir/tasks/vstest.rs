@@ -16,23 +16,133 @@
 //! ADO task reference:
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/vstest-v2>
 
-use super::common::{push_bool, push_opt};
+use super::common::{de_opt_bool_flex, push_bool, push_opt};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
+use serde_yaml::Value;
+
+/// Validate an authored `VSTest@2` `inputs:` mapping (advisory front-matter
+/// validation, see [`super::parse`]).
+pub(crate) fn validate_inputs(inputs: Value) -> Result<(), String> {
+    let mut map = match inputs {
+        Value::Mapping(m) => m,
+        Value::Null => Default::default(),
+        other => return Err(format!("`inputs` must be a mapping, got {other:?}")),
+    };
+    let selector = match map.remove("testSelector") {
+        Some(value) => value
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| "`testSelector` must be a string".to_string())?,
+        None => "testAssemblies".to_string(),
+    };
+
+    validate_common(&Value::Mapping(map.clone())).map_err(|e| format!("common inputs: {e}"))?;
+    remove_common_inputs(&mut map);
+    let rest = Value::Mapping(map);
+
+    let result = match selector.as_str() {
+        "testAssemblies" => serde_yaml::from_value::<VsTestAssemblies>(rest).map(drop),
+        "testPlan" => serde_yaml::from_value::<VsTestPlan>(rest).map(drop),
+        "testRun" => serde_yaml::from_value::<VsTestRun>(rest).map(drop),
+        other => return Err(format!("VSTest@2: unknown testSelector `{other}`")),
+    };
+    result.map_err(|e| format!("testSelector `{selector}`: {e}"))
+}
+
+fn validate_common(inputs: &Value) -> Result<(), serde_yaml::Error> {
+    serde_yaml::from_value::<VsTestCommonInputs>(inputs.clone()).map(drop)
+}
+
+fn remove_common_inputs(map: &mut serde_yaml::Mapping) {
+    for key in [
+        "searchFolder",
+        "resultsFolder",
+        "runSettingsFile",
+        "overrideTestrunParameters",
+        "pathtoCustomTestAdapters",
+        "runInParallel",
+        "runTestsInIsolation",
+        "codeCoverageEnabled",
+        "testRunTitle",
+        "platform",
+        "configuration",
+        "publishRunAttachments",
+        "otherConsoleOptions",
+        "vsTestVersion",
+    ] {
+        map.remove(key);
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct VsTestCommonInputs {
+    #[serde(rename = "searchFolder", default)]
+    _search_folder: Option<String>,
+    #[serde(rename = "resultsFolder", default)]
+    _results_folder: Option<String>,
+    #[serde(rename = "runSettingsFile", default)]
+    _run_settings_file: Option<String>,
+    #[serde(rename = "overrideTestrunParameters", default)]
+    _override_testrun_parameters: Option<String>,
+    #[serde(rename = "pathtoCustomTestAdapters", default)]
+    _path_to_custom_test_adapters: Option<String>,
+    #[serde(
+        rename = "runInParallel",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
+    _run_in_parallel: Option<bool>,
+    #[serde(
+        rename = "runTestsInIsolation",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
+    _run_tests_in_isolation: Option<bool>,
+    #[serde(
+        rename = "codeCoverageEnabled",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
+    _code_coverage_enabled: Option<bool>,
+    #[serde(rename = "testRunTitle", default)]
+    _test_run_title: Option<String>,
+    #[serde(rename = "platform", default)]
+    _platform: Option<String>,
+    #[serde(rename = "configuration", default)]
+    _configuration: Option<String>,
+    #[serde(
+        rename = "publishRunAttachments",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
+    _publish_run_attachments: Option<bool>,
+    #[serde(rename = "otherConsoleOptions", default)]
+    _other_console_options: Option<String>,
+    #[serde(rename = "vsTestVersion", default)]
+    _vs_test_version: Option<VsTestVersion>,
+}
 
 /// Visual Studio Test runner version (`vsTestVersion` input).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum VsTestVersion {
     /// `"latest"` — always use the newest installed version.
+    #[serde(rename = "latest")]
     Latest,
     /// `"17.0"` — Visual Studio 2022.
+    #[serde(rename = "17.0")]
     V17,
     /// `"16.0"` — Visual Studio 2019.
+    #[serde(rename = "16.0")]
     V16,
     /// `"15.0"` — Visual Studio 2017.
+    #[serde(rename = "15.0")]
     V15,
     /// `"14.0"` — Visual Studio 2015.
+    #[serde(rename = "14.0")]
     V14,
     /// `"toolsInstaller"` — use the version installed by `VisualStudioTestPlatformInstaller@1`.
+    #[serde(rename = "toolsInstaller")]
     ToolsInstaller,
 }
 
@@ -54,12 +164,15 @@ impl VsTestVersion {
 ///
 /// Tests are discovered via file-glob patterns (`testAssemblyVer2`). An optional
 /// `testFiltercriteria` can narrow which tests within matched assemblies to run.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VsTestAssemblies {
     /// `testAssemblyVer2` — newline-separated glob patterns for test DLLs,
     /// e.g. `"**\\bin\\**\\*tests.dll"`.
+    #[serde(rename = "testAssemblyVer2")]
     test_assembly: String,
     /// `testFiltercriteria` — VSTest filter expression, e.g. `"TestCategory=Unit"`.
+    #[serde(rename = "testFiltercriteria", default)]
     test_filter_criteria: Option<String>,
 }
 
@@ -80,13 +193,17 @@ impl VsTestAssemblies {
 }
 
 /// Per-selector data for `testSelector: testPlan` — run tests from an Azure Test Plan.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VsTestPlan {
     /// `testPlan` — ID of the Azure Test Plan.
+    #[serde(rename = "testPlan")]
     test_plan: String,
     /// `testSuite` — ID(s) of the test suite(s) within the plan.
+    #[serde(rename = "testSuite")]
     test_suite: String,
     /// `testConfiguration` — ID of the test configuration.
+    #[serde(rename = "testConfiguration")]
     test_configuration: String,
 }
 
@@ -106,9 +223,11 @@ impl VsTestPlan {
 }
 
 /// Per-selector data for `testSelector: testRun` — run tests from a triggered test run.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VsTestRun {
     /// `tcmTestRun` — test run ID; defaults to `$(test.RunId)` when omitted.
+    #[serde(rename = "tcmTestRun", default)]
     tcm_test_run: Option<String>,
 }
 
@@ -351,15 +470,27 @@ impl VsTest {
         push_opt(&mut t, "searchFolder", self.search_folder);
         push_opt(&mut t, "resultsFolder", self.results_folder);
         push_opt(&mut t, "runSettingsFile", self.run_settings_file);
-        push_opt(&mut t, "overrideTestrunParameters", self.override_testrun_parameters);
-        push_opt(&mut t, "pathtoCustomTestAdapters", self.path_to_custom_test_adapters);
+        push_opt(
+            &mut t,
+            "overrideTestrunParameters",
+            self.override_testrun_parameters,
+        );
+        push_opt(
+            &mut t,
+            "pathtoCustomTestAdapters",
+            self.path_to_custom_test_adapters,
+        );
         push_bool(&mut t, "runInParallel", self.run_in_parallel);
         push_bool(&mut t, "runTestsInIsolation", self.run_tests_in_isolation);
         push_bool(&mut t, "codeCoverageEnabled", self.code_coverage_enabled);
         push_opt(&mut t, "testRunTitle", self.test_run_title);
         push_opt(&mut t, "platform", self.platform);
         push_opt(&mut t, "configuration", self.configuration);
-        push_bool(&mut t, "publishRunAttachments", self.publish_run_attachments);
+        push_bool(
+            &mut t,
+            "publishRunAttachments",
+            self.publish_run_attachments,
+        );
         push_opt(&mut t, "otherConsoleOptions", self.other_console_options);
         if let Some(v) = self.vs_test_version {
             t = t.with_input("vsTestVersion", v.as_ado_str());
@@ -374,10 +505,7 @@ mod tests {
 
     #[test]
     fn assemblies_sets_selector_and_pattern() {
-        let t = VsTest::assemblies(VsTestAssemblies::new(
-            "**\\bin\\**\\*tests.dll",
-        ))
-        .into_step();
+        let t = VsTest::assemblies(VsTestAssemblies::new("**\\bin\\**\\*tests.dll")).into_step();
         assert_eq!(t.task, "VSTest@2");
         assert_eq!(t.display_name, "Run Visual Studio Tests");
         assert_eq!(

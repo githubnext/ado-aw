@@ -1,6 +1,7 @@
 //! Typed builder for `DownloadSecureFile@1`.
 
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Builder for a [`TaskStep`] invoking `DownloadSecureFile@1`.
 ///
@@ -11,11 +12,16 @@ use crate::compile::ir::step::TaskStep;
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/download-secure-file-v1>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DownloadSecureFile {
+    #[serde(rename = "secureFile")]
     secure_file: String,
+    #[serde(rename = "retryCount", default)]
     retry_count: Option<String>,
+    #[serde(rename = "socketTimeout", default)]
     socket_timeout: Option<String>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 

@@ -223,6 +223,29 @@ parameters:                    # optional ADO runtime parameters (surfaced in UI
 Build the project and run all tests...
 ```
 
+## Inline step validation (`setup` / `steps` / `post-steps` / `teardown`)
+
+Inline steps are authored as raw Azure DevOps YAML and are emitted into the
+generated pipeline **verbatim** (a passthrough). For steps that invoke a
+built-in ADO task the compiler also knows (e.g. `CopyFiles@2`, `Docker@2`,
+`DotNetCoreCLI@2`, and most other first-party tasks), it performs an
+**advisory** validation of the `inputs:` mapping against the task's typed
+schema — checking for missing required inputs, unknown input keys, bad
+constrained values, and (for command/mode tasks) inputs supplied for the wrong
+command.
+
+This validation is **warning-only and never fails a compile**:
+
+- A recognized task with invalid inputs prints a `Warning: …` to stderr; the
+  step is still emitted unchanged.
+- A task the compiler does not model, or a non-task step (`bash:`/`script:`/
+  `checkout:`), is passed through with no validation.
+
+So adding validation coverage can only ever *surface* authoring mistakes — it
+never rejects a workflow that compiled before. See
+[`ir.md`](ir.md) (`tasks/parse.rs`) for the mechanism and how to extend
+coverage.
+
 ## Debug-only `ado-aw-debug:`
 
 `ado-aw-debug:` is accepted in front matter for repository dogfooding and

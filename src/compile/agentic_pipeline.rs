@@ -137,6 +137,13 @@ pub(crate) fn build_pipeline_context(
         sc.validate()?;
     }
 
+    // Advisory validation of authored task steps. Recognized ADO tasks
+    // (e.g. `CopyFiles@2`, `Docker@2`) are validated against their typed
+    // builders; invalid inputs surface as a **warning** and never fail the
+    // compile. Unrecognized tasks / non-task steps are left untouched — the
+    // step is still emitted verbatim as a passthrough regardless.
+    warn_on_invalid_task_steps(front_matter);
+
     let mut extension_declarations = Vec::with_capacity(extensions.len());
     for ext in extensions {
         let decl = ext.declarations(ctx)?;
@@ -330,6 +337,30 @@ pub(crate) fn build_pipeline_context(
         triggers,
         jobs,
     })
+}
+
+/// Advisory validation pass over every authored front-matter step list
+/// (`setup`, `steps`, `post_steps`, `teardown`). Each step is checked against
+/// the typed task builders via
+/// [`crate::compile::ir::tasks::parse::validate_task_step`]; a recognized task
+/// with invalid inputs produces a **warning** on the same channel as extension
+/// warnings. This never fails the compile and never alters emitted YAML — the
+/// step is still lowered to its `Step::RawYaml` passthrough unchanged.
+fn warn_on_invalid_task_steps(front_matter: &FrontMatter) {
+    use crate::compile::ir::tasks::parse::validate_task_step;
+
+    let all_steps = front_matter
+        .setup
+        .iter()
+        .chain(&front_matter.steps)
+        .chain(&front_matter.post_steps)
+        .chain(&front_matter.teardown);
+
+    for step in all_steps {
+        if let Some(Err(msg)) = validate_task_step(step) {
+            eprintln!("Warning: {}", msg);
+        }
+    }
 }
 
 /// Build the canonical 5-job graph (Setup?, Agent, Detection,

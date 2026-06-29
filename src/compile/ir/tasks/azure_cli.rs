@@ -1,22 +1,27 @@
 //! Typed builder for `AzureCLI@2`.
 
-use super::common::{push_bool, push_opt};
+use super::common::{de_opt_bool_flex, push_bool, push_opt};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Script type for `AzureCLI@2`.
 ///
 /// Selects the shell that executes the script body.
 ///
 /// ADO input: `scriptType`
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum ScriptType {
     /// Bash shell (`bash`).
+    #[serde(rename = "bash")]
     Bash,
     /// Windows PowerShell (`ps`).
+    #[serde(rename = "ps")]
     Ps,
     /// PowerShell Core (`pscore`).
+    #[serde(rename = "pscore")]
     PsCore,
     /// Windows batch script (`batch`).
+    #[serde(rename = "batch")]
     Batch,
 }
 
@@ -40,24 +45,29 @@ impl ScriptType {
 /// unrepresentable.
 ///
 /// ADO input: `scriptLocation`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub enum ScriptLocation {
     /// Embed the script body inline (`scriptLocation: inlineScript`).
+    #[serde(rename = "inlineScript")]
     Inline(String),
     /// Execute a script file by path (`scriptLocation: scriptPath`).
+    #[serde(rename = "scriptPath")]
     ScriptPath(String),
 }
 
 /// `ErrorActionPreference` for PowerShell scripts (`scriptType: ps` or `pscore`).
 ///
 /// ADO input: `powerShellErrorActionPreference`
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum PowerShellErrorActionPreference {
     /// Stop on first error (`stop`). This is the ADO default.
+    #[serde(rename = "stop")]
     Stop,
     /// Continue on errors (`continue`).
+    #[serde(rename = "continue")]
     Continue,
     /// Silently continue (`silentlyContinue`).
+    #[serde(rename = "silentlyContinue")]
     SilentlyContinue,
 }
 
@@ -96,19 +106,52 @@ impl PowerShellErrorActionPreference {
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/azure-cli-v2>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AzureCli {
+    #[serde(rename = "azureSubscription")]
     azure_subscription: String,
+    #[serde(rename = "scriptType")]
     script_type: ScriptType,
+    #[serde(rename = "scriptLocation")]
     location: ScriptLocation,
+    #[serde(default)]
     arguments: Option<String>,
+    #[serde(rename = "powerShellErrorActionPreference", default)]
     ps_error_action_preference: Option<PowerShellErrorActionPreference>,
+    #[serde(
+        rename = "addSpnToEnvironment",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     add_spn_to_environment: Option<bool>,
+    #[serde(
+        rename = "useGlobalConfig",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     use_global_config: Option<bool>,
+    #[serde(rename = "workingDirectory", default)]
     working_directory: Option<String>,
+    #[serde(
+        rename = "failOnStandardError",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     fail_on_standard_error: Option<bool>,
+    #[serde(
+        rename = "powerShellIgnoreLASTEXITCODE",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     ps_ignore_last_exit_code: Option<bool>,
+    #[serde(
+        rename = "visibleAzLogin",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     visible_az_login: Option<bool>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 
@@ -147,10 +190,7 @@ impl AzureCli {
 
     /// `powerShellErrorActionPreference` — how PowerShell handles non-terminating errors.
     /// Relevant only when `script_type` is [`ScriptType::Ps`] or [`ScriptType::PsCore`].
-    pub fn ps_error_action_preference(
-        mut self,
-        value: PowerShellErrorActionPreference,
-    ) -> Self {
+    pub fn ps_error_action_preference(mut self, value: PowerShellErrorActionPreference) -> Self {
         self.ps_error_action_preference = Some(value);
         self
     }
@@ -285,7 +325,10 @@ mod tests {
         )
         .into_step();
 
-        assert_eq!(t.inputs.get("scriptType").map(String::as_str), Some("pscore"));
+        assert_eq!(
+            t.inputs.get("scriptType").map(String::as_str),
+            Some("pscore")
+        );
         assert_eq!(
             t.inputs.get("scriptLocation").map(String::as_str),
             Some("scriptPath")
@@ -384,10 +427,7 @@ mod tests {
 
     #[test]
     fn ps_error_preference_ado_strings() {
-        assert_eq!(
-            PowerShellErrorActionPreference::Stop.as_ado_str(),
-            "stop"
-        );
+        assert_eq!(PowerShellErrorActionPreference::Stop.as_ado_str(), "stop");
         assert_eq!(
             PowerShellErrorActionPreference::Continue.as_ado_str(),
             "continue"
