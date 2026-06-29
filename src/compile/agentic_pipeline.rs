@@ -1493,7 +1493,7 @@ fn build_conclusion_job(
 
     let conclusion_script = "\
 if command -v node >/dev/null 2>&1 && [ -f /tmp/ado-aw-scripts/ado-script/conclusion.js ]; then\n  \
-  node /tmp/ado-aw-scripts/ado-script/conclusion.js\n\
+  node /tmp/ado-aw-scripts/ado-script/conclusion.js || true\n\
 else\n  \
   echo \"##vso[task.logissue type=warning]conclusion.js unavailable; skipping conclusion reporting\"\n\
 fi\n";
@@ -1513,7 +1513,10 @@ fi\n";
         )
         .with_env(
             "AW_PIPELINE_NAME",
-            EnvValue::Literal(front_matter.name.clone()),
+            // Sanitize for consistency with the per-tool config fields below:
+            // the name flows verbatim into the ADO work-item title/body, and
+            // operator-controlled strings are sanitized everywhere else.
+            EnvValue::Literal(crate::sanitize::sanitize(&front_matter.name)),
         )
         .with_env(
             "AW_SAFE_OUTPUT_DIR",

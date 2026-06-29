@@ -91,7 +91,13 @@ fn apply_codemod(fm: &mut Mapping, _ctx: &CodemodContext) -> Result<bool> {
 
         // Hoist fields from work-item: to the parent level
         for (k, v) in wi_map {
-            let key_str = k.as_str().unwrap_or_default().to_string();
+            // Skip non-string keys defensively. serde_yaml front matter is
+            // always string-keyed in practice, but silently coercing a
+            // non-string key to "" would inject a bogus empty key into the
+            // parent mapping.
+            let Some(key_str) = k.as_str().map(str::to_string) else {
+                continue;
+            };
             let new_key = match key_str.as_str() {
                 "title" => "title-prefix".to_string(),
                 "enabled" => "report-as-work-item".to_string(),

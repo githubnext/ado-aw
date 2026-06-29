@@ -27,9 +27,16 @@ All configuration lives under `safe-outputs:` in front matter.
 
 ### Global toggle
 
+`report-failure-as-work-item` is a **master kill-switch**. When set to
+`false` the Conclusion job files **no** work items at all — this suppresses
+*every* signal, including the `noop`, `missing-tool`, and `missing-data`
+diagnostics, not just pipeline failures. To suppress an individual diagnostic
+while keeping the others, use its per-tool `report-as-work-item: false`
+(see below) instead of the global toggle.
+
 ```yaml
 safe-outputs:
-  report-failure-as-work-item: false   # disable all failure work-item filing
+  report-failure-as-work-item: false   # master kill-switch: disable ALL work-item filing
 ```
 
 ### Per-tool configuration
