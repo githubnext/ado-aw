@@ -694,6 +694,12 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
                 // Repo contributor (Stage 7 — opt-in, default OFF, no
                 // bearer / no REST, pure git).
                 exec_context_repo_active: repo_contributor_will_activate(front_matter),
+                // True whenever any safe-output tool is enabled — drives the
+                // Agent-job bundle install/download so `approval-summary.js`
+                // is present for the end-of-job render step that
+                // `build_agent_job` emits. MUST use the same predicate as that
+                // step (see `FrontMatter::has_any_safe_output_tool`).
+                safe_outputs_summary_active: front_matter.has_any_safe_output_tool(),
                 pr_trigger_for_synth,
                 supply_chain: front_matter.supply_chain().cloned(),
             }

@@ -201,12 +201,14 @@ mod tests {
     }
 
     #[test]
-    fn prepare_step_carries_bearer() {
+    fn prepare_step_carries_bearer_condition_and_pr_id() {
+        // Non-synth path: condition must be eq(Build.Reason, 'PullRequest'),
+        // PR ID env must be the plain ADO macro (not a pipeline var).
         let c = PrChecksContextContributor::new(
             PrChecksContextConfig {
                 enabled: Some(true),
             },
-            false,
+            false, // synthetic_pr_active = false
             true,
         );
         let fm = pr_fm();
@@ -216,9 +218,29 @@ mod tests {
             Step::Bash(b) => b,
             _ => panic!(),
         };
+        // Trust boundary: bearer must be present.
         assert!(matches!(
             bash.env.get("SYSTEM_ACCESSTOKEN"),
             Some(EnvValue::AdoMacro("System.AccessToken"))
         ));
+        // Runtime gate: step must only fire on PR builds.
+        match bash.condition.as_ref().expect("condition required") {
+            Condition::Eq(Expr::Variable(v), Expr::Literal(l)) => {
+                assert_eq!(v, "Build.Reason");
+                assert_eq!(l, "PullRequest");
+            }
+            other => panic!(
+                "expected Condition::Eq(Variable(Build.Reason), Literal(PullRequest)), got {other:?}"
+            ),
+        }
+        // PR ID env: plain ADO macro on non-synth path.
+        assert!(
+            matches!(
+                bash.env.get("SYSTEM_PULLREQUEST_PULLREQUESTID"),
+                Some(EnvValue::AdoMacro("System.PullRequest.PullRequestId"))
+            ),
+            "expected AdoMacro(System.PullRequest.PullRequestId), got {:?}",
+            bash.env.get("SYSTEM_PULLREQUEST_PULLREQUESTID")
+        );
     }
 }

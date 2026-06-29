@@ -385,7 +385,11 @@ mod tests {
     fn and_constructor_collects_iterator() {
         let c = Condition::and([Condition::Succeeded, Condition::Always]);
         match c {
-            Condition::And(parts) => assert_eq!(parts.len(), 2),
+            Condition::And(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], Condition::Succeeded, "first part must be Succeeded");
+                assert_eq!(parts[1], Condition::Always, "second part must be Always");
+            }
             _ => panic!(),
         }
     }

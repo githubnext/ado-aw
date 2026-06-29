@@ -22,7 +22,7 @@ Those wrappers are the only place per-target shape (top-level `PipelineShape`, t
 
 - `ids.rs` — typed `StageId`, `JobId`, and `StepId` newtypes. Constructors validate the ADO identifier grammar (`^[A-Za-z_][A-Za-z0-9_]*$`) so invalid names fail at compile time.
 - `step.rs` — `Step` and concrete step structs: `BashStep`, `TaskStep`, `CheckoutStep`, `DownloadStep`, and `PublishStep`.
-- `tasks.rs` — typed factory helpers for built-in ADO task steps (`CopyFiles@2`, `DockerInstaller@0`, `DotNetCoreCLI@2`, `ArchiveFiles@2`, `ExtractFiles@1`, `PublishTestResults@2`, `NuGetCommand@2`, `PowerShell@2`). Prefer these over hand-crafted `TaskStep::new()` calls — see [Typed task helpers](#typed-task-helpers) below.
+- `tasks/` — typed builder structs for 44 built-in ADO task steps spanning toolchain setup, file operations, build/test, artifact publishing, scripting, containers, package auth, Azure integrations, and pipeline control. Each builder exposes `new(<required>)`, typed optional setters, and `into_step()`. Prefer these over hand-crafted `TaskStep::new()` calls — see [Typed task helpers](#typed-task-helpers) below.
 - `job.rs` — `Job`, `Pool`, job variables, 1ES `templateContext` support, and target-job external `dependsOn` / `condition` wrapping.
 - `stage.rs` — `Stage` plus target-stage external `dependsOn` / `condition` wrapping.
 - `env.rs` — typed environment values (`EnvValue`) including ADO macros, pipeline variables, secrets, `OutputRef`s, `Coalesce`, and macro-form `Concat`.
@@ -117,66 +117,159 @@ let synth = Step::Bash(
 
 ## Typed task helpers
 
-`src/compile/ir/tasks.rs` contains typed factory functions for common ADO built-in tasks. Each function returns a pre-configured `TaskStep` with required inputs already set; optional inputs are layered on with `.with_input("key", "value")` chaining.
+`src/compile/ir/tasks/` contains typed **builder structs** for 44 ADO built-in tasks. Each follows the same pattern:
 
-These helpers eliminate hand-crafted `TaskStep::new(…)` + raw string inputs at every call site, making task usage self-documenting and the required/optional input boundary explicit.
+```rust
+Builder::new(required_params)   // required inputs as typed positional args
+    .optional_setter(value)     // chained typed setters — only emitted when called
+    .into_step()                // returns a TaskStep
+```
 
-### Available helpers
+This eliminates hand-crafted `TaskStep::new(…)` + raw string inputs at every call site, makes the required/optional boundary explicit, and prevents invalid input combinations for command-dispatch tasks at compile time.
 
-| Function | ADO task | Required parameters |
-|----------|----------|---------------------|
-| `copy_files_step(contents, target_folder)` | `CopyFiles@2` | glob pattern; destination folder |
-| `docker_installer_step(docker_version)` | `DockerInstaller@0` | engine version (e.g. `"26.1.4"`) |
-| `dot_net_core_cli_step(command)` | `DotNetCoreCLI@2` | sub-command (`"build"`, `"test"`, `"publish"`, …) |
-| `archive_files_step(root_folder_or_file, archive_file)` | `ArchiveFiles@2` | source path; output archive path |
-| `extract_files_step(archive_file_patterns, destination_folder)` | `ExtractFiles@1` | archive glob; destination folder |
-| `publish_test_results_step(test_results_format, test_results_files)` | `PublishTestResults@2` | format (`"JUnit"`, `"NUnit"`, `"VSTest"`, `"XUnit"`, `"CTest"`); result file glob |
-| `nuget_command_step(command)` | `NuGetCommand@2` | operation (`"restore"`, `"push"`, `"pack"`, `"custom"`) |
-| `powershell_file_step(file_path)` | `PowerShell@2` (file mode) | path to `.ps1` script |
-| `powershell_inline_step(script)` | `PowerShell@2` (inline mode) | inline script body |
+**Command-dispatch tasks** (`Docker@2`, `DotNetCoreCLI@2`, `NuGetCommand@2`, `Npm@1`, `PowerShell@2`, `AzurePowerShell@5`, `AzureCLI@2`, `PythonScript@0`, `VSTest@2`, `GitHubRelease@1`, `PublishBuildArtifacts@1`, `UniversalPackages@1`) take a typed command/mode enum rather than a plain string — applying an input to the wrong command variant is unrepresentable.
+
+### Available builders
+
+#### Toolchain setup
+
+| Builder | ADO task | Constructor |
+|---------|----------|-------------|
+| `DockerInstaller::new(docker_version)` | `DockerInstaller@0` | Docker engine version (e.g. `"26.1.4"`) |
+| `GoTool::new(version)` | `GoTool@0` | Go version (e.g. `"1.21"`) |
+| `JavaToolInstaller::new(version_spec, architecture, source)` | `JavaToolInstaller@0` | JDK version; `JdkArchitecture` enum; `JdkSource` enum |
+| `UseDotNet::new()` | `UseDotNet@2` | All inputs optional — chain `.with_version(s)` or `.with_global_json()` |
+| `UseNode::new(version)` | `UseNode@1` | Node.js version spec (e.g. `"22.x"`) |
+| `UsePythonVersion::new(version_spec)` | `UsePythonVersion@0` | Python version spec (e.g. `"3.x"`) |
+| `UseRubyVersion::new(version_spec)` | `UseRubyVersion@0` | Ruby version range (e.g. `">= 2.4"`) |
+| `HelmInstaller::new()` | `HelmInstaller@1` | All inputs optional — chain `.helm_version("3.x")` to pin a specific version |
+
+#### File operations
+
+| Builder | ADO task | Constructor |
+|---------|----------|-------------|
+| `ArchiveFiles::new(root_folder_or_file, archive_file)` | `ArchiveFiles@2` | source path; output archive path |
+| `CopyFiles::new(contents, target_folder)` | `CopyFiles@2` | glob pattern; destination folder |
+| `DeleteFiles::new(contents)` | `DeleteFiles@1` | newline-separated glob patterns |
+| `DownloadPackage::new(package_type, feed, definition, version, download_path)` | `DownloadPackage@1` | `PackageType` enum; feed; definition; version; local path |
+| `DownloadSecureFile::new(secure_file)` | `DownloadSecureFile@1` | secure-file name or GUID from ADO Secure Files library |
+| `ExtractFiles::new(archive_file_patterns, destination_folder)` | `ExtractFiles@1` | archive glob; destination folder |
+
+#### Script execution
+
+| Builder | ADO task | Constructor |
+|---------|----------|-------------|
+| `AzureCli::new(azure_subscription, ScriptType, ScriptLocation)` | `AzureCLI@2` | ARM service connection; `ScriptType::Bash \| Ps \| PsCore \| Batch` enum; `ScriptLocation::Inline(script) \| ScriptPath(path)` enum |
+| `AzurePowerShell::file(connection, script_path)` / `::inline(connection, script)` | `AzurePowerShell@5` | Azure RM service connection; `.ps1` path or inline script |
+| `CmdLine::new(script)` | `CmdLine@2` | inline script text |
+| `PowerShell::file(file_path)` / `::inline(script)` | `PowerShell@2` | `.ps1` path or inline script body |
+| `PythonScript::file(script_path)` / `::inline(script)` | `PythonScript@0` | `.py` path or inline script body |
+
+#### Build and test
+
+| Builder | ADO task | Constructor |
+|---------|----------|-------------|
+| `DotNetCoreCli::new(DotNetCommand)` | `DotNetCoreCLI@2` | `DotNetCommand::Build \| Test \| Publish \| Restore \| Pack \| Run \| Push \| Custom` |
+| `Gradle::new(gradle_wrapper_file, tasks)` | `Gradle@3` | path to `gradlew`; space-separated task names |
+| `Maven::new(maven_pom_file)` | `Maven@3` | path to `pom.xml` |
+| `PublishCodeCoverageResults::new(summary_file_location)` | `PublishCodeCoverageResults@2` | glob path to coverage summary file |
+| `PublishTestResults::new(format, files)` | `PublishTestResults@2` | `TestResultsFormat` enum; result files glob |
+| `VsTest::new(VsTestSelector)` | `VSTest@2` | `VsTestSelector::Assemblies \| Plan \| Run` |
+| `VsBuild::new(solution)` | `VSBuild@1` | path to `.sln` or glob; `VsVersion`, `MsBuildArchitecture`, `LogFileVerbosity` enums and all other inputs optional |
+
+#### Artifact publishing
+
+| Builder | ADO task | Constructor |
+|---------|----------|-------------|
+| `DownloadBuildArtifacts::new(download_path)` | `DownloadBuildArtifacts@1` | local download directory; `BuildType`, `DownloadType`, `BuildVersionToDownload` enums and all other inputs optional |
+| `DownloadPipelineArtifact::new(target_path)` | `DownloadPipelineArtifact@2` | local download path |
+| `PublishBuildArtifacts::new(path_to_publish, artifact_name, location)` | `PublishBuildArtifacts@1` | source path; artifact name; `PublishLocation` enum |
+| `PublishPipelineArtifact::new(target_path)` | `PublishPipelineArtifact@1` | path to publish |
+
+#### Containers and cloud
+
+| Builder | ADO task | Constructor |
+|---------|----------|-------------|
+| `AzureKeyVault::new(connected_service_name, key_vault_name)` | `AzureKeyVault@2` | Azure RM service connection; vault name |
+| `AzureWebApp::new(azure_subscription, app_type, app_name, package)` | `AzureWebApp@1` | Azure RM service connection; `AppType` enum; app name; package path |
+| `Docker::new(DockerCommand)` | `Docker@2` | `DockerCommand::BuildAndPush \| Build \| Push \| Login \| Logout` |
+| `GitHubRelease::new(git_hub_connection, repository_name, action)` | `GitHubRelease@1` | GitHub service connection; `"owner/repo"`; `GitHubReleaseAction` enum |
+
+#### Package authentication
+
+| Builder | ADO task | Constructor |
+|---------|----------|-------------|
+| `CargoAuthenticate::new(config_file)` | `CargoAuthenticate@0` | path to `config.toml` |
+| `MavenAuthenticate::new()` | `MavenAuthenticate@0` | all inputs optional |
+| `Npm::new(NpmCommand)` | `Npm@1` | `NpmCommand::Install \| Ci \| Publish \| Custom` |
+| `NpmAuthenticate::new(working_file)` | `npmAuthenticate@0` | path to `.npmrc` file to authenticate |
+| `NuGetAuthenticate::new()` | `NuGetAuthenticate@1` | all inputs optional |
+| `NuGetCommand::new(NuGetOp)` | `NuGetCommand@2` | `NuGetOp::Restore \| Push \| Pack \| Custom` |
+| `PipAuthenticate::new()` | `PipAuthenticate@1` | all inputs optional |
+| `TwineAuthenticate::new()` | `TwineAuthenticate@1` | all inputs optional |
+| `UniversalPackages::download(feed, package_name, spec)` / `::publish(…, spec)` | `UniversalPackages@1` | `UniversalPackagesDownload` / `UniversalPackagesPublish` carry per-command optionals; `.workload_identity_service_connection()` for cross-org feeds |
+
+#### Pipeline control
+
+| Builder | ADO task | Constructor |
+|---------|----------|-------------|
+| `ManualValidation::new(notify_users)` | `ManualValidation@1` | comma-separated notification addresses; all approval settings (`.approvers()`, `.instructions()`, `.on_timeout(OnTimeout::Reject \| Resume)`) optional |
 
 ### Usage example
 
 ```rust
 use crate::compile::ir::step::Step;
 use crate::compile::ir::tasks::{
-    dot_net_core_cli_step, powershell_inline_step, publish_test_results_step,
+    dotnet_core_cli::{DotNetBuild, DotNetCoreCli, DotNetTest},
+    powershell::PowerShell,
+    publish_test_results::{PublishTestResults, TestResultsFormat},
+    use_node::UseNode,
 };
 
-// Build a .NET project — required input only
-let build = Step::Task(dot_net_core_cli_step("build"));
+// Install Node.js — simple builder, one required input
+let node = Step::Task(UseNode::new("22.x").into_step());
 
-// Run tests with optional inputs chained on
+// Build .NET — command-dispatch with optional inputs on the command variant
+let build = Step::Task(
+    DotNetCoreCli::build(
+        DotNetBuild::new()
+            .projects("**/*.csproj")
+            .arguments("--configuration Release"),
+    )
+    .into_step(),
+);
+
+// Run tests (separate command variant; cannot accidentally set build-only inputs)
 let test = Step::Task(
-    dot_net_core_cli_step("test")
-        .with_input("projects", "**/*Tests.csproj")
-        .with_input("arguments", "--no-build --configuration Release")
-        .with_input("publishTestResults", "true"),
+    DotNetCoreCli::test(DotNetTest::new().projects("**/*Tests.csproj"))
+        .into_step(),
 );
 
-// Publish test results (required inputs set; no optional inputs needed)
+// Publish test results — required inputs are typed, not raw strings
 let publish = Step::Task(
-    publish_test_results_step("VSTest", "**/*.trx")
-        .with_input("failTaskOnFailedTests", "true"),
+    PublishTestResults::new(TestResultsFormat::VSTest, "**/*.trx").into_step(),
 );
 
-// Inline PowerShell (cross-platform)
+// Inline PowerShell with optional pwsh flag
 let ps = Step::Task(
-    powershell_inline_step("Write-Output 'hello'")
-        .with_input("pwsh", "true"),
+    PowerShell::inline("Write-Output 'hello'")
+        .pwsh(true)
+        .into_step(),
 );
 ```
 
-### Adding a new helper
+### Adding a new builder
 
-When you need an ADO task that doesn't have a typed helper yet, add one to `tasks.rs`:
+When you need an ADO task that doesn't have a typed builder yet:
 
-1. Write a `pub fn <name>_step(…) -> TaskStep` that sets the ADO task identifier and all **required** inputs as positional parameters.
-2. Document required vs. optional inputs with the `/// | Input key | Type | Default | Description |` table pattern used by existing helpers.
-3. Add a link to the ADO task reference at `learn.microsoft.com`.
-4. Write a unit test that asserts the task name, display name, and that required inputs are set with the correct keys.
+1. Create `src/compile/ir/tasks/<snake_name>.rs`. For a simple task, follow `use_node.rs` as the template. For a task with multiple commands or modes, follow `docker.rs` (canonical command-dispatch template).
+2. Export the new module from `src/compile/ir/tasks/mod.rs` with `pub mod <snake_name>;`.
+3. Map required inputs to positional `pub fn new(…)` parameters; optional inputs become chained setters that return `Self`.
+4. `pub fn into_step(self) -> TaskStep` emits only the inputs that are `Some`.
+5. Add an ADO task reference link in the module doc comment.
+6. Write a unit test asserting the task identifier, display name, and that required inputs are present and optional inputs are absent when unset.
 
-Do **not** use `Step::RawYaml` for tasks that the IR can model. Typed helpers preserve all compiler-owned fields (`condition`, `env`, `timeout`, `continue_on_error`) and participate correctly in the graph pass.
+Do **not** use `Step::RawYaml` for tasks the IR can model. Typed builders preserve all compiler-owned fields (`condition`, `env`, `timeout`, `continue_on_error`) and participate correctly in the graph pass.
 
 ## Output declarations and references
 

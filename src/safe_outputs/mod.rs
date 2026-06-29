@@ -182,33 +182,50 @@ pub(crate) async fn resolve_wiki_branch(
 ///    (e.g. `sdk-FtdiDeviceControl` for `4x4/sdk-FtdiDeviceControl`).
 ///
 /// Azure DevOps repository names are case-insensitive, so the trailing-name fallback
+/// matches case-insensitively. Returns the resolved alias key on success, or `None`
+/// if no entry matches.
+pub(crate) fn lookup_allowed_repository_alias<'a>(
+    input: &str,
+    allowed_repositories: &'a std::collections::HashMap<String, String>,
+) -> Option<&'a String> {
+    // 1. Exact alias key match
+    if let Some((alias, _)) = allowed_repositories.get_key_value(input) {
+        return Some(alias);
+    }
+    // 2. Case-insensitive value match (full "project/repo" or just "repo").
+    // ADO repo names are case-insensitive, so accept any case for the full path.
+    if let Some((alias, _)) = allowed_repositories
+        .iter()
+        .find(|(_, v)| v.eq_ignore_ascii_case(input))
+    {
+        return Some(alias);
+    }
+    // 3. Trailing repo-name part match (case-insensitive)
+    allowed_repositories.iter().find_map(|(alias, v)| {
+        let trailing = v.rsplit('/').next().unwrap_or(v.as_str());
+        if trailing.eq_ignore_ascii_case(input) {
+            Some(alias)
+        } else {
+            None
+        }
+    })
+}
+
+/// Look up an ADO repo name in `allowed_repositories`, accepting either:
+/// 1. an exact alias key (e.g. `repo-sdk-ftdidevicecontrol`),
+/// 2. an exact value match against the configured `name` (e.g. `4x4/sdk-FtdiDeviceControl`), or
+/// 3. a case-insensitive match against the trailing repo-name part of the value
+///    (e.g. `sdk-FtdiDeviceControl` for `4x4/sdk-FtdiDeviceControl`).
+///
+/// Azure DevOps repository names are case-insensitive, so the trailing-name fallback
 /// matches case-insensitively. Returns the resolved ADO repo name (the map value) on
 /// success, or `None` if no entry matches.
 pub(crate) fn lookup_allowed_repository<'a>(
     input: &str,
     allowed_repositories: &'a std::collections::HashMap<String, String>,
 ) -> Option<&'a String> {
-    // 1. Exact alias key match
-    if let Some(name) = allowed_repositories.get(input) {
-        return Some(name);
-    }
-    // 2. Case-insensitive value match (full "project/repo" or just "repo").
-    // ADO repo names are case-insensitive, so accept any case for the full path.
-    if let Some((_, name)) = allowed_repositories
-        .iter()
-        .find(|(_, v)| v.eq_ignore_ascii_case(input))
-    {
-        return Some(name);
-    }
-    // 3. Trailing repo-name part match (case-insensitive)
-    allowed_repositories.iter().find_map(|(_, v)| {
-        let trailing = v.rsplit('/').next().unwrap_or(v.as_str());
-        if trailing.eq_ignore_ascii_case(input) {
-            Some(v)
-        } else {
-            None
-        }
-    })
+    lookup_allowed_repository_alias(input, allowed_repositories)
+        .and_then(|alias| allowed_repositories.get(alias))
 }
 
 /// Return `true` if `input` refers to the pipeline's own repository — either the

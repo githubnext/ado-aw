@@ -66,7 +66,7 @@ description: "Checks for outdated dependencies and opens PRs to update them"
 
 Default engine is `copilot` (GitHub Copilot CLI). The `engine:` field is an engine identifier, not a model name. Only include `engine:` if you need to set a non-default model or timeout.
 
-The default model is `claude-opus-4.7`. To use a different model, use the object form:
+The default model is `claude-opus-4.7`. The compiler accepts any valid model identifier; the table below lists recommended choices. To use a different model, use the object form:
 
 | Model | Use when |
 |---|---|
@@ -109,6 +109,7 @@ on:
 | `daily around 14:00` | Within ±60 min of 2 PM UTC |
 | `daily around 3pm utc+9` | 3 PM JST → converted to UTC |
 | `daily between 9:00 and 17:00` | Business hours |
+| `weekly` | Any day, scattered time |
 | `weekly on monday` | Every Monday, scattered time |
 | `weekly on friday around 17:00` | Friday ~5 PM |
 | `every 2 days` | Every N days, time scattered |
@@ -317,7 +318,7 @@ tools:
 | `reply-to-pr-comment` | Reply to an existing PR review thread | ✅ |
 | `resolve-pr-thread` | Resolve or update status of a PR thread | ✅ |
 | `submit-pr-review` | Submit a review vote on a PR | ✅ |
-| `update-pr` | Update PR metadata (reviewers, labels, auto-complete, vote) | ✅ |
+| `update-pr` | Update PR metadata (reviewers, labels, auto-complete, vote, update-description) | ✅ |
 | **Builds & Branches** | | |
 | `queue-build` | Queue an ADO pipeline build by definition ID | ✅ |
 | `create-branch` | Create a new branch from an existing ref | ✅ |

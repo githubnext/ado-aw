@@ -24,13 +24,14 @@ These flags apply to all commands:
 Initialize a repository for AI-first agentic pipeline authoring. Creates `.github/agents/ado-aw.agent.md`, a Copilot dispatcher agent that routes to the create, update, and debug prompts.
 
 ```bash
-ado-aw init [--path <path>] [--force]
+ado-aw init [--path <path>] [--force] [--agency]
 ```
 
 Options:
 
 - `--path <path>` -- target directory (defaults to current directory)
 - `--force` -- bypass the GitHub-remote guard (use when running inside a GitHub-hosted repository like `githubnext/ado-aw`)
+- `--agency` -- additionally scaffold an Agency / Claude Code plugin under `agency/plugins/ado-aw/` plus repo-root marketplace catalogs (`.claude-plugin/marketplace.json` and `.github/plugin/marketplace.json`); additive to the standard agent file. See the [Agency Plugin reference](/ado-aw/reference/agency-plugin/).
 
 ### `compile [<path>]`
 

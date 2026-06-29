@@ -111,8 +111,11 @@ mod tests {
         };
         let checks = lower_pr_filters(&filters);
         let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
-        match &spec.checks[0].predicate {
-            PredicateSpec::LabelSetMatch { none_of, .. } => {
+        let check = &spec.checks[0];
+        assert_eq!(check.name, "labels");
+        match &check.predicate {
+            PredicateSpec::LabelSetMatch { fact, none_of, .. } => {
+                assert_eq!(fact, "pr_labels");
                 assert!(none_of.contains(&"do-not-run".to_string()));
             }
             other => panic!("expected LabelSetMatch, got {:?}", other),
@@ -285,7 +288,8 @@ mod tests {
         let checks = lower_pr_filters(&filters);
         let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
         match &spec.checks[0].predicate {
-            PredicateSpec::ValueInSet { values, .. } => {
+            PredicateSpec::ValueInSet { fact, values, .. } => {
+                assert_eq!(fact, "build_reason");
                 assert!(values.contains(&"PullRequest".to_string()));
                 assert!(values.contains(&"Manual".to_string()));
             }
@@ -309,7 +313,8 @@ mod tests {
         let checks = lower_pr_filters(&filters);
         let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
         match &spec.checks[0].predicate {
-            PredicateSpec::ValueNotInSet { values, .. } => {
+            PredicateSpec::ValueNotInSet { fact, values, .. } => {
+                assert_eq!(fact, "build_reason");
                 assert!(values.contains(&"Schedule".to_string()));
             }
             other => panic!("expected ValueNotInSet, got {:?}", other),
@@ -319,18 +324,18 @@ mod tests {
 
     #[test]
     fn test_gate_step_change_count_includes_changed_files_fact() {
+        // Uses only min_changes (no changed_files filter) to verify that the
+        // ChangedFileCount fact transitively requires ChangedFiles via its
+        // declared dependency — without an explicit changed_files filter the
+        // only source of the changed_files fact is the dependency graph.
         use crate::compile::filter_ir::{GateContext, build_gate_spec, lower_pr_filters};
         let filters = PrFilters {
-            changed_files: Some(IncludeExcludeFilter {
-                include: vec!["src/**".into()],
-                ..Default::default()
-            }),
             min_changes: Some(3),
             ..Default::default()
         };
         let checks = lower_pr_filters(&filters);
         let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
-        // Both changed_files and changed_file_count facts should be present
+        // changed_files must appear because changed_file_count depends on it
         assert!(spec.facts.iter().any(|f| f.kind == "changed_files"));
         assert!(spec.facts.iter().any(|f| f.kind == "changed_file_count"));
     }
@@ -387,7 +392,7 @@ triggers:
         match &spec.checks[0].predicate {
             PredicateSpec::GlobMatch { fact, pattern } => {
                 assert_eq!(fact, "commit_message");
-                assert!(pattern.contains("skip-agent"));
+                assert_eq!(pattern, "*[skip-agent]*");
             }
             other => panic!("expected GlobMatch, got {:?}", other),
         }

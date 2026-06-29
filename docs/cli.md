@@ -9,6 +9,7 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
 - `init` - Initialize a repository for AI-first agentic pipeline authoring
   - `--path <path>` - Target directory (defaults to current directory)
   - `--force` - Bypass the GitHub-remote guard (use when running inside a GitHub-hosted repository like `githubnext/ado-aw` itself)
+  - `--agency` - **Additive.** Also generate an Agency / [Claude Code plugin](https://code.claude.com/docs/en/plugins-reference) and the marketplace catalogs that make the repo directly installable (in addition to the standard Copilot agent file). Writes the plugin under `agency/plugins/ado-aw` (mirroring how it is checked in to ado-aw itself) plus **repo-root** marketplace catalogs `.claude-plugin/marketplace.json` (Claude) and `.github/plugin/marketplace.json` (Copilot) that list the plugin via `source: "./agency/plugins/ado-aw"`. After scaffolding, register with `/plugin marketplace add <repo>` then `/plugin install ado-aw@ado-aw`. The plugin tree is a verbatim copy of the canonical in-repo plugin at [`agency/plugins/ado-aw/`](../agency/plugins/ado-aw): `.claude-plugin/plugin.json`, `.mcp.json` (wires the read-only `ado-aw mcp-author` server), `agency.json` (marketplace governance + external `source` pointer), `README.md`, an `agents/ado-aw.md` dispatcher subagent, six `skills/<name>/SKILL.md` playbooks (`create-workflow`, `update-workflow`, `debug-workflow`, `compile-and-validate`, `manage-lifecycle`, `audit-build`), and `scripts/doctor.{sh,ps1}` prerequisite checks. The canonical plugin + catalogs are version-locked to the compiler (release-please bumps the plugin/catalog versions + pinned prompt URLs in lock-step).
   - Creates `.github/agents/ado-aw.agent.md` — a Copilot dispatcher agent that routes to specialized prompts for creating, updating, and debugging agentic pipelines
   - The agent auto-downloads the ado-aw compiler and handles the full lifecycle (create → compile → check)
 - `compile [<path>]` - Compile a markdown file to Azure DevOps pipeline YAML. If no path is given, auto-discovers and recompiles all detected agentic pipelines in the current directory.
@@ -35,6 +36,8 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - `--ado-org-url <url>` - Azure DevOps organization URL override
   - `--ado-project <name>` - Azure DevOps project name override
   - `--dry-run` - Validate inputs but skip ADO API calls (useful for local testing and QA review)
+  - `--only <tool>` - Execute only these safe-output tools (repeatable). Used by the manual-review split for the approval-gated `SafeOutputs_Reviewed` job.
+  - `--exclude <tool>` - Skip these safe-output tools (repeatable). Used by the manual-review split so the automatic `SafeOutputs` job applies non-gated outputs while reviewed ones wait. See [`docs/safe-outputs.md`](safe-outputs.md#manual-review-require-approval).
 
 - `configure` *(deprecated; hidden in --help)* - Alias forwarding to `secrets set GITHUB_TOKEN`. Existing scripts keep working but get a stderr warning.
 

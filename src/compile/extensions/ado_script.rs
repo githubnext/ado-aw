@@ -29,7 +29,8 @@ use crate::compile::ir::condition::{Condition, Expr};
 use crate::compile::ir::env::EnvValue;
 use crate::compile::ir::ids::StepId;
 use crate::compile::ir::output::OutputDecl;
-use crate::compile::ir::step::{BashStep, Step, TaskStep};
+use crate::compile::ir::step::{BashStep, Step};
+use crate::compile::ir::tasks::use_node::UseNode;
 use crate::compile::types::{PipelineFilters, PrFilters, SupplyChainConfig};
 
 const GATE_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/gate.js";
@@ -82,6 +83,11 @@ pub(crate) const EXEC_CONTEXT_REPO_PATH: &str =
 /// by [`AdoScriptExtension::declarations`].
 pub(crate) const EXEC_CONTEXT_PR_SYNTH_PATH: &str =
     "/tmp/ado-aw-scripts/ado-script/exec-context-pr-synth.js";
+/// Path to the safe-outputs approval-summary bundle inside the unpacked
+/// `ado-script.zip`. Runs at the end of the Agent job to render the proposed
+/// safe outputs to a sanitized markdown summary tab.
+pub(crate) const APPROVAL_SUMMARY_PATH: &str =
+    "/tmp/ado-aw-scripts/ado-script/approval-summary.js";
 const RELEASE_BASE_URL: &str = "https://github.com/githubnext/ado-aw/releases/download";
 
 /// Single always-on extension that owns all `ado-script` bundle wiring.
@@ -141,6 +147,12 @@ pub struct AdoScriptExtension {
     /// build-out — see plan.md) will activate. Always-on capability,
     /// default OFF (opt-in).
     pub exec_context_repo_active: bool,
+    /// Whether the safe-outputs approval-summary step will run at the
+    /// end of the Agent job. True whenever the workflow enables any
+    /// safe-output tool. When true the Agent-job install/download must
+    /// fire so that `approval-summary.js` is present for the
+    /// end-of-job render step (emitted by `build_agent_job`).
+    pub safe_outputs_summary_active: bool,
     /// PR trigger config required to build `PR_SYNTH_SPEC`. `Some(_)`
     /// is the single source of truth for "synthetic-from-ci path is
     /// active for this agent" — `is_some()` replaces what used to be a
@@ -347,8 +359,7 @@ pub(crate) fn install_and_download_steps_typed(
 ) -> Vec<Step> {
     let version = env!("CARGO_PKG_VERSION");
     let install = {
-        let mut t =
-            TaskStep::new("UseNode@1", "Install Node.js 22.x").with_input("version", "22.x");
+        let mut t = UseNode::new("22.x").into_step();
         t.timeout = Some(std::time::Duration::from_secs(300));
         t.condition = Some(Condition::Succeeded);
         t
@@ -629,6 +640,7 @@ impl CompilerExtension for AdoScriptExtension {
             || self.exec_context_schedule_active
             || self.exec_context_pr_checks_active
             || self.exec_context_repo_active
+            || self.safe_outputs_summary_active
         {
             agent_prepare_steps.extend(install_and_download_steps_typed(self.supply_chain.as_ref()));
             if import_active {
@@ -832,6 +844,7 @@ mod tests {
             exec_context_schedule_active: false,
             exec_context_pr_checks_active: false,
             exec_context_repo_active: false,
+            safe_outputs_summary_active: false,
             pr_trigger_for_synth: None,
             supply_chain: None,
         }
@@ -901,6 +914,7 @@ mod tests {
             exec_context_schedule_active: false,
             exec_context_pr_checks_active: false,
             exec_context_repo_active: false,
+            safe_outputs_summary_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -957,6 +971,7 @@ mod tests {
             exec_context_schedule_active: false,
             exec_context_pr_checks_active: false,
             exec_context_repo_active: false,
+            safe_outputs_summary_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -1066,7 +1081,11 @@ mod tests {
         let ext = ext_with(Some(filters), None, true);
         let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
         let ctx = CompileContext::for_test(&fm);
-        assert!(ext.declarations(&ctx).is_err());
+        let err = ext.declarations(&ctx).unwrap_err();
+        assert!(
+            err.to_string().contains("min-changes"),
+            "expected min-changes / max-changes error, got: {err}"
+        );
     }
 
     #[test]
@@ -1117,6 +1136,7 @@ mod tests {
             exec_context_schedule_active: false,
             exec_context_pr_checks_active: false,
             exec_context_repo_active: false,
+            safe_outputs_summary_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -1252,10 +1272,26 @@ mod tests {
             panic!("expected And inside Or, got {:?}", parts[0]);
         };
         assert_eq!(and_parts.len(), 2);
+        // and_parts[0]: Ne(Build.Reason, "PullRequest") — real PullRequest
+        // builds must still clear the PR gate even when synth is active.
+        assert!(matches!(
+            &and_parts[0],
+            Condition::Ne(Expr::Variable(name), Expr::Literal(lit))
+                if name == "Build.Reason" && lit == "PullRequest"
+        ));
+        // and_parts[1]: Ne(synthPr.AW_SYNTHETIC_PR, "true") — synth-promoted
+        // CI builds are also routed through the gate.
         assert!(matches!(
             &and_parts[1],
             Condition::Ne(Expr::StepOutput(out), Expr::Literal(lit))
                 if out.step.as_str() == "synthPr" && out.name == "AW_SYNTHETIC_PR" && lit == "true"
+        ));
+        // parts[1]: Eq(prGate.SHOULD_RUN, "true") — gate short-circuit for
+        // builds that cleared the PR filter.
+        assert!(matches!(
+            &parts[1],
+            Condition::Eq(Expr::StepOutput(out), Expr::Literal(lit))
+                if out.step.as_str() == "prGate" && out.name == "SHOULD_RUN" && lit == "true"
         ));
     }
 
@@ -1565,9 +1601,7 @@ mod tests {
 
     /// `declarations()` returns empty step lists when neither
     /// runtime-import nor exec-context-pr nor any gate / synth path
-    /// is active. Mirrors `setup_steps_empty_without_gate` /
-    /// `prepare_steps_empty_when_inlined_imports_true` for the typed
-    /// path.
+    /// is active.
     #[test]
     fn declarations_empty_when_nothing_active() {
         let ext = ext_with(None, None, true);
@@ -1635,6 +1669,7 @@ mod tests {
             exec_context_schedule_active: false,
             exec_context_pr_checks_active: false,
             exec_context_repo_active: false,
+            safe_outputs_summary_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],

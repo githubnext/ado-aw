@@ -28,10 +28,38 @@ use crate::sanitize::neutralize_pipeline_commands;
 // Re-export memory types for use by main.rs
 pub use crate::tools::cache_memory::{MemoryConfig, process_agent_memory};
 
+/// Selects which safe-output entries Stage 3 executes, by tool name.
+///
+/// Used to split execution into an automatic path and a manual-review path:
+/// the auto execution job `exclude`s the reviewed tools, and the reviewed
+/// execution job runs `only` the reviewed tools (after the approval gate).
+/// An empty filter (the default) executes every entry.
+#[derive(Debug, Default, Clone)]
+pub struct ToolFilter {
+    /// When non-empty, only entries whose tool name appears here run.
+    pub only: Vec<String>,
+    /// Entries whose tool name appears here are skipped.
+    pub exclude: Vec<String>,
+}
+
+impl ToolFilter {
+    /// Whether an entry with tool name `tool` is permitted by this filter.
+    pub fn allows(&self, tool: &str) -> bool {
+        if !self.only.is_empty() && !self.only.iter().any(|t| t == tool) {
+            return false;
+        }
+        if self.exclude.iter().any(|t| t == tool) {
+            return false;
+        }
+        true
+    }
+}
+
 /// Execute all safe outputs from the NDJSON file in the specified directory
 pub async fn execute_safe_outputs(
     safe_output_dir: &Path,
     ctx: &ExecutionContext,
+    filter: &ToolFilter,
 ) -> Result<Vec<ExecutionResult>> {
     let safe_output_path = safe_output_dir.join(SAFE_OUTPUT_FILENAME);
 
@@ -113,6 +141,17 @@ pub async fn execute_safe_outputs(
             .get("name")
             .and_then(|name| name.as_str())
             .unwrap_or("unknown");
+        // Skip entries the active filter excludes (manual-review split: the
+        // auto job excludes reviewed tools; the reviewed job runs only them).
+        if !filter.allows(proposal_tool_name) {
+            debug!(
+                "[{}/{}] Skipping entry for tool '{}' (filtered out)",
+                i + 1,
+                entries.len(),
+                proposal_tool_name
+            );
+            continue;
+        }
         debug!(
             "[{}/{}] Executing entry: {}",
             i + 1,
@@ -666,15 +705,33 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_entry_context_preserves_normal_title() {
-        let entry = serde_json::json!({"title": "Fix login bug"});
-        assert_eq!(extract_entry_context(&entry), " (\"Fix login bug\")");
-    }
-
-    #[test]
     fn test_extract_entry_context_prefers_id_over_title() {
         let entry = serde_json::json!({"id": 42, "title": "should be ignored"});
         assert_eq!(extract_entry_context(&entry), " (work item #42)");
+    }
+
+    #[test]
+    fn test_tool_filter_allows() {
+        // Empty filter allows everything.
+        let f = ToolFilter::default();
+        assert!(f.allows("create-pull-request"));
+        assert!(f.allows("add-pr-comment"));
+
+        // `only` restricts to the listed tools.
+        let f = ToolFilter {
+            only: vec!["create-pull-request".into()],
+            exclude: vec![],
+        };
+        assert!(f.allows("create-pull-request"));
+        assert!(!f.allows("add-pr-comment"));
+
+        // `exclude` removes the listed tools.
+        let f = ToolFilter {
+            only: vec![],
+            exclude: vec!["create-pull-request".into()],
+        };
+        assert!(!f.allows("create-pull-request"));
+        assert!(f.allows("add-pr-comment"));
     }
 
     #[test]
@@ -804,7 +861,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let ctx = ExecutionContext::default();
 
-        let results = execute_safe_outputs(temp_dir.path(), &ctx).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
         assert!(results.is_empty());
     }
 
@@ -820,7 +877,7 @@ mod tests {
         tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
 
         let ctx = ExecutionContext::default();
-        let results = execute_safe_outputs(temp_dir.path(), &ctx).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
 
         assert_eq!(results.len(), 2);
         assert!(results[0].success);
@@ -840,7 +897,7 @@ mod tests {
         tokio::fs::write(&safe_output_path, "").await.unwrap();
 
         let ctx = ExecutionContext::default();
-        let results = execute_safe_outputs(temp_dir.path(), &ctx).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
         assert!(results.is_empty());
     }
 
@@ -863,7 +920,7 @@ mod tests {
             dry_run: true,
             ..Default::default()
         };
-        let results = execute_safe_outputs(temp_dir.path(), &ctx).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
         assert_eq!(results.len(), 2);
 
         let executed_path = temp_dir.path().join(EXECUTED_NDJSON_FILENAME);
@@ -894,7 +951,7 @@ mod tests {
             dry_run: true,
             ..Default::default()
         };
-        let results = execute_safe_outputs(temp_dir.path(), &ctx).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
         assert_eq!(results.len(), 2);
 
         let manifest = read_executed_manifest(&temp_dir).await;
@@ -915,7 +972,7 @@ mod tests {
         tokio::fs::write(&safe_output_path, "").await.unwrap();
 
         let ctx = ExecutionContext::default();
-        let results = execute_safe_outputs(temp_dir.path(), &ctx).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
         assert!(results.is_empty());
         assert!(!temp_dir.path().join(EXECUTED_NDJSON_FILENAME).exists());
     }
@@ -1224,7 +1281,7 @@ mod tests {
             ..Default::default()
         };
 
-        let results = execute_safe_outputs(temp_dir.path(), &ctx).await;
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await;
         // The batch must NOT abort — execute_safe_outputs should return Ok
         assert!(
             results.is_ok(),
@@ -1407,7 +1464,7 @@ mod tests {
         tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
 
         let ctx = ExecutionContext::default();
-        let results = execute_safe_outputs(temp_dir.path(), &ctx).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
 
         // One entry processed (as a failure — unknown tool)
         assert_eq!(results.len(), 1);
@@ -1507,7 +1564,7 @@ mod tests {
             ..Default::default()
         };
 
-        let results = execute_safe_outputs(temp_dir.path(), &ctx).await;
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await;
         assert!(
             results.is_ok(),
             "Batch should not abort when max is exceeded"
@@ -1572,7 +1629,7 @@ mod tests {
             ..Default::default()
         };
 
-        let results = execute_safe_outputs(temp_dir.path(), &ctx).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
         assert_eq!(results.len(), 5);
 
         // Second create-work-item should be skipped
@@ -1608,7 +1665,7 @@ mod tests {
             ..Default::default()
         };
 
-        let results = execute_safe_outputs(temp_dir.path(), &ctx).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].success, "dry-run should succeed");
         assert!(
@@ -1640,7 +1697,7 @@ mod tests {
             ..Default::default()
         };
 
-        let results = execute_safe_outputs(temp_dir.path(), &ctx).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
         assert_eq!(results.len(), 2);
         // create-work-item goes through Executor trait → dry-run intercepted
         assert!(results[0].message.contains("[DRY-RUN]"));

@@ -118,39 +118,49 @@ let step = Step::Bash(
 
 ### Task steps
 
-When a typed factory helper exists for the ADO task you need, use it — it sets the required inputs and makes the call site self-documenting:
+When a typed builder exists for the ADO task you need, use it — required inputs are positional, optional inputs are chained typed setters, and command-dispatch tasks accept a typed enum instead of a plain string:
 
 ```rust
 use crate::compile::ir::step::Step;
-use crate::compile::ir::tasks::{copy_files_step, dot_net_core_cli_step};
+use crate::compile::ir::tasks::{
+    copy_files::CopyFiles,
+    dotnet_core_cli::{DotNetBuild, DotNetCoreCli},
+};
 
-// Use a typed helper — required inputs are positional, optional inputs chain on
-let build = Step::Task(
-    dot_net_core_cli_step("build")
-        .with_input("projects", "**/*.csproj")
-        .with_input("arguments", "--configuration Release"),
+// Required inputs are positional — optional inputs chain on
+let copy = Step::Task(
+    CopyFiles::new("**/*.nupkg", "$(Build.ArtifactStagingDirectory)")
+        .source_folder("$(Build.SourcesDirectory)/out")
+        .into_step(),
 );
 
-let copy = Step::Task(
-    copy_files_step("**/*.nupkg", "$(Build.ArtifactStagingDirectory)")
-        .with_input("SourceFolder", "$(Build.SourcesDirectory)/out"),
+// Command-dispatch builder: applying a build-only input to a test command
+// is unrepresentable at the type level
+let build = Step::Task(
+    DotNetCoreCli::build(
+        DotNetBuild::new()
+            .projects("**/*.csproj")
+            .arguments("--configuration Release"),
+    )
+    .into_step(),
 );
 ```
 
-The full set of typed helpers lives in `src/compile/ir/tasks.rs` and is documented in the [IR reference](/ado-aw/reference/ir/#typed-task-helpers). Helpers cover: `CopyFiles@2`, `DockerInstaller@0`, `DotNetCoreCLI@2`, `ArchiveFiles@2`, `ExtractFiles@1`, `PublishTestResults@2`, `NuGetCommand@2`, and `PowerShell@2` (file and inline modes).
+The full catalogue of typed builders lives in `src/compile/ir/tasks/` and is documented in the [IR reference](/ado-aw/reference/ir/#typed-task-helpers). It covers toolchain setup (`UseNode@1`, `UsePythonVersion@0`, `UseDotNet@2`, `UseRubyVersion@0`, `GoTool@0`), file operations, build and test, artifact publishing, scripting, containers, Azure integrations, package authentication (Cargo, Maven, npm, NuGet, pip, Twine, Universal Packages), and pipeline control — 44 builders in total.
 
-When no typed helper exists for your task, fall back to `TaskStep::new`:
+When no typed builder exists for your task, fall back to `TaskStep::new`:
 
 ```rust
 use crate::compile::ir::step::{Step, TaskStep};
 
+// For tasks without a typed builder, use the lower-level TaskStep::new
 let step = Step::Task(
-    TaskStep::new("UseNode@1", "Install Node.js")
-        .with_input("version", "20.x"),
+    TaskStep::new("SomeCustomTask@1", "Run custom task")
+        .with_input("inputKey", "value"),
 );
 ```
 
-Use `TaskStep` for Azure DevOps built-in tasks such as `UseNode@1`, `UsePythonVersion@0`, and `UseDotNet@2`.
+Reserve `TaskStep::new` for ADO tasks that don't yet have a typed builder. Prefer the typed builder when one exists.
 
 ### Download and publish steps
 

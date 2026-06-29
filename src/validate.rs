@@ -186,6 +186,18 @@ pub fn contains_ado_expression(s: &str) -> bool {
     s.contains("${{") || s.contains("$(") || s.contains("$[")
 }
 
+/// Returns true if the string contains an ADO **template** expression
+/// (`${{ ... }}`). These are evaluated by ADO's YAML template engine at queue
+/// time — *before* a task sees the value — so an author-supplied
+/// `${{ variables['secret-token'] }}` would be expanded into the pipeline.
+/// Narrower than [`contains_ado_expression`]: it deliberately does **not**
+/// match runtime macros (`$(...)`) or runtime expressions (`$[...]`), which are
+/// evaluated later and are intended in some author-facing fields (e.g. the
+/// manual-review `instructions` message supports `$(...)` interpolation).
+pub fn contains_ado_template_expression(s: &str) -> bool {
+    s.contains("${{")
+}
+
 /// Returns true if the string contains an ADO pipeline command
 /// (`##vso[` or `##[`).
 pub fn contains_pipeline_command(s: &str) -> bool {
@@ -947,7 +959,9 @@ mod tests {
         let env = HashMap::from([("AZURE_DEVOPS_EXT_PAT".to_string(), "secret123".to_string())]);
         let warnings = warn_potential_secrets("mcp", &env, &HashMap::new());
         assert!(!warnings.is_empty());
-        assert!(warnings[0].contains("secret"));
+        // Verify the warning names the triggering variable, not just that the
+        // word "secret" appears (which is always true from the format string).
+        assert!(warnings[0].contains("AZURE_DEVOPS_EXT_PAT"));
 
         let empty_env = HashMap::from([("AZURE_DEVOPS_EXT_PAT".to_string(), String::new())]);
         let warnings = warn_potential_secrets("mcp", &empty_env, &HashMap::new());
@@ -1088,6 +1102,8 @@ mod tests {
         assert!(validate_git_ref_name("foo..bar", "b").is_err());
         assert!(validate_git_ref_name("foo@{bar", "b").is_err());
         assert!(validate_git_ref_name("foo.lock", "b").is_err());
+        // ends-with-dot is a separate rule from ends-with-".lock"
+        assert!(validate_git_ref_name("trailing.", "b").is_err());
         assert!(validate_git_ref_name("foo//bar", "b").is_err());
         assert!(validate_git_ref_name("foo:bar", "b").is_err());
         assert!(validate_git_ref_name("foo/.hidden", "b").is_err());

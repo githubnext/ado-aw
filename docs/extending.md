@@ -117,15 +117,16 @@ let step = Step::Bash(
 
 ```rust
 use crate::compile::ir::step::Step;
-use crate::compile::ir::tasks::publish_test_results_step;
+use crate::compile::ir::tasks::publish_test_results::{PublishTestResults, TestResultsFormat};
 
 let step = Step::Task(
-    publish_test_results_step("JUnit", "**/TEST-*.xml")
-        .with_input("testRunTitle", "Unit Tests"),
+    PublishTestResults::new(TestResultsFormat::JUnit, "**/TEST-*.xml")
+        .test_run_title("Unit Tests")
+        .into_step(),
 );
 ```
 
-Use `TaskStep` for Azure DevOps built-in tasks. When the task is compiler-generated, add or reuse a typed helper in `src/compile/ir/tasks.rs` so required inputs are explicit and call sites do not hand-construct `TaskStep::new(...)` with raw task/input strings.
+Use `TaskStep` for Azure DevOps built-in tasks. When the task is compiler-generated, add or reuse a typed builder struct in `src/compile/ir/tasks/` (one file per task) so required inputs are positional, optional inputs are typed setters, and call sites do not hand-construct `TaskStep::new(...)` with raw task/input strings. Each builder exposes `new(<required>)`, typed chained setters, and `into_step() -> TaskStep`; constrained values are typed enums and bool inputs take `bool`. Command/mode-dispatch tasks (e.g. `Docker@2`) use a command enum with per-variant data — model new ones on `src/compile/ir/tasks/docker.rs`.
 
 ### Download and publish steps
 

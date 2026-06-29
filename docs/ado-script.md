@@ -3,7 +3,7 @@
 `ado-script` is the umbrella name for the TypeScript workspace at
 [`scripts/ado-script/`](../scripts/ado-script/). It produces small,
 ncc-bundled Node programs that the **compiler injects into every emitted
-pipeline** as runtime helpers. Today it produces seven bundles:
+pipeline** as runtime helpers. Today it produces thirteen bundles:
 
 - `gate.js` — trigger-filter gate evaluator (Setup job).
 - `import.js` — runtime prompt resolver described in
@@ -26,10 +26,36 @@ pipeline** as runtime helpers. Today it produces seven bundles:
   `aw-context/pipeline/upstream-*` files plus a `## Pipeline-completion
   context` prompt fragment (Agent job; see
   [`execution-context.md`](execution-context.md)).
+- `exec-context-ci-push.js` — CI/push precompute that stages "since
+  last green build" diff context under `aw-context/ci-push/` (Agent
+  job; see [`execution-context.md`](execution-context.md)).
+- `exec-context-workitem.js` — PR-linked work-item precompute that
+  stages linked work-item metadata and descriptions under
+  `aw-context/workitem/` (Agent job; see
+  [`execution-context.md`](execution-context.md)).
+- `exec-context-schedule.js` — Scheduled-run precompute that stages
+  "since last successful scheduled run" context under
+  `aw-context/schedule/` (Agent job; see
+  [`execution-context.md`](execution-context.md)).
+- `exec-context-pr-checks.js` — PR Build Validation checks precompute
+  that stages succeeded/failing check results under
+  `aw-context/pr/checks/` (Agent job; see
+  [`execution-context.md`](execution-context.md)).
+- `exec-context-repo.js` — Repository identity precompute that stages
+  branch, SHA, last release tag, and commits-since-tag facts under
+  `aw-context/repo/` (Agent job; see
+  [`execution-context.md`](execution-context.md)).
 - `conclusion.js` — Conclusion job work-item reporter: reads the
   safe-outputs execution manifest and upstream job results,
   files/comments ADO work items for pipeline failures and diagnostic
   signals (Conclusion job).
+- `approval-summary.js` — Safe-outputs summary renderer that runs at the
+  **end of the Agent job** (after proposals are collected). It reads the
+  proposed safe outputs from `safe_outputs.ndjson`, renders a sanitized
+  per-tool markdown summary (pending-approval proposals first when manual
+  review is configured), and attaches it to the build's
+  `ado-aw-safe-outputs` summary tab via `##vso[task.uploadsummary]`. See
+  [`safe-outputs.md`](safe-outputs.md).
 
 > **Internal-only.** `ado-script` is not a user-facing front-matter
 > feature. Authors never write an `ado-script:` block in their agent
@@ -76,10 +102,9 @@ because the compiler always embeds an absolute marker path and
 not re-expanded).
 
 The bundle lives at `import.js` and ships in the same
-`ado-script.zip` release asset as `gate.js`, `exec-context-pr.js`,
-`exec-context-pr-synth.js`, `exec-context-manual.js`, and
-`exec-context-pipeline.js`, so pipelines download it through the
-same Agent-job asset flow.
+`ado-script.zip` release asset as `gate.js` and the ten
+`exec-context-*.js` bundles listed in the workspace layout, so
+pipelines download it through the same Agent-job asset flow.
 `import.js` uses only the Node standard library, so the ncc bundle is
 small (~1.5 KB) and carries no SDK dependency.
 
@@ -388,6 +413,21 @@ scripts/ado-script/
 │   ├── exec-context-pipeline/   # exec-context-pipeline.js entry point + pipeline-completion precompute
 │   │   ├── index.ts             # main(): validate TriggeredBy ids → fetch upstream Build via REST → stage + prompt
 │   │   └── __tests__/           # unit tests for validate / success / failure / sanitisation paths
+│   ├── exec-context-ci-push/    # exec-context-ci-push.js entry point + CI/push diff context
+│   │   ├── index.ts             # main(): find last green build → stage changed files / commits → prompt
+│   │   └── __tests__/           # unit tests for success / fallback / sanitisation paths
+│   ├── exec-context-workitem/   # exec-context-workitem.js entry point + PR-linked work-item context
+│   │   ├── index.ts             # main(): fetch linked WIs → stage metadata + descriptions → prompt
+│   │   └── __tests__/           # unit tests for fetch / truncation / sanitisation paths
+│   ├── exec-context-schedule/   # exec-context-schedule.js entry point + scheduled-run diff context
+│   │   ├── index.ts             # main(): find prior scheduled success → stage changed files / commits → prompt
+│   │   └── __tests__/           # unit tests for success / no-baseline / sanitisation paths
+│   ├── exec-context-pr-checks/  # exec-context-pr-checks.js entry point + PR validation checks context
+│   │   ├── index.ts             # main(): fetch policy/build checks → stage failing/succeeded JSON → prompt
+│   │   └── __tests__/           # unit tests for checks filtering / sanitisation paths
+│   ├── exec-context-repo/       # exec-context-repo.js entry point + repository identity context
+│   │   ├── index.ts             # main(): stage branch/SHA/tag/commits-since-tag facts → prompt
+│   │   └── __tests__/           # unit tests for identity / tag fallback / sanitisation paths
 │   └── conclusion/              # conclusion.js entry point + Conclusion-job reporter
 │       ├── index.ts             # main(): inspect upstream results + safe-outputs manifest → file/append work items
 │       └── __tests__/           # unit tests for signal detection and work-item filing behaviour
@@ -398,7 +438,13 @@ scripts/ado-script/
 ├── exec-context-pr-synth.js     # ncc bundle output (gitignored)
 ├── exec-context-manual.js       # ncc bundle output (gitignored)
 ├── exec-context-pipeline.js     # ncc bundle output (gitignored)
-└── conclusion.js                # ncc bundle output (gitignored)
+├── exec-context-ci-push.js      # ncc bundle output (gitignored)
+├── exec-context-workitem.js     # ncc bundle output (gitignored)
+├── exec-context-schedule.js     # ncc bundle output (gitignored)
+├── exec-context-pr-checks.js    # ncc bundle output (gitignored)
+├── exec-context-repo.js         # ncc bundle output (gitignored)
+├── conclusion.js                # ncc bundle output (gitignored)
+└── approval-summary.js          # ncc bundle output (gitignored)
 ```
 
 The release workflow (`.github/workflows/release.yml`) runs
@@ -406,9 +452,15 @@ The release workflow (`.github/workflows/release.yml`) runs
 `scripts/ado-script/import.js`,
 `scripts/ado-script/exec-context-pr.js`,
 `scripts/ado-script/exec-context-pr-synth.js`,
-`scripts/ado-script/exec-context-manual.js`, and
-`scripts/ado-script/exec-context-pipeline.js`, and
-`scripts/ado-script/conclusion.js` into the
+`scripts/ado-script/exec-context-manual.js`,
+`scripts/ado-script/exec-context-pipeline.js`,
+`scripts/ado-script/exec-context-ci-push.js`,
+`scripts/ado-script/exec-context-workitem.js`,
+`scripts/ado-script/exec-context-schedule.js`,
+`scripts/ado-script/exec-context-pr-checks.js`,
+`scripts/ado-script/exec-context-repo.js`,
+`scripts/ado-script/conclusion.js`, and
+`scripts/ado-script/approval-summary.js` into the
 `ado-script.zip` release asset. Pipelines download that asset at
 runtime by URL pinned to the compiler's `CARGO_PKG_VERSION`, verify
 its SHA-256 against the `checksums.txt` asset, then extract.
@@ -509,10 +561,10 @@ The rows below assume the synthetic-PR resolver is **not** active
 |---|---|---|---|
 | no gate    | none                                   | (none)                              | (none)                              |
 | no gate    | `inlined-imports: false` only          | (no Setup job)                      | install + download + resolver       |
-| no gate    | `on.pr` execution-context only         | (no Setup job)                      | install + download + exec-context-pr |
-| no gate    | both                                   | (no Setup job)                      | install + download + resolver + exec-context-pr |
+| no gate    | execution-context contributor(s) only | (no Setup job)                      | install + download + exec-context bundle(s) |
+| no gate    | resolver + execution-context          | (no Setup job)                      | install + download + resolver + exec-context bundle(s) |
 | gate       | none                                   | install + download + gate           | (none)                              |
-| gate       | any combination of resolver / exec-pr  | install + download + gate           | install + download + (resolver?) + (exec-context-pr?) |
+| gate       | any combination of resolver / exec-context | install + download + gate       | install + download + (resolver?) + (exec-context bundle(s)?) |
 
 When the synthetic-PR resolver **is** active
 (`pr_trigger_for_synth = Some(_)`, i.e. `synthetic_pr_active()` is
@@ -591,8 +643,8 @@ npm ci                 # one-time
 npm run codegen        # regenerate types.gen.ts (compiles ado-aw first)
 npm test               # vitest unit tests
 npm run typecheck      # strict tsc --noEmit
-npm run build          # ncc-bundle to gate.js
-npm run test:smoke     # build + smoke test the bundle end-to-end
+npm run build          # ncc-bundle all ado-script JS helpers
+npm run test:smoke     # build + smoke test the bundles end-to-end
 ```
 
 The Rust-side E2E gate test compiles a real agent, extracts the

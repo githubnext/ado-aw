@@ -1,4 +1,4 @@
-# Copilot Instructions for Azure DevOps Agentic Pipelines
+# Copilot Instructions for Azure DevOps Agentic Workflows
 
 This repository contains a compiler for Azure DevOps pipelines that transforms
 natural language markdown files with YAML front matter into Azure DevOps
@@ -39,6 +39,15 @@ Every compiled pipeline runs as three sequential jobs:
 3. **SafeOutputs (Stage 3)** — a non-agent executor applies approved safe outputs
    using a write-capable ADO token that the agent never sees.
 
+**Optional manual review.** When a safe output is configured with
+`require-approval` (see [`docs/safe-outputs.md`](docs/safe-outputs.md)), an
+agentless `ManualReview` job (`pool: server`, `ManualValidation@1`) is inserted
+between Detection and SafeOutputs to pause for human approval. With a mix of
+gated and non-gated outputs, Stage 3 splits into an automatic `SafeOutputs` job
+(applies non-gated outputs immediately) and a `SafeOutputs_Reviewed` job (gated
+behind `ManualReview`, publishes `safe_outputs_reviewed`). The gate is
+fail-closed and only pauses when the agent actually proposed a reviewed output.
+
 ### Architecture
 
 ```
@@ -50,20 +59,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── compile/          # Pipeline compilation module
 │   │   ├── mod.rs        # Module entry point and Compiler trait
 │   │   ├── common.rs     # Shared helpers across targets
-│   │   ├── agentic_pipeline.rs # Canonical Setup → Agent → Detection → SafeOutputs → Teardown → Conclusion shape (Conclusion emitted when configured; shared by every target); BuiltPipelineContext, build_pipeline_context, build_canonical_jobs, per-job builders, fold_agent_conditions, agent_job_variables_hoist
-│   │   ├── ir/            # Typed Azure DevOps pipeline IR
-│   │   │   ├── mod.rs     # IR module entry point and shared types
-│   │   │   ├── ids.rs     # Stable IDs for jobs/steps/outputs in the IR
-│   │   │   ├── step.rs    # Step declarations and typed step variants
-│   │   │   ├── tasks.rs   # Typed factory helpers for built-in ADO TaskStep creation
-│   │   │   ├── job.rs     # Job declarations and typed job graph nodes
-│   │   │   ├── stage.rs   # Stage declarations and typed stage graph nodes
-│   │   │   ├── env.rs     # Typed environment and variable modeling
-│   │   │   ├── condition.rs # Condition AST and expression helpers
-│   │   │   ├── output.rs  # Output references and output dependency wiring
-│   │   │   ├── graph.rs   # Graph construction and validation passes
-│   │   │   ├── lower.rs   # IR lowering from front matter into typed nodes
-│   │   │   └── emit.rs    # YAML emission from typed IR
+│   │   ├── agentic_pipeline.rs # Canonical Setup → Agent → Detection → (ManualReview?) → SafeOutputs(+SafeOutputs_Reviewed?) → Teardown → Conclusion shape (Conclusion emitted when configured; shared by every target); BuiltPipelineContext, build_pipeline_context, build_canonical_jobs, per-job builders incl. build_manual_review_job + SafeOutputsVariant split, fold_agent_conditions, agent_job_variables_hoist
 │   │   ├── standalone.rs # Standalone pipeline compiler
 │   │   ├── standalone_ir.rs # Standalone target typed-IR builder
 │   │   ├── onees.rs      # 1ES Pipeline Template compiler
@@ -81,7 +77,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   │   ├── ado_aw_marker.rs # Always-on metadata marker extension (emits # ado-aw-metadata JSON)
 │   │   │   ├── github.rs # Always-on GitHub MCP extension
 │   │   │   ├── safe_outputs.rs # Always-on SafeOutputs MCP extension
-│   │   │   ├── ado_script.rs # Always-on ado-script extension (gate evaluator + runtime-import resolver + exec-context-pr precompute, per-job downloads)
+│   │   │   ├── ado_script.rs # Always-on ado-script extension (gate evaluator + runtime-import resolver + execution-context precomputes, per-job downloads)
 │   │   │   ├── exec_context/ # Always-on execution-context extension (issue #860)
 │   │   │   │   ├── mod.rs    # ExecContextExtension; CompilerExtension impl; contributor fan-out
 │   │   │   │   ├── contributor.rs # Internal ContextContributor trait + Contributor enum
@@ -106,6 +102,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   │       ├── mod.rs    # Pipeline / PipelineBody / PipelineShape root types
 │   │       ├── ids.rs    # Typed StageId / JobId / StepId newtypes
 │   │       ├── step.rs   # Step variants (Bash, Task, Checkout, Download, Publish, RawYaml)
+│   │       ├── tasks/    # Typed builder structs for built-in ADO tasks (one file per task; new()+typed setters+into_step(); command-enum dispatch for Docker/DotNet/NuGet/Npm/UniversalPackages; typestate builders for PowerShell; docker.rs canonical template)
 │   │       ├── job.rs    # Job, Pool, TemplateContext, JobVariable
 │   │       ├── stage.rs  # Stage + external-params wrap
 │   │       ├── env.rs    # Typed EnvValue (Literal, AdoMacro, PipelineVar, Secret, StepOutput, Coalesce, Concat)
@@ -115,7 +112,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   │       ├── lower.rs  # IR → serde_yaml::Value lowering
 │   │       ├── emit.rs   # Thin `lower() + serde_yaml::to_string()` wrapper
 │   │       └── summary.rs # Public, serializable PipelineSummary / GraphSummary for agent-facing tooling (see docs/ir.md Public JSON summary)
-│   ├── init.rs           # Repository initialization for AI-first authoring
+│   ├── init.rs           # Repository initialization for AI-first authoring (incl. `--agency` plugin scaffold, embeds agency/plugins/ado-aw/ via include_str!)
 │   ├── execute.rs        # Stage 3 safe output execution
 │   ├── fuzzy_schedule.rs # Fuzzy schedule parsing
 │   ├── logging.rs        # File-based logging infrastructure
@@ -166,7 +163,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   ├── whatif.rs     # `ado-aw whatif`: static downstream skip classification for failures
 │   │   ├── lint.rs       # `ado-aw lint`: structural workflow lint checks
 │   │   └── catalog.rs    # `ado-aw catalog`: list in-tree registries (tools, runtimes, models, etc.)
-│   ├── detect.rs         # Agentic pipeline detection — discovers compiled pipelines; used by all lifecycle commands
+│   ├── detect.rs         # Agentic workflow detection — discovers compiled pipelines; used by all lifecycle commands
 │   ├── update_check.rs   # Version update check — queries GitHub Releases and prints advisory when newer version is available
 │   ├── ndjson.rs         # NDJSON parsing utilities
 │   ├── sanitize.rs       # Input sanitization for safe outputs
@@ -229,13 +226,26 @@ Every compiled pipeline runs as three sequential jobs:
 │           ├── extension.rs # CompilerExtension impl (compile-time)
 │           └── execute.rs   # Stage 3 runtime (validate/copy)
 ├── ado-aw-derive/        # Proc-macro crate: #[derive(SanitizeConfig)], #[derive(SanitizeContent)]
+├── .claude-plugin/       # Root Claude marketplace catalog (makes the repo installable via `/plugin marketplace add`); release-please-versioned
+│   └── marketplace.json  # Lists the ado-aw plugin with source ./agency/plugins/ado-aw
+├── .github/plugin/       # Copilot marketplace catalog (mirrors .claude-plugin/marketplace.json for Copilot); release-please-versioned
+│   └── marketplace.json  # Lists the ado-aw plugin with source ./agency/plugins/ado-aw
+├── agency/               # Agency / Claude Code marketplace plugin (canonical source of truth)
+│   └── plugins/ado-aw/   # Version-locked plugin (release-please bumps version + pinned prompt URLs); listed in Agency marketplace via external `source`; scaffolded into consumer repos by `ado-aw init --agency`
+│       ├── .claude-plugin/ # plugin.json (manifest)
+│       ├── .mcp.json     # Wires read-only `ado-aw mcp-author` stdio server
+│       ├── README.md     # Plugin readme
+│       ├── agency.json   # Marketplace governance metadata + external source pointer
+│       ├── agents/ado-aw.md # Dispatcher subagent
+│       ├── skills/       # 6 SKILL.md playbooks (create/update/debug-workflow, compile-and-validate, manage-lifecycle, audit-build)
+│       └── scripts/      # doctor.{sh,ps1} prerequisite checks
 ├── examples/             # Example agent definitions
 ├── prompts/              # AI agent prompt files for workflow authoring tasks
-│   ├── create-ado-agentic-workflow.md # Step-by-step guide for creating a new agentic pipeline
-│   ├── update-ado-agentic-workflow.md # Guide for modifying an existing agentic pipeline
-│   └── debug-ado-agentic-workflow.md  # Guide for troubleshooting a failing agentic pipeline
+│   ├── create-ado-agentic-workflow.md # Step-by-step guide for creating a new agentic workflow
+│   ├── update-ado-agentic-workflow.md # Guide for modifying an existing agentic workflow
+│   └── debug-ado-agentic-workflow.md  # Guide for troubleshooting a failing agentic workflow
 ├── scripts/              # Supporting scripts shipped as release artifacts
-│   └── ado-script/       # TypeScript workspace for bundled runtime helpers (gate.js, import.js, exec-context-*.js, conclusion.js)
+│   └── ado-script/       # TypeScript workspace for bundled gate/import helpers plus execution-context, conclusion, and approval-summary bundles
 │       └── src/
 │           ├── gate/     # Gate evaluator source (bundled to gate.js)
 │           ├── import/   # Runtime prompt resolver source (bundled to import.js)
@@ -243,7 +253,13 @@ Every compiled pipeline runs as three sequential jobs:
 │           ├── exec-context-pr-synth/ # Synthetic-PR resolver source (bundled to exec-context-pr-synth.js)
 │           ├── exec-context-manual/ # Manual-run context source (bundled to exec-context-manual.js)
 │           ├── exec-context-pipeline/ # Pipeline-completion context source (bundled to exec-context-pipeline.js)
+│           ├── exec-context-ci-push/ # CI/push context source (bundled to exec-context-ci-push.js)
+│           ├── exec-context-workitem/ # Linked work-item context source (bundled to exec-context-workitem.js)
+│           ├── exec-context-schedule/ # Scheduled-run context source (bundled to exec-context-schedule.js)
+│           ├── exec-context-pr-checks/ # PR validation checks context source (bundled to exec-context-pr-checks.js)
+│           ├── exec-context-repo/ # Repository identity context source (bundled to exec-context-repo.js)
 │           ├── conclusion/ # Conclusion-job reporter source (bundled to conclusion.js)
+│           ├── approval-summary/ # Safe-outputs summary renderer (bundled to approval-summary.js; end-of-Agent-job summary tab)
 │           └── shared/   # Shared modules across bundles (auth, ado-client, env-facts, types.gen.ts)
 ├── tests/                # Integration tests and fixtures
 ├── docs/                 # Per-concept reference documentation (see index below)
@@ -256,7 +272,7 @@ Every compiled pipeline runs as three sequential jobs:
 - **Language**: Rust (2024 edition) - Note: Rust 2024 edition exists and is the edition used by this project
 - **CLI Framework**: clap v4 with derive macros
 - **Error Handling**: anyhow for ergonomic error propagation
-- **Bundled scripts**: TypeScript + ncc (`scripts/ado-script/`) — compiled gate evaluator, runtime import resolver, PR-context precompute, and synthetic-PR resolver; see [`docs/ado-script.md`](docs/ado-script.md).
+- **Bundled scripts**: TypeScript + ncc (`scripts/ado-script/`) — compiled gate evaluator, runtime import resolver, and execution-context precompute helpers; see [`docs/ado-script.md`](docs/ado-script.md).
 - **Async Runtime**: tokio with full features
 - **YAML Parsing**: serde_yaml
 - **MCP Server**: rmcp with server and transport-io features
@@ -270,11 +286,11 @@ index to jump to the right page.
 ### Prompt files for workflow authoring
 
 - [`prompts/create-ado-agentic-workflow.md`](prompts/create-ado-agentic-workflow.md) — step-by-step
-  guide for creating a new agentic pipeline from scratch (interactive and non-interactive modes).
+  guide for creating a new agentic workflow from scratch (interactive and non-interactive modes).
 - [`prompts/update-ado-agentic-workflow.md`](prompts/update-ado-agentic-workflow.md) — guide for
-  modifying an existing agentic pipeline (read-then-update workflow with validation).
+  modifying an existing agentic workflow (read-then-update workflow with validation).
 - [`prompts/debug-ado-agentic-workflow.md`](prompts/debug-ado-agentic-workflow.md) — guide for
-  troubleshooting a failing agentic pipeline and filing a diagnostic report.
+  troubleshooting a failing agentic workflow and filing a diagnostic report.
 
 ### Authoring agent files
 
@@ -299,11 +315,9 @@ index to jump to the right page.
 - [`docs/targets.md`](docs/targets.md) — target platforms: `standalone`,
   `1es`, `job`, and `stage`.
 - [`docs/execution-context.md`](docs/execution-context.md) — built-in
-  `aw-context/` precompute (issue #860): PR target-branch fetch +
-  merge-base resolution, `base.sha`/`head.sha` artefacts, prompt
-  fragment with pre-filled ADO MCP identifiers, auto-extension of the
-  agent's bash allow-list with read-only git commands; configured via
-  the `execution-context:` front-matter block.
+  `aw-context/` precompute contributors for PR, manual, pipeline,
+  CI/push, work-item, scheduled, PR-check, and repository context;
+  configured via the `execution-context:` front-matter block.
 - [`docs/safe-outputs.md`](docs/safe-outputs.md) — full reference for every
   safe-output tool agents can use to propose actions (PRs, work items, wiki
   pages, comments, etc.) plus their per-agent configuration.
@@ -328,7 +342,13 @@ index to jump to the right page.
 - [`docs/ir.md`](docs/ir.md) — typed Azure DevOps pipeline IR (`Pipeline`, jobs/stages/steps, output refs, graph pass, lowering, target builders, and the public JSON summary consumed by agent-facing tooling).
 - [`docs/cli.md`](docs/cli.md) — `ado-aw` CLI commands (`init`, `compile`,
   `check`, `mcp`, `mcp-http`, `execute`, `secrets`, `enable`, `disable`,
-  `remove`, `list`, `status`, `run`, `audit`; `configure` is a deprecated hidden alias).
+  `remove`, `list`, `status`, `run`, `audit`, `mcp-author`, `trace`,
+  `inspect`, `graph`, `whatif`, `lint`, `catalog`; `configure` is a
+  deprecated hidden alias and `export-gate-schema` is a hidden build-time tool).
+- [`docs/agency-plugin.md`](docs/agency-plugin.md) — the Agency / Claude Code
+  plugin (`agency/plugins/ado-aw/`): canonical layout, six skills, `mcp-author`
+  wiring, the self-contained root marketplace catalogs, `init --agency`
+  scaffolding, release-please version-locking, and shared-marketplace listing.
 - [`docs/audit.md`](docs/audit.md) — `ado-aw audit`: accepted build-id / URL
   forms, artifact layout, cache behavior, rejection tracing, and `AuditData`
   report shape.
@@ -353,10 +373,10 @@ index to jump to the right page.
   rewrite on breaking-change updates, contributor workflow for
   adding codemods.
 - [`docs/ado-script.md`](docs/ado-script.md) — `ado-script` workspace
-  (`scripts/ado-script/`): the bundled TypeScript runtime helpers (today:
-  `gate.js`, `import.js`, `exec-context-pr.js`, `exec-context-pr-synth.js`,
-  `exec-context-manual.js`, `exec-context-pipeline.js`, `conclusion.js`),
-  schemars-driven type codegen, and the A2 design decision.
+  (`scripts/ado-script/`): the bundled TypeScript runtime helpers
+  (`gate.js`, `import.js`, the execution-context `exec-context-*.js`
+  bundles, `conclusion.js`, and `approval-summary.js`), schemars-driven
+  type codegen, and the A2 design decision.
 - [`docs/local-development.md`](docs/local-development.md) — local development
   setup notes.
 
@@ -469,10 +489,10 @@ the bash body — shellcheck honours the directive and it's inert at runtime.
 cargo run -- compile ./path/to/agent.md
 ```
 
-### Recompile all agentic pipelines in the current directory
+### Recompile all agentic workflows in the current directory
 
 ```bash
-# Auto-discovers and recompiles all detected agentic pipelines
+# Auto-discovers and recompiles all detected agentic workflows
 cargo run -- compile
 ```
 
