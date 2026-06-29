@@ -6587,6 +6587,35 @@ safe-outputs:
     );
 }
 
+/// In the mixed split, the Conclusion job DOES depend on the reviewed
+/// SafeOutputs job and surfaces its result via AW_SAFEOUTPUTS_REVIEWED_RESULT,
+/// so a reviewer rejection (failing SafeOutputs_Reviewed) is reported.
+#[test]
+fn test_mixed_approval_conclusion_reports_reviewed_result() {
+    let source = r#"---
+name: "Mixed Conclusion Agent"
+description: "Mixed approval split conclusion wiring"
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+    require-approval: true
+  add-pr-comment: {}
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("approval-mixed-conclusion", source);
+    assert!(ok, "mixed approval pipeline should compile: {stderr}");
+    assert!(
+        compiled.contains("job: SafeOutputs_Reviewed"),
+        "reviewed SafeOutputs job expected:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("AW_SAFEOUTPUTS_REVIEWED_RESULT"),
+        "Conclusion must surface the reviewed job result:\n{compiled}"
+    );
+}
+
 /// In the mixed split, the Teardown job depends only on the automatic
 /// `SafeOutputs` job — never on the human-gated `SafeOutputs_Reviewed` job —
 /// so cleanup still fires on the common no-reviewed-proposal path (where the

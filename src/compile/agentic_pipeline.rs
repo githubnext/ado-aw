@@ -1486,6 +1486,8 @@ fn build_conclusion_job(
     .with_input("artifact", "safe_outputs")
     .with_input("path", "$(Pipeline.Workspace)/conclusion_inputs");
     download_artifact.condition = Some(Condition::Always);
+    // The safe_outputs artifact may not exist when SafeOutputs was skipped;
+    // ignore the download failure — conclusion.js handles a missing dir.
     download_artifact.continue_on_error = true;
     steps.push(Step::Task(download_artifact));
 
@@ -1575,23 +1577,27 @@ fi\n";
                     }
                 }
                 if let Some(v) = obj.get("title-prefix").and_then(|v| v.as_str()) {
-                    conclusion_step = conclusion_step
-                        .with_env(format!("{env_prefix}_TITLE_PREFIX"), EnvValue::Literal(v.to_string()));
+                    conclusion_step = conclusion_step.with_env(
+                        format!("{env_prefix}_TITLE_PREFIX"),
+                        EnvValue::Literal(crate::sanitize::sanitize(v)),
+                    );
                 }
                 if let Some(v) = obj.get("work-item-type").and_then(|v| v.as_str()) {
                     conclusion_step = conclusion_step.with_env(
                         format!("{env_prefix}_WORK_ITEM_TYPE"),
-                        EnvValue::Literal(v.to_string()),
+                        EnvValue::Literal(crate::sanitize::sanitize(v)),
                     );
                 }
                 if let Some(v) = obj.get("area-path").and_then(|v| v.as_str()) {
-                    conclusion_step = conclusion_step
-                        .with_env(format!("{env_prefix}_AREA_PATH"), EnvValue::Literal(v.to_string()));
+                    conclusion_step = conclusion_step.with_env(
+                        format!("{env_prefix}_AREA_PATH"),
+                        EnvValue::Literal(crate::sanitize::sanitize(v)),
+                    );
                 }
                 if let Some(v) = obj.get("iteration-path").and_then(|v| v.as_str()) {
                     conclusion_step = conclusion_step.with_env(
                         format!("{env_prefix}_ITERATION_PATH"),
-                        EnvValue::Literal(v.to_string()),
+                        EnvValue::Literal(crate::sanitize::sanitize(v)),
                     );
                 }
                 if let Some(tags) = obj.get("tags").and_then(|v| v.as_array()) {
@@ -1611,8 +1617,20 @@ fi\n";
     let agent_id = prefix.id("Agent")?;
     let detection_id = prefix.id("Detection")?;
     let safeoutputs_id = prefix.id("SafeOutputs")?;
+    let reviewed_id = prefix.id("SafeOutputs_Reviewed")?;
 
-    let conclusion_variables = vec![
+    // In the mixed manual-review split both a SafeOutputs (automatic) and a
+    // SafeOutputs_Reviewed (gated) job exist. Surface the reviewed job's result
+    // too so a reviewer rejection (which fails SafeOutputs_Reviewed) is reported
+    // instead of silently lost.
+    let (auto, reviewed) = front_matter.partition_safe_outputs_by_approval();
+    let has_reviewed_job = !reviewed.is_empty() && !auto.is_empty();
+
+    let mut conclusion_variables = vec![
+        // EnvValue::Literal deliberately carries a raw `$[...]` runtime expression:
+        // ADO evaluates `$[...]` only in `variables:`/`condition:`, so the value is
+        // hoisted here and consumed as a `$(name)` macro in the step env below
+        // (not EnvValue::AdoMacro — the lower.rs guard rejects pre-wrapped macros).
         JobVariable {
             name: "AW_AGENT_RESULT".to_string(),
             value: EnvValue::Literal(format!("$[dependencies.{}.result]", agent_id.as_str())),
@@ -1629,6 +1647,12 @@ fi\n";
             )),
         },
     ];
+    if has_reviewed_job {
+        conclusion_variables.push(JobVariable {
+            name: "AW_SAFEOUTPUTS_REVIEWED_RESULT".to_string(),
+            value: EnvValue::Literal(format!("$[dependencies.{}.result]", reviewed_id.as_str())),
+        });
+    }
 
     conclusion_step = conclusion_step
         .with_env("AW_AGENT_RESULT", EnvValue::PipelineVar("AW_AGENT_RESULT".to_string()))
@@ -1640,6 +1664,12 @@ fi\n";
             "AW_SAFEOUTPUTS_RESULT",
             EnvValue::PipelineVar("AW_SAFEOUTPUTS_RESULT".to_string()),
         );
+    if has_reviewed_job {
+        conclusion_step = conclusion_step.with_env(
+            "AW_SAFEOUTPUTS_REVIEWED_RESULT",
+            EnvValue::PipelineVar("AW_SAFEOUTPUTS_REVIEWED_RESULT".to_string()),
+        );
+    }
 
     steps.push(Step::Bash(conclusion_step));
 
@@ -1726,6 +1756,15 @@ fn wire_explicit_dependencies(jobs: &mut [Job], prefix: &JobPrefix<'_>) -> Resul
                 detection_id.clone(),
                 safeoutputs_id.clone(),
             ];
+            if has_reviewed_job {
+                // Mixed split: depend on the reviewed execution job too so a
+                // reviewer rejection (which fails SafeOutputs_Reviewed) is
+                // detected by Conclusion. Accepted trade-off: in the mixed case
+                // Conclusion waits behind the manual-review gate. The job's
+                // always() condition still fires when the reviewed job is
+                // skipped or fails.
+                deps.push(reviewed_id.clone());
+            }
             if has_teardown {
                 deps.push(teardown_id.clone());
             }

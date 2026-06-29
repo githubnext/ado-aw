@@ -130,6 +130,16 @@ function loadConfig(env: NodeJS.ProcessEnv): RuntimeConfig {
       { name: "Agent", result: readJobResult(env, "AW_AGENT_RESULT") },
       { name: "Detection", result: readJobResult(env, "AW_DETECTION_RESULT") },
       { name: "SafeOutputs", result: readJobResult(env, "AW_SAFEOUTPUTS_RESULT") },
+      // Only present in the mixed manual-review split; omit otherwise so a
+      // non-split run doesn't report a phantom "Unknown" reviewed job.
+      ...(readOptionalEnv(env, "AW_SAFEOUTPUTS_REVIEWED_RESULT") !== undefined
+        ? [
+            {
+              name: "SafeOutputs_Reviewed",
+              result: readJobResult(env, "AW_SAFEOUTPUTS_REVIEWED_RESULT"),
+            },
+          ]
+        : []),
     ],
     toolConfigs: {
       noop: parsePerToolConfigFlat(env, "AW_NOOP"),

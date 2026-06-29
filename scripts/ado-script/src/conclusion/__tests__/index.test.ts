@@ -18,6 +18,7 @@ const {
       "AW_AGENT_RESULT",
       "AW_DETECTION_RESULT",
       "AW_SAFEOUTPUTS_RESULT",
+      "AW_SAFEOUTPUTS_REVIEWED_RESULT",
       "AW_REPORT_FAILURE_AS_WORK_ITEM",
       "AW_SAFE_OUTPUT_DIR",
       "AW_PIPELINE_NAME",
@@ -89,6 +90,7 @@ const trackedEnvKeys = [
   "AW_DETECTION_RESULT",
   "AW_SAFEOUTPUTS_RESULT",
   "AW_REPORT_FAILURE_AS_WORK_ITEM",
+  "AW_SAFEOUTPUTS_REVIEWED_RESULT",
   "AW_SAFE_OUTPUT_DIR",
   "AW_PIPELINE_NAME",
   "AW_NOOP_REPORT_AS_WORK_ITEM",
@@ -244,6 +246,20 @@ describe("conclusion/main", () => {
       }),
       "[ado-aw] Pipeline failure: feature reporter",
       expect.stringContaining("Agent (Failed)"),
+    );
+  });
+
+  it("files a pipeline-failure work item when the reviewed job failed", async () => {
+    applyEnv({ AW_SAFEOUTPUTS_REVIEWED_RESULT: "Failed" });
+
+    await expect(main()).resolves.toBe(0);
+
+    expect(fileOrAppendWorkItem).toHaveBeenCalledTimes(1);
+    expect(fileOrAppendWorkItem).toHaveBeenCalledWith(
+      "MyProject",
+      expect.objectContaining({ enabled: true, workItemType: "Task" }),
+      "[ado-aw] Pipeline failure: feature reporter",
+      expect.stringContaining("SafeOutputs_Reviewed (Failed)"),
     );
   });
 
