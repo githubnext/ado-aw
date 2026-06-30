@@ -6738,15 +6738,17 @@ safe-outputs:
     );
 }
 
-// ── Front-matter task-step validation (advisory, warn-not-fail) ──────────────
+// ── Front-matter task-step validation (advisory; surfaced via lint) ──────────
 
 /// An authored task step with invalid inputs — here `CopyFiles@2` missing the
 /// required `TargetFolder` and carrying an unknown `Bogus` input — must:
-///   1. NOT fail the compile (validation is advisory: warn, never error), and
+///   1. NOT fail the compile (validation is advisory and lives in `lint`), and
 ///   2. still be passed through to the generated YAML verbatim, and
-///   3. surface an advisory warning on stderr that names the offending task.
+///   3. NOT print a warning during compile — the validation feedback is
+///      surfaced through `ado-aw lint` / the `lint_workflow` MCP tool instead,
+///      so compile (which also re-runs in-pipeline for integrity) stays quiet.
 #[test]
-fn invalid_task_input_warns_but_compiles_and_preserves_passthrough() {
+fn invalid_task_input_compiles_silently_and_preserves_passthrough() {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let unique_id = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -6781,7 +6783,7 @@ fn invalid_task_input_warns_but_compiles_and_preserves_passthrough() {
     let compiled = fs::read_to_string(&output_path).unwrap_or_default();
     let _ = fs::remove_dir_all(&temp_dir);
 
-    // (1) Warn, not fail: the process still exits 0.
+    // (1) Never fail: the process still exits 0.
     assert!(
         output.status.success(),
         "compile must succeed despite invalid task inputs; stderr:\n{stderr}"
@@ -6795,10 +6797,11 @@ fn invalid_task_input_warns_but_compiles_and_preserves_passthrough() {
         compiled.contains("Bogus"),
         "the (invalid) input must be passed through unchanged:\n{compiled}"
     );
-    // (3) An advisory warning naming the task is emitted on stderr.
+    // (3) Compile does NOT emit the task-validation warning — that feedback is
+    // surfaced through lint, not compile (see `ado-aw lint` integration test).
     assert!(
-        stderr.contains("Warning") && stderr.contains("CopyFiles@2"),
-        "expected an advisory warning naming CopyFiles@2 on stderr; got:\n{stderr}"
+        !stderr.contains("CopyFiles@2"),
+        "compile must not warn about task inputs (that belongs to lint); got:\n{stderr}"
     );
 }
 

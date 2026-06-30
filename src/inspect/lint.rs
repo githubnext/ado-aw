@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::compile::ir::summary::{JobSummary, PipelineSummary, StepSummary};
+use crate::compile::types::FrontMatter;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -71,11 +72,10 @@ pub fn lint(summary: &PipelineSummary) -> Vec<LintFinding> {
     findings
 }
 
-pub fn report(summary: &PipelineSummary) -> LintReport {
-    let findings = lint(summary);
-    // Rename the local to avoid shadowing the `PipelineSummary`
-    // parameter with a `LintSummary` of the same name in the same
-    // scope; the struct field is still called `summary` below.
+/// Build a [`LintReport`] from an already-collected set of findings (e.g. the
+/// structural rules over a [`PipelineSummary`] merged with the front-matter
+/// task-step findings from [`lint_front_matter_tasks`]).
+pub fn report_from_findings(findings: Vec<LintFinding>) -> LintReport {
     let tally = summarize_findings(&findings);
     LintReport {
         findings,
@@ -323,6 +323,38 @@ fn location_for(job: &JobSummary, step: Option<&str>) -> LintLocation {
     }
 }
 
+/// Lint rule: authored task steps (`setup` / `steps` / `post-steps` /
+/// `teardown`) whose inputs are invalid for the ADO task they invoke.
+///
+/// This is the agent-facing surface of the typed-builder task validation (see
+/// `crate::compile::ir::tasks::parse`). It runs over the **front matter** rather
+/// than the lowered [`PipelineSummary`] (authored task steps are opaque
+/// `Step::RawYaml` passthroughs once lowered), so it is merged into the report
+/// separately by `build_lint`. Findings are advisory `Warning`s — a recognized
+/// task with bad inputs is flagged with enough location (which list + the task
+/// id) for an agent to fix the step it synthesised; unmodeled tasks and
+/// non-task steps produce nothing.
+pub fn lint_front_matter_tasks(front_matter: &FrontMatter) -> Vec<LintFinding> {
+    crate::compile::ir::tasks::parse::validate_front_matter_task_steps(
+        &front_matter.setup,
+        &front_matter.steps,
+        &front_matter.post_steps,
+        &front_matter.teardown,
+    )
+    .into_iter()
+    .map(|f| LintFinding {
+        severity: LintSeverity::Warning,
+        code: "task-input-invalid".to_string(),
+        message: format!("{} (in `{}[{}]`)", f.message, f.list, f.index),
+        location: Some(LintLocation {
+            stage: None,
+            job: Some(f.list.to_string()),
+            step: Some(f.task),
+        }),
+    })
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,7 +376,7 @@ mod tests {
     #[test]
     fn no_findings_inspect_lint_emits_empty_list_and_zero_errors() {
         let summary = summary_with_steps(vec![plain_step("only")], vec![]);
-        let report = report(&summary);
+        let report = report_from_findings(lint(&summary));
         assert!(report.findings.is_empty());
         assert_eq!(report.summary.errors, 0);
     }
@@ -413,6 +445,31 @@ mod tests {
         let summary = PipelineSummary::from_pipeline(&pipeline).unwrap();
         let findings = lint(&summary);
         assert!(!findings.iter().any(|f| f.code == "unused-output"));
+    }
+
+    #[test]
+    fn invalid_front_matter_task_step_emits_task_input_invalid_finding() {
+        let (front_matter, _) = crate::compile::parse_markdown(
+            "---\nname: t\ndescription: d\nsteps:\n- task: CopyFiles@2\n  inputs:\n    Contents: \"**\"\n    Bogus: nope\n---\n",
+        )
+        .unwrap();
+        let findings = lint_front_matter_tasks(&front_matter);
+        assert_eq!(findings.len(), 1, "got: {findings:?}");
+        let f = &findings[0];
+        assert_eq!(f.code, "task-input-invalid");
+        assert_eq!(f.severity, LintSeverity::Warning);
+        let loc = f.location.as_ref().expect("location present");
+        assert_eq!(loc.job.as_deref(), Some("steps"));
+        assert_eq!(loc.step.as_deref(), Some("CopyFiles@2"));
+    }
+
+    #[test]
+    fn valid_front_matter_task_steps_emit_no_findings() {
+        let (front_matter, _) = crate::compile::parse_markdown(
+            "---\nname: t\ndescription: d\nsteps:\n- task: CopyFiles@2\n  inputs:\n    Contents: \"**\"\n    TargetFolder: out\n- bash: echo hi\n---\n",
+        )
+        .unwrap();
+        assert!(lint_front_matter_tasks(&front_matter).is_empty());
     }
 
     #[test]

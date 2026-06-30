@@ -228,23 +228,30 @@ Build the project and run all tests...
 Inline steps are authored as raw Azure DevOps YAML and are emitted into the
 generated pipeline **verbatim** (a passthrough). For steps that invoke a
 built-in ADO task the compiler also knows (e.g. `CopyFiles@2`, `Docker@2`,
-`DotNetCoreCLI@2`, and most other first-party tasks), it performs an
+`DotNetCoreCLI@2`, and most other first-party tasks), `ado-aw lint` performs an
 **advisory** validation of the `inputs:` mapping against the task's typed
 schema — checking for missing required inputs, unknown input keys, bad
 constrained values, and (for command/mode tasks) inputs supplied for the wrong
 command.
 
-This validation is **warning-only and never fails a compile**:
+This validation is surfaced through the **lint** channel, not compile:
 
-- A recognized task with invalid inputs prints a `Warning: …` to stderr; the
-  step is still emitted unchanged.
+- Run `ado-aw lint <agent.md>` (add `--json` for machine-readable findings), or
+  call the `lint_workflow` tool on the author-facing MCP server. Each invalid
+  step produces a `task-input-invalid` **warning** finding with the offending
+  task id and which step list it came from.
+- It is **warning-only**: findings never fail `lint` (exit code stays 0) and
+  never affect `compile` or the emitted YAML — the step is always passed through
+  unchanged.
 - A task the compiler does not model, or a non-task step (`bash:`/`script:`/
-  `checkout:`), is passed through with no validation.
+  `checkout:`), produces no finding.
 
-So adding validation coverage can only ever *surface* authoring mistakes — it
-never rejects a workflow that compiled before. See
-[`ir.md`](ir.md) (`tasks/parse.rs`) for the mechanism and how to extend
-coverage.
+Surfacing this through lint (rather than as a compile-time stderr warning) keeps
+the feedback in the structured channel that authoring agents already consume to
+check the steps they synthesise, and keeps the in-pipeline integrity recompile
+quiet. So adding validation coverage can only ever *surface* authoring mistakes
+— it never rejects a workflow that compiled before. See [`ir.md`](ir.md)
+(`tasks/parse.rs`) for the mechanism and how to extend coverage.
 
 ## Debug-only `ado-aw-debug:`
 

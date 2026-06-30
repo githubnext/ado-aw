@@ -133,6 +133,63 @@ pub fn validate_task_step(step: &Value) -> Option<Result<(), String>> {
     Some(validate(inputs).map_err(|e| format!("task `{task}`: {e}")))
 }
 
+/// A structured finding for one invalid authored task step, suitable for
+/// surfacing through the agent-facing lint channel (`ado-aw lint` /
+/// `lint_workflow` MCP tool). Carries enough location to let an agent that
+/// synthesised the step attribute and fix the finding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskStepFinding {
+    /// Which front-matter step list the step came from: `"setup"`, `"steps"`,
+    /// `"post-steps"`, or `"teardown"`.
+    pub list: &'static str,
+    /// Zero-based index of the step within that list.
+    pub index: usize,
+    /// The ADO task id (e.g. `"CopyFiles@2"`).
+    pub task: String,
+    /// Human-readable description of why the inputs are invalid.
+    pub message: String,
+}
+
+/// Validate every authored task step across the four front-matter step lists,
+/// returning a structured finding per recognized-but-invalid step. Valid steps,
+/// unmodeled tasks, and non-task steps produce no finding. Never errors.
+///
+/// The lists are passed individually (rather than the `FrontMatter` type) to
+/// keep this module free of the front-matter grammar; callers pass
+/// `front_matter.setup`, `.steps`, `.post_steps`, `.teardown`.
+pub fn validate_front_matter_task_steps(
+    setup: &[Value],
+    steps: &[Value],
+    post_steps: &[Value],
+    teardown: &[Value],
+) -> Vec<TaskStepFinding> {
+    let mut findings = Vec::new();
+    for (list, values) in [
+        ("setup", setup),
+        ("steps", steps),
+        ("post-steps", post_steps),
+        ("teardown", teardown),
+    ] {
+        for (index, step) in values.iter().enumerate() {
+            if let Some(Err(message)) = validate_task_step(step) {
+                let task = step
+                    .as_mapping()
+                    .and_then(|m| m.get("task"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                findings.push(TaskStepFinding {
+                    list,
+                    index,
+                    task,
+                    message,
+                });
+            }
+        }
+    }
+    findings
+}
+
 /// Validate an `inputs:` mapping by attempting to deserialize it into the typed
 /// builder `T`. `Ok(())` iff it deserializes cleanly (required inputs present,
 /// no unknown keys, constrained values valid).
@@ -426,6 +483,121 @@ mod tests {
             "#,
         );
         assert!(validate_task_step(&step).expect("recognized").is_err());
+    }
+
+    #[test]
+    fn roundtrip_nuget_command_dispatch() {
+        assert_roundtrips(
+            nuget_command::NuGetCommand::restore(nuget_command::NuGetRestore::new()).into_step(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_npm_command_dispatch() {
+        assert_roundtrips(npm::Npm::install(npm::NpmInstall::new()).into_step());
+    }
+
+    #[test]
+    fn roundtrip_github_release_action_dispatch() {
+        assert_roundtrips(
+            github_release::GitHubRelease::create(
+                "gh-conn",
+                "owner/repo",
+                github_release::GitHubReleaseCreate::new(),
+            )
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_azure_file_copy_destination_dispatch() {
+        assert_roundtrips(
+            azure_file_copy::AzureFileCopy::new(
+                "$(Build.ArtifactStagingDirectory)",
+                "arm-conn",
+                "mystorage",
+                azure_file_copy::AzureFileCopyDestination::AzureBlob(
+                    azure_file_copy::AzureFileCopyToBlob::new("my-container"),
+                ),
+            )
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_publish_build_artifacts_location_dispatch() {
+        assert_roundtrips(
+            publish_build_artifacts::PublishBuildArtifacts::container(
+                "$(Build.ArtifactStagingDirectory)",
+                "drop",
+            )
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_java_tool_installer_source_dispatch() {
+        assert_roundtrips(
+            java_tool_installer::JavaToolInstaller::pre_installed(
+                "11",
+                java_tool_installer::JdkArchitecture::X64,
+            )
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_azure_powershell_inline_dispatch() {
+        assert_roundtrips(
+            azure_powershell::AzurePowerShell::inline("arm-conn", "Write-Host hi").into_step(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_python_script_file_dispatch() {
+        assert_roundtrips(python_script::PythonScript::file("scripts/run.py").into_step());
+    }
+
+    // Flat builders whose enum input is a *required* constructor arg — these
+    // exercise the enum's `as_ado_str()` token through the validation path,
+    // guarding against a wrong `#[serde(rename = "...")]` on a variant.
+
+    #[test]
+    fn roundtrip_azure_web_app_required_enum() {
+        assert_roundtrips(
+            azure_web_app::AzureWebApp::new(
+                "arm-conn",
+                azure_web_app::AppType::WebApp,
+                "my-app",
+                "$(Build.ArtifactStagingDirectory)/app.zip",
+            )
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_download_package_required_enum() {
+        assert_roundtrips(
+            download_package::DownloadPackage::new(
+                download_package::PackageType::NuGet,
+                "my-feed",
+                "my-def",
+                "1.0.0",
+                "$(System.ArtifactsDirectory)",
+            )
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_publish_test_results_required_enum() {
+        assert_roundtrips(
+            publish_test_results::PublishTestResults::new(
+                publish_test_results::TestResultsFormat::JUnit,
+                "**/TEST-*.xml",
+            )
+            .into_step(),
+        );
     }
 
     #[test]

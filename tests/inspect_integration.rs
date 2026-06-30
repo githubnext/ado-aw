@@ -137,3 +137,45 @@ fn graph_rejects_unknown_format() {
         "expected clap value-enum rejection for --format, got:\n{stderr}"
     );
 }
+
+/// `ado-aw lint` surfaces invalid authored task inputs as a `task-input-invalid`
+/// **warning** finding (not an error), so the agent self-optimization loop can
+/// read structured feedback on the steps it synthesised. Warnings do not fail
+/// the command (exit 0).
+#[test]
+fn lint_reports_invalid_task_input_as_warning_finding() {
+    let workspace = tempfile::tempdir().expect("create temp dir");
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("invalid-task-input-agent.md");
+    let dst = workspace.path().join("invalid-task-input-agent.md");
+    std::fs::copy(&src, &dst).expect("copy fixture into temp dir");
+
+    let out = Command::new(binary_path())
+        .arg("lint")
+        .arg(&dst)
+        .arg("--json")
+        .output()
+        .expect("run ado-aw lint --json");
+
+    // Warning-level findings must not fail the command.
+    assert!(
+        out.status.success(),
+        "lint must exit 0 for warning-only findings. stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("\"code\": \"task-input-invalid\""),
+        "expected a task-input-invalid finding, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("CopyFiles@2"),
+        "the finding should name the offending task, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("\"severity\": \"warning\""),
+        "task-input-invalid must be a warning, got:\n{stdout}"
+    );
+}
