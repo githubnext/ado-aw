@@ -106,10 +106,11 @@ Codemods live in `src/compile/codemods/`:
 
 ```
 src/compile/codemods/
-├── mod.rs                  # Framework + CODEMODS registry
-├── helpers.rs              # take_key, insert_no_overwrite, rename_key, ConflictPolicy
-├── 0001_repos_unified.rs   # Legacy repositories: + checkout: → repos: codemod
-└── 0002_pool_object_form.rs # Legacy scalar pool → explicit object form codemod
+├── mod.rs                             # Framework + CODEMODS registry
+├── helpers.rs                         # take_key, insert_no_overwrite, rename_key, ConflictPolicy
+├── 0001_repos_unified.rs              # Legacy repositories: + checkout: → repos: codemod
+├── 0002_pool_object_form.rs           # Legacy scalar pool → explicit object form codemod
+└── 0003_flatten_work_item_config.rs   # safe-outputs.{noop,missing-tool,missing-data}.work-item → flat form codemod
 ```
 
 (New codemods are appended as `<NNNN>_<id>.rs` files.)
