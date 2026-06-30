@@ -109,7 +109,9 @@ src/compile/codemods/
 ├── mod.rs                  # Framework + CODEMODS registry
 ├── helpers.rs              # take_key, insert_no_overwrite, rename_key, ConflictPolicy
 ├── 0001_repos_unified.rs   # Legacy repositories: + checkout: → repos: codemod
-└── 0002_pool_object_form.rs # Legacy scalar pool → explicit object form codemod
+├── 0002_pool_object_form.rs # Legacy scalar pool → explicit object form codemod
+├── 0003_flatten_work_item_config.rs # Legacy work-item config flatten codemod
+└── 0004_legacy_path_markers.rs # {{ workspace }} / {{ working_directory }} / {{ trigger_repo_directory }} → explicit ADO path exprs
 ```
 
 (New codemods are appended as `<NNNN>_<id>.rs` files.)
@@ -356,6 +358,39 @@ fn describe(v: &Value) -> &'static str {
    The `#[path = ...]` attribute is required because Rust module
    identifiers cannot start with digits, but the file name does.
    The registry-uniqueness and filename-prefix tests keep passing.
+
+## Legacy directory markers (`0004_legacy_path_markers`)
+
+Before the native-IR migration, the compiler folded a fixed
+replacement list across the **entire** generated YAML — including
+user-authored `steps:` / `post-steps:` / `setup:` / `teardown:`. That
+fold substituted the directory markers:
+
+| Marker | Resolved to |
+|--------|-------------|
+| `{{ workspace }}`, `{{ working_directory }}` | the resolved working directory (`$(Build.SourcesDirectory)`, `$(Build.SourcesDirectory)/$(Build.Repository.Name)`, or `$(Build.SourcesDirectory)/<alias>`) |
+| `{{ trigger_repo_directory }}` | the trigger ("self") repo dir |
+
+After the IR migration these markers flow through verbatim and are no
+longer substituted. Rather than restore runtime substitution of a
+fixed-path anchor — an antipattern under multi-checkout, where
+`$(Build.SourcesDirectory)` is the **shared root** of every checked-out
+repo — the `legacy_path_markers` codemod migrates existing sources by
+rewriting each marker (interior whitespace ignored, so both
+`{{ workspace }}` and `{{workspace}}` are handled) to the explicit ADO
+path expression it resolved to, derived from the source's own
+`workspace:` / `repos:`. The rewrite walks every string scalar in the
+front-matter mapping, so markers in any field (not just custom steps)
+are migrated.
+
+The codemod cannot touch the **markdown body** (codemods are
+mapping-only). A companion warning-only pass —
+`src/compile/path_layout_check.rs` — surfaces deprecated markers left
+in the body, plus checkout-aware path mistakes such as a
+`$(Build.SourcesDirectory)/<seg>` reference whose `<seg>` is a
+declared-but-not-checked-out repo, or the multi-checkout self subfolder
+form used under a single checkout. These are advisory and never fail
+the compile.
 
 ## Tests
 

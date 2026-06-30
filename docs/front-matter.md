@@ -252,6 +252,31 @@ default):
 Set `workspace:` explicitly to `root`, `repo` (alias `self`), or a specific
 checked-out repository alias to override this behavior.
 
+### Deprecated directory markers
+
+Earlier releases substituted the directory markers `{{ workspace }}`,
+`{{ working_directory }}`, and `{{ trigger_repo_directory }}` inside custom
+`steps:` / `post-steps:` / `setup:` / `teardown:` blocks. These are
+**deprecated** — they encouraged hard-coding a fixed path anchor, which is
+incorrect under multi-checkout where `$(Build.SourcesDirectory)` is the shared
+root of every checked-out repository.
+
+Reference the explicit ADO path instead:
+
+- `$(Build.SourcesDirectory)` — the checkout root (the trigger repo root when
+  only `self` is checked out).
+- `$(Build.SourcesDirectory)/$(Build.Repository.Name)` — the trigger repo when
+  one or more additional repositories are checked out.
+- `$(Build.SourcesDirectory)/<alias>` — a specific checked-out repository.
+
+The `legacy_path_markers` codemod automatically rewrites any remaining markers
+in front matter to the path they resolved to on the next `compile` (see
+[`docs/codemods.md`](codemods.md)). Markers left in the **agent body** cannot be
+migrated automatically and are reported as a compile warning. The compiler also
+emits warning-only advisories when a `$(Build.SourcesDirectory)/<seg>` reference
+or a `{{#runtime-import …}}` target points at a path that will not exist under
+the resolved checkout layout.
+
 ## Repositories (`repos:`)
 
 The `repos:` field provides a compact way to declare additional repository

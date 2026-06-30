@@ -775,24 +775,61 @@ pub fn compute_effective_workspace(
     checkout: &[String],
     agent_name: &str,
 ) -> Result<String> {
+    let (encoded, warn_no_checkouts) =
+        resolve_effective_workspace(explicit_workspace, checkout, agent_name)?;
+    if warn_no_checkouts {
+        let ws = explicit_workspace.as_deref().unwrap_or("repo");
+        eprintln!(
+            "Warning: Agent '{}' has workspace: {} but no additional repositories in checkout. \
+            When only 'self' is checked out, $(Build.SourcesDirectory) already contains the repository content. \
+            The workspace setting has no effect in this case.",
+            agent_name, ws
+        );
+    }
+    Ok(encoded)
+}
+
+/// Resolve the `workspace:` setting straight to the working-directory ADO
+/// path expression (e.g. `$(Build.SourcesDirectory)/<alias>`), with **no**
+/// side effects.
+///
+/// This is the side-effect-free counterpart to
+/// [`compute_effective_workspace`] + [`generate_working_directory`]. It is
+/// used by the `legacy_path_markers` codemod (codemods must stay pure — no
+/// stderr, no I/O) to migrate `{{ workspace }}` / `{{ working_directory }}`
+/// markers to the explicit path they resolved to. The "workspace: repo with
+/// no additional checkouts" advisory warning is intentionally dropped here;
+/// the normal typed compile path still surfaces it via
+/// [`compute_effective_workspace`].
+pub fn resolve_working_directory_expr(
+    explicit_workspace: &Option<String>,
+    checkout: &[String],
+    agent_name: &str,
+) -> Result<String> {
+    let (encoded, _warn) = resolve_effective_workspace(explicit_workspace, checkout, agent_name)?;
+    Ok(generate_working_directory(&encoded))
+}
+
+/// Pure resolution core shared by [`compute_effective_workspace`] (which adds
+/// a stderr advisory warning) and [`resolve_working_directory_expr`] (which
+/// must remain side-effect-free for codemod use).
+///
+/// Returns the encoded effective-workspace string (consumed by
+/// [`generate_working_directory`]) and a flag indicating whether the
+/// "workspace: repo/self with no additional checkouts" advisory applies.
+fn resolve_effective_workspace(
+    explicit_workspace: &Option<String>,
+    checkout: &[String],
+    agent_name: &str,
+) -> Result<(String, bool)> {
     let has_additional_checkouts = !checkout.is_empty();
 
     match explicit_workspace {
         Some(ws) => {
             let ws = ws.as_str();
             match ws {
-                "root" => Ok("root".to_string()),
-                "repo" | "self" => {
-                    if !has_additional_checkouts {
-                        eprintln!(
-                            "Warning: Agent '{}' has workspace: {} but no additional repositories in checkout. \
-                            When only 'self' is checked out, $(Build.SourcesDirectory) already contains the repository content. \
-                            The workspace setting has no effect in this case.",
-                            agent_name, ws
-                        );
-                    }
-                    Ok("repo".to_string())
-                }
+                "root" => Ok(("root".to_string(), false)),
+                "repo" | "self" => Ok(("repo".to_string(), !has_additional_checkouts)),
                 alias => {
                     // Defense in depth: even though aliases are constrained
                     // by `validate_checkout_list` to match a `repository:`
@@ -828,13 +865,37 @@ pub fn compute_effective_workspace(
                             checkout
                         );
                     }
-                    Ok(format!("{}{}", WORKSPACE_ALIAS_PREFIX, alias))
+                    Ok((format!("{}{}", WORKSPACE_ALIAS_PREFIX, alias), false))
                 }
             }
         }
-        None if has_additional_checkouts => Ok("repo".to_string()),
-        None => Ok("root".to_string()),
+        None if has_additional_checkouts => Ok(("repo".to_string(), false)),
+        None => Ok(("root".to_string(), false)),
     }
+}
+
+/// Whether `input` contains a `{{ name }}` template marker, ignoring
+/// interior whitespace (so both `{{ workspace }}` and `{{workspace}}`
+/// match). Non-matching `{{ ... }}` spans (e.g. `{{#runtime-import …}}`
+/// or `${{ parameters.x }}`) are ignored.
+///
+/// Shared by the `legacy_path_markers` codemod (marker detection) and
+/// the path-layout validation pass (agent-body deprecation warnings).
+pub(crate) fn contains_template_marker(input: &str, name: &str) -> bool {
+    let mut i = 0;
+    while let Some(open) = input[i..].find("{{") {
+        let start = i + open + 2;
+        match input[start..].find("}}") {
+            Some(close) => {
+                if input[start..start + close].trim() == name {
+                    return true;
+                }
+                i = start + close + 2;
+            }
+            None => break,
+        }
+    }
+    false
 }
 
 /// Generate the directory where the trigger ("self") repository is checked out.
