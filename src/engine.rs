@@ -3,9 +3,9 @@ use anyhow::Result;
 use crate::compile::extensions::Declarations;
 use crate::compile::types::{CompileTarget, EngineConfig, FrontMatter, McpConfig};
 use crate::validate::{
-    contains_ado_expression, contains_newline, contains_pipeline_command, is_valid_arg,
-    is_valid_command_path, is_valid_env_var_name, is_valid_hostname, is_valid_identifier,
-    is_valid_version,
+    contains_ado_expression, contains_ado_template_expression, contains_newline,
+    contains_pipeline_command, is_valid_arg, is_valid_command_path, is_valid_env_var_name,
+    is_valid_hostname, is_valid_identifier, is_valid_version,
 };
 
 /// Flags that the compiler controls — user args must not attempt to override these.
@@ -36,6 +36,42 @@ pub const BLOCKED_ENV_KEYS: &[&str] = &[
     "LD_PRELOAD",
     "LD_LIBRARY_PATH",
 ];
+
+/// Copilot Bring Your Own Model / Key (BYOM/BYOK) provider env-var keys that are
+/// permitted to carry ADO macro (`$(...)`) / runtime (`$[...]`) expressions in
+/// `engine.env`. Every other key remains literal-only.
+///
+/// This mirrors gh-aw's `CopilotEngine.GetSupportedEnvVarKeys()` allowlist
+/// (`COPILOT_PROVIDER_*`), which gates dynamic provider credentials to a known
+/// set of keys rather than relaxing expression handling globally. Setting
+/// `COPILOT_PROVIDER_BASE_URL` activates BYOM mode so requests route to an
+/// external Azure Copilot Foundry / OpenAI-compatible provider.
+///
+/// ADO **template** expressions (`${{ }}`) are still rejected for these keys —
+/// they are evaluated at compile time and have no secret-scoped analog — and
+/// pipeline-command injection (`##vso[`) / newline checks still apply.
+pub const COPILOT_PROVIDER_EXPR_ENV_KEYS: &[&str] = &[
+    "COPILOT_PROVIDER_BASE_URL",
+    "COPILOT_PROVIDER_API_KEY",
+    "COPILOT_PROVIDER_BEARER_TOKEN",
+    "COPILOT_PROVIDER_WIRE_API",
+];
+
+/// Returns true when `key` is an allowlisted BYOM/BYOK provider env-var key that
+/// may carry ADO macro/runtime expressions in `engine.env`.
+fn is_provider_expr_env_key(key: &str) -> bool {
+    COPILOT_PROVIDER_EXPR_ENV_KEYS
+        .iter()
+        .any(|allowed| key.eq_ignore_ascii_case(allowed))
+}
+
+/// Extract the hostname from a literal `COPILOT_PROVIDER_BASE_URL` value so it can
+/// be added to the AWF network allowlist. Returns `None` when the value is not a
+/// parseable absolute URL with a host.
+fn provider_base_url_host(base_url: &str) -> Option<String> {
+    let parsed = url::Url::parse(base_url.trim()).ok()?;
+    parsed.host_str().map(str::to_string)
+}
 
 /// Default model used by the Copilot engine when no model is specified in front matter.
 pub const DEFAULT_COPILOT_MODEL: &str = "claude-opus-4.7";
@@ -124,6 +160,21 @@ impl Engine {
                 let mut hosts = Vec::new();
                 if let Some(api_target) = engine_config.api_target() {
                     hosts.push(api_target.to_string());
+                }
+                // BYOM/BYOK: when COPILOT_PROVIDER_BASE_URL is a literal URL,
+                // add its hostname to the AWF allowlist so the agent can reach
+                // the external provider. When it is an ADO expression the
+                // concrete host is unknown at compile time, so the author must
+                // add it to `network.allowed` manually (mirrors gh-aw).
+                if let Some(env_map) = engine_config.env()
+                    && let Some(base_url) = env_map
+                        .iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case("COPILOT_PROVIDER_BASE_URL"))
+                        .map(|(_, v)| v)
+                    && !contains_ado_expression(base_url)
+                    && let Some(host) = provider_base_url_host(base_url)
+                {
+                    hosts.push(host);
                 }
                 hosts
             }
@@ -491,11 +542,26 @@ fn copilot_env(engine_config: &EngineConfig) -> Result<String> {
                     key
                 );
             }
-            if contains_ado_expression(value) {
+            // Allowlisted BYOM/BYOK provider keys may carry ADO macro/runtime
+            // expressions (e.g. `$(Setup.FOUNDRY_TOKEN)`) so credentials can be
+            // sourced from Setup-job outputs or pipeline variables. They still
+            // may not carry compile-time template expressions (`${{ }}`).
+            // Every other key remains literal-only.
+            if is_provider_expr_env_key(key) {
+                if contains_ado_template_expression(value) {
+                    anyhow::bail!(
+                        "engine.env value for '{}' contains an ADO template expression ('${{{{}}}}'). \
+                         Provider keys may use macro/runtime expressions ('$(...)' or '$[...]') only.",
+                        key
+                    );
+                }
+            } else if contains_ado_expression(value) {
                 anyhow::bail!(
                     "engine.env value for '{}' contains ADO expression syntax ('$(' or '${{{{}}}}')). \
-                     Use literal values only — ADO macro/expression expansion is not allowed.",
-                    key
+                     Use literal values only — ADO macro/expression expansion is not allowed \
+                     (allowed for BYOM provider keys: {}).",
+                    key,
+                    COPILOT_PROVIDER_EXPR_ENV_KEYS.join(", ")
                 );
             }
             if contains_newline(value) {
@@ -1103,6 +1169,101 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("ADO expression syntax")
+        );
+    }
+
+    #[test]
+    fn engine_env_allows_macro_on_provider_key() {
+        // BYOM/BYOK: provider keys may carry ADO macro expressions sourced from
+        // Setup-job outputs.
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    COPILOT_PROVIDER_BEARER_TOKEN: \"$(Setup.FOUNDRY_TOKEN)\"\n---\n",
+        ).unwrap();
+        let env = Engine::Copilot.env(&fm.engine).unwrap();
+        assert!(
+            env.contains(r#"COPILOT_PROVIDER_BEARER_TOKEN: "$(Setup.FOUNDRY_TOKEN)""#),
+            "provider key macro expression should be emitted verbatim: {env}"
+        );
+    }
+
+    #[test]
+    fn engine_env_allows_runtime_expr_on_provider_key() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    COPILOT_PROVIDER_API_KEY: \"$[ variables.Key ]\"\n---\n",
+        ).unwrap();
+        let env = Engine::Copilot.env(&fm.engine).unwrap();
+        assert!(env.contains(r#"COPILOT_PROVIDER_API_KEY: "$[ variables.Key ]""#));
+    }
+
+    #[test]
+    fn engine_env_provider_key_rejects_template_expression() {
+        // Compile-time template expressions remain forbidden even on provider keys.
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    COPILOT_PROVIDER_API_KEY: \"${{ variables.Key }}\"\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.env(&fm.engine);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("ADO template expression")
+        );
+    }
+
+    #[test]
+    fn engine_env_provider_key_rejects_vso_injection() {
+        // Pipeline-command injection is still blocked on provider keys.
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    COPILOT_PROVIDER_BASE_URL: \"##vso[task.setvariable]evil\"\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.env(&fm.engine);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("ADO pipeline command injection")
+        );
+    }
+
+    #[test]
+    fn engine_env_non_provider_key_still_rejects_macro() {
+        // A COPILOT_PROVIDER_* lookalike that is not on the allowlist is rejected.
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    COPILOT_PROVIDER_TYPE: \"$(Setup.Type)\"\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.env(&fm.engine);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("ADO expression syntax")
+        );
+    }
+
+    #[test]
+    fn engine_env_literal_base_url_adds_required_host() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    COPILOT_PROVIDER_BASE_URL: https://my-foundry.cognitiveservices.azure.com/openai/v1\n---\n",
+        ).unwrap();
+        let hosts = Engine::Copilot.required_hosts(&fm.engine);
+        assert!(
+            hosts.contains(&"my-foundry.cognitiveservices.azure.com".to_string()),
+            "literal base URL host should be added to allowlist: {hosts:?}"
+        );
+    }
+
+    #[test]
+    fn engine_env_expression_base_url_skips_required_host() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    COPILOT_PROVIDER_BASE_URL: \"$(Setup.BASE_URL)\"\n---\n",
+        ).unwrap();
+        let hosts = Engine::Copilot.required_hosts(&fm.engine);
+        assert!(
+            hosts.is_empty(),
+            "expression-valued base URL must not contribute a host: {hosts:?}"
         );
     }
 

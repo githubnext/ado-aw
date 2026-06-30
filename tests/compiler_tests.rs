@@ -4807,6 +4807,30 @@ fn test_executor_step_has_env_block_with_write_permissions() {
     );
 }
 
+/// Copilot BYOM/BYOK (#1261): provider env keys in `engine.env` may carry ADO
+/// macro expressions (e.g. `$(Setup.FOUNDRY_TOKEN)`), they are merged verbatim
+/// into the agent step's env block, and a literal `COPILOT_PROVIDER_BASE_URL`
+/// host is added to the AWF allow-domains list. Compilation must succeed and
+/// pass integrity checks (no `--skip-integrity`).
+#[test]
+fn test_byom_provider_env_compiles_and_merges() {
+    let compiled = compile_fixture("byom-foundry-agent.md");
+    assert_valid_yaml(&compiled, "byom-foundry-agent.md");
+
+    assert!(
+        compiled.contains("COPILOT_PROVIDER_BEARER_TOKEN: $(Setup.FOUNDRY_TOKEN)"),
+        "BYOM provider macro env value must be merged verbatim into the agent step: {compiled}"
+    );
+    assert!(
+        compiled.contains("COPILOT_PROVIDER_TYPE: azure"),
+        "Literal provider config value must still be emitted: {compiled}"
+    );
+    assert!(
+        compiled.contains("my-foundry.cognitiveservices.azure.com"),
+        "Literal COPILOT_PROVIDER_BASE_URL host must be added to the AWF allow-domains list: {compiled}"
+    );
+}
+
 /// Defense-in-depth: parse a compiled pipeline as YAML, locate the **Agent**
 /// job, and assert no step in that job maps `SYSTEM_ACCESSTOKEN` at all.
 ///
