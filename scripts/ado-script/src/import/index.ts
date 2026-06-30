@@ -62,7 +62,7 @@ function fail(messages: string[]): never {
 }
 
 // Parse the CLI:
-//   node import.js <target> [--base <path>]
+//   node import.js <target> [--base <path>] [--var name=value ...]
 // The optional --base flag sets the root that relative marker paths
 // resolve against. When omitted, falls back to `dirname(target)`.
 // In pipeline use the compiler always passes
@@ -70,12 +70,25 @@ function fail(messages: string[]): never {
 // trigger-repo-relative path (NOT absolute) — see
 // `AdoScriptExtension::resolver_step` in
 // src/compile/extensions/ado_script.rs.
-function parseArgs(argv: string[]): { target: string; base: string | null } {
+//
+// The repeatable `--var name=value` flag carries a small, fixed set of
+// ADO path-anchor variables (e.g. `Build.SourcesDirectory`,
+// `Build.Repository.Name`). ADO expands the `$(...)` macros into
+// concrete values in the resolver step's bash args before node runs, so
+// the values arrive here already resolved. The allowlist is owned by the
+// compiler (which emits the flags); import.js is a dumb substitutor and
+// never reads these from the environment.
+function parseArgs(argv: string[]): {
+  target: string;
+  base: string | null;
+  vars: Map<string, string>;
+} {
   if (argv.length === 0) {
     fail(["missing target file argument"]);
   }
   const target = argv[0]!;
   let base: string | null = null;
+  const vars = new Map<string, string>();
   let i = 1;
   while (i < argv.length) {
     const arg = argv[i]!;
@@ -86,15 +99,27 @@ function parseArgs(argv: string[]): { target: string; base: string | null } {
       }
       base = value;
       i += 2;
+    } else if (arg === "--var") {
+      const value = argv[i + 1];
+      if (value === undefined) {
+        fail(["--var requires a value of the form name=value"]);
+      }
+      const eq = value.indexOf("=");
+      // `eq <= 0` rejects both a missing `=` and an empty name.
+      if (eq <= 0) {
+        fail([`--var expects name=value, got: ${sanitizeForVsoMessage(value)}`]);
+      }
+      vars.set(value.slice(0, eq), value.slice(eq + 1));
+      i += 2;
     } else {
       fail([`unknown argument: ${sanitizeForVsoMessage(arg)}`]);
     }
   }
-  return { target, base };
+  return { target, base, vars };
 }
 
 function main(): void {
-  const { target, base: baseArg } = parseArgs(process.argv.slice(2));
+  const { target, base: baseArg, vars } = parseArgs(process.argv.slice(2));
   if (!existsSync(target)) {
     fail([`target file not found: ${sanitizeForVsoMessage(target)}`]);
   }
@@ -158,7 +183,20 @@ function main(): void {
   if (errors.length > 0) {
     fail(errors);
   }
-  writeFileSync(target, expanded, "utf8");
+
+  // Substitute the compiler-provided ADO path-anchor variables (e.g.
+  // `$(Build.SourcesDirectory)`). Runs on the fully expanded prompt, so it
+  // covers both the author body and any inlined snippets, giving the same
+  // result whether imports are inlined at compile time (where ADO expands
+  // the macro in the heredoc) or resolved here at runtime. Literal
+  // split/join avoids regex metacharacter pitfalls in either the name or
+  // the value; unknown `$(...)` macros are left untouched.
+  let substituted = expanded;
+  for (const [name, value] of vars) {
+    substituted = substituted.split(`$(${name})`).join(value);
+  }
+
+  writeFileSync(target, substituted, "utf8");
 }
 
 main();

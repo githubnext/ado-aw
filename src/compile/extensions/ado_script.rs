@@ -433,11 +433,31 @@ pub(crate) fn install_and_download_steps_typed(
     vec![Step::Task(install), Step::Bash(download)]
 }
 
+/// Path-anchor ADO variables exposed to the agent prompt via the runtime
+/// import resolver. The compiler owns this allowlist; `import.js`
+/// substitutes only the `$(name)` tokens it is handed — it never reads
+/// these from the environment (see
+/// `scripts/ado-script/src/import/index.ts`). Each entry is both the
+/// substitution key and the ADO macro name, so the resolver emits
+/// `--var "<name>=$(<name>)"` and ADO expands the macro at runtime before
+/// node runs. Keep this list minimal and non-secret — anything added here
+/// is interpolated verbatim into the (potentially untrusted) agent prompt.
+const PROMPT_ADO_VARS: &[&str] = &["Build.SourcesDirectory", "Build.Repository.Name"];
+
 /// The resolver step that expands runtime import markers in the agent prompt.
 fn resolver_step_typed() -> Step {
+    // `--var "<name>=$(<name>)"` for each allowlisted path-anchor var. ADO
+    // substitutes the `$(...)` macro into the bash arg at runtime, so
+    // import.js receives the concrete value and can replace `$(<name>)`
+    // occurrences in the prompt — giving the same result whether imports
+    // are inlined at compile time or resolved here at runtime.
+    let var_flags: String = PROMPT_ADO_VARS
+        .iter()
+        .map(|name| format!(" --var \"{name}=$({name})\""))
+        .collect();
     let script = format!(
         "set -eo pipefail\n\
-         node '{IMPORT_EVAL_PATH}' /tmp/awf-tools/agent-prompt.md --base \"$(Build.SourcesDirectory)\"\n"
+         node '{IMPORT_EVAL_PATH}' /tmp/awf-tools/agent-prompt.md --base \"$(Build.SourcesDirectory)\"{var_flags}\n"
     );
     Step::Bash(
         BashStep::new("Resolve runtime imports (agent prompt)", script)
@@ -1068,6 +1088,23 @@ mod tests {
         assert!(
             !resolver.script.contains("ADO_AW_IMPORT_BASE"),
             "resolver step must not export ADO_AW_IMPORT_BASE — base is passed via --base, not env"
+        );
+        // Each path-anchor var is passed as `--var "<name>=$(<name>)"` so
+        // ADO expands the macro at runtime and import.js substitutes the
+        // concrete value into the prompt (consistent with inlined mode).
+        assert!(
+            resolver
+                .script
+                .contains("--var \"Build.SourcesDirectory=$(Build.SourcesDirectory)\""),
+            "resolver step must pass Build.SourcesDirectory as a --var, got: {}",
+            resolver.script
+        );
+        assert!(
+            resolver
+                .script
+                .contains("--var \"Build.Repository.Name=$(Build.Repository.Name)\""),
+            "resolver step must pass Build.Repository.Name as a --var, got: {}",
+            resolver.script
         );
     }
 
