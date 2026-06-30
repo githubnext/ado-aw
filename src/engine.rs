@@ -65,6 +65,35 @@ fn is_provider_expr_env_key(key: &str) -> bool {
         .any(|allowed| key.eq_ignore_ascii_case(allowed))
 }
 
+/// BYOM/BYOK provider **credential** env keys. Their presence in `engine.env`
+/// activates BYOM mode and, in turn, the AWF api-proxy sidecar that holds the
+/// real credential and injects it only at the proxy layer — keeping it out of
+/// the agent container. These are also passed as AWF `--exclude-env` flags so
+/// the raw value never reaches the agent via `--env-all` passthrough
+/// (defense-in-depth; AWF also overrides them with placeholders).
+///
+/// Note this is the credential subset of [`COPILOT_PROVIDER_EXPR_ENV_KEYS`] —
+/// it excludes the non-sensitive `COPILOT_PROVIDER_WIRE_API` config key.
+pub const COPILOT_BYOM_CREDENTIAL_ENV_KEYS: &[&str] = &[
+    "COPILOT_PROVIDER_BASE_URL",
+    "COPILOT_PROVIDER_API_KEY",
+    "COPILOT_PROVIDER_BEARER_TOKEN",
+];
+
+/// Returns true when `engine.env` activates Copilot BYOM/BYOK mode — i.e. any
+/// provider credential / base-URL key is present. Used by the pipeline compiler
+/// to enable the AWF api-proxy sidecar (`--enable-api-proxy`) for credential
+/// isolation and to pre-pull the api-proxy container image.
+pub fn copilot_byom_active(engine_config: &EngineConfig) -> bool {
+    engine_config.env().is_some_and(|env| {
+        env.keys().any(|key| {
+            COPILOT_BYOM_CREDENTIAL_ENV_KEYS
+                .iter()
+                .any(|cred| key.eq_ignore_ascii_case(cred))
+        })
+    })
+}
+
 /// Extract the hostname from a literal `COPILOT_PROVIDER_BASE_URL` value so it can
 /// be added to the AWF network allowlist. Returns `None` when the value is not a
 /// parseable absolute URL with a host.
@@ -804,7 +833,7 @@ fn copilot_invocation(
 
 #[cfg(test)]
 mod tests {
-    use super::{Engine, get_engine, normalize_version_tag};
+    use super::{Engine, copilot_byom_active, get_engine, normalize_version_tag};
     use crate::compile::{
         extensions::{CompileContext, CompilerExtension, Declarations, collect_extensions},
         parse_markdown,
@@ -1193,6 +1222,42 @@ mod tests {
         ).unwrap();
         let env = Engine::Copilot.env(&fm.engine).unwrap();
         assert!(env.contains(r#"COPILOT_PROVIDER_API_KEY: "$[ variables.Key ]""#));
+    }
+
+    #[test]
+    fn copilot_byom_active_detects_credential_keys() {
+        for key in [
+            "COPILOT_PROVIDER_BASE_URL",
+            "COPILOT_PROVIDER_API_KEY",
+            "COPILOT_PROVIDER_BEARER_TOKEN",
+        ] {
+            let md = format!(
+                "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    {key}: value\n---\n"
+            );
+            let (fm, _) = parse_markdown(&md).unwrap();
+            assert!(
+                copilot_byom_active(&fm.engine),
+                "BYOM should be active when {key} is present"
+            );
+        }
+    }
+
+    #[test]
+    fn copilot_byom_inactive_without_credential_keys() {
+        // No env at all.
+        let (fm, _) =
+            parse_markdown("---\nname: test\ndescription: test\nengine:\n  id: copilot\n---\n")
+                .unwrap();
+        assert!(!copilot_byom_active(&fm.engine));
+
+        // Only the non-credential WIRE_API config key and an unrelated var.
+        let (fm2, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    COPILOT_PROVIDER_WIRE_API: responses\n    MY_VAR: hi\n---\n",
+        ).unwrap();
+        assert!(
+            !copilot_byom_active(&fm2.engine),
+            "WIRE_API alone must not activate BYOM (it is non-credential config)"
+        );
     }
 
     #[test]

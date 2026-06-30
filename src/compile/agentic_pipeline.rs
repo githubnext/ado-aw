@@ -184,6 +184,7 @@ pub(crate) fn build_pipeline_context(
     let engine_log_dir = ctx.engine.log_dir().to_string();
 
     let mut engine_env = ctx.engine.env(&front_matter.engine)?;
+    let byom_active = crate::engine::copilot_byom_active(&front_matter.engine);
     // AWF path env (when extensions declare path prepends)
     let awf_paths = common::collect_awf_path_prepends(&extension_declarations);
     let has_awf_paths = !awf_paths.is_empty();
@@ -312,6 +313,7 @@ pub(crate) fn build_pipeline_context(
         integrity_check_yaml,
         agent_content_value,
         debug_pipeline,
+        byom_active,
     };
 
     // ─── Build jobs ───────────────────────────────────────────────
@@ -485,6 +487,10 @@ pub(crate) struct StandaloneCtx {
     /// `{{#runtime-import ...}}` marker).
     pub(crate) agent_content_value: String,
     pub(crate) debug_pipeline: bool,
+    /// True when `engine.env` activates Copilot BYOM/BYOK mode. Enables the AWF
+    /// api-proxy sidecar (`--enable-api-proxy`) on the agent step for credential
+    /// isolation and pre-pulls the api-proxy container image.
+    pub(crate) byom_active: bool,
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -834,8 +840,12 @@ fn build_agent_job(
     // 11. Download AWF
     steps.extend(download_awf_step(front_matter.supply_chain()));
 
-    // 12. Pre-pull AWF + MCPG container images
-    steps.extend(prepull_images_step(true, front_matter.supply_chain()));
+    // 12. Pre-pull AWF + MCPG container images (+ api-proxy when BYOM is active)
+    steps.extend(prepull_images_step(
+        true,
+        cfg.byom_active,
+        front_matter.supply_chain(),
+    ));
 
     // 13. Extension prepare steps (typed) + user steps (RawYaml)
     steps.extend(ext_agent_prepare.iter().cloned());
@@ -872,6 +882,7 @@ fn build_agent_job(
         &cfg.working_directory,
         &cfg.engine_run,
         &cfg.engine_env,
+        cfg.byom_active,
     )?));
 
     // 19. Collect safe outputs from AWF container
@@ -1028,8 +1039,13 @@ fn build_detection_job(
     steps.push(Step::Task(DockerInstaller::new("26.1.4").into_step()));
     // Download AWF
     steps.extend(download_awf_step(front_matter.supply_chain()));
-    // Pre-pull AWF (no MCPG image for detection)
-    steps.extend(prepull_images_step(false, front_matter.supply_chain()));
+    // Pre-pull AWF (no MCPG image for detection; no api-proxy — detection runs
+    // the threat-analysis agent with the default GitHub token, not BYOM).
+    steps.extend(prepull_images_step(
+        false,
+        false,
+        front_matter.supply_chain(),
+    ));
     // Prepare safe outputs for analysis
     steps.push(Step::Bash(prepare_safe_outputs_for_analysis(
         &cfg.working_directory,
@@ -2127,7 +2143,11 @@ fn download_awf_step(supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
     ))]
 }
 
-fn prepull_images_step(include_mcpg: bool, supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
+fn prepull_images_step(
+    include_mcpg: bool,
+    include_api_proxy: bool,
+    supply_chain: Option<&SupplyChainConfig>,
+) -> Vec<Step> {
     let registry = supply_chain.and_then(|sc| sc.registry.as_ref());
     let registry_base = registry.map(|r| r.name.as_str());
 
@@ -2150,6 +2170,20 @@ fn prepull_images_step(include_mcpg: bool, supply_chain: Option<&SupplyChainConf
          docker tag {squid} {squid_latest}\n\
          docker tag {agent} {agent_latest}\n"
     );
+    // Copilot BYOM/BYOK credential isolation: AWF starts the api-proxy sidecar
+    // when `--enable-api-proxy` is passed (see run_agent_step). Pre-pull and
+    // `:latest`-tag the image the same way as squid/agent so `--skip-pull` finds
+    // it locally.
+    if include_api_proxy {
+        let api_proxy =
+            image_ref("ghcr.io/github/gh-aw-firewall/api-proxy", AWF_VERSION, registry_base);
+        let api_proxy_latest =
+            image_ref("ghcr.io/github/gh-aw-firewall/api-proxy", "latest", None);
+        script.push_str(&format!(
+            "docker pull {api_proxy}\n\
+             docker tag {api_proxy} {api_proxy_latest}\n"
+        ));
+    }
     let display = if include_mcpg {
         let mcpg = image_ref(MCPG_IMAGE, &format!("v{MCPG_VERSION}"), registry_base);
         script.push_str(&format!("docker pull {mcpg}\n"));
@@ -2379,6 +2413,7 @@ fn run_agent_step(
     working_directory: &str,
     engine_run: &str,
     engine_env: &str,
+    byom_active: bool,
 ) -> Result<BashStep> {
     // The awf_mounts string is a `\`-joined chain of `--mount "..."` lines.
     // Render each at 2-space indent inside the bash body (the surrounding
@@ -2392,6 +2427,21 @@ fn run_agent_step(
             .map(|l| format!("  {l}"))
             .collect::<Vec<_>>()
             .join("\n")
+    };
+    // Copilot BYOM/BYOK: enable the AWF api-proxy sidecar so the real provider
+    // credential is held by the proxy and never reaches the agent container.
+    // The credential env keys are also excluded from `--env-all` passthrough
+    // (defense-in-depth; AWF also overrides them with placeholders). Each line
+    // is a 2-space-indented `--flag \` continuation ending in `\\\n` so it
+    // slots in directly before the mounts block.
+    let api_proxy_block: String = if byom_active {
+        let mut block = String::from("  --enable-api-proxy \\\n");
+        for key in crate::engine::COPILOT_BYOM_CREDENTIAL_ENV_KEYS {
+            block.push_str(&format!("  --exclude-env {key} \\\n"));
+        }
+        block
+    } else {
+        String::new()
     };
     let script = format!(
         "set -o pipefail\n\
@@ -2417,6 +2467,7 @@ fn run_agent_step(
            --skip-pull \\\n  \
            --env-all \\\n  \
            --enable-host-access \\\n\
+{api_proxy_block}\
 {awf_mounts_block}\n  \
            --container-workdir \"{working_directory}\" \\\n  \
            --log-level info \\\n  \

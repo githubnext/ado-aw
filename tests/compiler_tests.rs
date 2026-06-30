@@ -4829,6 +4829,46 @@ fn test_byom_provider_env_compiles_and_merges() {
         compiled.contains("my-foundry.cognitiveservices.azure.com"),
         "Literal COPILOT_PROVIDER_BASE_URL host must be added to the AWF allow-domains list: {compiled}"
     );
+
+    // Credential isolation: the AWF api-proxy sidecar is enabled and the
+    // provider credential env keys are excluded from --env-all passthrough.
+    assert!(
+        compiled.contains("--enable-api-proxy"),
+        "BYOM must enable the AWF api-proxy sidecar for credential isolation: {compiled}"
+    );
+    for key in [
+        "--exclude-env COPILOT_PROVIDER_BASE_URL",
+        "--exclude-env COPILOT_PROVIDER_API_KEY",
+        "--exclude-env COPILOT_PROVIDER_BEARER_TOKEN",
+    ] {
+        assert!(
+            compiled.contains(key),
+            "BYOM must exclude provider credential from agent passthrough ({key}): {compiled}"
+        );
+    }
+    // The api-proxy container image must be pre-pulled (and :latest-tagged) so
+    // AWF's --skip-pull finds it locally.
+    assert!(
+        compiled.contains("docker pull ghcr.io/github/gh-aw-firewall/api-proxy:"),
+        "BYOM must pre-pull the api-proxy container image: {compiled}"
+    );
+}
+
+/// A non-BYOM agent must NOT enable the api-proxy sidecar or pre-pull its image —
+/// the isolation plumbing is strictly opt-in via the presence of a
+/// `COPILOT_PROVIDER_*` credential key in `engine.env`.
+#[test]
+fn test_non_byom_agent_has_no_api_proxy() {
+    let compiled = compile_fixture("minimal-agent.md");
+    assert_valid_yaml(&compiled, "minimal-agent.md");
+    assert!(
+        !compiled.contains("--enable-api-proxy"),
+        "Non-BYOM agent must not enable the api-proxy sidecar: {compiled}"
+    );
+    assert!(
+        !compiled.contains("api-proxy"),
+        "Non-BYOM agent must not reference the api-proxy image: {compiled}"
+    );
 }
 
 /// Defense-in-depth: parse a compiled pipeline as YAML, locate the **Agent**

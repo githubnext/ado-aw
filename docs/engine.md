@@ -77,6 +77,26 @@ a pipeline variable rather than hard-coded. They may **not** carry ADO
 command injection (`##vso[`). All non-provider `engine.env` values stay
 literal-only.
 
+#### Credential isolation (api-proxy sidecar)
+
+When a BYOM credential key (`COPILOT_PROVIDER_BASE_URL`,
+`COPILOT_PROVIDER_API_KEY`, or `COPILOT_PROVIDER_BEARER_TOKEN`) is present in
+`engine.env`, the compiler automatically enables the AWF **api-proxy sidecar**
+(`--enable-api-proxy`) on the agent step and pre-pulls its container image. With
+the sidecar active:
+
+- The **real** credential is read by the AWF host process and held inside the
+  proxy container; the agent container receives only a placeholder value and a
+  proxy URL. The proxy strips the client's auth header and injects the real
+  credential on the outbound request, so the secret never reaches the Copilot
+  CLI process or the agent sandbox.
+- The credential keys are additionally passed as AWF `--exclude-env` flags so the
+  raw value is never copied into the agent via `--env-all` (defense-in-depth; AWF
+  also overrides them with placeholders).
+
+This isolation applies to the **Agent** stage. The **Detection** (threat-analysis)
+stage runs with the default GitHub token and is not affected.
+
 #### Network allowlist
 
 When `COPILOT_PROVIDER_BASE_URL` is a **literal** URL, the compiler automatically
