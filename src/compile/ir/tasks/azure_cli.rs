@@ -82,6 +82,83 @@ impl PowerShellErrorActionPreference {
     }
 }
 
+/// Validate an authored `AzureCLI@2` `inputs:` mapping (advisory front-matter
+/// validation, see [`super::parse`]).
+///
+/// The [`AzureCli`] builder models `scriptLocation` + its script content as the
+/// typed [`ScriptLocation`] enum for *construction*, but ADO authors the **flat**
+/// shape — a bare `scriptLocation: inlineScript|scriptPath` discriminator plus a
+/// *sibling* `inlineScript:`/`scriptPath:` key. That flat shape does not match an
+/// externally-tagged enum field, so validation uses a dedicated flat schema here
+/// rather than `Deserialize` on the builder. `AzureCLI@2` is therefore registered
+/// with this `validate_inputs`, not `validate_by_deserialize::<AzureCli>`.
+pub(crate) fn validate_inputs(inputs: serde_yaml::Value) -> Result<(), String> {
+    /// Flat `scriptLocation` discriminator value (`inlineScript` / `scriptPath`).
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    enum ScriptLocationKind {
+        InlineScript,
+        ScriptPath,
+    }
+
+    /// Flat validation schema mirroring the inputs `AzureCli::into_step` emits.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)] // fields exist only to drive deserialization-as-validation
+    struct AzureCliInputs {
+        #[serde(rename = "azureSubscription")]
+        azure_subscription: String,
+        #[serde(rename = "scriptType")]
+        script_type: ScriptType,
+        #[serde(rename = "scriptLocation", default)]
+        script_location: Option<ScriptLocationKind>,
+        #[serde(rename = "inlineScript", default)]
+        inline_script: Option<String>,
+        #[serde(rename = "scriptPath", default)]
+        script_path: Option<String>,
+        #[serde(rename = "arguments", default)]
+        arguments: Option<String>,
+        #[serde(rename = "powerShellErrorActionPreference", default)]
+        ps_error_action_preference: Option<PowerShellErrorActionPreference>,
+        #[serde(
+            rename = "addSpnToEnvironment",
+            default,
+            deserialize_with = "de_opt_bool_flex"
+        )]
+        add_spn_to_environment: Option<bool>,
+        #[serde(
+            rename = "useGlobalConfig",
+            default,
+            deserialize_with = "de_opt_bool_flex"
+        )]
+        use_global_config: Option<bool>,
+        #[serde(rename = "workingDirectory", default)]
+        working_directory: Option<String>,
+        #[serde(
+            rename = "failOnStandardError",
+            default,
+            deserialize_with = "de_opt_bool_flex"
+        )]
+        fail_on_standard_error: Option<bool>,
+        #[serde(
+            rename = "powerShellIgnoreLASTEXITCODE",
+            default,
+            deserialize_with = "de_opt_bool_flex"
+        )]
+        ps_ignore_last_exit_code: Option<bool>,
+        #[serde(
+            rename = "visibleAzLogin",
+            default,
+            deserialize_with = "de_opt_bool_flex"
+        )]
+        visible_az_login: Option<bool>,
+    }
+
+    serde_yaml::from_value::<AzureCliInputs>(inputs)
+        .map(drop)
+        .map_err(|e| e.to_string())
+}
+
 /// Builder for a [`TaskStep`] invoking `AzureCLI@2`.
 ///
 /// Runs a bash, PowerShell, or batch script inside an authenticated Azure CLI

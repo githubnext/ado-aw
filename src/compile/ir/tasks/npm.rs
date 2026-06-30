@@ -23,7 +23,9 @@ pub(crate) fn validate_inputs(inputs: Value) -> Result<(), String> {
     let command = map
         .remove("command")
         .and_then(|v| v.as_str().map(str::to_string))
-        .ok_or_else(|| "Npm@1 requires a `command` input".to_string())?;
+        // ADO defaults `command` to `install` when omitted — treat a missing
+        // command as the default variant rather than an error.
+        .unwrap_or_else(|| "install".to_string());
     let rest = Value::Mapping(map);
 
     let result = match command.as_str() {

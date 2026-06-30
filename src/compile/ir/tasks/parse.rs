@@ -51,7 +51,6 @@ use super::{
 const VALIDATORS: &[(&str, fn(Value) -> Result<(), String>)] = &[
     // ── Flat single-struct builders (validity == clean deserialization) ──
     ("ArchiveFiles@2", validate_by_deserialize::<archive_files::ArchiveFiles>),
-    ("AzureCLI@2", validate_by_deserialize::<azure_cli::AzureCli>),
     ("AzureContainerApps@1", validate_by_deserialize::<azure_container_apps::AzureContainerApps>),
     ("AzureKeyVault@2", validate_by_deserialize::<azure_key_vault::AzureKeyVault>),
     ("AzureWebApp@1", validate_by_deserialize::<azure_web_app::AzureWebApp>),
@@ -96,6 +95,7 @@ const VALIDATORS: &[(&str, fn(Value) -> Result<(), String>)] = &[
     ("VSBuild@1", validate_by_deserialize::<vs_build::VsBuild>),
     ("npmAuthenticate@0", validate_by_deserialize::<npm_authenticate::NpmAuthenticate>),
     // ── Command / mode-dispatch builders (custom discriminator dispatch) ──
+    ("AzureCLI@2", azure_cli::validate_inputs),
     ("AzureFileCopy@6", azure_file_copy::validate_inputs),
     ("AzurePowerShell@5", azure_powershell::validate_inputs),
     ("Docker@2", docker::validate_inputs),
@@ -257,7 +257,9 @@ mod tests {
     }
 
     #[test]
-    fn docker_missing_command_warns() {
+    fn docker_missing_command_defaults_to_build_and_push() {
+        // ADO defaults `command` to `buildAndPush`; `repository` is valid there,
+        // so an omitted command is NOT flagged (matches what ADO would run).
         let step = yaml(
             r#"
             task: Docker@2
@@ -265,8 +267,7 @@ mod tests {
               repository: myapp
             "#,
         );
-        let err = validate_task_step(&step).expect("recognized").unwrap_err();
-        assert!(err.contains("command"), "got: {err}");
+        assert!(validate_task_step(&step).expect("recognized").is_ok());
     }
 
     #[test]
@@ -386,6 +387,45 @@ mod tests {
             )
             .into_step(),
         );
+    }
+
+    #[test]
+    fn roundtrip_azure_cli_flat_script_location() {
+        // Guards the flat `scriptLocation: inlineScript` + sibling `inlineScript:`
+        // authoring shape (the builder models it as a typed enum for construction,
+        // but validation must accept the flat form ADO authors / into_step emits).
+        assert_roundtrips(
+            azure_cli::AzureCli::new(
+                "conn",
+                azure_cli::ScriptType::Bash,
+                azure_cli::ScriptLocation::Inline("echo hi\n".into()),
+            )
+            .into_step(),
+        );
+        assert_roundtrips(
+            azure_cli::AzureCli::new(
+                "conn",
+                azure_cli::ScriptType::PsCore,
+                azure_cli::ScriptLocation::ScriptPath("scripts/deploy.ps1".into()),
+            )
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn azure_cli_unknown_input_warns() {
+        let step = yaml(
+            r#"
+            task: AzureCLI@2
+            inputs:
+              azureSubscription: conn
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: echo hi
+              Bogus: nope
+            "#,
+        );
+        assert!(validate_task_step(&step).expect("recognized").is_err());
     }
 
     #[test]
