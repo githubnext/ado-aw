@@ -22,7 +22,7 @@ Those wrappers are the only place per-target shape (top-level `PipelineShape`, t
 
 - `ids.rs` — typed `StageId`, `JobId`, and `StepId` newtypes. Constructors validate the ADO identifier grammar (`^[A-Za-z_][A-Za-z0-9_]*$`) so invalid names fail at compile time.
 - `step.rs` — `Step` and concrete step structs: `BashStep`, `TaskStep`, `CheckoutStep`, `DownloadStep`, and `PublishStep`.
-- `tasks/` — typed builder structs for 44 built-in ADO task steps spanning toolchain setup, file operations, build/test, artifact publishing, scripting, containers, package auth, Azure integrations, and pipeline control. Each builder exposes `new(<required>)`, typed optional setters, and `into_step()`. Prefer these over hand-crafted `TaskStep::new()` calls — see [Typed task helpers](#typed-task-helpers) below.
+- `tasks/` — typed builder structs for 46 built-in ADO task steps spanning toolchain setup, file operations, build/test, artifact publishing, scripting, containers, package auth, Azure integrations, and pipeline control. Each builder exposes `new(<required>)`, typed optional setters, and `into_step()`. Prefer these over hand-crafted `TaskStep::new()` calls — see [Typed task helpers](#typed-task-helpers) below.
 - `job.rs` — `Job`, `Pool`, job variables, 1ES `templateContext` support, and target-job external `dependsOn` / `condition` wrapping.
 - `stage.rs` — `Stage` plus target-stage external `dependsOn` / `condition` wrapping.
 - `env.rs` — typed environment values (`EnvValue`) including ADO macros, pipeline variables, secrets, `OutputRef`s, `Coalesce`, and macro-form `Concat`.
@@ -117,7 +117,7 @@ let synth = Step::Bash(
 
 ## Typed task helpers
 
-`src/compile/ir/tasks/` contains typed **builder structs** for 44 ADO built-in tasks. Each follows the same pattern:
+`src/compile/ir/tasks/` contains typed **builder structs** for 46 ADO built-in tasks. Each follows the same pattern:
 
 ```rust
 Builder::new(required_params)   // required inputs as typed positional args
@@ -127,7 +127,7 @@ Builder::new(required_params)   // required inputs as typed positional args
 
 This eliminates hand-crafted `TaskStep::new(…)` + raw string inputs at every call site, makes the required/optional boundary explicit, and prevents invalid input combinations for command-dispatch tasks at compile time.
 
-**Command-dispatch tasks** (`Docker@2`, `DotNetCoreCLI@2`, `NuGetCommand@2`, `Npm@1`, `PowerShell@2`, `AzurePowerShell@5`, `AzureCLI@2`, `PythonScript@0`, `VSTest@2`, `GitHubRelease@1`, `PublishBuildArtifacts@1`, `UniversalPackages@1`) take a typed command/mode enum rather than a plain string — applying an input to the wrong command variant is unrepresentable.
+**Command-dispatch tasks** (`Docker@2`, `DotNetCoreCLI@2`, `NuGetCommand@2`, `Npm@1`, `PowerShell@2`, `AzurePowerShell@5`, `AzureCLI@2`, `PythonScript@0`, `VSTest@2`, `GitHubRelease@1`, `PublishBuildArtifacts@1`, `UniversalPackages@1`, `AzureFileCopy@6`) take a typed command/mode enum rather than a plain string — applying an input to the wrong command variant is unrepresentable.
 
 ### Available builders
 
@@ -190,6 +190,8 @@ This eliminates hand-crafted `TaskStep::new(…)` + raw string inputs at every c
 
 | Builder | ADO task | Constructor |
 |---------|----------|-------------|
+| `AzureContainerApps::new(azure_subscription)` | `AzureContainerApps@1` | Azure RM service connection; two patterns: build from source (`.app_source_path()` + `.acr_name()`) or deploy an existing image (`.image_to_deploy()`); `ContainerAppIngress::External \| Internal` enum; `.yaml_config_path()` for file-driven config |
+| `AzureFileCopy::new(source_path, azure_subscription, storage, AzureFileCopyDestination)` | `AzureFileCopy@6` | ARM service connection; storage account name; `AzureFileCopyDestination::AzureBlob(AzureFileCopyToBlob)` or `::AzureVMs(AzureFileCopyToVMs)` — blob-only and VM-only inputs are unrepresentable across variants |
 | `AzureKeyVault::new(connected_service_name, key_vault_name)` | `AzureKeyVault@2` | Azure RM service connection; vault name |
 | `AzureWebApp::new(azure_subscription, app_type, app_name, package)` | `AzureWebApp@1` | Azure RM service connection; `AppType` enum; app name; package path |
 | `Docker::new(DockerCommand)` | `Docker@2` | `DockerCommand::BuildAndPush \| Build \| Push \| Login \| Logout` |

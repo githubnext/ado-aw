@@ -93,13 +93,38 @@ The compiler runs it as a post-prepare-prompt step when
 [`runtime-imports.md`](runtime-imports.md) for the author-facing marker
 syntax.
 
-### Env-var contract
+### CLI contract
 
-`import.js` takes no environment variables. Relative-path markers
-resolve against `dirname(argv[2])`; in pipeline use this is irrelevant
-because the compiler always embeds an absolute marker path and
-`import.js` is single-pass (nested markers inside the inlined body are
-not re-expanded).
+`import.js` takes **no environment variables** — all inputs are explicit
+CLI flags, so the resolver cannot be influenced by ambient pipeline state:
+
+```
+node import.js <prompt-file> --base "$(Build.SourcesDirectory)" \
+  --var "Build.SourcesDirectory=$(Build.SourcesDirectory)" \
+  --var "Build.Repository.Name=$(Build.Repository.Name)"
+```
+
+- `--base <path>` — root that relative marker paths resolve against. The
+  compiler always passes `$(Build.SourcesDirectory)` (ADO expands the macro
+  before node runs), and the compiler-emitted marker for the agent body is a
+  **trigger-repo-relative** path (e.g. `agents/foo.md`, or
+  `$(Build.Repository.Name)/agents/foo.md` under multi-checkout) — not
+  absolute. `import.js` rejects absolute and `..` paths.
+- `--var name=value` (repeatable) — a small, **compiler-owned allowlist** of
+  ADO path-anchor variables (currently `Build.SourcesDirectory` and
+  `Build.Repository.Name`, defined by `PROMPT_ADO_VARS` in
+  `src/compile/extensions/ado_script.rs`). ADO expands the `$(...)` macro into
+  the bash arg at runtime, so `import.js` receives the concrete value and
+  literally substitutes every `$(name)` occurrence in the **final** prompt
+  (author body + inlined snippets). Unknown `$(...)` macros are left untouched.
+  `import.js` never reads these from the environment; the allowlist is the set
+  of `--var` flags the compiler emits, so an untrusted agent body cannot
+  introduce new variables. This makes path anchors behave the same whether
+  imports are inlined at compile time (where ADO expands the macro in the
+  heredoc) or resolved here at runtime.
+
+Resolution is single-pass: nested markers inside an inlined body are not
+re-expanded.
 
 The bundle lives at `import.js` and ships in the same
 `ado-script.zip` release asset as `gate.js` and the ten

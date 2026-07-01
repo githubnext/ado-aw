@@ -84,6 +84,54 @@ fn copy_fixture(dir: &Path, fixture_name: &str) -> PathBuf {
     dest
 }
 
+// ─── Legacy directory marker migration (codemod 0004) ──────────────────────
+
+#[test]
+fn compile_migrates_legacy_workspace_marker_in_steps() {
+    let dir = fresh_temp_dir();
+    let original = "---\nname: ws-marker\ndescription: d\nsteps:\n  - script: cd {{ workspace }} && ls\n---\n## Body\n\nHello.\n";
+    let source = write_source(dir.path(), original);
+
+    let output = run_compile(&source);
+    assert!(
+        output.status.success(),
+        "compile should succeed: stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // The source is rewritten in place: the marker is replaced with the
+    // explicit ADO path it resolved to (single-checkout → sources root).
+    let after = fs::read_to_string(&source).expect("re-read source");
+    assert!(
+        after.contains("cd $(Build.SourcesDirectory) && ls"),
+        "source should be migrated, got:\n{after}"
+    );
+    assert!(
+        !after.contains("{{ workspace }}"),
+        "legacy marker must be gone from source, got:\n{after}"
+    );
+
+    // The codemod warning is surfaced.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("applied codemods"),
+        "expected codemod warning, got stderr: {stderr}"
+    );
+
+    // The compiled lock file carries the resolved path, not the marker.
+    let lock = source.with_extension("lock.yml");
+    let lock_str = fs::read_to_string(&lock).expect("read lock");
+    assert!(
+        lock_str.contains("cd $(Build.SourcesDirectory) && ls"),
+        "lock should contain resolved path, got:\n{lock_str}"
+    );
+    assert!(
+        !lock_str.contains("{{ workspace }}"),
+        "lock must not contain the legacy marker"
+    );
+}
+
 // ─── Healthy compile (no codemods needed) ──────────────────────────────────
 
 #[test]

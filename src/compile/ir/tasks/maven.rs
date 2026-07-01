@@ -1,18 +1,22 @@
 //! Typed builder for `Maven@3`.
 
-use super::common::{push_bool, push_opt};
+use super::common::{de_opt_bool_flex, push_bool, push_opt};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Code-coverage tool selection for `Maven@3`.
 ///
 /// Controls the `codeCoverageToolOption` input.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum CodeCoverageTool {
     /// No code-coverage instrumentation (ADO default).
+    #[serde(rename = "None")]
     None,
     /// Cobertura coverage format.
+    #[serde(rename = "Cobertura")]
     Cobertura,
     /// JaCoCo coverage format.
+    #[serde(rename = "JaCoCo")]
     JaCoCo,
 }
 
@@ -31,25 +35,34 @@ impl CodeCoverageTool {
 ///
 /// Controls the `jdkVersionOption` input (used when `javaHomeOption` is
 /// `JDKVersion`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum JdkVersion {
     /// Use the JDK already on PATH (ADO default).
+    #[serde(rename = "default")]
     Default,
     /// JDK 21.
+    #[serde(rename = "1.21")]
     V21,
     /// JDK 17.
+    #[serde(rename = "1.17")]
     V17,
     /// JDK 11.
+    #[serde(rename = "1.11")]
     V11,
     /// JDK 10.
+    #[serde(rename = "1.10")]
     V10,
     /// JDK 9.
+    #[serde(rename = "1.9")]
     V9,
     /// JDK 8.
+    #[serde(rename = "1.8")]
     V8,
     /// JDK 7.
+    #[serde(rename = "1.7")]
     V7,
     /// JDK 6.
+    #[serde(rename = "1.6")]
     V6,
 }
 
@@ -73,13 +86,16 @@ impl JdkVersion {
 /// JDK architecture for `Maven@3`.
 ///
 /// Controls the `jdkArchitectureOption` input.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum JdkArchitecture {
     /// 32-bit JDK.
+    #[serde(rename = "x86")]
     X86,
     /// 64-bit JDK (ADO default).
+    #[serde(rename = "x64")]
     X64,
     /// ARM 64-bit JDK.
+    #[serde(rename = "arm64")]
     Arm64,
 }
 
@@ -103,34 +119,88 @@ impl JdkArchitecture {
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/maven-v3>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Maven {
+    #[serde(rename = "mavenPOMFile")]
     maven_pom_file: String,
     // Build
+    #[serde(rename = "goals", default)]
     goals: Option<String>,
+    #[serde(rename = "options", default)]
     options: Option<String>,
     // JUnit test results
+    #[serde(
+        rename = "publishJUnitResults",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     publish_junit_results: Option<bool>,
+    #[serde(rename = "testResultsFiles", default)]
     test_results_files: Option<String>,
+    #[serde(rename = "testRunTitle", default)]
     test_run_title: Option<String>,
+    #[serde(
+        rename = "allowBrokenSymlinks",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     allow_broken_symlinks: Option<bool>,
     // Code coverage
+    #[serde(rename = "codeCoverageToolOption", default)]
     code_coverage_tool: Option<CodeCoverageTool>,
+    #[serde(rename = "codeCoverageClassFilter", default)]
     code_coverage_class_filter: Option<String>,
+    #[serde(rename = "codeCoverageClassFilesDirectories", default)]
     code_coverage_class_files_directories: Option<String>,
+    #[serde(rename = "codeCoverageSourceDirectories", default)]
     code_coverage_source_directories: Option<String>,
+    #[serde(
+        rename = "codeCoverageFailIfEmpty",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     code_coverage_fail_if_empty: Option<bool>,
+    #[serde(
+        rename = "codeCoverageRestoreOriginalPomXml",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     code_coverage_restore_original_pom_xml: Option<bool>,
     // JDK / advanced
+    #[serde(rename = "jdkVersionOption", default)]
     jdk_version: Option<JdkVersion>,
+    #[serde(rename = "jdkArchitectureOption", default)]
     jdk_architecture: Option<JdkArchitecture>,
+    #[serde(rename = "mavenOptions", default)]
     maven_options: Option<String>,
+    #[serde(
+        rename = "mavenAuthenticateFeed",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     maven_authenticate_feed: Option<bool>,
     // Code analysis
+    #[serde(
+        rename = "checkStyleRunAnalysis",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     checkstyle_run_analysis: Option<bool>,
+    #[serde(
+        rename = "pmdRunAnalysis",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     pmd_run_analysis: Option<bool>,
+    #[serde(
+        rename = "spotBugsRunAnalysis",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     spot_bugs_run_analysis: Option<bool>,
 
+    #[serde(skip)]
     display_name: Option<String>,
 }
 
@@ -316,7 +386,11 @@ impl Maven {
         if let Some(v) = self.code_coverage_tool {
             t = t.with_input("codeCoverageToolOption", v.as_ado_str());
         }
-        push_opt(&mut t, "codeCoverageClassFilter", self.code_coverage_class_filter);
+        push_opt(
+            &mut t,
+            "codeCoverageClassFilter",
+            self.code_coverage_class_filter,
+        );
         push_opt(
             &mut t,
             "codeCoverageClassFilesDirectories",
@@ -327,7 +401,11 @@ impl Maven {
             "codeCoverageSourceDirectories",
             self.code_coverage_source_directories,
         );
-        push_bool(&mut t, "codeCoverageFailIfEmpty", self.code_coverage_fail_if_empty);
+        push_bool(
+            &mut t,
+            "codeCoverageFailIfEmpty",
+            self.code_coverage_fail_if_empty,
+        );
         push_bool(
             &mut t,
             "codeCoverageRestoreOriginalPomXml",
@@ -341,8 +419,16 @@ impl Maven {
             t = t.with_input("jdkArchitectureOption", v.as_ado_str());
         }
         push_opt(&mut t, "mavenOptions", self.maven_options);
-        push_bool(&mut t, "mavenAuthenticateFeed", self.maven_authenticate_feed);
-        push_bool(&mut t, "checkStyleRunAnalysis", self.checkstyle_run_analysis);
+        push_bool(
+            &mut t,
+            "mavenAuthenticateFeed",
+            self.maven_authenticate_feed,
+        );
+        push_bool(
+            &mut t,
+            "checkStyleRunAnalysis",
+            self.checkstyle_run_analysis,
+        );
         push_bool(&mut t, "pmdRunAnalysis", self.pmd_run_analysis);
         push_bool(&mut t, "spotBugsRunAnalysis", self.spot_bugs_run_analysis);
 
@@ -359,7 +445,10 @@ mod tests {
         let t = Maven::new("pom.xml").into_step();
         assert_eq!(t.task, "Maven@3");
         assert_eq!(t.display_name, "Maven");
-        assert_eq!(t.inputs.get("mavenPOMFile").map(String::as_str), Some("pom.xml"));
+        assert_eq!(
+            t.inputs.get("mavenPOMFile").map(String::as_str),
+            Some("pom.xml")
+        );
         // Optional inputs absent by default.
         assert!(t.inputs.get("goals").is_none());
         assert!(t.inputs.get("options").is_none());
@@ -387,13 +476,22 @@ mod tests {
             .test_run_title("Unit Tests")
             .allow_broken_symlinks(false)
             .into_step();
-        assert_eq!(t.inputs.get("publishJUnitResults").map(String::as_str), Some("true"));
+        assert_eq!(
+            t.inputs.get("publishJUnitResults").map(String::as_str),
+            Some("true")
+        );
         assert_eq!(
             t.inputs.get("testResultsFiles").map(String::as_str),
             Some("**/surefire-reports/TEST-*.xml")
         );
-        assert_eq!(t.inputs.get("testRunTitle").map(String::as_str), Some("Unit Tests"));
-        assert_eq!(t.inputs.get("allowBrokenSymlinks").map(String::as_str), Some("false"));
+        assert_eq!(
+            t.inputs.get("testRunTitle").map(String::as_str),
+            Some("Unit Tests")
+        );
+        assert_eq!(
+            t.inputs.get("allowBrokenSymlinks").map(String::as_str),
+            Some("false")
+        );
     }
 
     #[test]
@@ -411,7 +509,10 @@ mod tests {
             t.inputs.get("codeCoverageClassFilter").map(String::as_str),
             Some("+:com.example.*,-:com.example.generated.*")
         );
-        assert_eq!(t.inputs.get("codeCoverageFailIfEmpty").map(String::as_str), Some("true"));
+        assert_eq!(
+            t.inputs.get("codeCoverageFailIfEmpty").map(String::as_str),
+            Some("true")
+        );
     }
 
     #[test]
@@ -420,8 +521,14 @@ mod tests {
             .jdk_version(JdkVersion::V17)
             .jdk_architecture(JdkArchitecture::X64)
             .into_step();
-        assert_eq!(t.inputs.get("jdkVersionOption").map(String::as_str), Some("1.17"));
-        assert_eq!(t.inputs.get("jdkArchitectureOption").map(String::as_str), Some("x64"));
+        assert_eq!(
+            t.inputs.get("jdkVersionOption").map(String::as_str),
+            Some("1.17")
+        );
+        assert_eq!(
+            t.inputs.get("jdkArchitectureOption").map(String::as_str),
+            Some("x64")
+        );
     }
 
     #[test]
@@ -430,8 +537,14 @@ mod tests {
             .maven_options("-Xmx2048m")
             .maven_authenticate_feed(true)
             .into_step();
-        assert_eq!(t.inputs.get("mavenOptions").map(String::as_str), Some("-Xmx2048m"));
-        assert_eq!(t.inputs.get("mavenAuthenticateFeed").map(String::as_str), Some("true"));
+        assert_eq!(
+            t.inputs.get("mavenOptions").map(String::as_str),
+            Some("-Xmx2048m")
+        );
+        assert_eq!(
+            t.inputs.get("mavenAuthenticateFeed").map(String::as_str),
+            Some("true")
+        );
     }
 
     #[test]
@@ -441,9 +554,18 @@ mod tests {
             .pmd_run_analysis(true)
             .spot_bugs_run_analysis(false)
             .into_step();
-        assert_eq!(t.inputs.get("checkStyleRunAnalysis").map(String::as_str), Some("true"));
-        assert_eq!(t.inputs.get("pmdRunAnalysis").map(String::as_str), Some("true"));
-        assert_eq!(t.inputs.get("spotBugsRunAnalysis").map(String::as_str), Some("false"));
+        assert_eq!(
+            t.inputs.get("checkStyleRunAnalysis").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            t.inputs.get("pmdRunAnalysis").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            t.inputs.get("spotBugsRunAnalysis").map(String::as_str),
+            Some("false")
+        );
     }
 
     #[test]
