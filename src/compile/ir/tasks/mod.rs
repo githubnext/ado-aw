@@ -60,6 +60,7 @@ pub mod publish_code_coverage_results;
 pub mod publish_pipeline_artifact;
 pub mod publish_test_results;
 pub mod sonar_qube_analyze;
+pub mod sonar_qube_prepare;
 pub mod sonar_qube_publish;
 pub mod twine_authenticate;
 pub mod universal_packages;
