@@ -705,6 +705,19 @@ ado-aw compile <path/to/agent.md> -o <path/to/pipeline.lock.yml>
 
 This generates a `.lock.yml` pipeline file. Both the source `.md` and generated `.lock.yml` must be committed together. The compiler also writes/updates a `.gitattributes` file at the repository root so compiled pipelines are marked `linguist-generated=true merge=ours`.
 
+### Lint authored task steps
+
+If the workflow includes raw Azure DevOps `task:` steps in `setup:`, `steps:`, `post-steps:`, or `teardown:`, run the linter and fix any findings before committing:
+
+```bash
+ado-aw lint <path/to/agent.md> --json
+```
+
+The compiler emits those steps **verbatim** and does **not** validate their inputs — invalid task inputs (a missing required input, an unknown/misspelled input key, a bad enum value, or an input for the wrong command of a command-dispatch task like `Docker@2`) surface **only** through `ado-aw lint` as `task-input-invalid` warning findings. (The same checks are available via the `lint_workflow` tool on the author-facing MCP server.)
+
+> **Read the findings, not the exit code.** These are advisory *warnings*, so `ado-aw lint` still exits `0` — parse the JSON `findings` array and address any entry whose `code` is `task-input-invalid` (its `location.step` names the offending task and `location.job` the step list). Unmodeled tasks and non-`task:` steps (`bash:`/`script:`) are never flagged, so a clean lint means every recognized task's inputs are well-formed.
+
+
 If the `ado-aw` CLI is not installed or not available on `PATH`, guide the user to download it from:
 https://github.com/githubnext/ado-aw/releases
 
@@ -808,3 +821,4 @@ safe-outputs:
 - **No direct writes**: All mutations go through safe outputs — the agent cannot push code or call write APIs directly.
 - **Compile before committing**: Always compile with `ado-aw compile` and commit both the `.md` source and generated `.lock.yml` together.
 - **Check validation**: The compiler validates front-matter fields and emits errors for invalid configurations (e.g., conflicting filter rules, missing required fields like `comment-on-work-item.target`). Write-bearing safe outputs do **not** require `permissions.write` — the executor defaults to `$(System.AccessToken)`.
+- **Lint raw task steps**: When you author `task:` steps, run `ado-aw lint <file> --json` and fix any `task-input-invalid` findings — the compiler passes those steps through unchecked, so lint is the only place invalid task inputs surface.

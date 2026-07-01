@@ -334,6 +334,16 @@ fn location_for(job: &JobSummary, step: Option<&str>) -> LintLocation {
 /// task with bad inputs is flagged with enough location (which list + the task
 /// id) for an agent to fix the step it synthesised; unmodeled tasks and
 /// non-task steps produce nothing.
+///
+/// **`location` convention for `task-input-invalid`.** These findings originate
+/// in front matter, before jobs/stages exist, so `location` does **not** carry
+/// real graph identifiers like the structural rules do. Instead it encodes the
+/// authored source position: `stage` is always `None`, `job` holds the
+/// front-matter step *list* name (`"setup"` / `"steps"` / `"post-steps"` /
+/// `"teardown"`), and `step` holds the offending ADO task id (e.g.
+/// `"CopyFiles@2"`). Consumers correlating findings with the pipeline graph
+/// should branch on `code == "task-input-invalid"` and treat `job` as a list
+/// name rather than a job id for this class.
 pub fn lint_front_matter_tasks(front_matter: &FrontMatter) -> Vec<LintFinding> {
     crate::compile::ir::tasks::parse::validate_front_matter_task_steps(
         &front_matter.setup,

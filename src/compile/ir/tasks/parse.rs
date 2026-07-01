@@ -177,6 +177,10 @@ pub fn validate_front_matter_task_steps(
     ] {
         for (index, step) in values.iter().enumerate() {
             if let Some(Err(message)) = validate_task_step(step) {
+                // A `Some(_)` result guarantees `validate_task_step` already
+                // matched a string `task:` key (it early-returns `None`
+                // otherwise), so this re-extraction cannot actually fail; the
+                // fallback is only to avoid another `Option` in the finding.
                 let task = step
                     .as_mapping()
                     .and_then(|m| m.get("task"))

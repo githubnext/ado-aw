@@ -72,6 +72,12 @@ where
 /// `delayBetweenRetries: 1000`); serde would otherwise reject the integer scalar
 /// against an `Option<String>` and produce a false-positive validation finding.
 /// Numbers are stringified to match how ADO coerces them.
+///
+/// A bare `f64` (e.g. `retryCount: 3.14`) is also accepted and stringified,
+/// which ADO would then reject at runtime for an integer input. That is a
+/// deliberate *false-negative* (a gap, not noise): authoring a count as a
+/// non-integer float is rare, and this validation intentionally prefers gaps
+/// over false positives.
 pub(crate) fn de_opt_str_or_int<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
