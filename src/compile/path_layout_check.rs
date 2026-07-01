@@ -61,6 +61,13 @@ pub fn collect_path_layout_warnings(front_matter: &FrontMatter, markdown_body: &
         .collect();
 
     // 1. `$(Build.SourcesDirectory)/<seg>` references in custom steps.
+    //
+    // Deliberately narrowed to the executable step blocks
+    // (`setup/steps/post_steps/teardown`). The codemod migrates every
+    // front-matter string scalar, but only step scalars are interpreted as
+    // filesystem paths at runtime, so a stray `$(Build.SourcesDirectory)/…`
+    // in a non-step field (e.g. `description:`) is harmless and intentionally
+    // not flagged here.
     let mut step_scalars: Vec<&str> = Vec::new();
     for block in [
         &front_matter.setup,
@@ -155,7 +162,11 @@ fn sources_dir_segments(s: &str) -> Vec<String> {
         // for a back-to-back double prefix
         // (`$(Build.SourcesDirectory)/$(Build.SourcesDirectory)/foo`), pushing
         // the same span twice; `start + seg.len()` is the intended
-        // advancement and reports each segment once.
+        // advancement and reports each segment once. When `seg` is empty (the
+        // char right after the prefix is a stopper like a space or quote) this
+        // is `start + 0 = start`, which still makes progress: the following
+        // `find` starts past the just-matched prefix and cannot re-match it,
+        // so there is no infinite-loop risk.
         i = start + seg.len();
         if !seg.is_empty() {
             segs.push(seg);

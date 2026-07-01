@@ -157,8 +157,14 @@ fn replace_marker(input: &str, name: &str, repl: &str) -> String {
     let mut i = 0;
     while i < input.len() {
         if input[i..].starts_with("{{") {
+            // Skip `${{ ... }}` (ADO template expression): it is not a legacy
+            // marker, and substituting it would leave a stray `$` before the
+            // replacement (e.g. `$$(Build.SourcesDirectory)`). Mirrors the
+            // guard in `contains_template_marker`.
+            let preceded_by_dollar = i > 0 && input.as_bytes()[i - 1] == b'$';
             let start = i + 2;
-            if let Some(close) = input[start..].find("}}")
+            if !preceded_by_dollar
+                && let Some(close) = input[start..].find("}}")
                 && input[start..start + close].trim() == name
             {
                 out.push_str(repl);
@@ -335,6 +341,26 @@ mod tests {
         assert!(!contains_template_marker("{{#runtime-import x}}", "workspace"));
         assert!(!contains_template_marker("${{ parameters.x }}", "workspace"));
         assert!(!contains_template_marker("no markers here", "workspace"));
+    }
+
+    #[test]
+    fn dollar_template_expression_is_not_a_marker() {
+        // `${{ workspace }}` is an ADO template expression, not a legacy
+        // marker: it must not be detected or substituted (substituting would
+        // leave a stray `$` before the replacement).
+        assert!(!contains_template_marker("${{ workspace }}", "workspace"));
+        assert!(!contains_template_marker("a ${{ workspace }} b", "workspace"));
+        assert_eq!(
+            replace_marker("${{ workspace }}", "workspace", "REPL"),
+            "${{ workspace }}"
+        );
+        // A bare (non-dollar) marker sitting alongside a `${{ }}` expression is
+        // still migrated.
+        assert!(contains_template_marker("${{ p }} {{ workspace }}", "workspace"));
+        assert_eq!(
+            replace_marker("${{ p }} {{ workspace }}", "workspace", "REPL"),
+            "${{ p }} REPL"
+        );
     }
 
     #[test]

@@ -886,7 +886,14 @@ pub(crate) fn contains_template_marker(input: &str, name: &str) -> bool {
     while let Some(open) = input[i..].find("{{") {
         let marker_start = i + open;
         let start = marker_start + 2;
-        if let Some(close) = input[start..].find("}}")
+        // Skip `${{ ... }}` (an ADO template expression), which is never a
+        // legacy marker even if its inner content trims to `name`. Matching it
+        // here would both raise a false positive and — in `replace_marker` —
+        // splice `repl` after the `$`, corrupting the output.
+        let preceded_by_dollar =
+            marker_start > 0 && input.as_bytes()[marker_start - 1] == b'$';
+        if !preceded_by_dollar
+            && let Some(close) = input[start..].find("}}")
             && input[start..start + close].trim() == name
         {
             return true;
