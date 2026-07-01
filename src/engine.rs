@@ -38,8 +38,8 @@ pub const BLOCKED_ENV_KEYS: &[&str] = &[
 ];
 
 /// Copilot Bring Your Own Model / Key (BYOM/BYOK) provider env-var keys that are
-/// permitted to carry ADO macro (`$(...)`) / runtime (`$[...]`) expressions in
-/// `engine.env`. Every other key remains literal-only.
+/// permitted to carry an ADO **macro** (`$(...)`) expression in `engine.env`.
+/// Every other key remains literal-only.
 ///
 /// This mirrors gh-aw's `CopilotEngine.GetSupportedEnvVarKeys()` allowlist
 /// (`COPILOT_PROVIDER_*`), which gates dynamic provider credentials to a known
@@ -47,9 +47,18 @@ pub const BLOCKED_ENV_KEYS: &[&str] = &[
 /// `COPILOT_PROVIDER_BASE_URL` activates BYOM mode so requests route to an
 /// external Azure Copilot Foundry / OpenAI-compatible provider.
 ///
-/// ADO **template** expressions (`${{ }}`) are still rejected for these keys —
-/// they are evaluated at compile time and have no secret-scoped analog — and
-/// pipeline-command injection (`##vso[`) / newline checks still apply.
+/// Only ADO **macros** `$(...)` are allowed — they are the sole expression form
+/// ADO evaluates inside a step `env:` block. Template expressions (`${{ }}`,
+/// compile-time, no secret-scoped analog) and runtime expressions (`$[ ... ]`,
+/// not evaluated in step env — passed verbatim, see #1076) are rejected, as are
+/// pipeline-command injection (`##vso[`) and newlines.
+///
+/// Matching against these keys is **case-sensitive** (exact), unlike the
+/// case-insensitive [`BLOCKED_ENV_KEYS`]: the Copilot CLI only reads the
+/// canonical uppercase `COPILOT_PROVIDER_*` names, so a lowercase lookalike is
+/// never a usable provider var. Requiring exact case fails closed — a lowercase
+/// `copilot_provider_api_key` carrying an expression is rejected with a clear
+/// error rather than half-activating BYOM and then silently breaking at runtime.
 pub const COPILOT_PROVIDER_EXPR_ENV_KEYS: &[&str] = &[
     "COPILOT_PROVIDER_BASE_URL",
     "COPILOT_PROVIDER_API_KEY",
@@ -57,12 +66,15 @@ pub const COPILOT_PROVIDER_EXPR_ENV_KEYS: &[&str] = &[
     "COPILOT_PROVIDER_WIRE_API",
 ];
 
+/// Case-sensitive prefix shared by every BYOM provider env-var key. Used to
+/// select the provider subset for the Detection step.
+const COPILOT_PROVIDER_PREFIX: &str = "COPILOT_PROVIDER_";
+
 /// Returns true when `key` is an allowlisted BYOM/BYOK provider env-var key that
-/// may carry ADO macro/runtime expressions in `engine.env`.
+/// may carry ADO macro/runtime expressions in `engine.env`. Case-sensitive: see
+/// [`COPILOT_PROVIDER_EXPR_ENV_KEYS`] for why exact case is required.
 fn is_provider_expr_env_key(key: &str) -> bool {
-    COPILOT_PROVIDER_EXPR_ENV_KEYS
-        .iter()
-        .any(|allowed| key.eq_ignore_ascii_case(allowed))
+    COPILOT_PROVIDER_EXPR_ENV_KEYS.contains(&key)
 }
 
 /// BYOM/BYOK provider **credential** env keys. Their presence in `engine.env`
@@ -72,8 +84,12 @@ fn is_provider_expr_env_key(key: &str) -> bool {
 /// the raw value never reaches the agent via `--env-all` passthrough
 /// (defense-in-depth; AWF also overrides them with placeholders).
 ///
-/// Note this is the credential subset of [`COPILOT_PROVIDER_EXPR_ENV_KEYS`] —
-/// it excludes the non-sensitive `COPILOT_PROVIDER_WIRE_API` config key.
+/// This is the credential subset of [`COPILOT_PROVIDER_EXPR_ENV_KEYS`]:
+/// `COPILOT_PROVIDER_WIRE_API` is **deliberately excluded** because it is
+/// non-sensitive wire-format config, not a credential. Consequently a workflow
+/// that only sets `COPILOT_PROVIDER_WIRE_API` dynamically may carry an expression
+/// on it (it is in the expression allowlist) without activating the api-proxy
+/// sidecar — which is correct, since there is no credential to isolate.
 pub const COPILOT_BYOM_CREDENTIAL_ENV_KEYS: &[&str] = &[
     "COPILOT_PROVIDER_BASE_URL",
     "COPILOT_PROVIDER_API_KEY",
@@ -83,39 +99,26 @@ pub const COPILOT_BYOM_CREDENTIAL_ENV_KEYS: &[&str] = &[
 /// Returns true when `engine.env` activates Copilot BYOM/BYOK mode — i.e. any
 /// provider credential / base-URL key is present. Used by the pipeline compiler
 /// to enable the AWF api-proxy sidecar (`--enable-api-proxy`) for credential
-/// isolation and to pre-pull the api-proxy container image.
+/// isolation and to pre-pull the api-proxy container image. Case-sensitive.
 pub fn copilot_byom_active(engine_config: &EngineConfig) -> bool {
     engine_config.env().is_some_and(|env| {
-        env.keys().any(|key| {
-            COPILOT_BYOM_CREDENTIAL_ENV_KEYS
-                .iter()
-                .any(|cred| key.eq_ignore_ascii_case(cred))
-        })
+        env.keys()
+            .any(|key| COPILOT_BYOM_CREDENTIAL_ENV_KEYS.contains(&key.as_str()))
     })
 }
 
-/// Return the **actual** `engine.env` keys (in the user's original casing) that
-/// match a BYOM credential key case-insensitively. These are the keys that must
-/// be passed to AWF's `--exclude-env` so the raw credential is kept out of the
-/// `--env-all` passthrough.
-///
-/// Case matters: env-var names are case-sensitive on Linux and AWF matches
-/// `--exclude-env` by exact name. Detection ([`copilot_byom_active`]) is
-/// case-insensitive so isolation always activates when a provider key is clearly
-/// intended, but the exclusion list must use the exact key the user wrote —
-/// otherwise a key like `copilot_provider_api_key` would activate the sidecar yet
-/// still leak into the agent container. Sorted for deterministic output.
+/// Return the BYOM credential env keys present in `engine.env`, sorted. These are
+/// passed to AWF's `--exclude-env` so the raw credential is kept out of the
+/// `--env-all` passthrough. Matching is case-sensitive (exact), so the emitted
+/// `--exclude-env <key>` always names the canonical uppercase key AWF and the
+/// Copilot CLI actually use.
 pub fn copilot_byom_credential_keys(engine_config: &EngineConfig) -> Vec<String> {
     let Some(env_map) = engine_config.env() else {
         return Vec::new();
     };
     let mut keys: Vec<String> = env_map
         .keys()
-        .filter(|key| {
-            COPILOT_BYOM_CREDENTIAL_ENV_KEYS
-                .iter()
-                .any(|cred| key.eq_ignore_ascii_case(cred))
-        })
+        .filter(|key| COPILOT_BYOM_CREDENTIAL_ENV_KEYS.contains(&key.as_str()))
         .cloned()
         .collect();
     keys.sort();
@@ -226,7 +229,7 @@ impl Engine {
                 if let Some(env_map) = engine_config.env()
                     && let Some(base_url) = env_map
                         .iter()
-                        .find(|(k, _)| k.eq_ignore_ascii_case("COPILOT_PROVIDER_BASE_URL"))
+                        .find(|(k, _)| k.as_str() == "COPILOT_PROVIDER_BASE_URL")
                         .map(|(_, v)| v)
                     && !contains_ado_expression(base_url)
                     && let Some(host) = provider_base_url_host(base_url)
@@ -584,10 +587,7 @@ pub fn copilot_provider_env(engine_config: &EngineConfig) -> Result<String> {
     };
     let mut keys: Vec<&String> = env_map
         .keys()
-        .filter(|k| {
-            k.get(..17)
-                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("COPILOT_PROVIDER_"))
-        })
+        .filter(|k| k.starts_with(COPILOT_PROVIDER_PREFIX))
         .collect();
     keys.sort();
 
@@ -601,7 +601,7 @@ pub fn copilot_provider_env(engine_config: &EngineConfig) -> Result<String> {
 /// Validate a single `engine.env` entry and render it as a YAML `KEY: "VALUE"`
 /// line. Enforces env-var-name rules, blocks compiler-controlled keys, rejects
 /// pipeline-command injection / newlines, and applies the BYOM provider
-/// expression allowlist (allowlisted keys may carry `$(...)`/`$[...]`; all
+/// expression allowlist (allowlisted keys may carry an ADO macro `$(...)`; all
 /// others are literal-only). Shared by [`copilot_env`] and
 /// [`copilot_provider_env`] so both paths validate identically.
 fn render_engine_env_entry(key: &str, value: &str) -> Result<String> {
@@ -644,16 +644,22 @@ fn render_engine_env_entry(key: &str, value: &str) -> Result<String> {
             key
         );
     }
-    // Allowlisted BYOM/BYOK provider keys may carry ADO macro/runtime
-    // expressions (e.g. `$(Setup.FOUNDRY_TOKEN)`) so credentials can be
-    // sourced from Setup-job outputs or pipeline variables. They still
-    // may not carry compile-time template expressions (`${{ }}`).
+    // Allowlisted BYOM/BYOK provider keys may carry an ADO **macro** expression
+    // (e.g. `$(Setup.FOUNDRY_TOKEN)`) so credentials can be sourced from
+    // Setup-job outputs or pipeline variables. Macros are the only expression
+    // form ADO evaluates inside a step `env:` block. They may NOT carry:
+    //   - template expressions `${{ }}` — expanded at compile time (secret
+    //     exfiltration risk), and
+    //   - runtime expressions `$[ ... ]` — ADO does *not* evaluate these inside
+    //     step env; the literal string is passed verbatim (see ir::lower guard
+    //     and #1076), so permitting them would silently ship a broken value.
     // Every other key remains literal-only.
     if is_provider_expr_env_key(key) {
-        if contains_ado_template_expression(value) {
+        if contains_ado_template_expression(value) || value.contains("$[") {
             anyhow::bail!(
-                "engine.env value for '{}' contains an ADO template expression '${{{{ }}}}'. \
-                 Provider keys may use macro '$(...)' or runtime '$[...]' expressions only.",
+                "engine.env value for '{}' contains an ADO template ('${{{{ }}}}') or \
+                 runtime ('$[...]') expression. Provider keys may use macro '$(...)' \
+                 expressions only (ADO does not evaluate '${{{{ }}}}' or '$[...]' inside step env).",
                 key
             );
         }
@@ -1289,12 +1295,21 @@ mod tests {
     }
 
     #[test]
-    fn engine_env_allows_runtime_expr_on_provider_key() {
+    fn engine_env_rejects_runtime_expr_on_provider_key() {
+        // ADO runtime expressions `$[ ... ]` are NOT evaluated inside step env
+        // (passed verbatim, see #1076), so they are rejected even on provider
+        // keys — only macros `$(...)` are permitted.
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    COPILOT_PROVIDER_API_KEY: \"$[ variables.Key ]\"\n---\n",
         ).unwrap();
-        let env = Engine::Copilot.env(&fm.engine).unwrap();
-        assert!(env.contains(r#"COPILOT_PROVIDER_API_KEY: "$[ variables.Key ]""#));
+        let result = Engine::Copilot.env(&fm.engine);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("runtime ('$[...]') expression")
+        );
     }
 
     #[test]
@@ -1334,14 +1349,42 @@ mod tests {
     }
 
     #[test]
-    fn copilot_byom_credential_keys_preserves_user_casing() {
-        // Exact provider credential keys are returned in the user's casing,
-        // sorted; non-credential and non-provider keys are excluded.
+    fn copilot_byom_credential_keys_returns_present_keys() {
+        // Only the credential keys present are returned (sorted); the
+        // non-credential WIRE_API and unrelated vars are excluded.
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    COPILOT_PROVIDER_BASE_URL: https://x/y\n    COPILOT_PROVIDER_WIRE_API: responses\n    MY_VAR: hi\n---\n",
         ).unwrap();
         let keys = copilot_byom_credential_keys(&fm.engine);
         assert_eq!(keys, vec!["COPILOT_PROVIDER_BASE_URL".to_string()]);
+    }
+
+    #[test]
+    fn provider_key_matching_is_case_sensitive() {
+        // A lowercase provider key is NOT a real Copilot provider var (the CLI
+        // reads uppercase). It must not activate BYOM, must not appear in the
+        // exclude list, and — carrying an expression — must be rejected as a
+        // normal literal-only key (fail-closed, no silent runtime break).
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    copilot_provider_api_key: literal-value\n---\n",
+        ).unwrap();
+        assert!(
+            !copilot_byom_active(&fm.engine),
+            "lowercase provider key must not activate BYOM"
+        );
+        assert!(
+            copilot_byom_credential_keys(&fm.engine).is_empty(),
+            "lowercase provider key must not appear in the exclude list"
+        );
+
+        let (fm_expr, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    copilot_provider_api_key: \"$(Setup.Key)\"\n---\n",
+        ).unwrap();
+        let result = Engine::Copilot.env(&fm_expr.engine);
+        assert!(
+            result.is_err(),
+            "lowercase provider key carrying an expression must be rejected (not silently allowed)"
+        );
     }
 
     #[test]
@@ -1410,7 +1453,7 @@ mod tests {
             result
                 .unwrap_err()
                 .to_string()
-                .contains("ADO template expression")
+                .contains("ADO template ('${{ }}') or")
         );
     }
 

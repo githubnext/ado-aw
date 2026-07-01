@@ -28,7 +28,7 @@ engine:
 | `agent` | string | *(none)* | Custom agent file identifier (Copilot only). Adds `--agent <name>` to the CLI invocation, selecting a custom agent from `.github/agents/`. |
 | `api-target` | string | *(none)* | Custom API endpoint hostname for GHES/GHEC (e.g., `"api.acme.ghe.com"`). Adds `--api-target <hostname>` to the CLI invocation and adds the hostname to the AWF network allowlist. |
 | `args` | list | `[]` | Custom CLI arguments appended after compiler-generated args. Subject to shell-safety validation and blocked from overriding compiler-controlled flags (`--prompt`, `--additional-mcp-config`, `--allow-tool`, `--allow-all-tools`, `--allow-all-paths`, `--disable-builtin-mcps`, `--no-ask-user`, `--ask-user`). |
-| `env` | map | *(none)* | Engine-specific environment variables merged into the sandbox step's `env:` block. Keys must be valid env var names. Values are literal-only and must not contain ADO expressions (`$(`, `${{`, `$[`) or pipeline command injection (`##vso[`), **except** the Copilot BYOM provider keys (`COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_API_KEY`, `COPILOT_PROVIDER_BEARER_TOKEN`, `COPILOT_PROVIDER_WIRE_API`), which may carry ADO macro (`$(...)`) / runtime (`$[...]`) expressions — see [Copilot BYOM / BYOK provider configuration](#copilot-byom--byok-provider-configuration). Compiler-controlled keys (`GITHUB_TOKEN`, `PATH`, `BASH_ENV`, etc.) are blocked. |
+| `env` | map | *(none)* | Engine-specific environment variables merged into the sandbox step's `env:` block. Keys must be valid env var names. Values are literal-only and must not contain ADO expressions (`$(`, `${{`, `$[`) or pipeline command injection (`##vso[`), **except** the Copilot BYOM provider keys (`COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_API_KEY`, `COPILOT_PROVIDER_BEARER_TOKEN`, `COPILOT_PROVIDER_WIRE_API`), which may carry an ADO macro (`$(...)`) expression — see [Copilot BYOM / BYOK provider configuration](#copilot-byom--byok-provider-configuration). Compiler-controlled keys (`GITHUB_TOKEN`, `PATH`, `BASH_ENV`, etc.) are blocked. |
 | `command` | string | *(none)* | Custom engine executable path (skips the default engine binary installation — NuGet for `target: 1es`, GitHub Releases for all other targets). The path must be accessible inside the AWF container (e.g., `/tmp/...` or workspace-mounted paths). |
 
 
@@ -70,11 +70,13 @@ fixed allowlist of provider env keys may carry expressions; every other
 
 The credential/provider keys `COPILOT_PROVIDER_BASE_URL`,
 `COPILOT_PROVIDER_API_KEY`, `COPILOT_PROVIDER_BEARER_TOKEN`, and
-`COPILOT_PROVIDER_WIRE_API` may carry ADO **macro** (`$(...)`) or **runtime**
-(`$[...]`) expressions, so credentials can be sourced from a Setup-job output or
-a pipeline variable rather than hard-coded. They may **not** carry ADO
-**template** expressions (`${{ }}`, evaluated at compile time) or pipeline
-command injection (`##vso[`). All non-provider `engine.env` values stay
+`COPILOT_PROVIDER_WIRE_API` may carry an ADO **macro** (`$(...)`) expression, so
+credentials can be sourced from a Setup-job output or a pipeline variable rather
+than hard-coded. Macros are the only expression form ADO evaluates inside a step
+`env:` block. These keys may **not** carry ADO **template** expressions (`${{ }}`,
+evaluated at compile time) or **runtime** expressions (`$[ ... ]`, which ADO does
+not evaluate in step env — the literal string would be passed verbatim), nor
+pipeline command injection (`##vso[`). All non-provider `engine.env` values stay
 literal-only.
 
 #### Credential isolation (api-proxy sidecar)

@@ -2439,16 +2439,27 @@ fn start_mcpg_step(
 
 /// Build the AWF api-proxy sidecar flag lines for a Copilot BYOM/BYOK run.
 ///
-/// `exclude_keys` are the actual provider credential env keys present (in the
-/// user's original casing). When non-empty, returns `--enable-api-proxy` plus
-/// one `--exclude-env <key>` line per key, each as a 2-space-indented `--flag \`
-/// continuation ending in `\\\n` so it slots directly into the AWF command
-/// body. The api-proxy holds the real credential and injects it only at the
-/// proxy layer (keeping it out of the agent container); `--exclude-env` keeps
-/// the raw value out of `--env-all` passthrough (defense-in-depth; AWF also
-/// overrides them with placeholders). Case-preserving: env-var names are
-/// case-sensitive, so the exact key the user wrote must be excluded. Returns an
-/// empty string when `exclude_keys` is empty (non-BYOM).
+/// `exclude_keys` are the provider credential env keys present in `engine.env`
+/// (canonical uppercase `COPILOT_PROVIDER_*` names). When non-empty, returns
+/// `--enable-api-proxy` plus one `--exclude-env <key>` line per key, each as a
+/// 2-space-indented `--flag \` continuation ending in `\\\n` so it slots
+/// directly into the AWF command body. Returns an empty string when
+/// `exclude_keys` is empty (non-BYOM).
+///
+/// How the credential reaches the provider without reaching the agent: with
+/// `--enable-api-proxy`, AWF starts the api-proxy sidecar which reads the *real*
+/// `COPILOT_PROVIDER_*` values from the host process env, and injects
+/// **placeholders** into the agent container regardless of `--env-all` —
+/// `COPILOT_PROVIDER_BASE_URL` becomes the sidecar URL (e.g.
+/// `http://172.30.0.30:10002`) and `COPILOT_PROVIDER_API_KEY` a dummy token (see
+/// gh-aw-firewall `docs/api-proxy-sidecar.md`, "agent container env" table, and
+/// `containers/api-proxy/providers/copilot.js`, verified against AWF v0.27.9).
+/// The Copilot CLI therefore talks to the sidecar, which strips the client auth
+/// header and injects the real credential on the outbound request. `--exclude-env`
+/// keeps the raw value out of `--env-all` passthrough (defense-in-depth on top of
+/// AWF's placeholder override). Because env-var names are case-sensitive and the
+/// keys are the canonical uppercase names, the emitted `--exclude-env <key>`
+/// matches exactly what AWF overrides and the CLI reads.
 ///
 /// Shared by [`run_agent_step`] and [`run_threat_analysis_step`] so both AWF
 /// invocations enable isolation identically.
