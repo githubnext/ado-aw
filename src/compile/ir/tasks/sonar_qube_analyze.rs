@@ -4,18 +4,22 @@
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/sonar-qube-analyze-v8>
 
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// JDK version source used by the SonarQube scanner during analysis.
 ///
 /// Maps to the `jdkversion` input of `SonarQubeAnalyze@8`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum JdkVersion {
     /// Use the value of the `JAVA_HOME` environment variable.
+    #[serde(rename = "JAVA_HOME")]
     JavaHome,
     /// Use the built-in `JAVA_HOME_17_X64` path available on hosted agents
     /// (ADO server default).
+    #[serde(rename = "JAVA_HOME_17_X64")]
     JavaHome17X64,
     /// Use the built-in `JAVA_HOME_21_X64` path available on hosted agents.
+    #[serde(rename = "JAVA_HOME_21_X64")]
     JavaHome21X64,
 }
 
@@ -41,9 +45,12 @@ impl JdkVersion {
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/sonar-qube-analyze-v8>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SonarQubeAnalyze {
+    #[serde(rename = "jdkversion", default)]
     jdk_version: Option<JdkVersion>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 

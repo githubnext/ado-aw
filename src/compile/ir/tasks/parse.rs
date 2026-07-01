@@ -37,8 +37,8 @@ use super::{
     helm_installer, java_tool_installer, manual_validation, maven, maven_authenticate, node_tool,
     npm, npm_authenticate, nuget_authenticate, nuget_command, pip_authenticate, powershell,
     publish_build_artifacts, publish_code_coverage_results, publish_pipeline_artifact,
-    publish_test_results, python_script, sonar_qube_publish, twine_authenticate, universal_packages,
-    use_dotnet, use_node, use_python_version, use_ruby_version, vs_build, vstest,
+    publish_test_results, python_script, sonar_qube_analyze, sonar_qube_publish, twine_authenticate,
+    universal_packages, use_dotnet, use_node, use_python_version, use_ruby_version, vs_build, vstest,
 };
 
 /// Registry mapping an ADO task id (`"CopyFiles@2"`) to a validator that checks
@@ -93,6 +93,7 @@ const VALIDATORS: &[(&str, fn(Value) -> Result<(), String>)] = &[
         validate_by_deserialize::<publish_pipeline_artifact::PublishPipelineArtifact>,
     ),
     ("PublishTestResults@2", validate_by_deserialize::<publish_test_results::PublishTestResults>),
+    ("SonarQubeAnalyze@8", validate_by_deserialize::<sonar_qube_analyze::SonarQubeAnalyze>),
     ("SonarQubePublish@8", validate_by_deserialize::<sonar_qube_publish::SonarQubePublish>),
     ("TwineAuthenticate@1", validate_by_deserialize::<twine_authenticate::TwineAuthenticate>),
     ("UseDotNet@2", validate_by_deserialize::<use_dotnet::UseDotNet>),
@@ -712,6 +713,29 @@ mod tests {
         );
         let err = validate_task_step(&step).expect("recognized").unwrap_err();
         assert!(err.contains("SonarQubePublish@8"), "got: {err}");
+    }
+
+    #[test]
+    fn roundtrip_sonar_qube_analyze() {
+        assert_roundtrips(sonar_qube_analyze::SonarQubeAnalyze::new().into_step());
+        assert_roundtrips(
+            sonar_qube_analyze::SonarQubeAnalyze::new()
+                .jdk_version(sonar_qube_analyze::JdkVersion::JavaHome21X64)
+                .into_step(),
+        );
+    }
+
+    #[test]
+    fn sonar_qube_analyze_unknown_input_warns() {
+        let step = yaml(
+            r#"
+            task: SonarQubeAnalyze@8
+            inputs:
+              bogusInput: nope
+            "#,
+        );
+        let err = validate_task_step(&step).expect("recognized").unwrap_err();
+        assert!(err.contains("SonarQubeAnalyze@8"), "got: {err}");
     }
 
     #[test]
