@@ -10,6 +10,8 @@
 
 use super::common::push_opt;
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
+use serde_yaml::Value;
 
 /// Scanner integration mode for `SonarQubePrepare@8`.
 #[derive(Debug, Clone)]
@@ -272,13 +274,126 @@ impl SonarQubePrepare {
     }
 }
 
+/// Validate an authored `SonarQubePrepare@8` `inputs:` mapping (advisory
+/// front-matter validation, see [`super::parse`]).
+///
+/// This is a mode-dispatch task: `scannerMode` (default `dotnet`) selects the
+/// applicable inputs, and within `cli` mode `configMode` (default `file`)
+/// selects a further sub-schema. Each mode is validated against a
+/// `deny_unknown_fields` schema so an input supplied for the wrong mode is
+/// reported.
+pub(crate) fn validate_inputs(inputs: Value) -> Result<(), String> {
+    let mut map = match inputs {
+        Value::Mapping(m) => m,
+        Value::Null => Default::default(),
+        other => return Err(format!("`inputs` must be a mapping, got {other:?}")),
+    };
+
+    // Common inputs shared by every mode.
+    match map.get("SonarQube") {
+        Some(v) if v.is_string() => {}
+        Some(_) => return Err("`SonarQube` must be a string".to_string()),
+        None => return Err("missing required input `SonarQube`".to_string()),
+    }
+    map.remove("SonarQube");
+    if let Some(v) = map.get("extraProperties")
+        && !v.is_string()
+    {
+        return Err("`extraProperties` must be a string".to_string());
+    }
+    map.remove("extraProperties");
+
+    let scanner_mode = match map.remove("scannerMode") {
+        Some(v) => v
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| "`scannerMode` must be a string".to_string())?,
+        None => "dotnet".to_string(),
+    };
+
+    match scanner_mode.as_str() {
+        "dotnet" => serde_yaml::from_value::<DotNetSpec>(Value::Mapping(map))
+            .map(drop)
+            .map_err(|e| format!("scannerMode `dotnet`: {e}")),
+        "other" => serde_yaml::from_value::<OtherSpec>(Value::Mapping(map))
+            .map(drop)
+            .map_err(|e| format!("scannerMode `other`: {e}")),
+        "cli" => {
+            let config_mode = match map.remove("configMode") {
+                Some(v) => v
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| "`configMode` must be a string".to_string())?,
+                None => "file".to_string(),
+            };
+            let rest = Value::Mapping(map);
+            match config_mode.as_str() {
+                "file" => serde_yaml::from_value::<CliFileSpec>(rest)
+                    .map(drop)
+                    .map_err(|e| format!("scannerMode `cli`, configMode `file`: {e}")),
+                "manual" => serde_yaml::from_value::<CliManualSpec>(rest)
+                    .map(drop)
+                    .map_err(|e| format!("scannerMode `cli`, configMode `manual`: {e}")),
+                other => Err(format!("unknown configMode `{other}` (expected file|manual)")),
+            }
+        }
+        other => Err(format!(
+            "unknown scannerMode `{other}` (expected dotnet|cli|other)"
+        )),
+    }
+}
+
+/// Inputs valid for `scannerMode = dotnet`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DotNetSpec {
+    #[serde(rename = "projectKey")]
+    _project_key: String,
+    #[serde(rename = "projectName", default)]
+    _project_name: Option<String>,
+    #[serde(rename = "projectVersion", default)]
+    _project_version: Option<String>,
+    #[serde(rename = "dotnetScannerVersion", alias = "msBuildVersion", default)]
+    _scanner_version: Option<String>,
+}
+
+/// Inputs valid for `scannerMode = cli, configMode = file`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CliFileSpec {
+    #[serde(rename = "cliScannerVersion", alias = "cliVersion", default)]
+    _cli_version: Option<String>,
+    #[serde(rename = "configFile", default)]
+    _config_file: Option<String>,
+}
+
+/// Inputs valid for `scannerMode = cli, configMode = manual`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CliManualSpec {
+    #[serde(rename = "cliProjectKey")]
+    _project_key: String,
+    #[serde(rename = "cliScannerVersion", alias = "cliVersion", default)]
+    _cli_version: Option<String>,
+    #[serde(rename = "cliProjectName", default)]
+    _project_name: Option<String>,
+    #[serde(rename = "cliProjectVersion", default)]
+    _project_version: Option<String>,
+    #[serde(rename = "cliSources", default)]
+    _sources: Option<String>,
+}
+
+/// Inputs valid for `scannerMode = other` (no extra scanner inputs).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OtherSpec {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn dotnet_mode_required_inputs() {
-        let t = SonarQubePrepare::dotnet(
+    fn dotnet_mode_required_inputs() {        let t = SonarQubePrepare::dotnet(
             "MySonarQubeConnection",
             DotNetMode::new("my-project-key"),
         )

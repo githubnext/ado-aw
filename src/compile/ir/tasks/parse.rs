@@ -37,8 +37,9 @@ use super::{
     helm_installer, java_tool_installer, manual_validation, maven, maven_authenticate, node_tool,
     npm, npm_authenticate, nuget_authenticate, nuget_command, pip_authenticate, powershell,
     publish_build_artifacts, publish_code_coverage_results, publish_pipeline_artifact,
-    publish_test_results, python_script, sonar_qube_analyze, sonar_qube_publish, twine_authenticate,
-    universal_packages, use_dotnet, use_node, use_python_version, use_ruby_version, vs_build, vstest,
+    publish_test_results, python_script, sonar_qube_analyze, sonar_qube_prepare, sonar_qube_publish,
+    twine_authenticate, universal_packages, use_dotnet, use_node, use_python_version,
+    use_ruby_version, vs_build, vstest,
 };
 
 /// Registry mapping an ADO task id (`"CopyFiles@2"`) to a validator that checks
@@ -115,6 +116,7 @@ const VALIDATORS: &[(&str, fn(Value) -> Result<(), String>)] = &[
     ("PowerShell@2", powershell::validate_inputs),
     ("PublishBuildArtifacts@1", publish_build_artifacts::validate_inputs),
     ("PythonScript@0", python_script::validate_inputs),
+    ("SonarQubePrepare@8", sonar_qube_prepare::validate_inputs),
     ("UniversalPackages@1", universal_packages::validate_inputs),
     ("VSTest@2", vstest::validate_inputs),
 ];
@@ -736,6 +738,76 @@ mod tests {
         );
         let err = validate_task_step(&step).expect("recognized").unwrap_err();
         assert!(err.contains("SonarQubeAnalyze@8"), "got: {err}");
+    }
+
+    #[test]
+    fn roundtrip_sonar_qube_prepare_dotnet() {
+        assert_roundtrips(
+            sonar_qube_prepare::SonarQubePrepare::dotnet(
+                "sq-conn",
+                sonar_qube_prepare::DotNetMode::new("my-key"),
+            )
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_sonar_qube_prepare_cli_file() {
+        assert_roundtrips(
+            sonar_qube_prepare::SonarQubePrepare::cli(
+                "sq-conn",
+                sonar_qube_prepare::CliMode::File(sonar_qube_prepare::CliFileMode::new()),
+            )
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_sonar_qube_prepare_cli_manual() {
+        assert_roundtrips(
+            sonar_qube_prepare::SonarQubePrepare::cli(
+                "sq-conn",
+                sonar_qube_prepare::CliMode::Manual(sonar_qube_prepare::CliManualMode::new(
+                    "my-key",
+                )),
+            )
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_sonar_qube_prepare_other() {
+        assert_roundtrips(sonar_qube_prepare::SonarQubePrepare::other("sq-conn").into_step());
+    }
+
+    #[test]
+    fn sonar_qube_prepare_input_for_wrong_mode_warns() {
+        // `configFile` is a cli-only input; it must not be accepted in dotnet mode.
+        let step = yaml(
+            r#"
+            task: SonarQubePrepare@8
+            inputs:
+              SonarQube: sq-conn
+              scannerMode: dotnet
+              projectKey: my-key
+              configFile: sonar-project.properties
+            "#,
+        );
+        let err = validate_task_step(&step).expect("recognized").unwrap_err();
+        assert!(err.contains("SonarQubePrepare@8"), "got: {err}");
+    }
+
+    #[test]
+    fn sonar_qube_prepare_missing_service_connection_warns() {
+        let step = yaml(
+            r#"
+            task: SonarQubePrepare@8
+            inputs:
+              scannerMode: other
+            "#,
+        );
+        let err = validate_task_step(&step).expect("recognized").unwrap_err();
+        assert!(err.contains("SonarQube"), "got: {err}");
     }
 
     #[test]
