@@ -30,10 +30,10 @@ use serde::de::DeserializeOwned;
 use serde_yaml::Value;
 
 use super::{
-    archive_files, azure_cli, azure_container_apps, azure_file_copy, azure_function_app,
-    azure_key_vault, azure_powershell, azure_web_app, bicep_deploy, cargo_authenticate, cmd_line,
-    copy_files, delete_files, docker, docker_installer, dotnet_core_cli, download_build_artifacts,
-    download_package, download_pipeline_artifact, download_secure_file, extract_files,
+    archive_files, arm_template_deployment, azure_cli, azure_container_apps, azure_file_copy,
+    azure_function_app, azure_key_vault, azure_powershell, azure_web_app, bicep_deploy,
+    cargo_authenticate, cmd_line, copy_files, delete_files, docker, docker_installer,
+    dotnet_core_cli, download_build_artifacts,    download_package, download_pipeline_artifact, download_secure_file, extract_files,
     github_release, go_tool, gradle, helm_installer, java_tool_installer, manual_validation, maven,
     maven_authenticate, node_tool, npm, npm_authenticate, nuget_authenticate, nuget_command,
     pip_authenticate, powershell, publish_build_artifacts, publish_code_coverage_results,
@@ -106,6 +106,10 @@ const VALIDATORS: &[(&str, fn(Value) -> Result<(), String>)] = &[
     ("npmAuthenticate@0", validate_by_deserialize::<npm_authenticate::NpmAuthenticate>),
     // ── Command / mode-dispatch builders (custom discriminator dispatch) ──
     ("AzureCLI@2", azure_cli::validate_inputs),
+    (
+        "AzureResourceManagerTemplateDeployment@3",
+        arm_template_deployment::validate_inputs,
+    ),
     ("AzureFileCopy@6", azure_file_copy::validate_inputs),
     ("AzurePowerShell@5", azure_powershell::validate_inputs),
     ("BicepDeploy@0", bicep_deploy::validate_inputs),
@@ -905,6 +909,83 @@ mod tests {
         );
         let err = validate_task_step(&step).expect("recognized").unwrap_err();
         assert!(err.contains("resourceGroupName"), "got: {err}");
+    }
+
+    #[test]
+    fn roundtrip_arm_template_deployment_resource_group() {
+        assert_roundtrips(
+            arm_template_deployment::ArmTemplateDeployment::resource_group_deploy(
+                arm_template_deployment::ResourceGroupDeploy::new(
+                    "arm-conn",
+                    "$(SubId)",
+                    "my-rg",
+                    "East US",
+                    arm_template_deployment::ArmTemplateSource::linked_artifact("infra/main.bicep"),
+                ),
+            )
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_arm_template_deployment_delete_rg() {
+        assert_roundtrips(
+            arm_template_deployment::ArmTemplateDeployment::resource_group_delete(
+                arm_template_deployment::ResourceGroupDelete::new("arm-conn", "$(SubId)", "my-rg"),
+            )
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_arm_template_deployment_management_group() {
+        assert_roundtrips(
+            arm_template_deployment::ArmTemplateDeployment::management_group_deploy(
+                arm_template_deployment::ManagementGroupDeploy::new(
+                    "arm-conn",
+                    "East US",
+                    arm_template_deployment::ArmTemplateSource::url(
+                        "https://example.com/azuredeploy.json",
+                    ),
+                ),
+            )
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn arm_template_deployment_template_input_in_delete_warns() {
+        // `csmFile` is not valid for the DeleteRG action.
+        let step = yaml(
+            r#"
+            task: AzureResourceManagerTemplateDeployment@3
+            inputs:
+              azureResourceManagerConnection: arm-conn
+              deploymentScope: Resource Group
+              action: DeleteRG
+              subscriptionId: $(SubId)
+              resourceGroupName: my-rg
+              csmFile: infra/main.bicep
+            "#,
+        );
+        let err = validate_task_step(&step).expect("recognized").unwrap_err();
+        assert!(err.contains("AzureResourceManagerTemplateDeployment@3"), "got: {err}");
+    }
+
+    #[test]
+    fn arm_template_deployment_missing_location_warns() {
+        let step = yaml(
+            r#"
+            task: AzureResourceManagerTemplateDeployment@3
+            inputs:
+              azureResourceManagerConnection: arm-conn
+              deploymentScope: Subscription
+              subscriptionId: $(SubId)
+              csmFile: infra/main.bicep
+            "#,
+        );
+        let err = validate_task_step(&step).expect("recognized").unwrap_err();
+        assert!(err.contains("location"), "got: {err}");
     }
 
     #[test]
