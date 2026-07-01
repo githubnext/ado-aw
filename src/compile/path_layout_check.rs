@@ -47,7 +47,7 @@ const DEPRECATED_MARKERS: &[&str] = &["workspace", "working_directory", "trigger
 ///
 /// Warning-only: the returned strings are advisory. Returns an empty
 /// vector when nothing looks wrong. Messages are de-duplicated.
-pub fn collect_path_layout_warnings(front_matter: &FrontMatter, markdown_body: &str) -> Vec<String> {
+pub(crate) fn collect_path_layout_warnings(front_matter: &FrontMatter, markdown_body: &str) -> Vec<String> {
     let mut warnings: Vec<String> = Vec::new();
 
     let checked_out: Vec<&str> = front_matter.checkout.iter().map(String::as_str).collect();

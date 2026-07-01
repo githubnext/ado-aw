@@ -801,7 +801,7 @@ pub fn compute_effective_workspace(
 /// no additional checkouts" advisory warning is intentionally dropped here;
 /// the normal typed compile path still surfaces it via
 /// [`compute_effective_workspace`].
-pub fn resolve_working_directory_expr(
+pub(crate) fn resolve_working_directory_expr(
     explicit_workspace: &Option<String>,
     checkout: &[String],
     agent_name: &str,
