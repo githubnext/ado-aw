@@ -31,8 +31,8 @@ use serde_yaml::Value;
 
 use super::{
     archive_files, azure_cli, azure_container_apps, azure_file_copy, azure_function_app,
-    azure_key_vault, azure_powershell, azure_web_app, cargo_authenticate, cmd_line, copy_files,
-    delete_files, docker, docker_installer, dotnet_core_cli, download_build_artifacts,
+    azure_key_vault, azure_powershell, azure_web_app, bicep_deploy, cargo_authenticate, cmd_line,
+    copy_files, delete_files, docker, docker_installer, dotnet_core_cli, download_build_artifacts,
     download_package, download_pipeline_artifact, download_secure_file, extract_files,
     github_release, go_tool, gradle, helm_installer, java_tool_installer, manual_validation, maven,
     maven_authenticate, node_tool, npm, npm_authenticate, nuget_authenticate, nuget_command,
@@ -108,6 +108,7 @@ const VALIDATORS: &[(&str, fn(Value) -> Result<(), String>)] = &[
     ("AzureCLI@2", azure_cli::validate_inputs),
     ("AzureFileCopy@6", azure_file_copy::validate_inputs),
     ("AzurePowerShell@5", azure_powershell::validate_inputs),
+    ("BicepDeploy@0", bicep_deploy::validate_inputs),
     ("Docker@2", docker::validate_inputs),
     ("DotNetCoreCLI@2", dotnet_core_cli::validate_inputs),
     ("GitHubRelease@1", github_release::validate_inputs),
@@ -843,6 +844,67 @@ mod tests {
         );
         let err = validate_task_step(&step).expect("recognized").unwrap_err();
         assert!(err.contains("AzureFunctionApp@2"), "got: {err}");
+    }
+
+    #[test]
+    fn roundtrip_bicep_deploy_resource_group() {
+        assert_roundtrips(
+            bicep_deploy::deploy_to_resource_group("arm-conn", "$(SubId)", "my-rg").into_step(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_bicep_deploy_stack_subscription() {
+        assert_roundtrips(
+            bicep_deploy::BicepDeploy::new(
+                "arm-conn",
+                bicep_deploy::BicepScope::Subscription {
+                    subscription_id: "$(SubId)".into(),
+                    location: "eastus".into(),
+                },
+                bicep_deploy::BicepDeploymentType::DeploymentStack(
+                    bicep_deploy::BicepDeploymentStack::new()
+                        .deny_settings_mode(bicep_deploy::BicepDenySettingsMode::DenyDelete)
+                        .bypass_stack_out_of_sync_error(true),
+                ),
+            )
+            .template_file("infra/main.bicep")
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn bicep_deploy_stack_input_in_deployment_type_warns() {
+        // `denySettingsMode` is a deploymentStack-only input.
+        let step = yaml(
+            r#"
+            task: BicepDeploy@0
+            inputs:
+              azureResourceManagerConnection: arm-conn
+              type: deployment
+              scope: resourceGroup
+              subscriptionId: $(SubId)
+              resourceGroupName: my-rg
+              denySettingsMode: denyDelete
+            "#,
+        );
+        let err = validate_task_step(&step).expect("recognized").unwrap_err();
+        assert!(err.contains("BicepDeploy@0"), "got: {err}");
+    }
+
+    #[test]
+    fn bicep_deploy_missing_scope_required_input_warns() {
+        let step = yaml(
+            r#"
+            task: BicepDeploy@0
+            inputs:
+              azureResourceManagerConnection: arm-conn
+              scope: resourceGroup
+              subscriptionId: $(SubId)
+            "#,
+        );
+        let err = validate_task_step(&step).expect("recognized").unwrap_err();
+        assert!(err.contains("resourceGroupName"), "got: {err}");
     }
 
     #[test]
