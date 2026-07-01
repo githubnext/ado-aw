@@ -186,6 +186,18 @@ pub fn contains_ado_expression(s: &str) -> bool {
     s.contains("${{") || s.contains("$(") || s.contains("$[")
 }
 
+/// Returns true if the string contains an ADO **template** expression
+/// (`${{ ... }}`). These are evaluated by ADO's YAML template engine at queue
+/// time — *before* a task sees the value — so an author-supplied
+/// `${{ variables['secret-token'] }}` would be expanded into the pipeline.
+/// Narrower than [`contains_ado_expression`]: it deliberately does **not**
+/// match runtime macros (`$(...)`) or runtime expressions (`$[...]`), which are
+/// evaluated later and are intended in some author-facing fields (e.g. the
+/// manual-review `instructions` message supports `$(...)` interpolation).
+pub fn contains_ado_template_expression(s: &str) -> bool {
+    s.contains("${{")
+}
+
 /// Returns true if the string contains an ADO pipeline command
 /// (`##vso[` or `##[`).
 pub fn contains_pipeline_command(s: &str) -> bool {

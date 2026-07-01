@@ -3,8 +3,9 @@
 //! ADO task reference:
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/use-ruby-version-v0>
 
-use super::common::bool_input;
+use super::common::{bool_input, de_opt_bool_flex};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Builder for a [`TaskStep`] invoking `UseRubyVersion@0`.
 ///
@@ -14,10 +15,14 @@ use crate::compile::ir::step::TaskStep;
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/use-ruby-version-v0>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UseRubyVersion {
+    #[serde(rename = "versionSpec")]
     version_spec: String,
+    #[serde(rename = "addToPath", default, deserialize_with = "de_opt_bool_flex")]
     add_to_path: Option<bool>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 

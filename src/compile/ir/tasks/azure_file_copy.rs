@@ -9,17 +9,80 @@
 //! ADO task reference:
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/azure-file-copy-v6>
 
-use super::common::{push_bool, push_opt};
+use super::common::{de_opt_bool_flex, push_bool, push_opt};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
+use serde_yaml::Value;
+
+/// Validate an authored `AzureFileCopy@6` `inputs:` mapping (advisory
+/// front-matter validation, see [`super::parse`]).
+pub(crate) fn validate_inputs(inputs: Value) -> Result<(), String> {
+    let mut map = match inputs {
+        Value::Mapping(m) => m,
+        Value::Null => Default::default(),
+        other => return Err(format!("`inputs` must be a mapping, got {other:?}")),
+    };
+    let destination = match map.remove("Destination") {
+        Some(value) => value
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| "`Destination` must be a string".to_string())?,
+        None => "AzureBlob".to_string(),
+    };
+
+    validate_common(&Value::Mapping(map.clone())).map_err(|e| format!("common inputs: {e}"))?;
+    remove_common_inputs(&mut map);
+    let rest = Value::Mapping(map);
+
+    let result = match destination.as_str() {
+        "AzureBlob" => serde_yaml::from_value::<AzureFileCopyToBlob>(rest).map(drop),
+        "AzureVMs" => serde_yaml::from_value::<AzureFileCopyToVMs>(rest).map(drop),
+        other => return Err(format!("AzureFileCopy@6: unknown Destination `{other}`")),
+    };
+    result.map_err(|e| format!("Destination `{destination}`: {e}"))
+}
+
+fn validate_common(inputs: &Value) -> Result<(), serde_yaml::Error> {
+    serde_yaml::from_value::<AzureFileCopyCommonInputs>(inputs.clone()).map(drop)
+}
+
+fn remove_common_inputs(map: &mut serde_yaml::Mapping) {
+    for key in [
+        "SourcePath",
+        "azureSubscription",
+        "storage",
+        "CleanTargetBeforeCopy",
+    ] {
+        map.remove(key);
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct AzureFileCopyCommonInputs {
+    #[serde(rename = "SourcePath")]
+    _source_path: String,
+    #[serde(rename = "azureSubscription")]
+    _azure_subscription: String,
+    #[serde(rename = "storage")]
+    _storage: String,
+    #[serde(
+        rename = "CleanTargetBeforeCopy",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
+    _clean_target_before_copy: Option<bool>,
+}
 
 /// Resource filtering method for Azure VM targets.
 ///
 /// Controls how the `MachineNames` filter is interpreted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum ResourceFilteringMethod {
     /// Filter by machine name (`machineNames`). ADO default.
+    #[serde(rename = "machineNames")]
     MachineNames,
     /// Filter by tag (`tags`).
+    #[serde(rename = "tags")]
     Tags,
 }
 
@@ -52,10 +115,14 @@ pub enum AzureFileCopyDestination {
 /// Inputs for [`AzureFileCopyDestination::AzureBlob`].
 ///
 /// `container_name` is required; all other inputs are optional.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AzureFileCopyToBlob {
+    #[serde(rename = "ContainerName")]
     container_name: String,
+    #[serde(rename = "BlobPrefix", default)]
     blob_prefix: Option<String>,
+    #[serde(rename = "AdditionalArgumentsForBlobCopy", default)]
     additional_arguments: Option<String>,
 }
 
@@ -95,17 +162,36 @@ impl AzureFileCopyToBlob {
 /// The four positional parameters (`resource_group`, `admin_user`,
 /// `admin_password`, `target_path`) are required; all other inputs are
 /// optional.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AzureFileCopyToVMs {
+    #[serde(rename = "resourceGroup")]
     resource_group: String,
+    #[serde(rename = "vmsAdminUserName")]
     admin_user: String,
+    #[serde(rename = "vmsAdminPassword")]
     admin_password: String,
+    #[serde(rename = "TargetPath")]
     target_path: String,
+    #[serde(rename = "ResourceFilteringMethod", default)]
     resource_filtering_method: Option<ResourceFilteringMethod>,
+    #[serde(rename = "MachineNames", default)]
     machine_names: Option<String>,
+    #[serde(rename = "AdditionalArgumentsForVMCopy", default)]
     additional_arguments: Option<String>,
+    #[serde(
+        rename = "enableCopyPrerequisites",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     enable_copy_prerequisites: Option<bool>,
+    #[serde(
+        rename = "CopyFilesInParallel",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     copy_files_in_parallel: Option<bool>,
+    #[serde(rename = "skipCACheck", default, deserialize_with = "de_opt_bool_flex")]
     skip_ca_check: Option<bool>,
 }
 
@@ -275,14 +361,19 @@ impl AzureFileCopy {
 
         let mut t = TaskStep::new(
             "AzureFileCopy@6",
-            self.display_name.unwrap_or_else(|| "Azure File Copy".into()),
+            self.display_name
+                .unwrap_or_else(|| "Azure File Copy".into()),
         )
         .with_input("SourcePath", self.source_path)
         .with_input("azureSubscription", self.azure_subscription)
         .with_input("Destination", destination_str)
         .with_input("storage", self.storage);
 
-        push_bool(&mut t, "CleanTargetBeforeCopy", self.clean_target_before_copy);
+        push_bool(
+            &mut t,
+            "CleanTargetBeforeCopy",
+            self.clean_target_before_copy,
+        );
 
         match self.destination {
             AzureFileCopyDestination::AzureBlob(blob) => {
@@ -308,7 +399,11 @@ impl AzureFileCopy {
                     "AdditionalArgumentsForVMCopy",
                     vms.additional_arguments,
                 );
-                push_bool(&mut t, "enableCopyPrerequisites", vms.enable_copy_prerequisites);
+                push_bool(
+                    &mut t,
+                    "enableCopyPrerequisites",
+                    vms.enable_copy_prerequisites,
+                );
                 push_bool(&mut t, "CopyFilesInParallel", vms.copy_files_in_parallel);
                 push_bool(&mut t, "skipCACheck", vms.skip_ca_check);
             }
@@ -376,7 +471,9 @@ mod tests {
             Some("$(Build.BuildNumber)")
         );
         assert_eq!(
-            step.inputs.get("AdditionalArgumentsForBlobCopy").map(String::as_str),
+            step.inputs
+                .get("AdditionalArgumentsForBlobCopy")
+                .map(String::as_str),
             Some("--blob-type=PageBlob")
         );
         assert_eq!(
@@ -446,7 +543,9 @@ mod tests {
         .into_step();
 
         assert_eq!(
-            step.inputs.get("ResourceFilteringMethod").map(String::as_str),
+            step.inputs
+                .get("ResourceFilteringMethod")
+                .map(String::as_str),
             Some("tags")
         );
         assert_eq!(
@@ -454,7 +553,9 @@ mod tests {
             Some("Role:Web")
         );
         assert_eq!(
-            step.inputs.get("enableCopyPrerequisites").map(String::as_str),
+            step.inputs
+                .get("enableCopyPrerequisites")
+                .map(String::as_str),
             Some("true")
         );
         assert_eq!(

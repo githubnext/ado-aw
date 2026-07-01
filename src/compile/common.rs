@@ -775,24 +775,61 @@ pub fn compute_effective_workspace(
     checkout: &[String],
     agent_name: &str,
 ) -> Result<String> {
+    let (encoded, warn_no_checkouts) =
+        resolve_effective_workspace(explicit_workspace, checkout, agent_name)?;
+    if warn_no_checkouts {
+        let ws = explicit_workspace.as_deref().unwrap_or("repo");
+        eprintln!(
+            "Warning: Agent '{}' has workspace: {} but no additional repositories in checkout. \
+            When only 'self' is checked out, $(Build.SourcesDirectory) already contains the repository content. \
+            The workspace setting has no effect in this case.",
+            agent_name, ws
+        );
+    }
+    Ok(encoded)
+}
+
+/// Resolve the `workspace:` setting straight to the working-directory ADO
+/// path expression (e.g. `$(Build.SourcesDirectory)/<alias>`), with **no**
+/// side effects.
+///
+/// This is the side-effect-free counterpart to
+/// [`compute_effective_workspace`] + [`generate_working_directory`]. It is
+/// used by the `legacy_path_markers` codemod (codemods must stay pure — no
+/// stderr, no I/O) to migrate `{{ workspace }}` / `{{ working_directory }}`
+/// markers to the explicit path they resolved to. The "workspace: repo with
+/// no additional checkouts" advisory warning is intentionally dropped here;
+/// the normal typed compile path still surfaces it via
+/// [`compute_effective_workspace`].
+pub(crate) fn resolve_working_directory_expr(
+    explicit_workspace: &Option<String>,
+    checkout: &[String],
+    agent_name: &str,
+) -> Result<String> {
+    let (encoded, _warn) = resolve_effective_workspace(explicit_workspace, checkout, agent_name)?;
+    Ok(generate_working_directory(&encoded))
+}
+
+/// Pure resolution core shared by [`compute_effective_workspace`] (which adds
+/// a stderr advisory warning) and [`resolve_working_directory_expr`] (which
+/// must remain side-effect-free for codemod use).
+///
+/// Returns the encoded effective-workspace string (consumed by
+/// [`generate_working_directory`]) and a flag indicating whether the
+/// "workspace: repo/self with no additional checkouts" advisory applies.
+fn resolve_effective_workspace(
+    explicit_workspace: &Option<String>,
+    checkout: &[String],
+    agent_name: &str,
+) -> Result<(String, bool)> {
     let has_additional_checkouts = !checkout.is_empty();
 
     match explicit_workspace {
         Some(ws) => {
             let ws = ws.as_str();
             match ws {
-                "root" => Ok("root".to_string()),
-                "repo" | "self" => {
-                    if !has_additional_checkouts {
-                        eprintln!(
-                            "Warning: Agent '{}' has workspace: {} but no additional repositories in checkout. \
-                            When only 'self' is checked out, $(Build.SourcesDirectory) already contains the repository content. \
-                            The workspace setting has no effect in this case.",
-                            agent_name, ws
-                        );
-                    }
-                    Ok("repo".to_string())
-                }
+                "root" => Ok(("root".to_string(), false)),
+                "repo" | "self" => Ok(("repo".to_string(), !has_additional_checkouts)),
                 alias => {
                     // Defense in depth: even though aliases are constrained
                     // by `validate_checkout_list` to match a `repository:`
@@ -828,13 +865,47 @@ pub fn compute_effective_workspace(
                             checkout
                         );
                     }
-                    Ok(format!("{}{}", WORKSPACE_ALIAS_PREFIX, alias))
+                    Ok((format!("{}{}", WORKSPACE_ALIAS_PREFIX, alias), false))
                 }
             }
         }
-        None if has_additional_checkouts => Ok("repo".to_string()),
-        None => Ok("root".to_string()),
+        None if has_additional_checkouts => Ok(("repo".to_string(), false)),
+        None => Ok(("root".to_string(), false)),
     }
+}
+
+/// Whether `input` contains a `{{ name }}` template marker, ignoring
+/// interior whitespace (so both `{{ workspace }}` and `{{workspace}}`
+/// match). Non-matching `{{ ... }}` spans (e.g. `{{#runtime-import …}}`
+/// or `${{ parameters.x }}`) are ignored.
+///
+/// Shared by the `legacy_path_markers` codemod (marker detection) and
+/// the path-layout validation pass (agent-body deprecation warnings).
+pub(crate) fn contains_template_marker(input: &str, name: &str) -> bool {
+    let mut i = 0;
+    while let Some(open) = input[i..].find("{{") {
+        let marker_start = i + open;
+        let start = marker_start + 2;
+        // Skip `${{ ... }}` (an ADO template expression), which is never a
+        // legacy marker even if its inner content trims to `name`. Matching it
+        // here would both raise a false positive and — in `replace_marker` —
+        // splice `repl` after the `$`, corrupting the output.
+        let preceded_by_dollar =
+            marker_start > 0 && input.as_bytes()[marker_start - 1] == b'$';
+        if !preceded_by_dollar
+            && let Some(close) = input[start..].find("}}")
+            && input[start..start + close].trim() == name
+        {
+            return true;
+        }
+        // Advance by one code-point past the `{{` (not past the closing
+        // `}}`) so nested `{{ ... }}` forms are still discovered. This keeps
+        // the scan consistent with `replace_marker`, which walks the input a
+        // code-point at a time; otherwise the two helpers could disagree on
+        // pathological doubly-nested input and leave a marker unsubstituted.
+        i = marker_start + 1;
+    }
+    false
 }
 
 /// Generate the directory where the trigger ("self") repository is checked out.
@@ -1231,7 +1302,7 @@ pub(crate) fn debug_create_issue_enabled(front_matter: &FrontMatter) -> bool {
 ///
 /// Pure config check — no I/O, runs at compile time.
 pub fn validate_ado_aw_debug_config(front_matter: &FrontMatter) -> Result<()> {
-    use crate::safeoutputs::DEBUG_ONLY_TOOLS;
+    use crate::safe_outputs::DEBUG_ONLY_TOOLS;
 
     // Defence-in-depth: reject any debug-only tool name appearing under the
     // regular safe-outputs surface. There is no legitimate reason for it to
@@ -1256,7 +1327,7 @@ pub fn validate_ado_aw_debug_config(front_matter: &FrontMatter) -> Result<()> {
         return Ok(());
     };
 
-    crate::safeoutputs::validate_target_repo(&ci.target_repo)?;
+    crate::safe_outputs::validate_target_repo(&ci.target_repo)?;
 
     crate::validate::reject_pipeline_injection(
         &ci.target_repo,
@@ -1476,7 +1547,7 @@ pub fn generate_executor_ado_env(
 /// to prevent shell injection when the args are embedded in bash commands.
 /// Unrecognized tool names emit a compile-time warning and are skipped.
 pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
-    use crate::safeoutputs::{ALL_KNOWN_SAFE_OUTPUTS, ALWAYS_ON_TOOLS, NON_MCP_SAFE_OUTPUT_KEYS};
+    use crate::safe_outputs::{ALL_KNOWN_SAFE_OUTPUTS, ALWAYS_ON_TOOLS, NON_MCP_SAFE_OUTPUT_KEYS};
     use std::collections::HashSet;
 
     let debug_create_issue = debug_create_issue_enabled(front_matter);
@@ -1491,7 +1562,7 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
     let mut seen = HashSet::new();
     let mut tools: Vec<String> = Vec::new();
     let mut effective_mcp_tool_count = 0usize;
-    for key in front_matter.safe_outputs.keys() {
+    for key in front_matter.safe_output_tool_names() {
         if !validate::is_safe_tool_name(key) {
             eprintln!(
                 "Warning: skipping invalid safe-output tool name '{}' (must be ASCII alphanumeric/hyphens only)",
@@ -1740,17 +1811,24 @@ pub fn validate_resolve_pr_thread_statuses(front_matter: &FrontMatter) -> Result
 /// `validate_ado_aw_debug_config` with a more specific error message;
 /// this validator skips them so the operator gets that better message.
 pub fn validate_safe_outputs_keys(front_matter: &FrontMatter) -> Result<()> {
-    use crate::safeoutputs::{ALL_KNOWN_SAFE_OUTPUTS, DEBUG_ONLY_TOOLS, NON_MCP_SAFE_OUTPUT_KEYS};
+    use crate::safe_outputs::{
+        ALL_KNOWN_SAFE_OUTPUTS, DEBUG_ONLY_TOOLS, NON_MCP_SAFE_OUTPUT_KEYS, SAFE_OUTPUT_CONFIG_KEYS,
+    };
 
     let mut unknown: Vec<(String, Vec<&'static str>)> = Vec::new();
     let mut invalid_names: Vec<String> = Vec::new();
 
-    for key in front_matter.safe_outputs.keys() {
+    for key in front_matter.safe_output_tool_names() {
         if !validate::is_safe_tool_name(key) {
             invalid_names.push(key.clone());
             continue;
         }
         if NON_MCP_SAFE_OUTPUT_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        // Global config keys (e.g. `report-failure-as-work-item`) configure the
+        // Conclusion job rather than registering a tool — accept them here.
+        if SAFE_OUTPUT_CONFIG_KEYS.contains(&key.as_str()) {
             continue;
         }
         // `memory` is a known migration path — left as a warning in
@@ -1800,7 +1878,7 @@ pub fn validate_safe_outputs_keys(front_matter: &FrontMatter) -> Result<()> {
         msg.push_str(
             "\nValid safe-output keys are listed in docs/safe-outputs.md. \
              Each key must match exactly the kebab-case name registered by a \
-             tool in src/safeoutputs/ (e.g. `create-pull-request`, not \
+             tool in src/safe_outputs/ (e.g. `create-pull-request`, not \
              `create-pr`).",
         );
         anyhow::bail!("{}", msg);
@@ -1814,7 +1892,7 @@ pub fn validate_safe_outputs_keys(front_matter: &FrontMatter) -> Result<()> {
 /// If no candidate shares the head, returns an empty vec — better to give
 /// no suggestion than a misleading one (`update-pr` for `create-pr`).
 fn related_safe_output_names(key: &str) -> Vec<&'static str> {
-    use crate::safeoutputs::ALL_KNOWN_SAFE_OUTPUTS;
+    use crate::safe_outputs::ALL_KNOWN_SAFE_OUTPUTS;
 
     let head = key.split('-').next().unwrap_or_default();
     if head.is_empty() {
@@ -2277,6 +2355,11 @@ pub fn generate_allowed_domains(
     let engine = crate::engine::get_engine(front_matter.engine.engine_id())?;
     for host in engine.required_hosts(&front_matter.engine) {
         hosts.insert(host);
+    }
+    // Surface non-fatal engine network warnings (e.g. a literal but malformed
+    // COPILOT_PROVIDER_BASE_URL whose host could not be resolved and added).
+    for warning in engine.network_host_warnings(&front_matter.engine) {
+        eprintln!("warning: {warning}");
     }
 
     // Add user-specified hosts (validated against DNS-safe characters).
@@ -3948,6 +4031,21 @@ ado-aw-debug:
     }
 
     #[test]
+    fn test_generate_enabled_tools_args_skips_require_approval_reserved_key() {
+        // The reserved section-level `require-approval` key must never be
+        // treated as a tool name in `--enabled-tools`.
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  require-approval: true\n  create-pull-request:\n    target-branch: main\n---\n"
+        ).unwrap();
+        let args = generate_enabled_tools_args(&fm);
+        assert!(
+            !args.contains("require-approval"),
+            "reserved require-approval key must not be emitted as a tool: {args}"
+        );
+        assert!(args.contains("--enabled-tools create-pull-request"));
+    }
+
+    #[test]
     fn test_generate_enabled_tools_args_no_duplicates() {
         // If a diagnostic tool is also in safe-outputs, it shouldn't appear twice
         let (fm, _) = parse_markdown(
@@ -4183,6 +4281,25 @@ safe-outputs:
 "#;
         let (fm, _) = parse_markdown(yaml).unwrap();
         assert!(validate_safe_outputs_keys(&fm).is_ok());
+    }
+
+    #[test]
+    fn test_validate_safe_outputs_keys_accepts_global_config_key() {
+        // `report-failure-as-work-item` is a Conclusion-job config toggle, not
+        // a tool name. It must not trigger the "unrecognised tool name" error.
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  report-failure-as-work-item: false
+  noop: {}
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        assert!(
+            validate_safe_outputs_keys(&fm).is_ok(),
+            "report-failure-as-work-item should be accepted as a global config key"
+        );
     }
 
     #[test]

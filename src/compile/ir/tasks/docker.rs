@@ -17,6 +17,42 @@
 
 use super::common::push_opt;
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
+use serde_yaml::Value;
+
+/// Validate an authored `Docker@2` `inputs:` mapping (advisory front-matter
+/// validation, see [`super::parse`]).
+///
+/// `Docker@2` selects the command via its `command` input; we dispatch on it
+/// and deserialize the remaining inputs into that command's variant struct.
+/// Each variant struct derives `#[serde(deny_unknown_fields)]`, so an input
+/// belonging to a different command (or an unknown input) is rejected. This is
+/// done with an explicit dispatch rather than a serde internally-tagged enum
+/// because serde silently ignores `deny_unknown_fields` on tagged enums.
+pub(crate) fn validate_inputs(inputs: Value) -> Result<(), String> {
+    let mut map = match inputs {
+        Value::Mapping(m) => m,
+        Value::Null => Default::default(),
+        other => return Err(format!("`inputs` must be a mapping, got {other:?}")),
+    };
+    let command = map
+        .remove("command")
+        .and_then(|v| v.as_str().map(str::to_string))
+        // ADO defaults `command` to `buildAndPush` when omitted, so a missing
+        // command is valid (not an error) — fall back to the default variant.
+        .unwrap_or_else(|| "buildAndPush".to_string());
+    let rest = Value::Mapping(map);
+
+    let result = match command.as_str() {
+        "buildAndPush" => serde_yaml::from_value::<DockerBuildAndPush>(rest).map(drop),
+        "build" => serde_yaml::from_value::<DockerBuild>(rest).map(drop),
+        "push" => serde_yaml::from_value::<DockerPush>(rest).map(drop),
+        "login" => serde_yaml::from_value::<DockerLogin>(rest).map(drop),
+        "logout" => serde_yaml::from_value::<DockerLogout>(rest).map(drop),
+        other => return Err(format!("Docker@2: unknown command `{other}`")),
+    };
+    result.map_err(|e| format!("command `{command}`: {e}"))
+}
 
 /// `Docker@2` `command` selector, carrying the per-command optional inputs.
 #[derive(Debug, Clone)]
@@ -29,12 +65,18 @@ pub enum DockerCommand {
 }
 
 /// Optionals for `Docker@2` `command: buildAndPush`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DockerBuildAndPush {
+    #[serde(rename = "containerRegistry", default)]
     container_registry: Option<String>,
+    #[serde(default)]
     repository: Option<String>,
+    #[serde(rename = "Dockerfile", default)]
     dockerfile: Option<String>,
+    #[serde(rename = "buildContext", default)]
     build_context: Option<String>,
+    #[serde(default)]
     tags: Option<String>,
 }
 
@@ -70,13 +112,20 @@ impl DockerBuildAndPush {
 }
 
 /// Optionals for `Docker@2` `command: build`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DockerBuild {
+    #[serde(rename = "containerRegistry", default)]
     container_registry: Option<String>,
+    #[serde(default)]
     repository: Option<String>,
+    #[serde(rename = "Dockerfile", default)]
     dockerfile: Option<String>,
+    #[serde(rename = "buildContext", default)]
     build_context: Option<String>,
+    #[serde(default)]
     tags: Option<String>,
+    #[serde(default)]
     arguments: Option<String>,
 }
 
@@ -117,11 +166,16 @@ impl DockerBuild {
 }
 
 /// Optionals for `Docker@2` `command: push`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DockerPush {
+    #[serde(rename = "containerRegistry", default)]
     container_registry: Option<String>,
+    #[serde(default)]
     repository: Option<String>,
+    #[serde(default)]
     tags: Option<String>,
+    #[serde(default)]
     arguments: Option<String>,
 }
 
@@ -152,8 +206,10 @@ impl DockerPush {
 }
 
 /// Optionals for `Docker@2` `command: login`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DockerLogin {
+    #[serde(rename = "containerRegistry", default)]
     container_registry: Option<String>,
 }
 
@@ -169,8 +225,10 @@ impl DockerLogin {
 }
 
 /// Optionals for `Docker@2` `command: logout`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DockerLogout {
+    #[serde(rename = "containerRegistry", default)]
     container_registry: Option<String>,
 }
 
