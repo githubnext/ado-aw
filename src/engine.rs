@@ -572,8 +572,9 @@ fn copilot_env(engine_config: &EngineConfig) -> Result<String> {
     Ok(lines.join("\n"))
 }
 
-/// Render only the `COPILOT_PROVIDER_*` entries of `engine.env` as a YAML env
-/// block (`KEY: "VALUE"` lines, one per line; empty string when none present).
+/// Return the `COPILOT_PROVIDER_*` entries of `engine.env` as validated,
+/// **raw** `(key, value)` pairs (value un-rendered; empty vec when none present),
+/// sorted by key.
 ///
 /// Used by the Detection (threat-analysis) step so the detection Copilot run
 /// inherits the same BYOM/BYOK provider routing (and credential isolation) as
@@ -581,9 +582,14 @@ fn copilot_env(engine_config: &EngineConfig) -> Result<String> {
 /// main engine's `Env` (`threat_detection_inline_engine.go`). The main model is
 /// already threaded via the `--model` flag on the detection invocation, so only
 /// the provider routing/credential keys are needed here.
-pub fn copilot_provider_env(engine_config: &EngineConfig) -> Result<String> {
+///
+/// Returning raw pairs (rather than a rendered YAML string) lets the call site
+/// build typed `EnvValue`s directly — no render-to-YAML-then-reparse round-trip,
+/// and no implicit coupling between a quoting format and a re-parser. Each entry
+/// is validated with [`validate_engine_env_entry`], identical to the agent path.
+pub fn copilot_provider_env(engine_config: &EngineConfig) -> Result<Vec<(String, String)>> {
     let Some(env_map) = engine_config.env() else {
-        return Ok(String::new());
+        return Ok(Vec::new());
     };
     let mut keys: Vec<&String> = env_map
         .keys()
@@ -591,20 +597,22 @@ pub fn copilot_provider_env(engine_config: &EngineConfig) -> Result<String> {
         .collect();
     keys.sort();
 
-    let mut lines = Vec::new();
+    let mut pairs = Vec::with_capacity(keys.len());
     for key in keys {
-        lines.push(render_engine_env_entry(key, &env_map[key])?);
+        let value = &env_map[key];
+        validate_engine_env_entry(key, value)?;
+        pairs.push((key.clone(), value.clone()));
     }
-    Ok(lines.join("\n"))
+    Ok(pairs)
 }
 
-/// Validate a single `engine.env` entry and render it as a YAML `KEY: "VALUE"`
-/// line. Enforces env-var-name rules, blocks compiler-controlled keys, rejects
-/// pipeline-command injection / newlines, and applies the BYOM provider
-/// expression allowlist (allowlisted keys may carry an ADO macro `$(...)`; all
-/// others are literal-only). Shared by [`copilot_env`] and
-/// [`copilot_provider_env`] so both paths validate identically.
-fn render_engine_env_entry(key: &str, value: &str) -> Result<String> {
+/// Validate a single `engine.env` entry: enforces env-var-name rules, blocks
+/// compiler-controlled keys, rejects pipeline-command injection / newlines, and
+/// applies the BYOM provider expression allowlist (allowlisted keys may carry an
+/// ADO macro `$(...)`; all others are literal-only). Shared by
+/// [`render_engine_env_entry`] (agent path) and [`copilot_provider_env`]
+/// (detection path) so both validate identically.
+fn validate_engine_env_entry(key: &str, value: &str) -> Result<()> {
     // Validate key: must be a valid env var name
     if key.is_empty() {
         anyhow::bail!(
@@ -680,7 +688,13 @@ fn render_engine_env_entry(key: &str, value: &str) -> Result<String> {
             key
         );
     }
+    Ok(())
+}
 
+/// Validate a single `engine.env` entry and render it as a YAML `KEY: "VALUE"`
+/// line for the aggregated agent env block (see [`copilot_env`]).
+fn render_engine_env_entry(key: &str, value: &str) -> Result<String> {
+    validate_engine_env_entry(key, value)?;
     // YAML-quote the value to prevent injection
     Ok(format!(
         "{}: \"{}\"",
@@ -1410,26 +1424,22 @@ mod tests {
     }
 
     #[test]
-    fn copilot_provider_env_renders_only_provider_keys() {
+    fn copilot_provider_env_returns_only_provider_keys() {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    COPILOT_PROVIDER_TYPE: azure\n    COPILOT_PROVIDER_BEARER_TOKEN: \"$(Setup.FOUNDRY_TOKEN)\"\n    MY_VAR: keep-out\n---\n",
         ).unwrap();
-        let provider_env = copilot_provider_env(&fm.engine).unwrap();
-        assert!(
-            provider_env.contains(r#"COPILOT_PROVIDER_TYPE: "azure""#),
-            "provider env must include COPILOT_PROVIDER_* keys: {provider_env}"
-        );
-        assert!(
-            provider_env.contains(r#"COPILOT_PROVIDER_BEARER_TOKEN: "$(Setup.FOUNDRY_TOKEN)""#),
-            "provider env must carry the macro-valued credential: {provider_env}"
-        );
-        assert!(
-            !provider_env.contains("MY_VAR"),
-            "provider env must exclude non-provider keys: {provider_env}"
-        );
-        assert!(
-            !provider_env.contains("GITHUB_TOKEN"),
-            "provider env must not include the compiler-managed base env: {provider_env}"
+        let pairs = copilot_provider_env(&fm.engine).unwrap();
+        // Validated raw (key, value) pairs, sorted by key; non-provider and
+        // compiler-managed base env excluded.
+        assert_eq!(
+            pairs,
+            vec![
+                (
+                    "COPILOT_PROVIDER_BEARER_TOKEN".to_string(),
+                    "$(Setup.FOUNDRY_TOKEN)".to_string()
+                ),
+                ("COPILOT_PROVIDER_TYPE".to_string(), "azure".to_string()),
+            ]
         );
     }
 

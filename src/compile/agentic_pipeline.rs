@@ -201,7 +201,7 @@ pub(crate) fn build_pipeline_context(
     let detection_provider_env = if is_copilot {
         crate::engine::copilot_provider_env(&front_matter.engine)?
     } else {
-        String::new()
+        Vec::new()
     };
     // AWF path env (when extensions declare path prepends)
     let awf_paths = common::collect_awf_path_prepends(&extension_declarations);
@@ -510,14 +510,13 @@ pub(crate) struct StandaloneCtx {
     /// True when `engine.env` activates Copilot BYOM/BYOK mode. Pre-pulls the
     /// api-proxy container image in the Agent and Detection jobs.
     pub(crate) byom_active: bool,
-    /// Actual provider credential env keys present (user's casing) to pass to
-    /// AWF `--exclude-env`; non-empty ⇒ enable the api-proxy sidecar. Empty for
-    /// non-BYOM. Case-preserving so case-sensitive `--exclude-env` matches.
+    /// Actual provider credential env keys present to pass to AWF `--exclude-env`;
+    /// non-empty ⇒ enable the api-proxy sidecar. Empty for non-BYOM.
     pub(crate) byom_exclude_keys: Vec<String>,
-    /// Provider-only (`COPILOT_PROVIDER_*`) subset of `engine.env`, rendered as a
-    /// `KEY: "VALUE"` YAML block (empty when none). Applied to the Detection
+    /// Provider-only (`COPILOT_PROVIDER_*`) subset of `engine.env` as validated
+    /// raw `(key, value)` pairs (empty when none). Applied to the Detection
     /// (threat-analysis) step so it inherits BYOM provider routing + isolation.
-    pub(crate) detection_provider_env: String,
+    pub(crate) detection_provider_env: Vec<(String, String)>,
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -2758,7 +2757,7 @@ fn run_threat_analysis_step(
     working_directory: &str,
     engine_run_detection: &str,
     byom_exclude_keys: &[String],
-    detection_provider_env: &str,
+    detection_provider_env: &[(String, String)],
 ) -> Result<BashStep> {
     let api_proxy_block = awf_api_proxy_flags(byom_exclude_keys);
     let script = format!(
@@ -2797,19 +2796,10 @@ fn run_threat_analysis_step(
             EnvValue::RawYamlScalar(serde_yaml::Value::Number(1.into())),
         );
     // BYOM/BYOK: apply the COPILOT_PROVIDER_* env so the detection Copilot run
-    // routes to the same external provider as the main agent.
-    if !detection_provider_env.trim().is_empty() {
-        let synthetic_block = format!(
-            "env:\n{}",
-            detection_provider_env
-                .lines()
-                .map(|l| format!("  {l}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
-        for (k, v) in parse_env_block(&synthetic_block)? {
-            step = step.with_env(k, v);
-        }
+    // routes to the same external provider as the main agent. Classify each raw
+    // value directly (macro → PipelineVar, else Literal) — no YAML round-trip.
+    for (k, raw) in detection_provider_env {
+        step = step.with_env(k.clone(), env_value_from_str(raw));
     }
     Ok(step)
 }
@@ -3065,6 +3055,25 @@ fn dedent(s: &str) -> String {
 /// surfacing it loudly is much better than the previous silent
 /// empty-vec fallback (which produced runtime "GITHUB_TOKEN missing"
 /// failures in the pipeline with no compile-time signal).
+/// Classify a single raw env-var value string into a typed [`EnvValue`].
+///
+/// An ADO **macro** `$(NAME)` (with no nested `$` or `(`) becomes an
+/// [`EnvValue::PipelineVar`] so lowering re-emits the unquoted `$(NAME)` form;
+/// anything else becomes an [`EnvValue::Literal`]. Single source of truth for
+/// macro-vs-literal classification, shared by [`parse_env_block`] (which also
+/// handles YAML-typed scalars) and the detection provider-env path.
+fn env_value_from_str(raw: &str) -> super::ir::env::EnvValue {
+    use super::ir::env::EnvValue;
+    if let Some(inner) = raw.strip_prefix("$(").and_then(|s| s.strip_suffix(')'))
+        && !inner.contains('$')
+        && !inner.contains('(')
+    {
+        EnvValue::pipeline_var(inner.to_string())
+    } else {
+        EnvValue::literal(raw.to_string())
+    }
+}
+
 fn parse_env_block(yaml_block: &str) -> Result<Vec<(String, super::ir::env::EnvValue)>> {
     use super::ir::env::EnvValue;
     if yaml_block.trim().is_empty() {
@@ -3108,16 +3117,7 @@ fn parse_env_block(yaml_block: &str) -> Result<Vec<(String, super::ir::env::EnvV
             // lowering preserves the `$(X)` form unquoted; everything
             // else lands as a Literal.
             serde_yaml::Value::String(raw_value) => {
-                if let Some(inner) = raw_value
-                    .strip_prefix("$(")
-                    .and_then(|s| s.strip_suffix(')'))
-                    && !inner.contains('$')
-                    && !inner.contains('(')
-                {
-                    out.push((key, EnvValue::pipeline_var(inner.to_string())));
-                } else {
-                    out.push((key, EnvValue::literal(raw_value.clone())));
-                }
+                out.push((key, env_value_from_str(raw_value)));
             }
             // Non-string scalars (numbers / bools): preserve the
             // typed scalar identity through RawYamlScalar so the
