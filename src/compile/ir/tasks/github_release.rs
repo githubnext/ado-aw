@@ -8,18 +8,69 @@
 //! ADO task reference:
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/github-release-v1>
 
-use super::common::{push_bool, push_opt};
+use super::common::{de_opt_bool_flex, push_bool, push_opt};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
+use serde_yaml::Value;
+
+/// Validate an authored `GitHubRelease@1` `inputs:` mapping (advisory
+/// front-matter validation, see [`super::parse`]).
+pub(crate) fn validate_inputs(inputs: Value) -> Result<(), String> {
+    let mut map = match inputs {
+        Value::Mapping(m) => m,
+        Value::Null => Default::default(),
+        other => return Err(format!("`inputs` must be a mapping, got {other:?}")),
+    };
+    let action = match map.remove("action") {
+        Some(value) => value
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| "`action` must be a string".to_string())?,
+        None => "create".to_string(),
+    };
+
+    validate_common(&Value::Mapping(map.clone())).map_err(|e| format!("common inputs: {e}"))?;
+    remove_common_inputs(&mut map);
+    let rest = Value::Mapping(map);
+
+    let result = match action.as_str() {
+        "create" => serde_yaml::from_value::<GitHubReleaseCreate>(rest).map(drop),
+        "edit" => serde_yaml::from_value::<GitHubReleaseEdit>(rest).map(drop),
+        "delete" => serde_yaml::from_value::<GitHubReleaseDelete>(rest).map(drop),
+        other => return Err(format!("GitHubRelease@1: unknown action `{other}`")),
+    };
+    result.map_err(|e| format!("action `{action}`: {e}"))
+}
+
+fn validate_common(inputs: &Value) -> Result<(), serde_yaml::Error> {
+    serde_yaml::from_value::<GitHubReleaseCommonInputs>(inputs.clone()).map(drop)
+}
+
+fn remove_common_inputs(map: &mut serde_yaml::Mapping) {
+    for key in ["gitHubConnection", "repositoryName"] {
+        map.remove(key);
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubReleaseCommonInputs {
+    #[serde(rename = "gitHubConnection")]
+    _git_hub_connection: String,
+    #[serde(rename = "repositoryName")]
+    _repository_name: String,
+}
 
 // ─── Constrained input enums ──────────────────────────────────────────────────
 
 /// Where the release tag comes from (`tagSource` input). Only applies to
 /// `action: create`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum TagSource {
     /// Use the git tag that triggered the pipeline run (default).
+    #[serde(rename = "gitTag")]
     GitTag,
     /// Use a user-specified tag string.
+    #[serde(rename = "userSpecifiedTag")]
     UserSpecifiedTag,
 }
 
@@ -34,11 +85,13 @@ impl TagSource {
 
 /// Where the release notes come from (`releaseNotesSource` input). Applies to
 /// `action: create` and `action: edit`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum ReleaseNotesSource {
     /// Read release notes from a file (`releaseNotesFilePath`).
+    #[serde(rename = "filePath")]
     FilePath,
     /// Provide release notes inline (`releaseNotesInline`).
+    #[serde(rename = "inline")]
     Inline,
 }
 
@@ -53,11 +106,13 @@ impl ReleaseNotesSource {
 
 /// Upload mode for assets when editing a release (`assetUploadMode` input).
 /// Only applies to `action: edit`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum AssetUploadMode {
     /// Delete all existing assets before uploading (default).
+    #[serde(rename = "delete")]
     Delete,
     /// Replace individual matching assets.
+    #[serde(rename = "replace")]
     Replace,
 }
 
@@ -73,11 +128,14 @@ impl AssetUploadMode {
 /// Whether to mark the release as the latest GitHub release (`makeLatest`
 /// input). This is a three-way enum, not a plain bool: `legacy` preserves the
 /// pre-2022 comparison logic based on `isDraft` / `isPreRelease`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum MakeLatest {
+    #[serde(rename = "true")]
     True,
+    #[serde(rename = "false")]
     False,
     /// Use the legacy `isPreRelease` / `isDraft` comparison.
+    #[serde(rename = "legacy")]
     Legacy,
 }
 
@@ -93,13 +151,16 @@ impl MakeLatest {
 
 /// Which prior release to compare against when generating the changelog
 /// (`changeLogCompareToRelease` input).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum ChangeLogCompareToRelease {
     /// Compare against the last full (non-draft, non-pre-release) release (default).
+    #[serde(rename = "lastFullRelease")]
     FullRelease,
     /// Compare against the last non-draft release.
+    #[serde(rename = "lastNonDraftRelease")]
     NonDraftRelease,
     /// Compare against the last non-draft release matching a given tag.
+    #[serde(rename = "lastNonDraftReleaseByTag")]
     NonDraftReleaseByTag,
 }
 
@@ -114,11 +175,13 @@ impl ChangeLogCompareToRelease {
 }
 
 /// Changelog entry format (`changeLogType` input).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum ChangeLogType {
     /// Entries based on commit messages (default).
+    #[serde(rename = "commitBased")]
     CommitBased,
     /// Entries based on closed issues.
+    #[serde(rename = "issueBased")]
     IssueBased,
 }
 
@@ -138,24 +201,50 @@ impl ChangeLogType {
 /// All fields are optional because the ADO task provides sensible defaults. Set
 /// `tag_source` to [`TagSource::UserSpecifiedTag`] and call
 /// [`GitHubReleaseCreate::tag`] when you need to pin the tag string explicitly.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GitHubReleaseCreate {
+    #[serde(default)]
     target: Option<String>,
+    #[serde(rename = "tagSource", default)]
     tag_source: Option<TagSource>,
+    #[serde(rename = "tagPattern", default)]
     tag_pattern: Option<String>,
+    #[serde(default)]
     tag: Option<String>,
+    #[serde(default)]
     title: Option<String>,
+    #[serde(rename = "releaseNotesSource", default)]
     release_notes_source: Option<ReleaseNotesSource>,
+    #[serde(rename = "releaseNotesFilePath", default)]
     release_notes_file_path: Option<String>,
+    #[serde(rename = "releaseNotesInline", default)]
     release_notes_inline: Option<String>,
+    #[serde(default)]
     assets: Option<String>,
+    #[serde(rename = "isDraft", default, deserialize_with = "de_opt_bool_flex")]
     is_draft: Option<bool>,
+    #[serde(
+        rename = "isPreRelease",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     is_pre_release: Option<bool>,
+    #[serde(rename = "makeLatest", default)]
     make_latest: Option<MakeLatest>,
+    #[serde(
+        rename = "addChangeLog",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     add_change_log: Option<bool>,
+    #[serde(rename = "changeLogCompareToRelease", default)]
     change_log_compare_to_release: Option<ChangeLogCompareToRelease>,
+    #[serde(rename = "changeLogCompareToReleaseTag", default)]
     change_log_compare_to_release_tag: Option<String>,
+    #[serde(rename = "changeLogType", default)]
     change_log_type: Option<ChangeLogType>,
+    #[serde(rename = "changeLogLabels", default)]
     change_log_labels: Option<String>,
 }
 
@@ -277,24 +366,49 @@ impl GitHubReleaseCreate {
 }
 
 /// Required and optional inputs for `GitHubRelease@1` `action: edit`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GitHubReleaseEdit {
     /// `tag` — tag identifying the release to edit. Required.
+    #[serde(rename = "tag")]
     tag: String,
+    #[serde(default)]
     target: Option<String>,
+    #[serde(default)]
     title: Option<String>,
+    #[serde(rename = "releaseNotesSource", default)]
     release_notes_source: Option<ReleaseNotesSource>,
+    #[serde(rename = "releaseNotesFilePath", default)]
     release_notes_file_path: Option<String>,
+    #[serde(rename = "releaseNotesInline", default)]
     release_notes_inline: Option<String>,
+    #[serde(default)]
     assets: Option<String>,
+    #[serde(rename = "assetUploadMode", default)]
     asset_upload_mode: Option<AssetUploadMode>,
+    #[serde(rename = "isDraft", default, deserialize_with = "de_opt_bool_flex")]
     is_draft: Option<bool>,
+    #[serde(
+        rename = "isPreRelease",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     is_pre_release: Option<bool>,
+    #[serde(rename = "makeLatest", default)]
     make_latest: Option<MakeLatest>,
+    #[serde(
+        rename = "addChangeLog",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     add_change_log: Option<bool>,
+    #[serde(rename = "changeLogCompareToRelease", default)]
     change_log_compare_to_release: Option<ChangeLogCompareToRelease>,
+    #[serde(rename = "changeLogCompareToReleaseTag", default)]
     change_log_compare_to_release_tag: Option<String>,
+    #[serde(rename = "changeLogType", default)]
     change_log_type: Option<ChangeLogType>,
+    #[serde(rename = "changeLogLabels", default)]
     change_log_labels: Option<String>,
 }
 
@@ -420,9 +534,11 @@ impl GitHubReleaseEdit {
 }
 
 /// Required inputs for `GitHubRelease@1` `action: delete`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GitHubReleaseDelete {
     /// `tag` — tag identifying the release to delete. Required.
+    #[serde(rename = "tag")]
     tag: String,
 }
 
@@ -498,7 +614,11 @@ impl GitHubRelease {
         repository_name: impl Into<String>,
         spec: GitHubReleaseCreate,
     ) -> Self {
-        Self::new(git_hub_connection, repository_name, GitHubReleaseAction::Create(spec))
+        Self::new(
+            git_hub_connection,
+            repository_name,
+            GitHubReleaseAction::Create(spec),
+        )
     }
 
     /// `action: edit` — update an existing release.
@@ -507,7 +627,11 @@ impl GitHubRelease {
         repository_name: impl Into<String>,
         spec: GitHubReleaseEdit,
     ) -> Self {
-        Self::new(git_hub_connection, repository_name, GitHubReleaseAction::Edit(spec))
+        Self::new(
+            git_hub_connection,
+            repository_name,
+            GitHubReleaseAction::Edit(spec),
+        )
     }
 
     /// `action: delete` — delete an existing release.
@@ -516,7 +640,11 @@ impl GitHubRelease {
         repository_name: impl Into<String>,
         spec: GitHubReleaseDelete,
     ) -> Self {
-        Self::new(git_hub_connection, repository_name, GitHubReleaseAction::Delete(spec))
+        Self::new(
+            git_hub_connection,
+            repository_name,
+            GitHubReleaseAction::Delete(spec),
+        )
     }
 
     /// Override the default per-action `displayName`.
@@ -543,7 +671,11 @@ impl GitHubRelease {
         match self.action {
             GitHubReleaseAction::Create(s) => {
                 push_opt(&mut t, "target", s.target);
-                push_opt(&mut t, "tagSource", s.tag_source.map(|v| v.as_ado_str().to_string()));
+                push_opt(
+                    &mut t,
+                    "tagSource",
+                    s.tag_source.map(|v| v.as_ado_str().to_string()),
+                );
                 push_opt(&mut t, "tagPattern", s.tag_pattern);
                 push_opt(&mut t, "tag", s.tag);
                 push_opt(&mut t, "title", s.title);
@@ -557,14 +689,23 @@ impl GitHubRelease {
                 push_opt(&mut t, "assets", s.assets);
                 push_bool(&mut t, "isDraft", s.is_draft);
                 push_bool(&mut t, "isPreRelease", s.is_pre_release);
-                push_opt(&mut t, "makeLatest", s.make_latest.map(|v| v.as_ado_str().to_string()));
+                push_opt(
+                    &mut t,
+                    "makeLatest",
+                    s.make_latest.map(|v| v.as_ado_str().to_string()),
+                );
                 push_bool(&mut t, "addChangeLog", s.add_change_log);
                 push_opt(
                     &mut t,
                     "changeLogCompareToRelease",
-                    s.change_log_compare_to_release.map(|v| v.as_ado_str().to_string()),
+                    s.change_log_compare_to_release
+                        .map(|v| v.as_ado_str().to_string()),
                 );
-                push_opt(&mut t, "changeLogCompareToReleaseTag", s.change_log_compare_to_release_tag);
+                push_opt(
+                    &mut t,
+                    "changeLogCompareToReleaseTag",
+                    s.change_log_compare_to_release_tag,
+                );
                 push_opt(
                     &mut t,
                     "changeLogType",
@@ -591,14 +732,23 @@ impl GitHubRelease {
                 );
                 push_bool(&mut t, "isDraft", s.is_draft);
                 push_bool(&mut t, "isPreRelease", s.is_pre_release);
-                push_opt(&mut t, "makeLatest", s.make_latest.map(|v| v.as_ado_str().to_string()));
+                push_opt(
+                    &mut t,
+                    "makeLatest",
+                    s.make_latest.map(|v| v.as_ado_str().to_string()),
+                );
                 push_bool(&mut t, "addChangeLog", s.add_change_log);
                 push_opt(
                     &mut t,
                     "changeLogCompareToRelease",
-                    s.change_log_compare_to_release.map(|v| v.as_ado_str().to_string()),
+                    s.change_log_compare_to_release
+                        .map(|v| v.as_ado_str().to_string()),
                 );
-                push_opt(&mut t, "changeLogCompareToReleaseTag", s.change_log_compare_to_release_tag);
+                push_opt(
+                    &mut t,
+                    "changeLogCompareToReleaseTag",
+                    s.change_log_compare_to_release_tag,
+                );
                 push_opt(
                     &mut t,
                     "changeLogType",
@@ -661,9 +811,15 @@ mod tests {
         .into_step();
         assert_eq!(t.display_name, "Publish Release");
         assert_eq!(t.inputs.get("action").map(String::as_str), Some("create"));
-        assert_eq!(t.inputs.get("tagSource").map(String::as_str), Some("userSpecifiedTag"));
+        assert_eq!(
+            t.inputs.get("tagSource").map(String::as_str),
+            Some("userSpecifiedTag")
+        );
         assert_eq!(t.inputs.get("tag").map(String::as_str), Some("v1.2.3"));
-        assert_eq!(t.inputs.get("title").map(String::as_str), Some("Release 1.2.3"));
+        assert_eq!(
+            t.inputs.get("title").map(String::as_str),
+            Some("Release 1.2.3")
+        );
         assert_eq!(
             t.inputs.get("releaseNotesSource").map(String::as_str),
             Some("inline")
@@ -676,7 +832,10 @@ mod tests {
             t.inputs.get("assets").map(String::as_str),
             Some("$(Build.ArtifactStagingDirectory)/*.tar.gz")
         );
-        assert_eq!(t.inputs.get("isPreRelease").map(String::as_str), Some("false"));
+        assert_eq!(
+            t.inputs.get("isPreRelease").map(String::as_str),
+            Some("false")
+        );
         assert_eq!(t.inputs.get("makeLatest").map(String::as_str), Some("true"));
     }
 
@@ -690,8 +849,14 @@ mod tests {
                 .tag_pattern(r"^v\d+\.\d+\.\d+$"),
         )
         .into_step();
-        assert_eq!(t.inputs.get("tagSource").map(String::as_str), Some("gitTag"));
-        assert_eq!(t.inputs.get("tagPattern").map(String::as_str), Some(r"^v\d+\.\d+\.\d+$"));
+        assert_eq!(
+            t.inputs.get("tagSource").map(String::as_str),
+            Some("gitTag")
+        );
+        assert_eq!(
+            t.inputs.get("tagPattern").map(String::as_str),
+            Some(r"^v\d+\.\d+\.\d+$")
+        );
     }
 
     #[test]
@@ -707,16 +872,26 @@ mod tests {
                 .change_log_labels(r#"[{"label":"bug","displayName":"Bugs","state":"closed"}]"#),
         )
         .into_step();
-        assert_eq!(t.inputs.get("addChangeLog").map(String::as_str), Some("true"));
         assert_eq!(
-            t.inputs.get("changeLogCompareToRelease").map(String::as_str),
+            t.inputs.get("addChangeLog").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            t.inputs
+                .get("changeLogCompareToRelease")
+                .map(String::as_str),
             Some("lastNonDraftReleaseByTag")
         );
         assert_eq!(
-            t.inputs.get("changeLogCompareToReleaseTag").map(String::as_str),
+            t.inputs
+                .get("changeLogCompareToReleaseTag")
+                .map(String::as_str),
             Some("v1.0.0")
         );
-        assert_eq!(t.inputs.get("changeLogType").map(String::as_str), Some("issueBased"));
+        assert_eq!(
+            t.inputs.get("changeLogType").map(String::as_str),
+            Some("issueBased")
+        );
     }
 
     #[test]
@@ -744,19 +919,18 @@ mod tests {
                 .asset_upload_mode(AssetUploadMode::Replace),
         )
         .into_step();
-        assert_eq!(t.inputs.get("assetUploadMode").map(String::as_str), Some("replace"));
+        assert_eq!(
+            t.inputs.get("assetUploadMode").map(String::as_str),
+            Some("replace")
+        );
         // tag_source should NOT be emitted for edit
         assert!(t.inputs.get("tagSource").is_none());
     }
 
     #[test]
     fn delete_emits_required_tag_only() {
-        let t = GitHubRelease::delete(
-            "conn",
-            "org/repo",
-            GitHubReleaseDelete::new("v0.1.0-rc.1"),
-        )
-        .into_step();
+        let t = GitHubRelease::delete("conn", "org/repo", GitHubReleaseDelete::new("v0.1.0-rc.1"))
+            .into_step();
         assert_eq!(t.task, "GitHubRelease@1");
         assert_eq!(t.display_name, "Delete GitHub Release");
         assert_eq!(t.inputs.get("action").map(String::as_str), Some("delete"));
@@ -774,6 +948,9 @@ mod tests {
             GitHubReleaseCreate::new().make_latest(MakeLatest::Legacy),
         )
         .into_step();
-        assert_eq!(t.inputs.get("makeLatest").map(String::as_str), Some("legacy"));
+        assert_eq!(
+            t.inputs.get("makeLatest").map(String::as_str),
+            Some("legacy")
+        );
     }
 }

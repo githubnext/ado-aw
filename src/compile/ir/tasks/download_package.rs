@@ -1,16 +1,23 @@
 //! Typed builder for `DownloadPackage@1`.
 
-use super::common::{bool_input, push_opt};
+use super::common::{bool_input, de_opt_bool_flex, push_opt};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Package ecosystem for [`DownloadPackage`] (`packageType` input).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum PackageType {
+    #[serde(rename = "nuget")]
     NuGet,
+    #[serde(rename = "npm")]
     Npm,
+    #[serde(rename = "pypi")]
     PyPi,
+    #[serde(rename = "maven")]
     Maven,
+    #[serde(rename = "upack")]
     UPack,
+    #[serde(rename = "cargo")]
     Cargo,
 }
 
@@ -40,17 +47,24 @@ impl PackageType {
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/download-package-v1-task>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DownloadPackage {
+    #[serde(rename = "packageType")]
     package_type: PackageType,
     feed: String,
     /// The package name (`definition` input).
     definition: String,
     version: String,
+    #[serde(rename = "downloadPath")]
     download_path: String,
+    #[serde(default)]
     view: Option<String>,
+    #[serde(default)]
     files: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_bool_flex")]
     extract: Option<bool>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 
@@ -118,7 +132,8 @@ impl DownloadPackage {
     pub fn into_step(self) -> TaskStep {
         let mut t = TaskStep::new(
             "DownloadPackage@1",
-            self.display_name.unwrap_or_else(|| "Download Package".into()),
+            self.display_name
+                .unwrap_or_else(|| "Download Package".into()),
         )
         .with_input("packageType", self.package_type.as_ado_str())
         .with_input("feed", self.feed)
@@ -149,9 +164,15 @@ mod tests {
         .into_step();
         assert_eq!(t.task, "DownloadPackage@1");
         assert_eq!(t.display_name, "Download Package");
-        assert_eq!(t.inputs.get("packageType").map(String::as_str), Some("nuget"));
+        assert_eq!(
+            t.inputs.get("packageType").map(String::as_str),
+            Some("nuget")
+        );
         assert_eq!(t.inputs.get("feed").map(String::as_str), Some("my-feed"));
-        assert_eq!(t.inputs.get("definition").map(String::as_str), Some("my-package"));
+        assert_eq!(
+            t.inputs.get("definition").map(String::as_str),
+            Some("my-package")
+        );
         assert_eq!(t.inputs.get("version").map(String::as_str), Some("1.2.3"));
         assert_eq!(
             t.inputs.get("downloadPath").map(String::as_str),
@@ -199,7 +220,10 @@ mod tests {
         ];
         for (pt, expected) in cases {
             let t = DownloadPackage::new(pt, "feed", "pkg", "1.0.0", "/out").into_step();
-            assert_eq!(t.inputs.get("packageType").map(String::as_str), Some(expected));
+            assert_eq!(
+                t.inputs.get("packageType").map(String::as_str),
+                Some(expected)
+            );
         }
     }
 }

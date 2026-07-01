@@ -11,9 +11,7 @@ engine:
 permissions:
   read: agent-playground-read
 safe-outputs:
-  noop:
-    work-item:
-      enabled: false
+  noop: {}
 ---
 
 ## Noop target pipeline

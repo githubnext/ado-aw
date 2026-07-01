@@ -14,9 +14,7 @@ permissions:
   read: agent-playground-read
   write: agent-playground-write
 safe-outputs:
-  noop:
-    work-item:
-      enabled: false
+  noop: {}
 ---
 
 ## Daily smoke for noop

@@ -4,6 +4,7 @@
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/helm-installer-v1>
 
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Builder for a [`TaskStep`] invoking `HelmInstaller@1`.
 ///
@@ -13,9 +14,12 @@ use crate::compile::ir::step::TaskStep;
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/helm-installer-v1>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HelmInstaller {
+    #[serde(rename = "helmVersionToInstall", default)]
     helm_version: Option<String>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 

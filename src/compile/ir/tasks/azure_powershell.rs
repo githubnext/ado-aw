@@ -9,14 +9,46 @@
 //! ADO task reference:
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/azure-powershell-v5>
 
-use super::common::{push_bool, push_opt};
+use super::common::{de_opt_bool_flex, push_bool, push_opt};
 use crate::compile::ir::step::TaskStep;
+use serde::{Deserialize, Deserializer};
+use serde_yaml::Value;
+
+/// Validate an authored `AzurePowerShell@5` `inputs:` mapping (advisory
+/// front-matter validation, see [`super::parse`]).
+pub(crate) fn validate_inputs(inputs: Value) -> Result<(), String> {
+    let mut map = match inputs {
+        Value::Mapping(m) => m,
+        Value::Null => Default::default(),
+        other => return Err(format!("`inputs` must be a mapping, got {other:?}")),
+    };
+    let script_type = match map.remove("ScriptType") {
+        Some(v) => Some(
+            v.as_str()
+                .ok_or_else(|| "AzurePowerShell@5: `ScriptType` must be a string".to_string())?
+                .to_string(),
+        ),
+        None => None,
+    };
+    let mode = script_type.as_deref().unwrap_or("FilePath");
+    let rest = Value::Mapping(map);
+
+    let result = match mode {
+        "FilePath" => serde_yaml::from_value::<AzurePowerShellFile>(rest).map(drop),
+        "InlineScript" => serde_yaml::from_value::<AzurePowerShellInline>(rest).map(drop),
+        other => return Err(format!("AzurePowerShell@5: unknown ScriptType `{other}`")),
+    };
+    result.map_err(|e| format!("ScriptType `{mode}`: {e}"))
+}
 
 /// Non-terminating error behaviour (`errorActionPreference`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum ErrorActionPreference {
+    #[serde(rename = "stop")]
     Stop,
+    #[serde(rename = "continue")]
     Continue,
+    #[serde(rename = "silentlyContinue")]
     SilentlyContinue,
 }
 
@@ -43,37 +75,28 @@ pub enum AzurePowerShellVersion {
     Preferred(String),
 }
 
-/// Optionals shared by both `AzurePowerShell@5` modes.
-#[derive(Debug, Clone, Default)]
-struct Shared {
-    error_action_preference: Option<ErrorActionPreference>,
-    fail_on_standard_error: Option<bool>,
-    pwsh: Option<bool>,
-    working_directory: Option<String>,
-    azure_powershell_version: Option<AzurePowerShellVersion>,
-}
-
-impl Shared {
-    fn apply(self, t: &mut TaskStep) {
-        if let Some(v) = self.error_action_preference {
-            t.inputs
-                .insert("errorActionPreference".to_string(), v.as_ado_str().to_string());
-        }
-        push_bool(t, "FailOnStandardError", self.fail_on_standard_error);
-        push_bool(t, "pwsh", self.pwsh);
-        push_opt(t, "workingDirectory", self.working_directory);
-        match self.azure_powershell_version {
-            None => {}
-            Some(AzurePowerShellVersion::Latest) => {
-                t.inputs
-                    .insert("azurePowerShellVersion".to_string(), "LatestVersion".to_string());
-            }
-            Some(AzurePowerShellVersion::Preferred(ver)) => {
-                t.inputs
-                    .insert("azurePowerShellVersion".to_string(), "OtherVersion".to_string());
-                t.inputs
-                    .insert("preferredAzurePowerShellVersion".to_string(), ver);
-            }
+impl<'de> Deserialize<'de> for AzurePowerShellVersion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let token = String::deserialize(deserializer)?;
+        match token.as_str() {
+            "LatestVersion" => Ok(Self::Latest),
+            // Sentinel: the flat ADO shape carries the pinned version in a
+            // *separate* `preferredAzurePowerShellVersion` input, not inside
+            // this one, so on deserialization we only know it's `OtherVersion`
+            // here. The empty string is a placeholder; the real value is
+            // validated via the struct's own `preferred_azure_powershell_version`
+            // field. `into_step()` is never called on a deserialized value (the
+            // validation path only checks that it *parses*), and in the builder
+            // path this variant is constructed with the real version, so the
+            // sentinel never reaches emitted YAML.
+            "OtherVersion" => Ok(Self::Preferred(String::new())),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["LatestVersion", "OtherVersion"],
+            )),
         }
     }
 }
@@ -83,25 +106,25 @@ macro_rules! shared_setters {
     () => {
         /// `errorActionPreference` — non-terminating error behaviour (default `stop`).
         pub fn error_action_preference(mut self, value: ErrorActionPreference) -> Self {
-            self.shared.error_action_preference = Some(value);
+            self.error_action_preference = Some(value);
             self
         }
 
         /// `FailOnStandardError` — fail the step when anything is written to stderr.
         pub fn fail_on_standard_error(mut self, value: bool) -> Self {
-            self.shared.fail_on_standard_error = Some(value);
+            self.fail_on_standard_error = Some(value);
             self
         }
 
         /// `pwsh` — use PowerShell Core (`pwsh`) instead of Windows PowerShell.
         pub fn pwsh(mut self, value: bool) -> Self {
-            self.shared.pwsh = Some(value);
+            self.pwsh = Some(value);
             self
         }
 
         /// `workingDirectory` — working directory for the script.
         pub fn working_directory(mut self, value: impl Into<String>) -> Self {
-            self.shared.working_directory = Some(value.into());
+            self.working_directory = Some(value.into());
             self
         }
 
@@ -111,7 +134,7 @@ macro_rules! shared_setters {
         /// [`AzurePowerShellVersion::Preferred`] → `OtherVersion` +
         /// `preferredAzurePowerShellVersion`.
         pub fn azure_powershell_version(mut self, value: AzurePowerShellVersion) -> Self {
-            self.shared.azure_powershell_version = Some(value);
+            self.azure_powershell_version = Some(value);
             self
         }
 
@@ -124,12 +147,32 @@ macro_rules! shared_setters {
 }
 
 /// Builder for `AzurePowerShell@5` in file-path mode (`ScriptType: FilePath`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AzurePowerShellFile {
+    #[serde(rename = "azureSubscription")]
     azure_subscription: String,
+    #[serde(rename = "ScriptPath")]
     script_path: String,
+    #[serde(rename = "ScriptArguments", default)]
     script_arguments: Option<String>,
-    shared: Shared,
+    #[serde(rename = "errorActionPreference", default)]
+    error_action_preference: Option<ErrorActionPreference>,
+    #[serde(
+        rename = "FailOnStandardError",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
+    fail_on_standard_error: Option<bool>,
+    #[serde(rename = "pwsh", default, deserialize_with = "de_opt_bool_flex")]
+    pwsh: Option<bool>,
+    #[serde(rename = "workingDirectory", default)]
+    working_directory: Option<String>,
+    #[serde(rename = "azurePowerShellVersion", default)]
+    azure_powershell_version: Option<AzurePowerShellVersion>,
+    #[serde(rename = "preferredAzurePowerShellVersion", default)]
+    preferred_azure_powershell_version: Option<String>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 
@@ -153,17 +196,66 @@ impl AzurePowerShellFile {
         .with_input("ScriptType", "FilePath")
         .with_input("ScriptPath", self.script_path);
         push_opt(&mut t, "ScriptArguments", self.script_arguments);
-        self.shared.apply(&mut t);
+        if let Some(v) = self.error_action_preference {
+            t.inputs.insert(
+                "errorActionPreference".to_string(),
+                v.as_ado_str().to_string(),
+            );
+        }
+        push_bool(&mut t, "FailOnStandardError", self.fail_on_standard_error);
+        push_bool(&mut t, "pwsh", self.pwsh);
+        push_opt(&mut t, "workingDirectory", self.working_directory);
+        match self.azure_powershell_version {
+            None => {}
+            Some(AzurePowerShellVersion::Latest) => {
+                t.inputs.insert(
+                    "azurePowerShellVersion".to_string(),
+                    "LatestVersion".to_string(),
+                );
+            }
+            Some(AzurePowerShellVersion::Preferred(ver)) => {
+                t.inputs.insert(
+                    "azurePowerShellVersion".to_string(),
+                    "OtherVersion".to_string(),
+                );
+                t.inputs
+                    .insert("preferredAzurePowerShellVersion".to_string(), ver);
+            }
+        }
+        push_opt(
+            &mut t,
+            "preferredAzurePowerShellVersion",
+            self.preferred_azure_powershell_version,
+        );
         t
     }
 }
 
 /// Builder for `AzurePowerShell@5` in inline mode (`ScriptType: InlineScript`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AzurePowerShellInline {
+    #[serde(rename = "azureSubscription")]
     azure_subscription: String,
+    #[serde(rename = "Inline")]
     script: String,
-    shared: Shared,
+    #[serde(rename = "errorActionPreference", default)]
+    error_action_preference: Option<ErrorActionPreference>,
+    #[serde(
+        rename = "FailOnStandardError",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
+    fail_on_standard_error: Option<bool>,
+    #[serde(rename = "pwsh", default, deserialize_with = "de_opt_bool_flex")]
+    pwsh: Option<bool>,
+    #[serde(rename = "workingDirectory", default)]
+    working_directory: Option<String>,
+    #[serde(rename = "azurePowerShellVersion", default)]
+    azure_powershell_version: Option<AzurePowerShellVersion>,
+    #[serde(rename = "preferredAzurePowerShellVersion", default)]
+    preferred_azure_powershell_version: Option<String>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 
@@ -180,7 +272,37 @@ impl AzurePowerShellInline {
         .with_input("azureSubscription", self.azure_subscription)
         .with_input("ScriptType", "InlineScript")
         .with_input("Inline", self.script);
-        self.shared.apply(&mut t);
+        if let Some(v) = self.error_action_preference {
+            t.inputs.insert(
+                "errorActionPreference".to_string(),
+                v.as_ado_str().to_string(),
+            );
+        }
+        push_bool(&mut t, "FailOnStandardError", self.fail_on_standard_error);
+        push_bool(&mut t, "pwsh", self.pwsh);
+        push_opt(&mut t, "workingDirectory", self.working_directory);
+        match self.azure_powershell_version {
+            None => {}
+            Some(AzurePowerShellVersion::Latest) => {
+                t.inputs.insert(
+                    "azurePowerShellVersion".to_string(),
+                    "LatestVersion".to_string(),
+                );
+            }
+            Some(AzurePowerShellVersion::Preferred(ver)) => {
+                t.inputs.insert(
+                    "azurePowerShellVersion".to_string(),
+                    "OtherVersion".to_string(),
+                );
+                t.inputs
+                    .insert("preferredAzurePowerShellVersion".to_string(), ver);
+            }
+        }
+        push_opt(
+            &mut t,
+            "preferredAzurePowerShellVersion",
+            self.preferred_azure_powershell_version,
+        );
         t
     }
 }
@@ -203,7 +325,12 @@ impl AzurePowerShell {
             azure_subscription: azure_subscription.into(),
             script_path: script_path.into(),
             script_arguments: None,
-            shared: Shared::default(),
+            error_action_preference: None,
+            fail_on_standard_error: None,
+            pwsh: None,
+            working_directory: None,
+            azure_powershell_version: None,
+            preferred_azure_powershell_version: None,
             display_name: None,
         }
     }
@@ -217,7 +344,12 @@ impl AzurePowerShell {
         AzurePowerShellInline {
             azure_subscription: azure_subscription.into(),
             script: script.into(),
-            shared: Shared::default(),
+            error_action_preference: None,
+            fail_on_standard_error: None,
+            pwsh: None,
+            working_directory: None,
+            azure_powershell_version: None,
+            preferred_azure_powershell_version: None,
             display_name: None,
         }
     }
@@ -235,7 +367,10 @@ mod tests {
             t.inputs.get("azureSubscription").map(String::as_str),
             Some("my-azure-sub")
         );
-        assert_eq!(t.inputs.get("ScriptType").map(String::as_str), Some("FilePath"));
+        assert_eq!(
+            t.inputs.get("ScriptType").map(String::as_str),
+            Some("FilePath")
+        );
         assert_eq!(
             t.inputs.get("ScriptPath").map(String::as_str),
             Some("scripts/deploy.ps1")
@@ -272,7 +407,10 @@ mod tests {
     #[test]
     fn inline_mode_sets_script() {
         let t = AzurePowerShell::inline("my-sub", "Write-Host 'hello'").into_step();
-        assert_eq!(t.inputs.get("ScriptType").map(String::as_str), Some("InlineScript"));
+        assert_eq!(
+            t.inputs.get("ScriptType").map(String::as_str),
+            Some("InlineScript")
+        );
         assert_eq!(
             t.inputs.get("Inline").map(String::as_str),
             Some("Write-Host 'hello'")
@@ -291,7 +429,9 @@ mod tests {
             Some("OtherVersion")
         );
         assert_eq!(
-            t.inputs.get("preferredAzurePowerShellVersion").map(String::as_str),
+            t.inputs
+                .get("preferredAzurePowerShellVersion")
+                .map(String::as_str),
             Some("8.0.0")
         );
     }

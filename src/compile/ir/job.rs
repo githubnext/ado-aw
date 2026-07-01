@@ -180,6 +180,11 @@ pub enum Pool {
         /// Optional `os:` field (1ES pool OS).
         os: Option<String>,
     },
+    /// `server` — an agentless (server) job. Emits the scalar
+    /// `pool: server`. Required for server-only tasks such as
+    /// `ManualValidation@1`; such jobs must contain no agent steps
+    /// (no checkout, downloads, or shell/`ado-aw` invocations).
+    Server,
 }
 
 impl Job {
