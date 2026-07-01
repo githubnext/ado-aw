@@ -3,20 +3,9 @@
 //! ADO task reference:
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/node-tool-installer-v0>
 
-use super::common::bool_input;
+use super::common::{bool_input, de_opt_bool_flex, de_opt_str_or_int};
 use crate::compile::ir::step::TaskStep;
-
-/// Version source for [`NodeTool`].
-///
-/// Controls whether the Node.js version is taken from an explicit version
-/// spec string or read from an `.nvmrc` / `.node-version` file.
-#[derive(Debug, Clone)]
-enum VersionSource {
-    /// Use an explicit version spec (e.g. `"20.x"`).  This is the default.
-    Spec(String),
-    /// Read the version from the file at the given path (e.g. `".nvmrc"`).
-    File(String),
-}
+use serde::Deserialize;
 
 /// Builder for a [`TaskStep`] invoking `NodeTool@0`.
 ///
@@ -26,14 +15,34 @@ enum VersionSource {
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/node-tool-installer-v0>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NodeTool {
-    source: VersionSource,
+    #[serde(rename = "versionSpec", default)]
+    version_spec: Option<String>,
+    #[serde(rename = "versionSource", default)]
+    version_source: Option<String>,
+    #[serde(rename = "versionFilePath", default)]
+    version_file_path: Option<String>,
+    #[serde(rename = "checkLatest", default, deserialize_with = "de_opt_bool_flex")]
     check_latest: Option<bool>,
+    #[serde(rename = "force32bit", default, deserialize_with = "de_opt_bool_flex")]
     force32bit: Option<bool>,
+    #[serde(rename = "nodejsMirror", default)]
     nodejs_mirror: Option<String>,
+    #[serde(
+        rename = "retryCountOnDownloadFails",
+        default,
+        deserialize_with = "de_opt_str_or_int"
+    )]
     retry_count_on_download_fails: Option<String>,
+    #[serde(
+        rename = "delayBetweenRetries",
+        default,
+        deserialize_with = "de_opt_str_or_int"
+    )]
     delay_between_retries: Option<String>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 
@@ -44,7 +53,9 @@ impl NodeTool {
     /// `spec` and is omitted from the emitted YAML (no unnecessary noise).
     pub fn new(version_spec: impl Into<String>) -> Self {
         Self {
-            source: VersionSource::Spec(version_spec.into()),
+            version_spec: Some(version_spec.into()),
+            version_source: None,
+            version_file_path: None,
             check_latest: None,
             force32bit: None,
             nodejs_mirror: None,
@@ -59,7 +70,9 @@ impl NodeTool {
     /// Sets `versionSource` to `fromFile` and `versionFilePath` to `path`.
     pub fn from_file(path: impl Into<String>) -> Self {
         Self {
-            source: VersionSource::File(path.into()),
+            version_spec: None,
+            version_source: Some("fromFile".to_string()),
+            version_file_path: Some(path.into()),
             check_latest: None,
             force32bit: None,
             nodejs_mirror: None,
@@ -112,20 +125,20 @@ impl NodeTool {
 
     /// Lower into a [`TaskStep`].
     pub fn into_step(self) -> TaskStep {
-        let default_display = match &self.source {
-            VersionSource::Spec(spec) => format!("Install Node.js {spec}"),
-            VersionSource::File(path) => format!("Install Node.js (from {path})"),
+        let default_display = match (&self.version_spec, &self.version_file_path) {
+            (Some(spec), _) => format!("Install Node.js {spec}"),
+            (None, Some(path)) => format!("Install Node.js (from {path})"),
+            (None, None) => "Install Node.js".to_string(),
         };
         let mut t = TaskStep::new("NodeTool@0", self.display_name.unwrap_or(default_display));
-        match self.source {
-            VersionSource::Spec(spec) => {
-                t = t.with_input("versionSpec", spec);
-            }
-            VersionSource::File(path) => {
-                t = t
-                    .with_input("versionSource", "fromFile")
-                    .with_input("versionFilePath", path);
-            }
+        if let Some(spec) = self.version_spec {
+            t = t.with_input("versionSpec", spec);
+        }
+        if let Some(source) = self.version_source {
+            t = t.with_input("versionSource", source);
+        }
+        if let Some(path) = self.version_file_path {
+            t = t.with_input("versionFilePath", path);
         }
         if let Some(v) = self.check_latest {
             t = t.with_input("checkLatest", bool_input(v));

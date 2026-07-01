@@ -34,8 +34,8 @@ use super::{
     azure_powershell, azure_web_app, cargo_authenticate, cmd_line, copy_files, delete_files, docker,
     docker_installer, dotnet_core_cli, download_build_artifacts, download_package,
     download_pipeline_artifact, download_secure_file, extract_files, github_release, go_tool, gradle,
-    helm_installer, java_tool_installer, manual_validation, maven, maven_authenticate, npm,
-    npm_authenticate, nuget_authenticate, nuget_command, pip_authenticate, powershell,
+    helm_installer, java_tool_installer, manual_validation, maven, maven_authenticate, node_tool,
+    npm, npm_authenticate, nuget_authenticate, nuget_command, pip_authenticate, powershell,
     publish_build_artifacts, publish_code_coverage_results, publish_pipeline_artifact,
     publish_test_results, python_script, twine_authenticate, universal_packages, use_dotnet,
     use_node, use_python_version, use_ruby_version, vs_build, vstest,
@@ -82,6 +82,7 @@ const VALIDATORS: &[(&str, fn(Value) -> Result<(), String>)] = &[
     ("Maven@3", validate_by_deserialize::<maven::Maven>),
     ("MavenAuthenticate@0", validate_by_deserialize::<maven_authenticate::MavenAuthenticate>),
     ("NuGetAuthenticate@1", validate_by_deserialize::<nuget_authenticate::NuGetAuthenticate>),
+    ("NodeTool@0", validate_by_deserialize::<node_tool::NodeTool>),
     ("PipAuthenticate@1", validate_by_deserialize::<pip_authenticate::PipAuthenticate>),
     (
         "PublishCodeCoverageResults@2",
@@ -663,6 +664,30 @@ mod tests {
             )
             .into_step(),
         );
+    }
+
+    #[test]
+    fn roundtrip_node_tool_spec() {
+        assert_roundtrips(node_tool::NodeTool::new("20.x").into_step());
+    }
+
+    #[test]
+    fn roundtrip_node_tool_from_file() {
+        assert_roundtrips(node_tool::NodeTool::from_file(".nvmrc").into_step());
+    }
+
+    #[test]
+    fn node_tool_unknown_input_warns() {
+        let step = yaml(
+            r#"
+            task: NodeTool@0
+            inputs:
+              versionSpec: "20.x"
+              bogusInput: nope
+            "#,
+        );
+        let err = validate_task_step(&step).expect("recognized").unwrap_err();
+        assert!(err.contains("NodeTool@0"), "got: {err}");
     }
 
     #[test]
