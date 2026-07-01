@@ -176,6 +176,7 @@ mod tests {
             python: None,
             node: None,
             dotnet: None,
+            tla: None,
         });
         let exts = super::super::extensions::collect_extensions(&fm);
         let domains = allowed_domains(&fm, &exts).unwrap();
@@ -201,6 +202,7 @@ mod tests {
             python: None,
             node: None,
             dotnet: None,
+            tla: None,
         });
         let exts = super::super::extensions::collect_extensions(&fm);
         let domains = allowed_domains(&fm, &exts).unwrap();

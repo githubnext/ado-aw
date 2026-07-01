@@ -569,6 +569,14 @@ pub struct RuntimesConfig {
     /// equivalent for selecting a package source.
     #[serde(default)]
     pub dotnet: Option<crate::runtimes::dotnet::DotnetRuntimeConfig>,
+
+    /// TLA+ / TLC formal model-checking runtime.
+    /// Downloads a JRE from Eclipse Temurin (Adoptium) and `tla2tools.jar`
+    /// from the TLA+ GitHub releases page, creates convenience shims
+    /// (`tlc`, `pluscal`, `sany`), adds Java ecosystem domains to the AWF
+    /// network allowlist, and extends the bash command allow-list.
+    #[serde(default)]
+    pub tla: Option<crate::runtimes::tla::TlaRuntimeConfig>,
 }
 
 impl SanitizeConfigTrait for RuntimesConfig {
@@ -584,6 +592,9 @@ impl SanitizeConfigTrait for RuntimesConfig {
         }
         if let Some(ref mut dotnet) = self.dotnet {
             dotnet.sanitize_config_fields();
+        }
+        if let Some(ref mut tla) = self.tla {
+            tla.sanitize_config_fields();
         }
     }
 }

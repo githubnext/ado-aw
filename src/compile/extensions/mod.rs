@@ -571,6 +571,7 @@ pub use crate::runtimes::dotnet::DotnetExtension;
 pub use crate::runtimes::lean::LeanExtension;
 pub use crate::runtimes::node::NodeExtension;
 pub use crate::runtimes::python::PythonExtension;
+pub use crate::runtimes::tla::TlaExtension;
 pub use crate::tools::azure_devops::AzureDevOpsExtension;
 pub use crate::tools::cache_memory::CacheMemoryExtension;
 pub use ado_aw_marker::AdoAwMarkerExtension;
@@ -600,6 +601,7 @@ extension_enum! {
         Python(PythonExtension),
         Node(NodeExtension),
         Dotnet(DotnetExtension),
+        Tla(TlaExtension),
         AzureDevOps(AzureDevOpsExtension),
         CacheMemory(CacheMemoryExtension),
         AzureCli(AzureCliExtension),
@@ -747,6 +749,11 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
         && dotnet.is_enabled()
     {
         extensions.push(Extension::Dotnet(DotnetExtension::new(dotnet.clone())));
+    }
+    if let Some(tla) = front_matter.runtimes.as_ref().and_then(|r| r.tla.as_ref())
+        && tla.is_enabled()
+    {
+        extensions.push(Extension::Tla(TlaExtension::new(tla.clone())));
     }
 
     // ── First-party tools (ExtensionPhase::Tool) ──
