@@ -34,9 +34,9 @@ use super::{
     azure_function_app, azure_key_vault, azure_powershell, azure_web_app, bicep_deploy,
     cargo_authenticate, cmd_line, copy_files, delete_files, docker, docker_installer,
     dotnet_core_cli, download_build_artifacts,    download_package, download_pipeline_artifact, download_secure_file, extract_files,
-    github_release, go_tool, gradle, helm_installer, java_tool_installer, manual_validation, maven,
-    maven_authenticate, node_tool, npm, npm_authenticate, nuget_authenticate, nuget_command,
-    pip_authenticate, powershell, publish_build_artifacts, publish_code_coverage_results,
+    github_release, go_tool, gradle, helm_installer, java_tool_installer, kubernetes_manifest,
+    manual_validation, maven, maven_authenticate, node_tool, npm, npm_authenticate,
+    nuget_authenticate, nuget_command, pip_authenticate, powershell, publish_build_artifacts, publish_code_coverage_results,
     publish_pipeline_artifact, publish_test_results, python_script, sonar_qube_analyze,
     sonar_qube_prepare, sonar_qube_publish, twine_authenticate, universal_packages, use_dotnet,
     use_node, use_python_version, use_ruby_version, vs_build, vstest,
@@ -117,6 +117,7 @@ const VALIDATORS: &[(&str, fn(Value) -> Result<(), String>)] = &[
     ("DotNetCoreCLI@2", dotnet_core_cli::validate_inputs),
     ("GitHubRelease@1", github_release::validate_inputs),
     ("JavaToolInstaller@0", java_tool_installer::validate_inputs),
+    ("KubernetesManifest@1", kubernetes_manifest::validate_inputs),
     ("Npm@1", npm::validate_inputs),
     ("NuGetCommand@2", nuget_command::validate_inputs),
     ("PowerShell@2", powershell::validate_inputs),
@@ -986,6 +987,89 @@ mod tests {
         );
         let err = validate_task_step(&step).expect("recognized").unwrap_err();
         assert!(err.contains("location"), "got: {err}");
+    }
+
+    #[test]
+    fn roundtrip_kubernetes_manifest_deploy() {
+        assert_roundtrips(
+            kubernetes_manifest::KubernetesManifest::deploy(
+                kubernetes_manifest::KubernetesManifestDeploy::new("manifests/*.yaml"),
+            )
+            .kubernetes_service_connection("myCluster")
+            .namespace("prod")
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_kubernetes_manifest_create_secret() {
+        assert_roundtrips(
+            kubernetes_manifest::KubernetesManifest::create_secret(
+                kubernetes_manifest::KubernetesManifestCreateSecret::new(
+                    kubernetes_manifest::SecretType::Generic,
+                ),
+            )
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_kubernetes_manifest_patch() {
+        assert_roundtrips(
+            kubernetes_manifest::KubernetesManifest::patch(
+                kubernetes_manifest::KubernetesManifestPatch::new(
+                    kubernetes_manifest::PatchTarget::Name,
+                    kubernetes_manifest::MergeStrategy::Strategic,
+                    "{\"spec\":{}}",
+                ),
+            )
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_kubernetes_manifest_scale() {
+        assert_roundtrips(
+            kubernetes_manifest::KubernetesManifest::scale(
+                kubernetes_manifest::KubernetesManifestScale::new(
+                    kubernetes_manifest::ResourceKind::Deployment,
+                    "my-app",
+                    "3",
+                ),
+            )
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn kubernetes_manifest_input_for_wrong_action_warns() {
+        // `secretType` is a createSecret-only input; not valid for deploy.
+        let step = yaml(
+            r#"
+            task: KubernetesManifest@1
+            inputs:
+              action: deploy
+              manifests: manifests/*.yaml
+              secretType: generic
+            "#,
+        );
+        let err = validate_task_step(&step).expect("recognized").unwrap_err();
+        assert!(err.contains("KubernetesManifest@1"), "got: {err}");
+    }
+
+    #[test]
+    fn kubernetes_manifest_scale_accepts_integer_replicas() {
+        let step = yaml(
+            r#"
+            task: KubernetesManifest@1
+            inputs:
+              action: scale
+              kind: deployment
+              name: my-app
+              replicas: 3
+            "#,
+        );
+        assert!(validate_task_step(&step).expect("recognized").is_ok());
     }
 
     #[test]

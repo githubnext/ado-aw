@@ -46,6 +46,7 @@ pub mod go_tool;
 pub mod gradle;
 pub mod helm_installer;
 pub mod java_tool_installer;
+pub mod kubernetes_manifest;
 pub mod manual_validation;
 pub mod maven;
 pub mod maven_authenticate;
