@@ -3,8 +3,9 @@
 //! ADO task reference:
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/use-node-v1-task>
 
-use super::common::bool_input;
+use super::common::{bool_input, de_opt_bool_flex, de_opt_str_or_int};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Builder for a [`TaskStep`] invoking `UseNode@1`.
 ///
@@ -13,13 +14,28 @@ use crate::compile::ir::step::TaskStep;
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/use-node-v1-task>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UseNode {
+    #[serde(rename = "version")]
     version: String,
+    #[serde(rename = "checkLatest", default, deserialize_with = "de_opt_bool_flex")]
     check_latest: Option<bool>,
+    #[serde(rename = "force32bit", default, deserialize_with = "de_opt_bool_flex")]
     force32bit: Option<bool>,
+    #[serde(
+        rename = "retryCountOnDownloadFails",
+        default,
+        deserialize_with = "de_opt_str_or_int"
+    )]
     retry_count_on_download_fails: Option<String>,
+    #[serde(
+        rename = "delayBetweenRetries",
+        default,
+        deserialize_with = "de_opt_str_or_int"
+    )]
     delay_between_retries: Option<String>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 

@@ -1,7 +1,8 @@
 //! Typed builder for `ExtractFiles@1`.
 
-use super::common::bool_input;
+use super::common::{bool_input, de_opt_bool_flex};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Builder for a [`TaskStep`] invoking `ExtractFiles@1`.
 ///
@@ -9,13 +10,28 @@ use crate::compile::ir::step::TaskStep;
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/extract-files-v1>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExtractFiles {
+    #[serde(rename = "archiveFilePatterns")]
     archive_file_patterns: String,
+    #[serde(rename = "destinationFolder")]
     destination_folder: String,
+    #[serde(
+        rename = "cleanDestinationFolder",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     clean_destination_folder: Option<bool>,
+    #[serde(
+        rename = "overwriteExistingFiles",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     overwrite_existing_files: Option<bool>,
+    #[serde(rename = "pathToSevenZipTool", default)]
     path_to_seven_zip_tool: Option<String>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 

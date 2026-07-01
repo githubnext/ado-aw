@@ -10,23 +10,36 @@
 //! ADO task reference:
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/python-script-v0>
 
-use super::common::{push_bool, push_opt};
+use super::common::{de_opt_bool_flex, push_bool, push_opt};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
+use serde_yaml::Value;
 
-/// Optionals shared by both `PythonScript@0` builders.
-#[derive(Debug, Clone, Default)]
-struct Shared {
-    python_interpreter: Option<String>,
-    working_directory: Option<String>,
-    fail_on_stderr: Option<bool>,
-}
+/// Validate an authored `PythonScript@0` `inputs:` mapping (advisory
+/// front-matter validation, see [`super::parse`]).
+pub(crate) fn validate_inputs(inputs: Value) -> Result<(), String> {
+    let mut map = match inputs {
+        Value::Mapping(m) => m,
+        Value::Null => Default::default(),
+        other => return Err(format!("`inputs` must be a mapping, got {other:?}")),
+    };
+    let script_source = match map.remove("scriptSource") {
+        Some(v) => Some(
+            v.as_str()
+                .ok_or_else(|| "PythonScript@0: `scriptSource` must be a string".to_string())?
+                .to_string(),
+        ),
+        None => None,
+    };
+    let mode = script_source.as_deref().unwrap_or("filePath");
+    let rest = Value::Mapping(map);
 
-impl Shared {
-    fn apply(self, t: &mut TaskStep) {
-        push_opt(t, "pythonInterpreter", self.python_interpreter);
-        push_opt(t, "workingDirectory", self.working_directory);
-        push_bool(t, "failOnStderr", self.fail_on_stderr);
-    }
+    let result = match mode {
+        "filePath" => serde_yaml::from_value::<PythonScriptFile>(rest).map(drop),
+        "inline" => serde_yaml::from_value::<PythonScriptInline>(rest).map(drop),
+        other => return Err(format!("PythonScript@0: unknown scriptSource `{other}`")),
+    };
+    result.map_err(|e| format!("scriptSource `{mode}`: {e}"))
 }
 
 /// Generate the optional setters shared by both PythonScript builders.
@@ -36,20 +49,20 @@ macro_rules! shared_python_script_setters {
         /// uses the interpreter from PATH (or the one configured by
         /// `UsePythonVersion@0` / `UsePythonVersion@0`).
         pub fn python_interpreter(mut self, value: impl Into<String>) -> Self {
-            self.shared.python_interpreter = Some(value.into());
+            self.python_interpreter = Some(value.into());
             self
         }
 
         /// `workingDirectory` — working directory for the script. Defaults to
         /// the repository root (`$(System.DefaultWorkingDirectory)`).
         pub fn working_directory(mut self, value: impl Into<String>) -> Self {
-            self.shared.working_directory = Some(value.into());
+            self.working_directory = Some(value.into());
             self
         }
 
         /// `failOnStderr` — fail the step if the script writes to stderr.
         pub fn fail_on_stderr(mut self, value: bool) -> Self {
-            self.shared.fail_on_stderr = Some(value);
+            self.fail_on_stderr = Some(value);
             self
         }
 
@@ -62,11 +75,24 @@ macro_rules! shared_python_script_setters {
 }
 
 /// Builder for `PythonScript@0` in file-path mode (`scriptSource: filePath`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PythonScriptFile {
+    #[serde(rename = "scriptPath")]
     script_path: String,
+    #[serde(rename = "arguments", default)]
     arguments: Option<String>,
-    shared: Shared,
+    #[serde(rename = "pythonInterpreter", default)]
+    python_interpreter: Option<String>,
+    #[serde(rename = "workingDirectory", default)]
+    working_directory: Option<String>,
+    #[serde(
+        rename = "failOnStderr",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
+    fail_on_stderr: Option<bool>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 
@@ -90,16 +116,30 @@ impl PythonScriptFile {
         .with_input("scriptSource", "filePath")
         .with_input("scriptPath", self.script_path);
         push_opt(&mut t, "arguments", self.arguments);
-        self.shared.apply(&mut t);
+        push_opt(&mut t, "pythonInterpreter", self.python_interpreter);
+        push_opt(&mut t, "workingDirectory", self.working_directory);
+        push_bool(&mut t, "failOnStderr", self.fail_on_stderr);
         t
     }
 }
 
 /// Builder for `PythonScript@0` in inline mode (`scriptSource: inline`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PythonScriptInline {
+    #[serde(rename = "script")]
     script: String,
-    shared: Shared,
+    #[serde(rename = "pythonInterpreter", default)]
+    python_interpreter: Option<String>,
+    #[serde(rename = "workingDirectory", default)]
+    working_directory: Option<String>,
+    #[serde(
+        rename = "failOnStderr",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
+    fail_on_stderr: Option<bool>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 
@@ -115,7 +155,9 @@ impl PythonScriptInline {
         )
         .with_input("scriptSource", "inline")
         .with_input("script", self.script);
-        self.shared.apply(&mut t);
+        push_opt(&mut t, "pythonInterpreter", self.python_interpreter);
+        push_opt(&mut t, "workingDirectory", self.working_directory);
+        push_bool(&mut t, "failOnStderr", self.fail_on_stderr);
         t
     }
 }
@@ -131,7 +173,9 @@ impl PythonScript {
         PythonScriptFile {
             script_path: script_path.into(),
             arguments: None,
-            shared: Shared::default(),
+            python_interpreter: None,
+            working_directory: None,
+            fail_on_stderr: None,
             display_name: None,
         }
     }
@@ -140,7 +184,9 @@ impl PythonScript {
     pub fn inline(script: impl Into<String>) -> PythonScriptInline {
         PythonScriptInline {
             script: script.into(),
-            shared: Shared::default(),
+            python_interpreter: None,
+            working_directory: None,
+            fail_on_stderr: None,
             display_name: None,
         }
     }

@@ -184,6 +184,25 @@ pub(crate) fn build_pipeline_context(
     let engine_log_dir = ctx.engine.log_dir().to_string();
 
     let mut engine_env = ctx.engine.env(&front_matter.engine)?;
+    // BYOM/BYOK isolation is Copilot-specific: gate on the engine type so a
+    // future non-Copilot engine whose env happens to contain a COPILOT_PROVIDER_*
+    // key never erroneously activates the api-proxy sidecar.
+    let is_copilot = matches!(ctx.engine, crate::engine::Engine::Copilot);
+    let byom_active = is_copilot && crate::engine::copilot_byom_active(&front_matter.engine);
+    // Actual provider credential keys (user's casing) for AWF `--exclude-env`.
+    let byom_exclude_keys = if is_copilot {
+        crate::engine::copilot_byom_credential_keys(&front_matter.engine)
+    } else {
+        Vec::new()
+    };
+    // Provider-only env subset for the Detection step, so the threat-analysis
+    // Copilot run inherits the same BYOM/BYOK routing + credential isolation as
+    // the main agent (mirrors gh-aw's detection engine-config Env inheritance).
+    let detection_provider_env = if is_copilot {
+        crate::engine::copilot_provider_env(&front_matter.engine)?
+    } else {
+        Vec::new()
+    };
     // AWF path env (when extensions declare path prepends)
     let awf_paths = common::collect_awf_path_prepends(&extension_declarations);
     let has_awf_paths = !awf_paths.is_empty();
@@ -312,6 +331,9 @@ pub(crate) fn build_pipeline_context(
         integrity_check_yaml,
         agent_content_value,
         debug_pipeline,
+        byom_active,
+        byom_exclude_keys,
+        detection_provider_env,
     };
 
     // ─── Build jobs ───────────────────────────────────────────────
@@ -485,6 +507,16 @@ pub(crate) struct StandaloneCtx {
     /// `{{#runtime-import ...}}` marker).
     pub(crate) agent_content_value: String,
     pub(crate) debug_pipeline: bool,
+    /// True when `engine.env` activates Copilot BYOM/BYOK mode. Pre-pulls the
+    /// api-proxy container image in the Agent and Detection jobs.
+    pub(crate) byom_active: bool,
+    /// Actual provider credential env keys present to pass to AWF `--exclude-env`;
+    /// non-empty ⇒ enable the api-proxy sidecar. Empty for non-BYOM.
+    pub(crate) byom_exclude_keys: Vec<String>,
+    /// Provider-only (`COPILOT_PROVIDER_*`) subset of `engine.env` as validated
+    /// raw `(key, value)` pairs (empty when none). Applied to the Detection
+    /// (threat-analysis) step so it inherits BYOM provider routing + isolation.
+    pub(crate) detection_provider_env: Vec<(String, String)>,
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -834,8 +866,12 @@ fn build_agent_job(
     // 11. Download AWF
     steps.extend(download_awf_step(front_matter.supply_chain()));
 
-    // 12. Pre-pull AWF + MCPG container images
-    steps.extend(prepull_images_step(true, front_matter.supply_chain()));
+    // 12. Pre-pull AWF + MCPG container images (+ api-proxy when BYOM is active)
+    steps.extend(prepull_images_step(
+        true,
+        cfg.byom_active,
+        front_matter.supply_chain(),
+    ));
 
     // 13. Extension prepare steps (typed) + user steps (RawYaml)
     steps.extend(ext_agent_prepare.iter().cloned());
@@ -872,6 +908,7 @@ fn build_agent_job(
         &cfg.working_directory,
         &cfg.engine_run,
         &cfg.engine_env,
+        &cfg.byom_exclude_keys,
     )?));
 
     // 19. Collect safe outputs from AWF container
@@ -1028,8 +1065,14 @@ fn build_detection_job(
     steps.push(Step::Task(DockerInstaller::new("26.1.4").into_step()));
     // Download AWF
     steps.extend(download_awf_step(front_matter.supply_chain()));
-    // Pre-pull AWF (no MCPG image for detection)
-    steps.extend(prepull_images_step(false, front_matter.supply_chain()));
+    // Pre-pull AWF (no MCPG image for detection). Pull the api-proxy image when
+    // BYOM is active so the detection Copilot run gets the same credential
+    // isolation as the main agent.
+    steps.extend(prepull_images_step(
+        false,
+        cfg.byom_active,
+        front_matter.supply_chain(),
+    ));
     // Prepare safe outputs for analysis
     steps.push(Step::Bash(prepare_safe_outputs_for_analysis(
         &cfg.working_directory,
@@ -1057,7 +1100,9 @@ fn build_detection_job(
         &cfg.allowed_domains,
         &cfg.working_directory,
         &cfg.engine_run_detection,
-    )));
+        &cfg.byom_exclude_keys,
+        &cfg.detection_provider_env,
+    )?));
     // Prepare analyzed outputs
     steps.push(Step::Bash(prepare_analyzed_outputs_step()));
     // Evaluate threat analysis — DECLARES TYPED OUTPUT
@@ -2127,7 +2172,11 @@ fn download_awf_step(supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
     ))]
 }
 
-fn prepull_images_step(include_mcpg: bool, supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
+fn prepull_images_step(
+    include_mcpg: bool,
+    include_api_proxy: bool,
+    supply_chain: Option<&SupplyChainConfig>,
+) -> Vec<Step> {
     let registry = supply_chain.and_then(|sc| sc.registry.as_ref());
     let registry_base = registry.map(|r| r.name.as_str());
 
@@ -2150,6 +2199,20 @@ fn prepull_images_step(include_mcpg: bool, supply_chain: Option<&SupplyChainConf
          docker tag {squid} {squid_latest}\n\
          docker tag {agent} {agent_latest}\n"
     );
+    // Copilot BYOM/BYOK credential isolation: AWF starts the api-proxy sidecar
+    // when `--enable-api-proxy` is passed (see run_agent_step). Pre-pull and
+    // `:latest`-tag the image the same way as squid/agent so `--skip-pull` finds
+    // it locally.
+    if include_api_proxy {
+        let api_proxy =
+            image_ref("ghcr.io/github/gh-aw-firewall/api-proxy", AWF_VERSION, registry_base);
+        let api_proxy_latest =
+            image_ref("ghcr.io/github/gh-aw-firewall/api-proxy", "latest", None);
+        script.push_str(&format!(
+            "docker pull {api_proxy}\n\
+             docker tag {api_proxy} {api_proxy_latest}\n"
+        ));
+    }
     let display = if include_mcpg {
         let mcpg = image_ref(MCPG_IMAGE, &format!("v{MCPG_VERSION}"), registry_base);
         script.push_str(&format!("docker pull {mcpg}\n"));
@@ -2373,12 +2436,50 @@ fn start_mcpg_step(
     Ok(step)
 }
 
+/// Build the AWF api-proxy sidecar flag lines for a Copilot BYOM/BYOK run.
+///
+/// `exclude_keys` are the provider credential env keys present in `engine.env`
+/// (canonical uppercase `COPILOT_PROVIDER_*` names). When non-empty, returns
+/// `--enable-api-proxy` plus one `--exclude-env <key>` line per key, each as a
+/// 2-space-indented `--flag \` continuation ending in `\\\n` so it slots
+/// directly into the AWF command body. Returns an empty string when
+/// `exclude_keys` is empty (non-BYOM).
+///
+/// How the credential reaches the provider without reaching the agent: with
+/// `--enable-api-proxy`, AWF starts the api-proxy sidecar which reads the *real*
+/// `COPILOT_PROVIDER_*` values from the host process env, and injects
+/// **placeholders** into the agent container regardless of `--env-all` —
+/// `COPILOT_PROVIDER_BASE_URL` becomes the sidecar URL (e.g.
+/// `http://172.30.0.30:10002`) and `COPILOT_PROVIDER_API_KEY` a dummy token (see
+/// gh-aw-firewall `docs/api-proxy-sidecar.md`, "agent container env" table, and
+/// `containers/api-proxy/providers/copilot.js`, verified against AWF v0.27.9).
+/// The Copilot CLI therefore talks to the sidecar, which strips the client auth
+/// header and injects the real credential on the outbound request. `--exclude-env`
+/// keeps the raw value out of `--env-all` passthrough (defense-in-depth on top of
+/// AWF's placeholder override). Because env-var names are case-sensitive and the
+/// keys are the canonical uppercase names, the emitted `--exclude-env <key>`
+/// matches exactly what AWF overrides and the CLI reads.
+///
+/// Shared by [`run_agent_step`] and [`run_threat_analysis_step`] so both AWF
+/// invocations enable isolation identically.
+fn awf_api_proxy_flags(exclude_keys: &[String]) -> String {
+    if exclude_keys.is_empty() {
+        return String::new();
+    }
+    let mut block = String::from("  --enable-api-proxy \\\n");
+    for key in exclude_keys {
+        block.push_str(&format!("  --exclude-env {key} \\\n"));
+    }
+    block
+}
+
 fn run_agent_step(
     allowed_domains: &str,
     awf_mounts: &str,
     working_directory: &str,
     engine_run: &str,
     engine_env: &str,
+    byom_exclude_keys: &[String],
 ) -> Result<BashStep> {
     // The awf_mounts string is a `\`-joined chain of `--mount "..."` lines.
     // Render each at 2-space indent inside the bash body (the surrounding
@@ -2393,6 +2494,7 @@ fn run_agent_step(
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let api_proxy_block = awf_api_proxy_flags(byom_exclude_keys);
     let script = format!(
         "set -o pipefail\n\
          \n\
@@ -2417,6 +2519,7 @@ fn run_agent_step(
            --skip-pull \\\n  \
            --env-all \\\n  \
            --enable-host-access \\\n\
+{api_proxy_block}\
 {awf_mounts_block}\n  \
            --container-workdir \"{working_directory}\" \\\n  \
            --log-level info \\\n  \
@@ -2653,7 +2756,10 @@ fn run_threat_analysis_step(
     allowed_domains: &str,
     working_directory: &str,
     engine_run_detection: &str,
-) -> BashStep {
+    byom_exclude_keys: &[String],
+    detection_provider_env: &[(String, String)],
+) -> Result<BashStep> {
+    let api_proxy_block = awf_api_proxy_flags(byom_exclude_keys);
     let script = format!(
         "set -o pipefail\n\
          \n\
@@ -2664,7 +2770,8 @@ fn run_threat_analysis_step(
          sudo -E \"$(Pipeline.Workspace)/awf/awf\" \\\n  \
            --allow-domains \"{allowed_domains}\" \\\n  \
            --skip-pull \\\n  \
-           --env-all \\\n  \
+           --env-all \\\n\
+{api_proxy_block}  \
            --container-workdir \"{working_directory}\" \\\n  \
            --log-level info \\\n  \
            --proxy-logs-dir \"$(Agent.TempDirectory)/threat-analysis-logs/firewall\" \\\n  \
@@ -2688,7 +2795,13 @@ fn run_threat_analysis_step(
             "GITHUB_READ_ONLY",
             EnvValue::RawYamlScalar(serde_yaml::Value::Number(1.into())),
         );
-    step
+    // BYOM/BYOK: apply the COPILOT_PROVIDER_* env so the detection Copilot run
+    // routes to the same external provider as the main agent. Classify each raw
+    // value directly (macro → PipelineVar, else Literal) — no YAML round-trip.
+    for (k, raw) in detection_provider_env {
+        step = step.with_env(k.clone(), env_value_from_str(raw));
+    }
+    Ok(step)
 }
 
 fn prepare_analyzed_outputs_step() -> BashStep {
@@ -2925,13 +3038,40 @@ fn dedent(s: &str) -> String {
     out
 }
 
+/// Classify a single raw env-var value string into a typed [`EnvValue`].
+///
+/// An ADO **macro** `$(NAME)` (with no nested `$` or `(`) becomes an
+/// [`EnvValue::PipelineVar`] so lowering re-emits the unquoted `$(NAME)` form;
+/// anything else becomes an [`EnvValue::Literal`]. Single source of truth for
+/// macro-vs-literal classification, shared by [`parse_env_block`] (which also
+/// handles YAML-typed scalars) and the detection provider-env path.
+///
+/// Only a value that is *exactly* one `$(NAME)` wrapper is treated as a macro.
+/// Compound values (e.g. `$(A)$(B)`, or `prefix-$(X)`) intentionally fall through
+/// to `Literal` — they are emitted as a quoted YAML scalar. This is still
+/// correct at runtime: ADO expands `$( )` macro references inside step-env values
+/// regardless of quoting, so both references still expand. The only observable
+/// difference is the quoted-vs-unquoted rendering in the compiled YAML.
+fn env_value_from_str(raw: &str) -> super::ir::env::EnvValue {
+    use super::ir::env::EnvValue;
+    if let Some(inner) = raw.strip_prefix("$(").and_then(|s| s.strip_suffix(')'))
+        && !inner.contains('$')
+        && !inner.contains('(')
+    {
+        EnvValue::pipeline_var(inner.to_string())
+    } else {
+        EnvValue::literal(raw.to_string())
+    }
+}
+
 /// Parse a legacy YAML env block (`env:\n  KEY: VALUE\n  KEY: VALUE`)
 /// into typed `(name, EnvValue)` pairs preserving insertion order.
 ///
 /// Each value is round-tripped through `serde_yaml` so quoted forms
-/// (`"true"`, `"file"`) become bare literals and ADO macros (`$(X)`)
-/// land as `EnvValue::PipelineVar` so the lowering pass re-emits the
-/// macro form. Anything else lands as `EnvValue::Literal`.
+/// (`"true"`, `"file"`) become bare literals; string values are then
+/// classified by [`env_value_from_str`] (ADO macros → `PipelineVar`,
+/// otherwise `Literal`) and non-string scalars are preserved as
+/// `RawYamlScalar`.
 ///
 /// # Errors
 ///
@@ -2985,16 +3125,7 @@ fn parse_env_block(yaml_block: &str) -> Result<Vec<(String, super::ir::env::EnvV
             // lowering preserves the `$(X)` form unquoted; everything
             // else lands as a Literal.
             serde_yaml::Value::String(raw_value) => {
-                if let Some(inner) = raw_value
-                    .strip_prefix("$(")
-                    .and_then(|s| s.strip_suffix(')'))
-                    && !inner.contains('$')
-                    && !inner.contains('(')
-                {
-                    out.push((key, EnvValue::pipeline_var(inner.to_string())));
-                } else {
-                    out.push((key, EnvValue::literal(raw_value.clone())));
-                }
+                out.push((key, env_value_from_str(raw_value)));
             }
             // Non-string scalars (numbers / bools): preserve the
             // typed scalar identity through RawYamlScalar so the
@@ -3236,6 +3367,30 @@ mod tests {
             pairs[0].1,
             crate::compile::ir::env::EnvValue::PipelineVar(ref name) if name == "GITHUB_TOKEN"
         ));
+    }
+
+    #[test]
+    fn env_value_from_str_single_macro_is_pipeline_var() {
+        use crate::compile::ir::env::EnvValue;
+        assert!(matches!(
+            env_value_from_str("$(Setup.Token)"),
+            EnvValue::PipelineVar(ref n) if n == "Setup.Token"
+        ));
+    }
+
+    #[test]
+    fn env_value_from_str_compound_or_partial_macro_is_literal() {
+        use crate::compile::ir::env::EnvValue;
+        // Concatenated / partial macros are NOT single-wrapper macros, so they
+        // fall through to Literal. They are still correct at runtime: ADO expands
+        // $( ) references inside the (quoted) literal value. This pins the
+        // documented classification boundary.
+        for raw in ["$(A)$(B)", "prefix-$(X)", "$(X)-suffix", "plain-literal"] {
+            assert!(
+                matches!(env_value_from_str(raw), EnvValue::Literal(ref v) if v == raw),
+                "value {raw:?} should classify as a verbatim Literal"
+            );
+        }
     }
 
     #[test]

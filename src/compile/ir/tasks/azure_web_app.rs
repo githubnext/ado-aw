@@ -3,19 +3,22 @@
 //! ADO task reference:
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/azure-web-app-v1>
 
-use super::common::{push_bool, push_opt};
+use super::common::{de_opt_bool_flex, push_bool, push_opt};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// The type of Azure App Service to deploy to.
 ///
 /// Controls which optional inputs are applicable:
 /// - [`AppType::WebApp`] enables `deployment_method` and `custom_web_config`.
 /// - [`AppType::WebAppLinux`] enables `runtime_stack` and `startup_command`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum AppType {
     /// Web App on Windows (`webApp`).
+    #[serde(rename = "webApp")]
     WebApp,
     /// Web App on Linux (`webAppLinux`).
+    #[serde(rename = "webAppLinux")]
     WebAppLinux,
 }
 
@@ -33,13 +36,16 @@ impl AppType {
 ///
 /// Only applicable when `app_type` is [`AppType::WebApp`] and the package is
 /// not a `.war` or `.jar` file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum DeploymentMethod {
     /// ADO auto-selects the best method (`auto`). This is the ADO default.
+    #[serde(rename = "auto")]
     Auto,
     /// Deploy as a zip package (`zipDeploy`).
+    #[serde(rename = "zipDeploy")]
     ZipDeploy,
     /// Deploy as a run-from-package mount (`runFromPackage`).
+    #[serde(rename = "runFromPackage")]
     RunFromPackage,
 }
 
@@ -92,20 +98,37 @@ impl DeploymentMethod {
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/azure-web-app-v1>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AzureWebApp {
+    #[serde(rename = "azureSubscription")]
     azure_subscription: String,
+    #[serde(rename = "appType")]
     app_type: AppType,
+    #[serde(rename = "appName")]
     app_name: String,
     package: String,
+    #[serde(
+        rename = "deployToSlotOrASE",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     deploy_to_slot_or_ase: Option<bool>,
+    #[serde(rename = "resourceGroupName", default)]
     resource_group_name: Option<String>,
+    #[serde(rename = "slotName", default)]
     slot_name: Option<String>,
+    #[serde(rename = "customDeployFolder", default)]
     custom_deploy_folder: Option<String>,
+    #[serde(rename = "runtimeStack", default)]
     runtime_stack: Option<String>,
+    #[serde(rename = "startUpCommand", default)]
     startup_command: Option<String>,
+    #[serde(rename = "customWebConfig", default)]
     custom_web_config: Option<String>,
+    #[serde(rename = "deploymentMethod", default)]
     deployment_method: Option<DeploymentMethod>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 
@@ -367,6 +390,9 @@ mod tests {
     fn deployment_method_as_ado_str() {
         assert_eq!(DeploymentMethod::Auto.as_ado_str(), "auto");
         assert_eq!(DeploymentMethod::ZipDeploy.as_ado_str(), "zipDeploy");
-        assert_eq!(DeploymentMethod::RunFromPackage.as_ado_str(), "runFromPackage");
+        assert_eq!(
+            DeploymentMethod::RunFromPackage.as_ado_str(),
+            "runFromPackage"
+        );
     }
 }

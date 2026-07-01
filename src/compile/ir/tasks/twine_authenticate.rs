@@ -1,6 +1,7 @@
 //! Typed builder for `TwineAuthenticate@1`.
 
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Builder for a [`TaskStep`] invoking `TwineAuthenticate@1`.
 ///
@@ -19,10 +20,14 @@ use crate::compile::ir::step::TaskStep;
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/twine-authenticate-v1>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TwineAuthenticate {
+    #[serde(rename = "artifactFeed", default)]
     artifact_feed: Option<String>,
+    #[serde(rename = "pythonUploadServiceConnection", default)]
     python_upload_service_connection: Option<String>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 

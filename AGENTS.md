@@ -72,6 +72,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── gitattributes.rs # .gitattributes management for compiled pipelines
 │   │   ├── filter_ir.rs  # Filter expression IR: Fact/Predicate types, lowering, validation, codegen
 │   │   ├── pr_filters.rs # PR trigger filter generation (native ADO + gate steps)
+│   │   ├── path_layout_check.rs # Warning-only checkout-aware path validation: $(Build.SourcesDirectory)/<seg> refs in steps, runtime-import targets, deprecated directory markers in the body
 │   │   ├── extensions/   # CompilerExtension trait and infrastructure extensions
 │   │   │   ├── mod.rs    # Trait, Extension enum, collect_extensions(), re-exports
 │   │   │   ├── ado_aw_marker.rs # Always-on metadata marker extension (emits # ado-aw-metadata JSON)
@@ -95,6 +96,8 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   │   ├── mod.rs    # Codemod struct, CODEMODS registry, runner
 │   │   │   ├── 0001_repos_unified.rs # Legacy repositories/checkout → repos codemod
 │   │   │   ├── 0002_pool_object_form.rs # Legacy scalar pool → object form codemod
+│   │   │   ├── 0003_flatten_work_item_config.rs # Legacy work-item config flatten codemod
+│   │   │   ├── 0004_legacy_path_markers.rs # Migrate {{ workspace }}/{{ working_directory }}/{{ trigger_repo_directory }} markers → explicit ADO path exprs (resolved from workspace:/repos:)
 │   │   │   └── helpers.rs # take_key, insert_no_overwrite, rename_key, ConflictPolicy
 │   │   ├── codemod_integration_test.rs # White-box rewrite-path tests (stub registry injection)
 │   │   ├── types.rs      # Front matter grammar and types
@@ -102,7 +105,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │       ├── mod.rs    # Pipeline / PipelineBody / PipelineShape root types
 │   │       ├── ids.rs    # Typed StageId / JobId / StepId newtypes
 │   │       ├── step.rs   # Step variants (Bash, Task, Checkout, Download, Publish, RawYaml)
-│   │       ├── tasks/    # Typed builder structs for built-in ADO tasks (one file per task; new()+typed setters+into_step(); command-enum dispatch for Docker/DotNet/NuGet/Npm/UniversalPackages; typestate builders for PowerShell; docker.rs canonical template)
+│   │       ├── tasks/    # Typed builder structs for built-in ADO tasks (one file per task; new()+typed setters+into_step(); command-enum dispatch for Docker/DotNet/NuGet/Npm/UniversalPackages; typestate builders for PowerShell; docker.rs canonical template; tasks/parse.rs reuses the builders as serde schemas to advisory-validate authored front-matter task steps — surfaced as task-input-invalid warnings via ado-aw lint / lint_workflow MCP, NOT via compile)
 │   │       ├── job.rs    # Job, Pool, TemplateContext, JobVariable
 │   │       ├── stage.rs  # Stage + external-params wrap
 │   │       ├── env.rs    # Typed EnvValue (Literal, AdoMacro, PipelineVar, Secret, StepOutput, Coalesce, Concat)
@@ -171,7 +174,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   ├── validate.rs       # Structural input validators (char allowlists, format checks, injection detectors)
 │   ├── agent_stats.rs    # OTel-based agent statistics parsing (token usage, duration, turns)
 │   ├── hash.rs           # SHA-256 utilities for safe-output file integrity
-│   ├── safeoutputs/      # Safe-output MCP tool implementations (Stage 1 → NDJSON → Stage 3)
+│   ├── safe_outputs/     # Safe-output MCP tool implementations (Stage 1 → NDJSON → Stage 3)
 │   │   ├── mod.rs
 │   │   ├── add_build_tag.rs
 │   │   ├── add_pr_comment.rs
@@ -248,7 +251,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   └── ado-script/       # TypeScript workspace for bundled gate/import helpers plus execution-context, conclusion, and approval-summary bundles
 │       └── src/
 │           ├── gate/     # Gate evaluator source (bundled to gate.js)
-│           ├── import/   # Runtime prompt resolver source (bundled to import.js)
+│           ├── import/   # Runtime prompt resolver source (bundled to import.js); resolves {{#runtime-import}} markers + substitutes a compiler-owned allowlist of ADO path-anchor vars via --var flags
 │           ├── exec-context-pr/ # PR-context precompute source (bundled to exec-context-pr.js)
 │           ├── exec-context-pr-synth/ # Synthetic-PR resolver source (bundled to exec-context-pr-synth.js)
 │           ├── exec-context-manual/ # Manual-run context source (bundled to exec-context-manual.js)
