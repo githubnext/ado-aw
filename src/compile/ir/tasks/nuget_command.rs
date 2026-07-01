@@ -7,14 +7,45 @@
 //! ADO task reference:
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/nuget-command-v2>
 
-use super::common::{push_bool, push_opt};
+use super::common::{de_opt_bool_flex, push_bool, push_opt};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
+use serde_yaml::Value;
+
+/// Validate an authored `NuGetCommand@2` `inputs:` mapping (advisory
+/// front-matter validation, see [`super::parse`]).
+pub(crate) fn validate_inputs(inputs: Value) -> Result<(), String> {
+    let mut map = match inputs {
+        Value::Mapping(m) => m,
+        Value::Null => Default::default(),
+        other => return Err(format!("`inputs` must be a mapping, got {other:?}")),
+    };
+    let command = map
+        .remove("command")
+        .and_then(|v| v.as_str().map(str::to_string))
+        // ADO defaults `command` to `restore` when omitted — treat a missing
+        // command as the default variant rather than an error.
+        .unwrap_or_else(|| "restore".to_string());
+    let rest = Value::Mapping(map);
+
+    let result = match command.as_str() {
+        "restore" => serde_yaml::from_value::<NuGetRestore>(rest).map(drop),
+        "push" => serde_yaml::from_value::<NuGetPush>(rest).map(drop),
+        "pack" => serde_yaml::from_value::<NuGetPack>(rest).map(drop),
+        "custom" => serde_yaml::from_value::<NuGetCustom>(rest).map(drop),
+        other => return Err(format!("NuGetCommand@2: unknown command `{other}`")),
+    };
+    result.map_err(|e| format!("command `{command}`: {e}"))
+}
 
 /// NuGet task verbosity (`verbosityRestore` / `verbosityPush` / `verbosityPack`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum Verbosity {
+    #[serde(rename = "Quiet")]
     Quiet,
+    #[serde(rename = "Normal")]
     Normal,
+    #[serde(rename = "Detailed")]
     Detailed,
 }
 
@@ -30,9 +61,11 @@ impl Verbosity {
 }
 
 /// `feedsToUse` selector for `nuget restore`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum FeedsToUse {
+    #[serde(rename = "select")]
     Select,
+    #[serde(rename = "config")]
     Config,
 }
 
@@ -47,9 +80,11 @@ impl FeedsToUse {
 }
 
 /// `nuGetFeedType` selector for `nuget push`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum NuGetFeedType {
+    #[serde(rename = "internal")]
     Internal,
+    #[serde(rename = "external")]
     External,
 }
 
@@ -64,11 +99,15 @@ impl NuGetFeedType {
 }
 
 /// `versioningScheme` selector for `nuget pack`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum VersioningScheme {
+    #[serde(rename = "off")]
     Off,
+    #[serde(rename = "byPrereleaseNumber")]
     ByPrereleaseNumber,
+    #[serde(rename = "byEnvVar")]
     ByEnvVar,
+    #[serde(rename = "byBuildNumber")]
     ByBuildNumber,
 }
 
@@ -94,17 +133,36 @@ pub enum NuGetOp {
 }
 
 /// Optionals for `nuget restore`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NuGetRestore {
+    #[serde(rename = "solution", default)]
     solution: Option<String>,
+    #[serde(rename = "feedsToUse", default)]
     feeds_to_use: Option<FeedsToUse>,
+    #[serde(rename = "vstsFeed", default)]
     vsts_feed: Option<String>,
+    #[serde(
+        rename = "includeNuGetOrg",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     include_nuget_org: Option<bool>,
+    #[serde(rename = "nugetConfigPath", default)]
     nuget_config_path: Option<String>,
+    #[serde(rename = "externalFeedCredentials", default)]
     external_feed_credentials: Option<String>,
+    #[serde(rename = "noCache", default, deserialize_with = "de_opt_bool_flex")]
     no_cache: Option<bool>,
+    #[serde(
+        rename = "disableParallelProcessing",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     disable_parallel_processing: Option<bool>,
+    #[serde(rename = "restoreDirectory", default)]
     restore_directory: Option<String>,
+    #[serde(rename = "verbosityRestore", default)]
     verbosity_restore: Option<Verbosity>,
 }
 
@@ -165,14 +223,30 @@ impl NuGetRestore {
 }
 
 /// Optionals for `nuget push`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NuGetPush {
+    #[serde(rename = "packagesToPush", default)]
     packages_to_push: Option<String>,
+    #[serde(rename = "nuGetFeedType", default)]
     nuget_feed_type: Option<NuGetFeedType>,
+    #[serde(rename = "publishVstsFeed", default)]
     publish_vsts_feed: Option<String>,
+    #[serde(
+        rename = "allowPackageConflicts",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     allow_package_conflicts: Option<bool>,
+    #[serde(rename = "publishFeedCredentials", default)]
     publish_feed_credentials: Option<String>,
+    #[serde(
+        rename = "publishPackageMetadata",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     publish_package_metadata: Option<bool>,
+    #[serde(rename = "verbosityPush", default)]
     verbosity_push: Option<Verbosity>,
 }
 
@@ -218,11 +292,16 @@ impl NuGetPush {
 }
 
 /// Optionals for `nuget pack`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NuGetPack {
+    #[serde(rename = "packagesToPack", default)]
     packages_to_pack: Option<String>,
+    #[serde(rename = "configuration", default)]
     configuration: Option<String>,
+    #[serde(rename = "versioningScheme", default)]
     versioning_scheme: Option<VersioningScheme>,
+    #[serde(rename = "verbosityPack", default)]
     verbosity_pack: Option<Verbosity>,
 }
 
@@ -253,8 +332,10 @@ impl NuGetPack {
 }
 
 /// Inputs for `nuget custom`. `arguments` is required.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NuGetCustom {
+    #[serde(rename = "arguments")]
     arguments: String,
 }
 
@@ -316,19 +397,32 @@ impl NuGetCommand {
         };
         let mut t = TaskStep::new(
             "NuGetCommand@2",
-            self.display_name.unwrap_or_else(|| format!("NuGet {command}")),
+            self.display_name
+                .unwrap_or_else(|| format!("NuGet {command}")),
         )
         .with_input("command", command);
         match self.command {
             NuGetOp::Restore(s) => {
                 push_opt(&mut t, "solution", s.solution);
-                push_opt(&mut t, "feedsToUse", s.feeds_to_use.map(|v| v.as_ado_str().to_string()));
+                push_opt(
+                    &mut t,
+                    "feedsToUse",
+                    s.feeds_to_use.map(|v| v.as_ado_str().to_string()),
+                );
                 push_opt(&mut t, "vstsFeed", s.vsts_feed);
                 push_bool(&mut t, "includeNuGetOrg", s.include_nuget_org);
                 push_opt(&mut t, "nugetConfigPath", s.nuget_config_path);
-                push_opt(&mut t, "externalFeedCredentials", s.external_feed_credentials);
+                push_opt(
+                    &mut t,
+                    "externalFeedCredentials",
+                    s.external_feed_credentials,
+                );
                 push_bool(&mut t, "noCache", s.no_cache);
-                push_bool(&mut t, "disableParallelProcessing", s.disable_parallel_processing);
+                push_bool(
+                    &mut t,
+                    "disableParallelProcessing",
+                    s.disable_parallel_processing,
+                );
                 push_opt(&mut t, "restoreDirectory", s.restore_directory);
                 push_opt(
                     &mut t,
@@ -398,10 +492,22 @@ mod tests {
                 .verbosity_restore(Verbosity::Detailed),
         )
         .into_step();
-        assert_eq!(t.inputs.get("solution").map(String::as_str), Some("src/MyApp.sln"));
-        assert_eq!(t.inputs.get("feedsToUse").map(String::as_str), Some("select"));
-        assert_eq!(t.inputs.get("includeNuGetOrg").map(String::as_str), Some("false"));
-        assert_eq!(t.inputs.get("verbosityRestore").map(String::as_str), Some("Detailed"));
+        assert_eq!(
+            t.inputs.get("solution").map(String::as_str),
+            Some("src/MyApp.sln")
+        );
+        assert_eq!(
+            t.inputs.get("feedsToUse").map(String::as_str),
+            Some("select")
+        );
+        assert_eq!(
+            t.inputs.get("includeNuGetOrg").map(String::as_str),
+            Some("false")
+        );
+        assert_eq!(
+            t.inputs.get("verbosityRestore").map(String::as_str),
+            Some("Detailed")
+        );
     }
 
     #[test]
@@ -414,8 +520,14 @@ mod tests {
         )
         .into_step();
         assert_eq!(t.inputs.get("command").map(String::as_str), Some("push"));
-        assert_eq!(t.inputs.get("nuGetFeedType").map(String::as_str), Some("internal"));
-        assert_eq!(t.inputs.get("allowPackageConflicts").map(String::as_str), Some("true"));
+        assert_eq!(
+            t.inputs.get("nuGetFeedType").map(String::as_str),
+            Some("internal")
+        );
+        assert_eq!(
+            t.inputs.get("allowPackageConflicts").map(String::as_str),
+            Some("true")
+        );
     }
 
     #[test]

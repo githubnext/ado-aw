@@ -1,7 +1,8 @@
 //! Typed builder for `DeleteFiles@1`.
 
-use super::common::bool_input;
+use super::common::{bool_input, de_opt_bool_flex};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Builder for a [`TaskStep`] invoking `DeleteFiles@1`.
 ///
@@ -9,12 +10,26 @@ use crate::compile::ir::step::TaskStep;
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/delete-files-v1>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeleteFiles {
+    #[serde(rename = "Contents")]
     contents: String,
+    #[serde(rename = "SourceFolder", default)]
     source_folder: Option<String>,
+    #[serde(
+        rename = "RemoveSourceFolder",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     remove_source_folder: Option<bool>,
+    #[serde(
+        rename = "RemoveDotFiles",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     remove_dot_files: Option<bool>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 

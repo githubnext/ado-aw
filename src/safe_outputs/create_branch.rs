@@ -417,6 +417,8 @@ mod tests {
         assert_eq!(result.name, "create-branch");
         assert_eq!(result.branch_name, "feature/new-work");
         assert_eq!(result.source_branch, Some("develop".to_string()));
+        assert_eq!(result.source_commit, None);
+        assert_eq!(result.repository, None);
     }
 
     #[test]
@@ -428,7 +430,11 @@ mod tests {
             repository: None,
         };
         let result: Result<CreateBranchResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("branch_name must not be empty"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -440,7 +446,11 @@ mod tests {
             repository: None,
         };
         let result: Result<CreateBranchResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("branch_name must not contain"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -452,7 +462,11 @@ mod tests {
             repository: None,
         };
         let result: Result<CreateBranchResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("source_commit"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -464,7 +478,11 @@ mod tests {
             repository: Some("##vso[task.setvariable variable=x]y".to_string()),
         };
         let result: Result<CreateBranchResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("repository"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
