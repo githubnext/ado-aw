@@ -30,16 +30,16 @@ use serde::de::DeserializeOwned;
 use serde_yaml::Value;
 
 use super::{
-    archive_files, azure_cli, azure_container_apps, azure_file_copy, azure_key_vault,
-    azure_powershell, azure_web_app, cargo_authenticate, cmd_line, copy_files, delete_files, docker,
-    docker_installer, dotnet_core_cli, download_build_artifacts, download_package,
-    download_pipeline_artifact, download_secure_file, extract_files, github_release, go_tool, gradle,
-    helm_installer, java_tool_installer, manual_validation, maven, maven_authenticate, node_tool,
-    npm, npm_authenticate, nuget_authenticate, nuget_command, pip_authenticate, powershell,
-    publish_build_artifacts, publish_code_coverage_results, publish_pipeline_artifact,
-    publish_test_results, python_script, sonar_qube_analyze, sonar_qube_prepare, sonar_qube_publish,
-    twine_authenticate, universal_packages, use_dotnet, use_node, use_python_version,
-    use_ruby_version, vs_build, vstest,
+    archive_files, azure_cli, azure_container_apps, azure_file_copy, azure_function_app,
+    azure_key_vault, azure_powershell, azure_web_app, cargo_authenticate, cmd_line, copy_files,
+    delete_files, docker, docker_installer, dotnet_core_cli, download_build_artifacts,
+    download_package, download_pipeline_artifact, download_secure_file, extract_files,
+    github_release, go_tool, gradle, helm_installer, java_tool_installer, manual_validation, maven,
+    maven_authenticate, node_tool, npm, npm_authenticate, nuget_authenticate, nuget_command,
+    pip_authenticate, powershell, publish_build_artifacts, publish_code_coverage_results,
+    publish_pipeline_artifact, publish_test_results, python_script, sonar_qube_analyze,
+    sonar_qube_prepare, sonar_qube_publish, twine_authenticate, universal_packages, use_dotnet,
+    use_node, use_python_version, use_ruby_version, vs_build, vstest,
 };
 
 /// Registry mapping an ADO task id (`"CopyFiles@2"`) to a validator that checks
@@ -58,6 +58,7 @@ const VALIDATORS: &[(&str, fn(Value) -> Result<(), String>)] = &[
     // ── Flat single-struct builders (validity == clean deserialization) ──
     ("ArchiveFiles@2", validate_by_deserialize::<archive_files::ArchiveFiles>),
     ("AzureContainerApps@1", validate_by_deserialize::<azure_container_apps::AzureContainerApps>),
+    ("AzureFunctionApp@2", validate_by_deserialize::<azure_function_app::AzureFunctionApp>),
     ("AzureKeyVault@2", validate_by_deserialize::<azure_key_vault::AzureKeyVault>),
     ("AzureWebApp@1", validate_by_deserialize::<azure_web_app::AzureWebApp>),
     ("CargoAuthenticate@0", validate_by_deserialize::<cargo_authenticate::CargoAuthenticate>),
@@ -808,6 +809,40 @@ mod tests {
         );
         let err = validate_task_step(&step).expect("recognized").unwrap_err();
         assert!(err.contains("SonarQube"), "got: {err}");
+    }
+
+    #[test]
+    fn roundtrip_azure_function_app() {
+        assert_roundtrips(
+            azure_function_app::AzureFunctionApp::new(
+                "arm-conn",
+                azure_function_app::FunctionAppType::Linux,
+                "my-func",
+                "$(Build.ArtifactStagingDirectory)/app.zip",
+            )
+            .deploy_to_slot_or_ase(true)
+            .resource_group_name("rg")
+            .slot_name("staging")
+            .deployment_method(azure_function_app::FunctionDeploymentMethod::ZipDeploy)
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn azure_function_app_unknown_input_warns() {
+        let step = yaml(
+            r#"
+            task: AzureFunctionApp@2
+            inputs:
+              azureSubscription: conn
+              appType: functionApp
+              appName: my-func
+              package: app.zip
+              bogusInput: nope
+            "#,
+        );
+        let err = validate_task_step(&step).expect("recognized").unwrap_err();
+        assert!(err.contains("AzureFunctionApp@2"), "got: {err}");
     }
 
     #[test]

@@ -8,15 +8,18 @@
 //! ADO task reference:
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/azure-function-app-v2>
 
-use super::common::{push_bool, push_opt};
+use super::common::{de_opt_bool_flex, push_bool, push_opt};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Hosting OS for the Azure Functions App (`appType` input).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum FunctionAppType {
     /// Function App on Windows (`"functionApp"`).
+    #[serde(rename = "functionApp")]
     Windows,
     /// Function App on Linux (`"functionAppLinux"`).
+    #[serde(rename = "functionAppLinux")]
     Linux,
 }
 
@@ -33,13 +36,16 @@ impl FunctionAppType {
 /// Package deployment method for the function app (`deploymentMethod` input).
 ///
 /// Not applicable to Flex Consumption plan apps or WAR/JAR packages.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum FunctionDeploymentMethod {
     /// ADO auto-selects the best method (`"auto"`). ADO default.
+    #[serde(rename = "auto")]
     Auto,
     /// Deploy as a zip package (`"zipDeploy"`).
+    #[serde(rename = "zipDeploy")]
     ZipDeploy,
     /// Deploy as a run-from-package mount (`"runFromPackage"`).
+    #[serde(rename = "runFromPackage")]
     RunFromPackage,
 }
 
@@ -95,19 +101,39 @@ impl FunctionDeploymentMethod {
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/azure-function-app-v2>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AzureFunctionApp {
+    #[serde(rename = "azureSubscription")]
     azure_subscription: String,
+    #[serde(rename = "appType")]
     app_type: FunctionAppType,
+    #[serde(rename = "appName")]
     app_name: String,
     package: String,
+    #[serde(
+        rename = "isFlexConsumption",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     is_flex_consumption: Option<bool>,
+    #[serde(
+        rename = "deployToSlotOrASE",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     deploy_to_slot_or_ase: Option<bool>,
+    #[serde(rename = "resourceGroupName", default)]
     resource_group_name: Option<String>,
+    #[serde(rename = "slotName", default)]
     slot_name: Option<String>,
+    #[serde(rename = "runtimeStack", default)]
     runtime_stack: Option<String>,
+    #[serde(rename = "appSettings", default)]
     app_settings: Option<String>,
+    #[serde(rename = "deploymentMethod", default)]
     deployment_method: Option<FunctionDeploymentMethod>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 
