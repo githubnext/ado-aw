@@ -95,6 +95,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   │   ├── mod.rs    # Codemod struct, CODEMODS registry, runner
 │   │   │   ├── 0001_repos_unified.rs # Legacy repositories/checkout → repos codemod
 │   │   │   ├── 0002_pool_object_form.rs # Legacy scalar pool → object form codemod
+│   │   │   ├── 0003_flatten_work_item_config.rs # safe-outputs.{noop,missing-tool,missing-data}.work-item → flat fields codemod
 │   │   │   └── helpers.rs # take_key, insert_no_overwrite, rename_key, ConflictPolicy
 │   │   ├── codemod_integration_test.rs # White-box rewrite-path tests (stub registry injection)
 │   │   ├── types.rs      # Front matter grammar and types
@@ -171,7 +172,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   ├── validate.rs       # Structural input validators (char allowlists, format checks, injection detectors)
 │   ├── agent_stats.rs    # OTel-based agent statistics parsing (token usage, duration, turns)
 │   ├── hash.rs           # SHA-256 utilities for safe-output file integrity
-│   ├── safeoutputs/      # Safe-output MCP tool implementations (Stage 1 → NDJSON → Stage 3)
+│   ├── safe_outputs/     # Safe-output MCP tool implementations (Stage 1 → NDJSON → Stage 3)
 │   │   ├── mod.rs
 │   │   ├── add_build_tag.rs
 │   │   ├── add_pr_comment.rs
