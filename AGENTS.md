@@ -308,9 +308,9 @@ index to jump to the right page.
   `command`).
 - [`docs/parameters.md`](docs/parameters.md) — ADO runtime parameters surfaced
   in the pipeline UI, including the auto-injected `clearMemory` parameter.
-- [`docs/conclusion.md`](docs/conclusion.md) — `conclusion:` configuration for
-  the always-running post-pipeline housekeeping job that files work-item
-  reports for failures and diagnostic signals.
+- [`docs/conclusion.md`](docs/conclusion.md) — Conclusion job — the
+  always-running post-pipeline housekeeping job (triggered by `safe-outputs:`)
+  that files work-item reports for failures and diagnostic signals.
 - [`docs/tools.md`](docs/tools.md) — `tools:` configuration (bash allow-list,
   `edit`, `cache-memory`, `azure-devops` MCP).
 - [`docs/runtimes.md`](docs/runtimes.md) — `runtimes:` configuration (Lean 4,
