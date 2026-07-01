@@ -31,3 +31,73 @@ pub(crate) fn push_bool(t: &mut TaskStep, key: &str, value: Option<bool>) {
         t.inputs.insert(key.to_string(), bool_input(v).to_string());
     }
 }
+
+/// Deserialize an optional ADO bool-string input, accepting either a native
+/// YAML boolean (`true`) or the ADO-canonical string form (`"true"` /
+/// `"false"`). Used by the front-matter validation path in [`super::parse`] so
+/// authored task inputs match ADO's accepted shapes.
+pub(crate) fn de_opt_bool_flex<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum BoolOrStr {
+        Bool(bool),
+        Str(String),
+    }
+
+    match Option::<BoolOrStr>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(BoolOrStr::Bool(b)) => Ok(Some(b)),
+        // Accept the ADO string form case-insensitively: serde_yaml (YAML 1.2)
+        // only treats lowercase `true`/`false` as native booleans, so an
+        // authored `CleanTargetFolder: True` arrives here as the string
+        // `"True"` — which ADO would accept, so we must not flag it.
+        Some(BoolOrStr::Str(s)) => match s.to_ascii_lowercase().as_str() {
+            "true" => Ok(Some(true)),
+            "false" => Ok(Some(false)),
+            _ => Err(serde::de::Error::custom(format!(
+                "expected a boolean or \"true\"/\"false\", got {s:?}"
+            ))),
+        },
+    }
+}
+
+/// Deserialize an optional ADO string input, accepting a native YAML number in
+/// addition to a string. ADO task inputs are all strings, but authors naturally
+/// write integer-valued ones bare (e.g. `retryCount: 3`,
+/// `delayBetweenRetries: 1000`); serde would otherwise reject the integer scalar
+/// against an `Option<String>` and produce a false-positive validation finding.
+/// Numbers are stringified to match how ADO coerces them.
+///
+/// A bare `f64` (e.g. `retryCount: 3.14`) is also accepted and stringified,
+/// which ADO would then reject at runtime for an integer input. That is a
+/// deliberate *false-negative* (a gap, not noise): authoring a count as a
+/// non-integer float is rare, and this validation intentionally prefers gaps
+/// over false positives.
+pub(crate) fn de_opt_str_or_int<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StrOrNum {
+        Str(String),
+        Int(i64),
+        UInt(u64),
+        Float(f64),
+    }
+
+    Ok(match Option::<StrOrNum>::deserialize(deserializer)? {
+        None => None,
+        Some(StrOrNum::Str(s)) => Some(s),
+        Some(StrOrNum::Int(i)) => Some(i.to_string()),
+        Some(StrOrNum::UInt(u)) => Some(u.to_string()),
+        Some(StrOrNum::Float(f)) => Some(f.to_string()),
+    })
+}

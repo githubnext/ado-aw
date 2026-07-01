@@ -1,6 +1,7 @@
 //! Typed builder for `CargoAuthenticate@0`.
 
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Builder for a [`TaskStep`] invoking `CargoAuthenticate@0`.
 ///
@@ -14,12 +15,18 @@ use crate::compile::ir::step::TaskStep;
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/cargo-authenticate-v0>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CargoAuthenticate {
+    #[serde(rename = "configFile")]
     config_file: String,
+    #[serde(rename = "cargoServiceConnections", default)]
     cargo_service_connections: Option<String>,
+    #[serde(rename = "registryNames", default)]
     registry_names: Option<String>,
+    #[serde(rename = "azureDevOpsServiceConnection", default)]
     azure_devops_service_connection: Option<String>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 

@@ -486,7 +486,27 @@ safe-outputs:
       - needs-triage
 ```
 
----
+### Manual Review (`require-approval`)
+
+High-impact safe outputs can be gated behind a human approval step. When the agent proposes a gated action, the pipeline inserts a `ManualValidation` step between Detection and SafeOutputs. A reviewer must approve before the output is applied.
+
+Set `require-approval: true` per tool, or use the detailed form for approvers and timeout:
+
+```yaml
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+    require-approval: true          # Gate this tool behind manual review
+  create-work-item:
+    work-item-type: Task
+    require-approval:
+      approvers: ["my-ado-group"]   # Optional: specific approvers
+      timeout-minutes: 1440         # Optional: 24h default
+      on-timeout: reject            # "reject" (default) or "approve"
+      instructions: "Review carefully before approving."
+```
+
+See [`docs/safe-outputs.md`](docs/safe-outputs.md) for the full reference.
 
 ## Network Isolation
 
@@ -628,6 +648,13 @@ index to jump to the right page.
 - [`docs/ir.md`](docs/ir.md) — typed Azure DevOps pipeline IR (`Pipeline`,
   jobs/stages/steps, output refs, graph pass, lowering, and target builders).
 - [`docs/cli.md`](docs/cli.md) — `ado-aw` CLI command and flag reference.
+- [`docs/agency-plugin.md`](docs/agency-plugin.md) — the Agency / Claude Code
+  plugin (`agency/plugins/ado-aw/`): canonical layout, six skills, `mcp-author`
+  wiring, the self-contained root marketplace catalogs, `init --agency`
+  scaffolding, release-please version-locking, and shared-marketplace listing.
+- [`docs/audit.md`](docs/audit.md) — `ado-aw audit`: accepted build-id / URL
+  forms, artifact layout, cache behavior, rejection tracing, and `AuditData`
+  report shape.
 - [`docs/mcp.md`](docs/mcp.md) — MCP server configuration (stdio containers,
   HTTP servers, env passthrough).
 - [`docs/mcp-author.md`](docs/mcp-author.md) — author-facing MCP server

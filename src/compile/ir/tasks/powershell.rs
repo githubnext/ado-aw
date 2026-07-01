@@ -11,15 +11,47 @@
 //! ADO task reference:
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/powershell-v2>
 
-use super::common::{push_bool, push_opt};
+use super::common::{de_opt_bool_flex, push_bool, push_opt};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
+use serde_yaml::Value;
+
+/// Validate an authored `PowerShell@2` `inputs:` mapping (advisory front-matter
+/// validation, see [`super::parse`]).
+pub(crate) fn validate_inputs(inputs: Value) -> Result<(), String> {
+    let mut map = match inputs {
+        Value::Mapping(m) => m,
+        Value::Null => Default::default(),
+        other => return Err(format!("`inputs` must be a mapping, got {other:?}")),
+    };
+    let target_type = match map.remove("targetType") {
+        Some(v) => Some(
+            v.as_str()
+                .ok_or_else(|| "PowerShell@2: `targetType` must be a string".to_string())?
+                .to_string(),
+        ),
+        None => None,
+    };
+    let mode = target_type.as_deref().unwrap_or("filePath");
+    let rest = Value::Mapping(map);
+
+    let result = match mode {
+        "filePath" => serde_yaml::from_value::<PowerShellFile>(rest).map(drop),
+        "inline" => serde_yaml::from_value::<PowerShellInline>(rest).map(drop),
+        other => return Err(format!("PowerShell@2: unknown targetType `{other}`")),
+    };
+    result.map_err(|e| format!("targetType `{mode}`: {e}"))
+}
 
 /// Non-terminating error behaviour for the PowerShell builders
 /// (`errorActionPreference`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum ErrorActionPreference {
+    #[serde(rename = "stop")]
     Stop,
+    #[serde(rename = "continue")]
     Continue,
+    #[serde(rename = "silentlyContinue")]
     SilentlyContinue,
 }
 
@@ -34,60 +66,37 @@ impl ErrorActionPreference {
     }
 }
 
-/// Optionals shared by both `PowerShell@2` targets.
-#[derive(Debug, Clone, Default)]
-struct Shared {
-    error_action_preference: Option<ErrorActionPreference>,
-    fail_on_stderr: Option<bool>,
-    ignore_last_exit_code: Option<bool>,
-    pwsh: Option<bool>,
-    working_directory: Option<String>,
-}
-
-impl Shared {
-    fn apply(self, t: &mut TaskStep) {
-        if let Some(v) = self.error_action_preference {
-            t.inputs
-                .insert("errorActionPreference".to_string(), v.as_ado_str().to_string());
-        }
-        push_bool(t, "failOnStderr", self.fail_on_stderr);
-        push_bool(t, "ignoreLASTEXITCODE", self.ignore_last_exit_code);
-        push_bool(t, "pwsh", self.pwsh);
-        push_opt(t, "workingDirectory", self.working_directory);
-    }
-}
-
 /// Generate the optional setters shared by both PowerShell builders. Each
-/// builder has a `shared: Shared` field and a `display_name: Option<String>`.
+/// builder has the shared optional fields and a `display_name: Option<String>`.
 macro_rules! shared_powershell_setters {
     () => {
         /// `errorActionPreference` — non-terminating error behaviour (default `stop`).
         pub fn error_action_preference(mut self, value: ErrorActionPreference) -> Self {
-            self.shared.error_action_preference = Some(value);
+            self.error_action_preference = Some(value);
             self
         }
 
         /// `failOnStderr` — fail the step if anything is written to stderr.
         pub fn fail_on_stderr(mut self, value: bool) -> Self {
-            self.shared.fail_on_stderr = Some(value);
+            self.fail_on_stderr = Some(value);
             self
         }
 
         /// `ignoreLASTEXITCODE` — do not fail when `$LASTEXITCODE` is non-zero.
         pub fn ignore_last_exit_code(mut self, value: bool) -> Self {
-            self.shared.ignore_last_exit_code = Some(value);
+            self.ignore_last_exit_code = Some(value);
             self
         }
 
         /// `pwsh` — use PowerShell Core (`pwsh`) instead of Windows PowerShell.
         pub fn pwsh(mut self, value: bool) -> Self {
-            self.shared.pwsh = Some(value);
+            self.pwsh = Some(value);
             self
         }
 
         /// `workingDirectory` — working directory for the script.
         pub fn working_directory(mut self, value: impl Into<String>) -> Self {
-            self.shared.working_directory = Some(value.into());
+            self.working_directory = Some(value.into());
             self
         }
 
@@ -100,11 +109,32 @@ macro_rules! shared_powershell_setters {
 }
 
 /// Builder for `PowerShell@2` in file-path mode (`targetType: filePath`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PowerShellFile {
+    #[serde(rename = "filePath")]
     file_path: String,
+    #[serde(rename = "arguments", default)]
     arguments: Option<String>,
-    shared: Shared,
+    #[serde(rename = "errorActionPreference", default)]
+    error_action_preference: Option<ErrorActionPreference>,
+    #[serde(
+        rename = "failOnStderr",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
+    fail_on_stderr: Option<bool>,
+    #[serde(
+        rename = "ignoreLASTEXITCODE",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
+    ignore_last_exit_code: Option<bool>,
+    #[serde(rename = "pwsh", default, deserialize_with = "de_opt_bool_flex")]
+    pwsh: Option<bool>,
+    #[serde(rename = "workingDirectory", default)]
+    working_directory: Option<String>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 
@@ -122,21 +152,51 @@ impl PowerShellFile {
     pub fn into_step(self) -> TaskStep {
         let mut t = TaskStep::new(
             "PowerShell@2",
-            self.display_name.unwrap_or_else(|| "PowerShell Script".into()),
+            self.display_name
+                .unwrap_or_else(|| "PowerShell Script".into()),
         )
         .with_input("targetType", "filePath")
         .with_input("filePath", self.file_path);
         push_opt(&mut t, "arguments", self.arguments);
-        self.shared.apply(&mut t);
+        if let Some(v) = self.error_action_preference {
+            t.inputs.insert(
+                "errorActionPreference".to_string(),
+                v.as_ado_str().to_string(),
+            );
+        }
+        push_bool(&mut t, "failOnStderr", self.fail_on_stderr);
+        push_bool(&mut t, "ignoreLASTEXITCODE", self.ignore_last_exit_code);
+        push_bool(&mut t, "pwsh", self.pwsh);
+        push_opt(&mut t, "workingDirectory", self.working_directory);
         t
     }
 }
 
 /// Builder for `PowerShell@2` in inline mode (`targetType: inline`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PowerShellInline {
+    #[serde(rename = "script")]
     script: String,
-    shared: Shared,
+    #[serde(rename = "errorActionPreference", default)]
+    error_action_preference: Option<ErrorActionPreference>,
+    #[serde(
+        rename = "failOnStderr",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
+    fail_on_stderr: Option<bool>,
+    #[serde(
+        rename = "ignoreLASTEXITCODE",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
+    ignore_last_exit_code: Option<bool>,
+    #[serde(rename = "pwsh", default, deserialize_with = "de_opt_bool_flex")]
+    pwsh: Option<bool>,
+    #[serde(rename = "workingDirectory", default)]
+    working_directory: Option<String>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 
@@ -147,11 +207,21 @@ impl PowerShellInline {
     pub fn into_step(self) -> TaskStep {
         let mut t = TaskStep::new(
             "PowerShell@2",
-            self.display_name.unwrap_or_else(|| "PowerShell Script".into()),
+            self.display_name
+                .unwrap_or_else(|| "PowerShell Script".into()),
         )
         .with_input("targetType", "inline")
         .with_input("script", self.script);
-        self.shared.apply(&mut t);
+        if let Some(v) = self.error_action_preference {
+            t.inputs.insert(
+                "errorActionPreference".to_string(),
+                v.as_ado_str().to_string(),
+            );
+        }
+        push_bool(&mut t, "failOnStderr", self.fail_on_stderr);
+        push_bool(&mut t, "ignoreLASTEXITCODE", self.ignore_last_exit_code);
+        push_bool(&mut t, "pwsh", self.pwsh);
+        push_opt(&mut t, "workingDirectory", self.working_directory);
         t
     }
 }
@@ -166,7 +236,11 @@ impl PowerShell {
         PowerShellFile {
             file_path: file_path.into(),
             arguments: None,
-            shared: Shared::default(),
+            error_action_preference: None,
+            fail_on_stderr: None,
+            ignore_last_exit_code: None,
+            pwsh: None,
+            working_directory: None,
             display_name: None,
         }
     }
@@ -175,7 +249,11 @@ impl PowerShell {
     pub fn inline(script: impl Into<String>) -> PowerShellInline {
         PowerShellInline {
             script: script.into(),
-            shared: Shared::default(),
+            error_action_preference: None,
+            fail_on_stderr: None,
+            ignore_last_exit_code: None,
+            pwsh: None,
+            working_directory: None,
             display_name: None,
         }
     }
@@ -189,8 +267,14 @@ mod tests {
     fn file_mode_sets_target_and_path() {
         let t = PowerShell::file("scripts/build.ps1").into_step();
         assert_eq!(t.task, "PowerShell@2");
-        assert_eq!(t.inputs.get("targetType").map(String::as_str), Some("filePath"));
-        assert_eq!(t.inputs.get("filePath").map(String::as_str), Some("scripts/build.ps1"));
+        assert_eq!(
+            t.inputs.get("targetType").map(String::as_str),
+            Some("filePath")
+        );
+        assert_eq!(
+            t.inputs.get("filePath").map(String::as_str),
+            Some("scripts/build.ps1")
+        );
     }
 
     #[test]
@@ -201,9 +285,15 @@ mod tests {
             .pwsh(true)
             .error_action_preference(ErrorActionPreference::Continue)
             .into_step();
-        assert_eq!(t.inputs.get("arguments").map(String::as_str), Some("-Configuration Release"));
+        assert_eq!(
+            t.inputs.get("arguments").map(String::as_str),
+            Some("-Configuration Release")
+        );
         assert_eq!(t.inputs.get("pwsh").map(String::as_str), Some("true"));
-        assert_eq!(t.inputs.get("errorActionPreference").map(String::as_str), Some("continue"));
+        assert_eq!(
+            t.inputs.get("errorActionPreference").map(String::as_str),
+            Some("continue")
+        );
     }
 
     #[test]
@@ -211,9 +301,18 @@ mod tests {
         let t = PowerShell::inline("Write-Host hi")
             .ignore_last_exit_code(true)
             .into_step();
-        assert_eq!(t.inputs.get("targetType").map(String::as_str), Some("inline"));
-        assert_eq!(t.inputs.get("script").map(String::as_str), Some("Write-Host hi"));
-        assert_eq!(t.inputs.get("ignoreLASTEXITCODE").map(String::as_str), Some("true"));
+        assert_eq!(
+            t.inputs.get("targetType").map(String::as_str),
+            Some("inline")
+        );
+        assert_eq!(
+            t.inputs.get("script").map(String::as_str),
+            Some("Write-Host hi")
+        );
+        assert_eq!(
+            t.inputs.get("ignoreLASTEXITCODE").map(String::as_str),
+            Some("true")
+        );
     }
 
     // Note: there is intentionally no `arguments` setter on `PowerShellInline`,

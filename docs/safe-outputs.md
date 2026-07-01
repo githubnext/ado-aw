@@ -37,6 +37,123 @@ safe-outputs:
 
 Safe output configurations are passed to Stage 3 execution and used when processing safe outputs.
 
+### Manual review (`require-approval`)
+
+High-impact safe outputs can be gated behind a human approval step
+(`ManualValidation@1`) that pauses the run until a reviewer approves or rejects
+in the Azure DevOps UI. This lets agents propose more consequential actions
+(PRs, branches, queued builds, work items) safely.
+
+Set `require-approval` at the **section level** for a pipeline-wide default,
+and/or inside an **individual tool** to override the default for that tool:
+
+```yaml
+safe-outputs:
+  require-approval: true          # global default: every output below needs review
+  create-pull-request:
+    target-branch: main
+  add-pr-comment:
+    require-approval: false       # …except low-impact comments, which auto-apply
+```
+
+`require-approval` accepts either a bare boolean or an object for finer control:
+
+```yaml
+safe-outputs:
+  create-pull-request:
+    require-approval:
+      approvers: ["[MyOrg]\\release-team"]   # who may approve (empty → anyone with run permission)
+      notify-users: ["ops@example.com"]      # who is emailed (empty → no email)
+      timeout-minutes: 120                    # pending period before on-timeout fires (omit → pipeline default)
+      on-timeout: reject                      # reject (default, fail-closed) | resume
+      instructions: "Verify the proposed PR before approving."
+```
+
+Resolution per tool: the tool's own `require-approval` wins; otherwise the
+section-level `require-approval` applies; otherwise the tool is **not** gated.
+
+**Defaults (bare `require-approval: true`)** — the run pauses on a Review panel;
+**anyone with run permission** can approve or reject; **no** notification emails
+are sent; and the validation **fails closed** on timeout (`on-timeout: reject`),
+so un-approved outputs are never applied.
+
+**Timeout (`timeout-minutes` / `on-timeout`)** — `timeout-minutes` bounds the
+`ManualValidation@1` task's pending period; when it elapses the task applies
+`on-timeout` (`reject` by default, or `resume` to auto-approve). The agentless
+`ManualReview` job carries a slightly larger outer timeout as a hard bound, so a
+job-level cancellation never preempts the task's graceful `on-timeout` handling
+(in particular, `on-timeout: resume` reliably auto-approves rather than being
+cancelled). Omit `timeout-minutes` to inherit the pipeline default.
+
+**Reviewer message** — set `instructions` to control the text shown in the
+Review panel and notification emails. It is plain text and supports pipeline
+variable (`$(...)`) interpolation. When omitted, ado-aw generates a default
+message listing the reviewed safe-output type(s) awaiting approval. A run uses a
+**single** `ManualReview` gate covering every reviewed tool: the gate message
+**lists every reviewed tool** and aggregates **all** author-supplied per-tool
+`instructions` (grouped when identical), so no tool's note is dropped when
+several are gated. A single reviewed tool with its own `instructions` shows that
+message verbatim; set `instructions` on the section-level `require-approval` to
+apply one note to every tool.
+
+**Execution shape** — manual review changes the compiled pipeline:
+
+- A new agentless `ManualReview` job (`pool: server`) runs `ManualValidation@1`
+  between Detection and the safe-output execution.
+- It only pauses when Detection cleared the run (no prompt-injection / secret
+  leak) **and** the agent actually proposed a reviewed-type output (a Detection
+  step sets a `HasReviewedProposals` flag) — so the run never pauses for
+  nothing.
+- When some tools are gated and others are not, execution **splits**: an
+  automatic `SafeOutputs` job applies the non-gated outputs immediately
+  (independent of the review outcome), while a separate `SafeOutputs_Reviewed`
+  job — gated behind `ManualReview` — applies the approved outputs and publishes
+  a distinct `safe_outputs_reviewed` artifact. A rejected or timed-out review
+  fails closed: the reviewed job is skipped while the automatic outputs are
+  unaffected.
+- When **every** configured tool requires approval (no automatic tools),
+  execution is **not** split — the single `SafeOutputs` job is gated behind
+  `ManualReview` in its entirety. Note this also defers the always-enabled
+  diagnostic outputs (`noop`, `report_incomplete`, `missing-tool`,
+  `missing-data`) until after approval, since they share that one job. If you
+  want diagnostics to apply without waiting on a human, leave at least one
+  low-impact tool (e.g. `add-pr-comment`) non-gated so the automatic split job
+  is created.
+
+The Detection threat gate always runs first, so a flagged run applies nothing —
+automatic or reviewed.
+
+### Safe-outputs summary tab
+
+Every run that proposes safe outputs publishes a human-readable **build summary
+tab** titled **`ado-aw-safe-outputs`**, listing what the agent proposed. This is
+always on — it does **not** require `require-approval` — so non-elevated runs get
+the same transparency, and it is the panel a reviewer reads before approving a
+gated run.
+
+- The summary is rendered at the **end of the Agent job** (the job that produced
+  the proposals) by the `approval-summary` ado-script bundle, and attached via
+  `##vso[task.uploadsummary]`. It is **not** produced by the Detection
+  (threat-analysis) stage, whose only job is inspecting proposals for threats.
+- Each proposal is shown with per-tool key fields (e.g. PR title + target branch,
+  work-item title) plus a truncated excerpt of any long body. All content is
+  **agent-generated** and is sanitized for display (markdown/HTML escaped, code
+  fences neutralised, control characters stripped, long values truncated) so a
+  proposal cannot forge UI or break the layout.
+- When manual review is configured, the **pending-approval** proposals are listed
+  first (under a `⏳ Pending approval` heading), followed by the automatic ones.
+  With no approval configured, a single list is shown. The default review
+  message points approvers at this tab.
+- Rendering is best-effort: if it fails it is logged as a warning and never fails
+  the build or blocks the review gate.
+
+**Coexistence with your own summary tabs.** ADO derives a summary section's title
+from the uploaded file's base name and does not de-duplicate, so this feature uses
+a namespaced base name (`ado-aw-safe-outputs.md` → the `ado-aw-safe-outputs`
+section). It is additive and build-scoped: it appears as one extra section
+alongside any `task.uploadsummary` tabs your own steps publish (including under
+`target: job` / `target: stage`), and never collides with them.
+
 ### Executor authentication
 
 All write-bearing safe outputs (e.g. `create-pull-request`,
@@ -215,30 +332,18 @@ When `workspace: root` and multiple repositories are checked out, agents can cre
 ```
 The `repository` value must be `"self"`, an alias from the `checkout:` list in the front matter, the full Azure DevOps repository name (e.g. `project/repo`), or the bare repository name (case-insensitive, e.g. `sdk-FtdiDeviceControl` for an entry whose ADO name is `4x4/sdk-FtdiDeviceControl`).
 
+### Diagnostic signals
+
+`noop`, `missing-tool`, and `missing-data` are diagnostic safe outputs.
+When `conclusion:` is configured, the always-running Conclusion job
+handles Azure DevOps work-item filing/commenting for these signals. See
+[docs/conclusion.md](conclusion.md).
+
 ### noop
 Reports that no action was needed. Use this to provide visibility when analysis is complete but no changes or outputs are required.
 
-The executor always files an Azure DevOps work item or appends a comment to an existing one. Override the defaults in front matter to customise the title, type, or area path. If ADO credentials are not available the tool succeeds with a warning.
-
 **Agent parameters:**
 - `context` - Optional context about why no action was taken
-
-**Configuration options (front matter):**
-```yaml
-safe-outputs:
-  noop:
-    work-item:                                  # Work item config — always active with these defaults
-      enabled: true                             # Set to false to disable work-item filing entirely
-      title: "[ado-aw] Agent reported no operation"  # Default title (used to find existing items too)
-      work-item-type: Task                      # Work item type (default: "Task")
-      area-path: "MyProject\\MyTeam"            # Optional — area path
-      iteration-path: "MyProject\\Sprint 1"     # Optional — iteration path
-      tags:                                     # Optional — tags to apply
-        - agent-noop
-      include-stats: true                       # Append agent stats to description/comment (default: true)
-```
-
-The executor searches for a non-closed work item with the same `title` in the project. If one is found, a comment is appended; otherwise a new work item is created.
 
 ### missing-data
 Reports that data or information needed to complete the task is not available.
@@ -251,28 +356,9 @@ Reports that data or information needed to complete the task is not available.
 ### missing-tool
 Reports that a tool or capability needed to complete the task is not available.
 
-The executor always files an Azure DevOps work item or appends a comment to an existing one. Override the defaults in front matter to customise the title, type, or area path. If ADO credentials are not available the tool succeeds with a warning.
-
 **Agent parameters:**
 - `tool_name` - Name of the tool that was expected but not found
 - `context` - Optional context about why the tool was needed
-
-**Configuration options (front matter):**
-```yaml
-safe-outputs:
-  missing-tool:
-    work-item:                                     # Work item config — always active with these defaults
-      enabled: true                                # Set to false to disable work-item filing entirely
-      title: "[ado-aw] Agent encountered missing tool"  # Default title (used to find existing items too)
-      work-item-type: Task                         # Work item type (default: "Task")
-      area-path: "MyProject\\MyTeam"               # Optional — area path
-      iteration-path: "MyProject\\Sprint 1"        # Optional — iteration path
-      tags:                                        # Optional — tags to apply
-        - agent-missing-tool
-      include-stats: true                          # Append agent stats to description/comment (default: true)
-```
-
-The executor searches for a non-closed work item with the same `title` in the project. If one is found, a comment is appended; otherwise a new work item is created.
 
 ### report-incomplete
 Reports that a task could not be completed.

@@ -146,7 +146,7 @@ let build = Step::Task(
 );
 ```
 
-The full catalogue of typed builders lives in `src/compile/ir/tasks/` and is documented in the [IR reference](/ado-aw/reference/ir/#typed-task-helpers). It covers toolchain setup (`UseNode@1`, `UsePythonVersion@0`, `UseDotNet@2`, `UseRubyVersion@0`, `GoTool@0`), file operations, build and test, artifact publishing, scripting, containers, Azure integrations, package authentication (Cargo, Maven, npm, NuGet, pip, Twine, Universal Packages), and pipeline control — 44 builders in total.
+The full catalogue of typed builders lives in `src/compile/ir/tasks/` and is documented in the [IR reference](/ado-aw/reference/ir/#typed-task-helpers). It covers toolchain setup (`UseNode@1`, `UsePythonVersion@0`, `UseDotNet@2`, `UseRubyVersion@0`, `GoTool@0`), file operations, build and test, artifact publishing, scripting, containers, Azure integrations (Container Apps, File Copy, Key Vault, Web App), package authentication (Cargo, Maven, npm, NuGet, pip, Twine, Universal Packages), and pipeline control — 46 builders in total.
 
 When no typed builder exists for your task, fall back to `TaskStep::new`:
 
