@@ -6917,3 +6917,71 @@ safe-outputs:
     );
 }
 
+// ── Front-matter task-step validation (advisory; surfaced via lint) ──────────
+
+/// An authored task step with invalid inputs — here `CopyFiles@2` missing the
+/// required `TargetFolder` and carrying an unknown `Bogus` input — must:
+///   1. NOT fail the compile (validation is advisory and lives in `lint`), and
+///   2. still be passed through to the generated YAML verbatim, and
+///   3. NOT print a warning during compile — the validation feedback is
+///      surfaced through `ado-aw lint` / the `lint_workflow` MCP tool instead,
+///      so compile (which also re-runs in-pipeline for integrity) stays quiet.
+#[test]
+fn invalid_task_input_compiles_silently_and_preserves_passthrough() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique_id = COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-task-validate-{}-{}",
+        std::process::id(),
+        unique_id,
+    ));
+    fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+    let fixture_src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("invalid-task-input-agent.md");
+    let fixture_path = temp_dir.join("invalid-task-input-agent.md");
+    fs::copy(&fixture_src, &fixture_path).expect("copy fixture");
+    let output_path = temp_dir.join("invalid-task-input-agent.yml");
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            fixture_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run compiler");
+
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let compiled = fs::read_to_string(&output_path).unwrap_or_default();
+    let _ = fs::remove_dir_all(&temp_dir);
+
+    // (1) Never fail: the process still exits 0.
+    assert!(
+        output.status.success(),
+        "compile must succeed despite invalid task inputs; stderr:\n{stderr}"
+    );
+    // (2) Passthrough preserved verbatim — validation never alters output.
+    assert!(
+        compiled.contains("CopyFiles@2"),
+        "the authored task step must be emitted unchanged:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("Bogus"),
+        "the (invalid) input must be passed through unchanged:\n{compiled}"
+    );
+    // (3) Compile does NOT emit the task-validation warning — that feedback is
+    // surfaced through lint, not compile (see `ado-aw lint` integration test).
+    assert!(
+        !stderr.contains("CopyFiles@2"),
+        "compile must not warn about task inputs (that belongs to lint); got:\n{stderr}"
+    );
+}
+
+

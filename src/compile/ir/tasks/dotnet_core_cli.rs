@@ -8,8 +8,40 @@
 //! ADO task reference:
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/dotnet-core-cli-v2>
 
-use super::common::{push_bool, push_opt};
+use super::common::{de_opt_bool_flex, push_bool, push_opt};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
+use serde_yaml::Value;
+
+/// Validate an authored `DotNetCoreCLI@2` `inputs:` mapping (advisory
+/// front-matter validation, see [`super::parse`]).
+pub(crate) fn validate_inputs(inputs: Value) -> Result<(), String> {
+    let mut map = match inputs {
+        Value::Mapping(m) => m,
+        Value::Null => Default::default(),
+        other => return Err(format!("`inputs` must be a mapping, got {other:?}")),
+    };
+    let command = map
+        .remove("command")
+        .and_then(|v| v.as_str().map(str::to_string))
+        // ADO defaults `command` to `build` when omitted — treat a missing
+        // command as the default variant rather than an error.
+        .unwrap_or_else(|| "build".to_string());
+    let rest = Value::Mapping(map);
+
+    let result = match command.as_str() {
+        "build" => serde_yaml::from_value::<DotNetBuild>(rest).map(drop),
+        "test" => serde_yaml::from_value::<DotNetTest>(rest).map(drop),
+        "publish" => serde_yaml::from_value::<DotNetPublish>(rest).map(drop),
+        "restore" => serde_yaml::from_value::<DotNetRestore>(rest).map(drop),
+        "pack" => serde_yaml::from_value::<DotNetPack>(rest).map(drop),
+        "run" => serde_yaml::from_value::<DotNetRun>(rest).map(drop),
+        "push" => serde_yaml::from_value::<DotNetPush>(rest).map(drop),
+        "custom" => serde_yaml::from_value::<DotNetCustom>(rest).map(drop),
+        other => return Err(format!("DotNetCoreCLI@2: unknown command `{other}`")),
+    };
+    result.map_err(|e| format!("command `{command}`: {e}"))
+}
 
 /// `DotNetCoreCLI@2` `command` selector, carrying per-command optional inputs.
 #[derive(Debug, Clone)]
@@ -25,10 +57,14 @@ pub enum DotNetCommand {
 }
 
 /// Optionals for `dotnet build`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DotNetBuild {
+    #[serde(rename = "projects", default)]
     projects: Option<String>,
+    #[serde(rename = "arguments", default)]
     arguments: Option<String>,
+    #[serde(rename = "workingDirectory", default)]
     working_directory: Option<String>,
 }
 
@@ -54,12 +90,22 @@ impl DotNetBuild {
 }
 
 /// Optionals for `dotnet test`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DotNetTest {
+    #[serde(rename = "projects", default)]
     projects: Option<String>,
+    #[serde(rename = "arguments", default)]
     arguments: Option<String>,
+    #[serde(rename = "workingDirectory", default)]
     working_directory: Option<String>,
+    #[serde(
+        rename = "publishTestResults",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     publish_test_results: Option<bool>,
+    #[serde(rename = "testRunTitle", default)]
     test_run_title: Option<String>,
 }
 
@@ -95,13 +141,32 @@ impl DotNetTest {
 }
 
 /// Optionals for `dotnet publish`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DotNetPublish {
+    #[serde(rename = "projects", default)]
     projects: Option<String>,
+    #[serde(rename = "arguments", default)]
     arguments: Option<String>,
+    #[serde(rename = "workingDirectory", default)]
     working_directory: Option<String>,
+    #[serde(
+        rename = "zipAfterPublish",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     zip_after_publish: Option<bool>,
+    #[serde(
+        rename = "modifyOutputPath",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     modify_output_path: Option<bool>,
+    #[serde(
+        rename = "publishWebProjects",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     publish_web_projects: Option<bool>,
 }
 
@@ -142,8 +207,10 @@ impl DotNetPublish {
 }
 
 /// Optionals for `dotnet restore`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DotNetRestore {
+    #[serde(rename = "projects", default)]
     projects: Option<String>,
 }
 
@@ -159,8 +226,10 @@ impl DotNetRestore {
 }
 
 /// Optionals for `dotnet pack`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DotNetPack {
+    #[serde(rename = "packagesToPack", default)]
     packages_to_pack: Option<String>,
 }
 
@@ -176,10 +245,14 @@ impl DotNetPack {
 }
 
 /// Optionals for `dotnet run`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DotNetRun {
+    #[serde(rename = "projects", default)]
     projects: Option<String>,
+    #[serde(rename = "arguments", default)]
     arguments: Option<String>,
+    #[serde(rename = "workingDirectory", default)]
     working_directory: Option<String>,
 }
 
@@ -205,8 +278,10 @@ impl DotNetRun {
 }
 
 /// Optionals for `dotnet push` (NuGet publish).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DotNetPush {
+    #[serde(rename = "packagesToPush", default)]
     packages_to_push: Option<String>,
 }
 
@@ -222,9 +297,12 @@ impl DotNetPush {
 }
 
 /// Inputs for `dotnet custom`. `custom` (the sub-command word) is required.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DotNetCustom {
+    #[serde(rename = "custom")]
     custom: String,
+    #[serde(rename = "arguments", default)]
     arguments: Option<String>,
 }
 
@@ -312,7 +390,8 @@ impl DotNetCoreCli {
         };
         let mut t = TaskStep::new(
             "DotNetCoreCLI@2",
-            self.display_name.unwrap_or_else(|| format!("dotnet {command}")),
+            self.display_name
+                .unwrap_or_else(|| format!("dotnet {command}")),
         )
         .with_input("command", command);
         match self.command {
@@ -382,9 +461,18 @@ mod tests {
         )
         .into_step();
         assert_eq!(t.inputs.get("command").map(String::as_str), Some("test"));
-        assert_eq!(t.inputs.get("projects").map(String::as_str), Some("**/*Tests.csproj"));
-        assert_eq!(t.inputs.get("publishTestResults").map(String::as_str), Some("true"));
-        assert_eq!(t.inputs.get("testRunTitle").map(String::as_str), Some("Unit Tests"));
+        assert_eq!(
+            t.inputs.get("projects").map(String::as_str),
+            Some("**/*Tests.csproj")
+        );
+        assert_eq!(
+            t.inputs.get("publishTestResults").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            t.inputs.get("testRunTitle").map(String::as_str),
+            Some("Unit Tests")
+        );
     }
 
     #[test]
@@ -393,6 +481,9 @@ mod tests {
             .into_step();
         assert_eq!(t.inputs.get("command").map(String::as_str), Some("custom"));
         assert_eq!(t.inputs.get("custom").map(String::as_str), Some("tool"));
-        assert_eq!(t.inputs.get("arguments").map(String::as_str), Some("install -g foo"));
+        assert_eq!(
+            t.inputs.get("arguments").map(String::as_str),
+            Some("install -g foo")
+        );
     }
 }

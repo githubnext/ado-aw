@@ -1,7 +1,8 @@
 //! Typed builder for `PublishCodeCoverageResults@2`.
 
-use super::common::bool_input;
+use super::common::{bool_input, de_opt_bool_flex};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Builder for a [`TaskStep`] invoking `PublishCodeCoverageResults@2`.
 ///
@@ -10,15 +11,24 @@ use crate::compile::ir::step::TaskStep;
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/publish-code-coverage-results-v2>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PublishCodeCoverageResults {
     /// `summaryFileLocation` — path (minimatch patterns accepted) to the coverage summary file(s).
+    #[serde(rename = "summaryFileLocation")]
     summary_file_location: String,
     /// `pathToSources` — path to source files, required when coverage XML lacks absolute paths
     /// (e.g. JaCoCo for Java).
+    #[serde(rename = "pathToSources", default)]
     path_to_sources: Option<String>,
     /// `failIfCoverageEmpty` — fail the step when no coverage data was produced.
+    #[serde(
+        rename = "failIfCoverageEmpty",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     fail_if_coverage_empty: Option<bool>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 

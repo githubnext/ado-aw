@@ -7,15 +7,18 @@
 //! ADO task reference:
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/gradle-v3>
 
-use super::common::{push_bool, push_opt};
+use super::common::{de_opt_bool_flex, push_bool, push_opt};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// How JAVA_HOME is determined (`javaHomeOption` / `javaHomeSelection` input).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum JavaHomeOption {
     /// `"JDKVersion"` — resolve the JDK install for a specific version.
+    #[serde(rename = "JDKVersion")]
     JdkVersion,
     /// `"Path"` — set JAVA_HOME to a user-supplied directory path.
+    #[serde(rename = "Path")]
     Path,
 }
 
@@ -31,25 +34,34 @@ impl JavaHomeOption {
 
 /// JDK version to install when `javaHomeOption = JDKVersion`
 /// (`jdkVersionOption` / `jdkVersion` input).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum JdkVersion {
     /// `"default"` — use whatever JDK is already on PATH.
+    #[serde(rename = "default")]
     Default,
     /// `"1.21"` — JDK 21.
+    #[serde(rename = "1.21")]
     V1_21,
     /// `"1.17"` — JDK 17.
+    #[serde(rename = "1.17")]
     V1_17,
     /// `"1.11"` — JDK 11.
+    #[serde(rename = "1.11")]
     V1_11,
     /// `"1.10"` — JDK 10.
+    #[serde(rename = "1.10")]
     V1_10,
     /// `"1.9"` — JDK 9.
+    #[serde(rename = "1.9")]
     V1_9,
     /// `"1.8"` — JDK 8.
+    #[serde(rename = "1.8")]
     V1_8,
     /// `"1.7"` — JDK 7.
+    #[serde(rename = "1.7")]
     V1_7,
     /// `"1.6"` — JDK 6.
+    #[serde(rename = "1.6")]
     V1_6,
 }
 
@@ -71,13 +83,16 @@ impl JdkVersion {
 }
 
 /// JDK CPU architecture (`jdkArchitectureOption` / `jdkArchitecture` input).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum JdkArchitecture {
     /// `"x86"` — 32-bit x86.
+    #[serde(rename = "x86")]
     X86,
     /// `"x64"` — 64-bit x64 (default).
+    #[serde(rename = "x64")]
     X64,
     /// `"arm64"` — ARM 64-bit.
+    #[serde(rename = "arm64")]
     Arm64,
 }
 
@@ -93,13 +108,16 @@ impl JdkArchitecture {
 }
 
 /// Code coverage tool (`codeCoverageToolOption` / `codeCoverageTool` input).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum CodeCoverageTool {
     /// `"None"` — no code coverage (default).
+    #[serde(rename = "None")]
     None,
     /// `"Cobertura"` — Cobertura XML coverage.
+    #[serde(rename = "Cobertura")]
     Cobertura,
     /// `"JaCoCo"` — JaCoCo XML coverage.
+    #[serde(rename = "JaCoCo")]
     JaCoCo,
 }
 
@@ -131,36 +149,59 @@ impl CodeCoverageTool {
 ///     .into_step();
 /// assert_eq!(step.task, "Gradle@3");
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Gradle {
     /// `gradleWrapperFile` — path to the Gradle wrapper script (e.g. `gradlew`).
+    #[serde(rename = "gradleWrapperFile")]
     gradle_wrapper_file: String,
     /// `tasks` — space-separated list of Gradle tasks to execute (e.g. `build test`).
+    #[serde(rename = "tasks")]
     tasks: String,
     /// `options` — additional command-line options passed to Gradle.
+    #[serde(rename = "options", default)]
     options: Option<String>,
     /// `publishJUnitResults` — publish JUnit XML results to Azure Pipelines.
+    #[serde(
+        rename = "publishJUnitResults",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     publish_junit_results: Option<bool>,
     /// `testResultsFiles` — glob for JUnit XML files (required when `publishJUnitResults = true`).
+    #[serde(rename = "testResultsFiles", default)]
     test_results_files: Option<String>,
     /// `codeCoverageToolOption` — optional code coverage tool.
+    #[serde(rename = "codeCoverageToolOption", default)]
     code_coverage_tool: Option<CodeCoverageTool>,
     /// `codeCoverageClassFilesDirectories` — class file paths for coverage (required when
     /// `codeCoverageToolOption != None`).
+    #[serde(rename = "codeCoverageClassFilesDirectories", default)]
     code_coverage_class_files_dirs: Option<String>,
     /// `codeCoverageFailIfEmpty` — fail the build when coverage results are missing.
+    #[serde(
+        rename = "codeCoverageFailIfEmpty",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     code_coverage_fail_if_empty: Option<bool>,
     /// `javaHomeOption` — how to resolve `JAVA_HOME`.
+    #[serde(rename = "javaHomeOption", default)]
     java_home_option: Option<JavaHomeOption>,
     /// `jdkVersionOption` — JDK version (only when `javaHomeOption = JDKVersion`).
+    #[serde(rename = "jdkVersionOption", default)]
     jdk_version_option: Option<JdkVersion>,
     /// `jdkDirectory` — path to JDK home (only when `javaHomeOption = Path`).
+    #[serde(rename = "jdkDirectory", default)]
     jdk_directory: Option<String>,
     /// `jdkArchitectureOption` — JDK architecture (only when `jdkVersionOption != default`).
+    #[serde(rename = "jdkArchitectureOption", default)]
     jdk_architecture: Option<JdkArchitecture>,
     /// `gradleOptions` — value for the `GRADLE_OPTS` environment variable.
+    #[serde(rename = "gradleOptions", default)]
     gradle_options: Option<String>,
     /// Override for the step's `displayName`.
+    #[serde(skip)]
     display_name: Option<String>,
 }
 
@@ -171,10 +212,7 @@ impl Gradle {
     ///   (typically `"gradlew"` on Linux/macOS, `"gradlew.bat"` on Windows).
     /// - `tasks` — space-separated list of Gradle tasks to run (e.g. `"build"`,
     ///   `"build test"`, `"clean build"`).
-    pub fn new(
-        gradle_wrapper_file: impl Into<String>,
-        tasks: impl Into<String>,
-    ) -> Self {
+    pub fn new(gradle_wrapper_file: impl Into<String>, tasks: impl Into<String>) -> Self {
         Self {
             gradle_wrapper_file: gradle_wrapper_file.into(),
             tasks: tasks.into(),
@@ -284,8 +322,10 @@ impl Gradle {
         push_bool(&mut t, "publishJUnitResults", self.publish_junit_results);
         push_opt(&mut t, "testResultsFiles", self.test_results_files);
         if let Some(v) = self.code_coverage_tool {
-            t.inputs
-                .insert("codeCoverageToolOption".to_string(), v.as_ado_str().to_string());
+            t.inputs.insert(
+                "codeCoverageToolOption".to_string(),
+                v.as_ado_str().to_string(),
+            );
         }
         push_opt(
             &mut t,
@@ -307,8 +347,10 @@ impl Gradle {
         }
         push_opt(&mut t, "jdkDirectory", self.jdk_directory);
         if let Some(v) = self.jdk_architecture {
-            t.inputs
-                .insert("jdkArchitectureOption".to_string(), v.as_ado_str().to_string());
+            t.inputs.insert(
+                "jdkArchitectureOption".to_string(),
+                v.as_ado_str().to_string(),
+            );
         }
         push_opt(&mut t, "gradleOptions", self.gradle_options);
 
@@ -425,9 +467,7 @@ mod tests {
             Some("build/classes/java/main")
         );
         assert_eq!(
-            t.inputs
-                .get("codeCoverageFailIfEmpty")
-                .map(String::as_str),
+            t.inputs.get("codeCoverageFailIfEmpty").map(String::as_str),
             Some("true")
         );
     }

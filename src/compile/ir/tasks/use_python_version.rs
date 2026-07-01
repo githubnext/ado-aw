@@ -3,17 +3,21 @@
 //! ADO task reference:
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/use-python-version-v0>
 
-use super::common::bool_input;
+use super::common::{bool_input, de_opt_bool_flex};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Target architecture for the Python interpreter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum Architecture {
     /// 32-bit (x86) Python interpreter.
+    #[serde(rename = "x86")]
     X86,
     /// 64-bit (x64) Python interpreter (default).
+    #[serde(rename = "x64")]
     X64,
     /// ARM 64-bit Python interpreter.
+    #[serde(rename = "arm64")]
     Arm64,
 }
 
@@ -36,14 +40,30 @@ impl Architecture {
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/use-python-version-v0>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UsePythonVersion {
+    #[serde(rename = "versionSpec")]
     version_spec: String,
+    #[serde(rename = "architecture", default)]
     architecture: Option<Architecture>,
+    #[serde(rename = "addToPath", default, deserialize_with = "de_opt_bool_flex")]
     add_to_path: Option<bool>,
+    #[serde(
+        rename = "disableDownloadFromRegistry",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     disable_download_from_registry: Option<bool>,
+    #[serde(
+        rename = "allowUnstable",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     allow_unstable: Option<bool>,
+    #[serde(rename = "githubToken", default)]
     github_token: Option<String>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 
@@ -142,10 +162,7 @@ mod tests {
         let t = UsePythonVersion::new("3.x").into_step();
         assert_eq!(t.task, "UsePythonVersion@0");
         assert_eq!(t.display_name, "Install Python 3.x");
-        assert_eq!(
-            t.inputs.get("versionSpec").map(String::as_str),
-            Some("3.x")
-        );
+        assert_eq!(t.inputs.get("versionSpec").map(String::as_str), Some("3.x"));
     }
 
     #[test]
@@ -176,10 +193,7 @@ mod tests {
     #[test]
     fn add_to_path_false() {
         let t = UsePythonVersion::new("3.x").add_to_path(false).into_step();
-        assert_eq!(
-            t.inputs.get("addToPath").map(String::as_str),
-            Some("false")
-        );
+        assert_eq!(t.inputs.get("addToPath").map(String::as_str), Some("false"));
     }
 
     #[test]
@@ -241,10 +255,7 @@ mod tests {
             t.inputs.get("architecture").map(String::as_str),
             Some("x64")
         );
-        assert_eq!(
-            t.inputs.get("addToPath").map(String::as_str),
-            Some("true")
-        );
+        assert_eq!(t.inputs.get("addToPath").map(String::as_str), Some("true"));
         assert_eq!(
             t.inputs
                 .get("disableDownloadFromRegistry")
