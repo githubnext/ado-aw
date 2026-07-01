@@ -1,15 +1,21 @@
 //! Typed builder for `PublishTestResults@2`.
 
-use super::common::bool_input;
+use super::common::{bool_input, de_opt_bool_flex};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Test result format for [`PublishTestResults`] (`testResultsFormat` input).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum TestResultsFormat {
+    #[serde(rename = "JUnit")]
     JUnit,
+    #[serde(rename = "NUnit")]
     NUnit,
+    #[serde(rename = "VSTest")]
     VSTest,
+    #[serde(rename = "XUnit")]
     XUnit,
+    #[serde(rename = "CTest")]
     CTest,
 }
 
@@ -30,15 +36,36 @@ impl TestResultsFormat {
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/publish-test-results-v2>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PublishTestResults {
+    #[serde(rename = "testResultsFormat")]
     test_results_format: TestResultsFormat,
+    #[serde(rename = "testResultsFiles")]
     test_results_files: String,
+    #[serde(rename = "testRunTitle", default)]
     test_run_title: Option<String>,
+    #[serde(rename = "searchFolder", default)]
     search_folder: Option<String>,
+    #[serde(
+        rename = "mergeTestResults",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     merge_test_results: Option<bool>,
+    #[serde(
+        rename = "failTaskOnFailedTests",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     fail_task_on_failed_tests: Option<bool>,
+    #[serde(
+        rename = "publishRunAttachments",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     publish_run_attachments: Option<bool>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 
@@ -100,7 +127,8 @@ impl PublishTestResults {
     pub fn into_step(self) -> TaskStep {
         let mut t = TaskStep::new(
             "PublishTestResults@2",
-            self.display_name.unwrap_or_else(|| "Publish Test Results".into()),
+            self.display_name
+                .unwrap_or_else(|| "Publish Test Results".into()),
         )
         .with_input("testResultsFormat", self.test_results_format.as_ado_str())
         .with_input("testResultsFiles", self.test_results_files);
@@ -131,8 +159,14 @@ mod tests {
     fn sets_task_and_required_inputs() {
         let t = PublishTestResults::new(TestResultsFormat::JUnit, "**/TEST-*.xml").into_step();
         assert_eq!(t.task, "PublishTestResults@2");
-        assert_eq!(t.inputs.get("testResultsFormat").map(String::as_str), Some("JUnit"));
-        assert_eq!(t.inputs.get("testResultsFiles").map(String::as_str), Some("**/TEST-*.xml"));
+        assert_eq!(
+            t.inputs.get("testResultsFormat").map(String::as_str),
+            Some("JUnit")
+        );
+        assert_eq!(
+            t.inputs.get("testResultsFiles").map(String::as_str),
+            Some("**/TEST-*.xml")
+        );
     }
 
     #[test]
@@ -142,8 +176,14 @@ mod tests {
             .merge_test_results(true)
             .search_folder("$(System.DefaultWorkingDirectory)")
             .into_step();
-        assert_eq!(t.inputs.get("testRunTitle").map(String::as_str), Some("Unit Tests"));
-        assert_eq!(t.inputs.get("mergeTestResults").map(String::as_str), Some("true"));
+        assert_eq!(
+            t.inputs.get("testRunTitle").map(String::as_str),
+            Some("Unit Tests")
+        );
+        assert_eq!(
+            t.inputs.get("mergeTestResults").map(String::as_str),
+            Some("true")
+        );
         assert_eq!(
             t.inputs.get("searchFolder").map(String::as_str),
             Some("$(System.DefaultWorkingDirectory)")

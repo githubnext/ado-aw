@@ -1,7 +1,8 @@
 //! Typed builder for `NuGetAuthenticate@1`.
 
-use super::common::bool_input;
+use super::common::{bool_input, de_opt_bool_flex};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Builder for a [`TaskStep`] invoking `NuGetAuthenticate@1`.
 ///
@@ -13,12 +14,22 @@ use crate::compile::ir::step::TaskStep;
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/nuget-authenticate-v1>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NuGetAuthenticate {
+    #[serde(rename = "nuGetServiceConnections", default)]
     nuget_service_connections: Option<String>,
+    #[serde(
+        rename = "forceReinstallCredentialProvider",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     force_reinstall_credential_provider: Option<bool>,
+    #[serde(rename = "workloadIdentityServiceConnection", default)]
     workload_identity_service_connection: Option<String>,
+    #[serde(rename = "feedUrl", default)]
     feed_url: Option<String>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 

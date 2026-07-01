@@ -3,16 +3,19 @@
 //! ADO task reference:
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/azure-container-apps-v1>
 
-use super::common::{push_bool, push_opt};
+use super::common::{de_opt_bool_flex, push_bool, push_opt};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Ingress setting for an Azure Container App (`AzureContainerApps@1`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum ContainerAppIngress {
     /// Accepts traffic from the internet (`external`).
+    #[serde(rename = "external")]
     External,
     /// Accepts traffic only from within the Azure Container Apps environment
     /// (`internal`).
+    #[serde(rename = "internal")]
     Internal,
 }
 
@@ -42,52 +45,77 @@ impl ContainerAppIngress {
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/azure-container-apps-v1>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AzureContainerApps {
     /// `azureSubscription` / `connectedServiceNameARM` — Azure RM service connection (required).
+    #[serde(rename = "azureSubscription")]
     azure_subscription: String,
     /// `workingDirectory` / `cwd` — working directory for the task.
+    #[serde(rename = "workingDirectory", default)]
     working_directory: Option<String>,
     /// `appSourcePath` — local path to the application source to build.
+    #[serde(rename = "appSourcePath", default)]
     app_source_path: Option<String>,
     /// `acrName` — Azure Container Registry name (without `.azurecr.io`).
+    #[serde(rename = "acrName", default)]
     acr_name: Option<String>,
     /// `acrUsername` — ACR username (use a secret variable in practice).
+    #[serde(rename = "acrUsername", default)]
     acr_username: Option<String>,
     /// `acrPassword` — ACR password (use a secret variable in practice).
+    #[serde(rename = "acrPassword", default)]
     acr_password: Option<String>,
     /// `dockerfilePath` — path to a Dockerfile relative to `app_source_path`.
+    #[serde(rename = "dockerfilePath", default)]
     dockerfile_path: Option<String>,
     /// `imageToBuild` — fully-qualified image name to build and push.
+    #[serde(rename = "imageToBuild", default)]
     image_to_build: Option<String>,
     /// `imageToDeploy` — fully-qualified image name of an existing image to
     /// deploy (mutually exclusive with build-from-source inputs).
+    #[serde(rename = "imageToDeploy", default)]
     image_to_deploy: Option<String>,
     /// `containerAppName` — name of the Container App to create or update.
+    #[serde(rename = "containerAppName", default)]
     container_app_name: Option<String>,
     /// `resourceGroup` — Azure resource group that contains the Container App.
+    #[serde(rename = "resourceGroup", default)]
     resource_group: Option<String>,
     /// `containerAppEnvironment` — name or resource ID of the Container Apps
     /// environment.
+    #[serde(rename = "containerAppEnvironment", default)]
     container_app_environment: Option<String>,
     /// `runtimeStack` — runtime stack to use when Oryx detects the runtime
     /// automatically (e.g. `"node:18"`, `"python:3.11"`).
+    #[serde(rename = "runtimeStack", default)]
     runtime_stack: Option<String>,
     /// `targetPort` — port that the container listens on.
+    #[serde(rename = "targetPort", default)]
     target_port: Option<String>,
     /// `location` — Azure region for the Container App (e.g. `"eastus"`).
+    #[serde(default)]
     location: Option<String>,
     /// `environmentVariables` — space-separated list of `KEY=VALUE` pairs (or
     /// `KEY=secretref:SECRET_NAME` for secret references).
+    #[serde(rename = "environmentVariables", default)]
     environment_variables: Option<String>,
     /// `ingress` — ingress setting for the Container App.
+    #[serde(default)]
     ingress: Option<ContainerAppIngress>,
     /// `yamlConfigPath` — path to a YAML configuration file that defines the
     /// Container App.  When set, most other inputs are ignored.
+    #[serde(rename = "yamlConfigPath", default)]
     yaml_config_path: Option<String>,
     /// `disableTelemetry` — suppress telemetry sent to Microsoft.
+    #[serde(
+        rename = "disableTelemetry",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     disable_telemetry: Option<bool>,
     /// Override the default `displayName`.
+    #[serde(skip)]
     display_name: Option<String>,
 }
 
@@ -335,7 +363,10 @@ mod tests {
             t.inputs.get("appSourcePath").map(String::as_str),
             Some("$(System.DefaultWorkingDirectory)")
         );
-        assert_eq!(t.inputs.get("acrName").map(String::as_str), Some("mytestacr"));
+        assert_eq!(
+            t.inputs.get("acrName").map(String::as_str),
+            Some("mytestacr")
+        );
         assert!(t.inputs.get("imageToDeploy").is_none());
     }
 
@@ -344,12 +375,18 @@ mod tests {
         let ext = AzureContainerApps::new("sc")
             .ingress(ContainerAppIngress::External)
             .into_step();
-        assert_eq!(ext.inputs.get("ingress").map(String::as_str), Some("external"));
+        assert_eq!(
+            ext.inputs.get("ingress").map(String::as_str),
+            Some("external")
+        );
 
         let int = AzureContainerApps::new("sc")
             .ingress(ContainerAppIngress::Internal)
             .into_step();
-        assert_eq!(int.inputs.get("ingress").map(String::as_str), Some("internal"));
+        assert_eq!(
+            int.inputs.get("ingress").map(String::as_str),
+            Some("internal")
+        );
     }
 
     #[test]
@@ -374,7 +411,10 @@ mod tests {
             t.inputs.get("containerAppEnvironment").map(String::as_str),
             Some("my-env")
         );
-        assert_eq!(t.inputs.get("runtimeStack").map(String::as_str), Some("node:18"));
+        assert_eq!(
+            t.inputs.get("runtimeStack").map(String::as_str),
+            Some("node:18")
+        );
         assert_eq!(t.inputs.get("targetPort").map(String::as_str), Some("3000"));
         assert_eq!(t.inputs.get("location").map(String::as_str), Some("eastus"));
         assert_eq!(

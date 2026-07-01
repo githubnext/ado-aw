@@ -233,10 +233,7 @@ mod tests {
             Step::Task(t) => {
                 assert_eq!(t.task, "UseNode@1");
                 assert_eq!(t.display_name, "Install Node.js 22.x");
-                assert_eq!(
-                    t.inputs.get("version").map(String::as_str),
-                    Some("22.x")
-                );
+                assert_eq!(t.inputs.get("version").map(String::as_str), Some("22.x"));
             }
             other => panic!("expected Step::Task, got {other:?}"),
         }
