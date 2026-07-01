@@ -276,8 +276,7 @@ mod tests {
 
     #[test]
     fn task_step_builder_adds_inputs() {
-        let t = TaskStep::new("UseNode@1", "Install Node.js 20.x")
-            .with_input("version", "20.x");
+        let t = TaskStep::new("UseNode@1", "Install Node.js 20.x").with_input("version", "20.x");
         assert_eq!(t.task, "UseNode@1");
         assert_eq!(t.inputs.get("version").map(|s| s.as_str()), Some("20.x"));
     }
