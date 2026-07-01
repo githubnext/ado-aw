@@ -1,12 +1,15 @@
 //! Typed builder for `PublishPipelineArtifact@1`.
 
-use super::common::bool_input;
+use super::common::{bool_input, de_opt_bool_flex};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Storage location for [`PublishPipelineArtifact`] (`publishLocation` input).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum PublishLocation {
+    #[serde(rename = "pipeline")]
     Pipeline,
+    #[serde(rename = "filepath")]
     Filepath,
 }
 
@@ -24,15 +27,24 @@ impl PublishLocation {
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/publish-pipeline-artifact-v1>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PublishPipelineArtifact {
+    #[serde(rename = "targetPath")]
     target_path: String,
+    #[serde(rename = "artifact", default)]
     artifact: Option<String>,
+    #[serde(rename = "publishLocation", default)]
     publish_location: Option<PublishLocation>,
+    #[serde(rename = "fileSharePath", default)]
     file_share_path: Option<String>,
+    #[serde(rename = "parallel", default, deserialize_with = "de_opt_bool_flex")]
     parallel: Option<bool>,
+    #[serde(rename = "parallelCount", default)]
     parallel_count: Option<String>,
+    #[serde(rename = "properties", default)]
     properties: Option<String>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 
@@ -97,7 +109,8 @@ impl PublishPipelineArtifact {
     pub fn into_step(self) -> TaskStep {
         let mut t = TaskStep::new(
             "PublishPipelineArtifact@1",
-            self.display_name.unwrap_or_else(|| "Publish Pipeline Artifact".into()),
+            self.display_name
+                .unwrap_or_else(|| "Publish Pipeline Artifact".into()),
         )
         .with_input("targetPath", self.target_path);
         if let Some(v) = self.artifact {
@@ -143,8 +156,14 @@ mod tests {
             .publish_location(PublishLocation::Filepath)
             .file_share_path("\\\\myserver\\share\\$(Build.DefinitionName)")
             .into_step();
-        assert_eq!(t.inputs.get("artifact").map(String::as_str), Some("binaries"));
-        assert_eq!(t.inputs.get("publishLocation").map(String::as_str), Some("filepath"));
+        assert_eq!(
+            t.inputs.get("artifact").map(String::as_str),
+            Some("binaries")
+        );
+        assert_eq!(
+            t.inputs.get("publishLocation").map(String::as_str),
+            Some("filepath")
+        );
         assert_eq!(
             t.inputs.get("fileSharePath").map(String::as_str),
             Some("\\\\myserver\\share\\$(Build.DefinitionName)")

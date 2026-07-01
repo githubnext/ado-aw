@@ -1,13 +1,18 @@
 //! Typed builder for `DockerInstaller@0`.
 
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Docker release channel for [`DockerInstaller`] (`releaseType` input).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum ReleaseType {
+    #[serde(rename = "stable")]
     Stable,
+    #[serde(rename = "edge")]
     Edge,
+    #[serde(rename = "test")]
     Test,
+    #[serde(rename = "nightly")]
     Nightly,
 }
 
@@ -29,10 +34,14 @@ impl ReleaseType {
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/docker-installer-v0>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DockerInstaller {
+    #[serde(rename = "dockerVersion")]
     docker_version: String,
+    #[serde(rename = "releaseType", default)]
     release_type: Option<ReleaseType>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 
@@ -81,13 +90,21 @@ mod tests {
         let t = DockerInstaller::new("26.1.4").into_step();
         assert_eq!(t.task, "DockerInstaller@0");
         assert_eq!(t.display_name, "Install Docker");
-        assert_eq!(t.inputs.get("dockerVersion").map(String::as_str), Some("26.1.4"));
+        assert_eq!(
+            t.inputs.get("dockerVersion").map(String::as_str),
+            Some("26.1.4")
+        );
         assert!(t.inputs.get("releaseType").is_none());
     }
 
     #[test]
     fn release_type_is_typed() {
-        let t = DockerInstaller::new("26.1.4").release_type(ReleaseType::Edge).into_step();
-        assert_eq!(t.inputs.get("releaseType").map(String::as_str), Some("edge"));
+        let t = DockerInstaller::new("26.1.4")
+            .release_type(ReleaseType::Edge)
+            .into_step();
+        assert_eq!(
+            t.inputs.get("releaseType").map(String::as_str),
+            Some("edge")
+        );
     }
 }
