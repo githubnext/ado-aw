@@ -1,6 +1,7 @@
 //! Typed builder for `SonarQubePublish@8`.
 
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Builder for a [`TaskStep`] invoking `SonarQubePublish@8`.
 ///
@@ -13,9 +14,16 @@ use crate::compile::ir::step::TaskStep;
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/sonar-qube-publish-v8-task>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SonarQubePublish {
-    polling_timeout_sec: Option<u32>,
+    #[serde(
+        rename = "pollingTimeoutSec",
+        default,
+        deserialize_with = "super::common::de_opt_str_or_int"
+    )]
+    polling_timeout_sec: Option<String>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 
@@ -35,7 +43,7 @@ impl SonarQubePublish {
     /// `pollingTimeoutSec` — maximum seconds to wait for the Quality Gate
     /// result. ADO default is `300`.
     pub fn polling_timeout_sec(mut self, secs: u32) -> Self {
-        self.polling_timeout_sec = Some(secs);
+        self.polling_timeout_sec = Some(secs.to_string());
         self
     }
 
@@ -53,7 +61,7 @@ impl SonarQubePublish {
                 .unwrap_or_else(|| "Publish Quality Gate Result".into()),
         );
         if let Some(secs) = self.polling_timeout_sec {
-            t = t.with_input("pollingTimeoutSec", secs.to_string());
+            t = t.with_input("pollingTimeoutSec", secs);
         }
         t
     }
