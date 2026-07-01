@@ -3,18 +3,21 @@
 //! ADO task reference:
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/use-dotnet-v2-task>
 
-use super::common::{push_bool, push_opt};
+use super::common::{de_opt_bool_flex, push_bool, push_opt};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// `packageType` input for [`UseDotNet`]: whether to install the SDK or only
 /// the runtime.
 ///
 /// ADO default: [`PackageType::Sdk`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum PackageType {
     /// Install the full .NET SDK (`"sdk"`). This is the ADO task default.
+    #[serde(rename = "sdk")]
     Sdk,
     /// Install only the .NET runtime (`"runtime"`).
+    #[serde(rename = "runtime")]
     Runtime,
 }
 
@@ -44,15 +47,36 @@ impl PackageType {
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/use-dotnet-v2-task>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UseDotNet {
+    #[serde(rename = "version", default)]
     version: Option<String>,
+    #[serde(rename = "packageType", default)]
     package_type: Option<PackageType>,
+    #[serde(
+        rename = "useGlobalJson",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     use_global_json: Option<bool>,
+    #[serde(rename = "workingDirectory", default)]
     working_directory: Option<String>,
+    #[serde(rename = "installationPath", default)]
     installation_path: Option<String>,
+    #[serde(
+        rename = "performMultiLevelLookup",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     perform_multi_level_lookup: Option<bool>,
+    #[serde(
+        rename = "failOnStandardError",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     fail_on_standard_error: Option<bool>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 
@@ -168,10 +192,7 @@ impl UseDotNet {
             format!("Install .NET {package_label}")
         };
 
-        let mut t = TaskStep::new(
-            "UseDotNet@2",
-            self.display_name.unwrap_or(default_name),
-        );
+        let mut t = TaskStep::new("UseDotNet@2", self.display_name.unwrap_or(default_name));
         push_opt(
             &mut t,
             "packageType",
@@ -241,10 +262,7 @@ mod tests {
         let t = UseDotNet::with_version("6.0.x")
             .package_type(PackageType::Sdk)
             .into_step();
-        assert_eq!(
-            t.inputs.get("packageType").map(String::as_str),
-            Some("sdk")
-        );
+        assert_eq!(t.inputs.get("packageType").map(String::as_str), Some("sdk"));
     }
 
     #[test]
@@ -287,10 +305,7 @@ mod tests {
         let t = UseDotNet::with_version("8.0.x")
             .with_display_name("Install .NET SDK (from global.json)")
             .into_step();
-        assert_eq!(
-            t.display_name,
-            "Install .NET SDK (from global.json)"
-        );
+        assert_eq!(t.display_name, "Install .NET SDK (from global.json)");
         assert_eq!(t.inputs.get("version").map(String::as_str), Some("8.0.x"));
     }
 
@@ -310,9 +325,7 @@ mod tests {
 
     #[test]
     fn bool_input_false_emits_false_string() {
-        let t = UseDotNet::new()
-            .use_global_json(false)
-            .into_step();
+        let t = UseDotNet::new().use_global_json(false).into_step();
         assert_eq!(
             t.inputs.get("useGlobalJson").map(String::as_str),
             Some("false")

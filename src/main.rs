@@ -22,7 +22,7 @@ mod ndjson;
 mod remove;
 mod run;
 pub mod runtimes;
-mod safeoutputs;
+mod safe_outputs;
 pub mod sanitize;
 mod secrets;
 pub mod secure;
@@ -265,6 +265,15 @@ enum Commands {
         /// Dry run: validate inputs but skip ADO API calls
         #[arg(long)]
         dry_run: bool,
+        /// Execute only these safe-output tools (repeatable). Used by the
+        /// manual-review split to run only approval-gated tools.
+        #[arg(long = "only")]
+        only: Vec<String>,
+        /// Skip these safe-output tools (repeatable). Used by the
+        /// manual-review split to run the automatic tools while reviewed
+        /// tools wait for approval.
+        #[arg(long = "exclude")]
+        exclude: Vec<String>,
     },
     /// Run SafeOutputs MCP server over HTTP (for MCPG integration)
     McpHttp {
@@ -701,6 +710,7 @@ async fn run_execute(
     ado_org_url: Option<String>,
     ado_project: Option<String>,
     dry_run: bool,
+    filter: execute::ToolFilter,
 ) -> Result<()> {
     // Read and parse source markdown to get tool configs.
     // Use parse_markdown_detailed so Stage 3 benefits from in-memory
@@ -758,7 +768,7 @@ async fn run_execute(
         log::info!("Agent source last author: {}", email);
     }
 
-    let results = execute::execute_safe_outputs(&safe_output_dir, &ctx).await?;
+    let results = execute::execute_safe_outputs(&safe_output_dir, &ctx, &filter).await?;
 
     // Process agent memory if cache-memory tool is enabled
     process_cache_memory(tools.as_ref(), &safe_output_dir, output_dir).await?;
@@ -783,7 +793,7 @@ async fn build_execution_context(
     ado_org_url: Option<String>,
     ado_project: Option<String>,
     dry_run: bool,
-) -> crate::safeoutputs::ExecutionContext {
+) -> crate::safe_outputs::ExecutionContext {
     // Map checkout aliases to ADO repo names from the repositories list
     let allowed_repositories = front_matter
         .checkout
@@ -797,19 +807,29 @@ async fn build_execution_context(
         })
         .collect();
 
-    let mut ctx = crate::safeoutputs::ExecutionContext::default();
+    let mut ctx = crate::safe_outputs::ExecutionContext::default();
     // Only override env-derived values when CLI args are explicitly provided;
     // otherwise keep the defaults from SYSTEM_TEAMFOUNDATIONCOLLECTIONURI /
     // SYSTEM_TEAMPROJECT that ExecutionContext::default() already resolved.
     if let Some(url) = ado_org_url {
-        ctx.ado_organization = crate::safeoutputs::org_from_url(&url);
+        ctx.ado_organization = crate::safe_outputs::org_from_url(&url);
         ctx.ado_org_url = Some(url);
     }
     if let Some(project) = ado_project {
         ctx.ado_project = Some(project);
     }
     ctx.working_directory = safe_output_dir.to_path_buf();
-    ctx.tool_configs = front_matter.safe_outputs.clone();
+    // Copy per-tool safe-output config, excluding reserved section-level keys
+    // (e.g. `require-approval`) which are not tools and must never be looked up
+    // as one by the executor.
+    ctx.tool_configs = front_matter
+        .safe_outputs
+        .iter()
+        .filter(|(k, _)| {
+            !crate::compile::types::SAFE_OUTPUT_RESERVED_KEYS.contains(&k.as_str())
+        })
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     // Merge ado-aw-debug.create-issue config under the same tool_configs map
     // so Stage 3's `ctx.get_tool_config::<CreateIssueConfig>("create-issue")`
     // works exactly like every other safe-output. Without this merge the
@@ -930,7 +950,7 @@ async fn process_cache_memory(
     Ok(())
 }
 
-fn print_execution_summary(results: &[crate::safeoutputs::ExecutionResult]) {
+fn print_execution_summary(results: &[crate::safe_outputs::ExecutionResult]) {
     let success_count = results
         .iter()
         .filter(|r| r.success && !r.is_warning())
@@ -1058,6 +1078,8 @@ async fn main() -> Result<()> {
             ado_org_url,
             ado_project,
             dry_run,
+            only,
+            exclude,
         } => {
             run_execute(
                 source,
@@ -1066,6 +1088,7 @@ async fn main() -> Result<()> {
                 ado_org_url,
                 ado_project,
                 dry_run,
+                execute::ToolFilter { only, exclude },
             )
             .await?;
         }

@@ -6,7 +6,7 @@ use std::fmt;
 use serde::Serialize;
 
 use crate::engine::DEFAULT_COPILOT_MODEL;
-use crate::safeoutputs::{ALL_KNOWN_SAFE_OUTPUTS, ALWAYS_ON_TOOLS, DEBUG_ONLY_TOOLS};
+use crate::safe_outputs::{ALL_KNOWN_SAFE_OUTPUTS, ALWAYS_ON_TOOLS, DEBUG_ONLY_TOOLS};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SafeOutputCatalogEntry {

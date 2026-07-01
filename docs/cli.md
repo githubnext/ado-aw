@@ -36,6 +36,8 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - `--ado-org-url <url>` - Azure DevOps organization URL override
   - `--ado-project <name>` - Azure DevOps project name override
   - `--dry-run` - Validate inputs but skip ADO API calls (useful for local testing and QA review)
+  - `--only <tool>` - Execute only these safe-output tools (repeatable). Used by the manual-review split for the approval-gated `SafeOutputs_Reviewed` job.
+  - `--exclude <tool>` - Skip these safe-output tools (repeatable). Used by the manual-review split so the automatic `SafeOutputs` job applies non-gated outputs while reviewed ones wait. See [`docs/safe-outputs.md`](safe-outputs.md#manual-review-require-approval).
 
 - `configure` *(deprecated; hidden in --help)* - Alias forwarding to `secrets set GITHUB_TOKEN`. Existing scripts keep working but get a stderr warning.
 
@@ -185,6 +187,6 @@ These commands are not shown in `--help` but are available for contributors work
 
 ## Pipeline IR Reference
 
-The compiler builds typed Azure DevOps pipeline IR and lowers it through one YAML emitter. The canonical Setup → Agent → Detection → SafeOutputs → Teardown shape lives in `agentic_pipeline.rs` (shared by every target); target-specific builders (`standalone_ir.rs`, `onees_ir.rs`, `job_ir.rs`, and `stage_ir.rs`) own only the per-target envelope (pipeline shape, template parameters, 1ES wrapping).
+The compiler builds typed Azure DevOps pipeline IR and lowers it through one YAML emitter. The canonical Setup → Agent → Detection → SafeOutputs → Teardown shape, plus the optional always-running Conclusion job when `safe-outputs:` is configured, lives in `agentic_pipeline.rs` (shared by every target); target-specific builders (`standalone_ir.rs`, `onees_ir.rs`, `job_ir.rs`, and `stage_ir.rs`) own only the per-target envelope (pipeline shape, template parameters, 1ES wrapping).
 
 See [`docs/ir.md`](ir.md) for the complete IR reference.

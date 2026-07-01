@@ -39,6 +39,15 @@ Every compiled pipeline runs as three sequential jobs:
 3. **SafeOutputs (Stage 3)** — a non-agent executor applies approved safe outputs
    using a write-capable ADO token that the agent never sees.
 
+**Optional manual review.** When a safe output is configured with
+`require-approval` (see [`docs/safe-outputs.md`](docs/safe-outputs.md)), an
+agentless `ManualReview` job (`pool: server`, `ManualValidation@1`) is inserted
+between Detection and SafeOutputs to pause for human approval. With a mix of
+gated and non-gated outputs, Stage 3 splits into an automatic `SafeOutputs` job
+(applies non-gated outputs immediately) and a `SafeOutputs_Reviewed` job (gated
+behind `ManualReview`, publishes `safe_outputs_reviewed`). The gate is
+fail-closed and only pauses when the agent actually proposed a reviewed output.
+
 ### Architecture
 
 ```
@@ -50,7 +59,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── compile/          # Pipeline compilation module
 │   │   ├── mod.rs        # Module entry point and Compiler trait
 │   │   ├── common.rs     # Shared helpers across targets
-│   │   ├── agentic_pipeline.rs # Canonical Setup → Agent → Detection → SafeOutputs → Teardown shape (shared by every target); BuiltPipelineContext, build_pipeline_context, build_canonical_jobs, per-job builders, fold_agent_conditions, agent_job_variables_hoist
+│   │   ├── agentic_pipeline.rs # Canonical Setup → Agent → Detection → (ManualReview?) → SafeOutputs(+SafeOutputs_Reviewed?) → Teardown → Conclusion shape (Conclusion emitted when configured; shared by every target); BuiltPipelineContext, build_pipeline_context, build_canonical_jobs, per-job builders incl. build_manual_review_job + SafeOutputsVariant split, fold_agent_conditions, agent_job_variables_hoist
 │   │   ├── standalone.rs # Standalone pipeline compiler
 │   │   ├── standalone_ir.rs # Standalone target typed-IR builder
 │   │   ├── onees.rs      # 1ES Pipeline Template compiler
@@ -63,6 +72,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   ├── gitattributes.rs # .gitattributes management for compiled pipelines
 │   │   ├── filter_ir.rs  # Filter expression IR: Fact/Predicate types, lowering, validation, codegen
 │   │   ├── pr_filters.rs # PR trigger filter generation (native ADO + gate steps)
+│   │   ├── path_layout_check.rs # Warning-only checkout-aware path validation: $(Build.SourcesDirectory)/<seg> refs in steps, runtime-import targets, deprecated directory markers in the body
 │   │   ├── extensions/   # CompilerExtension trait and infrastructure extensions
 │   │   │   ├── mod.rs    # Trait, Extension enum, collect_extensions(), re-exports
 │   │   │   ├── ado_aw_marker.rs # Always-on metadata marker extension (emits # ado-aw-metadata JSON)
@@ -86,6 +96,8 @@ Every compiled pipeline runs as three sequential jobs:
 │   │   │   ├── mod.rs    # Codemod struct, CODEMODS registry, runner
 │   │   │   ├── 0001_repos_unified.rs # Legacy repositories/checkout → repos codemod
 │   │   │   ├── 0002_pool_object_form.rs # Legacy scalar pool → object form codemod
+│   │   │   ├── 0003_flatten_work_item_config.rs # Legacy work-item config flatten codemod
+│   │   │   ├── 0004_legacy_path_markers.rs # Migrate {{ workspace }}/{{ working_directory }}/{{ trigger_repo_directory }} markers → explicit ADO path exprs (resolved from workspace:/repos:)
 │   │   │   └── helpers.rs # take_key, insert_no_overwrite, rename_key, ConflictPolicy
 │   │   ├── codemod_integration_test.rs # White-box rewrite-path tests (stub registry injection)
 │   │   ├── types.rs      # Front matter grammar and types
@@ -93,7 +105,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   │       ├── mod.rs    # Pipeline / PipelineBody / PipelineShape root types
 │   │       ├── ids.rs    # Typed StageId / JobId / StepId newtypes
 │   │       ├── step.rs   # Step variants (Bash, Task, Checkout, Download, Publish, RawYaml)
-│   │       ├── tasks/    # Typed builder structs for built-in ADO tasks (one file per task; new()+typed setters+into_step(); command-enum dispatch for Docker/DotNet/NuGet/Npm/UniversalPackages; typestate builders for PowerShell; docker.rs canonical template)
+│   │       ├── tasks/    # Typed builder structs for built-in ADO tasks (one file per task; new()+typed setters+into_step(); command-enum dispatch for Docker/DotNet/NuGet/Npm/UniversalPackages; typestate builders for PowerShell; docker.rs canonical template; tasks/parse.rs reuses the builders as serde schemas to advisory-validate authored front-matter task steps — surfaced as task-input-invalid warnings via ado-aw lint / lint_workflow MCP, NOT via compile)
 │   │       ├── job.rs    # Job, Pool, TemplateContext, JobVariable
 │   │       ├── stage.rs  # Stage + external-params wrap
 │   │       ├── env.rs    # Typed EnvValue (Literal, AdoMacro, PipelineVar, Secret, StepOutput, Coalesce, Concat)
@@ -162,7 +174,7 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── validate.rs       # Structural input validators (char allowlists, format checks, injection detectors)
 │   ├── agent_stats.rs    # OTel-based agent statistics parsing (token usage, duration, turns)
 │   ├── hash.rs           # SHA-256 utilities for safe-output file integrity
-│   ├── safeoutputs/      # Safe-output MCP tool implementations (Stage 1 → NDJSON → Stage 3)
+│   ├── safe_outputs/     # Safe-output MCP tool implementations (Stage 1 → NDJSON → Stage 3)
 │   │   ├── mod.rs
 │   │   ├── add_build_tag.rs
 │   │   ├── add_pr_comment.rs
@@ -236,10 +248,10 @@ Every compiled pipeline runs as three sequential jobs:
 │   ├── update-ado-agentic-workflow.md # Guide for modifying an existing agentic workflow
 │   └── debug-ado-agentic-workflow.md  # Guide for troubleshooting a failing agentic workflow
 ├── scripts/              # Supporting scripts shipped as release artifacts
-│   └── ado-script/       # TypeScript workspace for bundled gate/import helpers plus execution-context bundles
+│   └── ado-script/       # TypeScript workspace for bundled gate/import helpers plus execution-context, conclusion, and approval-summary bundles
 │       └── src/
 │           ├── gate/     # Gate evaluator source (bundled to gate.js)
-│           ├── import/   # Runtime prompt resolver source (bundled to import.js)
+│           ├── import/   # Runtime prompt resolver source (bundled to import.js); resolves {{#runtime-import}} markers + substitutes a compiler-owned allowlist of ADO path-anchor vars via --var flags
 │           ├── exec-context-pr/ # PR-context precompute source (bundled to exec-context-pr.js)
 │           ├── exec-context-pr-synth/ # Synthetic-PR resolver source (bundled to exec-context-pr-synth.js)
 │           ├── exec-context-manual/ # Manual-run context source (bundled to exec-context-manual.js)
@@ -249,6 +261,8 @@ Every compiled pipeline runs as three sequential jobs:
 │           ├── exec-context-schedule/ # Scheduled-run context source (bundled to exec-context-schedule.js)
 │           ├── exec-context-pr-checks/ # PR validation checks context source (bundled to exec-context-pr-checks.js)
 │           ├── exec-context-repo/ # Repository identity context source (bundled to exec-context-repo.js)
+│           ├── conclusion/ # Conclusion-job reporter source (bundled to conclusion.js)
+│           ├── approval-summary/ # Safe-outputs summary renderer (bundled to approval-summary.js; end-of-Agent-job summary tab)
 │           └── shared/   # Shared modules across bundles (auth, ado-client, env-facts, types.gen.ts)
 ├── tests/                # Integration tests and fixtures
 ├── docs/                 # Per-concept reference documentation (see index below)
@@ -294,6 +308,9 @@ index to jump to the right page.
   `command`).
 - [`docs/parameters.md`](docs/parameters.md) — ADO runtime parameters surfaced
   in the pipeline UI, including the auto-injected `clearMemory` parameter.
+- [`docs/conclusion.md`](docs/conclusion.md) — `conclusion:` configuration for
+  the always-running post-pipeline housekeeping job that files work-item
+  reports for failures and diagnostic signals.
 - [`docs/tools.md`](docs/tools.md) — `tools:` configuration (bash allow-list,
   `edit`, `cache-memory`, `azure-devops` MCP).
 - [`docs/runtimes.md`](docs/runtimes.md) — `runtimes:` configuration (Lean 4,
@@ -360,8 +377,9 @@ index to jump to the right page.
   adding codemods.
 - [`docs/ado-script.md`](docs/ado-script.md) — `ado-script` workspace
   (`scripts/ado-script/`): the bundled TypeScript runtime helpers
-  (`gate.js`, `import.js`, and the execution-context `exec-context-*.js`
-  bundles), schemars-driven type codegen, and the A2 design decision.
+  (`gate.js`, `import.js`, the execution-context `exec-context-*.js`
+  bundles, `conclusion.js`, and `approval-summary.js`), schemars-driven
+  type codegen, and the A2 design decision.
 - [`docs/local-development.md`](docs/local-development.md) — local development
   setup notes.
 

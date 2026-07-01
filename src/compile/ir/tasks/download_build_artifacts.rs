@@ -12,15 +12,18 @@
 //! ADO task reference:
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/download-build-artifacts-v1>
 
-use super::common::{bool_input, push_bool, push_opt};
+use super::common::{bool_input, de_opt_bool_flex, push_bool, push_opt};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Which build to download artifacts from (`buildType` input).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum BuildType {
     /// Download from the current pipeline run (default).
+    #[serde(rename = "current")]
     Current,
     /// Download from a specific pipeline definition / run.
+    #[serde(rename = "specific")]
     Specific,
 }
 
@@ -36,13 +39,16 @@ impl BuildType {
 
 /// Which build version to retrieve when `buildType = specific`
 /// (`buildVersionToDownload` input).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum BuildVersionToDownload {
     /// Latest successful build (default).
+    #[serde(rename = "latest")]
     Latest,
     /// Latest successful build from a specific branch.
+    #[serde(rename = "latestFromBranch")]
     LatestFromBranch,
     /// A specific build identified by its build ID.
+    #[serde(rename = "specific")]
     Specific,
 }
 
@@ -58,11 +64,13 @@ impl BuildVersionToDownload {
 }
 
 /// How many artifacts to download (`downloadType` input).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum DownloadType {
     /// Download a single artifact by name (default).
+    #[serde(rename = "single")]
     Single,
     /// Download all artifacts whose paths match `itemPattern`.
+    #[serde(rename = "specific")]
     Specific,
 }
 
@@ -94,46 +102,82 @@ impl DownloadType {
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/download-build-artifacts-v1>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DownloadBuildArtifacts {
     /// `downloadPath` — destination directory on the agent.
+    #[serde(rename = "downloadPath")]
     download_path: String,
     /// `buildType` — which build to download from.
+    #[serde(rename = "buildType", default)]
     build_type: Option<BuildType>,
     /// `downloadType` — single artifact or all matching a pattern.
+    #[serde(rename = "downloadType", default)]
     download_type: Option<DownloadType>,
     /// `artifactName` — name of the artifact to download (`downloadType = single`).
+    #[serde(rename = "artifactName", default)]
     artifact_name: Option<String>,
     /// `itemPattern` — minimatch glob applied to artifact contents (`downloadType = specific`).
+    #[serde(rename = "itemPattern", default)]
     item_pattern: Option<String>,
     // --- buildType=specific inputs ---
     /// `project` — ADO project name or ID.
+    #[serde(default)]
     project: Option<String>,
     /// `definition` — pipeline definition ID or name.
+    #[serde(default)]
     definition: Option<String>,
     /// `buildVersionToDownload` — which build to select.
+    #[serde(rename = "buildVersionToDownload", default)]
     build_version_to_download: Option<BuildVersionToDownload>,
     /// `branchName` — branch filter (`buildVersionToDownload = latestFromBranch`).
+    #[serde(rename = "branchName", default)]
     branch_name: Option<String>,
     /// `buildId` — build ID to download from (`buildVersionToDownload = specific`).
+    #[serde(rename = "buildId", default)]
     build_id: Option<String>,
     /// `tags` — comma-separated build tags to filter candidate builds.
+    #[serde(default)]
     tags: Option<String>,
     /// `specificBuildWithTriggering` — use the triggering build when it matches.
+    #[serde(
+        rename = "specificBuildWithTriggering",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     specific_build_with_triggering: Option<bool>,
     /// `allowPartiallySucceededBuilds` — include partially-succeeded builds.
+    #[serde(
+        rename = "allowPartiallySucceededBuilds",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     allow_partially_succeeded_builds: Option<bool>,
     // --- misc optionals ---
     /// `cleanDestinationFolder` — clean the destination folder before downloading.
+    #[serde(
+        rename = "cleanDestinationFolder",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     clean_destination_folder: Option<bool>,
     /// `parallelizationLimit` — number of parallel download threads (default `"8"`).
+    #[serde(rename = "parallelizationLimit", default)]
     parallelization_limit: Option<String>,
     /// `checkDownloadedFiles` — verify downloaded files are not corrupt.
+    #[serde(
+        rename = "checkDownloadedFiles",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     check_downloaded_files: Option<bool>,
     /// `retryDownloadCount` — number of retries on download failure (default `"4"`).
+    #[serde(rename = "retryDownloadCount", default)]
     retry_download_count: Option<String>,
     /// `extractTars` — automatically extract downloaded tar archives.
+    #[serde(rename = "extractTars", default, deserialize_with = "de_opt_bool_flex")]
     extract_tars: Option<bool>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 
@@ -298,13 +342,21 @@ impl DownloadBuildArtifacts {
         push_opt(&mut t, "branchName", self.branch_name);
         push_opt(&mut t, "buildId", self.build_id);
         push_opt(&mut t, "tags", self.tags);
-        push_bool(&mut t, "specificBuildWithTriggering", self.specific_build_with_triggering);
+        push_bool(
+            &mut t,
+            "specificBuildWithTriggering",
+            self.specific_build_with_triggering,
+        );
         push_bool(
             &mut t,
             "allowPartiallySucceededBuilds",
             self.allow_partially_succeeded_builds,
         );
-        push_bool(&mut t, "cleanDestinationFolder", self.clean_destination_folder);
+        push_bool(
+            &mut t,
+            "cleanDestinationFolder",
+            self.clean_destination_folder,
+        );
         push_opt(&mut t, "parallelizationLimit", self.parallelization_limit);
         push_bool(&mut t, "checkDownloadedFiles", self.check_downloaded_files);
         push_opt(&mut t, "retryDownloadCount", self.retry_download_count);
@@ -341,9 +393,18 @@ mod tests {
             .download_type(DownloadType::Single)
             .artifact_name("drop")
             .into_step();
-        assert_eq!(t.inputs.get("buildType").map(String::as_str), Some("current"));
-        assert_eq!(t.inputs.get("downloadType").map(String::as_str), Some("single"));
-        assert_eq!(t.inputs.get("artifactName").map(String::as_str), Some("drop"));
+        assert_eq!(
+            t.inputs.get("buildType").map(String::as_str),
+            Some("current")
+        );
+        assert_eq!(
+            t.inputs.get("downloadType").map(String::as_str),
+            Some("single")
+        );
+        assert_eq!(
+            t.inputs.get("artifactName").map(String::as_str),
+            Some("drop")
+        );
     }
 
     #[test]
@@ -356,7 +417,10 @@ mod tests {
             .artifact_name("binaries")
             .allow_partially_succeeded_builds(true)
             .into_step();
-        assert_eq!(t.inputs.get("buildType").map(String::as_str), Some("specific"));
+        assert_eq!(
+            t.inputs.get("buildType").map(String::as_str),
+            Some("specific")
+        );
         assert_eq!(
             t.inputs.get("project").map(String::as_str),
             Some("$(System.TeamProject)")
@@ -367,7 +431,9 @@ mod tests {
             Some("latest")
         );
         assert_eq!(
-            t.inputs.get("allowPartiallySucceededBuilds").map(String::as_str),
+            t.inputs
+                .get("allowPartiallySucceededBuilds")
+                .map(String::as_str),
             Some("true")
         );
     }
@@ -419,8 +485,14 @@ mod tests {
             .retry_download_count("3")
             .extract_tars(false)
             .into_step();
-        assert_eq!(t.inputs.get("downloadType").map(String::as_str), Some("specific"));
-        assert_eq!(t.inputs.get("itemPattern").map(String::as_str), Some("**/*.nupkg"));
+        assert_eq!(
+            t.inputs.get("downloadType").map(String::as_str),
+            Some("specific")
+        );
+        assert_eq!(
+            t.inputs.get("itemPattern").map(String::as_str),
+            Some("**/*.nupkg")
+        );
         assert_eq!(
             t.inputs.get("cleanDestinationFolder").map(String::as_str),
             Some("true")
@@ -433,8 +505,14 @@ mod tests {
             t.inputs.get("checkDownloadedFiles").map(String::as_str),
             Some("true")
         );
-        assert_eq!(t.inputs.get("retryDownloadCount").map(String::as_str), Some("3"));
-        assert_eq!(t.inputs.get("extractTars").map(String::as_str), Some("false"));
+        assert_eq!(
+            t.inputs.get("retryDownloadCount").map(String::as_str),
+            Some("3")
+        );
+        assert_eq!(
+            t.inputs.get("extractTars").map(String::as_str),
+            Some("false")
+        );
     }
 
     #[test]

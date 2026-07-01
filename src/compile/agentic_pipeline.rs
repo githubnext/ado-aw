@@ -1,7 +1,8 @@
 //! Typed-IR builder for the canonical agentic-pipeline shape.
 //!
-//! Owns the Setup → Agent → Detection → SafeOutputs → Teardown
-//! shape consumed by **every** compile target (`standalone`, `1es`,
+//! Owns the Setup → Agent → Detection → (ManualReview?) → SafeOutputs
+//! (+ SafeOutputs_Reviewed?) → Teardown → Conclusion shape consumed by
+//! **every** compile target (`standalone`, `1es`,
 //! `job`, `stage`). Each target's wrapper module (`standalone_ir.rs`,
 //! `onees_ir.rs`, `job_ir.rs`, `stage_ir.rs`) is a one-screen
 //! envelope that calls [`build_pipeline_context`] and lifts the
@@ -40,14 +41,24 @@
 //!   Emitted when filters / synthPr / user setup are present.
 //! - `Agent`: extensions + the static AWF / MCPG / agent-run scaffold.
 //! - `Detection`: threat-analysis pass that produces the
-//!   `threatAnalysis.SafeToProcess` output.
+//!   `threatAnalysis.SafeToProcess` output. When manual review is
+//!   configured it also produces `reviewedProposals.HasReviewedProposals`.
+//! - `ManualReview` (optional): an agentless (`pool: server`)
+//!   `ManualValidation@1` gate inserted when a safe output is configured
+//!   with `require-approval`. Pauses for human approval only when the run
+//!   is safe **and** the agent proposed a reviewed-type output. Fail-closed
+//!   on rejection/timeout.
 //! - `SafeOutputs`: gated on Detection's `SafeToProcess` output via
 //!   typed [`Condition::Eq`] over a typed
 //!   [`crate::compile::ir::output::OutputRef`]. The lowering pass
 //!   picks `dependencies.Detection.outputs['threatAnalysis.SafeToProcess']`
 //!   — first production use of typed cross-job OutputRef in a
-//!   condition.
+//!   condition. With mixed `require-approval`, execution splits into this
+//!   automatic job (excludes reviewed tools) plus a `SafeOutputs_Reviewed`
+//!   job gated behind `ManualReview` (runs only the reviewed tools,
+//!   publishes a distinct `safe_outputs_reviewed` artifact).
 //! - `Teardown` (optional): user `teardown:` steps.
+//! - `Conclusion` (optional): post-run reporting / work-item filing.
 
 use anyhow::Result;
 use std::path::Path;
@@ -58,21 +69,26 @@ use super::common::{
 };
 use super::extensions::{CompileContext, CompilerExtension, Declarations, Extension, McpgConfig};
 use super::ir::condition::{Condition, Expr};
+use super::ir::env::EnvValue;
 use super::ir::ids::{JobId, StepId};
-use super::ir::job::{Job, Pool};
+use super::ir::job::{Job, JobVariable, Pool};
 use super::ir::output::{OutputDecl, OutputRef};
 use super::ir::step::{
     BashStep, CheckoutRepo, CheckoutStep, DownloadStep, PublishStep, Step, SubmodulesOpt, TaskStep,
 };
 use super::ir::tasks::docker_installer::DockerInstaller;
 use super::ir::tasks::download_package::DownloadPackage;
+use super::ir::tasks::manual_validation::{ManualValidation, OnTimeout};
 use super::ir::tasks::nuget_authenticate::NuGetAuthenticate;
 use super::ir::tasks::azure_cli::{AzureCli, ScriptLocation, ScriptType};
 use super::ir::{
     CiTrigger, Parameter, ParameterDefault, ParameterKind, PipelineResource, PipelineVar,
     PrTrigger, RepositoryResource, Resources, Schedule, Triggers,
 };
-use super::types::{FrontMatter, OnConfig, PrMode, Repository as RepoCfg, SupplyChainConfig};
+use super::types::{
+    ApprovalConfig, ApprovalOnTimeout, FrontMatter, OnConfig, PrMode, Repository as RepoCfg,
+    SupplyChainConfig,
+};
 
 /// Built pipeline context — the result of running every validation,
 /// scalar computation, extension declaration fanout, and canonical-
@@ -112,6 +128,7 @@ pub(crate) fn build_pipeline_context(
         ctx.ado_context.as_ref().map(|c| c.repo_name.as_str()),
     )?;
     common::validate_safe_outputs_keys(front_matter)?;
+    front_matter.validate_require_approval()?;
     common::validate_comment_target(front_matter)?;
     common::validate_update_work_item_target(front_matter)?;
     common::validate_submit_pr_review_events(front_matter)?;
@@ -167,6 +184,25 @@ pub(crate) fn build_pipeline_context(
     let engine_log_dir = ctx.engine.log_dir().to_string();
 
     let mut engine_env = ctx.engine.env(&front_matter.engine)?;
+    // BYOM/BYOK isolation is Copilot-specific: gate on the engine type so a
+    // future non-Copilot engine whose env happens to contain a COPILOT_PROVIDER_*
+    // key never erroneously activates the api-proxy sidecar.
+    let is_copilot = matches!(ctx.engine, crate::engine::Engine::Copilot);
+    let byom_active = is_copilot && crate::engine::copilot_byom_active(&front_matter.engine);
+    // Actual provider credential keys (user's casing) for AWF `--exclude-env`.
+    let byom_exclude_keys = if is_copilot {
+        crate::engine::copilot_byom_credential_keys(&front_matter.engine)
+    } else {
+        Vec::new()
+    };
+    // Provider-only env subset for the Detection step, so the threat-analysis
+    // Copilot run inherits the same BYOM/BYOK routing + credential isolation as
+    // the main agent (mirrors gh-aw's detection engine-config Env inheritance).
+    let detection_provider_env = if is_copilot {
+        crate::engine::copilot_provider_env(&front_matter.engine)?
+    } else {
+        Vec::new()
+    };
     // AWF path env (when extensions declare path prepends)
     let awf_paths = common::collect_awf_path_prepends(&extension_declarations);
     let has_awf_paths = !awf_paths.is_empty();
@@ -295,6 +331,9 @@ pub(crate) fn build_pipeline_context(
         integrity_check_yaml,
         agent_content_value,
         debug_pipeline,
+        byom_active,
+        byom_exclude_keys,
+        detection_provider_env,
     };
 
     // ─── Build jobs ───────────────────────────────────────────────
@@ -317,8 +356,8 @@ pub(crate) fn build_pipeline_context(
     })
 }
 
-/// Build the canonical 5-job graph (Setup?, Agent, Detection,
-/// SafeOutputs, Teardown?) used by every target. The optional
+/// Build the canonical job graph (Setup?, Agent, Detection,
+/// SafeOutputs, Teardown?, Conclusion?) used by every target. The optional
 /// `prefix` is applied to Agent / Detection / SafeOutputs job IDs
 /// (matches the legacy template behaviour: Setup and Teardown stay
 /// unprefixed even in `target: job|stage`, see `src/data/job-base.yml`
@@ -355,9 +394,42 @@ pub(crate) fn build_canonical_jobs(
         &p,
     )?);
     jobs.push(build_detection_job(front_matter, cfg, &p)?);
-    jobs.push(build_safeoutputs_job(front_matter, cfg, &p)?);
+    if let Some(review) = build_manual_review_job(front_matter, cfg, &p)? {
+        jobs.push(review);
+    }
+    // Safe-outputs execution. With manual review, execution may split into an
+    // automatic job (runs immediately) and a reviewed job (gated behind the
+    // ManualReview approval). Partition decides the shape:
+    //   - no reviewed tools           → single default job (unchanged)
+    //   - all reviewed tools          → single default job, gated by ManualReview
+    //   - mixed (auto + reviewed)     → auto job + reviewed job
+    let (auto, reviewed) = front_matter.partition_safe_outputs_by_approval();
+    if reviewed.is_empty() || auto.is_empty() {
+        jobs.push(build_safeoutputs_job(
+            front_matter,
+            cfg,
+            &p,
+            &SafeOutputsVariant::default_single(),
+        )?);
+    } else {
+        jobs.push(build_safeoutputs_job(
+            front_matter,
+            cfg,
+            &p,
+            &SafeOutputsVariant::automatic(&reviewed),
+        )?);
+        jobs.push(build_safeoutputs_job(
+            front_matter,
+            cfg,
+            &p,
+            &SafeOutputsVariant::reviewed(&reviewed),
+        )?);
+    }
     if let Some(teardown) = build_teardown_job(front_matter, cfg, &p)? {
         jobs.push(teardown);
+    }
+    if let Some(conclusion) = build_conclusion_job(front_matter, cfg, &p)? {
+        jobs.push(conclusion);
     }
 
     // Wire dependsOn between jobs (graph pass also derives but
@@ -373,14 +445,16 @@ pub(crate) struct JobPrefix<'a>(pub Option<&'a str>);
 
 impl<'a> JobPrefix<'a> {
     /// Produce the `JobId` for a canonical job (`Setup` / `Agent` /
-    /// `Detection` / `SafeOutputs` / `Teardown`). Setup and Teardown
-    /// are always unprefixed; the other three are prefixed when a
-    /// prefix is provided.
+    /// `Detection` / `SafeOutputs` / `Teardown` / `Conclusion`).
+    /// Setup, Teardown, and Conclusion are always unprefixed; Agent,
+    /// Detection, and SafeOutputs are prefixed when a prefix is
+    /// provided.
     pub(crate) fn id(&self, base: &str) -> Result<JobId> {
         match (self.0, base) {
-            (Some(prefix), "Agent" | "Detection" | "SafeOutputs") => {
-                JobId::new(format!("{prefix}_{base}"))
-            }
+            (
+                Some(prefix),
+                "Agent" | "Detection" | "ManualReview" | "SafeOutputs" | "SafeOutputs_Reviewed",
+            ) => JobId::new(format!("{prefix}_{base}")),
             _ => JobId::new(base),
         }
     }
@@ -433,6 +507,16 @@ pub(crate) struct StandaloneCtx {
     /// `{{#runtime-import ...}}` marker).
     pub(crate) agent_content_value: String,
     pub(crate) debug_pipeline: bool,
+    /// True when `engine.env` activates Copilot BYOM/BYOK mode. Pre-pulls the
+    /// api-proxy container image in the Agent and Detection jobs.
+    pub(crate) byom_active: bool,
+    /// Actual provider credential env keys present to pass to AWF `--exclude-env`;
+    /// non-empty ⇒ enable the api-proxy sidecar. Empty for non-BYOM.
+    pub(crate) byom_exclude_keys: Vec<String>,
+    /// Provider-only (`COPILOT_PROVIDER_*`) subset of `engine.env` as validated
+    /// raw `(key, value)` pairs (empty when none). Applied to the Detection
+    /// (threat-analysis) step so it inherits BYOM provider routing + isolation.
+    pub(crate) detection_provider_env: Vec<(String, String)>,
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -782,8 +866,12 @@ fn build_agent_job(
     // 11. Download AWF
     steps.extend(download_awf_step(front_matter.supply_chain()));
 
-    // 12. Pre-pull AWF + MCPG container images
-    steps.extend(prepull_images_step(true, front_matter.supply_chain()));
+    // 12. Pre-pull AWF + MCPG container images (+ api-proxy when BYOM is active)
+    steps.extend(prepull_images_step(
+        true,
+        cfg.byom_active,
+        front_matter.supply_chain(),
+    ));
 
     // 13. Extension prepare steps (typed) + user steps (RawYaml)
     steps.extend(ext_agent_prepare.iter().cloned());
@@ -820,10 +908,23 @@ fn build_agent_job(
         &cfg.working_directory,
         &cfg.engine_run,
         &cfg.engine_env,
+        &cfg.byom_exclude_keys,
     )?));
 
     // 19. Collect safe outputs from AWF container
     steps.push(Step::Bash(collect_safe_outputs_step()));
+
+    // 19a. Render the proposed safe outputs to the build summary tab. Always
+    // emitted when any safe-output tool is enabled (transparency for every
+    // run); when manual review is configured the reviewed proposals are listed
+    // first. The ado-script bundle was delivered earlier in this job by the
+    // ado-script extension, gated on the SAME predicate
+    // (`has_any_safe_output_tool` → `safe_outputs_summary_active`), so the
+    // bundle is downloaded iff this step is emitted.
+    if front_matter.has_any_safe_output_tool() {
+        let (_, reviewed_summary_tools) = front_matter.partition_safe_outputs_by_approval();
+        steps.push(Step::Bash(safe_outputs_summary_step(&reviewed_summary_tools)));
+    }
 
     // 20. Stop MCPG and SafeOutputs
     steps.push(Step::Bash(stop_mcpg_step()));
@@ -905,7 +1006,6 @@ fn agent_job_variables_hoist(
     front_matter: &FrontMatter,
 ) -> Result<Vec<crate::compile::ir::job::JobVariable>> {
     use crate::compile::ir::env::EnvValue;
-    use crate::compile::ir::job::JobVariable;
     use crate::compile::ir::output::OutputRef;
 
     if !front_matter.is_synthetic_pr() {
@@ -965,8 +1065,14 @@ fn build_detection_job(
     steps.push(Step::Task(DockerInstaller::new("26.1.4").into_step()));
     // Download AWF
     steps.extend(download_awf_step(front_matter.supply_chain()));
-    // Pre-pull AWF (no MCPG image for detection)
-    steps.extend(prepull_images_step(false, front_matter.supply_chain()));
+    // Pre-pull AWF (no MCPG image for detection). Pull the api-proxy image when
+    // BYOM is active so the detection Copilot run gets the same credential
+    // isolation as the main agent.
+    steps.extend(prepull_images_step(
+        false,
+        cfg.byom_active,
+        front_matter.supply_chain(),
+    ));
     // Prepare safe outputs for analysis
     steps.push(Step::Bash(prepare_safe_outputs_for_analysis(
         &cfg.working_directory,
@@ -994,11 +1100,24 @@ fn build_detection_job(
         &cfg.allowed_domains,
         &cfg.working_directory,
         &cfg.engine_run_detection,
-    )));
+        &cfg.byom_exclude_keys,
+        &cfg.detection_provider_env,
+    )?));
     // Prepare analyzed outputs
     steps.push(Step::Bash(prepare_analyzed_outputs_step()));
     // Evaluate threat analysis — DECLARES TYPED OUTPUT
     steps.push(Step::Bash(evaluate_threat_analysis_step()));
+    // When manual review is configured, detect whether the agent actually
+    // proposed any approval-gated outputs — DECLARES TYPED OUTPUT. The
+    // ManualReview gate is conditioned on this so the run never pauses for a
+    // human when there is nothing to review.
+    let (_, reviewed_tools) = front_matter.partition_safe_outputs_by_approval();
+    if !reviewed_tools.is_empty() {
+        steps.push(Step::Bash(detect_reviewed_proposals_step(
+            &cfg.working_directory,
+            &reviewed_tools,
+        )));
+    }
     // Copy logs
     steps.push(Step::Bash(copy_logs_step(&cfg.engine_log_dir, true)));
     // Publish
@@ -1013,10 +1132,74 @@ fn build_detection_job(
     Ok(job)
 }
 
+/// Describes one safe-outputs execution job. The canonical graph emits a
+/// single default variant in the common case, or — when manual review splits
+/// execution — an automatic variant (`--exclude` the reviewed tools) plus a
+/// reviewed variant (`--only` the reviewed tools) gated behind ManualReview.
+struct SafeOutputsVariant {
+    /// Canonical job base name passed to `JobPrefix::id`.
+    base: &'static str,
+    /// Job `displayName`.
+    display: &'static str,
+    /// Published pipeline-artifact name (must be unique per run).
+    artifact: &'static str,
+    /// Trailing `--only`/`--exclude` flags for `ado-aw execute` (or empty).
+    filter_args: String,
+}
+
+impl SafeOutputsVariant {
+    /// The default single-job variant: no filter, canonical names.
+    fn default_single() -> Self {
+        Self {
+            base: "SafeOutputs",
+            display: "SafeOutputs",
+            artifact: "safe_outputs",
+            filter_args: String::new(),
+        }
+    }
+
+    /// The automatic variant in a split: excludes every reviewed tool.
+    fn automatic(reviewed: &[String]) -> Self {
+        Self {
+            base: "SafeOutputs",
+            display: "SafeOutputs",
+            artifact: "safe_outputs",
+            filter_args: filter_flags("--exclude", reviewed),
+        }
+    }
+
+    /// The reviewed variant in a split: runs only the reviewed tools.
+    fn reviewed(reviewed: &[String]) -> Self {
+        Self {
+            base: "SafeOutputs_Reviewed",
+            display: "SafeOutputs (reviewed)",
+            artifact: "safe_outputs_reviewed",
+            filter_args: filter_flags("--only", reviewed),
+        }
+    }
+}
+
+/// Build a ` --<flag> <tool>` run for `ado-aw execute` (leading space so it
+/// concatenates onto the fixed command). Tool names are spliced into the bash
+/// command without per-name shell quoting; this is safe because they are
+/// compiler-controlled safe-output identifiers restricted to ASCII
+/// alphanumeric/hyphen (no shell metacharacters). The invariant is enforced by
+/// `validate::is_safe_tool_name` via `common::validate_safe_outputs_keys`,
+/// which `build_pipeline_context` runs before `build_canonical_jobs` reaches
+/// this function.
+fn filter_flags(flag: &str, tools: &[String]) -> String {
+    let mut s = String::new();
+    for t in tools {
+        s.push_str(&format!(" {flag} {t}"));
+    }
+    s
+}
+
 fn build_safeoutputs_job(
     front_matter: &FrontMatter,
     cfg: &StandaloneCtx,
     prefix: &JobPrefix<'_>,
+    variant: &SafeOutputsVariant,
 ) -> Result<Job> {
     let mut steps: Vec<Step> = Vec::new();
     steps.push(checkout_self_step());
@@ -1054,17 +1237,18 @@ fn build_safeoutputs_job(
         &cfg.source_path,
         &cfg.working_directory,
         &cfg.executor_ado_env,
+        &variant.filter_args,
     )?));
     // Copy logs
     steps.push(Step::Bash(copy_logs_safeoutputs_step(&cfg.engine_log_dir)));
     // Publish
     steps.push(Step::Publish(PublishStep {
         path: "$(Agent.TempDirectory)/staging".to_string(),
-        artifact: "safe_outputs".to_string(),
+        artifact: variant.artifact.to_string(),
         condition: Some(Condition::Always),
     }));
 
-    let mut job = Job::new(prefix.id("SafeOutputs")?, "SafeOutputs", cfg.pool.clone());
+    let mut job = Job::new(prefix.id(variant.base)?, variant.display, cfg.pool.clone());
     job.steps = steps;
     // **Marquee**: condition uses typed Expr::StepOutput on Detection's
     // threatAnalysis.SafeToProcess output. Lowering picks the cross-job
@@ -1083,6 +1267,224 @@ fn build_safeoutputs_job(
     Ok(job)
 }
 
+/// Grace minutes added to the agentless `ManualReview` job-level timeout on top
+/// of the task's `timeoutInMinutes`. Keeps the job timeout strictly larger than
+/// the task timeout so the task's graceful `onTimeout` (reject/resume) always
+/// fires before any job-level cancellation could preempt it.
+const MANUAL_REVIEW_JOB_TIMEOUT_GRACE_MINUTES: u64 = 5;
+
+/// Build the agentless **ManualReview** job (a `ManualValidation@1` server
+/// task) when any enabled safe-output tool resolves to require manual review.
+///
+/// Returns `Ok(None)` when no tool requires approval (the common case — the
+/// canonical graph is then unchanged). The gate sits between Detection and
+/// SafeOutputs; its condition reuses Detection's `threatAnalysis.SafeToProcess`
+/// output so a run flagged unsafe never pauses for a human, and a rejected
+/// validation fails the gate so SafeOutputs (which depends on it) is skipped —
+/// fail-closed by default.
+fn build_manual_review_job(
+    front_matter: &FrontMatter,
+    cfg: &StandaloneCtx,
+    prefix: &JobPrefix<'_>,
+) -> Result<Option<Job>> {
+    let (_, reviewed) = front_matter.partition_safe_outputs_by_approval();
+    if reviewed.is_empty() {
+        return Ok(None);
+    }
+    let approval = aggregate_approval_config(front_matter, &reviewed);
+
+    let mut job = Job::new(prefix.id("ManualReview")?, "Manual Review", Pool::Server);
+    job.steps = vec![Step::Task(build_manual_validation_step(&approval, &reviewed))];
+    // The pending-period timeout is enforced on the TASK
+    // (`ManualValidation@1`'s step `timeoutInMinutes`, set in
+    // `build_manual_validation_step`) so that the task's `onTimeout`
+    // handler (reject/resume) fires gracefully. The job-level timeout is kept
+    // only as a strictly-larger outer hard bound: if it equalled the task
+    // timeout it would race with — and could preempt — the task's `onTimeout`,
+    // re-introducing the very cancellation that defeats `on-timeout: resume`.
+    if let Some(mins) = approval.timeout_minutes {
+        let job_bound = (mins as u64) + MANUAL_REVIEW_JOB_TIMEOUT_GRACE_MINUTES;
+        job.timeout = Some(std::time::Duration::from_secs(60 * job_bound));
+    }
+    let _ = cfg; // pool/compiler context not needed for an agentless gate
+    job.condition = Some(Condition::And(vec![
+        Condition::Succeeded,
+        Condition::Eq(
+            Expr::StepOutput(OutputRef::new(
+                StepId::new("threatAnalysis")?,
+                "SafeToProcess",
+            )),
+            Expr::Literal("true".to_string()),
+        ),
+        // Only pause for a human when the agent actually proposed an
+        // approval-gated output (set by Detection's reviewedProposals step).
+        Condition::Eq(
+            Expr::StepOutput(OutputRef::new(
+                StepId::new("reviewedProposals")?,
+                "HasReviewedProposals",
+            )),
+            Expr::Literal("true".to_string()),
+        ),
+    ]));
+    Ok(Some(job))
+}
+
+/// Fold the per-tool/global approval settings of every reviewed tool into the
+/// single settings object that drives the whole-pipeline `ManualValidation@1`
+/// gate. Lists are unioned; the timeout is the strictest (smallest) provided;
+/// `on-timeout` is fail-closed (`reject`) unless *every* contributing config
+/// explicitly asks to `resume`.
+///
+/// **Instructions:** every reviewed tool is listed and **all** author-supplied
+/// per-tool `instructions` are aggregated into the single gate message (grouped
+/// when identical) — no tool's note is dropped. See
+/// [`compose_review_instructions`].
+fn aggregate_approval_config(front_matter: &FrontMatter, reviewed: &[String]) -> ApprovalConfig {
+    use std::collections::BTreeSet;
+    // The sole caller (`build_manual_review_job`) only invokes this when at
+    // least one tool requires approval. Calling it with an empty slice would
+    // return `on_timeout: Some(Resume)` (a fail-OPEN default), so enforce the
+    // invariant with a release-build `assert!` — this is a security boundary
+    // and the compiler is not a hot path, so the cost is irrelevant.
+    assert!(
+        !reviewed.is_empty(),
+        "aggregate_approval_config called with no reviewed tools (would default to fail-open resume)"
+    );
+    let mut approvers: BTreeSet<String> = BTreeSet::new();
+    let mut notify: BTreeSet<String> = BTreeSet::new();
+    let mut timeout_minutes: Option<u32> = None;
+    let mut all_resume = true;
+    // Per-tool author instructions, in sorted (reviewed) order. A single
+    // ManualReview gate covers every reviewed tool, so rather than silently
+    // dropping all but the first note (the old behaviour), we keep them all and
+    // compose a message that lists every tool and attaches its note — see
+    // `compose_review_instructions`.
+    let mut per_tool_instructions: Vec<(String, String)> = Vec::new();
+
+    for tool in reviewed {
+        let Some(cfg) = front_matter.tool_requires_approval(tool) else {
+            // A tool in `reviewed` with no resolvable config should be
+            // impossible (the partition is built from the same predicate), but
+            // if a future regression produces one, fail closed rather than let
+            // the aggregated gate silently default to `on-timeout: resume`.
+            all_resume = false;
+            continue;
+        };
+        approvers.extend(cfg.approvers);
+        notify.extend(cfg.notify_users);
+        if let Some(t) = cfg.timeout_minutes {
+            timeout_minutes = Some(timeout_minutes.map_or(t, |existing| existing.min(t)));
+        }
+        match cfg.on_timeout {
+            Some(ApprovalOnTimeout::Resume) => {}
+            _ => all_resume = false,
+        }
+        if let Some(instr) = cfg.instructions {
+            let instr = instr.trim();
+            if !instr.is_empty() {
+                per_tool_instructions.push((tool.clone(), instr.to_string()));
+            }
+        }
+    }
+
+    ApprovalConfig {
+        approvers: approvers.into_iter().collect(),
+        notify_users: notify.into_iter().collect(),
+        timeout_minutes,
+        on_timeout: Some(if all_resume {
+            ApprovalOnTimeout::Resume
+        } else {
+            ApprovalOnTimeout::Reject
+        }),
+        instructions: Some(compose_review_instructions(reviewed, &per_tool_instructions)),
+    }
+}
+
+/// Compose the single `ManualValidation@1` reviewer message for a run.
+///
+/// Because one gate covers every reviewed tool, this **lists every reviewed
+/// tool** (the actions pending approval) and attaches **all** author-supplied
+/// per-tool notes — none is silently dropped. `per_tool` holds the non-empty
+/// instructions in sorted reviewed order; tools sharing identical note text
+/// (e.g. inherited from a section-level `require-approval`) are grouped so the
+/// note appears once, attributed to every tool it covers.
+///
+/// - No author notes anywhere → the standard default listing every tool.
+/// - Exactly one reviewed tool with a note → that note verbatim (unchanged
+///   single-tool authoring experience).
+/// - Multiple reviewed tools with at least one note → enumerated message.
+fn compose_review_instructions(reviewed: &[String], per_tool: &[(String, String)]) -> String {
+    if per_tool.is_empty() {
+        return default_review_instructions(reviewed);
+    }
+    if reviewed.len() == 1 {
+        return per_tool[0].1.clone();
+    }
+
+    let mut msg = format!(
+        "This run is paused for manual review. The agent has proposed safe \
+         outputs of the following type(s) that require approval before they \
+         are applied: {}.",
+        reviewed.join(", ")
+    );
+    msg.push_str("\n\nReviewer notes by tool:");
+    // Group tools sharing identical note text, preserving first-seen order.
+    let mut grouped: Vec<(String, Vec<String>)> = Vec::new();
+    for (tool, instr) in per_tool {
+        if let Some(entry) = grouped.iter_mut().find(|(text, _)| text == instr) {
+            entry.1.push(tool.clone());
+        } else {
+            grouped.push((instr.clone(), vec![tool.clone()]));
+        }
+    }
+    for (instr, tools) in &grouped {
+        msg.push_str(&format!("\n- {}: {}", tools.join(", "), instr));
+    }
+    msg.push_str(
+        "\n\nReview the proposed content in the 'ado-aw-safe-outputs' summary \
+         tab on this run, then Approve (Resume) to apply them, or Reject to \
+         discard them.",
+    );
+    msg
+}
+
+/// Build the `ManualValidation@1` step from the aggregated approval settings.
+fn build_manual_validation_step(approval: &ApprovalConfig, reviewed: &[String]) -> TaskStep {
+    let mut builder = ManualValidation::new(approval.notify_users.join(", "));
+    if !approval.approvers.is_empty() {
+        builder = builder.approvers(approval.approvers.join(", "));
+    }
+    let instructions = approval
+        .instructions
+        .clone()
+        .unwrap_or_else(|| default_review_instructions(reviewed));
+    builder = builder.instructions(instructions);
+    let on_timeout = match approval.on_timeout {
+        Some(ApprovalOnTimeout::Resume) => OnTimeout::Resume,
+        _ => OnTimeout::Reject,
+    };
+    builder = builder.on_timeout(on_timeout);
+    if let Some(mins) = approval.timeout_minutes {
+        // Bound the pending period on the TASK so its `onTimeout` handler
+        // (reject/resume) actually fires — a job-level timeout would instead
+        // cancel the job and never apply `on-timeout: resume`.
+        builder = builder.timeout_minutes(mins);
+    }
+    builder.into_step()
+}
+
+/// Default reviewer message when the author did not set `instructions`.
+fn default_review_instructions(reviewed: &[String]) -> String {
+    format!(
+        "This run is paused for manual review. The agent has proposed safe \
+         outputs of the following type(s) that require approval before they \
+         are applied: {}. Review the proposed content in the \
+         'ado-aw-safe-outputs' summary tab on this run, then Approve (Resume) \
+         to apply them, or Reject to discard them.",
+        reviewed.join(", ")
+    )
+}
+
 fn build_teardown_job(
     front_matter: &FrontMatter,
     cfg: &StandaloneCtx,
@@ -1098,6 +1500,239 @@ fn build_teardown_job(
     }
     let mut job = Job::new(prefix.id("Teardown")?, "Teardown", cfg.pool.clone());
     job.steps = steps;
+    Ok(Some(job))
+}
+
+fn build_conclusion_job(
+    front_matter: &FrontMatter,
+    cfg: &StandaloneCtx,
+    prefix: &JobPrefix<'_>,
+) -> Result<Option<Job>> {
+    // Conclusion job is always emitted when safe-outputs exist (gh-aw pattern).
+    if front_matter.safe_outputs.is_empty() {
+        return Ok(None);
+    }
+
+    let mut steps: Vec<Step> = Vec::new();
+
+    // Install Node + download/verify the ado-script bundle using the canonical
+    // helper. This keeps the supply-chain mirror handling and the unzip layout
+    // (`/tmp/ado-aw-scripts/ado-script/<bundle>.js`) consistent with the
+    // Agent/Setup jobs — a hand-rolled copy here previously double-nested the
+    // unzip path and bypassed the supply-chain feed.
+    steps.extend(super::extensions::ado_script::install_and_download_steps_typed(
+        front_matter.supply_chain.as_ref(),
+    ));
+
+    let mut download_artifact = TaskStep::new(
+        "DownloadPipelineArtifact@2",
+        "Download SafeOutputs artifact",
+    )
+    .with_input("artifact", "safe_outputs")
+    .with_input("path", "$(Pipeline.Workspace)/conclusion_inputs");
+    download_artifact.condition = Some(Condition::Always);
+    // The safe_outputs artifact may not exist when SafeOutputs was skipped;
+    // ignore the download failure — conclusion.js handles a missing dir.
+    download_artifact.continue_on_error = true;
+    steps.push(Step::Task(download_artifact));
+
+    let conclusion_script = "\
+if command -v node >/dev/null 2>&1 && [ -f /tmp/ado-aw-scripts/ado-script/conclusion.js ]; then\n  \
+  node /tmp/ado-aw-scripts/ado-script/conclusion.js\n\
+else\n  \
+  echo \"##vso[task.logissue type=warning]conclusion.js unavailable; skipping conclusion reporting\"\n\
+fi\n";
+    let mut conclusion_step = bash("Report pipeline conclusion", conclusion_script);
+    conclusion_step = conclusion_step.with_condition(Condition::Always);
+    // The Conclusion job's contract is "always runs, never fails": it exists to
+    // surface OTHER jobs' failures, so it must not turn a non-zero exit of its
+    // own (e.g. node OOM/SIGKILL, or an unhandled rejection escaping
+    // conclusion.js's top-level `.then`) into a pipeline failure that masks the
+    // real signal. Use ADO's `continueOnError` rather than a blanket `|| true`
+    // in the bash body: the failure still shows up in the timeline as a warning
+    // (preserving observability) instead of being silently swallowed.
+    conclusion_step.continue_on_error = true;
+
+    // Global opt-out: safe-outputs.report-failure-as-work-item (default: true)
+    let report_failure = front_matter
+        .safe_outputs
+        .get("report-failure-as-work-item")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    conclusion_step = conclusion_step
+        .with_env(
+            "AW_REPORT_FAILURE_AS_WORK_ITEM",
+            EnvValue::Literal(report_failure.to_string()),
+        )
+        .with_env(
+            "AW_PIPELINE_NAME",
+            // Sanitize for consistency with the per-tool config fields below:
+            // the name flows verbatim into the ADO work-item title/body, and
+            // operator-controlled strings are sanitized everywhere else.
+            EnvValue::Literal(crate::sanitize::sanitize(&front_matter.name)),
+        )
+        .with_env(
+            "AW_SAFE_OUTPUT_DIR",
+            EnvValue::Literal("$(Pipeline.Workspace)/conclusion_inputs".to_string()),
+        );
+
+    // Use SC_WRITE_TOKEN when a write service connection is configured;
+    // fall back to System.AccessToken otherwise.
+    let has_write_sc = front_matter
+        .permissions
+        .as_ref()
+        .and_then(|p| p.write.as_ref())
+        .is_some();
+    if has_write_sc {
+        conclusion_step = conclusion_step.with_env(
+            "SYSTEM_ACCESSTOKEN",
+            EnvValue::secret("SC_WRITE_TOKEN"),
+        );
+    } else {
+        conclusion_step =
+            conclusion_step.with_env("SYSTEM_ACCESSTOKEN", EnvValue::secret("System.AccessToken"));
+    }
+
+    // Pass per-tool configs as individual flat env vars (gh-aw pattern).
+    // Each field gets its own env var — avoids JSON-in-env-var corruption in ADO.
+    //
+    // Note: pipeline_failure has no per-tool config entry — it uses hardcoded
+    // defaults (type: Task, no area/iteration path). The global
+    // report-failure-as-work-item toggle controls whether it files at all.
+    for tool_key in &["noop", "missing-tool", "missing-data"] {
+        if let Some(tool_config) = front_matter.safe_outputs.get(*tool_key) {
+            let env_prefix = format!("AW_{}", tool_key.to_uppercase().replace('-', "_"));
+
+            // Tool disabled entirely (e.g. noop: false)
+            if tool_config.is_boolean() {
+                if tool_config.as_bool() == Some(false) {
+                    conclusion_step = conclusion_step.with_env(
+                        format!("{env_prefix}_REPORT_AS_WORK_ITEM"),
+                        EnvValue::Literal("false".to_string()),
+                    );
+                }
+                continue;
+            }
+
+            if let Some(obj) = tool_config.as_object() {
+                // report-as-work-item: accept both YAML bool and string forms.
+                // serde_json::Value::to_string() on String("false") would emit
+                // "\"false\"" (JSON-encoded with quotes), which the TypeScript
+                // readBooleanEnv would reject and default to true — silently
+                // inverting the opt-out. Use as_bool()/as_str() instead.
+                if let Some(v) = obj.get("report-as-work-item") {
+                    let bool_str = v
+                        .as_bool()
+                        .map(|b| b.to_string())
+                        .or_else(|| v.as_str().map(|s| s.to_string()));
+                    if let Some(s) = bool_str {
+                        conclusion_step = conclusion_step.with_env(
+                            format!("{env_prefix}_REPORT_AS_WORK_ITEM"),
+                            EnvValue::Literal(s),
+                        );
+                    }
+                }
+                if let Some(v) = obj.get("title-prefix").and_then(|v| v.as_str()) {
+                    conclusion_step = conclusion_step.with_env(
+                        format!("{env_prefix}_TITLE_PREFIX"),
+                        EnvValue::Literal(crate::sanitize::sanitize(v)),
+                    );
+                }
+                if let Some(v) = obj.get("work-item-type").and_then(|v| v.as_str()) {
+                    conclusion_step = conclusion_step.with_env(
+                        format!("{env_prefix}_WORK_ITEM_TYPE"),
+                        EnvValue::Literal(crate::sanitize::sanitize(v)),
+                    );
+                }
+                if let Some(v) = obj.get("area-path").and_then(|v| v.as_str()) {
+                    conclusion_step = conclusion_step.with_env(
+                        format!("{env_prefix}_AREA_PATH"),
+                        EnvValue::Literal(crate::sanitize::sanitize(v)),
+                    );
+                }
+                if let Some(v) = obj.get("iteration-path").and_then(|v| v.as_str()) {
+                    conclusion_step = conclusion_step.with_env(
+                        format!("{env_prefix}_ITERATION_PATH"),
+                        EnvValue::Literal(crate::sanitize::sanitize(v)),
+                    );
+                }
+                if let Some(tags) = obj.get("tags").and_then(|v| v.as_array()) {
+                    let tags_json =
+                        serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string());
+                    conclusion_step = conclusion_step
+                        .with_env(format!("{env_prefix}_TAGS"), EnvValue::Literal(tags_json));
+                }
+            }
+        }
+    }
+
+    // Pass upstream job results via job-level variables hoist.
+    // ADO only evaluates $[...] runtime expressions inside `variables:` and
+    // `condition:` — NOT in step env blocks. We hoist to job variables and
+    // reference them as $(name) macros in the step env.
+    let agent_id = prefix.id("Agent")?;
+    let detection_id = prefix.id("Detection")?;
+    let safeoutputs_id = prefix.id("SafeOutputs")?;
+    let reviewed_id = prefix.id("SafeOutputs_Reviewed")?;
+
+    // In the mixed manual-review split both a SafeOutputs (automatic) and a
+    // SafeOutputs_Reviewed (gated) job exist. Surface the reviewed job's result
+    // too so a reviewer rejection (which fails SafeOutputs_Reviewed) is reported
+    // instead of silently lost.
+    let (auto, reviewed) = front_matter.partition_safe_outputs_by_approval();
+    let has_reviewed_job = !reviewed.is_empty() && !auto.is_empty();
+
+    let mut conclusion_variables = vec![
+        // EnvValue::Literal deliberately carries a raw `$[...]` runtime expression:
+        // ADO evaluates `$[...]` only in `variables:`/`condition:`, so the value is
+        // hoisted here and consumed as a `$(name)` macro in the step env below
+        // (not EnvValue::AdoMacro — the lower.rs guard rejects pre-wrapped macros).
+        JobVariable {
+            name: "AW_AGENT_RESULT".to_string(),
+            value: EnvValue::Literal(format!("$[dependencies.{}.result]", agent_id.as_str())),
+        },
+        JobVariable {
+            name: "AW_DETECTION_RESULT".to_string(),
+            value: EnvValue::Literal(format!("$[dependencies.{}.result]", detection_id.as_str())),
+        },
+        JobVariable {
+            name: "AW_SAFEOUTPUTS_RESULT".to_string(),
+            value: EnvValue::Literal(format!(
+                "$[dependencies.{}.result]",
+                safeoutputs_id.as_str()
+            )),
+        },
+    ];
+    if has_reviewed_job {
+        conclusion_variables.push(JobVariable {
+            name: "AW_SAFEOUTPUTS_REVIEWED_RESULT".to_string(),
+            value: EnvValue::Literal(format!("$[dependencies.{}.result]", reviewed_id.as_str())),
+        });
+    }
+
+    conclusion_step = conclusion_step
+        .with_env("AW_AGENT_RESULT", EnvValue::PipelineVar("AW_AGENT_RESULT".to_string()))
+        .with_env(
+            "AW_DETECTION_RESULT",
+            EnvValue::PipelineVar("AW_DETECTION_RESULT".to_string()),
+        )
+        .with_env(
+            "AW_SAFEOUTPUTS_RESULT",
+            EnvValue::PipelineVar("AW_SAFEOUTPUTS_RESULT".to_string()),
+        );
+    if has_reviewed_job {
+        conclusion_step = conclusion_step.with_env(
+            "AW_SAFEOUTPUTS_REVIEWED_RESULT",
+            EnvValue::PipelineVar("AW_SAFEOUTPUTS_REVIEWED_RESULT".to_string()),
+        );
+    }
+
+    steps.push(Step::Bash(conclusion_step));
+
+    let mut job = Job::new(prefix.id("Conclusion")?, "Conclusion", cfg.pool.clone());
+    job.variables = conclusion_variables;
+    job.steps = steps;
+    job.condition = Some(Condition::Always);
     Ok(Some(job))
 }
 
@@ -1119,18 +1754,77 @@ fn wire_explicit_dependencies(jobs: &mut [Job], prefix: &JobPrefix<'_>) -> Resul
     let setup_id = prefix.id("Setup")?;
     let agent_id = prefix.id("Agent")?;
     let detection_id = prefix.id("Detection")?;
+    let manualreview_id = prefix.id("ManualReview")?;
     let safeoutputs_id = prefix.id("SafeOutputs")?;
+    let reviewed_id = prefix.id("SafeOutputs_Reviewed")?;
     let teardown_id = prefix.id("Teardown")?;
+    let conclusion_id = prefix.id("Conclusion")?;
     let has_setup = jobs.iter().any(|j| j.id == setup_id);
+    let has_teardown = jobs.iter().any(|j| j.id == teardown_id);
+    let has_review = jobs.iter().any(|j| j.id == manualreview_id);
+    // The reviewed execution job only exists in the mixed (split) case.
+    let has_reviewed_job = jobs.iter().any(|j| j.id == reviewed_id);
     for j in jobs.iter_mut() {
         if j.id == agent_id && has_setup {
             j.depends_on = vec![setup_id.clone()];
         } else if j.id == detection_id {
             j.depends_on = vec![agent_id.clone()];
-        } else if j.id == safeoutputs_id {
+        } else if j.id == manualreview_id {
+            // Agentless gate: depends on Detection (its condition reads
+            // Detection's threatAnalysis.SafeToProcess output).
             j.depends_on = vec![agent_id.clone(), detection_id.clone()];
+        } else if j.id == safeoutputs_id {
+            // The "SafeOutputs" job is the automatic path. It is gated behind
+            // ManualReview only when it is the *sole* execution job (all tools
+            // reviewed); in the mixed split it runs immediately after Detection
+            // alongside the separate reviewed job.
+            j.depends_on = if has_review && !has_reviewed_job {
+                vec![
+                    agent_id.clone(),
+                    detection_id.clone(),
+                    manualreview_id.clone(),
+                ]
+            } else {
+                vec![agent_id.clone(), detection_id.clone()]
+            };
+        } else if j.id == reviewed_id {
+            // Reviewed execution runs only after the approval gate clears, so a
+            // rejected review fails closed (this job is skipped).
+            j.depends_on = vec![
+                agent_id.clone(),
+                detection_id.clone(),
+                manualreview_id.clone(),
+            ];
         } else if j.id == teardown_id {
+            // Teardown is cleanup paired with the *automatic* execution path.
+            // In the mixed split it deliberately does NOT depend on the
+            // human-gated `SafeOutputs_Reviewed` job: that job is routinely
+            // skipped (whenever the agent proposed no reviewed-type output) and
+            // can stay paused on the approval gate indefinitely. Depending on it
+            // under ADO's implicit `succeeded()` gate would skip Teardown on the
+            // common no-reviewed-proposal path (and block cleanup behind a human
+            // approval otherwise). Waiting only on the auto `SafeOutputs` job
+            // keeps Teardown's behaviour identical to the single-job case.
             j.depends_on = vec![safeoutputs_id.clone()];
+        } else if j.id == conclusion_id {
+            let mut deps = vec![
+                agent_id.clone(),
+                detection_id.clone(),
+                safeoutputs_id.clone(),
+            ];
+            if has_reviewed_job {
+                // Mixed split: depend on the reviewed execution job too so a
+                // reviewer rejection (which fails SafeOutputs_Reviewed) is
+                // detected by Conclusion. Accepted trade-off: in the mixed case
+                // Conclusion waits behind the manual-review gate. The job's
+                // always() condition still fires when the reviewed job is
+                // skipped or fails.
+                deps.push(reviewed_id.clone());
+            }
+            if has_teardown {
+                deps.push(teardown_id.clone());
+            }
+            j.depends_on = deps;
         }
     }
     Ok(())
@@ -1478,7 +2172,11 @@ fn download_awf_step(supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
     ))]
 }
 
-fn prepull_images_step(include_mcpg: bool, supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
+fn prepull_images_step(
+    include_mcpg: bool,
+    include_api_proxy: bool,
+    supply_chain: Option<&SupplyChainConfig>,
+) -> Vec<Step> {
     let registry = supply_chain.and_then(|sc| sc.registry.as_ref());
     let registry_base = registry.map(|r| r.name.as_str());
 
@@ -1501,6 +2199,20 @@ fn prepull_images_step(include_mcpg: bool, supply_chain: Option<&SupplyChainConf
          docker tag {squid} {squid_latest}\n\
          docker tag {agent} {agent_latest}\n"
     );
+    // Copilot BYOM/BYOK credential isolation: AWF starts the api-proxy sidecar
+    // when `--enable-api-proxy` is passed (see run_agent_step). Pre-pull and
+    // `:latest`-tag the image the same way as squid/agent so `--skip-pull` finds
+    // it locally.
+    if include_api_proxy {
+        let api_proxy =
+            image_ref("ghcr.io/github/gh-aw-firewall/api-proxy", AWF_VERSION, registry_base);
+        let api_proxy_latest =
+            image_ref("ghcr.io/github/gh-aw-firewall/api-proxy", "latest", None);
+        script.push_str(&format!(
+            "docker pull {api_proxy}\n\
+             docker tag {api_proxy} {api_proxy_latest}\n"
+        ));
+    }
     let display = if include_mcpg {
         let mcpg = image_ref(MCPG_IMAGE, &format!("v{MCPG_VERSION}"), registry_base);
         script.push_str(&format!("docker pull {mcpg}\n"));
@@ -1605,10 +2317,7 @@ fn start_mcpg_step(
             // another ` \` (doing so would emit a stray `\ \` that bash reads
             // as a one-character " " argument, corrupting the `docker run`
             // image reference — see issue #1034).
-            mcpg_docker_env
-                .lines()
-                .collect::<Vec<_>>()
-                .join("\n  ")
+            mcpg_docker_env.lines().collect::<Vec<_>>().join("\n  ")
         };
     // `--debug-pipeline` injects an extra `-e DEBUG="*" \` continuation
     // line into the `docker run …` invocation so MCPG (and the stdio
@@ -1727,12 +2436,50 @@ fn start_mcpg_step(
     Ok(step)
 }
 
+/// Build the AWF api-proxy sidecar flag lines for a Copilot BYOM/BYOK run.
+///
+/// `exclude_keys` are the provider credential env keys present in `engine.env`
+/// (canonical uppercase `COPILOT_PROVIDER_*` names). When non-empty, returns
+/// `--enable-api-proxy` plus one `--exclude-env <key>` line per key, each as a
+/// 2-space-indented `--flag \` continuation ending in `\\\n` so it slots
+/// directly into the AWF command body. Returns an empty string when
+/// `exclude_keys` is empty (non-BYOM).
+///
+/// How the credential reaches the provider without reaching the agent: with
+/// `--enable-api-proxy`, AWF starts the api-proxy sidecar which reads the *real*
+/// `COPILOT_PROVIDER_*` values from the host process env, and injects
+/// **placeholders** into the agent container regardless of `--env-all` —
+/// `COPILOT_PROVIDER_BASE_URL` becomes the sidecar URL (e.g.
+/// `http://172.30.0.30:10002`) and `COPILOT_PROVIDER_API_KEY` a dummy token (see
+/// gh-aw-firewall `docs/api-proxy-sidecar.md`, "agent container env" table, and
+/// `containers/api-proxy/providers/copilot.js`, verified against AWF v0.27.9).
+/// The Copilot CLI therefore talks to the sidecar, which strips the client auth
+/// header and injects the real credential on the outbound request. `--exclude-env`
+/// keeps the raw value out of `--env-all` passthrough (defense-in-depth on top of
+/// AWF's placeholder override). Because env-var names are case-sensitive and the
+/// keys are the canonical uppercase names, the emitted `--exclude-env <key>`
+/// matches exactly what AWF overrides and the CLI reads.
+///
+/// Shared by [`run_agent_step`] and [`run_threat_analysis_step`] so both AWF
+/// invocations enable isolation identically.
+fn awf_api_proxy_flags(exclude_keys: &[String]) -> String {
+    if exclude_keys.is_empty() {
+        return String::new();
+    }
+    let mut block = String::from("  --enable-api-proxy \\\n");
+    for key in exclude_keys {
+        block.push_str(&format!("  --exclude-env {key} \\\n"));
+    }
+    block
+}
+
 fn run_agent_step(
     allowed_domains: &str,
     awf_mounts: &str,
     working_directory: &str,
     engine_run: &str,
     engine_env: &str,
+    byom_exclude_keys: &[String],
 ) -> Result<BashStep> {
     // The awf_mounts string is a `\`-joined chain of `--mount "..."` lines.
     // Render each at 2-space indent inside the bash body (the surrounding
@@ -1747,6 +2494,7 @@ fn run_agent_step(
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let api_proxy_block = awf_api_proxy_flags(byom_exclude_keys);
     let script = format!(
         "set -o pipefail\n\
          \n\
@@ -1771,6 +2519,7 @@ fn run_agent_step(
            --skip-pull \\\n  \
            --env-all \\\n  \
            --enable-host-access \\\n\
+{api_proxy_block}\
 {awf_mounts_block}\n  \
            --container-workdir \"{working_directory}\" \\\n  \
            --log-level info \\\n  \
@@ -1811,9 +2560,12 @@ fn execute_safe_outputs_step(
     source_path: &str,
     working_directory: &str,
     executor_ado_env: &str,
+    filter_args: &str,
 ) -> Result<BashStep> {
+    // `filter_args` is either empty or a leading-space-prefixed run of
+    // `--only <tool>` / `--exclude <tool>` flags appended to the command.
     let script = format!(
-        "ado-aw execute --source \"{source_path}\" --safe-output-dir \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)\" --output-dir \"$(Agent.TempDirectory)/staging\"\n\
+        "ado-aw execute --source \"{source_path}\" --safe-output-dir \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)\" --output-dir \"$(Agent.TempDirectory)/staging\"{filter_args}\n\
          EXIT_CODE=$?\n\
          if [ $EXIT_CODE -eq 2 ]; then\n  \
            echo \"##vso[task.complete result=SucceededWithIssues;]Executor completed with warnings\"\n  \
@@ -1836,6 +2588,52 @@ fn collect_safe_outputs_step() -> BashStep {
                   echo \"Safe outputs copied to $(Agent.TempDirectory)/staging\"\n\
                   ls -la \"$(Agent.TempDirectory)/staging\" 2>/dev/null || echo \"No safe outputs found\"\n";
     bash("Collect safe outputs from AWF container", script).with_condition(Condition::Always)
+}
+
+/// Render the proposed safe outputs to a sanitized markdown file and attach it
+/// to the build summary tab (`##vso[task.uploadsummary]`), via the
+/// `approval-summary.js` ado-script bundle.
+///
+/// Emitted at the **end of the Agent job** (after `collect_safe_outputs_step`
+/// has staged `safe_outputs.ndjson`), never in the Detection/threat-analysis
+/// job. The ado-script bundle is delivered earlier in the same job by the
+/// ado-script extension's agent-prepare steps (gated on
+/// `safe_outputs_summary_active`).
+///
+/// `reviewed` is the compiler-resolved set of approval-gated tool names; when
+/// non-empty the bundle lists those proposals first under a "Pending approval"
+/// heading. It is passed through the typed env block (not spliced into the
+/// shell command), so tool names never reach a shell word-split. Tool names are
+/// joined with a newline (`\n`) rather than a comma: a `,` can legally appear in
+/// an unrestricted YAML map key, so a comma delimiter could misparse such a key,
+/// whereas a newline can never appear in a one-line map key. (`is_safe_tool_name`
+/// already rejects both via `validate_safe_outputs_keys`, so this is
+/// defense-in-depth.)
+///
+/// Best-effort: a non-zero exit from the bundle is downgraded to a warning so
+/// rendering the summary can never fail the build or block the review gate.
+/// The output base name is namespaced (`ado-aw-safe-outputs.md`) so the
+/// ADO-derived summary-tab title never collides with a consumer/template-target
+/// `task.uploadsummary` tab.
+fn safe_outputs_summary_step(reviewed: &[String]) -> BashStep {
+    use super::ir::env::EnvValue;
+    let approval_summary_path =
+        super::extensions::ado_script::APPROVAL_SUMMARY_PATH;
+    let script = format!(
+        "node '{approval_summary_path}' \
+         || echo \"##vso[task.logissue type=warning]approval-summary step failed (non-fatal)\"\n"
+    );
+    bash("Render safe-outputs summary", script)
+        .with_env(
+            "AW_SAFE_OUTPUTS_NDJSON",
+            EnvValue::literal("$(Agent.TempDirectory)/staging/safe_outputs.ndjson"),
+        )
+        .with_env(
+            "AW_APPROVAL_SUMMARY_OUT",
+            EnvValue::literal("$(Agent.TempDirectory)/ado-aw-safe-outputs.md"),
+        )
+        .with_env("AW_REVIEWED_TOOLS", EnvValue::literal(reviewed.join("\n")))
+        .with_condition(Condition::Always)
 }
 
 fn stop_mcpg_step() -> BashStep {
@@ -1901,6 +2699,9 @@ fn copy_logs_safeoutputs_step(engine_log_dir: &str) -> BashStep {
          # Copy agent output log from analyzed_outputs for optimisation use\n\
          cp \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)/logs/agent-output.txt\" \\\n  \
            \"$(Agent.TempDirectory)/staging/logs/agent-output.txt\" 2>/dev/null || true\n\
+         # Copy executed NDJSON manifest so the Conclusion job can read diagnostic signals\n\
+         cp \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)/safe-outputs-executed.ndjson\" \\\n  \
+           \"$(Agent.TempDirectory)/staging/safe-outputs-executed.ndjson\" 2>/dev/null || true\n\
          if [ -d \"{engine_log_dir}\" ]; then\n  \
            mkdir -p \"$(Agent.TempDirectory)/staging/logs/copilot\"\n  \
            cp -r \"{engine_log_dir}\"/* \"$(Agent.TempDirectory)/staging/logs/copilot/\" 2>/dev/null || true\n\
@@ -1955,7 +2756,10 @@ fn run_threat_analysis_step(
     allowed_domains: &str,
     working_directory: &str,
     engine_run_detection: &str,
-) -> BashStep {
+    byom_exclude_keys: &[String],
+    detection_provider_env: &[(String, String)],
+) -> Result<BashStep> {
+    let api_proxy_block = awf_api_proxy_flags(byom_exclude_keys);
     let script = format!(
         "set -o pipefail\n\
          \n\
@@ -1966,7 +2770,8 @@ fn run_threat_analysis_step(
          sudo -E \"$(Pipeline.Workspace)/awf/awf\" \\\n  \
            --allow-domains \"{allowed_domains}\" \\\n  \
            --skip-pull \\\n  \
-           --env-all \\\n  \
+           --env-all \\\n\
+{api_proxy_block}  \
            --container-workdir \"{working_directory}\" \\\n  \
            --log-level info \\\n  \
            --proxy-logs-dir \"$(Agent.TempDirectory)/threat-analysis-logs/firewall\" \\\n  \
@@ -1990,7 +2795,13 @@ fn run_threat_analysis_step(
             "GITHUB_READ_ONLY",
             EnvValue::RawYamlScalar(serde_yaml::Value::Number(1.into())),
         );
-    step
+    // BYOM/BYOK: apply the COPILOT_PROVIDER_* env so the detection Copilot run
+    // routes to the same external provider as the main agent. Classify each raw
+    // value directly (macro → PipelineVar, else Literal) — no YAML round-trip.
+    for (k, raw) in detection_provider_env {
+        step = step.with_env(k.clone(), env_value_from_str(raw));
+    }
+    Ok(step)
 }
 
 fn prepare_analyzed_outputs_step() -> BashStep {
@@ -2057,6 +2868,53 @@ fn evaluate_threat_analysis_step() -> BashStep {
                 .expect("threatAnalysis is a valid StepId — see StepId::new contract"),
         )
         .with_output(OutputDecl::new("SafeToProcess"))
+        .with_condition(Condition::Always)
+}
+
+/// Scan the agent's proposed safe-output NDJSON for any approval-gated tool
+/// and publish a `HasReviewedProposals` output variable. The ManualReview gate
+/// is conditioned on this so a run never pauses for a human when the agent did
+/// not propose anything that requires review.
+fn detect_reviewed_proposals_step(working_directory: &str, reviewed: &[String]) -> BashStep {
+    // `reviewed` are compiler-controlled safe-output names (ASCII
+    // alphanumeric/hyphen only — see `validate::is_safe_tool_name`), so they
+    // are safe to embed directly in a jq/grep alternation.
+    let alternation = reviewed.join("|");
+    let script = format!(
+        "HAS_REVIEWED=\"false\"\n\
+         PROPOSALS=$(find \"{working_directory}/safe_outputs\" -name \"safe_outputs.ndjson\" 2>/dev/null | head -n 1)\n\
+         if [ -n \"$PROPOSALS\" ] && [ -f \"$PROPOSALS\" ]; then\n  \
+           if command -v jq >/dev/null 2>&1; then\n    \
+             # Match only the top-level \"name\" of each NDJSON object so a\n    \
+             # \"name\" key nested inside a tool's params can't false-positive.\n    \
+             if NAMES=$(jq -r 'select(type==\"object\") | .name // empty' \"$PROPOSALS\" 2>/dev/null); then\n      \
+               if printf '%s\\n' \"$NAMES\" | grep -Eqx '({alternation})'; then\n        \
+                 HAS_REVIEWED=\"true\"\n      \
+               fi\n    \
+             else\n      \
+               # jq failed (e.g. corrupt/truncated proposals). Fall back to the\n      \
+               # broad raw scan so detection fails safe (over-match, never under-\n      \
+               # match) and record that detection was inconclusive.\n      \
+               echo \"##vso[task.logissue type=warning]approval-gate: jq failed to parse $PROPOSALS; using raw scan for reviewed-proposal detection\"\n      \
+               if grep -Eq '\"name\"[[:space:]]*:[[:space:]]*\"({alternation})\"' \"$PROPOSALS\"; then\n        \
+                 HAS_REVIEWED=\"true\"\n      \
+               fi\n    \
+             fi\n  \
+           elif grep -Eq '\"name\"[[:space:]]*:[[:space:]]*\"({alternation})\"' \"$PROPOSALS\"; then\n    \
+             # jq unavailable: fall back to a broad scan. May over-match (pause\n    \
+             # unnecessarily) but never under-matches, so the gate stays fail-safe.\n    \
+             HAS_REVIEWED=\"true\"\n  \
+           fi\n\
+         fi\n\
+         echo \"##vso[task.setvariable variable=HasReviewedProposals;isOutput=true]$HAS_REVIEWED\"\n\
+         echo \"HasReviewedProposals set to: $HAS_REVIEWED\"\n"
+    );
+    bash("Detect reviewed proposals", script)
+        .with_id(
+            StepId::new("reviewedProposals")
+                .expect("reviewedProposals is a valid StepId — see StepId::new contract"),
+        )
+        .with_output(OutputDecl::new("HasReviewedProposals"))
         .with_condition(Condition::Always)
 }
 
@@ -2180,13 +3038,40 @@ fn dedent(s: &str) -> String {
     out
 }
 
+/// Classify a single raw env-var value string into a typed [`EnvValue`].
+///
+/// An ADO **macro** `$(NAME)` (with no nested `$` or `(`) becomes an
+/// [`EnvValue::PipelineVar`] so lowering re-emits the unquoted `$(NAME)` form;
+/// anything else becomes an [`EnvValue::Literal`]. Single source of truth for
+/// macro-vs-literal classification, shared by [`parse_env_block`] (which also
+/// handles YAML-typed scalars) and the detection provider-env path.
+///
+/// Only a value that is *exactly* one `$(NAME)` wrapper is treated as a macro.
+/// Compound values (e.g. `$(A)$(B)`, or `prefix-$(X)`) intentionally fall through
+/// to `Literal` — they are emitted as a quoted YAML scalar. This is still
+/// correct at runtime: ADO expands `$( )` macro references inside step-env values
+/// regardless of quoting, so both references still expand. The only observable
+/// difference is the quoted-vs-unquoted rendering in the compiled YAML.
+fn env_value_from_str(raw: &str) -> super::ir::env::EnvValue {
+    use super::ir::env::EnvValue;
+    if let Some(inner) = raw.strip_prefix("$(").and_then(|s| s.strip_suffix(')'))
+        && !inner.contains('$')
+        && !inner.contains('(')
+    {
+        EnvValue::pipeline_var(inner.to_string())
+    } else {
+        EnvValue::literal(raw.to_string())
+    }
+}
+
 /// Parse a legacy YAML env block (`env:\n  KEY: VALUE\n  KEY: VALUE`)
 /// into typed `(name, EnvValue)` pairs preserving insertion order.
 ///
 /// Each value is round-tripped through `serde_yaml` so quoted forms
-/// (`"true"`, `"file"`) become bare literals and ADO macros (`$(X)`)
-/// land as `EnvValue::PipelineVar` so the lowering pass re-emits the
-/// macro form. Anything else lands as `EnvValue::Literal`.
+/// (`"true"`, `"file"`) become bare literals; string values are then
+/// classified by [`env_value_from_str`] (ADO macros → `PipelineVar`,
+/// otherwise `Literal`) and non-string scalars are preserved as
+/// `RawYamlScalar`.
 ///
 /// # Errors
 ///
@@ -2240,16 +3125,7 @@ fn parse_env_block(yaml_block: &str) -> Result<Vec<(String, super::ir::env::EnvV
             // lowering preserves the `$(X)` form unquoted; everything
             // else lands as a Literal.
             serde_yaml::Value::String(raw_value) => {
-                if let Some(inner) = raw_value
-                    .strip_prefix("$(")
-                    .and_then(|s| s.strip_suffix(')'))
-                    && !inner.contains('$')
-                    && !inner.contains('(')
-                {
-                    out.push((key, EnvValue::pipeline_var(inner.to_string())));
-                } else {
-                    out.push((key, EnvValue::literal(raw_value.clone())));
-                }
+                out.push((key, env_value_from_str(raw_value)));
             }
             // Non-string scalars (numbers / bools): preserve the
             // typed scalar identity through RawYamlScalar so the
@@ -2491,6 +3367,30 @@ mod tests {
             pairs[0].1,
             crate::compile::ir::env::EnvValue::PipelineVar(ref name) if name == "GITHUB_TOKEN"
         ));
+    }
+
+    #[test]
+    fn env_value_from_str_single_macro_is_pipeline_var() {
+        use crate::compile::ir::env::EnvValue;
+        assert!(matches!(
+            env_value_from_str("$(Setup.Token)"),
+            EnvValue::PipelineVar(ref n) if n == "Setup.Token"
+        ));
+    }
+
+    #[test]
+    fn env_value_from_str_compound_or_partial_macro_is_literal() {
+        use crate::compile::ir::env::EnvValue;
+        // Concatenated / partial macros are NOT single-wrapper macros, so they
+        // fall through to Literal. They are still correct at runtime: ADO expands
+        // $( ) references inside the (quoted) literal value. This pins the
+        // documented classification boundary.
+        for raw in ["$(A)$(B)", "prefix-$(X)", "$(X)-suffix", "plain-literal"] {
+            assert!(
+                matches!(env_value_from_str(raw), EnvValue::Literal(ref v) if v == raw),
+                "value {raw:?} should classify as a verbatim Literal"
+            );
+        }
     }
 
     #[test]
