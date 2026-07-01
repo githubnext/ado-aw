@@ -2285,6 +2285,11 @@ pub fn generate_allowed_domains(
     for host in engine.required_hosts(&front_matter.engine) {
         hosts.insert(host);
     }
+    // Surface non-fatal engine network warnings (e.g. a literal but malformed
+    // COPILOT_PROVIDER_BASE_URL whose host could not be resolved and added).
+    for warning in engine.network_host_warnings(&front_matter.engine) {
+        eprintln!("warning: {warning}");
+    }
 
     // Add user-specified hosts (validated against DNS-safe characters).
     // Entries may be ecosystem identifiers (e.g., "python", "rust") which

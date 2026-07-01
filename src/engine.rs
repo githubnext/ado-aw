@@ -133,6 +133,53 @@ fn provider_base_url_host(base_url: &str) -> Option<String> {
     parsed.host_str().map(str::to_string)
 }
 
+/// Outcome of resolving `COPILOT_PROVIDER_BASE_URL` into an AWF-allowlist host.
+///
+/// Single source of truth shared by [`Engine::required_hosts`] (which consumes
+/// the `Host` case) and [`Engine::network_host_warnings`] (which surfaces the
+/// `Unresolved` case as a compile warning), so the two paths can never diverge.
+enum ProviderBaseUrlHost {
+    /// No literal base URL to resolve: the key is absent, or its value is an ADO
+    /// expression (documented as requiring a manual `network.allowed` entry — not
+    /// a surprising silent drop).
+    None,
+    /// A literal URL that parsed to a DNS-safe host — added to the allowlist.
+    Host(String),
+    /// A literal value that is **not** a parseable absolute URL, or whose host is
+    /// not DNS-safe (e.g. an IPv6 literal). Not added — the author must add the
+    /// provider hostname manually. Surfaced as a warning so the misconfiguration
+    /// is visible at compile time rather than failing at runtime with a firewall
+    /// block.
+    Unresolved(String),
+}
+
+/// Classify the literal `COPILOT_PROVIDER_BASE_URL` in `engine_config.env` into a
+/// [`ProviderBaseUrlHost`]. Case-sensitive key match (canonical uppercase).
+fn resolve_provider_base_url_host(engine_config: &EngineConfig) -> ProviderBaseUrlHost {
+    let Some(env_map) = engine_config.env() else {
+        return ProviderBaseUrlHost::None;
+    };
+    let Some(base_url) = env_map
+        .iter()
+        .find(|(k, _)| k.as_str() == "COPILOT_PROVIDER_BASE_URL")
+        .map(|(_, v)| v)
+    else {
+        return ProviderBaseUrlHost::None;
+    };
+    // Expression-valued base URLs resolve to an unknown host at compile time;
+    // the author adds the host to `network.allowed` (documented) — no warning.
+    if contains_ado_expression(base_url) {
+        return ProviderBaseUrlHost::None;
+    }
+    match provider_base_url_host(base_url) {
+        // Validate the parsed host with the same DNS-safe check the api-target
+        // path uses, so non-DNS-safe hosts (e.g. an IPv6 literal `::1`, or an
+        // IDN) never land in `--allow-domains`.
+        Some(host) if is_valid_hostname(&host) => ProviderBaseUrlHost::Host(host),
+        _ => ProviderBaseUrlHost::Unresolved(base_url.clone()),
+    }
+}
+
 /// Default model used by the Copilot engine when no model is specified in front matter.
 pub const DEFAULT_COPILOT_MODEL: &str = "claude-opus-4.7";
 
@@ -223,25 +270,38 @@ impl Engine {
                 }
                 // BYOM/BYOK: when COPILOT_PROVIDER_BASE_URL is a literal URL,
                 // add its hostname to the AWF allowlist so the agent can reach
-                // the external provider. When it is an ADO expression the
-                // concrete host is unknown at compile time, so the author must
-                // add it to `network.allowed` manually (mirrors gh-aw).
-                if let Some(env_map) = engine_config.env()
-                    && let Some(base_url) = env_map
-                        .iter()
-                        .find(|(k, _)| k.as_str() == "COPILOT_PROVIDER_BASE_URL")
-                        .map(|(_, v)| v)
-                    && !contains_ado_expression(base_url)
-                    && let Some(host) = provider_base_url_host(base_url)
-                    // Validate the parsed host with the same DNS-safe check the
-                    // api-target path uses, so non-DNS-safe hosts (e.g. an IPv6
-                    // literal `::1`, or an IDN) never land in `--allow-domains`.
-                    && is_valid_hostname(&host)
+                // the external provider. Expression-valued or malformed URLs
+                // resolve to `None`/`Unresolved` and are handled elsewhere
+                // (`network_host_warnings` surfaces the malformed case).
+                if let ProviderBaseUrlHost::Host(host) =
+                    resolve_provider_base_url_host(engine_config)
                 {
                     hosts.push(host);
                 }
                 hosts
             }
+        }
+    }
+
+    /// Non-fatal compile-time warnings about network-host resolution.
+    ///
+    /// Currently surfaces the case where a **literal** `COPILOT_PROVIDER_BASE_URL`
+    /// could not be resolved to a DNS-safe host (malformed URL, missing scheme, or
+    /// an IPv6/IDN host). Without this the host would be silently dropped from the
+    /// AWF allowlist and the agent would fail at runtime with a firewall block,
+    /// contradicting the documented promise that a literal base URL is added
+    /// automatically. The compile stays non-fatal; the operator is told to add the
+    /// host via `network.allowed`.
+    pub fn network_host_warnings(&self, engine_config: &EngineConfig) -> Vec<String> {
+        match self {
+            Engine::Copilot => match resolve_provider_base_url_host(engine_config) {
+                ProviderBaseUrlHost::Unresolved(value) => vec![format!(
+                    "COPILOT_PROVIDER_BASE_URL: '{value}' is not a parseable absolute URL \
+                     (or its host is not DNS-safe); the host was not added to the AWF \
+                     allowlist — add the provider hostname manually via network.allowed."
+                )],
+                ProviderBaseUrlHost::None | ProviderBaseUrlHost::Host(_) => Vec::new(),
+            },
         }
     }
 
@@ -1531,6 +1591,58 @@ mod tests {
             hosts.is_empty(),
             "expression-valued base URL must not contribute a host: {hosts:?}"
         );
+    }
+
+    #[test]
+    fn engine_env_malformed_base_url_warns() {
+        // A literal but scheme-less / unparseable URL must not silently drop:
+        // required_hosts adds nothing AND a warning is surfaced.
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    COPILOT_PROVIDER_BASE_URL: my-foundry/openai/v1\n---\n",
+        ).unwrap();
+        assert!(
+            Engine::Copilot.required_hosts(&fm.engine).is_empty(),
+            "malformed base URL must not contribute a host"
+        );
+        let warnings = Engine::Copilot.network_host_warnings(&fm.engine);
+        assert_eq!(warnings.len(), 1, "expected one warning: {warnings:?}");
+        assert!(
+            warnings[0].contains("COPILOT_PROVIDER_BASE_URL")
+                && warnings[0].contains("my-foundry/openai/v1")
+                && warnings[0].contains("network.allowed"),
+            "warning must name the key, the bad value, and the network.allowed fix: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn engine_env_ipv6_base_url_warns() {
+        // Non-DNS-safe host (IPv6 literal) is also surfaced, not silently dropped.
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    COPILOT_PROVIDER_BASE_URL: \"http://[::1]:8080/v1\"\n---\n",
+        ).unwrap();
+        assert!(Engine::Copilot.required_hosts(&fm.engine).is_empty());
+        assert_eq!(Engine::Copilot.network_host_warnings(&fm.engine).len(), 1);
+    }
+
+    #[test]
+    fn engine_env_no_warning_for_valid_or_expression_or_absent_base_url() {
+        // Valid literal → host added, no warning.
+        let (fm_ok, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    COPILOT_PROVIDER_BASE_URL: https://x.example.com/v1\n---\n",
+        ).unwrap();
+        assert!(Engine::Copilot.network_host_warnings(&fm_ok.engine).is_empty());
+
+        // Expression-valued → documented manual path, no warning.
+        let (fm_expr, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    COPILOT_PROVIDER_BASE_URL: \"$(Setup.BASE_URL)\"\n---\n",
+        ).unwrap();
+        assert!(Engine::Copilot.network_host_warnings(&fm_expr.engine).is_empty());
+
+        // Absent → no warning.
+        let (fm_none, _) =
+            parse_markdown("---\nname: test\ndescription: test\nengine:\n  id: copilot\n---\n")
+                .unwrap();
+        assert!(Engine::Copilot.network_host_warnings(&fm_none.engine).is_empty());
     }
 
     #[test]

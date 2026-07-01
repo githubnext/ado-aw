@@ -109,6 +109,20 @@ adds its hostname to the AWF network allowlist. When the base URL is supplied vi
 an expression (so the concrete host is unknown at compile time), add the provider
 hostname explicitly to `network.allowed`.
 
+If a **literal** value cannot be resolved to a DNS-safe host — for example a
+scheme-less string like `my-foundry/openai/v1`, or an IPv6 literal — the compiler
+cannot add it automatically. Rather than silently dropping it (which would fail at
+runtime with a firewall block), the compiler emits a non-fatal warning:
+
+```
+warning: COPILOT_PROVIDER_BASE_URL: 'my-foundry/openai/v1' is not a parseable
+absolute URL (or its host is not DNS-safe); the host was not added to the AWF
+allowlist — add the provider hostname manually via network.allowed.
+```
+
+Fix it by using a full absolute URL (including `https://`) and/or adding the host
+to `network.allowed`.
+
 #### Example — Azure Copilot Foundry with a Setup-acquired bearer token
 
 ```yaml
