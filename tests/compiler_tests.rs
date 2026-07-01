@@ -3158,6 +3158,156 @@ fn assert_valid_yaml(compiled: &str, fixture_name: &str) {
     );
 }
 
+fn parse_compiled_yaml(compiled: &str) -> serde_yaml::Value {
+    let yaml_content: String = compiled
+        .lines()
+        .skip_while(|line| line.starts_with('#') || line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    serde_yaml::from_str(&yaml_content).expect("compiled YAML must parse")
+}
+
+fn yaml_key(key: &str) -> serde_yaml::Value {
+    serde_yaml::Value::String(key.to_string())
+}
+
+fn find_job_mapping<'a>(
+    value: &'a serde_yaml::Value,
+    job_id: &str,
+) -> Option<&'a serde_yaml::Mapping> {
+    match value {
+        serde_yaml::Value::Mapping(map) => {
+            if map.get(yaml_key("job")).and_then(|v| v.as_str()) == Some(job_id) {
+                return Some(map);
+            }
+            map.values()
+                .find_map(|child| find_job_mapping(child, job_id))
+        }
+        serde_yaml::Value::Sequence(items) => items
+            .iter()
+            .find_map(|child| find_job_mapping(child, job_id)),
+        _ => None,
+    }
+}
+
+fn find_bash_step_containing<'a>(
+    job: &'a serde_yaml::Mapping,
+    needle: &str,
+) -> Option<&'a serde_yaml::Mapping> {
+    job.get(yaml_key("steps"))
+        .and_then(|v| v.as_sequence())
+        .and_then(|steps| {
+            steps.iter().find_map(|step| {
+                let map = step.as_mapping()?;
+                let bash = map.get(yaml_key("bash")).and_then(|v| v.as_str())?;
+                if bash.contains(needle) {
+                    Some(map)
+                } else {
+                    None
+                }
+            })
+        })
+}
+
+#[test]
+fn test_conclusion_job_is_emitted_with_expected_condition_and_dependencies() {
+    let compiled = compile_fixture("conclusion_basic.md");
+    let doc = parse_compiled_yaml(&compiled);
+
+    let conclusion_job =
+        find_job_mapping(&doc, "Conclusion").expect("compiled YAML should contain Conclusion job");
+
+    assert_eq!(
+        conclusion_job
+            .get(yaml_key("condition"))
+            .and_then(|v| v.as_str()),
+        Some("always()"),
+        "Conclusion job should have condition: always()"
+    );
+
+    let depends_on = conclusion_job
+        .get(yaml_key("dependsOn"))
+        .and_then(|v| v.as_sequence())
+        .expect("Conclusion job should have a dependsOn sequence");
+    let deps: Vec<&str> = depends_on
+        .iter()
+        .map(|v| v.as_str().expect("dependsOn entries should be strings"))
+        .collect();
+
+    assert_eq!(
+        deps,
+        vec!["Agent", "Detection", "SafeOutputs"],
+        "Conclusion job should depend on Agent, Detection, and SafeOutputs"
+    );
+}
+
+#[test]
+fn test_conclusion_job_emits_expected_env_vars_for_conclusion_script() {
+    let compiled = compile_fixture("conclusion_basic.md");
+    let doc = parse_compiled_yaml(&compiled);
+
+    let conclusion_job =
+        find_job_mapping(&doc, "Conclusion").expect("compiled YAML should contain Conclusion job");
+    let conclusion_step = find_bash_step_containing(conclusion_job, "conclusion.js")
+        .expect("Conclusion job should include the conclusion.js bash step");
+    let env = conclusion_step
+        .get(yaml_key("env"))
+        .and_then(|v| v.as_mapping())
+        .expect("conclusion.js step should have an env block");
+
+    assert_eq!(
+        env.get(yaml_key("AW_REPORT_FAILURE_AS_WORK_ITEM"))
+            .and_then(|v| v.as_str()),
+        Some("true"),
+        "default report-failure-as-work-item should be true"
+    );
+    assert_eq!(
+        env.get(yaml_key("AW_PIPELINE_NAME"))
+            .and_then(|v| v.as_str()),
+        Some("Conclusion Test Agent")
+    );
+    assert_eq!(
+        env.get(yaml_key("AW_SAFE_OUTPUT_DIR"))
+            .and_then(|v| v.as_str()),
+        Some("$(Pipeline.Workspace)/conclusion_inputs")
+    );
+    assert!(
+        env.contains_key(yaml_key("SYSTEM_ACCESSTOKEN")),
+        "conclusion.js step should include SYSTEM_ACCESSTOKEN"
+    );
+    assert_eq!(
+        env.get(yaml_key("AW_NOOP_TITLE_PREFIX"))
+            .and_then(|v| v.as_str()),
+        Some("[ado-aw] Agent noop")
+    );
+    assert_eq!(
+        env.get(yaml_key("AW_NOOP_AREA_PATH"))
+            .and_then(|v| v.as_str()),
+        Some(r#"TestProject\TestTeam"#)
+    );
+
+    // The Conclusion job must never fail the pipeline (it reports OTHER jobs'
+    // failures), so the conclusion.js step is marked continueOnError: true.
+    assert_eq!(
+        conclusion_step
+            .get(yaml_key("continueOnError"))
+            .and_then(|v| v.as_bool()),
+        Some(true),
+        "conclusion.js step should set continueOnError so a non-zero node exit never fails the pipeline"
+    );
+}
+
+#[test]
+fn test_conclusion_job_is_not_emitted_without_safe_outputs() {
+    let compiled = compile_fixture("minimal-agent.md");
+    let doc = parse_compiled_yaml(&compiled);
+
+    assert!(
+        find_job_mapping(&doc, "Conclusion").is_none(),
+        "pipelines without safe-outputs must not emit a Conclusion job"
+    );
+}
+
 /// Assert that no step's `env:` block contains a `$[ ... ]` ADO runtime
 /// expression. ADO ONLY evaluates `$[ ... ]` inside `variables:` mappings
 /// and `condition:` fields — putting one in step `env:` passes the
@@ -4654,6 +4804,100 @@ fn test_executor_step_has_env_block_with_write_permissions() {
     assert!(
         after_execute.contains("SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)"),
         "Executor step should include SYSTEM_ACCESSTOKEN: {after_execute}"
+    );
+}
+
+/// Copilot BYOM/BYOK (#1261): provider env keys in `engine.env` may carry ADO
+/// macro expressions (e.g. `$(Setup.FOUNDRY_TOKEN)`), they are merged verbatim
+/// into the agent step's env block, and a literal `COPILOT_PROVIDER_BASE_URL`
+/// host is added to the AWF allow-domains list. Compilation must succeed and
+/// pass integrity checks (no `--skip-integrity`).
+#[test]
+fn test_byom_provider_env_compiles_and_merges() {
+    let compiled = compile_fixture("byom-foundry-agent.md");
+    assert_valid_yaml(&compiled, "byom-foundry-agent.md");
+
+    // Emitted verbatim (unquoted): the typed EnvValue re-serialization renders
+    // an ADO macro without surrounding quotes. Pin the trailing newline so the
+    // assertion fails if quoting is ever (incorrectly) introduced.
+    assert!(
+        compiled.contains("COPILOT_PROVIDER_BEARER_TOKEN: $(Setup.FOUNDRY_TOKEN)\n"),
+        "BYOM provider macro env value must be merged verbatim (unquoted) into the agent step: {compiled}"
+    );
+    assert!(
+        compiled.contains("COPILOT_PROVIDER_TYPE: azure"),
+        "Literal provider config value must still be emitted: {compiled}"
+    );
+    assert!(
+        compiled.contains("my-foundry.cognitiveservices.azure.com"),
+        "Literal COPILOT_PROVIDER_BASE_URL host must be added to the AWF allow-domains list: {compiled}"
+    );
+
+    // Credential isolation: the AWF api-proxy sidecar is enabled and the
+    // provider credential env keys are excluded from --env-all passthrough.
+    // This must happen in BOTH the Agent and Detection jobs (the detection
+    // threat-analysis Copilot run inherits the same BYOM routing + isolation,
+    // mirroring gh-aw), so each marker appears exactly twice.
+    assert_eq!(
+        compiled.matches("--enable-api-proxy").count(),
+        2,
+        "BYOM must enable the AWF api-proxy sidecar in both the Agent and Detection jobs: {compiled}"
+    );
+    // --exclude-env now lists exactly the provider credential keys present in
+    // engine.env (case-preserving), not a hardcoded set. The fixture defines
+    // COPILOT_PROVIDER_BASE_URL + COPILOT_PROVIDER_BEARER_TOKEN (no API_KEY), so
+    // only those two are excluded, in both the Agent and Detection jobs.
+    for key in [
+        "--exclude-env COPILOT_PROVIDER_BASE_URL",
+        "--exclude-env COPILOT_PROVIDER_BEARER_TOKEN",
+    ] {
+        assert_eq!(
+            compiled.matches(key).count(),
+            2,
+            "BYOM must exclude provider credential from passthrough in both jobs ({key}): {compiled}"
+        );
+    }
+    // A credential key NOT present in engine.env must NOT be excluded.
+    assert_eq!(
+        compiled.matches("--exclude-env COPILOT_PROVIDER_API_KEY").count(),
+        0,
+        "credential keys absent from engine.env must not be passed to --exclude-env: {compiled}"
+    );
+    // The api-proxy container image must be pre-pulled (and :latest-tagged) in
+    // both jobs so AWF's --skip-pull finds it locally.
+    assert_eq!(
+        compiled
+            .matches("docker pull ghcr.io/github/gh-aw-firewall/api-proxy:")
+            .count(),
+        2,
+        "BYOM must pre-pull the api-proxy container image in both the Agent and Detection jobs: {compiled}"
+    );
+    // The Detection threat-analysis step inherits the provider routing env
+    // (COPILOT_PROVIDER_* subset) so it reaches the same external provider.
+    // The bearer-token macro therefore appears twice: agent step + detection step.
+    assert_eq!(
+        compiled
+            .matches("COPILOT_PROVIDER_BEARER_TOKEN: $(Setup.FOUNDRY_TOKEN)\n")
+            .count(),
+        2,
+        "Detection step must inherit the BYOM provider env alongside the agent step: {compiled}"
+    );
+}
+
+/// A non-BYOM agent must NOT enable the api-proxy sidecar or pre-pull its image —
+/// the isolation plumbing is strictly opt-in via the presence of a
+/// `COPILOT_PROVIDER_*` credential key in `engine.env`.
+#[test]
+fn test_non_byom_agent_has_no_api_proxy() {
+    let compiled = compile_fixture("minimal-agent.md");
+    assert_valid_yaml(&compiled, "minimal-agent.md");
+    assert!(
+        !compiled.contains("--enable-api-proxy"),
+        "Non-BYOM agent must not enable the api-proxy sidecar: {compiled}"
+    );
+    assert!(
+        !compiled.contains("api-proxy"),
+        "Non-BYOM agent must not reference the api-proxy image: {compiled}"
     );
 }
 
@@ -6447,6 +6691,35 @@ safe-outputs:
     );
 }
 
+/// In the mixed split, the Conclusion job DOES depend on the reviewed
+/// SafeOutputs job and surfaces its result via AW_SAFEOUTPUTS_REVIEWED_RESULT,
+/// so a reviewer rejection (failing SafeOutputs_Reviewed) is reported.
+#[test]
+fn test_mixed_approval_conclusion_reports_reviewed_result() {
+    let source = r#"---
+name: "Mixed Conclusion Agent"
+description: "Mixed approval split conclusion wiring"
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+    require-approval: true
+  add-pr-comment: {}
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("approval-mixed-conclusion", source);
+    assert!(ok, "mixed approval pipeline should compile: {stderr}");
+    assert!(
+        compiled.contains("job: SafeOutputs_Reviewed"),
+        "reviewed SafeOutputs job expected:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("AW_SAFEOUTPUTS_REVIEWED_RESULT"),
+        "Conclusion must surface the reviewed job result:\n{compiled}"
+    );
+}
+
 /// In the mixed split, the Teardown job depends only on the automatic
 /// `SafeOutputs` job — never on the human-gated `SafeOutputs_Reviewed` job —
 /// so cleanup still fires on the common no-reviewed-proposal path (where the
@@ -6737,4 +7010,72 @@ safe-outputs:
         "the job-level timeout must be the strictly-larger outer bound (125):\n{block}"
     );
 }
+
+// ── Front-matter task-step validation (advisory; surfaced via lint) ──────────
+
+/// An authored task step with invalid inputs — here `CopyFiles@2` missing the
+/// required `TargetFolder` and carrying an unknown `Bogus` input — must:
+///   1. NOT fail the compile (validation is advisory and lives in `lint`), and
+///   2. still be passed through to the generated YAML verbatim, and
+///   3. NOT print a warning during compile — the validation feedback is
+///      surfaced through `ado-aw lint` / the `lint_workflow` MCP tool instead,
+///      so compile (which also re-runs in-pipeline for integrity) stays quiet.
+#[test]
+fn invalid_task_input_compiles_silently_and_preserves_passthrough() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique_id = COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-task-validate-{}-{}",
+        std::process::id(),
+        unique_id,
+    ));
+    fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+    let fixture_src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("invalid-task-input-agent.md");
+    let fixture_path = temp_dir.join("invalid-task-input-agent.md");
+    fs::copy(&fixture_src, &fixture_path).expect("copy fixture");
+    let output_path = temp_dir.join("invalid-task-input-agent.yml");
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            fixture_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run compiler");
+
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let compiled = fs::read_to_string(&output_path).unwrap_or_default();
+    let _ = fs::remove_dir_all(&temp_dir);
+
+    // (1) Never fail: the process still exits 0.
+    assert!(
+        output.status.success(),
+        "compile must succeed despite invalid task inputs; stderr:\n{stderr}"
+    );
+    // (2) Passthrough preserved verbatim — validation never alters output.
+    assert!(
+        compiled.contains("CopyFiles@2"),
+        "the authored task step must be emitted unchanged:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("Bogus"),
+        "the (invalid) input must be passed through unchanged:\n{compiled}"
+    );
+    // (3) Compile does NOT emit the task-validation warning — that feedback is
+    // surfaced through lint, not compile (see `ado-aw lint` integration test).
+    assert!(
+        !stderr.contains("CopyFiles@2"),
+        "compile must not warn about task inputs (that belongs to lint); got:\n{stderr}"
+    );
+}
+
 

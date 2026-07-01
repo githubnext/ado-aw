@@ -22,7 +22,7 @@ mod ndjson;
 mod remove;
 mod run;
 pub mod runtimes;
-mod safeoutputs;
+mod safe_outputs;
 pub mod sanitize;
 mod secrets;
 pub mod secure;
@@ -793,7 +793,7 @@ async fn build_execution_context(
     ado_org_url: Option<String>,
     ado_project: Option<String>,
     dry_run: bool,
-) -> crate::safeoutputs::ExecutionContext {
+) -> crate::safe_outputs::ExecutionContext {
     // Map checkout aliases to ADO repo names from the repositories list
     let allowed_repositories = front_matter
         .checkout
@@ -807,12 +807,12 @@ async fn build_execution_context(
         })
         .collect();
 
-    let mut ctx = crate::safeoutputs::ExecutionContext::default();
+    let mut ctx = crate::safe_outputs::ExecutionContext::default();
     // Only override env-derived values when CLI args are explicitly provided;
     // otherwise keep the defaults from SYSTEM_TEAMFOUNDATIONCOLLECTIONURI /
     // SYSTEM_TEAMPROJECT that ExecutionContext::default() already resolved.
     if let Some(url) = ado_org_url {
-        ctx.ado_organization = crate::safeoutputs::org_from_url(&url);
+        ctx.ado_organization = crate::safe_outputs::org_from_url(&url);
         ctx.ado_org_url = Some(url);
     }
     if let Some(project) = ado_project {
@@ -950,7 +950,7 @@ async fn process_cache_memory(
     Ok(())
 }
 
-fn print_execution_summary(results: &[crate::safeoutputs::ExecutionResult]) {
+fn print_execution_summary(results: &[crate::safe_outputs::ExecutionResult]) {
     let success_count = results
         .iter()
         .filter(|r| r.success && !r.is_warning())

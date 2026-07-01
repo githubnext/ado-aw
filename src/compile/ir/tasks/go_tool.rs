@@ -4,6 +4,7 @@
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/go-tool-v0>
 
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Builder for a [`TaskStep`] invoking `GoTool@0`.
 ///
@@ -12,12 +13,18 @@ use crate::compile::ir::step::TaskStep;
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/go-tool-v0>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GoTool {
+    #[serde(rename = "version")]
     version: String,
+    #[serde(rename = "goPath", default)]
     go_path: Option<String>,
+    #[serde(rename = "goBin", default)]
     go_bin: Option<String>,
+    #[serde(rename = "goDownloadUrl", default)]
     go_download_url: Option<String>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 

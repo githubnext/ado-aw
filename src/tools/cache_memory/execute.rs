@@ -10,7 +10,7 @@ use log::{debug, info, warn};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-use crate::safeoutputs::ExecutionResult;
+use crate::safe_outputs::ExecutionResult;
 
 /// Directory name for agent memory within the staging/artifact directories
 pub const AGENT_MEMORY_DIR: &str = "agent_memory";

@@ -14,7 +14,7 @@ use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 
 use crate::ndjson::{self, EXECUTED_NDJSON_FILENAME, SAFE_OUTPUT_FILENAME};
-use crate::safeoutputs::{
+use crate::safe_outputs::{
     AddBuildTagResult, AddPrCommentResult, CommentOnWorkItemResult, CreateBranchResult,
     CreateGitTagResult, CreateIssueResult, CreatePrResult, CreateWikiPageResult,
     CreateWorkItemResult, ExecutionContext, ExecutionResult, Executor, LinkWorkItemsResult,
@@ -65,31 +65,9 @@ pub async fn execute_safe_outputs(
 
     log_execution_context(safe_output_dir, ctx);
 
-    if !safe_output_path.exists() {
-        info!(
-            "No safe outputs file found at: {}",
-            safe_output_path.display()
-        );
-        println!(
-            "No safe outputs file found at: {}",
-            safe_output_path.display()
-        );
+    let Some(entries) = load_safe_output_entries(&safe_output_path).await? else {
         return Ok(vec![]);
-    }
-
-    info!("Processing safe outputs: {}", safe_output_path.display());
-    println!("Processing safe outputs: {}", safe_output_path.display());
-
-    let entries = ndjson::read_ndjson_file(&safe_output_path).await?;
-
-    if entries.is_empty() {
-        info!("Safe outputs file is empty");
-        println!("Safe outputs file is empty");
-        return Ok(vec![]);
-    }
-
-    info!("Found {} safe output(s) to execute", entries.len());
-    println!("Found {} safe output(s) to execute", entries.len());
+    };
 
     log_queued_entries(&entries);
 
@@ -99,7 +77,7 @@ pub async fn execute_safe_outputs(
     //
     // IMPORTANT: When adding a new ToolResult implementor, also register it here
     // so its budget is enforced. There is no compile-time guard for this.
-    let mut budgets: HashMap<&str, (usize, usize)> = HashMap::new();
+    let mut budgets: HashMap<&'static str, (usize, usize)> = HashMap::new();
     macro_rules! register_budgets {
         ($($tool:ty),+ $(,)?) => {
             $({
@@ -135,67 +113,11 @@ pub async fn execute_safe_outputs(
 
     let mut results = Vec::new();
     for (i, entry) in entries.iter().enumerate() {
-        let entry_json = serde_json::to_string(entry).unwrap_or_else(|_| "<invalid>".to_string());
-        let proposal_context = entry.get("context").and_then(|value| value.as_str());
-        let proposal_tool_name = entry
-            .get("name")
-            .and_then(|name| name.as_str())
-            .unwrap_or("unknown");
-        // Skip entries the active filter excludes (manual-review split: the
-        // auto job excludes reviewed tools; the reviewed job runs only them).
-        if !filter.allows(proposal_tool_name) {
-            debug!(
-                "[{}/{}] Skipping entry for tool '{}' (filtered out)",
-                i + 1,
-                entries.len(),
-                proposal_tool_name
-            );
-            continue;
-        }
-        debug!(
-            "[{}/{}] Executing entry: {}",
-            i + 1,
-            entries.len(),
-            entry_json
-        );
-
-        // Generic budget enforcement: skip excess entries rather than aborting the whole batch.
-        // Budget is consumed before execution so that failed attempts (target policy rejection,
-        // network errors) still count — this prevents unbounded retries against a failing endpoint.
-        if let Some(result) = enforce_budget(entry, &mut budgets, entries.len(), i) {
-            append_execution_record(
-                safe_output_dir,
-                proposal_tool_name,
-                &result,
-                proposal_context,
-            )
-            .await;
+        if let Some(result) =
+            process_one_entry(i, entries.len(), entry, &mut budgets, filter, ctx, safe_output_dir)
+                .await
+        {
             results.push(result);
-            continue;
-        }
-
-        match execute_safe_output(entry, ctx).await {
-            Ok((tool_name, result)) => {
-                log_and_print_entry_result(i, entries.len(), &tool_name, &result);
-                append_execution_record(safe_output_dir, &tool_name, &result, proposal_context)
-                    .await;
-                results.push(result);
-            }
-            Err(e) => {
-                error!("[{}/{}] Execution error: {}", i + 1, entries.len(), e);
-                let raw_msg = format!("Failed to execute entry: {}", e);
-                let safe_msg = neutralize_pipeline_commands(&raw_msg);
-                let result = ExecutionResult::failure(safe_msg);
-                println!("[{}/{}] ✗ - {}", i + 1, entries.len(), result.message);
-                append_execution_record(
-                    safe_output_dir,
-                    proposal_tool_name,
-                    &result,
-                    proposal_context,
-                )
-                .await;
-                results.push(result);
-            }
         }
     }
 
@@ -212,6 +134,98 @@ pub async fn execute_safe_outputs(
     );
 
     Ok(results)
+}
+
+/// Load and validate safe-output entries from the specified NDJSON path.
+///
+/// Returns `Ok(None)` when there is nothing to execute (file absent or empty),
+/// with appropriate log and console output already emitted.
+async fn load_safe_output_entries(path: &Path) -> Result<Option<Vec<Value>>> {
+    if !path.exists() {
+        info!("No safe outputs file found at: {}", path.display());
+        println!("No safe outputs file found at: {}", path.display());
+        return Ok(None);
+    }
+    info!("Processing safe outputs: {}", path.display());
+    println!("Processing safe outputs: {}", path.display());
+    let entries = ndjson::read_ndjson_file(path).await?;
+    if entries.is_empty() {
+        info!("Safe outputs file is empty");
+        println!("Safe outputs file is empty");
+        return Ok(None);
+    }
+    info!("Found {} safe output(s) to execute", entries.len());
+    println!("Found {} safe output(s) to execute", entries.len());
+    Ok(Some(entries))
+}
+
+/// Process a single safe-output entry: apply the tool filter, enforce the budget, and execute.
+///
+/// Returns `None` when the entry is filtered out (caller skips it, nothing pushed to results).
+/// Returns `Some(result)` for all other outcomes: budget-exhausted, successful, and failed.
+#[allow(clippy::too_many_arguments)]
+async fn process_one_entry(
+    i: usize,
+    total: usize,
+    entry: &Value,
+    budgets: &mut HashMap<&'static str, (usize, usize)>,
+    filter: &ToolFilter,
+    ctx: &ExecutionContext,
+    safe_output_dir: &Path,
+) -> Option<ExecutionResult> {
+    let proposal_context = entry.get("context").and_then(|value| value.as_str());
+    let proposal_tool_name = entry
+        .get("name")
+        .and_then(|name| name.as_str())
+        .unwrap_or("unknown");
+
+    // Skip entries the active filter excludes (manual-review split: the
+    // auto job excludes reviewed tools; the reviewed job runs only them).
+    if !filter.allows(proposal_tool_name) {
+        debug!(
+            "[{}/{}] Skipping entry for tool '{}' (filtered out)",
+            i + 1,
+            total,
+            proposal_tool_name
+        );
+        return None;
+    }
+
+    let entry_json = serde_json::to_string(entry).unwrap_or_else(|_| "<invalid>".to_string());
+    debug!("[{}/{}] Executing entry: {}", i + 1, total, entry_json);
+
+    // Generic budget enforcement: skip excess entries rather than aborting the whole batch.
+    // Budget is consumed before execution so that failed attempts (target policy rejection,
+    // network errors) still count — this prevents unbounded retries against a failing endpoint.
+    if let Some(result) = enforce_budget(entry, budgets, total, i) {
+        append_execution_record(safe_output_dir, proposal_tool_name, &result, proposal_context)
+            .await;
+        return Some(result);
+    }
+
+    let result = match execute_safe_output(entry, ctx).await {
+        Ok((tool_name, result)) => {
+            log_and_print_entry_result(i, total, &tool_name, &result);
+            append_execution_record(safe_output_dir, &tool_name, &result, proposal_context).await;
+            result
+        }
+        Err(e) => {
+            error!("[{}/{}] Execution error: {}", i + 1, total, e);
+            let raw_msg = format!("Failed to execute entry: {}", e);
+            let safe_msg = neutralize_pipeline_commands(&raw_msg);
+            let result = ExecutionResult::failure(safe_msg);
+            println!("[{}/{}] ✗ - {}", i + 1, total, result.message);
+            append_execution_record(
+                safe_output_dir,
+                proposal_tool_name,
+                &result,
+                proposal_context,
+            )
+            .await;
+            result
+        }
+    };
+    Some(result)
 }
 
 /// Emit debug-level context about the execution environment at Stage 3 startup.
@@ -279,7 +293,7 @@ fn log_queued_entries(entries: &[Value]) {
 /// returned so execution can proceed.
 fn enforce_budget(
     entry: &Value,
-    budgets: &mut HashMap<&str, (usize, usize)>,
+    budgets: &mut HashMap<&'static str, (usize, usize)>,
     total: usize,
     i: usize,
 ) -> Option<ExecutionResult> {
@@ -825,16 +839,13 @@ mod tests {
         assert!(result.is_ok());
         let (tool_name, result) = result.unwrap();
         assert_eq!(tool_name, "noop");
-        // noop always attempts to file a work item; without ADO credentials it
-        // returns a warning (success=true) rather than failing hard.
+        // noop is a pass-through diagnostic signal — work-item filing is now
+        // handled by the Conclusion job, so execute_impl returns plain success.
         assert!(result.success);
+        assert!(!result.is_warning());
         assert!(
-            result.is_warning(),
-            "noop without credentials should be a warning"
-        );
-        assert!(
-            result.message.contains("not set"),
-            "noop warning should mention missing config, got: {}",
+            result.message.contains("No operation needed"),
+            "noop should report no-op message, got: {}",
             result.message
         );
     }
@@ -848,16 +859,13 @@ mod tests {
         assert!(result.is_ok());
         let (tool_name, result) = result.unwrap();
         assert_eq!(tool_name, "missing-tool");
-        // missing-tool always attempts to file a work item; without ADO credentials
-        // it returns a warning (success=true) rather than failing hard.
+        // missing-tool is a pass-through diagnostic signal — work-item filing
+        // is now handled by the Conclusion job, so execute_impl returns plain success.
         assert!(result.success);
+        assert!(!result.is_warning());
         assert!(
-            result.is_warning(),
-            "missing-tool without credentials should be a warning"
-        );
-        assert!(
-            result.message.contains("not set"),
-            "missing-tool warning should mention missing config, got: {}",
+            result.message.contains("Missing tool reported"),
+            "missing-tool should report tool name, got: {}",
             result.message
         );
     }
@@ -891,9 +899,9 @@ mod tests {
 
         let manifest = read_executed_manifest(&temp_dir).await;
         assert_eq!(manifest.len(), 2);
-        assert_eq!(manifest[0]["status"], "warning");
+        assert_eq!(manifest[0]["status"], "succeeded");
         assert_eq!(manifest[0]["context"], "test1");
-        assert_eq!(manifest[1]["status"], "warning");
+        assert_eq!(manifest[1]["status"], "succeeded");
     }
 
     #[tokio::test]

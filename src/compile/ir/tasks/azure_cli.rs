@@ -1,22 +1,27 @@
 //! Typed builder for `AzureCLI@2`.
 
-use super::common::{push_bool, push_opt};
+use super::common::{de_opt_bool_flex, push_bool, push_opt};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Script type for `AzureCLI@2`.
 ///
 /// Selects the shell that executes the script body.
 ///
 /// ADO input: `scriptType`
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum ScriptType {
     /// Bash shell (`bash`).
+    #[serde(rename = "bash")]
     Bash,
     /// Windows PowerShell (`ps`).
+    #[serde(rename = "ps")]
     Ps,
     /// PowerShell Core (`pscore`).
+    #[serde(rename = "pscore")]
     PsCore,
     /// Windows batch script (`batch`).
+    #[serde(rename = "batch")]
     Batch,
 }
 
@@ -39,6 +44,12 @@ impl ScriptType {
 /// invalid combination (e.g. `scriptLocation: scriptPath` with no path) is
 /// unrepresentable.
 ///
+/// This is a **construction-only** type and deliberately does *not* derive
+/// `Deserialize`: the authored ADO shape is flat (a bare
+/// `scriptLocation: inlineScript` discriminator plus a *sibling* `inlineScript:`
+/// key), which an externally-tagged enum cannot represent. Validation therefore
+/// uses the flat [`AzureCliInputs`] schema in [`validate_inputs`] instead.
+///
 /// ADO input: `scriptLocation`
 #[derive(Debug, Clone)]
 pub enum ScriptLocation {
@@ -51,13 +62,16 @@ pub enum ScriptLocation {
 /// `ErrorActionPreference` for PowerShell scripts (`scriptType: ps` or `pscore`).
 ///
 /// ADO input: `powerShellErrorActionPreference`
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum PowerShellErrorActionPreference {
     /// Stop on first error (`stop`). This is the ADO default.
+    #[serde(rename = "stop")]
     Stop,
     /// Continue on errors (`continue`).
+    #[serde(rename = "continue")]
     Continue,
     /// Silently continue (`silentlyContinue`).
+    #[serde(rename = "silentlyContinue")]
     SilentlyContinue,
 }
 
@@ -70,6 +84,83 @@ impl PowerShellErrorActionPreference {
             PowerShellErrorActionPreference::SilentlyContinue => "silentlyContinue",
         }
     }
+}
+
+/// Validate an authored `AzureCLI@2` `inputs:` mapping (advisory front-matter
+/// validation, see [`super::parse`]).
+///
+/// The [`AzureCli`] builder models `scriptLocation` + its script content as the
+/// typed [`ScriptLocation`] enum for *construction*, but ADO authors the **flat**
+/// shape — a bare `scriptLocation: inlineScript|scriptPath` discriminator plus a
+/// *sibling* `inlineScript:`/`scriptPath:` key. That flat shape does not match an
+/// externally-tagged enum field, so validation uses a dedicated flat schema here
+/// rather than `Deserialize` on the builder. `AzureCLI@2` is therefore registered
+/// with this `validate_inputs`, not `validate_by_deserialize::<AzureCli>`.
+pub(crate) fn validate_inputs(inputs: serde_yaml::Value) -> Result<(), String> {
+    /// Flat `scriptLocation` discriminator value (`inlineScript` / `scriptPath`).
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    enum ScriptLocationKind {
+        InlineScript,
+        ScriptPath,
+    }
+
+    /// Flat validation schema mirroring the inputs `AzureCli::into_step` emits.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)] // fields exist only to drive deserialization-as-validation
+    struct AzureCliInputs {
+        #[serde(rename = "azureSubscription")]
+        azure_subscription: String,
+        #[serde(rename = "scriptType")]
+        script_type: ScriptType,
+        #[serde(rename = "scriptLocation", default)]
+        script_location: Option<ScriptLocationKind>,
+        #[serde(rename = "inlineScript", default)]
+        inline_script: Option<String>,
+        #[serde(rename = "scriptPath", default)]
+        script_path: Option<String>,
+        #[serde(rename = "arguments", default)]
+        arguments: Option<String>,
+        #[serde(rename = "powerShellErrorActionPreference", default)]
+        ps_error_action_preference: Option<PowerShellErrorActionPreference>,
+        #[serde(
+            rename = "addSpnToEnvironment",
+            default,
+            deserialize_with = "de_opt_bool_flex"
+        )]
+        add_spn_to_environment: Option<bool>,
+        #[serde(
+            rename = "useGlobalConfig",
+            default,
+            deserialize_with = "de_opt_bool_flex"
+        )]
+        use_global_config: Option<bool>,
+        #[serde(rename = "workingDirectory", default)]
+        working_directory: Option<String>,
+        #[serde(
+            rename = "failOnStandardError",
+            default,
+            deserialize_with = "de_opt_bool_flex"
+        )]
+        fail_on_standard_error: Option<bool>,
+        #[serde(
+            rename = "powerShellIgnoreLASTEXITCODE",
+            default,
+            deserialize_with = "de_opt_bool_flex"
+        )]
+        ps_ignore_last_exit_code: Option<bool>,
+        #[serde(
+            rename = "visibleAzLogin",
+            default,
+            deserialize_with = "de_opt_bool_flex"
+        )]
+        visible_az_login: Option<bool>,
+    }
+
+    serde_yaml::from_value::<AzureCliInputs>(inputs)
+        .map(drop)
+        .map_err(|e| e.to_string())
 }
 
 /// Builder for a [`TaskStep`] invoking `AzureCLI@2`.
@@ -96,6 +187,10 @@ impl PowerShellErrorActionPreference {
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/azure-cli-v2>
+///
+/// This is the **construction** builder; it does not derive `Deserialize`.
+/// Validation of an authored `AzureCLI@2` step uses the flat [`AzureCliInputs`]
+/// schema in [`validate_inputs`] (see [`ScriptLocation`] for why).
 #[derive(Debug, Clone)]
 pub struct AzureCli {
     azure_subscription: String,
@@ -147,10 +242,7 @@ impl AzureCli {
 
     /// `powerShellErrorActionPreference` — how PowerShell handles non-terminating errors.
     /// Relevant only when `script_type` is [`ScriptType::Ps`] or [`ScriptType::PsCore`].
-    pub fn ps_error_action_preference(
-        mut self,
-        value: PowerShellErrorActionPreference,
-    ) -> Self {
+    pub fn ps_error_action_preference(mut self, value: PowerShellErrorActionPreference) -> Self {
         self.ps_error_action_preference = Some(value);
         self
     }
@@ -285,7 +377,10 @@ mod tests {
         )
         .into_step();
 
-        assert_eq!(t.inputs.get("scriptType").map(String::as_str), Some("pscore"));
+        assert_eq!(
+            t.inputs.get("scriptType").map(String::as_str),
+            Some("pscore")
+        );
         assert_eq!(
             t.inputs.get("scriptLocation").map(String::as_str),
             Some("scriptPath")
@@ -384,10 +479,7 @@ mod tests {
 
     #[test]
     fn ps_error_preference_ado_strings() {
-        assert_eq!(
-            PowerShellErrorActionPreference::Stop.as_ado_str(),
-            "stop"
-        );
+        assert_eq!(PowerShellErrorActionPreference::Stop.as_ado_str(), "stop");
         assert_eq!(
             PowerShellErrorActionPreference::Continue.as_ado_str(),
             "continue"

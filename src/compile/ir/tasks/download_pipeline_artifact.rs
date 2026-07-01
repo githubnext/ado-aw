@@ -1,12 +1,15 @@
 //! Typed builder for `DownloadPipelineArtifact@2`.
 
-use super::common::bool_input;
+use super::common::{bool_input, de_opt_bool_flex};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Run source for [`DownloadPipelineArtifact`] (`source` input).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum ArtifactSource {
+    #[serde(rename = "current")]
     Current,
+    #[serde(rename = "specific")]
     Specific,
 }
 
@@ -21,10 +24,13 @@ impl ArtifactSource {
 }
 
 /// Which run to download from for [`DownloadPipelineArtifact`] (`runVersion`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum RunVersion {
+    #[serde(rename = "latest")]
     Latest,
+    #[serde(rename = "latestFromBranch")]
     LatestFromBranch,
+    #[serde(rename = "specific")]
     Specific,
 }
 
@@ -43,22 +49,50 @@ impl RunVersion {
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/download-pipeline-artifact-v2>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DownloadPipelineArtifact {
+    #[serde(rename = "targetPath")]
     target_path: String,
+    #[serde(default)]
     artifact: Option<String>,
+    #[serde(default)]
     patterns: Option<String>,
+    #[serde(default)]
     source: Option<ArtifactSource>,
+    #[serde(default)]
     project: Option<String>,
+    #[serde(default)]
     pipeline: Option<String>,
+    #[serde(rename = "runVersion", default)]
     run_version: Option<RunVersion>,
+    #[serde(rename = "branchName", default)]
     branch_name: Option<String>,
+    #[serde(rename = "runId", default)]
     run_id: Option<String>,
+    #[serde(default)]
     tags: Option<String>,
+    #[serde(
+        rename = "allowPartiallySucceededBuilds",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     allow_partially_succeeded_builds: Option<bool>,
+    #[serde(
+        rename = "allowFailedBuilds",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     allow_failed_builds: Option<bool>,
+    #[serde(
+        rename = "preferTriggeringPipeline",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     prefer_triggering_pipeline: Option<bool>,
+    #[serde(rename = "itemPattern", default)]
     item_pattern: Option<String>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 
@@ -172,7 +206,8 @@ impl DownloadPipelineArtifact {
     pub fn into_step(self) -> TaskStep {
         let mut t = TaskStep::new(
             "DownloadPipelineArtifact@2",
-            self.display_name.unwrap_or_else(|| "Download Pipeline Artifact".into()),
+            self.display_name
+                .unwrap_or_else(|| "Download Pipeline Artifact".into()),
         )
         .with_input("targetPath", self.target_path);
         if let Some(v) = self.artifact {
@@ -244,10 +279,18 @@ mod tests {
             .allow_partially_succeeded_builds(true)
             .into_step();
         assert_eq!(t.inputs.get("source").map(String::as_str), Some("specific"));
-        assert_eq!(t.inputs.get("runVersion").map(String::as_str), Some("latestFromBranch"));
-        assert_eq!(t.inputs.get("artifact").map(String::as_str), Some("safe_outputs"));
         assert_eq!(
-            t.inputs.get("allowPartiallySucceededBuilds").map(String::as_str),
+            t.inputs.get("runVersion").map(String::as_str),
+            Some("latestFromBranch")
+        );
+        assert_eq!(
+            t.inputs.get("artifact").map(String::as_str),
+            Some("safe_outputs")
+        );
+        assert_eq!(
+            t.inputs
+                .get("allowPartiallySucceededBuilds")
+                .map(String::as_str),
             Some("true")
         );
     }

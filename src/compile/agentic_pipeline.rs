@@ -1,8 +1,8 @@
 //! Typed-IR builder for the canonical agentic-pipeline shape.
 //!
 //! Owns the Setup → Agent → Detection → (ManualReview?) → SafeOutputs
-//! (+ SafeOutputs_Reviewed?) → Teardown shape consumed by **every**
-//! compile target (`standalone`, `1es`,
+//! (+ SafeOutputs_Reviewed?) → Teardown → Conclusion shape consumed by
+//! **every** compile target (`standalone`, `1es`,
 //! `job`, `stage`). Each target's wrapper module (`standalone_ir.rs`,
 //! `onees_ir.rs`, `job_ir.rs`, `stage_ir.rs`) is a one-screen
 //! envelope that calls [`build_pipeline_context`] and lifts the
@@ -58,6 +58,7 @@
 //!   job gated behind `ManualReview` (runs only the reviewed tools,
 //!   publishes a distinct `safe_outputs_reviewed` artifact).
 //! - `Teardown` (optional): user `teardown:` steps.
+//! - `Conclusion` (optional): post-run reporting / work-item filing.
 
 use anyhow::Result;
 use std::path::Path;
@@ -68,8 +69,9 @@ use super::common::{
 };
 use super::extensions::{CompileContext, CompilerExtension, Declarations, Extension, McpgConfig};
 use super::ir::condition::{Condition, Expr};
+use super::ir::env::EnvValue;
 use super::ir::ids::{JobId, StepId};
-use super::ir::job::{Job, Pool};
+use super::ir::job::{Job, JobVariable, Pool};
 use super::ir::output::{OutputDecl, OutputRef};
 use super::ir::step::{
     BashStep, CheckoutRepo, CheckoutStep, DownloadStep, PublishStep, Step, SubmodulesOpt, TaskStep,
@@ -182,6 +184,25 @@ pub(crate) fn build_pipeline_context(
     let engine_log_dir = ctx.engine.log_dir().to_string();
 
     let mut engine_env = ctx.engine.env(&front_matter.engine)?;
+    // BYOM/BYOK isolation is Copilot-specific: gate on the engine type so a
+    // future non-Copilot engine whose env happens to contain a COPILOT_PROVIDER_*
+    // key never erroneously activates the api-proxy sidecar.
+    let is_copilot = matches!(ctx.engine, crate::engine::Engine::Copilot);
+    let byom_active = is_copilot && crate::engine::copilot_byom_active(&front_matter.engine);
+    // Actual provider credential keys (user's casing) for AWF `--exclude-env`.
+    let byom_exclude_keys = if is_copilot {
+        crate::engine::copilot_byom_credential_keys(&front_matter.engine)
+    } else {
+        Vec::new()
+    };
+    // Provider-only env subset for the Detection step, so the threat-analysis
+    // Copilot run inherits the same BYOM/BYOK routing + credential isolation as
+    // the main agent (mirrors gh-aw's detection engine-config Env inheritance).
+    let detection_provider_env = if is_copilot {
+        crate::engine::copilot_provider_env(&front_matter.engine)?
+    } else {
+        Vec::new()
+    };
     // AWF path env (when extensions declare path prepends)
     let awf_paths = common::collect_awf_path_prepends(&extension_declarations);
     let has_awf_paths = !awf_paths.is_empty();
@@ -310,6 +331,9 @@ pub(crate) fn build_pipeline_context(
         integrity_check_yaml,
         agent_content_value,
         debug_pipeline,
+        byom_active,
+        byom_exclude_keys,
+        detection_provider_env,
     };
 
     // ─── Build jobs ───────────────────────────────────────────────
@@ -332,8 +356,8 @@ pub(crate) fn build_pipeline_context(
     })
 }
 
-/// Build the canonical 5-job graph (Setup?, Agent, Detection,
-/// SafeOutputs, Teardown?) used by every target. The optional
+/// Build the canonical job graph (Setup?, Agent, Detection,
+/// SafeOutputs, Teardown?, Conclusion?) used by every target. The optional
 /// `prefix` is applied to Agent / Detection / SafeOutputs job IDs
 /// (matches the legacy template behaviour: Setup and Teardown stay
 /// unprefixed even in `target: job|stage`, see `src/data/job-base.yml`
@@ -404,6 +428,9 @@ pub(crate) fn build_canonical_jobs(
     if let Some(teardown) = build_teardown_job(front_matter, cfg, &p)? {
         jobs.push(teardown);
     }
+    if let Some(conclusion) = build_conclusion_job(front_matter, cfg, &p)? {
+        jobs.push(conclusion);
+    }
 
     // Wire dependsOn between jobs (graph pass also derives but
     // explicit edges make the YAML match committed lock files).
@@ -418,9 +445,10 @@ pub(crate) struct JobPrefix<'a>(pub Option<&'a str>);
 
 impl<'a> JobPrefix<'a> {
     /// Produce the `JobId` for a canonical job (`Setup` / `Agent` /
-    /// `Detection` / `SafeOutputs` / `Teardown`). Setup and Teardown
-    /// are always unprefixed; the other three are prefixed when a
-    /// prefix is provided.
+    /// `Detection` / `SafeOutputs` / `Teardown` / `Conclusion`).
+    /// Setup, Teardown, and Conclusion are always unprefixed; Agent,
+    /// Detection, and SafeOutputs are prefixed when a prefix is
+    /// provided.
     pub(crate) fn id(&self, base: &str) -> Result<JobId> {
         match (self.0, base) {
             (
@@ -479,6 +507,16 @@ pub(crate) struct StandaloneCtx {
     /// `{{#runtime-import ...}}` marker).
     pub(crate) agent_content_value: String,
     pub(crate) debug_pipeline: bool,
+    /// True when `engine.env` activates Copilot BYOM/BYOK mode. Pre-pulls the
+    /// api-proxy container image in the Agent and Detection jobs.
+    pub(crate) byom_active: bool,
+    /// Actual provider credential env keys present to pass to AWF `--exclude-env`;
+    /// non-empty ⇒ enable the api-proxy sidecar. Empty for non-BYOM.
+    pub(crate) byom_exclude_keys: Vec<String>,
+    /// Provider-only (`COPILOT_PROVIDER_*`) subset of `engine.env` as validated
+    /// raw `(key, value)` pairs (empty when none). Applied to the Detection
+    /// (threat-analysis) step so it inherits BYOM provider routing + isolation.
+    pub(crate) detection_provider_env: Vec<(String, String)>,
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -828,8 +866,12 @@ fn build_agent_job(
     // 11. Download AWF
     steps.extend(download_awf_step(front_matter.supply_chain()));
 
-    // 12. Pre-pull AWF + MCPG container images
-    steps.extend(prepull_images_step(true, front_matter.supply_chain()));
+    // 12. Pre-pull AWF + MCPG container images (+ api-proxy when BYOM is active)
+    steps.extend(prepull_images_step(
+        true,
+        cfg.byom_active,
+        front_matter.supply_chain(),
+    ));
 
     // 13. Extension prepare steps (typed) + user steps (RawYaml)
     steps.extend(ext_agent_prepare.iter().cloned());
@@ -866,6 +908,7 @@ fn build_agent_job(
         &cfg.working_directory,
         &cfg.engine_run,
         &cfg.engine_env,
+        &cfg.byom_exclude_keys,
     )?));
 
     // 19. Collect safe outputs from AWF container
@@ -963,7 +1006,6 @@ fn agent_job_variables_hoist(
     front_matter: &FrontMatter,
 ) -> Result<Vec<crate::compile::ir::job::JobVariable>> {
     use crate::compile::ir::env::EnvValue;
-    use crate::compile::ir::job::JobVariable;
     use crate::compile::ir::output::OutputRef;
 
     if !front_matter.is_synthetic_pr() {
@@ -1023,8 +1065,14 @@ fn build_detection_job(
     steps.push(Step::Task(DockerInstaller::new("26.1.4").into_step()));
     // Download AWF
     steps.extend(download_awf_step(front_matter.supply_chain()));
-    // Pre-pull AWF (no MCPG image for detection)
-    steps.extend(prepull_images_step(false, front_matter.supply_chain()));
+    // Pre-pull AWF (no MCPG image for detection). Pull the api-proxy image when
+    // BYOM is active so the detection Copilot run gets the same credential
+    // isolation as the main agent.
+    steps.extend(prepull_images_step(
+        false,
+        cfg.byom_active,
+        front_matter.supply_chain(),
+    ));
     // Prepare safe outputs for analysis
     steps.push(Step::Bash(prepare_safe_outputs_for_analysis(
         &cfg.working_directory,
@@ -1052,7 +1100,9 @@ fn build_detection_job(
         &cfg.allowed_domains,
         &cfg.working_directory,
         &cfg.engine_run_detection,
-    )));
+        &cfg.byom_exclude_keys,
+        &cfg.detection_provider_env,
+    )?));
     // Prepare analyzed outputs
     steps.push(Step::Bash(prepare_analyzed_outputs_step()));
     // Evaluate threat analysis — DECLARES TYPED OUTPUT
@@ -1453,6 +1503,239 @@ fn build_teardown_job(
     Ok(Some(job))
 }
 
+fn build_conclusion_job(
+    front_matter: &FrontMatter,
+    cfg: &StandaloneCtx,
+    prefix: &JobPrefix<'_>,
+) -> Result<Option<Job>> {
+    // Conclusion job is always emitted when safe-outputs exist (gh-aw pattern).
+    if front_matter.safe_outputs.is_empty() {
+        return Ok(None);
+    }
+
+    let mut steps: Vec<Step> = Vec::new();
+
+    // Install Node + download/verify the ado-script bundle using the canonical
+    // helper. This keeps the supply-chain mirror handling and the unzip layout
+    // (`/tmp/ado-aw-scripts/ado-script/<bundle>.js`) consistent with the
+    // Agent/Setup jobs — a hand-rolled copy here previously double-nested the
+    // unzip path and bypassed the supply-chain feed.
+    steps.extend(super::extensions::ado_script::install_and_download_steps_typed(
+        front_matter.supply_chain.as_ref(),
+    ));
+
+    let mut download_artifact = TaskStep::new(
+        "DownloadPipelineArtifact@2",
+        "Download SafeOutputs artifact",
+    )
+    .with_input("artifact", "safe_outputs")
+    .with_input("path", "$(Pipeline.Workspace)/conclusion_inputs");
+    download_artifact.condition = Some(Condition::Always);
+    // The safe_outputs artifact may not exist when SafeOutputs was skipped;
+    // ignore the download failure — conclusion.js handles a missing dir.
+    download_artifact.continue_on_error = true;
+    steps.push(Step::Task(download_artifact));
+
+    let conclusion_script = "\
+if command -v node >/dev/null 2>&1 && [ -f /tmp/ado-aw-scripts/ado-script/conclusion.js ]; then\n  \
+  node /tmp/ado-aw-scripts/ado-script/conclusion.js\n\
+else\n  \
+  echo \"##vso[task.logissue type=warning]conclusion.js unavailable; skipping conclusion reporting\"\n\
+fi\n";
+    let mut conclusion_step = bash("Report pipeline conclusion", conclusion_script);
+    conclusion_step = conclusion_step.with_condition(Condition::Always);
+    // The Conclusion job's contract is "always runs, never fails": it exists to
+    // surface OTHER jobs' failures, so it must not turn a non-zero exit of its
+    // own (e.g. node OOM/SIGKILL, or an unhandled rejection escaping
+    // conclusion.js's top-level `.then`) into a pipeline failure that masks the
+    // real signal. Use ADO's `continueOnError` rather than a blanket `|| true`
+    // in the bash body: the failure still shows up in the timeline as a warning
+    // (preserving observability) instead of being silently swallowed.
+    conclusion_step.continue_on_error = true;
+
+    // Global opt-out: safe-outputs.report-failure-as-work-item (default: true)
+    let report_failure = front_matter
+        .safe_outputs
+        .get("report-failure-as-work-item")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    conclusion_step = conclusion_step
+        .with_env(
+            "AW_REPORT_FAILURE_AS_WORK_ITEM",
+            EnvValue::Literal(report_failure.to_string()),
+        )
+        .with_env(
+            "AW_PIPELINE_NAME",
+            // Sanitize for consistency with the per-tool config fields below:
+            // the name flows verbatim into the ADO work-item title/body, and
+            // operator-controlled strings are sanitized everywhere else.
+            EnvValue::Literal(crate::sanitize::sanitize(&front_matter.name)),
+        )
+        .with_env(
+            "AW_SAFE_OUTPUT_DIR",
+            EnvValue::Literal("$(Pipeline.Workspace)/conclusion_inputs".to_string()),
+        );
+
+    // Use SC_WRITE_TOKEN when a write service connection is configured;
+    // fall back to System.AccessToken otherwise.
+    let has_write_sc = front_matter
+        .permissions
+        .as_ref()
+        .and_then(|p| p.write.as_ref())
+        .is_some();
+    if has_write_sc {
+        conclusion_step = conclusion_step.with_env(
+            "SYSTEM_ACCESSTOKEN",
+            EnvValue::secret("SC_WRITE_TOKEN"),
+        );
+    } else {
+        conclusion_step =
+            conclusion_step.with_env("SYSTEM_ACCESSTOKEN", EnvValue::secret("System.AccessToken"));
+    }
+
+    // Pass per-tool configs as individual flat env vars (gh-aw pattern).
+    // Each field gets its own env var — avoids JSON-in-env-var corruption in ADO.
+    //
+    // Note: pipeline_failure has no per-tool config entry — it uses hardcoded
+    // defaults (type: Task, no area/iteration path). The global
+    // report-failure-as-work-item toggle controls whether it files at all.
+    for tool_key in &["noop", "missing-tool", "missing-data"] {
+        if let Some(tool_config) = front_matter.safe_outputs.get(*tool_key) {
+            let env_prefix = format!("AW_{}", tool_key.to_uppercase().replace('-', "_"));
+
+            // Tool disabled entirely (e.g. noop: false)
+            if tool_config.is_boolean() {
+                if tool_config.as_bool() == Some(false) {
+                    conclusion_step = conclusion_step.with_env(
+                        format!("{env_prefix}_REPORT_AS_WORK_ITEM"),
+                        EnvValue::Literal("false".to_string()),
+                    );
+                }
+                continue;
+            }
+
+            if let Some(obj) = tool_config.as_object() {
+                // report-as-work-item: accept both YAML bool and string forms.
+                // serde_json::Value::to_string() on String("false") would emit
+                // "\"false\"" (JSON-encoded with quotes), which the TypeScript
+                // readBooleanEnv would reject and default to true — silently
+                // inverting the opt-out. Use as_bool()/as_str() instead.
+                if let Some(v) = obj.get("report-as-work-item") {
+                    let bool_str = v
+                        .as_bool()
+                        .map(|b| b.to_string())
+                        .or_else(|| v.as_str().map(|s| s.to_string()));
+                    if let Some(s) = bool_str {
+                        conclusion_step = conclusion_step.with_env(
+                            format!("{env_prefix}_REPORT_AS_WORK_ITEM"),
+                            EnvValue::Literal(s),
+                        );
+                    }
+                }
+                if let Some(v) = obj.get("title-prefix").and_then(|v| v.as_str()) {
+                    conclusion_step = conclusion_step.with_env(
+                        format!("{env_prefix}_TITLE_PREFIX"),
+                        EnvValue::Literal(crate::sanitize::sanitize(v)),
+                    );
+                }
+                if let Some(v) = obj.get("work-item-type").and_then(|v| v.as_str()) {
+                    conclusion_step = conclusion_step.with_env(
+                        format!("{env_prefix}_WORK_ITEM_TYPE"),
+                        EnvValue::Literal(crate::sanitize::sanitize(v)),
+                    );
+                }
+                if let Some(v) = obj.get("area-path").and_then(|v| v.as_str()) {
+                    conclusion_step = conclusion_step.with_env(
+                        format!("{env_prefix}_AREA_PATH"),
+                        EnvValue::Literal(crate::sanitize::sanitize(v)),
+                    );
+                }
+                if let Some(v) = obj.get("iteration-path").and_then(|v| v.as_str()) {
+                    conclusion_step = conclusion_step.with_env(
+                        format!("{env_prefix}_ITERATION_PATH"),
+                        EnvValue::Literal(crate::sanitize::sanitize(v)),
+                    );
+                }
+                if let Some(tags) = obj.get("tags").and_then(|v| v.as_array()) {
+                    let tags_json =
+                        serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string());
+                    conclusion_step = conclusion_step
+                        .with_env(format!("{env_prefix}_TAGS"), EnvValue::Literal(tags_json));
+                }
+            }
+        }
+    }
+
+    // Pass upstream job results via job-level variables hoist.
+    // ADO only evaluates $[...] runtime expressions inside `variables:` and
+    // `condition:` — NOT in step env blocks. We hoist to job variables and
+    // reference them as $(name) macros in the step env.
+    let agent_id = prefix.id("Agent")?;
+    let detection_id = prefix.id("Detection")?;
+    let safeoutputs_id = prefix.id("SafeOutputs")?;
+    let reviewed_id = prefix.id("SafeOutputs_Reviewed")?;
+
+    // In the mixed manual-review split both a SafeOutputs (automatic) and a
+    // SafeOutputs_Reviewed (gated) job exist. Surface the reviewed job's result
+    // too so a reviewer rejection (which fails SafeOutputs_Reviewed) is reported
+    // instead of silently lost.
+    let (auto, reviewed) = front_matter.partition_safe_outputs_by_approval();
+    let has_reviewed_job = !reviewed.is_empty() && !auto.is_empty();
+
+    let mut conclusion_variables = vec![
+        // EnvValue::Literal deliberately carries a raw `$[...]` runtime expression:
+        // ADO evaluates `$[...]` only in `variables:`/`condition:`, so the value is
+        // hoisted here and consumed as a `$(name)` macro in the step env below
+        // (not EnvValue::AdoMacro — the lower.rs guard rejects pre-wrapped macros).
+        JobVariable {
+            name: "AW_AGENT_RESULT".to_string(),
+            value: EnvValue::Literal(format!("$[dependencies.{}.result]", agent_id.as_str())),
+        },
+        JobVariable {
+            name: "AW_DETECTION_RESULT".to_string(),
+            value: EnvValue::Literal(format!("$[dependencies.{}.result]", detection_id.as_str())),
+        },
+        JobVariable {
+            name: "AW_SAFEOUTPUTS_RESULT".to_string(),
+            value: EnvValue::Literal(format!(
+                "$[dependencies.{}.result]",
+                safeoutputs_id.as_str()
+            )),
+        },
+    ];
+    if has_reviewed_job {
+        conclusion_variables.push(JobVariable {
+            name: "AW_SAFEOUTPUTS_REVIEWED_RESULT".to_string(),
+            value: EnvValue::Literal(format!("$[dependencies.{}.result]", reviewed_id.as_str())),
+        });
+    }
+
+    conclusion_step = conclusion_step
+        .with_env("AW_AGENT_RESULT", EnvValue::PipelineVar("AW_AGENT_RESULT".to_string()))
+        .with_env(
+            "AW_DETECTION_RESULT",
+            EnvValue::PipelineVar("AW_DETECTION_RESULT".to_string()),
+        )
+        .with_env(
+            "AW_SAFEOUTPUTS_RESULT",
+            EnvValue::PipelineVar("AW_SAFEOUTPUTS_RESULT".to_string()),
+        );
+    if has_reviewed_job {
+        conclusion_step = conclusion_step.with_env(
+            "AW_SAFEOUTPUTS_REVIEWED_RESULT",
+            EnvValue::PipelineVar("AW_SAFEOUTPUTS_REVIEWED_RESULT".to_string()),
+        );
+    }
+
+    steps.push(Step::Bash(conclusion_step));
+
+    let mut job = Job::new(prefix.id("Conclusion")?, "Conclusion", cfg.pool.clone());
+    job.variables = conclusion_variables;
+    job.steps = steps;
+    job.condition = Some(Condition::Always);
+    Ok(Some(job))
+}
+
 /// Wire explicit `depends_on` between the canonical jobs. The graph
 /// pass also derives these from OutputRefs but explicit edges make
 /// the emitted YAML match committed lock-file shapes exactly.
@@ -1475,7 +1758,9 @@ fn wire_explicit_dependencies(jobs: &mut [Job], prefix: &JobPrefix<'_>) -> Resul
     let safeoutputs_id = prefix.id("SafeOutputs")?;
     let reviewed_id = prefix.id("SafeOutputs_Reviewed")?;
     let teardown_id = prefix.id("Teardown")?;
+    let conclusion_id = prefix.id("Conclusion")?;
     let has_setup = jobs.iter().any(|j| j.id == setup_id);
+    let has_teardown = jobs.iter().any(|j| j.id == teardown_id);
     let has_review = jobs.iter().any(|j| j.id == manualreview_id);
     // The reviewed execution job only exists in the mixed (split) case.
     let has_reviewed_job = jobs.iter().any(|j| j.id == reviewed_id);
@@ -1521,6 +1806,25 @@ fn wire_explicit_dependencies(jobs: &mut [Job], prefix: &JobPrefix<'_>) -> Resul
             // approval otherwise). Waiting only on the auto `SafeOutputs` job
             // keeps Teardown's behaviour identical to the single-job case.
             j.depends_on = vec![safeoutputs_id.clone()];
+        } else if j.id == conclusion_id {
+            let mut deps = vec![
+                agent_id.clone(),
+                detection_id.clone(),
+                safeoutputs_id.clone(),
+            ];
+            if has_reviewed_job {
+                // Mixed split: depend on the reviewed execution job too so a
+                // reviewer rejection (which fails SafeOutputs_Reviewed) is
+                // detected by Conclusion. Accepted trade-off: in the mixed case
+                // Conclusion waits behind the manual-review gate. The job's
+                // always() condition still fires when the reviewed job is
+                // skipped or fails.
+                deps.push(reviewed_id.clone());
+            }
+            if has_teardown {
+                deps.push(teardown_id.clone());
+            }
+            j.depends_on = deps;
         }
     }
     Ok(())
@@ -1868,7 +2172,11 @@ fn download_awf_step(supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
     ))]
 }
 
-fn prepull_images_step(include_mcpg: bool, supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
+fn prepull_images_step(
+    include_mcpg: bool,
+    include_api_proxy: bool,
+    supply_chain: Option<&SupplyChainConfig>,
+) -> Vec<Step> {
     let registry = supply_chain.and_then(|sc| sc.registry.as_ref());
     let registry_base = registry.map(|r| r.name.as_str());
 
@@ -1891,6 +2199,20 @@ fn prepull_images_step(include_mcpg: bool, supply_chain: Option<&SupplyChainConf
          docker tag {squid} {squid_latest}\n\
          docker tag {agent} {agent_latest}\n"
     );
+    // Copilot BYOM/BYOK credential isolation: AWF starts the api-proxy sidecar
+    // when `--enable-api-proxy` is passed (see run_agent_step). Pre-pull and
+    // `:latest`-tag the image the same way as squid/agent so `--skip-pull` finds
+    // it locally.
+    if include_api_proxy {
+        let api_proxy =
+            image_ref("ghcr.io/github/gh-aw-firewall/api-proxy", AWF_VERSION, registry_base);
+        let api_proxy_latest =
+            image_ref("ghcr.io/github/gh-aw-firewall/api-proxy", "latest", None);
+        script.push_str(&format!(
+            "docker pull {api_proxy}\n\
+             docker tag {api_proxy} {api_proxy_latest}\n"
+        ));
+    }
     let display = if include_mcpg {
         let mcpg = image_ref(MCPG_IMAGE, &format!("v{MCPG_VERSION}"), registry_base);
         script.push_str(&format!("docker pull {mcpg}\n"));
@@ -1995,10 +2317,7 @@ fn start_mcpg_step(
             // another ` \` (doing so would emit a stray `\ \` that bash reads
             // as a one-character " " argument, corrupting the `docker run`
             // image reference — see issue #1034).
-            mcpg_docker_env
-                .lines()
-                .collect::<Vec<_>>()
-                .join("\n  ")
+            mcpg_docker_env.lines().collect::<Vec<_>>().join("\n  ")
         };
     // `--debug-pipeline` injects an extra `-e DEBUG="*" \` continuation
     // line into the `docker run …` invocation so MCPG (and the stdio
@@ -2117,12 +2436,50 @@ fn start_mcpg_step(
     Ok(step)
 }
 
+/// Build the AWF api-proxy sidecar flag lines for a Copilot BYOM/BYOK run.
+///
+/// `exclude_keys` are the provider credential env keys present in `engine.env`
+/// (canonical uppercase `COPILOT_PROVIDER_*` names). When non-empty, returns
+/// `--enable-api-proxy` plus one `--exclude-env <key>` line per key, each as a
+/// 2-space-indented `--flag \` continuation ending in `\\\n` so it slots
+/// directly into the AWF command body. Returns an empty string when
+/// `exclude_keys` is empty (non-BYOM).
+///
+/// How the credential reaches the provider without reaching the agent: with
+/// `--enable-api-proxy`, AWF starts the api-proxy sidecar which reads the *real*
+/// `COPILOT_PROVIDER_*` values from the host process env, and injects
+/// **placeholders** into the agent container regardless of `--env-all` —
+/// `COPILOT_PROVIDER_BASE_URL` becomes the sidecar URL (e.g.
+/// `http://172.30.0.30:10002`) and `COPILOT_PROVIDER_API_KEY` a dummy token (see
+/// gh-aw-firewall `docs/api-proxy-sidecar.md`, "agent container env" table, and
+/// `containers/api-proxy/providers/copilot.js`, verified against AWF v0.27.9).
+/// The Copilot CLI therefore talks to the sidecar, which strips the client auth
+/// header and injects the real credential on the outbound request. `--exclude-env`
+/// keeps the raw value out of `--env-all` passthrough (defense-in-depth on top of
+/// AWF's placeholder override). Because env-var names are case-sensitive and the
+/// keys are the canonical uppercase names, the emitted `--exclude-env <key>`
+/// matches exactly what AWF overrides and the CLI reads.
+///
+/// Shared by [`run_agent_step`] and [`run_threat_analysis_step`] so both AWF
+/// invocations enable isolation identically.
+fn awf_api_proxy_flags(exclude_keys: &[String]) -> String {
+    if exclude_keys.is_empty() {
+        return String::new();
+    }
+    let mut block = String::from("  --enable-api-proxy \\\n");
+    for key in exclude_keys {
+        block.push_str(&format!("  --exclude-env {key} \\\n"));
+    }
+    block
+}
+
 fn run_agent_step(
     allowed_domains: &str,
     awf_mounts: &str,
     working_directory: &str,
     engine_run: &str,
     engine_env: &str,
+    byom_exclude_keys: &[String],
 ) -> Result<BashStep> {
     // The awf_mounts string is a `\`-joined chain of `--mount "..."` lines.
     // Render each at 2-space indent inside the bash body (the surrounding
@@ -2137,6 +2494,7 @@ fn run_agent_step(
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let api_proxy_block = awf_api_proxy_flags(byom_exclude_keys);
     let script = format!(
         "set -o pipefail\n\
          \n\
@@ -2161,6 +2519,7 @@ fn run_agent_step(
            --skip-pull \\\n  \
            --env-all \\\n  \
            --enable-host-access \\\n\
+{api_proxy_block}\
 {awf_mounts_block}\n  \
            --container-workdir \"{working_directory}\" \\\n  \
            --log-level info \\\n  \
@@ -2340,6 +2699,9 @@ fn copy_logs_safeoutputs_step(engine_log_dir: &str) -> BashStep {
          # Copy agent output log from analyzed_outputs for optimisation use\n\
          cp \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)/logs/agent-output.txt\" \\\n  \
            \"$(Agent.TempDirectory)/staging/logs/agent-output.txt\" 2>/dev/null || true\n\
+         # Copy executed NDJSON manifest so the Conclusion job can read diagnostic signals\n\
+         cp \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)/safe-outputs-executed.ndjson\" \\\n  \
+           \"$(Agent.TempDirectory)/staging/safe-outputs-executed.ndjson\" 2>/dev/null || true\n\
          if [ -d \"{engine_log_dir}\" ]; then\n  \
            mkdir -p \"$(Agent.TempDirectory)/staging/logs/copilot\"\n  \
            cp -r \"{engine_log_dir}\"/* \"$(Agent.TempDirectory)/staging/logs/copilot/\" 2>/dev/null || true\n\
@@ -2394,7 +2756,10 @@ fn run_threat_analysis_step(
     allowed_domains: &str,
     working_directory: &str,
     engine_run_detection: &str,
-) -> BashStep {
+    byom_exclude_keys: &[String],
+    detection_provider_env: &[(String, String)],
+) -> Result<BashStep> {
+    let api_proxy_block = awf_api_proxy_flags(byom_exclude_keys);
     let script = format!(
         "set -o pipefail\n\
          \n\
@@ -2405,7 +2770,8 @@ fn run_threat_analysis_step(
          sudo -E \"$(Pipeline.Workspace)/awf/awf\" \\\n  \
            --allow-domains \"{allowed_domains}\" \\\n  \
            --skip-pull \\\n  \
-           --env-all \\\n  \
+           --env-all \\\n\
+{api_proxy_block}  \
            --container-workdir \"{working_directory}\" \\\n  \
            --log-level info \\\n  \
            --proxy-logs-dir \"$(Agent.TempDirectory)/threat-analysis-logs/firewall\" \\\n  \
@@ -2429,7 +2795,13 @@ fn run_threat_analysis_step(
             "GITHUB_READ_ONLY",
             EnvValue::RawYamlScalar(serde_yaml::Value::Number(1.into())),
         );
-    step
+    // BYOM/BYOK: apply the COPILOT_PROVIDER_* env so the detection Copilot run
+    // routes to the same external provider as the main agent. Classify each raw
+    // value directly (macro → PipelineVar, else Literal) — no YAML round-trip.
+    for (k, raw) in detection_provider_env {
+        step = step.with_env(k.clone(), env_value_from_str(raw));
+    }
+    Ok(step)
 }
 
 fn prepare_analyzed_outputs_step() -> BashStep {
@@ -2666,13 +3038,40 @@ fn dedent(s: &str) -> String {
     out
 }
 
+/// Classify a single raw env-var value string into a typed [`EnvValue`].
+///
+/// An ADO **macro** `$(NAME)` (with no nested `$` or `(`) becomes an
+/// [`EnvValue::PipelineVar`] so lowering re-emits the unquoted `$(NAME)` form;
+/// anything else becomes an [`EnvValue::Literal`]. Single source of truth for
+/// macro-vs-literal classification, shared by [`parse_env_block`] (which also
+/// handles YAML-typed scalars) and the detection provider-env path.
+///
+/// Only a value that is *exactly* one `$(NAME)` wrapper is treated as a macro.
+/// Compound values (e.g. `$(A)$(B)`, or `prefix-$(X)`) intentionally fall through
+/// to `Literal` — they are emitted as a quoted YAML scalar. This is still
+/// correct at runtime: ADO expands `$( )` macro references inside step-env values
+/// regardless of quoting, so both references still expand. The only observable
+/// difference is the quoted-vs-unquoted rendering in the compiled YAML.
+fn env_value_from_str(raw: &str) -> super::ir::env::EnvValue {
+    use super::ir::env::EnvValue;
+    if let Some(inner) = raw.strip_prefix("$(").and_then(|s| s.strip_suffix(')'))
+        && !inner.contains('$')
+        && !inner.contains('(')
+    {
+        EnvValue::pipeline_var(inner.to_string())
+    } else {
+        EnvValue::literal(raw.to_string())
+    }
+}
+
 /// Parse a legacy YAML env block (`env:\n  KEY: VALUE\n  KEY: VALUE`)
 /// into typed `(name, EnvValue)` pairs preserving insertion order.
 ///
 /// Each value is round-tripped through `serde_yaml` so quoted forms
-/// (`"true"`, `"file"`) become bare literals and ADO macros (`$(X)`)
-/// land as `EnvValue::PipelineVar` so the lowering pass re-emits the
-/// macro form. Anything else lands as `EnvValue::Literal`.
+/// (`"true"`, `"file"`) become bare literals; string values are then
+/// classified by [`env_value_from_str`] (ADO macros → `PipelineVar`,
+/// otherwise `Literal`) and non-string scalars are preserved as
+/// `RawYamlScalar`.
 ///
 /// # Errors
 ///
@@ -2726,16 +3125,7 @@ fn parse_env_block(yaml_block: &str) -> Result<Vec<(String, super::ir::env::EnvV
             // lowering preserves the `$(X)` form unquoted; everything
             // else lands as a Literal.
             serde_yaml::Value::String(raw_value) => {
-                if let Some(inner) = raw_value
-                    .strip_prefix("$(")
-                    .and_then(|s| s.strip_suffix(')'))
-                    && !inner.contains('$')
-                    && !inner.contains('(')
-                {
-                    out.push((key, EnvValue::pipeline_var(inner.to_string())));
-                } else {
-                    out.push((key, EnvValue::literal(raw_value.clone())));
-                }
+                out.push((key, env_value_from_str(raw_value)));
             }
             // Non-string scalars (numbers / bools): preserve the
             // typed scalar identity through RawYamlScalar so the
@@ -2977,6 +3367,30 @@ mod tests {
             pairs[0].1,
             crate::compile::ir::env::EnvValue::PipelineVar(ref name) if name == "GITHUB_TOKEN"
         ));
+    }
+
+    #[test]
+    fn env_value_from_str_single_macro_is_pipeline_var() {
+        use crate::compile::ir::env::EnvValue;
+        assert!(matches!(
+            env_value_from_str("$(Setup.Token)"),
+            EnvValue::PipelineVar(ref n) if n == "Setup.Token"
+        ));
+    }
+
+    #[test]
+    fn env_value_from_str_compound_or_partial_macro_is_literal() {
+        use crate::compile::ir::env::EnvValue;
+        // Concatenated / partial macros are NOT single-wrapper macros, so they
+        // fall through to Literal. They are still correct at runtime: ADO expands
+        // $( ) references inside the (quoted) literal value. This pins the
+        // documented classification boundary.
+        for raw in ["$(A)$(B)", "prefix-$(X)", "$(X)-suffix", "plain-literal"] {
+            assert!(
+                matches!(env_value_from_str(raw), EnvValue::Literal(ref v) if v == raw),
+                "value {raw:?} should classify as a verbatim Literal"
+            );
+        }
     }
 
     #[test]
