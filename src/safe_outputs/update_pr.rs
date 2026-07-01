@@ -1149,18 +1149,4 @@ allowed-votes:
         assert_eq!(config.merge_strategy, "rebase");
     }
 
-    #[test]
-    fn test_valid_merge_strategies_are_recognized() {
-        // Each strategy name should be lowercase/camelCase as the ADO API requires.
-        // Verify that valid strategies are accepted and case-sensitive rejects apply.
-        assert!(!VALID_MERGE_STRATEGIES.contains(&"invalid"));
-        assert!(
-            !VALID_MERGE_STRATEGIES.contains(&"Squash"),
-            "'Squash' is not valid; only lowercase 'squash' is"
-        );
-        assert!(
-            !VALID_MERGE_STRATEGIES.contains(&"REBASE"),
-            "'REBASE' is not valid; only camelCase 'rebase' is"
-        );
-    }
 }

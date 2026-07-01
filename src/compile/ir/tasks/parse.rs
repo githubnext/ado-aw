@@ -30,15 +30,16 @@ use serde::de::DeserializeOwned;
 use serde_yaml::Value;
 
 use super::{
-    archive_files, azure_cli, azure_container_apps, azure_file_copy, azure_key_vault,
-    azure_powershell, azure_web_app, cargo_authenticate, cmd_line, copy_files, delete_files, docker,
-    docker_installer, dotnet_core_cli, download_build_artifacts, download_package,
-    download_pipeline_artifact, download_secure_file, extract_files, github_release, go_tool, gradle,
-    helm_installer, java_tool_installer, manual_validation, maven, maven_authenticate, node_tool,
-    npm, npm_authenticate, nuget_authenticate, nuget_command, pip_authenticate, powershell,
-    publish_build_artifacts, publish_code_coverage_results, publish_pipeline_artifact,
-    publish_test_results, python_script, sonar_qube_publish, twine_authenticate, universal_packages,
-    use_dotnet, use_node, use_python_version, use_ruby_version, vs_build, vstest,
+    archive_files, arm_template_deployment, azure_cli, azure_container_apps, azure_file_copy,
+    azure_function_app, azure_key_vault, azure_powershell, azure_web_app, bicep_deploy,
+    cargo_authenticate, cmd_line, copy_files, delete_files, docker, docker_installer,
+    dotnet_core_cli, download_build_artifacts,    download_package, download_pipeline_artifact, download_secure_file, extract_files,
+    github_release, go_tool, gradle, helm_installer, java_tool_installer, kubernetes_manifest,
+    manual_validation, maven, maven_authenticate, node_tool, npm, npm_authenticate,
+    nuget_authenticate, nuget_command, pip_authenticate, powershell, publish_build_artifacts, publish_code_coverage_results,
+    publish_pipeline_artifact, publish_test_results, python_script, sonar_qube_analyze,
+    sonar_qube_prepare, sonar_qube_publish, twine_authenticate, universal_packages, use_dotnet,
+    use_node, use_python_version, use_ruby_version, vs_build, vstest,
 };
 
 /// Registry mapping an ADO task id (`"CopyFiles@2"`) to a validator that checks
@@ -57,6 +58,7 @@ const VALIDATORS: &[(&str, fn(Value) -> Result<(), String>)] = &[
     // ── Flat single-struct builders (validity == clean deserialization) ──
     ("ArchiveFiles@2", validate_by_deserialize::<archive_files::ArchiveFiles>),
     ("AzureContainerApps@1", validate_by_deserialize::<azure_container_apps::AzureContainerApps>),
+    ("AzureFunctionApp@2", validate_by_deserialize::<azure_function_app::AzureFunctionApp>),
     ("AzureKeyVault@2", validate_by_deserialize::<azure_key_vault::AzureKeyVault>),
     ("AzureWebApp@1", validate_by_deserialize::<azure_web_app::AzureWebApp>),
     ("CargoAuthenticate@0", validate_by_deserialize::<cargo_authenticate::CargoAuthenticate>),
@@ -93,6 +95,7 @@ const VALIDATORS: &[(&str, fn(Value) -> Result<(), String>)] = &[
         validate_by_deserialize::<publish_pipeline_artifact::PublishPipelineArtifact>,
     ),
     ("PublishTestResults@2", validate_by_deserialize::<publish_test_results::PublishTestResults>),
+    ("SonarQubeAnalyze@8", validate_by_deserialize::<sonar_qube_analyze::SonarQubeAnalyze>),
     ("SonarQubePublish@8", validate_by_deserialize::<sonar_qube_publish::SonarQubePublish>),
     ("TwineAuthenticate@1", validate_by_deserialize::<twine_authenticate::TwineAuthenticate>),
     ("UseDotNet@2", validate_by_deserialize::<use_dotnet::UseDotNet>),
@@ -103,17 +106,24 @@ const VALIDATORS: &[(&str, fn(Value) -> Result<(), String>)] = &[
     ("npmAuthenticate@0", validate_by_deserialize::<npm_authenticate::NpmAuthenticate>),
     // ── Command / mode-dispatch builders (custom discriminator dispatch) ──
     ("AzureCLI@2", azure_cli::validate_inputs),
+    (
+        "AzureResourceManagerTemplateDeployment@3",
+        arm_template_deployment::validate_inputs,
+    ),
     ("AzureFileCopy@6", azure_file_copy::validate_inputs),
     ("AzurePowerShell@5", azure_powershell::validate_inputs),
+    ("BicepDeploy@0", bicep_deploy::validate_inputs),
     ("Docker@2", docker::validate_inputs),
     ("DotNetCoreCLI@2", dotnet_core_cli::validate_inputs),
     ("GitHubRelease@1", github_release::validate_inputs),
     ("JavaToolInstaller@0", java_tool_installer::validate_inputs),
+    ("KubernetesManifest@1", kubernetes_manifest::validate_inputs),
     ("Npm@1", npm::validate_inputs),
     ("NuGetCommand@2", nuget_command::validate_inputs),
     ("PowerShell@2", powershell::validate_inputs),
     ("PublishBuildArtifacts@1", publish_build_artifacts::validate_inputs),
     ("PythonScript@0", python_script::validate_inputs),
+    ("SonarQubePrepare@8", sonar_qube_prepare::validate_inputs),
     ("UniversalPackages@1", universal_packages::validate_inputs),
     ("VSTest@2", vstest::validate_inputs),
 ];
@@ -712,6 +722,354 @@ mod tests {
         );
         let err = validate_task_step(&step).expect("recognized").unwrap_err();
         assert!(err.contains("SonarQubePublish@8"), "got: {err}");
+    }
+
+    #[test]
+    fn roundtrip_sonar_qube_analyze() {
+        assert_roundtrips(sonar_qube_analyze::SonarQubeAnalyze::new().into_step());
+        assert_roundtrips(
+            sonar_qube_analyze::SonarQubeAnalyze::new()
+                .jdk_version(sonar_qube_analyze::JdkVersion::JavaHome21X64)
+                .into_step(),
+        );
+    }
+
+    #[test]
+    fn sonar_qube_analyze_unknown_input_warns() {
+        let step = yaml(
+            r#"
+            task: SonarQubeAnalyze@8
+            inputs:
+              bogusInput: nope
+            "#,
+        );
+        let err = validate_task_step(&step).expect("recognized").unwrap_err();
+        assert!(err.contains("SonarQubeAnalyze@8"), "got: {err}");
+    }
+
+    #[test]
+    fn roundtrip_sonar_qube_prepare_dotnet() {
+        assert_roundtrips(
+            sonar_qube_prepare::SonarQubePrepare::dotnet(
+                "sq-conn",
+                sonar_qube_prepare::DotNetMode::new("my-key"),
+            )
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_sonar_qube_prepare_cli_file() {
+        assert_roundtrips(
+            sonar_qube_prepare::SonarQubePrepare::cli(
+                "sq-conn",
+                sonar_qube_prepare::CliMode::File(sonar_qube_prepare::CliFileMode::new()),
+            )
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_sonar_qube_prepare_cli_manual() {
+        assert_roundtrips(
+            sonar_qube_prepare::SonarQubePrepare::cli(
+                "sq-conn",
+                sonar_qube_prepare::CliMode::Manual(sonar_qube_prepare::CliManualMode::new(
+                    "my-key",
+                )),
+            )
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_sonar_qube_prepare_other() {
+        assert_roundtrips(sonar_qube_prepare::SonarQubePrepare::other("sq-conn").into_step());
+    }
+
+    #[test]
+    fn sonar_qube_prepare_input_for_wrong_mode_warns() {
+        // `configFile` is a cli-only input; it must not be accepted in dotnet mode.
+        let step = yaml(
+            r#"
+            task: SonarQubePrepare@8
+            inputs:
+              SonarQube: sq-conn
+              scannerMode: dotnet
+              projectKey: my-key
+              configFile: sonar-project.properties
+            "#,
+        );
+        let err = validate_task_step(&step).expect("recognized").unwrap_err();
+        assert!(err.contains("SonarQubePrepare@8"), "got: {err}");
+    }
+
+    #[test]
+    fn sonar_qube_prepare_missing_service_connection_warns() {
+        let step = yaml(
+            r#"
+            task: SonarQubePrepare@8
+            inputs:
+              scannerMode: other
+            "#,
+        );
+        let err = validate_task_step(&step).expect("recognized").unwrap_err();
+        assert!(err.contains("SonarQube"), "got: {err}");
+    }
+
+    #[test]
+    fn roundtrip_azure_function_app() {
+        assert_roundtrips(
+            azure_function_app::AzureFunctionApp::new(
+                "arm-conn",
+                azure_function_app::FunctionAppType::Linux,
+                "my-func",
+                "$(Build.ArtifactStagingDirectory)/app.zip",
+            )
+            .deploy_to_slot_or_ase(true)
+            .resource_group_name("rg")
+            .slot_name("staging")
+            .deployment_method(azure_function_app::FunctionDeploymentMethod::ZipDeploy)
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn azure_function_app_unknown_input_warns() {
+        let step = yaml(
+            r#"
+            task: AzureFunctionApp@2
+            inputs:
+              azureSubscription: conn
+              appType: functionApp
+              appName: my-func
+              package: app.zip
+              bogusInput: nope
+            "#,
+        );
+        let err = validate_task_step(&step).expect("recognized").unwrap_err();
+        assert!(err.contains("AzureFunctionApp@2"), "got: {err}");
+    }
+
+    #[test]
+    fn roundtrip_bicep_deploy_resource_group() {
+        assert_roundtrips(
+            bicep_deploy::deploy_to_resource_group("arm-conn", "$(SubId)", "my-rg").into_step(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_bicep_deploy_stack_subscription() {
+        assert_roundtrips(
+            bicep_deploy::BicepDeploy::new(
+                "arm-conn",
+                bicep_deploy::BicepScope::Subscription {
+                    subscription_id: "$(SubId)".into(),
+                    location: "eastus".into(),
+                },
+                bicep_deploy::BicepDeploymentType::DeploymentStack(
+                    bicep_deploy::BicepDeploymentStack::new()
+                        .deny_settings_mode(bicep_deploy::BicepDenySettingsMode::DenyDelete)
+                        .bypass_stack_out_of_sync_error(true),
+                ),
+            )
+            .template_file("infra/main.bicep")
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn bicep_deploy_stack_input_in_deployment_type_warns() {
+        // `denySettingsMode` is a deploymentStack-only input.
+        let step = yaml(
+            r#"
+            task: BicepDeploy@0
+            inputs:
+              azureResourceManagerConnection: arm-conn
+              type: deployment
+              scope: resourceGroup
+              subscriptionId: $(SubId)
+              resourceGroupName: my-rg
+              denySettingsMode: denyDelete
+            "#,
+        );
+        let err = validate_task_step(&step).expect("recognized").unwrap_err();
+        assert!(err.contains("BicepDeploy@0"), "got: {err}");
+    }
+
+    #[test]
+    fn bicep_deploy_missing_scope_required_input_warns() {
+        let step = yaml(
+            r#"
+            task: BicepDeploy@0
+            inputs:
+              azureResourceManagerConnection: arm-conn
+              scope: resourceGroup
+              subscriptionId: $(SubId)
+            "#,
+        );
+        let err = validate_task_step(&step).expect("recognized").unwrap_err();
+        assert!(err.contains("resourceGroupName"), "got: {err}");
+    }
+
+    #[test]
+    fn roundtrip_arm_template_deployment_resource_group() {
+        assert_roundtrips(
+            arm_template_deployment::ArmTemplateDeployment::resource_group_deploy(
+                arm_template_deployment::ResourceGroupDeploy::new(
+                    "arm-conn",
+                    "$(SubId)",
+                    "my-rg",
+                    "East US",
+                    arm_template_deployment::ArmTemplateSource::linked_artifact("infra/main.bicep"),
+                ),
+            )
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_arm_template_deployment_delete_rg() {
+        assert_roundtrips(
+            arm_template_deployment::ArmTemplateDeployment::resource_group_delete(
+                arm_template_deployment::ResourceGroupDelete::new("arm-conn", "$(SubId)", "my-rg"),
+            )
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_arm_template_deployment_management_group() {
+        assert_roundtrips(
+            arm_template_deployment::ArmTemplateDeployment::management_group_deploy(
+                arm_template_deployment::ManagementGroupDeploy::new(
+                    "arm-conn",
+                    "East US",
+                    arm_template_deployment::ArmTemplateSource::url(
+                        "https://example.com/azuredeploy.json",
+                    ),
+                ),
+            )
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn arm_template_deployment_template_input_in_delete_warns() {
+        // `csmFile` is not valid for the DeleteRG action.
+        let step = yaml(
+            r#"
+            task: AzureResourceManagerTemplateDeployment@3
+            inputs:
+              azureResourceManagerConnection: arm-conn
+              deploymentScope: Resource Group
+              action: DeleteRG
+              subscriptionId: $(SubId)
+              resourceGroupName: my-rg
+              csmFile: infra/main.bicep
+            "#,
+        );
+        let err = validate_task_step(&step).expect("recognized").unwrap_err();
+        assert!(err.contains("AzureResourceManagerTemplateDeployment@3"), "got: {err}");
+    }
+
+    #[test]
+    fn arm_template_deployment_missing_location_warns() {
+        let step = yaml(
+            r#"
+            task: AzureResourceManagerTemplateDeployment@3
+            inputs:
+              azureResourceManagerConnection: arm-conn
+              deploymentScope: Subscription
+              subscriptionId: $(SubId)
+              csmFile: infra/main.bicep
+            "#,
+        );
+        let err = validate_task_step(&step).expect("recognized").unwrap_err();
+        assert!(err.contains("location"), "got: {err}");
+    }
+
+    #[test]
+    fn roundtrip_kubernetes_manifest_deploy() {
+        assert_roundtrips(
+            kubernetes_manifest::KubernetesManifest::deploy(
+                kubernetes_manifest::KubernetesManifestDeploy::new("manifests/*.yaml"),
+            )
+            .kubernetes_service_connection("myCluster")
+            .namespace("prod")
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_kubernetes_manifest_create_secret() {
+        assert_roundtrips(
+            kubernetes_manifest::KubernetesManifest::create_secret(
+                kubernetes_manifest::KubernetesManifestCreateSecret::new(
+                    kubernetes_manifest::SecretType::Generic,
+                ),
+            )
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_kubernetes_manifest_patch() {
+        assert_roundtrips(
+            kubernetes_manifest::KubernetesManifest::patch(
+                kubernetes_manifest::KubernetesManifestPatch::new(
+                    kubernetes_manifest::PatchTarget::Name,
+                    kubernetes_manifest::MergeStrategy::Strategic,
+                    "{\"spec\":{}}",
+                ),
+            )
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_kubernetes_manifest_scale() {
+        assert_roundtrips(
+            kubernetes_manifest::KubernetesManifest::scale(
+                kubernetes_manifest::KubernetesManifestScale::new(
+                    kubernetes_manifest::ResourceKind::Deployment,
+                    "my-app",
+                    "3",
+                ),
+            )
+            .into_step(),
+        );
+    }
+
+    #[test]
+    fn kubernetes_manifest_input_for_wrong_action_warns() {
+        // `secretType` is a createSecret-only input; not valid for deploy.
+        let step = yaml(
+            r#"
+            task: KubernetesManifest@1
+            inputs:
+              action: deploy
+              manifests: manifests/*.yaml
+              secretType: generic
+            "#,
+        );
+        let err = validate_task_step(&step).expect("recognized").unwrap_err();
+        assert!(err.contains("KubernetesManifest@1"), "got: {err}");
+    }
+
+    #[test]
+    fn kubernetes_manifest_scale_accepts_integer_replicas() {
+        let step = yaml(
+            r#"
+            task: KubernetesManifest@1
+            inputs:
+              action: scale
+              kind: deployment
+              name: my-app
+              replicas: 3
+            "#,
+        );
+        assert!(validate_task_step(&step).expect("recognized").is_ok());
     }
 
     #[test]
