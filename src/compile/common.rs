@@ -884,16 +884,19 @@ fn resolve_effective_workspace(
 pub(crate) fn contains_template_marker(input: &str, name: &str) -> bool {
     let mut i = 0;
     while let Some(open) = input[i..].find("{{") {
-        let start = i + open + 2;
-        match input[start..].find("}}") {
-            Some(close) => {
-                if input[start..start + close].trim() == name {
-                    return true;
-                }
-                i = start + close + 2;
-            }
-            None => break,
+        let marker_start = i + open;
+        let start = marker_start + 2;
+        if let Some(close) = input[start..].find("}}")
+            && input[start..start + close].trim() == name
+        {
+            return true;
         }
+        // Advance by one code-point past the `{{` (not past the closing
+        // `}}`) so nested `{{ ... }}` forms are still discovered. This keeps
+        // the scan consistent with `replace_marker`, which walks the input a
+        // code-point at a time; otherwise the two helpers could disagree on
+        // pathological doubly-nested input and leave a marker unsubstituted.
+        i = marker_start + 1;
     }
     false
 }

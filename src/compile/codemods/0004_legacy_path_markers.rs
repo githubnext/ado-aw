@@ -166,7 +166,9 @@ fn replace_marker(input: &str, name: &str, repl: &str) -> String {
                 continue;
             }
         }
-        let ch = input[i..].chars().next().expect("non-empty remainder");
+        let Some(ch) = input[i..].chars().next() else {
+            break;
+        };
         out.push(ch);
         i += ch.len_utf8();
     }
@@ -333,5 +335,21 @@ mod tests {
         assert!(!contains_template_marker("{{#runtime-import x}}", "workspace"));
         assert!(!contains_template_marker("${{ parameters.x }}", "workspace"));
         assert!(!contains_template_marker("no markers here", "workspace"));
+    }
+
+    #[test]
+    fn nested_marker_detection_matches_replacement() {
+        // Regression: `contains_template_marker` (the early-exit gate) and
+        // `replace_marker` must agree on doubly-nested input. Previously the
+        // gate jumped past the outer `}}` and missed the inner marker while
+        // the replacer found and substituted it — leaving the gate returning
+        // `false` for a value that would actually be rewritten.
+        let input = "{{ bad {{ workspace }} }}";
+        assert!(contains_template_marker(input, "workspace"));
+        assert_ne!(
+            replace_marker(input, "workspace", "REPL"),
+            input,
+            "replace_marker should substitute the inner marker"
+        );
     }
 }

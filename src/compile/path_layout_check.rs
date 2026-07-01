@@ -150,10 +150,16 @@ fn sources_dir_segments(s: &str) -> Vec<String> {
             .chars()
             .take_while(|&c| c != '/' && !c.is_whitespace() && c != '"' && c != '\'' && c != '\\')
             .collect();
+        // Advance past the extracted segment. `i = start` (immediately after
+        // the prefix) would re-scan the extracted span on the next iteration
+        // for a back-to-back double prefix
+        // (`$(Build.SourcesDirectory)/$(Build.SourcesDirectory)/foo`), pushing
+        // the same span twice; `start + seg.len()` is the intended
+        // advancement and reports each segment once.
+        i = start + seg.len();
         if !seg.is_empty() {
             segs.push(seg);
         }
-        i = start;
     }
     segs
 }
@@ -283,6 +289,14 @@ mod tests {
         assert_eq!(
             sources_dir_segments("$(Build.SourcesDirectory)/$(Build.Repository.Name)/x"),
             vec![SELF_REPO_SEGMENT.to_string()]
+        );
+        // Back-to-back double prefix: the inner `$(Build.SourcesDirectory)`
+        // is extracted as the segment and the loop advances past it (rather
+        // than re-scanning from just after the outer prefix), so the segment
+        // is reported exactly once with no duplicate/re-extraction.
+        assert_eq!(
+            sources_dir_segments("$(Build.SourcesDirectory)/$(Build.SourcesDirectory)/foo"),
+            vec!["$(Build.SourcesDirectory)".to_string()]
         );
     }
 
