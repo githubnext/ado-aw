@@ -86,6 +86,8 @@ pub struct Declarations {
     pub awf_path_prepends: Vec<String>,
     pub agent_env_vars: Vec<(String, String)>,
     pub warnings: Vec<String>,
+    /// Clauses AND-ed into the Agent job's `condition:` by `fold_agent_conditions`.
+    pub agent_conditions: Vec<Condition>,
 }
 ```
 

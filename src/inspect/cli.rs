@@ -281,9 +281,20 @@ pub async fn dispatch_lint(opts: LintOptions<'_>) -> Result<bool> {
 }
 
 /// Build the structural lint report for an agent source file.
+///
+/// Merges the structural rules over the lowered [`PipelineSummary`] with the
+/// front-matter task-step validation (`lint::lint_front_matter_tasks`), so that
+/// `ado-aw lint` and the `lint_workflow` MCP tool surface invalid authored task
+/// inputs alongside the graph-level findings.
 pub async fn build_lint(source: &Path) -> Result<lint::LintReport> {
-    let summary = build_inspect(source).await?;
-    Ok(lint::report(&summary))
+    let (front_matter, pipeline) = build_pipeline_ir(source)
+        .await
+        .with_context(|| format!("Failed to build IR for {}", source.display()))?;
+    let summary = PipelineSummary::from_pipeline(&pipeline)?;
+
+    let mut findings = lint::lint(&summary);
+    findings.extend(lint::lint_front_matter_tasks(&front_matter));
+    Ok(lint::report_from_findings(findings))
 }
 
 /// Options for `ado-aw catalog`.

@@ -1,7 +1,8 @@
 //! Typed builder for `CmdLine@2`.
 
-use super::common::bool_input;
+use super::common::{bool_input, de_opt_bool_flex};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Builder for a [`TaskStep`] invoking `CmdLine@2`.
 ///
@@ -10,11 +11,20 @@ use crate::compile::ir::step::TaskStep;
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/cmd-line-v2>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CmdLine {
+    #[serde(rename = "script")]
     script: String,
+    #[serde(rename = "workingDirectory", default)]
     working_directory: Option<String>,
+    #[serde(
+        rename = "failOnStderr",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     fail_on_stderr: Option<bool>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 

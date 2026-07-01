@@ -105,7 +105,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │       ├── mod.rs    # Pipeline / PipelineBody / PipelineShape root types
 │   │       ├── ids.rs    # Typed StageId / JobId / StepId newtypes
 │   │       ├── step.rs   # Step variants (Bash, Task, Checkout, Download, Publish, RawYaml)
-│   │       ├── tasks/    # Typed builder structs for built-in ADO tasks (one file per task; new()+typed setters+into_step(); command-enum dispatch for Docker/DotNet/NuGet/Npm/UniversalPackages; typestate builders for PowerShell; docker.rs canonical template)
+│   │       ├── tasks/    # Typed builder structs for built-in ADO tasks (one file per task; new()+typed setters+into_step(); command-enum dispatch for Docker/DotNet/NuGet/Npm/UniversalPackages; typestate builders for PowerShell; docker.rs canonical template; tasks/parse.rs reuses the builders as serde schemas to advisory-validate authored front-matter task steps — surfaced as task-input-invalid warnings via ado-aw lint / lint_workflow MCP, NOT via compile)
 │   │       ├── job.rs    # Job, Pool, TemplateContext, JobVariable
 │   │       ├── stage.rs  # Stage + external-params wrap
 │   │       ├── env.rs    # Typed EnvValue (Literal, AdoMacro, PipelineVar, Secret, StepOutput, Coalesce, Concat)
@@ -174,7 +174,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   ├── validate.rs       # Structural input validators (char allowlists, format checks, injection detectors)
 │   ├── agent_stats.rs    # OTel-based agent statistics parsing (token usage, duration, turns)
 │   ├── hash.rs           # SHA-256 utilities for safe-output file integrity
-│   ├── safeoutputs/      # Safe-output MCP tool implementations (Stage 1 → NDJSON → Stage 3)
+│   ├── safe_outputs/     # Safe-output MCP tool implementations (Stage 1 → NDJSON → Stage 3)
 │   │   ├── mod.rs
 │   │   ├── add_build_tag.rs
 │   │   ├── add_pr_comment.rs

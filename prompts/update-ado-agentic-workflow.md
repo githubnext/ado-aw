@@ -6,7 +6,7 @@ Modify an existing **ado-aw** agent file — a markdown document with YAML front
 
 ## Modes
 
-**Interactive mode** — ask the user what they want to change, confirm each modification, and explain any side-effects (e.g., adding `permissions.write` when a write-requiring safe output is introduced).
+**Interactive mode** — ask the user what they want to change, confirm each modification, and explain any side-effects (e.g., adding `permissions.write` when cross-org writes or named-identity attribution is needed).
 
 **Non-interactive mode** — apply the requested changes directly, validate the result, and report what was changed and why.
 
@@ -218,12 +218,12 @@ permissions:
 
 | Config | Effect |
 |---|---|
-| `read` only | Agent can query ADO APIs; no safe-output writes |
-| `write` only | Agent has no ADO API access; safe-outputs can write |
-| Both | Agent reads; safe-outputs write |
-| Neither | No ADO tokens anywhere |
+| `read` only | Agent can query ADO APIs; executor writes via `$(System.AccessToken)` (default) |
+| `write` only | Agent has no ADO API access; executor writes via the ARM-minted token |
+| Both | Agent can read; executor writes via the ARM-minted token |
+| Neither | Agent has no ADO API access; executor writes via `$(System.AccessToken)` |
 
-If adding write-requiring safe outputs (`create-pull-request`, `create-work-item`, `comment-on-work-item`, `update-work-item`, `create-wiki-page`, `update-wiki-page`, `link-work-items`, `upload-workitem-attachment`, `create-branch`, `create-git-tag`, `add-build-tag`, `add-pr-comment`, `reply-to-pr-comment`, `resolve-pr-thread`, `submit-pr-review`, `update-pr`, `queue-build`), you **must** also add `permissions.write`. The compiler will error otherwise.
+`permissions.write` is **optional** — the Stage 3 executor defaults to `$(System.AccessToken)`. Set it only when you need cross-org writes or named-identity attribution instead of `Project Collection Build Service`.
 
 ### Adding Pre/Post Steps
 
@@ -268,7 +268,7 @@ When updating instructions:
 
 Before finalizing any update, verify:
 
-1. **Write permissions**: Every write-requiring safe output has a corresponding `permissions.write` configured.
+1. **Write permissions**: The Stage 3 executor defaults to `$(System.AccessToken)` — `permissions.write` is only needed for cross-org writes or named-identity attribution (e.g., attributing PRs to a specific service account rather than `Project Collection Build Service`).
 
 2. **MCP allow-lists**: Custom MCP servers (with `container:` or `url:`) have explicit `allowed:` lists.
 
