@@ -26,6 +26,7 @@ pub mod azure_file_copy;
 pub mod azure_key_vault;
 pub mod azure_powershell;
 pub mod azure_web_app;
+pub mod bicep_deploy;
 pub mod cargo_authenticate;
 pub mod cmd_line;
 pub mod copy_files;
