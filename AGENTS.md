@@ -174,7 +174,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   ├── validate.rs       # Structural input validators (char allowlists, format checks, injection detectors)
 │   ├── agent_stats.rs    # OTel-based agent statistics parsing (token usage, duration, turns)
 │   ├── hash.rs           # SHA-256 utilities for safe-output file integrity
-│   ├── safeoutputs/      # Safe-output MCP tool implementations (Stage 1 → NDJSON → Stage 3)
+│   ├── safe_outputs/     # Safe-output MCP tool implementations (Stage 1 → NDJSON → Stage 3)
 │   │   ├── mod.rs
 │   │   ├── add_build_tag.rs
 │   │   ├── add_pr_comment.rs
