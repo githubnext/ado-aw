@@ -22,7 +22,7 @@ Those wrappers are the only place per-target shape (top-level `PipelineShape`, t
 
 - `ids.rs` — typed `StageId`, `JobId`, and `StepId` newtypes. Constructors validate the ADO identifier grammar (`^[A-Za-z_][A-Za-z0-9_]*$`) so invalid names fail at compile time.
 - `step.rs` — `Step` and concrete step structs: `BashStep`, `TaskStep`, `CheckoutStep`, `DownloadStep`, and `PublishStep`.
-- `tasks/` — typed builder structs for 46 built-in ADO task steps spanning toolchain setup, file operations, build/test, artifact publishing, scripting, containers, package auth, Azure integrations, and pipeline control. Each builder exposes `new(<required>)`, typed optional setters, and `into_step()`. Prefer these over hand-crafted `TaskStep::new()` calls — see [Typed task helpers](#typed-task-helpers) below.
+- `tasks/` — typed builder structs for 54 built-in ADO task steps spanning toolchain setup, file operations, build/test, artifact publishing, scripting, containers, package auth, Azure integrations, infrastructure as code, and pipeline control. Each builder exposes `new(<required>)`, typed optional setters, and `into_step()`. Prefer these over hand-crafted `TaskStep::new()` calls — see [Typed task helpers](#typed-task-helpers) below.
 - `job.rs` — `Job`, `Pool`, job variables, 1ES `templateContext` support, and target-job external `dependsOn` / `condition` wrapping.
 - `stage.rs` — `Stage` plus target-stage external `dependsOn` / `condition` wrapping.
 - `env.rs` — typed environment values (`EnvValue`) including ADO macros, pipeline variables, secrets, `OutputRef`s, `Coalesce`, and macro-form `Concat`.
@@ -117,7 +117,7 @@ let synth = Step::Bash(
 
 ## Typed task helpers
 
-`src/compile/ir/tasks/` contains typed **builder structs** for 46 ADO built-in tasks. Each follows the same pattern:
+`src/compile/ir/tasks/` contains typed **builder structs** for 54 ADO built-in tasks. Each follows the same pattern:
 
 ```rust
 Builder::new(required_params)   // required inputs as typed positional args
@@ -127,7 +127,7 @@ Builder::new(required_params)   // required inputs as typed positional args
 
 This eliminates hand-crafted `TaskStep::new(…)` + raw string inputs at every call site, makes the required/optional boundary explicit, and prevents invalid input combinations for command-dispatch tasks at compile time.
 
-**Command-dispatch tasks** (`Docker@2`, `DotNetCoreCLI@2`, `NuGetCommand@2`, `Npm@1`, `PowerShell@2`, `AzurePowerShell@5`, `AzureCLI@2`, `PythonScript@0`, `VSTest@2`, `GitHubRelease@1`, `PublishBuildArtifacts@1`, `UniversalPackages@1`, `AzureFileCopy@6`) take a typed command/mode enum rather than a plain string — applying an input to the wrong command variant is unrepresentable.
+**Command-dispatch tasks** (`Docker@2`, `DotNetCoreCLI@2`, `NuGetCommand@2`, `Npm@1`, `PowerShell@2`, `AzurePowerShell@5`, `AzureCLI@2`, `PythonScript@0`, `VSTest@2`, `GitHubRelease@1`, `PublishBuildArtifacts@1`, `UniversalPackages@1`, `AzureFileCopy@6`, `BicepDeploy@0`, `KubernetesManifest@1`, `AzureResourceManagerTemplateDeployment@3`, `SonarQubePrepare@8`) take a typed command/mode enum rather than a plain string — applying an input to the wrong command variant is unrepresentable.
 
 ### Available builders
 
@@ -143,6 +143,7 @@ This eliminates hand-crafted `TaskStep::new(…)` + raw string inputs at every c
 | `UsePythonVersion::new(version_spec)` | `UsePythonVersion@0` | Python version spec (e.g. `"3.x"`) |
 | `UseRubyVersion::new(version_spec)` | `UseRubyVersion@0` | Ruby version range (e.g. `">= 2.4"`) |
 | `HelmInstaller::new()` | `HelmInstaller@1` | All inputs optional — chain `.helm_version("3.x")` to pin a specific version |
+| `NodeTool::new(version_spec)` | `NodeTool@0` | Legacy Node.js tool installer — all other inputs optional. Prefer `UseNode@1` for new pipelines. |
 
 #### File operations
 
@@ -176,6 +177,9 @@ This eliminates hand-crafted `TaskStep::new(…)` + raw string inputs at every c
 | `PublishTestResults::new(format, files)` | `PublishTestResults@2` | `TestResultsFormat` enum; result files glob |
 | `VsTest::new(VsTestSelector)` | `VSTest@2` | `VsTestSelector::Assemblies \| Plan \| Run` |
 | `VsBuild::new(solution)` | `VSBuild@1` | path to `.sln` or glob; `VsVersion`, `MsBuildArchitecture`, `LogFileVerbosity` enums and all other inputs optional |
+| `SonarQubeAnalyze::new()` | `SonarQubeAnalyze@8` | All inputs optional — chain `.jdk_version(JdkVersion)` to select the JDK path used by the scanner |
+| `SonarQubePrepare::dotnet(sonar_qube, DotNetMode)` / `::cli(sonar_qube, CliMode)` / `::other(sonar_qube)` | `SonarQubePrepare@8` | Service connection name; mode dispatch — `DotNetMode::new(project_key)` for MSBuild integration; `CliMode::File(CliFileMode)` or `CliMode::Manual(CliManualMode)` for the standalone CLI |
+| `SonarQubePublish::new()` | `SonarQubePublish@8` | All inputs optional — chain `.polling_timeout_sec(n)` to override the default Quality Gate wait time. Third step in the SonarQube trio: Prepare → Analyze → Publish. |
 
 #### Artifact publishing
 
@@ -194,6 +198,8 @@ This eliminates hand-crafted `TaskStep::new(…)` + raw string inputs at every c
 | `AzureFileCopy::new(source_path, azure_subscription, storage, AzureFileCopyDestination)` | `AzureFileCopy@6` | ARM service connection; storage account name; `AzureFileCopyDestination::AzureBlob(AzureFileCopyToBlob)` or `::AzureVMs(AzureFileCopyToVMs)` — blob-only and VM-only inputs are unrepresentable across variants |
 | `AzureKeyVault::new(connected_service_name, key_vault_name)` | `AzureKeyVault@2` | Azure RM service connection; vault name |
 | `AzureWebApp::new(azure_subscription, app_type, app_name, package)` | `AzureWebApp@1` | Azure RM service connection; `AppType` enum; app name; package path |
+| `AzureFunctionApp::new(azure_subscription, app_type, app_name, package)` | `AzureFunctionApp@2` | Azure RM service connection; `FunctionAppType::Windows \| Linux` enum; app name; package path; optional `FunctionDeploymentMethod::Auto \| ZipDeploy \| RunFromPackage` and slot targeting |
+| `KubernetesManifest::deploy(spec)` / `::bake(spec)` / `::create_secret(spec)` / `::delete(spec)` / `::patch(spec)` / `::promote(spec)` / `::scale(spec)` / `::reject(spec)` | `KubernetesManifest@1` | Action dispatch — each variant carries its own required and optional inputs; shared connection (`ConnectionType::KubernetesServiceConnection \| AzureResourceManager`) and namespace set on the builder |
 | `Docker::new(DockerCommand)` | `Docker@2` | `DockerCommand::BuildAndPush \| Build \| Push \| Login \| Logout` |
 | `GitHubRelease::new(git_hub_connection, repository_name, action)` | `GitHubRelease@1` | GitHub service connection; `"owner/repo"`; `GitHubReleaseAction` enum |
 
@@ -210,6 +216,13 @@ This eliminates hand-crafted `TaskStep::new(…)` + raw string inputs at every c
 | `PipAuthenticate::new()` | `PipAuthenticate@1` | all inputs optional |
 | `TwineAuthenticate::new()` | `TwineAuthenticate@1` | all inputs optional |
 | `UniversalPackages::download(feed, package_name, spec)` / `::publish(…, spec)` | `UniversalPackages@1` | `UniversalPackagesDownload` / `UniversalPackagesPublish` carry per-command optionals; `.workload_identity_service_connection()` for cross-org feeds |
+
+#### Infrastructure as code
+
+| Builder | ADO task | Constructor |
+|---------|----------|-------------|
+| `ArmTemplateDeployment::resource_group_deploy(spec)` / `::resource_group_delete(spec)` / `::subscription_deploy(spec)` / `::management_group_deploy(spec)` / `::tenant_deploy(spec)` | `AzureResourceManagerTemplateDeployment@3` | Scope dispatch via `ArmDeploymentCommand` — each scope struct carries its own required inputs (connection, subscription/management-group/tenant ID, resource group, location, `ArmTemplateSource`); `ArmDeploymentMode::Incremental \| Complete` optional |
+| `BicepDeploy::new(connection, BicepScope, BicepDeploymentType)` | `BicepDeploy@0` | Scope dispatch via `BicepScope::ResourceGroup \| Subscription \| ManagementGroup \| Tenant`; type dispatch via `BicepDeploymentType::Deployment(BicepDeployment) \| Stack(BicepDeploymentStack)`; convenience constructors `deploy_to_resource_group(connection, subscription_id, resource_group)` and `deploy_to_subscription(connection, subscription_id, location)` |
 
 #### Pipeline control
 
