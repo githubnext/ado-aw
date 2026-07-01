@@ -175,6 +175,7 @@ execution-context:             # optional execution-context plugin (see docs/exe
     enabled: true               # scheduled-run diff context (requires on.schedule)
   repo:
     enabled: false              # opt-in repository identity context
+    conventions: false          # opt-in deeper probe (CODEOWNERS / CONTRIBUTING.md / .editorconfig)
 steps:                         # inline steps before agent runs (same job, generate context)
   - bash: echo "Preparing context for agent"
     displayName: "Prepare context"
