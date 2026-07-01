@@ -47,6 +47,11 @@ use super::{
 /// `validate_inputs` that dispatches on their discriminator input (e.g.
 /// `command`, `targetType`, `Destination`). One line per task — adding a new
 /// task is a `#[derive(Deserialize)]` on the builder plus one entry here.
+///
+/// Lookup is a linear scan ([`validate_task_step`]), run once per authored task
+/// step. At ~46 entries and a handful of steps per workflow this is negligible;
+/// switch to a sorted array + `partition_point` binary search (or a
+/// `OnceLock<HashMap<&str, _>>`) if coverage grows past a few hundred entries.
 #[allow(clippy::type_complexity)]
 const VALIDATORS: &[(&str, fn(Value) -> Result<(), String>)] = &[
     // ── Flat single-struct builders (validity == clean deserialization) ──
@@ -269,6 +274,27 @@ mod tests {
         assert!(validate_task_step(&step).expect("recognized").is_err());
     }
 
+    #[test]
+    fn copy_files_integer_authored_retry_count_is_ok() {
+        // `retryCount`/`delayBetweenRetries` are ADO string inputs, but authors
+        // naturally write them as bare integers. These must validate (no
+        // false-positive), matching how ADO coerces them.
+        let step = yaml(
+            r#"
+            task: CopyFiles@2
+            inputs:
+              Contents: "**"
+              TargetFolder: out
+              retryCount: 3
+              delayBetweenRetries: 1000
+            "#,
+        );
+        assert!(
+            validate_task_step(&step).expect("recognized").is_ok(),
+            "integer-authored string inputs must not be rejected"
+        );
+    }
+
     // ── Docker@2 (command-dispatch) ──────────────────────────────────────
 
     #[test]
@@ -324,6 +350,14 @@ mod tests {
               repository: myapp
             "#,
         );
+        assert!(validate_task_step(&step).expect("recognized").is_ok());
+    }
+
+    #[test]
+    fn docker_null_inputs_defaults_and_is_ok() {
+        // `inputs: ~` deserialises to a null inputs value; the dispatcher must
+        // treat it as an empty mapping (default command), not panic or error.
+        let step = yaml("task: Docker@2\ninputs: ~");
         assert!(validate_task_step(&step).expect("recognized").is_ok());
     }
 

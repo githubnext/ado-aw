@@ -44,14 +44,18 @@ impl ScriptType {
 /// invalid combination (e.g. `scriptLocation: scriptPath` with no path) is
 /// unrepresentable.
 ///
+/// This is a **construction-only** type and deliberately does *not* derive
+/// `Deserialize`: the authored ADO shape is flat (a bare
+/// `scriptLocation: inlineScript` discriminator plus a *sibling* `inlineScript:`
+/// key), which an externally-tagged enum cannot represent. Validation therefore
+/// uses the flat [`AzureCliInputs`] schema in [`validate_inputs`] instead.
+///
 /// ADO input: `scriptLocation`
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum ScriptLocation {
     /// Embed the script body inline (`scriptLocation: inlineScript`).
-    #[serde(rename = "inlineScript")]
     Inline(String),
     /// Execute a script file by path (`scriptLocation: scriptPath`).
-    #[serde(rename = "scriptPath")]
     ScriptPath(String),
 }
 
@@ -183,52 +187,23 @@ pub(crate) fn validate_inputs(inputs: serde_yaml::Value) -> Result<(), String> {
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/azure-cli-v2>
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+///
+/// This is the **construction** builder; it does not derive `Deserialize`.
+/// Validation of an authored `AzureCLI@2` step uses the flat [`AzureCliInputs`]
+/// schema in [`validate_inputs`] (see [`ScriptLocation`] for why).
+#[derive(Debug, Clone)]
 pub struct AzureCli {
-    #[serde(rename = "azureSubscription")]
     azure_subscription: String,
-    #[serde(rename = "scriptType")]
     script_type: ScriptType,
-    #[serde(rename = "scriptLocation")]
     location: ScriptLocation,
-    #[serde(default)]
     arguments: Option<String>,
-    #[serde(rename = "powerShellErrorActionPreference", default)]
     ps_error_action_preference: Option<PowerShellErrorActionPreference>,
-    #[serde(
-        rename = "addSpnToEnvironment",
-        default,
-        deserialize_with = "de_opt_bool_flex"
-    )]
     add_spn_to_environment: Option<bool>,
-    #[serde(
-        rename = "useGlobalConfig",
-        default,
-        deserialize_with = "de_opt_bool_flex"
-    )]
     use_global_config: Option<bool>,
-    #[serde(rename = "workingDirectory", default)]
     working_directory: Option<String>,
-    #[serde(
-        rename = "failOnStandardError",
-        default,
-        deserialize_with = "de_opt_bool_flex"
-    )]
     fail_on_standard_error: Option<bool>,
-    #[serde(
-        rename = "powerShellIgnoreLASTEXITCODE",
-        default,
-        deserialize_with = "de_opt_bool_flex"
-    )]
     ps_ignore_last_exit_code: Option<bool>,
-    #[serde(
-        rename = "visibleAzLogin",
-        default,
-        deserialize_with = "de_opt_bool_flex"
-    )]
     visible_az_login: Option<bool>,
-    #[serde(skip)]
     display_name: Option<String>,
 }
 

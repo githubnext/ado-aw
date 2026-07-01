@@ -61,3 +61,33 @@ where
         },
     }
 }
+
+/// Deserialize an optional ADO string input, accepting a native YAML number in
+/// addition to a string. ADO task inputs are all strings, but authors naturally
+/// write integer-valued ones bare (e.g. `retryCount: 3`,
+/// `delayBetweenRetries: 1000`); serde would otherwise reject the integer scalar
+/// against an `Option<String>` and produce a false-positive validation finding.
+/// Numbers are stringified to match how ADO coerces them.
+pub(crate) fn de_opt_str_or_int<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StrOrNum {
+        Str(String),
+        Int(i64),
+        UInt(u64),
+        Float(f64),
+    }
+
+    Ok(match Option::<StrOrNum>::deserialize(deserializer)? {
+        None => None,
+        Some(StrOrNum::Str(s)) => Some(s),
+        Some(StrOrNum::Int(i)) => Some(i.to_string()),
+        Some(StrOrNum::UInt(u)) => Some(u.to_string()),
+        Some(StrOrNum::Float(f)) => Some(f.to_string()),
+    })
+}

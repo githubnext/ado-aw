@@ -1,6 +1,6 @@
 //! Typed builder for `CopyFiles@2`.
 
-use super::common::{bool_input, de_opt_bool_flex};
+use super::common::{bool_input, de_opt_bool_flex, de_opt_str_or_int};
 use crate::compile::ir::step::TaskStep;
 use serde::Deserialize;
 
@@ -32,9 +32,13 @@ pub struct CopyFiles {
     flatten_folders: Option<bool>,
     #[serde(rename = "preserveTimestamp", default, deserialize_with = "de_opt_bool_flex")]
     preserve_timestamp: Option<bool>,
-    #[serde(rename = "retryCount", default)]
+    #[serde(rename = "retryCount", default, deserialize_with = "de_opt_str_or_int")]
     retry_count: Option<String>,
-    #[serde(rename = "delayBetweenRetries", default)]
+    #[serde(
+        rename = "delayBetweenRetries",
+        default,
+        deserialize_with = "de_opt_str_or_int"
+    )]
     delay_between_retries: Option<String>,
     #[serde(rename = "ignoreMakeDirErrors", default, deserialize_with = "de_opt_bool_flex")]
     ignore_make_dir_errors: Option<bool>,

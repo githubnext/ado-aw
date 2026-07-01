@@ -3,6 +3,8 @@
 use crate::compile::ir::step::TaskStep;
 use serde::Deserialize;
 
+use super::common::de_opt_str_or_int;
+
 /// Builder for a [`TaskStep`] invoking `DownloadSecureFile@1`.
 ///
 /// Downloads a secure file from the ADO Secure Files library to the agent
@@ -17,9 +19,13 @@ use serde::Deserialize;
 pub struct DownloadSecureFile {
     #[serde(rename = "secureFile")]
     secure_file: String,
-    #[serde(rename = "retryCount", default)]
+    #[serde(rename = "retryCount", default, deserialize_with = "de_opt_str_or_int")]
     retry_count: Option<String>,
-    #[serde(rename = "socketTimeout", default)]
+    #[serde(
+        rename = "socketTimeout",
+        default,
+        deserialize_with = "de_opt_str_or_int"
+    )]
     socket_timeout: Option<String>,
     #[serde(skip)]
     display_name: Option<String>,
