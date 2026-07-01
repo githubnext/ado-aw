@@ -94,8 +94,11 @@ the sidecar active:
   raw value is never copied into the agent via `--env-all` (defense-in-depth; AWF
   also overrides them with placeholders).
 
-This isolation applies to the **Agent** stage. The **Detection** (threat-analysis)
-stage runs with the default GitHub token and is not affected.
+This isolation applies to **both** the Agent stage and the Detection
+(threat-analysis) stage: the detection Copilot run inherits the same
+`COPILOT_PROVIDER_*` routing and api-proxy credential isolation, so it reaches
+the same external provider without exposing the credential (matching gh-aw,
+whose detection engine config inherits the main engine's `env`).
 
 #### Network allowlist
 

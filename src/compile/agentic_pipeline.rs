@@ -185,6 +185,10 @@ pub(crate) fn build_pipeline_context(
 
     let mut engine_env = ctx.engine.env(&front_matter.engine)?;
     let byom_active = crate::engine::copilot_byom_active(&front_matter.engine);
+    // Provider-only env subset for the Detection step, so the threat-analysis
+    // Copilot run inherits the same BYOM/BYOK routing + credential isolation as
+    // the main agent (mirrors gh-aw's detection engine-config Env inheritance).
+    let detection_provider_env = crate::engine::copilot_provider_env(&front_matter.engine)?;
     // AWF path env (when extensions declare path prepends)
     let awf_paths = common::collect_awf_path_prepends(&extension_declarations);
     let has_awf_paths = !awf_paths.is_empty();
@@ -314,6 +318,7 @@ pub(crate) fn build_pipeline_context(
         agent_content_value,
         debug_pipeline,
         byom_active,
+        detection_provider_env,
     };
 
     // ─── Build jobs ───────────────────────────────────────────────
@@ -491,6 +496,10 @@ pub(crate) struct StandaloneCtx {
     /// api-proxy sidecar (`--enable-api-proxy`) on the agent step for credential
     /// isolation and pre-pulls the api-proxy container image.
     pub(crate) byom_active: bool,
+    /// Provider-only (`COPILOT_PROVIDER_*`) subset of `engine.env`, rendered as a
+    /// `KEY: "VALUE"` YAML block (empty when none). Applied to the Detection
+    /// (threat-analysis) step so it inherits BYOM provider routing + isolation.
+    pub(crate) detection_provider_env: String,
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1039,11 +1048,12 @@ fn build_detection_job(
     steps.push(Step::Task(DockerInstaller::new("26.1.4").into_step()));
     // Download AWF
     steps.extend(download_awf_step(front_matter.supply_chain()));
-    // Pre-pull AWF (no MCPG image for detection; no api-proxy — detection runs
-    // the threat-analysis agent with the default GitHub token, not BYOM).
+    // Pre-pull AWF (no MCPG image for detection). Pull the api-proxy image when
+    // BYOM is active so the detection Copilot run gets the same credential
+    // isolation as the main agent.
     steps.extend(prepull_images_step(
         false,
-        false,
+        cfg.byom_active,
         front_matter.supply_chain(),
     ));
     // Prepare safe outputs for analysis
@@ -1073,7 +1083,9 @@ fn build_detection_job(
         &cfg.allowed_domains,
         &cfg.working_directory,
         &cfg.engine_run_detection,
-    )));
+        cfg.byom_active,
+        &cfg.detection_provider_env,
+    )?));
     // Prepare analyzed outputs
     steps.push(Step::Bash(prepare_analyzed_outputs_step()));
     // Evaluate threat analysis — DECLARES TYPED OUTPUT
@@ -2407,6 +2419,29 @@ fn start_mcpg_step(
     Ok(step)
 }
 
+/// Build the AWF api-proxy sidecar flag lines for a Copilot BYOM/BYOK run.
+///
+/// When `byom_active`, returns `--enable-api-proxy` plus one `--exclude-env`
+/// line per provider credential key, each as a 2-space-indented `--flag \`
+/// continuation ending in `\\\n` so it slots directly into the AWF command
+/// body. The api-proxy holds the real credential and injects it only at the
+/// proxy layer (keeping it out of the agent container); `--exclude-env` keeps
+/// the raw value out of `--env-all` passthrough (defense-in-depth; AWF also
+/// overrides them with placeholders). Returns an empty string otherwise.
+///
+/// Shared by [`run_agent_step`] and [`run_threat_analysis_step`] so both AWF
+/// invocations enable isolation identically.
+fn awf_api_proxy_flags(byom_active: bool) -> String {
+    if !byom_active {
+        return String::new();
+    }
+    let mut block = String::from("  --enable-api-proxy \\\n");
+    for key in crate::engine::COPILOT_BYOM_CREDENTIAL_ENV_KEYS {
+        block.push_str(&format!("  --exclude-env {key} \\\n"));
+    }
+    block
+}
+
 fn run_agent_step(
     allowed_domains: &str,
     awf_mounts: &str,
@@ -2428,21 +2463,7 @@ fn run_agent_step(
             .collect::<Vec<_>>()
             .join("\n")
     };
-    // Copilot BYOM/BYOK: enable the AWF api-proxy sidecar so the real provider
-    // credential is held by the proxy and never reaches the agent container.
-    // The credential env keys are also excluded from `--env-all` passthrough
-    // (defense-in-depth; AWF also overrides them with placeholders). Each line
-    // is a 2-space-indented `--flag \` continuation ending in `\\\n` so it
-    // slots in directly before the mounts block.
-    let api_proxy_block: String = if byom_active {
-        let mut block = String::from("  --enable-api-proxy \\\n");
-        for key in crate::engine::COPILOT_BYOM_CREDENTIAL_ENV_KEYS {
-            block.push_str(&format!("  --exclude-env {key} \\\n"));
-        }
-        block
-    } else {
-        String::new()
-    };
+    let api_proxy_block = awf_api_proxy_flags(byom_active);
     let script = format!(
         "set -o pipefail\n\
          \n\
@@ -2704,7 +2725,10 @@ fn run_threat_analysis_step(
     allowed_domains: &str,
     working_directory: &str,
     engine_run_detection: &str,
-) -> BashStep {
+    byom_active: bool,
+    detection_provider_env: &str,
+) -> Result<BashStep> {
+    let api_proxy_block = awf_api_proxy_flags(byom_active);
     let script = format!(
         "set -o pipefail\n\
          \n\
@@ -2715,7 +2739,8 @@ fn run_threat_analysis_step(
          sudo -E \"$(Pipeline.Workspace)/awf/awf\" \\\n  \
            --allow-domains \"{allowed_domains}\" \\\n  \
            --skip-pull \\\n  \
-           --env-all \\\n  \
+           --env-all \\\n\
+{api_proxy_block}  \
            --container-workdir \"{working_directory}\" \\\n  \
            --log-level info \\\n  \
            --proxy-logs-dir \"$(Agent.TempDirectory)/threat-analysis-logs/firewall\" \\\n  \
@@ -2739,7 +2764,22 @@ fn run_threat_analysis_step(
             "GITHUB_READ_ONLY",
             EnvValue::RawYamlScalar(serde_yaml::Value::Number(1.into())),
         );
-    step
+    // BYOM/BYOK: apply the COPILOT_PROVIDER_* env so the detection Copilot run
+    // routes to the same external provider as the main agent.
+    if !detection_provider_env.trim().is_empty() {
+        let synthetic_block = format!(
+            "env:\n{}",
+            detection_provider_env
+                .lines()
+                .map(|l| format!("  {l}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        for (k, v) in parse_env_block(&synthetic_block)? {
+            step = step.with_env(k, v);
+        }
+    }
+    Ok(step)
 }
 
 fn prepare_analyzed_outputs_step() -> BashStep {

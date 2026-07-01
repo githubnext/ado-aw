@@ -4832,25 +4832,43 @@ fn test_byom_provider_env_compiles_and_merges() {
 
     // Credential isolation: the AWF api-proxy sidecar is enabled and the
     // provider credential env keys are excluded from --env-all passthrough.
-    assert!(
-        compiled.contains("--enable-api-proxy"),
-        "BYOM must enable the AWF api-proxy sidecar for credential isolation: {compiled}"
+    // This must happen in BOTH the Agent and Detection jobs (the detection
+    // threat-analysis Copilot run inherits the same BYOM routing + isolation,
+    // mirroring gh-aw), so each marker appears exactly twice.
+    assert_eq!(
+        compiled.matches("--enable-api-proxy").count(),
+        2,
+        "BYOM must enable the AWF api-proxy sidecar in both the Agent and Detection jobs: {compiled}"
     );
     for key in [
         "--exclude-env COPILOT_PROVIDER_BASE_URL",
         "--exclude-env COPILOT_PROVIDER_API_KEY",
         "--exclude-env COPILOT_PROVIDER_BEARER_TOKEN",
     ] {
-        assert!(
-            compiled.contains(key),
-            "BYOM must exclude provider credential from agent passthrough ({key}): {compiled}"
+        assert_eq!(
+            compiled.matches(key).count(),
+            2,
+            "BYOM must exclude provider credential from passthrough in both jobs ({key}): {compiled}"
         );
     }
-    // The api-proxy container image must be pre-pulled (and :latest-tagged) so
-    // AWF's --skip-pull finds it locally.
-    assert!(
-        compiled.contains("docker pull ghcr.io/github/gh-aw-firewall/api-proxy:"),
-        "BYOM must pre-pull the api-proxy container image: {compiled}"
+    // The api-proxy container image must be pre-pulled (and :latest-tagged) in
+    // both jobs so AWF's --skip-pull finds it locally.
+    assert_eq!(
+        compiled
+            .matches("docker pull ghcr.io/github/gh-aw-firewall/api-proxy:")
+            .count(),
+        2,
+        "BYOM must pre-pull the api-proxy container image in both the Agent and Detection jobs: {compiled}"
+    );
+    // The Detection threat-analysis step inherits the provider routing env
+    // (COPILOT_PROVIDER_* subset) so it reaches the same external provider.
+    // The bearer-token macro therefore appears twice: agent step + detection step.
+    assert_eq!(
+        compiled
+            .matches("COPILOT_PROVIDER_BEARER_TOKEN: $(Setup.FOUNDRY_TOKEN)")
+            .count(),
+        2,
+        "Detection step must inherit the BYOM provider env alongside the agent step: {compiled}"
     );
 }
 

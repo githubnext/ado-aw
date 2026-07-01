@@ -530,87 +530,124 @@ fn copilot_env(engine_config: &EngineConfig) -> Result<String> {
         sorted_keys.sort();
 
         for key in sorted_keys {
-            let value = &env_map[key];
-
-            // Validate key: must be a valid env var name
-            if key.is_empty() {
-                anyhow::bail!(
-                    "engine.env contains an empty key. \
-                     Keys must match [A-Za-z_][A-Za-z0-9_]*."
-                );
-            }
-            if !is_valid_env_var_name(key) {
-                anyhow::bail!(
-                    "engine.env key '{}' is not a valid environment variable name. \
-                     Must match [A-Za-z_][A-Za-z0-9_]*.",
-                    key
-                );
-            }
-
-            // Block compiler-controlled env vars.
-            // Intentionally case-insensitive: while Linux env vars are case-sensitive,
-            // blocking both "GITHUB_TOKEN" and "github_token" prevents accidental
-            // shadowing and confusion. The trade-off is that a legitimate custom var
-            // whose name collides case-insensitively with a blocked key is rejected.
-            if BLOCKED_ENV_KEYS
-                .iter()
-                .any(|blocked| key.eq_ignore_ascii_case(blocked))
-            {
-                anyhow::bail!(
-                    "engine.env key '{}' conflicts with a compiler-controlled environment variable. \
-                     These variables are managed by the compiler and cannot be overridden.",
-                    key
-                );
-            }
-
-            // Validate value: reject ADO command injection and YAML-breaking content
-            if contains_pipeline_command(value) {
-                anyhow::bail!(
-                    "engine.env value for '{}' contains ADO pipeline command injection ('##vso[' or '##['). \
-                     This is not allowed.",
-                    key
-                );
-            }
-            // Allowlisted BYOM/BYOK provider keys may carry ADO macro/runtime
-            // expressions (e.g. `$(Setup.FOUNDRY_TOKEN)`) so credentials can be
-            // sourced from Setup-job outputs or pipeline variables. They still
-            // may not carry compile-time template expressions (`${{ }}`).
-            // Every other key remains literal-only.
-            if is_provider_expr_env_key(key) {
-                if contains_ado_template_expression(value) {
-                    anyhow::bail!(
-                        "engine.env value for '{}' contains an ADO template expression ('${{{{}}}}'). \
-                         Provider keys may use macro/runtime expressions ('$(...)' or '$[...]') only.",
-                        key
-                    );
-                }
-            } else if contains_ado_expression(value) {
-                anyhow::bail!(
-                    "engine.env value for '{}' contains ADO expression syntax ('$(' or '${{{{}}}}')). \
-                     Use literal values only — ADO macro/expression expansion is not allowed \
-                     (allowed for BYOM provider keys: {}).",
-                    key,
-                    COPILOT_PROVIDER_EXPR_ENV_KEYS.join(", ")
-                );
-            }
-            if contains_newline(value) {
-                anyhow::bail!(
-                    "engine.env value for '{}' contains newline characters, \
-                     which would break YAML formatting.",
-                    key
-                );
-            }
-
-            // YAML-quote the value to prevent injection
-            lines.push(format!(
-                "{}: \"{}\"",
-                key,
-                value.replace('\\', "\\\\").replace('"', "\\\"")
-            ));
+            lines.push(render_engine_env_entry(key, &env_map[key])?);
         }
     }
 
     Ok(lines.join("\n"))
+}
+
+/// Render only the `COPILOT_PROVIDER_*` entries of `engine.env` as a YAML env
+/// block (`KEY: "VALUE"` lines, one per line; empty string when none present).
+///
+/// Used by the Detection (threat-analysis) step so the detection Copilot run
+/// inherits the same BYOM/BYOK provider routing (and credential isolation) as
+/// the main agent. Mirrors gh-aw, whose detection engine config inherits the
+/// main engine's `Env` (`threat_detection_inline_engine.go`). The main model is
+/// already threaded via the `--model` flag on the detection invocation, so only
+/// the provider routing/credential keys are needed here.
+pub fn copilot_provider_env(engine_config: &EngineConfig) -> Result<String> {
+    let Some(env_map) = engine_config.env() else {
+        return Ok(String::new());
+    };
+    let mut keys: Vec<&String> = env_map
+        .keys()
+        .filter(|k| {
+            k.get(..17)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("COPILOT_PROVIDER_"))
+        })
+        .collect();
+    keys.sort();
+
+    let mut lines = Vec::new();
+    for key in keys {
+        lines.push(render_engine_env_entry(key, &env_map[key])?);
+    }
+    Ok(lines.join("\n"))
+}
+
+/// Validate a single `engine.env` entry and render it as a YAML `KEY: "VALUE"`
+/// line. Enforces env-var-name rules, blocks compiler-controlled keys, rejects
+/// pipeline-command injection / newlines, and applies the BYOM provider
+/// expression allowlist (allowlisted keys may carry `$(...)`/`$[...]`; all
+/// others are literal-only). Shared by [`copilot_env`] and
+/// [`copilot_provider_env`] so both paths validate identically.
+fn render_engine_env_entry(key: &str, value: &str) -> Result<String> {
+    // Validate key: must be a valid env var name
+    if key.is_empty() {
+        anyhow::bail!(
+            "engine.env contains an empty key. \
+             Keys must match [A-Za-z_][A-Za-z0-9_]*."
+        );
+    }
+    if !is_valid_env_var_name(key) {
+        anyhow::bail!(
+            "engine.env key '{}' is not a valid environment variable name. \
+             Must match [A-Za-z_][A-Za-z0-9_]*.",
+            key
+        );
+    }
+
+    // Block compiler-controlled env vars.
+    // Intentionally case-insensitive: while Linux env vars are case-sensitive,
+    // blocking both "GITHUB_TOKEN" and "github_token" prevents accidental
+    // shadowing and confusion. The trade-off is that a legitimate custom var
+    // whose name collides case-insensitively with a blocked key is rejected.
+    if BLOCKED_ENV_KEYS
+        .iter()
+        .any(|blocked| key.eq_ignore_ascii_case(blocked))
+    {
+        anyhow::bail!(
+            "engine.env key '{}' conflicts with a compiler-controlled environment variable. \
+             These variables are managed by the compiler and cannot be overridden.",
+            key
+        );
+    }
+
+    // Validate value: reject ADO command injection and YAML-breaking content
+    if contains_pipeline_command(value) {
+        anyhow::bail!(
+            "engine.env value for '{}' contains ADO pipeline command injection ('##vso[' or '##['). \
+             This is not allowed.",
+            key
+        );
+    }
+    // Allowlisted BYOM/BYOK provider keys may carry ADO macro/runtime
+    // expressions (e.g. `$(Setup.FOUNDRY_TOKEN)`) so credentials can be
+    // sourced from Setup-job outputs or pipeline variables. They still
+    // may not carry compile-time template expressions (`${{ }}`).
+    // Every other key remains literal-only.
+    if is_provider_expr_env_key(key) {
+        if contains_ado_template_expression(value) {
+            anyhow::bail!(
+                "engine.env value for '{}' contains an ADO template expression ('${{{{}}}}'). \
+                 Provider keys may use macro/runtime expressions ('$(...)' or '$[...]') only.",
+                key
+            );
+        }
+    } else if contains_ado_expression(value) {
+        anyhow::bail!(
+            "engine.env value for '{}' contains ADO expression syntax ('$(' or '${{{{}}}}')). \
+             Use literal values only — ADO macro/expression expansion is not allowed \
+             (allowed for BYOM provider keys: {}).",
+            key,
+            COPILOT_PROVIDER_EXPR_ENV_KEYS.join(", ")
+        );
+    }
+    if contains_newline(value) {
+        anyhow::bail!(
+            "engine.env value for '{}' contains newline characters, \
+             which would break YAML formatting.",
+            key
+        );
+    }
+
+    // YAML-quote the value to prevent injection
+    Ok(format!(
+        "{}: \"{}\"",
+        key,
+        value.replace('\\', "\\\\").replace('"', "\\\"")
+    ))
 }
 
 /// Generate Copilot CLI install steps for Azure DevOps pipelines.
@@ -833,7 +870,9 @@ fn copilot_invocation(
 
 #[cfg(test)]
 mod tests {
-    use super::{Engine, copilot_byom_active, get_engine, normalize_version_tag};
+    use super::{
+        Engine, copilot_byom_active, copilot_provider_env, get_engine, normalize_version_tag,
+    };
     use crate::compile::{
         extensions::{CompileContext, CompilerExtension, Declarations, collect_extensions},
         parse_markdown,
@@ -1258,6 +1297,38 @@ mod tests {
             !copilot_byom_active(&fm2.engine),
             "WIRE_API alone must not activate BYOM (it is non-credential config)"
         );
+    }
+
+    #[test]
+    fn copilot_provider_env_renders_only_provider_keys() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    COPILOT_PROVIDER_TYPE: azure\n    COPILOT_PROVIDER_BEARER_TOKEN: \"$(Setup.FOUNDRY_TOKEN)\"\n    MY_VAR: keep-out\n---\n",
+        ).unwrap();
+        let provider_env = copilot_provider_env(&fm.engine).unwrap();
+        assert!(
+            provider_env.contains(r#"COPILOT_PROVIDER_TYPE: "azure""#),
+            "provider env must include COPILOT_PROVIDER_* keys: {provider_env}"
+        );
+        assert!(
+            provider_env.contains(r#"COPILOT_PROVIDER_BEARER_TOKEN: "$(Setup.FOUNDRY_TOKEN)""#),
+            "provider env must carry the macro-valued credential: {provider_env}"
+        );
+        assert!(
+            !provider_env.contains("MY_VAR"),
+            "provider env must exclude non-provider keys: {provider_env}"
+        );
+        assert!(
+            !provider_env.contains("GITHUB_TOKEN"),
+            "provider env must not include the compiler-managed base env: {provider_env}"
+        );
+    }
+
+    #[test]
+    fn copilot_provider_env_empty_without_provider_keys() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    MY_VAR: hi\n---\n",
+        ).unwrap();
+        assert!(copilot_provider_env(&fm.engine).unwrap().is_empty());
     }
 
     #[test]
