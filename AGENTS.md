@@ -248,7 +248,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   └── ado-script/       # TypeScript workspace for bundled gate/import helpers plus execution-context, conclusion, and approval-summary bundles
 │       └── src/
 │           ├── gate/     # Gate evaluator source (bundled to gate.js)
-│           ├── import/   # Runtime prompt resolver source (bundled to import.js)
+│           ├── import/   # Runtime prompt resolver source (bundled to import.js); resolves {{#runtime-import}} markers + substitutes a compiler-owned allowlist of ADO path-anchor vars via --var flags
 │           ├── exec-context-pr/ # PR-context precompute source (bundled to exec-context-pr.js)
 │           ├── exec-context-pr-synth/ # Synthetic-PR resolver source (bundled to exec-context-pr-synth.js)
 │           ├── exec-context-manual/ # Manual-run context source (bundled to exec-context-manual.js)

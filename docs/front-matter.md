@@ -337,6 +337,12 @@ The trade-off is that the generated YAML is larger, and prompt-body
 edits require `ado-aw compile` plus committing the updated pipeline
 file.
 
+A small, fixed set of ADO path-anchor variables —
+`$(Build.SourcesDirectory)` and `$(Build.Repository.Name)` — is
+substituted into the prompt consistently in **both** modes. Arbitrary
+`$(...)` macros and pipeline/secret variables are not expanded; see
+[ADO variables in the prompt](runtime-imports.md#ado-variables-in-the-prompt).
+
 ## Filter Validation
 
 The compiler validates filter configurations at compile time and will emit
