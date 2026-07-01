@@ -1,6 +1,7 @@
 //! Typed builder for `MavenAuthenticate@0`.
 
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Builder for a [`TaskStep`] invoking `MavenAuthenticate@0`.
 ///
@@ -22,11 +23,16 @@ use crate::compile::ir::step::TaskStep;
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/maven-authenticate-v0>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MavenAuthenticate {
+    #[serde(rename = "artifactsFeeds", default)]
     artifacts_feeds: Option<String>,
+    #[serde(rename = "mavenServiceConnections", default)]
     maven_service_connections: Option<String>,
+    #[serde(rename = "workloadIdentityServiceConnection", default)]
     workload_identity_service_connection: Option<String>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 
