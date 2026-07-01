@@ -10,8 +10,10 @@
 //! ADO task reference:
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/bicep-deploy-v0>
 
-use super::common::{push_bool, push_opt};
+use super::common::{de_opt_bool_flex, push_bool, push_opt};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
+use serde_yaml::Value;
 
 // ── Deployment scope ──────────────────────────────────────────────────────────
 
@@ -74,13 +76,16 @@ impl BicepScope {
 /// Operation for a standard `BicepDeploy@0` deployment (`type: deployment`).
 ///
 /// ADO input: `operation`
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum BicepOperation {
     /// Create or update resources (`create`). This is the ADO default.
+    #[serde(rename = "create")]
     Create,
     /// Validate the template without deploying (`validate`).
+    #[serde(rename = "validate")]
     Validate,
     /// Preview changes without deploying (`whatIf`).
+    #[serde(rename = "whatIf")]
     WhatIf,
 }
 
@@ -97,13 +102,16 @@ impl BicepOperation {
 /// Operation for a `BicepDeploy@0` deployment stack (`type: deploymentStack`).
 ///
 /// ADO input: `operation`
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum BicepStackOperation {
     /// Create or update the deployment stack (`create`). This is the ADO default.
+    #[serde(rename = "create")]
     Create,
     /// Validate the template without deploying (`validate`).
+    #[serde(rename = "validate")]
     Validate,
     /// Delete the deployment stack (`delete`).
+    #[serde(rename = "delete")]
     Delete,
 }
 
@@ -124,12 +132,14 @@ impl BicepStackOperation {
 ///
 /// ADO inputs: `actionOnUnmanageResources`, `actionOnUnmanageResourceGroups`,
 /// `actionOnUnmanageManagementGroups`
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum BicepUnmanageAction {
     /// Delete the unmanaged resource (`delete`).
+    #[serde(rename = "delete")]
     Delete,
     /// Detach (remove from stack management) but do not delete (`detach`).
     /// This is the ADO default for `actionOnUnmanageResources`.
+    #[serde(rename = "detach")]
     Detach,
 }
 
@@ -145,13 +155,16 @@ impl BicepUnmanageAction {
 /// Deny-settings mode for a deployment stack.
 ///
 /// ADO input: `denySettingsMode`
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum BicepDenySettingsMode {
     /// No deny assignments (`none`). This is the ADO default.
+    #[serde(rename = "none")]
     None,
     /// Deny delete operations only (`denyDelete`).
+    #[serde(rename = "denyDelete")]
     DenyDelete,
     /// Deny all write and delete operations (`denyWriteAndDelete`).
+    #[serde(rename = "denyWriteAndDelete")]
     DenyWriteAndDelete,
 }
 
@@ -170,15 +183,19 @@ impl BicepDenySettingsMode {
 /// Azure cloud environment for `BicepDeploy@0`.
 ///
 /// ADO input: `environment`
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum BicepEnvironment {
     /// Azure Public Cloud (`azureCloud`). This is the ADO default.
+    #[serde(rename = "azureCloud")]
     Cloud,
     /// Azure China Cloud (`azureChinaCloud`).
+    #[serde(rename = "azureChinaCloud")]
     ChinaCloud,
     /// Azure German Cloud (`azureGermanCloud`).
+    #[serde(rename = "azureGermanCloud")]
     GermanCloud,
     /// Azure US Government (`azureUSGovernment`).
+    #[serde(rename = "azureUSGovernment")]
     UsGovernment,
 }
 
@@ -196,13 +213,16 @@ impl BicepEnvironment {
 /// Validation level for deployment validate/whatIf operations.
 ///
 /// ADO input: `validationLevel`
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum BicepValidationLevel {
     /// Validate using the resource provider, including RBAC checks (`provider`).
+    #[serde(rename = "provider")]
     Provider,
     /// Validate the template structure only (`template`).
+    #[serde(rename = "template")]
     Template,
     /// Validate using the resource provider without RBAC checks (`providerNoRbac`).
+    #[serde(rename = "providerNoRbac")]
     ProviderNoRbac,
 }
 
@@ -611,9 +631,177 @@ pub fn deploy_to_subscription(
     )
 }
 
+/// Validate an authored `BicepDeploy@0` `inputs:` mapping (advisory
+/// front-matter validation, see [`super::parse`]).
+///
+/// `BicepDeploy@0` dispatches on two orthogonal discriminators: `scope`
+/// (default `resourceGroup`) selects the scope-specific required inputs, and
+/// `type` (default `deployment`) selects the per-type optional inputs. The
+/// scope inputs are validated first (required keys present, removed from the
+/// map), then the remainder is validated against a per-`type`
+/// `deny_unknown_fields` schema, so an input supplied for the wrong scope or
+/// wrong type is reported.
+pub(crate) fn validate_inputs(inputs: Value) -> Result<(), String> {
+    let mut map = match inputs {
+        Value::Mapping(m) => m,
+        Value::Null => Default::default(),
+        other => return Err(format!("`inputs` must be a mapping, got {other:?}")),
+    };
+
+    // The ARM service connection is required (`azureResourceManagerConnection`,
+    // alias of the `ConnectedServiceName` input).
+    let has_connection = ["azureResourceManagerConnection", "ConnectedServiceName"]
+        .into_iter()
+        .any(|k| map.remove(k).is_some());
+    if !has_connection {
+        return Err("missing required input `azureResourceManagerConnection`".to_string());
+    }
+
+    let scope = take_string(&mut map, "scope")?.unwrap_or_else(|| "resourceGroup".to_string());
+    let kind = take_string(&mut map, "type")?.unwrap_or_else(|| "deployment".to_string());
+
+    // Scope-specific required inputs.
+    match scope.as_str() {
+        "resourceGroup" => {
+            require_string(&mut map, "subscriptionId")?;
+            require_string(&mut map, "resourceGroupName")?;
+        }
+        "subscription" => {
+            require_string(&mut map, "subscriptionId")?;
+            require_string(&mut map, "location")?;
+        }
+        "managementGroup" => {
+            require_string(&mut map, "managementGroupId")?;
+            require_string(&mut map, "location")?;
+        }
+        "tenant" => {
+            require_string(&mut map, "tenantId")?;
+            require_string(&mut map, "location")?;
+        }
+        other => {
+            return Err(format!(
+                "unknown scope `{other}` (expected resourceGroup|subscription|managementGroup|tenant)"
+            ));
+        }
+    }
+
+    let rest = Value::Mapping(map);
+    match kind.as_str() {
+        "deployment" => serde_yaml::from_value::<DeploymentSpec>(rest)
+            .map(drop)
+            .map_err(|e| format!("type `deployment`: {e}")),
+        "deploymentStack" => serde_yaml::from_value::<DeploymentStackSpec>(rest)
+            .map(drop)
+            .map_err(|e| format!("type `deploymentStack`: {e}")),
+        other => Err(format!(
+            "unknown type `{other}` (expected deployment|deploymentStack)"
+        )),
+    }
+}
+
+/// Remove `key` and return its string value, erroring if present but non-string.
+fn take_string(map: &mut serde_yaml::Mapping, key: &str) -> Result<Option<String>, String> {
+    match map.remove(key) {
+        Some(v) => v
+            .as_str()
+            .map(str::to_string)
+            .map(Some)
+            .ok_or_else(|| format!("`{key}` must be a string")),
+        None => Ok(None),
+    }
+}
+
+/// Remove a required string `key`, erroring if missing or non-string.
+fn require_string(map: &mut serde_yaml::Mapping, key: &str) -> Result<(), String> {
+    match take_string(map, key)? {
+        Some(_) => Ok(()),
+        None => Err(format!("missing required input `{key}` for the selected scope")),
+    }
+}
+
+/// Inputs valid for `type = deployment` (plus the shared optional inputs).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeploymentSpec {
+    #[serde(rename = "name", default)]
+    _name: Option<String>,
+    #[serde(rename = "templateFile", default)]
+    _template_file: Option<String>,
+    #[serde(rename = "parametersFile", default)]
+    _parameters_file: Option<String>,
+    #[serde(rename = "parameters", default)]
+    _parameters: Option<String>,
+    #[serde(rename = "description", default)]
+    _description: Option<String>,
+    #[serde(rename = "bicepVersion", default)]
+    _bicep_version: Option<String>,
+    #[serde(rename = "maskedOutputs", default)]
+    _masked_outputs: Option<String>,
+    #[serde(rename = "environment", default)]
+    _environment: Option<BicepEnvironment>,
+    #[serde(rename = "operation", default)]
+    _operation: Option<BicepOperation>,
+    #[serde(rename = "validationLevel", default)]
+    _validation_level: Option<BicepValidationLevel>,
+    #[serde(rename = "whatIfExcludeChangeTypes", default)]
+    _what_if_exclude_change_types: Option<String>,
+}
+
+/// Inputs valid for `type = deploymentStack` (plus the shared optional inputs).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeploymentStackSpec {
+    #[serde(rename = "name", default)]
+    _name: Option<String>,
+    #[serde(rename = "templateFile", default)]
+    _template_file: Option<String>,
+    #[serde(rename = "parametersFile", default)]
+    _parameters_file: Option<String>,
+    #[serde(rename = "parameters", default)]
+    _parameters: Option<String>,
+    #[serde(rename = "description", default)]
+    _description: Option<String>,
+    #[serde(rename = "bicepVersion", default)]
+    _bicep_version: Option<String>,
+    #[serde(rename = "maskedOutputs", default)]
+    _masked_outputs: Option<String>,
+    #[serde(rename = "environment", default)]
+    _environment: Option<BicepEnvironment>,
+    #[serde(rename = "operation", default)]
+    _operation: Option<BicepStackOperation>,
+    #[serde(rename = "actionOnUnmanageResources", default)]
+    _action_on_unmanage_resources: Option<BicepUnmanageAction>,
+    #[serde(rename = "actionOnUnmanageResourceGroups", default)]
+    _action_on_unmanage_resource_groups: Option<BicepUnmanageAction>,
+    #[serde(rename = "actionOnUnmanageManagementGroups", default)]
+    _action_on_unmanage_management_groups: Option<BicepUnmanageAction>,
+    #[serde(rename = "denySettingsMode", default)]
+    _deny_settings_mode: Option<BicepDenySettingsMode>,
+    #[serde(rename = "denySettingsExcludedActions", default)]
+    _deny_settings_excluded_actions: Option<String>,
+    #[serde(rename = "denySettingsExcludedPrincipals", default)]
+    _deny_settings_excluded_principals: Option<String>,
+    #[serde(
+        rename = "denySettingsApplyToChildScopes",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
+    _deny_settings_apply_to_child_scopes: Option<bool>,
+    #[serde(
+        rename = "bypassStackOutOfSyncError",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
+    _bypass_stack_out_of_sync_error: Option<bool>,
+    #[serde(rename = "tags", default)]
+    _tags: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── validate_inputs ────────────────────────────────────────────────────
 
     #[test]
     fn resource_group_scope_emits_required_inputs() {
