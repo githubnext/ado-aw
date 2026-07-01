@@ -361,6 +361,35 @@ Diagnostic tools (`noop`, `missing-data`, `missing-tool`, `report-incomplete`) a
 
 > **Note**: The compiler no longer requires `permissions.write` for write-bearing safe outputs — the executor defaults to `$(System.AccessToken)`. Set `permissions.write` only when you need cross-org writes or a named identity instead of `Project Collection Build Service`.
 
+### Requiring Manual Review for High-Impact Outputs
+
+Add `require-approval` to gate any safe-output proposal behind a human review step. The ADO pipeline will pause at a `ManualValidation` step, show the agent's proposal, and only proceed after a reviewer approves.
+
+Use `require-approval: true` at the section level to gate all outputs, or set it per tool:
+
+```yaml
+safe-outputs:
+  create-pull-request:
+    require-approval: true   # Gate this specific tool
+  comment-on-work-item:
+    target: "*"
+```
+
+For more control, use the detailed form with optional approvers and timeout:
+
+```yaml
+safe-outputs:
+  create-pull-request:
+    require-approval:
+      approvers: ["my-ado-group", "jane@example.com"]  # Optional: specific approvers
+      notify-users: ["jane@example.com"]                # Optional: users to notify
+      timeout-minutes: 1440                             # Optional: 24h default
+      on-timeout: reject                                # "reject" (default) or "approve"
+      instructions: "Review the proposed PR carefully." # Optional: reviewer instructions
+```
+
+When an agent uses a `require-approval`-gated tool, a `ManualReview` job is inserted between Detection and SafeOutputs. If a workflow has a mix of gated and non-gated outputs, Stage 3 splits into `SafeOutputs` (non-gated, runs immediately) and `SafeOutputs_Reviewed` (gated, runs after manual approval).
+
 ### Step 11 — Permissions
 
 ADO access tokens for the agent (Stage 1) are minted from ARM service connections. The Stage 3 executor defaults to `$(System.AccessToken)`; an optional ARM SC under `permissions.write` overrides that default for cross-org writes or named-identity attribution.
