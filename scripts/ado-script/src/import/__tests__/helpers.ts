@@ -45,6 +45,12 @@ export type RunOptions = {
   env?: NodeJS.ProcessEnv;
   /** Optional `--base <path>` argument forwarded to `import.js`. */
   base?: string;
+  /**
+   * Optional `--var name=value` pairs forwarded to `import.js`. Passed as
+   * raw strings (already in `name=value` form) so tests can also exercise
+   * malformed inputs like `"noequals"`.
+   */
+  vars?: string[];
 };
 
 export function runImportSource(target: string, options: RunOptions = {}): RunResult {
@@ -61,6 +67,9 @@ export function runImportSource(target: string, options: RunOptions = {}): RunRe
   const args = [runnerPath, target];
   if (options.base !== undefined) {
     args.push("--base", options.base);
+  }
+  for (const pair of options.vars ?? []) {
+    args.push("--var", pair);
   }
 
   const result = spawnSync(process.execPath, args, {

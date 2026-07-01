@@ -3,25 +3,32 @@
 //! ADO task reference:
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/vsbuild-v1-task>
 
-use super::common::{push_bool, push_opt};
+use super::common::{de_opt_bool_flex, push_bool, push_opt};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Visual Studio version constraint for [`VsBuild`].
 ///
 /// Maps to the `vsVersion` input of `VSBuild@1`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum VsVersion {
     /// Use the latest installed Visual Studio version.
+    #[serde(rename = "latest")]
     Latest,
     /// Visual Studio 2022 (18.0).
+    #[serde(rename = "18.0")]
     Vs2022,
     /// Visual Studio 2022 (17.0).
+    #[serde(rename = "17.0")]
     Vs2019,
     /// Visual Studio 2019 (16.0).
+    #[serde(rename = "16.0")]
     Vs2017,
     /// Visual Studio 2017 (15.0).
+    #[serde(rename = "15.0")]
     Vs2015,
     /// Visual Studio 2015 (14.0).
+    #[serde(rename = "14.0")]
     Vs2013,
 }
 
@@ -42,13 +49,16 @@ impl VsVersion {
 /// MSBuild architecture for [`VsBuild`].
 ///
 /// Maps to the `msbuildArchitecture` input of `VSBuild@1`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum MsBuildArchitecture {
     /// 32-bit MSBuild.
+    #[serde(rename = "x86")]
     X86,
     /// 64-bit MSBuild.
+    #[serde(rename = "x64")]
     X64,
     /// ARM64 MSBuild.
+    #[serde(rename = "arm64")]
     Arm64,
 }
 
@@ -66,17 +76,22 @@ impl MsBuildArchitecture {
 /// MSBuild log verbosity for [`VsBuild`].
 ///
 /// Maps to the `logFileVerbosity` input of `VSBuild@1`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum LogFileVerbosity {
     /// Minimal output.
+    #[serde(rename = "quiet")]
     Quiet,
     /// Minimal output plus errors and warnings.
+    #[serde(rename = "minimal")]
     Minimal,
     /// Standard output (default).
+    #[serde(rename = "normal")]
     Normal,
     /// Detailed output.
+    #[serde(rename = "detailed")]
     Detailed,
     /// All available output.
+    #[serde(rename = "diagnostic")]
     Diagnostic,
 }
 
@@ -101,22 +116,58 @@ impl LogFileVerbosity {
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/vsbuild-v1-task>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VsBuild {
+    #[serde(rename = "solution")]
     solution: String,
+    #[serde(rename = "vsVersion", default)]
     vs_version: Option<VsVersion>,
+    #[serde(rename = "msbuildArgs", default)]
     msbuild_args: Option<String>,
+    #[serde(rename = "platform", default)]
     platform: Option<String>,
+    #[serde(rename = "configuration", default)]
     configuration: Option<String>,
+    #[serde(rename = "clean", default, deserialize_with = "de_opt_bool_flex")]
     clean: Option<bool>,
+    #[serde(
+        rename = "maximumCpuCount",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     maximum_cpu_count: Option<bool>,
+    #[serde(
+        rename = "restoreNugetPackages",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     restore_nuget_packages: Option<bool>,
+    #[serde(rename = "msbuildArchitecture", default)]
     msbuild_architecture: Option<MsBuildArchitecture>,
+    #[serde(
+        rename = "logProjectEvents",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     log_project_events: Option<bool>,
+    #[serde(
+        rename = "createLogFile",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     create_log_file: Option<bool>,
+    #[serde(rename = "logFileVerbosity", default)]
     log_file_verbosity: Option<LogFileVerbosity>,
+    #[serde(
+        rename = "enableDefaultLogger",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     enable_default_logger: Option<bool>,
+    #[serde(rename = "customVersion", default)]
     custom_version: Option<String>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 
@@ -268,7 +319,10 @@ mod tests {
         let t = VsBuild::new("**\\*.sln").into_step();
         assert_eq!(t.task, "VSBuild@1");
         assert_eq!(t.display_name, "Build solution");
-        assert_eq!(t.inputs.get("solution").map(String::as_str), Some("**\\*.sln"));
+        assert_eq!(
+            t.inputs.get("solution").map(String::as_str),
+            Some("**\\*.sln")
+        );
         // No optional inputs should be emitted.
         assert!(t.inputs.get("vsVersion").is_none());
         assert!(t.inputs.get("msbuildArgs").is_none());
@@ -285,23 +339,36 @@ mod tests {
             .clean(true)
             .maximum_cpu_count(true)
             .into_step();
-        assert_eq!(t.inputs.get("configuration").map(String::as_str), Some("Release"));
+        assert_eq!(
+            t.inputs.get("configuration").map(String::as_str),
+            Some("Release")
+        );
         assert_eq!(t.inputs.get("platform").map(String::as_str), Some("x64"));
         assert_eq!(
             t.inputs.get("msbuildArgs").map(String::as_str),
             Some("/p:DeployOnBuild=true")
         );
         assert_eq!(t.inputs.get("clean").map(String::as_str), Some("true"));
-        assert_eq!(t.inputs.get("maximumCpuCount").map(String::as_str), Some("true"));
+        assert_eq!(
+            t.inputs.get("maximumCpuCount").map(String::as_str),
+            Some("true")
+        );
     }
 
     #[test]
     fn vs_version_enum_emits_correct_token() {
-        let t = VsBuild::new("**\\*.sln").vs_version(VsVersion::Vs2019).into_step();
+        let t = VsBuild::new("**\\*.sln")
+            .vs_version(VsVersion::Vs2019)
+            .into_step();
         assert_eq!(t.inputs.get("vsVersion").map(String::as_str), Some("17.0"));
 
-        let t = VsBuild::new("**\\*.sln").vs_version(VsVersion::Latest).into_step();
-        assert_eq!(t.inputs.get("vsVersion").map(String::as_str), Some("latest"));
+        let t = VsBuild::new("**\\*.sln")
+            .vs_version(VsVersion::Latest)
+            .into_step();
+        assert_eq!(
+            t.inputs.get("vsVersion").map(String::as_str),
+            Some("latest")
+        );
     }
 
     #[test]
@@ -309,7 +376,10 @@ mod tests {
         let t = VsBuild::new("**\\*.sln")
             .msbuild_architecture(MsBuildArchitecture::X64)
             .into_step();
-        assert_eq!(t.inputs.get("msbuildArchitecture").map(String::as_str), Some("x64"));
+        assert_eq!(
+            t.inputs.get("msbuildArchitecture").map(String::as_str),
+            Some("x64")
+        );
     }
 
     #[test]
@@ -318,8 +388,14 @@ mod tests {
             .create_log_file(true)
             .log_file_verbosity(LogFileVerbosity::Detailed)
             .into_step();
-        assert_eq!(t.inputs.get("createLogFile").map(String::as_str), Some("true"));
-        assert_eq!(t.inputs.get("logFileVerbosity").map(String::as_str), Some("detailed"));
+        assert_eq!(
+            t.inputs.get("createLogFile").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            t.inputs.get("logFileVerbosity").map(String::as_str),
+            Some("detailed")
+        );
     }
 
     #[test]

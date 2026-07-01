@@ -43,11 +43,39 @@ along with any author-written markers.
   from untrusted PR branches embedding host files into the compiled YAML —
   e.g. `{{#runtime-import /home/runner/.ssh/id_rsa}}` or
   `{{#runtime-import ../../../../etc/passwd}}` are both compile-time errors.
-- **Compiler-generated marker for the agent body** uses an absolute path
-  (`$(Build.SourcesDirectory)/…`) built from the trigger-repo checkout root,
-  so the runtime resolver never has to resolve a relative path. The
-  compile-time restriction does not apply here because the path is
-  tooling-generated, not author-supplied.
+- **Compiler-generated marker for the agent body** uses a **trigger-repo-relative**
+  path resolved against `--base "$(Build.SourcesDirectory)"` — e.g. `agents/foo.md`,
+  or `$(Build.Repository.Name)/agents/foo.md` under multi-checkout (ADO expands the
+  macro before the resolver runs). It is deliberately relative, not absolute:
+  `import.js` rejects absolute paths for everyone. The compile-time `..`/absolute
+  restriction is a compile-host guard and does not constrain this tooling-generated
+  path beyond the runtime resolver's own absolute/`..` rejection.
+
+## ADO variables in the prompt
+
+A small, fixed set of ADO **path-anchor** variables is substituted into the prompt
+by the runtime resolver:
+
+| Variable | Expands to |
+|----------|------------|
+| `$(Build.SourcesDirectory)` | the checkout root |
+| `$(Build.Repository.Name)` | the trigger repo's subfolder name (multi-checkout) |
+
+The compiler passes these to `import.js` as `--var name=$(name)` flags (ADO expands
+the macro at runtime); the resolver then replaces every `$(name)` occurrence in the
+final prompt — author body and inlined snippets alike. This is a deliberately tiny,
+compiler-owned allowlist (defined by `PROMPT_ADO_VARS` in
+`src/compile/extensions/ado_script.rs`), **not** a general expression engine:
+arbitrary `$(...)` macros and any pipeline/secret variables are **not** expanded and
+reach the agent literally. For richer runtime values (PR sha, branch, etc.), use the
+[execution-context `aw-context/` files](execution-context.md) rather than
+interpolating into the prompt.
+
+> **Mode note.** With `inlined-imports: true` the body is folded into a bash step at
+> compile time, so ADO natively expands *any* `$(...)` macro in it. The curated set
+> above behaves identically in both modes; other `$(...)` macros only expand in the
+> inlined path and should not be relied on.
+
 
 ## Single-pass behavior
 

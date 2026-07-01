@@ -175,6 +175,7 @@ execution-context:             # optional execution-context plugin (see docs/exe
     enabled: true               # scheduled-run diff context (requires on.schedule)
   repo:
     enabled: false              # opt-in repository identity context
+    conventions: false          # opt-in deeper probe (CODEOWNERS / CONTRIBUTING.md / .editorconfig)
 steps:                         # inline steps before agent runs (same job, generate context)
   - bash: echo "Preparing context for agent"
     displayName: "Prepare context"
@@ -228,6 +229,36 @@ Additional top-level field reference:
 Build the project and run all tests...
 ```
 
+## Inline step validation (`setup` / `steps` / `post-steps` / `teardown`)
+
+Inline steps are authored as raw Azure DevOps YAML and are emitted into the
+generated pipeline **verbatim** (a passthrough). For steps that invoke a
+built-in ADO task the compiler also knows (e.g. `CopyFiles@2`, `Docker@2`,
+`DotNetCoreCLI@2`, and most other first-party tasks), `ado-aw lint` performs an
+**advisory** validation of the `inputs:` mapping against the task's typed
+schema — checking for missing required inputs, unknown input keys, bad
+constrained values, and (for command/mode tasks) inputs supplied for the wrong
+command.
+
+This validation is surfaced through the **lint** channel, not compile:
+
+- Run `ado-aw lint <agent.md>` (add `--json` for machine-readable findings), or
+  call the `lint_workflow` tool on the author-facing MCP server. Each invalid
+  step produces a `task-input-invalid` **warning** finding with the offending
+  task id and which step list it came from.
+- It is **warning-only**: findings never fail `lint` (exit code stays 0) and
+  never affect `compile` or the emitted YAML — the step is always passed through
+  unchanged.
+- A task the compiler does not model, or a non-task step (`bash:`/`script:`/
+  `checkout:`), produces no finding.
+
+Surfacing this through lint (rather than as a compile-time stderr warning) keeps
+the feedback in the structured channel that authoring agents already consume to
+check the steps they synthesise, and keeps the in-pipeline integrity recompile
+quiet. So adding validation coverage can only ever *surface* authoring mistakes
+— it never rejects a workflow that compiled before. See [`ir.md`](ir.md)
+(`tasks/parse.rs`) for the mechanism and how to extend coverage.
+
 ## Debug-only `ado-aw-debug:`
 
 `ado-aw-debug:` is accepted in front matter for repository dogfooding and
@@ -251,6 +282,31 @@ default):
 
 Set `workspace:` explicitly to `root`, `repo` (alias `self`), or a specific
 checked-out repository alias to override this behavior.
+
+### Deprecated directory markers
+
+Earlier releases substituted the directory markers `{{ workspace }}`,
+`{{ working_directory }}`, and `{{ trigger_repo_directory }}` inside custom
+`steps:` / `post-steps:` / `setup:` / `teardown:` blocks. These are
+**deprecated** — they encouraged hard-coding a fixed path anchor, which is
+incorrect under multi-checkout where `$(Build.SourcesDirectory)` is the shared
+root of every checked-out repository.
+
+Reference the explicit ADO path instead:
+
+- `$(Build.SourcesDirectory)` — the checkout root (the trigger repo root when
+  only `self` is checked out).
+- `$(Build.SourcesDirectory)/$(Build.Repository.Name)` — the trigger repo when
+  one or more additional repositories are checked out.
+- `$(Build.SourcesDirectory)/<alias>` — a specific checked-out repository.
+
+The `legacy_path_markers` codemod automatically rewrites any remaining markers
+in front matter to the path they resolved to on the next `compile` (see
+[`docs/codemods.md`](codemods.md)). Markers left in the **agent body** cannot be
+migrated automatically and are reported as a compile warning. The compiler also
+emits warning-only advisories when a `$(Build.SourcesDirectory)/<seg>` reference
+or a `{{#runtime-import …}}` target points at a path that will not exist under
+the resolved checkout layout.
 
 ## Repositories (`repos:`)
 
@@ -336,6 +392,12 @@ expanded prompt body, so the pipeline file is self-contained.
 The trade-off is that the generated YAML is larger, and prompt-body
 edits require `ado-aw compile` plus committing the updated pipeline
 file.
+
+A small, fixed set of ADO path-anchor variables —
+`$(Build.SourcesDirectory)` and `$(Build.Repository.Name)` — is
+substituted into the prompt consistently in **both** modes. Arbitrary
+`$(...)` macros and pipeline/secret variables are not expanded; see
+[ADO variables in the prompt](runtime-imports.md#ado-variables-in-the-prompt).
 
 ## Filter Validation
 

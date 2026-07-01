@@ -143,6 +143,26 @@ contributor).
 - **`workitem.max-body-kb`** (`int`, default `32`) — cap per body
   field (description / acceptance / repro), in KB. Larger bodies
   truncated with a trailing marker carrying the dropped-byte count.
+- **`pr.checks.enabled`** (`bool`, **default `false`** — opt-in) —
+  whether to activate the PR-checks sub-contributor. Stages
+  `aw-context/pr/checks/failing.json` and
+  `aw-context/pr/checks/succeeded.json` listing Build Validation
+  runs whose source matches the PR. Requires the PR contributor to
+  be active.
+- **`schedule.enabled`** (`bool`, **default `false`** — opt-in) —
+  whether to activate the Schedule contributor. Stages
+  "since last successful run of this pipeline on this branch" diff
+  context for scheduled builds. Requires `on.schedule` to be
+  configured.
+- **`repo.enabled`** (`bool`, **default `false`** — opt-in) —
+  whether to activate the Repo contributor. Stages repository
+  identity information (branch, SHA, last release tag,
+  commits-since-tag) under `aw-context/repo/`. Pure git — no REST
+  calls; no bearer required.
+- **`repo.conventions`** (`bool`, **default `false`** — opt-in) —
+  when `repo` is enabled, additionally stages `aw-context/repo/conventions.json`
+  — a probe of `CODEOWNERS`, `CONTRIBUTING.md`, `.editorconfig`, and
+  `AGENTS.md` presence, plus the first 50 lines of each found file.
 
 `pr.enabled: false` also suppresses the auto-extension of the agent's
 bash allow-list with git commands described below.
