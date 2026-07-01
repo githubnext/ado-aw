@@ -9,22 +9,27 @@
 //! ADO task reference:
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/azure-resource-manager-template-deployment-v3>
 
-use super::common::{push_bool, push_opt};
+use super::common::{de_opt_bool_flex, push_bool, push_opt};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
+use serde_yaml::Value;
 
 // ── Shared enums ─────────────────────────────────────────────────────────────
 
 /// Deployment mode for ARM template deployments.
 ///
 /// Only relevant for scopes that deploy a template (not `ResourceGroupDelete`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum ArmDeploymentMode {
     /// Apply only the changes in the template; leave unchanged resources
     /// untouched (ADO default).
+    #[serde(rename = "Incremental")]
     Incremental,
     /// Delete all resources in the scope that are **not** in the template.
+    #[serde(rename = "Complete")]
     Complete,
     /// Validate the template without creating any resources.
+    #[serde(rename = "Validation")]
     Validation,
 }
 
@@ -556,6 +561,159 @@ fn push_deploy_opts(t: &mut TaskStep, opts: DeployOptions) {
     push_bool(t, "addSpnToEnvironment", opts.add_spn_to_environment);
     push_bool(t, "useWithoutJSON", opts.use_without_json);
 }
+
+// ── Advisory front-matter validation ─────────────────────────────────────────
+
+/// Validate an authored `AzureResourceManagerTemplateDeployment@3` `inputs:`
+/// mapping (advisory front-matter validation, see [`super::parse`]).
+///
+/// The task dispatches on `deploymentScope` (default `Resource Group`), and
+/// within the Resource Group scope on `action` (default
+/// `Create Or Update Resource Group`). Scope/action-specific required inputs are
+/// checked and removed, then the remainder is validated against a
+/// `deny_unknown_fields` schema so an input used for the wrong scope/action is
+/// reported.
+pub(crate) fn validate_inputs(inputs: Value) -> Result<(), String> {
+    let mut map = match inputs {
+        Value::Mapping(m) => m,
+        Value::Null => Default::default(),
+        other => return Err(format!("`inputs` must be a mapping, got {other:?}")),
+    };
+
+    // The ARM service connection is required (`azureResourceManagerConnection`,
+    // alias of the `ConnectedServiceName` input).
+    let has_connection = ["azureResourceManagerConnection", "ConnectedServiceName"]
+        .into_iter()
+        .any(|k| map.remove(k).is_some());
+    if !has_connection {
+        return Err("missing required input `azureResourceManagerConnection`".to_string());
+    }
+
+    let scope =
+        take_string(&mut map, "deploymentScope")?.unwrap_or_else(|| "Resource Group".to_string());
+
+    match scope.as_str() {
+        "Resource Group" => {
+            let action = take_string(&mut map, "action")?
+                .unwrap_or_else(|| "Create Or Update Resource Group".to_string());
+            match action.as_str() {
+                "Create Or Update Resource Group" => {
+                    require_subscription(&mut map)?;
+                    require_string(&mut map, "resourceGroupName")?;
+                    require_string(&mut map, "location")?;
+                    validate_template_deploy(map)
+                }
+                "DeleteRG" => {
+                    require_subscription(&mut map)?;
+                    require_string(&mut map, "resourceGroupName")?;
+                    serde_yaml::from_value::<DeleteSpec>(Value::Mapping(map))
+                        .map(drop)
+                        .map_err(|e| format!("action `DeleteRG`: {e}"))
+                }
+                other => Err(format!(
+                    "unknown action `{other}` (expected Create Or Update Resource Group|DeleteRG)"
+                )),
+            }
+        }
+        "Subscription" => {
+            require_subscription(&mut map)?;
+            require_string(&mut map, "location")?;
+            validate_template_deploy(map)
+        }
+        "Management Group" => {
+            require_string(&mut map, "location")?;
+            validate_template_deploy(map)
+        }
+        "Tenant" => {
+            require_string(&mut map, "location")?;
+            validate_template_deploy(map)
+        }
+        other => Err(format!(
+            "unknown deploymentScope `{other}` \
+             (expected Resource Group|Subscription|Management Group|Tenant)"
+        )),
+    }
+}
+
+fn validate_template_deploy(map: serde_yaml::Mapping) -> Result<(), String> {
+    serde_yaml::from_value::<TemplateDeploySpec>(Value::Mapping(map))
+        .map(drop)
+        .map_err(|e| format!("template deployment inputs: {e}"))
+}
+
+/// Remove `key` and return its string value, erroring if present but non-string.
+fn take_string(map: &mut serde_yaml::Mapping, key: &str) -> Result<Option<String>, String> {
+    match map.remove(key) {
+        Some(v) => v
+            .as_str()
+            .map(str::to_string)
+            .map(Some)
+            .ok_or_else(|| format!("`{key}` must be a string")),
+        None => Ok(None),
+    }
+}
+
+/// Remove a required string `key`, erroring if missing or non-string.
+fn require_string(map: &mut serde_yaml::Mapping, key: &str) -> Result<(), String> {
+    match take_string(map, key)? {
+        Some(_) => Ok(()),
+        None => Err(format!("missing required input `{key}` for the selected scope")),
+    }
+}
+
+/// The subscription input accepts either the `subscriptionId` alias or the
+/// canonical `subscriptionName` key; require one of them.
+fn require_subscription(map: &mut serde_yaml::Mapping) -> Result<(), String> {
+    let present = ["subscriptionId", "subscriptionName"]
+        .into_iter()
+        .any(|k| map.remove(k).is_some());
+    if present {
+        Ok(())
+    } else {
+        Err("missing required input `subscriptionId` for the selected scope".to_string())
+    }
+}
+
+/// Template + advanced inputs shared by every "deploy template" command.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TemplateDeploySpec {
+    #[serde(rename = "templateLocation", default)]
+    _template_location: Option<String>,
+    #[serde(rename = "csmFile", default)]
+    _csm_file: Option<String>,
+    #[serde(rename = "csmParametersFile", default)]
+    _csm_parameters_file: Option<String>,
+    #[serde(rename = "csmFileLink", default)]
+    _csm_file_link: Option<String>,
+    #[serde(rename = "csmParametersFileLink", default)]
+    _csm_parameters_file_link: Option<String>,
+    #[serde(rename = "overrideParameters", default)]
+    _override_parameters: Option<String>,
+    #[serde(rename = "deploymentMode", default)]
+    _deployment_mode: Option<ArmDeploymentMode>,
+    #[serde(rename = "deploymentName", default)]
+    _deployment_name: Option<String>,
+    #[serde(rename = "deploymentOutputs", default)]
+    _deployment_outputs: Option<String>,
+    #[serde(
+        rename = "addSpnToEnvironment",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
+    _add_spn_to_environment: Option<bool>,
+    #[serde(
+        rename = "useWithoutJSON",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
+    _use_without_json: Option<bool>,
+}
+
+/// `action = DeleteRG` takes no template or advanced inputs.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteSpec {}
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
