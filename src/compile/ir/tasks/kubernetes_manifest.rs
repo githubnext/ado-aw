@@ -9,16 +9,20 @@
 //! ADO task reference:
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/kubernetes-manifest-v1>
 
-use super::common::{push_bool, push_opt};
+use super::common::{de_opt_str_or_int, push_bool, push_opt};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
+use serde_yaml::Value;
 
 /// Service-connection type for `KubernetesManifest@1` (all actions except `bake`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub enum ConnectionType {
     /// Uses a KubeConfig file or Service Account.
+    #[serde(rename = "kubernetesServiceConnection")]
     KubernetesServiceConnection,
     /// Uses an AKS instance via an Azure Resource Manager service connection;
     /// does not require cluster access at service-connection configuration time.
+    #[serde(rename = "azureResourceManager")]
     AzureResourceManager,
 }
 
@@ -32,9 +36,11 @@ impl ConnectionType {
 }
 
 /// Deployment strategy for `deploy`, `promote`, and `reject` actions.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub enum DeploymentStrategy {
+    #[serde(rename = "none")]
     None,
+    #[serde(rename = "canary")]
     Canary,
 }
 
@@ -48,11 +54,13 @@ impl DeploymentStrategy {
 }
 
 /// Traffic split method when `strategy = canary`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub enum TrafficSplitMethod {
     /// Pod-level traffic splitting.
+    #[serde(rename = "pod")]
     Pod,
     /// Service Mesh Interface (SMI) traffic splitting.
+    #[serde(rename = "smi")]
     Smi,
 }
 
@@ -66,10 +74,13 @@ impl TrafficSplitMethod {
 }
 
 /// Render engine for the `bake` action.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub enum RenderType {
+    #[serde(rename = "helm")]
     Helm,
+    #[serde(rename = "kompose")]
     Kompose,
+    #[serde(rename = "kustomize")]
     Kustomize,
 }
 
@@ -84,10 +95,13 @@ impl RenderType {
 }
 
 /// Kubernetes resource kind, used by the `scale` and `patch` actions.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub enum ResourceKind {
+    #[serde(rename = "deployment")]
     Deployment,
+    #[serde(rename = "replicaset")]
     ReplicaSet,
+    #[serde(rename = "statefulset")]
     StatefulSet,
 }
 
@@ -102,10 +116,13 @@ impl ResourceKind {
 }
 
 /// Merge strategy for the `patch` action.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub enum MergeStrategy {
+    #[serde(rename = "json")]
     Json,
+    #[serde(rename = "merge")]
     Merge,
+    #[serde(rename = "strategic")]
     Strategic,
 }
 
@@ -120,9 +137,11 @@ impl MergeStrategy {
 }
 
 /// Kubernetes secret type for the `createSecret` action.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub enum SecretType {
+    #[serde(rename = "dockerRegistry")]
     DockerRegistry,
+    #[serde(rename = "generic")]
     Generic,
 }
 
@@ -136,11 +155,13 @@ impl SecretType {
 }
 
 /// Resource-to-patch selector for the `patch` action.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub enum PatchTarget {
     /// Patch a resource described by a manifest file.
+    #[serde(rename = "file")]
     File,
     /// Patch a resource identified by kind and name.
+    #[serde(rename = "name")]
     Name,
 }
 
@@ -773,6 +794,245 @@ impl KubernetesManifest {
             }
         }
         t
+    }
+}
+
+// ─── Advisory front-matter validation ────────────────────────────────────────
+
+/// Validate an authored `KubernetesManifest@1` `inputs:` mapping (advisory
+/// front-matter validation, see [`super::parse`]).
+///
+/// The task dispatches on `action` (default `deploy`). Shared connection inputs
+/// (applicable to every action) are validated and removed first, then the
+/// per-action inputs are validated against a `deny_unknown_fields` schema so an
+/// input supplied for the wrong action is reported.
+pub(crate) fn validate_inputs(inputs: Value) -> Result<(), String> {
+    let mut map = match inputs {
+        Value::Mapping(m) => m,
+        Value::Null => Default::default(),
+        other => return Err(format!("`inputs` must be a mapping, got {other:?}")),
+    };
+
+    strip_shared_inputs(&mut map)?;
+
+    let action = match map.remove("action") {
+        Some(v) => v
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| "`action` must be a string".to_string())?,
+        None => "deploy".to_string(),
+    };
+
+    let rest = Value::Mapping(map);
+    let result = match action.as_str() {
+        "deploy" => serde_yaml::from_value::<DeploySpec>(rest).map(drop),
+        "bake" => serde_yaml::from_value::<BakeSpec>(rest).map(drop),
+        "createSecret" => serde_yaml::from_value::<CreateSecretSpec>(rest).map(drop),
+        "delete" => serde_yaml::from_value::<DeleteSpec>(rest).map(drop),
+        "patch" => serde_yaml::from_value::<PatchSpec>(rest).map(drop),
+        "promote" => serde_yaml::from_value::<PromoteSpec>(rest).map(drop),
+        "scale" => serde_yaml::from_value::<ScaleSpec>(rest).map(drop),
+        "reject" => serde_yaml::from_value::<RejectSpec>(rest).map(drop),
+        other => {
+            return Err(format!(
+                "unknown action `{other}` \
+                 (expected deploy|bake|createSecret|delete|patch|promote|scale|reject)"
+            ));
+        }
+    };
+    result.map_err(|e| format!("action `{action}`: {e}"))
+}
+
+/// Validate and remove the connection/namespace inputs shared by every action.
+fn strip_shared_inputs(map: &mut serde_yaml::Mapping) -> Result<(), String> {
+    for key in [
+        "kubernetesServiceConnection",
+        "azureSubscriptionConnection",
+        "azureResourceGroup",
+        "kubernetesCluster",
+        "namespace",
+    ] {
+        if let Some(v) = map.get(key)
+            && !v.is_string()
+        {
+            return Err(format!("`{key}` must be a string"));
+        }
+        map.remove(key);
+    }
+    if let Some(v) = map.remove("connectionType") {
+        serde_yaml::from_value::<ConnectionType>(v)
+            .map(drop)
+            .map_err(|e| format!("`connectionType`: {e}"))?;
+    }
+    if let Some(v) = map.remove("useClusterAdmin") {
+        let ok = v.is_bool()
+            || v
+                .as_str()
+                .is_some_and(|s| s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("false"));
+        if !ok {
+            return Err("`useClusterAdmin` must be a boolean".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Inputs valid for `action = deploy`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeploySpec {
+    #[serde(rename = "manifests")]
+    _manifests: String,
+    #[serde(rename = "strategy", default)]
+    _strategy: Option<DeploymentStrategy>,
+    #[serde(rename = "trafficSplitMethod", default)]
+    _traffic_split_method: Option<TrafficSplitMethod>,
+    #[serde(rename = "percentage", default, deserialize_with = "de_opt_str_or_int")]
+    _percentage: Option<String>,
+    #[serde(
+        rename = "baselineAndCanaryReplicas",
+        default,
+        deserialize_with = "de_opt_str_or_int"
+    )]
+    _baseline_and_canary_replicas: Option<String>,
+    #[serde(rename = "containers", default)]
+    _containers: Option<String>,
+    #[serde(rename = "imagePullSecrets", default)]
+    _image_pull_secrets: Option<String>,
+    #[serde(
+        rename = "rolloutStatusTimeout",
+        default,
+        deserialize_with = "de_opt_str_or_int"
+    )]
+    _rollout_status_timeout: Option<String>,
+    #[serde(rename = "resourceType", default)]
+    _resource_type: Option<String>,
+}
+
+/// Inputs valid for `action = bake` (all optional).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BakeSpec {
+    #[serde(rename = "renderType", default)]
+    _render_type: Option<RenderType>,
+    #[serde(rename = "helmChart", default)]
+    _helm_chart: Option<String>,
+    #[serde(rename = "dockerComposeFile", default)]
+    _docker_compose_file: Option<String>,
+    #[serde(rename = "kustomizationPath", default)]
+    _kustomization_path: Option<String>,
+    #[serde(rename = "releaseName", default)]
+    _release_name: Option<String>,
+    #[serde(rename = "overrideFiles", default)]
+    _override_files: Option<String>,
+    #[serde(rename = "overrides", default)]
+    _overrides: Option<String>,
+    #[serde(rename = "containers", default)]
+    _containers: Option<String>,
+}
+
+/// Inputs valid for `action = createSecret`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateSecretSpec {
+    #[serde(rename = "secretType")]
+    _secret_type: SecretType,
+    #[serde(rename = "secretName", default)]
+    _secret_name: Option<String>,
+    #[serde(rename = "secretArguments", default)]
+    _secret_arguments: Option<String>,
+    #[serde(rename = "dockerRegistryEndpoint", default)]
+    _docker_registry_endpoint: Option<String>,
+}
+
+/// Inputs valid for `action = delete`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteSpec {
+    #[serde(rename = "arguments", default)]
+    _arguments: Option<String>,
+}
+
+/// Inputs valid for `action = patch`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PatchSpec {
+    #[serde(rename = "resourceToPatch")]
+    _resource_to_patch: PatchTarget,
+    #[serde(rename = "mergeStrategy")]
+    _merge_strategy: MergeStrategy,
+    #[serde(rename = "patch")]
+    _patch: String,
+    #[serde(rename = "resourceFileToPatch", default)]
+    _resource_file_to_patch: Option<String>,
+    #[serde(rename = "kind", default)]
+    _kind: Option<ResourceKind>,
+    #[serde(rename = "name", default)]
+    _name: Option<String>,
+    #[serde(
+        rename = "rolloutStatusTimeout",
+        default,
+        deserialize_with = "de_opt_str_or_int"
+    )]
+    _rollout_status_timeout: Option<String>,
+}
+
+/// Inputs valid for `action = promote`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PromoteSpec {
+    #[serde(rename = "manifests")]
+    _manifests: String,
+    #[serde(rename = "strategy", default)]
+    _strategy: Option<DeploymentStrategy>,
+    #[serde(rename = "containers", default)]
+    _containers: Option<String>,
+    #[serde(rename = "imagePullSecrets", default)]
+    _image_pull_secrets: Option<String>,
+    #[serde(
+        rename = "rolloutStatusTimeout",
+        default,
+        deserialize_with = "de_opt_str_or_int"
+    )]
+    _rollout_status_timeout: Option<String>,
+}
+
+/// Inputs valid for `action = scale`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScaleSpec {
+    #[serde(rename = "kind")]
+    _kind: ResourceKind,
+    #[serde(rename = "name")]
+    _name: String,
+    #[serde(rename = "replicas", deserialize_with = "de_str_or_int")]
+    _replicas: String,
+    #[serde(
+        rename = "rolloutStatusTimeout",
+        default,
+        deserialize_with = "de_opt_str_or_int"
+    )]
+    _rollout_status_timeout: Option<String>,
+}
+
+/// Inputs valid for `action = reject`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RejectSpec {
+    #[serde(rename = "manifests")]
+    _manifests: String,
+    #[serde(rename = "strategy", default)]
+    _strategy: Option<DeploymentStrategy>,
+}
+
+/// Deserialize a required ADO input that may be authored as a string or an
+/// integer (e.g. `replicas: 3` or `replicas: "3"`) into a `String`.
+fn de_str_or_int<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match de_opt_str_or_int(deserializer)? {
+        Some(s) => Ok(s),
+        None => Err(serde::de::Error::custom("expected a string or integer")),
     }
 }
 
