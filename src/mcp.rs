@@ -372,6 +372,79 @@ async fn undo_synthetic_commit(git_dir: &std::path::Path) -> Result<(), McpError
     Ok(())
 }
 
+/// Decide whether a single tool should remain in the router after filtering.
+///
+/// Three categories, evaluated in priority order:
+/// - `DEBUG_ONLY_TOOLS` — kept only when the caller explicitly lists the tool.
+/// - `ALWAYS_ON_TOOLS` — always kept regardless of the enabled list.
+/// - Everything else — permissive default when no list is provided; otherwise
+///   filtered to what the caller requested.
+fn should_keep_tool(tool_name: &str, enabled_tools: Option<&[String]>) -> bool {
+    if DEBUG_ONLY_TOOLS.contains(&tool_name) {
+        enabled_tools
+            .map(|list| list.iter().any(|e| e.as_str() == tool_name))
+            .unwrap_or(false)
+    } else if ALWAYS_ON_TOOLS.contains(&tool_name) {
+        true
+    } else {
+        enabled_tools
+            .map(|list| list.iter().any(|e| e.as_str() == tool_name))
+            .unwrap_or(true)
+    }
+}
+
+/// Apply the `enabled_tools` filter to `tool_router`, warn about unknown names,
+/// and log the before/after counts.
+fn apply_tool_filter(
+    tool_router: &mut ToolRouter<SafeOutputs>,
+    enabled_tools: Option<&[String]>,
+) {
+    let all_tools: Vec<String> = tool_router
+        .list_all()
+        .iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    let total = all_tools.len();
+
+    for tool_name in &all_tools {
+        if !should_keep_tool(tool_name, enabled_tools) {
+            debug!("Filtering out tool: {}", tool_name);
+            tool_router.remove_route(tool_name);
+        }
+    }
+
+    if let Some(enabled) = enabled_tools {
+        for name in enabled {
+            if !all_tools.iter().any(|t| t == name) {
+                warn!(
+                    "Enabled-tools entry '{}' has no matching route (ignored)",
+                    name
+                );
+            }
+        }
+    }
+
+    let remaining: Vec<String> = tool_router
+        .list_all()
+        .iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    if enabled_tools.is_some() {
+        info!(
+            "Tool filtering applied: {} of {} tools enabled: {:?}",
+            remaining.len(),
+            total,
+            remaining
+        );
+    } else {
+        info!(
+            "Default tool exposure: {} of {} tools served (debug-only stripped)",
+            remaining.len(),
+            total
+        );
+    }
+}
+
 #[tool_router]
 impl SafeOutputs {
     /// Get the full path to the safe output file
@@ -447,64 +520,7 @@ impl SafeOutputs {
         //     reachable only when explicitly listed in `enabled_tools`.
         //   * Everything else — permissive default when `enabled_tools` is
         //     `None`; otherwise filtered against the explicit allowlist.
-        let all_tools: Vec<String> = tool_router
-            .list_all()
-            .iter()
-            .map(|t| t.name.to_string())
-            .collect();
-        let total = all_tools.len();
-        let explicit_filter = enabled_tools.is_some();
-        for tool_name in &all_tools {
-            let is_always_on = ALWAYS_ON_TOOLS.contains(&tool_name.as_str());
-            let is_debug_only = DEBUG_ONLY_TOOLS.contains(&tool_name.as_str());
-            let explicitly_enabled = enabled_tools
-                .map(|enabled| enabled.iter().any(|e| e == tool_name))
-                .unwrap_or(false);
-
-            let keep = if is_debug_only {
-                explicitly_enabled
-            } else if is_always_on {
-                true
-            } else if let Some(enabled) = enabled_tools {
-                enabled.iter().any(|e| e == tool_name)
-            } else {
-                true
-            };
-
-            if !keep {
-                debug!("Filtering out tool: {}", tool_name);
-                tool_router.remove_route(tool_name);
-            }
-        }
-        if let Some(enabled) = enabled_tools {
-            for name in enabled {
-                if !all_tools.iter().any(|t| t == name) {
-                    warn!(
-                        "Enabled-tools entry '{}' has no matching route (ignored)",
-                        name
-                    );
-                }
-            }
-        }
-        let remaining: Vec<String> = tool_router
-            .list_all()
-            .iter()
-            .map(|t| t.name.to_string())
-            .collect();
-        if explicit_filter {
-            info!(
-                "Tool filtering applied: {} of {} tools enabled: {:?}",
-                remaining.len(),
-                total,
-                remaining
-            );
-        } else {
-            info!(
-                "Default tool exposure: {} of {} tools served (debug-only stripped)",
-                remaining.len(),
-                total
-            );
-        }
+        apply_tool_filter(&mut tool_router, enabled_tools);
 
         Ok(Self {
             bounding_directory: bounding_dir,
