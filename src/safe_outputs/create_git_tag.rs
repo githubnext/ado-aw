@@ -374,12 +374,6 @@ impl Executor for CreateGitTagResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safe_outputs::ToolResult;
-
-    #[test]
-    fn test_result_has_correct_name() {
-        assert_eq!(CreateGitTagResult::NAME, "create-git-tag");
-    }
 
     #[test]
     fn test_params_deserializes() {
@@ -404,6 +398,12 @@ mod tests {
         let result: CreateGitTagResult = params.try_into().unwrap();
         assert_eq!(result.name, "create-git-tag");
         assert_eq!(result.tag_name, "v1.0.0");
+        assert_eq!(
+            result.commit.as_deref(),
+            Some("abcdef1234567890abcdef1234567890abcdef12")
+        );
+        assert_eq!(result.message.as_deref(), Some("Initial release"));
+        assert!(result.repository.is_none());
     }
 
     #[test]
@@ -415,7 +415,11 @@ mod tests {
             repository: None,
         };
         let result: Result<CreateGitTagResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("tag_name must be at least 3 characters"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -427,7 +431,11 @@ mod tests {
             repository: None,
         };
         let result: Result<CreateGitTagResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("tag_name contains invalid characters"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -439,7 +447,11 @@ mod tests {
             repository: None,
         };
         let result: Result<CreateGitTagResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("commit must be exactly 40 hex characters"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
