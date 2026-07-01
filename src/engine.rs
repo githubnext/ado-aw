@@ -94,6 +94,34 @@ pub fn copilot_byom_active(engine_config: &EngineConfig) -> bool {
     })
 }
 
+/// Return the **actual** `engine.env` keys (in the user's original casing) that
+/// match a BYOM credential key case-insensitively. These are the keys that must
+/// be passed to AWF's `--exclude-env` so the raw credential is kept out of the
+/// `--env-all` passthrough.
+///
+/// Case matters: env-var names are case-sensitive on Linux and AWF matches
+/// `--exclude-env` by exact name. Detection ([`copilot_byom_active`]) is
+/// case-insensitive so isolation always activates when a provider key is clearly
+/// intended, but the exclusion list must use the exact key the user wrote —
+/// otherwise a key like `copilot_provider_api_key` would activate the sidecar yet
+/// still leak into the agent container. Sorted for deterministic output.
+pub fn copilot_byom_credential_keys(engine_config: &EngineConfig) -> Vec<String> {
+    let Some(env_map) = engine_config.env() else {
+        return Vec::new();
+    };
+    let mut keys: Vec<String> = env_map
+        .keys()
+        .filter(|key| {
+            COPILOT_BYOM_CREDENTIAL_ENV_KEYS
+                .iter()
+                .any(|cred| key.eq_ignore_ascii_case(cred))
+        })
+        .cloned()
+        .collect();
+    keys.sort();
+    keys
+}
+
 /// Extract the hostname from a literal `COPILOT_PROVIDER_BASE_URL` value so it can
 /// be added to the AWF network allowlist. Returns `None` when the value is not a
 /// parseable absolute URL with a host.
@@ -202,6 +230,10 @@ impl Engine {
                         .map(|(_, v)| v)
                     && !contains_ado_expression(base_url)
                     && let Some(host) = provider_base_url_host(base_url)
+                    // Validate the parsed host with the same DNS-safe check the
+                    // api-target path uses, so non-DNS-safe hosts (e.g. an IPv6
+                    // literal `::1`, or an IDN) never land in `--allow-domains`.
+                    && is_valid_hostname(&host)
                 {
                     hosts.push(host);
                 }
@@ -620,14 +652,15 @@ fn render_engine_env_entry(key: &str, value: &str) -> Result<String> {
     if is_provider_expr_env_key(key) {
         if contains_ado_template_expression(value) {
             anyhow::bail!(
-                "engine.env value for '{}' contains an ADO template expression ('${{{{}}}}'). \
-                 Provider keys may use macro/runtime expressions ('$(...)' or '$[...]') only.",
+                "engine.env value for '{}' contains an ADO template expression '${{{{ }}}}'. \
+                 Provider keys may use macro '$(...)' or runtime '$[...]' expressions only.",
                 key
             );
         }
     } else if contains_ado_expression(value) {
         anyhow::bail!(
-            "engine.env value for '{}' contains ADO expression syntax ('$(' or '${{{{}}}}')). \
+            "engine.env value for '{}' contains an ADO expression \
+             (one of '$(...)', '${{{{ }}}}', or '$[...]'). \
              Use literal values only — ADO macro/expression expansion is not allowed \
              (allowed for BYOM provider keys: {}).",
             key,
@@ -871,7 +904,8 @@ fn copilot_invocation(
 #[cfg(test)]
 mod tests {
     use super::{
-        Engine, copilot_byom_active, copilot_provider_env, get_engine, normalize_version_tag,
+        Engine, copilot_byom_active, copilot_byom_credential_keys, copilot_provider_env,
+        get_engine, normalize_version_tag,
     };
     use crate::compile::{
         extensions::{CompileContext, CompilerExtension, Declarations, collect_extensions},
@@ -1236,7 +1270,7 @@ mod tests {
             result
                 .unwrap_err()
                 .to_string()
-                .contains("ADO expression syntax")
+                .contains("contains an ADO expression")
         );
     }
 
@@ -1296,6 +1330,39 @@ mod tests {
         assert!(
             !copilot_byom_active(&fm2.engine),
             "WIRE_API alone must not activate BYOM (it is non-credential config)"
+        );
+    }
+
+    #[test]
+    fn copilot_byom_credential_keys_preserves_user_casing() {
+        // Exact provider credential keys are returned in the user's casing,
+        // sorted; non-credential and non-provider keys are excluded.
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    COPILOT_PROVIDER_BASE_URL: https://x/y\n    COPILOT_PROVIDER_WIRE_API: responses\n    MY_VAR: hi\n---\n",
+        ).unwrap();
+        let keys = copilot_byom_credential_keys(&fm.engine);
+        assert_eq!(keys, vec!["COPILOT_PROVIDER_BASE_URL".to_string()]);
+    }
+
+    #[test]
+    fn copilot_byom_credential_keys_empty_without_provider() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    MY_VAR: hi\n---\n",
+        ).unwrap();
+        assert!(copilot_byom_credential_keys(&fm.engine).is_empty());
+    }
+
+    #[test]
+    fn engine_expression_base_url_host_rejects_non_dns_safe() {
+        // An IPv6 literal parses to a host but is not DNS-safe, so it must not
+        // be added to the AWF allow-domains list (consistent with api-target).
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    COPILOT_PROVIDER_BASE_URL: \"http://[::1]:8080/v1\"\n---\n",
+        ).unwrap();
+        let hosts = Engine::Copilot.required_hosts(&fm.engine);
+        assert!(
+            hosts.is_empty(),
+            "non-DNS-safe host (IPv6 literal) must be rejected from the allowlist: {hosts:?}"
         );
     }
 
@@ -1375,7 +1442,7 @@ mod tests {
             result
                 .unwrap_err()
                 .to_string()
-                .contains("ADO expression syntax")
+                .contains("contains an ADO expression")
         );
     }
 

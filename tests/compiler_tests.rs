@@ -4817,9 +4817,12 @@ fn test_byom_provider_env_compiles_and_merges() {
     let compiled = compile_fixture("byom-foundry-agent.md");
     assert_valid_yaml(&compiled, "byom-foundry-agent.md");
 
+    // Emitted verbatim (unquoted): the typed EnvValue re-serialization renders
+    // an ADO macro without surrounding quotes. Pin the trailing newline so the
+    // assertion fails if quoting is ever (incorrectly) introduced.
     assert!(
-        compiled.contains("COPILOT_PROVIDER_BEARER_TOKEN: $(Setup.FOUNDRY_TOKEN)"),
-        "BYOM provider macro env value must be merged verbatim into the agent step: {compiled}"
+        compiled.contains("COPILOT_PROVIDER_BEARER_TOKEN: $(Setup.FOUNDRY_TOKEN)\n"),
+        "BYOM provider macro env value must be merged verbatim (unquoted) into the agent step: {compiled}"
     );
     assert!(
         compiled.contains("COPILOT_PROVIDER_TYPE: azure"),
@@ -4840,9 +4843,12 @@ fn test_byom_provider_env_compiles_and_merges() {
         2,
         "BYOM must enable the AWF api-proxy sidecar in both the Agent and Detection jobs: {compiled}"
     );
+    // --exclude-env now lists exactly the provider credential keys present in
+    // engine.env (case-preserving), not a hardcoded set. The fixture defines
+    // COPILOT_PROVIDER_BASE_URL + COPILOT_PROVIDER_BEARER_TOKEN (no API_KEY), so
+    // only those two are excluded, in both the Agent and Detection jobs.
     for key in [
         "--exclude-env COPILOT_PROVIDER_BASE_URL",
-        "--exclude-env COPILOT_PROVIDER_API_KEY",
         "--exclude-env COPILOT_PROVIDER_BEARER_TOKEN",
     ] {
         assert_eq!(
@@ -4851,6 +4857,12 @@ fn test_byom_provider_env_compiles_and_merges() {
             "BYOM must exclude provider credential from passthrough in both jobs ({key}): {compiled}"
         );
     }
+    // A credential key NOT present in engine.env must NOT be excluded.
+    assert_eq!(
+        compiled.matches("--exclude-env COPILOT_PROVIDER_API_KEY").count(),
+        0,
+        "credential keys absent from engine.env must not be passed to --exclude-env: {compiled}"
+    );
     // The api-proxy container image must be pre-pulled (and :latest-tagged) in
     // both jobs so AWF's --skip-pull finds it locally.
     assert_eq!(
@@ -4865,7 +4877,7 @@ fn test_byom_provider_env_compiles_and_merges() {
     // The bearer-token macro therefore appears twice: agent step + detection step.
     assert_eq!(
         compiled
-            .matches("COPILOT_PROVIDER_BEARER_TOKEN: $(Setup.FOUNDRY_TOKEN)")
+            .matches("COPILOT_PROVIDER_BEARER_TOKEN: $(Setup.FOUNDRY_TOKEN)\n")
             .count(),
         2,
         "Detection step must inherit the BYOM provider env alongside the agent step: {compiled}"

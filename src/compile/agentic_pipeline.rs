@@ -184,11 +184,25 @@ pub(crate) fn build_pipeline_context(
     let engine_log_dir = ctx.engine.log_dir().to_string();
 
     let mut engine_env = ctx.engine.env(&front_matter.engine)?;
-    let byom_active = crate::engine::copilot_byom_active(&front_matter.engine);
+    // BYOM/BYOK isolation is Copilot-specific: gate on the engine type so a
+    // future non-Copilot engine whose env happens to contain a COPILOT_PROVIDER_*
+    // key never erroneously activates the api-proxy sidecar.
+    let is_copilot = matches!(ctx.engine, crate::engine::Engine::Copilot);
+    let byom_active = is_copilot && crate::engine::copilot_byom_active(&front_matter.engine);
+    // Actual provider credential keys (user's casing) for AWF `--exclude-env`.
+    let byom_exclude_keys = if is_copilot {
+        crate::engine::copilot_byom_credential_keys(&front_matter.engine)
+    } else {
+        Vec::new()
+    };
     // Provider-only env subset for the Detection step, so the threat-analysis
     // Copilot run inherits the same BYOM/BYOK routing + credential isolation as
     // the main agent (mirrors gh-aw's detection engine-config Env inheritance).
-    let detection_provider_env = crate::engine::copilot_provider_env(&front_matter.engine)?;
+    let detection_provider_env = if is_copilot {
+        crate::engine::copilot_provider_env(&front_matter.engine)?
+    } else {
+        String::new()
+    };
     // AWF path env (when extensions declare path prepends)
     let awf_paths = common::collect_awf_path_prepends(&extension_declarations);
     let has_awf_paths = !awf_paths.is_empty();
@@ -318,6 +332,7 @@ pub(crate) fn build_pipeline_context(
         agent_content_value,
         debug_pipeline,
         byom_active,
+        byom_exclude_keys,
         detection_provider_env,
     };
 
@@ -492,10 +507,13 @@ pub(crate) struct StandaloneCtx {
     /// `{{#runtime-import ...}}` marker).
     pub(crate) agent_content_value: String,
     pub(crate) debug_pipeline: bool,
-    /// True when `engine.env` activates Copilot BYOM/BYOK mode. Enables the AWF
-    /// api-proxy sidecar (`--enable-api-proxy`) on the agent step for credential
-    /// isolation and pre-pulls the api-proxy container image.
+    /// True when `engine.env` activates Copilot BYOM/BYOK mode. Pre-pulls the
+    /// api-proxy container image in the Agent and Detection jobs.
     pub(crate) byom_active: bool,
+    /// Actual provider credential env keys present (user's casing) to pass to
+    /// AWF `--exclude-env`; non-empty ⇒ enable the api-proxy sidecar. Empty for
+    /// non-BYOM. Case-preserving so case-sensitive `--exclude-env` matches.
+    pub(crate) byom_exclude_keys: Vec<String>,
     /// Provider-only (`COPILOT_PROVIDER_*`) subset of `engine.env`, rendered as a
     /// `KEY: "VALUE"` YAML block (empty when none). Applied to the Detection
     /// (threat-analysis) step so it inherits BYOM provider routing + isolation.
@@ -891,7 +909,7 @@ fn build_agent_job(
         &cfg.working_directory,
         &cfg.engine_run,
         &cfg.engine_env,
-        cfg.byom_active,
+        &cfg.byom_exclude_keys,
     )?));
 
     // 19. Collect safe outputs from AWF container
@@ -1083,7 +1101,7 @@ fn build_detection_job(
         &cfg.allowed_domains,
         &cfg.working_directory,
         &cfg.engine_run_detection,
-        cfg.byom_active,
+        &cfg.byom_exclude_keys,
         &cfg.detection_provider_env,
     )?));
     // Prepare analyzed outputs
@@ -2421,22 +2439,25 @@ fn start_mcpg_step(
 
 /// Build the AWF api-proxy sidecar flag lines for a Copilot BYOM/BYOK run.
 ///
-/// When `byom_active`, returns `--enable-api-proxy` plus one `--exclude-env`
-/// line per provider credential key, each as a 2-space-indented `--flag \`
+/// `exclude_keys` are the actual provider credential env keys present (in the
+/// user's original casing). When non-empty, returns `--enable-api-proxy` plus
+/// one `--exclude-env <key>` line per key, each as a 2-space-indented `--flag \`
 /// continuation ending in `\\\n` so it slots directly into the AWF command
 /// body. The api-proxy holds the real credential and injects it only at the
 /// proxy layer (keeping it out of the agent container); `--exclude-env` keeps
 /// the raw value out of `--env-all` passthrough (defense-in-depth; AWF also
-/// overrides them with placeholders). Returns an empty string otherwise.
+/// overrides them with placeholders). Case-preserving: env-var names are
+/// case-sensitive, so the exact key the user wrote must be excluded. Returns an
+/// empty string when `exclude_keys` is empty (non-BYOM).
 ///
 /// Shared by [`run_agent_step`] and [`run_threat_analysis_step`] so both AWF
 /// invocations enable isolation identically.
-fn awf_api_proxy_flags(byom_active: bool) -> String {
-    if !byom_active {
+fn awf_api_proxy_flags(exclude_keys: &[String]) -> String {
+    if exclude_keys.is_empty() {
         return String::new();
     }
     let mut block = String::from("  --enable-api-proxy \\\n");
-    for key in crate::engine::COPILOT_BYOM_CREDENTIAL_ENV_KEYS {
+    for key in exclude_keys {
         block.push_str(&format!("  --exclude-env {key} \\\n"));
     }
     block
@@ -2448,7 +2469,7 @@ fn run_agent_step(
     working_directory: &str,
     engine_run: &str,
     engine_env: &str,
-    byom_active: bool,
+    byom_exclude_keys: &[String],
 ) -> Result<BashStep> {
     // The awf_mounts string is a `\`-joined chain of `--mount "..."` lines.
     // Render each at 2-space indent inside the bash body (the surrounding
@@ -2463,7 +2484,7 @@ fn run_agent_step(
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let api_proxy_block = awf_api_proxy_flags(byom_active);
+    let api_proxy_block = awf_api_proxy_flags(byom_exclude_keys);
     let script = format!(
         "set -o pipefail\n\
          \n\
@@ -2725,10 +2746,10 @@ fn run_threat_analysis_step(
     allowed_domains: &str,
     working_directory: &str,
     engine_run_detection: &str,
-    byom_active: bool,
+    byom_exclude_keys: &[String],
     detection_provider_env: &str,
 ) -> Result<BashStep> {
-    let api_proxy_block = awf_api_proxy_flags(byom_active);
+    let api_proxy_block = awf_api_proxy_flags(byom_exclude_keys);
     let script = format!(
         "set -o pipefail\n\
          \n\
