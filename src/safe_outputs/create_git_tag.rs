@@ -374,7 +374,6 @@ impl Executor for CreateGitTagResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safe_outputs::ToolResult;
 
     #[test]
     fn test_params_deserializes() {
