@@ -7,14 +7,74 @@
 //! ADO task reference:
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/java-tool-installer-v0>
 
-use super::common::{push_bool, push_opt};
+use super::common::{de_opt_bool_flex, push_bool, push_opt};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
+use serde_yaml::Value;
+
+/// Validate an authored `JavaToolInstaller@0` `inputs:` mapping (advisory
+/// front-matter validation, see [`super::parse`]).
+pub(crate) fn validate_inputs(inputs: Value) -> Result<(), String> {
+    let mut map = match inputs {
+        Value::Mapping(m) => m,
+        Value::Null => Default::default(),
+        other => return Err(format!("`inputs` must be a mapping, got {other:?}")),
+    };
+    let source = match map.remove("jdkSourceOption") {
+        Some(value) => value
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| "`jdkSourceOption` must be a string".to_string())?,
+        None => "PreInstalled".to_string(),
+    };
+
+    validate_common(&Value::Mapping(map.clone())).map_err(|e| format!("common inputs: {e}"))?;
+    remove_common_inputs(&mut map);
+    let rest = Value::Mapping(map);
+
+    let result = match source.as_str() {
+        "PreInstalled" => serde_yaml::from_value::<PreInstalledSpec>(rest).map(drop),
+        "LocalDirectory" => serde_yaml::from_value::<LocalDirectorySpec>(rest).map(drop),
+        "AzureStorage" => serde_yaml::from_value::<AzureStorageSpec>(rest).map(drop),
+        other => {
+            return Err(format!(
+                "JavaToolInstaller@0: unknown jdkSourceOption `{other}`"
+            ))
+        }
+    };
+    result.map_err(|e| format!("jdkSourceOption `{source}`: {e}"))
+}
+
+fn validate_common(inputs: &Value) -> Result<(), serde_yaml::Error> {
+    serde_yaml::from_value::<JavaToolInstallerCommonInputs>(inputs.clone()).map(drop)
+}
+
+fn remove_common_inputs(map: &mut serde_yaml::Mapping) {
+    for key in ["versionSpec", "jdkArchitectureOption"] {
+        map.remove(key);
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct JavaToolInstallerCommonInputs {
+    #[serde(rename = "versionSpec")]
+    _version_spec: String,
+    #[serde(rename = "jdkArchitectureOption")]
+    _architecture: JdkArchitecture,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreInstalledSpec {}
 
 /// JDK CPU architecture for [`JavaToolInstaller`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum JdkArchitecture {
+    #[serde(rename = "x64")]
     X64,
+    #[serde(rename = "x86")]
     X86,
+    #[serde(rename = "arm64")]
     Arm64,
 }
 
@@ -44,22 +104,32 @@ pub enum JdkSource {
 }
 
 /// Per-source required and optional inputs for `jdkSourceOption: LocalDirectory`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LocalDirectorySpec {
     /// `jdkFile` — path to the JDK archive on the build agent.
+    #[serde(rename = "jdkFile")]
     pub jdk_file: String,
     /// `jdkDestinationDirectory` — directory where the JDK is installed.
+    #[serde(rename = "jdkDestinationDirectory")]
     pub jdk_destination_directory: String,
+    #[serde(
+        rename = "cleanDestinationDirectory",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     clean_destination_directory: Option<bool>,
+    #[serde(
+        rename = "createExtractDirectory",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     create_extract_directory: Option<bool>,
 }
 
 impl LocalDirectorySpec {
     /// Required: `jdk_file` path and `jdk_destination_directory`.
-    pub fn new(
-        jdk_file: impl Into<String>,
-        jdk_destination_directory: impl Into<String>,
-    ) -> Self {
+    pub fn new(jdk_file: impl Into<String>, jdk_destination_directory: impl Into<String>) -> Self {
         Self {
             jdk_file: jdk_file.into(),
             jdk_destination_directory: jdk_destination_directory.into(),
@@ -82,18 +152,34 @@ impl LocalDirectorySpec {
 }
 
 /// Per-source required and optional inputs for `jdkSourceOption: AzureStorage`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AzureStorageSpec {
     /// `azureStorageAccountName` — Azure Storage account containing the JDK archive.
+    #[serde(rename = "azureStorageAccountName")]
     pub azure_storage_account_name: String,
     /// `azureContainerName` — Blob container name.
+    #[serde(rename = "azureContainerName")]
     pub azure_container_name: String,
     /// `azureCommonVirtualFile` — common virtual path to the JDK archive.
+    #[serde(rename = "azureCommonVirtualFile")]
     pub azure_common_virtual_file: String,
     /// `jdkDestinationDirectory` — directory where the JDK is installed.
+    #[serde(rename = "jdkDestinationDirectory")]
     pub jdk_destination_directory: String,
+    #[serde(rename = "azureResourceGroupName", default)]
     azure_resource_group_name: Option<String>,
+    #[serde(
+        rename = "cleanDestinationDirectory",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     clean_destination_directory: Option<bool>,
+    #[serde(
+        rename = "createExtractDirectory",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     create_extract_directory: Option<bool>,
 }
 
@@ -223,7 +309,11 @@ impl JavaToolInstaller {
                 t = t
                     .with_input("jdkFile", s.jdk_file)
                     .with_input("jdkDestinationDirectory", s.jdk_destination_directory);
-                push_bool(&mut t, "cleanDestinationDirectory", s.clean_destination_directory);
+                push_bool(
+                    &mut t,
+                    "cleanDestinationDirectory",
+                    s.clean_destination_directory,
+                );
                 push_bool(&mut t, "createExtractDirectory", s.create_extract_directory);
             }
             JdkSource::AzureStorage(s) => {
@@ -232,8 +322,16 @@ impl JavaToolInstaller {
                     .with_input("azureContainerName", s.azure_container_name)
                     .with_input("azureCommonVirtualFile", s.azure_common_virtual_file)
                     .with_input("jdkDestinationDirectory", s.jdk_destination_directory);
-                push_opt(&mut t, "azureResourceGroupName", s.azure_resource_group_name);
-                push_bool(&mut t, "cleanDestinationDirectory", s.clean_destination_directory);
+                push_opt(
+                    &mut t,
+                    "azureResourceGroupName",
+                    s.azure_resource_group_name,
+                );
+                push_bool(
+                    &mut t,
+                    "cleanDestinationDirectory",
+                    s.clean_destination_directory,
+                );
                 push_bool(&mut t, "createExtractDirectory", s.create_extract_directory);
             }
         }
@@ -292,7 +390,9 @@ mod tests {
             Some("/tools/jdk17")
         );
         assert_eq!(
-            t.inputs.get("cleanDestinationDirectory").map(String::as_str),
+            t.inputs
+                .get("cleanDestinationDirectory")
+                .map(String::as_str),
             Some("true")
         );
         assert_eq!(
@@ -321,8 +421,7 @@ mod tests {
         )
         .azure_resource_group_name("my-rg")
         .clean_destination_directory(false);
-        let t =
-            JavaToolInstaller::azure_storage("17", JdkArchitecture::X64, spec).into_step();
+        let t = JavaToolInstaller::azure_storage("17", JdkArchitecture::X64, spec).into_step();
         assert_eq!(
             t.inputs.get("jdkSourceOption").map(String::as_str),
             Some("AzureStorage")
@@ -348,7 +447,9 @@ mod tests {
             Some("my-rg")
         );
         assert_eq!(
-            t.inputs.get("cleanDestinationDirectory").map(String::as_str),
+            t.inputs
+                .get("cleanDestinationDirectory")
+                .map(String::as_str),
             Some("false")
         );
         // LocalDirectory keys must not be emitted.
@@ -358,8 +459,7 @@ mod tests {
     #[test]
     fn azure_storage_optional_absent_when_unset() {
         let spec = AzureStorageSpec::new("acct", "container", "path/jdk.tar.gz", "/jdk");
-        let t =
-            JavaToolInstaller::azure_storage("11", JdkArchitecture::X64, spec).into_step();
+        let t = JavaToolInstaller::azure_storage("11", JdkArchitecture::X64, spec).into_step();
         assert!(t.inputs.get("azureResourceGroupName").is_none());
         assert!(t.inputs.get("cleanDestinationDirectory").is_none());
         assert!(t.inputs.get("createExtractDirectory").is_none());

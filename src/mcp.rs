@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
-use crate::safeoutputs::{
+use crate::safe_outputs::{
     AddBuildTagParams, AddBuildTagResult, AddPrCommentParams, AddPrCommentResult,
     CommentOnWorkItemParams, CommentOnWorkItemResult, CreateBranchParams, CreateBranchResult,
     CreateGitTagParams, CreateGitTagResult, CreateIssueParams, CreateIssueResult, CreatePrParams,
@@ -55,7 +55,7 @@ fn generate_short_id() -> String {
 }
 
 // Re-export from tools module
-use crate::safeoutputs::{ALWAYS_ON_TOOLS, DEBUG_ONLY_TOOLS};
+use crate::safe_outputs::{ALWAYS_ON_TOOLS, DEBUG_ONLY_TOOLS};
 
 // ============================================================================
 // Git merge-base helpers (used by find_merge_base)
@@ -1145,7 +1145,7 @@ may apply per the workflow's safe-outputs config."
         // Validate the agent-supplied params (build id, artifact name charset,
         // path traversal / absolute / null bytes, etc.) before touching the
         // filesystem.
-        crate::safeoutputs::Validate::validate(&params.0).map_err(anyhow_to_mcp_error)?;
+        crate::safe_outputs::Validate::validate(&params.0).map_err(anyhow_to_mcp_error)?;
 
         // Resolve the agent-supplied file path against the bounding directory
         // (the agent's workspace root inside the sandbox) and verify it
@@ -1284,7 +1284,7 @@ restrictions may apply per the workflow's safe-outputs config."
             params.0.artifact_name, params.0.file_path, params.0.build_id
         );
 
-        crate::safeoutputs::Validate::validate(&params.0).map_err(anyhow_to_mcp_error)?;
+        crate::safe_outputs::Validate::validate(&params.0).map_err(anyhow_to_mcp_error)?;
 
         let resolved = self.bounding_directory.join(&params.0.file_path);
         let canonical =
@@ -1987,7 +1987,7 @@ mod tests {
     /// safe-outputs.
     #[tokio::test]
     async fn test_all_known_safe_outputs_covers_router() {
-        use crate::safeoutputs::ALL_KNOWN_SAFE_OUTPUTS;
+        use crate::safe_outputs::ALL_KNOWN_SAFE_OUTPUTS;
 
         let temp_dir = tempfile::tempdir().unwrap();
         // Pass an enable list that includes every debug-only tool so they
@@ -2010,7 +2010,7 @@ mod tests {
             }
             assert!(
                 ALL_KNOWN_SAFE_OUTPUTS.contains(&tool_name.as_str()),
-                "Tool '{}' is registered in the router but missing from ALL_KNOWN_SAFE_OUTPUTS in src/safeoutputs/mod.rs",
+                "Tool '{}' is registered in the router but missing from ALL_KNOWN_SAFE_OUTPUTS in src/safe_outputs/mod.rs",
                 tool_name
             );
         }

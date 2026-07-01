@@ -83,6 +83,11 @@ pub(crate) const EXEC_CONTEXT_REPO_PATH: &str =
 /// by [`AdoScriptExtension::declarations`].
 pub(crate) const EXEC_CONTEXT_PR_SYNTH_PATH: &str =
     "/tmp/ado-aw-scripts/ado-script/exec-context-pr-synth.js";
+/// Path to the safe-outputs approval-summary bundle inside the unpacked
+/// `ado-script.zip`. Runs at the end of the Agent job to render the proposed
+/// safe outputs to a sanitized markdown summary tab.
+pub(crate) const APPROVAL_SUMMARY_PATH: &str =
+    "/tmp/ado-aw-scripts/ado-script/approval-summary.js";
 const RELEASE_BASE_URL: &str = "https://github.com/githubnext/ado-aw/releases/download";
 
 /// Single always-on extension that owns all `ado-script` bundle wiring.
@@ -142,6 +147,12 @@ pub struct AdoScriptExtension {
     /// build-out — see plan.md) will activate. Always-on capability,
     /// default OFF (opt-in).
     pub exec_context_repo_active: bool,
+    /// Whether the safe-outputs approval-summary step will run at the
+    /// end of the Agent job. True whenever the workflow enables any
+    /// safe-output tool. When true the Agent-job install/download must
+    /// fire so that `approval-summary.js` is present for the
+    /// end-of-job render step (emitted by `build_agent_job`).
+    pub safe_outputs_summary_active: bool,
     /// PR trigger config required to build `PR_SYNTH_SPEC`. `Some(_)`
     /// is the single source of truth for "synthetic-from-ci path is
     /// active for this agent" — `is_some()` replaces what used to be a
@@ -337,7 +348,15 @@ impl AdoScriptExtension {
 /// pulled from the Azure DevOps Artifacts feed (NuGet) instead of GitHub
 /// Releases; the `.nupkg` is unzipped and `ado-script.zip` relocated, then
 /// verified and unpacked exactly as in the GitHub path.
-fn install_and_download_steps_typed(supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
+///
+/// Bundles are unpacked into `/tmp/ado-aw-scripts/` so the consumer
+/// references `/tmp/ado-aw-scripts/ado-script/<bundle>.js`. Shared by the
+/// Agent/Setup jobs (via the extension's declarations) and the Conclusion
+/// job (via [`crate::compile::agentic_pipeline`]) so the supply-chain
+/// mirror and unzip layout stay consistent across every consumer.
+pub(crate) fn install_and_download_steps_typed(
+    supply_chain: Option<&SupplyChainConfig>,
+) -> Vec<Step> {
     let version = env!("CARGO_PKG_VERSION");
     let install = {
         let mut t = UseNode::new("22.x").into_step();
@@ -414,11 +433,39 @@ fn install_and_download_steps_typed(supply_chain: Option<&SupplyChainConfig>) ->
     vec![Step::Task(install), Step::Bash(download)]
 }
 
+/// Path-anchor ADO variables exposed to the agent prompt via the runtime
+/// import resolver. The compiler owns this allowlist; `import.js`
+/// substitutes only the `$(name)` tokens it is handed — it never reads
+/// these from the environment (see
+/// `scripts/ado-script/src/import/index.ts`). Each entry is both the
+/// substitution key and the ADO macro name, so the resolver emits
+/// `--var "<name>=$(<name>)"` and ADO expands the macro at runtime before
+/// node runs. Keep this list minimal and non-secret — anything added here
+/// is interpolated verbatim into the (potentially untrusted) agent prompt.
+///
+/// NOTE: each var is emitted as `--var "<name>=$(<name>)"`. If ADO ever
+/// expanded a value containing a literal `"` (e.g. a user-influenced
+/// variable added to this list), it would break bash argument parsing in
+/// the resolver step — the same pre-existing exposure as the adjacent
+/// `--base "$(Build.SourcesDirectory)"`. The current entries are
+/// ADO-controlled path anchors that cannot contain `"`, so this is safe;
+/// re-quote (or shell-escape) before adding any user-influenced variable.
+const PROMPT_ADO_VARS: &[&str] = &["Build.SourcesDirectory", "Build.Repository.Name"];
+
 /// The resolver step that expands runtime import markers in the agent prompt.
 fn resolver_step_typed() -> Step {
+    // `--var "<name>=$(<name>)"` for each allowlisted path-anchor var. ADO
+    // substitutes the `$(...)` macro into the bash arg at runtime, so
+    // import.js receives the concrete value and can replace `$(<name>)`
+    // occurrences in the prompt — giving the same result whether imports
+    // are inlined at compile time or resolved here at runtime.
+    let var_flags: String = PROMPT_ADO_VARS
+        .iter()
+        .map(|name| format!(" --var \"{name}=$({name})\""))
+        .collect();
     let script = format!(
         "set -eo pipefail\n\
-         node '{IMPORT_EVAL_PATH}' /tmp/awf-tools/agent-prompt.md --base \"$(Build.SourcesDirectory)\"\n"
+         node '{IMPORT_EVAL_PATH}' /tmp/awf-tools/agent-prompt.md --base \"$(Build.SourcesDirectory)\"{var_flags}\n"
     );
     Step::Bash(
         BashStep::new("Resolve runtime imports (agent prompt)", script)
@@ -621,6 +668,7 @@ impl CompilerExtension for AdoScriptExtension {
             || self.exec_context_schedule_active
             || self.exec_context_pr_checks_active
             || self.exec_context_repo_active
+            || self.safe_outputs_summary_active
         {
             agent_prepare_steps.extend(install_and_download_steps_typed(self.supply_chain.as_ref()));
             if import_active {
@@ -824,6 +872,7 @@ mod tests {
             exec_context_schedule_active: false,
             exec_context_pr_checks_active: false,
             exec_context_repo_active: false,
+            safe_outputs_summary_active: false,
             pr_trigger_for_synth: None,
             supply_chain: None,
         }
@@ -893,6 +942,7 @@ mod tests {
             exec_context_schedule_active: false,
             exec_context_pr_checks_active: false,
             exec_context_repo_active: false,
+            safe_outputs_summary_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -949,6 +999,7 @@ mod tests {
             exec_context_schedule_active: false,
             exec_context_pr_checks_active: false,
             exec_context_repo_active: false,
+            safe_outputs_summary_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -1046,6 +1097,23 @@ mod tests {
             !resolver.script.contains("ADO_AW_IMPORT_BASE"),
             "resolver step must not export ADO_AW_IMPORT_BASE — base is passed via --base, not env"
         );
+        // Each path-anchor var is passed as `--var "<name>=$(<name>)"` so
+        // ADO expands the macro at runtime and import.js substitutes the
+        // concrete value into the prompt (consistent with inlined mode).
+        assert!(
+            resolver
+                .script
+                .contains("--var \"Build.SourcesDirectory=$(Build.SourcesDirectory)\""),
+            "resolver step must pass Build.SourcesDirectory as a --var, got: {}",
+            resolver.script
+        );
+        assert!(
+            resolver
+                .script
+                .contains("--var \"Build.Repository.Name=$(Build.Repository.Name)\""),
+            "resolver step must pass Build.Repository.Name as a --var, got: {}",
+            resolver.script
+        );
     }
 
     #[test]
@@ -1113,6 +1181,7 @@ mod tests {
             exec_context_schedule_active: false,
             exec_context_pr_checks_active: false,
             exec_context_repo_active: false,
+            safe_outputs_summary_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -1645,6 +1714,7 @@ mod tests {
             exec_context_schedule_active: false,
             exec_context_pr_checks_active: false,
             exec_context_repo_active: false,
+            safe_outputs_summary_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],

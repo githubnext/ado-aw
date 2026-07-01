@@ -165,7 +165,7 @@ fn sanitize_for_markdown(s: &str) -> String {
 /// (which contains the `include_stats` field).
 pub fn append_stats_to_body(
     body: &str,
-    ctx: &crate::safeoutputs::ExecutionContext,
+    ctx: &crate::safe_outputs::ExecutionContext,
     include_stats: bool,
 ) -> String {
     if !include_stats {
@@ -361,7 +361,7 @@ mod tests {
 
     #[test]
     fn test_append_stats_to_body_opt_out() {
-        let ctx = crate::safeoutputs::ExecutionContext {
+        let ctx = crate::safe_outputs::ExecutionContext {
             agent_stats: Some(AgentStats {
                 agent_name: "test".to_string(),
                 model: Some("model".to_string()),
@@ -378,13 +378,13 @@ mod tests {
 
     #[test]
     fn test_append_stats_to_body_no_stats() {
-        let ctx = crate::safeoutputs::ExecutionContext::default(); // agent_stats: None
+        let ctx = crate::safe_outputs::ExecutionContext::default(); // agent_stats: None
         assert_eq!(append_stats_to_body("body", &ctx, true), "body");
     }
 
     #[test]
     fn test_append_stats_to_body_with_stats() {
-        let ctx = crate::safeoutputs::ExecutionContext {
+        let ctx = crate::safe_outputs::ExecutionContext {
             agent_stats: Some(AgentStats {
                 agent_name: "test".to_string(),
                 model: Some("model".to_string()),

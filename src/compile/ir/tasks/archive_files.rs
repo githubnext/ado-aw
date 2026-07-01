@@ -1,14 +1,19 @@
 //! Typed builder for `ArchiveFiles@2`.
 
-use super::common::bool_input;
+use super::common::{bool_input, de_opt_bool_flex};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Archive format for [`ArchiveFiles`] (`archiveType` input).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum ArchiveType {
+    #[serde(rename = "zip")]
     Zip,
+    #[serde(rename = "7z")]
     SevenZip,
+    #[serde(rename = "tar")]
     Tar,
+    #[serde(rename = "wim")]
     Wim,
 }
 
@@ -26,11 +31,15 @@ impl ArchiveType {
 
 /// Tar compression for [`ArchiveFiles`] (`tarCompression` input, only when
 /// `archiveType = tar`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum TarCompression {
+    #[serde(rename = "gz")]
     Gz,
+    #[serde(rename = "bz2")]
     Bz2,
+    #[serde(rename = "xz")]
     Xz,
+    #[serde(rename = "none")]
     None,
 }
 
@@ -48,13 +57,19 @@ impl TarCompression {
 
 /// 7-Zip compression level for [`ArchiveFiles`] (`sevenZipCompression` input,
 /// only when `archiveType = 7z`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum SevenZipCompression {
+    #[serde(rename = "ultra")]
     Ultra,
+    #[serde(rename = "maximum")]
     Maximum,
+    #[serde(rename = "normal")]
     Normal,
+    #[serde(rename = "fast")]
     Fast,
+    #[serde(rename = "fastest")]
     Fastest,
+    #[serde(rename = "none")]
     None,
 }
 
@@ -78,26 +93,42 @@ impl SevenZipCompression {
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/archive-files-v2>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArchiveFiles {
+    #[serde(rename = "rootFolderOrFile")]
     root_folder_or_file: String,
+    #[serde(rename = "archiveFile")]
     archive_file: String,
+    #[serde(rename = "archiveType", default)]
     archive_type: Option<ArchiveType>,
+    #[serde(
+        rename = "includeRootFolder",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     include_root_folder: Option<bool>,
+    #[serde(
+        rename = "replaceExistingArchive",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     replace_existing_archive: Option<bool>,
+    #[serde(rename = "sevenZipCompression", default)]
     seven_zip_compression: Option<SevenZipCompression>,
+    #[serde(rename = "tarCompression", default)]
     tar_compression: Option<TarCompression>,
+    #[serde(default, deserialize_with = "de_opt_bool_flex")]
     verbose: Option<bool>,
+    #[serde(default, deserialize_with = "de_opt_bool_flex")]
     quiet: Option<bool>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 
 impl ArchiveFiles {
     /// Required inputs: `rootFolderOrFile` and `archiveFile`.
-    pub fn new(
-        root_folder_or_file: impl Into<String>,
-        archive_file: impl Into<String>,
-    ) -> Self {
+    pub fn new(root_folder_or_file: impl Into<String>, archive_file: impl Into<String>) -> Self {
         Self {
             root_folder_or_file: root_folder_or_file.into(),
             archive_file: archive_file.into(),
@@ -223,8 +254,14 @@ mod tests {
             .include_root_folder(false)
             .into_step();
         assert_eq!(t.inputs.get("archiveType").map(String::as_str), Some("tar"));
-        assert_eq!(t.inputs.get("tarCompression").map(String::as_str), Some("gz"));
-        assert_eq!(t.inputs.get("includeRootFolder").map(String::as_str), Some("false"));
+        assert_eq!(
+            t.inputs.get("tarCompression").map(String::as_str),
+            Some("gz")
+        );
+        assert_eq!(
+            t.inputs.get("includeRootFolder").map(String::as_str),
+            Some("false")
+        );
     }
 
     #[test]
@@ -234,6 +271,9 @@ mod tests {
             .seven_zip_compression(SevenZipCompression::Ultra)
             .into_step();
         assert_eq!(t.inputs.get("archiveType").map(String::as_str), Some("7z"));
-        assert_eq!(t.inputs.get("sevenZipCompression").map(String::as_str), Some("ultra"));
+        assert_eq!(
+            t.inputs.get("sevenZipCompression").map(String::as_str),
+            Some("ultra")
+        );
     }
 }

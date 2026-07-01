@@ -3,17 +3,20 @@
 //! ADO task reference:
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/manual-validation-v1>
 
-use super::common::{push_bool, push_opt};
+use super::common::{de_opt_bool_flex, push_bool, push_opt};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// What the task should do when the timeout elapses with no human response.
 ///
 /// Maps to the `onTimeout` input of `ManualValidation@1`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum OnTimeout {
     /// Automatically reject the run on timeout (ADO default).
+    #[serde(rename = "reject")]
     Reject,
     /// Automatically resume (approve) the run on timeout.
+    #[serde(rename = "resume")]
     Resume,
 }
 
@@ -35,13 +38,26 @@ impl OnTimeout {
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/manual-validation-v1>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ManualValidation {
+    #[serde(rename = "notifyUsers")]
     notify_users: String,
+    #[serde(rename = "approvers", default)]
     approvers: Option<String>,
+    #[serde(
+        rename = "allowApproversToApproveTheirOwnRuns",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     allow_approvers_to_approve_their_own_runs: Option<bool>,
+    #[serde(rename = "instructions", default)]
     instructions: Option<String>,
+    #[serde(rename = "onTimeout", default)]
     on_timeout: Option<OnTimeout>,
+    #[serde(skip)]
+    timeout_minutes: Option<u32>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 
@@ -58,6 +74,7 @@ impl ManualValidation {
             allow_approvers_to_approve_their_own_runs: None,
             instructions: None,
             on_timeout: None,
+            timeout_minutes: None,
             display_name: None,
         }
     }
@@ -91,6 +108,18 @@ impl ManualValidation {
         self
     }
 
+    /// Bound the validation's pending period via the **step-level**
+    /// `timeoutInMinutes` control option (NOT a task input — `ManualValidation@1`
+    /// has none). This is the timeout that triggers the task's `onTimeout`
+    /// handler: when it elapses the task applies `reject`/`resume` and completes
+    /// gracefully. A *job*-level timeout, by contrast, cancels the job and never
+    /// lets the task apply `onTimeout: resume`. `0`/`None` inherits the
+    /// pipeline default.
+    pub fn timeout_minutes(mut self, minutes: u32) -> Self {
+        self.timeout_minutes = Some(minutes);
+        self
+    }
+
     /// Override the default `displayName` (`"Manual Validation"`).
     pub fn with_display_name(mut self, value: impl Into<String>) -> Self {
         self.display_name = Some(value.into());
@@ -115,6 +144,11 @@ impl ManualValidation {
         if let Some(v) = self.on_timeout {
             t = t.with_input("onTimeout", v.as_ado_str());
         }
+        if let Some(mins) = self.timeout_minutes {
+            // Step-level `timeoutInMinutes` — the bound that fires the task's
+            // `onTimeout` handler (see `timeout_minutes`). Lowered by the IR.
+            t.timeout = Some(std::time::Duration::from_secs(60 * (mins as u64)));
+        }
         t
     }
 }
@@ -137,17 +171,17 @@ mod tests {
     #[test]
     fn empty_notify_users_is_valid() {
         let t = ManualValidation::new("").into_step();
-        assert_eq!(
-            t.inputs.get("notifyUsers").map(String::as_str),
-            Some("")
-        );
+        assert_eq!(t.inputs.get("notifyUsers").map(String::as_str), Some(""));
     }
 
     #[test]
     fn optional_inputs_not_emitted_by_default() {
         let t = ManualValidation::new("team@example.com").into_step();
         assert!(t.inputs.get("approvers").is_none());
-        assert!(t.inputs.get("allowApproversToApproveTheirOwnRuns").is_none());
+        assert!(t
+            .inputs
+            .get("allowApproversToApproveTheirOwnRuns")
+            .is_none());
         assert!(t.inputs.get("instructions").is_none());
         assert!(t.inputs.get("onTimeout").is_none());
     }
@@ -209,6 +243,21 @@ mod tests {
             t.inputs.get("onTimeout").map(String::as_str),
             Some("reject")
         );
+    }
+
+    #[test]
+    fn timeout_minutes_sets_step_timeout_not_an_input() {
+        let t = ManualValidation::new("").timeout_minutes(120).into_step();
+        // It is a step-level control option (lowers to timeoutInMinutes), not
+        // a task input — ManualValidation@1 has no `timeout` input.
+        assert!(t.inputs.get("timeout").is_none());
+        assert_eq!(t.timeout, Some(std::time::Duration::from_secs(120 * 60)));
+    }
+
+    #[test]
+    fn no_timeout_minutes_leaves_step_timeout_unset() {
+        let t = ManualValidation::new("").into_step();
+        assert!(t.timeout.is_none());
     }
 
     #[test]

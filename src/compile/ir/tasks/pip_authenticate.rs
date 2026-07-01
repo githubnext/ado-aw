@@ -1,7 +1,8 @@
 //! Typed builder for `PipAuthenticate@1`.
 
-use super::common::bool_input;
+use super::common::{bool_input, de_opt_bool_flex};
 use crate::compile::ir::step::TaskStep;
+use serde::Deserialize;
 
 /// Builder for a [`TaskStep`] invoking `PipAuthenticate@1`.
 ///
@@ -20,13 +21,24 @@ use crate::compile::ir::step::TaskStep;
 ///
 /// ADO task reference:
 /// <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/pip-authenticate-v1>
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PipAuthenticate {
+    #[serde(rename = "azureDevOpsServiceConnection", default)]
     azure_devops_service_connection: Option<String>,
+    #[serde(rename = "feedUrl", default)]
     feed_url: Option<String>,
+    #[serde(rename = "artifactFeeds", default)]
     artifact_feeds: Option<String>,
+    #[serde(rename = "pythonDownloadServiceConnections", default)]
     python_download_service_connections: Option<String>,
+    #[serde(
+        rename = "onlyAddExtraIndex",
+        default,
+        deserialize_with = "de_opt_bool_flex"
+    )]
     only_add_extra_index: Option<bool>,
+    #[serde(skip)]
     display_name: Option<String>,
 }
 

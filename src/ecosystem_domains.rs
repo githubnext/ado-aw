@@ -273,4 +273,12 @@ mod tests {
         let result = get_ecosystem_domains_inner("python", 0);
         assert!(!result.is_empty(), "depth 0 should return normal results");
     }
+
+    #[test]
+    fn test_get_lean_domains() {
+        let domains = get_ecosystem_domains("lean");
+        assert!(domains.contains(&"elan.lean-lang.org".to_string()));
+        assert!(domains.contains(&"leanprover.github.io".to_string()));
+        assert!(domains.contains(&"lean-lang.org".to_string()));
+    }
 }
