@@ -442,6 +442,14 @@ pub(crate) fn install_and_download_steps_typed(
 /// `--var "<name>=$(<name>)"` and ADO expands the macro at runtime before
 /// node runs. Keep this list minimal and non-secret — anything added here
 /// is interpolated verbatim into the (potentially untrusted) agent prompt.
+///
+/// NOTE: each var is emitted as `--var "<name>=$(<name>)"`. If ADO ever
+/// expanded a value containing a literal `"` (e.g. a user-influenced
+/// variable added to this list), it would break bash argument parsing in
+/// the resolver step — the same pre-existing exposure as the adjacent
+/// `--base "$(Build.SourcesDirectory)"`. The current entries are
+/// ADO-controlled path anchors that cannot contain `"`, so this is safe;
+/// re-quote (or shell-escape) before adding any user-influenced variable.
 const PROMPT_ADO_VARS: &[&str] = &["Build.SourcesDirectory", "Build.Repository.Name"];
 
 /// The resolver step that expands runtime import markers in the agent prompt.

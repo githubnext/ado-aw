@@ -109,6 +109,10 @@ function parseArgs(argv: string[]): {
       if (eq <= 0) {
         fail([`--var expects name=value, got: ${sanitizeForVsoMessage(value)}`]);
       }
+      // Last-write-wins on a duplicate name. The compiler emits each var at
+      // most once (see PROMPT_ADO_VARS in
+      // src/compile/extensions/ado_script.rs), so this only matters for
+      // hand-run invocations.
       vars.set(value.slice(0, eq), value.slice(eq + 1));
       i += 2;
     } else {
