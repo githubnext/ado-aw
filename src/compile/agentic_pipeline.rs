@@ -3038,23 +3038,6 @@ fn dedent(s: &str) -> String {
     out
 }
 
-/// Parse a legacy YAML env block (`env:\n  KEY: VALUE\n  KEY: VALUE`)
-/// into typed `(name, EnvValue)` pairs preserving insertion order.
-///
-/// Each value is round-tripped through `serde_yaml` so quoted forms
-/// (`"true"`, `"file"`) become bare literals and ADO macros (`$(X)`)
-/// land as `EnvValue::PipelineVar` so the lowering pass re-emits the
-/// macro form. Anything else lands as `EnvValue::Literal`.
-///
-/// # Errors
-///
-/// Returns `Err` if the input fails to parse as YAML or does not
-/// match the `env: { KEY: VALUE, … }` shape. The inputs are
-/// compiler-generated from validated front-matter, so a parse
-/// failure here indicates a compiler bug rather than user error —
-/// surfacing it loudly is much better than the previous silent
-/// empty-vec fallback (which produced runtime "GITHUB_TOKEN missing"
-/// failures in the pipeline with no compile-time signal).
 /// Classify a single raw env-var value string into a typed [`EnvValue`].
 ///
 /// An ADO **macro** `$(NAME)` (with no nested `$` or `(`) becomes an
@@ -3062,6 +3045,13 @@ fn dedent(s: &str) -> String {
 /// anything else becomes an [`EnvValue::Literal`]. Single source of truth for
 /// macro-vs-literal classification, shared by [`parse_env_block`] (which also
 /// handles YAML-typed scalars) and the detection provider-env path.
+///
+/// Only a value that is *exactly* one `$(NAME)` wrapper is treated as a macro.
+/// Compound values (e.g. `$(A)$(B)`, or `prefix-$(X)`) intentionally fall through
+/// to `Literal` — they are emitted as a quoted YAML scalar. This is still
+/// correct at runtime: ADO expands `$( )` macro references inside step-env values
+/// regardless of quoting, so both references still expand. The only observable
+/// difference is the quoted-vs-unquoted rendering in the compiled YAML.
 fn env_value_from_str(raw: &str) -> super::ir::env::EnvValue {
     use super::ir::env::EnvValue;
     if let Some(inner) = raw.strip_prefix("$(").and_then(|s| s.strip_suffix(')'))
@@ -3074,6 +3064,24 @@ fn env_value_from_str(raw: &str) -> super::ir::env::EnvValue {
     }
 }
 
+/// Parse a legacy YAML env block (`env:\n  KEY: VALUE\n  KEY: VALUE`)
+/// into typed `(name, EnvValue)` pairs preserving insertion order.
+///
+/// Each value is round-tripped through `serde_yaml` so quoted forms
+/// (`"true"`, `"file"`) become bare literals; string values are then
+/// classified by [`env_value_from_str`] (ADO macros → `PipelineVar`,
+/// otherwise `Literal`) and non-string scalars are preserved as
+/// `RawYamlScalar`.
+///
+/// # Errors
+///
+/// Returns `Err` if the input fails to parse as YAML or does not
+/// match the `env: { KEY: VALUE, … }` shape. The inputs are
+/// compiler-generated from validated front-matter, so a parse
+/// failure here indicates a compiler bug rather than user error —
+/// surfacing it loudly is much better than the previous silent
+/// empty-vec fallback (which produced runtime "GITHUB_TOKEN missing"
+/// failures in the pipeline with no compile-time signal).
 fn parse_env_block(yaml_block: &str) -> Result<Vec<(String, super::ir::env::EnvValue)>> {
     use super::ir::env::EnvValue;
     if yaml_block.trim().is_empty() {
@@ -3359,6 +3367,30 @@ mod tests {
             pairs[0].1,
             crate::compile::ir::env::EnvValue::PipelineVar(ref name) if name == "GITHUB_TOKEN"
         ));
+    }
+
+    #[test]
+    fn env_value_from_str_single_macro_is_pipeline_var() {
+        use crate::compile::ir::env::EnvValue;
+        assert!(matches!(
+            env_value_from_str("$(Setup.Token)"),
+            EnvValue::PipelineVar(ref n) if n == "Setup.Token"
+        ));
+    }
+
+    #[test]
+    fn env_value_from_str_compound_or_partial_macro_is_literal() {
+        use crate::compile::ir::env::EnvValue;
+        // Concatenated / partial macros are NOT single-wrapper macros, so they
+        // fall through to Literal. They are still correct at runtime: ADO expands
+        // $( ) references inside the (quoted) literal value. This pins the
+        // documented classification boundary.
+        for raw in ["$(A)$(B)", "prefix-$(X)", "$(X)-suffix", "plain-literal"] {
+            assert!(
+                matches!(env_value_from_str(raw), EnvValue::Literal(ref v) if v == raw),
+                "value {raw:?} should classify as a verbatim Literal"
+            );
+        }
     }
 
     #[test]

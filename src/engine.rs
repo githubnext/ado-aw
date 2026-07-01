@@ -587,6 +587,16 @@ fn copilot_env(engine_config: &EngineConfig) -> Result<String> {
 /// build typed `EnvValue`s directly — no render-to-YAML-then-reparse round-trip,
 /// and no implicit coupling between a quoting format and a re-parser. Each entry
 /// is validated with [`validate_engine_env_entry`], identical to the agent path.
+///
+/// **Scope note — two distinct provider-key sets, do not conflate:**
+/// - This function forwards **every** `COPILOT_PROVIDER_*` key (prefix match) to
+///   the detection step's env, so detection routes to the same provider as the
+///   agent (including non-credential config like `COPILOT_PROVIDER_TYPE` /
+///   `COPILOT_PROVIDER_WIRE_API`). Unknown extras are harmless — the CLI ignores
+///   keys it doesn't recognise.
+/// - The narrower [`COPILOT_BYOM_CREDENTIAL_ENV_KEYS`] set (via
+///   [`copilot_byom_credential_keys`]) drives BYOM *activation* and the AWF
+///   `--exclude-env` isolation flags — only the actual credential-bearing keys.
 pub fn copilot_provider_env(engine_config: &EngineConfig) -> Result<Vec<(String, String)>> {
     let Some(env_map) = engine_config.env() else {
         return Ok(Vec::new());
