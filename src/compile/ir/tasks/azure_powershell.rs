@@ -83,6 +83,15 @@ impl<'de> Deserialize<'de> for AzurePowerShellVersion {
         let token = String::deserialize(deserializer)?;
         match token.as_str() {
             "LatestVersion" => Ok(Self::Latest),
+            // Sentinel: the flat ADO shape carries the pinned version in a
+            // *separate* `preferredAzurePowerShellVersion` input, not inside
+            // this one, so on deserialization we only know it's `OtherVersion`
+            // here. The empty string is a placeholder; the real value is
+            // validated via the struct's own `preferred_azure_powershell_version`
+            // field. `into_step()` is never called on a deserialized value (the
+            // validation path only checks that it *parses*), and in the builder
+            // path this variant is constructed with the real version, so the
+            // sentinel never reaches emitted YAML.
             "OtherVersion" => Ok(Self::Preferred(String::new())),
             other => Err(serde::de::Error::unknown_variant(
                 other,

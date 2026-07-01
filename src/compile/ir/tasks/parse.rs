@@ -612,6 +612,13 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_azure_powershell_file_dispatch() {
+        assert_roundtrips(
+            azure_powershell::AzurePowerShell::file("arm-conn", "scripts/deploy.ps1").into_step(),
+        );
+    }
+
+    #[test]
     fn roundtrip_python_script_file_dispatch() {
         assert_roundtrips(python_script::PythonScript::file("scripts/run.py").into_step());
     }

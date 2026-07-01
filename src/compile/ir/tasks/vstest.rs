@@ -50,6 +50,15 @@ pub(crate) fn validate_inputs(inputs: Value) -> Result<(), String> {
     result.map_err(|e| format!("testSelector `{selector}`: {e}"))
 }
 
+/// Type-checks the inputs shared by every `testSelector` variant.
+///
+/// Note the backing [`VsTestCommonInputs`] deliberately does **not** use
+/// `deny_unknown_fields`: this runs on the full input map, which still contains
+/// the *selector-specific* inputs (e.g. `testAssemblyVer2`, `testPlan`), so
+/// denying unknowns here would reject those valid fields. Typos are still
+/// caught — an unknown/misspelled input survives `remove_common_inputs` and is
+/// reported by the selector variant's own `deny_unknown_fields` (which names the
+/// offending field, attributed to the selector rather than to "common inputs").
 fn validate_common(inputs: &Value) -> Result<(), serde_yaml::Error> {
     serde_yaml::from_value::<VsTestCommonInputs>(inputs.clone()).map(drop)
 }
