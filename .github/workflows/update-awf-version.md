@@ -29,6 +29,8 @@ safe-outputs:
     required-title-prefix: "[deps-release-notes] "
     max: 10
     state-reason: "not_planned"
+  threat-detection:
+    max-ai-credits: -1
 max-ai-credits: -1
 max-daily-ai-credits: -1
 ---
