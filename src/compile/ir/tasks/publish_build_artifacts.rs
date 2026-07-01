@@ -9,7 +9,7 @@
 //! ADO task reference:
 //! <https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/publish-build-artifacts-v1>
 
-use super::common::{de_opt_bool_flex, push_bool, push_opt};
+use super::common::{de_opt_bool_flex, de_opt_str_or_int, push_bool, push_opt};
 use crate::compile::ir::step::TaskStep;
 use serde::Deserialize;
 use serde_yaml::Value;
@@ -116,7 +116,11 @@ pub struct FilePathLocation {
     #[serde(rename = "Parallel", default, deserialize_with = "de_opt_bool_flex")]
     parallel: Option<bool>,
     /// `ParallelCount` — number of threads for parallel copy (1–128, default 8).
-    #[serde(rename = "ParallelCount", default)]
+    #[serde(
+        rename = "ParallelCount",
+        default,
+        deserialize_with = "de_opt_str_or_int"
+    )]
     parallel_count: Option<String>,
     /// `FileCopyOptions` — additional robocopy arguments.
     #[serde(rename = "FileCopyOptions", default)]
@@ -260,6 +264,37 @@ impl PublishBuildArtifacts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Drift guard for the two-pass validator: `remove_common_inputs` must stay
+    /// in sync with `PublishBuildArtifactsCommonInputs`. A step that sets every
+    /// common input must validate for both locations — a common field added to
+    /// the struct but forgotten in the removal list would survive into the
+    /// variant dispatch and trip `deny_unknown_fields`, failing this test.
+    #[test]
+    fn all_common_inputs_validate_across_both_locations() {
+        let common = concat!(
+            "\nPathtoPublish: $(Build.ArtifactStagingDirectory)",
+            "\nArtifactName: drop",
+            "\nMaxArtifactSize: '0'",
+            "\nStoreAsTar: true",
+        );
+
+        let container =
+            serde_yaml::from_str(&format!("publishLocation: Container{common}")).unwrap();
+        assert!(
+            validate_inputs(container).is_ok(),
+            "common inputs must validate for Container"
+        );
+
+        let file_path = serde_yaml::from_str(&format!(
+            "publishLocation: FilePath\nTargetPath: \\\\share\\drops{common}"
+        ))
+        .unwrap();
+        assert!(
+            validate_inputs(file_path).is_ok(),
+            "common inputs must validate for FilePath"
+        );
+    }
 
     #[test]
     fn container_defaults() {

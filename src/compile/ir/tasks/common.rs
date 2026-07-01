@@ -52,11 +52,15 @@ where
     match Option::<BoolOrStr>::deserialize(deserializer)? {
         None => Ok(None),
         Some(BoolOrStr::Bool(b)) => Ok(Some(b)),
-        Some(BoolOrStr::Str(s)) => match s.as_str() {
+        // Accept the ADO string form case-insensitively: serde_yaml (YAML 1.2)
+        // only treats lowercase `true`/`false` as native booleans, so an
+        // authored `CleanTargetFolder: True` arrives here as the string
+        // `"True"` — which ADO would accept, so we must not flag it.
+        Some(BoolOrStr::Str(s)) => match s.to_ascii_lowercase().as_str() {
             "true" => Ok(Some(true)),
             "false" => Ok(Some(false)),
-            other => Err(serde::de::Error::custom(format!(
-                "expected a boolean or \"true\"/\"false\", got {other:?}"
+            _ => Err(serde::de::Error::custom(format!(
+                "expected a boolean or \"true\"/\"false\", got {s:?}"
             ))),
         },
     }

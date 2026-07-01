@@ -503,6 +503,55 @@ impl VsTest {
 mod tests {
     use super::*;
 
+    /// Drift guard for the two-pass validator: `remove_common_inputs` must stay
+    /// in sync with `VsTestCommonInputs`. A step that sets **every** common input
+    /// must validate for all three selectors — if a common field were added to
+    /// the struct but forgotten in the removal list, the leftover key would trip
+    /// the variant's `deny_unknown_fields` and this test would fail.
+    #[test]
+    fn all_common_inputs_validate_across_every_selector() {
+        let common = concat!(
+            "\nsearchFolder: $(System.DefaultWorkingDirectory)",
+            "\nresultsFolder: $(Agent.TempDirectory)/results",
+            "\nrunSettingsFile: tests.runsettings",
+            "\noverrideTestrunParameters: -key value",
+            "\npathtoCustomTestAdapters: adapters/",
+            "\nrunInParallel: true",
+            "\nrunTestsInIsolation: true",
+            "\ncodeCoverageEnabled: true",
+            "\ntestRunTitle: My Tests",
+            "\nplatform: x64",
+            "\nconfiguration: Release",
+            "\npublishRunAttachments: true",
+            "\notherConsoleOptions: /Blame",
+            "\nvsTestVersion: latest",
+        );
+
+        let assemblies = serde_yaml::from_str(&format!(
+            "testSelector: testAssemblies\ntestAssemblyVer2: '**/*tests.dll'{common}"
+        ))
+        .unwrap();
+        assert!(
+            validate_inputs(assemblies).is_ok(),
+            "common inputs must validate for testAssemblies"
+        );
+
+        let plan = serde_yaml::from_str(&format!(
+            "testSelector: testPlan\ntestPlan: '1'\ntestSuite: '2'\ntestConfiguration: '3'{common}"
+        ))
+        .unwrap();
+        assert!(
+            validate_inputs(plan).is_ok(),
+            "common inputs must validate for testPlan"
+        );
+
+        let run = serde_yaml::from_str(&format!("testSelector: testRun{common}")).unwrap();
+        assert!(
+            validate_inputs(run).is_ok(),
+            "common inputs must validate for testRun"
+        );
+    }
+
     #[test]
     fn assemblies_sets_selector_and_pattern() {
         let t = VsTest::assemblies(VsTestAssemblies::new("**\\bin\\**\\*tests.dll")).into_step();

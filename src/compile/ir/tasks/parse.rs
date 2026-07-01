@@ -275,6 +275,26 @@ mod tests {
     }
 
     #[test]
+    fn copy_files_capitalized_bool_is_ok() {
+        // serde_yaml (YAML 1.2) parses `True`/`False` as strings, not bools;
+        // ADO accepts them, so the flexible bool deserializer must too.
+        let step = yaml(
+            r#"
+            task: CopyFiles@2
+            inputs:
+              Contents: "**"
+              TargetFolder: out
+              CleanTargetFolder: "True"
+              OverWrite: "FALSE"
+            "#,
+        );
+        assert!(
+            validate_task_step(&step).expect("recognized").is_ok(),
+            "capitalized string booleans must not be rejected"
+        );
+    }
+
+    #[test]
     fn copy_files_integer_authored_retry_count_is_ok() {
         // `retryCount`/`delayBetweenRetries` are ADO string inputs, but authors
         // naturally write them as bare integers. These must validate (no
