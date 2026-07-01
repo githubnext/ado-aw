@@ -335,7 +335,7 @@ The `repository` value must be `"self"`, an alias from the `checkout:` list in t
 ### Diagnostic signals
 
 `noop`, `missing-tool`, and `missing-data` are diagnostic safe outputs.
-When `conclusion:` is configured, the always-running Conclusion job
+When `safe-outputs:` is configured, the always-running Conclusion job
 handles Azure DevOps work-item filing/commenting for these signals. See
 [docs/conclusion.md](conclusion.md).
 
