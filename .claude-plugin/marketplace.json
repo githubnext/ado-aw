@@ -2,7 +2,7 @@
   "name": "ado-aw",
   "metadata": {
     "description": "Azure DevOps Agentic Workflows (ado-aw) marketplace",
-    "version": "0.38.0"
+    "version": "0.39.0"
   },
   "owner": {
     "name": "GitHub Next",
@@ -12,9 +12,15 @@
     {
       "name": "ado-aw",
       "source": "./agency/plugins/ado-aw",
-      "version": "0.38.0",
+      "version": "0.39.0",
       "description": "Create, update, validate, operate, and debug Azure DevOps agentic workflows with ado-aw",
-      "keywords": ["azure-devops", "ado", "agentic", "pipelines", "ado-aw"]
+      "keywords": [
+        "azure-devops",
+        "ado",
+        "agentic",
+        "pipelines",
+        "ado-aw"
+      ]
     }
   ]
 }
