@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.39.0](https://github.com/githubnext/ado-aw/compare/v0.38.0...v0.39.0) (2026-07-01)
+
+
+### Features
+
+* **agency:** centralize Claude Code plugin and self-contained marketplace ([#1102](https://github.com/githubnext/ado-aw/issues/1102)) ([0635922](https://github.com/githubnext/ado-aw/commit/0635922469f0afc55be90809e50413b7253e8114))
+* **compile:** add Conclusion job for pipeline failure reporting ([#1076](https://github.com/githubnext/ado-aw/issues/1076)) ([9a1ba2f](https://github.com/githubnext/ado-aw/commit/9a1ba2f6d38fca22e0a65b66bad8237c6e5aadaa))
+* **compile:** gate high-impact safe outputs behind manual review ([#1196](https://github.com/githubnext/ado-aw/issues/1196)) ([8e76df6](https://github.com/githubnext/ado-aw/commit/8e76df6ed312475623edae4170c2506b853a096c))
+* **compile:** migrate legacy {{ workspace }} markers and validate checkout-aware paths ([#1263](https://github.com/githubnext/ado-aw/issues/1263)) ([9a01c07](https://github.com/githubnext/ado-aw/commit/9a01c07aaa4ea0f19dfe7f3a4f45a947c37c6ade))
+* **compile:** substitute ADO path-anchor variables in the agent prompt ([#1265](https://github.com/githubnext/ado-aw/issues/1265)) ([79a0f72](https://github.com/githubnext/ado-aw/commit/79a0f72c29de2abe375d9f72df6969db06374b81))
+* **engine:** allow ADO macros on Copilot BYOM provider env keys ([#1264](https://github.com/githubnext/ado-aw/issues/1264)) ([dff4c64](https://github.com/githubnext/ado-aw/commit/dff4c6410bd831551c5630d57a5dab3c2515ca4c))
+* **ir:** add typed builder for AzureCLI@2 ([#1195](https://github.com/githubnext/ado-aw/issues/1195)) ([56f7004](https://github.com/githubnext/ado-aw/commit/56f7004aba3fa461a505886438ad41a498dbb145))
+* **ir:** add typed builder for AzureContainerApps@1 ([#1200](https://github.com/githubnext/ado-aw/issues/1200)) ([4da4dff](https://github.com/githubnext/ado-aw/commit/4da4dff77eefcb82b9aa5eefbb49d95712983238))
+* **ir:** add typed builder for AzureFileCopy@6 ([#1214](https://github.com/githubnext/ado-aw/issues/1214)) ([1e8a74a](https://github.com/githubnext/ado-aw/commit/1e8a74ab7cea78f9b482b4f206142f2af5ddbf55))
+* **ir:** add typed builder for AzureFunctionApp@2 ([#1230](https://github.com/githubnext/ado-aw/issues/1230)) ([985121c](https://github.com/githubnext/ado-aw/commit/985121c3880635737e9f9225460ca7422615e5db))
+* **ir:** add typed builder for AzureResourceManagerTemplateDeployment@3 ([#1232](https://github.com/githubnext/ado-aw/issues/1232)) ([b41491a](https://github.com/githubnext/ado-aw/commit/b41491a7a0ce96a5bed5a333a3d0c06dff405e55))
+* **ir:** add typed builder for AzureWebApp@1 ([#1179](https://github.com/githubnext/ado-aw/issues/1179)) ([c9fdeb3](https://github.com/githubnext/ado-aw/commit/c9fdeb3e8e15705b967e3782ce80195baa78f791))
+* **ir:** add typed builder for BicepDeploy@0 ([#1269](https://github.com/githubnext/ado-aw/issues/1269)) ([7ac5a94](https://github.com/githubnext/ado-aw/commit/7ac5a94a73a2ba41fb6fce97323eec1f93d80728))
+* **ir:** add typed builder for DownloadBuildArtifacts@1 ([#1197](https://github.com/githubnext/ado-aw/issues/1197)) ([2971c21](https://github.com/githubnext/ado-aw/commit/2971c21745f2e2f3ec04ecf3274ce490d15ad439))
+* **ir:** add typed builder for DownloadSecureFile@1 ([#1174](https://github.com/githubnext/ado-aw/issues/1174)) ([3096eef](https://github.com/githubnext/ado-aw/commit/3096eefc71ce65502ae21a4e1f8f7586d045c3bc))
+* **ir:** add typed builder for GitHubRelease@1 ([#1164](https://github.com/githubnext/ado-aw/issues/1164)) ([0d558cc](https://github.com/githubnext/ado-aw/commit/0d558cc03eaece9da5a258772ea7f333c627f308))
+* **ir:** add typed builder for Gradle@3 ([#1113](https://github.com/githubnext/ado-aw/issues/1113)) ([2a070e0](https://github.com/githubnext/ado-aw/commit/2a070e03189df5bd95dd2448dca5ebbcfe97e423))
+* **ir:** add typed builder for HelmInstaller@1 ([#1213](https://github.com/githubnext/ado-aw/issues/1213)) ([2ad1e2b](https://github.com/githubnext/ado-aw/commit/2ad1e2b815a47a2b70aafac25e2db2ca4f14d725))
+* **ir:** add typed builder for KubernetesManifest@1 ([#1229](https://github.com/githubnext/ado-aw/issues/1229)) ([01d06cf](https://github.com/githubnext/ado-aw/commit/01d06cf17bdae6173ba31654bdef2d5db34e8262))
+* **ir:** add typed builder for ManualValidation@1 ([#1193](https://github.com/githubnext/ado-aw/issues/1193)) ([f049b32](https://github.com/githubnext/ado-aw/commit/f049b32debccc8b152b97b32546f6597b4bf7f03))
+* **ir:** add typed builder for Maven@3 ([#1122](https://github.com/githubnext/ado-aw/issues/1122)) ([cd7f0f1](https://github.com/githubnext/ado-aw/commit/cd7f0f181c860f4b9dfc7b4dc1dc925b21b8e2c4))
+* **ir:** add typed builder for MavenAuthenticate@0 ([#1161](https://github.com/githubnext/ado-aw/issues/1161)) ([3d719eb](https://github.com/githubnext/ado-aw/commit/3d719ebc9a3970edbb78e1f00698337f0b40eb7c))
+* **ir:** add typed builder for NodeTool@0 ([#1224](https://github.com/githubnext/ado-aw/issues/1224)) ([553bac3](https://github.com/githubnext/ado-aw/commit/553bac37f8712242f810f0e11b72cb1c63f65564))
+* **ir:** add typed builder for npmAuthenticate@0 ([#1157](https://github.com/githubnext/ado-aw/issues/1157)) ([b2da117](https://github.com/githubnext/ado-aw/commit/b2da117f6b94b58164520ef04e2e22905d127d49))
+* **ir:** add typed builder for SonarQubeAnalyze@8 ([#1245](https://github.com/githubnext/ado-aw/issues/1245)) ([c6d3af3](https://github.com/githubnext/ado-aw/commit/c6d3af36a67cc1e210bc3221cc8d9a74121ff945))
+* **ir:** add typed builder for SonarQubePrepare@8 ([#1226](https://github.com/githubnext/ado-aw/issues/1226)) ([b2a86e1](https://github.com/githubnext/ado-aw/commit/b2a86e1d28073b3879f08d4e1507fa13c80ec546))
+* **ir:** add typed builder for SonarQubePublish@8 ([#1268](https://github.com/githubnext/ado-aw/issues/1268)) ([426ee21](https://github.com/githubnext/ado-aw/commit/426ee21f6dbcfce3b4acac4ba6c8d6e03670556d))
+* **ir:** add typed builder for TwineAuthenticate@1 ([#1158](https://github.com/githubnext/ado-aw/issues/1158)) ([096c8f1](https://github.com/githubnext/ado-aw/commit/096c8f1f04be65d38935510dcbe6e3f8dc73690f))
+* **ir:** add typed builder for UniversalPackages@1 ([#1208](https://github.com/githubnext/ado-aw/issues/1208)) ([d375dde](https://github.com/githubnext/ado-aw/commit/d375dde81bb51ccd44e61950721e158941a23d41))
+* **ir:** add typed builder for UseRubyVersion@0 ([#1176](https://github.com/githubnext/ado-aw/issues/1176)) ([ccab04d](https://github.com/githubnext/ado-aw/commit/ccab04d0ecde23f38b524d20ccc7676fbdd179f5))
+* **ir:** add typed builder for VSBuild@1 ([#1210](https://github.com/githubnext/ado-aw/issues/1210)) ([af20033](https://github.com/githubnext/ado-aw/commit/af2003362f843030033fa0cfbed25d68ed4da577))
+
+
+### Bug Fixes
+
+* **site:** fix build broken by astro@6.4.8 dependabot bump ([#1191](https://github.com/githubnext/ado-aw/issues/1191)) ([32063ac](https://github.com/githubnext/ado-aw/commit/32063ac66e96969734c864cfb9dd9065c49861c0))
+* **workflows:** let docs auditors open PRs for README and AGENTS.md ([#1188](https://github.com/githubnext/ado-aw/issues/1188)) ([d855e6e](https://github.com/githubnext/ado-aw/commit/d855e6e22825fbba4bd78ca674f1dce78389472c))
+
 ## [0.38.0](https://github.com/githubnext/ado-aw/compare/v0.37.0...v0.38.0) (2026-06-22)
 
 
