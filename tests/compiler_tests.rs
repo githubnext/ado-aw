@@ -4807,6 +4807,100 @@ fn test_executor_step_has_env_block_with_write_permissions() {
     );
 }
 
+/// Copilot BYOM/BYOK (#1261): provider env keys in `engine.env` may carry ADO
+/// macro expressions (e.g. `$(Setup.FOUNDRY_TOKEN)`), they are merged verbatim
+/// into the agent step's env block, and a literal `COPILOT_PROVIDER_BASE_URL`
+/// host is added to the AWF allow-domains list. Compilation must succeed and
+/// pass integrity checks (no `--skip-integrity`).
+#[test]
+fn test_byom_provider_env_compiles_and_merges() {
+    let compiled = compile_fixture("byom-foundry-agent.md");
+    assert_valid_yaml(&compiled, "byom-foundry-agent.md");
+
+    // Emitted verbatim (unquoted): the typed EnvValue re-serialization renders
+    // an ADO macro without surrounding quotes. Pin the trailing newline so the
+    // assertion fails if quoting is ever (incorrectly) introduced.
+    assert!(
+        compiled.contains("COPILOT_PROVIDER_BEARER_TOKEN: $(Setup.FOUNDRY_TOKEN)\n"),
+        "BYOM provider macro env value must be merged verbatim (unquoted) into the agent step: {compiled}"
+    );
+    assert!(
+        compiled.contains("COPILOT_PROVIDER_TYPE: azure"),
+        "Literal provider config value must still be emitted: {compiled}"
+    );
+    assert!(
+        compiled.contains("my-foundry.cognitiveservices.azure.com"),
+        "Literal COPILOT_PROVIDER_BASE_URL host must be added to the AWF allow-domains list: {compiled}"
+    );
+
+    // Credential isolation: the AWF api-proxy sidecar is enabled and the
+    // provider credential env keys are excluded from --env-all passthrough.
+    // This must happen in BOTH the Agent and Detection jobs (the detection
+    // threat-analysis Copilot run inherits the same BYOM routing + isolation,
+    // mirroring gh-aw), so each marker appears exactly twice.
+    assert_eq!(
+        compiled.matches("--enable-api-proxy").count(),
+        2,
+        "BYOM must enable the AWF api-proxy sidecar in both the Agent and Detection jobs: {compiled}"
+    );
+    // --exclude-env now lists exactly the provider credential keys present in
+    // engine.env (case-preserving), not a hardcoded set. The fixture defines
+    // COPILOT_PROVIDER_BASE_URL + COPILOT_PROVIDER_BEARER_TOKEN (no API_KEY), so
+    // only those two are excluded, in both the Agent and Detection jobs.
+    for key in [
+        "--exclude-env COPILOT_PROVIDER_BASE_URL",
+        "--exclude-env COPILOT_PROVIDER_BEARER_TOKEN",
+    ] {
+        assert_eq!(
+            compiled.matches(key).count(),
+            2,
+            "BYOM must exclude provider credential from passthrough in both jobs ({key}): {compiled}"
+        );
+    }
+    // A credential key NOT present in engine.env must NOT be excluded.
+    assert_eq!(
+        compiled.matches("--exclude-env COPILOT_PROVIDER_API_KEY").count(),
+        0,
+        "credential keys absent from engine.env must not be passed to --exclude-env: {compiled}"
+    );
+    // The api-proxy container image must be pre-pulled (and :latest-tagged) in
+    // both jobs so AWF's --skip-pull finds it locally.
+    assert_eq!(
+        compiled
+            .matches("docker pull ghcr.io/github/gh-aw-firewall/api-proxy:")
+            .count(),
+        2,
+        "BYOM must pre-pull the api-proxy container image in both the Agent and Detection jobs: {compiled}"
+    );
+    // The Detection threat-analysis step inherits the provider routing env
+    // (COPILOT_PROVIDER_* subset) so it reaches the same external provider.
+    // The bearer-token macro therefore appears twice: agent step + detection step.
+    assert_eq!(
+        compiled
+            .matches("COPILOT_PROVIDER_BEARER_TOKEN: $(Setup.FOUNDRY_TOKEN)\n")
+            .count(),
+        2,
+        "Detection step must inherit the BYOM provider env alongside the agent step: {compiled}"
+    );
+}
+
+/// A non-BYOM agent must NOT enable the api-proxy sidecar or pre-pull its image —
+/// the isolation plumbing is strictly opt-in via the presence of a
+/// `COPILOT_PROVIDER_*` credential key in `engine.env`.
+#[test]
+fn test_non_byom_agent_has_no_api_proxy() {
+    let compiled = compile_fixture("minimal-agent.md");
+    assert_valid_yaml(&compiled, "minimal-agent.md");
+    assert!(
+        !compiled.contains("--enable-api-proxy"),
+        "Non-BYOM agent must not enable the api-proxy sidecar: {compiled}"
+    );
+    assert!(
+        !compiled.contains("api-proxy"),
+        "Non-BYOM agent must not reference the api-proxy image: {compiled}"
+    );
+}
+
 /// Defense-in-depth: parse a compiled pipeline as YAML, locate the **Agent**
 /// job, and assert no step in that job maps `SYSTEM_ACCESSTOKEN` at all.
 ///
