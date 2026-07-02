@@ -250,12 +250,6 @@ impl Executor for ReplyToPrCommentResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safe_outputs::ToolResult;
-
-    #[test]
-    fn test_result_has_correct_name() {
-        assert_eq!(ReplyToPrCommentResult::NAME, "reply-to-pr-comment");
-    }
 
     #[test]
     fn test_params_deserializes() {
@@ -294,7 +288,11 @@ mod tests {
             repository: Some("self".to_string()),
         };
         let result: Result<ReplyToPrCommentResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("pull_request_id must be positive"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -306,7 +304,11 @@ mod tests {
             repository: Some("self".to_string()),
         };
         let result: Result<ReplyToPrCommentResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("thread_id must be positive"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -318,7 +320,11 @@ mod tests {
             repository: Some("self".to_string()),
         };
         let result: Result<ReplyToPrCommentResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("content must be at least 10 characters"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -330,7 +336,15 @@ mod tests {
             repository: Some("##vso[task.setvariable variable=x]y".to_string()),
         };
         let result: Result<ReplyToPrCommentResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("repository"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.to_string().contains("##vso["),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
