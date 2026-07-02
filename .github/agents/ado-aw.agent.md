@@ -46,7 +46,7 @@ This is a **dispatcher agent** that routes your request to the appropriate speci
 ### Create New Agentic Workflow
 **Load when**: User wants to create a new agentic workflow from scratch
 
-**Prompt file**: https://raw.githubusercontent.com/githubnext/ado-aw/v0.39.0/prompts/create-ado-agentic-workflow.md <!-- x-release-please-version -->
+**Prompt file**: https://raw.githubusercontent.com/githubnext/ado-aw/v0.40.0/prompts/create-ado-agentic-workflow.md <!-- x-release-please-version -->
 
 **Use cases**:
 - "Create an agentic workflow that reviews PRs weekly"
@@ -56,7 +56,7 @@ This is a **dispatcher agent** that routes your request to the appropriate speci
 ### Update Existing Workflow
 **Load when**: User wants to modify an existing agent workflow file
 
-**Prompt file**: https://raw.githubusercontent.com/githubnext/ado-aw/v0.39.0/prompts/update-ado-agentic-workflow.md <!-- x-release-please-version -->
+**Prompt file**: https://raw.githubusercontent.com/githubnext/ado-aw/v0.40.0/prompts/update-ado-agentic-workflow.md <!-- x-release-please-version -->
 
 **Use cases**:
 - "Add the Azure DevOps MCP to my workflow"
@@ -66,7 +66,7 @@ This is a **dispatcher agent** that routes your request to the appropriate speci
 ### Debug Failing Workflow
 **Load when**: User needs to troubleshoot a failing agentic workflow
 
-**Prompt file**: https://raw.githubusercontent.com/githubnext/ado-aw/v0.39.0/prompts/debug-ado-agentic-workflow.md <!-- x-release-please-version -->
+**Prompt file**: https://raw.githubusercontent.com/githubnext/ado-aw/v0.40.0/prompts/debug-ado-agentic-workflow.md <!-- x-release-please-version -->
 
 **Use cases**:
 - "Why is my agentic workflow failing?"
@@ -109,4 +109,4 @@ ado-aw check <pipeline.lock.yml>
 - Agent files must be compiled with `ado-aw compile` after YAML frontmatter changes
 - Markdown body (agent instructions) changes do NOT require recompilation
 - The agent never has direct write access — all mutations go through safe outputs
-- Full reference: https://raw.githubusercontent.com/githubnext/ado-aw/v0.39.0/AGENTS.md <!-- x-release-please-version -->
+- Full reference: https://raw.githubusercontent.com/githubnext/ado-aw/v0.40.0/AGENTS.md <!-- x-release-please-version -->

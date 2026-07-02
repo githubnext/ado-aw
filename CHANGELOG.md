@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.40.0](https://github.com/githubnext/ado-aw/compare/v0.39.0...v0.40.0) (2026-07-02)
+
+
+### Features
+
+* **workflows:** add issue-triage and issue-arborist workflows; upgrade gh-aw to v0.81.6 ([#1281](https://github.com/githubnext/ado-aw/issues/1281)) ([dccd040](https://github.com/githubnext/ado-aw/commit/dccd04005d71488d1c47f512a6f5a963cd2fdaaa))
+
 ## [0.39.0](https://github.com/githubnext/ado-aw/compare/v0.38.0...v0.39.0) (2026-07-01)
 
 
