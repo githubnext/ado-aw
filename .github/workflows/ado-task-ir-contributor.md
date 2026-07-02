@@ -16,6 +16,8 @@ tools:
 network:
   allowed: [defaults, rust, learn.microsoft.com, dev.azure.com]
 safe-outputs:
+  threat-detection:
+    max-ai-credits: -1
   create-pull-request:
     max: 1
     protected-files: fallback-to-issue

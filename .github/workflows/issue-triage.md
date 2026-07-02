@@ -17,6 +17,8 @@ tools:
     toolsets: [issues]
     min-integrity: none
 safe-outputs:
+  threat-detection:
+    max-ai-credits: -1
   add-labels:
     max: 10
     allowed:

@@ -21,6 +21,8 @@ runtimes:
     action-repo: "actions-rust-lang/setup-rust-toolchain"
     action-version: "v1"
 safe-outputs:
+  threat-detection:
+    max-ai-credits: -1
   create-issue:
     max: 1
     labels: [frontmatter-alignment]

@@ -19,6 +19,8 @@ tools:
 network:
   allowed: [defaults, rust, dev.azure.com, learn.microsoft.com]
 safe-outputs:
+  threat-detection:
+    max-ai-credits: -1
   add-comment:
     max: 3
 max-ai-credits: -1
