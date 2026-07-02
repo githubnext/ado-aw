@@ -18,6 +18,8 @@ and contributors (how to add one).
 |----|---------|---------------|
 | `repos_unified` | `repositories:` + `checkout:` → unified `repos:` | 0.28.0 |
 | `pool_object_form` | `pool: <string>` → explicit `pool:` object form (`name` / `vmImage`) | 0.30.0 |
+| `flatten_work_item_config` | `safe-outputs.{noop,missing-tool,missing-data}.work-item:` nested block → flat fields (`title-prefix`, `area-path`, `report-as-work-item`, …) | 0.37.0 |
+| `legacy_path_markers` | `{{ workspace }}` / `{{ working_directory }}` / `{{ trigger_repo_directory }}` → explicit ADO path expressions | 0.38.0 |
 
 If `ado-aw compile` rewrites your source, it prints a warning to stderr naming each codemod that fired and reminding you that front-matter comments are dropped by the round-trip.
 
@@ -116,10 +118,12 @@ Codemods live in `src/compile/codemods/`:
 
 ```text
 src/compile/codemods/
-├── mod.rs                  # Framework + CODEMODS registry
-├── helpers.rs              # take_key, insert_no_overwrite, rename_key, ConflictPolicy
-├── 0001_repos_unified.rs   # repositories: + checkout: -> unified repos:
-└── 0002_pool_object_form.rs # pool: <string> -> pool object form (name/vmImage)
+├── mod.rs                         # Framework + CODEMODS registry
+├── helpers.rs                     # take_key, insert_no_overwrite, rename_key, ConflictPolicy
+├── 0001_repos_unified.rs          # repositories: + checkout: -> unified repos:
+├── 0002_pool_object_form.rs       # pool: <string> -> pool object form (name/vmImage)
+├── 0003_flatten_work_item_config.rs # safe-outputs.*.work-item: -> flat fields
+└── 0004_legacy_path_markers.rs    # {{ workspace }}/{{ working_directory }}/{{ trigger_repo_directory }} -> ADO path
 ```
 
 The filename prefix is a zero-padded sequence number (`<NNNN>`). It
