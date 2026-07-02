@@ -701,7 +701,7 @@ If a future bundle blows the budget:
   arbitrary TypeScript at pipeline runtime would bypass the
   safe-output trust boundary and require sandboxing the project does
   not have.
-- Migrating the safe-output executors (`src/safeoutputs/*.rs`) to
+- Migrating the safe-output executors (`src/safe_outputs/*.rs`) to
   Node. Stage 3 keeps a Rust-only execution path.
 - Migrating the agent-stats parser. It runs in-pipeline as part of
   Stage 1 wrap-up and has no TypeScript dependency need.

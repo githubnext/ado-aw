@@ -12,7 +12,7 @@ When extending the compiler:
 2. **New compile targets**: build a typed `Pipeline` IR in a target wrapper module under `src/compile/` (use existing `standalone_ir.rs`, `onees_ir.rs`, `job_ir.rs`, and `stage_ir.rs` as references). The canonical Setup → Agent → Detection → SafeOutputs → Teardown shape, plus the optional Conclusion job, lives in `src/compile/agentic_pipeline.rs` and is reused by every target — wrappers only set the per-target `PipelineShape` and lift the shared `BuiltPipelineContext` into the right envelope.
 3. **New front matter fields**: add fields to `FrontMatter` or nested config types in `src/compile/types.rs`. Breaking changes require a codemod under `src/compile/codemods/`; see [`docs/codemods.md`](codemods.md).
 4. **New compiler extensions**: implement the `CompilerExtension` `name` / `phase` / `declarations` trio and return typed `Declarations`.
-5. **New safe-output tools**: add to `src/safeoutputs/`, implement the safe-output data model and executor, and register it in MCP and Stage 3 execution wiring.
+5. **New safe-output tools**: add to `src/safe_outputs/`, implement the safe-output data model and executor, and register it in MCP and Stage 3 execution wiring.
 6. **New first-class tools**: create `src/tools/<name>/` with `mod.rs` and `extension.rs` (`CompilerExtension` impl). Add `execute.rs` if the tool has Stage 3 runtime logic. Extend `ToolsConfig` in `types.rs` and collection in `collect_extensions()`.
 7. **New runtimes**: create `src/runtimes/<name>/` with `mod.rs` (config types/helpers) and `extension.rs` (`CompilerExtension` impl). Extend `RuntimesConfig` in `types.rs` and collection in `collect_extensions()`.
 8. **Validation**: add compile-time validation for front matter, safe outputs, permissions, and any IR invariants your feature introduces.
@@ -24,7 +24,7 @@ The codebase follows a colocation principle:
 - **Tools** (`tools:` front matter) live in `src/tools/<name>/` — one directory per tool, containing compile-time (`extension.rs`) and optional runtime (`execute.rs`) code.
 - **Runtimes** (`runtimes:` front matter) live in `src/runtimes/<name>/` — config and helpers in `mod.rs`, compiler integration in `extension.rs`.
 - **Infrastructure extensions** live in `src/compile/extensions/`. These are always-on compiler plumbing, not user-facing tools.
-- **Safe outputs** (`safe-outputs:` front matter) live in `src/safeoutputs/`. They follow the Stage 1 NDJSON proposal → Detection → Stage 3 execution lifecycle and are not `CompilerExtension` implementations.
+- **Safe outputs** (`safe-outputs:` front matter) live in `src/safe_outputs/`. They follow the Stage 1 NDJSON proposal → Detection → Stage 3 execution lifecycle and are not `CompilerExtension` implementations.
 
 `src/compile/extensions/mod.rs` owns the `CompilerExtension` trait, the `Extension` enum, `Declarations`, and `collect_extensions()`. It re-exports runtime/tool extension types from their colocated modules so target compilers can import extension machinery from one place.
 
@@ -222,12 +222,12 @@ Do not create new template files or marker replacement systems for new targets.
 
 ## Adding a safe-output tool
 
-Safe-output tools live in `src/safeoutputs/`. Use them when the agent should propose a write action that Detection can inspect and Stage 3 can apply with a write-capable token.
+Safe-output tools live in `src/safe_outputs/`. Use them when the agent should propose a write action that Detection can inspect and Stage 3 can apply with a write-capable token.
 
 Typical steps:
 
-1. Add `src/safeoutputs/<tool>.rs` with the tool input type, sanitization/validation, `ToolResult`, and `Executor` implementation.
-2. Register the module in `src/safeoutputs/mod.rs`.
+1. Add `src/safe_outputs/<tool>.rs` with the tool input type, sanitization/validation, `ToolResult`, and `Executor` implementation.
+2. Register the module in `src/safe_outputs/mod.rs`.
 3. Expose the MCP tool in `src/mcp.rs`.
 4. Wire Stage 3 execution in `src/execute.rs` if the executor dispatch table needs an update.
 5. Add front-matter configuration if the tool is configurable under `safe-outputs:`.
