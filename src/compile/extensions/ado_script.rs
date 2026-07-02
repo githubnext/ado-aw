@@ -33,7 +33,7 @@ use crate::compile::ir::step::{BashStep, Step};
 use crate::compile::ir::tasks::use_node::UseNode;
 use crate::compile::types::{PipelineFilters, PrFilters, SupplyChainConfig};
 
-const GATE_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/gate.js";
+pub(crate) const GATE_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/gate.js";
 pub(crate) const IMPORT_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/import.js";
 /// Path to the exec-context-pr bundle inside the unpacked `ado-script.zip`.
 /// Consumed by `src/compile/extensions/exec_context/pr.rs` to invoke
@@ -500,27 +500,17 @@ pub fn synthetic_pr_step_typed(spec_b64: &str) -> Result<BashStep> {
     for name in SYNTH_PR_OUTPUT_NAMES {
         step = step.with_output(OutputDecl::new(*name));
     }
-    let envs: &[(&str, EnvValue)] = &[
-        (
-            "SYSTEM_ACCESSTOKEN",
-            EnvValue::ado_macro("System.AccessToken")?,
-        ),
-        ("ADO_PROJECT", EnvValue::ado_macro("System.TeamProject")?),
-        ("ADO_REPO_ID", EnvValue::ado_macro("Build.Repository.ID")?),
-        ("BUILD_REASON", EnvValue::ado_macro("Build.Reason")?),
-        (
-            "BUILD_REPOSITORY_PROVIDER",
-            EnvValue::ado_macro("Build.Repository.Provider")?,
-        ),
-        (
-            "BUILD_SOURCEBRANCH",
-            EnvValue::ado_macro("Build.SourceBranch")?,
-        ),
-        ("PR_SYNTH_SPEC", EnvValue::literal(spec_b64)),
-    ];
-    for (k, v) in envs {
-        step = step.with_env(*k, v.clone());
-    }
+    // ADO auto-injects the predefined context vars this bundle reads
+    // (SYSTEM_TEAMPROJECT, BUILD_REPOSITORY_ID, BUILD_REASON,
+    // BUILD_REPOSITORY_PROVIDER, BUILD_SOURCEBRANCH, SYSTEM_PULLREQUEST_*),
+    // so only the non-auto-injected SYSTEM_ACCESSTOKEN bearer and the
+    // compiler-computed PR_SYNTH_SPEC are projected here.
+    let step = crate::compile::ado_bundle::apply_bundle_auth(
+        step,
+        crate::compile::ado_bundle::Bundle::ExecContextPrSynth,
+        crate::compile::ado_bundle::TokenSource::SystemAccessToken,
+    )
+    .with_env("PR_SYNTH_SPEC", EnvValue::literal(spec_b64));
     Ok(step)
 }
 

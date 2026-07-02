@@ -55,6 +55,7 @@
 //! block; same posture as the PR contributor.
 
 use crate::compile::extensions::CompileContext;
+use crate::compile::ado_bundle::{Bundle, TokenSource, apply_bundle_auth};
 use crate::compile::extensions::ado_script::EXEC_CONTEXT_WORKITEM_PATH;
 use crate::compile::ir::condition::{Condition, Expr};
 use crate::compile::ir::env::EnvValue;
@@ -127,18 +128,16 @@ impl ContextContributor for WorkitemContextContributor {
         if !self.should_activate(ctx) {
             return Ok(None);
         }
-        // Mirror the PR contributor's synth-vs-real PR identifier
-        // selection — when synth is active the PR id comes from the
-        // hoisted `AW_PR_ID` Agent-job variable.
-        let (pr_id_env, condition) = if self.synthetic_pr_active {
-            (EnvValue::pipeline_var("AW_PR_ID"), Condition::Succeeded)
+        // In synth mode the PR id comes from the hoisted AW_PR_ID Agent-job
+        // variable and the step always runs (guarded by a runtime prelude);
+        // in real-PR mode the auto-injected SYSTEM_PULLREQUEST_PULLREQUESTID is
+        // read directly and the step gates on Build.Reason == PullRequest.
+        let condition = if self.synthetic_pr_active {
+            Condition::Succeeded
         } else {
-            (
-                EnvValue::ado_macro("System.PullRequest.PullRequestId")?,
-                Condition::Eq(
-                    Expr::Variable("Build.Reason".to_string()),
-                    Expr::Literal("PullRequest".to_string()),
-                ),
+            Condition::Eq(
+                Expr::Variable("Build.Reason".to_string()),
+                Expr::Literal("PullRequest".to_string()),
             )
         };
 
@@ -152,40 +151,33 @@ impl ContextContributor for WorkitemContextContributor {
         let max_body_kb = self.config.max_body_kb_resolved();
 
         let script = format!("set -euo pipefail\n{prelude}node '{EXEC_CONTEXT_WORKITEM_PATH}'\n");
-        let step = BashStep::new(
-            "Stage workitem execution context (aw-context/workitem/*)",
-            script,
-        )
-        .with_condition(condition)
-        .with_env(
-            "SYSTEM_ACCESSTOKEN",
-            EnvValue::ado_macro("System.AccessToken")?,
-        )
-        .with_env(
-            "SYSTEM_COLLECTIONURI",
-            EnvValue::ado_macro("System.CollectionUri")?,
-        )
-        .with_env(
-            "SYSTEM_TEAMPROJECT",
-            EnvValue::ado_macro("System.TeamProject")?,
-        )
-        .with_env(
-            "BUILD_SOURCESDIRECTORY",
-            EnvValue::ado_macro("Build.SourcesDirectory")?,
-        )
-        .with_env(
-            "BUILD_REPOSITORY_ID",
-            EnvValue::ado_macro("Build.Repository.ID")?,
-        )
-        .with_env("SYSTEM_PULLREQUEST_PULLREQUESTID", pr_id_env)
-        .with_env(
-            "AW_WORKITEM_MAX_ITEMS",
-            EnvValue::literal(max_items.to_string()),
-        )
-        .with_env(
-            "AW_WORKITEM_MAX_BODY_KB",
-            EnvValue::literal(max_body_kb.to_string()),
+        // ADO auto-injects predefined System.*/Build.* context vars, so only
+        // the SYSTEM_ACCESSTOKEN bearer (not auto-injected), the mode-dependent
+        // synth PR id, and the computed limits are projected.
+        let mut step = apply_bundle_auth(
+            BashStep::new(
+                "Stage workitem execution context (aw-context/workitem/*)",
+                script,
+            )
+            .with_condition(condition),
+            Bundle::ExecContextWorkitem,
+            TokenSource::SystemAccessToken,
         );
+        if self.synthetic_pr_active {
+            step = step.with_env(
+                "SYSTEM_PULLREQUEST_PULLREQUESTID",
+                EnvValue::pipeline_var("AW_PR_ID"),
+            );
+        }
+        step = step
+            .with_env(
+                "AW_WORKITEM_MAX_ITEMS",
+                EnvValue::literal(max_items.to_string()),
+            )
+            .with_env(
+                "AW_WORKITEM_MAX_BODY_KB",
+                EnvValue::literal(max_body_kb.to_string()),
+            );
 
         Ok(Some(Step::Bash(step)))
     }
@@ -302,13 +294,22 @@ mod tests {
         };
         assert!(matches!(
             bash.env.get("SYSTEM_ACCESSTOKEN"),
-            Some(EnvValue::AdoMacro("System.AccessToken"))
+            Some(EnvValue::Secret(v)) if v == "System.AccessToken"
         ));
-        // PR id env from System macro (non-synth path).
-        assert!(matches!(
-            bash.env.get("SYSTEM_PULLREQUEST_PULLREQUESTID"),
-            Some(EnvValue::AdoMacro("System.PullRequest.PullRequestId"))
-        ));
+        // Non-synth path: the bundle reads the auto-injected PR + context
+        // vars directly, so the step re-projects none of them.
+        for stripped in [
+            "SYSTEM_PULLREQUEST_PULLREQUESTID",
+            "SYSTEM_COLLECTIONURI",
+            "SYSTEM_TEAMPROJECT",
+            "BUILD_SOURCESDIRECTORY",
+            "BUILD_REPOSITORY_ID",
+        ] {
+            assert!(
+                bash.env.get(stripped).is_none(),
+                "{stripped} is auto-injected and must not be re-projected"
+            );
+        }
         // Default caps surfaced as env literals so the bundle can read them.
         match bash.env.get("AW_WORKITEM_MAX_ITEMS") {
             Some(EnvValue::Literal(s)) => assert_eq!(s, "5"),

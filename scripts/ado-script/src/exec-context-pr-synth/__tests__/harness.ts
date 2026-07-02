@@ -41,8 +41,8 @@ export function makeEnv(overrides: Record<string, string>): NodeJS.ProcessEnv {
     BUILD_REASON: "IndividualCI",
     BUILD_REPOSITORY_PROVIDER: "TfsGit",
     BUILD_SOURCEBRANCH: "refs/heads/feature/x",
-    ADO_PROJECT: "MyProject",
-    ADO_REPO_ID: "00000000-0000-0000-0000-000000000000",
+    SYSTEM_TEAMPROJECT: "MyProject",
+    BUILD_REPOSITORY_ID: "00000000-0000-0000-0000-000000000000",
     ...overrides,
   };
 }

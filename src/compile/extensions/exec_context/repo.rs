@@ -53,22 +53,14 @@ impl ContextContributor for RepoContextContributor {
             return Ok(None);
         }
         let script = format!("set -euo pipefail\nnode '{EXEC_CONTEXT_REPO_PATH}'\n");
+        // ADO auto-injects BUILD_SOURCESDIRECTORY / BUILD_SOURCEVERSION /
+        // BUILD_SOURCEBRANCH into the step env, so the git-only bundle reads
+        // them directly; only the compile-time AW_REPO_CONVENTIONS toggle is a
+        // genuine step input. Repo has no bearer (BundleAuth::None).
         let step = BashStep::new("Stage repo execution context (aw-context/repo/*)", script)
             // Always-on (no Build.Reason gate). The compile-time
             // activation flag is the only gate.
             .with_condition(Condition::Succeeded)
-            .with_env(
-                "BUILD_SOURCESDIRECTORY",
-                EnvValue::ado_macro("Build.SourcesDirectory")?,
-            )
-            .with_env(
-                "BUILD_SOURCEVERSION",
-                EnvValue::ado_macro("Build.SourceVersion")?,
-            )
-            .with_env(
-                "BUILD_SOURCEBRANCH",
-                EnvValue::ado_macro("Build.SourceBranch")?,
-            )
             .with_env(
                 "AW_REPO_CONVENTIONS",
                 EnvValue::literal(self.config.conventions_enabled().to_string()),

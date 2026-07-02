@@ -20,6 +20,7 @@
 //! same `AW_PR_ID`-empty-check gate.
 
 use crate::compile::extensions::CompileContext;
+use crate::compile::ado_bundle::{Bundle, TokenSource, apply_bundle_auth};
 use crate::compile::extensions::ado_script::EXEC_CONTEXT_PR_CHECKS_PATH;
 use crate::compile::ir::condition::{Condition, Expr};
 use crate::compile::ir::env::EnvValue;
@@ -76,18 +77,17 @@ impl ContextContributor for PrChecksContextContributor {
         if !self.should_activate(ctx) {
             return Ok(None);
         }
-        // Mirror the PR contributor's synth-active env selection so
-        // the bundle reads the same PR id under both real and synth
-        // paths.
-        let (pr_id_env, condition, prelude) = if self.synthetic_pr_active {
+        // In synth mode the PR id is overridden from the hoisted AW_PR_ID job
+        // variable and the step always runs (guarded by a runtime prelude);
+        // in real-PR mode the auto-injected SYSTEM_PULLREQUEST_PULLREQUESTID is
+        // read directly and the step gates on Build.Reason == PullRequest.
+        let (condition, prelude) = if self.synthetic_pr_active {
             (
-                EnvValue::pipeline_var("AW_PR_ID"),
                 Condition::Succeeded,
                 "    if [ -z \"$SYSTEM_PULLREQUEST_PULLREQUESTID\" ]; then\n      echo \"[aw-context] No PR identifier resolved; skipping exec-context-pr-checks.\"\n      exit 0\n    fi\n",
             )
         } else {
             (
-                EnvValue::ado_macro("System.PullRequest.PullRequestId")?,
                 Condition::Eq(
                     Expr::Variable("Build.Reason".to_string()),
                     Expr::Literal("PullRequest".to_string()),
@@ -97,29 +97,26 @@ impl ContextContributor for PrChecksContextContributor {
         };
 
         let script = format!("set -euo pipefail\n{prelude}node '{EXEC_CONTEXT_PR_CHECKS_PATH}'\n");
-        let step = BashStep::new(
-            "Stage PR-checks execution context (aw-context/pr/checks/*)",
-            script,
-        )
-        .with_condition(condition)
-        .with_env(
-            "SYSTEM_ACCESSTOKEN",
-            EnvValue::ado_macro("System.AccessToken")?,
-        )
-        .with_env(
-            "SYSTEM_COLLECTIONURI",
-            EnvValue::ado_macro("System.CollectionUri")?,
-        )
-        .with_env(
-            "SYSTEM_TEAMPROJECT",
-            EnvValue::ado_macro("System.TeamProject")?,
-        )
-        .with_env("BUILD_BUILDID", EnvValue::ado_macro("Build.BuildId")?)
-        .with_env(
-            "BUILD_SOURCESDIRECTORY",
-            EnvValue::ado_macro("Build.SourcesDirectory")?,
-        )
-        .with_env("SYSTEM_PULLREQUEST_PULLREQUESTID", pr_id_env);
+        // ADO auto-injects predefined System.*/Build.* context vars, so only
+        // SYSTEM_ACCESSTOKEN (bearer, not auto-injected) and the mode-dependent
+        // PR id are projected. In synth mode the id comes from the hoisted
+        // AW_PR_ID job variable; in real-PR mode the auto-injected value is
+        // used directly.
+        let mut step = apply_bundle_auth(
+            BashStep::new(
+                "Stage PR-checks execution context (aw-context/pr/checks/*)",
+                script,
+            )
+            .with_condition(condition),
+            Bundle::ExecContextPrChecks,
+            TokenSource::SystemAccessToken,
+        );
+        if self.synthetic_pr_active {
+            step = step.with_env(
+                "SYSTEM_PULLREQUEST_PULLREQUESTID",
+                EnvValue::pipeline_var("AW_PR_ID"),
+            );
+        }
         Ok(Some(Step::Bash(step)))
     }
 
@@ -218,10 +215,10 @@ mod tests {
             Step::Bash(b) => b,
             _ => panic!(),
         };
-        // Trust boundary: bearer must be present.
+        // Trust boundary: bearer must be present (secret via applier).
         assert!(matches!(
             bash.env.get("SYSTEM_ACCESSTOKEN"),
-            Some(EnvValue::AdoMacro("System.AccessToken"))
+            Some(EnvValue::Secret(v)) if v == "System.AccessToken"
         ));
         // Runtime gate: step must only fire on PR builds.
         match bash.condition.as_ref().expect("condition required") {
@@ -233,14 +230,20 @@ mod tests {
                 "expected Condition::Eq(Variable(Build.Reason), Literal(PullRequest)), got {other:?}"
             ),
         }
-        // PR ID env: plain ADO macro on non-synth path.
-        assert!(
-            matches!(
-                bash.env.get("SYSTEM_PULLREQUEST_PULLREQUESTID"),
-                Some(EnvValue::AdoMacro("System.PullRequest.PullRequestId"))
-            ),
-            "expected AdoMacro(System.PullRequest.PullRequestId), got {:?}",
-            bash.env.get("SYSTEM_PULLREQUEST_PULLREQUESTID")
-        );
+        // Non-synth path: the bundle reads the auto-injected
+        // SYSTEM_PULLREQUEST_PULLREQUESTID (and other context vars) directly,
+        // so the step re-projects none of them.
+        for stripped in [
+            "SYSTEM_PULLREQUEST_PULLREQUESTID",
+            "SYSTEM_COLLECTIONURI",
+            "SYSTEM_TEAMPROJECT",
+            "BUILD_BUILDID",
+            "BUILD_SOURCESDIRECTORY",
+        ] {
+            assert!(
+                bash.env.get(stripped).is_none(),
+                "{stripped} is auto-injected and must not be re-projected"
+            );
+        }
     }
 }

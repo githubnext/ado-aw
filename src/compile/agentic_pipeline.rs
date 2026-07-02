@@ -1577,21 +1577,19 @@ fi\n";
         );
 
     // Use SC_WRITE_TOKEN when a write service connection is configured;
-    // fall back to System.AccessToken otherwise.
-    let has_write_sc = front_matter
+    // fall back to System.AccessToken otherwise. The token source is selected
+    // by the shared `token_source_for` helper (same logic as the Stage 3
+    // executor) and projected via the bundle-auth applier so the Conclusion
+    // step can never ship without a bearer (the regression that was #1307).
+    let write_sc = front_matter
         .permissions
         .as_ref()
-        .and_then(|p| p.write.as_ref())
-        .is_some();
-    if has_write_sc {
-        conclusion_step = conclusion_step.with_env(
-            "SYSTEM_ACCESSTOKEN",
-            EnvValue::secret("SC_WRITE_TOKEN"),
-        );
-    } else {
-        conclusion_step =
-            conclusion_step.with_env("SYSTEM_ACCESSTOKEN", EnvValue::secret("System.AccessToken"));
-    }
+        .and_then(|p| p.write.as_deref());
+    conclusion_step = crate::compile::ado_bundle::apply_bundle_auth(
+        conclusion_step,
+        crate::compile::ado_bundle::Bundle::Conclusion,
+        crate::compile::ado_bundle::token_source_for(write_sc),
+    );
 
     // Pass per-tool configs as individual flat env vars (gh-aw pattern).
     // Each field gets its own env var — avoids JSON-in-env-var corruption in ADO.

@@ -143,6 +143,11 @@ impl ContextContributor for ManualContextContributor {
         }
 
         let script = format!("set -euo pipefail\nnode '{EXEC_CONTEXT_MANUAL_PATH}'\n");
+        // BUILD_SOURCESDIRECTORY is auto-injected by ADO, so it is not
+        // re-projected. BUILD_REQUESTEDFOR / BUILD_REQUESTEDFOREMAIL are
+        // retained (identity vars behind the opt-in email hygiene gate — the
+        // projection makes the intent explicit at the call site). Manual has
+        // no bearer (BundleAuth::None).
         let mut step = BashStep::new(
             "Stage manual execution context (aw-context/manual/*)",
             script,
@@ -154,10 +159,6 @@ impl ContextContributor for ManualContextContributor {
         .with_env(
             "BUILD_REQUESTEDFOR",
             EnvValue::ado_macro("Build.RequestedFor")?,
-        )
-        .with_env(
-            "BUILD_SOURCESDIRECTORY",
-            EnvValue::ado_macro("Build.SourcesDirectory")?,
         );
 
         // Email is opt-in for hygiene — see ManualContextConfig docs.

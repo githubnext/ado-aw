@@ -8,6 +8,7 @@
 
 mod common;
 pub(crate) use common::resolve_repos;
+pub(crate) mod ado_bundle;
 pub(crate) mod agentic_pipeline;
 #[cfg(test)]
 mod codemod_integration_test;

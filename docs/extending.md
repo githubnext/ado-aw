@@ -115,7 +115,24 @@ let step = Step::Bash(
 
 `BashStep::script` is the raw bash body. Do not include `- bash: |` or YAML indentation; the lowerer and serializer own YAML formatting.
 
-### Task steps
+### Steps that run an ado-script bundle
+
+If your step invokes an ado-script Node bundle (`/tmp/ado-aw-scripts/ado-script/*.js`),
+model its env contract via [`src/compile/ado_bundle.rs`](../src/compile/ado_bundle.rs)
+rather than hand-writing the auth env:
+
+- Add a `Bundle` variant with its `path()` and `auth()` (`BundleAuth::AdoRest`
+  if the bundle calls `getWebApi()`, else `BundleAuth::None`).
+- Project the bearer with `apply_bundle_auth(step, Bundle::X, token)` — never
+  `.with_env("SYSTEM_ACCESSTOKEN", …)` by hand. Use `token_source_for(write_sc)`
+  to pick the token source.
+- Do **not** re-project ADO predefined variables (`System.*` / `Build.*`): ADO
+  auto-injects them into every script step's env under their SCREAMING_SNAKE
+  names, so the bundle reads them directly. Only genuinely computed inputs
+  (base64 specs, `AW_*` config, `PARAM_*`) belong in `.with_env`. The contract
+  tests and the churn guard in `tests/compiler_tests.rs` enforce this.
+
+
 
 ```rust
 use crate::compile::ir::step::Step;
