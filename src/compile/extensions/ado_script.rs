@@ -505,10 +505,6 @@ pub fn synthetic_pr_step_typed(spec_b64: &str) -> Result<BashStep> {
             "SYSTEM_ACCESSTOKEN",
             EnvValue::ado_macro("System.AccessToken")?,
         ),
-        (
-            "ADO_COLLECTION_URI",
-            EnvValue::ado_macro("System.CollectionUri")?,
-        ),
         ("ADO_PROJECT", EnvValue::ado_macro("System.TeamProject")?),
         ("ADO_REPO_ID", EnvValue::ado_macro("Build.Repository.ID")?),
         ("BUILD_REASON", EnvValue::ado_macro("Build.Reason")?),

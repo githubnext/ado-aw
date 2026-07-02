@@ -1411,10 +1411,11 @@ fn collect_ado_exports(
     let mut exports: Vec<(&str, &str)> = Vec::new();
     let mut seen = BTreeSet::new();
 
-    // Always-needed infra vars
+    // Always-needed infra vars.
+    // Collection URI is intentionally NOT exported here: ado-script reads
+    // ADO's auto-injected SYSTEM_COLLECTIONURI directly (see auth.ts).
     let infra: Vec<(&str, &str)> = vec![
         ("ADO_BUILD_REASON", "$(Build.Reason)"),
-        ("ADO_COLLECTION_URI", "$(System.CollectionUri)"),
         ("ADO_PROJECT", "$(System.TeamProject)"),
         ("ADO_BUILD_ID", "$(Build.BuildId)"),
     ];

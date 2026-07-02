@@ -248,11 +248,11 @@ gate spec.
 - bash: |
     # 1. ADO macro exports (fact-specific, minimal set)
     export ADO_BUILD_REASON="$(Build.Reason)"
-    export ADO_COLLECTION_URI="$(System.CollectionUri)"
     export ADO_PROJECT="$(System.TeamProject)"
     export ADO_BUILD_ID="$(Build.BuildId)"
     export ADO_PR_TITLE="$(System.PullRequest.Title)"
     # ... only the macros needed by this spec's facts ...
+    # (collection URI is read from ADO's auto-injected SYSTEM_COLLECTIONURI)
 
     # 2. Base64-encoded gate spec (safe from ADO macro expansion)
     export GATE_SPEC="eyJjb250ZXh0Ijp7Li4ufX0="
@@ -329,8 +329,9 @@ The evaluator never changes per-pipeline — all variation is in the spec.
 
 The bash shim exports only the ADO macros needed by the spec's facts:
 
-- **Always exported**: `ADO_BUILD_REASON`, `ADO_COLLECTION_URI`, `ADO_PROJECT`,
-  `ADO_BUILD_ID` (needed for bypass and self-cancel)
+- **Always exported**: `ADO_BUILD_REASON`, `ADO_PROJECT`,
+  `ADO_BUILD_ID` (needed for bypass and self-cancel). The collection URI is
+  not exported — the gate reads ADO's auto-injected `SYSTEM_COLLECTIONURI`.
 - **PR API facts**: `ADO_REPO_ID`, `ADO_PR_ID` (only when `pr_metadata`,
   `pr_is_draft`, `pr_labels`, or `changed_files` facts are required)
 - **Fact-specific**: each `Fact` variant declares its ADO exports via
