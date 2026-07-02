@@ -38,9 +38,9 @@ Modify **only** what the user requests. Do not refactor unrelated sections, reor
 When adding new fields, place them in the conventional front matter order:
 
 ```
-name → description → target → engine → schedule → workspace → pool →
-repos → tools → mcp-servers → safe-outputs →
-triggers → steps → post-steps → setup → teardown → network →
+name → description → target → engine → workspace → pool →
+repos → tools → runtimes → mcp-servers → safe-outputs →
+on (schedule + triggers) → execution-context → steps → post-steps → setup → teardown → network →
 permissions → parameters
 ```
 
