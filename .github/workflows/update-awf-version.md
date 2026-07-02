@@ -26,6 +26,10 @@ safe-outputs:
     title-prefix: "[deps-release-notes] "
     labels: [automation, dependencies]
     max: 3
+  add-comment:
+    target: "*"
+    required-title-prefix: "[deps-release-notes] "
+    max: 3
   close-issue:
     target: "*"
     required-title-prefix: "[deps-release-notes] "
@@ -113,7 +117,7 @@ The `safe-outputs.create-pull-request.title-prefix` field is configured to `chor
 
   ### Action Items
 
-  If the upstream release notes describe changes that need follow-up in ado-aw, the workflow has also filed a companion issue titled `[deps-release-notes] awf v<latest-version> action items` summarizing them. If no such issue exists, the release was deemed routine (patch-level fixes, internal refactors, dependency bumps with no consumer-visible effect).
+  If the upstream release notes describe changes that need follow-up in ado-aw, the workflow has recorded them on the canonical rolling issue `[deps-release-notes] awf — upstream release action items` (as a new comment for this version range). If that issue does not yet exist, it was created; if the release was routine (patch-level fixes, internal refactors, no consumer-visible effect), no action items were recorded.
 
   ---
   *This PR was opened automatically by the dependency version updater workflow.*
@@ -133,7 +137,7 @@ The `safe-outputs.create-pull-request.title-prefix` field is configured to `chor
 
   ### Action Items
 
-  If the upstream release notes describe changes that need follow-up in ado-aw, the workflow has also filed a companion issue titled `[deps-release-notes] copilot-cli v<latest-version> action items` summarizing them. If no such issue exists, the release was deemed routine (patch-level fixes, internal refactors, dependency bumps with no consumer-visible effect).
+  If the upstream release notes describe changes that need follow-up in ado-aw, the workflow has recorded them on the canonical rolling issue `[deps-release-notes] copilot-cli — upstream release action items` (as a new comment for this version range). If that issue does not yet exist, it was created; if the release was routine (patch-level fixes, internal refactors, no consumer-visible effect), no action items were recorded.
 
   ---
   *This PR was opened automatically by the dependency version updater workflow.*
@@ -153,7 +157,7 @@ The `safe-outputs.create-pull-request.title-prefix` field is configured to `chor
 
   ### Action Items
 
-  If the upstream release notes describe changes that need follow-up in ado-aw, the workflow has also filed a companion issue titled `[deps-release-notes] mcpg v<latest-version> action items` summarizing them. If no such issue exists, the release was deemed routine (patch-level fixes, internal refactors, dependency bumps with no consumer-visible effect).
+  If the upstream release notes describe changes that need follow-up in ado-aw, the workflow has recorded them on the canonical rolling issue `[deps-release-notes] mcpg — upstream release action items` (as a new comment for this version range). If that issue does not yet exist, it was created; if the release was routine (patch-level fixes, internal refactors, no consumer-visible effect), no action items were recorded.
 
   ---
   *This PR was opened automatically by the dependency version updater workflow.*
@@ -161,9 +165,11 @@ The `safe-outputs.create-pull-request.title-prefix` field is configured to `chor
 
 - **Base branch**: `main`
 
-### Step 5: File a Release-Notes Action-Items Issue (if applicable)
+### Step 5: Record Release-Notes Action Items on the Canonical Rolling Issue (if applicable)
 
-After emitting the version-bump PR, analyze the upstream release notes between the **current** (about-to-be-replaced) version and the **latest** version, and decide whether to file a companion GitHub issue capturing items that need follow-up in ado-aw.
+After emitting the version-bump PR, analyze the upstream release notes between the **current** (about-to-be-replaced) version and the **latest** version, and decide whether to record items that need follow-up in ado-aw.
+
+Rather than opening a **new** issue per release (which floods the backlog), each dependency has a **single canonical rolling issue** titled `[deps-release-notes] <dep-token> — upstream release action items`. When there are action items for a bump, you **append a comment** to that canonical issue summarizing the new version range. You only ever **create** the issue if the canonical one does not yet exist.
 
 This step **only** applies when Step 3 determined the version is being bumped. If the version is already up to date, skip Step 5 as well.
 
@@ -210,38 +216,76 @@ Ignore items that are purely:
 - Upstream dependency bumps that do not change consumer behaviour
 - CI / repo-hygiene changes upstream
 
-#### Step 5c: Decide whether to file an issue
+#### Step 5c: Decide whether to record anything
 
-If after classification there are **no** items across all selected releases in any of the four categories above, **skip** — do not file an issue for this dependency. The PR body's "Action Items" section will then accurately read as "no issue exists" to reviewers.
+If after classification there are **no** items across all selected releases in any of the four categories above, **skip** — do not touch the canonical issue for this dependency. The PR body's "Action Items" section then accurately reads as "the release was routine" to reviewers.
 
 If there is **at least one** item in any category, continue to Step 5d.
 
-#### Step 5d: Close older action-items issues for the same dependency
+#### Step 5d: Find (or create) the canonical rolling issue
 
-Search open issues whose titles start with the prefix `[deps-release-notes] <dep-token> v` (where `<dep-token>` is `awf`, `mcpg`, or `copilot-cli`). For each match:
+Each dependency has a single canonical rolling issue titled exactly:
 
-- If the title exactly matches the **expected** title for this run — `[deps-release-notes] <dep-token> v<latest-version> action items` — **skip** the issue-creation step; an up-to-date action-items issue is already open.
-- Otherwise the issue is an older action-items issue for the same dependency. Emit a `close-issue` safe output for its issue number with a short comment explaining that it is superseded by the issue being filed for `<latest-version>`. Then continue to Step 5e.
+```
+[deps-release-notes] <dep-token> — upstream release action items
+```
 
-Only close issues whose titles start with the per-dependency prefix above — never close issues that merely share the broader `[deps-release-notes] ` prefix but belong to a different dependency token.
+(Note the em dash `—`, and that the title carries **no** version number.)
 
-#### Step 5e: Create the action-items issue
+Search open issues whose titles start with `[deps-release-notes] <dep-token> ` (where `<dep-token>` is `awf`, `mcpg`, or `copilot-cli`). Only consider issues for **this** token — never `awf` when handling `copilot-cli`, etc.
 
-The `safe-outputs.create-issue.title-prefix` field is configured to `[deps-release-notes] `, so gh-aw will automatically prepend that prefix to every issue title. Provide the title below **without** the `[deps-release-notes] ` prefix — the compiled workflow will add it.
+- **If the canonical issue already exists** (title exactly `[deps-release-notes] <dep-token> — upstream release action items`): record this bump by emitting an `add_comment` safe output targeting that issue's `issue_number` (Step 5e, comment form). This is the normal steady-state path.
+- **If no canonical issue exists yet** but one or more **old version-titled** issues (`[deps-release-notes] <dep-token> v<version> action items`) are open: pick the newest such issue as the canonical one going forward and `add_comment` to it (Step 5e, comment form). Do **not** create a second issue. (The `deps-notes-consolidator` workflow will retitle it to the canonical form and fold in older history on its next run.)
+- **If there is no `[deps-release-notes] <dep-token> …` issue open at all**: create the canonical issue once via `create-issue` (Step 5e, create form).
 
-- **Title**: `<dep-token> v<latest-version> action items` (will be published as `[deps-release-notes] <dep-token> v<latest-version> action items`)
+Any **stray, superseded** version-titled issues for the same token that remain open (beyond the one you chose as canonical) may be closed with a `close-issue` safe output (`state_reason: not_planned`) and a short comment pointing at the canonical issue. Only close issues whose titles start with `[deps-release-notes] <dep-token> ` — never a different token or a human-authored issue.
+
+#### Step 5e: Record the action items
+
+**Comment form** (canonical issue already exists — the normal path). Emit an `add_comment` targeting the canonical issue's number:
+
+```markdown
+## `<dep-token>` `<old-version>` → `<latest-version>`
+
+### Releases analyzed
+
+- [v<version-1>](<release-url-1>)
+- …
+- [v<latest-version>](<release-url-latest>)
+
+### Breaking changes
+
+- <one bullet per breaking change, with a brief description and a link to the release that introduced it. Omit the section entirely if there are none.>
+
+### Security fixes
+
+- <one bullet per security fix, with a brief description and a link to the release. Omit the section entirely if there are none.>
+
+### Notable features for ado-aw to adopt
+
+- <one bullet per notable feature, with a brief description of how ado-aw could surface or integrate it, and a link to the release. Omit the section entirely if there are none.>
+
+### Deprecations
+
+- <one bullet per deprecation, with a brief description and a link to the release. Omit the section entirely if there are none.>
+```
+
+**Create form** (only when no canonical issue and no version-titled issue exists for this token). The `safe-outputs.create-issue.title-prefix` field is configured to `[deps-release-notes] `, so gh-aw automatically prepends it. Provide the title **without** the prefix.
+
+- **Title**: `<dep-token> — upstream release action items` (will be published as `[deps-release-notes] <dep-token> — upstream release action items`)
 - **Body**:
   ```markdown
-  ## Release Notes Action Items for `<dep-token>` `<old-version>` → `<latest-version>`
+  # Rolling upstream release action items — `<dep-token>`
 
-  This issue summarizes upstream release notes for the `<dep-token>` dependency between the previously pinned version (`<old-version>`) and the new pinned version (`<latest-version>`), highlighting items that may need follow-up in ado-aw.
+  This is the **single canonical tracking issue** for action items arising from new releases of the `<dep-token>` dependency. The dependency version updater workflow appends a new comment to this issue for each version bump, so **the most recent activity lives in the comments below**.
 
-  The companion version-bump PR is titled `chore(deps): update <CONSTANT_NAME> to <latest-version>`.
+  The companion version-bump PR for the first recorded range is titled `chore(deps): update <CONSTANT_NAME> to <latest-version>`.
+
+  ## `<dep-token>` `<old-version>` → `<latest-version>`
 
   ### Releases analyzed
 
   - [v<version-1>](<release-url-1>)
-  - [v<version-2>](<release-url-2>)
   - …
   - [v<latest-version>](<release-url-latest>)
 
@@ -260,14 +304,12 @@ The `safe-outputs.create-issue.title-prefix` field is configured to `[deps-relea
   ### Deprecations
 
   - <one bullet per deprecation, with a brief description and a link to the release. Omit the section entirely if there are none.>
-
-  ---
-  *This issue was opened automatically by the dependency version updater workflow.*
   ```
 
-Keep the body grounded in the actual upstream release notes — do not invent items, and do not paraphrase so heavily that the upstream wording is lost. Each bullet should be checkable against the linked release.
+Keep the body/comment grounded in the actual upstream release notes — do not invent items, and do not paraphrase so heavily that the upstream wording is lost. Each bullet should be checkable against the linked release.
 
 ---
+
 
 ## For ecosystem_domains.json:
 
