@@ -29,7 +29,7 @@ Agent             →  Detection          →  SafeOutputs
 |-----|---------|-------|-------------|
 | **Agent** | Runs the AI agent inside an AWF network sandbox (Squid proxy + Docker). Agent proposes actions via safe-output MCP tools. | Read-only (`permissions.read`) | Network-isolated via AWF |
 | **Detection** | Threat analysis on proposed safe outputs — checks for prompt injection, secret leaks, malicious patches. | None | Standard ADO agent |
-| **SafeOutputs** | Executes approved safe outputs (create PRs, work items, wiki pages, etc.) | Write (`permissions.write`) | Standard ADO agent |
+| **SafeOutputs** | Executes approved safe outputs (create PRs, work items, wiki pages, etc.) | `$(System.AccessToken)` (default) or `permissions.write` if set | Standard ADO agent |
 
 Additional optional jobs:
 - **Setup** — runs before `Agent` (from `setup:` front matter). When `on.pr` is set with the default `mode: synthetic`, this job also runs a `synthPr` step that calls the ADO REST API to promote CI-triggered builds to PR semantics when an open PR matches; if it sets `AW_SYNTHETIC_PR_SKIP=true`, the Agent job is skipped cleanly. With `mode: policy` there is no synthPr step (and `trigger: none` is emitted so the operator's Build Validation branch policy is the sole source of PR builds). See [`docs/front-matter.md#pr-triggering-in-azure-repos`](../docs/front-matter.md#pr-triggering-in-azure-repos).
@@ -483,7 +483,7 @@ this action. Details: identity 'Build\<guid>', scope '<scope>'.
 
 ### Permission Mismatches
 
-The compiler validates that write-requiring safe outputs have `permissions.write` at compile time. If you're hitting permission errors at runtime:
+Stage 3 uses `$(System.AccessToken)` by default; `permissions.write` is only needed for cross-org writes or named-identity attribution. If you're hitting permission errors at runtime:
 
 - The front matter was edited without recompiling → run `ado-aw compile`
 - The service connection exists but isn't authorized for this pipeline → authorize it in ADO pipeline settings
