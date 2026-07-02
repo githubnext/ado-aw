@@ -22,6 +22,8 @@ tools:
 network:
   allowed: [defaults, github, dev.azure.com, learn.microsoft.com]
 safe-outputs:
+  threat-detection:
+    max-ai-credits: -1
   create-pull-request:
     title-prefix: "chore(workflows): "
     max: 1

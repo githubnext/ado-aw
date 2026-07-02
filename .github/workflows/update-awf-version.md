@@ -13,6 +13,8 @@ tools:
 network:
   allowed: [defaults, dev.azure.com, learn.microsoft.com]
 safe-outputs:
+  threat-detection:
+    max-ai-credits: -1
   create-pull-request:
     title-prefix: "chore(deps): "
     max: 4

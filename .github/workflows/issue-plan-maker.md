@@ -16,6 +16,8 @@ tools:
 network:
   allowed: [defaults, dev.azure.com, learn.microsoft.com]
 safe-outputs:
+  threat-detection:
+    max-ai-credits: -1
   add-comment:
     max: 2
 max-ai-credits: -1

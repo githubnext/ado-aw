@@ -16,6 +16,8 @@ network:
   allowed: [defaults, rust, dev.azure.com, learn.microsoft.com]
 timeout-minutes: 60
 safe-outputs:
+  threat-detection:
+    max-ai-credits: -1
   create-pull-request:
     max: 1
     protected-files: fallback-to-issue

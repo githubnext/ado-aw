@@ -32,6 +32,8 @@ steps:
         > /tmp/gh-aw/agent/issues-data/issues.json
       echo "Total issues fetched: $(jq 'length' /tmp/gh-aw/agent/issues-data/issues.json)"
 safe-outputs:
+  threat-detection:
+    max-ai-credits: -1
   create-issue:
     title-prefix: "[Parent] "
     max: 3
