@@ -1518,6 +1518,7 @@ fn build_conclusion_job(
     cfg: &StandaloneCtx,
     prefix: &JobPrefix<'_>,
 ) -> Result<Option<Job>> {
+    use crate::compile::ado_bundle::{Bundle, apply_bundle_auth, token_source_for};
     // Conclusion job is always emitted when safe-outputs exist (gh-aw pattern).
     if front_matter.safe_outputs.is_empty() {
         return Ok(None);
@@ -1546,12 +1547,15 @@ fn build_conclusion_job(
     download_artifact.continue_on_error = true;
     steps.push(Step::Task(download_artifact));
 
-    let conclusion_script = "\
-if command -v node >/dev/null 2>&1 && [ -f /tmp/ado-aw-scripts/ado-script/conclusion.js ]; then\n  \
-  node /tmp/ado-aw-scripts/ado-script/conclusion.js\n\
+    let conclusion_path = super::extensions::ado_script::CONCLUSION_PATH;
+    let conclusion_script = format!(
+        "\
+if command -v node >/dev/null 2>&1 && [ -f {conclusion_path} ]; then\n  \
+  node {conclusion_path}\n\
 else\n  \
   echo \"##vso[task.logissue type=warning]conclusion.js unavailable; skipping conclusion reporting\"\n\
-fi\n";
+fi\n"
+    );
     let mut conclusion_step = bash("Report pipeline conclusion", conclusion_script);
     conclusion_step = conclusion_step.with_condition(Condition::Always);
     // The Conclusion job's contract is "always runs, never fails": it exists to
@@ -1587,21 +1591,19 @@ fi\n";
         );
 
     // Use SC_WRITE_TOKEN when a write service connection is configured;
-    // fall back to System.AccessToken otherwise.
-    let has_write_sc = front_matter
+    // fall back to System.AccessToken otherwise. The token source is selected
+    // by the shared `token_source_for` helper (same logic as the Stage 3
+    // executor) and projected via the bundle-auth applier so the Conclusion
+    // step can never ship without a bearer (the regression that was #1307).
+    let write_sc = front_matter
         .permissions
         .as_ref()
-        .and_then(|p| p.write.as_ref())
-        .is_some();
-    if has_write_sc {
-        conclusion_step = conclusion_step.with_env(
-            "SYSTEM_ACCESSTOKEN",
-            EnvValue::secret("SC_WRITE_TOKEN"),
-        );
-    } else {
-        conclusion_step =
-            conclusion_step.with_env("SYSTEM_ACCESSTOKEN", EnvValue::secret("System.AccessToken"));
-    }
+        .and_then(|p| p.write.as_deref());
+    conclusion_step = apply_bundle_auth(
+        conclusion_step,
+        Bundle::Conclusion,
+        token_source_for(write_sc),
+    );
 
     // Pass per-tool configs as individual flat env vars (gh-aw pattern).
     // Each field gets its own env var — avoids JSON-in-env-var corruption in ADO.

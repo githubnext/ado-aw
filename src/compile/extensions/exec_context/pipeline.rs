@@ -40,9 +40,9 @@
 //!   PR-author-controlled).
 
 use crate::compile::extensions::CompileContext;
+use crate::compile::ado_bundle::{Bundle, TokenSource, apply_bundle_auth};
 use crate::compile::extensions::ado_script::EXEC_CONTEXT_PIPELINE_PATH;
 use crate::compile::ir::condition::{Condition, Expr};
-use crate::compile::ir::env::EnvValue;
 use crate::compile::ir::step::{BashStep, Step};
 use crate::compile::types::PipelineContextConfig;
 
@@ -88,48 +88,22 @@ impl ContextContributor for PipelineContextContributor {
             return Ok(None);
         }
         let script = format!("set -euo pipefail\nnode '{EXEC_CONTEXT_PIPELINE_PATH}'\n");
-        let step = BashStep::new(
-            "Stage pipeline execution context (aw-context/pipeline/*)",
-            script,
-        )
-        .with_condition(Condition::Eq(
-            Expr::Variable("Build.Reason".to_string()),
-            Expr::Literal("ResourceTrigger".to_string()),
-        ))
-        .with_env(
-            "SYSTEM_ACCESSTOKEN",
-            EnvValue::ado_macro("System.AccessToken")?,
-        )
-        .with_env(
-            "SYSTEM_COLLECTIONURI",
-            EnvValue::ado_macro("System.CollectionUri")?,
-        )
-        .with_env(
-            "BUILD_SOURCESDIRECTORY",
-            EnvValue::ado_macro("Build.SourcesDirectory")?,
-        )
-        // Upstream-build identifiers populated by ADO when the build
-        // was triggered via `resources.pipelines`. The bundle uses
-        // these to look up the upstream Build via the REST API.
-        // `Build.TriggeredBy.ProjectID` carries the project that owns
-        // the upstream pipeline (may differ from the consumer's
-        // project for cross-project triggers — ADO handles the
-        // routing natively).
-        .with_env(
-            "BUILD_TRIGGEREDBY_BUILDID",
-            EnvValue::ado_macro("Build.TriggeredBy.BuildId")?,
-        )
-        .with_env(
-            "BUILD_TRIGGEREDBY_DEFINITIONID",
-            EnvValue::ado_macro("Build.TriggeredBy.DefinitionId")?,
-        )
-        .with_env(
-            "BUILD_TRIGGEREDBY_DEFINITIONNAME",
-            EnvValue::ado_macro("Build.TriggeredBy.DefinitionName")?,
-        )
-        .with_env(
-            "BUILD_TRIGGEREDBY_PROJECTID",
-            EnvValue::ado_macro("Build.TriggeredBy.ProjectID")?,
+        // ADO auto-injects every predefined System.*/Build.* variable into the
+        // step env (SCREAMING_SNAKE form), so the bundle reads
+        // SYSTEM_COLLECTIONURI / BUILD_SOURCESDIRECTORY / BUILD_TRIGGEREDBY_*
+        // directly without re-projection. Only the non-auto-injected
+        // SYSTEM_ACCESSTOKEN bearer is projected, via the bundle-auth applier.
+        let step = apply_bundle_auth(
+            BashStep::new(
+                "Stage pipeline execution context (aw-context/pipeline/*)",
+                script,
+            )
+            .with_condition(Condition::Eq(
+                Expr::Variable("Build.Reason".to_string()),
+                Expr::Literal("ResourceTrigger".to_string()),
+            )),
+            Bundle::ExecContextPipeline,
+            TokenSource::SystemAccessToken,
         );
         Ok(Some(Step::Bash(step)))
     }
@@ -146,6 +120,7 @@ impl ContextContributor for PipelineContextContributor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compile::ir::env::EnvValue;
     use crate::compile::extensions::CompileContext;
     use crate::compile::types::FrontMatter;
 
@@ -218,30 +193,22 @@ mod tests {
         // Bearer present.
         assert!(matches!(
             bash.env.get("SYSTEM_ACCESSTOKEN"),
-            Some(EnvValue::AdoMacro("System.AccessToken"))
+            Some(EnvValue::Secret(v)) if v == "System.AccessToken"
         ));
-        // Collection URI for REST endpoint construction.
-        assert!(matches!(
-            bash.env.get("SYSTEM_COLLECTIONURI"),
-            Some(EnvValue::AdoMacro("System.CollectionUri"))
-        ));
-        // TriggeredBy quartet.
-        for (env_key, ado_var) in [
-            ("BUILD_TRIGGEREDBY_BUILDID", "Build.TriggeredBy.BuildId"),
-            (
-                "BUILD_TRIGGEREDBY_DEFINITIONID",
-                "Build.TriggeredBy.DefinitionId",
-            ),
-            (
-                "BUILD_TRIGGEREDBY_DEFINITIONNAME",
-                "Build.TriggeredBy.DefinitionName",
-            ),
-            ("BUILD_TRIGGEREDBY_PROJECTID", "Build.TriggeredBy.ProjectID"),
+        // Every predefined System.*/Build.* var this bundle reads is
+        // auto-injected by ADO, so the step must NOT re-project them.
+        for stripped in [
+            "SYSTEM_COLLECTIONURI",
+            "BUILD_SOURCESDIRECTORY",
+            "BUILD_TRIGGEREDBY_BUILDID",
+            "BUILD_TRIGGEREDBY_DEFINITIONID",
+            "BUILD_TRIGGEREDBY_DEFINITIONNAME",
+            "BUILD_TRIGGEREDBY_PROJECTID",
         ] {
-            match bash.env.get(env_key) {
-                Some(EnvValue::AdoMacro(name)) => assert_eq!(*name, ado_var),
-                other => panic!("expected {env_key} -> AdoMacro({ado_var}), got {other:?}"),
-            }
+            assert!(
+                bash.env.get(stripped).is_none(),
+                "{stripped} is auto-injected and must not be re-projected"
+            );
         }
     }
 

@@ -273,25 +273,61 @@ non-zero:
 
 ### Env-var contract
 
-The compiler injects these on the `node exec-context-pr-synth.js`
-step; the predefined `SYSTEM_PULLREQUEST_*` variables are auto-mapped
-into the process env by ADO at runtime:
+The compiler injects only the non-auto-injected `SYSTEM_ACCESSTOKEN` bearer
+(via the shared bundle-auth applier — see [Bundle env contract](#bundle-env-contract))
+plus the computed `PR_SYNTH_SPEC` on the `node exec-context-pr-synth.js` step.
+Every predefined `System.*` / `Build.*` variable the bundle reads
+(`SYSTEM_TEAMPROJECT`, `BUILD_REPOSITORY_ID`, `BUILD_REASON`,
+`BUILD_REPOSITORY_PROVIDER`, `BUILD_SOURCEBRANCH`, `SYSTEM_PULLREQUEST_*`) is
+auto-mapped into the process env by ADO at runtime, so it is **not**
+re-projected on the step:
 
 | Env var | Source | Purpose |
 |---|---|---|
 | `PR_SYNTH_SPEC` | compiled inline (base64) | The branch/path filter spec |
-| `SYSTEM_ACCESSTOKEN` | `$(System.AccessToken)` | ADO REST auth |
+| `SYSTEM_ACCESSTOKEN` | `$(System.AccessToken)` (bundle-auth applier) | ADO REST auth |
 | `SYSTEM_COLLECTIONURI` | ADO auto-injected | ADO org base URL (read via `getWebApi()`; falls back to `SYSTEM_TEAMFOUNDATIONCOLLECTIONURI`) |
-| `ADO_PROJECT` | `$(System.TeamProject)` | ADO project for the PR lookup |
-| `ADO_REPO_ID` | `$(Build.Repository.ID)` | Repository id for the PR lookup |
-| `BUILD_REASON` | `$(Build.Reason)` | Distinguishes CI from PR builds |
-| `BUILD_REPOSITORY_PROVIDER` | `$(Build.Repository.Provider)` | Detects GitHub-typed repos |
-| `BUILD_SOURCEBRANCH` | `$(Build.SourceBranch)` | Source ref matched against active PRs |
-| `SYSTEM_PULLREQUEST_*` | ADO-injected | Real-PR identifiers propagated verbatim |
+| `SYSTEM_TEAMPROJECT` | ADO auto-injected | ADO project for the PR lookup |
+| `BUILD_REPOSITORY_ID` | ADO auto-injected | Repository id for the PR lookup |
+| `BUILD_REASON` | ADO auto-injected | Distinguishes CI from PR builds |
+| `BUILD_REPOSITORY_PROVIDER` | ADO auto-injected | Detects GitHub-typed repos |
+| `BUILD_SOURCEBRANCH` | ADO auto-injected | Source ref matched against active PRs |
+| `SYSTEM_PULLREQUEST_*` | ADO auto-injected | Real-PR identifiers read verbatim |
 
 The bundle lazy-imports `azure-devops-node-api` only when it needs to
 call the PR REST endpoints (steps 4 and 7); real PR builds and
 GitHub-typed repos return before any SDK load.
+
+## Bundle env contract
+
+Every compiler-emitted step that runs an ado-script bundle has an implicit
+environment contract — which `process.env` keys the bundle reads. That contract
+is modelled in [`src/compile/ado_bundle.rs`](../src/compile/ado_bundle.rs):
+
+- **`Bundle`** enumerates every bundle with its on-disk `path()` and its
+  `auth()` requirement (`BundleAuth::Bearer` for bundles that read
+  `SYSTEM_ACCESSTOKEN` — for ADO REST via `getWebApi()` and/or git bearer auth
+  via `bearerEnv` — `BundleAuth::None` otherwise).
+- **`apply_bundle_auth(step, bundle, token)`** is the single chokepoint that
+  projects `SYSTEM_ACCESSTOKEN` (from a `TokenSource`) into every
+  bearer-requiring bundle step. `SYSTEM_ACCESSTOKEN` is the one ADO predefined variable that is
+  **not** auto-injected — ADO maps it only when a step explicitly references
+  it — so it must be projected. This applier is why a step can no longer ship
+  without a bearer (the regression behind #1307).
+- **`token_source_for(write_service_connection)`** unifies the
+  `System.AccessToken` vs `SC_WRITE_TOKEN` selection shared by the Conclusion
+  job and the Stage 3 executor.
+
+Every other ADO predefined variable (`System.*`, `Build.*`) is auto-injected
+into every script step's env under its SCREAMING_SNAKE name, so bundle steps
+**must not** re-project them (e.g. `SYSTEM_TEAMPROJECT: $(System.TeamProject)`
+is a redundant mirror). `is_redundant_ado_mirror` identifies such entries and
+the contract tests — plus the compiled-YAML churn guard in
+`tests/compiler_tests.rs` — assert migrated steps do not emit them. The ADO
+collection URI is likewise read from the auto-injected `SYSTEM_COLLECTIONURI`
+(`scripts/ado-script/src/shared/auth.ts::getWebApi`, see #1307), so it
+is never part of a step's env contract.
+
 
 ## End-to-end data flow
 

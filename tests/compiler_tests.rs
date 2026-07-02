@@ -5588,17 +5588,20 @@ fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
         compiled.contains("SYSTEM_PULLREQUEST_TARGETBRANCH: $(AW_PR_TARGETBRANCH)"),
         "Prepare step must pass the PR target branch via the hoisted AW_PR_TARGETBRANCH job-variable"
     );
+    // ADO auto-injects the predefined System.*/Build.* context vars the
+    // bundle reads, so the prepare step must NOT re-project them (they were
+    // redundant mirrors — see src/compile/ado_bundle.rs).
     assert!(
-        compiled.contains("SYSTEM_TEAMPROJECT: $(System.TeamProject)"),
-        "Prepare step must pass the ADO project name through to the bundle"
+        !compiled.contains("SYSTEM_TEAMPROJECT: $(System.TeamProject)"),
+        "SYSTEM_TEAMPROJECT is auto-injected and must not be re-projected"
     );
     assert!(
-        compiled.contains("BUILD_REPOSITORY_NAME: $(Build.Repository.Name)"),
-        "Prepare step must pass the repository name through to the bundle"
+        !compiled.contains("BUILD_REPOSITORY_NAME: $(Build.Repository.Name)"),
+        "BUILD_REPOSITORY_NAME is auto-injected and must not be re-projected"
     );
     assert!(
-        compiled.contains("BUILD_SOURCESDIRECTORY: $(Build.SourcesDirectory)"),
-        "Prepare step must pass the workspace root through to the bundle"
+        !compiled.contains("BUILD_SOURCESDIRECTORY: $(Build.SourcesDirectory)"),
+        "BUILD_SOURCESDIRECTORY is auto-injected and must not be re-projected"
     );
 
     // v7: the bundle install/download must be present in the Agent
@@ -5759,6 +5762,108 @@ fn test_execution_context_pr_does_not_leak_system_accesstoken() {
          among the env blocks declaring SYSTEM_ACCESSTOKEN, but it was missing. \
          The PR contributor did not activate as expected."
     );
+}
+
+/// Churn guard for the bundle env-var contract refactor: no bundle step
+/// re-projects an ADO predefined variable that the runtime already
+/// auto-injects (e.g. `SYSTEM_TEAMPROJECT: $(System.TeamProject)`). Such
+/// redundant mirrors were stripped when the auth contract was centralised in
+/// `src/compile/ado_bundle.rs`; this test walks the compiled YAML and fails if
+/// any reappear.
+///
+/// The invariant: for a step `env:` entry `KEY: $(Dotted.Var)`, it is a
+/// redundant mirror iff `KEY == Dotted.Var.replace('.', "_").to_uppercase()`.
+/// `SYSTEM_ACCESSTOKEN: $(System.AccessToken)` is the sanctioned exception —
+/// the token is NOT auto-injected and must be projected (that projection is
+/// what fixed #1307).
+///
+/// Runs against multiple fixture families so the exec-context prepare steps,
+/// the synth-PR step, the conclusion step, AND the filter `gate.js` step are
+/// all covered.
+#[test]
+fn test_bundle_steps_do_not_reproject_auto_injected_ado_vars() {
+    use serde_yaml::Value;
+
+    // Keys retained deliberately even though they mirror an auto-injected var:
+    //  - SYSTEM_ACCESSTOKEN: the bearer, which is NOT auto-injected (ADO maps
+    //    it only on explicit reference), so it must be projected.
+    //  - BUILD_REQUESTEDFOR / BUILD_REQUESTEDFOREMAIL: the manual contributor's
+    //    requestor-identity vars. These ARE auto-injected, so stripping them
+    //    would not change runtime behaviour — but they sit behind the
+    //    `include_email_resolved()` email-hygiene opt-in, and projecting them
+    //    keeps that privacy intent visible at the call site. See the comment in
+    //    src/compile/extensions/exec_context/manual.rs::prepare_step_typed.
+    const RETAINED: &[&str] = &[
+        "SYSTEM_ACCESSTOKEN",
+        "BUILD_REQUESTEDFOR",
+        "BUILD_REQUESTEDFOREMAIL",
+    ];
+
+    fn screaming_snake(dotted: &str) -> String {
+        dotted.replace('.', "_").to_uppercase()
+    }
+
+    fn walk(v: &Value, offenders: &mut Vec<String>) {
+        match v {
+            Value::Mapping(m) => {
+                if let Some(Value::Mapping(env_map)) = m.get(Value::String("env".to_string())) {
+                    for (k, val) in env_map {
+                        let (key, value) = match (k.as_str(), val.as_str()) {
+                            (Some(k), Some(v)) => (k, v),
+                            _ => continue,
+                        };
+                        if RETAINED.contains(&key) {
+                            continue;
+                        }
+                        // Match a bare `$(Dotted.Var)` macro value.
+                        let inner = value
+                            .strip_prefix("$(")
+                            .and_then(|s| s.strip_suffix(')'));
+                        if let Some(dotted) = inner
+                            && dotted.contains('.')
+                            && key == screaming_snake(dotted)
+                        {
+                            offenders.push(format!("{key}: {value}"));
+                        }
+                    }
+                }
+                for (_, vv) in m {
+                    walk(vv, offenders);
+                }
+            }
+            Value::Sequence(seq) => {
+                for item in seq {
+                    walk(item, offenders);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Fixture families that between them exercise every bundle step shape:
+    //  - execution-context-agent.md: the exec-context prepare steps + synth-PR
+    //    + conclusion (safe-outputs) steps.
+    //  - pr-filter-tier1-agent.md / pipeline-filter-agent.md: the filter
+    //    `gate.js` step (prGate / pipelineGate).
+    const FIXTURES: &[&str] = &[
+        "execution-context-agent.md",
+        "pr-filter-tier1-agent.md",
+        "pipeline-filter-agent.md",
+    ];
+
+    for fixture in FIXTURES {
+        let compiled = compile_fixture(fixture);
+        let yaml: Value = serde_yaml::from_str(&compiled)
+            .unwrap_or_else(|e| panic!("{fixture} should parse as YAML: {e}"));
+        let mut offenders: Vec<String> = Vec::new();
+        walk(&yaml, &mut offenders);
+        assert!(
+            offenders.is_empty(),
+            "{fixture}: found redundant re-projections of auto-injected ADO variables in \
+             compiled bundle steps (these must be dropped — the runtime auto-injects them): \
+             {offenders:?}"
+        );
+    }
 }
 
 /// Regression trap for an entire bug class: ADO step-level `condition:`

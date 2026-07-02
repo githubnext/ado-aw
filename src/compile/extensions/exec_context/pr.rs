@@ -59,6 +59,7 @@
 //! emitted YAML.
 
 use crate::compile::extensions::CompileContext;
+use crate::compile::ado_bundle::{Bundle, TokenSource, apply_bundle_auth};
 use crate::compile::extensions::ado_script::EXEC_CONTEXT_PR_PATH;
 use crate::compile::ir::condition::{Condition, Expr};
 use crate::compile::ir::env::EnvValue;
@@ -129,17 +130,13 @@ impl ContextContributor for PrContextContributor {
         // which is exactly when this step should skip.
         //
         // Coexists with `prepare_step` until production callers switch.
-        let (pr_id, target_branch, prelude, condition) = if self.synthetic_pr_active {
+        let (prelude, condition) = if self.synthetic_pr_active {
             (
-                EnvValue::pipeline_var("AW_PR_ID"),
-                EnvValue::pipeline_var("AW_PR_TARGETBRANCH"),
                 "    if [ -z \"$AW_PR_ID\" ]; then\n      echo \"[aw-context] No PR identifier resolved (not a PR build and not synth-promoted); skipping exec-context-pr.\"\n      exit 0\n    fi\n",
                 Condition::Succeeded,
             )
         } else {
             (
-                EnvValue::ado_macro("System.PullRequest.PullRequestId")?,
-                EnvValue::ado_macro("System.PullRequest.TargetBranch")?,
                 "",
                 Condition::Eq(
                     Expr::Variable("Build.Reason".to_string()),
@@ -148,26 +145,28 @@ impl ContextContributor for PrContextContributor {
             )
         };
         let script = format!("set -euo pipefail\n{prelude}node '{EXEC_CONTEXT_PR_PATH}'\n");
-        let step = BashStep::new("Stage PR execution context (aw-context/pr/*)", script)
-            .with_condition(condition)
-            .with_env(
-                "SYSTEM_ACCESSTOKEN",
-                EnvValue::ado_macro("System.AccessToken")?,
-            )
-            .with_env("SYSTEM_PULLREQUEST_PULLREQUESTID", pr_id)
-            .with_env("SYSTEM_PULLREQUEST_TARGETBRANCH", target_branch)
-            .with_env(
-                "SYSTEM_TEAMPROJECT",
-                EnvValue::ado_macro("System.TeamProject")?,
-            )
-            .with_env(
-                "BUILD_REPOSITORY_NAME",
-                EnvValue::ado_macro("Build.Repository.Name")?,
-            )
-            .with_env(
-                "BUILD_SOURCESDIRECTORY",
-                EnvValue::ado_macro("Build.SourcesDirectory")?,
-            );
+        // ADO auto-injects predefined System.*/Build.* context vars, so the
+        // bundle reads SYSTEM_TEAMPROJECT / BUILD_REPOSITORY_NAME /
+        // BUILD_SOURCESDIRECTORY (and, in real-PR mode, SYSTEM_PULLREQUEST_*)
+        // directly. Only the non-auto-injected SYSTEM_ACCESSTOKEN bearer and,
+        // in synth mode, the hoisted AW_PR_* overrides are projected.
+        let mut step = apply_bundle_auth(
+            BashStep::new("Stage PR execution context (aw-context/pr/*)", script)
+                .with_condition(condition),
+            Bundle::ExecContextPr,
+            TokenSource::SystemAccessToken,
+        );
+        if self.synthetic_pr_active {
+            step = step
+                .with_env(
+                    "SYSTEM_PULLREQUEST_PULLREQUESTID",
+                    EnvValue::pipeline_var("AW_PR_ID"),
+                )
+                .with_env(
+                    "SYSTEM_PULLREQUEST_TARGETBRANCH",
+                    EnvValue::pipeline_var("AW_PR_TARGETBRANCH"),
+                );
+        }
         Ok(Some(Step::Bash(step)))
     }
 
@@ -273,16 +272,17 @@ mod tests {
         );
 
         // SYSTEM_ACCESSTOKEN must still be in the step's env (the
-        // trust boundary that the bundle relies on).
+        // trust boundary that the bundle relies on), projected as a secret
+        // via the bundle-auth applier.
         assert!(matches!(
             bash.env.get("SYSTEM_ACCESSTOKEN"),
-            Some(EnvValue::AdoMacro("System.AccessToken"))
+            Some(EnvValue::Secret(v)) if v == "System.AccessToken"
         ));
     }
 
-    /// Synth-inactive: PR id / target branch are plain
-    /// `EnvValue::AdoMacro` values, no Coalesce; condition is the
-    /// typed `Eq(Variable("Build.Reason"), Literal("PullRequest"))`.
+    /// Synth-inactive: the auto-injected `SYSTEM_PULLREQUEST_*` and
+    /// `SYSTEM_TEAMPROJECT` / `BUILD_*` context vars are NOT re-projected;
+    /// condition is the typed `Eq(Variable("Build.Reason"), Literal("PullRequest"))`.
     #[test]
     fn prepare_step_typed_synth_inactive_uses_plain_macros_and_narrow_condition() {
         let contributor = PrContextContributor::new(PrContextConfig::default(), false);
@@ -298,14 +298,20 @@ mod tests {
             other => panic!("expected Step::Bash, got {other:?}"),
         };
 
-        assert!(matches!(
-            bash.env.get("SYSTEM_PULLREQUEST_PULLREQUESTID"),
-            Some(EnvValue::AdoMacro("System.PullRequest.PullRequestId"))
-        ));
-        assert!(matches!(
-            bash.env.get("SYSTEM_PULLREQUEST_TARGETBRANCH"),
-            Some(EnvValue::AdoMacro("System.PullRequest.TargetBranch"))
-        ));
+        // In real-PR mode the bundle reads the auto-injected PR vars and
+        // context vars directly, so the step re-projects none of them.
+        for stripped in [
+            "SYSTEM_PULLREQUEST_PULLREQUESTID",
+            "SYSTEM_PULLREQUEST_TARGETBRANCH",
+            "SYSTEM_TEAMPROJECT",
+            "BUILD_REPOSITORY_NAME",
+            "BUILD_SOURCESDIRECTORY",
+        ] {
+            assert!(
+                bash.env.get(stripped).is_none(),
+                "{stripped} is auto-injected and must not be re-projected"
+            );
+        }
 
         // No BUILD_REASON / AW_SYNTHETIC_PR env entries (the bash
         // guard isn't emitted on the synth-inactive path).

@@ -1204,6 +1204,7 @@ pub fn build_gate_step_typed(
     evaluator_path: &str,
     synthetic_pr_active: bool,
 ) -> anyhow::Result<crate::compile::ir::step::BashStep> {
+    use crate::compile::ado_bundle::{Bundle, TokenSource, apply_bundle_auth};
     use crate::compile::ir::condition::Condition;
     use crate::compile::ir::env::EnvValue;
     use crate::compile::ir::ids::StepId;
@@ -1225,21 +1226,21 @@ pub fn build_gate_step_typed(
     let pr_synth_active = synthetic_pr_active && matches!(ctx, GateContext::PullRequest);
 
     let script = format!("node '{evaluator_path}'\n");
-    let mut step = BashStep::new(ctx.display_name(), script)
-        .with_id(StepId::new(ctx.step_name())?)
-        .with_condition(Condition::Succeeded)
-        // The gate evaluator JS bundle emits `##vso[task.setvariable
-        // variable=SHOULD_RUN;isOutput=true]` at runtime — declare it
-        // here so cross-job consumers (e.g. the Agent-job condition's
-        // typed `Condition::Eq(Expr::StepOutput(..., "SHOULD_RUN"))`)
-        // pass graph validation. See `src/compile/ir/output.rs` for
-        // the `OutputDecl` contract.
-        .with_output(crate::compile::ir::output::OutputDecl::new("SHOULD_RUN"))
-        .with_env(
-            "SYSTEM_ACCESSTOKEN",
-            EnvValue::ado_macro("System.AccessToken")?,
-        )
-        .with_env("GATE_SPEC", EnvValue::literal(spec_b64));
+    let mut step = apply_bundle_auth(
+        BashStep::new(ctx.display_name(), script)
+            .with_id(StepId::new(ctx.step_name())?)
+            .with_condition(Condition::Succeeded)
+            // The gate evaluator JS bundle emits `##vso[task.setvariable
+            // variable=SHOULD_RUN;isOutput=true]` at runtime — declare it
+            // here so cross-job consumers (e.g. the Agent-job condition's
+            // typed `Condition::Eq(Expr::StepOutput(..., "SHOULD_RUN"))`)
+            // pass graph validation. See `src/compile/ir/output.rs` for
+            // the `OutputDecl` contract.
+            .with_output(crate::compile::ir::output::OutputDecl::new("SHOULD_RUN")),
+        Bundle::Gate,
+        TokenSource::SystemAccessToken,
+    )
+    .with_env("GATE_SPEC", EnvValue::literal(spec_b64));
 
     // AW_SYNTHETIC_PR (same-job consumer of the synthPr step) reads
     // the setVar-registered variable via plain `$(name)` macro. The

@@ -15,9 +15,9 @@
 //! `exec-context-ci-push`.
 
 use crate::compile::extensions::CompileContext;
+use crate::compile::ado_bundle::{Bundle, TokenSource, apply_bundle_auth};
 use crate::compile::extensions::ado_script::EXEC_CONTEXT_SCHEDULE_PATH;
 use crate::compile::ir::condition::{Condition, Expr};
-use crate::compile::ir::env::EnvValue;
 use crate::compile::ir::step::{BashStep, Step};
 use crate::compile::types::ScheduleContextConfig;
 
@@ -58,42 +58,20 @@ impl ContextContributor for ScheduleContextContributor {
             return Ok(None);
         }
         let script = format!("set -euo pipefail\nnode '{EXEC_CONTEXT_SCHEDULE_PATH}'\n");
-        let step = BashStep::new(
-            "Stage schedule execution context (aw-context/schedule/*)",
-            script,
-        )
-        .with_condition(Condition::Eq(
-            Expr::Variable("Build.Reason".to_string()),
-            Expr::Literal("Schedule".to_string()),
-        ))
-        .with_env(
-            "SYSTEM_ACCESSTOKEN",
-            EnvValue::ado_macro("System.AccessToken")?,
-        )
-        .with_env(
-            "SYSTEM_COLLECTIONURI",
-            EnvValue::ado_macro("System.CollectionUri")?,
-        )
-        .with_env(
-            "SYSTEM_TEAMPROJECT",
-            EnvValue::ado_macro("System.TeamProject")?,
-        )
-        .with_env(
-            "SYSTEM_DEFINITIONID",
-            EnvValue::ado_macro("System.DefinitionId")?,
-        )
-        .with_env("BUILD_BUILDID", EnvValue::ado_macro("Build.BuildId")?)
-        .with_env(
-            "BUILD_SOURCESDIRECTORY",
-            EnvValue::ado_macro("Build.SourcesDirectory")?,
-        )
-        .with_env(
-            "BUILD_SOURCEVERSION",
-            EnvValue::ado_macro("Build.SourceVersion")?,
-        )
-        .with_env(
-            "BUILD_SOURCEBRANCH",
-            EnvValue::ado_macro("Build.SourceBranch")?,
+        // ADO auto-injects the predefined System.*/Build.* context variables
+        // into the step env, so the bundle reads them directly; only the
+        // non-auto-injected SYSTEM_ACCESSTOKEN bearer is projected here.
+        let step = apply_bundle_auth(
+            BashStep::new(
+                "Stage schedule execution context (aw-context/schedule/*)",
+                script,
+            )
+            .with_condition(Condition::Eq(
+                Expr::Variable("Build.Reason".to_string()),
+                Expr::Literal("Schedule".to_string()),
+            )),
+            Bundle::ExecContextSchedule,
+            TokenSource::SystemAccessToken,
         );
         Ok(Some(Step::Bash(step)))
     }
@@ -116,6 +94,7 @@ impl ContextContributor for ScheduleContextContributor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compile::ir::env::EnvValue;
     use crate::compile::extensions::CompileContext;
     use crate::compile::types::FrontMatter;
 
@@ -183,8 +162,24 @@ mod tests {
         }
         assert!(matches!(
             bash.env.get("SYSTEM_ACCESSTOKEN"),
-            Some(EnvValue::AdoMacro("System.AccessToken"))
+            Some(EnvValue::Secret(v)) if v == "System.AccessToken"
         ));
+        // Predefined System.*/Build.* context vars are auto-injected by ADO;
+        // the step must not re-project them.
+        for stripped in [
+            "SYSTEM_COLLECTIONURI",
+            "SYSTEM_TEAMPROJECT",
+            "SYSTEM_DEFINITIONID",
+            "BUILD_BUILDID",
+            "BUILD_SOURCESDIRECTORY",
+            "BUILD_SOURCEVERSION",
+            "BUILD_SOURCEBRANCH",
+        ] {
+            assert!(
+                bash.env.get(stripped).is_none(),
+                "{stripped} is auto-injected and must not be re-projected"
+            );
+        }
     }
 
     #[test]

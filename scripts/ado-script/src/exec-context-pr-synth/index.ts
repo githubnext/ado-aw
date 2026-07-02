@@ -180,11 +180,11 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     return 0;
   }
 
-  const project = env.ADO_PROJECT ?? "";
-  const repoId = env.ADO_REPO_ID ?? "";
+  const project = env.SYSTEM_TEAMPROJECT ?? "";
+  const repoId = env.BUILD_REPOSITORY_ID ?? "";
   if (project.length === 0 || repoId.length === 0) {
     logError(
-      "[synth-pr] required env vars ADO_PROJECT and ADO_REPO_ID must be set by the compiler",
+      "[synth-pr] required env vars SYSTEM_TEAMPROJECT and BUILD_REPOSITORY_ID must be auto-injected by ADO",
     );
     return 1;
   }

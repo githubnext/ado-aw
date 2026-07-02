@@ -1613,11 +1613,10 @@ pub fn generate_executor_ado_env(
     debug_create_issue_enabled: bool,
 ) -> String {
     let mut lines: Vec<String> = Vec::new();
-    if write_service_connection.is_some() {
-        lines.push("SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)".to_string());
-    } else {
-        lines.push("SYSTEM_ACCESSTOKEN: $(System.AccessToken)".to_string());
-    }
+    // Select the ADO bearer via the shared `token_source_for` helper so the
+    // executor and the Conclusion job cannot disagree on the token source.
+    let token = crate::compile::ado_bundle::token_source_for(write_service_connection);
+    lines.push(format!("SYSTEM_ACCESSTOKEN: $({})", token.variable()));
     if debug_create_issue_enabled {
         lines.push("ADO_AW_DEBUG_GITHUB_TOKEN: $(ADO_AW_DEBUG_GITHUB_TOKEN)".to_string());
     }

@@ -46,9 +46,9 @@
 //! - **REST failure** — Build API returned an error. Same.
 
 use crate::compile::extensions::CompileContext;
+use crate::compile::ado_bundle::{Bundle, TokenSource, apply_bundle_auth};
 use crate::compile::extensions::ado_script::EXEC_CONTEXT_CI_PUSH_PATH;
 use crate::compile::ir::condition::{Condition, Expr};
-use crate::compile::ir::env::EnvValue;
 use crate::compile::ir::step::{BashStep, Step};
 use crate::compile::types::CiPushContextConfig;
 
@@ -91,48 +91,26 @@ impl ContextContributor for CiPushContextContributor {
             return Ok(None);
         }
         let script = format!("set -euo pipefail\nnode '{EXEC_CONTEXT_CI_PUSH_PATH}'\n");
-        let step = BashStep::new(
-            "Stage ci-push execution context (aw-context/ci-push/*)",
-            script,
-        )
-        .with_condition(Condition::Or(vec![
-            Condition::Eq(
-                Expr::Variable("Build.Reason".to_string()),
-                Expr::Literal("IndividualCI".to_string()),
-            ),
-            Condition::Eq(
-                Expr::Variable("Build.Reason".to_string()),
-                Expr::Literal("BatchedCI".to_string()),
-            ),
-        ]))
-        .with_env(
-            "SYSTEM_ACCESSTOKEN",
-            EnvValue::ado_macro("System.AccessToken")?,
-        )
-        .with_env(
-            "SYSTEM_COLLECTIONURI",
-            EnvValue::ado_macro("System.CollectionUri")?,
-        )
-        .with_env(
-            "SYSTEM_TEAMPROJECT",
-            EnvValue::ado_macro("System.TeamProject")?,
-        )
-        .with_env(
-            "SYSTEM_DEFINITIONID",
-            EnvValue::ado_macro("System.DefinitionId")?,
-        )
-        .with_env("BUILD_BUILDID", EnvValue::ado_macro("Build.BuildId")?)
-        .with_env(
-            "BUILD_SOURCESDIRECTORY",
-            EnvValue::ado_macro("Build.SourcesDirectory")?,
-        )
-        .with_env(
-            "BUILD_SOURCEVERSION",
-            EnvValue::ado_macro("Build.SourceVersion")?,
-        )
-        .with_env(
-            "BUILD_SOURCEBRANCH",
-            EnvValue::ado_macro("Build.SourceBranch")?,
+        // ADO auto-injects the predefined System.*/Build.* context variables
+        // into the step env, so the bundle reads them directly; only the
+        // non-auto-injected SYSTEM_ACCESSTOKEN bearer is projected here.
+        let step = apply_bundle_auth(
+            BashStep::new(
+                "Stage ci-push execution context (aw-context/ci-push/*)",
+                script,
+            )
+            .with_condition(Condition::Or(vec![
+                Condition::Eq(
+                    Expr::Variable("Build.Reason".to_string()),
+                    Expr::Literal("IndividualCI".to_string()),
+                ),
+                Condition::Eq(
+                    Expr::Variable("Build.Reason".to_string()),
+                    Expr::Literal("BatchedCI".to_string()),
+                ),
+            ])),
+            Bundle::ExecContextCiPush,
+            TokenSource::SystemAccessToken,
         );
         Ok(Some(Step::Bash(step)))
     }
@@ -156,6 +134,7 @@ impl ContextContributor for CiPushContextContributor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compile::ir::env::EnvValue;
     use crate::compile::extensions::CompileContext;
     use crate::compile::types::FrontMatter;
 
@@ -216,24 +195,28 @@ mod tests {
             other => panic!("expected Or condition, got {other:?}"),
         }
 
-        // Trust boundary: bearer present.
+        // Trust boundary: bearer present, projected as a secret via the
+        // bundle-auth applier (not an AdoMacro).
         assert!(matches!(
             bash.env.get("SYSTEM_ACCESSTOKEN"),
-            Some(EnvValue::AdoMacro("System.AccessToken"))
+            Some(EnvValue::Secret(v)) if v == "System.AccessToken"
         ));
-        // Identifiers needed for the REST + git fetch.
-        assert!(matches!(
-            bash.env.get("SYSTEM_DEFINITIONID"),
-            Some(EnvValue::AdoMacro("System.DefinitionId"))
-        ));
-        assert!(matches!(
-            bash.env.get("BUILD_SOURCEVERSION"),
-            Some(EnvValue::AdoMacro("Build.SourceVersion"))
-        ));
-        assert!(matches!(
-            bash.env.get("BUILD_SOURCEBRANCH"),
-            Some(EnvValue::AdoMacro("Build.SourceBranch"))
-        ));
+        // All predefined System.*/Build.* context vars are auto-injected by
+        // ADO, so the step must not re-project them.
+        for stripped in [
+            "SYSTEM_COLLECTIONURI",
+            "SYSTEM_TEAMPROJECT",
+            "SYSTEM_DEFINITIONID",
+            "BUILD_BUILDID",
+            "BUILD_SOURCESDIRECTORY",
+            "BUILD_SOURCEVERSION",
+            "BUILD_SOURCEBRANCH",
+        ] {
+            assert!(
+                bash.env.get(stripped).is_none(),
+                "{stripped} is auto-injected and must not be re-projected"
+            );
+        }
     }
 
     #[test]
