@@ -99,7 +99,7 @@ fn derive_checkout_aliases(fm: &Mapping) -> Result<Vec<String>> {
     let items: Vec<ReposItem> = serde_yaml::from_value(repos_val.clone()).map_err(|e| {
         anyhow::anyhow!("failed to read `repos:` while migrating legacy path markers: {e}")
     })?;
-    let (_repositories, checkout) = lower_repos(&items)?;
+    let (_repositories, checkout, _fetch) = lower_repos(&items)?;
     Ok(checkout)
 }
 

@@ -7078,3 +7078,108 @@ fn invalid_task_input_compiles_silently_and_preserves_passthrough() {
     );
 }
 
+/// A reserved `self` entry in `repos:` tunes the auto-generated
+/// `checkout: self` step in every job (fetchDepth + fetchTags) without emitting
+/// a repository resource or an extra checkout.
+#[test]
+fn test_repos_self_entry_tunes_all_self_checkouts() {
+    let source = r#"---
+name: "Self Checkout Tuning"
+description: "shallow, no tags on self"
+repos:
+  - name: self
+    fetch-depth: 1
+    fetch-tags: false
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("self-checkout-tuning", source);
+    assert!(ok, "self-checkout tuning should compile: {stderr}");
+
+    let self_checkouts = compiled.matches("- checkout: self").count();
+    assert!(
+        self_checkouts >= 2,
+        "expected multiple `checkout: self` steps, found {self_checkouts}:\n{compiled}"
+    );
+    // Every self checkout carries the tuned fetch options.
+    assert_eq!(
+        compiled.matches("fetchDepth: 1").count(),
+        self_checkouts,
+        "each `checkout: self` must carry fetchDepth: 1:\n{compiled}"
+    );
+    assert_eq!(
+        compiled.matches("fetchTags: false").count(),
+        self_checkouts,
+        "each `checkout: self` must carry fetchTags: false:\n{compiled}"
+    );
+    // `self` must NOT add an extra repository resource — only the canonical
+    // `SelfRepo` (always emitted) should be present.
+    assert_eq!(
+        compiled.matches("repository: self").count(),
+        1,
+        "the reserved `self` entry must not emit an extra repository resource:\n{compiled}"
+    );
+}
+
+/// `fetch-depth` / `fetch-tags` on a named `repos:` entry tune that
+/// repository's checkout step (which lands in the Agent job).
+#[test]
+fn test_repos_named_entry_fetch_tuning_emitted() {
+    let source = r#"---
+name: "Named Checkout Tuning"
+description: "shallow named repo"
+repos:
+  - name: my-org/monorepo
+    fetch-depth: 1
+    fetch-tags: false
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("named-checkout-tuning", source);
+    assert!(ok, "named checkout tuning should compile: {stderr}");
+
+    let agent = job_block(&compiled, "Agent");
+    assert!(
+        agent.contains("- checkout: monorepo"),
+        "the named repo must be checked out in the Agent job:\n{agent}"
+    );
+    assert!(
+        agent.contains("fetchDepth: 1") && agent.contains("fetchTags: false"),
+        "the named checkout must carry the tuned fetch options:\n{agent}"
+    );
+    // Without a `self` entry, `checkout: self` stays at ADO defaults.
+    assert!(
+        !agent.contains("- checkout: self\n  fetchDepth"),
+        "checkout: self must stay untuned when only a named repo is tuned:\n{agent}"
+    );
+}
+
+/// Regression: with no `repos:` fetch tuning, checkout steps stay bare (ADO
+/// defaults), so existing agents compile byte-for-byte unchanged.
+#[test]
+fn test_no_repos_fetch_tuning_emits_bare_checkout() {
+    let source = r#"---
+name: "Bare Checkout"
+description: "no fetch tuning"
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("bare-checkout", source);
+    assert!(ok, "bare agent should compile: {stderr}");
+    assert!(
+        compiled.contains("- checkout: self"),
+        "the self checkout must still be emitted:\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("fetchDepth"),
+        "no fetchDepth key without tuning:\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("fetchTags"),
+        "no fetchTags key without tuning:\n{compiled}"
+    );
+}
+

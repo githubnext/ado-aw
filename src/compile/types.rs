@@ -664,6 +664,11 @@ pub struct FrontMatter {
     /// YAML directly.
     #[serde(skip)]
     pub checkout: Vec<String>,
+    /// Lowered per-checkout fetch tuning, populated by `lower_repos()`. Keyed by
+    /// alias, plus [`SELF_CHECKOUT_ALIAS`] for the trigger repo. Not
+    /// deserialized from YAML directly.
+    #[serde(skip)]
+    pub checkout_fetch: HashMap<String, CheckoutFetchOpts>,
     /// MCP server configurations
     #[serde(default, rename = "mcp-servers")]
     pub mcp_servers: HashMap<String, McpConfig>,
@@ -1327,6 +1332,17 @@ pub struct RepoEntry {
     /// Whether the agent job checks out this repository. Defaults to `true`.
     #[serde(default = "default_checkout")]
     pub checkout: bool,
+    /// Shallow-clone depth for this repository's checkout step. Maps to ADO
+    /// `fetchDepth`. `0` means full history (no `fetchDepth` emitted). When
+    /// omitted, the ADO default applies. Also settable on a reserved `self`
+    /// entry to tune the auto-generated `checkout: self`.
+    #[serde(default, rename = "fetch-depth")]
+    pub fetch_depth: Option<u32>,
+    /// Whether to fetch git tags during this repository's checkout step. Maps
+    /// to ADO `fetchTags`. When omitted, the ADO default applies. Also settable
+    /// on a reserved `self` entry.
+    #[serde(default, rename = "fetch-tags")]
+    pub fetch_tags: Option<bool>,
 }
 
 fn default_repo_type() -> String {
@@ -1335,6 +1351,34 @@ fn default_repo_type() -> String {
 
 fn default_checkout() -> bool {
     true
+}
+
+/// Reserved `repos:` alias that tunes the auto-generated `checkout: self`
+/// step rather than declaring an additional repository resource.
+pub const SELF_CHECKOUT_ALIAS: &str = "self";
+
+/// Resolved fetch tuning for a single checkout step (`self` or a named
+/// repository). Populated by `lower_repos()` from `repos:` entries and keyed by
+/// alias (with [`SELF_CHECKOUT_ALIAS`] for the trigger repo).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CheckoutFetchOpts {
+    /// ADO `fetchDepth`. `Some(0)` means full history.
+    pub fetch_depth: Option<u32>,
+    /// ADO `fetchTags`.
+    pub fetch_tags: Option<bool>,
+}
+
+impl CheckoutFetchOpts {
+    /// `true` when no tuning is set (a no-op, e.g. a bare `self` entry).
+    pub fn is_empty(&self) -> bool {
+        self.fetch_depth.is_none() && self.fetch_tags.is_none()
+    }
+
+    /// The `fetchDepth` value to emit: `Some(0)` (full history) collapses to
+    /// `None` so no `fetchDepth` key is written.
+    pub fn depth_for_emit(&self) -> Option<u32> {
+        self.fetch_depth.filter(|d| *d != 0)
+    }
 }
 
 /// A single item in the `repos:` list — either a string shorthand or an object.

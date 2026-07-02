@@ -998,6 +998,9 @@ fn lower_checkout(c: &CheckoutStep) -> Value {
     if let Some(fd) = c.fetch_depth {
         m.insert(s("fetchDepth"), Value::from(fd));
     }
+    if let Some(ft) = c.fetch_tags {
+        m.insert(s("fetchTags"), Value::Bool(ft));
+    }
     if let Some(pc) = c.persist_credentials {
         m.insert(s("persistCredentials"), Value::Bool(pc));
     }
@@ -2747,5 +2750,38 @@ mod tests {
             merge_condition_with_template_param("succeeded()", "condition"),
             "and(succeeded(), ${{ parameters.condition }})"
         );
+    }
+
+    #[test]
+    fn lower_checkout_emits_fetch_depth_and_tags_when_set() {
+        let c = CheckoutStep {
+            repository: CheckoutRepo::Self_,
+            clean: None,
+            submodules: None,
+            fetch_depth: Some(1),
+            fetch_tags: Some(false),
+            persist_credentials: None,
+        };
+        let v = lower_checkout(&c);
+        let m = v.as_mapping().unwrap();
+        assert_eq!(m.get(s("checkout")).unwrap(), &s("self"));
+        assert_eq!(m.get(s("fetchDepth")).unwrap(), &Value::from(1u32));
+        assert_eq!(m.get(s("fetchTags")).unwrap(), &Value::Bool(false));
+    }
+
+    #[test]
+    fn lower_checkout_omits_fetch_keys_when_none() {
+        let c = CheckoutStep {
+            repository: CheckoutRepo::Self_,
+            clean: None,
+            submodules: None,
+            fetch_depth: None,
+            fetch_tags: None,
+            persist_credentials: None,
+        };
+        let v = lower_checkout(&c);
+        let m = v.as_mapping().unwrap();
+        assert!(m.get(s("fetchDepth")).is_none());
+        assert!(m.get(s("fetchTags")).is_none());
     }
 }

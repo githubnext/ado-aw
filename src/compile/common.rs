@@ -8,7 +8,8 @@ use super::extensions::{
     CompilerExtension, Declarations, McpgConfig, McpgGatewayConfig, McpgServerConfig,
 };
 use super::types::{
-    CompileTarget, FrontMatter, PipelineParameter, PoolConfig, ReposItem, Repository,
+    CheckoutFetchOpts, CompileTarget, FrontMatter, PipelineParameter, PoolConfig, ReposItem,
+    Repository, SELF_CHECKOUT_ALIAS,
 };
 use crate::allowed_hosts::{CORE_ALLOWED_HOSTS, mcp_required_hosts};
 use crate::compile::types::McpConfig;
@@ -534,15 +535,24 @@ pub fn build_parameters(
 // Compact `repos:` lowering
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Lower a `repos:` list into the internal `(Vec<Repository>, Vec<String>)` pair
-/// consumed by the rest of the compiler. Also validates aliases for collisions.
-pub fn lower_repos(items: &[ReposItem]) -> Result<(Vec<Repository>, Vec<String>)> {
+/// The result of lowering a `repos:` list: the ADO repository resources, the
+/// checkout-alias list, and per-checkout fetch tuning keyed by alias (plus
+/// [`SELF_CHECKOUT_ALIAS`] for the trigger repo).
+pub type LoweredRepos = (Vec<Repository>, Vec<String>, HashMap<String, CheckoutFetchOpts>);
+
+/// Lower a `repos:` list into the internal [`LoweredRepos`] triple consumed by
+/// the rest of the compiler. A reserved `self` entry (an entry whose *name* is
+/// exactly `self`) contributes only fetch tuning under the
+/// [`SELF_CHECKOUT_ALIAS`] key and emits neither a repository resource nor a
+/// checkout alias. Also validates aliases for collisions.
+pub fn lower_repos(items: &[ReposItem]) -> Result<LoweredRepos> {
     let mut repositories: Vec<Repository> = Vec::new();
     let mut checkout: Vec<String> = Vec::new();
+    let mut fetch: HashMap<String, CheckoutFetchOpts> = HashMap::new();
     let mut seen_aliases: HashSet<String> = HashSet::new();
 
     for item in items {
-        let (name, alias, repo_type, repo_ref, do_checkout) = match item {
+        let (name, alias, repo_type, repo_ref, do_checkout, fetch_opts) = match item {
             ReposItem::Shorthand(s) => {
                 let (alias, name) = parse_shorthand(s)?;
                 (
@@ -551,6 +561,7 @@ pub fn lower_repos(items: &[ReposItem]) -> Result<(Vec<Repository>, Vec<String>)
                     "git".to_string(),
                     "refs/heads/main".to_string(),
                     true,
+                    CheckoutFetchOpts::default(),
                 )
             }
             ReposItem::Full(entry) => {
@@ -564,9 +575,31 @@ pub fn lower_repos(items: &[ReposItem]) -> Result<(Vec<Repository>, Vec<String>)
                     entry.repo_type.clone(),
                     entry.repo_ref.clone(),
                     entry.checkout,
+                    CheckoutFetchOpts {
+                        fetch_depth: entry.fetch_depth,
+                        fetch_tags: entry.fetch_tags,
+                    },
                 )
             }
         };
+
+        // Reserved `self` entry: tunes the auto-generated `checkout: self`
+        // rather than declaring an additional repository resource. Detected by
+        // an explicit `self` *name* (not a derived/aliased collision like
+        // `org/self` or `self=org/repo`, which still hit the reserved guard
+        // below so real repos can't be silently swallowed).
+        if name == SELF_CHECKOUT_ALIAS {
+            if fetch
+                .insert(SELF_CHECKOUT_ALIAS.to_string(), fetch_opts)
+                .is_some()
+            {
+                anyhow::bail!(
+                    "Duplicate 'self' entry in repos. Declare the self-checkout \
+                    fetch tuning at most once."
+                );
+            }
+            continue;
+        }
 
         // Reject duplicate aliases
         if !seen_aliases.insert(alias.clone()) {
@@ -595,11 +628,14 @@ pub fn lower_repos(items: &[ReposItem]) -> Result<(Vec<Repository>, Vec<String>)
         });
 
         if do_checkout {
-            checkout.push(alias);
+            checkout.push(alias.clone());
+        }
+        if !fetch_opts.is_empty() {
+            fetch.insert(alias, fetch_opts);
         }
     }
 
-    Ok((repositories, checkout))
+    Ok((repositories, checkout, fetch))
 }
 
 /// Parse a shorthand string: `"org/repo"` → (derived alias, name), or
@@ -637,15 +673,16 @@ fn derive_alias(name: &str) -> Result<String> {
 }
 
 /// Resolve the `repos:` field in a `FrontMatter` into the canonical
-/// `(Vec<Repository>, Vec<String>)` pair consumed by the rest of the compiler.
+/// `(repositories, checkout, checkout_fetch)` triple consumed by the rest of
+/// the compiler.
 ///
 /// The legacy `repositories:` + `checkout:` fields are converted to `repos:`
 /// by the `repos_unified` codemod (`src/compile/codemods/0001_repos_unified.rs`)
 /// before typed deserialization, so by the time this function runs the only
 /// shape it sees is `repos:`.
-pub fn resolve_repos(front_matter: &FrontMatter) -> Result<(Vec<Repository>, Vec<String>)> {
+pub fn resolve_repos(front_matter: &FrontMatter) -> Result<LoweredRepos> {
     if front_matter.repos.is_empty() {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), HashMap::new()));
     }
     lower_repos(&front_matter.repos)
 }
@@ -6271,7 +6308,7 @@ safe-outputs:
     #[test]
     fn test_repos_shorthand_simple() {
         let items = vec![ReposItem::Shorthand("my-org/my-repo".to_string())];
-        let (repos, checkout) = lower_repos(&items).unwrap();
+        let (repos, checkout, _fetch) = lower_repos(&items).unwrap();
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].repository, "my-repo");
         assert_eq!(repos[0].name, "my-org/my-repo");
@@ -6285,7 +6322,7 @@ safe-outputs:
         let items = vec![ReposItem::Shorthand(
             "schemas=my-org/internal-schemas".to_string(),
         )];
-        let (repos, checkout) = lower_repos(&items).unwrap();
+        let (repos, checkout, _fetch) = lower_repos(&items).unwrap();
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].repository, "schemas");
         assert_eq!(repos[0].name, "my-org/internal-schemas");
@@ -6300,8 +6337,10 @@ safe-outputs:
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/main".to_string(),
             checkout: true,
+            fetch_depth: None,
+            fetch_tags: None,
         })];
-        let (repos, checkout) = lower_repos(&items).unwrap();
+        let (repos, checkout, _fetch) = lower_repos(&items).unwrap();
         assert_eq!(repos[0].repository, "docs");
         assert_eq!(repos[0].name, "my-org/docs");
         assert_eq!(checkout, vec!["docs"]);
@@ -6315,8 +6354,10 @@ safe-outputs:
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/main".to_string(),
             checkout: false,
+            fetch_depth: None,
+            fetch_tags: None,
         })];
-        let (repos, checkout) = lower_repos(&items).unwrap();
+        let (repos, checkout, _fetch) = lower_repos(&items).unwrap();
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].repository, "big-monorepo");
         assert!(checkout.is_empty());
@@ -6330,8 +6371,10 @@ safe-outputs:
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/release/2.x".to_string(),
             checkout: true,
+            fetch_depth: None,
+            fetch_tags: None,
         })];
-        let (repos, checkout) = lower_repos(&items).unwrap();
+        let (repos, checkout, _fetch) = lower_repos(&items).unwrap();
         assert_eq!(repos[0].repository, "docs-v2");
         assert_eq!(repos[0].repo_ref, "refs/heads/release/2.x");
         assert_eq!(checkout, vec!["docs-v2"]);
@@ -6373,6 +6416,8 @@ safe-outputs:
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/main".to_string(),
             checkout: true,
+            fetch_depth: None,
+            fetch_tags: None,
         })];
         let err = lower_repos(&items).unwrap_err();
         assert!(err.to_string().contains("reserved"), "{err}");
@@ -6389,12 +6434,87 @@ safe-outputs:
                 repo_type: "git".to_string(),
                 repo_ref: "refs/heads/main".to_string(),
                 checkout: false,
+                fetch_depth: None,
+                fetch_tags: None,
             }),
         ];
-        let (repos, checkout) = lower_repos(&items).unwrap();
+        let (repos, checkout, _fetch) = lower_repos(&items).unwrap();
         assert_eq!(repos.len(), 3);
         assert_eq!(checkout, vec!["tools", "schemas"]);
         assert_eq!(repos[2].repository, "templates");
+    }
+
+    #[test]
+    fn test_repos_self_entry_tunes_self_checkout_only() {
+        let items = vec![
+            ReposItem::Full(RepoEntry {
+                name: "self".to_string(),
+                alias: None,
+                repo_type: "git".to_string(),
+                repo_ref: "refs/heads/main".to_string(),
+                checkout: true,
+                fetch_depth: Some(1),
+                fetch_tags: Some(false),
+            }),
+            ReposItem::Shorthand("my-org/tools".to_string()),
+        ];
+        let (repos, checkout, fetch) = lower_repos(&items).unwrap();
+        // The `self` entry emits no repository resource and no checkout alias.
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].repository, "tools");
+        assert_eq!(checkout, vec!["tools"]);
+        // Its fetch tuning is captured under the reserved `self` key.
+        let self_opts = fetch.get("self").unwrap();
+        assert_eq!(self_opts.fetch_depth, Some(1));
+        assert_eq!(self_opts.fetch_tags, Some(false));
+        assert!(!fetch.contains_key("tools"));
+    }
+
+    #[test]
+    fn test_repos_named_entry_captures_fetch_opts() {
+        let items = vec![ReposItem::Full(RepoEntry {
+            name: "my-org/monorepo".to_string(),
+            alias: None,
+            repo_type: "git".to_string(),
+            repo_ref: "refs/heads/main".to_string(),
+            checkout: true,
+            fetch_depth: Some(0),
+            fetch_tags: Some(false),
+        })];
+        let (repos, checkout, fetch) = lower_repos(&items).unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(checkout, vec!["monorepo"]);
+        let opts = fetch.get("monorepo").unwrap();
+        // `0` is preserved as the resolved value; depth_for_emit collapses it.
+        assert_eq!(opts.fetch_depth, Some(0));
+        assert_eq!(opts.depth_for_emit(), None);
+        assert_eq!(opts.fetch_tags, Some(false));
+    }
+
+    #[test]
+    fn test_repos_rejects_duplicate_self_entry() {
+        let items = vec![
+            ReposItem::Full(RepoEntry {
+                name: "self".to_string(),
+                alias: None,
+                repo_type: "git".to_string(),
+                repo_ref: "refs/heads/main".to_string(),
+                checkout: true,
+                fetch_depth: Some(1),
+                fetch_tags: None,
+            }),
+            ReposItem::Full(RepoEntry {
+                name: "self".to_string(),
+                alias: None,
+                repo_type: "git".to_string(),
+                repo_ref: "refs/heads/main".to_string(),
+                checkout: true,
+                fetch_depth: None,
+                fetch_tags: Some(true),
+            }),
+        ];
+        let err = lower_repos(&items).unwrap_err();
+        assert!(err.to_string().contains("Duplicate 'self' entry"), "{err}");
     }
 
     #[test]
@@ -6444,7 +6564,7 @@ name: "test"
 description: "test"
 "#;
         let fm: FrontMatter = serde_yaml::from_str(yaml).unwrap();
-        let (repos, checkout) = resolve_repos(&fm).unwrap();
+        let (repos, checkout, _fetch) = resolve_repos(&fm).unwrap();
         assert!(repos.is_empty());
         assert!(checkout.is_empty());
     }
@@ -6463,7 +6583,7 @@ repos:
     checkout: false
 "#;
         let fm: FrontMatter = serde_yaml::from_str(yaml).unwrap();
-        let (repos, checkout) = resolve_repos(&fm).unwrap();
+        let (repos, checkout, _fetch) = resolve_repos(&fm).unwrap();
         assert_eq!(repos.len(), 3);
         assert_eq!(repos[0].repository, "tools");
         assert_eq!(repos[0].name, "my-org/tools");
@@ -6487,7 +6607,7 @@ repos:
                       checkout:\n  - tools\n\
                       ---\nbody\n";
         let (fm, _) = parse_markdown(source).unwrap();
-        let (repos, checkout) = resolve_repos(&fm).unwrap();
+        let (repos, checkout, _fetch) = resolve_repos(&fm).unwrap();
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].repository, "tools");
         assert_eq!(checkout, vec!["tools"]);

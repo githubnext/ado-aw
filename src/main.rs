@@ -741,10 +741,12 @@ async fn run_execute(
     front_matter.sanitize_config_fields();
 
     // Resolve compact repos: syntax into the legacy fields for execution
-    let (resolved_repos, resolved_checkout) = compile::resolve_repos(&front_matter)
-        .with_context(|| "Failed to resolve repository configuration")?;
+    let (resolved_repos, resolved_checkout, resolved_checkout_fetch) =
+        compile::resolve_repos(&front_matter)
+            .with_context(|| "Failed to resolve repository configuration")?;
     front_matter.repositories = resolved_repos;
     front_matter.checkout = resolved_checkout;
+    front_matter.checkout_fetch = resolved_checkout_fetch;
 
     println!("Loaded tool configs from: {}", source.display());
 

@@ -324,13 +324,57 @@ Each entry can be:
 
 Object fields:
 
-| Field      | Default                | Description |
-|------------|------------------------|-------------|
-| `name`     | *(required)*           | Full `org/repo` name (maps to ADO `name:`) |
-| `alias`    | last segment of `name` | Repository alias (maps to ADO `repository:`) |
-| `type`     | `git`                  | ADO repository resource type |
-| `ref`      | `refs/heads/main`      | Branch or tag reference |
-| `checkout` | `true`                 | Whether the agent job clones this repo |
+| Field         | Default                | Description |
+|---------------|------------------------|-------------|
+| `name`        | *(required)*           | Full `org/repo` name (maps to ADO `name:`) |
+| `alias`       | last segment of `name` | Repository alias (maps to ADO `repository:`) |
+| `type`        | `git`                  | ADO repository resource type |
+| `ref`         | `refs/heads/main`      | Branch or tag reference |
+| `checkout`    | `true`                 | Whether the agent job clones this repo |
+| `fetch-depth` | *(ADO default)*        | Shallow-clone depth for this repo's checkout (ADO `fetchDepth`). `0` = full history |
+| `fetch-tags`  | *(ADO default)*        | Whether to fetch git tags during checkout (ADO `fetchTags`) |
+
+### Tuning checkout fetch behavior (`fetch-depth` / `fetch-tags`)
+
+On large monorepos the checkout step can dominate the run: ADO's default
+`checkout` performs a full-history clone **and** `git fetch --tags`, which may
+take tens of minutes. `fetch-depth` and `fetch-tags` let you tune this
+per-repository:
+
+```yaml
+repos:
+  - name: my-org/monorepo
+    fetch-depth: 1      # shallow — only the tip commit
+    fetch-tags: false   # skip the (often huge) tag fetch
+```
+
+- `fetch-depth: 0` means **full history** (no `fetchDepth` is emitted).
+- When a field is omitted the ADO default applies, so agents that don't set
+  these compile **unchanged**.
+
+#### Tuning the trigger repository (`self`)
+
+The trigger repository is always checked out as `checkout: self` and is not
+otherwise a `repos:` entry. To tune its fetch behavior, add a reserved entry
+whose `name` is exactly `self`:
+
+```yaml
+repos:
+  - name: self
+    fetch-depth: 1
+    fetch-tags: false
+```
+
+A `self` entry contributes **only** fetch tuning — it does not declare an extra
+repository resource or an additional checkout. The tuning is applied to the
+`checkout: self` step in every job (Setup, Agent, Detection, SafeOutputs,
+Teardown). Because the tuning comes from source, the compiled lock stays in
+sync and the runtime **"Verify pipeline integrity"** step keeps passing — no
+need to hand-edit the lock or set `ado-aw-debug.skip-integrity`.
+
+> `persistCredentials` is intentionally not exposed on `self`; see
+> [`docs/execution-context.md`](execution-context.md) for the trust-boundary
+> rationale.
 
 ### Examples
 

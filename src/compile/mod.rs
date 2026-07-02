@@ -158,9 +158,11 @@ async fn compile_pipeline_inner(
     front_matter.sanitize_config_fields();
 
     // Resolve repos: new compact syntax or legacy repositories: + checkout:
-    let (resolved_repos, resolved_checkout) = common::resolve_repos(&front_matter)?;
+    let (resolved_repos, resolved_checkout, resolved_checkout_fetch) =
+        common::resolve_repos(&front_matter)?;
     front_matter.repositories = resolved_repos;
     front_matter.checkout = resolved_checkout;
+    front_matter.checkout_fetch = resolved_checkout_fetch;
 
     // Validate checkout list against repositories
     common::validate_checkout_list(&front_matter.repositories, &front_matter.checkout)?;
@@ -594,9 +596,11 @@ pub async fn check_pipeline(pipeline_path: &str) -> Result<()> {
     front_matter.sanitize_config_fields();
 
     // Resolve repos (compact or legacy)
-    let (resolved_repos, resolved_checkout) = common::resolve_repos(&front_matter)?;
+    let (resolved_repos, resolved_checkout, resolved_checkout_fetch) =
+        common::resolve_repos(&front_matter)?;
     front_matter.repositories = resolved_repos;
     front_matter.checkout = resolved_checkout;
+    front_matter.checkout_fetch = resolved_checkout_fetch;
 
     common::validate_checkout_list(&front_matter.repositories, &front_matter.checkout)?;
 
@@ -902,9 +906,11 @@ pub async fn build_pipeline_ir(input_path: &Path) -> Result<(FrontMatter, ir::Pi
     use crate::sanitize::SanitizeConfig;
     front_matter.sanitize_config_fields();
 
-    let (resolved_repos, resolved_checkout) = common::resolve_repos(&front_matter)?;
+    let (resolved_repos, resolved_checkout, resolved_checkout_fetch) =
+        common::resolve_repos(&front_matter)?;
     front_matter.repositories = resolved_repos;
     front_matter.checkout = resolved_checkout;
+    front_matter.checkout_fetch = resolved_checkout_fetch;
     common::validate_checkout_list(&front_matter.repositories, &front_matter.checkout)?;
 
     // Inferred output path for the marker step. Defaults to
