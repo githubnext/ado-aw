@@ -384,7 +384,7 @@ safe-outputs:
       approvers: ["my-ado-group", "jane@example.com"]  # Optional: specific approvers
       notify-users: ["jane@example.com"]                # Optional: users to notify
       timeout-minutes: 1440                             # Optional: 24h default
-      on-timeout: reject                                # "reject" (default) or "approve"
+      on-timeout: reject                                # "reject" (default) or "resume"
       instructions: "Review the proposed PR carefully." # Optional: reviewer instructions
 ```
 

@@ -139,10 +139,12 @@ Example: changing from daily to weekly.
 
 ```yaml
 # Before
-schedule: daily around 14:00
+on:
+  schedule: daily around 14:00
 
 # After
-schedule: weekly on monday around 9:00
+on:
+  schedule: weekly on monday around 9:00
 ```
 
 The fuzzy schedule syntax scatters execution time deterministically based on the agent name hash. The actual cron time will be within ±60 minutes of the specified time.
@@ -164,11 +166,12 @@ Append `utc+N` or `utc-N` for timezone conversion: `daily around 9:00 utc-5`
 To schedule on branches other than `main`, use the object form:
 
 ```yaml
-schedule:
-  run: weekly on monday around 9:00
-  branches:
-    - main
-    - release/*
+on:
+  schedule:
+    run: weekly on monday around 9:00
+    branches:
+      - main
+      - release/*
 ```
 
 Recompile after any schedule change.
@@ -298,7 +301,8 @@ Before finalizing any update, verify:
 ---
 name: "Code Review Bot"
 description: "Reviews open PRs for common issues"
-schedule: daily around 10:00
+on:
+  schedule: daily around 10:00
 permissions:
   read: my-read-sc
 ---
@@ -314,7 +318,8 @@ Review all open pull requests and leave comments on any issues found.
 ---
 name: "Code Review Bot"
 description: "Reviews open PRs for common issues and creates tracking work items"
-schedule: weekly on monday around 10:00
+on:
+  schedule: weekly on monday around 10:00
 permissions:
   read: my-read-sc
   write: my-write-sc
