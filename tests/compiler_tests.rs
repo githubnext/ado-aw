@@ -3221,8 +3221,8 @@ fn test_conclusion_job_is_emitted_with_expected_condition_and_dependencies() {
         conclusion_job
             .get(yaml_key("condition"))
             .and_then(|v| v.as_str()),
-        Some("always()"),
-        "Conclusion job should have condition: always()"
+        Some("and(always(), not(canceled()))"),
+        "Conclusion job should run for all outcomes except explicit cancellation"
     );
 
     let depends_on = conclusion_job
@@ -7077,5 +7077,4 @@ fn invalid_task_input_compiles_silently_and_preserves_passthrough() {
         "compile must not warn about task inputs (that belongs to lint); got:\n{stderr}"
     );
 }
-
 
