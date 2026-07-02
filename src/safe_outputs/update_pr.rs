@@ -866,19 +866,15 @@ impl UpdatePrResult {
     }
 }
 
-/// Resolve an ADO identity for `reviewer` via the VSSPS identities API, then
-/// PUT the reviewer onto the PR. Returns [`ReviewerAddResult::Added`] on success
-/// or [`ReviewerAddResult::Failed`] with a short reason string on any failure.
-async fn resolve_and_add_reviewer(
+/// Look up the Azure DevOps identity GUID for `reviewer` via the VSSPS
+/// identities API. Returns `Some(guid)` on success or `None` if the identity
+/// cannot be resolved (warning is logged in that case).
+async fn lookup_reviewer_id(
     client: &reqwest::Client,
     vssps_base: &str,
-    base_url: &str,
-    encoded_repo: &str,
-    pr_id: i32,
     reviewer: &str,
     token: &str,
-) -> ReviewerAddResult {
-    // Step 1: Resolve the reviewer's Azure DevOps identity via VSSPS.
+) -> Option<String> {
     let identity_url = format!(
         "{}/_apis/identities?searchFilter=General&filterValue={}&api-version=7.1",
         vssps_base,
@@ -886,13 +882,12 @@ async fn resolve_and_add_reviewer(
     );
     debug!("Resolving identity for '{}': {}", reviewer, identity_url);
 
-    let identity_response = client
+    match client
         .get(&identity_url)
         .basic_auth("", Some(token))
         .send()
-        .await;
-
-    let reviewer_id = match identity_response {
+        .await
+    {
         Ok(resp) if resp.status().is_success() => {
             let body: serde_json::Value = resp.json().await.unwrap_or_default();
             body.get("value")
@@ -914,14 +909,21 @@ async fn resolve_and_add_reviewer(
             warn!("Identity lookup for '{}' failed: {}", reviewer, e);
             None
         }
-    };
+    }
+}
 
-    let Some(reviewer_id) = reviewer_id else {
-        warn!("Could not resolve identity for '{}', skipping", reviewer);
-        return ReviewerAddResult::Failed("identity not found".to_string());
-    };
-
-    // Step 2: Add the resolved identity to the PR as a reviewer.
+/// PUT `reviewer_id` as a reviewer onto `pr_id`. Returns
+/// [`ReviewerAddResult::Added`] on success or [`ReviewerAddResult::Failed`]
+/// with a short reason string on any HTTP or transport error.
+async fn add_reviewer_to_pr(
+    client: &reqwest::Client,
+    base_url: &str,
+    encoded_repo: &str,
+    pr_id: i32,
+    reviewer_id: &str,
+    reviewer: &str,
+    token: &str,
+) -> ReviewerAddResult {
     let reviewer_url = format!(
         "{}/{}/pullRequests/{}/reviewers/{}?api-version=7.1",
         base_url, encoded_repo, pr_id, reviewer_id,
@@ -962,6 +964,34 @@ async fn resolve_and_add_reviewer(
             ReviewerAddResult::Failed("request error".to_string())
         }
     }
+}
+
+/// Resolve an ADO identity for `reviewer` via the VSSPS identities API, then
+/// PUT the reviewer onto the PR. Returns [`ReviewerAddResult::Added`] on success
+/// or [`ReviewerAddResult::Failed`] with a short reason string on any failure.
+async fn resolve_and_add_reviewer(
+    client: &reqwest::Client,
+    vssps_base: &str,
+    base_url: &str,
+    encoded_repo: &str,
+    pr_id: i32,
+    reviewer: &str,
+    token: &str,
+) -> ReviewerAddResult {
+    let Some(reviewer_id) = lookup_reviewer_id(client, vssps_base, reviewer, token).await else {
+        warn!("Could not resolve identity for '{}', skipping", reviewer);
+        return ReviewerAddResult::Failed("identity not found".to_string());
+    };
+    add_reviewer_to_pr(
+        client,
+        base_url,
+        encoded_repo,
+        pr_id,
+        &reviewer_id,
+        reviewer,
+        token,
+    )
+    .await
 }
 
 #[cfg(test)]
