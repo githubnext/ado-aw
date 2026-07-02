@@ -5776,12 +5776,13 @@ fn test_execution_context_pr_does_not_leak_system_accesstoken() {
 /// `SYSTEM_ACCESSTOKEN: $(System.AccessToken)` is the sanctioned exception —
 /// the token is NOT auto-injected and must be projected (that projection is
 /// what fixed #1307).
+///
+/// Runs against multiple fixture families so the exec-context prepare steps,
+/// the synth-PR step, the conclusion step, AND the filter `gate.js` step are
+/// all covered.
 #[test]
 fn test_bundle_steps_do_not_reproject_auto_injected_ado_vars() {
     use serde_yaml::Value;
-    let compiled = compile_fixture("execution-context-agent.md");
-    let yaml: Value =
-        serde_yaml::from_str(&compiled).expect("compiled output should parse as YAML");
 
     // Keys retained deliberately even though they mirror an auto-injected var:
     //  - SYSTEM_ACCESSTOKEN: the bearer, which is NOT auto-injected (ADO maps
@@ -5839,14 +5840,30 @@ fn test_bundle_steps_do_not_reproject_auto_injected_ado_vars() {
         }
     }
 
-    let mut offenders: Vec<String> = Vec::new();
-    walk(&yaml, &mut offenders);
+    // Fixture families that between them exercise every bundle step shape:
+    //  - execution-context-agent.md: the exec-context prepare steps + synth-PR
+    //    + conclusion (safe-outputs) steps.
+    //  - pr-filter-tier1-agent.md / pipeline-filter-agent.md: the filter
+    //    `gate.js` step (prGate / pipelineGate).
+    const FIXTURES: &[&str] = &[
+        "execution-context-agent.md",
+        "pr-filter-tier1-agent.md",
+        "pipeline-filter-agent.md",
+    ];
 
-    assert!(
-        offenders.is_empty(),
-        "found redundant re-projections of auto-injected ADO variables in compiled \
-         bundle steps (these must be dropped — the runtime auto-injects them): {offenders:?}"
-    );
+    for fixture in FIXTURES {
+        let compiled = compile_fixture(fixture);
+        let yaml: Value = serde_yaml::from_str(&compiled)
+            .unwrap_or_else(|e| panic!("{fixture} should parse as YAML: {e}"));
+        let mut offenders: Vec<String> = Vec::new();
+        walk(&yaml, &mut offenders);
+        assert!(
+            offenders.is_empty(),
+            "{fixture}: found redundant re-projections of auto-injected ADO variables in \
+             compiled bundle steps (these must be dropped — the runtime auto-injects them): \
+             {offenders:?}"
+        );
+    }
 }
 
 /// Regression trap for an entire bug class: ADO step-level `condition:`

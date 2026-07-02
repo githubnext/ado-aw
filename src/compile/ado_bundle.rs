@@ -110,8 +110,11 @@ pub fn token_source_for(write_service_connection: Option<&str>) -> TokenSource {
 
 impl Bundle {
     /// Every bundle, for registry-wide iteration. Consumed by the contract
-    /// tests in this module (the bin artifact itself iterates a fixed set of
-    /// call sites, so this is `dead_code` outside `cfg(test)`).
+    /// tests in this module. `ALL` is compiled in all builds (not `cfg(test)`)
+    /// so that every `Bundle` variant is constructed here — that keeps the
+    /// `None`-auth variants, which production only ever *matches* on (never
+    /// constructs), from tripping `dead_code`. `ALL` itself is unused outside
+    /// tests, hence `#[allow(dead_code)]`.
     #[allow(dead_code)]
     pub const ALL: &'static [Bundle] = &[
         Bundle::Gate,
@@ -132,7 +135,9 @@ impl Bundle {
     /// The bundle's unpacked on-disk path inside the runtime VM. The Conclusion
     /// bundle is referenced inline by `agentic_pipeline` (not via a shared
     /// const), so its literal path is repeated here as the single registry
-    /// source of truth. Consumed by the contract tests in this module.
+    /// source of truth. Consumed by the contract tests in this module
+    /// (production references the path constants directly); `#[allow(dead_code)]`
+    /// rather than `#[cfg(test)]` so `paths` stays a normal import.
     #[allow(dead_code)]
     pub fn path(self) -> &'static str {
         match self {
@@ -213,8 +218,8 @@ pub fn apply_bundle_auth(step: BashStep, bundle: Bundle, token: TokenSource) -> 
 ///
 /// Consumed by the contract tests in this module; the compiled-YAML churn
 /// guard in `tests/compiler_tests.rs` re-implements the same rule at the
-/// integration level.
-#[allow(dead_code)]
+/// integration level. Test-only, so compiled only under `cfg(test)`.
+#[cfg(test)]
 pub fn is_redundant_ado_mirror(key: &str, value: &EnvValue) -> bool {
     match value {
         EnvValue::AdoMacro(name) => key == name.replace('.', "_").to_uppercase(),

@@ -1508,6 +1508,7 @@ fn build_conclusion_job(
     cfg: &StandaloneCtx,
     prefix: &JobPrefix<'_>,
 ) -> Result<Option<Job>> {
+    use crate::compile::ado_bundle::{Bundle, apply_bundle_auth, token_source_for};
     // Conclusion job is always emitted when safe-outputs exist (gh-aw pattern).
     if front_matter.safe_outputs.is_empty() {
         return Ok(None);
@@ -1588,10 +1589,10 @@ fi\n"
         .permissions
         .as_ref()
         .and_then(|p| p.write.as_deref());
-    conclusion_step = crate::compile::ado_bundle::apply_bundle_auth(
+    conclusion_step = apply_bundle_auth(
         conclusion_step,
-        crate::compile::ado_bundle::Bundle::Conclusion,
-        crate::compile::ado_bundle::token_source_for(write_sc),
+        Bundle::Conclusion,
+        token_source_for(write_sc),
     );
 
     // Pass per-tool configs as individual flat env vars (gh-aw pattern).
