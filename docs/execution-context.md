@@ -119,21 +119,18 @@ contributor).
   build, but we keep it out of the agent's prompt unless the user
   opts in).
 - **`pipeline.enabled`** (`bool`, default `true` when `on.pipeline`
-  is set) — whether to activate the Pipeline contributor (Stage 2 of
-  the build-out — see plan.md). **`on.pipeline` must be configured**
+  is set) — whether to activate the Pipeline contributor. **`on.pipeline` must be configured**
   for the contributor to activate at all. Stages upstream-build
   metadata under `aw-context/pipeline/` so the agent can decide what
   to do based on the run that triggered it.
 - **`ci-push.enabled`** (`bool`, **default `false`** — opt-in) —
-  whether to activate the CI-push contributor (Stage 3 of the
-  build-out — see plan.md). Stages "since last green build on this
+  whether to activate the CI-push contributor. Stages "since last green build on this
   branch" diff context for non-PR push builds. Default-off because
   the helper does ADO REST + git fetch deepening that adds startup
   latency; most agents don't need it.
 - **`workitem.enabled`** (`bool`, default `true` when the PR
   contributor activates) — whether to activate the Workitem
-  contributor (Stage 4 of the build-out — see plan.md, PR-linked
-  mode only). Fetches the work items linked to the PR and stages
+  contributor (PR-linked mode only). Fetches the work items linked to the PR and stages
   per-WI directories (description / acceptance criteria / repro /
   comments / links / attachment metadata) under
   `aw-context/workitem/`. **Crosses an untrusted-prose boundary**
