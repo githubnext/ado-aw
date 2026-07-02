@@ -351,6 +351,8 @@ repos:
 - `fetch-depth: 0` means **full history** (no `fetchDepth` is emitted).
 - When a field is omitted the ADO default applies, so agents that don't set
   these compile **unchanged**.
+- Setting `fetch-depth`/`fetch-tags` on an entry with `checkout: false` has no
+  effect (no checkout step is emitted for it); the compiler emits a warning.
 
 #### Tuning the trigger repository (`self`)
 
@@ -371,6 +373,11 @@ repository resource or an additional checkout. The tuning is applied to the
 Teardown). Because the tuning comes from source, the compiled lock stays in
 sync and the runtime **"Verify pipeline integrity"** step keeps passing — no
 need to hand-edit the lock or set `ado-aw-debug.skip-integrity`.
+
+A `self` entry accepts only `fetch-depth` and `fetch-tags`; setting any other
+field (`alias`, `type`, `ref`, `checkout`) on it is rejected at compile time.
+A bare `self` entry with no fetch fields (e.g. `- name: self` or the `- self`
+shorthand) is a harmless no-op — it changes nothing.
 
 > `persistCredentials` is intentionally not exposed on `self`; see
 > [`docs/execution-context.md`](execution-context.md) for the trust-boundary

@@ -552,6 +552,24 @@ pub fn lower_repos(items: &[ReposItem]) -> Result<LoweredRepos> {
     let mut seen_aliases: HashSet<String> = HashSet::new();
 
     for item in items {
+        // Reserved `self` entry: tunes the auto-generated `checkout: self`
+        // rather than declaring an additional repository resource. Detected by
+        // an explicit `self` *name* (not a derived/aliased collision like
+        // `org/self` or `self=org/repo`, which still hit the reserved guard
+        // below so real repos can't be silently swallowed).
+        if let Some(self_opts) = self_entry_fetch_opts(item)? {
+            if fetch
+                .insert(SELF_CHECKOUT_ALIAS.to_string(), self_opts)
+                .is_some()
+            {
+                anyhow::bail!(
+                    "Duplicate 'self' entry in repos. Declare the self-checkout \
+                    fetch tuning at most once."
+                );
+            }
+            continue;
+        }
+
         let (name, alias, repo_type, repo_ref, do_checkout, fetch_opts) = match item {
             ReposItem::Shorthand(s) => {
                 let (alias, name) = parse_shorthand(s)?;
@@ -583,24 +601,6 @@ pub fn lower_repos(items: &[ReposItem]) -> Result<LoweredRepos> {
             }
         };
 
-        // Reserved `self` entry: tunes the auto-generated `checkout: self`
-        // rather than declaring an additional repository resource. Detected by
-        // an explicit `self` *name* (not a derived/aliased collision like
-        // `org/self` or `self=org/repo`, which still hit the reserved guard
-        // below so real repos can't be silently swallowed).
-        if name == SELF_CHECKOUT_ALIAS {
-            if fetch
-                .insert(SELF_CHECKOUT_ALIAS.to_string(), fetch_opts)
-                .is_some()
-            {
-                anyhow::bail!(
-                    "Duplicate 'self' entry in repos. Declare the self-checkout \
-                    fetch tuning at most once."
-                );
-            }
-            continue;
-        }
-
         // Reject duplicate aliases
         if !seen_aliases.insert(alias.clone()) {
             anyhow::bail!(
@@ -620,6 +620,16 @@ pub fn lower_repos(items: &[ReposItem]) -> Result<LoweredRepos> {
             );
         }
 
+        // Fetch tuning on a repo that is not checked out is a no-op — the
+        // checkout step is never emitted, so the opts are never read. Warn so
+        // authors don't assume the tuning took effect.
+        if !do_checkout && !fetch_opts.is_empty() {
+            eprintln!(
+                "Warning: repository '{alias}' sets fetch-depth/fetch-tags but has \
+                checkout: false — the fetch tuning is ignored (no checkout step is emitted)."
+            );
+        }
+
         repositories.push(Repository {
             repository: alias.clone(),
             repo_type,
@@ -629,13 +639,67 @@ pub fn lower_repos(items: &[ReposItem]) -> Result<LoweredRepos> {
 
         if do_checkout {
             checkout.push(alias.clone());
-        }
-        if !fetch_opts.is_empty() {
-            fetch.insert(alias, fetch_opts);
+            if !fetch_opts.is_empty() {
+                fetch.insert(alias, fetch_opts);
+            }
         }
     }
 
     Ok((repositories, checkout, fetch))
+}
+
+/// If `item` is a reserved `self` entry (its resolved *name* is exactly
+/// `self`), return its fetch tuning. Rejects any other field on a `self`
+/// entry (`alias`/`type`/`ref`/`checkout`), which is silently meaningless for
+/// the trigger repo, so the mistake surfaces at compile time. Returns `None`
+/// for ordinary repository entries.
+fn self_entry_fetch_opts(item: &ReposItem) -> Result<Option<CheckoutFetchOpts>> {
+    match item {
+        ReposItem::Shorthand(s) => {
+            let (alias, name) = parse_shorthand(s)?;
+            if name != SELF_CHECKOUT_ALIAS {
+                return Ok(None);
+            }
+            // Only the bare `self` shorthand is meaningful; an `alias=self`
+            // form assigns an alias the trigger repo cannot take.
+            if alias != SELF_CHECKOUT_ALIAS {
+                anyhow::bail!(
+                    "A 'self' repos entry only tunes the trigger checkout and takes no alias; \
+                    write it as `- name: self` with `fetch-depth`/`fetch-tags`."
+                );
+            }
+            Ok(Some(CheckoutFetchOpts::default()))
+        }
+        ReposItem::Full(entry) => {
+            if entry.name != SELF_CHECKOUT_ALIAS {
+                return Ok(None);
+            }
+            let mut unsupported = Vec::new();
+            if entry.alias.is_some() {
+                unsupported.push("alias");
+            }
+            if entry.repo_type != "git" {
+                unsupported.push("type");
+            }
+            if entry.repo_ref != "refs/heads/main" {
+                unsupported.push("ref");
+            }
+            if !entry.checkout {
+                unsupported.push("checkout");
+            }
+            if !unsupported.is_empty() {
+                anyhow::bail!(
+                    "A 'self' repos entry only accepts `fetch-depth`/`fetch-tags`; \
+                    remove unsupported field(s): {}.",
+                    unsupported.join(", ")
+                );
+            }
+            Ok(Some(CheckoutFetchOpts {
+                fetch_depth: entry.fetch_depth,
+                fetch_tags: entry.fetch_tags,
+            }))
+        }
+    }
 }
 
 /// Parse a shorthand string: `"org/repo"` → (derived alias, name), or
@@ -6303,7 +6367,7 @@ safe-outputs:
     // ──────────────────────────────────────────────────────────────────────
 
     use super::{derive_alias, lower_repos, parse_shorthand, resolve_repos};
-    use crate::compile::types::{RepoEntry, ReposItem};
+    use crate::compile::types::{CheckoutFetchOpts, RepoEntry, ReposItem};
 
     #[test]
     fn test_repos_shorthand_simple() {
@@ -6515,6 +6579,62 @@ safe-outputs:
         ];
         let err = lower_repos(&items).unwrap_err();
         assert!(err.to_string().contains("Duplicate 'self' entry"), "{err}");
+    }
+
+    #[test]
+    fn test_repos_self_entry_rejects_unsupported_fields() {
+        // A `self` entry with a non-default `ref` (and an `alias`) must be
+        // rejected — those fields are meaningless for the trigger repo.
+        let items = vec![ReposItem::Full(RepoEntry {
+            name: "self".to_string(),
+            alias: Some("mine".to_string()),
+            repo_type: "git".to_string(),
+            repo_ref: "refs/heads/feature".to_string(),
+            checkout: false,
+            fetch_depth: Some(1),
+            fetch_tags: None,
+        })];
+        let err = lower_repos(&items).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("only accepts"), "{msg}");
+        assert!(msg.contains("alias"), "{msg}");
+        assert!(msg.contains("ref"), "{msg}");
+        assert!(msg.contains("checkout"), "{msg}");
+    }
+
+    #[test]
+    fn test_repos_self_shorthand_rejects_alias() {
+        let items = vec![ReposItem::Shorthand("mine=self".to_string())];
+        let err = lower_repos(&items).unwrap_err();
+        assert!(err.to_string().contains("takes no alias"), "{err}");
+    }
+
+    #[test]
+    fn test_repos_bare_self_shorthand_is_noop() {
+        let items = vec![ReposItem::Shorthand("self".to_string())];
+        let (repos, checkout, fetch) = lower_repos(&items).unwrap();
+        assert!(repos.is_empty());
+        assert!(checkout.is_empty());
+        // A bare `self` records empty tuning under the reserved key.
+        assert_eq!(fetch.get("self"), Some(&CheckoutFetchOpts::default()));
+    }
+
+    #[test]
+    fn test_repos_fetch_opts_dropped_when_not_checked_out() {
+        let items = vec![ReposItem::Full(RepoEntry {
+            name: "my-org/monorepo".to_string(),
+            alias: None,
+            repo_type: "git".to_string(),
+            repo_ref: "refs/heads/main".to_string(),
+            checkout: false,
+            fetch_depth: Some(1),
+            fetch_tags: Some(false),
+        })];
+        let (repos, checkout, fetch) = lower_repos(&items).unwrap();
+        assert_eq!(repos.len(), 1);
+        assert!(checkout.is_empty());
+        // Not checked out ⇒ no fetch entry retained (it would never be read).
+        assert!(fetch.is_empty());
     }
 
     #[test]
