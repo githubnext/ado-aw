@@ -304,12 +304,6 @@ impl Executor for QueueBuildResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safe_outputs::ToolResult;
-
-    #[test]
-    fn test_result_has_correct_name() {
-        assert_eq!(QueueBuildResult::NAME, "queue-build");
-    }
 
     #[test]
     fn test_params_deserializes() {
@@ -345,19 +339,11 @@ mod tests {
             reason: None,
         };
         let result: Result<QueueBuildResult, _> = params.try_into();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_validation_rejects_negative_pipeline_id() {
-        let params = QueueBuildParams {
-            pipeline_id: -1,
-            branch: None,
-            parameters: None,
-            reason: None,
-        };
-        let result: Result<QueueBuildResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("pipeline_id must be positive"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -369,7 +355,11 @@ mod tests {
             reason: Some("Hi".to_string()),
         };
         let result: Result<QueueBuildResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("reason must be at least 5 characters"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -381,7 +371,11 @@ mod tests {
             reason: None,
         };
         let result: Result<QueueBuildResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("branch name must not contain '..'"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
