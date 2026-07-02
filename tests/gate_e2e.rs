@@ -47,7 +47,7 @@ fn run_gate(gate_js: &Path, gate_spec: &str, pr_title: &str) -> Output {
         .env("ADO_BUILD_REASON", "PullRequest")
         .env("ADO_PR_TITLE", pr_title)
         .env("SYSTEM_ACCESSTOKEN", "dummy")
-        .env("ADO_COLLECTION_URI", "https://example.invalid/")
+        .env("SYSTEM_COLLECTIONURI", "https://example.invalid/")
         .env("ADO_PROJECT", "p")
         .env("ADO_BUILD_ID", "1")
         .output()

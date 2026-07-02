@@ -281,7 +281,7 @@ into the process env by ADO at runtime:
 |---|---|---|
 | `PR_SYNTH_SPEC` | compiled inline (base64) | The branch/path filter spec |
 | `SYSTEM_ACCESSTOKEN` | `$(System.AccessToken)` | ADO REST auth |
-| `ADO_COLLECTION_URI` | `$(System.CollectionUri)` | ADO org base URL |
+| `SYSTEM_COLLECTIONURI` | ADO auto-injected | ADO org base URL (read via `getWebApi()`; falls back to `SYSTEM_TEAMFOUNDATIONCOLLECTIONURI`) |
 | `ADO_PROJECT` | `$(System.TeamProject)` | ADO project for the PR lookup |
 | `ADO_REPO_ID` | `$(Build.Repository.ID)` | Repository id for the PR lookup |
 | `BUILD_REASON` | `$(Build.Reason)` | Distinguishes CI from PR builds |
@@ -374,7 +374,7 @@ The compiler injects these environment variables on the
 |---|---|---|
 | `GATE_SPEC` | compiled inline (base64) | The full `GateSpec` JSON |
 | `SYSTEM_ACCESSTOKEN` | `$(System.AccessToken)` | ADO REST auth |
-| `ADO_COLLECTION_URI` | `$(System.CollectionUri)` | ADO org base URL |
+| `SYSTEM_COLLECTIONURI` | ADO auto-injected | ADO org base URL (read via `getWebApi()`; falls back to `SYSTEM_TEAMFOUNDATIONCOLLECTIONURI`) |
 | `ADO_BUILD_REASON` | `$(Build.Reason)` | Used by the bypass branch |
 | `ADO_BUILD_ID` | `$(Build.BuildId)` | Used for `selfCancelIfRequested` |
 | `ADO_PROJECT` / `ADO_REPO_ID` / `ADO_PR_ID` | compiler-injected | PR-derived facts |

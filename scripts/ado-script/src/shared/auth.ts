@@ -2,8 +2,8 @@
  * ADO authentication helper.
  *
  * Builds and caches an `azure-devops-node-api` `WebApi` from the
- * `SYSTEM_ACCESSTOKEN` and `ADO_COLLECTION_URI` pipeline env vars via
- * `getPersonalAccessTokenHandler`.
+ * `SYSTEM_ACCESSTOKEN` pipeline env var and ADO's auto-injected collection
+ * URI variable via `getPersonalAccessTokenHandler`.
  *
  * Import shape: the SDK is imported statically. An earlier revision
  * deferred it via `await import(...)` to save ~50–100 ms of
@@ -17,11 +17,14 @@
  * `Cannot find module '/tmp/ado-aw-scripts/ado-script/<id>.index.js'`.
  * A static import keeps everything in a single self-contained bundle.
  *
- * Env-var contract (set by the compiler in
- * `src/compile/filter_ir.rs::compile_gate_step_external` /
- * `collect_ado_exports`):
+ * Env-var contract:
  *   - `SYSTEM_ACCESSTOKEN` ← `$(System.AccessToken)`
- *   - `ADO_COLLECTION_URI` ← `$(System.CollectionUri)`
+ *   - collection URI ← ADO's auto-injected `SYSTEM_COLLECTIONURI`
+ *     (falls back to `SYSTEM_TEAMFOUNDATIONCOLLECTIONURI`). Both are
+ *     predefined ADO variables auto-mapped into the env of every script
+ *     step, so no compiler-side injection is required — this matches how
+ *     the `ado-aw` Rust binary reads the org URL (see
+ *     `src/safe_outputs/result.rs`).
  */
 import * as azdev from "azure-devops-node-api";
 import type { WebApi } from "azure-devops-node-api";
@@ -37,10 +40,13 @@ export function _resetCacheForTesting(): void {
 export async function getWebApi(): Promise<WebApi> {
   if (cached) return cached;
 
-  const orgUrl = process.env.ADO_COLLECTION_URI;
+  const orgUrl =
+    process.env.SYSTEM_COLLECTIONURI ||
+    process.env.SYSTEM_TEAMFOUNDATIONCOLLECTIONURI;
   const token = process.env.SYSTEM_ACCESSTOKEN;
   if (!orgUrl) {
-    const msg = "ADO_COLLECTION_URI env var is missing";
+    const msg =
+      "collection URI env var is missing (expected SYSTEM_COLLECTIONURI or SYSTEM_TEAMFOUNDATIONCOLLECTIONURI)";
     logError(msg);
     throw new Error(msg);
   }
