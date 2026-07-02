@@ -44,7 +44,7 @@ Used to surface failures from ADO-hosted dogfood pipelines back to
    entry that isn't in that set, so a forged or smuggled NDJSON entry
    fails closed before any token is read.
 
-[debug-only-tools]: ../src/safeoutputs/mod.rs
+[debug-only-tools]: ../src/safe_outputs/mod.rs
 
 ### Front-matter schema
 
@@ -101,7 +101,7 @@ The agent calls the `create-issue` MCP tool with:
 ```
 
 The MCP-side `Validate` impl rejects ADO pipeline-command sequences in
-labels and assignees (see [src/safeoutputs/create_issue.rs](../src/safeoutputs/create_issue.rs)).
+labels and assignees (see [src/safe_outputs/create_issue.rs](../src/safe_outputs/create_issue.rs)).
 Stage 3 also neutralises `##vso[…]` in any error messages it produces, so
 agent-supplied content cannot escape the executor's stdout.
 
