@@ -217,7 +217,7 @@ pub enum EngineConfig {
     /// Engine identifier string (e.g., "copilot")
     Simple(String),
     /// Full engine configuration object
-    Full(EngineOptions),
+    Full(Box<EngineOptions>),
 }
 
 impl Default for EngineConfig {
@@ -299,6 +299,16 @@ impl EngineConfig {
             EngineConfig::Full(opts) => opts.command.as_deref(),
         }
     }
+
+    /// Get the GitHub App token configuration, if specified.
+    /// Returns `None` when the engine uses the default `$(GITHUB_TOKEN)`
+    /// pipeline-variable source.
+    pub fn github_app_token(&self) -> Option<&GithubAppTokenConfig> {
+        match self {
+            EngineConfig::Simple(_) => None,
+            EngineConfig::Full(opts) => opts.github_app_token.as_ref(),
+        }
+    }
 }
 
 impl SanitizeConfigTrait for EngineConfig {
@@ -339,6 +349,167 @@ pub struct EngineOptions {
     /// Workflow timeout in minutes
     #[serde(default, rename = "timeout-minutes")]
     pub timeout_minutes: Option<u32>,
+    /// GitHub App-backed Copilot engine authentication (Copilot only).
+    ///
+    /// When set, the compiler emits a token-mint step (the
+    /// `github-app-token` ado-script bundle) immediately before the Copilot
+    /// invocation in the Agent and Detection jobs. The minted GitHub App
+    /// installation token is wired into `GITHUB_TOKEN` for the Copilot engine
+    /// env only — never SafeOutputs, user steps, ManualReview, Teardown, or
+    /// Conclusion. Absent ⇒ `GITHUB_TOKEN` is sourced from the
+    /// `$(GITHUB_TOKEN)` pipeline variable as before.
+    #[serde(default, rename = "github-app-token")]
+    #[sanitize_config(skip)]
+    pub github_app_token: Option<GithubAppTokenConfig>,
+}
+
+/// GitHub App-backed Copilot engine authentication configuration.
+///
+/// Mirrors gh-aw's `create-github-app-token` model, adapted to Azure DevOps:
+/// the App ID and private key are supplied as **ADO pipeline variable names**
+/// (set via `ado-aw secrets set`), not literal values, so no secret material
+/// appears in the source or the generated lock.
+///
+/// ```yaml
+/// engine:
+///   id: copilot
+///   github-app-token:
+///     app-id: GH_APP_ID          # ADO variable name holding the App ID
+///     private-key: GH_APP_KEY    # ADO *secret* variable name holding the PEM
+///     owner: octo-org            # installation owner (org or user)
+///     repositories: [octo-repo]  # optional; scopes the installation token
+/// ```
+#[derive(Debug, Deserialize, Clone, SanitizeConfig)]
+pub struct GithubAppTokenConfig {
+    /// The GitHub App ID. Accepts either a **literal** numeric App ID
+    /// (e.g. `1234567`, quoted or unquoted) — rendered verbatim — or the
+    /// **name** of an ADO pipeline variable holding it (e.g. `GH_APP_ID`) —
+    /// rendered as a `$(NAME)` macro. The App ID is not secret; the variable
+    /// form is offered for parity with the private key.
+    #[serde(rename = "app-id", deserialize_with = "de_string_or_number")]
+    pub app_id: String,
+    /// Name of the ADO **secret** pipeline variable holding the GitHub App
+    /// private key (PEM). Rendered as a `$(NAME)` macro; the key material is
+    /// never inlined.
+    #[serde(rename = "private-key")]
+    pub private_key: String,
+    /// GitHub installation owner (organization or user login) the App is
+    /// installed on.
+    pub owner: String,
+    /// Optional list of repository names (owner-relative) the installation
+    /// token should be scoped to. Empty ⇒ token spans all repositories the
+    /// installation grants.
+    #[serde(default)]
+    pub repositories: Vec<String>,
+    /// Optional GitHub API base URL. Defaults to `https://api.github.com`
+    /// (GHEC). For GitHub Enterprise Server, set the `/api/v3` base URL
+    /// (e.g. `https://ghe.example.com/api/v3`). Must be an `https://` URL.
+    #[serde(default, rename = "api-url")]
+    pub api_url: Option<String>,
+    /// When true, skip revoking the installation token after the Copilot run.
+    /// By default (false) the compiler emits a best-effort post-run step that
+    /// deletes the token (`DELETE /installation/token`) so it does not remain
+    /// valid for its full ~1h lifetime.
+    #[serde(default, rename = "skip-token-revocation")]
+    pub skip_token_revocation: bool,
+}
+
+/// Deserialize a scalar that may be a YAML string **or** an integer into a
+/// `String`. Used for `github-app-token.app-id` so an unquoted numeric App ID
+/// (`app-id: 1234567`) is accepted alongside a quoted string or a variable
+/// name.
+fn de_string_or_number<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct StringOrNumber;
+    impl serde::de::Visitor<'_> for StringOrNumber {
+        type Value = String;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a GitHub App ID (integer) or an ADO variable name (string)")
+        }
+        fn visit_str<E>(self, v: &str) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+        fn visit_string<E>(self, v: String) -> Result<String, E> {
+            Ok(v)
+        }
+        fn visit_u64<E>(self, v: u64) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+        fn visit_i64<E>(self, v: i64) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+    }
+    deserializer.deserialize_any(StringOrNumber)
+}
+
+impl GithubAppTokenConfig {
+    /// Whether `app-id` is a literal numeric App ID (rendered verbatim) rather
+    /// than an ADO variable name (rendered as a `$(NAME)` macro).
+    pub fn app_id_is_literal(&self) -> bool {
+        !self.app_id.is_empty() && self.app_id.chars().all(|c| c.is_ascii_digit())
+    }
+
+    /// Validate the referenced variable names / literal App ID, the GitHub
+    /// owner/repository name segments, and the optional API URL. `private-key`
+    /// must be a valid env-var name (rendered as a `$(NAME)` macro); `app-id`
+    /// may additionally be an all-digits literal; `owner` and each
+    /// `repositories` entry must be a single safe path segment (GitHub name
+    /// rules); `api-url` (when set) must be an `https://` URL with a host.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        use crate::validate::{is_safe_path_segment, is_valid_env_var_name};
+        if !(self.app_id_is_literal() || is_valid_env_var_name(&self.app_id)) {
+            anyhow::bail!(
+                "engine.github-app-token.app-id '{}' must be either a numeric App ID \
+                 (e.g. 1234567) or an ADO variable name matching [A-Za-z_][A-Za-z0-9_]* \
+                 (rendered as a $(NAME) macro).",
+                self.app_id
+            );
+        }
+        if !is_valid_env_var_name(&self.private_key) {
+            anyhow::bail!(
+                "engine.github-app-token.private-key '{}' must be an ADO variable name \
+                 matching [A-Za-z_][A-Za-z0-9_]* (it is rendered as a $(NAME) macro; \
+                 store the PEM with `ado-aw secrets set`).",
+                self.private_key
+            );
+        }
+        if !is_safe_path_segment(&self.owner) {
+            anyhow::bail!(
+                "engine.github-app-token.owner '{}' is not a valid GitHub owner name \
+                 (allowed: [A-Za-z0-9._-], no '/', no leading '.').",
+                self.owner
+            );
+        }
+        for repo in &self.repositories {
+            if !is_safe_path_segment(repo) {
+                anyhow::bail!(
+                    "engine.github-app-token.repositories entry '{}' is not a valid \
+                     GitHub repository name (allowed: [A-Za-z0-9._-], no '/', no \
+                     leading '.').",
+                    repo
+                );
+            }
+        }
+        if let Some(api_url) = &self.api_url {
+            let parsed = url::Url::parse(api_url).map_err(|e| {
+                anyhow::anyhow!(
+                    "engine.github-app-token.api-url '{}' is not a valid URL: {}",
+                    api_url,
+                    e
+                )
+            })?;
+            if parsed.scheme() != "https" || parsed.host_str().is_none() {
+                anyhow::bail!(
+                    "engine.github-app-token.api-url '{}' must be an https:// URL with a host \
+                     (e.g. https://ghe.example.com/api/v3).",
+                    api_url
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Tools configuration for the agent
@@ -2409,7 +2580,7 @@ mod tests {
     fn test_engine_config_full_object_partial_fields() {
         let yaml = "timeout-minutes: 10";
         let opts: EngineOptions = serde_yaml::from_str(yaml).unwrap();
-        let ec = EngineConfig::Full(opts);
+        let ec = EngineConfig::Full(Box::new(opts));
         // id defaults to "copilot" when not specified
         assert_eq!(ec.engine_id(), "copilot");
         // model is None when not specified (engine impl decides default)
@@ -2461,7 +2632,7 @@ command: /usr/local/bin/copilot
 timeout-minutes: 60
 "#;
         let opts: EngineOptions = serde_yaml::from_str(yaml).unwrap();
-        let ec = EngineConfig::Full(opts);
+        let ec = EngineConfig::Full(Box::new(opts));
         assert_eq!(ec.engine_id(), "copilot");
         assert_eq!(ec.model(), Some("gpt-5"));
         assert_eq!(ec.version(), Some("0.0.422"));
@@ -2473,6 +2644,139 @@ timeout-minutes: 60
         let env = ec.env().unwrap();
         assert_eq!(env.get("DEBUG_MODE").unwrap(), "true");
         assert_eq!(env.get("AWS_REGION").unwrap(), "us-west-2");
+    }
+
+    // ─── GithubAppTokenConfig ────────────────────────────────────────────
+
+    #[test]
+    fn test_engine_github_app_token_deserialized() {
+        let yaml = r#"
+id: copilot
+github-app-token:
+  app-id: GH_APP_ID
+  private-key: GH_APP_KEY
+  owner: octo-org
+  repositories: [octo-repo, other-repo]
+"#;
+        let opts: EngineOptions = serde_yaml::from_str(yaml).unwrap();
+        let ec = EngineConfig::Full(Box::new(opts));
+        let gat = ec.github_app_token().expect("github-app-token present");
+        assert_eq!(gat.app_id, "GH_APP_ID");
+        assert_eq!(gat.private_key, "GH_APP_KEY");
+        assert_eq!(gat.owner, "octo-org");
+        assert_eq!(gat.repositories, vec!["octo-repo", "other-repo"]);
+        assert!(gat.api_url.is_none());
+        assert!(!gat.skip_token_revocation);
+        assert!(!gat.app_id_is_literal());
+        gat.validate().expect("valid config passes validation");
+    }
+
+    #[test]
+    fn test_engine_github_app_token_literal_app_id_and_api_url() {
+        // Unquoted numeric app-id + api-url + skip-token-revocation.
+        let yaml = r#"
+id: copilot
+github-app-token:
+  app-id: 1234567
+  private-key: GH_APP_KEY
+  owner: octo-org
+  api-url: https://ghe.example.com/api/v3
+  skip-token-revocation: true
+"#;
+        let opts: EngineOptions = serde_yaml::from_str(yaml).unwrap();
+        let gat = EngineConfig::Full(Box::new(opts))
+            .github_app_token()
+            .unwrap()
+            .clone();
+        assert_eq!(gat.app_id, "1234567");
+        assert!(gat.app_id_is_literal());
+        assert_eq!(gat.api_url.as_deref(), Some("https://ghe.example.com/api/v3"));
+        assert!(gat.skip_token_revocation);
+        gat.validate().expect("literal app-id + https api-url is valid");
+    }
+
+    #[test]
+    fn test_github_app_token_validate_rejects_non_https_api_url() {
+        let yaml = r#"
+id: copilot
+github-app-token:
+  app-id: GH_APP_ID
+  private-key: GH_APP_KEY
+  owner: octo-org
+  api-url: http://insecure.example.com/api/v3
+"#;
+        let opts: EngineOptions = serde_yaml::from_str(yaml).unwrap();
+        let gat = EngineConfig::Full(Box::new(opts))
+            .github_app_token()
+            .unwrap()
+            .clone();
+        let err = gat.validate().unwrap_err().to_string();
+        assert!(err.contains("api-url"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_engine_github_app_token_absent_by_default() {
+        let ec = EngineConfig::default();
+        assert!(ec.github_app_token().is_none());
+        let opts: EngineOptions = serde_yaml::from_str("id: copilot").unwrap();
+        assert!(EngineConfig::Full(Box::new(opts)).github_app_token().is_none());
+    }
+
+    #[test]
+    fn test_engine_github_app_token_repositories_optional() {
+        let yaml = r#"
+id: copilot
+github-app-token:
+  app-id: GH_APP_ID
+  private-key: GH_APP_KEY
+  owner: octo-org
+"#;
+        let opts: EngineOptions = serde_yaml::from_str(yaml).unwrap();
+        let gat = EngineConfig::Full(Box::new(opts)).github_app_token().unwrap().clone();
+        assert!(gat.repositories.is_empty());
+        gat.validate().unwrap();
+    }
+
+    #[test]
+    fn test_github_app_token_validate_rejects_bad_var_name() {
+        let gat = GithubAppTokenConfig {
+            app_id: "not a var".to_string(),
+            private_key: "GH_APP_KEY".to_string(),
+            owner: "octo-org".to_string(),
+            repositories: vec![],
+            api_url: None,
+            skip_token_revocation: false,
+        };
+        let err = gat.validate().unwrap_err().to_string();
+        assert!(err.contains("app-id"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_github_app_token_validate_rejects_bad_owner() {
+        let gat = GithubAppTokenConfig {
+            app_id: "GH_APP_ID".to_string(),
+            private_key: "GH_APP_KEY".to_string(),
+            owner: "octo/org".to_string(),
+            repositories: vec![],
+            api_url: None,
+            skip_token_revocation: false,
+        };
+        let err = gat.validate().unwrap_err().to_string();
+        assert!(err.contains("owner"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_github_app_token_validate_rejects_bad_repository() {
+        let gat = GithubAppTokenConfig {
+            app_id: "GH_APP_ID".to_string(),
+            private_key: "GH_APP_KEY".to_string(),
+            owner: "octo-org".to_string(),
+            repositories: vec!["ok-repo".to_string(), "bad;repo".to_string()],
+            api_url: None,
+            skip_token_revocation: false,
+        };
+        let err = gat.validate().unwrap_err().to_string();
+        assert!(err.contains("repositories"), "unexpected error: {err}");
     }
 
     // ─── PermissionsConfig deserialization ───────────────────────────────

@@ -700,6 +700,13 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
                 // `build_agent_job` emits. MUST use the same predicate as that
                 // step (see `FrontMatter::has_any_safe_output_tool`).
                 safe_outputs_summary_active: front_matter.has_any_safe_output_tool(),
+                // True when `engine.github-app-token` is configured — drives the
+                // Agent-job bundle install/download so `github-app-token.js` is
+                // present for the mint/revoke steps that `build_agent_job` emits
+                // around the Copilot run. Same loose-coupling pattern as
+                // `safe_outputs_summary_active`: the consuming steps live in
+                // `build_agent_job`, not this extension.
+                github_app_token_active: front_matter.engine.github_app_token().is_some(),
                 pr_trigger_for_synth,
                 supply_chain: front_matter.supply_chain().cloned(),
             }

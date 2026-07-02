@@ -94,6 +94,12 @@ pub(crate) const APPROVAL_SUMMARY_PATH: &str =
 /// that job's shell body and by `Bundle::Conclusion.path()` so the two copies
 /// cannot diverge.
 pub(crate) const CONCLUSION_PATH: &str = "/tmp/ado-aw-scripts/ado-script/conclusion.js";
+/// Path to the github-app-token bundle inside the unpacked `ado-script.zip`.
+/// Runs immediately before the Copilot invocation in the Agent and Detection
+/// jobs (issue #1316) to mint a GitHub App installation token and expose it as
+/// a masked same-job `GITHUB_APP_TOKEN` variable.
+pub(crate) const GITHUB_APP_TOKEN_PATH: &str =
+    "/tmp/ado-aw-scripts/ado-script/github-app-token.js";
 const RELEASE_BASE_URL: &str = "https://github.com/githubnext/ado-aw/releases/download";
 
 /// Single always-on extension that owns all `ado-script` bundle wiring.
@@ -159,6 +165,15 @@ pub struct AdoScriptExtension {
     /// fire so that `approval-summary.js` is present for the
     /// end-of-job render step (emitted by `build_agent_job`).
     pub safe_outputs_summary_active: bool,
+    /// Whether GitHub App-backed Copilot auth is configured
+    /// (`engine.github-app-token`, issue #1316). When true the Agent-job
+    /// install/download must fire so that `github-app-token.js` is present for
+    /// the mint (and revoke) steps that `build_agent_job` emits immediately
+    /// around the Copilot run. Mirrors `safe_outputs_summary_active`: the
+    /// consuming steps are emitted by `build_agent_job`, not this extension, so
+    /// the flag drives the shared bundle download — the builder never has to
+    /// inspect emitted steps to decide whether to download.
+    pub github_app_token_active: bool,
     /// PR trigger config required to build `PR_SYNTH_SPEC`. `Some(_)`
     /// is the single source of truth for "synthetic-from-ci path is
     /// active for this agent" — `is_some()` replaces what used to be a
@@ -479,6 +494,79 @@ fn resolver_step_typed() -> Step {
     )
 }
 
+/// The GitHub App token-mint step (issue #1316). Runs immediately before the
+/// Copilot invocation in the Agent and Detection jobs to mint a GitHub App
+/// installation access token via the `github-app-token` ado-script bundle and
+/// expose it as a masked, same-job `GITHUB_APP_TOKEN` variable, which
+/// `copilot_env` sources `GITHUB_TOKEN` from.
+///
+/// The App ID and private key are passed as `$(NAME)` pipeline-variable macros
+/// (their names come from validated `engine.github-app-token.app-id` /
+/// `.private-key`); the values never appear in the compiled pipeline. `owner`
+/// and `repositories` are validated single-segment names, safe as literals.
+///
+/// The step runs OUTSIDE the AWF sandbox and reaches `api.github.com` over the
+/// build agent pool's normal network — no AWF allowlist entry is required.
+pub fn github_app_token_step_typed(
+    cfg: &crate::compile::types::GithubAppTokenConfig,
+) -> Result<Step> {
+    cfg.validate()?;
+    let script = format!("set -eo pipefail\nnode '{GITHUB_APP_TOKEN_PATH}'\n");
+    let mut step = BashStep::new("Mint GitHub App token (Copilot engine auth)", script)
+        .with_condition(Condition::Succeeded);
+    // A numeric App ID is not secret and is emitted verbatim; a variable-name
+    // App ID is rendered as a `$(NAME)` macro (parity with the private key).
+    let app_id_value = if cfg.app_id_is_literal() {
+        EnvValue::literal(cfg.app_id.clone())
+    } else {
+        EnvValue::pipeline_var(cfg.app_id.clone())
+    };
+    step = step
+        .with_env("GH_APP_ID", app_id_value)
+        .with_env(
+            "GH_APP_PRIVATE_KEY",
+            EnvValue::secret(cfg.private_key.clone()),
+        )
+        .with_env("GH_APP_OWNER", EnvValue::literal(cfg.owner.clone()));
+    if !cfg.repositories.is_empty() {
+        step = step.with_env(
+            "GH_APP_REPOSITORIES",
+            EnvValue::literal(cfg.repositories.join(" ")),
+        );
+    }
+    if let Some(api_url) = &cfg.api_url {
+        step = step.with_env("GH_APP_API_URL", EnvValue::literal(api_url.clone()));
+    }
+    Ok(Step::Bash(step))
+}
+
+/// The GitHub App token **revocation** step (issue #1316). Runs after the
+/// Copilot invocation in the Agent and Detection jobs (unless
+/// `skip-token-revocation` is set) to delete the minted installation token
+/// (`DELETE /installation/token`) so it does not remain valid for its full
+/// ~1h lifetime — matching `actions/create-github-app-token`'s default.
+///
+/// Best-effort: it runs with `condition: always()` (so it fires even when the
+/// Copilot run failed) and `continueOnError` (revocation failure never fails
+/// the build). The minted token is read from the masked same-job
+/// `GITHUB_APP_TOKEN` variable set by the mint step.
+pub fn github_app_token_revoke_step_typed(
+    cfg: &crate::compile::types::GithubAppTokenConfig,
+) -> Result<Step> {
+    let script = format!("node '{GITHUB_APP_TOKEN_PATH}' revoke\n");
+    let mut step = BashStep::new("Revoke GitHub App token", script)
+        .with_condition(Condition::Always);
+    step.continue_on_error = true;
+    step = step.with_env(
+        "GH_APP_TOKEN",
+        EnvValue::secret(crate::engine::GITHUB_APP_TOKEN_VAR),
+    );
+    if let Some(api_url) = &cfg.api_url {
+        step = step.with_env("GH_APP_API_URL", EnvValue::literal(api_url.clone()));
+    }
+    Ok(Step::Bash(step))
+}
+
 /// The synthetic-PR-context step that runs in the Setup job before
 /// `prGate`. Declares the PR outputs so downstream consumers can
 /// reference them via [`crate::compile::ir::output::OutputRef`].
@@ -661,6 +749,7 @@ impl CompilerExtension for AdoScriptExtension {
             || self.exec_context_pr_checks_active
             || self.exec_context_repo_active
             || self.safe_outputs_summary_active
+            || self.github_app_token_active
         {
             agent_prepare_steps.extend(install_and_download_steps_typed(self.supply_chain.as_ref()));
             if import_active {
@@ -865,6 +954,7 @@ mod tests {
             exec_context_pr_checks_active: false,
             exec_context_repo_active: false,
             safe_outputs_summary_active: false,
+            github_app_token_active: false,
             pr_trigger_for_synth: None,
             supply_chain: None,
         }
@@ -935,6 +1025,7 @@ mod tests {
             exec_context_pr_checks_active: false,
             exec_context_repo_active: false,
             safe_outputs_summary_active: false,
+            github_app_token_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -992,6 +1083,7 @@ mod tests {
             exec_context_pr_checks_active: false,
             exec_context_repo_active: false,
             safe_outputs_summary_active: false,
+            github_app_token_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -1049,6 +1141,144 @@ mod tests {
             ),
             other => panic!("expected download bash step, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn github_app_token_step_renders_node_invocation_and_env() {
+        use crate::compile::types::GithubAppTokenConfig;
+        let cfg = GithubAppTokenConfig {
+            app_id: "GH_APP_ID".to_string(),
+            private_key: "GH_APP_KEY".to_string(),
+            owner: "octo-org".to_string(),
+            repositories: vec!["octo-repo".to_string(), "other-repo".to_string()],
+            api_url: None,
+            skip_token_revocation: false,
+        };
+        let Step::Bash(step) = github_app_token_step_typed(&cfg).unwrap() else {
+            panic!("expected a bash step");
+        };
+        assert_eq!(step.display_name, "Mint GitHub App token (Copilot engine auth)");
+        assert!(
+            step.script
+                .contains("node '/tmp/ado-aw-scripts/ado-script/github-app-token.js'"),
+            "script must invoke the bundle:\n{}",
+            step.script
+        );
+        // A variable-name app-id flows through as a $(VAR) macro; the private
+        // key is always a $(VAR) macro (values never inlined).
+        assert!(matches!(
+            step.env.get("GH_APP_ID"),
+            Some(EnvValue::PipelineVar(v)) if v == "GH_APP_ID"
+        ));
+        assert!(matches!(
+            step.env.get("GH_APP_PRIVATE_KEY"),
+            Some(EnvValue::Secret(v)) if v == "GH_APP_KEY"
+        ));
+        assert!(matches!(
+            step.env.get("GH_APP_OWNER"),
+            Some(EnvValue::Literal(v)) if v == "octo-org"
+        ));
+        assert!(matches!(
+            step.env.get("GH_APP_REPOSITORIES"),
+            Some(EnvValue::Literal(v)) if v == "octo-repo other-repo"
+        ));
+        // No api-url configured ⇒ the bundle uses its api.github.com default.
+        assert!(!step.env.contains_key("GH_APP_API_URL"));
+    }
+
+    #[test]
+    fn github_app_token_step_renders_literal_app_id_and_api_url() {
+        use crate::compile::types::GithubAppTokenConfig;
+        let cfg = GithubAppTokenConfig {
+            app_id: "1234567".to_string(),
+            private_key: "GH_APP_KEY".to_string(),
+            owner: "octo-org".to_string(),
+            repositories: vec![],
+            api_url: Some("https://ghe.example.com/api/v3".to_string()),
+            skip_token_revocation: false,
+        };
+        let Step::Bash(step) = github_app_token_step_typed(&cfg).unwrap() else {
+            panic!("expected a bash step");
+        };
+        // A numeric app-id is emitted verbatim, not as a $(VAR) macro.
+        assert!(matches!(
+            step.env.get("GH_APP_ID"),
+            Some(EnvValue::Literal(v)) if v == "1234567"
+        ));
+        assert!(matches!(
+            step.env.get("GH_APP_API_URL"),
+            Some(EnvValue::Literal(v)) if v == "https://ghe.example.com/api/v3"
+        ));
+    }
+
+    #[test]
+    fn github_app_token_step_omits_repositories_when_empty() {
+        use crate::compile::types::GithubAppTokenConfig;
+        let cfg = GithubAppTokenConfig {
+            app_id: "GH_APP_ID".to_string(),
+            private_key: "GH_APP_KEY".to_string(),
+            owner: "octo-org".to_string(),
+            repositories: vec![],
+            api_url: None,
+            skip_token_revocation: false,
+        };
+        let Step::Bash(step) = github_app_token_step_typed(&cfg).unwrap() else {
+            panic!("expected a bash step");
+        };
+        assert!(!step.env.contains_key("GH_APP_REPOSITORIES"));
+    }
+
+    #[test]
+    fn github_app_token_step_rejects_invalid_config() {
+        use crate::compile::types::GithubAppTokenConfig;
+        let cfg = GithubAppTokenConfig {
+            app_id: "bad var".to_string(),
+            private_key: "GH_APP_KEY".to_string(),
+            owner: "octo-org".to_string(),
+            repositories: vec![],
+            api_url: None,
+            skip_token_revocation: false,
+        };
+        assert!(github_app_token_step_typed(&cfg).is_err());
+    }
+
+    #[test]
+    fn github_app_token_revoke_step_renders_best_effort_delete() {
+        use crate::compile::ir::condition::Condition;
+        use crate::compile::types::GithubAppTokenConfig;
+        let cfg = GithubAppTokenConfig {
+            app_id: "GH_APP_ID".to_string(),
+            private_key: "GH_APP_KEY".to_string(),
+            owner: "octo-org".to_string(),
+            repositories: vec![],
+            api_url: Some("https://ghe.example.com/api/v3".to_string()),
+            skip_token_revocation: false,
+        };
+        let Step::Bash(step) = github_app_token_revoke_step_typed(&cfg).unwrap() else {
+            panic!("expected a bash step");
+        };
+        assert!(
+            step.script
+                .contains("node '/tmp/ado-aw-scripts/ado-script/github-app-token.js' revoke"),
+            "revoke step must invoke the bundle in revoke mode:\n{}",
+            step.script
+        );
+        // The minted token is passed as a masked secret; never fails the build.
+        assert!(matches!(
+            step.env.get("GH_APP_TOKEN"),
+            Some(EnvValue::Secret(v)) if v == "GITHUB_APP_TOKEN"
+        ));
+        assert!(matches!(
+            step.env.get("GH_APP_API_URL"),
+            Some(EnvValue::Literal(v)) if v == "https://ghe.example.com/api/v3"
+        ));
+        assert_eq!(step.condition, Some(Condition::Always));
+        assert!(step.continue_on_error);
+    }
+
+    #[test]
+    fn github_app_token_eval_path_consistent_with_download_dir() {
+        assert!(GITHUB_APP_TOKEN_PATH.starts_with("/tmp/ado-aw-scripts/ado-script/"));
     }
 
     #[test]
@@ -1174,6 +1404,7 @@ mod tests {
             exec_context_pr_checks_active: false,
             exec_context_repo_active: false,
             safe_outputs_summary_active: false,
+            github_app_token_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -1707,6 +1938,7 @@ mod tests {
             exec_context_pr_checks_active: false,
             exec_context_repo_active: false,
             safe_outputs_summary_active: false,
+            github_app_token_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],

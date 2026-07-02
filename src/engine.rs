@@ -610,9 +610,30 @@ fn copilot_args(
     Ok(params.join(" "))
 }
 
+/// The masked, same-job pipeline variable the `github-app-token` ado-script
+/// bundle sets. When `engine.github-app-token` is configured, the Copilot
+/// engine's `GITHUB_TOKEN` is sourced from this variable (set by the mint step
+/// earlier in the same job) instead of the operator-provided `GITHUB_TOKEN`
+/// pipeline variable.
+pub const GITHUB_APP_TOKEN_VAR: &str = "GITHUB_APP_TOKEN";
+
+/// Return the ADO pipeline-variable name that `GITHUB_TOKEN` should be sourced
+/// from for the Copilot engine, given the engine config. When
+/// `engine.github-app-token` is set this is [`GITHUB_APP_TOKEN_VAR`] (minted
+/// same-job by the token step); otherwise it is the operator-provided
+/// `GITHUB_TOKEN` pipeline variable.
+pub fn github_token_source_var(engine_config: &EngineConfig) -> &'static str {
+    if engine_config.github_app_token().is_some() {
+        GITHUB_APP_TOKEN_VAR
+    } else {
+        "GITHUB_TOKEN"
+    }
+}
+
 fn copilot_env(engine_config: &EngineConfig) -> Result<String> {
+    let token_var = github_token_source_var(engine_config);
     let mut lines: Vec<String> = vec![
-        "GITHUB_TOKEN: $(GITHUB_TOKEN)".to_string(),
+        format!("GITHUB_TOKEN: $({token_var})"),
         "GITHUB_READ_ONLY: 1".to_string(),
         "COPILOT_OTEL_ENABLED: \"true\"".to_string(),
         "COPILOT_OTEL_EXPORTER_TYPE: \"file\"".to_string(),
@@ -994,8 +1015,8 @@ fn copilot_invocation(
 #[cfg(test)]
 mod tests {
     use super::{
-        Engine, copilot_byom_active, copilot_byom_credential_keys, copilot_provider_env,
-        get_engine, normalize_version_tag,
+        Engine, GITHUB_APP_TOKEN_VAR, copilot_byom_active, copilot_byom_credential_keys,
+        copilot_provider_env, get_engine, github_token_source_var, normalize_version_tag,
     };
     use crate::compile::{
         extensions::{CompileContext, CompilerExtension, Declarations, collect_extensions},
@@ -1050,6 +1071,33 @@ mod tests {
         assert!(env.contains("COPILOT_OTEL_ENABLED"));
         assert!(!env.contains("SYSTEM_ACCESSTOKEN"));
         assert!(!env.contains("AZURE_DEVOPS_EXT_PAT"));
+    }
+
+    #[test]
+    fn copilot_engine_env_sources_github_token_from_app_token_var_when_configured() {
+        let src = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  \
+                   github-app-token:\n    app-id: GH_APP_ID\n    private-key: GH_APP_KEY\n    \
+                   owner: octo-org\n---\n";
+        let (front_matter, _) = parse_markdown(src).unwrap();
+        let env = Engine::Copilot.env(&front_matter.engine).unwrap();
+        assert!(
+            env.contains("GITHUB_TOKEN: $(GITHUB_APP_TOKEN)"),
+            "expected GITHUB_APP_TOKEN source, got:\n{env}"
+        );
+        assert!(!env.contains("GITHUB_TOKEN: $(GITHUB_TOKEN)"));
+    }
+
+    #[test]
+    fn github_token_source_var_switches_on_config() {
+        let (default_fm, _) =
+            parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
+        assert_eq!(github_token_source_var(&default_fm.engine), "GITHUB_TOKEN");
+
+        let src = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  \
+                   github-app-token:\n    app-id: GH_APP_ID\n    private-key: GH_APP_KEY\n    \
+                   owner: octo-org\n---\n";
+        let (app_fm, _) = parse_markdown(src).unwrap();
+        assert_eq!(github_token_source_var(&app_fm.engine), GITHUB_APP_TOKEN_VAR);
     }
 
     #[test]

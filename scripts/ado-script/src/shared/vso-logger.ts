@@ -71,6 +71,21 @@ export function setVar(name: string, value: string): void {
   emit(`##vso[task.setvariable variable=${safeName}]${safeValue}`);
 }
 
+/**
+ * Set a **masked secret** same-job pipeline variable
+ * (`task.setvariable variable=…;issecret=true`). ADO registers the value as a
+ * secret so it is scrubbed from subsequent log output. Like {@link setVar}, the
+ * variable is visible to later steps in the **same job** via `$(name)` — it is
+ * NOT an output variable, so it does not cross job boundaries. Use this for
+ * minted tokens (e.g. a GitHub App installation token) that must be consumed by
+ * a downstream step in the same job without leaking into the log.
+ */
+export function setSecretVar(name: string, value: string): void {
+  const safeName = escapeProperty(name);
+  const safeValue = escapeMessage(value);
+  emit(`##vso[task.setvariable variable=${safeName};issecret=true]${safeValue}`);
+}
+
 export function addBuildTag(tag: string): void {
   emit(`##vso[build.addbuildtag]${escapeMessage(tag)}`);
 }
