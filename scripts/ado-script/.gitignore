@@ -12,5 +12,6 @@ exec-context-schedule.js
 exec-context-pr-checks.js
 exec-context-repo.js
 approval-summary.js
+conclusion.js
 schema
 *.tsbuildinfo
