@@ -88,6 +88,12 @@ pub(crate) const EXEC_CONTEXT_PR_SYNTH_PATH: &str =
 /// safe outputs to a sanitized markdown summary tab.
 pub(crate) const APPROVAL_SUMMARY_PATH: &str =
     "/tmp/ado-aw-scripts/ado-script/approval-summary.js";
+/// Path to the conclusion bundle inside the unpacked `ado-script.zip`. Runs in
+/// the always-on Conclusion job (see [`crate::compile::agentic_pipeline`]) to
+/// file pipeline-failure work items and diagnostic signals. Referenced both by
+/// that job's shell body and by `Bundle::Conclusion.path()` so the two copies
+/// cannot diverge.
+pub(crate) const CONCLUSION_PATH: &str = "/tmp/ado-aw-scripts/ado-script/conclusion.js";
 const RELEASE_BASE_URL: &str = "https://github.com/githubnext/ado-aw/releases/download";
 
 /// Single always-on extension that owns all `ado-script` bundle wiring.

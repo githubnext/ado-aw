@@ -1536,12 +1536,15 @@ fn build_conclusion_job(
     download_artifact.continue_on_error = true;
     steps.push(Step::Task(download_artifact));
 
-    let conclusion_script = "\
-if command -v node >/dev/null 2>&1 && [ -f /tmp/ado-aw-scripts/ado-script/conclusion.js ]; then\n  \
-  node /tmp/ado-aw-scripts/ado-script/conclusion.js\n\
+    let conclusion_path = super::extensions::ado_script::CONCLUSION_PATH;
+    let conclusion_script = format!(
+        "\
+if command -v node >/dev/null 2>&1 && [ -f {conclusion_path} ]; then\n  \
+  node {conclusion_path}\n\
 else\n  \
   echo \"##vso[task.logissue type=warning]conclusion.js unavailable; skipping conclusion reporting\"\n\
-fi\n";
+fi\n"
+    );
     let mut conclusion_step = bash("Report pipeline conclusion", conclusion_script);
     conclusion_step = conclusion_step.with_condition(Condition::Always);
     // The Conclusion job's contract is "always runs, never fails": it exists to

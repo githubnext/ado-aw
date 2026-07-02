@@ -5783,9 +5783,15 @@ fn test_bundle_steps_do_not_reproject_auto_injected_ado_vars() {
     let yaml: Value =
         serde_yaml::from_str(&compiled).expect("compiled output should parse as YAML");
 
-    // Keys retained deliberately even though they mirror an auto-injected var
-    // (documented in src/compile/ado_bundle.rs): the SYSTEM_ACCESSTOKEN bearer
-    // and the manual contributor's identity vars behind the email hygiene gate.
+    // Keys retained deliberately even though they mirror an auto-injected var:
+    //  - SYSTEM_ACCESSTOKEN: the bearer, which is NOT auto-injected (ADO maps
+    //    it only on explicit reference), so it must be projected.
+    //  - BUILD_REQUESTEDFOR / BUILD_REQUESTEDFOREMAIL: the manual contributor's
+    //    requestor-identity vars. These ARE auto-injected, so stripping them
+    //    would not change runtime behaviour — but they sit behind the
+    //    `include_email_resolved()` email-hygiene opt-in, and projecting them
+    //    keeps that privacy intent visible at the call site. See the comment in
+    //    src/compile/extensions/exec_context/manual.rs::prepare_step_typed.
     const RETAINED: &[&str] = &[
         "SYSTEM_ACCESSTOKEN",
         "BUILD_REQUESTEDFOR",

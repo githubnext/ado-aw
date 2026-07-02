@@ -145,7 +145,7 @@ impl Bundle {
             Bundle::ExecContextManual => paths::EXEC_CONTEXT_MANUAL_PATH,
             Bundle::ExecContextRepo => paths::EXEC_CONTEXT_REPO_PATH,
             Bundle::ApprovalSummary => paths::APPROVAL_SUMMARY_PATH,
-            Bundle::Conclusion => "/tmp/ado-aw-scripts/ado-script/conclusion.js",
+            Bundle::Conclusion => paths::CONCLUSION_PATH,
         }
     }
 
@@ -196,6 +196,14 @@ pub fn apply_bundle_auth(step: BashStep, bundle: Bundle, token: TokenSource) -> 
 /// here even though `System.AccessToken` shares the `SYSTEM_ACCESSTOKEN` name —
 /// that projection is intentional (ADO maps the token only on explicit
 /// reference).
+///
+/// Note: some auto-injected vars are still projected deliberately even though
+/// this function *would* flag them — e.g. the manual contributor's
+/// `BUILD_REQUESTEDFOR` / `BUILD_REQUESTEDFOREMAIL` requestor-identity vars,
+/// which are retained to keep the email-hygiene opt-in visible at the call
+/// site. Such exemptions live in an explicit allowlist at the (test) call site
+/// rather than being special-cased here, so this predicate stays a pure
+/// "does the key mirror the macro" check.
 ///
 /// Consumed by the contract tests in this module; the compiled-YAML churn
 /// guard in `tests/compiler_tests.rs` re-implements the same rule at the
