@@ -203,14 +203,14 @@ The `repository` value must be `"self"`, an alias from the `checkout:` list in t
 
 The four *signal tools* communicate agent outcomes without creating external ADO artifacts (no PR, no wiki page, no branch). Choose the right one based on what happened and how urgent it is:
 
-| Tool | Stage 3 result | ADO work item filed? |
-|------|---------------|----------------------|
-| `noop` | ✅ Succeeded (or ⚠️ Succeeded with Issues) | **Yes** — create-or-append on every run |
-| `missing-data` | ✅ Succeeded | No |
-| `missing-tool` | ✅ Succeeded (or ⚠️ Succeeded with Issues) | **Yes** — create-or-append on every run |
+| Tool | SafeOutputs job result | Conclusion job files work item? |
+|------|------------------------|----------------------------------|
+| `noop` | ✅ Succeeded | Yes (by default) |
+| `missing-data` | ✅ Succeeded | Yes (by default) |
+| `missing-tool` | ✅ Succeeded | Yes (by default) |
 | `report-incomplete` | ❌ **Failed** | No |
 
-**"Succeeded with Issues"** (exit code 2) occurs when `noop` or `missing-tool` need to file a work item but cannot reach ADO — for example, when no write service connection is configured. The pipeline build shows as "Succeeded with Issues" rather than "Failed" so a missing credential doesn't block visibility.
+Work-item filing for `noop`, `missing-data`, and `missing-tool` is handled by the **[Conclusion job](#conclusion-job)** — a separate always-running job that executes after SafeOutputs. The SafeOutputs job itself simply logs the signal and succeeds.
 
 **`report-incomplete` marks the pipeline run as Failed** (exit code 1). This is intentional: it signals that the agent could not accomplish the assigned task and an operator must investigate. Use it when the agent's primary goal is unachievable, not just when information is missing.
 
@@ -222,21 +222,21 @@ Reports that no action was needed. Use this to provide visibility when analysis 
 
 **Configuration options (front matter):**
 
-By default, Stage 3 **automatically files or appends to an ADO work item** every time `noop` fires. If a non-closed work item with the same title already exists, a new comment is appended instead of creating a duplicate. If ADO credentials are unavailable, execution succeeds with a warning.
+Work-item filing is handled by the [Conclusion job](#conclusion-job). Configure it directly under the `noop:` key:
 
 ```yaml
 safe-outputs:
   noop:
-    work-item:
-      enabled: true                               # Set false to disable work-item filing entirely
-      title: "[ado-aw] Agent reported no operation"  # Work item title (used for dedup lookup too)
-      work-item-type: Task                        # ADO work item type (default: Task)
-      area-path: "MyProject\\MyTeam"              # Optional area path
-      iteration-path: "MyProject\\Sprint 1"       # Optional iteration path
-      tags:                                       # Optional tags applied to the work item
-        - agent-noop
-      include-stats: true                         # Append agent execution stats (default: true)
+    report-as-work-item: false       # Set false to opt out of work-item filing
+    title-prefix: "[ado-aw] noop"    # Prefix added to the pipeline name in the work-item title
+    work-item-type: Task             # ADO work item type (default: Task)
+    area-path: "MyProject\\MyTeam"   # Optional area path
+    iteration-path: "MyProject\\Sprint 1"  # Optional iteration path
+    tags:                            # Optional static tags applied to the work item
+      - agent-noop
 ```
+
+Set `noop: false` (scalar) to disable the tool entirely — the agent cannot call it and no work item is filed.
 
 ### missing-data
 Reports that data or information needed to complete the task is not available.
@@ -246,7 +246,23 @@ Reports that data or information needed to complete the task is not available.
 - `reason` - Why this data is required
 - `context` - Optional additional context about the missing information
 
-Stage 3 logs the report and succeeds. Unlike `noop` and `missing-tool`, `missing-data` does **not** file an ADO work item and has no front-matter configuration options.
+The SafeOutputs job logs the report and succeeds. Like `noop` and `missing-tool`, the [Conclusion job](#conclusion-job) files or appends an ADO work item by default.
+
+**Configuration options (front matter):**
+
+```yaml
+safe-outputs:
+  missing-data:
+    report-as-work-item: false       # Set false to opt out of work-item filing
+    title-prefix: "[ado-aw] missing-data"  # Prefix added to the pipeline name in the work-item title
+    work-item-type: Task             # ADO work item type (default: Task)
+    area-path: "MyProject\\MyTeam"   # Optional area path
+    iteration-path: "MyProject\\Sprint 1"  # Optional iteration path
+    tags:                            # Optional static tags applied to the work item
+      - agent-missing-data
+```
+
+Set `missing-data: false` (scalar) to disable the tool entirely.
 
 ### missing-tool
 Reports that a tool or capability needed to complete the task is not available.
@@ -257,21 +273,21 @@ Reports that a tool or capability needed to complete the task is not available.
 
 **Configuration options (front matter):**
 
-Like `noop`, Stage 3 **automatically files or appends to an ADO work item** when `missing-tool` fires. If ADO credentials are unavailable, execution succeeds with a warning.
+Work-item filing is handled by the [Conclusion job](#conclusion-job). Configure it directly under the `missing-tool:` key:
 
 ```yaml
 safe-outputs:
   missing-tool:
-    work-item:
-      enabled: true                                       # Set false to disable work-item filing entirely
-      title: "[ado-aw] Agent encountered missing tool"    # Work item title (used for dedup lookup too)
-      work-item-type: Task                                # ADO work item type (default: Task)
-      area-path: "MyProject\\MyTeam"                      # Optional area path
-      iteration-path: "MyProject\\Sprint 1"               # Optional iteration path
-      tags:                                               # Optional tags applied to the work item
-        - agent-missing-tool
-      include-stats: true                                 # Append agent execution stats (default: true)
+    report-as-work-item: false       # Set false to opt out of work-item filing
+    title-prefix: "[ado-aw] missing-tool"  # Prefix added to the pipeline name in the work-item title
+    work-item-type: Task             # ADO work item type (default: Task)
+    area-path: "MyProject\\MyTeam"   # Optional area path
+    iteration-path: "MyProject\\Sprint 1"  # Optional iteration path
+    tags:                            # Optional static tags applied to the work item
+      - agent-missing-tool
 ```
+
+Set `missing-tool: false` (scalar) to disable the tool entirely.
 
 ### report-incomplete
 Reports that a task could not be completed. **Stage 3 fails** when this tool fires (exit code 1, ADO build shows "Failed"). Use this when the agent's primary goal is unachievable, not when information is merely missing.
@@ -281,6 +297,40 @@ Reports that a task could not be completed. **Stage 3 fails** when this tool fir
 - `context` - Optional additional context about what was attempted
 
 There are no front-matter configuration options for this tool.
+
+### Conclusion job
+
+The **Conclusion job** is an always-running housekeeping job emitted by the compiler whenever `safe-outputs:` is configured. It runs after SafeOutputs with `condition: always()` and is responsible for filing or appending ADO work items for diagnostic signals and pipeline failures.
+
+**Pipeline shape:**
+
+```
+Setup → Agent → Detection → SafeOutputs → Teardown → Conclusion
+                                                        ↑
+                                              condition: always()
+```
+
+**What it reports:**
+
+| Signal | When filed |
+|--------|-----------|
+| `noop` | Agent called `noop` at least once |
+| `missing-tool` | Agent called `missing-tool` at least once |
+| `missing-data` | Agent called `missing-data` at least once |
+| Pipeline failure | Any of Agent, Detection, or SafeOutputs failed |
+
+Work items are deduplicated by title: if an open work item with the same title already exists, the Conclusion job appends a comment instead of creating a duplicate.
+
+**Global toggle — disable all work-item filing:**
+
+```yaml
+safe-outputs:
+  report-failure-as-work-item: false   # master kill-switch: disables ALL Conclusion work-item filing
+```
+
+This suppresses every signal including noop, missing-tool, missing-data, and pipeline failures. To opt out of an individual signal while keeping the others, use `report-as-work-item: false` on that tool's config instead (see per-tool options above).
+
+**Token:** The Conclusion job uses `$(System.AccessToken)` by default, or `SC_WRITE_TOKEN` when a write service connection is configured under `permissions:`.
 
 ### add-pr-comment
 Adds a new comment thread to a pull request.
