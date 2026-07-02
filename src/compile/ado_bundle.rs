@@ -13,7 +13,7 @@
 //! * [`Bundle`] enumerates every bundle, with its on-disk [`Bundle::path`] and
 //!   its [`Bundle::auth`] requirement.
 //! * [`apply_bundle_auth`] is the single chokepoint that projects
-//!   `SYSTEM_ACCESSTOKEN` into a step for every REST-calling bundle, so no
+//!   `SYSTEM_ACCESSTOKEN` into a step for every bearer-requiring bundle, so no
 //!   call site can forget it again.
 //! * [`token_source_for`] unifies the `System.AccessToken` vs `SC_WRITE_TOKEN`
 //!   selection that was previously duplicated between the Conclusion job and
@@ -58,13 +58,16 @@ pub enum Bundle {
 /// The auth contract a bundle requires from the step that invokes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BundleAuth {
-    /// The bundle authenticates to the ADO REST API via `getWebApi()` in
-    /// `scripts/ado-script/src/shared/auth.ts`, so its step must map
-    /// `SYSTEM_ACCESSTOKEN`. The collection URI comes from the auto-injected
-    /// `SYSTEM_COLLECTIONURI` and is therefore *not* part of this contract
-    /// (see #1307).
-    AdoRest,
-    /// The bundle needs no ADO REST auth (pure filesystem / git / argv).
+    /// The bundle reads `SYSTEM_ACCESSTOKEN` from its env — for ADO REST auth
+    /// (via `getWebApi()` in `scripts/ado-script/src/shared/auth.ts`), for git
+    /// credential/bearer auth (via `shared/git.ts::bearerEnv`), or both — so
+    /// its step must project the token. `SYSTEM_ACCESSTOKEN` is the one ADO
+    /// predefined variable that is *not* auto-injected (ADO maps it only on
+    /// explicit reference), which is why it must be projected. The collection
+    /// URI, by contrast, comes from the auto-injected `SYSTEM_COLLECTIONURI`
+    /// and is therefore *not* part of this contract (see #1307).
+    Bearer,
+    /// The bundle needs no bearer (pure filesystem / git-without-auth / argv).
     None,
 }
 
@@ -152,7 +155,8 @@ impl Bundle {
     /// The auth contract this bundle requires from its invoking step.
     pub fn auth(self) -> BundleAuth {
         match self {
-            // These bundles call `getWebApi()` (ADO REST) at runtime.
+            // These bundles read SYSTEM_ACCESSTOKEN at runtime — for ADO REST
+            // (via getWebApi()) and/or git bearer auth (via bearerEnv).
             Bundle::Gate
             | Bundle::ExecContextPr
             | Bundle::ExecContextPrSynth
@@ -161,8 +165,8 @@ impl Bundle {
             | Bundle::ExecContextCiPush
             | Bundle::ExecContextWorkitem
             | Bundle::ExecContextSchedule
-            | Bundle::Conclusion => BundleAuth::AdoRest,
-            // Pure filesystem / git / argv — no ADO REST auth.
+            | Bundle::Conclusion => BundleAuth::Bearer,
+            // Pure filesystem / git-without-auth / argv — no bearer.
             Bundle::Import
             | Bundle::ExecContextManual
             | Bundle::ExecContextRepo
@@ -173,13 +177,15 @@ impl Bundle {
 
 /// Project the bundle's auth env contract onto a step.
 ///
-/// For [`BundleAuth::AdoRest`] bundles this maps `SYSTEM_ACCESSTOKEN` from the
-/// chosen [`TokenSource`]; for [`BundleAuth::None`] it is a no-op. This is the
-/// single guarantee that every REST-calling bundle step carries a bearer token
-/// — the structural fix for the class of bug behind #1307.
+/// For [`BundleAuth::Bearer`] bundles this maps `SYSTEM_ACCESSTOKEN` from the
+/// chosen [`TokenSource`]. For [`BundleAuth::None`] it is a no-op — the `token`
+/// argument is ignored (a `None`-auth bundle needs no bearer, and today no
+/// caller routes such a bundle through this function). This is the single
+/// guarantee that every bearer-requiring bundle step carries a token — the
+/// structural fix for the class of bug behind #1307.
 pub fn apply_bundle_auth(step: BashStep, bundle: Bundle, token: TokenSource) -> BashStep {
     match bundle.auth() {
-        BundleAuth::AdoRest => {
+        BundleAuth::Bearer => {
             step.with_env("SYSTEM_ACCESSTOKEN", EnvValue::secret(token.variable()))
         }
         BundleAuth::None => step,
@@ -233,15 +239,15 @@ mod tests {
     }
 
     #[test]
-    fn apply_bundle_auth_projects_token_for_ado_rest_only() {
+    fn apply_bundle_auth_projects_token_for_bearer_bundles_only() {
         for b in Bundle::ALL {
             let step = BashStep::new("t", "node x\n");
             let out = apply_bundle_auth(step, *b, TokenSource::SystemAccessToken);
             let has_token = out.env.contains_key("SYSTEM_ACCESSTOKEN");
             match b.auth() {
-                BundleAuth::AdoRest => assert!(
+                BundleAuth::Bearer => assert!(
                     has_token,
-                    "{b:?} is AdoRest and must carry SYSTEM_ACCESSTOKEN"
+                    "{b:?} is Bearer and must carry SYSTEM_ACCESSTOKEN"
                 ),
                 BundleAuth::None => assert!(
                     !has_token,

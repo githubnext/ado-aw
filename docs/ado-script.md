@@ -305,11 +305,12 @@ environment contract — which `process.env` keys the bundle reads. That contrac
 is modelled in [`src/compile/ado_bundle.rs`](../src/compile/ado_bundle.rs):
 
 - **`Bundle`** enumerates every bundle with its on-disk `path()` and its
-  `auth()` requirement (`BundleAuth::AdoRest` for bundles that call
-  `getWebApi()`, `BundleAuth::None` otherwise).
+  `auth()` requirement (`BundleAuth::Bearer` for bundles that read
+  `SYSTEM_ACCESSTOKEN` — for ADO REST via `getWebApi()` and/or git bearer auth
+  via `bearerEnv` — `BundleAuth::None` otherwise).
 - **`apply_bundle_auth(step, bundle, token)`** is the single chokepoint that
-  projects `SYSTEM_ACCESSTOKEN` (from a `TokenSource`) into every REST-calling
-  bundle step. `SYSTEM_ACCESSTOKEN` is the one ADO predefined variable that is
+  projects `SYSTEM_ACCESSTOKEN` (from a `TokenSource`) into every
+  bearer-requiring bundle step. `SYSTEM_ACCESSTOKEN` is the one ADO predefined variable that is
   **not** auto-injected — ADO maps it only when a step explicitly references
   it — so it must be projected. This applier is why a step can no longer ship
   without a bearer (the regression behind #1307).

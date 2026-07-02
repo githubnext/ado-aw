@@ -121,8 +121,9 @@ If your step invokes an ado-script Node bundle (`/tmp/ado-aw-scripts/ado-script/
 model its env contract via [`src/compile/ado_bundle.rs`](../src/compile/ado_bundle.rs)
 rather than hand-writing the auth env:
 
-- Add a `Bundle` variant with its `path()` and `auth()` (`BundleAuth::AdoRest`
-  if the bundle calls `getWebApi()`, else `BundleAuth::None`).
+- Add a `Bundle` variant with its `path()` and `auth()` (`BundleAuth::Bearer`
+  if the bundle reads `SYSTEM_ACCESSTOKEN` — for ADO REST via `getWebApi()`
+  and/or git bearer auth — else `BundleAuth::None`).
 - Project the bearer with `apply_bundle_auth(step, Bundle::X, token)` — never
   `.with_env("SYSTEM_ACCESSTOKEN", …)` by hand. Use `token_source_for(write_sc)`
   to pick the token source.
