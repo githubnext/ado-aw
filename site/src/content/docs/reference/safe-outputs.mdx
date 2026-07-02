@@ -300,14 +300,14 @@ There are no front-matter configuration options for this tool.
 
 ### Conclusion job
 
-The **Conclusion job** is an always-running housekeeping job emitted by the compiler whenever `safe-outputs:` is configured. It runs after SafeOutputs with `condition: always()` and is responsible for filing or appending ADO work items for diagnostic signals and pipeline failures.
+The **Conclusion job** is a housekeeping job emitted by the compiler whenever `safe-outputs:` is configured. It runs after SafeOutputs for all pipeline outcomes — including job failures and timeouts — but is **skipped on explicit cancellation**. This preserves post-run housekeeping while avoiding unnecessary billing when an operator manually cancels a run.
 
 **Pipeline shape:**
 
 ```
 Setup → Agent → Detection → SafeOutputs → Teardown → Conclusion
                                                         ↑
-                                              condition: always()
+                                              condition: and(always(), not(canceled()))
 ```
 
 **What it reports:**
