@@ -210,10 +210,11 @@ mod tests {
         let mut fm: FrontMatter = serde_yaml::from_str(yaml).expect("parse front matter");
         // Lower repos the way the compile pipeline does.
         if !fm.repos.is_empty() {
-            let (repositories, checkout) =
+            let (repositories, checkout, checkout_fetch) =
                 crate::compile::common::lower_repos(&fm.repos).expect("lower repos");
             fm.repositories = repositories;
             fm.checkout = checkout;
+            fm.checkout_fetch = checkout_fetch;
         }
         fm
     }

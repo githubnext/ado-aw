@@ -186,6 +186,7 @@ pub struct CheckoutStep {
     pub clean: Option<bool>,
     pub submodules: Option<SubmodulesOpt>,
     pub fetch_depth: Option<u32>,
+    pub fetch_tags: Option<bool>,
     pub persist_credentials: Option<bool>,
 }
 
@@ -255,6 +256,7 @@ mod tests {
             clean: None,
             submodules: None,
             fetch_depth: None,
+            fetch_tags: None,
             persist_credentials: None,
         });
         assert!(chk.id().is_none());

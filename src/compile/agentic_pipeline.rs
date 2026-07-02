@@ -86,8 +86,8 @@ use super::ir::{
     PrTrigger, RepositoryResource, Resources, Schedule, Triggers,
 };
 use super::types::{
-    ApprovalConfig, ApprovalOnTimeout, FrontMatter, OnConfig, PrMode, Repository as RepoCfg,
-    SupplyChainConfig,
+    ApprovalConfig, ApprovalOnTimeout, CheckoutFetchOpts, FrontMatter, OnConfig, PrMode,
+    Repository as RepoCfg, SELF_CHECKOUT_ALIAS, SupplyChainConfig,
 };
 
 /// Built pipeline context — the result of running every validation,
@@ -308,6 +308,11 @@ pub(crate) fn build_pipeline_context(
     let cfg = StandaloneCtx {
         pool: pool.clone(),
         agent_display_name: agent_display_name.clone(),
+        self_checkout_fetch: front_matter
+            .checkout_fetch
+            .get(SELF_CHECKOUT_ALIAS)
+            .cloned()
+            .unwrap_or_default(),
         working_directory: working_directory.clone(),
         trigger_repo_directory: trigger_repo_directory.clone(),
         compiler_version: compiler_version.clone(),
@@ -466,6 +471,9 @@ impl<'a> JobPrefix<'a> {
 pub(crate) struct StandaloneCtx {
     pub(crate) pool: Pool,
     pub(crate) agent_display_name: String,
+    /// Fetch tuning for the auto-generated `checkout: self` step, resolved from
+    /// a reserved `self` entry in `repos:` (empty ⇒ ADO defaults).
+    pub(crate) self_checkout_fetch: CheckoutFetchOpts,
     pub(crate) working_directory: String,
     pub(crate) trigger_repo_directory: String,
     pub(crate) compiler_version: String,
@@ -750,7 +758,7 @@ fn build_setup_job(
         return Ok(None);
     }
     let mut steps: Vec<Step> = Vec::new();
-    steps.push(checkout_self_step());
+    steps.push(checkout_self_step(&cfg.self_checkout_fetch));
     steps.extend(ext_setup_steps.iter().cloned());
 
     // User setup steps as RawYaml — they're arbitrary user-authored ADO YAML
@@ -808,14 +816,16 @@ fn build_agent_job(
     let mut steps: Vec<Step> = Vec::new();
 
     // 1. checkout: self
-    steps.push(checkout_self_step());
+    steps.push(checkout_self_step(&cfg.self_checkout_fetch));
     // 2. additional repo checkouts
     for repo in &front_matter.checkout {
+        let fetch = front_matter.checkout_fetch.get(repo).cloned().unwrap_or_default();
         steps.push(Step::Checkout(CheckoutStep {
             repository: CheckoutRepo::Named(repo.clone()),
             clean: None,
             submodules: None,
-            fetch_depth: None,
+            fetch_depth: fetch.depth_for_emit(),
+            fetch_tags: fetch.fetch_tags,
             persist_credentials: None,
         }));
     }
@@ -1042,7 +1052,7 @@ fn build_detection_job(
     prefix: &JobPrefix<'_>,
 ) -> Result<Job> {
     let mut steps: Vec<Step> = Vec::new();
-    steps.push(checkout_self_step());
+    steps.push(checkout_self_step(&cfg.self_checkout_fetch));
     // Detection job pulls the Agent's output artifact via cross-job download
     steps.push(Step::Download(DownloadStep {
         source: "current".to_string(),
@@ -1202,7 +1212,7 @@ fn build_safeoutputs_job(
     variant: &SafeOutputsVariant,
 ) -> Result<Job> {
     let mut steps: Vec<Step> = Vec::new();
-    steps.push(checkout_self_step());
+    steps.push(checkout_self_step(&cfg.self_checkout_fetch));
     // Acquire write token (when configured)
     push_raw_yaml_if_nonempty(&mut steps, &cfg.acquire_write_token)?;
     // Download analyzed outputs
@@ -1494,7 +1504,7 @@ fn build_teardown_job(
         return Ok(None);
     }
     let mut steps: Vec<Step> = Vec::new();
-    steps.push(checkout_self_step());
+    steps.push(checkout_self_step(&cfg.self_checkout_fetch));
     for user_step_val in &front_matter.teardown {
         steps.push(Step::RawYaml(step_to_raw_yaml_string(user_step_val)?));
     }
@@ -1839,12 +1849,13 @@ fn wire_explicit_dependencies(jobs: &mut [Job], prefix: &JobPrefix<'_>) -> Resul
 // Step body builders — typed BashStep/TaskStep with format!() bodies
 // ─────────────────────────────────────────────────────────────────────
 
-fn checkout_self_step() -> Step {
+fn checkout_self_step(fetch: &CheckoutFetchOpts) -> Step {
     Step::Checkout(CheckoutStep {
         repository: CheckoutRepo::Self_,
         clean: None,
         submodules: None,
-        fetch_depth: None,
+        fetch_depth: fetch.depth_for_emit(),
+        fetch_tags: fetch.fetch_tags,
         persist_credentials: None,
     })
 }
