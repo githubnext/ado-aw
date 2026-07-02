@@ -1732,7 +1732,12 @@ fi\n";
     let mut job = Job::new(prefix.id("Conclusion")?, "Conclusion", cfg.pool.clone());
     job.variables = conclusion_variables;
     job.steps = steps;
-    job.condition = Some(Condition::Always);
+    // Keep Conclusion's "run regardless of upstream result" behavior, but do
+    // not continue running after an explicit pipeline cancellation request.
+    job.condition = Some(Condition::And(vec![
+        Condition::Always,
+        Condition::Custom("not(canceled())".to_string()),
+    ]));
     Ok(Some(job))
 }
 
