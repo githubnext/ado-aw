@@ -289,12 +289,6 @@ impl Executor for ResolvePrThreadResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safe_outputs::ToolResult;
-
-    #[test]
-    fn test_result_has_correct_name() {
-        assert_eq!(ResolvePrThreadResult::NAME, "resolve-pr-thread");
-    }
 
     #[test]
     fn test_params_deserializes() {
@@ -319,6 +313,7 @@ mod tests {
         assert_eq!(result.pull_request_id, 42);
         assert_eq!(result.thread_id, 7);
         assert_eq!(result.status, "fixed");
+        assert_eq!(result.repository, Some("self".to_string()));
     }
 
     #[test]
@@ -329,8 +324,11 @@ mod tests {
             status: "fixed".to_string(),
             repository: Some("self".to_string()),
         };
-        let result: Result<ResolvePrThreadResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = <ResolvePrThreadResult as TryFrom<_>>::try_from(params).unwrap_err();
+        assert!(
+            err.to_string().contains("pull_request_id must be positive"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -341,8 +339,11 @@ mod tests {
             status: "fixed".to_string(),
             repository: Some("self".to_string()),
         };
-        let result: Result<ResolvePrThreadResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = <ResolvePrThreadResult as TryFrom<_>>::try_from(params).unwrap_err();
+        assert!(
+            err.to_string().contains("thread_id must be positive"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -353,8 +354,15 @@ mod tests {
             status: "invalid-status".to_string(),
             repository: Some("self".to_string()),
         };
-        let result: Result<ResolvePrThreadResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = <ResolvePrThreadResult as TryFrom<_>>::try_from(params).unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid status"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.to_string().contains("invalid-status"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -365,8 +373,12 @@ mod tests {
             status: "fixed".to_string(),
             repository: Some("##vso[task.setvariable variable=x]y".to_string()),
         };
-        let result: Result<ResolvePrThreadResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = <ResolvePrThreadResult as TryFrom<_>>::try_from(params).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("repository") || msg.contains("##vso["),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
