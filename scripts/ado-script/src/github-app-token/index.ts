@@ -27,17 +27,24 @@
  * key is read from the process env (set from a `$(VAR)` macro) and never
  * written to disk.
  *
- * Env-var contract (all set by the compiler's step `env:` block):
- *   - `GH_APP_ID`            (required) — the GitHub App ID.
- *   - `GH_APP_PRIVATE_KEY`   (required) — the App private key (PEM).
- *   - `GH_APP_OWNER`         (required) — installation owner (org or user).
- *   - `GH_APP_REPOSITORIES`  (optional) — comma/space/newline-separated repo
- *                            names to scope the token to.
- *   - `GH_APP_API_URL`       (optional) — API base URL (default
- *                            `https://api.github.com`; for GHES use
- *                            `https://<host>/api/v3`).
- *   - `GH_APP_OUTPUT_VAR`    (optional) — name of the masked variable to set
- *                            (default `GITHUB_APP_TOKEN`).
+ * Invocation contract. Compiler-owned, **non-secret** inputs are passed as argv
+ * flags (immune to ADO pipeline-variable shadowing — see `CliArgs`); the two
+ * **secrets** stay in env as `$(secret)` macros so ADO masks them and they never
+ * appear in the step's command line.
+ *
+ *   Mint:   node github-app-token.js \
+ *             --app-id <id> --owner <login> --output-var <name> \
+ *             [--repositories "a b"] [--api-url https://host/api/v3]
+ *           env: GH_APP_PRIVATE_KEY (required, secret)
+ *
+ *   Revoke: node github-app-token.js revoke [--api-url https://host/api/v3]
+ *           env: GH_APP_TOKEN (the minted token, secret)
+ *
+ * Flags: `--app-id` the GitHub App ID; `--owner` installation owner (org/user);
+ * `--output-var` the masked variable name to set (compiler-pinned, defaults to
+ * `GITHUB_APP_TOKEN`); `--repositories` space/comma-separated repo names to
+ * scope the token to; `--api-url` API base URL (default `https://api.github.com`,
+ * GHES uses `https://<host>/api/v3`).
  */
 import { createSign } from "node:crypto";
 
@@ -202,12 +209,70 @@ function requireEnv(env: NodeJS.ProcessEnv, key: string): string {
   return value;
 }
 
-function resolveApiUrl(env: NodeJS.ProcessEnv): string {
-  return (
-    env.GH_APP_API_URL && env.GH_APP_API_URL.length > 0
-      ? env.GH_APP_API_URL
-      : DEFAULT_API_URL
-  ).replace(/\/+$/, "");
+/** Normalize an optional API base URL, defaulting to GHEC and stripping any
+ *  trailing slashes. */
+function normalizeApiUrl(raw: string | undefined): string {
+  return (raw && raw.length > 0 ? raw : DEFAULT_API_URL).replace(/\/+$/, "");
+}
+
+/**
+ * Options that steer the mint/revoke flows. These are **compiler-owned,
+ * non-secret** inputs passed as argv flags — deliberately NOT read from
+ * `process.env`. ADO injects every pipeline variable into a step's env, so an
+ * env-sourced knob (e.g. the output-variable name) could be silently shadowed
+ * by a same-named pipeline variable and, in the worst case, redirect the minted
+ * token. Argv comes only from the compiler-authored step script, so it cannot
+ * be shadowed. Secret material (`GH_APP_PRIVATE_KEY`, and the minted
+ * `GH_APP_TOKEN` for revoke) stays in env as `$(secret)` macros so ADO masks it
+ * and it never appears in the step's command line.
+ */
+export interface CliArgs {
+  appId?: string;
+  owner?: string;
+  outputVar?: string;
+  repositories?: string;
+  apiUrl?: string;
+}
+
+/**
+ * Parse the `--flag value` argv (after any leading `revoke` subcommand) into a
+ * flat `CliArgs`. Unknown flags are ignored so the compiler can add new ones
+ * without breaking an older bundle. Repeated flags are last-write-wins.
+ */
+export function parseArgs(argv: string[]): CliArgs {
+  const out: CliArgs = {};
+  for (let i = 0; i < argv.length; i += 2) {
+    const flag = argv[i];
+    const value = argv[i + 1];
+    if (value === undefined) break;
+    switch (flag) {
+      case "--app-id":
+        out.appId = value;
+        break;
+      case "--owner":
+        out.owner = value;
+        break;
+      case "--output-var":
+        out.outputVar = value;
+        break;
+      case "--repositories":
+        out.repositories = value;
+        break;
+      case "--api-url":
+        out.apiUrl = value;
+        break;
+      default:
+        break;
+    }
+  }
+  return out;
+}
+
+function requireArg(value: string | undefined, flag: string): string {
+  if (!value || value.length === 0) {
+    throw new Error(`required argument ${flag} is missing or empty`);
+  }
+  return value;
 }
 
 /**
@@ -220,6 +285,7 @@ function resolveApiUrl(env: NodeJS.ProcessEnv): string {
  * from `GH_APP_TOKEN` (the masked same-job variable set by the mint step).
  */
 export async function revoke(
+  args: CliArgs,
   env: NodeJS.ProcessEnv = process.env,
   fetchFn: FetchLike = fetch as unknown as FetchLike,
 ): Promise<number> {
@@ -228,7 +294,7 @@ export async function revoke(
     logWarning("[github-app-token] no token to revoke (GH_APP_TOKEN empty)");
     return 0;
   }
-  const apiUrl = resolveApiUrl(env);
+  const apiUrl = normalizeApiUrl(args.apiUrl);
   try {
     const resp = await fetchFn(`${apiUrl}/installation/token`, {
       method: "DELETE",
@@ -252,18 +318,21 @@ export async function revoke(
 }
 
 export async function main(
+  args: CliArgs,
   env: NodeJS.ProcessEnv = process.env,
   fetchFn: FetchLike = fetch as unknown as FetchLike,
 ): Promise<number> {
   try {
-    const appId = requireEnv(env, "GH_APP_ID");
+    // Non-secret, compiler-owned inputs come from argv (immune to pipeline-var
+    // shadowing); only the private key is read from the masked env.
+    const appId = requireArg(args.appId, "--app-id");
+    const owner = requireArg(args.owner, "--owner");
     const privateKey = requireEnv(env, "GH_APP_PRIVATE_KEY");
-    const owner = requireEnv(env, "GH_APP_OWNER");
-    const repositories = parseRepositories(env.GH_APP_REPOSITORIES);
-    const apiUrl = resolveApiUrl(env);
+    const repositories = parseRepositories(args.repositories);
+    const apiUrl = normalizeApiUrl(args.apiUrl);
     const outputVar =
-      env.GH_APP_OUTPUT_VAR && env.GH_APP_OUTPUT_VAR.length > 0
-        ? env.GH_APP_OUTPUT_VAR
+      args.outputVar && args.outputVar.length > 0
+        ? args.outputVar
         : DEFAULT_OUTPUT_VAR;
 
     const jwt = buildAppJwt(appId, privateKey);
@@ -302,14 +371,18 @@ export async function main(
 }
 
 // CLI entry guard: only run when invoked directly (not when imported by tests).
-// A `revoke` argument switches to token-revocation mode; otherwise the default
-// mint flow runs. Uses argv comparison rather than a top-level await so the
-// bundle stays CJS.
+// A leading `revoke` argument switches to token-revocation mode; otherwise the
+// default mint flow runs. Compiler-owned inputs are argv flags; secrets stay in
+// env. Uses argv comparison rather than a top-level await so the bundle stays
+// CJS.
 if (
   typeof process !== "undefined" &&
   process.argv[1] &&
   /github-app-token(\/index)?\.js$/.test(process.argv[1])
 ) {
-  const run = process.argv[2] === "revoke" ? revoke() : main();
+  const rest = process.argv.slice(2);
+  const isRevoke = rest[0] === "revoke";
+  const args = parseArgs(isRevoke ? rest.slice(1) : rest);
+  const run = isRevoke ? revoke(args) : main(args);
   run.then((rc) => process.exit(rc));
 }

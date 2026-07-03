@@ -58,12 +58,15 @@ pipeline** as runtime helpers. Today it produces thirteen bundles:
   [`safe-outputs.md`](safe-outputs.md).
 - `github-app-token.js` — GitHub App token minter that runs immediately
   before the Copilot invocation in the **Agent and Detection jobs** when
-  `engine.github-app-token` is configured. Builds an RS256 JWT from the App
-  ID + private key (env vars sourced from ADO variables), resolves the
-  installation for the owner, exchanges it for an installation access token,
-  and exposes it as a masked same-job `GITHUB_APP_TOKEN`. Invoked again with a
-  `revoke` argument after the Copilot run (best-effort) to delete the token via
-  `DELETE /installation/token`. Runs outside AWF. See
+  `engine.github-app-token` is configured. Builds an RS256 JWT from the App ID
+  (argv) + private key (masked env secret), resolves the installation for the
+  owner, exchanges it for an installation access token, and exposes it as a
+  masked same-job `GITHUB_APP_TOKEN`. Invoked again with a `revoke` argument
+  after the Copilot run (best-effort) to delete the token via
+  `DELETE /installation/token`. Compiler-owned, non-secret inputs (`--app-id`,
+  `--owner`, `--output-var`, `--repositories`, `--api-url`) are argv flags, not
+  env vars, so a pipeline variable can't shadow them (only the private key /
+  minted token ride in masked env). Runs outside AWF. See
   [`engine.md`](engine.md#github-app-backed-copilot-engine-auth).
 
 > **Internal-only.** `ado-script` is not a user-facing front-matter
@@ -340,9 +343,12 @@ is never part of a step's env contract.
 Not every bundle authenticates to Azure DevOps. The `github-app-token` bundle
 (issue #1316) is `BundleAuth::None`: it authenticates to the **GitHub** API with
 its own App JWT / minted installation token, so it carries no
-`SYSTEM_ACCESSTOKEN` and no ADO predefined mirrors — only its `GH_APP_*` inputs
-(the App ID, the `$(...)`-sourced private key, owner/repositories, and optional
-`api-url`).
+`SYSTEM_ACCESSTOKEN` and no ADO predefined mirrors. Its only env var is the
+masked private-key secret (`GH_APP_PRIVATE_KEY`, and `GH_APP_TOKEN` for revoke);
+every other, non-secret input (App ID, owner, repositories, output-variable
+name, api-url) is a single-quoted **argv flag** rather than an env var, so a
+pipeline variable can never shadow it (ADO injects pipeline variables into a
+step's env, but argv comes only from the compiler-authored script).
 
 
 ## End-to-end data flow

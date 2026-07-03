@@ -3,6 +3,7 @@ import { generateKeyPairSync, createVerify } from "node:crypto";
 
 import {
   buildAppJwt,
+  parseArgs,
   parseRepositories,
   resolveInstallationId,
   mintInstallationToken,
@@ -171,6 +172,38 @@ describe("mintInstallationToken", () => {
   });
 });
 
+describe("parseArgs", () => {
+  it("parses the mint flags into CliArgs", () => {
+    const args = parseArgs([
+      "--app-id",
+      "1234567",
+      "--owner",
+      "octo-org",
+      "--output-var",
+      "GITHUB_APP_TOKEN",
+      "--repositories",
+      "repo-a repo-b",
+      "--api-url",
+      "https://ghe.example.com/api/v3",
+    ]);
+    expect(args).toEqual({
+      appId: "1234567",
+      owner: "octo-org",
+      outputVar: "GITHUB_APP_TOKEN",
+      repositories: "repo-a repo-b",
+      apiUrl: "https://ghe.example.com/api/v3",
+    });
+  });
+
+  it("ignores unknown flags and tolerates a bare revoke arg list", () => {
+    expect(parseArgs(["--api-url", "https://x/api/v3"])).toEqual({
+      apiUrl: "https://x/api/v3",
+    });
+    expect(parseArgs(["--unknown", "v"])).toEqual({});
+    expect(parseArgs([])).toEqual({});
+  });
+});
+
 describe("main", () => {
   it("mints a token and emits a masked same-job variable", async () => {
     const { privateKey } = makeKeyPair();
@@ -188,11 +221,12 @@ describe("main", () => {
 
     const rc = await main(
       {
-        GH_APP_ID: "123",
-        GH_APP_PRIVATE_KEY: privateKey,
-        GH_APP_OWNER: "octo-org",
-        GH_APP_REPOSITORIES: "repo-a repo-b",
-      } as NodeJS.ProcessEnv,
+        appId: "123",
+        owner: "octo-org",
+        outputVar: "GITHUB_APP_TOKEN",
+        repositories: "repo-a repo-b",
+      },
+      { GH_APP_PRIVATE_KEY: privateKey } as NodeJS.ProcessEnv,
       fetchFn as never,
     );
     spy.mockRestore();
@@ -204,7 +238,7 @@ describe("main", () => {
     );
   });
 
-  it("honours GH_APP_API_URL and GH_APP_OUTPUT_VAR", async () => {
+  it("honours --api-url and --output-var", async () => {
     const { privateKey } = makeKeyPair();
     const fetchFn = vi
       .fn()
@@ -220,12 +254,12 @@ describe("main", () => {
 
     const rc = await main(
       {
-        GH_APP_ID: "1",
-        GH_APP_PRIVATE_KEY: privateKey,
-        GH_APP_OWNER: "acme",
-        GH_APP_API_URL: "https://ghes.example.com/api/v3/",
-        GH_APP_OUTPUT_VAR: "CUSTOM_TOKEN",
-      } as NodeJS.ProcessEnv,
+        appId: "1",
+        owner: "acme",
+        apiUrl: "https://ghes.example.com/api/v3/",
+        outputVar: "CUSTOM_TOKEN",
+      },
+      { GH_APP_PRIVATE_KEY: privateKey } as NodeJS.ProcessEnv,
       fetchFn as never,
     );
     spy.mockRestore();
@@ -240,7 +274,26 @@ describe("main", () => {
     );
   });
 
-  it("returns 1 and logs an error when a required env var is missing", async () => {
+  it("returns 1 and logs an error when a required arg is missing", async () => {
+    const writes: string[] = [];
+    const spy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation((chunk: string | Uint8Array): boolean => {
+        writes.push(chunk.toString());
+        return true;
+      });
+    // --owner missing.
+    const rc = await main(
+      { appId: "1" },
+      { GH_APP_PRIVATE_KEY: "key" } as NodeJS.ProcessEnv,
+      vi.fn() as never,
+    );
+    spy.mockRestore();
+    expect(rc).toBe(1);
+    expect(writes.join("")).toContain("--owner");
+  });
+
+  it("returns 1 when the private key env secret is missing", async () => {
     const writes: string[] = [];
     const spy = vi
       .spyOn(process.stdout, "write")
@@ -249,7 +302,8 @@ describe("main", () => {
         return true;
       });
     const rc = await main(
-      { GH_APP_ID: "1" } as NodeJS.ProcessEnv,
+      { appId: "1", owner: "acme" },
+      {} as NodeJS.ProcessEnv,
       vi.fn() as never,
     );
     spy.mockRestore();
@@ -262,10 +316,8 @@ describe("revoke", () => {
   it("DELETEs the installation token and returns 0", async () => {
     const fetchFn = vi.fn().mockResolvedValueOnce(jsonResponse(204, ""));
     const rc = await revoke(
-      {
-        GH_APP_TOKEN: "ghs_minted",
-        GH_APP_API_URL: "https://ghe.example.com/api/v3/",
-      } as NodeJS.ProcessEnv,
+      { apiUrl: "https://ghe.example.com/api/v3/" },
+      { GH_APP_TOKEN: "ghs_minted" } as NodeJS.ProcessEnv,
       fetchFn as never,
     );
     expect(rc).toBe(0);
@@ -277,7 +329,7 @@ describe("revoke", () => {
 
   it("is a no-op (returns 0) when no token is present", async () => {
     const fetchFn = vi.fn();
-    const rc = await revoke({} as NodeJS.ProcessEnv, fetchFn as never);
+    const rc = await revoke({}, {} as NodeJS.ProcessEnv, fetchFn as never);
     expect(rc).toBe(0);
     expect(fetchFn).not.toHaveBeenCalled();
   });
@@ -285,6 +337,7 @@ describe("revoke", () => {
   it("never fails the build when the DELETE errors", async () => {
     const fetchFn = vi.fn().mockRejectedValueOnce(new Error("network down"));
     const rc = await revoke(
+      {},
       { GH_APP_TOKEN: "ghs_minted" } as NodeJS.ProcessEnv,
       fetchFn as never,
     );
@@ -294,6 +347,7 @@ describe("revoke", () => {
   it("tolerates a non-2xx DELETE response", async () => {
     const fetchFn = vi.fn().mockResolvedValueOnce(jsonResponse(404, "gone"));
     const rc = await revoke(
+      {},
       { GH_APP_TOKEN: "ghs_minted" } as NodeJS.ProcessEnv,
       fetchFn as never,
     );

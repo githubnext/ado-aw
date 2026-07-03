@@ -500,56 +500,82 @@ fn resolver_step_typed() -> Step {
 /// expose it as a masked, same-job `GITHUB_APP_TOKEN` variable, which
 /// `copilot_env` sources `GITHUB_TOKEN` from.
 ///
-/// The App ID and private key are passed as `$(NAME)` pipeline-variable macros
-/// (their names come from validated `engine.github-app-token.app-id` /
-/// `.private-key`); the values never appear in the compiled pipeline. `owner`
-/// and `repositories` are validated single-segment names, safe as literals.
+/// ## Why non-secret inputs are argv flags, not env vars
 ///
-/// The step runs OUTSIDE the AWF sandbox and reaches `api.github.com` over the
-/// build agent pool's normal network — no AWF allowlist entry is required.
+/// ADO injects **every pipeline variable** into a step's process env, so an
+/// env-sourced knob can be silently shadowed by a same-named pipeline variable
+/// — in the worst case redirecting the minted token to an attacker-chosen
+/// variable name. Argv comes only from this compiler-authored script, so it
+/// cannot be shadowed. All non-secret inputs (`--app-id`, `--owner`,
+/// `--output-var`, `--repositories`, `--api-url`) are therefore passed as
+/// single-quoted argv flags. Values are single-quoted (with `'\''` escaping) so
+/// a value containing shell metacharacters — or the runtime-substituted
+/// variable-form `$(app-id)` value — cannot break out or trigger command
+/// substitution.
+///
+/// The **private key** stays in the masked env (`GH_APP_PRIVATE_KEY:
+/// $(secret)`): a secret must never appear on a command line (it would show in
+/// process listings and the rendered step script), and ADO only maps a secret
+/// variable into env on explicit reference.
+///
+/// The step runs OUTSIDE the AWF sandbox and reaches `api.github.com` (or
+/// `--api-url`) over the build agent pool's normal network — no AWF allowlist
+/// entry is required.
 pub fn github_app_token_step_typed(
     cfg: &crate::compile::types::GithubAppTokenConfig,
 ) -> Result<Step> {
     cfg.validate()?;
-    let script = format!("set -eo pipefail\nnode '{GITHUB_APP_TOKEN_PATH}'\n");
-    let mut step = BashStep::new("Mint GitHub App token (Copilot engine auth)", script)
-        .with_condition(Condition::Succeeded);
-    // A numeric App ID is not secret and is emitted verbatim; a variable-name
-    // App ID is rendered as a `$(NAME)` macro (parity with the private key).
-    let app_id_value = if cfg.app_id_is_literal() {
-        EnvValue::literal(cfg.app_id.clone())
+    // A numeric App ID is a compile-time literal; a variable-name App ID is an
+    // ADO macro substituted (as text) at runtime. Both are single-quoted so the
+    // (compile-time or runtime) value can't expand or word-split.
+    let app_id_arg = if cfg.app_id_is_literal() {
+        sh_single_quote(&cfg.app_id)
     } else {
-        EnvValue::pipeline_var(cfg.app_id.clone())
+        // `cfg.app_id` is a validated env-var name (no quotes/metachars), so
+        // the macro token itself is safe to embed inside single quotes; ADO
+        // replaces `$(NAME)` with the value before bash runs, and the single
+        // quotes stop that value from expanding.
+        format!("'$({})'", cfg.app_id)
     };
-    step = step
-        .with_env("GH_APP_ID", app_id_value)
+    let mut args: Vec<String> = vec![
+        format!("--app-id {app_id_arg}"),
+        format!("--owner {}", sh_single_quote(&cfg.owner)),
+        // Pin the output variable name (a compiler constant) as argv so no
+        // pipeline variable can redirect the minted token.
+        format!(
+            "--output-var {}",
+            sh_single_quote(crate::engine::GITHUB_APP_TOKEN_VAR)
+        ),
+    ];
+    if !cfg.repositories.is_empty() {
+        args.push(format!(
+            "--repositories {}",
+            sh_single_quote(&cfg.repositories.join(" "))
+        ));
+    }
+    if let Some(api_url) = &cfg.api_url {
+        args.push(format!("--api-url {}", sh_single_quote(api_url)));
+    }
+    let script = format!(
+        "set -eo pipefail\nnode '{GITHUB_APP_TOKEN_PATH}' {}\n",
+        args.join(" ")
+    );
+    let step = BashStep::new("Mint GitHub App token (Copilot engine auth)", script)
+        .with_condition(Condition::Succeeded)
+        // Only the secret rides in env — masked, never on the command line.
         .with_env(
             "GH_APP_PRIVATE_KEY",
             EnvValue::secret(cfg.private_key.clone()),
-        )
-        .with_env("GH_APP_OWNER", EnvValue::literal(cfg.owner.clone()))
-        // Pin the output variable name to the compiler's constant. ADO injects
-        // every pipeline variable as an env var, so without an explicit
-        // step-level `env:` entry a pipeline variable named `GH_APP_OUTPUT_VAR`
-        // could silently redirect the minted token to a different name (leaving
-        // `$(GITHUB_APP_TOKEN)` empty and breaking auth with no mint-time
-        // error). A step `env:` value takes precedence over the pipeline-var
-        // injection, so pinning it here closes that hole and keeps
-        // `GITHUB_APP_TOKEN_VAR` the single source of truth.
-        .with_env(
-            "GH_APP_OUTPUT_VAR",
-            EnvValue::literal(crate::engine::GITHUB_APP_TOKEN_VAR),
         );
-    if !cfg.repositories.is_empty() {
-        step = step.with_env(
-            "GH_APP_REPOSITORIES",
-            EnvValue::literal(cfg.repositories.join(" ")),
-        );
-    }
-    if let Some(api_url) = &cfg.api_url {
-        step = step.with_env("GH_APP_API_URL", EnvValue::literal(api_url.clone()));
-    }
     Ok(Step::Bash(step))
+}
+
+/// Single-quote a value for safe embedding in a bash command line, escaping any
+/// embedded single quotes as `'\''`. Single quotes suppress all shell
+/// expansion (`$(...)`, backticks, `${...}`, word-splitting), so a value with
+/// metacharacters is passed through verbatim as one argv token.
+fn sh_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// The GitHub App token **revocation** step (issue #1316). Runs after the
@@ -561,7 +587,9 @@ pub fn github_app_token_step_typed(
 /// Best-effort: it runs with `condition: always()` (so it fires even when the
 /// Copilot run failed) and `continueOnError` (revocation failure never fails
 /// the build). The minted token is read from the masked same-job
-/// `GITHUB_APP_TOKEN` variable set by the mint step.
+/// `GITHUB_APP_TOKEN` variable (via the `GH_APP_TOKEN` secret env); the API base
+/// URL, if any, is an argv flag (see `github_app_token_step_typed` for why
+/// non-secret inputs are argv, not env).
 pub fn github_app_token_revoke_step_typed(
     cfg: &crate::compile::types::GithubAppTokenConfig,
 ) -> Result<Step> {
@@ -574,7 +602,11 @@ pub fn github_app_token_revoke_step_typed(
     // so aborting the shell early on a non-zero would neither help nor change
     // the outcome — it would only risk turning a benign revoke hiccup into a
     // timeline error.
-    let script = format!("node '{GITHUB_APP_TOKEN_PATH}' revoke\n");
+    let api_url_arg = match &cfg.api_url {
+        Some(api_url) => format!(" --api-url {}", sh_single_quote(api_url)),
+        None => String::new(),
+    };
+    let script = format!("node '{GITHUB_APP_TOKEN_PATH}' revoke{api_url_arg}\n");
     let mut step = BashStep::new("Revoke GitHub App token", script)
         .with_condition(Condition::Always);
     step.continue_on_error = true;
@@ -582,9 +614,6 @@ pub fn github_app_token_revoke_step_typed(
         "GH_APP_TOKEN",
         EnvValue::secret(crate::engine::GITHUB_APP_TOKEN_VAR),
     );
-    if let Some(api_url) = &cfg.api_url {
-        step = step.with_env("GH_APP_API_URL", EnvValue::literal(api_url.clone()));
-    }
     Ok(Step::Bash(step))
 }
 
@@ -1185,32 +1214,43 @@ mod tests {
             "script must invoke the bundle:\n{}",
             step.script
         );
-        // A variable-name app-id flows through as a $(VAR) macro; the private
-        // key is always a $(VAR) macro (values never inlined).
-        assert!(matches!(
-            step.env.get("GH_APP_ID"),
-            Some(EnvValue::PipelineVar(v)) if v == "GH_APP_ID"
-        ));
+        // Non-secret inputs are argv flags (shadow-proof), single-quoted.
+        // A variable-name app-id becomes a single-quoted $(macro).
+        assert!(
+            step.script.contains("--app-id '$(GH_APP_ID)'"),
+            "variable-form app-id must be a single-quoted macro arg:\n{}",
+            step.script
+        );
+        assert!(
+            step.script.contains("--owner 'octo-org'"),
+            "owner must be a single-quoted argv flag:\n{}",
+            step.script
+        );
+        assert!(
+            step.script.contains("--repositories 'octo-repo other-repo'"),
+            "repositories must be a single-quoted argv flag:\n{}",
+            step.script
+        );
+        // The output variable name is pinned as argv so no pipeline variable
+        // can redirect the minted token.
+        assert!(
+            step.script.contains("--output-var 'GITHUB_APP_TOKEN'"),
+            "output-var must be pinned as an argv flag:\n{}",
+            step.script
+        );
+        // No api-url configured ⇒ no --api-url flag (bundle uses its default).
+        assert!(!step.script.contains("--api-url"));
+        // Only the private key rides in env — as a masked secret, never argv.
         assert!(matches!(
             step.env.get("GH_APP_PRIVATE_KEY"),
             Some(EnvValue::Secret(v)) if v == "GH_APP_KEY"
         ));
-        assert!(matches!(
-            step.env.get("GH_APP_OWNER"),
-            Some(EnvValue::Literal(v)) if v == "octo-org"
-        ));
-        assert!(matches!(
-            step.env.get("GH_APP_REPOSITORIES"),
-            Some(EnvValue::Literal(v)) if v == "octo-repo other-repo"
-        ));
-        // No api-url configured ⇒ the bundle uses its api.github.com default.
+        // No non-secret GH_APP_* env keys (they are argv now).
+        assert!(!step.env.contains_key("GH_APP_ID"));
+        assert!(!step.env.contains_key("GH_APP_OWNER"));
+        assert!(!step.env.contains_key("GH_APP_REPOSITORIES"));
+        assert!(!step.env.contains_key("GH_APP_OUTPUT_VAR"));
         assert!(!step.env.contains_key("GH_APP_API_URL"));
-        // The output variable name is pinned to the compiler constant so a
-        // stray/adversarial pipeline variable can't redirect the minted token.
-        assert!(matches!(
-            step.env.get("GH_APP_OUTPUT_VAR"),
-            Some(EnvValue::Literal(v)) if v == "GITHUB_APP_TOKEN"
-        ));
     }
 
     #[test]
@@ -1227,15 +1267,19 @@ mod tests {
         let Step::Bash(step) = github_app_token_step_typed(&cfg).unwrap() else {
             panic!("expected a bash step");
         };
-        // A numeric app-id is emitted verbatim, not as a $(VAR) macro.
-        assert!(matches!(
-            step.env.get("GH_APP_ID"),
-            Some(EnvValue::Literal(v)) if v == "1234567"
-        ));
-        assert!(matches!(
-            step.env.get("GH_APP_API_URL"),
-            Some(EnvValue::Literal(v)) if v == "https://ghe.example.com/api/v3"
-        ));
+        // A numeric app-id is emitted verbatim (single-quoted), not as a macro.
+        assert!(
+            step.script.contains("--app-id '1234567'"),
+            "literal app-id must be a single-quoted verbatim arg:\n{}",
+            step.script
+        );
+        assert!(!step.script.contains("--app-id '$("));
+        assert!(
+            step.script
+                .contains("--api-url 'https://ghe.example.com/api/v3'"),
+            "api-url must be a single-quoted argv flag:\n{}",
+            step.script
+        );
     }
 
     #[test]
@@ -1252,7 +1296,7 @@ mod tests {
         let Step::Bash(step) = github_app_token_step_typed(&cfg).unwrap() else {
             panic!("expected a bash step");
         };
-        assert!(!step.env.contains_key("GH_APP_REPOSITORIES"));
+        assert!(!step.script.contains("--repositories"));
     }
 
     #[test]
@@ -1295,10 +1339,13 @@ mod tests {
             step.env.get("GH_APP_TOKEN"),
             Some(EnvValue::Secret(v)) if v == "GITHUB_APP_TOKEN"
         ));
-        assert!(matches!(
-            step.env.get("GH_APP_API_URL"),
-            Some(EnvValue::Literal(v)) if v == "https://ghe.example.com/api/v3"
-        ));
+        // api-url is an argv flag (non-secret), not an env var.
+        assert!(
+            step.script.contains("revoke --api-url 'https://ghe.example.com/api/v3'"),
+            "revoke must pass api-url as an argv flag:\n{}",
+            step.script
+        );
+        assert!(!step.env.contains_key("GH_APP_API_URL"));
         assert_eq!(step.condition, Some(Condition::Always));
         assert!(step.continue_on_error);
     }

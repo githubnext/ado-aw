@@ -7366,19 +7366,37 @@ fn assert_github_app_token_wiring(compiled: &str) {
         "no Copilot env should use the operator $(GITHUB_TOKEN) when App auth is configured:\n{compiled}"
     );
 
-    // App ID / private key only ever appear as $(VAR) macros — never inlined.
-    assert!(compiled.contains("GH_APP_ID: $(GH_APP_ID)"));
+    // Non-secret inputs are single-quoted argv flags (shadow-proof); the app-id
+    // (variable form) is a single-quoted macro and the private key is the only
+    // GH_APP_* env var (a masked secret). App ID / key never inlined.
+    assert!(
+        compiled.contains("--app-id '$(GH_APP_ID)'"),
+        "variable-form app-id must be a single-quoted argv macro:\n{compiled}"
+    );
     assert!(compiled.contains("GH_APP_PRIVATE_KEY: $(GH_APP_KEY)"));
+    // The private key is the ONLY GH_APP_* env var; every other input is argv.
+    for key in [
+        "GH_APP_ID:",
+        "GH_APP_OWNER:",
+        "GH_APP_REPOSITORIES:",
+        "GH_APP_OUTPUT_VAR:",
+        "GH_APP_API_URL:",
+    ] {
+        assert!(
+            !compiled.contains(key),
+            "{key} must not be an env var (non-secret inputs are argv):\n{compiled}"
+        );
+    }
 
-    // The output variable name is pinned by the compiler in both mint steps, so
-    // a stray/adversarial pipeline variable named GH_APP_OUTPUT_VAR cannot
-    // redirect the minted token (step env overrides pipeline-var injection).
+    // The output variable name is pinned as an argv flag in both mint steps, so
+    // no pipeline variable named GH_APP_OUTPUT_VAR can redirect the minted
+    // token (argv comes only from the compiler-authored script).
     let output_var_pins = compiled
-        .matches("GH_APP_OUTPUT_VAR: GITHUB_APP_TOKEN")
+        .matches("--output-var 'GITHUB_APP_TOKEN'")
         .count();
     assert_eq!(
         output_var_pins, 2,
-        "expected GH_APP_OUTPUT_VAR pinned to GITHUB_APP_TOKEN in both mint steps:\n{compiled}"
+        "expected --output-var pinned to GITHUB_APP_TOKEN in both mint steps:\n{compiled}"
     );
 
     // By default the token is revoked after the Copilot run in both jobs
@@ -7391,26 +7409,6 @@ fn assert_github_app_token_wiring(compiled: &str) {
         compiled.contains("GH_APP_TOKEN: $(GITHUB_APP_TOKEN)"),
         "revoke step reads the minted token from $(GITHUB_APP_TOKEN):\n{compiled}"
     );
-
-    // Conformance with the #1315 bundle env contract: the mint/revoke steps
-    // must not re-project any auto-injected ADO predefined variable
-    // (`KEY: $(Dotted.Var)` where KEY == SCREAMING_SNAKE(Dotted.Var)). The
-    // github-app-token bundle authenticates to GitHub (not ADO REST), so it
-    // needs neither SYSTEM_ACCESSTOKEN nor any System.*/Build.* mirror.
-    for line in compiled.lines() {
-        let trimmed = line.trim();
-        // Only inspect the GitHub App step env keys.
-        if let Some(rest) = trimmed.strip_prefix("GH_APP_")
-            && let Some((_key, value)) = rest.split_once(": ")
-        {
-            assert!(
-                !value.trim_start().starts_with("$(System.")
-                    && !value.trim_start().starts_with("$(Build."),
-                "github-app-token step env must not re-project an auto-injected \
-                 ADO predefined variable: {trimmed}"
-            );
-        }
-    }
 }
 
 #[test]
@@ -7477,21 +7475,27 @@ fn test_github_app_token_skip_revocation() {
 fn test_github_app_token_literal_app_id_and_api_url() {
     let content = "---\nname: \"GH App Literal\"\ndescription: \"literal app id + ghes\"\nengine:\n  id: copilot\n  github-app-token:\n    app-id: 1234567\n    private-key: GH_APP_KEY\n    owner: octo-org\n    api-url: https://ghe.example.com/api/v3\n---\n\n## Agent\n\nDo work.\n";
     let compiled = compile_inline_agent("ghapp-literal", content);
-    // Numeric app-id is emitted verbatim, not as a $(VAR) macro.
+    // Numeric app-id is emitted verbatim as a single-quoted argv flag, not a macro.
     assert!(
-        compiled.contains("GH_APP_ID: '1234567'") || compiled.contains("GH_APP_ID: \"1234567\"")
-            || compiled.contains("GH_APP_ID: 1234567"),
-        "literal numeric app-id must be emitted verbatim:\n{compiled}"
+        compiled.contains("--app-id '1234567'"),
+        "literal numeric app-id must be a single-quoted verbatim argv flag:\n{compiled}"
     );
     assert!(
-        !compiled.contains("GH_APP_ID: $(1234567)"),
+        !compiled.contains("--app-id '$("),
         "literal app-id must not be treated as a variable macro:\n{compiled}"
     );
-    // GHES api-url flows into both mint and revoke steps.
+    // GHES api-url flows into both mint and revoke steps as an argv flag.
+    // Mint: `... --api-url '...'`; revoke: `revoke --api-url '...'`.
+    let api_url_args = compiled
+        .matches("--api-url 'https://ghe.example.com/api/v3'")
+        .count();
+    assert_eq!(
+        api_url_args, 4,
+        "api-url must appear as an argv flag in both mint and both revoke steps (2 jobs x 2):\n{compiled}"
+    );
     assert!(
-        compiled.contains("GH_APP_API_URL: https://ghe.example.com/api/v3")
-            || compiled.contains("GH_APP_API_URL: 'https://ghe.example.com/api/v3'"),
-        "api-url must flow through to the token steps:\n{compiled}"
+        !compiled.contains("GH_APP_API_URL:"),
+        "api-url must be argv, never an env var:\n{compiled}"
     );
 }
 
