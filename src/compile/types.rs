@@ -365,19 +365,22 @@ pub struct EngineOptions {
 
 /// GitHub App-backed Copilot engine authentication configuration.
 ///
-/// Mirrors gh-aw's `create-github-app-token` model, adapted to Azure DevOps:
-/// the App ID and private key are supplied as **ADO pipeline variable names**
-/// (set via `ado-aw secrets set`), not literal values, so no secret material
-/// appears in the source or the generated lock.
+/// Mirrors gh-aw's `create-github-app-token` model, adapted to Azure DevOps.
+/// The **App ID** (`app-id`) is a literal, non-secret value (a numeric App ID
+/// or an alphanumeric client ID) — like `owner`, it is written verbatim. Only
+/// the **private key** is secret: `private-key` names an ADO **secret** pipeline
+/// variable (set via `ado-aw secrets set`), defaulting to
+/// `GITHUB_APP_PRIVATE_KEY`, so the key material never appears in the source or
+/// the generated lock.
 ///
 /// ```yaml
 /// engine:
 ///   id: copilot
 ///   github-app-token:
-///     app-id: GH_APP_ID          # ADO variable name holding the App ID
-///     private-key: GH_APP_KEY    # ADO *secret* variable name holding the PEM
+///     app-id: 1234567            # literal App ID or client ID (required)
 ///     owner: octo-org            # installation owner (org or user)
 ///     repositories: [octo-repo]  # optional; scopes the installation token
+///     # private-key: MY_SECRET   # optional; defaults to GITHUB_APP_PRIVATE_KEY
 /// ```
 #[derive(Debug, Deserialize, Clone, SanitizeConfig)]
 pub struct GithubAppTokenConfig {
