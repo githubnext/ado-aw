@@ -1073,6 +1073,17 @@ fn agent_job_variables_hoist(
 /// (see `AdoScriptExtension::build_agent_conditions` for today's
 /// only contributor — synth-PR-skip, PR-filter gate, pipeline-filter
 /// gate, and user `expression:` escape hatches).
+/// Whether the Detection job must stage the `ado-script` bundle. The Detection
+/// job has no extension-prepare phase (unlike the Agent job, whose bundle
+/// download is contributed by `AdoScriptExtension`), so it stages the bundle
+/// itself — but gated on this single predicate so exactly one download is
+/// emitted. Today only the GitHub App token step needs it; future
+/// detection-only bundle consumers should `||` their own condition in here
+/// rather than adding a second `install_and_download_steps_typed` call.
+fn detection_job_needs_ado_script_bundle(front_matter: &FrontMatter) -> bool {
+    front_matter.engine.github_app_token().is_some()
+}
+
 fn build_detection_job(
     front_matter: &FrontMatter,
     cfg: &StandaloneCtx,
@@ -1137,19 +1148,16 @@ fn build_detection_job(
     // (whose bundle download is staged by the ado-script extension's
     // agent-prepare phase, gated on `github_app_token_active`), the Detection
     // job has no extension-prepare phase to piggyback on, so it stages the
-    // bundle self-contained. Both jobs therefore emit exactly one download —
-    // by construction, not by inspecting emitted steps.
-    //
-    // NOTE: this is currently the *only* ado-script bundle download in the
-    // Detection job. If a future Detection-job feature also needs the bundle,
-    // hoist a single `install_and_download_steps_typed` call gated on the union
-    // of the features rather than adding a second one here — `unzip -o` makes a
-    // double-download merely wasteful, not incorrect, but one download is the
-    // intended shape.
-    if let Some(app_token) = front_matter.engine.github_app_token() {
+    // bundle self-contained — but exactly once, gated on the single
+    // `detection_job_needs_ado_script_bundle` predicate below so future
+    // detection-only bundle consumers OR into one download rather than adding a
+    // second (mirroring the Agent-job predicate in `AdoScriptExtension`).
+    if detection_job_needs_ado_script_bundle(front_matter) {
         steps.extend(super::extensions::ado_script::install_and_download_steps_typed(
             front_matter.supply_chain(),
         ));
+    }
+    if let Some(app_token) = front_matter.engine.github_app_token() {
         steps.push(super::extensions::ado_script::github_app_token_step_typed(
             app_token,
         )?);

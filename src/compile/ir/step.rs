@@ -130,6 +130,12 @@ impl BashStep {
         self
     }
 
+    /// Set `continueOnError` (best-effort steps that must never fail the build).
+    pub fn with_continue_on_error(mut self, yes: bool) -> Self {
+        self.continue_on_error = yes;
+        self
+    }
+
     /// Add (or replace) an env-var binding.
     pub fn with_env(mut self, key: impl Into<String>, value: EnvValue) -> Self {
         self.env.insert(key.into(), value);

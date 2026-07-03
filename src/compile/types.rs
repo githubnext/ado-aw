@@ -472,6 +472,7 @@ impl GithubAppTokenConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
         use crate::validate::{is_safe_path_segment, is_valid_env_var_name};
         if self.app_id.is_empty()
+            || !self.app_id.starts_with(|c: char| c.is_ascii_alphanumeric())
             || !self
                 .app_id
                 .chars()
@@ -479,8 +480,9 @@ impl GithubAppTokenConfig {
         {
             anyhow::bail!(
                 "engine.github-app-token.app-id '{}' must be a non-empty GitHub App ID \
-                 (numeric, e.g. 1234567) or client ID (e.g. Iv23liABC), containing only \
-                 [A-Za-z0-9._-]. It is a literal value, not a variable name.",
+                 (numeric, e.g. 1234567) or client ID (e.g. Iv23liABC): it must start with \
+                 an alphanumeric character and contain only [A-Za-z0-9._-]. It is a literal \
+                 value, not a variable name (a leading '-', e.g. a negative number, is invalid).",
                 self.app_id
             );
         }
@@ -2802,6 +2804,27 @@ github-app-token:
             api_url: None,
             skip_token_revocation: false,
         };
+        let err = gat.validate().unwrap_err().to_string();
+        assert!(err.contains("app-id"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_github_app_token_validate_rejects_negative_app_id() {
+        // A negative unquoted integer (app-id: -7654321) stringifies to
+        // "-7654321"; the leading '-' must be rejected (it is in the charset
+        // but is not a valid App ID and would produce a bad JWT `iss`).
+        let yaml = r#"
+id: copilot
+github-app-token:
+  app-id: -7654321
+  owner: octo-org
+"#;
+        let opts: EngineOptions = serde_yaml::from_str(yaml).unwrap();
+        let gat = EngineConfig::Full(Box::new(opts))
+            .github_app_token()
+            .unwrap()
+            .clone();
+        assert_eq!(gat.app_id, "-7654321");
         let err = gat.validate().unwrap_err().to_string();
         assert!(err.contains("app-id"), "unexpected error: {err}");
     }

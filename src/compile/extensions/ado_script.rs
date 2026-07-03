@@ -599,13 +599,13 @@ pub fn github_app_token_revoke_step_typed(
         None => String::new(),
     };
     let script = format!("node '{GITHUB_APP_TOKEN_PATH}' revoke{api_url_arg}\n");
-    let mut step = BashStep::new("Revoke GitHub App token", script)
-        .with_condition(Condition::Always);
-    step.continue_on_error = true;
-    step = step.with_env(
-        "GH_APP_TOKEN",
-        EnvValue::secret(crate::engine::GITHUB_APP_TOKEN_VAR),
-    );
+    let step = BashStep::new("Revoke GitHub App token", script)
+        .with_condition(Condition::Always)
+        .with_continue_on_error(true)
+        .with_env(
+            "GH_APP_TOKEN",
+            EnvValue::secret(crate::engine::GITHUB_APP_TOKEN_VAR),
+        );
     Ok(Step::Bash(step))
 }
 
