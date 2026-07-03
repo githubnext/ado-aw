@@ -118,18 +118,23 @@ pub fn resolve(p: &mut Pipeline) -> Result<()> {
 /// run cycle detection — call [`detect_cycles`] separately if needed.
 pub fn build_graph(p: &Pipeline) -> Result<Graph> {
     let mut g = Graph::default();
+    index_all_steps(p, &mut g)?;
+    add_all_manual_edges(p, &mut g);
+    add_all_output_edges(p, &mut g)?;
+    Ok(g)
+}
+
+/// Pass 1: index every step's location + outputs and reject duplicate ids.
+fn index_all_steps(p: &Pipeline, g: &mut Graph) -> Result<()> {
     let mut seen_stage_ids: HashSet<&str> = HashSet::new();
     let mut seen_job_ids: HashSet<&str> = HashSet::new();
-
-    // Pass 1: index every step's location + outputs. Reject duplicate
-    // ids of every kind.
     match &p.body {
         PipelineBody::Jobs(jobs) => {
             for job in jobs {
                 if !seen_job_ids.insert(job.id.as_str()) {
                     bail!("ir::graph: duplicate JobId '{}'", job.id);
                 }
-                index_job_steps(None, job, &mut g)?;
+                index_job_steps(None, job, g)?;
             }
         }
         PipelineBody::Stages(stages) => {
@@ -148,20 +153,23 @@ pub fn build_graph(p: &Pipeline) -> Result<Graph> {
                             stage.id
                         );
                     }
-                    index_job_steps(Some(stage.id.clone()), job, &mut g)?;
+                    index_job_steps(Some(stage.id.clone()), job, g)?;
                 }
             }
         }
     }
+    Ok(())
+}
 
-    // Pass 2: fold manually-populated depends_on fields into the
-    // graph before cycle detection. The tuple shape is
-    // (consumer, producer): `Agent.depends_on = [Setup]` becomes
-    // `(Agent, Setup)`.
+/// Pass 2: fold manually-populated `depends_on` fields into the graph.
+///
+/// The tuple shape is (consumer, producer): `Agent.depends_on = [Setup]`
+/// becomes `(Agent, Setup)`.
+fn add_all_manual_edges(p: &Pipeline, g: &mut Graph) {
     match &p.body {
         PipelineBody::Jobs(jobs) => {
             for job in jobs {
-                add_manual_job_edges(job, &mut g);
+                add_manual_job_edges(job, g);
             }
         }
         PipelineBody::Stages(stages) => {
@@ -170,34 +178,35 @@ pub fn build_graph(p: &Pipeline) -> Result<Graph> {
                     g.stage_edges.insert((stage.id.clone(), producer.clone()));
                 }
                 for job in &stage.jobs {
-                    add_manual_job_edges(job, &mut g);
+                    add_manual_job_edges(job, g);
                 }
             }
         }
     }
+}
 
-    // Pass 3: walk every OutputRef and add the corresponding edges.
+/// Pass 3: walk every `OutputRef` in step envs and conditions and add edges.
+fn add_all_output_edges(p: &Pipeline, g: &mut Graph) -> Result<()> {
     match &p.body {
         PipelineBody::Jobs(jobs) => {
             for job in jobs {
-                add_edges_from_job(None, job, &mut g)?;
+                add_edges_from_job(None, job, g)?;
             }
         }
         PipelineBody::Stages(stages) => {
             for stage in stages {
                 if let Some(cond) = &stage.condition {
                     for r in collect_condition_refs(cond) {
-                        add_edge_for_stage_condition(&stage.id, r, &mut g)?;
+                        add_edge_for_stage_condition(&stage.id, r, g)?;
                     }
                 }
                 for job in &stage.jobs {
-                    add_edges_from_job(Some(stage.id.clone()), job, &mut g)?;
+                    add_edges_from_job(Some(stage.id.clone()), job, g)?;
                 }
             }
         }
     }
-
-    Ok(g)
+    Ok(())
 }
 
 fn add_manual_job_edges(job: &super::job::Job, g: &mut Graph) {
