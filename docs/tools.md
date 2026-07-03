@@ -81,10 +81,12 @@ tools:
 
 When enabled, the compiler:
 - Generates a containerized stdio MCP entry (`node:20-slim` + `npx @azure-devops/mcp`) in the MCPG config
-- Auto-maps `AZURE_DEVOPS_EXT_PAT` token passthrough when `permissions.read` is configured
+- Injects `ADO_MCP_AUTH_TOKEN` (sourced from `SC_READ_TOKEN`) into the MCP container when `permissions.read` is configured — this authenticates the ADO MCP
 - Adds ADO-specific hosts to the network allowlist
 - Auto-infers org from the git remote URL at compile time (overridable via `org:` field)
 - Fails compilation if org cannot be determined (no explicit override and no ADO git remote)
+
+> **Note:** `AZURE_DEVOPS_EXT_PAT` is a separate variable — it is injected by AWF into the agent sandbox for use by `az devops` CLI subcommands (see [Built-in CLIs — Azure CLI](#azure-cli-az) below), not by this extension for the MCP container.
 
 ## Built-in CLIs
 
