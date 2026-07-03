@@ -7370,6 +7370,17 @@ fn assert_github_app_token_wiring(compiled: &str) {
     assert!(compiled.contains("GH_APP_ID: $(GH_APP_ID)"));
     assert!(compiled.contains("GH_APP_PRIVATE_KEY: $(GH_APP_KEY)"));
 
+    // The output variable name is pinned by the compiler in both mint steps, so
+    // a stray/adversarial pipeline variable named GH_APP_OUTPUT_VAR cannot
+    // redirect the minted token (step env overrides pipeline-var injection).
+    let output_var_pins = compiled
+        .matches("GH_APP_OUTPUT_VAR: GITHUB_APP_TOKEN")
+        .count();
+    assert_eq!(
+        output_var_pins, 2,
+        "expected GH_APP_OUTPUT_VAR pinned to GITHUB_APP_TOKEN in both mint steps:\n{compiled}"
+    );
+
     // By default the token is revoked after the Copilot run in both jobs
     // (revoke_hits computed above).
     assert_eq!(

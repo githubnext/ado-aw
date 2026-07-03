@@ -527,7 +527,19 @@ pub fn github_app_token_step_typed(
             "GH_APP_PRIVATE_KEY",
             EnvValue::secret(cfg.private_key.clone()),
         )
-        .with_env("GH_APP_OWNER", EnvValue::literal(cfg.owner.clone()));
+        .with_env("GH_APP_OWNER", EnvValue::literal(cfg.owner.clone()))
+        // Pin the output variable name to the compiler's constant. ADO injects
+        // every pipeline variable as an env var, so without an explicit
+        // step-level `env:` entry a pipeline variable named `GH_APP_OUTPUT_VAR`
+        // could silently redirect the minted token to a different name (leaving
+        // `$(GITHUB_APP_TOKEN)` empty and breaking auth with no mint-time
+        // error). A step `env:` value takes precedence over the pipeline-var
+        // injection, so pinning it here closes that hole and keeps
+        // `GITHUB_APP_TOKEN_VAR` the single source of truth.
+        .with_env(
+            "GH_APP_OUTPUT_VAR",
+            EnvValue::literal(crate::engine::GITHUB_APP_TOKEN_VAR),
+        );
     if !cfg.repositories.is_empty() {
         step = step.with_env(
             "GH_APP_REPOSITORIES",
@@ -553,6 +565,15 @@ pub fn github_app_token_step_typed(
 pub fn github_app_token_revoke_step_typed(
     cfg: &crate::compile::types::GithubAppTokenConfig,
 ) -> Result<Step> {
+    // Validate for symmetry with the mint step, so neither function silently
+    // assumes the other ran first (e.g. if a future caller emits revoke alone).
+    cfg.validate()?;
+    // No `set -eo pipefail` here (unlike the mint step) is intentional: this is
+    // a best-effort cleanup. The bundle's `revoke` mode always exits 0 (it
+    // downgrades every failure to a warning), and the step is `continueOnError`,
+    // so aborting the shell early on a non-zero would neither help nor change
+    // the outcome — it would only risk turning a benign revoke hiccup into a
+    // timeline error.
     let script = format!("node '{GITHUB_APP_TOKEN_PATH}' revoke\n");
     let mut step = BashStep::new("Revoke GitHub App token", script)
         .with_condition(Condition::Always);
@@ -1184,6 +1205,12 @@ mod tests {
         ));
         // No api-url configured ⇒ the bundle uses its api.github.com default.
         assert!(!step.env.contains_key("GH_APP_API_URL"));
+        // The output variable name is pinned to the compiler constant so a
+        // stray/adversarial pipeline variable can't redirect the minted token.
+        assert!(matches!(
+            step.env.get("GH_APP_OUTPUT_VAR"),
+            Some(EnvValue::Literal(v)) if v == "GITHUB_APP_TOKEN"
+        ));
     }
 
     #[test]
@@ -1274,6 +1301,22 @@ mod tests {
         ));
         assert_eq!(step.condition, Some(Condition::Always));
         assert!(step.continue_on_error);
+    }
+
+    #[test]
+    fn github_app_token_revoke_step_rejects_invalid_config() {
+        // Symmetry with the mint step: the revoke builder validates too, so a
+        // caller can't emit a revoke step from an invalid config.
+        use crate::compile::types::GithubAppTokenConfig;
+        let cfg = GithubAppTokenConfig {
+            app_id: "GH_APP_ID".to_string(),
+            private_key: "GH_APP_KEY".to_string(),
+            owner: "octo-org".to_string(),
+            repositories: vec![],
+            api_url: Some("http://insecure.example.com/api/v3".to_string()),
+            skip_token_revocation: false,
+        };
+        assert!(github_app_token_revoke_step_typed(&cfg).is_err());
     }
 
     #[test]
