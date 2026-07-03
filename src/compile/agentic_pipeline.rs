@@ -1139,6 +1139,13 @@ fn build_detection_job(
     // job has no extension-prepare phase to piggyback on, so it stages the
     // bundle self-contained. Both jobs therefore emit exactly one download —
     // by construction, not by inspecting emitted steps.
+    //
+    // NOTE: this is currently the *only* ado-script bundle download in the
+    // Detection job. If a future Detection-job feature also needs the bundle,
+    // hoist a single `install_and_download_steps_typed` call gated on the union
+    // of the features rather than adding a second one here — `unzip -o` makes a
+    // double-download merely wasteful, not incorrect, but one download is the
+    // intended shape.
     if let Some(app_token) = front_matter.engine.github_app_token() {
         steps.extend(super::extensions::ado_script::install_and_download_steps_typed(
             front_matter.supply_chain(),

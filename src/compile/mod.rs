@@ -177,6 +177,14 @@ async fn compile_pipeline_inner(
         eprintln!("Warning: {warning}");
     }
 
+    // GitHub App auth (issue #1316): the compiler validates the private-key
+    // variable *name* but cannot verify the ADO variable is marked secret.
+    // Surface a non-blocking advisory so the author is reminded to store it as
+    // a secret. Fires only when `engine.github-app-token` is configured.
+    if let Some(advisory) = crate::engine::github_app_token_secrecy_advisory(&front_matter.engine) {
+        eprintln!("Warning: {advisory}");
+    }
+
     // Determine output path. By default use `.lock.yml` to match
     // gh-aw's convention for compiled-pipeline files (so they can be
     // marked as generated and merge=ours via `.gitattributes`). When the

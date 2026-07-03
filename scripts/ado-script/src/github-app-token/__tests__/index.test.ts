@@ -202,6 +202,28 @@ describe("parseArgs", () => {
     expect(parseArgs(["--unknown", "v"])).toEqual({});
     expect(parseArgs([])).toEqual({});
   });
+
+  it("stays aligned when a value-less boolean flag precedes real flags", () => {
+    // A future compiler adds `--debug` (no value); an older bundle must not
+    // swallow the following `--app-id` as --debug's value.
+    const args = parseArgs([
+      "--debug",
+      "--app-id",
+      "1234567",
+      "--owner",
+      "octo-org",
+    ]);
+    expect(args.appId).toBe("1234567");
+    expect(args.owner).toBe("octo-org");
+  });
+
+  it("does not consume a following flag as a value", () => {
+    // `--repositories` with no value (immediately followed by another flag)
+    // leaves repositories unset rather than eating `--owner`.
+    const args = parseArgs(["--repositories", "--owner", "octo-org"]);
+    expect(args.repositories).toBeUndefined();
+    expect(args.owner).toBe("octo-org");
+  });
 });
 
 describe("main", () => {

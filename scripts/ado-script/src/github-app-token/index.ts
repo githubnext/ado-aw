@@ -238,32 +238,41 @@ export interface CliArgs {
  * Parse the `--flag value` argv (after any leading `revoke` subcommand) into a
  * flat `CliArgs`. Unknown flags are ignored so the compiler can add new ones
  * without breaking an older bundle. Repeated flags are last-write-wins.
+ *
+ * Forward-compatibility: a token that looks like a flag (`--…`) is never
+ * consumed as the *value* of a preceding flag. This keeps parsing aligned even
+ * if a future compiler emits a value-less boolean flag (e.g. `--debug`) — the
+ * boolean is skipped by itself rather than swallowing the next real flag.
  */
 export function parseArgs(argv: string[]): CliArgs {
   const out: CliArgs = {};
-  for (let i = 0; i < argv.length; i += 2) {
+  let i = 0;
+  while (i < argv.length) {
     const flag = argv[i];
-    const value = argv[i + 1];
-    if (value === undefined) break;
+    const next = argv[i + 1];
+    // A `--…` token is a flag, not a value: treat the current flag as valueless
+    // and advance by one so the next flag stays aligned.
+    const value = next !== undefined && !next.startsWith("--") ? next : undefined;
     switch (flag) {
       case "--app-id":
-        out.appId = value;
+        if (value !== undefined) out.appId = value;
         break;
       case "--owner":
-        out.owner = value;
+        if (value !== undefined) out.owner = value;
         break;
       case "--output-var":
-        out.outputVar = value;
+        if (value !== undefined) out.outputVar = value;
         break;
       case "--repositories":
-        out.repositories = value;
+        if (value !== undefined) out.repositories = value;
         break;
       case "--api-url":
-        out.apiUrl = value;
+        if (value !== undefined) out.apiUrl = value;
         break;
       default:
         break;
     }
+    i += value !== undefined ? 2 : 1;
   }
   return out;
 }

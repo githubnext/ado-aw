@@ -630,6 +630,26 @@ pub fn github_token_source_var(engine_config: &EngineConfig) -> &'static str {
     }
 }
 
+/// Non-blocking advisory emitted at compile time when `engine.github-app-token`
+/// is configured. The compiler cannot introspect ADO variable metadata, so it
+/// cannot verify that the referenced `private-key` variable is actually marked
+/// **secret** — it only validates the variable *name*. This advisory reminds
+/// the author to store the private key as a secret (via `ado-aw secrets set`),
+/// which is the one thing they must get right and the compiler can't enforce.
+///
+/// Returns `None` when the feature is not used, so the caller emits nothing for
+/// the common case. Naming the specific variable keeps the message actionable.
+pub fn github_app_token_secrecy_advisory(engine_config: &EngineConfig) -> Option<String> {
+    engine_config.github_app_token().map(|cfg| {
+        format!(
+            "engine.github-app-token.private-key references pipeline variable '{0}'. \
+             Ensure '{0}' is stored as a SECRET (e.g. `ado-aw secrets set {0} \"$(cat key.pem)\"`); \
+             the compiler validates the variable name but cannot verify it is marked secret.",
+            cfg.private_key
+        )
+    })
+}
+
 fn copilot_env(engine_config: &EngineConfig) -> Result<String> {
     let token_var = github_token_source_var(engine_config);
     let mut lines: Vec<String> = vec![
@@ -1016,7 +1036,8 @@ fn copilot_invocation(
 mod tests {
     use super::{
         Engine, GITHUB_APP_TOKEN_VAR, copilot_byom_active, copilot_byom_credential_keys,
-        copilot_provider_env, get_engine, github_token_source_var, normalize_version_tag,
+        copilot_provider_env, get_engine, github_app_token_secrecy_advisory,
+        github_token_source_var, normalize_version_tag,
     };
     use crate::compile::{
         extensions::{CompileContext, CompilerExtension, Declarations, collect_extensions},
@@ -1098,6 +1119,23 @@ mod tests {
                    owner: octo-org\n---\n";
         let (app_fm, _) = parse_markdown(src).unwrap();
         assert_eq!(github_token_source_var(&app_fm.engine), GITHUB_APP_TOKEN_VAR);
+    }
+
+    #[test]
+    fn github_app_token_secrecy_advisory_fires_only_when_configured() {
+        let (default_fm, _) =
+            parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
+        assert!(github_app_token_secrecy_advisory(&default_fm.engine).is_none());
+
+        let src = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  \
+                   github-app-token:\n    app-id: GH_APP_ID\n    private-key: GH_APP_KEY\n    \
+                   owner: octo-org\n---\n";
+        let (app_fm, _) = parse_markdown(src).unwrap();
+        let advisory = github_app_token_secrecy_advisory(&app_fm.engine)
+            .expect("advisory present when github-app-token configured");
+        // Names the specific variable and points at `secrets set`.
+        assert!(advisory.contains("GH_APP_KEY"), "advisory: {advisory}");
+        assert!(advisory.contains("secret"), "advisory: {advisory}");
     }
 
     #[test]
