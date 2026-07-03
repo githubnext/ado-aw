@@ -159,6 +159,7 @@ The fuzzy schedule syntax scatters execution time deterministically based on the
 | `hourly` | Every hour, scattered minute |
 | `every 2h` | Every 2 hours |
 | `bi-weekly` | Every 14 days |
+| `tri-weekly` | Every 21 days |
 | `daily between 9:00 and 17:00` | Business hours |
 
 Append `utc+N` or `utc-N` for timezone conversion: `daily around 9:00 utc-5`
