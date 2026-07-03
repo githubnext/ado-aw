@@ -228,6 +228,34 @@ permissions:
 
 `permissions.write` is **optional** — the Stage 3 executor defaults to `$(System.AccessToken)`. Set it only when you need cross-org writes or named-identity attribution instead of `Project Collection Build Service`.
 
+### Enabling GitHub App-backed Copilot Auth
+
+Add a `github-app-token` block under `engine:` so Copilot authenticates with an
+org-backed GitHub App installation token (Copilot engine only):
+
+```yaml
+engine:
+  id: copilot
+  github-app-token:
+    app-id: 1234567       # literal App ID or client ID
+    owner: octo-org       # installation owner (org or user)
+    # repositories: [octo-repo]        # optional; scopes the token
+    # api-url: https://ghe.example.com/api/v3   # optional; GHES
+    # private-key: MY_SECRET_VAR       # optional; defaults to GITHUB_APP_PRIVATE_KEY
+    # skip-token-revocation: false     # optional; token is revoked by default
+```
+
+Then store the private key as a secret:
+```bash
+ado-aw secrets set GITHUB_APP_PRIVATE_KEY "$(cat app-private-key.pem)"
+```
+
+Notes: this is distinct from `permissions:` (ADO API tokens) — it only sources
+the Copilot engine's `GITHUB_TOKEN`. Compile prints a non-blocking advisory
+reminding you to mark the private-key variable secret. See
+[`docs/engine.md`](../docs/engine.md#github-app-backed-copilot-engine-auth).
+Requires recompilation.
+
 ### Adding Pre/Post Steps
 
 **Inline steps** run inside the `Agent` job:

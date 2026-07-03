@@ -314,6 +314,7 @@ network:
     timeout-minutes: 120
   ```
 - **API rate limiting**: The model provider is rate-limiting requests. Check Copilot CLI logs for 429 responses.
+- **GitHub App auth failures** (when `engine.github-app-token` is set): if Copilot fails to authenticate, check the `Mint GitHub App token` step logs in the Agent (and Detection) job. Common causes: the `GITHUB_APP_PRIVATE_KEY` secret (or your `private-key` override) is unset or not marked secret; a wrong `app-id`/`owner` (the App must be installed on that owner); or GHES without `api-url` set to the `/api/v3` base URL. `github-app-token` is Copilot-engine only — the compiler rejects it on other engines. See [`docs/engine.md`](../docs/engine.md#github-app-backed-copilot-engine-auth).
 
 ### Agent Tool Errors
 

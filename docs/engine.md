@@ -93,6 +93,9 @@ ado-aw secrets set GITHUB_APP_PRIVATE_KEY "$(cat app-private-key.pem)"
    ado-aw secrets set GITHUB_APP_PRIVATE_KEY "$(cat app-private-key.pem)"
    ```
 3. Set `engine.github-app-token` (`app-id` + `owner` at minimum) and compile.
+   Each compile prints a non-blocking advisory reminding you to store the
+   private-key variable as a secret — this is expected (the compiler cannot
+   verify secrecy itself).
 
 #### What the compiler generates
 
@@ -132,6 +135,16 @@ agent pool's normal network — no AWF `network.allowed` entry is required.
 
 #### Notes and limitations
 
+- **Copilot engine only.** `github-app-token` is rejected at compile time for
+  any other `engine.id` (the minted token is wired into `GITHUB_TOKEN` only on
+  the Copilot path), so a misconfiguration fails fast rather than silently
+  no-opping.
+- **Secrecy is your responsibility.** The compiler validates the private-key
+  *variable name* but cannot verify the ADO variable is actually marked secret,
+  so every compile of a `github-app-token` workflow emits an advisory:
+  `Warning: engine.github-app-token uses pipeline variable '<name>' … Ensure
+  '<name>' is stored as a SECRET …`. It is non-blocking — heed it by setting the
+  value with `ado-aw secrets set` (which stores it as a secret).
 - **GHEC by default; GHES via `api-url`.** The mint/revoke steps target
   `https://api.github.com` unless you set `api-url` to your GitHub Enterprise
   Server `/api/v3` base URL. This is independent of `engine.api-target`, which
