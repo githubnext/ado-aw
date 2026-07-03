@@ -7471,6 +7471,23 @@ fn test_github_app_token_skip_revocation() {
 }
 
 #[test]
+fn test_github_app_token_rejected_on_non_copilot_engine() {
+    // github-app-token on a non-copilot engine must be a hard compile error
+    // (not a silent no-op): the minted token is only wired into GITHUB_TOKEN on
+    // the Copilot path.
+    let source = "---\nname: \"GH App Wrong Engine\"\ndescription: \"non-copilot + app token\"\nengine:\n  id: claude\n  github-app-token:\n    app-id: 1234567\n    owner: octo-org\n---\n\n## Agent\n\nDo work.\n";
+    let (ok, _compiled, stderr) = compile_inline_source("ghapp-wrong-engine", source);
+    assert!(
+        !ok,
+        "compile must fail for github-app-token on a non-copilot engine.\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("github-app-token") && stderr.contains("copilot"),
+        "error must explain github-app-token requires the copilot engine.\nstderr: {stderr}"
+    );
+}
+
+#[test]
 fn test_github_app_token_literal_app_id_and_api_url() {
     // This fixture also exercises the private-key OVERRIDE (explicit GH_APP_KEY).
     let content = "---\nname: \"GH App Literal\"\ndescription: \"literal app id + ghes\"\nengine:\n  id: copilot\n  github-app-token:\n    app-id: 1234567\n    private-key: GH_APP_KEY\n    owner: octo-org\n    api-url: https://ghe.example.com/api/v3\n---\n\n## Agent\n\nDo work.\n";

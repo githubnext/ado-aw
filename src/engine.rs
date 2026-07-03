@@ -630,6 +630,31 @@ pub fn github_token_source_var(engine_config: &EngineConfig) -> &'static str {
     }
 }
 
+/// Cross-field validation: reject engine-specific config that only the Copilot
+/// engine wires up when it is set alongside a different `engine.id`. Without
+/// this, `engine.github-app-token` on a non-Copilot engine would silently be a
+/// no-op — the mint/revoke steps would run but `copilot_env` (the only place
+/// `GITHUB_TOKEN` is sourced from `$(GITHUB_APP_TOKEN)`) is Copilot-only.
+///
+/// Modelled on gh-aw's engine-gated config validation (e.g.
+/// `validateMaxToolDenialsSupport`, which hard-errors "…supported only with
+/// engine 'copilot'…"). ado-aw currently only supports the Copilot engine
+/// (`get_engine` rejects other ids), so this is primarily a future-proofing
+/// guard + a precise error message; when a second engine is added it becomes
+/// the load-bearing check that prevents a silent no-op.
+pub fn validate_engine_feature_support(engine_config: &EngineConfig) -> Result<()> {
+    let id = engine_config.engine_id();
+    if engine_config.github_app_token().is_some() && id != "copilot" {
+        anyhow::bail!(
+            "engine.github-app-token is only supported for engine.id = copilot (got '{id}'). \
+             The minted installation token is wired into GITHUB_TOKEN only on the Copilot \
+             engine path; on another engine it would be a no-op. Remove github-app-token or \
+             set engine.id to copilot."
+        );
+    }
+    Ok(())
+}
+
 /// Non-blocking advisory emitted at compile time when `engine.github-app-token`
 /// is configured. The compiler cannot introspect ADO variable metadata, so it
 /// cannot verify that the referenced `private-key` variable is actually marked
@@ -1037,7 +1062,7 @@ mod tests {
     use super::{
         Engine, GITHUB_APP_TOKEN_VAR, copilot_byom_active, copilot_byom_credential_keys,
         copilot_provider_env, get_engine, github_app_token_secrecy_advisory,
-        github_token_source_var, normalize_version_tag,
+        github_token_source_var, normalize_version_tag, validate_engine_feature_support,
     };
     use crate::compile::{
         extensions::{CompileContext, CompilerExtension, Declarations, collect_extensions},
@@ -1128,14 +1153,39 @@ mod tests {
         assert!(github_app_token_secrecy_advisory(&default_fm.engine).is_none());
 
         let src = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  \
-                   github-app-token:\n    app-id: GH_APP_ID\n    private-key: GH_APP_KEY\n    \
-                   owner: octo-org\n---\n";
+                   github-app-token:\n    app-id: 1234567\n    owner: octo-org\n---\n";
         let (app_fm, _) = parse_markdown(src).unwrap();
         let advisory = github_app_token_secrecy_advisory(&app_fm.engine)
             .expect("advisory present when github-app-token configured");
-        // Names the specific variable and points at `secrets set`.
-        assert!(advisory.contains("GH_APP_KEY"), "advisory: {advisory}");
-        assert!(advisory.contains("secret"), "advisory: {advisory}");
+        // Names the effective (default) variable and points at secrecy.
+        assert!(advisory.contains("GITHUB_APP_PRIVATE_KEY"), "advisory: {advisory}");
+        assert!(advisory.contains("SECRET"), "advisory: {advisory}");
+    }
+
+    #[test]
+    fn validate_engine_feature_support_rejects_github_app_token_on_non_copilot() {
+        // github-app-token on a non-copilot engine is a hard error (gh-aw
+        // pattern for engine-gated config), preventing a silent no-op.
+        let src = "---\nname: test\ndescription: test\nengine:\n  id: claude\n  \
+                   github-app-token:\n    app-id: 1234567\n    owner: octo-org\n---\n";
+        let (fm, _) = parse_markdown(src).unwrap();
+        let err = validate_engine_feature_support(&fm.engine).unwrap_err().to_string();
+        assert!(err.contains("github-app-token"), "err: {err}");
+        assert!(err.contains("copilot"), "err: {err}");
+    }
+
+    #[test]
+    fn validate_engine_feature_support_allows_copilot_and_absent() {
+        // Copilot + github-app-token: ok.
+        let src = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  \
+                   github-app-token:\n    app-id: 1234567\n    owner: octo-org\n---\n";
+        let (fm, _) = parse_markdown(src).unwrap();
+        validate_engine_feature_support(&fm.engine).expect("copilot + app-token is valid");
+
+        // No github-app-token: ok regardless of engine.
+        let (default_fm, _) =
+            parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
+        validate_engine_feature_support(&default_fm.engine).expect("absent config is valid");
     }
 
     #[test]

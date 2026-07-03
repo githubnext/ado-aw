@@ -177,6 +177,12 @@ async fn compile_pipeline_inner(
         eprintln!("Warning: {warning}");
     }
 
+    // Reject engine-specific config on the wrong engine before anything else
+    // consumes it (gh-aw pattern: engine-gated config is a hard error, not a
+    // silent no-op). Runs before target dispatch / `get_engine`, so the author
+    // gets this precise message rather than a generic "unsupported engine".
+    crate::engine::validate_engine_feature_support(&front_matter.engine)?;
+
     // GitHub App auth (issue #1316): the compiler validates the private-key
     // variable *name* but cannot verify the ADO variable is marked secret.
     // Surface a non-blocking advisory so the author is reminded to store it as
