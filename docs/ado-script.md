@@ -56,6 +56,18 @@ pipeline** as runtime helpers. Today it produces thirteen bundles:
   review is configured), and attaches it to the build's
   `ado-aw-safe-outputs` summary tab via `##vso[task.uploadsummary]`. See
   [`safe-outputs.md`](safe-outputs.md).
+- `github-app-token.js` — GitHub App token minter that runs immediately
+  before the Copilot invocation in the **Agent and Detection jobs** when
+  `engine.github-app-token` is configured. Builds an RS256 JWT from the App ID
+  (argv) + private key (masked env secret), resolves the installation for the
+  owner, exchanges it for an installation access token, and exposes it as a
+  masked same-job `GITHUB_APP_TOKEN`. Invoked again with a `revoke` argument
+  after the Copilot run (best-effort) to delete the token via
+  `DELETE /installation/token`. Compiler-owned, non-secret inputs (`--app-id`,
+  `--owner`, `--output-var`, `--repositories`, `--api-url`) are argv flags, not
+  env vars, so a pipeline variable can't shadow them (only the private key /
+  minted token ride in masked env). Runs outside AWF. See
+  [`engine.md`](engine.md#github-app-backed-copilot-engine-auth).
 
 > **Internal-only.** `ado-script` is not a user-facing front-matter
 > feature. Authors never write an `ado-script:` block in their agent
@@ -328,6 +340,16 @@ collection URI is likewise read from the auto-injected `SYSTEM_COLLECTIONURI`
 (`scripts/ado-script/src/shared/auth.ts::getWebApi`, see #1307), so it
 is never part of a step's env contract.
 
+Not every bundle authenticates to Azure DevOps. The `github-app-token` bundle
+(issue #1316) is `BundleAuth::None`: it authenticates to the **GitHub** API with
+its own App JWT / minted installation token, so it carries no
+`SYSTEM_ACCESSTOKEN` and no ADO predefined mirrors. Its only env var is the
+masked private-key secret (`GH_APP_PRIVATE_KEY`, and `GH_APP_TOKEN` for revoke);
+every other, non-secret input (App ID, owner, repositories, output-variable
+name, api-url) is a single-quoted **argv flag** rather than an env var, so a
+pipeline variable can never shadow it (ADO injects pipeline variables into a
+step's env, but argv comes only from the compiler-authored script).
+
 
 ## End-to-end data flow
 
@@ -492,6 +514,9 @@ scripts/ado-script/
 │   └── conclusion/              # conclusion.js entry point + Conclusion-job reporter
 │       ├── index.ts             # main(): inspect upstream results + safe-outputs manifest → file/append work items
 │       └── __tests__/           # unit tests for signal detection and work-item filing behaviour
+│   └── github-app-token/        # github-app-token.js entry point + GitHub App token minter
+│       ├── index.ts             # main(): RS256 JWT → resolve installation → mint installation token → masked GITHUB_APP_TOKEN
+│       └── __tests__/           # unit tests for JWT signing / installation resolution / token minting
 ├── test/                        # End-to-end smoke tests (gate, import, exec-context-pr)
 ├── gate.js                      # ncc bundle output (gitignored)
 ├── import.js                    # ncc bundle output (gitignored)
@@ -505,23 +530,19 @@ scripts/ado-script/
 ├── exec-context-pr-checks.js    # ncc bundle output (gitignored)
 ├── exec-context-repo.js         # ncc bundle output (gitignored)
 ├── conclusion.js                # ncc bundle output (gitignored)
-└── approval-summary.js          # ncc bundle output (gitignored)
+├── approval-summary.js          # ncc bundle output (gitignored)
+└── github-app-token.js          # ncc bundle output (gitignored)
 ```
 
 The release workflow (`.github/workflows/release.yml`) runs
-`npm ci && npm run build`, then zips `scripts/ado-script/gate.js`,
-`scripts/ado-script/import.js`,
-`scripts/ado-script/exec-context-pr.js`,
-`scripts/ado-script/exec-context-pr-synth.js`,
-`scripts/ado-script/exec-context-manual.js`,
-`scripts/ado-script/exec-context-pipeline.js`,
-`scripts/ado-script/exec-context-ci-push.js`,
-`scripts/ado-script/exec-context-workitem.js`,
-`scripts/ado-script/exec-context-schedule.js`,
-`scripts/ado-script/exec-context-pr-checks.js`,
-`scripts/ado-script/exec-context-repo.js`,
-`scripts/ado-script/conclusion.js`, and
-`scripts/ado-script/approval-summary.js` into the
+`npm ci && npm run build`, then globs `scripts/ado-script/*.js` — which
+captures every bundle, including `gate.js`, `import.js`,
+`exec-context-pr.js`, `exec-context-pr-synth.js`,
+`exec-context-manual.js`, `exec-context-pipeline.js`,
+`exec-context-ci-push.js`, `exec-context-workitem.js`,
+`exec-context-schedule.js`, `exec-context-pr-checks.js`,
+`exec-context-repo.js`, `conclusion.js`, `approval-summary.js`, and
+`github-app-token.js` — into the
 `ado-script.zip` release asset. Pipelines download that asset at
 runtime by URL pinned to the compiler's `CARGO_PKG_VERSION`, verify
 its SHA-256 against the `checksums.txt` asset, then extract.

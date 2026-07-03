@@ -177,6 +177,20 @@ async fn compile_pipeline_inner(
         eprintln!("Warning: {warning}");
     }
 
+    // Reject engine-specific config on the wrong engine before anything else
+    // consumes it (gh-aw pattern: engine-gated config is a hard error, not a
+    // silent no-op). Runs before target dispatch / `get_engine`, so the author
+    // gets this precise message rather than a generic "unsupported engine".
+    crate::engine::validate_engine_feature_support(&front_matter.engine)?;
+
+    // GitHub App auth (issue #1316): the compiler validates the private-key
+    // variable *name* but cannot verify the ADO variable is marked secret.
+    // Surface a non-blocking advisory so the author is reminded to store it as
+    // a secret. Fires only when `engine.github-app-token` is configured.
+    if let Some(advisory) = crate::engine::github_app_token_secrecy_advisory(&front_matter.engine) {
+        eprintln!("Warning: {advisory}");
+    }
+
     // Determine output path. By default use `.lock.yml` to match
     // gh-aw's convention for compiled-pipeline files (so they can be
     // marked as generated and merge=ours via `.gitattributes`). When the

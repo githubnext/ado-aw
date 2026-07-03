@@ -264,6 +264,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │           ├── exec-context-repo/ # Repository identity context source (bundled to exec-context-repo.js)
 │           ├── conclusion/ # Conclusion-job reporter source (bundled to conclusion.js)
 │           ├── approval-summary/ # Safe-outputs summary renderer (bundled to approval-summary.js; end-of-Agent-job summary tab)
+│           ├── github-app-token/ # GitHub App token minter (bundled to github-app-token.js; mints installation token in Agent + Detection when engine.github-app-token is set)
 │           └── shared/   # Shared modules across bundles (auth, ado-client, env-facts, types.gen.ts)
 ├── tests/                # Integration tests and fixtures
 ├── docs/                 # Per-concept reference documentation (see index below)
@@ -379,7 +380,11 @@ index to jump to the right page.
 - [`docs/ado-script.md`](docs/ado-script.md) — `ado-script` workspace
   (`scripts/ado-script/`): the bundled TypeScript runtime helpers
   (`gate.js`, `import.js`, the execution-context `exec-context-*.js`
-  bundles, `conclusion.js`, and `approval-summary.js`), schemars-driven
+- [`docs/ado-script.md`](docs/ado-script.md) — `ado-script` workspace
+  (`scripts/ado-script/`): the bundled TypeScript runtime helpers
+  (`gate.js`, `import.js`, the execution-context `exec-context-*.js`
+  bundles, `conclusion.js`, `approval-summary.js`, and
+  `github-app-token.js`), schemars-driven
   type codegen, the A2 design decision, and the bundle env contract
   modelled in `src/compile/ado_bundle.rs`.
 - [`docs/local-development.md`](docs/local-development.md) — local development

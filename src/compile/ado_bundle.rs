@@ -53,6 +53,10 @@ pub enum Bundle {
     ExecContextRepo,
     ApprovalSummary,
     Conclusion,
+    /// GitHub App installation-token minter/revoker (issue #1316). Runs before
+    /// the Copilot invocation in the Agent and Detection jobs. It authenticates
+    /// to the **GitHub** API (not ADO REST), so it needs no ADO bearer.
+    GithubAppToken,
 }
 
 /// The auth contract a bundle requires from the step that invokes it.
@@ -130,6 +134,7 @@ impl Bundle {
         Bundle::ExecContextRepo,
         Bundle::ApprovalSummary,
         Bundle::Conclusion,
+        Bundle::GithubAppToken,
     ];
 
     /// The bundle's unpacked on-disk path inside the runtime VM. The Conclusion
@@ -154,6 +159,7 @@ impl Bundle {
             Bundle::ExecContextRepo => paths::EXEC_CONTEXT_REPO_PATH,
             Bundle::ApprovalSummary => paths::APPROVAL_SUMMARY_PATH,
             Bundle::Conclusion => paths::CONCLUSION_PATH,
+            Bundle::GithubAppToken => paths::GITHUB_APP_TOKEN_PATH,
         }
     }
 
@@ -175,7 +181,10 @@ impl Bundle {
             Bundle::Import
             | Bundle::ExecContextManual
             | Bundle::ExecContextRepo
-            | Bundle::ApprovalSummary => BundleAuth::None,
+            | Bundle::ApprovalSummary
+            // Authenticates to the GitHub API with its own App JWT / minted
+            // token, not the ADO bearer.
+            | Bundle::GithubAppToken => BundleAuth::None,
         }
     }
 }

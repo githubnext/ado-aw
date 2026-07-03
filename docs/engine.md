@@ -30,6 +30,7 @@ engine:
 | `args` | list | `[]` | Custom CLI arguments appended after compiler-generated args. Subject to shell-safety validation and blocked from overriding compiler-controlled flags (`--prompt`, `--additional-mcp-config`, `--allow-tool`, `--allow-all-tools`, `--allow-all-paths`, `--disable-builtin-mcps`, `--no-ask-user`, `--ask-user`). |
 | `env` | map | *(none)* | Engine-specific environment variables merged into the sandbox step's `env:` block. Keys must be valid env var names. Values are literal-only and must not contain ADO expressions (`$(`, `${{`, `$[`) or pipeline command injection (`##vso[`), **except** the Copilot BYOM provider keys (`COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_API_KEY`, `COPILOT_PROVIDER_BEARER_TOKEN`, `COPILOT_PROVIDER_WIRE_API`), which may carry an ADO macro (`$(...)`) expression — see [Copilot BYOM / BYOK provider configuration](#copilot-byom--byok-provider-configuration). Compiler-controlled keys (`GITHUB_TOKEN`, `PATH`, `BASH_ENV`, etc.) are blocked. |
 | `command` | string | *(none)* | Custom engine executable path (skips the default engine binary installation — NuGet for `target: 1es`, GitHub Releases for all other targets). The path must be accessible inside the AWF container (e.g., `/tmp/...` or workspace-mounted paths). |
+| `github-app-token` | map | *(none)* | GitHub App-backed Copilot engine authentication. When set, the compiler mints (and, by default, revokes) a GitHub App installation token in the Agent and Detection jobs and sources `GITHUB_TOKEN` from it (for Copilot only). See [GitHub App-backed Copilot engine auth](#github-app-backed-copilot-engine-auth). |
 
 
 ### `timeout-minutes`
@@ -41,6 +42,118 @@ The `timeout-minutes` field sets a wall-clock limit (in minutes) for the entire 
 - **SLA compliance** — ensuring scheduled agents complete within a known window.
 
 When omitted, Azure DevOps uses its default job timeout (60 minutes). When set, the compiler emits `timeoutInMinutes: <value>` on the agentic job.
+
+### GitHub App-backed Copilot engine auth
+
+By default the Copilot engine authenticates with the `GITHUB_TOKEN` pipeline
+variable you provide (`ado-aw secrets set GITHUB_TOKEN <pat>`). For
+organization-backed Copilot authentication you can instead have the compiler
+mint a **GitHub App installation access token** at runtime — mirroring
+[gh-aw's](https://github.com/githubnext/gh-aw) `create-github-app-token` model,
+adapted to Azure DevOps.
+
+```yaml
+engine:
+  id: copilot
+  github-app-token:
+    app-id: 1234567            # literal App ID or client ID (required)
+    owner: octo-org            # installation owner (org or user login)
+    repositories: [octo-repo]  # optional; scopes the token to these repos
+    # api-url: https://ghe.example.com/api/v3   # optional; GHES base URL
+    # skip-token-revocation: false              # optional; revoke by default
+    # private-key: MY_SECRET_VAR                # optional override; see below
+```
+
+Store the private key once and you're done:
+
+```bash
+ado-aw secrets set GITHUB_APP_PRIVATE_KEY "$(cat app-private-key.pem)"
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `app-id` | yes | The GitHub App ID — a **literal** value: either a numeric App ID (e.g. `1234567`, quoted or unquoted) or an alphanumeric client ID (e.g. `Iv23liABC…`). The App ID is not secret (it is plain per-app config, like `owner`), so it is written verbatim, not indirected through a variable. |
+| `owner` | yes | GitHub installation owner (organization or user login). |
+| `repositories` | no | Repository names (owner-relative) to scope the installation token to. Omit to span every repository the installation grants. |
+| `api-url` | no | GitHub API base URL. Defaults to `https://api.github.com` (GHEC). For GitHub Enterprise Server, set the `/api/v3` base URL (e.g. `https://ghe.example.com/api/v3`). Must be an `https://` URL. |
+| `skip-token-revocation` | no | When `true`, do not revoke the minted token after the Copilot run. Defaults to `false` (the token is revoked — see below). |
+| `private-key` | no | Name of the ADO **secret** pipeline variable holding the private key (PEM). **Defaults to `GITHUB_APP_PRIVATE_KEY`** — the compiler owns the name, exactly like `GITHUB_TOKEN`, so the common case sets no field and just runs `ado-aw secrets set GITHUB_APP_PRIVATE_KEY …`. Set this only to point at a differently-named secret (e.g. reusing an existing variable). |
+
+#### Setup
+
+1. Create the GitHub App and install it on the owning org/user, ensuring the
+   installation is suitable for Copilot organization-backed
+   authentication/billing in your tenant. Copilot capability is granted on the
+   **App/org side** — the installation token inherits it automatically; you do
+   not (and cannot) configure it here.
+2. Store the private key as an ADO **secret** pipeline variable — the default
+   name `GITHUB_APP_PRIVATE_KEY` unless you set a `private-key` override:
+
+   ```bash
+   ado-aw secrets set GITHUB_APP_PRIVATE_KEY "$(cat app-private-key.pem)"
+   ```
+3. Set `engine.github-app-token` (`app-id` + `owner` at minimum) and compile.
+   Each compile prints a non-blocking advisory reminding you to store the
+   private-key variable as a secret — this is expected (the compiler cannot
+   verify secrecy itself).
+
+#### What the compiler generates
+
+- A **token-mint step** (the `github-app-token` ado-script bundle) runs
+  immediately before the Copilot invocation in **both** the Agent and Detection
+  jobs. It builds a short-lived RS256 JWT from the App ID + private key,
+  resolves the installation for `owner`, exchanges it for an installation
+  access token (optionally scoped to `repositories`), and exposes it as a
+  **masked, same-job** `GITHUB_APP_TOKEN` variable.
+- The Copilot engine's `GITHUB_TOKEN` is then sourced from `$(GITHUB_APP_TOKEN)`
+  instead of the operator-provided `$(GITHUB_TOKEN)` variable.
+- A **token-revocation step** runs after the Copilot invocation in both jobs
+  (unless `skip-token-revocation: true`). It deletes the minted token
+  (`DELETE /installation/token`) so it does not remain valid for its full ~1h
+  lifetime — matching `actions/create-github-app-token`'s default. Revocation is
+  best-effort (`always()` + `continueOnError`) and never fails the build.
+- The token is **never** provided to SafeOutputs, user-authored `steps:`,
+  ManualReview, Teardown, or Conclusion.
+
+The mint/revoke steps run **outside** the AWF network sandbox (like the
+ADO-token and execution-context steps), reaching the GitHub API over the build
+agent pool's normal network — no AWF `network.allowed` entry is required.
+
+#### Scope and boundaries — what this token is *not*
+
+- **ADO API permissions** (`permissions.read` / `permissions.write`) are
+  entirely separate: they describe Azure DevOps OAuth/service-connection tokens
+  used by the pipeline and Stage 3 executor. The GitHub App token has no effect
+  on them.
+- The GitHub App token is for **Copilot engine authentication only**. It does
+  **not** authenticate the `gh` CLI, grant GitHub MCP permissions, or give the
+  agent sandbox GitHub write access.
+- There is **no `permissions:` sub-field** to scope the token. Copilot access
+  rides on the App's own granted capability (configured App/org-side); narrowing
+  the installation token's permissions at mint time cannot grant Copilot access
+  and risks stripping the capability it needs.
+
+#### Notes and limitations
+
+- **Copilot engine only.** `github-app-token` is rejected at compile time for
+  any other `engine.id` (the minted token is wired into `GITHUB_TOKEN` only on
+  the Copilot path), so a misconfiguration fails fast rather than silently
+  no-opping.
+- **Secrecy is your responsibility.** The compiler validates the private-key
+  *variable name* but cannot verify the ADO variable is actually marked secret,
+  so every compile of a `github-app-token` workflow emits an advisory:
+  `Warning: engine.github-app-token uses pipeline variable '<name>' … Ensure
+  '<name>' is stored as a SECRET …`. It is non-blocking — heed it by setting the
+  value with `ado-aw secrets set` (which stores it as a secret).
+- **GHEC by default; GHES via `api-url`.** The mint/revoke steps target
+  `https://api.github.com` unless you set `api-url` to your GitHub Enterprise
+  Server `/api/v3` base URL. This is independent of `engine.api-target`, which
+  configures the Copilot API host, not the GitHub App API host.
+- **`openssl` is not required** — the token is minted with Node's built-in
+  crypto. The build agent needs Node (installed automatically) and network
+  access to the GitHub API host.
+- You may still need to pin `engine.version` until the relevant Copilot CLI auth
+  behavior is broadly available.
 
 ### Copilot BYOM / BYOK provider configuration
 

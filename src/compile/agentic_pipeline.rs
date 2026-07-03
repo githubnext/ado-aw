@@ -911,7 +911,23 @@ fn build_agent_job(
         steps.push(Step::Bash(verify_mcp_backends_step()));
     }
 
-    // 18. Run copilot (AWF network isolated) — the big one
+    // 18. Run copilot (AWF network isolated) — the big one.
+    //     When GitHub App auth is configured, mint the installation token
+    //     immediately before the Copilot run; `copilot_env` sources
+    //     `GITHUB_TOKEN` from the masked same-job `GITHUB_APP_TOKEN` the mint
+    //     step sets. Never runs for SafeOutputs/user steps.
+    //
+    //     The ado-script bundle is staged by the ado-script extension's
+    //     agent-prepare steps: `github_app_token_active` is OR'd into that
+    //     extension's Agent-job download predicate (mirroring
+    //     `safe_outputs_summary_active`), so the bundle is guaranteed present by
+    //     the time we reach this step — no need to inspect emitted steps or
+    //     re-download here.
+    if let Some(app_token) = front_matter.engine.github_app_token() {
+        steps.push(super::extensions::ado_script::github_app_token_step_typed(
+            app_token,
+        )?);
+    }
     steps.push(Step::Bash(run_agent_step(
         &cfg.allowed_domains,
         &cfg.awf_mounts,
@@ -920,6 +936,17 @@ fn build_agent_job(
         &cfg.engine_env,
         &cfg.byom_exclude_keys,
     )?));
+
+    // 18a. Revoke the GitHub App token (best-effort, always) once the Copilot
+    //      run has returned, so the minted installation token does not remain
+    //      valid for its full lifetime. Skipped when `skip-token-revocation`.
+    if let Some(app_token) = front_matter.engine.github_app_token()
+        && !app_token.skip_token_revocation
+    {
+        steps.push(super::extensions::ado_script::github_app_token_revoke_step_typed(
+            app_token,
+        )?);
+    }
 
     // 19. Collect safe outputs from AWF container
     steps.push(Step::Bash(collect_safe_outputs_step()));
@@ -1046,6 +1073,17 @@ fn agent_job_variables_hoist(
 /// (see `AdoScriptExtension::build_agent_conditions` for today's
 /// only contributor — synth-PR-skip, PR-filter gate, pipeline-filter
 /// gate, and user `expression:` escape hatches).
+/// Whether the Detection job must stage the `ado-script` bundle. The Detection
+/// job has no extension-prepare phase (unlike the Agent job, whose bundle
+/// download is contributed by `AdoScriptExtension`), so it stages the bundle
+/// itself — but gated on this single predicate so exactly one download is
+/// emitted. Today only the GitHub App token step needs it; future
+/// detection-only bundle consumers should `||` their own condition in here
+/// rather than adding a second `install_and_download_steps_typed` call.
+fn detection_job_needs_ado_script_bundle(front_matter: &FrontMatter) -> bool {
+    front_matter.engine.github_app_token().is_some()
+}
+
 fn build_detection_job(
     front_matter: &FrontMatter,
     cfg: &StandaloneCtx,
@@ -1105,6 +1143,25 @@ fn build_detection_job(
     )?));
     // Setup compiler
     steps.push(Step::Bash(setup_compiler_step()));
+    // When GitHub App auth is configured, mint the installation token
+    // immediately before the threat-analysis Copilot run. Unlike the Agent job
+    // (whose bundle download is staged by the ado-script extension's
+    // agent-prepare phase, gated on `github_app_token_active`), the Detection
+    // job has no extension-prepare phase to piggyback on, so it stages the
+    // bundle self-contained — but exactly once, gated on the single
+    // `detection_job_needs_ado_script_bundle` predicate below so future
+    // detection-only bundle consumers OR into one download rather than adding a
+    // second (mirroring the Agent-job predicate in `AdoScriptExtension`).
+    if detection_job_needs_ado_script_bundle(front_matter) {
+        steps.extend(super::extensions::ado_script::install_and_download_steps_typed(
+            front_matter.supply_chain(),
+        ));
+    }
+    if let Some(app_token) = front_matter.engine.github_app_token() {
+        steps.push(super::extensions::ado_script::github_app_token_step_typed(
+            app_token,
+        )?);
+    }
     // Run threat analysis
     steps.push(Step::Bash(run_threat_analysis_step(
         &cfg.allowed_domains,
@@ -1112,7 +1169,16 @@ fn build_detection_job(
         &cfg.engine_run_detection,
         &cfg.byom_exclude_keys,
         &cfg.detection_provider_env,
+        crate::engine::github_token_source_var(&front_matter.engine),
     )?));
+    // Revoke the GitHub App token (best-effort, always) after threat analysis.
+    if let Some(app_token) = front_matter.engine.github_app_token()
+        && !app_token.skip_token_revocation
+    {
+        steps.push(super::extensions::ado_script::github_app_token_revoke_step_typed(
+            app_token,
+        )?);
+    }
     // Prepare analyzed outputs
     steps.push(Step::Bash(prepare_analyzed_outputs_step()));
     // Evaluate threat analysis — DECLARES TYPED OUTPUT
@@ -2776,6 +2842,7 @@ fn run_threat_analysis_step(
     engine_run_detection: &str,
     byom_exclude_keys: &[String],
     detection_provider_env: &[(String, String)],
+    github_token_var: &str,
 ) -> Result<BashStep> {
     let api_proxy_block = awf_api_proxy_flags(byom_exclude_keys);
     let script = format!(
@@ -2808,7 +2875,7 @@ fn run_threat_analysis_step(
     // legacy copilot_env output of `GITHUB_READ_ONLY: 1`, not `'1'`).
     use super::ir::env::EnvValue;
     step = step
-        .with_env("GITHUB_TOKEN", EnvValue::pipeline_var("GITHUB_TOKEN"))
+        .with_env("GITHUB_TOKEN", EnvValue::pipeline_var(github_token_var))
         .with_env(
             "GITHUB_READ_ONLY",
             EnvValue::RawYamlScalar(serde_yaml::Value::Number(1.into())),

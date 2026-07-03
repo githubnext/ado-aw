@@ -13,5 +13,6 @@ exec-context-pr-checks.js
 exec-context-repo.js
 approval-summary.js
 conclusion.js
+github-app-token.js
 schema
 *.tsbuildinfo

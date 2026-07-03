@@ -7288,3 +7288,280 @@ description: "no fetch tuning"
     );
 }
 
+// ─── GitHub App-backed Copilot engine auth (issue #1316) ─────────────────────
+
+/// Compile inline agent `content` in an isolated temp dir and return the
+/// compiled YAML. Panics on compile failure.
+fn compile_inline_agent(tag: &str, content: &str) -> String {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-{tag}-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&temp_dir);
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+    let input = temp_dir.join(format!("{tag}-agent.md"));
+    fs::write(&input, content).expect("Failed to write test input");
+    let output_path = temp_dir.join(format!("{tag}-agent.yml"));
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+    assert!(
+        output.status.success(),
+        "compile should succeed for {tag}.\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let compiled = fs::read_to_string(&output_path).expect("Compiled YAML should exist");
+    let _ = fs::remove_dir_all(&temp_dir);
+    compiled
+}
+
+const GITHUB_APP_TOKEN_FM: &str = r#"
+engine:
+  id: copilot
+  github-app-token:
+    app-id: 1234567
+    owner: octo-org
+    repositories: [octo-repo]
+"#;
+
+/// Assert the GitHub App token wiring is present in exactly the Agent and
+/// Detection jobs (two mint steps, two `GITHUB_APP_TOKEN`-sourced tokens) and
+/// nowhere else, for a given compiled pipeline.
+fn assert_github_app_token_wiring(compiled: &str) {
+    // Total bundle invocations = mint (Agent + Detection) + revoke
+    // (Agent + Detection) = 4. Revoke invocations carry the ` revoke` arg.
+    let total_bundle = compiled
+        .matches("node '/tmp/ado-aw-scripts/ado-script/github-app-token.js'")
+        .count();
+    let revoke_hits = compiled
+        .matches("node '/tmp/ado-aw-scripts/ado-script/github-app-token.js' revoke")
+        .count();
+    let mint_hits = total_bundle - revoke_hits;
+    assert_eq!(
+        mint_hits, 2,
+        "expected the mint step in exactly Agent + Detection, found {mint_hits}:\n{compiled}"
+    );
+    let mint_display = compiled
+        .matches("Mint GitHub App token (Copilot engine auth)")
+        .count();
+    assert_eq!(mint_display, 2, "expected two mint-step display names");
+
+    // GITHUB_TOKEN is sourced from the minted masked variable in both Copilot
+    // envs (agent + detection), never from the operator's $(GITHUB_TOKEN).
+    let app_token_src = compiled.matches("GITHUB_TOKEN: $(GITHUB_APP_TOKEN)").count();
+    assert_eq!(
+        app_token_src, 2,
+        "expected GITHUB_TOKEN sourced from $(GITHUB_APP_TOKEN) in agent + detection:\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("GITHUB_TOKEN: $(GITHUB_TOKEN)"),
+        "no Copilot env should use the operator $(GITHUB_TOKEN) when App auth is configured:\n{compiled}"
+    );
+
+    // Non-secret inputs are single-quoted argv flags (shadow-proof); the app-id
+    // is a single-quoted literal and the private key (default variable name,
+    // since the fixture omits `private-key`) is the only GH_APP_* env var.
+    assert!(
+        compiled.contains("--app-id '1234567'"),
+        "app-id must be a single-quoted literal argv flag:\n{compiled}"
+    );
+    assert!(compiled.contains("GH_APP_PRIVATE_KEY: $(GITHUB_APP_PRIVATE_KEY)"));
+    // The private key is the ONLY GH_APP_* env var; every other input is argv.
+    for key in [
+        "GH_APP_ID:",
+        "GH_APP_OWNER:",
+        "GH_APP_REPOSITORIES:",
+        "GH_APP_OUTPUT_VAR:",
+        "GH_APP_API_URL:",
+    ] {
+        assert!(
+            !compiled.contains(key),
+            "{key} must not be an env var (non-secret inputs are argv):\n{compiled}"
+        );
+    }
+
+    // The output variable name is pinned as an argv flag in both mint steps, so
+    // no pipeline variable named GH_APP_OUTPUT_VAR can redirect the minted
+    // token (argv comes only from the compiler-authored script).
+    let output_var_pins = compiled
+        .matches("--output-var 'GITHUB_APP_TOKEN'")
+        .count();
+    assert_eq!(
+        output_var_pins, 2,
+        "expected --output-var pinned to GITHUB_APP_TOKEN in both mint steps:\n{compiled}"
+    );
+
+    // By default the token is revoked after the Copilot run in both jobs
+    // (revoke_hits computed above).
+    assert_eq!(
+        revoke_hits, 2,
+        "expected a revoke step in Agent + Detection by default, found {revoke_hits}:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("GH_APP_TOKEN: $(GITHUB_APP_TOKEN)"),
+        "revoke step reads the minted token from $(GITHUB_APP_TOKEN):\n{compiled}"
+    );
+}
+
+#[test]
+fn test_github_app_token_wiring_standalone() {
+    let content = format!(
+        "---\nname: \"GH App Standalone\"\ndescription: \"gh app token\"{GITHUB_APP_TOKEN_FM}---\n\n## Agent\n\nDo work.\n"
+    );
+    let compiled = compile_inline_agent("ghapp-standalone", &content);
+    assert_github_app_token_wiring(&compiled);
+}
+
+#[test]
+fn test_github_app_token_wiring_all_targets() {
+    for target in ["1es", "job", "stage"] {
+        let content = format!(
+            "---\nname: \"GH App {target}\"\ndescription: \"gh app token\"\ntarget: {target}{GITHUB_APP_TOKEN_FM}---\n\n## Agent\n\nDo work.\n"
+        );
+        let compiled = compile_inline_agent(&format!("ghapp-{target}"), &content);
+        assert_github_app_token_wiring(&compiled);
+    }
+}
+
+#[test]
+fn test_no_github_app_token_by_default() {
+    let content = "---\nname: \"No GH App\"\ndescription: \"default token\"\n---\n\n## Agent\n\nDo work.\n";
+    let compiled = compile_inline_agent("ghapp-absent", content);
+    assert!(
+        !compiled.contains("github-app-token.js"),
+        "default agent must not emit the mint step:\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("GITHUB_APP_TOKEN"),
+        "default agent must not reference GITHUB_APP_TOKEN:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("GITHUB_TOKEN: $(GITHUB_TOKEN)"),
+        "default agent sources GITHUB_TOKEN from the operator variable:\n{compiled}"
+    );
+}
+
+#[test]
+fn test_github_app_token_skip_revocation() {
+    let content = "---\nname: \"GH App No Revoke\"\ndescription: \"gh app token, no revoke\"\nengine:\n  id: copilot\n  github-app-token:\n    app-id: 1234567\n    owner: octo-org\n    skip-token-revocation: true\n---\n\n## Agent\n\nDo work.\n";
+    let compiled = compile_inline_agent("ghapp-norevoke", content);
+    // Mint step still present in Agent + Detection.
+    assert_eq!(
+        compiled
+            .matches("node '/tmp/ado-aw-scripts/ado-script/github-app-token.js'")
+            .count()
+            - compiled
+                .matches("node '/tmp/ado-aw-scripts/ado-script/github-app-token.js' revoke")
+                .count(),
+        2,
+        "mint step must still be present:\n{compiled}"
+    );
+    // ...but no revoke step.
+    assert!(
+        !compiled.contains("github-app-token.js' revoke"),
+        "skip-token-revocation must suppress the revoke step:\n{compiled}"
+    );
+}
+
+#[test]
+fn test_github_app_token_rejected_on_non_copilot_engine() {
+    // github-app-token on a non-copilot engine must be a hard compile error
+    // (not a silent no-op): the minted token is only wired into GITHUB_TOKEN on
+    // the Copilot path.
+    let source = "---\nname: \"GH App Wrong Engine\"\ndescription: \"non-copilot + app token\"\nengine:\n  id: claude\n  github-app-token:\n    app-id: 1234567\n    owner: octo-org\n---\n\n## Agent\n\nDo work.\n";
+    let (ok, _compiled, stderr) = compile_inline_source("ghapp-wrong-engine", source);
+    assert!(
+        !ok,
+        "compile must fail for github-app-token on a non-copilot engine.\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("github-app-token") && stderr.contains("copilot"),
+        "error must explain github-app-token requires the copilot engine.\nstderr: {stderr}"
+    );
+}
+
+#[test]
+fn test_github_app_token_literal_app_id_and_api_url() {
+    // This fixture also exercises the private-key OVERRIDE (explicit GH_APP_KEY).
+    let content = "---\nname: \"GH App Literal\"\ndescription: \"literal app id + ghes\"\nengine:\n  id: copilot\n  github-app-token:\n    app-id: 1234567\n    private-key: GH_APP_KEY\n    owner: octo-org\n    api-url: https://ghe.example.com/api/v3\n---\n\n## Agent\n\nDo work.\n";
+    let compiled = compile_inline_agent("ghapp-literal", content);
+    // Numeric app-id is emitted verbatim as a single-quoted argv flag, not a macro.
+    assert!(
+        compiled.contains("--app-id '1234567'"),
+        "literal numeric app-id must be a single-quoted verbatim argv flag:\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("--app-id '$("),
+        "literal app-id must not be treated as a variable macro:\n{compiled}"
+    );
+    // The private-key override names GH_APP_KEY as the masked secret env var.
+    assert!(
+        compiled.contains("GH_APP_PRIVATE_KEY: $(GH_APP_KEY)"),
+        "private-key override must source the secret from $(GH_APP_KEY):\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("$(GITHUB_APP_PRIVATE_KEY)"),
+        "override must replace the default private-key variable:\n{compiled}"
+    );
+    // GHES api-url flows into both mint and revoke steps as an argv flag.
+    // Mint: `... --api-url '...'`; revoke: `revoke --api-url '...'`.
+    let api_url_args = compiled
+        .matches("--api-url 'https://ghe.example.com/api/v3'")
+        .count();
+    assert_eq!(
+        api_url_args, 4,
+        "api-url must appear as an argv flag in both mint and both revoke steps (2 jobs x 2):\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("GH_APP_API_URL:"),
+        "api-url must be argv, never an env var:\n{compiled}"
+    );
+}
+
+/// When another ado-script bundle feature is active in the Agent job (here a
+/// safe-output activates the approval-summary bundle download), the mint step
+/// must NOT trigger a second bundle download in that job — it reuses the
+/// already-staged bundle. Proven by a delta: adding `github-app-token` to an
+/// otherwise-identical workflow adds exactly ONE bundle download (the
+/// Detection job, which has no extension-prepare phase), never two.
+#[test]
+fn test_github_app_token_reuses_staged_bundle_in_agent() {
+    fn count_downloads(compiled: &str) -> usize {
+        compiled.matches("Download ado-aw scripts").count()
+            + compiled.matches("Stage ado-aw scripts").count()
+    }
+    let safe_output = "safe-outputs:\n  create-work-item:\n    work-item-type: Task\n";
+
+    let without = compile_inline_agent(
+        "ghapp-dedupe-without",
+        &format!(
+            "---\nname: \"No GH App SO\"\ndescription: \"safe output only\"\n{safe_output}---\n\n## Agent\n\nDo work.\n"
+        ),
+    );
+    let with = compile_inline_agent(
+        "ghapp-dedupe-with",
+        &format!(
+            "---\nname: \"GH App SO\"\ndescription: \"gh app token with safe output\"{GITHUB_APP_TOKEN_FM}{safe_output}---\n\n## Agent\n\nDo work.\n"
+        ),
+    );
+    assert_github_app_token_wiring(&with);
+
+    // Adding github-app-token stages the bundle only in Detection (Agent
+    // reuses its already-staged copy), so the download count grows by exactly 1.
+    assert_eq!(
+        count_downloads(&with),
+        count_downloads(&without) + 1,
+        "github-app-token must add exactly one bundle download (Detection), \
+         proving the Agent job reuses its staged bundle rather than \
+         double-downloading. without={}, with={}",
+        count_downloads(&without),
+        count_downloads(&with),
+    );
+}

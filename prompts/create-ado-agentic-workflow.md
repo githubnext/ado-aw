@@ -81,6 +81,25 @@ engine:
   timeout-minutes: 30
 ```
 
+**Org-backed Copilot auth (GitHub App).** By default Copilot authenticates with
+the `GITHUB_TOKEN` pipeline variable. For organization-backed authentication,
+add a `github-app-token` block so the compiler mints a GitHub App installation
+token at runtime (Copilot engine only):
+```yaml
+engine:
+  id: copilot
+  github-app-token:
+    app-id: 1234567       # literal App ID or client ID
+    owner: octo-org       # installation owner (org or user)
+    # repositories: [octo-repo]   # optional; scopes the token
+```
+Store the private key once with `ado-aw secrets set GITHUB_APP_PRIVATE_KEY
+"$(cat key.pem)"`. Only add this when the workflow explicitly needs org-backed
+Copilot auth — omit it otherwise. See
+[`docs/engine.md`](../docs/engine.md#github-app-backed-copilot-engine-auth) for
+the full field reference (`private-key` override, `api-url` for GHES,
+`skip-token-revocation`).
+
 ### Step 3 — Schedule
 
 Use the **fuzzy schedule syntax** (deterministic time scattering based on agent name hash prevents load spikes). Omit `on.schedule` (or omit `on:` entirely) for manual/trigger-only pipelines.
