@@ -562,7 +562,7 @@ network:
     - "evil.example.com"
 ```
 
-`allowed` accepts raw domain patterns (wildcards supported) or ecosystem identifiers (`python`, `node`, `rust`, `dotnet`, `lean`) that expand to the full set of package registry domains for that ecosystem. The built-in allowlist includes: Azure DevOps, GitHub, Microsoft identity, Azure services, Application Insights, and MCP-specific endpoints for each enabled server.
+`allowed` accepts raw domain patterns (wildcards supported) or ecosystem identifiers that expand to curated domain sets for their ecosystem. Common identifiers: `python`, `node`, `rust`, `dotnet`, `go`, `java`, `ruby`, `swift`, `terraform`, `containers`, `lean`. See [`docs/network.md`](../docs/network.md#ecosystem-identifiers) for the full list. The built-in allowlist includes: Azure DevOps, GitHub, Microsoft identity, Azure services, Application Insights, and MCP-specific endpoints for each enabled server.
 
 ### Step 16 — Parameters (optional)
 
