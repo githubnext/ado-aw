@@ -136,7 +136,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── mod.rs        # Shared ADO REST helpers used by all lifecycle commands (`enable`, `disable`, `list`, `status`, `run`, `remove`, `secrets`)
 │   │   └── discovery.rs  # Project-scope pipeline discovery (`--all-repos` / `--source` flags)
 │   ├── audit/            # `ado-aw audit` command — downloads pipeline artifacts and runs analyzers
-│   │   ├── mod.rs        # Shared audit data types; AuditData report model
+│   │   ├── mod.rs        # Module entry; declares submodules; re-exports `model::*` and CLI helpers
 │   │   ├── cli.rs        # CLI entry point for the `audit` subcommand
 │   │   ├── model.rs      # AuditData and supporting report structs
 │   │   ├── findings.rs   # Finding severity levels and structured finding types
@@ -377,9 +377,6 @@ index to jump to the right page.
   framework: detection-based transformations, automatic source
   rewrite on breaking-change updates, contributor workflow for
   adding codemods.
-- [`docs/ado-script.md`](docs/ado-script.md) — `ado-script` workspace
-  (`scripts/ado-script/`): the bundled TypeScript runtime helpers
-  (`gate.js`, `import.js`, the execution-context `exec-context-*.js`
 - [`docs/ado-script.md`](docs/ado-script.md) — `ado-script` workspace
   (`scripts/ado-script/`): the bundled TypeScript runtime helpers
   (`gate.js`, `import.js`, the execution-context `exec-context-*.js`
