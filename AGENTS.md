@@ -59,6 +59,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   ├── compile/          # Pipeline compilation module
 │   │   ├── mod.rs        # Module entry point and Compiler trait
 │   │   ├── common.rs     # Shared helpers across targets
+│   │   ├── ado_bundle.rs # Registry of ado-script bundles and their compile-time env contracts: Bundle enum (path + auth), apply_bundle_auth() (single chokepoint projecting SYSTEM_ACCESSTOKEN into every REST-calling bundle step), token_source_for() (System.AccessToken vs SC_WRITE_TOKEN selection), is_redundant_ado_mirror() (identifies auto-injected ADO predefined var re-projections)
 │   │   ├── agentic_pipeline.rs # Canonical Setup → Agent → Detection → (ManualReview?) → SafeOutputs(+SafeOutputs_Reviewed?) → Teardown → Conclusion shape (Conclusion emitted when configured; shared by every target); BuiltPipelineContext, build_pipeline_context, build_canonical_jobs, per-job builders incl. build_manual_review_job + SafeOutputsVariant split, fold_agent_conditions, agent_job_variables_hoist
 │   │   ├── ado_bundle.rs # ado-script bundle registry: Bundle enum + on-disk path/auth, apply_bundle_auth() chokepoint (ensures SYSTEM_ACCESSTOKEN is projected for every bearer-requiring step), token_source_for() (unifies System.AccessToken vs SC_WRITE_TOKEN selection)
 │   │   ├── standalone.rs # Standalone pipeline compiler
