@@ -509,14 +509,14 @@ fn resolver_step_typed() -> Step {
 /// cannot be shadowed. All non-secret inputs (`--app-id`, `--owner`,
 /// `--output-var`, `--repositories`, `--api-url`) are therefore passed as
 /// single-quoted argv flags. Values are single-quoted (with `'\''` escaping) so
-/// a value containing shell metacharacters — or the runtime-substituted
-/// variable-form `$(app-id)` value — cannot break out or trigger command
+/// a value containing shell metacharacters cannot break out or trigger command
 /// substitution.
 ///
 /// The **private key** stays in the masked env (`GH_APP_PRIVATE_KEY:
 /// $(secret)`): a secret must never appear on a command line (it would show in
 /// process listings and the rendered step script), and ADO only maps a secret
-/// variable into env on explicit reference.
+/// variable into env on explicit reference. Its variable name is the
+/// `private-key` override or the compiler-owned default `GITHUB_APP_PRIVATE_KEY`.
 ///
 /// The step runs OUTSIDE the AWF sandbox and reaches `api.github.com` (or
 /// `--api-url`) over the build agent pool's normal network — no AWF allowlist
@@ -525,20 +525,10 @@ pub fn github_app_token_step_typed(
     cfg: &crate::compile::types::GithubAppTokenConfig,
 ) -> Result<Step> {
     cfg.validate()?;
-    // A numeric App ID is a compile-time literal; a variable-name App ID is an
-    // ADO macro substituted (as text) at runtime. Both are single-quoted so the
-    // (compile-time or runtime) value can't expand or word-split.
-    let app_id_arg = if cfg.app_id_is_literal() {
-        sh_single_quote(&cfg.app_id)
-    } else {
-        // `cfg.app_id` is a validated env-var name (no quotes/metachars), so
-        // the macro token itself is safe to embed inside single quotes; ADO
-        // replaces `$(NAME)` with the value before bash runs, and the single
-        // quotes stop that value from expanding.
-        format!("'$({})'", cfg.app_id)
-    };
+    // The App ID is a non-secret literal (numeric App ID or alphanumeric client
+    // ID); single-quote it so any character is passed through as one argv token.
     let mut args: Vec<String> = vec![
-        format!("--app-id {app_id_arg}"),
+        format!("--app-id {}", sh_single_quote(&cfg.app_id)),
         format!("--owner {}", sh_single_quote(&cfg.owner)),
         // Pin the output variable name (a compiler constant) as argv so no
         // pipeline variable can redirect the minted token.
@@ -562,10 +552,12 @@ pub fn github_app_token_step_typed(
     );
     let step = BashStep::new("Mint GitHub App token (Copilot engine auth)", script)
         .with_condition(Condition::Succeeded)
-        // Only the secret rides in env — masked, never on the command line.
+        // Only the secret rides in env — masked, never on the command line. Its
+        // variable name is the `private-key` override or the default
+        // `GITHUB_APP_PRIVATE_KEY` (see `GithubAppTokenConfig::private_key_var`).
         .with_env(
             "GH_APP_PRIVATE_KEY",
-            EnvValue::secret(cfg.private_key.clone()),
+            EnvValue::secret(cfg.private_key_var().to_string()),
         );
     Ok(Step::Bash(step))
 }
@@ -1197,8 +1189,8 @@ mod tests {
     fn github_app_token_step_renders_node_invocation_and_env() {
         use crate::compile::types::GithubAppTokenConfig;
         let cfg = GithubAppTokenConfig {
-            app_id: "GH_APP_ID".to_string(),
-            private_key: "GH_APP_KEY".to_string(),
+            app_id: "1234567".to_string(),
+            private_key: Some("GH_APP_KEY".to_string()),
             owner: "octo-org".to_string(),
             repositories: vec!["octo-repo".to_string(), "other-repo".to_string()],
             api_url: None,
@@ -1214,11 +1206,11 @@ mod tests {
             "script must invoke the bundle:\n{}",
             step.script
         );
-        // Non-secret inputs are argv flags (shadow-proof), single-quoted.
-        // A variable-name app-id becomes a single-quoted $(macro).
+        // Non-secret inputs are single-quoted argv flags (shadow-proof). The
+        // app-id is a literal.
         assert!(
-            step.script.contains("--app-id '$(GH_APP_ID)'"),
-            "variable-form app-id must be a single-quoted macro arg:\n{}",
+            step.script.contains("--app-id '1234567'"),
+            "app-id must be a single-quoted literal arg:\n{}",
             step.script
         );
         assert!(
@@ -1241,6 +1233,7 @@ mod tests {
         // No api-url configured ⇒ no --api-url flag (bundle uses its default).
         assert!(!step.script.contains("--api-url"));
         // Only the private key rides in env — as a masked secret, never argv.
+        // Here the `private-key` override names GH_APP_KEY.
         assert!(matches!(
             step.env.get("GH_APP_PRIVATE_KEY"),
             Some(EnvValue::Secret(v)) if v == "GH_APP_KEY"
@@ -1254,11 +1247,55 @@ mod tests {
     }
 
     #[test]
+    fn github_app_token_step_defaults_private_key_var() {
+        use crate::compile::types::GithubAppTokenConfig;
+        // private-key omitted ⇒ the masked secret env uses the compiler default.
+        let cfg = GithubAppTokenConfig {
+            app_id: "1234567".to_string(),
+            private_key: None,
+            owner: "octo-org".to_string(),
+            repositories: vec![],
+            api_url: None,
+            skip_token_revocation: false,
+        };
+        let Step::Bash(step) = github_app_token_step_typed(&cfg).unwrap() else {
+            panic!("expected a bash step");
+        };
+        assert!(matches!(
+            step.env.get("GH_APP_PRIVATE_KEY"),
+            Some(EnvValue::Secret(v)) if v == "GITHUB_APP_PRIVATE_KEY"
+        ));
+    }
+
+    #[test]
+    fn github_app_token_step_accepts_client_id_app_id() {
+        use crate::compile::types::GithubAppTokenConfig;
+        // An alphanumeric client ID is a valid literal app-id (regression guard
+        // against the old digits-only "is it a variable?" heuristic).
+        let cfg = GithubAppTokenConfig {
+            app_id: "Iv23liABCdef".to_string(),
+            private_key: None,
+            owner: "octo-org".to_string(),
+            repositories: vec![],
+            api_url: None,
+            skip_token_revocation: false,
+        };
+        let Step::Bash(step) = github_app_token_step_typed(&cfg).unwrap() else {
+            panic!("expected a bash step");
+        };
+        assert!(
+            step.script.contains("--app-id 'Iv23liABCdef'"),
+            "client-id app-id must be a single-quoted literal, not a macro:\n{}",
+            step.script
+        );
+    }
+
+    #[test]
     fn github_app_token_step_renders_literal_app_id_and_api_url() {
         use crate::compile::types::GithubAppTokenConfig;
         let cfg = GithubAppTokenConfig {
             app_id: "1234567".to_string(),
-            private_key: "GH_APP_KEY".to_string(),
+            private_key: Some("GH_APP_KEY".to_string()),
             owner: "octo-org".to_string(),
             repositories: vec![],
             api_url: Some("https://ghe.example.com/api/v3".to_string()),
@@ -1286,8 +1323,8 @@ mod tests {
     fn github_app_token_step_omits_repositories_when_empty() {
         use crate::compile::types::GithubAppTokenConfig;
         let cfg = GithubAppTokenConfig {
-            app_id: "GH_APP_ID".to_string(),
-            private_key: "GH_APP_KEY".to_string(),
+            app_id: "1234567".to_string(),
+            private_key: Some("GH_APP_KEY".to_string()),
             owner: "octo-org".to_string(),
             repositories: vec![],
             api_url: None,
@@ -1304,7 +1341,7 @@ mod tests {
         use crate::compile::types::GithubAppTokenConfig;
         let cfg = GithubAppTokenConfig {
             app_id: "bad var".to_string(),
-            private_key: "GH_APP_KEY".to_string(),
+            private_key: Some("GH_APP_KEY".to_string()),
             owner: "octo-org".to_string(),
             repositories: vec![],
             api_url: None,
@@ -1318,8 +1355,8 @@ mod tests {
         use crate::compile::ir::condition::Condition;
         use crate::compile::types::GithubAppTokenConfig;
         let cfg = GithubAppTokenConfig {
-            app_id: "GH_APP_ID".to_string(),
-            private_key: "GH_APP_KEY".to_string(),
+            app_id: "1234567".to_string(),
+            private_key: Some("GH_APP_KEY".to_string()),
             owner: "octo-org".to_string(),
             repositories: vec![],
             api_url: Some("https://ghe.example.com/api/v3".to_string()),
@@ -1356,8 +1393,8 @@ mod tests {
         // caller can't emit a revoke step from an invalid config.
         use crate::compile::types::GithubAppTokenConfig;
         let cfg = GithubAppTokenConfig {
-            app_id: "GH_APP_ID".to_string(),
-            private_key: "GH_APP_KEY".to_string(),
+            app_id: "1234567".to_string(),
+            private_key: Some("GH_APP_KEY".to_string()),
             owner: "octo-org".to_string(),
             repositories: vec![],
             api_url: Some("http://insecure.example.com/api/v3".to_string()),

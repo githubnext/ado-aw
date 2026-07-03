@@ -381,18 +381,21 @@ pub struct EngineOptions {
 /// ```
 #[derive(Debug, Deserialize, Clone, SanitizeConfig)]
 pub struct GithubAppTokenConfig {
-    /// The GitHub App ID. Accepts either a **literal** numeric App ID
-    /// (e.g. `1234567`, quoted or unquoted) — rendered verbatim — or the
-    /// **name** of an ADO pipeline variable holding it (e.g. `GH_APP_ID`) —
-    /// rendered as a `$(NAME)` macro. The App ID is not secret; the variable
-    /// form is offered for parity with the private key.
+    /// The GitHub App ID — a **literal** value, either a numeric App ID
+    /// (e.g. `1234567`, quoted or unquoted) or an alphanumeric client ID
+    /// (e.g. `Iv23liABC…`). The App ID is not secret (it is visible in the
+    /// App's settings and is the JWT `iss`), so it is plain per-app config like
+    /// `owner` — it is emitted verbatim, never indirected through a variable.
     #[serde(rename = "app-id", deserialize_with = "de_string_or_number")]
     pub app_id: String,
-    /// Name of the ADO **secret** pipeline variable holding the GitHub App
-    /// private key (PEM). Rendered as a `$(NAME)` macro; the key material is
-    /// never inlined.
-    #[serde(rename = "private-key")]
-    pub private_key: String,
+    /// Optional name of the ADO **secret** pipeline variable holding the GitHub
+    /// App private key (PEM). Defaults to
+    /// [`DEFAULT_GITHUB_APP_PRIVATE_KEY_VAR`] when omitted — the compiler owns
+    /// the variable name, exactly like `GITHUB_TOKEN`, so the common case just
+    /// runs `ado-aw secrets set GITHUB_APP_PRIVATE_KEY …`. Set this only to
+    /// point at a differently-named secret. The key material is never inlined.
+    #[serde(default, rename = "private-key")]
+    pub private_key: Option<String>,
     /// GitHub installation owner (organization or user login) the App is
     /// installed on.
     pub owner: String,
@@ -414,10 +417,16 @@ pub struct GithubAppTokenConfig {
     pub skip_token_revocation: bool,
 }
 
+/// Default name of the ADO secret pipeline variable holding the GitHub App
+/// private key when `engine.github-app-token.private-key` is omitted. The
+/// compiler owns this name (mirroring the fixed `GITHUB_TOKEN` contract) so the
+/// common case needs no `private-key` line — set the value with
+/// `ado-aw secrets set GITHUB_APP_PRIVATE_KEY …`.
+pub const DEFAULT_GITHUB_APP_PRIVATE_KEY_VAR: &str = "GITHUB_APP_PRIVATE_KEY";
+
 /// Deserialize a scalar that may be a YAML string **or** an integer into a
 /// `String`. Used for `github-app-token.app-id` so an unquoted numeric App ID
-/// (`app-id: 1234567`) is accepted alongside a quoted string or a variable
-/// name.
+/// (`app-id: 1234567`) is accepted alongside a quoted string or client ID.
 fn de_string_or_number<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -426,7 +435,7 @@ where
     impl serde::de::Visitor<'_> for StringOrNumber {
         type Value = String;
         fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str("a GitHub App ID (integer) or an ADO variable name (string)")
+            f.write_str("a GitHub App ID (numeric) or client ID (string)")
         }
         fn visit_str<E>(self, v: &str) -> Result<String, E> {
             Ok(v.to_string())
@@ -445,34 +454,45 @@ where
 }
 
 impl GithubAppTokenConfig {
-    /// Whether `app-id` is a literal numeric App ID (rendered verbatim) rather
-    /// than an ADO variable name (rendered as a `$(NAME)` macro).
-    pub fn app_id_is_literal(&self) -> bool {
-        !self.app_id.is_empty() && self.app_id.chars().all(|c| c.is_ascii_digit())
+    /// The ADO secret pipeline-variable name that holds the private key — the
+    /// `private-key` override if set, else [`DEFAULT_GITHUB_APP_PRIVATE_KEY_VAR`].
+    pub fn private_key_var(&self) -> &str {
+        self.private_key
+            .as_deref()
+            .unwrap_or(DEFAULT_GITHUB_APP_PRIVATE_KEY_VAR)
     }
 
-    /// Validate the referenced variable names / literal App ID, the GitHub
-    /// owner/repository name segments, and the optional API URL. `private-key`
-    /// must be a valid env-var name (rendered as a `$(NAME)` macro); `app-id`
-    /// may additionally be an all-digits literal; `owner` and each
-    /// `repositories` entry must be a single safe path segment (GitHub name
-    /// rules); `api-url` (when set) must be an `https://` URL with a host.
+    /// Validate the literal App ID, the optional `private-key` override variable
+    /// name, the GitHub owner/repository name segments, and the optional API
+    /// URL. `app-id` must be a non-empty `[A-Za-z0-9._-]` literal (covers
+    /// numeric App IDs and alphanumeric/`Iv1.`-style client IDs);
+    /// `private-key` (when set) must be a valid env-var name; `owner` and each
+    /// `repositories` entry must be a single safe path segment; `api-url` (when
+    /// set) must be an `https://` URL with a host.
     pub fn validate(&self) -> anyhow::Result<()> {
         use crate::validate::{is_safe_path_segment, is_valid_env_var_name};
-        if !(self.app_id_is_literal() || is_valid_env_var_name(&self.app_id)) {
+        if self.app_id.is_empty()
+            || !self
+                .app_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        {
             anyhow::bail!(
-                "engine.github-app-token.app-id '{}' must be either a numeric App ID \
-                 (e.g. 1234567) or an ADO variable name matching [A-Za-z_][A-Za-z0-9_]* \
-                 (rendered as a $(NAME) macro).",
+                "engine.github-app-token.app-id '{}' must be a non-empty GitHub App ID \
+                 (numeric, e.g. 1234567) or client ID (e.g. Iv23liABC), containing only \
+                 [A-Za-z0-9._-]. It is a literal value, not a variable name.",
                 self.app_id
             );
         }
-        if !is_valid_env_var_name(&self.private_key) {
+        if let Some(private_key) = &self.private_key
+            && !is_valid_env_var_name(private_key)
+        {
             anyhow::bail!(
                 "engine.github-app-token.private-key '{}' must be an ADO variable name \
-                 matching [A-Za-z_][A-Za-z0-9_]* (it is rendered as a $(NAME) macro; \
-                 store the PEM with `ado-aw secrets set`).",
-                self.private_key
+                 matching [A-Za-z_][A-Za-z0-9_]* (it names the secret variable holding the \
+                 PEM; omit it to use the default '{}').",
+                private_key,
+                DEFAULT_GITHUB_APP_PRIVATE_KEY_VAR
             );
         }
         if !is_safe_path_segment(&self.owner) {
@@ -2653,7 +2673,7 @@ timeout-minutes: 60
         let yaml = r#"
 id: copilot
 github-app-token:
-  app-id: GH_APP_ID
+  app-id: "1234567"
   private-key: GH_APP_KEY
   owner: octo-org
   repositories: [octo-repo, other-repo]
@@ -2661,24 +2681,43 @@ github-app-token:
         let opts: EngineOptions = serde_yaml::from_str(yaml).unwrap();
         let ec = EngineConfig::Full(Box::new(opts));
         let gat = ec.github_app_token().expect("github-app-token present");
-        assert_eq!(gat.app_id, "GH_APP_ID");
-        assert_eq!(gat.private_key, "GH_APP_KEY");
+        assert_eq!(gat.app_id, "1234567");
+        // Explicit private-key override.
+        assert_eq!(gat.private_key.as_deref(), Some("GH_APP_KEY"));
+        assert_eq!(gat.private_key_var(), "GH_APP_KEY");
         assert_eq!(gat.owner, "octo-org");
         assert_eq!(gat.repositories, vec!["octo-repo", "other-repo"]);
         assert!(gat.api_url.is_none());
         assert!(!gat.skip_token_revocation);
-        assert!(!gat.app_id_is_literal());
         gat.validate().expect("valid config passes validation");
     }
 
     #[test]
-    fn test_engine_github_app_token_literal_app_id_and_api_url() {
+    fn test_engine_github_app_token_defaults_private_key_var() {
+        // private-key omitted ⇒ default compiler-owned secret variable name.
+        let yaml = r#"
+id: copilot
+github-app-token:
+  app-id: 1234567
+  owner: octo-org
+"#;
+        let opts: EngineOptions = serde_yaml::from_str(yaml).unwrap();
+        let gat = EngineConfig::Full(Box::new(opts))
+            .github_app_token()
+            .unwrap()
+            .clone();
+        assert!(gat.private_key.is_none());
+        assert_eq!(gat.private_key_var(), "GITHUB_APP_PRIVATE_KEY");
+        gat.validate().expect("default private-key is valid");
+    }
+
+    #[test]
+    fn test_engine_github_app_token_unquoted_numeric_and_api_url() {
         // Unquoted numeric app-id + api-url + skip-token-revocation.
         let yaml = r#"
 id: copilot
 github-app-token:
   app-id: 1234567
-  private-key: GH_APP_KEY
   owner: octo-org
   api-url: https://ghe.example.com/api/v3
   skip-token-revocation: true
@@ -2689,10 +2728,28 @@ github-app-token:
             .unwrap()
             .clone();
         assert_eq!(gat.app_id, "1234567");
-        assert!(gat.app_id_is_literal());
         assert_eq!(gat.api_url.as_deref(), Some("https://ghe.example.com/api/v3"));
         assert!(gat.skip_token_revocation);
-        gat.validate().expect("literal app-id + https api-url is valid");
+        gat.validate().expect("numeric app-id + https api-url is valid");
+    }
+
+    #[test]
+    fn test_engine_github_app_token_accepts_client_id() {
+        // Alphanumeric client ID is a valid literal app-id (regression guard
+        // against the removed digits-only heuristic).
+        let yaml = r#"
+id: copilot
+github-app-token:
+  app-id: Iv23liABCdef
+  owner: octo-org
+"#;
+        let opts: EngineOptions = serde_yaml::from_str(yaml).unwrap();
+        let gat = EngineConfig::Full(Box::new(opts))
+            .github_app_token()
+            .unwrap()
+            .clone();
+        assert_eq!(gat.app_id, "Iv23liABCdef");
+        gat.validate().expect("client-id app-id is valid");
     }
 
     #[test]
@@ -2700,8 +2757,7 @@ github-app-token:
         let yaml = r#"
 id: copilot
 github-app-token:
-  app-id: GH_APP_ID
-  private-key: GH_APP_KEY
+  app-id: 1234567
   owner: octo-org
   api-url: http://insecure.example.com/api/v3
 "#;
@@ -2727,8 +2783,7 @@ github-app-token:
         let yaml = r#"
 id: copilot
 github-app-token:
-  app-id: GH_APP_ID
-  private-key: GH_APP_KEY
+  app-id: 1234567
   owner: octo-org
 "#;
         let opts: EngineOptions = serde_yaml::from_str(yaml).unwrap();
@@ -2738,10 +2793,10 @@ github-app-token:
     }
 
     #[test]
-    fn test_github_app_token_validate_rejects_bad_var_name() {
+    fn test_github_app_token_validate_rejects_bad_app_id() {
         let gat = GithubAppTokenConfig {
-            app_id: "not a var".to_string(),
-            private_key: "GH_APP_KEY".to_string(),
+            app_id: "not a valid id".to_string(),
+            private_key: None,
             owner: "octo-org".to_string(),
             repositories: vec![],
             api_url: None,
@@ -2752,10 +2807,24 @@ github-app-token:
     }
 
     #[test]
+    fn test_github_app_token_validate_rejects_bad_private_key_override() {
+        let gat = GithubAppTokenConfig {
+            app_id: "1234567".to_string(),
+            private_key: Some("not a var".to_string()),
+            owner: "octo-org".to_string(),
+            repositories: vec![],
+            api_url: None,
+            skip_token_revocation: false,
+        };
+        let err = gat.validate().unwrap_err().to_string();
+        assert!(err.contains("private-key"), "unexpected error: {err}");
+    }
+
+    #[test]
     fn test_github_app_token_validate_rejects_bad_owner() {
         let gat = GithubAppTokenConfig {
-            app_id: "GH_APP_ID".to_string(),
-            private_key: "GH_APP_KEY".to_string(),
+            app_id: "1234567".to_string(),
+            private_key: None,
             owner: "octo/org".to_string(),
             repositories: vec![],
             api_url: None,
@@ -2768,8 +2837,8 @@ github-app-token:
     #[test]
     fn test_github_app_token_validate_rejects_bad_repository() {
         let gat = GithubAppTokenConfig {
-            app_id: "GH_APP_ID".to_string(),
-            private_key: "GH_APP_KEY".to_string(),
+            app_id: "1234567".to_string(),
+            private_key: None,
             owner: "octo-org".to_string(),
             repositories: vec!["ok-repo".to_string(), "bad;repo".to_string()],
             api_url: None,

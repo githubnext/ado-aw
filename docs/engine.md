@@ -56,22 +56,28 @@ adapted to Azure DevOps.
 engine:
   id: copilot
   github-app-token:
-    app-id: 1234567            # literal App ID (or an ADO variable name)
-    private-key: GH_APP_KEY    # ADO *secret* variable name holding the PEM
+    app-id: 1234567            # literal App ID or client ID (required)
     owner: octo-org            # installation owner (org or user login)
     repositories: [octo-repo]  # optional; scopes the token to these repos
     # api-url: https://ghe.example.com/api/v3   # optional; GHES base URL
     # skip-token-revocation: false              # optional; revoke by default
+    # private-key: MY_SECRET_VAR                # optional override; see below
+```
+
+Store the private key once and you're done:
+
+```bash
+ado-aw secrets set GITHUB_APP_PRIVATE_KEY "$(cat app-private-key.pem)"
 ```
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `app-id` | yes | The GitHub App ID. Accepts a **literal** numeric App ID (e.g. `1234567`, quoted or unquoted) rendered verbatim, **or** the name of an ADO pipeline variable holding it (e.g. `GH_APP_ID`) rendered as a `$(NAME)` macro. The App ID is not secret. |
-| `private-key` | yes | Name of the ADO **secret** pipeline variable holding the GitHub App private key (PEM). Rendered as a `$(NAME)` macro; the key material is never inlined. |
+| `app-id` | yes | The GitHub App ID — a **literal** value: either a numeric App ID (e.g. `1234567`, quoted or unquoted) or an alphanumeric client ID (e.g. `Iv23liABC…`). The App ID is not secret (it is plain per-app config, like `owner`), so it is written verbatim, not indirected through a variable. |
 | `owner` | yes | GitHub installation owner (organization or user login). |
 | `repositories` | no | Repository names (owner-relative) to scope the installation token to. Omit to span every repository the installation grants. |
 | `api-url` | no | GitHub API base URL. Defaults to `https://api.github.com` (GHEC). For GitHub Enterprise Server, set the `/api/v3` base URL (e.g. `https://ghe.example.com/api/v3`). Must be an `https://` URL. |
 | `skip-token-revocation` | no | When `true`, do not revoke the minted token after the Copilot run. Defaults to `false` (the token is revoked — see below). |
+| `private-key` | no | Name of the ADO **secret** pipeline variable holding the private key (PEM). **Defaults to `GITHUB_APP_PRIVATE_KEY`** — the compiler owns the name, exactly like `GITHUB_TOKEN`, so the common case sets no field and just runs `ado-aw secrets set GITHUB_APP_PRIVATE_KEY …`. Set this only to point at a differently-named secret (e.g. reusing an existing variable). |
 
 #### Setup
 
@@ -80,16 +86,13 @@ engine:
    authentication/billing in your tenant. Copilot capability is granted on the
    **App/org side** — the installation token inherits it automatically; you do
    not (and cannot) configure it here.
-2. Store the private key as an ADO **secret** pipeline variable (the App ID is
-   not secret — you may inline it or, for parity, store it as a variable too):
+2. Store the private key as an ADO **secret** pipeline variable — the default
+   name `GITHUB_APP_PRIVATE_KEY` unless you set a `private-key` override:
 
    ```bash
-   ado-aw secrets set GH_APP_KEY "$(cat app-private-key.pem)"
-   # optional, if you prefer a variable over an inline app-id:
-   ado-aw secrets set GH_APP_ID "1234567"
+   ado-aw secrets set GITHUB_APP_PRIVATE_KEY "$(cat app-private-key.pem)"
    ```
-3. Set `engine.github-app-token` (inline `app-id` or reference the variable
-   name) and compile.
+3. Set `engine.github-app-token` (`app-id` + `owner` at minimum) and compile.
 
 #### What the compiler generates
 

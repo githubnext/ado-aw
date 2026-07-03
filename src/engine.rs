@@ -642,10 +642,10 @@ pub fn github_token_source_var(engine_config: &EngineConfig) -> &'static str {
 pub fn github_app_token_secrecy_advisory(engine_config: &EngineConfig) -> Option<String> {
     engine_config.github_app_token().map(|cfg| {
         format!(
-            "engine.github-app-token.private-key references pipeline variable '{0}'. \
-             Ensure '{0}' is stored as a SECRET (e.g. `ado-aw secrets set {0} \"$(cat key.pem)\"`); \
-             the compiler validates the variable name but cannot verify it is marked secret.",
-            cfg.private_key
+            "engine.github-app-token uses pipeline variable '{0}' for the GitHub App \
+             private key. Ensure '{0}' is stored as a SECRET (e.g. `ado-aw secrets set {0} \
+             \"$(cat key.pem)\"`); the compiler cannot verify a variable is marked secret.",
+            cfg.private_key_var()
         )
     })
 }

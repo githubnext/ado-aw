@@ -7326,8 +7326,7 @@ const GITHUB_APP_TOKEN_FM: &str = r#"
 engine:
   id: copilot
   github-app-token:
-    app-id: GH_APP_ID
-    private-key: GH_APP_KEY
+    app-id: 1234567
     owner: octo-org
     repositories: [octo-repo]
 "#;
@@ -7367,13 +7366,13 @@ fn assert_github_app_token_wiring(compiled: &str) {
     );
 
     // Non-secret inputs are single-quoted argv flags (shadow-proof); the app-id
-    // (variable form) is a single-quoted macro and the private key is the only
-    // GH_APP_* env var (a masked secret). App ID / key never inlined.
+    // is a single-quoted literal and the private key (default variable name,
+    // since the fixture omits `private-key`) is the only GH_APP_* env var.
     assert!(
-        compiled.contains("--app-id '$(GH_APP_ID)'"),
-        "variable-form app-id must be a single-quoted argv macro:\n{compiled}"
+        compiled.contains("--app-id '1234567'"),
+        "app-id must be a single-quoted literal argv flag:\n{compiled}"
     );
-    assert!(compiled.contains("GH_APP_PRIVATE_KEY: $(GH_APP_KEY)"));
+    assert!(compiled.contains("GH_APP_PRIVATE_KEY: $(GITHUB_APP_PRIVATE_KEY)"));
     // The private key is the ONLY GH_APP_* env var; every other input is argv.
     for key in [
         "GH_APP_ID:",
@@ -7451,7 +7450,7 @@ fn test_no_github_app_token_by_default() {
 
 #[test]
 fn test_github_app_token_skip_revocation() {
-    let content = "---\nname: \"GH App No Revoke\"\ndescription: \"gh app token, no revoke\"\nengine:\n  id: copilot\n  github-app-token:\n    app-id: GH_APP_ID\n    private-key: GH_APP_KEY\n    owner: octo-org\n    skip-token-revocation: true\n---\n\n## Agent\n\nDo work.\n";
+    let content = "---\nname: \"GH App No Revoke\"\ndescription: \"gh app token, no revoke\"\nengine:\n  id: copilot\n  github-app-token:\n    app-id: 1234567\n    owner: octo-org\n    skip-token-revocation: true\n---\n\n## Agent\n\nDo work.\n";
     let compiled = compile_inline_agent("ghapp-norevoke", content);
     // Mint step still present in Agent + Detection.
     assert_eq!(
@@ -7473,6 +7472,7 @@ fn test_github_app_token_skip_revocation() {
 
 #[test]
 fn test_github_app_token_literal_app_id_and_api_url() {
+    // This fixture also exercises the private-key OVERRIDE (explicit GH_APP_KEY).
     let content = "---\nname: \"GH App Literal\"\ndescription: \"literal app id + ghes\"\nengine:\n  id: copilot\n  github-app-token:\n    app-id: 1234567\n    private-key: GH_APP_KEY\n    owner: octo-org\n    api-url: https://ghe.example.com/api/v3\n---\n\n## Agent\n\nDo work.\n";
     let compiled = compile_inline_agent("ghapp-literal", content);
     // Numeric app-id is emitted verbatim as a single-quoted argv flag, not a macro.
@@ -7483,6 +7483,15 @@ fn test_github_app_token_literal_app_id_and_api_url() {
     assert!(
         !compiled.contains("--app-id '$("),
         "literal app-id must not be treated as a variable macro:\n{compiled}"
+    );
+    // The private-key override names GH_APP_KEY as the masked secret env var.
+    assert!(
+        compiled.contains("GH_APP_PRIVATE_KEY: $(GH_APP_KEY)"),
+        "private-key override must source the secret from $(GH_APP_KEY):\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("$(GITHUB_APP_PRIVATE_KEY)"),
+        "override must replace the default private-key variable:\n{compiled}"
     );
     // GHES api-url flows into both mint and revoke steps as an argv flag.
     // Mint: `... --api-url '...'`; revoke: `revoke --api-url '...'`.
