@@ -60,6 +60,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── mod.rs        # Module entry point and Compiler trait
 │   │   ├── common.rs     # Shared helpers across targets
 │   │   ├── agentic_pipeline.rs # Canonical Setup → Agent → Detection → (ManualReview?) → SafeOutputs(+SafeOutputs_Reviewed?) → Teardown → Conclusion shape (Conclusion emitted when configured; shared by every target); BuiltPipelineContext, build_pipeline_context, build_canonical_jobs, per-job builders incl. build_manual_review_job + SafeOutputsVariant split, fold_agent_conditions, agent_job_variables_hoist
+│   │   ├── ado_bundle.rs # ado-script bundle registry: Bundle enum + on-disk path/auth, apply_bundle_auth() chokepoint (ensures SYSTEM_ACCESSTOKEN is projected for every bearer-requiring step), token_source_for() (unifies System.AccessToken vs SC_WRITE_TOKEN selection)
 │   │   ├── standalone.rs # Standalone pipeline compiler
 │   │   ├── standalone_ir.rs # Standalone target typed-IR builder
 │   │   ├── onees.rs      # 1ES Pipeline Template compiler
@@ -379,7 +380,8 @@ index to jump to the right page.
   (`scripts/ado-script/`): the bundled TypeScript runtime helpers
   (`gate.js`, `import.js`, the execution-context `exec-context-*.js`
   bundles, `conclusion.js`, and `approval-summary.js`), schemars-driven
-  type codegen, and the A2 design decision.
+  type codegen, the A2 design decision, and the bundle env contract
+  modelled in `src/compile/ado_bundle.rs`.
 - [`docs/local-development.md`](docs/local-development.md) — local development
   setup notes.
 
