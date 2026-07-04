@@ -725,7 +725,7 @@ When generating the agent file:
 
 1. **Produce exactly one `.md` file.** Do not create separate documentation, architecture notes, or runbooks.
 2. **Respect existing repository conventions** for file placement. Look at where existing pipeline YAML files or agent markdown files are located in the repo. If no convention exists, ask the user where they'd like the file placed.
-3. **Omit optional fields when they match defaults** — no `engine:` for `claude-opus-4.7`, no `workspace:` for `root`, no `target:` for `standalone`.
+3. **Omit optional fields when they match defaults** — no `engine:` when only the default `copilot` engine with model `claude-opus-4.7` is needed, no `workspace:` for `root`, no `target:` for `standalone`.
 4. **`permissions.write` is optional** — the Stage 3 executor defaults to `$(System.AccessToken)`. Only add `permissions.write` when the task requires cross-org writes or named-identity attribution.
 
 ## Compilation
