@@ -30,7 +30,8 @@ engine:
 | `api-target` | string | *(none)* | Custom API endpoint hostname for GHES/GHEC (e.g., `"api.acme.ghe.com"`). Adds `--api-target <hostname>` to the CLI invocation and adds the hostname to the AWF network allowlist. |
 | `args` | list | `[]` | Custom CLI arguments appended after compiler-generated args. Subject to shell-safety validation and blocked from overriding compiler-controlled flags (see [`args` reference](#args) below). |
 | `env` | map | *(none)* | Engine-specific environment variables merged into the sandbox step's `env:` block. Keys must be valid env var names; values must not contain ADO expressions (`$(`, `${{`) or pipeline command injection (`##vso[`). Compiler-controlled keys are blocked (see [`env` reference](#env) below). |
-| `command` | string | *(none)* | Custom engine executable path (skips default NuGet installation). The path must be accessible inside the AWF container (e.g., `/tmp/...` or workspace-mounted paths). |
+| `command` | string | *(none)* | Custom engine executable path (skips the default engine binary installation). The path must be accessible inside the AWF container (e.g., `/tmp/...` or workspace-mounted paths). |
+| `github-app-token` | map | *(none)* | GitHub App-backed Copilot authentication. When set, the compiler mints a short-lived installation token at runtime and sources `GITHUB_TOKEN` from it instead of the operator-provided secret variable. See [`github-app-token`](#github-app-token) below. Copilot engine only — rejected at compile time for any other `engine.id`. |
 
 
 ### `timeout-minutes`
@@ -79,9 +80,11 @@ The `env` map injects additional environment variables into the sandbox step's `
 import { Aside } from '@astrojs/starlight/components';
 
 <Aside type="caution">
-**Literal values only.** The compiler rejects any value that contains ADO macro expressions (`$(...)`, `${{...}}`, `$[...]`) or pipeline command injection markers (`##vso[`). Values are embedded verbatim into the generated YAML — ADO variable expansion does not apply here.
+**Literal values only (with one exception).** The compiler rejects any value that contains ADO macro expressions (`$(...)`, `${{...}}`, `$[...]`) or pipeline command injection markers (`##vso[`). Values are embedded verbatim into the generated YAML — ADO variable expansion does not apply here.
 
-To pass a pipeline variable's value to the agent, use a `setup:` step with an `env:` block on the ADO task, where ADO macro expansion is fully supported. See the [front-matter reference](/ado-aw/reference/front-matter/#custom-steps-injection) for custom step injection.
+**Exception: Copilot BYOM/BYOK provider keys.** The four Copilot provider environment variables — `COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_API_KEY`, `COPILOT_PROVIDER_BEARER_TOKEN`, and `COPILOT_PROVIDER_WIRE_API` — may carry an ADO macro (`$(...)`) expression so credentials can be sourced from a pipeline variable or a Setup-job output variable. See [Copilot BYOM / BYOK provider configuration](#copilot-byom--byok-provider-configuration).
+
+To pass any other pipeline variable's value to the agent, use a `setup:` step with an `env:` block on the ADO task, where ADO macro expansion is fully supported. See the [front-matter reference](/ado-aw/reference/front-matter/#custom-steps-injection) for custom step injection.
 </Aside>
 
 The compiler also blocks keys that it controls:
@@ -110,3 +113,133 @@ engine:
     STATIC_CONFIG: "production"
     FEATURE_FLAGS: "enable-new-parser,strict-mode"
 ```
+
+### `github-app-token`
+
+By default the Copilot engine authenticates using the `GITHUB_TOKEN` pipeline
+variable you store with `ado-aw secrets set GITHUB_TOKEN <pat>`. For
+organization-managed Copilot access you can instead have the compiler mint a
+**GitHub App installation token** at pipeline runtime — mirroring
+[gh-aw's](https://github.com/githubnext/gh-aw) `create-github-app-token` model,
+adapted to Azure DevOps.
+
+```yaml
+engine:
+  id: copilot
+  github-app-token:
+    app-id: 1234567            # literal App ID or client ID (required)
+    owner: octo-org            # installation owner (org or user login; required)
+    repositories: [octo-repo]  # optional — scopes the token to these repos only
+    # api-url: https://ghe.example.com/api/v3   # optional — GHES base URL
+    # skip-token-revocation: false              # optional — revoke token after use (default)
+    # private-key: MY_SECRET_VAR                # optional — override the default variable name
+```
+
+Store the App's private key once before running the pipeline:
+
+```bash
+ado-aw secrets set GITHUB_APP_PRIVATE_KEY "$(cat app-private-key.pem)"
+```
+
+**Fields:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `app-id` | Yes | The GitHub App ID — a **literal** value: either a numeric App ID (e.g. `1234567`, quoted or unquoted) or an alphanumeric client ID (e.g. `Iv23liABC…`). The App ID is not secret so it is written verbatim. |
+| `owner` | Yes | GitHub installation owner — organization or user login. |
+| `repositories` | No | Owner-relative repository names to scope the token to. Omit to span every repository the installation grants. |
+| `api-url` | No | GitHub API base URL. Defaults to `https://api.github.com`. For GitHub Enterprise Server, set the `/api/v3` base URL (e.g. `https://ghe.example.com/api/v3`). Must be an `https://` URL. |
+| `skip-token-revocation` | No | When `true`, do not revoke the minted token after the Copilot run. Defaults to `false` (token revoked after use). |
+| `private-key` | No | Name of the ADO **secret** pipeline variable holding the private key (PEM). **Defaults to `GITHUB_APP_PRIVATE_KEY`**. Set this only to point at a differently-named variable. |
+
+**What the compiler generates:**
+
+- A **token-mint step** runs immediately before the Copilot invocation in **both** the Agent and Detection jobs. It builds a short-lived RS256 JWT, resolves the GitHub App installation for `owner`, exchanges it for a scoped installation token, and exposes it as a masked same-job variable (`GITHUB_APP_TOKEN`).
+- The Copilot engine's `GITHUB_TOKEN` is sourced from `$(GITHUB_APP_TOKEN)` instead of the operator-provided static variable.
+- A **token-revocation step** runs after the Copilot invocation (unless `skip-token-revocation: true`), calling `DELETE /installation/token`. It is best-effort (`always()` + `continueOnError`) and never fails the build.
+- The minted token is **never** provided to SafeOutputs, user-authored `steps:`, Teardown, ManualReview, or Conclusion.
+
+The mint and revocation steps run **outside** the AWF network sandbox — they reach the GitHub API over the build agent pool's normal network, so no `network.allowed` entry is needed.
+
+<Aside type="caution" title="Secrecy is your responsibility">
+The compiler validates the private-key _variable name_ but cannot verify the ADO variable is actually marked as a secret. Every compile emits a non-blocking advisory:
+
+> `Warning: engine.github-app-token uses pipeline variable 'GITHUB_APP_PRIVATE_KEY' … Ensure 'GITHUB_APP_PRIVATE_KEY' is stored as a SECRET …`
+
+Heed it by storing the value with `ado-aw secrets set` (which stores it as a secret).
+</Aside>
+
+<Aside type="note" title="ADO permissions are separate">
+`engine.github-app-token` is for **Copilot engine authentication only**. It has no effect on `permissions.read` / `permissions.write` (Azure DevOps OAuth tokens), the `gh` CLI, GitHub MCP tool permissions, or any agent write access.
+</Aside>
+
+### Copilot BYOM / BYOK provider configuration
+
+The Copilot engine can route requests to an external LLM provider — for example
+a private **Azure Copilot Foundry** instance — instead of GitHub's default
+routing. This **Bring Your Own Model / Key (BYOM/BYOK)** mode is activated by
+setting `COPILOT_PROVIDER_BASE_URL` in `engine.env`.
+
+#### Provider variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `COPILOT_PROVIDER_BASE_URL` | ✅ for BYOM | Base URL of the external provider (e.g. `https://RESOURCE.cognitiveservices.azure.com/openai/v1`). Setting this activates BYOM mode. |
+| `COPILOT_MODEL` | Often required | Model to use (most providers require it). Can also be set via `engine.model`. |
+| `COPILOT_PROVIDER_API_KEY` | Optional | API key for cloud providers. |
+| `COPILOT_PROVIDER_BEARER_TOKEN` | Optional | Bearer token alternative to `COPILOT_PROVIDER_API_KEY`; takes precedence when set. |
+| `COPILOT_PROVIDER_TYPE` | Optional | Provider format: `openai` (default), `azure`, or `anthropic`. |
+| `COPILOT_PROVIDER_WIRE_API` | Optional | Wire API variant: `completions` (default) or `responses`. |
+
+The four credential/provider keys — `COPILOT_PROVIDER_BASE_URL`,
+`COPILOT_PROVIDER_API_KEY`, `COPILOT_PROVIDER_BEARER_TOKEN`, and
+`COPILOT_PROVIDER_WIRE_API` — are the only `engine.env` values that may carry an
+ADO macro (`$(...)`) expression, so secrets can be sourced from a pipeline
+variable or a Setup-job output instead of being hard-coded.
+
+#### Credential isolation
+
+When any BYOM credential key is present in `engine.env`, the compiler
+automatically enables the AWF **api-proxy sidecar** (`--enable-api-proxy`). With
+it active, the real credential is held inside the proxy container; the agent
+container receives only a placeholder and a proxy URL. The proxy strips the
+client's auth header and injects the real credential on the outbound request, so
+the secret never reaches the Copilot CLI process or the agent sandbox.
+
+This isolation applies to both the Agent and Detection stages.
+
+#### Network allowlist
+
+When `COPILOT_PROVIDER_BASE_URL` is a **literal** URL, the compiler automatically
+adds its hostname to the AWF network allowlist. When the value is an expression
+(so the host is unknown at compile time), add the provider hostname explicitly to
+`network.allowed`.
+
+#### Example — Azure Copilot Foundry with a Setup-acquired bearer token
+
+```yaml
+setup:
+  - task: AzureCLI@2
+    inputs:
+      azureSubscription: my-service-connection
+      scriptType: bash
+      inlineScript: |
+        TOKEN=$(az account get-access-token \
+          --resource https://cognitiveservices.azure.com/ \
+          --query accessToken -o tsv)
+        echo "##vso[task.setvariable variable=FOUNDRY_TOKEN;isOutput=true]$TOKEN"
+    displayName: Acquire Foundry bearer token
+
+engine:
+  id: copilot
+  model: gpt-4o
+  env:
+    COPILOT_PROVIDER_TYPE: azure
+    COPILOT_PROVIDER_BASE_URL: "https://my-foundry.cognitiveservices.azure.com/openai/v1"
+    COPILOT_PROVIDER_BEARER_TOKEN: "$(Setup.FOUNDRY_TOKEN)"
+```
+
+Because `COPILOT_PROVIDER_BASE_URL` is a literal URL,
+`my-foundry.cognitiveservices.azure.com` is added to the AWF allowlist
+automatically. If you source the base URL from an expression instead, add the
+host to `network.allowed` manually.
