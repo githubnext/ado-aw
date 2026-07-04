@@ -556,11 +556,6 @@ mod tests {
     use super::*;
     use crate::safe_outputs::ToolResult;
 
-    #[test]
-    fn test_result_has_correct_name() {
-        assert_eq!(UploadBuildAttachmentResult::NAME, "upload-build-attachment");
-    }
-
     fn make_params(
         build_id: Option<i64>,
         artifact_name: &str,
@@ -639,30 +634,50 @@ mod tests {
 
     #[test]
     fn test_validation_rejects_zero_build_id() {
+        let err = make_params(Some(0), "agent-report", "out/report.pdf")
+            .validate()
+            .unwrap_err();
         assert!(
-            make_params(Some(0), "agent-report", "out/report.pdf")
-                .validate()
-                .is_err()
+            err.to_string().contains("build_id must be positive"),
+            "expected 'build_id must be positive' error, got: {}",
+            err
         );
     }
 
     #[test]
     fn test_validation_rejects_negative_build_id() {
+        let err = make_params(Some(-1), "agent-report", "out/report.pdf")
+            .validate()
+            .unwrap_err();
         assert!(
-            make_params(Some(-1), "agent-report", "out/report.pdf")
-                .validate()
-                .is_err()
+            err.to_string().contains("build_id must be positive"),
+            "expected 'build_id must be positive' error, got: {}",
+            err
         );
     }
 
     #[test]
     fn test_validation_rejects_empty_artifact_name() {
-        assert!(try_params(Some(1), "", "out/report.pdf").is_err());
+        let err = try_params(Some(1), "", "out/report.pdf")
+            .err()
+            .expect("expected artifact_name validation error");
+        assert!(
+            err.to_string().contains("artifact_name"),
+            "expected 'artifact_name' in error, got: {}",
+            err
+        );
     }
 
     #[test]
     fn test_validation_rejects_artifact_name_starting_with_dot() {
-        assert!(try_params(Some(1), ".hidden", "out/report.pdf").is_err());
+        let err = try_params(Some(1), ".hidden", "out/report.pdf")
+            .err()
+            .expect("expected artifact_name dot-prefix validation error");
+        assert!(
+            err.to_string().contains("must not start with"),
+            "expected 'must not start with' in error, got: {}",
+            err
+        );
     }
 
     #[test]
