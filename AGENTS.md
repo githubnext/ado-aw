@@ -307,7 +307,7 @@ index to jump to the right page.
   syntax (`daily around 14:00`, `weekly on monday`, timezones, scattering).
 - [`docs/engine.md`](docs/engine.md) — `engine:` configuration (model,
   `timeout-minutes`, `version`, `agent`, `api-target`, `args`, `env`,
-  `command`).
+  `command`, `github-app-token`).
 - [`docs/parameters.md`](docs/parameters.md) — ADO runtime parameters surfaced
   in the pipeline UI, including the auto-injected `clearMemory` parameter.
 - [`docs/conclusion.md`](docs/conclusion.md) — Conclusion job — the
