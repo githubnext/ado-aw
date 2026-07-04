@@ -4,7 +4,7 @@ _Part of the [ado-aw documentation](../AGENTS.md)._
 
 `ado-aw mcp-author` runs a local, author/debug-facing MCP server over stdio for
 IDE and Copilot Chat integrations. It exposes read-only workflow inspection,
-graph, lint, what-if, trace, and audit tools.
+graph, step dependency traversal, output mapping, lint, what-if, trace, and audit tools.
 
 It is **not** the SafeOutputs MCP server embedded in compiled pipelines. The
 pipeline SafeOutputs server records proposed mutations for Stage 3 execution;
