@@ -133,16 +133,17 @@ safe-outputs:
     max: 2
 
   # ── Wiki tools ───────────────────────────────────────────────────────────
+  # REQUIRED — replace PLACEHOLDER_WIKI_NAME in BOTH entries below with the
+  # actual wiki name or GUID (e.g. "MyProject.wiki" or "4f3a1b2c-…").
+  # Run: az devops wiki list --project <project> --org <orgUrl>
+  # Both entries must use the same value.
   create-wiki-page:
-    # REQUIRED — operator must replace the placeholder below with the actual
-    # wiki name or GUID (e.g. "MyProject.wiki" or "4f3a1b2c-…").
-    # Run: az devops wiki list --project <project> --org <orgUrl>
     wiki-name: "PLACEHOLDER_WIKI_NAME"
     path-prefix: /smoke-test
     max: 2
 
   update-wiki-page:
-    wiki-name: "PLACEHOLDER_WIKI_NAME"
+    wiki-name: "PLACEHOLDER_WIKI_NAME"  # keep in sync with create-wiki-page above
     path-prefix: /smoke-test
     max: 2
 ---
@@ -187,19 +188,25 @@ An open, non-draft PR in the **self** repository is required for:
 `add-pr-comment`, `reply-to-pr-comment`, `resolve-pr-thread`,
 `submit-pr-review`, and `update-pr`.
 
-1. Create a feature branch from `main`:
+1. Get the current `main` branch commit SHA:
+   ```
+   az repos ref list --repository <repoName> --filter heads/main \
+     --org <orgUrl> --project <project> \
+     --query "[0].objectId" -o tsv
+   ```
+2. Create a feature branch from that SHA:
    ```
    az repos ref create --name refs/heads/smoke-test/fixture \
      --object-id <main-SHA> --org <orgUrl> --project <project> \
      --repository <repoName>
    ```
-2. Create the PR:
+3. Create the PR:
    ```
    az repos pr create --title "Smoke test fixture PR — keep open" \
      --source-branch smoke-test/fixture --target-branch main \
      --org <orgUrl> --project <project> --repository <repoName>
    ```
-3. Record the `pullRequestId` from the JSON response into
+4. Record the `pullRequestId` from the JSON response into
    `smokeTestPullRequestId`.
 
 ### PR comment thread (smokeTestPrThreadId)
@@ -265,7 +272,9 @@ Execute the steps below in order. For each step:
 
 ### Step 0 — Read runtime context
 
-Read the pipeline parameters from environment variables:
+Read the pipeline parameters from environment variables (ADO injects each
+`$(parameterName)` macro into the agent environment as-is; the
+SCREAMING_SNAKE_CASE names below are local aliases for readability):
 - `SMOKE_WORK_ITEM_ID_1` = `$(smokeTestWorkItemId1)`
 - `SMOKE_WORK_ITEM_ID_2` = `$(smokeTestWorkItemId2)`
 - `SMOKE_PR_ID` = `$(smokeTestPullRequestId)`
@@ -425,7 +434,7 @@ call create-pull-request(
 
 ```
 call add-build-tag(
-  build_id=$(Build.BuildId),
+  build_id="$(Build.BuildId)",
   tag="smoke-test-passed"
 )
 ```
@@ -454,7 +463,7 @@ call upload-build-attachment(
 ### Step 18 — queue-build
 
 If `SMOKE_QUEUE_BUILD_PIPELINE_ID` is 0, skip this step and call
-`missing-data(data_type="pipeline_definition_id", reason="smokeTestQueueBuildPipelineId parameter is 0 — set it to enable queue-build testing")`.
+`missing-data(data_type="pipeline_definition_id", reason="SMOKE_QUEUE_BUILD_PIPELINE_ID is 0 — set smokeTestQueueBuildPipelineId to enable queue-build testing")`.
 
 Otherwise:
 
@@ -469,7 +478,7 @@ call queue-build(
 ### Step 19 — create-wiki-page
 
 If `SMOKE_WIKI_NAME` is empty, call
-`missing-data(data_type="wiki_name", reason="smokeTestWikiName parameter is empty — set it to enable wiki testing")` and skip steps 19–20.
+`missing-data(data_type="wiki_name", reason="SMOKE_WIKI_NAME is empty — set smokeTestWikiName to enable wiki testing")` and skip steps 19–20.
 
 ```
 call create-wiki-page(
