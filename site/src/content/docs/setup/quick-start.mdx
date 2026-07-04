@@ -109,8 +109,8 @@ The fastest way to create an agentic pipeline is to let Copilot do the heavy lif
 
    See [Service Connections](/ado-aw/setup/service-connections/) for step-by-step creation instructions. You can use an existing connection if one is already configured in your project.
 
-   :::caution[Temporary limitation: GitHub PAT required]
-   The Copilot CLI does not yet support GitHub App tokens. You must provide a fine-grained GitHub PAT. This requirement will be removed once GitHub App token support is added to the Copilot CLI.
+   :::tip[Organization-managed access]
+   For org-managed Copilot deployments, use [`engine.github-app-token`](/ado-aw/reference/engine/#github-app-token) to mint a short-lived GitHub App installation token at pipeline runtime — no personal PAT required.
    :::
 
 4. **Run the pipeline**
@@ -192,7 +192,7 @@ If you prefer full control, you can author agent files by hand.
    ado-aw secrets set GITHUB_TOKEN
    ```
 
-   This stores the `GITHUB_TOKEN` pipeline variable (as a secret) on every matched ADO build definition. See the [With Agents](#with-agents-recommended) section above for details on what the command prompts for and the current GitHub PAT limitation.
+   This stores the `GITHUB_TOKEN` pipeline variable (as a secret) on every matched ADO build definition. See the [With Agents](#with-agents-recommended) section above for details on what the command prompts for.
 
    If your workflow uses write-requiring safe outputs, you'll also need an ARM service connection — see [Service Connections](/ado-aw/setup/service-connections/).
 
@@ -221,8 +221,8 @@ The Copilot CLI engine requires a **fine-grained GitHub Personal Access Token** 
 
 No repository permissions are needed -- the token is only used for Copilot inference.
 
-:::caution[Temporary limitation]
-GitHub App tokens and OAuth tokens are **not supported** for this secret. Only fine-grained PATs work. The token owner's account must have an active Copilot license.
+:::note
+OAuth tokens are not supported for this secret. For org-managed Copilot deployments, use [`engine.github-app-token`](/ado-aw/reference/engine/#github-app-token) to mint a short-lived GitHub App installation token at pipeline runtime — no personal PAT required. The PAT owner's account (or the org for App-based auth) must have an active Copilot license.
 :::
 
 The token is stored as the `GITHUB_TOKEN` pipeline variable on your Azure DevOps build definition (set by `ado-aw secrets set GITHUB_TOKEN`). It is never exposed to the agent -- only the pipeline runtime uses it.
