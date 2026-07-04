@@ -35,6 +35,8 @@ export class AdoRest {
   private readonly project: string;
   private readonly authHeader: string;
   private readonly log: (msg: string) => void;
+  /** The write token, exposed for callers that must clone via git over HTTPS. */
+  readonly token: string;
 
   constructor(opts: AdoRestOptions) {
     this.base = opts.orgUrl.replace(/\/+$/, "");
@@ -43,9 +45,6 @@ export class AdoRest {
     this.authHeader = "Basic " + Buffer.from(":" + opts.token).toString("base64");
     this.log = opts.log ?? (() => {});
   }
-
-  /** The write token, exposed for callers that must clone via git over HTTPS. */
-  readonly token: string;
 
   /** Percent-encode a single path segment (project names may contain spaces). */
   private static seg(value: string): string {

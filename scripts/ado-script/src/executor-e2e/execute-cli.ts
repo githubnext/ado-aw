@@ -171,13 +171,32 @@ function spawnCollect(
   args: string[],
   env: NodeJS.ProcessEnv,
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  // Guard against a hung `ado-aw execute` blocking the whole suite: kill the
+  // child after a bounded timeout and surface a meaningful error instead of
+  // waiting for the ADO job-level timeout.
+  const timeoutMs = Number(process.env.EXECUTOR_E2E_EXECUTE_TIMEOUT_MS) || 600_000;
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { env });
     let stdout = "";
     let stderr = "";
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, timeoutMs);
     child.stdout.on("data", (d: Buffer) => (stdout += d.toString()));
     child.stderr.on("data", (d: Buffer) => (stderr += d.toString()));
-    child.on("error", reject);
-    child.on("close", (code) => resolve({ exitCode: code ?? -1, stdout, stderr }));
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (timedOut) {
+        reject(new Error(`ado-aw execute timed out after ${timeoutMs}ms`));
+        return;
+      }
+      resolve({ exitCode: code ?? -1, stdout, stderr });
+    });
   });
 }

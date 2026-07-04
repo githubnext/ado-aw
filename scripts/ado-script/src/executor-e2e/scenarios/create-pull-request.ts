@@ -34,6 +34,8 @@ interface CreatePrState {
   patchContent: string;
   /** BUILD_SOURCESDIRECTORY passed to the executor. */
   sourcesDir: string;
+  /** PR id, populated in assert() so cleanup can abandon it. */
+  prId?: number;
 }
 
 const PATCH_REL_PATH = "create-pr.patch";
@@ -44,8 +46,18 @@ function runGit(
   extraHeader: string,
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const fullArgs = ["-c", `http.extraheader=Authorization: ${extraHeader}`, ...args];
-    const child = spawn("git", fullArgs, { cwd });
+    // Inject the auth header via GIT_CONFIG_* env vars rather than `-c` on the
+    // command line, so the token never appears in the process argv
+    // (/proc/<pid>/cmdline).
+    const child = spawn("git", args, {
+      cwd,
+      env: {
+        ...process.env,
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "http.extraheader",
+        GIT_CONFIG_VALUE_0: `Authorization: ${extraHeader}`,
+      },
+    });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d: Buffer) => (stdout += d.toString()));
@@ -138,16 +150,16 @@ export const createPullRequest: Scenario<CreatePrState> = {
     if (typeof prId !== "number") {
       throw new Error(`create-pull-request result has no numeric pull_request_id`);
     }
+    // Record the PR id up front so cleanup abandons it even if a later
+    // assertion (or the getPullRequest call itself) throws.
+    state.prId = prId;
     const pr = await ctx.rest.getPullRequest(state.repo, prId);
     if (pr.status === "abandoned") throw new Error(`PR #${prId} is abandoned`);
     const sha = await ctx.rest.getRefObjectId(state.repo, `heads/${state.sourceBranch}`);
     if (!sha) throw new Error(`source branch '${state.sourceBranch}' was not pushed`);
-    // Remember the PR id for cleanup.
-    (state as CreatePrState & { prId?: number }).prId = prId;
   },
   cleanup: async (ctx, state) => {
-    const prId = (state as CreatePrState & { prId?: number }).prId;
-    if (prId !== undefined) await ctx.rest.abandonPullRequest(state.repo, prId);
+    if (state.prId !== undefined) await ctx.rest.abandonPullRequest(state.repo, state.prId);
     await ctx.rest.deleteRef(state.repo, `refs/heads/${state.sourceBranch}`);
   },
 };

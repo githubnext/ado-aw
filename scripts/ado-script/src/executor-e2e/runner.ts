@@ -56,20 +56,26 @@ export async function runScenario<S>(
     const files = scenario.files ? await scenario.files(ctx, state) : undefined;
     const extraEnv = scenario.env ? await scenario.env(ctx, state) : undefined;
 
-    const result = await runExecute({
-      adoAwBin: ctx.adoAwBin,
-      scenarioDir,
-      tool,
-      config,
-      entry,
-      adoRepo: scenario.targetsAdoRepo ? ctx.adoRepo : undefined,
-      orgUrl: ctx.orgUrl,
-      project: ctx.project,
-      token: ctx.token,
-      files,
-      extraEnv,
-      log: ctx.log,
-    });
+    let result;
+    try {
+      result = await runExecute({
+        adoAwBin: ctx.adoAwBin,
+        scenarioDir,
+        tool,
+        config,
+        entry,
+        adoRepo: scenario.targetsAdoRepo ? ctx.adoRepo : undefined,
+        orgUrl: ctx.orgUrl,
+        project: ctx.project,
+        token: ctx.token,
+        files,
+        extraEnv,
+        log: ctx.log,
+      });
+    } catch (err) {
+      // e.g. the ado-aw execute child timed out or failed to spawn.
+      return finish({ ok: false, phase: "execute", message: errMessage(err) });
+    }
 
     if (!result.record) {
       return finish({
@@ -110,7 +116,7 @@ export async function runScenario<S>(
 
 export async function runAll(
   ctx: ScenarioContext,
-  scenarios: Scenario<any>[],
+  scenarios: Scenario<unknown>[],
 ): Promise<ScenarioResult[]> {
   const results: ScenarioResult[] = [];
   for (const scenario of scenarios) {

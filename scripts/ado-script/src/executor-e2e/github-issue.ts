@@ -43,7 +43,7 @@ export function loadIssueEnv(env: NodeJS.ProcessEnv = process.env): IssueEnv {
     buildUrl:
       env.EXECUTOR_E2E_BUILD_URL?.trim() ||
       (env.SYSTEM_COLLECTIONURI && env.SYSTEM_TEAMPROJECT && env.BUILD_BUILDID
-        ? `${env.SYSTEM_COLLECTIONURI.replace(/\/+$/, "")}/${env.SYSTEM_TEAMPROJECT}/_build/results?buildId=${env.BUILD_BUILDID}`
+        ? `${env.SYSTEM_COLLECTIONURI.replace(/\/+$/, "")}/${encodeURIComponent(env.SYSTEM_TEAMPROJECT)}/_build/results?buildId=${env.BUILD_BUILDID}`
         : undefined),
     project: env.SYSTEM_TEAMPROJECT?.trim(),
   };
