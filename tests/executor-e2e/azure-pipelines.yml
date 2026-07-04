@@ -1,0 +1,87 @@
+# Deterministic Stage 3 (executor) safe-output E2E pipeline.
+#
+# Unlike the agentic smoke suite in tests/safe-outputs/ (which drives Stage 3 by
+# having an LLM emit each safe output), this pipeline is fully deterministic and
+# has no agent in the loop. A TypeScript harness
+# (scripts/ado-script/src/executor-e2e/) sets up preconditions via the ADO REST
+# API, crafts the executor's NDJSON input directly, runs the real `ado-aw
+# execute` binary built from this checkout, asserts the effect via REST, and
+# cleans up. On any failure it files a GitHub issue on githubnext/ado-aw and
+# fails the build.
+#
+# This is a hand-authored ADO pipeline (NOT compiled from an agent markdown).
+# Register it in msazuresphere/AgentPlayground — see tests/executor-e2e/README.md.
+
+trigger: none
+pr: none
+
+schedules:
+  - cron: "0 5 * * *"
+    displayName: Daily deterministic executor E2E
+    branches:
+      include:
+        - main
+    always: true
+
+pool:
+  name: AZS-1ES-L-Playground-ubuntu-22.04
+
+variables:
+  # ADO Git repo (with an initialised main branch) used by the PR/git/
+  # create-pull-request scenarios.
+  EXECUTOR_E2E_ADO_REPO: agent-definitions
+  # GitHub repo that failure issues are filed against.
+  EXECUTOR_E2E_ISSUE_REPO: githubnext/ado-aw
+  # Optional-precondition scenarios: empty by default so queue-build / wiki
+  # skip gracefully. Override at queue time (or via a variable group) to enable.
+  E2E_QUEUE_PIPELINE_ID: ""
+  E2E_WIKI_NAME: ""
+  # EXECUTOR_E2E_GITHUB_TOKEN must be provided as a SECRET pipeline variable
+  # (fine-grained PAT scoped to Issues:read/write on githubnext/ado-aw ONLY).
+
+steps:
+  - checkout: self
+    fetchDepth: 1
+    displayName: Checkout ado-aw
+
+  - script: |
+      set -euo pipefail
+      if ! command -v cargo >/dev/null 2>&1; then
+        echo "Installing Rust toolchain..."
+        curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+        # shellcheck disable=SC1091
+        source "$HOME/.cargo/env"
+      fi
+      cargo build --release --bin ado-aw
+      echo "##vso[task.setvariable variable=ADO_AW_BIN]$(Build.SourcesDirectory)/target/release/ado-aw"
+    displayName: Build ado-aw (release, from checkout)
+
+  - task: NodeTool@0
+    inputs:
+      versionSpec: "20.x"
+    displayName: Use Node.js 20
+
+  - script: |
+      set -euo pipefail
+      npm ci
+      npm run build:executor-e2e
+    workingDirectory: scripts/ado-script
+    displayName: Build executor-e2e harness (not shipped in ado-script.zip)
+
+  - script: |
+      set -euo pipefail
+      node scripts/ado-script/test-bin/executor-e2e.js
+    displayName: Run deterministic executor E2E scenarios
+    env:
+      # ADO auth + context. SYSTEM_COLLECTIONURI / SYSTEM_TEAMPROJECT /
+      # BUILD_BUILDID are auto-injected; SYSTEM_ACCESSTOKEN must be mapped
+      # explicitly so the harness (and the ado-aw binary it spawns) can write.
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+      EXECUTOR_E2E_ADO_AW_BIN: $(ADO_AW_BIN)
+      EXECUTOR_E2E_ADO_REPO: $(EXECUTOR_E2E_ADO_REPO)
+      EXECUTOR_E2E_ISSUE_REPO: $(EXECUTOR_E2E_ISSUE_REPO)
+      # Secret PAT for filing failure issues (scoped to githubnext/ado-aw Issues).
+      EXECUTOR_E2E_GITHUB_TOKEN: $(EXECUTOR_E2E_GITHUB_TOKEN)
+      # Optional-precondition scenarios (skipped when unset):
+      E2E_QUEUE_PIPELINE_ID: $(E2E_QUEUE_PIPELINE_ID)
+      E2E_WIKI_NAME: $(E2E_WIKI_NAME)

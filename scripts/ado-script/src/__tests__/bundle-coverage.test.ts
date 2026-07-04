@@ -21,8 +21,17 @@ const here = dirname(fileURLToPath(import.meta.url));
 const srcDir = join(here, "..");
 const packageJsonPath = join(here, "..", "..", "package.json");
 
-/** Directories under src/ that are shared modules, not ncc bundle entry points. */
-const NON_BUNDLE_DIRS = new Set(["shared", "__tests__"]);
+/**
+ * Directories under src/ that are shared modules or test-only harnesses, not
+ * ncc bundle entry points that ship in `ado-script.zip`.
+ *
+ * `executor-e2e` is the deterministic Stage 3 executor E2E harness. It has its
+ * own `build:executor-e2e` script that emits to the non-root `test-bin/` dir,
+ * so the release glob (`ado-script/*.js`) never packages it — it is a test
+ * harness run only by the executor-e2e pipeline, never downloaded by compiled
+ * agentic pipelines at runtime.
+ */
+const NON_BUNDLE_DIRS = new Set(["shared", "__tests__", "executor-e2e"]);
 
 function listBundleDirs(): string[] {
   return readdirSync(srcDir)

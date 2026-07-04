@@ -1,0 +1,155 @@
+/**
+ * Flagship deterministic scenario: create-pull-request.
+ *
+ * Stage 3's create-pull-request executor operates on a real git checkout on
+ * disk (`<BUILD_SOURCESDIRECTORY>/<repo>`): it reads a staged patch file,
+ * verifies its SHA-256, applies it via `git apply --3way` on top of the target
+ * branch, and pushes a new source branch + opens the PR via ADO REST using the
+ * recorded `base_commit` as the parent.
+ *
+ * We reproduce that deterministically (no LLM):
+ *   - clone `agent-definitions` into the source-checkout dir,
+ *   - record `base_commit` = main HEAD,
+ *   - make a deterministic edit and capture a `git diff` patch,
+ *   - compute `patch_sha256`,
+ *   - run the executor, assert the PR + pushed branch, then abandon + delete.
+ *
+ * Test-harness module; not shipped in `ado-script.zip`.
+ */
+import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
+import type { Scenario, ScenarioContext } from "../scenario.js";
+import { detBody } from "./common.js";
+
+interface CreatePrState {
+  repo: string;
+  sourceBranch: string;
+  targetBranch: string;
+  baseCommit: string;
+  patchRelPath: string;
+  patchSha256: string;
+  patchContent: string;
+  /** BUILD_SOURCESDIRECTORY passed to the executor. */
+  sourcesDir: string;
+}
+
+const PATCH_REL_PATH = "create-pr.patch";
+
+function runGit(
+  args: string[],
+  cwd: string,
+  extraHeader: string,
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const fullArgs = ["-c", `http.extraheader=Authorization: ${extraHeader}`, ...args];
+    const child = spawn("git", fullArgs, { cwd });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d: Buffer) => (stdout += d.toString()));
+    child.stderr.on("data", (d: Buffer) => (stderr += d.toString()));
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ code: code ?? -1, stdout, stderr }));
+  });
+}
+
+async function git(
+  ctx: ScenarioContext,
+  args: string[],
+  cwd: string,
+  extraHeader: string,
+): Promise<string> {
+  const res = await runGit(args, cwd, extraHeader);
+  if (res.code !== 0) {
+    throw new Error(`git ${args.join(" ")} failed (${res.code}): ${res.stderr.trim()}`);
+  }
+  return res.stdout;
+}
+
+export const createPullRequest: Scenario<CreatePrState> = {
+  tool: "create-pull-request",
+  targetsAdoRepo: true,
+  config: (ctx) => ({
+    "target-branch": "main",
+    "allowed-repositories": [ctx.adoRepo],
+    "delete-source-branch": true,
+    "if-no-changes": "error",
+    "include-stats": false,
+  }),
+  setup: async (ctx) => {
+    const repo = ctx.adoRepo;
+    const authHeader = "Basic " + Buffer.from(":" + ctx.token).toString("base64");
+    const sourcesDir = join(ctx.workDir, "create-pull-request", "src-checkout");
+    await mkdir(sourcesDir, { recursive: true });
+    const checkout = join(sourcesDir, repo);
+
+    const cloneUrl = `${ctx.orgUrl.replace(/\/+$/, "")}/${encodeURIComponent(ctx.project)}/_git/${encodeURIComponent(repo)}`;
+    ctx.log(`[create-pull-request] cloning ${repo}`);
+    await git(ctx, ["clone", cloneUrl, checkout], sourcesDir, authHeader);
+
+    // Determine the default branch and its HEAD (the patch base commit).
+    const targetBranch =
+      (await git(ctx, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], checkout, authHeader))
+        .trim()
+        .replace(/^origin\//, "") || "main";
+    const baseCommit = (await git(ctx, ["rev-parse", "HEAD"], checkout, authHeader)).trim();
+
+    // Deterministic edit: add a new file, then capture a git diff (which
+    // `git apply --3way` applies cleanly on top of the target branch).
+    const relFile = `ado-aw-det/${ctx.buildId}.md`;
+    const absFile = join(checkout, relFile);
+    await mkdir(join(absFile, ".."), { recursive: true });
+    await writeFile(absFile, `${detBody(ctx, "create-pull-request")}\n`, "utf8");
+    await git(ctx, ["add", "-N", relFile], checkout, authHeader);
+    const patchContent = await git(ctx, ["diff", "--", relFile], checkout, authHeader);
+    if (!patchContent.trim()) throw new Error("generated patch is empty");
+    // Reset the intent-to-add so the checkout stays clean.
+    await git(ctx, ["reset", "--", relFile], checkout, authHeader);
+
+    const patchSha256 = createHash("sha256").update(patchContent, "utf8").digest("hex");
+
+    return {
+      repo,
+      sourceBranch: ctx.prefix("create-pull-request"),
+      targetBranch,
+      baseCommit,
+      patchRelPath: PATCH_REL_PATH,
+      patchSha256,
+      patchContent,
+      sourcesDir,
+    };
+  },
+  files: async (_ctx, state) => ({ [state.patchRelPath]: state.patchContent }),
+  env: async (_ctx, state) => ({ BUILD_SOURCESDIRECTORY: state.sourcesDir }),
+  ndjson: async (ctx, state) => ({
+    title: `${ctx.prefix("create-pull-request")} (do not merge)`,
+    description: detBody(ctx, "create-pull-request"),
+    source_branch: state.sourceBranch,
+    patch_file: state.patchRelPath,
+    repository: ctx.adoRepo,
+    agent_labels: [],
+    base_commit: state.baseCommit,
+    patch_sha256: state.patchSha256,
+  }),
+  assert: async (ctx, state, record) => {
+    const prId = record.result?.pull_request_id;
+    if (typeof prId !== "number") {
+      throw new Error(`create-pull-request result has no numeric pull_request_id`);
+    }
+    const pr = await ctx.rest.getPullRequest(state.repo, prId);
+    if (pr.status === "abandoned") throw new Error(`PR #${prId} is abandoned`);
+    const sha = await ctx.rest.getRefObjectId(state.repo, `heads/${state.sourceBranch}`);
+    if (!sha) throw new Error(`source branch '${state.sourceBranch}' was not pushed`);
+    // Remember the PR id for cleanup.
+    (state as CreatePrState & { prId?: number }).prId = prId;
+  },
+  cleanup: async (ctx, state) => {
+    const prId = (state as CreatePrState & { prId?: number }).prId;
+    if (prId !== undefined) await ctx.rest.abandonPullRequest(state.repo, prId);
+    await ctx.rest.deleteRef(state.repo, `refs/heads/${state.sourceBranch}`);
+  },
+};
+
+export const createPullRequestScenarios: Scenario<any>[] = [createPullRequest];

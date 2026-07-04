@@ -75,6 +75,15 @@ pipeline** as runtime helpers. Today it produces thirteen bundles:
 > and how to wire it. See [`docs/tools.md`](tools.md) for what *is*
 > user-facing.
 
+> **Test-only, not shipped: `executor-e2e`.** The workspace also contains a
+> `src/executor-e2e/` harness that drives the deterministic Stage 3 executor
+> E2E suite (see [`tests/executor-e2e/`](../tests/executor-e2e/)). It is **not**
+> a runtime bundle: it is built to the non-root `test-bin/executor-e2e.js` by
+> `npm run build:executor-e2e` (kept out of the main `build` chain and the
+> release `ado-script/*.js` glob), and `executor-e2e` is listed in
+> `NON_BUNDLE_DIRS` in `src/__tests__/bundle-coverage.test.ts` so the
+> shipped-bundle guard ignores it. The compiler never references it.
+
 ## What `gate.js` does
 
 `gate.js` is a single-shot Node program that runs as a step in the
