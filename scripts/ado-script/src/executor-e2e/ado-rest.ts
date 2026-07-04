@@ -35,6 +35,7 @@ export class AdoRest {
   private readonly project: string;
   private readonly authHeader: string;
   private readonly log: (msg: string) => void;
+  private readonly timeoutMs: number;
   /** The write token, exposed for callers that must clone via git over HTTPS. */
   readonly token: string;
 
@@ -44,6 +45,7 @@ export class AdoRest {
     this.token = opts.token;
     this.authHeader = "Basic " + Buffer.from(":" + opts.token).toString("base64");
     this.log = opts.log ?? (() => {});
+    this.timeoutMs = Number(process.env.EXECUTOR_E2E_REST_TIMEOUT_MS) || 30_000;
   }
 
   /** Percent-encode a single path segment (project names may contain spaces). */
@@ -51,12 +53,27 @@ export class AdoRest {
     return encodeURIComponent(value);
   }
 
-  private async request<T>(path: string, opts: RequestOptions = {}): Promise<T | undefined> {
+  /**
+   * Centralised fetch: injects the ADO auth header and a per-request timeout
+   * (AbortSignal) so a single hung endpoint can never block the whole suite.
+   * All REST access — including {@link getWikiPage}, which needs the raw
+   * Response for its ETag — goes through here, so auth stays in one place.
+   */
+  private async authedFetch(
+    path: string,
+    init: { method?: string; headers?: Record<string, string>; body?: string } = {},
+  ): Promise<Response> {
     const url = path.startsWith("http") ? path : `${this.base}/${path}`;
-    const headers: Record<string, string> = {
-      Authorization: this.authHeader,
-      Accept: opts.accept ?? "application/json",
-    };
+    return fetch(url, {
+      method: init.method ?? "GET",
+      headers: { Authorization: this.authHeader, ...init.headers },
+      body: init.body,
+      signal: AbortSignal.timeout(this.timeoutMs),
+    });
+  }
+
+  private async request<T>(path: string, opts: RequestOptions = {}): Promise<T | undefined> {
+    const headers: Record<string, string> = { Accept: opts.accept ?? "application/json" };
     let body: string | undefined;
     if (opts.rawBody !== undefined) {
       body = opts.rawBody;
@@ -66,11 +83,11 @@ export class AdoRest {
       headers["Content-Type"] = opts.contentType ?? "application/json";
     }
 
-    const res = await fetch(url, { method: opts.method ?? "GET", headers, body });
+    const res = await this.authedFetch(path, { method: opts.method ?? "GET", headers, body });
     if (res.status === 404 && opts.allow404) return undefined;
     if (!res.ok) {
       const text = await res.text().catch(() => "<no body>");
-      throw new Error(`ADO ${opts.method ?? "GET"} ${url} -> HTTP ${res.status}: ${text}`);
+      throw new Error(`ADO ${opts.method ?? "GET"} ${path} -> HTTP ${res.status}: ${text}`);
     }
     if (res.status === 204) return undefined;
     const text = await res.text();
@@ -354,10 +371,9 @@ export class AdoRest {
     const path = this.projPath(
       `_apis/wiki/wikis/${AdoRest.seg(wiki)}/pages?path=${encodeURIComponent(pagePath)}&includeContent=true&api-version=7.1`,
     );
-    const url = `${this.base}/${path}`;
-    const res = await fetch(url, {
-      headers: { Authorization: this.authHeader, Accept: "application/json" },
-    });
+    // Routed through authedFetch (not request()) because we need the raw
+    // Response to read the ETag; auth + timeout stay centralised.
+    const res = await this.authedFetch(path, { headers: { Accept: "application/json" } });
     if (res.status === 404) return undefined;
     if (!res.ok) {
       const text = await res.text().catch(() => "");

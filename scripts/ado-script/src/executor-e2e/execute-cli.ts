@@ -48,7 +48,9 @@ export function renderSourceMarkdown(opts: RenderSourceOptions): string {
     lines.push(`  - ${opts.adoRepo}=${opts.adoRepo}`);
   }
   lines.push("safe-outputs:");
-  lines.push(`  ${opts.tool}: ${JSON.stringify(opts.config)}`);
+  // Quote the tool key (JSON string is valid YAML) so an unusual tool name
+  // containing ": " or a leading "{" can't emit broken YAML.
+  lines.push(`  ${JSON.stringify(opts.tool)}: ${JSON.stringify(opts.config)}`);
   lines.push("---");
   lines.push("");
   lines.push(`Deterministic executor E2E fixture for \`${opts.tool}\`.`);

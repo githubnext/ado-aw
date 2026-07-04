@@ -73,6 +73,8 @@ async function git(
   cwd: string,
   extraHeader: string,
 ): Promise<string> {
+  // Safe to log: the auth token is passed via env (GIT_CONFIG_*), not argv.
+  ctx.log(`[create-pull-request] git ${args.join(" ")}`);
   const res = await runGit(args, cwd, extraHeader);
   if (res.code !== 0) {
     throw new Error(`git ${args.join(" ")} failed (${res.code}): ${res.stderr.trim()}`);

@@ -15,7 +15,7 @@ describe("renderSourceMarkdown", () => {
     expect(md).toContain('name: "executor-e2e: comment-on-work-item"');
     expect(md).toContain("target: standalone");
     expect(md).toContain("safe-outputs:");
-    expect(md).toContain('comment-on-work-item: {"target":"*","max":1}');
+    expect(md).toContain('"comment-on-work-item": {"target":"*","max":1}');
     expect(md).not.toContain("repos:");
     // Balanced front-matter fences.
     expect(md.match(/^---$/gm)?.length).toBe(2);
