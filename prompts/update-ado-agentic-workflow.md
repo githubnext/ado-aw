@@ -318,7 +318,7 @@ Before finalizing any update, verify:
 
 9. **Parameter names**: Runtime `parameters:` names must be valid ADO identifiers.
 
-10. **Engine model**: If `engine` is set to the default (`claude-opus-4.7`), it can be omitted.
+10. **Engine model**: If `engine:` only sets the default `copilot` engine with model `claude-opus-4.7` and no other settings (timeout, github-app-token, etc.), the `engine:` field can be omitted entirely.
 
 ---
 
