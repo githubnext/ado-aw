@@ -554,7 +554,6 @@ impl Executor for UploadBuildAttachmentResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safe_outputs::ToolResult;
 
     fn make_params(
         build_id: Option<i64>,
