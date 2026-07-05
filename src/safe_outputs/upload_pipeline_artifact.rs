@@ -715,19 +715,23 @@ mod tests {
 
     #[test]
     fn test_validation_rejects_zero_build_id() {
+        let err = make_params(Some(0), "report", "out/report.pdf")
+            .validate()
+            .unwrap_err();
         assert!(
-            make_params(Some(0), "report", "out/report.pdf")
-                .validate()
-                .is_err()
+            err.to_string().contains("build_id must be positive"),
+            "expected 'build_id must be positive' error, got: {err}"
         );
     }
 
     #[test]
     fn test_validation_rejects_negative_build_id() {
+        let err = make_params(Some(-1), "report", "out/report.pdf")
+            .validate()
+            .unwrap_err();
         assert!(
-            make_params(Some(-1), "report", "out/report.pdf")
-                .validate()
-                .is_err()
+            err.to_string().contains("build_id must be positive"),
+            "expected 'build_id must be positive' error, got: {err}"
         );
     }
 
@@ -743,7 +747,13 @@ mod tests {
 
     #[test]
     fn test_validation_rejects_leading_dot_artifact_name() {
-        assert!(try_params(None, ".hidden", "out/report.pdf").is_err());
+        let err = try_params(None, ".hidden", "out/report.pdf")
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("must not start with '.'"),
+            "expected 'must not start with' error, got: {err}"
+        );
     }
 
     #[test]
@@ -759,7 +769,13 @@ mod tests {
 
     #[test]
     fn test_validation_rejects_traversal_in_file_path() {
-        assert!(try_params(None, "report", "../etc/passwd").is_err());
+        let err = try_params(None, "report", "../etc/passwd")
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("path-traversal"),
+            "expected path-traversal error, got: {err}"
+        );
     }
 
     #[test]
@@ -784,15 +800,25 @@ mod tests {
 
     #[test]
     fn test_validation_rejects_pipeline_command_sequences_in_file_path() {
+        let err_vso = try_params(
+            None,
+            "report",
+            "##vso[task.setvariable variable=EXPLOIT]value.txt",
+        )
+        .map(|_| ())
+        .unwrap_err();
         assert!(
-            try_params(
-                None,
-                "report",
-                "##vso[task.setvariable variable=EXPLOIT]value.txt"
-            )
-            .is_err()
+            err_vso.to_string().contains("pipeline command"),
+            "expected pipeline-command error for ##vso[, got: {err_vso}"
         );
-        assert!(try_params(None, "report", "##[error]value.txt").is_err());
+
+        let err_hash = try_params(None, "report", "##[error]value.txt")
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            err_hash.to_string().contains("pipeline command"),
+            "expected pipeline-command error for ##[, got: {err_hash}"
+        );
     }
 
     #[test]
