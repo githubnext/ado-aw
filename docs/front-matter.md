@@ -159,7 +159,7 @@ execution-context:             # optional execution-context plugin (see docs/exe
                                # (also suppresses auto-adding the read-only git commands to the
                                # agent's bash allow-list).
     checks:
-      enabled: true             # include PR Build Validation check results
+      enabled: false            # OPT-IN: include PR Build Validation check results (default off)
   manual:
     enabled: true               # defaults to true when parameters are declared
     include-email: false
@@ -172,7 +172,7 @@ execution-context:             # optional execution-context plugin (see docs/exe
     max-items: 5
     max-body-kb: 32
   schedule:
-    enabled: true               # scheduled-run diff context (requires on.schedule)
+    enabled: false              # OPT-IN: "since last run" diff context for scheduled builds (requires on.schedule)
   repo:
     enabled: false              # opt-in repository identity context
     conventions: false          # opt-in deeper probe (CODEOWNERS / CONTRIBUTING.md / .editorconfig)
