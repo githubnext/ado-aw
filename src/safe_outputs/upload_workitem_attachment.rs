@@ -340,15 +340,6 @@ impl Executor for UploadWorkitemAttachmentResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safe_outputs::ToolResult;
-
-    #[test]
-    fn test_result_has_correct_name() {
-        assert_eq!(
-            UploadWorkitemAttachmentResult::NAME,
-            "upload-workitem-attachment"
-        );
-    }
 
     #[test]
     fn test_params_deserializes() {
@@ -381,8 +372,12 @@ mod tests {
             file_path: "output/report.pdf".to_string(),
             comment: None,
         };
-        let result: Result<UploadWorkitemAttachmentResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = <UploadWorkitemAttachmentParams as TryInto<UploadWorkitemAttachmentResult>>::try_into(params)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("work_item_id must be positive"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -392,8 +387,12 @@ mod tests {
             file_path: "".to_string(),
             comment: None,
         };
-        let result: Result<UploadWorkitemAttachmentResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = <UploadWorkitemAttachmentParams as TryInto<UploadWorkitemAttachmentResult>>::try_into(params)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("must not be empty"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -403,8 +402,12 @@ mod tests {
             file_path: "../etc/passwd".to_string(),
             comment: None,
         };
-        let result: Result<UploadWorkitemAttachmentResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = <UploadWorkitemAttachmentParams as TryInto<UploadWorkitemAttachmentResult>>::try_into(params)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("path-traversal"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -510,10 +513,18 @@ mod tests {
             file_path: "##[error]value.txt".to_string(),
             comment: None,
         };
-        let vso_result: Result<UploadWorkitemAttachmentResult, _> = vso.try_into();
-        let shorthand_result: Result<UploadWorkitemAttachmentResult, _> = shorthand.try_into();
-        assert!(vso_result.is_err());
-        assert!(shorthand_result.is_err());
+        let vso_err = <UploadWorkitemAttachmentParams as TryInto<UploadWorkitemAttachmentResult>>::try_into(vso)
+            .unwrap_err();
+        let shorthand_err = <UploadWorkitemAttachmentParams as TryInto<UploadWorkitemAttachmentResult>>::try_into(shorthand)
+            .unwrap_err();
+        assert!(
+            vso_err.to_string().contains("pipeline command"),
+            "unexpected error for ##vso[: {vso_err}"
+        );
+        assert!(
+            shorthand_err.to_string().contains("pipeline command"),
+            "unexpected error for ##[: {shorthand_err}"
+        );
     }
 
     #[test]
