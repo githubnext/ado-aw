@@ -102,7 +102,7 @@ safe-outputs:
 
 ### "safe-outputs.comment-on-work-item requires a 'target' field"
 
-Certain safe-output tools require an explicit `target:` in the front matter configuration. `comment-on-work-item` and `update-work-item` are the most common examples — they need `target:` to scope which work items can be modified.
+The `comment-on-work-item` tool requires an explicit `target:` field. Compilation fails if it is missing.
 
 **Solution:** Add a `target:` field under the tool's `safe-outputs:` entry:
 
@@ -111,6 +111,19 @@ safe-outputs:
   comment-on-work-item:
     max: 3
     target: "*"   # any work item, or a specific ID / area path prefix
+```
+
+### "safe-outputs.update-work-item requires a 'target' field"
+
+Like `comment-on-work-item`, the `update-work-item` tool requires an explicit `target:` field. Compilation fails if it is missing.
+
+**Solution:** Add a `target:` field and at least one enabled field:
+
+```yaml
+safe-outputs:
+  update-work-item:
+    title: true
+    target: "*"   # any work item, or a specific work item ID number (e.g. 42)
 ```
 
 ## Runtime Errors

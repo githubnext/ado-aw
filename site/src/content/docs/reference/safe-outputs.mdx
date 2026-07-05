@@ -113,13 +113,15 @@ safe-outputs:
     title-prefix: "[bot] "    # only update work items whose title starts with this prefix
     tag-prefix: "agent-"      # only update work items that have at least one tag starting with this prefix
     max: 3                    # maximum number of update-work-item outputs allowed per run (default: 1)
-    target: "*"               # "*" (default) allows any work item ID, or set to a specific work item ID number
+    target: "*"               # Required — "*" allows any work item ID, or a specific work item ID (e.g. 42)
     area-path: true           # enable area path updates (default: false)
     iteration-path: true      # enable iteration path updates (default: false)
     assignee: true            # enable assignee updates (default: false)
     tags: true                # enable tag updates (default: false)
     allowed-tags: []          # Optional -- restrict which tags the agent can set (empty = any; supports * wildcards like "agent-*")
 ```
+
+**Note:** The `target` field is required. If omitted, compilation fails with an error. Use `"*"` to allow any work item ID, or set it to a specific integer ID to restrict updates to a single work item.
 
 **Security note:** Every field that can be modified requires explicit opt-in (`true`) in the front matter configuration. If the `max` limit is exceeded, additional entries are skipped rather than aborting the entire batch.
 
