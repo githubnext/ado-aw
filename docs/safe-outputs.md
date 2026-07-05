@@ -248,7 +248,7 @@ safe-outputs:
     iteration-path: true      # enable iteration path updates (default: false)
     assignee: true            # enable assignee updates (default: false)
     tags: true                # enable tag updates (default: false)
-    allowed-tags: []          # Optional — restrict which tags the agent can set (empty = any; supports * wildcards like "agent-*")
+    allowed-tags: []          # Optional — restrict which tags the agent can set (empty = any; supports * wildcards anywhere in the pattern, e.g. "agent-*" or "copilot:repo=org/project/*@main")
 ```
 
 **Note:** The `target` field is required. If omitted, compilation fails with an error. This ensures operators are intentional about which work items agents can update.
@@ -536,7 +536,7 @@ Adds a tag to an Azure DevOps build.
 ```yaml
 safe-outputs:
   add-build-tag:
-    allowed-tags: []             # Optional — restrict which tags can be applied (supports * wildcards)
+    allowed-tags: []             # Optional — restrict which tags can be applied (supports * wildcards anywhere in the pattern, e.g. "agent-*" or "*-approved")
     tag-prefix: "agent-"         # Optional — prefix prepended to all tags
     allow-any-build: false       # When false, only the current pipeline build can be tagged (default: false)
     max: 1                       # Maximum per run (default: 1)
