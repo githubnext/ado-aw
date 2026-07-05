@@ -15,7 +15,7 @@ Inspired by [GitHub Agentic Workflows (gh-aw)](https://github.com/githubnext/gh-
 You author an **agent file** — a markdown document with YAML front matter that
 describes _what_ the agent should do, _when_ it should run, and _which tools_ it
 can use. The `ado-aw` compiler transforms that file into a production-ready Azure
-DevOps pipeline with three jobs:
+DevOps pipeline built around three core security stages:
 
 ```
 ┌────────────────────────┐     ┌──────────────────────┐     ┌───────────────────────┐
@@ -618,7 +618,7 @@ index to jump to the right page.
   (markdown body + YAML front matter grammar) with every supported field.
 - [`docs/engine.md`](docs/engine.md) — `engine:` configuration (model,
   `timeout-minutes`, `version`, `agent`, `api-target`, `args`, `env`,
-  `command`).
+  `command`, `github-app-token`).
 - [`docs/tools.md`](docs/tools.md) — `tools:` configuration (`bash` allow-list,
   `edit`, `cache-memory`, `azure-devops` MCP).
 - [`docs/runtimes.md`](docs/runtimes.md) — `runtimes:` configuration (Lean 4,
@@ -629,6 +629,9 @@ index to jump to the right page.
   syntax with timezones and scattering.
 - [`docs/parameters.md`](docs/parameters.md) — ADO runtime parameters surfaced
   in the pipeline UI.
+- [`docs/conclusion.md`](docs/conclusion.md) — Conclusion job — the
+  always-running post-pipeline housekeeping job (triggered by `safe-outputs:`)
+  that files work-item reports for failures and diagnostic signals.
 - [`docs/targets.md`](docs/targets.md) — target platforms: `standalone`, `1es`,
   `job`, and `stage`.
 - [`docs/execution-context.md`](docs/execution-context.md) — built-in
