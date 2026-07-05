@@ -322,8 +322,8 @@ tools:
 
 **All configurable safe output tools:**
 
-| Tool | Description | `permissions.write` |
-|------|-------------|:-------------------:|
+| Tool | Description | ADO write access |
+|------|-------------|:----------------:|
 | **Work Items** | | |
 | `create-work-item` | Create ADO work items | ✅ |
 | `update-work-item` | Update fields on existing work items (each field requires opt-in) | ✅ |
