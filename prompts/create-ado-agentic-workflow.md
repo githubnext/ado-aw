@@ -15,7 +15,7 @@ When working with a user in a chat session (e.g., Copilot Chat, Claude, Codex):
 - **Don't overwhelm with options** — introduce advanced features (MCP servers, permissions, multi-repo) only when relevant to the user's task.
 - **Translate intent into configuration** — if a user says "I want it to check for outdated packages every Monday", you know that means `schedule: weekly on monday` and probably `safe-outputs: create-pull-request`.
 - **Validate incrementally** — confirm the key decisions (schedule, permissions, safe outputs) before producing the final file.
-- **Explain trade-offs** when relevant — e.g., `claude-opus-4.7` vs `claude-sonnet-4.5` for cost vs capability.
+- **Explain trade-offs** when relevant — e.g., `claude-opus-4.7` vs `claude-sonnet-4.6` for cost vs capability.
 
 ### Non-Interactive Mode
 
@@ -71,14 +71,13 @@ The default model is `claude-opus-4.7`. The compiler accepts any valid model ide
 | Model | Use when |
 |---|---|
 | `claude-opus-4.7` | Default. Best reasoning, complex tasks. |
-| `claude-sonnet-4.5` | Faster, cheaper, simpler tasks. |
+| `claude-sonnet-4.6` | Faster, cheaper, simpler tasks. |
 
 Object form with model selection and extra options:
 ```yaml
 engine:
   id: copilot
-  model: claude-sonnet-4.5
-  timeout-minutes: 30
+  model: claude-sonnet-4.6
 ```
 
 **Org-backed Copilot auth (GitHub App).** By default Copilot authenticates with
@@ -675,7 +674,7 @@ name: "Dependency Updater"
 description: "Checks for outdated npm dependencies and opens PRs to update them"
 engine:
   id: copilot
-  model: claude-sonnet-4.5
+  model: claude-sonnet-4.6
 on:
   schedule: weekly on monday around 9:00
 tools:

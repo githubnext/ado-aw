@@ -218,16 +218,16 @@ parameters:                    # optional ADO runtime parameters (surfaced in UI
     default: false
 ---
 
-Additional top-level field reference:
+## Task
 
-- The always-running Conclusion job (pipeline failure / diagnostic
-  signal reporting) is triggered automatically when `safe-outputs:` is
-  configured. See [docs/conclusion.md](conclusion.md).
-
-## Build and Test
-
-Build the project and run all tests...
+Describe the agent's task here. This markdown body is read by the AI agent at
+runtime — write it as clear, structured natural-language instructions.
 ```
+
+> **Conclusion job**: when `safe-outputs:` is configured the compiler
+> automatically emits an always-running **Conclusion** job that files a work-item
+> report on pipeline failures and surfaces diagnostic signals. See
+> [`docs/conclusion.md`](conclusion.md).
 
 ## Inline step validation (`setup` / `steps` / `post-steps` / `teardown`)
 
