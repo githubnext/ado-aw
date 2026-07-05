@@ -86,7 +86,7 @@ After any **front matter** changes, the pipeline YAML must be regenerated:
 ado-aw compile <path/to/agent.md>
 ```
 
-> **Important**: Changes to the **markdown body** (agent instructions) do **not** require recompilation — the agent reads its instructions from the source `.md` file at runtime.
+> **Important**: Changes to the **markdown body** (agent instructions) do **not** require recompilation — the agent reads its instructions from the source `.md` file at runtime. **Exception**: if `inlined-imports: true` is set in the front matter, the body is embedded at compile time, so body edits also require `ado-aw compile`. Check the front matter before advising the user.
 
 ---
 
@@ -95,12 +95,12 @@ ado-aw compile <path/to/agent.md>
 | Change | Recompile? |
 |---|---|
 | Any YAML front matter field | **Yes** — run `ado-aw compile` |
-| Agent instructions (markdown body) | **No** — loaded at runtime |
+| Agent instructions (markdown body) | **No** — loaded at runtime (unless `inlined-imports: true`) |
 | Adding/removing safe outputs | **Yes** |
 | Changing schedule | **Yes** |
 | Adding/removing MCP servers | **Yes** |
 | Updating permissions | **Yes** |
-| Editing the agent's task description | **No** |
+| Editing the agent's task description | **No** (unless `inlined-imports: true`) |
 | Adding steps / post-steps / setup / teardown | **Yes** |
 | Changing network allow/blocked lists | **Yes** |
 
@@ -287,6 +287,8 @@ teardown:            # Separate job AFTER SafeOutputs
 
 Changes to the markdown body (after the closing `---`) do **not** require recompilation. The agent reads its instructions from the source `.md` file at runtime.
 
+> **Exception**: if `inlined-imports: true` is set in the front matter, the body is embedded into the pipeline YAML at compile time. In that case, body edits **do** require `ado-aw compile`. Always check the front matter for this field before advising the user.
+
 When updating instructions:
 
 - Preserve the existing structure unless the user asks for a rewrite
@@ -403,12 +405,21 @@ Next steps:
   3. Commit both the updated .md source and regenerated .lock.yml pipeline
 ```
 
-If only agent instructions were changed:
+If only agent instructions were changed (and `inlined-imports: true` is **not** set):
 
 ```
 Next steps:
   1. Review the changes in <filename>.md
   2. Commit the updated .md file (no recompilation needed)
+```
+
+If only agent instructions were changed but `inlined-imports: true` **is** set:
+
+```
+Next steps:
+  1. Review the changes in <filename>.md
+  2. Recompile: ado-aw compile <path/to/agent.md>
+  3. Commit both the updated .md source and regenerated .lock.yml pipeline
 ```
 
 ---
