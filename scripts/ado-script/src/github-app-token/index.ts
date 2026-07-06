@@ -56,6 +56,8 @@ const DEFAULT_OUTPUT_VAR = "GITHUB_APP_TOKEN";
 const JWT_TTL_SECONDS = 540;
 /** Small clock-skew backdating for `iat` to tolerate agent/GitHub clock drift. */
 const JWT_IAT_BACKDATE_SECONDS = 60;
+/** RFC 7468 PEM line-wrap width for base64 body lines. */
+const PEM_LINE_LENGTH = 64;
 
 function base64url(input: Buffer | string): string {
   const buf = typeof input === "string" ? Buffer.from(input, "utf8") : input;
@@ -106,15 +108,24 @@ export function normalizePrivateKeyPem(rawPem: string): string {
     .replace(/\r/g, "\n")
     .trim();
   const match = normalizedNewlines.match(
-    /-----BEGIN ([^-]+)-----([\s\S]*?)-----END \1-----/,
+    /-----BEGIN ([A-Z0-9 ]+)-----([\s\S]*?)-----END \1-----/,
   );
   if (!match) {
     return normalizedNewlines;
   }
   const label = match[1];
-  const body = match[2] ?? "";
+  const body = match[2]!;
   const compactBody = body.replace(/\s+/g, "");
-  const wrappedBody = compactBody.match(/.{1,64}/g)?.join("\n") ?? "";
+  if (
+    compactBody.length === 0 ||
+    !/^[A-Za-z0-9+/=]+$/.test(compactBody)
+  ) {
+    return normalizedNewlines;
+  }
+  const wrappedBody =
+    compactBody
+      .match(new RegExp(`.{1,${PEM_LINE_LENGTH}}`, "g"))
+      ?.join("\n") ?? "";
   return `-----BEGIN ${label}-----\n${wrappedBody}\n-----END ${label}-----`;
 }
 

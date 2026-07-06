@@ -75,12 +75,26 @@ describe("buildAppJwt", () => {
     expectJwtVerifies(jwt, publicKey, "123456", now);
   });
 
-  it("accepts escaped-newline PEM input", () => {
+  it("accepts escaped-lf PEM input", () => {
     const { publicKey, privateKey } = makeKeyPair();
     const now = 1_700_000_000;
-    const escaped = privateKey
-      .replace(/\r\n/g, "\\r\\n")
-      .replace(/\n/g, "\\n");
+    const escaped = privateKey.replace(/\n/g, "\\n");
+    const jwt = buildAppJwt("123456", escaped, now);
+    expectJwtVerifies(jwt, publicKey, "123456", now);
+  });
+
+  it("accepts escaped-crlf PEM input", () => {
+    const { publicKey, privateKey } = makeKeyPair();
+    const now = 1_700_000_000;
+    const escaped = privateKey.replace(/\n/g, "\\r\\n");
+    const jwt = buildAppJwt("123456", escaped, now);
+    expectJwtVerifies(jwt, publicKey, "123456", now);
+  });
+
+  it("accepts escaped-cr PEM input", () => {
+    const { publicKey, privateKey } = makeKeyPair();
+    const now = 1_700_000_000;
+    const escaped = privateKey.replace(/\r?\n/g, "\\r");
     const jwt = buildAppJwt("123456", escaped, now);
     expectJwtVerifies(jwt, publicKey, "123456", now);
   });
@@ -88,7 +102,7 @@ describe("buildAppJwt", () => {
   it("accepts whitespace-collapsed PEM input", () => {
     const { publicKey, privateKey } = makeKeyPair();
     const now = 1_700_000_000;
-    const collapsed = privateKey.replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim();
+    const collapsed = privateKey.replace(/\s+/g, " ").trim();
     const jwt = buildAppJwt("123456", collapsed, now);
     expectJwtVerifies(jwt, publicKey, "123456", now);
   });
