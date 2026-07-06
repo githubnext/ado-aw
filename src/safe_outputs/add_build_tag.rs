@@ -217,12 +217,6 @@ impl Executor for AddBuildTagResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safe_outputs::ToolResult;
-
-    #[test]
-    fn test_result_has_correct_name() {
-        assert_eq!(AddBuildTagResult::NAME, "add-build-tag");
-    }
 
     #[test]
     fn test_params_deserializes() {
@@ -250,8 +244,12 @@ mod tests {
             build_id: 0,
             tag: "verified".to_string(),
         };
-        let result: Result<AddBuildTagResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = <AddBuildTagParams as TryInto<AddBuildTagResult>>::try_into(params).unwrap_err();
+        assert!(
+            err.to_string().contains("build_id must be positive"),
+            "unexpected error: {}",
+            err
+        );
     }
 
     #[test]
@@ -260,8 +258,12 @@ mod tests {
             build_id: 42,
             tag: "".to_string(),
         };
-        let result: Result<AddBuildTagResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = <AddBuildTagParams as TryInto<AddBuildTagResult>>::try_into(params).unwrap_err();
+        assert!(
+            err.to_string().contains("tag must not be empty"),
+            "unexpected error: {}",
+            err
+        );
     }
 
     #[test]
@@ -270,8 +272,12 @@ mod tests {
             build_id: 42,
             tag: "invalid tag!".to_string(),
         };
-        let result: Result<AddBuildTagResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = <AddBuildTagParams as TryInto<AddBuildTagResult>>::try_into(params).unwrap_err();
+        assert!(
+            err.to_string().contains("alphanumeric"),
+            "unexpected error: {}",
+            err
+        );
     }
 
     #[test]

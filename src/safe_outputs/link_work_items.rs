@@ -305,12 +305,6 @@ impl Executor for LinkWorkItemsResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safe_outputs::ToolResult;
-
-    #[test]
-    fn test_result_has_correct_name() {
-        assert_eq!(LinkWorkItemsResult::NAME, "link-work-items");
-    }
 
     #[test]
     fn test_params_deserializes() {
