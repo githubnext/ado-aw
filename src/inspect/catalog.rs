@@ -280,7 +280,7 @@ fn models() -> Vec<String> {
     // prompts/create-ado-agentic-workflow.md step 2.
     vec![
         DEFAULT_COPILOT_MODEL.to_string(),
-        "claude-sonnet-4.5".to_string(),
+        "claude-sonnet-4.6".to_string(),
     ]
 }
 
