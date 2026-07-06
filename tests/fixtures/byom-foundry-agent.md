@@ -15,5 +15,6 @@ engine:
 This agent routes Copilot requests to a private Azure Copilot Foundry instance
 via the dedicated `engine.provider` block. The compiler mints the bearer token
 in-job (Agent + Detection) via `az account get-access-token` and wires it into
-`COPILOT_PROVIDER_BEARER_TOKEN` as a same-job secret.
+`COPILOT_PROVIDER_API_KEY` (the credential env var the AWF api-proxy sidecar
+reads) as a same-job secret.
 

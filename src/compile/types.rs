@@ -704,6 +704,12 @@ impl ProviderConfig {
         // injection (`##vso[`), or a newline.
         Self::reject_unsafe_provider_value("base-url", &self.base_url)?;
         if let Some(api_key) = &self.api_key {
+            if api_key.trim().is_empty() {
+                anyhow::bail!(
+                    "engine.provider.api-key must not be empty. Provide a secret \
+                     macro reference (e.g. `$(OPENAI_API_KEY)`) or omit the field."
+                );
+            }
             Self::reject_unsafe_provider_value("api-key", api_key)?;
         }
         // The provider endpoint receives the bearer token / API key, so it must

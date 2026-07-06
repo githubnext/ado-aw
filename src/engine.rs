@@ -2198,6 +2198,17 @@ mod tests {
     }
 
     #[test]
+    fn provider_api_key_rejects_empty() {
+        let md = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  provider:\n    base-url: https://x.example.com/v1\n    api-key: \"\"\n---\n";
+        let (fm, _) = parse_markdown(md).unwrap();
+        let err = validate_engine_feature_support(&fm.engine).unwrap_err().to_string();
+        assert!(
+            err.contains("api-key must not be empty"),
+            "an empty api-key must be rejected (would send an empty credential): {err}"
+        );
+    }
+
+    #[test]
     fn provider_api_key_rejects_injection() {
         let md = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  provider:\n    base-url: https://x.example.com/v1\n    api-key: \"##vso[task.setvariable variable=x]y\"\n---\n";
         let (fm, _) = parse_markdown(md).unwrap();
