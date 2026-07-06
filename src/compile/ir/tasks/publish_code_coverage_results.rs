@@ -90,9 +90,10 @@ mod tests {
 
     #[test]
     fn sets_task_and_required_input() {
-        let t =
-            PublishCodeCoverageResults::new("$(System.DefaultWorkingDirectory)/**/coverage.xml")
-                .into_step();
+        let t = PublishCodeCoverageResults::new(
+            "$(System.DefaultWorkingDirectory)/**/coverage.xml",
+        )
+        .into_step();
         assert_eq!(t.task, "PublishCodeCoverageResults@2");
         assert_eq!(
             t.inputs.get("summaryFileLocation").map(String::as_str),

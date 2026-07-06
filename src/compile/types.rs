@@ -1128,11 +1128,7 @@ impl FrontMatter {
             check("safe-outputs.require-approval", v)?;
         }
         for tool in self.safe_output_tool_names() {
-            if let Some(v) = self
-                .safe_outputs
-                .get(tool)
-                .and_then(|c| c.get("require-approval"))
-            {
+            if let Some(v) = self.safe_outputs.get(tool).and_then(|c| c.get("require-approval")) {
                 check(&format!("safe-outputs.{tool}.require-approval"), v)?;
             }
         }
@@ -2737,13 +2733,9 @@ github-app-token:
             .unwrap()
             .clone();
         assert_eq!(gat.app_id, "1234567");
-        assert_eq!(
-            gat.api_url.as_deref(),
-            Some("https://ghe.example.com/api/v3")
-        );
+        assert_eq!(gat.api_url.as_deref(), Some("https://ghe.example.com/api/v3"));
         assert!(gat.skip_token_revocation);
-        gat.validate()
-            .expect("numeric app-id + https api-url is valid");
+        gat.validate().expect("numeric app-id + https api-url is valid");
     }
 
     #[test]
@@ -2788,11 +2780,7 @@ github-app-token:
         let ec = EngineConfig::default();
         assert!(ec.github_app_token().is_none());
         let opts: EngineOptions = serde_yaml::from_str("id: copilot").unwrap();
-        assert!(
-            EngineConfig::Full(Box::new(opts))
-                .github_app_token()
-                .is_none()
-        );
+        assert!(EngineConfig::Full(Box::new(opts)).github_app_token().is_none());
     }
 
     #[test]
@@ -2804,10 +2792,7 @@ github-app-token:
   owner: octo-org
 "#;
         let opts: EngineOptions = serde_yaml::from_str(yaml).unwrap();
-        let gat = EngineConfig::Full(Box::new(opts))
-            .github_app_token()
-            .unwrap()
-            .clone();
+        let gat = EngineConfig::Full(Box::new(opts)).github_app_token().unwrap().clone();
         assert!(gat.repositories.is_empty());
         gat.validate().unwrap();
     }
@@ -2921,7 +2906,8 @@ github-app-token:
         // accidentally introducing a required field or a non-None serde default.
         let yaml = "permissions: {}";
         let fm: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
-        let pc: PermissionsConfig = serde_yaml::from_value(fm["permissions"].clone()).unwrap();
+        let pc: PermissionsConfig =
+            serde_yaml::from_value(fm["permissions"].clone()).unwrap();
         assert!(pc.read.is_none());
         assert!(pc.write.is_none());
     }
@@ -3884,14 +3870,8 @@ Body
         assert_eq!(report_flag, Some(false));
         // noop config with flat fields
         let noop = fm.safe_outputs.get("noop").unwrap();
-        assert_eq!(
-            noop.get("title-prefix").and_then(|v| v.as_str()),
-            Some("[ado-aw] Agent noop")
-        );
-        assert_eq!(
-            noop.get("area-path").and_then(|v| v.as_str()),
-            Some("MyProject\\MyTeam")
-        );
+        assert_eq!(noop.get("title-prefix").and_then(|v| v.as_str()), Some("[ado-aw] Agent noop"));
+        assert_eq!(noop.get("area-path").and_then(|v| v.as_str()), Some("MyProject\\MyTeam"));
     }
 
     #[test]
@@ -3923,9 +3903,6 @@ safe-outputs:
 Body
 "#;
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
-        assert!(
-            !fm.safe_outputs.is_empty(),
-            "safe_outputs should be non-empty"
-        );
+        assert!(!fm.safe_outputs.is_empty(), "safe_outputs should be non-empty");
     }
 }

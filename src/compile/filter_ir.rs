@@ -402,10 +402,7 @@ fn push_glob_match(
 ) {
     checks.push(FilterCheck {
         name,
-        predicate: Predicate::GlobMatch {
-            fact,
-            pattern: filter.pattern.clone(),
-        },
+        predicate: Predicate::GlobMatch { fact, pattern: filter.pattern.clone() },
         build_tag_suffix: suffix,
     });
 }
@@ -468,33 +465,15 @@ pub fn lower_pr_filters(filters: &super::types::PrFilters) -> Vec<FilterCheck> {
     }
 
     if let Some(source) = &filters.source_branch {
-        push_glob_match(
-            &mut checks,
-            "source-branch",
-            Fact::SourceBranch,
-            source,
-            "source-branch-mismatch",
-        );
+        push_glob_match(&mut checks, "source-branch", Fact::SourceBranch, source, "source-branch-mismatch");
     }
 
     if let Some(target) = &filters.target_branch {
-        push_glob_match(
-            &mut checks,
-            "target-branch",
-            Fact::TargetBranch,
-            target,
-            "target-branch-mismatch",
-        );
+        push_glob_match(&mut checks, "target-branch", Fact::TargetBranch, target, "target-branch-mismatch");
     }
 
     if let Some(cm) = &filters.commit_message {
-        push_glob_match(
-            &mut checks,
-            "commit-message",
-            Fact::CommitMessage,
-            cm,
-            "commit-message-mismatch",
-        );
+        push_glob_match(&mut checks, "commit-message", Fact::CommitMessage, cm, "commit-message-mismatch");
     }
 
     // Tier 2: REST API required
@@ -515,11 +494,7 @@ pub fn lower_pr_filters(filters: &super::types::PrFilters) -> Vec<FilterCheck> {
             name: "draft",
             predicate: Predicate::Equality {
                 fact: Fact::PrIsDraft,
-                value: if draft_expected {
-                    "true".into()
-                } else {
-                    "false".into()
-                },
+                value: if draft_expected { "true".into() } else { "false".into() },
             },
             build_tag_suffix: "draft-mismatch",
         });
@@ -540,10 +515,7 @@ pub fn lower_pr_filters(filters: &super::types::PrFilters) -> Vec<FilterCheck> {
     if let Some(tw) = &filters.time_window {
         checks.push(FilterCheck {
             name: "time-window",
-            predicate: Predicate::TimeWindow {
-                start: tw.start.clone(),
-                end: tw.end.clone(),
-            },
+            predicate: Predicate::TimeWindow { start: tw.start.clone(), end: tw.end.clone() },
             build_tag_suffix: "time-window-mismatch",
         });
     }
@@ -580,32 +552,17 @@ pub fn lower_pipeline_filters(filters: &super::types::PipelineFilters) -> Vec<Fi
     let mut checks = Vec::new();
 
     if let Some(sp) = &filters.source_pipeline {
-        push_glob_match(
-            &mut checks,
-            "source-pipeline",
-            Fact::TriggeredByPipeline,
-            sp,
-            "source-pipeline-mismatch",
-        );
+        push_glob_match(&mut checks, "source-pipeline", Fact::TriggeredByPipeline, sp, "source-pipeline-mismatch");
     }
 
     if let Some(branch) = &filters.branch {
-        push_glob_match(
-            &mut checks,
-            "branch",
-            Fact::TriggeringBranch,
-            branch,
-            "branch-mismatch",
-        );
+        push_glob_match(&mut checks, "branch", Fact::TriggeringBranch, branch, "branch-mismatch");
     }
 
     if let Some(tw) = &filters.time_window {
         checks.push(FilterCheck {
             name: "time-window",
-            predicate: Predicate::TimeWindow {
-                start: tw.start.clone(),
-                end: tw.end.clone(),
-            },
+            predicate: Predicate::TimeWindow { start: tw.start.clone(), end: tw.end.clone() },
             build_tag_suffix: "time-window-mismatch",
         });
     }
@@ -2126,11 +2083,7 @@ mod tests {
         assert_eq!(spec.context.step_name, "prGate");
         assert_eq!(spec.context.bypass_label, "PR");
         // Facts should include pr_title, pr_metadata (dep of pr_labels), pr_labels
-        assert_eq!(
-            spec.facts.len(),
-            3,
-            "exactly 3 facts required for title + labels checks"
-        );
+        assert_eq!(spec.facts.len(), 3, "exactly 3 facts required for title + labels checks");
         assert!(spec.facts.iter().any(|f| f.kind == "pr_title"));
         assert!(spec.facts.iter().any(|f| f.kind == "pr_metadata"));
         assert!(spec.facts.iter().any(|f| f.kind == "pr_labels"));

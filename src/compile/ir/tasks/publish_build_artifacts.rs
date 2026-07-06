@@ -58,7 +58,7 @@ pub(crate) fn validate_inputs(inputs: Value) -> Result<(), String> {
         other => {
             return Err(format!(
                 "PublishBuildArtifacts@1: unknown publishLocation `{other}`"
-            ));
+            ))
         }
     };
     result.map_err(|e| format!("publishLocation `{publish_location}`: {e}"))

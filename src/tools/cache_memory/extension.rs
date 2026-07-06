@@ -1,9 +1,9 @@
 use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
 use crate::compile::ir::condition::Condition;
-use crate::compile::ir::step::{BashStep, Step, TaskStep};
 use crate::compile::ir::tasks::download_pipeline_artifact::{
     ArtifactSource, DownloadPipelineArtifact, RunVersion,
 };
+use crate::compile::ir::step::{BashStep, Step, TaskStep};
 use crate::compile::types::CacheMemoryToolConfig;
 use anyhow::Result;
 

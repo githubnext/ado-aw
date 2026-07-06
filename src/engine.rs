@@ -1135,22 +1135,21 @@ mod tests {
 
     #[test]
     fn github_token_source_var_switches_on_config() {
-        let (default_fm, _) = parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
+        let (default_fm, _) =
+            parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
         assert_eq!(github_token_source_var(&default_fm.engine), "GITHUB_TOKEN");
 
         let src = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  \
                    github-app-token:\n    app-id: GH_APP_ID\n    private-key: GH_APP_KEY\n    \
                    owner: octo-org\n---\n";
         let (app_fm, _) = parse_markdown(src).unwrap();
-        assert_eq!(
-            github_token_source_var(&app_fm.engine),
-            GITHUB_APP_TOKEN_VAR
-        );
+        assert_eq!(github_token_source_var(&app_fm.engine), GITHUB_APP_TOKEN_VAR);
     }
 
     #[test]
     fn github_app_token_secrecy_advisory_fires_only_when_configured() {
-        let (default_fm, _) = parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
+        let (default_fm, _) =
+            parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
         assert!(github_app_token_secrecy_advisory(&default_fm.engine).is_none());
 
         let src = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  \
@@ -1159,10 +1158,7 @@ mod tests {
         let advisory = github_app_token_secrecy_advisory(&app_fm.engine)
             .expect("advisory present when github-app-token configured");
         // Names the effective (default) variable and points at secrecy.
-        assert!(
-            advisory.contains("GITHUB_APP_PRIVATE_KEY"),
-            "advisory: {advisory}"
-        );
+        assert!(advisory.contains("GITHUB_APP_PRIVATE_KEY"), "advisory: {advisory}");
         assert!(advisory.contains("SECRET"), "advisory: {advisory}");
     }
 
@@ -1173,9 +1169,7 @@ mod tests {
         let src = "---\nname: test\ndescription: test\nengine:\n  id: claude\n  \
                    github-app-token:\n    app-id: 1234567\n    owner: octo-org\n---\n";
         let (fm, _) = parse_markdown(src).unwrap();
-        let err = validate_engine_feature_support(&fm.engine)
-            .unwrap_err()
-            .to_string();
+        let err = validate_engine_feature_support(&fm.engine).unwrap_err().to_string();
         assert!(err.contains("github-app-token"), "err: {err}");
         assert!(err.contains("copilot"), "err: {err}");
     }
@@ -1189,7 +1183,8 @@ mod tests {
         validate_engine_feature_support(&fm.engine).expect("copilot + app-token is valid");
 
         // No github-app-token: ok regardless of engine.
-        let (default_fm, _) = parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
+        let (default_fm, _) =
+            parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
         validate_engine_feature_support(&default_fm.engine).expect("absent config is valid");
     }
 
@@ -1771,31 +1766,19 @@ mod tests {
         let (fm_ok, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    COPILOT_PROVIDER_BASE_URL: https://x.example.com/v1\n---\n",
         ).unwrap();
-        assert!(
-            Engine::Copilot
-                .network_host_warnings(&fm_ok.engine)
-                .is_empty()
-        );
+        assert!(Engine::Copilot.network_host_warnings(&fm_ok.engine).is_empty());
 
         // Expression-valued → documented manual path, no warning.
         let (fm_expr, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    COPILOT_PROVIDER_BASE_URL: \"$(Setup.BASE_URL)\"\n---\n",
         ).unwrap();
-        assert!(
-            Engine::Copilot
-                .network_host_warnings(&fm_expr.engine)
-                .is_empty()
-        );
+        assert!(Engine::Copilot.network_host_warnings(&fm_expr.engine).is_empty());
 
         // Absent → no warning.
         let (fm_none, _) =
             parse_markdown("---\nname: test\ndescription: test\nengine:\n  id: copilot\n---\n")
                 .unwrap();
-        assert!(
-            Engine::Copilot
-                .network_host_warnings(&fm_none.engine)
-                .is_empty()
-        );
+        assert!(Engine::Copilot.network_host_warnings(&fm_none.engine).is_empty());
     }
 
     #[test]

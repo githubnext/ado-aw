@@ -244,7 +244,8 @@ mod tests {
     fn every_bundle_path_is_under_the_unpack_dir() {
         for b in Bundle::ALL {
             assert!(
-                b.path().starts_with("/tmp/ado-aw-scripts/ado-script/"),
+                b.path()
+                    .starts_with("/tmp/ado-aw-scripts/ado-script/"),
                 "{b:?} path must live under the unzip destination"
             );
             assert!(b.path().ends_with(".js"), "{b:?} path must be a .js bundle");
@@ -278,7 +279,10 @@ mod tests {
             token_source_for(Some("my-sc")),
             TokenSource::WriteServiceConnection
         );
-        assert_eq!(token_source_for(Some("my-sc")).variable(), "SC_WRITE_TOKEN");
+        assert_eq!(
+            token_source_for(Some("my-sc")).variable(),
+            "SC_WRITE_TOKEN"
+        );
     }
 
     #[test]

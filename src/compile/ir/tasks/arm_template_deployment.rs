@@ -85,16 +85,10 @@ impl ArmTemplateSource {
     /// Attach a parameters file path (for `LinkedArtifact`) or URL (for `Url`).
     pub fn with_parameters_file(mut self, value: impl Into<String>) -> Self {
         match &mut self {
-            Self::LinkedArtifact {
-                csm_parameters_file,
-                ..
-            } => {
+            Self::LinkedArtifact { csm_parameters_file, .. } => {
                 *csm_parameters_file = Some(value.into());
             }
-            Self::Url {
-                csm_parameters_file_link,
-                ..
-            } => {
+            Self::Url { csm_parameters_file_link, .. } => {
                 *csm_parameters_file_link = Some(value.into());
             }
         }
@@ -434,10 +428,7 @@ pub struct ArmTemplateDeployment {
 impl ArmTemplateDeployment {
     /// Construct from an explicit [`ArmDeploymentCommand`].
     pub fn new(command: ArmDeploymentCommand) -> Self {
-        Self {
-            command,
-            display_name: None,
-        }
+        Self { command, display_name: None }
     }
 
     /// Deploy to a Resource Group.
@@ -547,21 +538,13 @@ impl ArmTemplateDeployment {
 
 fn push_template_source(t: &mut TaskStep, source: ArmTemplateSource) {
     match source {
-        ArmTemplateSource::LinkedArtifact {
-            csm_file,
-            csm_parameters_file,
-        } => {
-            t.inputs
-                .insert("templateLocation".into(), "Linked artifact".into());
+        ArmTemplateSource::LinkedArtifact { csm_file, csm_parameters_file } => {
+            t.inputs.insert("templateLocation".into(), "Linked artifact".into());
             t.inputs.insert("csmFile".into(), csm_file);
             push_opt(t, "csmParametersFile", csm_parameters_file);
         }
-        ArmTemplateSource::Url {
-            csm_file_link,
-            csm_parameters_file_link,
-        } => {
-            t.inputs
-                .insert("templateLocation".into(), "URL of the file".into());
+        ArmTemplateSource::Url { csm_file_link, csm_parameters_file_link } => {
+            t.inputs.insert("templateLocation".into(), "URL of the file".into());
             t.inputs.insert("csmFileLink".into(), csm_file_link);
             push_opt(t, "csmParametersFileLink", csm_parameters_file_link);
         }
@@ -570,8 +553,7 @@ fn push_template_source(t: &mut TaskStep, source: ArmTemplateSource) {
 
 fn push_deploy_opts(t: &mut TaskStep, opts: DeployOptions) {
     if let Some(mode) = opts.deployment_mode {
-        t.inputs
-            .insert("deploymentMode".into(), mode.as_ado_str().into());
+        t.inputs.insert("deploymentMode".into(), mode.as_ado_str().into());
     }
     push_opt(t, "overrideParameters", opts.override_parameters);
     push_opt(t, "deploymentName", opts.deployment_name);
@@ -675,9 +657,7 @@ fn take_string(map: &mut serde_yaml::Mapping, key: &str) -> Result<Option<String
 fn require_string(map: &mut serde_yaml::Mapping, key: &str) -> Result<(), String> {
     match take_string(map, key)? {
         Some(_) => Ok(()),
-        None => Err(format!(
-            "missing required input `{key}` for the selected scope"
-        )),
+        None => Err(format!("missing required input `{key}` for the selected scope")),
     }
 }
 
@@ -743,13 +723,15 @@ mod tests {
 
     #[test]
     fn resource_group_deploy_linked_artifact() {
-        let t = ArmTemplateDeployment::resource_group_deploy(ResourceGroupDeploy::new(
-            "myAzureConnection",
-            "00000000-0000-0000-0000-000000000000",
-            "my-rg",
-            "East US",
-            ArmTemplateSource::linked_artifact("infra/main.bicep"),
-        ))
+        let t = ArmTemplateDeployment::resource_group_deploy(
+            ResourceGroupDeploy::new(
+                "myAzureConnection",
+                "00000000-0000-0000-0000-000000000000",
+                "my-rg",
+                "East US",
+                ArmTemplateSource::linked_artifact("infra/main.bicep"),
+            ),
+        )
         .into_step();
 
         assert_eq!(t.task, "AzureResourceManagerTemplateDeployment@3");
@@ -763,31 +745,20 @@ mod tests {
             Some("Create Or Update Resource Group")
         );
         assert_eq!(
-            t.inputs
-                .get("azureResourceManagerConnection")
-                .map(String::as_str),
+            t.inputs.get("azureResourceManagerConnection").map(String::as_str),
             Some("myAzureConnection")
         );
         assert_eq!(
             t.inputs.get("subscriptionId").map(String::as_str),
             Some("00000000-0000-0000-0000-000000000000")
         );
-        assert_eq!(
-            t.inputs.get("resourceGroupName").map(String::as_str),
-            Some("my-rg")
-        );
-        assert_eq!(
-            t.inputs.get("location").map(String::as_str),
-            Some("East US")
-        );
+        assert_eq!(t.inputs.get("resourceGroupName").map(String::as_str), Some("my-rg"));
+        assert_eq!(t.inputs.get("location").map(String::as_str), Some("East US"));
         assert_eq!(
             t.inputs.get("templateLocation").map(String::as_str),
             Some("Linked artifact")
         );
-        assert_eq!(
-            t.inputs.get("csmFile").map(String::as_str),
-            Some("infra/main.bicep")
-        );
+        assert_eq!(t.inputs.get("csmFile").map(String::as_str), Some("infra/main.bicep"));
         assert!(t.inputs.get("csmParametersFile").is_none());
     }
 
@@ -812,36 +783,23 @@ mod tests {
         .into_step();
 
         assert_eq!(t.display_name, "Deploy Infrastructure");
-        assert_eq!(
-            t.inputs.get("deploymentMode").map(String::as_str),
-            Some("Complete")
-        );
+        assert_eq!(t.inputs.get("deploymentMode").map(String::as_str), Some("Complete"));
         assert_eq!(
             t.inputs.get("csmParametersFile").map(String::as_str),
             Some("main.parameters.json")
         );
-        assert_eq!(
-            t.inputs.get("deploymentName").map(String::as_str),
-            Some("my-deploy")
-        );
-        assert_eq!(
-            t.inputs.get("deploymentOutputs").map(String::as_str),
-            Some("armOutputs")
-        );
-        assert_eq!(
-            t.inputs.get("addSpnToEnvironment").map(String::as_str),
-            Some("true")
-        );
-        assert_eq!(
-            t.inputs.get("useWithoutJSON").map(String::as_str),
-            Some("true")
-        );
+        assert_eq!(t.inputs.get("deploymentName").map(String::as_str), Some("my-deploy"));
+        assert_eq!(t.inputs.get("deploymentOutputs").map(String::as_str), Some("armOutputs"));
+        assert_eq!(t.inputs.get("addSpnToEnvironment").map(String::as_str), Some("true"));
+        assert_eq!(t.inputs.get("useWithoutJSON").map(String::as_str), Some("true"));
     }
 
     #[test]
     fn resource_group_delete() {
         let t = ArmTemplateDeployment::resource_group_delete(ResourceGroupDelete::new(
-            "conn", "sub-id", "old-rg",
+            "conn",
+            "sub-id",
+            "old-rg",
         ))
         .into_step();
 
@@ -852,10 +810,7 @@ mod tests {
             Some("Resource Group")
         );
         assert_eq!(t.inputs.get("action").map(String::as_str), Some("DeleteRG"));
-        assert_eq!(
-            t.inputs.get("resourceGroupName").map(String::as_str),
-            Some("old-rg")
-        );
+        assert_eq!(t.inputs.get("resourceGroupName").map(String::as_str), Some("old-rg"));
         assert!(t.inputs.get("templateLocation").is_none());
         assert!(t.inputs.get("csmFile").is_none());
     }
@@ -871,10 +826,7 @@ mod tests {
         ))
         .into_step();
 
-        assert_eq!(
-            t.inputs.get("deploymentScope").map(String::as_str),
-            Some("Subscription")
-        );
+        assert_eq!(t.inputs.get("deploymentScope").map(String::as_str), Some("Subscription"));
         assert!(t.inputs.get("action").is_none());
         assert_eq!(
             t.inputs.get("templateLocation").map(String::as_str),
@@ -900,10 +852,7 @@ mod tests {
         );
         assert!(t.inputs.get("subscriptionId").is_none());
         assert!(t.inputs.get("action").is_none());
-        assert_eq!(
-            t.inputs.get("csmFile").map(String::as_str),
-            Some("mg-policy.json")
-        );
+        assert_eq!(t.inputs.get("csmFile").map(String::as_str), Some("mg-policy.json"));
     }
 
     #[test]
@@ -918,14 +867,8 @@ mod tests {
         )
         .into_step();
 
-        assert_eq!(
-            t.inputs.get("deploymentScope").map(String::as_str),
-            Some("Tenant")
-        );
-        assert_eq!(
-            t.inputs.get("deploymentMode").map(String::as_str),
-            Some("Validation")
-        );
+        assert_eq!(t.inputs.get("deploymentScope").map(String::as_str), Some("Tenant"));
+        assert_eq!(t.inputs.get("deploymentMode").map(String::as_str), Some("Validation"));
     }
 
     #[test]

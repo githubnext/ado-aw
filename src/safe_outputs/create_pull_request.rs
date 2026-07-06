@@ -137,7 +137,10 @@ fn find_identity_in_response(data: &serde_json::Value, reviewer: &str) -> Option
     }
 
     // Fall back to first result if no exact match
-    let local_id = identities.first()?.get("localId")?.as_str()?;
+    let local_id = identities
+        .first()?
+        .get("localId")?
+        .as_str()?;
     debug!(
         "Resolved reviewer '{}' to first match ID '{}'",
         reviewer, local_id

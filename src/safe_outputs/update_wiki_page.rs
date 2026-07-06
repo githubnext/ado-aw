@@ -496,8 +496,7 @@ mod tests {
         let result: Result<UpdateWikiPageResult, _> = params.try_into();
         let err = result.unwrap_err();
         assert!(
-            err.to_string()
-                .contains("content must be at least 10 characters"),
+            err.to_string().contains("content must be at least 10 characters"),
             "expected 'content must be at least 10 characters' in error; got: {err}"
         );
     }
@@ -800,4 +799,5 @@ wiki-name: "MyProject.wiki"
         assert!(!outcome.success);
         assert!(outcome.message.contains("path-prefix"));
     }
+
 }

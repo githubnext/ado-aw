@@ -145,9 +145,7 @@ mod tests {
             Some("false")
         );
         assert_eq!(
-            t.inputs
-                .get("retryCountOnDownloadFails")
-                .map(String::as_str),
+            t.inputs.get("retryCountOnDownloadFails").map(String::as_str),
             Some("3")
         );
         assert_eq!(
@@ -170,7 +168,10 @@ mod tests {
         for version in &["18.x", "20.x", "22.x"] {
             let t = UseNode::new(*version).into_step();
             assert_eq!(t.task, "UseNode@1");
-            assert_eq!(t.inputs.get("version").map(String::as_str), Some(*version));
+            assert_eq!(
+                t.inputs.get("version").map(String::as_str),
+                Some(*version)
+            );
             assert_eq!(t.display_name, format!("Install Node.js {version}"));
         }
     }

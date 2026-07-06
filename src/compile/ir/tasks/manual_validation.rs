@@ -178,11 +178,10 @@ mod tests {
     fn optional_inputs_not_emitted_by_default() {
         let t = ManualValidation::new("team@example.com").into_step();
         assert!(t.inputs.get("approvers").is_none());
-        assert!(
-            t.inputs
-                .get("allowApproversToApproveTheirOwnRuns")
-                .is_none()
-        );
+        assert!(t
+            .inputs
+            .get("allowApproversToApproveTheirOwnRuns")
+            .is_none());
         assert!(t.inputs.get("instructions").is_none());
         assert!(t.inputs.get("onTimeout").is_none());
     }

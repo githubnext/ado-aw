@@ -39,8 +39,8 @@
 //!   pipeline's name is auditable infrastructure metadata, not
 //!   PR-author-controlled).
 
-use crate::compile::ado_bundle::{Bundle, TokenSource, apply_bundle_auth};
 use crate::compile::extensions::CompileContext;
+use crate::compile::ado_bundle::{Bundle, TokenSource, apply_bundle_auth};
 use crate::compile::extensions::ado_script::EXEC_CONTEXT_PIPELINE_PATH;
 use crate::compile::ir::condition::{Condition, Expr};
 use crate::compile::ir::step::{BashStep, Step};
@@ -120,8 +120,8 @@ impl ContextContributor for PipelineContextContributor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compile::extensions::CompileContext;
     use crate::compile::ir::env::EnvValue;
+    use crate::compile::extensions::CompileContext;
     use crate::compile::types::FrontMatter;
 
     fn parse_fm(src: &str) -> FrontMatter {

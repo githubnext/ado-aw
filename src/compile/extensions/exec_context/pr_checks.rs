@@ -19,8 +19,8 @@
 //! (eq(Build.Reason, 'PullRequest')); for synthetic-from-CI runs,
 //! same `AW_PR_ID`-empty-check gate.
 
-use crate::compile::ado_bundle::{Bundle, TokenSource, apply_bundle_auth};
 use crate::compile::extensions::CompileContext;
+use crate::compile::ado_bundle::{Bundle, TokenSource, apply_bundle_auth};
 use crate::compile::extensions::ado_script::EXEC_CONTEXT_PR_CHECKS_PATH;
 use crate::compile::ir::condition::{Condition, Expr};
 use crate::compile::ir::env::EnvValue;

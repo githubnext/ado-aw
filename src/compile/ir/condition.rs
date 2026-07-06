@@ -387,11 +387,7 @@ mod tests {
         match c {
             Condition::And(parts) => {
                 assert_eq!(parts.len(), 2);
-                assert_eq!(
-                    parts[0],
-                    Condition::Succeeded,
-                    "first part must be Succeeded"
-                );
+                assert_eq!(parts[0], Condition::Succeeded, "first part must be Succeeded");
                 assert_eq!(parts[1], Condition::Always, "second part must be Always");
             }
             _ => panic!(),

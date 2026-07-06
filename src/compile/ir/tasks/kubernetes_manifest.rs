@@ -498,7 +498,11 @@ pub struct KubernetesManifestScale {
 
 impl KubernetesManifestScale {
     /// Required: `kind`, `name`, `replicas`.
-    pub fn new(kind: ResourceKind, name: impl Into<String>, replicas: impl Into<String>) -> Self {
+    pub fn new(
+        kind: ResourceKind,
+        name: impl Into<String>,
+        replicas: impl Into<String>,
+    ) -> Self {
         Self {
             kind,
             name: name.into(),
@@ -717,16 +721,8 @@ impl KubernetesManifest {
             "connectionType",
             self.connection_type.map(|c| c.as_ado_str().to_string()),
         );
-        push_opt(
-            &mut t,
-            "kubernetesServiceConnection",
-            self.kubernetes_service_connection,
-        );
-        push_opt(
-            &mut t,
-            "azureSubscriptionConnection",
-            self.azure_subscription_connection,
-        );
+        push_opt(&mut t, "kubernetesServiceConnection", self.kubernetes_service_connection);
+        push_opt(&mut t, "azureSubscriptionConnection", self.azure_subscription_connection);
         push_opt(&mut t, "azureResourceGroup", self.azure_resource_group);
         push_opt(&mut t, "kubernetesCluster", self.kubernetes_cluster);
         push_bool(&mut t, "useClusterAdmin", self.use_cluster_admin);
@@ -736,33 +732,21 @@ impl KubernetesManifest {
         match self.action {
             KubernetesManifestAction::Deploy(s) => {
                 t = t.with_input("manifests", s.manifests);
-                push_opt(
-                    &mut t,
-                    "strategy",
-                    s.strategy.map(|v| v.as_ado_str().to_string()),
-                );
+                push_opt(&mut t, "strategy", s.strategy.map(|v| v.as_ado_str().to_string()));
                 push_opt(
                     &mut t,
                     "trafficSplitMethod",
                     s.traffic_split_method.map(|v| v.as_ado_str().to_string()),
                 );
                 push_opt(&mut t, "percentage", s.percentage);
-                push_opt(
-                    &mut t,
-                    "baselineAndCanaryReplicas",
-                    s.baseline_and_canary_replicas,
-                );
+                push_opt(&mut t, "baselineAndCanaryReplicas", s.baseline_and_canary_replicas);
                 push_opt(&mut t, "containers", s.containers);
                 push_opt(&mut t, "imagePullSecrets", s.image_pull_secrets);
                 push_opt(&mut t, "rolloutStatusTimeout", s.rollout_status_timeout);
                 push_opt(&mut t, "resourceType", s.resource_type);
             }
             KubernetesManifestAction::Bake(s) => {
-                push_opt(
-                    &mut t,
-                    "renderType",
-                    s.render_type.map(|v| v.as_ado_str().to_string()),
-                );
+                push_opt(&mut t, "renderType", s.render_type.map(|v| v.as_ado_str().to_string()));
                 push_opt(&mut t, "helmChart", s.helm_chart);
                 push_opt(&mut t, "dockerComposeFile", s.docker_compose_file);
                 push_opt(&mut t, "kustomizationPath", s.kustomization_path);
@@ -792,11 +776,7 @@ impl KubernetesManifest {
             }
             KubernetesManifestAction::Promote(s) => {
                 t = t.with_input("manifests", s.manifests);
-                push_opt(
-                    &mut t,
-                    "strategy",
-                    s.strategy.map(|v| v.as_ado_str().to_string()),
-                );
+                push_opt(&mut t, "strategy", s.strategy.map(|v| v.as_ado_str().to_string()));
                 push_opt(&mut t, "containers", s.containers);
                 push_opt(&mut t, "imagePullSecrets", s.image_pull_secrets);
                 push_opt(&mut t, "rolloutStatusTimeout", s.rollout_status_timeout);
@@ -810,11 +790,7 @@ impl KubernetesManifest {
             }
             KubernetesManifestAction::Reject(s) => {
                 t = t.with_input("manifests", s.manifests);
-                push_opt(
-                    &mut t,
-                    "strategy",
-                    s.strategy.map(|v| v.as_ado_str().to_string()),
-                );
+                push_opt(&mut t, "strategy", s.strategy.map(|v| v.as_ado_str().to_string()));
             }
         }
         t
@@ -890,7 +866,8 @@ fn strip_shared_inputs(map: &mut serde_yaml::Mapping) -> Result<(), String> {
     }
     if let Some(v) = map.remove("useClusterAdmin") {
         let ok = v.is_bool()
-            || v.as_str()
+            || v
+                .as_str()
                 .is_some_and(|s| s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("false"));
         if !ok {
             return Err("`useClusterAdmin` must be a boolean".to_string());
@@ -1077,15 +1054,10 @@ mod tests {
             Some("k8s/deployment.yaml")
         );
         assert_eq!(
-            t.inputs
-                .get("kubernetesServiceConnection")
-                .map(String::as_str),
+            t.inputs.get("kubernetesServiceConnection").map(String::as_str),
             Some("myCluster")
         );
-        assert_eq!(
-            t.inputs.get("namespace").map(String::as_str),
-            Some("production")
-        );
+        assert_eq!(t.inputs.get("namespace").map(String::as_str), Some("production"));
     }
 
     #[test]
@@ -1118,14 +1090,8 @@ mod tests {
         .into_step();
         assert_eq!(t.inputs.get("action").map(String::as_str), Some("bake"));
         assert_eq!(t.inputs.get("renderType").map(String::as_str), Some("helm"));
-        assert_eq!(
-            t.inputs.get("helmChart").map(String::as_str),
-            Some("./charts/myapp")
-        );
-        assert_eq!(
-            t.inputs.get("releaseName").map(String::as_str),
-            Some("myapp-release")
-        );
+        assert_eq!(t.inputs.get("helmChart").map(String::as_str), Some("./charts/myapp"));
+        assert_eq!(t.inputs.get("releaseName").map(String::as_str), Some("myapp-release"));
         // Bake has no connection inputs.
         assert!(t.inputs.get("kubernetesServiceConnection").is_none());
     }
@@ -1138,10 +1104,7 @@ mod tests {
                 .kustomization_path("./overlays/production"),
         )
         .into_step();
-        assert_eq!(
-            t.inputs.get("renderType").map(String::as_str),
-            Some("kustomize")
-        );
+        assert_eq!(t.inputs.get("renderType").map(String::as_str), Some("kustomize"));
         assert_eq!(
             t.inputs.get("kustomizationPath").map(String::as_str),
             Some("./overlays/production")
@@ -1157,14 +1120,8 @@ mod tests {
         )
         .namespace("default")
         .into_step();
-        assert_eq!(
-            t.inputs.get("action").map(String::as_str),
-            Some("createSecret")
-        );
-        assert_eq!(
-            t.inputs.get("secretType").map(String::as_str),
-            Some("dockerRegistry")
-        );
+        assert_eq!(t.inputs.get("action").map(String::as_str), Some("createSecret"));
+        assert_eq!(t.inputs.get("secretType").map(String::as_str), Some("dockerRegistry"));
         assert_eq!(
             t.inputs.get("secretName").map(String::as_str),
             Some("myregistrysecret")
@@ -1173,10 +1130,7 @@ mod tests {
             t.inputs.get("dockerRegistryEndpoint").map(String::as_str),
             Some("myRegistry")
         );
-        assert_eq!(
-            t.inputs.get("namespace").map(String::as_str),
-            Some("default")
-        );
+        assert_eq!(t.inputs.get("namespace").map(String::as_str), Some("default"));
     }
 
     #[test]
@@ -1187,10 +1141,7 @@ mod tests {
                 .secret_arguments("--from-literal=key=value"),
         )
         .into_step();
-        assert_eq!(
-            t.inputs.get("secretType").map(String::as_str),
-            Some("generic")
-        );
+        assert_eq!(t.inputs.get("secretType").map(String::as_str), Some("generic"));
         assert_eq!(
             t.inputs.get("secretArguments").map(String::as_str),
             Some("--from-literal=key=value")
@@ -1211,9 +1162,7 @@ mod tests {
         assert_eq!(t.inputs.get("name").map(String::as_str), Some("myapp"));
         assert_eq!(t.inputs.get("replicas").map(String::as_str), Some("3"));
         assert_eq!(
-            t.inputs
-                .get("kubernetesServiceConnection")
-                .map(String::as_str),
+            t.inputs.get("kubernetesServiceConnection").map(String::as_str),
             Some("myCluster")
         );
     }
@@ -1227,14 +1176,8 @@ mod tests {
         ))
         .into_step();
         assert_eq!(t.inputs.get("action").map(String::as_str), Some("patch"));
-        assert_eq!(
-            t.inputs.get("resourceToPatch").map(String::as_str),
-            Some("file")
-        );
-        assert_eq!(
-            t.inputs.get("mergeStrategy").map(String::as_str),
-            Some("strategic")
-        );
+        assert_eq!(t.inputs.get("resourceToPatch").map(String::as_str), Some("file"));
+        assert_eq!(t.inputs.get("mergeStrategy").map(String::as_str), Some("strategic"));
         assert_eq!(
             t.inputs.get("patch").map(String::as_str),
             Some(r#"{"spec":{"replicas":2}}"#)
@@ -1253,10 +1196,7 @@ mod tests {
             t.inputs.get("arguments").map(String::as_str),
             Some("deployment/myapp")
         );
-        assert_eq!(
-            t.inputs.get("namespace").map(String::as_str),
-            Some("staging")
-        );
+        assert_eq!(t.inputs.get("namespace").map(String::as_str), Some("staging"));
     }
 
     #[test]
@@ -1267,10 +1207,7 @@ mod tests {
         )
         .into_step();
         assert_eq!(t.inputs.get("action").map(String::as_str), Some("promote"));
-        assert_eq!(
-            t.inputs.get("manifests").map(String::as_str),
-            Some("k8s/deployment.yaml")
-        );
+        assert_eq!(t.inputs.get("manifests").map(String::as_str), Some("k8s/deployment.yaml"));
         assert_eq!(t.inputs.get("strategy").map(String::as_str), Some("canary"));
     }
 
@@ -1281,10 +1218,7 @@ mod tests {
         )
         .into_step();
         assert_eq!(t.inputs.get("action").map(String::as_str), Some("reject"));
-        assert_eq!(
-            t.inputs.get("manifests").map(String::as_str),
-            Some("k8s/*.yaml")
-        );
+        assert_eq!(t.inputs.get("manifests").map(String::as_str), Some("k8s/*.yaml"));
         assert_eq!(t.inputs.get("strategy").map(String::as_str), Some("canary"));
     }
 
@@ -1302,23 +1236,15 @@ mod tests {
             Some("azureResourceManager")
         );
         assert_eq!(
-            t.inputs
-                .get("azureSubscriptionConnection")
-                .map(String::as_str),
+            t.inputs.get("azureSubscriptionConnection").map(String::as_str),
             Some("mySubscription")
         );
-        assert_eq!(
-            t.inputs.get("azureResourceGroup").map(String::as_str),
-            Some("myRG")
-        );
+        assert_eq!(t.inputs.get("azureResourceGroup").map(String::as_str), Some("myRG"));
         assert_eq!(
             t.inputs.get("kubernetesCluster").map(String::as_str),
             Some("myAKSCluster")
         );
-        assert_eq!(
-            t.inputs.get("useClusterAdmin").map(String::as_str),
-            Some("true")
-        );
+        assert_eq!(t.inputs.get("useClusterAdmin").map(String::as_str), Some("true"));
     }
 
     #[test]
@@ -1331,8 +1257,8 @@ mod tests {
 
     #[test]
     fn optionals_absent_by_default() {
-        let t = KubernetesManifest::deploy(KubernetesManifestDeploy::new("k8s/deploy.yaml"))
-            .into_step();
+        let t =
+            KubernetesManifest::deploy(KubernetesManifestDeploy::new("k8s/deploy.yaml")).into_step();
         assert!(t.inputs.get("strategy").is_none());
         assert!(t.inputs.get("namespace").is_none());
         assert!(t.inputs.get("connectionType").is_none());

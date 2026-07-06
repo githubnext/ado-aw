@@ -346,10 +346,7 @@ mod tests {
         let t = Docker::build_and_push(DockerBuildAndPush::new()).into_step();
         assert_eq!(t.task, "Docker@2");
         assert_eq!(t.display_name, "Build and Push Docker Image");
-        assert_eq!(
-            t.inputs.get("command").map(String::as_str),
-            Some("buildAndPush")
-        );
+        assert_eq!(t.inputs.get("command").map(String::as_str), Some("buildAndPush"));
     }
 
     #[test]
@@ -367,42 +364,24 @@ mod tests {
             t.inputs.get("containerRegistry").map(String::as_str),
             Some("myRegistryServiceConnection")
         );
-        assert_eq!(
-            t.inputs.get("repository").map(String::as_str),
-            Some("myapp")
-        );
-        assert_eq!(
-            t.inputs.get("Dockerfile").map(String::as_str),
-            Some("src/Dockerfile")
-        );
-        assert_eq!(
-            t.inputs.get("buildContext").map(String::as_str),
-            Some("src/")
-        );
-        assert_eq!(
-            t.inputs.get("tags").map(String::as_str),
-            Some("latest\n$(Build.BuildId)")
-        );
+        assert_eq!(t.inputs.get("repository").map(String::as_str), Some("myapp"));
+        assert_eq!(t.inputs.get("Dockerfile").map(String::as_str), Some("src/Dockerfile"));
+        assert_eq!(t.inputs.get("buildContext").map(String::as_str), Some("src/"));
+        assert_eq!(t.inputs.get("tags").map(String::as_str), Some("latest\n$(Build.BuildId)"));
     }
 
     #[test]
     fn build_command_has_arguments() {
         let t = Docker::build(DockerBuild::new().arguments("--no-cache")).into_step();
         assert_eq!(t.inputs.get("command").map(String::as_str), Some("build"));
-        assert_eq!(
-            t.inputs.get("arguments").map(String::as_str),
-            Some("--no-cache")
-        );
+        assert_eq!(t.inputs.get("arguments").map(String::as_str), Some("--no-cache"));
     }
 
     #[test]
     fn login_logout_only_registry() {
         let login =
             Docker::login(DockerLogin::new().container_registry("myPrivateRegistry")).into_step();
-        assert_eq!(
-            login.inputs.get("command").map(String::as_str),
-            Some("login")
-        );
+        assert_eq!(login.inputs.get("command").map(String::as_str), Some("login"));
         assert_eq!(
             login.inputs.get("containerRegistry").map(String::as_str),
             Some("myPrivateRegistry")
@@ -410,10 +389,7 @@ mod tests {
         assert!(login.inputs.get("repository").is_none());
 
         let logout = Docker::logout(DockerLogout::new()).into_step();
-        assert_eq!(
-            logout.inputs.get("command").map(String::as_str),
-            Some("logout")
-        );
+        assert_eq!(logout.inputs.get("command").map(String::as_str), Some("logout"));
         assert_eq!(logout.display_name, "Docker Logout");
     }
 }

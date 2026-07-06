@@ -97,10 +97,7 @@ mod tests {
     fn sets_task_and_required_contents() {
         let t = DeleteFiles::new("**/*.tmp").into_step();
         assert_eq!(t.task, "DeleteFiles@1");
-        assert_eq!(
-            t.inputs.get("Contents").map(String::as_str),
-            Some("**/*.tmp")
-        );
+        assert_eq!(t.inputs.get("Contents").map(String::as_str), Some("**/*.tmp"));
     }
 
     #[test]
@@ -114,13 +111,7 @@ mod tests {
             t.inputs.get("SourceFolder").map(String::as_str),
             Some("$(Build.ArtifactStagingDirectory)")
         );
-        assert_eq!(
-            t.inputs.get("RemoveSourceFolder").map(String::as_str),
-            Some("true")
-        );
-        assert_eq!(
-            t.inputs.get("RemoveDotFiles").map(String::as_str),
-            Some("true")
-        );
+        assert_eq!(t.inputs.get("RemoveSourceFolder").map(String::as_str), Some("true"));
+        assert_eq!(t.inputs.get("RemoveDotFiles").map(String::as_str), Some("true"));
     }
 }

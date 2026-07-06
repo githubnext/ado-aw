@@ -54,8 +54,8 @@
 //! `SYSTEM_ACCESSTOKEN` is mapped only into this step's `env:`
 //! block; same posture as the PR contributor.
 
-use crate::compile::ado_bundle::{Bundle, TokenSource, apply_bundle_auth};
 use crate::compile::extensions::CompileContext;
+use crate::compile::ado_bundle::{Bundle, TokenSource, apply_bundle_auth};
 use crate::compile::extensions::ado_script::EXEC_CONTEXT_WORKITEM_PATH;
 use crate::compile::ir::condition::{Condition, Expr};
 use crate::compile::ir::env::EnvValue;

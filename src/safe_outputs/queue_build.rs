@@ -357,8 +357,7 @@ mod tests {
         let result: Result<QueueBuildResult, _> = params.try_into();
         let err = result.unwrap_err();
         assert!(
-            err.to_string()
-                .contains("reason must be at least 5 characters"),
+            err.to_string().contains("reason must be at least 5 characters"),
             "unexpected error: {err}"
         );
     }
@@ -374,8 +373,7 @@ mod tests {
         let result: Result<QueueBuildResult, _> = params.try_into();
         let err = result.unwrap_err();
         assert!(
-            err.to_string()
-                .contains("branch name must not contain '..'"),
+            err.to_string().contains("branch name must not contain '..'"),
             "unexpected error: {err}"
         );
     }

@@ -33,14 +33,13 @@ use super::{
     archive_files, arm_template_deployment, azure_cli, azure_container_apps, azure_file_copy,
     azure_function_app, azure_key_vault, azure_powershell, azure_web_app, bicep_deploy,
     cargo_authenticate, cmd_line, copy_files, delete_files, docker, docker_installer,
-    dotnet_core_cli, download_build_artifacts, download_package, download_pipeline_artifact,
-    download_secure_file, extract_files, github_release, go_tool, gradle, helm_installer,
-    java_tool_installer, kubernetes_manifest, manual_validation, maven, maven_authenticate,
-    node_tool, npm, npm_authenticate, nuget_authenticate, nuget_command, pip_authenticate,
-    powershell, publish_build_artifacts, publish_code_coverage_results, publish_pipeline_artifact,
-    publish_test_results, python_script, sonar_qube_analyze, sonar_qube_prepare,
-    sonar_qube_publish, twine_authenticate, universal_packages, use_dotnet, use_node,
-    use_python_version, use_ruby_version, vs_build, vstest,
+    dotnet_core_cli, download_build_artifacts,    download_package, download_pipeline_artifact, download_secure_file, extract_files,
+    github_release, go_tool, gradle, helm_installer, java_tool_installer, kubernetes_manifest,
+    manual_validation, maven, maven_authenticate, node_tool, npm, npm_authenticate,
+    nuget_authenticate, nuget_command, pip_authenticate, powershell, publish_build_artifacts, publish_code_coverage_results,
+    publish_pipeline_artifact, publish_test_results, python_script, sonar_qube_analyze,
+    sonar_qube_prepare, sonar_qube_publish, twine_authenticate, universal_packages, use_dotnet,
+    use_node, use_python_version, use_ruby_version, vs_build, vstest,
 };
 
 /// Registry mapping an ADO task id (`"CopyFiles@2"`) to a validator that checks
@@ -57,87 +56,36 @@ use super::{
 #[allow(clippy::type_complexity)]
 const VALIDATORS: &[(&str, fn(Value) -> Result<(), String>)] = &[
     // ── Flat single-struct builders (validity == clean deserialization) ──
-    (
-        "ArchiveFiles@2",
-        validate_by_deserialize::<archive_files::ArchiveFiles>,
-    ),
-    (
-        "AzureContainerApps@1",
-        validate_by_deserialize::<azure_container_apps::AzureContainerApps>,
-    ),
-    (
-        "AzureFunctionApp@2",
-        validate_by_deserialize::<azure_function_app::AzureFunctionApp>,
-    ),
-    (
-        "AzureKeyVault@2",
-        validate_by_deserialize::<azure_key_vault::AzureKeyVault>,
-    ),
-    (
-        "AzureWebApp@1",
-        validate_by_deserialize::<azure_web_app::AzureWebApp>,
-    ),
-    (
-        "CargoAuthenticate@0",
-        validate_by_deserialize::<cargo_authenticate::CargoAuthenticate>,
-    ),
+    ("ArchiveFiles@2", validate_by_deserialize::<archive_files::ArchiveFiles>),
+    ("AzureContainerApps@1", validate_by_deserialize::<azure_container_apps::AzureContainerApps>),
+    ("AzureFunctionApp@2", validate_by_deserialize::<azure_function_app::AzureFunctionApp>),
+    ("AzureKeyVault@2", validate_by_deserialize::<azure_key_vault::AzureKeyVault>),
+    ("AzureWebApp@1", validate_by_deserialize::<azure_web_app::AzureWebApp>),
+    ("CargoAuthenticate@0", validate_by_deserialize::<cargo_authenticate::CargoAuthenticate>),
     ("CmdLine@2", validate_by_deserialize::<cmd_line::CmdLine>),
-    (
-        "CopyFiles@2",
-        validate_by_deserialize::<copy_files::CopyFiles>,
-    ),
-    (
-        "DeleteFiles@1",
-        validate_by_deserialize::<delete_files::DeleteFiles>,
-    ),
-    (
-        "DockerInstaller@0",
-        validate_by_deserialize::<docker_installer::DockerInstaller>,
-    ),
+    ("CopyFiles@2", validate_by_deserialize::<copy_files::CopyFiles>),
+    ("DeleteFiles@1", validate_by_deserialize::<delete_files::DeleteFiles>),
+    ("DockerInstaller@0", validate_by_deserialize::<docker_installer::DockerInstaller>),
     (
         "DownloadBuildArtifacts@1",
         validate_by_deserialize::<download_build_artifacts::DownloadBuildArtifacts>,
     ),
-    (
-        "DownloadPackage@1",
-        validate_by_deserialize::<download_package::DownloadPackage>,
-    ),
+    ("DownloadPackage@1", validate_by_deserialize::<download_package::DownloadPackage>),
     (
         "DownloadPipelineArtifact@2",
         validate_by_deserialize::<download_pipeline_artifact::DownloadPipelineArtifact>,
     ),
-    (
-        "DownloadSecureFile@1",
-        validate_by_deserialize::<download_secure_file::DownloadSecureFile>,
-    ),
-    (
-        "ExtractFiles@1",
-        validate_by_deserialize::<extract_files::ExtractFiles>,
-    ),
+    ("DownloadSecureFile@1", validate_by_deserialize::<download_secure_file::DownloadSecureFile>),
+    ("ExtractFiles@1", validate_by_deserialize::<extract_files::ExtractFiles>),
     ("GoTool@0", validate_by_deserialize::<go_tool::GoTool>),
     ("Gradle@3", validate_by_deserialize::<gradle::Gradle>),
-    (
-        "HelmInstaller@1",
-        validate_by_deserialize::<helm_installer::HelmInstaller>,
-    ),
-    (
-        "ManualValidation@1",
-        validate_by_deserialize::<manual_validation::ManualValidation>,
-    ),
+    ("HelmInstaller@1", validate_by_deserialize::<helm_installer::HelmInstaller>),
+    ("ManualValidation@1", validate_by_deserialize::<manual_validation::ManualValidation>),
     ("Maven@3", validate_by_deserialize::<maven::Maven>),
-    (
-        "MavenAuthenticate@0",
-        validate_by_deserialize::<maven_authenticate::MavenAuthenticate>,
-    ),
-    (
-        "NuGetAuthenticate@1",
-        validate_by_deserialize::<nuget_authenticate::NuGetAuthenticate>,
-    ),
+    ("MavenAuthenticate@0", validate_by_deserialize::<maven_authenticate::MavenAuthenticate>),
+    ("NuGetAuthenticate@1", validate_by_deserialize::<nuget_authenticate::NuGetAuthenticate>),
     ("NodeTool@0", validate_by_deserialize::<node_tool::NodeTool>),
-    (
-        "PipAuthenticate@1",
-        validate_by_deserialize::<pip_authenticate::PipAuthenticate>,
-    ),
+    ("PipAuthenticate@1", validate_by_deserialize::<pip_authenticate::PipAuthenticate>),
     (
         "PublishCodeCoverageResults@2",
         validate_by_deserialize::<publish_code_coverage_results::PublishCodeCoverageResults>,
@@ -146,40 +94,16 @@ const VALIDATORS: &[(&str, fn(Value) -> Result<(), String>)] = &[
         "PublishPipelineArtifact@1",
         validate_by_deserialize::<publish_pipeline_artifact::PublishPipelineArtifact>,
     ),
-    (
-        "PublishTestResults@2",
-        validate_by_deserialize::<publish_test_results::PublishTestResults>,
-    ),
-    (
-        "SonarQubeAnalyze@8",
-        validate_by_deserialize::<sonar_qube_analyze::SonarQubeAnalyze>,
-    ),
-    (
-        "SonarQubePublish@8",
-        validate_by_deserialize::<sonar_qube_publish::SonarQubePublish>,
-    ),
-    (
-        "TwineAuthenticate@1",
-        validate_by_deserialize::<twine_authenticate::TwineAuthenticate>,
-    ),
-    (
-        "UseDotNet@2",
-        validate_by_deserialize::<use_dotnet::UseDotNet>,
-    ),
+    ("PublishTestResults@2", validate_by_deserialize::<publish_test_results::PublishTestResults>),
+    ("SonarQubeAnalyze@8", validate_by_deserialize::<sonar_qube_analyze::SonarQubeAnalyze>),
+    ("SonarQubePublish@8", validate_by_deserialize::<sonar_qube_publish::SonarQubePublish>),
+    ("TwineAuthenticate@1", validate_by_deserialize::<twine_authenticate::TwineAuthenticate>),
+    ("UseDotNet@2", validate_by_deserialize::<use_dotnet::UseDotNet>),
     ("UseNode@1", validate_by_deserialize::<use_node::UseNode>),
-    (
-        "UsePythonVersion@0",
-        validate_by_deserialize::<use_python_version::UsePythonVersion>,
-    ),
-    (
-        "UseRubyVersion@0",
-        validate_by_deserialize::<use_ruby_version::UseRubyVersion>,
-    ),
+    ("UsePythonVersion@0", validate_by_deserialize::<use_python_version::UsePythonVersion>),
+    ("UseRubyVersion@0", validate_by_deserialize::<use_ruby_version::UseRubyVersion>),
     ("VSBuild@1", validate_by_deserialize::<vs_build::VsBuild>),
-    (
-        "npmAuthenticate@0",
-        validate_by_deserialize::<npm_authenticate::NpmAuthenticate>,
-    ),
+    ("npmAuthenticate@0", validate_by_deserialize::<npm_authenticate::NpmAuthenticate>),
     // ── Command / mode-dispatch builders (custom discriminator dispatch) ──
     ("AzureCLI@2", azure_cli::validate_inputs),
     (
@@ -197,10 +121,7 @@ const VALIDATORS: &[(&str, fn(Value) -> Result<(), String>)] = &[
     ("Npm@1", npm::validate_inputs),
     ("NuGetCommand@2", nuget_command::validate_inputs),
     ("PowerShell@2", powershell::validate_inputs),
-    (
-        "PublishBuildArtifacts@1",
-        publish_build_artifacts::validate_inputs,
-    ),
+    ("PublishBuildArtifacts@1", publish_build_artifacts::validate_inputs),
     ("PythonScript@0", python_script::validate_inputs),
     ("SonarQubePrepare@8", sonar_qube_prepare::validate_inputs),
     ("UniversalPackages@1", universal_packages::validate_inputs),
@@ -1049,10 +970,7 @@ mod tests {
             "#,
         );
         let err = validate_task_step(&step).expect("recognized").unwrap_err();
-        assert!(
-            err.contains("AzureResourceManagerTemplateDeployment@3"),
-            "got: {err}"
-        );
+        assert!(err.contains("AzureResourceManagerTemplateDeployment@3"), "got: {err}");
     }
 
     #[test]
@@ -1160,9 +1078,6 @@ mod tests {
         ids.sort_unstable();
         let mut deduped = ids.clone();
         deduped.dedup();
-        assert_eq!(
-            ids, deduped,
-            "VALIDATORS must not contain duplicate task ids"
-        );
+        assert_eq!(ids, deduped, "VALIDATORS must not contain duplicate task ids");
     }
 }

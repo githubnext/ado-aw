@@ -24,25 +24,13 @@ pub struct CopyFiles {
     target_folder: String,
     #[serde(rename = "SourceFolder", default)]
     source_folder: Option<String>,
-    #[serde(
-        rename = "CleanTargetFolder",
-        default,
-        deserialize_with = "de_opt_bool_flex"
-    )]
+    #[serde(rename = "CleanTargetFolder", default, deserialize_with = "de_opt_bool_flex")]
     clean_target_folder: Option<bool>,
     #[serde(rename = "OverWrite", default, deserialize_with = "de_opt_bool_flex")]
     over_write: Option<bool>,
-    #[serde(
-        rename = "flattenFolders",
-        default,
-        deserialize_with = "de_opt_bool_flex"
-    )]
+    #[serde(rename = "flattenFolders", default, deserialize_with = "de_opt_bool_flex")]
     flatten_folders: Option<bool>,
-    #[serde(
-        rename = "preserveTimestamp",
-        default,
-        deserialize_with = "de_opt_bool_flex"
-    )]
+    #[serde(rename = "preserveTimestamp", default, deserialize_with = "de_opt_bool_flex")]
     preserve_timestamp: Option<bool>,
     #[serde(rename = "retryCount", default, deserialize_with = "de_opt_str_or_int")]
     retry_count: Option<String>,
@@ -52,11 +40,7 @@ pub struct CopyFiles {
         deserialize_with = "de_opt_str_or_int"
     )]
     delay_between_retries: Option<String>,
-    #[serde(
-        rename = "ignoreMakeDirErrors",
-        default,
-        deserialize_with = "de_opt_bool_flex"
-    )]
+    #[serde(rename = "ignoreMakeDirErrors", default, deserialize_with = "de_opt_bool_flex")]
     ignore_make_dir_errors: Option<bool>,
     #[serde(skip)]
     display_name: Option<String>,
@@ -179,10 +163,7 @@ mod tests {
         let t = CopyFiles::new("**/*.rs", "$(Build.ArtifactStagingDirectory)").into_step();
         assert_eq!(t.task, "CopyFiles@2");
         assert_eq!(t.display_name, "Copy Files");
-        assert_eq!(
-            t.inputs.get("Contents").map(String::as_str),
-            Some("**/*.rs")
-        );
+        assert_eq!(t.inputs.get("Contents").map(String::as_str), Some("**/*.rs"));
         assert_eq!(
             t.inputs.get("TargetFolder").map(String::as_str),
             Some("$(Build.ArtifactStagingDirectory)")
@@ -201,15 +182,9 @@ mod tests {
             t.inputs.get("SourceFolder").map(String::as_str),
             Some("$(Build.SourcesDirectory)/src")
         );
-        assert_eq!(
-            t.inputs.get("CleanTargetFolder").map(String::as_str),
-            Some("true")
-        );
+        assert_eq!(t.inputs.get("CleanTargetFolder").map(String::as_str), Some("true"));
         assert_eq!(t.inputs.get("OverWrite").map(String::as_str), Some("true"));
-        assert_eq!(
-            t.inputs.get("flattenFolders").map(String::as_str),
-            Some("true")
-        );
+        assert_eq!(t.inputs.get("flattenFolders").map(String::as_str), Some("true"));
         // Untouched optionals are absent.
         assert!(t.inputs.get("preserveTimestamp").is_none());
         assert!(t.inputs.get("retryCount").is_none());
@@ -217,9 +192,7 @@ mod tests {
 
     #[test]
     fn display_name_override() {
-        let t = CopyFiles::new("**", "out")
-            .with_display_name("Stage build output")
-            .into_step();
+        let t = CopyFiles::new("**", "out").with_display_name("Stage build output").into_step();
         assert_eq!(t.display_name, "Stage build output");
     }
 }

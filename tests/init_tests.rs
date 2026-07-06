@@ -204,18 +204,15 @@ fn test_init_agency_generates_plugin() {
     // plugin.json must be valid JSON with the expected plugin name.
     let parsed: serde_json::Value =
         serde_json::from_str(&manifest).expect("plugin.json should be valid JSON");
-    assert_eq!(
-        parsed["name"], "ado-aw",
-        "plugin.json name should be ado-aw"
-    );
+    assert_eq!(parsed["name"], "ado-aw", "plugin.json name should be ado-aw");
 }
 
 /// Recursively collect file paths under `root`, returned relative to `root`
 /// (with forward-slash separators for stable comparison across platforms).
 fn collect_files_rel(root: &std::path::Path) -> Vec<String> {
     fn walk(dir: &std::path::Path, base: &std::path::Path, out: &mut Vec<String>) {
-        let entries =
-            fs::read_dir(dir).unwrap_or_else(|e| panic!("read_dir {} failed: {e}", dir.display()));
+        let entries = fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("read_dir {} failed: {e}", dir.display()));
         for entry in entries {
             let path = entry.expect("dir entry").path();
             if path.is_dir() {
@@ -291,10 +288,7 @@ fn test_init_agency_matches_canonical_source() {
             .unwrap_or_else(|e| panic!("canonical {rel} should be readable: {e}"));
         let got = fs::read_to_string(temp_dir.path().join(rel))
             .unwrap_or_else(|e| panic!("scaffolded {rel} should be readable: {e}"));
-        assert_eq!(
-            got, want,
-            "scaffolded {rel} must match the canonical repo-root catalog"
-        );
+        assert_eq!(got, want, "scaffolded {rel} must match the canonical repo-root catalog");
     }
 }
 
@@ -314,17 +308,11 @@ fn test_init_without_agency_skips_plugin() {
         "Plugin directory should not be created without --agency"
     );
     assert!(
-        !temp_dir
-            .path()
-            .join(".claude-plugin/marketplace.json")
-            .exists(),
+        !temp_dir.path().join(".claude-plugin/marketplace.json").exists(),
         "Root Claude catalog should not be created without --agency"
     );
     assert!(
-        !temp_dir
-            .path()
-            .join(".github/plugin/marketplace.json")
-            .exists(),
+        !temp_dir.path().join(".github/plugin/marketplace.json").exists(),
         "Root Copilot catalog should not be created without --agency"
     );
 }
@@ -449,10 +437,7 @@ fn test_init_agency_does_not_clobber_existing_catalog() {
         ])
         .output()
         .expect("Failed to run ado-aw init --agency");
-    assert!(
-        output.status.success(),
-        "init --agency should still succeed"
-    );
+    assert!(output.status.success(), "init --agency should still succeed");
 
     // The consumer's catalog must be left exactly as it was.
     let after = fs::read_to_string(&catalog).expect("catalog should still be readable");

@@ -78,22 +78,13 @@ fn apply_codemod(fm: &mut Mapping, _ctx: &CodemodContext) -> Result<bool> {
         };
 
         // Check for conflict: if flat fields already exist alongside work-item:
-        let flat_keys = [
-            "title-prefix",
-            "work-item-type",
-            "area-path",
-            "iteration-path",
-            "tags",
-            "report-as-work-item",
-        ];
+        let flat_keys = ["title-prefix", "work-item-type", "area-path", "iteration-path", "tags", "report-as-work-item"];
         for &fk in &flat_keys {
             if tool_map.contains_key(Value::String(fk.to_string())) {
                 bail!(
                     "safe-outputs.{}.work-item and safe-outputs.{}.{} both present — \
                      manual migration required (remove the nested work-item: block)",
-                    tool_key_str,
-                    tool_key_str,
-                    fk
+                    tool_key_str, tool_key_str, fk
                 );
             }
         }
@@ -150,25 +141,15 @@ safe-outputs:
         let changed = apply_codemod(&mut fm, &ctx()).unwrap();
         assert!(changed);
 
-        let so = fm
-            .get(Value::String("safe-outputs".into()))
-            .unwrap()
-            .as_mapping()
-            .unwrap();
-        let noop = so
-            .get(Value::String("noop".into()))
-            .unwrap()
-            .as_mapping()
-            .unwrap();
+        let so = fm.get(Value::String("safe-outputs".into())).unwrap().as_mapping().unwrap();
+        let noop = so.get(Value::String("noop".into())).unwrap().as_mapping().unwrap();
 
         // work-item: key should be gone
         assert!(!noop.contains_key(Value::String("work-item".into())));
         // Flat fields should be present
         assert_eq!(
             noop.get(Value::String("title-prefix".into())),
-            Some(&Value::String(
-                "[ado-aw] Agent reported no operation".into()
-            ))
+            Some(&Value::String("[ado-aw] Agent reported no operation".into()))
         );
         assert_eq!(
             noop.get(Value::String("work-item-type".into())),
@@ -195,16 +176,8 @@ safe-outputs:
         let changed = apply_codemod(&mut fm, &ctx()).unwrap();
         assert!(changed);
 
-        let so = fm
-            .get(Value::String("safe-outputs".into()))
-            .unwrap()
-            .as_mapping()
-            .unwrap();
-        let mt = so
-            .get(Value::String("missing-tool".into()))
-            .unwrap()
-            .as_mapping()
-            .unwrap();
+        let so = fm.get(Value::String("safe-outputs".into())).unwrap().as_mapping().unwrap();
+        let mt = so.get(Value::String("missing-tool".into())).unwrap().as_mapping().unwrap();
 
         assert!(!mt.contains_key(Value::String("work-item".into())));
         assert_eq!(

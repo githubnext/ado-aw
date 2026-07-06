@@ -104,10 +104,7 @@ mod tests {
     fn sets_task_and_required_inputs() {
         let t = ExtractFiles::new("**/*.zip", "$(Build.SourcesDirectory)/unpacked").into_step();
         assert_eq!(t.task, "ExtractFiles@1");
-        assert_eq!(
-            t.inputs.get("archiveFilePatterns").map(String::as_str),
-            Some("**/*.zip")
-        );
+        assert_eq!(t.inputs.get("archiveFilePatterns").map(String::as_str), Some("**/*.zip"));
         assert_eq!(
             t.inputs.get("destinationFolder").map(String::as_str),
             Some("$(Build.SourcesDirectory)/unpacked")
@@ -121,14 +118,8 @@ mod tests {
             .overwrite_existing_files(true)
             .path_to_seven_zip_tool("/usr/local/bin/7z")
             .into_step();
-        assert_eq!(
-            t.inputs.get("cleanDestinationFolder").map(String::as_str),
-            Some("false")
-        );
-        assert_eq!(
-            t.inputs.get("overwriteExistingFiles").map(String::as_str),
-            Some("true")
-        );
+        assert_eq!(t.inputs.get("cleanDestinationFolder").map(String::as_str), Some("false"));
+        assert_eq!(t.inputs.get("overwriteExistingFiles").map(String::as_str), Some("true"));
         assert_eq!(
             t.inputs.get("pathToSevenZipTool").map(String::as_str),
             Some("/usr/local/bin/7z")

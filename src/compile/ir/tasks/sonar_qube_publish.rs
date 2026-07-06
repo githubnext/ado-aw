@@ -82,10 +82,7 @@ mod tests {
         let t = SonarQubePublish::new().into_step();
         assert_eq!(t.task, "SonarQubePublish@8");
         assert_eq!(t.display_name, "Publish Quality Gate Result");
-        assert!(
-            t.inputs.is_empty(),
-            "no inputs should be emitted when using ADO defaults"
-        );
+        assert!(t.inputs.is_empty(), "no inputs should be emitted when using ADO defaults");
     }
 
     #[test]

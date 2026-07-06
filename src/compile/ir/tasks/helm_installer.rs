@@ -51,12 +51,12 @@ impl HelmInstaller {
 
     /// Lower into a [`TaskStep`].
     pub fn into_step(self) -> TaskStep {
-        let display = self
-            .display_name
-            .unwrap_or_else(|| match &self.helm_version {
+        let display = self.display_name.unwrap_or_else(|| {
+            match &self.helm_version {
                 Some(v) => format!("Install Helm {v}"),
                 None => "Install Helm".into(),
-            });
+            }
+        });
         let mut t = TaskStep::new("HelmInstaller@1", display);
         if let Some(v) = self.helm_version {
             t = t.with_input("helmVersionToInstall", v);

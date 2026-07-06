@@ -827,7 +827,9 @@ async fn build_execution_context(
     ctx.tool_configs = front_matter
         .safe_outputs
         .iter()
-        .filter(|(k, _)| !crate::compile::types::SAFE_OUTPUT_RESERVED_KEYS.contains(&k.as_str()))
+        .filter(|(k, _)| {
+            !crate::compile::types::SAFE_OUTPUT_RESERVED_KEYS.contains(&k.as_str())
+        })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     // Merge ado-aw-debug.create-issue config under the same tool_configs map

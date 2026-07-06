@@ -91,14 +91,24 @@ mod tests {
 
     #[test]
     fn add_to_path_false() {
-        let t = UseRubyVersion::new("3.2").add_to_path(false).into_step();
-        assert_eq!(t.inputs.get("addToPath").map(String::as_str), Some("false"));
+        let t = UseRubyVersion::new("3.2")
+            .add_to_path(false)
+            .into_step();
+        assert_eq!(
+            t.inputs.get("addToPath").map(String::as_str),
+            Some("false")
+        );
     }
 
     #[test]
     fn add_to_path_true_is_emitted_explicitly() {
-        let t = UseRubyVersion::new("3.x").add_to_path(true).into_step();
-        assert_eq!(t.inputs.get("addToPath").map(String::as_str), Some("true"));
+        let t = UseRubyVersion::new("3.x")
+            .add_to_path(true)
+            .into_step();
+        assert_eq!(
+            t.inputs.get("addToPath").map(String::as_str),
+            Some("true")
+        );
     }
 
     #[test]
@@ -118,7 +128,10 @@ mod tests {
         for spec in &[">= 2.4", "3.x", "3.2.0", "~> 3.1"] {
             let t = UseRubyVersion::new(*spec).into_step();
             assert_eq!(t.task, "UseRubyVersion@0");
-            assert_eq!(t.inputs.get("versionSpec").map(String::as_str), Some(*spec));
+            assert_eq!(
+                t.inputs.get("versionSpec").map(String::as_str),
+                Some(*spec)
+            );
             assert_eq!(t.display_name, format!("Use Ruby {spec}"));
         }
     }
@@ -131,7 +144,13 @@ mod tests {
             .into_step();
         assert_eq!(t.task, "UseRubyVersion@0");
         assert_eq!(t.display_name, "Set up Ruby 3.2");
-        assert_eq!(t.inputs.get("versionSpec").map(String::as_str), Some("3.2"));
-        assert_eq!(t.inputs.get("addToPath").map(String::as_str), Some("true"));
+        assert_eq!(
+            t.inputs.get("versionSpec").map(String::as_str),
+            Some("3.2")
+        );
+        assert_eq!(
+            t.inputs.get("addToPath").map(String::as_str),
+            Some("true")
+        );
     }
 }

@@ -334,9 +334,7 @@ pub(crate) fn validate_inputs(inputs: Value) -> Result<(), String> {
                 "manual" => serde_yaml::from_value::<CliManualSpec>(rest)
                     .map(drop)
                     .map_err(|e| format!("scannerMode `cli`, configMode `manual`: {e}")),
-                other => Err(format!(
-                    "unknown configMode `{other}` (expected file|manual)"
-                )),
+                other => Err(format!("unknown configMode `{other}` (expected file|manual)")),
             }
         }
         other => Err(format!(
@@ -395,10 +393,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dotnet_mode_required_inputs() {
-        let t =
-            SonarQubePrepare::dotnet("MySonarQubeConnection", DotNetMode::new("my-project-key"))
-                .into_step();
+    fn dotnet_mode_required_inputs() {        let t = SonarQubePrepare::dotnet(
+            "MySonarQubeConnection",
+            DotNetMode::new("my-project-key"),
+        )
+        .into_step();
         assert_eq!(t.task, "SonarQubePrepare@8");
         assert_eq!(t.display_name, "Prepare SonarQube Analysis (.NET)");
         assert_eq!(
@@ -450,11 +449,20 @@ mod tests {
 
     #[test]
     fn cli_file_mode_defaults() {
-        let t =
-            SonarQubePrepare::cli("SonarEndpoint", CliMode::File(CliFileMode::new())).into_step();
+        let t = SonarQubePrepare::cli(
+            "SonarEndpoint",
+            CliMode::File(CliFileMode::new()),
+        )
+        .into_step();
         assert_eq!(t.display_name, "Prepare SonarQube Analysis (CLI)");
-        assert_eq!(t.inputs.get("scannerMode").map(String::as_str), Some("cli"));
-        assert_eq!(t.inputs.get("configMode").map(String::as_str), Some("file"));
+        assert_eq!(
+            t.inputs.get("scannerMode").map(String::as_str),
+            Some("cli")
+        );
+        assert_eq!(
+            t.inputs.get("configMode").map(String::as_str),
+            Some("file")
+        );
         assert!(t.inputs.get("configFile").is_none());
         assert!(t.inputs.get("cliVersion").is_none());
     }
@@ -521,7 +529,10 @@ mod tests {
             t.inputs.get("cliProjectVersion").map(String::as_str),
             Some("2.0")
         );
-        assert_eq!(t.inputs.get("cliSources").map(String::as_str), Some("src/"));
+        assert_eq!(
+            t.inputs.get("cliSources").map(String::as_str),
+            Some("src/")
+        );
         assert_eq!(
             t.inputs.get("cliVersion").map(String::as_str),
             Some("5.0.1")
@@ -542,9 +553,12 @@ mod tests {
 
     #[test]
     fn display_name_override() {
-        let t = SonarQubePrepare::dotnet("SonarEndpoint", DotNetMode::new("my-key"))
-            .with_display_name("Configure SonarQube")
-            .into_step();
+        let t = SonarQubePrepare::dotnet(
+            "SonarEndpoint",
+            DotNetMode::new("my-key"),
+        )
+        .with_display_name("Configure SonarQube")
+        .into_step();
         assert_eq!(t.display_name, "Configure SonarQube");
     }
 }

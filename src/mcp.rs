@@ -239,7 +239,9 @@ fn resolve_git_dir_for_patch(
 }
 
 /// Check whether the working tree has uncommitted changes (staged or unstaged).
-async fn check_uncommitted_changes(git_dir: &std::path::Path) -> Result<bool, McpError> {
+async fn check_uncommitted_changes(
+    git_dir: &std::path::Path,
+) -> Result<bool, McpError> {
     use tokio::process::Command;
     let status_output = Command::new("git")
         .args(["status", "--porcelain"])
@@ -393,7 +395,10 @@ fn should_keep_tool(tool_name: &str, enabled_tools: Option<&[String]>) -> bool {
 
 /// Apply the `enabled_tools` filter to `tool_router`, warn about unknown names,
 /// and log the before/after counts.
-fn apply_tool_filter(tool_router: &mut ToolRouter<SafeOutputs>, enabled_tools: Option<&[String]>) {
+fn apply_tool_filter(
+    tool_router: &mut ToolRouter<SafeOutputs>,
+    enabled_tools: Option<&[String]>,
+) {
     let all_tools: Vec<String> = tool_router
         .list_all()
         .iter()

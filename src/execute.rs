@@ -113,16 +113,9 @@ pub async fn execute_safe_outputs(
 
     let mut results = Vec::new();
     for (i, entry) in entries.iter().enumerate() {
-        if let Some(result) = process_one_entry(
-            i,
-            entries.len(),
-            entry,
-            &mut budgets,
-            filter,
-            ctx,
-            safe_output_dir,
-        )
-        .await
+        if let Some(result) =
+            process_one_entry(i, entries.len(), entry, &mut budgets, filter, ctx, safe_output_dir)
+                .await
         {
             results.push(result);
         }
@@ -205,13 +198,8 @@ async fn process_one_entry(
     // Budget is consumed before execution so that failed attempts (target policy rejection,
     // network errors) still count — this prevents unbounded retries against a failing endpoint.
     if let Some(result) = enforce_budget(entry, budgets, total, i) {
-        append_execution_record(
-            safe_output_dir,
-            proposal_tool_name,
-            &result,
-            proposal_context,
-        )
-        .await;
+        append_execution_record(safe_output_dir, proposal_tool_name, &result, proposal_context)
+            .await;
         return Some(result);
     }
 
@@ -887,9 +875,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let ctx = ExecutionContext::default();
 
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
-            .await
-            .unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
         assert!(results.is_empty());
     }
 
@@ -905,9 +891,7 @@ mod tests {
         tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
 
         let ctx = ExecutionContext::default();
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
-            .await
-            .unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
 
         assert_eq!(results.len(), 2);
         assert!(results[0].success);
@@ -927,9 +911,7 @@ mod tests {
         tokio::fs::write(&safe_output_path, "").await.unwrap();
 
         let ctx = ExecutionContext::default();
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
-            .await
-            .unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
         assert!(results.is_empty());
     }
 
@@ -952,9 +934,7 @@ mod tests {
             dry_run: true,
             ..Default::default()
         };
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
-            .await
-            .unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
         assert_eq!(results.len(), 2);
 
         let executed_path = temp_dir.path().join(EXECUTED_NDJSON_FILENAME);
@@ -985,9 +965,7 @@ mod tests {
             dry_run: true,
             ..Default::default()
         };
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
-            .await
-            .unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
         assert_eq!(results.len(), 2);
 
         let manifest = read_executed_manifest(&temp_dir).await;
@@ -1008,9 +986,7 @@ mod tests {
         tokio::fs::write(&safe_output_path, "").await.unwrap();
 
         let ctx = ExecutionContext::default();
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
-            .await
-            .unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
         assert!(results.is_empty());
         assert!(!temp_dir.path().join(EXECUTED_NDJSON_FILENAME).exists());
     }
@@ -1502,9 +1478,7 @@ mod tests {
         tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
 
         let ctx = ExecutionContext::default();
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
-            .await
-            .unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
 
         // One entry processed (as a failure — unknown tool)
         assert_eq!(results.len(), 1);
@@ -1669,9 +1643,7 @@ mod tests {
             ..Default::default()
         };
 
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
-            .await
-            .unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
         assert_eq!(results.len(), 5);
 
         // Second create-work-item should be skipped
@@ -1707,9 +1679,7 @@ mod tests {
             ..Default::default()
         };
 
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
-            .await
-            .unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].success, "dry-run should succeed");
         assert!(
@@ -1741,9 +1711,7 @@ mod tests {
             ..Default::default()
         };
 
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
-            .await
-            .unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
         assert_eq!(results.len(), 2);
         // create-work-item goes through Executor trait → dry-run intercepted
         assert!(results[0].message.contains("[DRY-RUN]"));

@@ -86,7 +86,8 @@ pub(crate) const EXEC_CONTEXT_PR_SYNTH_PATH: &str =
 /// Path to the safe-outputs approval-summary bundle inside the unpacked
 /// `ado-script.zip`. Runs at the end of the Agent job to render the proposed
 /// safe outputs to a sanitized markdown summary tab.
-pub(crate) const APPROVAL_SUMMARY_PATH: &str = "/tmp/ado-aw-scripts/ado-script/approval-summary.js";
+pub(crate) const APPROVAL_SUMMARY_PATH: &str =
+    "/tmp/ado-aw-scripts/ado-script/approval-summary.js";
 /// Path to the conclusion bundle inside the unpacked `ado-script.zip`. Runs in
 /// the always-on Conclusion job (see [`crate::compile::agentic_pipeline`]) to
 /// file pipeline-failure work items and diagnostic signals. Referenced both by
@@ -97,7 +98,8 @@ pub(crate) const CONCLUSION_PATH: &str = "/tmp/ado-aw-scripts/ado-script/conclus
 /// Runs immediately before the Copilot invocation in the Agent and Detection
 /// jobs (issue #1316) to mint a GitHub App installation token and expose it as
 /// a masked same-job `GITHUB_APP_TOKEN` variable.
-pub(crate) const GITHUB_APP_TOKEN_PATH: &str = "/tmp/ado-aw-scripts/ado-script/github-app-token.js";
+pub(crate) const GITHUB_APP_TOKEN_PATH: &str =
+    "/tmp/ado-aw-scripts/ado-script/github-app-token.js";
 const RELEASE_BASE_URL: &str = "https://github.com/githubnext/ado-aw/releases/download";
 
 /// Single always-on extension that owns all `ado-script` bundle wiring.
@@ -791,8 +793,7 @@ impl CompilerExtension for AdoScriptExtension {
             || self.safe_outputs_summary_active
             || self.github_app_token_active
         {
-            agent_prepare_steps
-                .extend(install_and_download_steps_typed(self.supply_chain.as_ref()));
+            agent_prepare_steps.extend(install_and_download_steps_typed(self.supply_chain.as_ref()));
             if import_active {
                 agent_prepare_steps.push(resolver_step_typed());
             }
@@ -1198,10 +1199,7 @@ mod tests {
         let Step::Bash(step) = github_app_token_step_typed(&cfg).unwrap() else {
             panic!("expected a bash step");
         };
-        assert_eq!(
-            step.display_name,
-            "Mint GitHub App token (Copilot engine auth)"
-        );
+        assert_eq!(step.display_name, "Mint GitHub App token (Copilot engine auth)");
         assert!(
             step.script
                 .contains("node '/tmp/ado-aw-scripts/ado-script/github-app-token.js'"),
@@ -1221,8 +1219,7 @@ mod tests {
             step.script
         );
         assert!(
-            step.script
-                .contains("--repositories 'octo-repo other-repo'"),
+            step.script.contains("--repositories 'octo-repo other-repo'"),
             "repositories must be a single-quoted argv flag:\n{}",
             step.script
         );
@@ -1381,8 +1378,7 @@ mod tests {
         ));
         // api-url is an argv flag (non-secret), not an env var.
         assert!(
-            step.script
-                .contains("revoke --api-url 'https://ghe.example.com/api/v3'"),
+            step.script.contains("revoke --api-url 'https://ghe.example.com/api/v3'"),
             "revoke must pass api-url as an argv flag:\n{}",
             step.script
         );

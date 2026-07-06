@@ -723,9 +723,7 @@ mod tests {
     fn test_is_valid_service_connection() {
         assert!(is_valid_service_connection("acr-conn"));
         assert!(is_valid_service_connection("My ACR Connection")); // spaces allowed
-        assert!(is_valid_service_connection(
-            "11112222-3333-4444-5555-666677778888"
-        ));
+        assert!(is_valid_service_connection("11112222-3333-4444-5555-666677778888"));
         assert!(!is_valid_service_connection(""));
         assert!(!is_valid_service_connection("with\nnewline"));
         assert!(!is_valid_service_connection("with'quote"));
