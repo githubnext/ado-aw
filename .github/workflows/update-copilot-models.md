@@ -78,8 +78,9 @@ potentially stale snapshot.
 **From `src/inspect/catalog.rs`:**
 
 Read the file and locate the `models()` function. Extract every string literal
-inside that function. Call this set `catalog_models`. The first entry is the
-`DEFAULT_COPILOT_MODEL` (currently `"claude-opus-4.7"`).
+inside that function. Call this set `catalog_models`. The first entry corresponds
+to `DEFAULT_COPILOT_MODEL`; read its current value from `src/engine.rs` (look for
+the line `pub const DEFAULT_COPILOT_MODEL: &str = "...";`).
 
 **From `prompts/create-ado-agentic-workflow.md`:**
 
@@ -145,12 +146,12 @@ leave that wording intact).
 ### 4b — Update `prompts/create-ado-agentic-workflow.md`
 
 Locate the model table inside "Step 2 — Engine" (search for the heading
-`### Step 2 — Engine` or the table that contains `claude-opus-4.7` and
-`claude-sonnet-4.6`).
+`### Step 2 — Engine` or the table row that contains the `DEFAULT_COPILOT_MODEL`
+value you read in Step 2).
 
 Rules:
-1. **Never** remove the row for the default model (`claude-opus-4.7` or
-   whatever `DEFAULT_COPILOT_MODEL` is set to).
+1. **Never** remove the row for the default model (whatever `DEFAULT_COPILOT_MODEL`
+   is set to in `src/engine.rs`).
 2. Add one row per model in `new_models`. Use the following guidance for the
    "Use when" column:
    - If the model name contains `opus` or `o1` or `o3`: "Highest reasoning
@@ -191,7 +192,7 @@ available via the GitHub Copilot API.
 ### Note on `DEFAULT_COPILOT_MODEL`
 
 This PR does **not** change the `DEFAULT_COPILOT_MODEL` constant in
-`src/engine.rs` (currently `claude-opus-4.7`). Choosing a new default is an
+`src/engine.rs`. Choosing a new default is an
 opinionated, human decision that weighs stability, pricing, and capability
 trade-offs. If one of the newly added models is a strong candidate for the
 default, please update `src/engine.rs` and `prompts/create-ado-agentic-workflow.md`
