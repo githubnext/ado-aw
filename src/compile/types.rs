@@ -703,6 +703,18 @@ impl ProviderConfig {
         if let Some(api_key) = &self.api_key {
             Self::reject_unsafe_provider_value("api-key", api_key)?;
         }
+        // The provider endpoint receives the bearer token / API key, so it must
+        // use TLS. Require an `https://` scheme for a literal base-url; an
+        // `$(VAR)` macro is exempt (the concrete URL is unknown at compile time —
+        // the author is responsible for supplying an https endpoint).
+        if !self.base_url.starts_with("https://") && !self.base_url.trim_start().starts_with("$(") {
+            anyhow::bail!(
+                "engine.provider.base-url must use the https:// scheme (got '{}'). \
+                 The provider endpoint receives the bearer token / API key, so \
+                 plaintext HTTP is not allowed. Use an https:// URL or an $(VAR) macro.",
+                self.base_url
+            );
+        }
         Ok(())
     }
 

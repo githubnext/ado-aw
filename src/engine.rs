@@ -148,7 +148,16 @@ fn provider_derived_env(engine_config: &EngineConfig) -> Vec<(String, String)> {
 /// a unit test) provider-derived pairs win over any colliding raw keys.
 fn effective_engine_env(engine_config: &EngineConfig) -> HashMap<String, String> {
     let mut map: HashMap<String, String> = engine_config.env().cloned().unwrap_or_default();
-    for (k, v) in provider_derived_env(engine_config) {
+    let derived = provider_derived_env(engine_config);
+    // Self-enforce the pre-condition in debug/test builds: a `provider` block and
+    // a colliding raw `engine.env COPILOT_PROVIDER_*` key must have been rejected
+    // by `validate_engine_feature_support` upstream. No prod overhead.
+    debug_assert!(
+        derived.iter().all(|(k, _)| !map.contains_key(k)),
+        "effective_engine_env: provider-derived key collides with a raw engine.env \
+         COPILOT_PROVIDER_* key — validate_engine_feature_support should have rejected this"
+    );
+    for (k, v) in derived {
         map.insert(k, v);
     }
     map
@@ -2142,6 +2151,19 @@ mod tests {
         assert!(
             parse_markdown(md).is_err(),
             "a resource containing shell metacharacters must be rejected"
+        );
+    }
+
+    #[test]
+    fn provider_base_url_rejects_non_https_scheme() {
+        // The provider endpoint receives the bearer token, so plaintext HTTP
+        // must be rejected.
+        let md = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  provider:\n    base-url: http://insecure.example.com/v1\n    token:\n      service-connection: sc\n---\n";
+        let (fm, _) = parse_markdown(md).unwrap();
+        let err = validate_engine_feature_support(&fm.engine).unwrap_err().to_string();
+        assert!(
+            err.contains("https:// scheme"),
+            "a plaintext http base-url must be rejected: {err}"
         );
     }
 
