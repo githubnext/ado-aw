@@ -945,7 +945,7 @@ fn build_agent_job(
         )?);
     }
     // When an external provider token is configured, mint it in-job (same-job
-    // secret) immediately before the Copilot run so COPILOT_PROVIDER_BEARER_TOKEN
+    // secret) immediately before the Copilot run so COPILOT_PROVIDER_API_KEY
     // resolves via a plain macro. Coexists cleanly with the app-token mint above
     // (independent secret vars, both plain pre-run steps).
     if let Some(token) = front_matter
