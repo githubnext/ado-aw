@@ -130,7 +130,7 @@ export const uploadWorkitemAttachment: Scenario<{ id: number }> = {
   cleanup: async (ctx, state) => ctx.rest.deleteWorkItem(state.id),
 };
 
-export const workItemScenarios: Scenario<any>[] = [
+export const workItemScenarios: Scenario<unknown>[] = [
   createWorkItem,
   updateWorkItem,
   commentOnWorkItem,

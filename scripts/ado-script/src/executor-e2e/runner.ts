@@ -51,10 +51,18 @@ export async function runScenario<S>(
     }
 
     // ---- execute ----
-    const config = scenario.config(ctx, state);
-    const entry = await scenario.ndjson(ctx, state);
-    const files = scenario.files ? await scenario.files(ctx, state) : undefined;
-    const extraEnv = scenario.env ? await scenario.env(ctx, state) : undefined;
+    // Guard the auxiliary scenario methods too: a harness-level bug in any of
+    // these must record a failed result and let the rest of the suite run,
+    // not propagate out of runScenario and abort runAll early.
+    let config, entry, files, extraEnv;
+    try {
+      config = scenario.config(ctx, state);
+      entry = await scenario.ndjson(ctx, state);
+      files = scenario.files ? await scenario.files(ctx, state) : undefined;
+      extraEnv = scenario.env ? await scenario.env(ctx, state) : undefined;
+    } catch (err) {
+      return finish({ ok: false, phase: "execute", message: errMessage(err) });
+    }
 
     let result;
     try {

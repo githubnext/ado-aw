@@ -11,7 +11,7 @@ import { wikiScenarios } from "./wiki.js";
 import { workItemScenarios } from "./work-item.js";
 
 /** Every scenario, in a deterministic run order. */
-export const allScenarios: Scenario<any>[] = [
+export const allScenarios: Scenario<unknown>[] = [
   ...workItemScenarios,
   ...wikiScenarios,
   ...prScenarios,

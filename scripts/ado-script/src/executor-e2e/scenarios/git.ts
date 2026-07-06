@@ -3,13 +3,8 @@
  * create-branch, create-git-tag.
  * Test-harness module; not shipped in `ado-script.zip`.
  */
-import type { Scenario, ScenarioContext } from "../scenario.js";
-import { detBody } from "./common.js";
-
-async function defaultBranchShortName(ctx: ScenarioContext, repo: string): Promise<string> {
-  const info = await ctx.rest.getRepository(repo);
-  return (info.defaultBranch ?? "refs/heads/main").replace(/^refs\/heads\//, "");
-}
+import type { Scenario } from "../scenario.js";
+import { defaultBranchShortName, detBody } from "./common.js";
 
 export const createBranch: Scenario<{ repo: string; branch: string; base: string }> = {
   tool: "create-branch",
@@ -49,4 +44,4 @@ export const createGitTag: Scenario<{ repo: string; tag: string }> = {
   cleanup: async (ctx, state) => ctx.rest.deleteRef(state.repo, `refs/tags/${state.tag}`),
 };
 
-export const gitScenarios: Scenario<any>[] = [createBranch, createGitTag];
+export const gitScenarios: Scenario<unknown>[] = [createBranch, createGitTag];

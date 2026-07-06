@@ -10,19 +10,13 @@
  * Test-harness module; not shipped in `ado-script.zip`.
  */
 import type { Scenario, ScenarioContext } from "../scenario.js";
-import { detBody } from "./common.js";
+import { defaultBranchShortName, detBody } from "./common.js";
 
 interface PrState {
   repo: string;
   prId: number;
   branch: string;
   threadId?: number;
-}
-
-async function defaultBranchShortName(ctx: ScenarioContext, repo: string): Promise<string> {
-  const info = await ctx.rest.getRepository(repo);
-  const ref = info.defaultBranch ?? "refs/heads/main";
-  return ref.replace(/^refs\/heads\//, "");
 }
 
 async function setupPr(
@@ -127,8 +121,14 @@ export const resolvePrThread: Scenario<PrState> = {
   }),
   assert: async (ctx, state) => {
     const thread = await ctx.rest.getThread(state.repo, state.prId, state.threadId!);
-    const status = String(thread.status ?? "active").toLowerCase();
-    if (status === "active" || status === "1") {
+    // ADO returns thread status as either a numeric enum (1=active, 2=fixed,
+    // 3=wontFix, 4=closed, 5=byDesign, 6=pending) or its string name. We
+    // requested "fixed", so allowlist the resolved terminal states rather than
+    // denylisting "active" — an unexpected code must never pass as success.
+    const raw = thread.status;
+    const status = String(raw ?? "").toLowerCase();
+    const resolved = new Set(["2", "3", "4", "5", "fixed", "wontfix", "closed", "bydesign"]);
+    if (!resolved.has(status)) {
       throw new Error(`thread #${state.threadId} was not resolved (status='${status}')`);
     }
   },
@@ -178,7 +178,7 @@ export const updatePr: Scenario<PrState> = {
   cleanup: teardownPr,
 };
 
-export const prScenarios: Scenario<any>[] = [
+export const prScenarios: Scenario<unknown>[] = [
   addPrComment,
   replyToPrComment,
   resolvePrThread,

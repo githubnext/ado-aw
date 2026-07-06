@@ -112,7 +112,7 @@ export const uploadPipelineArtifact: Scenario<{ buildId: number }> = {
   },
 };
 
-export const buildScenarios: Scenario<any>[] = [
+export const buildScenarios: Scenario<unknown>[] = [
   addBuildTag,
   queueBuild,
   uploadBuildAttachment,

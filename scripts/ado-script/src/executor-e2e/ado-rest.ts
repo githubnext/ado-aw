@@ -311,13 +311,13 @@ export class AdoRest {
     repo: string,
     prId: number,
     threadId: number,
-  ): Promise<{ id: number; status?: string; comments?: { id: number; content: string }[] }> {
+  ): Promise<{ id: number; status?: string | number; comments?: { id: number; content: string }[] }> {
     const path = this.projPath(
       `_apis/git/repositories/${AdoRest.seg(repo)}/pullRequests/${prId}/threads/${threadId}?api-version=7.1`,
     );
     const res = await this.request<{
       id: number;
-      status?: string;
+      status?: string | number;
       comments?: { id: number; content: string }[];
     }>(path);
     if (!res) throw new Error(`getThread(${threadId}) returned no body`);

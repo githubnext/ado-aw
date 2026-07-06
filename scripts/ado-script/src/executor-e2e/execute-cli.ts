@@ -37,8 +37,10 @@ export interface RenderSourceOptions {
 export function renderSourceMarkdown(opts: RenderSourceOptions): string {
   const lines: string[] = [
     "---",
-    `name: "executor-e2e: ${opts.tool}"`,
-    `description: "Deterministic Stage 3 executor check for ${opts.tool}"`,
+    // JSON-stringify the string values (valid YAML) so a tool name containing
+    // a quote or backslash can't emit malformed front-matter.
+    `name: ${JSON.stringify(`executor-e2e: ${opts.tool}`)}`,
+    `description: ${JSON.stringify(`Deterministic Stage 3 executor check for ${opts.tool}`)}`,
     "target: standalone",
     "engine:",
     "  id: copilot",

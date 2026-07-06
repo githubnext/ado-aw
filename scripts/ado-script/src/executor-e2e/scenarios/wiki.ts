@@ -74,4 +74,4 @@ export const updateWikiPage: Scenario<WikiState> = {
   cleanup: async (ctx, state) => ctx.rest.deleteWikiPage(state.wiki, state.path),
 };
 
-export const wikiScenarios: Scenario<any>[] = [createWikiPage, updateWikiPage];
+export const wikiScenarios: Scenario<unknown>[] = [createWikiPage, updateWikiPage];

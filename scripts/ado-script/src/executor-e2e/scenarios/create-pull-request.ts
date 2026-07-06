@@ -122,10 +122,21 @@ export const createPullRequest: Scenario<CreatePrState> = {
     await git(ctx, ["clone", cloneUrl, checkout], sourcesDir, authHeader);
 
     // Determine the default branch and its HEAD (the patch base commit).
-    const targetBranch =
-      (await git(ctx, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], checkout, authHeader))
-        .trim()
-        .replace(/^origin\//, "") || "main";
+    // `symbolic-ref refs/remotes/origin/HEAD` exits non-zero (not empty) when
+    // the remote HEAD symref isn't configured, which git() turns into a throw.
+    // Catch that and fall back to "main" so the `|| "main"` isn't dead code.
+    let targetBranch = "main";
+    try {
+      const symref = await git(
+        ctx,
+        ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+        checkout,
+        authHeader,
+      );
+      targetBranch = symref.trim().replace(/^origin\//, "") || "main";
+    } catch {
+      ctx.log(`[create-pull-request] origin/HEAD symref not set; defaulting target branch to 'main'`);
+    }
     const baseCommit = (await git(ctx, ["rev-parse", "HEAD"], checkout, authHeader)).trim();
 
     // Deterministic edit: add a new file, then capture a git diff (which
@@ -186,4 +197,4 @@ export const createPullRequest: Scenario<CreatePrState> = {
   },
 };
 
-export const createPullRequestScenarios: Scenario<any>[] = [createPullRequest];
+export const createPullRequestScenarios: Scenario<unknown>[] = [createPullRequest];

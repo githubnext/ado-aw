@@ -29,6 +29,19 @@ export function detBody(ctx: ScenarioContext, tool: string): string {
   return `Deterministic executor E2E exercising ${tool} for build ${ctx.buildId}. Safe to delete.`;
 }
 
+/**
+ * Resolve the short name of a repo's default branch (e.g. `main`), stripping
+ * the `refs/heads/` prefix. Shared by the git and pr scenarios so a fix here
+ * reaches both.
+ */
+export async function defaultBranchShortName(
+  ctx: ScenarioContext,
+  repo: string,
+): Promise<string> {
+  const info = await ctx.rest.getRepository(repo);
+  return (info.defaultBranch ?? "refs/heads/main").replace(/^refs\/heads\//, "");
+}
+
 /** Read a required env var, or SkipError the scenario when it is absent. */
 export function requireEnv(name: string, tool: string): string {
   const value = process.env[name]?.trim();
