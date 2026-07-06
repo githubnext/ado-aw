@@ -47,7 +47,10 @@ export function renderSourceMarkdown(opts: RenderSourceOptions): string {
   ];
   if (opts.adoRepo) {
     lines.push("repos:");
-    lines.push(`  - ${opts.adoRepo}=${opts.adoRepo}`);
+    // JSON-stringify both the alias and the repo name (valid YAML) to stay
+    // consistent with the rest of the rendered front-matter and guard against
+    // repo names containing YAML-significant characters.
+    lines.push(`  - ${JSON.stringify(`${opts.adoRepo}=${opts.adoRepo}`)}`);
   }
   lines.push("safe-outputs:");
   // Quote the tool key (JSON string is valid YAML) so an unusual tool name

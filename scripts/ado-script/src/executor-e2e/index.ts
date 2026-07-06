@@ -19,7 +19,7 @@
  *
  * Test-harness module; not shipped in `ado-script.zip`.
  */
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -82,18 +82,25 @@ export async function main(): Promise<number> {
   };
 
   log(`Running ${allScenarios.length} executor E2E scenarios against ${orgUrl}${project}`);
-  const results = await runAll(ctx, allScenarios);
-  log(summarise(results));
-
-  const issueEnv = loadIssueEnv();
   try {
-    await fileFailureIssue(results, issueEnv, log);
-  } catch (err) {
-    log(`WARNING: failed to file GitHub issue: ${(err as Error).message}`);
-  }
+    const results = await runAll(ctx, allScenarios);
+    log(summarise(results));
 
-  const failed = results.filter((r) => !r.ok).length;
-  return failed > 0 ? 1 : 0;
+    const issueEnv = loadIssueEnv();
+    try {
+      await fileFailureIssue(results, issueEnv, log);
+    } catch (err) {
+      log(`WARNING: failed to file GitHub issue: ${(err as Error).message}`);
+    }
+
+    const failed = results.filter((r) => !r.ok).length;
+    return failed > 0 ? 1 : 0;
+  } finally {
+    // Remove the scratch dir so CI agents and local runs don't accumulate
+    // ado-aw-e2e-* directories (scenarios clean their own children, but the
+    // parent mkdtemp dir would otherwise persist).
+    await rm(workDir, { recursive: true, force: true });
+  }
 }
 
 // Run as the bundle entry point. Skipped under Vitest so unit tests can import

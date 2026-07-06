@@ -28,7 +28,7 @@ describe("renderSourceMarkdown", () => {
       adoRepo: "agent-definitions",
     });
     expect(md).toContain("repos:");
-    expect(md).toContain("  - agent-definitions=agent-definitions");
+    expect(md).toContain(`  - "agent-definitions=agent-definitions"`);
   });
 });
 
