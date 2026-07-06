@@ -4858,7 +4858,7 @@ fn test_byom_provider_env_compiles_and_merges() {
     );
     assert_eq!(
         compiled
-            .matches("az account get-access-token --resource https://cognitiveservices.azure.com")
+            .matches("az account get-access-token --resource 'https://cognitiveservices.azure.com'")
             .count(),
         2,
         "mint step must request a token for the default cognitiveservices resource in both jobs: {compiled}"

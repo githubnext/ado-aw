@@ -627,9 +627,12 @@ pub struct ProviderToken {
     #[sanitize_config(skip)]
     pub service_connection: crate::secure::ServiceConnection,
     /// Azure resource (audience) passed to `az account get-access-token
-    /// --resource`. Defaults to [`DEFAULT_PROVIDER_TOKEN_RESOURCE`].
+    /// --resource`. Defaults to [`DEFAULT_PROVIDER_TOKEN_RESOURCE`]. Validated
+    /// at deserialization to be shell-safe (it is interpolated into the
+    /// generated mint script).
     #[serde(default)]
-    pub resource: Option<String>,
+    #[sanitize_config(skip)]
+    pub resource: Option<crate::secure::ProviderResourceUrl>,
 }
 
 impl ProviderToken {
@@ -689,6 +692,27 @@ impl ProviderConfig {
                  exclusive. Use `token` (compiler-minted bearer via a service connection) \
                  OR `api-key` (a static `$(VAR)` secret)."
             );
+        }
+        // `api-key` is rendered into COPILOT_PROVIDER_API_KEY; like the raw
+        // engine.env provider-key path it may carry an ADO macro `$(VAR)` but not
+        // a template/runtime expression or pipeline-command injection.
+        if let Some(api_key) = &self.api_key {
+            if crate::validate::contains_ado_template_expression(api_key) || api_key.contains("$[")
+            {
+                anyhow::bail!(
+                    "engine.provider.api-key '{api_key}' contains an ADO template ('${{{{ }}}}') \
+                     or runtime ('$[...]') expression. Use a macro '$(VAR)' secret reference."
+                );
+            }
+            if crate::validate::contains_pipeline_command(api_key) {
+                anyhow::bail!(
+                    "engine.provider.api-key contains pipeline command injection \
+                     ('##vso[' or '##['). This is not allowed."
+                );
+            }
+            if crate::validate::contains_newline(api_key) {
+                anyhow::bail!("engine.provider.api-key must not contain newline characters.");
+            }
         }
         Ok(())
     }

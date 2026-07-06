@@ -141,6 +141,11 @@ fn provider_derived_env(engine_config: &EngineConfig) -> Vec<(String, String)> {
 /// mutually exclusive (a conflict is a hard error in
 /// [`validate_engine_feature_support`]), so the merge never silently clobbers.
 /// Returned owned so a `provider`-only config still yields the provider vars.
+///
+/// **Pre-condition:** callers rely on [`validate_engine_feature_support`] having
+/// already rejected a `provider` + raw `COPILOT_PROVIDER_*` conflict. This merge
+/// itself does not re-check that; if invoked before validation (e.g. directly in
+/// a unit test) provider-derived pairs win over any colliding raw keys.
 fn effective_engine_env(engine_config: &EngineConfig) -> HashMap<String, String> {
     let mut map: HashMap<String, String> = engine_config.env().cloned().unwrap_or_default();
     for (k, v) in provider_derived_env(engine_config) {
@@ -2125,6 +2130,29 @@ mod tests {
         assert!(
             err.contains("base-url is required"),
             "empty base-url must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn provider_token_resource_rejects_shell_metacharacters() {
+        // A resource with a shell-breakout payload must be rejected at
+        // deserialization (the ProviderResourceUrl newtype), never reaching the
+        // generated mint script.
+        let md = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  provider:\n    base-url: https://x.example.com/v1\n    token:\n      service-connection: sc\n      resource: \"https://x));whoami\"\n---\n";
+        assert!(
+            parse_markdown(md).is_err(),
+            "a resource containing shell metacharacters must be rejected"
+        );
+    }
+
+    #[test]
+    fn provider_api_key_rejects_injection() {
+        let md = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  provider:\n    base-url: https://x.example.com/v1\n    api-key: \"##vso[task.setvariable variable=x]y\"\n---\n";
+        let (fm, _) = parse_markdown(md).unwrap();
+        let err = validate_engine_feature_support(&fm.engine).unwrap_err().to_string();
+        assert!(
+            err.contains("pipeline command injection"),
+            "api-key with a ##vso injection must be rejected: {err}"
         );
     }
 

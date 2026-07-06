@@ -324,6 +324,24 @@ validated_string! {
     }
 }
 
+validated_string! {
+    /// An Azure resource (audience) URL passed to
+    /// `az account get-access-token --resource`. Validated to be a shell-safe,
+    /// URI-shaped value so it can be interpolated into the generated provider
+    /// token-mint bash script without escaping.
+    ProviderResourceUrl, "resource", |value: &str, label: &str| {
+        if validate::is_valid_provider_resource_url(value) {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "{label} '{value}' must be a URI-shaped Azure resource audience \
+                 (contain '://', at most 256 characters) composed only of \
+                 [A-Za-z0-9._:/%~-] — no spaces, quotes, or shell metacharacters"
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

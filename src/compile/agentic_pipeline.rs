@@ -2018,9 +2018,12 @@ fn acr_login_step(registry_base: &str, connection: &str) -> TaskStep {
 fn provider_token_mint_step(token: &ProviderToken) -> TaskStep {
     let resource = token.resource();
     let var = crate::compile::types::PROVIDER_BEARER_TOKEN_VAR;
+    // `resource` is a validated `ProviderResourceUrl` (shell-safe allowlist, no
+    // single-quotes); single-quoting here is defense-in-depth so the value is
+    // passed to `az` as one literal argument regardless.
     let script = format!(
         "set -eo pipefail\n\
-         TOKEN=$(az account get-access-token --resource {resource} --query accessToken -o tsv)\n\
+         TOKEN=$(az account get-access-token --resource '{resource}' --query accessToken -o tsv)\n\
          echo \"##vso[task.setvariable variable={var};issecret=true]$TOKEN\"\n"
     );
     AzureCli::new(

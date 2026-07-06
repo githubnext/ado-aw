@@ -150,6 +150,25 @@ pub fn is_valid_arg(s: &str) -> bool {
         })
 }
 
+/// Validate an Azure resource (audience) URL for
+/// `az account get-access-token --resource`.
+///
+/// This value is interpolated into a generated bash script (the provider
+/// token-mint step), so it must be shell-safe. Strict allowlist: URI-shaped
+/// (contains `://`), non-empty, at most 256 characters, and composed only of
+/// characters that appear in an Azure resource audience URI
+/// (`https://cognitiveservices.azure.com`, `api://<guid>`, …). The allowlist
+/// deliberately excludes every shell metacharacter (space, quotes, `$`,
+/// backtick, `(`/`)`, `;`, `&`, `|`, `<`/`>`), so the value cannot break out of
+/// the `$( … )` command substitution it is embedded in.
+pub fn is_valid_provider_resource_url(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 256
+        && s.contains("://")
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '/' | '%' | '~'))
+}
+
 // ── Format validators ───────────────────────────────────────────────────────
 
 /// Validate that a string is a valid ADO pipeline parameter name (`[A-Za-z_][A-Za-z0-9_]*`).
