@@ -99,6 +99,22 @@ describe("buildAppJwt", () => {
     expectJwtVerifies(jwt, publicKey, "123456", now);
   });
 
+  it("accepts real-crlf PEM input", () => {
+    const { publicKey, privateKey } = makeKeyPair();
+    const now = 1_700_000_000;
+    const crlf = privateKey.replace(/\n/g, "\r\n");
+    const jwt = buildAppJwt("123456", crlf, now);
+    expectJwtVerifies(jwt, publicKey, "123456", now);
+  });
+
+  it("accepts real-cr PEM input", () => {
+    const { publicKey, privateKey } = makeKeyPair();
+    const now = 1_700_000_000;
+    const cr = privateKey.replace(/\n/g, "\r");
+    const jwt = buildAppJwt("123456", cr, now);
+    expectJwtVerifies(jwt, publicKey, "123456", now);
+  });
+
   it("accepts whitespace-collapsed PEM input", () => {
     const { publicKey, privateKey } = makeKeyPair();
     const now = 1_700_000_000;
