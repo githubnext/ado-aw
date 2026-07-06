@@ -76,11 +76,11 @@ use super::ir::output::{OutputDecl, OutputRef};
 use super::ir::step::{
     BashStep, CheckoutRepo, CheckoutStep, DownloadStep, PublishStep, Step, SubmodulesOpt, TaskStep,
 };
+use super::ir::tasks::azure_cli::{AzureCli, ScriptLocation, ScriptType};
 use super::ir::tasks::docker_installer::DockerInstaller;
 use super::ir::tasks::download_package::DownloadPackage;
 use super::ir::tasks::manual_validation::{ManualValidation, OnTimeout};
 use super::ir::tasks::nuget_authenticate::NuGetAuthenticate;
-use super::ir::tasks::azure_cli::{AzureCli, ScriptLocation, ScriptType};
 use super::ir::{
     CiTrigger, Parameter, ParameterDefault, ParameterKind, PipelineResource, PipelineVar,
     PrTrigger, RepositoryResource, Resources, Schedule, Triggers,
@@ -835,7 +835,11 @@ fn build_agent_job(
     steps.push(checkout_self_step(&cfg.self_checkout_fetch));
     // 2. additional repo checkouts
     for repo in &front_matter.checkout {
-        let fetch = front_matter.checkout_fetch.get(repo).cloned().unwrap_or_default();
+        let fetch = front_matter
+            .checkout_fetch
+            .get(repo)
+            .cloned()
+            .unwrap_or_default();
         steps.push(Step::Checkout(CheckoutStep {
             repository: CheckoutRepo::Named(repo.clone()),
             clean: None,
@@ -970,9 +974,7 @@ fn build_agent_job(
     if let Some(app_token) = front_matter.engine.github_app_token()
         && !app_token.skip_token_revocation
     {
-        steps.push(super::extensions::ado_script::github_app_token_revoke_step_typed(
-            app_token,
-        )?);
+        steps.push(super::extensions::ado_script::github_app_token_revoke_step_typed(app_token)?);
     }
 
     // 19. Collect safe outputs from AWF container
@@ -987,7 +989,9 @@ fn build_agent_job(
     // bundle is downloaded iff this step is emitted.
     if front_matter.has_any_safe_output_tool() {
         let (_, reviewed_summary_tools) = front_matter.partition_safe_outputs_by_approval();
-        steps.push(Step::Bash(safe_outputs_summary_step(&reviewed_summary_tools)));
+        steps.push(Step::Bash(safe_outputs_summary_step(
+            &reviewed_summary_tools,
+        )));
     }
 
     // 20. Stop MCPG and SafeOutputs
@@ -1180,9 +1184,11 @@ fn build_detection_job(
     // detection-only bundle consumers OR into one download rather than adding a
     // second (mirroring the Agent-job predicate in `AdoScriptExtension`).
     if detection_job_needs_ado_script_bundle(front_matter) {
-        steps.extend(super::extensions::ado_script::install_and_download_steps_typed(
-            front_matter.supply_chain(),
-        ));
+        steps.extend(
+            super::extensions::ado_script::install_and_download_steps_typed(
+                front_matter.supply_chain(),
+            ),
+        );
     }
     if let Some(app_token) = front_matter.engine.github_app_token() {
         steps.push(super::extensions::ado_script::github_app_token_step_typed(
@@ -1211,9 +1217,7 @@ fn build_detection_job(
     if let Some(app_token) = front_matter.engine.github_app_token()
         && !app_token.skip_token_revocation
     {
-        steps.push(super::extensions::ado_script::github_app_token_revoke_step_typed(
-            app_token,
-        )?);
+        steps.push(super::extensions::ado_script::github_app_token_revoke_step_typed(app_token)?);
     }
     // Prepare analyzed outputs
     steps.push(Step::Bash(prepare_analyzed_outputs_step()));
@@ -1406,7 +1410,9 @@ fn build_manual_review_job(
     let approval = aggregate_approval_config(front_matter, &reviewed);
 
     let mut job = Job::new(prefix.id("ManualReview")?, "Manual Review", Pool::Server);
-    job.steps = vec![Step::Task(build_manual_validation_step(&approval, &reviewed))];
+    job.steps = vec![Step::Task(build_manual_validation_step(
+        &approval, &reviewed,
+    ))];
     // The pending-period timeout is enforced on the TASK
     // (`ManualValidation@1`'s step `timeoutInMinutes`, set in
     // `build_manual_validation_step`) so that the task's `onTimeout`
@@ -1508,7 +1514,10 @@ fn aggregate_approval_config(front_matter: &FrontMatter, reviewed: &[String]) ->
         } else {
             ApprovalOnTimeout::Reject
         }),
-        instructions: Some(compose_review_instructions(reviewed, &per_tool_instructions)),
+        instructions: Some(compose_review_instructions(
+            reviewed,
+            &per_tool_instructions,
+        )),
     }
 }
 
@@ -1627,15 +1636,18 @@ fn build_conclusion_job(
     }
 
     let mut steps: Vec<Step> = Vec::new();
+    steps.push(checkout_none_step());
 
     // Install Node + download/verify the ado-script bundle using the canonical
     // helper. This keeps the supply-chain mirror handling and the unzip layout
     // (`/tmp/ado-aw-scripts/ado-script/<bundle>.js`) consistent with the
     // Agent/Setup jobs — a hand-rolled copy here previously double-nested the
     // unzip path and bypassed the supply-chain feed.
-    steps.extend(super::extensions::ado_script::install_and_download_steps_typed(
-        front_matter.supply_chain.as_ref(),
-    ));
+    steps.extend(
+        super::extensions::ado_script::install_and_download_steps_typed(
+            front_matter.supply_chain.as_ref(),
+        ),
+    );
 
     let mut download_artifact = TaskStep::new(
         "DownloadPipelineArtifact@2",
@@ -1825,7 +1837,10 @@ fi\n"
     }
 
     conclusion_step = conclusion_step
-        .with_env("AW_AGENT_RESULT", EnvValue::PipelineVar("AW_AGENT_RESULT".to_string()))
+        .with_env(
+            "AW_AGENT_RESULT",
+            EnvValue::PipelineVar("AW_AGENT_RESULT".to_string()),
+        )
         .with_env(
             "AW_DETECTION_RESULT",
             EnvValue::PipelineVar("AW_DETECTION_RESULT".to_string()),
@@ -1964,6 +1979,17 @@ fn checkout_self_step(fetch: &CheckoutFetchOpts) -> Step {
     })
 }
 
+fn checkout_none_step() -> Step {
+    Step::Checkout(CheckoutStep {
+        repository: CheckoutRepo::None,
+        clean: None,
+        submodules: None,
+        fetch_depth: None,
+        fetch_tags: None,
+        persist_credentials: None,
+    })
+}
+
 /// Rewrite a GHCR image reference onto an internal registry when one is
 /// configured. `base` is the GHCR path (e.g.
 /// `ghcr.io/github/gh-aw-firewall/squid`), `tag` the image tag. When
@@ -2090,7 +2116,12 @@ pub(crate) fn download_package_step(
 /// trusted strings only (today: hardcoded ADO macro paths and literal payload
 /// names). Never pass user/front-matter-controlled data here — doing so would
 /// introduce shell-command injection into the generated pipeline.
-fn extract_package_payload_bash(staging: &str, dest_dir: &str, payload: &str, tail: &str) -> String {
+fn extract_package_payload_bash(
+    staging: &str,
+    dest_dir: &str,
+    payload: &str,
+    tail: &str,
+) -> String {
     format!(
         "set -eo pipefail\n\
          STAGING=\"{staging}\"\n\
@@ -2134,7 +2165,10 @@ fn feed_auth_step(supply_chain: Option<&SupplyChainConfig>) -> Option<Step> {
         .map(|_| Step::Task(nuget_authenticate_step(sc.feed_connection())))
 }
 
-fn download_compiler_step(compiler_version: &str, supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
+fn download_compiler_step(
+    compiler_version: &str,
+    supply_chain: Option<&SupplyChainConfig>,
+) -> Vec<Step> {
     if let Some(feed) = supply_chain.and_then(|sc| sc.feed.as_ref()) {
         let dest = "$(Pipeline.Workspace)/agentic-pipeline-compiler";
         let staging = "$(Pipeline.Workspace)/agentic-pipeline-compiler/_pkg";
@@ -2332,8 +2366,16 @@ fn prepull_images_step(
     let registry = supply_chain.and_then(|sc| sc.registry.as_ref());
     let registry_base = registry.map(|r| r.name.as_str());
 
-    let squid = image_ref("ghcr.io/github/gh-aw-firewall/squid", AWF_VERSION, registry_base);
-    let agent = image_ref("ghcr.io/github/gh-aw-firewall/agent", AWF_VERSION, registry_base);
+    let squid = image_ref(
+        "ghcr.io/github/gh-aw-firewall/squid",
+        AWF_VERSION,
+        registry_base,
+    );
+    let agent = image_ref(
+        "ghcr.io/github/gh-aw-firewall/agent",
+        AWF_VERSION,
+        registry_base,
+    );
     // The local `:latest` aliases must ALWAYS carry the GHCR image names that
     // AWF resolves by default when invoked with `--skip-pull` (run_agent_step
     // passes no `--awf-*-image` flags). Tagging them onto the internal
@@ -2356,10 +2398,12 @@ fn prepull_images_step(
     // `:latest`-tag the image the same way as squid/agent so `--skip-pull` finds
     // it locally.
     if include_api_proxy {
-        let api_proxy =
-            image_ref("ghcr.io/github/gh-aw-firewall/api-proxy", AWF_VERSION, registry_base);
-        let api_proxy_latest =
-            image_ref("ghcr.io/github/gh-aw-firewall/api-proxy", "latest", None);
+        let api_proxy = image_ref(
+            "ghcr.io/github/gh-aw-firewall/api-proxy",
+            AWF_VERSION,
+            registry_base,
+        );
+        let api_proxy_latest = image_ref("ghcr.io/github/gh-aw-firewall/api-proxy", "latest", None);
         script.push_str(&format!(
             "docker pull {api_proxy}\n\
              docker tag {api_proxy} {api_proxy_latest}\n"
@@ -2769,8 +2813,7 @@ fn collect_safe_outputs_step() -> BashStep {
 /// `task.uploadsummary` tab.
 fn safe_outputs_summary_step(reviewed: &[String]) -> BashStep {
     use super::ir::env::EnvValue;
-    let approval_summary_path =
-        super::extensions::ado_script::APPROVAL_SUMMARY_PATH;
+    let approval_summary_path = super::extensions::ado_script::APPROVAL_SUMMARY_PATH;
     let script = format!(
         "node '{approval_summary_path}' \
          || echo \"##vso[task.logissue type=warning]approval-summary step failed (non-fatal)\"\n"

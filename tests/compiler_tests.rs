@@ -3242,6 +3242,60 @@ fn test_conclusion_job_is_emitted_with_expected_condition_and_dependencies() {
 }
 
 #[test]
+fn test_conclusion_job_starts_with_checkout_none() {
+    let compiled = compile_fixture("conclusion_basic.md");
+    let doc = parse_compiled_yaml(&compiled);
+
+    let conclusion_job =
+        find_job_mapping(&doc, "Conclusion").expect("compiled YAML should contain Conclusion job");
+    let steps = conclusion_job
+        .get(yaml_key("steps"))
+        .and_then(|v| v.as_sequence())
+        .expect("Conclusion job should have steps");
+    let first_step = steps
+        .first()
+        .and_then(|v| v.as_mapping())
+        .expect("Conclusion job should have a first step mapping");
+
+    assert_eq!(
+        first_step
+            .get(yaml_key("checkout"))
+            .and_then(|v| v.as_str()),
+        Some("none"),
+        "Conclusion job should explicitly disable implicit repository checkout before any task"
+    );
+
+    assert_eq!(
+        steps
+            .get(1)
+            .and_then(|v| v.as_mapping())
+            .and_then(|m| m.get(yaml_key("task")))
+            .and_then(|v| v.as_str()),
+        Some("UseNode@1"),
+        "Conclusion job should install Node after disabling checkout"
+    );
+    assert!(
+        steps.iter().any(|step| {
+            let Some(map) = step.as_mapping() else {
+                return false;
+            };
+            map.get(yaml_key("task")).and_then(|v| v.as_str()) == Some("DownloadPipelineArtifact@2")
+                && map
+                    .get(yaml_key("inputs"))
+                    .and_then(|v| v.as_mapping())
+                    .and_then(|inputs| inputs.get(yaml_key("artifact")))
+                    .and_then(|v| v.as_str())
+                    == Some("safe_outputs")
+        }),
+        "Conclusion job should still download the safe_outputs artifact"
+    );
+    assert!(
+        find_bash_step_containing(conclusion_job, "conclusion.js").is_some(),
+        "Conclusion job should still run conclusion.js"
+    );
+}
+
+#[test]
 fn test_conclusion_job_emits_expected_env_vars_for_conclusion_script() {
     let compiled = compile_fixture("conclusion_basic.md");
     let doc = parse_compiled_yaml(&compiled);
@@ -5855,9 +5909,7 @@ fn test_bundle_steps_do_not_reproject_auto_injected_ado_vars() {
                             continue;
                         }
                         // Match a bare `$(Dotted.Var)` macro value.
-                        let inner = value
-                            .strip_prefix("$(")
-                            .and_then(|s| s.strip_suffix(')'));
+                        let inner = value.strip_prefix("$(").and_then(|s| s.strip_suffix(')'));
                         if let Some(dotted) = inner
                             && dotted.contains('.')
                             && key == screaming_snake(dotted)
@@ -6482,7 +6534,11 @@ fn test_supply_chain_full_reroutes_all_artifacts() {
         compiled.contains("nuGetServiceConnections: feed-conn"),
         "feed's resolved service connection must be passed to NuGetAuthenticate@1"
     );
-    for definition in ["definition: ado-aw", "definition: awf", "definition: ado-script"] {
+    for definition in [
+        "definition: ado-aw",
+        "definition: awf",
+        "definition: ado-script",
+    ] {
         assert!(
             compiled.contains(definition),
             "DownloadPackage@1 must pull {definition}"
@@ -7332,10 +7388,8 @@ description: "no fetch tuning"
 /// Compile inline agent `content` in an isolated temp dir and return the
 /// compiled YAML. Panics on compile failure.
 fn compile_inline_agent(tag: &str, content: &str) -> String {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-{tag}-{}",
-        std::process::id()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("agentic-pipeline-{tag}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&temp_dir);
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
     let input = temp_dir.join(format!("{tag}-agent.md"));
@@ -7394,7 +7448,9 @@ fn assert_github_app_token_wiring(compiled: &str) {
 
     // GITHUB_TOKEN is sourced from the minted masked variable in both Copilot
     // envs (agent + detection), never from the operator's $(GITHUB_TOKEN).
-    let app_token_src = compiled.matches("GITHUB_TOKEN: $(GITHUB_APP_TOKEN)").count();
+    let app_token_src = compiled
+        .matches("GITHUB_TOKEN: $(GITHUB_APP_TOKEN)")
+        .count();
     assert_eq!(
         app_token_src, 2,
         "expected GITHUB_TOKEN sourced from $(GITHUB_APP_TOKEN) in agent + detection:\n{compiled}"
@@ -7429,9 +7485,7 @@ fn assert_github_app_token_wiring(compiled: &str) {
     // The output variable name is pinned as an argv flag in both mint steps, so
     // no pipeline variable named GH_APP_OUTPUT_VAR can redirect the minted
     // token (argv comes only from the compiler-authored script).
-    let output_var_pins = compiled
-        .matches("--output-var 'GITHUB_APP_TOKEN'")
-        .count();
+    let output_var_pins = compiled.matches("--output-var 'GITHUB_APP_TOKEN'").count();
     assert_eq!(
         output_var_pins, 2,
         "expected --output-var pinned to GITHUB_APP_TOKEN in both mint steps:\n{compiled}"
@@ -7471,7 +7525,8 @@ fn test_github_app_token_wiring_all_targets() {
 
 #[test]
 fn test_no_github_app_token_by_default() {
-    let content = "---\nname: \"No GH App\"\ndescription: \"default token\"\n---\n\n## Agent\n\nDo work.\n";
+    let content =
+        "---\nname: \"No GH App\"\ndescription: \"default token\"\n---\n\n## Agent\n\nDo work.\n";
     let compiled = compile_inline_agent("ghapp-absent", content);
     assert!(
         !compiled.contains("github-app-token.js"),

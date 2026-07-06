@@ -78,7 +78,7 @@ ado-aw secrets set GITHUB_APP_PRIVATE_KEY "$(cat app-private-key.pem)"
 | `repositories` | no | Repository names (owner-relative) to scope the installation token to. Omit to span every repository the installation grants. |
 | `api-url` | no | GitHub API base URL. Defaults to `https://api.github.com` (GHEC). For GitHub Enterprise Server, set the `/api/v3` base URL (e.g. `https://ghe.example.com/api/v3`). Must be an `https://` URL. |
 | `skip-token-revocation` | no | When `true`, do not revoke the minted token after the Copilot run. Defaults to `false` (the token is revoked — see below). |
-| `private-key` | no | Name of the ADO **secret** pipeline variable holding the private key (PEM). **Defaults to `GITHUB_APP_PRIVATE_KEY`** — the compiler owns the name, exactly like `GITHUB_TOKEN`, so the common case sets no field and just runs `ado-aw secrets set GITHUB_APP_PRIVATE_KEY …`. Set this only to point at a differently-named secret (e.g. reusing an existing variable). |
+| `private-key` | no | Name of the ADO **secret** pipeline variable holding the private key (PEM). **Defaults to `GITHUB_APP_PRIVATE_KEY`** — the compiler owns the name, exactly like `GITHUB_TOKEN`, so the common case sets no field and just runs `ado-aw secrets set GITHUB_APP_PRIVATE_KEY …`. The mint bundle normalizes common ADO PEM representations (raw multiline PEM, escaped-newline text like `\\n`/`\\r\\n`, and whitespace-collapsed PEM bodies). Set this only to point at a differently-named secret (e.g. reusing an existing variable). |
 
 #### Setup
 

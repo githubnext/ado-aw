@@ -24,6 +24,39 @@ function decodeSegment(seg: string): unknown {
   return JSON.parse(Buffer.from(b64, "base64").toString("utf8"));
 }
 
+function expectJwtVerifies(
+  jwt: string,
+  publicKey: string,
+  expectedIss: string,
+  now: number,
+) {
+  const [h, p, s] = jwt.split(".") as [string, string, string];
+  expect(h).toBeTruthy();
+  expect(p).toBeTruthy();
+  expect(s).toBeTruthy();
+
+  const header = decodeSegment(h) as { alg: string; typ: string };
+  expect(header).toEqual({ alg: "RS256", typ: "JWT" });
+
+  const payload = decodeSegment(p) as {
+    iat: number;
+    exp: number;
+    iss: string;
+  };
+  expect(payload.iss).toBe(expectedIss);
+  expect(payload.iat).toBe(now - 60);
+  expect(payload.exp).toBe(now + 540);
+
+  const verifier = createVerify("RSA-SHA256");
+  verifier.update(`${h}.${p}`);
+  verifier.end();
+  const sig = Buffer.from(
+    s.replace(/-/g, "+").replace(/_/g, "/"),
+    "base64",
+  );
+  expect(verifier.verify(publicKey, sig)).toBe(true);
+}
+
 /** Build a minimal fetch-like Response stub. */
 function jsonResponse(status: number, body: unknown) {
   return {
@@ -39,31 +72,55 @@ describe("buildAppJwt", () => {
     const { publicKey, privateKey } = makeKeyPair();
     const now = 1_700_000_000;
     const jwt = buildAppJwt("123456", privateKey, now);
-    const [h, p, s] = jwt.split(".") as [string, string, string];
-    expect(h).toBeTruthy();
-    expect(p).toBeTruthy();
-    expect(s).toBeTruthy();
+    expectJwtVerifies(jwt, publicKey, "123456", now);
+  });
 
-    const header = decodeSegment(h) as { alg: string; typ: string };
-    expect(header).toEqual({ alg: "RS256", typ: "JWT" });
+  it("accepts escaped-lf PEM input", () => {
+    const { publicKey, privateKey } = makeKeyPair();
+    const now = 1_700_000_000;
+    const escaped = privateKey.replace(/\n/g, "\\n");
+    const jwt = buildAppJwt("123456", escaped, now);
+    expectJwtVerifies(jwt, publicKey, "123456", now);
+  });
 
-    const payload = decodeSegment(p) as {
-      iat: number;
-      exp: number;
-      iss: string;
-    };
-    expect(payload.iss).toBe("123456");
-    expect(payload.iat).toBe(now - 60);
-    expect(payload.exp).toBe(now + 540);
+  it("accepts escaped-crlf PEM input", () => {
+    const { publicKey, privateKey } = makeKeyPair();
+    const now = 1_700_000_000;
+    const escaped = privateKey.replace(/\n/g, "\\r\\n");
+    const jwt = buildAppJwt("123456", escaped, now);
+    expectJwtVerifies(jwt, publicKey, "123456", now);
+  });
 
-    const verifier = createVerify("RSA-SHA256");
-    verifier.update(`${h}.${p}`);
-    verifier.end();
-    const sig = Buffer.from(
-      s.replace(/-/g, "+").replace(/_/g, "/"),
-      "base64",
-    );
-    expect(verifier.verify(publicKey, sig)).toBe(true);
+  it("accepts escaped-cr PEM input", () => {
+    const { publicKey, privateKey } = makeKeyPair();
+    const now = 1_700_000_000;
+    const escaped = privateKey.replace(/\r?\n/g, "\\r");
+    const jwt = buildAppJwt("123456", escaped, now);
+    expectJwtVerifies(jwt, publicKey, "123456", now);
+  });
+
+  it("accepts real-crlf PEM input", () => {
+    const { publicKey, privateKey } = makeKeyPair();
+    const now = 1_700_000_000;
+    const crlf = privateKey.replace(/\n/g, "\r\n");
+    const jwt = buildAppJwt("123456", crlf, now);
+    expectJwtVerifies(jwt, publicKey, "123456", now);
+  });
+
+  it("accepts real-cr PEM input", () => {
+    const { publicKey, privateKey } = makeKeyPair();
+    const now = 1_700_000_000;
+    const cr = privateKey.replace(/\n/g, "\r");
+    const jwt = buildAppJwt("123456", cr, now);
+    expectJwtVerifies(jwt, publicKey, "123456", now);
+  });
+
+  it("accepts whitespace-collapsed PEM input", () => {
+    const { publicKey, privateKey } = makeKeyPair();
+    const now = 1_700_000_000;
+    const collapsed = privateKey.replace(/\s+/g, " ").trim();
+    const jwt = buildAppJwt("123456", collapsed, now);
+    expectJwtVerifies(jwt, publicKey, "123456", now);
   });
 });
 

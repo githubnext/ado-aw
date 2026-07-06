@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.41.0](https://github.com/githubnext/ado-aw/compare/v0.40.0...v0.41.0) (2026-07-06)
+
+
+### Features
+
+* **compile:** add per-repo checkout fetch depth/tags tuning ([#1325](https://github.com/githubnext/ado-aw/issues/1325)) ([b3f2110](https://github.com/githubnext/ado-aw/commit/b3f2110e854ca62c34391a0355917d455a85ff64))
+* **engine:** GitHub App-backed Copilot engine auth ([#1326](https://github.com/githubnext/ado-aw/issues/1326)) ([ca1b29e](https://github.com/githubnext/ado-aw/commit/ca1b29e6ac15c3b7d19328885e7945b8f43e4e62))
+
+
+### Bug Fixes
+
+* **ado-script:** normalize github app PEM secrets from ADO vars ([#1380](https://github.com/githubnext/ado-aw/issues/1380)) ([d429146](https://github.com/githubnext/ado-aw/commit/d429146bcdd3c40d837068f3d5cac739e26521d7))
+* **compile:** skip conclusion job when run is cancelled ([#1313](https://github.com/githubnext/ado-aw/issues/1313)) ([f5f67d6](https://github.com/githubnext/ado-aw/commit/f5f67d61c4f2ae405ca044c12e58793a40ef33c2))
+
 ## [0.40.0](https://github.com/githubnext/ado-aw/compare/v0.39.0...v0.40.0) (2026-07-02)
 
 
