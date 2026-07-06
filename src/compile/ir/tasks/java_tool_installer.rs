@@ -39,7 +39,7 @@ pub(crate) fn validate_inputs(inputs: Value) -> Result<(), String> {
         other => {
             return Err(format!(
                 "JavaToolInstaller@0: unknown jdkSourceOption `{other}`"
-            ))
+            ));
         }
     };
     result.map_err(|e| format!("jdkSourceOption `{source}`: {e}"))

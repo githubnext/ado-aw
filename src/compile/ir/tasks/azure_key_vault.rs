@@ -69,7 +69,8 @@ impl AzureKeyVault {
     pub fn into_step(self) -> TaskStep {
         let mut t = TaskStep::new(
             "AzureKeyVault@2",
-            self.display_name.unwrap_or_else(|| "Azure Key Vault".into()),
+            self.display_name
+                .unwrap_or_else(|| "Azure Key Vault".into()),
         )
         .with_input("ConnectedServiceName", self.connected_service_name)
         .with_input("KeyVaultName", self.key_vault_name);
@@ -114,7 +115,10 @@ mod tests {
             t.inputs.get("SecretsFilter").map(String::as_str),
             Some("MY_SECRET,ANOTHER_SECRET")
         );
-        assert_eq!(t.inputs.get("RunAsPreJob").map(String::as_str), Some("true"));
+        assert_eq!(
+            t.inputs.get("RunAsPreJob").map(String::as_str),
+            Some("true")
+        );
     }
 
     #[test]
@@ -127,8 +131,13 @@ mod tests {
 
     #[test]
     fn run_as_pre_job_false() {
-        let t = AzureKeyVault::new("svc-conn", "vault").run_as_pre_job(false).into_step();
-        assert_eq!(t.inputs.get("RunAsPreJob").map(String::as_str), Some("false"));
+        let t = AzureKeyVault::new("svc-conn", "vault")
+            .run_as_pre_job(false)
+            .into_step();
+        assert_eq!(
+            t.inputs.get("RunAsPreJob").map(String::as_str),
+            Some("false")
+        );
     }
 
     #[test]

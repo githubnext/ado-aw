@@ -61,7 +61,8 @@ impl CmdLine {
     pub fn into_step(self) -> TaskStep {
         let mut t = TaskStep::new(
             "CmdLine@2",
-            self.display_name.unwrap_or_else(|| "Command Line Script".into()),
+            self.display_name
+                .unwrap_or_else(|| "Command Line Script".into()),
         )
         .with_input("script", self.script);
         if let Some(v) = self.working_directory {
@@ -82,7 +83,10 @@ mod tests {
     fn sets_task_and_required_script() {
         let t = CmdLine::new("echo hello").into_step();
         assert_eq!(t.task, "CmdLine@2");
-        assert_eq!(t.inputs.get("script").map(String::as_str), Some("echo hello"));
+        assert_eq!(
+            t.inputs.get("script").map(String::as_str),
+            Some("echo hello")
+        );
     }
 
     #[test]
@@ -95,6 +99,9 @@ mod tests {
             t.inputs.get("workingDirectory").map(String::as_str),
             Some("$(Build.SourcesDirectory)")
         );
-        assert_eq!(t.inputs.get("failOnStderr").map(String::as_str), Some("true"));
+        assert_eq!(
+            t.inputs.get("failOnStderr").map(String::as_str),
+            Some("true")
+        );
     }
 }

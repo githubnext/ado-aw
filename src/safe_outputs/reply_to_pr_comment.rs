@@ -322,7 +322,8 @@ mod tests {
         let result: Result<ReplyToPrCommentResult, _> = params.try_into();
         let err = result.unwrap_err();
         assert!(
-            err.to_string().contains("content must be at least 10 characters"),
+            err.to_string()
+                .contains("content must be at least 10 characters"),
             "unexpected error: {err}"
         );
     }

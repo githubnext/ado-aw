@@ -1178,5 +1178,4 @@ allowed-votes:
         let config: UpdatePrConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.merge_strategy, "rebase");
     }
-
 }

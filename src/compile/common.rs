@@ -538,7 +538,11 @@ pub fn build_parameters(
 /// The result of lowering a `repos:` list: the ADO repository resources, the
 /// checkout-alias list, and per-checkout fetch tuning keyed by alias (plus
 /// [`SELF_CHECKOUT_ALIAS`] for the trigger repo).
-pub type LoweredRepos = (Vec<Repository>, Vec<String>, HashMap<String, CheckoutFetchOpts>);
+pub type LoweredRepos = (
+    Vec<Repository>,
+    Vec<String>,
+    HashMap<String, CheckoutFetchOpts>,
+);
 
 /// Lower a `repos:` list into the internal [`LoweredRepos`] triple consumed by
 /// the rest of the compiler. A reserved `self` entry (an entry whose *name* is
@@ -991,8 +995,7 @@ pub(crate) fn contains_template_marker(input: &str, name: &str) -> bool {
         // legacy marker even if its inner content trims to `name`. Matching it
         // here would both raise a false positive and — in `replace_marker` —
         // splice `repl` after the `$`, corrupting the output.
-        let preceded_by_dollar =
-            marker_start > 0 && input.as_bytes()[marker_start - 1] == b'$';
+        let preceded_by_dollar = marker_start > 0 && input.as_bytes()[marker_start - 1] == b'$';
         if !preceded_by_dollar
             && let Some(close) = input[start..].find("}}")
             && input[start..start + close].trim() == name
@@ -2345,10 +2348,7 @@ fn add_extension_network_hosts(
 /// Ecosystem identifiers (e.g., `"python"`) are expanded to their domain
 /// lists. Raw domain names are validated against DNS-safe characters before
 /// insertion; an invalid name causes this function to return an error.
-fn add_user_network_hosts(
-    user_hosts: &[String],
-    hosts: &mut HashSet<String>,
-) -> Result<()> {
+fn add_user_network_hosts(user_hosts: &[String], hosts: &mut HashSet<String>) -> Result<()> {
     for host in user_hosts {
         if is_ecosystem_identifier(host) {
             let domains = get_ecosystem_domains(host);
@@ -4842,8 +4842,8 @@ safe-outputs:
     #[test]
     fn test_model_name_rejects_single_quote() {
         let mut fm = minimal_front_matter();
-        fm.engine =
-            crate::compile::types::EngineConfig::Full(Box::new(crate::compile::types::EngineOptions {
+        fm.engine = crate::compile::types::EngineConfig::Full(Box::new(
+            crate::compile::types::EngineOptions {
                 id: Some("copilot".to_string()),
                 model: Some("model' && echo pwned".to_string()),
                 version: None,
@@ -4854,7 +4854,8 @@ safe-outputs:
                 command: None,
                 timeout_minutes: None,
                 github_app_token: None,
-            }));
+            },
+        ));
         let result = engine_args_for(&fm);
         assert!(result.is_err());
         assert!(
@@ -4868,8 +4869,8 @@ safe-outputs:
     #[test]
     fn test_model_name_rejects_space() {
         let mut fm = minimal_front_matter();
-        fm.engine =
-            crate::compile::types::EngineConfig::Full(Box::new(crate::compile::types::EngineOptions {
+        fm.engine = crate::compile::types::EngineConfig::Full(Box::new(
+            crate::compile::types::EngineOptions {
                 id: Some("copilot".to_string()),
                 model: Some("model && curl evil.com".to_string()),
                 version: None,
@@ -4880,7 +4881,8 @@ safe-outputs:
                 command: None,
                 timeout_minutes: None,
                 github_app_token: None,
-            }));
+            },
+        ));
         let result = engine_args_for(&fm);
         assert!(result.is_err());
     }
@@ -4894,8 +4896,8 @@ safe-outputs:
             "my_model:latest",
         ] {
             let mut fm = minimal_front_matter();
-            fm.engine =
-                crate::compile::types::EngineConfig::Full(Box::new(crate::compile::types::EngineOptions {
+            fm.engine = crate::compile::types::EngineConfig::Full(Box::new(
+                crate::compile::types::EngineOptions {
                     id: Some("copilot".to_string()),
                     model: Some(name.to_string()),
                     version: None,
@@ -4906,7 +4908,8 @@ safe-outputs:
                     command: None,
                     timeout_minutes: None,
                     github_app_token: None,
-                }));
+                },
+            ));
             let result = engine_args_for(&fm);
             assert!(result.is_ok(), "Model name '{}' should be valid", name);
         }

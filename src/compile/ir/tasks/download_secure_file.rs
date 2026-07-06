@@ -105,10 +105,7 @@ mod tests {
             .retry_count("3")
             .socket_timeout("5000")
             .into_step();
-        assert_eq!(
-            t.inputs.get("retryCount").map(String::as_str),
-            Some("3")
-        );
+        assert_eq!(t.inputs.get("retryCount").map(String::as_str), Some("3"));
         assert_eq!(
             t.inputs.get("socketTimeout").map(String::as_str),
             Some("5000")

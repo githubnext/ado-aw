@@ -132,9 +132,7 @@ mod tests {
             .cargo_service_connections("my-crates-io-conn")
             .into_step();
         assert_eq!(
-            t.inputs
-                .get("cargoServiceConnections")
-                .map(String::as_str),
+            t.inputs.get("cargoServiceConnections").map(String::as_str),
             Some("my-crates-io-conn")
         );
     }
@@ -178,9 +176,7 @@ mod tests {
             Some(".cargo/config.toml")
         );
         assert_eq!(
-            t.inputs
-                .get("cargoServiceConnections")
-                .map(String::as_str),
+            t.inputs.get("cargoServiceConnections").map(String::as_str),
             Some("external-conn")
         );
         assert_eq!(

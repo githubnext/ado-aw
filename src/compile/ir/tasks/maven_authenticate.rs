@@ -155,9 +155,7 @@ mod tests {
             .maven_service_connections("central,MavenOrg")
             .into_step();
         assert_eq!(
-            t.inputs
-                .get("mavenServiceConnections")
-                .map(String::as_str),
+            t.inputs.get("mavenServiceConnections").map(String::as_str),
             Some("central,MavenOrg")
         );
     }
@@ -197,9 +195,7 @@ mod tests {
             Some("internal-feed")
         );
         assert_eq!(
-            t.inputs
-                .get("mavenServiceConnections")
-                .map(String::as_str),
+            t.inputs.get("mavenServiceConnections").map(String::as_str),
             Some("external-maven-conn")
         );
     }

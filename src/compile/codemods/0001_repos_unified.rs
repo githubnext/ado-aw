@@ -402,8 +402,14 @@ mod tests {
         // warning.
         let mut m: Mapping = serde_yaml::from_str("name: x\nrepositories: []\n").unwrap();
         let changed = apply_codemod(&mut m, &CodemodContext::current()).expect("apply");
-        assert!(!changed, "empty repositories must not trigger a migration warning");
-        assert!(!m.contains_key(Value::String("repos".into())), "no repos key should be emitted");
+        assert!(
+            !changed,
+            "empty repositories must not trigger a migration warning"
+        );
+        assert!(
+            !m.contains_key(Value::String("repos".into())),
+            "no repos key should be emitted"
+        );
         assert!(
             !m.contains_key(Value::String("repositories".into())),
             "empty repositories stub should be cleaned up"

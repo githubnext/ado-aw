@@ -282,10 +282,7 @@ mod tests {
             t.inputs.get("appType").map(String::as_str),
             Some("functionApp")
         );
-        assert_eq!(
-            t.inputs.get("appName").map(String::as_str),
-            Some("my-func")
-        );
+        assert_eq!(t.inputs.get("appName").map(String::as_str), Some("my-func"));
         assert_eq!(
             t.inputs.get("package").map(String::as_str),
             Some("$(System.DefaultWorkingDirectory)/**/*.zip")
@@ -298,13 +295,8 @@ mod tests {
 
     #[test]
     fn linux_app_type_emits_correct_token() {
-        let t = AzureFunctionApp::new(
-            "sub",
-            FunctionAppType::Linux,
-            "func-app",
-            "app.zip",
-        )
-        .into_step();
+        let t =
+            AzureFunctionApp::new("sub", FunctionAppType::Linux, "func-app", "app.zip").into_step();
         assert_eq!(
             t.inputs.get("appType").map(String::as_str),
             Some("functionAppLinux")

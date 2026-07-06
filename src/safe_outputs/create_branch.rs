@@ -463,10 +463,7 @@ mod tests {
         };
         let result: Result<CreateBranchResult, _> = params.try_into();
         let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("source_commit"),
-            "unexpected error: {err}"
-        );
+        assert!(err.contains("source_commit"), "unexpected error: {err}");
     }
 
     #[test]
@@ -479,10 +476,7 @@ mod tests {
         };
         let result: Result<CreateBranchResult, _> = params.try_into();
         let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("repository"),
-            "unexpected error: {err}"
-        );
+        assert!(err.contains("repository"), "unexpected error: {err}");
     }
 
     #[test]

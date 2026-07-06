@@ -201,9 +201,7 @@ async fn load_detection_verdict(path: Option<&Path>) -> anyhow::Result<Option<De
     Ok(Some(verdict))
 }
 
-async fn load_execution_records(
-    paths: &[PathBuf],
-) -> anyhow::Result<Vec<IndexedExecutionRecord>> {
+async fn load_execution_records(paths: &[PathBuf]) -> anyhow::Result<Vec<IndexedExecutionRecord>> {
     let mut records = Vec::new();
     for path in paths {
         let values = read_ndjson_file(path).await?;
@@ -753,14 +751,18 @@ mod tests {
                 .path()
                 .join("safe_outputs")
                 .join(EXECUTED_NDJSON_FILENAME),
-            &[json!({"name": "add_pr_comment", "status": "succeeded", "context": "c-1", "result": {"status": "ok"}})],
+            &[
+                json!({"name": "add_pr_comment", "status": "succeeded", "context": "c-1", "result": {"status": "ok"}}),
+            ],
         );
         write_ndjson(
             &temp_dir
                 .path()
                 .join("safe_outputs_reviewed")
                 .join(EXECUTED_NDJSON_FILENAME),
-            &[json!({"name": "create_pull_request", "status": "succeeded", "context": "pr-1", "result": {"number": 9}})],
+            &[
+                json!({"name": "create_pull_request", "status": "succeeded", "context": "pr-1", "result": {"number": 9}}),
+            ],
         );
 
         let analysis = analyze_safe_outputs(temp_dir.path())

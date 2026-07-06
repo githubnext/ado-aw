@@ -45,8 +45,8 @@
 //!   deepening budget can reach. Same failure fragment.
 //! - **REST failure** — Build API returned an error. Same.
 
-use crate::compile::extensions::CompileContext;
 use crate::compile::ado_bundle::{Bundle, TokenSource, apply_bundle_auth};
+use crate::compile::extensions::CompileContext;
 use crate::compile::extensions::ado_script::EXEC_CONTEXT_CI_PUSH_PATH;
 use crate::compile::ir::condition::{Condition, Expr};
 use crate::compile::ir::step::{BashStep, Step};
@@ -134,8 +134,8 @@ impl ContextContributor for CiPushContextContributor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compile::ir::env::EnvValue;
     use crate::compile::extensions::CompileContext;
+    use crate::compile::ir::env::EnvValue;
     use crate::compile::types::FrontMatter;
 
     fn parse_fm(src: &str) -> FrontMatter {

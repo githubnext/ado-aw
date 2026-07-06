@@ -158,10 +158,7 @@ mod tests {
     #[test]
     fn artifact_feeds_empty_string() {
         let t = PipAuthenticate::new().artifact_feeds("").into_step();
-        assert_eq!(
-            t.inputs.get("artifactFeeds").map(String::as_str),
-            Some("")
-        );
+        assert_eq!(t.inputs.get("artifactFeeds").map(String::as_str), Some(""));
     }
 
     #[test]
@@ -233,10 +230,7 @@ mod tests {
         let t = PipAuthenticate::new()
             .with_display_name("Authenticate pip (build service identity)")
             .into_step();
-        assert_eq!(
-            t.display_name,
-            "Authenticate pip (build service identity)"
-        );
+        assert_eq!(t.display_name, "Authenticate pip (build service identity)");
     }
 
     #[test]

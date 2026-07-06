@@ -180,9 +180,7 @@ async fn write_agency_plugin(base: &Path) -> Result<()> {
             use std::os::unix::fs::PermissionsExt;
             tokio::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))
                 .await
-                .with_context(|| {
-                    format!("Failed to set executable bit: {}", dest.display())
-                })?;
+                .with_context(|| format!("Failed to set executable bit: {}", dest.display()))?;
         }
     }
 
@@ -214,7 +212,10 @@ async fn write_agency_plugin(base: &Path) -> Result<()> {
         }
 
         let parent = dest.parent().with_context(|| {
-            format!("Marketplace catalog has no parent directory: {}", dest.display())
+            format!(
+                "Marketplace catalog has no parent directory: {}",
+                dest.display()
+            )
         })?;
         tokio::fs::create_dir_all(parent)
             .await

@@ -520,7 +520,10 @@ impl BicepDeploy {
                     .with_input("managementGroupId", management_group_id)
                     .with_input("location", location);
             }
-            BicepScope::Tenant { tenant_id, location } => {
+            BicepScope::Tenant {
+                tenant_id,
+                location,
+            } => {
                 t = t
                     .with_input("tenantId", tenant_id)
                     .with_input("location", location);
@@ -715,7 +718,9 @@ fn take_string(map: &mut serde_yaml::Mapping, key: &str) -> Result<Option<String
 fn require_string(map: &mut serde_yaml::Mapping, key: &str) -> Result<(), String> {
     match take_string(map, key)? {
         Some(_) => Ok(()),
-        None => Err(format!("missing required input `{key}` for the selected scope")),
+        None => Err(format!(
+            "missing required input `{key}` for the selected scope"
+        )),
     }
 }
 
@@ -818,16 +823,24 @@ mod tests {
         assert_eq!(t.task, "BicepDeploy@0");
         assert_eq!(t.display_name, "Deploy Bicep template");
         assert_eq!(
-            t.inputs.get("azureResourceManagerConnection").map(String::as_str),
+            t.inputs
+                .get("azureResourceManagerConnection")
+                .map(String::as_str),
             Some("MyArmConnection")
         );
         assert_eq!(t.inputs.get("type").map(String::as_str), Some("deployment"));
-        assert_eq!(t.inputs.get("scope").map(String::as_str), Some("resourceGroup"));
+        assert_eq!(
+            t.inputs.get("scope").map(String::as_str),
+            Some("resourceGroup")
+        );
         assert_eq!(
             t.inputs.get("subscriptionId").map(String::as_str),
             Some("00000000-0000-0000-0000-000000000000")
         );
-        assert_eq!(t.inputs.get("resourceGroupName").map(String::as_str), Some("my-rg"));
+        assert_eq!(
+            t.inputs.get("resourceGroupName").map(String::as_str),
+            Some("my-rg")
+        );
         // No optional inputs emitted by default.
         assert!(t.inputs.get("operation").is_none());
         assert!(t.inputs.get("templateFile").is_none());
@@ -866,7 +879,10 @@ mod tests {
         )
         .into_step();
 
-        assert_eq!(t.inputs.get("operation").map(String::as_str), Some("whatIf"));
+        assert_eq!(
+            t.inputs.get("operation").map(String::as_str),
+            Some("whatIf")
+        );
         assert_eq!(
             t.inputs.get("validationLevel").map(String::as_str),
             Some("provider")
@@ -877,8 +893,14 @@ mod tests {
     fn subscription_scope_emits_location_not_resource_group() {
         let t = deploy_to_subscription("conn", "sub-id", "eastus").into_step();
 
-        assert_eq!(t.inputs.get("scope").map(String::as_str), Some("subscription"));
-        assert_eq!(t.inputs.get("subscriptionId").map(String::as_str), Some("sub-id"));
+        assert_eq!(
+            t.inputs.get("scope").map(String::as_str),
+            Some("subscription")
+        );
+        assert_eq!(
+            t.inputs.get("subscriptionId").map(String::as_str),
+            Some("sub-id")
+        );
         assert_eq!(t.inputs.get("location").map(String::as_str), Some("eastus"));
         assert!(t.inputs.get("resourceGroupName").is_none());
     }
@@ -895,12 +917,18 @@ mod tests {
         )
         .into_step();
 
-        assert_eq!(t.inputs.get("scope").map(String::as_str), Some("managementGroup"));
+        assert_eq!(
+            t.inputs.get("scope").map(String::as_str),
+            Some("managementGroup")
+        );
         assert_eq!(
             t.inputs.get("managementGroupId").map(String::as_str),
             Some("mg-root")
         );
-        assert_eq!(t.inputs.get("location").map(String::as_str), Some("westeurope"));
+        assert_eq!(
+            t.inputs.get("location").map(String::as_str),
+            Some("westeurope")
+        );
     }
 
     #[test]
@@ -916,8 +944,14 @@ mod tests {
         .into_step();
 
         assert_eq!(t.inputs.get("scope").map(String::as_str), Some("tenant"));
-        assert_eq!(t.inputs.get("tenantId").map(String::as_str), Some("tenant-id"));
-        assert_eq!(t.inputs.get("location").map(String::as_str), Some("northeurope"));
+        assert_eq!(
+            t.inputs.get("tenantId").map(String::as_str),
+            Some("tenant-id")
+        );
+        assert_eq!(
+            t.inputs.get("location").map(String::as_str),
+            Some("northeurope")
+        );
     }
 
     #[test]
@@ -939,9 +973,14 @@ mod tests {
         .template_file("infra/main.bicep")
         .into_step();
 
-        assert_eq!(t.inputs.get("type").map(String::as_str), Some("deploymentStack"));
         assert_eq!(
-            t.inputs.get("actionOnUnmanageResources").map(String::as_str),
+            t.inputs.get("type").map(String::as_str),
+            Some("deploymentStack")
+        );
+        assert_eq!(
+            t.inputs
+                .get("actionOnUnmanageResources")
+                .map(String::as_str),
             Some("delete")
         );
         assert_eq!(
@@ -949,11 +988,15 @@ mod tests {
             Some("denyDelete")
         );
         assert_eq!(
-            t.inputs.get("denySettingsApplyToChildScopes").map(String::as_str),
+            t.inputs
+                .get("denySettingsApplyToChildScopes")
+                .map(String::as_str),
             Some("true")
         );
         assert_eq!(
-            t.inputs.get("bypassStackOutOfSyncError").map(String::as_str),
+            t.inputs
+                .get("bypassStackOutOfSyncError")
+                .map(String::as_str),
             Some("false")
         );
         assert_eq!(
@@ -977,7 +1020,10 @@ mod tests {
         .name("my-stack")
         .into_step();
 
-        assert_eq!(t.inputs.get("operation").map(String::as_str), Some("delete"));
+        assert_eq!(
+            t.inputs.get("operation").map(String::as_str),
+            Some("delete")
+        );
         assert_eq!(t.inputs.get("name").map(String::as_str), Some("my-stack"));
     }
 

@@ -53,7 +53,9 @@ pub static CODEMOD: Codemod = Codemod {
 fn apply_codemod(fm: &mut Mapping, _ctx: &CodemodContext) -> Result<bool> {
     // Cheap detection first: only deserialize `repos:` and resolve the
     // working directory when at least one targeted marker is present.
-    let present = fm.iter().any(|(_k, v)| value_has_any_marker(v, MARKER_NAMES));
+    let present = fm
+        .iter()
+        .any(|(_k, v)| value_has_any_marker(v, MARKER_NAMES));
     if !present {
         return Ok(false);
     }
@@ -219,9 +221,8 @@ mod tests {
     #[test]
     fn workspace_marker_single_checkout_resolves_to_root() {
         // No additional repos → $(Build.SourcesDirectory) is the repo root.
-        let mut fm = fm_from(
-            "name: a\ndescription: d\nsteps:\n  - script: cd {{ workspace }} && ls\n",
-        );
+        let mut fm =
+            fm_from("name: a\ndescription: d\nsteps:\n  - script: cd {{ workspace }} && ls\n");
         let changed = apply_codemod(&mut fm, &ctx()).expect("apply");
         assert!(changed);
         assert_eq!(step_script(&fm), "cd $(Build.SourcesDirectory) && ls");
@@ -229,8 +230,7 @@ mod tests {
 
     #[test]
     fn no_space_variant_is_migrated() {
-        let mut fm =
-            fm_from("name: a\ndescription: d\nsteps:\n  - script: cd {{workspace}}\n");
+        let mut fm = fm_from("name: a\ndescription: d\nsteps:\n  - script: cd {{workspace}}\n");
         let changed = apply_codemod(&mut fm, &ctx()).expect("apply");
         assert!(changed);
         assert_eq!(step_script(&fm), "cd $(Build.SourcesDirectory)");
@@ -238,9 +238,8 @@ mod tests {
 
     #[test]
     fn working_directory_alias_resolves_same_as_workspace() {
-        let mut fm = fm_from(
-            "name: a\ndescription: d\nsteps:\n  - script: echo {{ working_directory }}\n",
-        );
+        let mut fm =
+            fm_from("name: a\ndescription: d\nsteps:\n  - script: echo {{ working_directory }}\n");
         apply_codemod(&mut fm, &ctx()).expect("apply");
         assert_eq!(step_script(&fm), "echo $(Build.SourcesDirectory)");
     }
@@ -323,9 +322,7 @@ mod tests {
 
     #[test]
     fn idempotent_second_run_is_noop() {
-        let mut fm = fm_from(
-            "name: a\ndescription: d\nsteps:\n  - script: cd {{ workspace }}\n",
-        );
+        let mut fm = fm_from("name: a\ndescription: d\nsteps:\n  - script: cd {{ workspace }}\n");
         let changed1 = apply_codemod(&mut fm, &ctx()).expect("first");
         assert!(changed1);
         let snapshot = fm.clone();
@@ -338,8 +335,14 @@ mod tests {
     fn marker_present_ignores_other_spans() {
         assert!(contains_template_marker("a {{ workspace }} b", "workspace"));
         assert!(contains_template_marker("{{workspace}}", "workspace"));
-        assert!(!contains_template_marker("{{#runtime-import x}}", "workspace"));
-        assert!(!contains_template_marker("${{ parameters.x }}", "workspace"));
+        assert!(!contains_template_marker(
+            "{{#runtime-import x}}",
+            "workspace"
+        ));
+        assert!(!contains_template_marker(
+            "${{ parameters.x }}",
+            "workspace"
+        ));
         assert!(!contains_template_marker("no markers here", "workspace"));
     }
 
@@ -349,14 +352,20 @@ mod tests {
         // marker: it must not be detected or substituted (substituting would
         // leave a stray `$` before the replacement).
         assert!(!contains_template_marker("${{ workspace }}", "workspace"));
-        assert!(!contains_template_marker("a ${{ workspace }} b", "workspace"));
+        assert!(!contains_template_marker(
+            "a ${{ workspace }} b",
+            "workspace"
+        ));
         assert_eq!(
             replace_marker("${{ workspace }}", "workspace", "REPL"),
             "${{ workspace }}"
         );
         // A bare (non-dollar) marker sitting alongside a `${{ }}` expression is
         // still migrated.
-        assert!(contains_template_marker("${{ p }} {{ workspace }}", "workspace"));
+        assert!(contains_template_marker(
+            "${{ p }} {{ workspace }}",
+            "workspace"
+        ));
         assert_eq!(
             replace_marker("${{ p }} {{ workspace }}", "workspace", "REPL"),
             "${{ p }} REPL"

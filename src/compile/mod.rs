@@ -21,8 +21,8 @@ mod job;
 mod job_ir;
 mod onees;
 mod onees_ir;
-pub(crate) mod pr_filters;
 mod path_layout_check;
+pub(crate) mod pr_filters;
 pub mod source_path_guard;
 mod stage;
 mod stage_ir;
@@ -171,9 +171,7 @@ async fn compile_pipeline_inner(
     // Checkout-aware path-layout advisories (warning-only): surface
     // hand-written paths that won't exist under the resolved checkout
     // layout, plus deprecated directory markers left in the agent body.
-    for warning in
-        path_layout_check::collect_path_layout_warnings(&front_matter, &markdown_body)
-    {
+    for warning in path_layout_check::collect_path_layout_warnings(&front_matter, &markdown_body) {
         eprintln!("Warning: {warning}");
     }
 

@@ -220,7 +220,9 @@ mod tests {
             Some("https://my.mirror/nodejs/dist")
         );
         assert_eq!(
-            t.inputs.get("retryCountOnDownloadFails").map(String::as_str),
+            t.inputs
+                .get("retryCountOnDownloadFails")
+                .map(String::as_str),
             Some("3")
         );
         assert_eq!(
