@@ -109,7 +109,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │       ├── tasks/    # Typed builder structs for built-in ADO tasks (one file per task; new()+typed setters+into_step(); command-enum dispatch for Docker/DotNet/NuGet/Npm/UniversalPackages; typestate builders for PowerShell; docker.rs canonical template; tasks/parse.rs reuses the builders as serde schemas to advisory-validate authored front-matter task steps — surfaced as task-input-invalid warnings via ado-aw lint / lint_workflow MCP, NOT via compile)
 │   │       ├── job.rs    # Job, Pool, TemplateContext, JobVariable
 │   │       ├── stage.rs  # Stage + external-params wrap
-│   │       ├── env.rs    # Typed EnvValue (Literal, AdoMacro, PipelineVar, Secret, StepOutput, Coalesce, Concat)
+│   │       ├── env.rs    # Typed EnvValue (Literal, AdoMacro, PipelineVar, Secret, StepOutput, Coalesce, Concat, RuntimeExpression, RawYamlScalar)
 │   │       ├── condition.rs # Typed Condition / Expr AST + codegen to ADO condition syntax
 │   │       ├── output.rs # OutputDecl / OutputRef + location-aware lowering
 │   │       ├── graph.rs  # Dependency graph: validation, edge derivation, isOutput promotion, cycle detection
