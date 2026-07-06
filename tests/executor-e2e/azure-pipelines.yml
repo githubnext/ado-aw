@@ -39,7 +39,7 @@ variables:
   # Internal sparse crates.io mirror (Azure Artifacts). Declared in the cargo
   # config below so CargoAuthenticate@0 can attach credentials, and reused as
   # RustInstaller's crates.io override so the two never drift.
-  CRATES_IO_FEED: "sparse+https://pkgs.dev.azure.com/msazuresphere/4x4/_packaging/cratesio/Cargo/index/"
+  CRATES_IO_FEED: "sparse+https://pkgs.dev.azure.com/msazuresphere/AgentPlayground/_packaging/cargo/Cargo/index/"
   # EXECUTOR_E2E_GITHUB_TOKEN must be provided as a SECRET pipeline variable
   # (fine-grained PAT scoped to Issues:read/write on githubnext/ado-aw ONLY).
 
@@ -58,8 +58,8 @@ steps:
       # the auth task has something to authenticate and `cargo build` fetches
       # crates from the internal mirror.
       {
-        printf '\n[source.crates-io]\nreplace-with = "cratesio-internal"\n\n'
-        printf '[source.cratesio-internal]\nregistry = "%s"\n' "$(CRATES_IO_FEED)"
+        printf '\n[registries]\ncargo = { index = "%s" }\n\n' "$(CRATES_IO_FEED)"
+        printf '[source.crates-io]\nreplace-with = "cargo"\n'
       } >> .cargo/config.toml
       echo "----- .cargo/config.toml -----"
       cat .cargo/config.toml
