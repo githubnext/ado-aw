@@ -121,7 +121,11 @@ export async function findOpenIssueByTitle(
 ): Promise<number | undefined> {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const q = `repo:${opts.repo} is:issue is:open in:title ${JSON.stringify(title)}`;
-  const url = `https://api.github.com/search/issues?q=${encodeURIComponent(q)}&per_page=20`;
+  // GitHub search does partial-phrase matching, so many open issues can share
+  // the title's words. Page at 100 (scoped to repo + is:open + in:title, so
+  // this comfortably covers the expected scale) to avoid the exact-match
+  // .find() missing an existing issue and filing a duplicate.
+  const url = `https://api.github.com/search/issues?q=${encodeURIComponent(q)}&per_page=100`;
   const res = await fetchImpl(url, { headers: ghHeaders(opts.token) });
   if (!res.ok) throw new Error(`GitHub search failed: HTTP ${res.status}`);
   const json = (await res.json()) as { items?: { number: number; title: string }[] };

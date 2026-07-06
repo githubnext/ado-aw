@@ -105,7 +105,8 @@ export const replyToPrComment: Scenario<PrState> = {
     repository: ctx.adoRepo,
   }),
   assert: async (ctx, state) => {
-    const thread = await ctx.rest.getThread(state.repo, state.prId, state.threadId!);
+    if (state.threadId === undefined) throw new Error(`[reply-to-pr-comment] threadId not set by setup`);
+    const thread = await ctx.rest.getThread(state.repo, state.prId, state.threadId);
     const replied = (thread.comments ?? []).some((c) => c.content.includes(`build ${ctx.buildId}`));
     if (!replied) throw new Error(`reply not found on thread #${state.threadId}`);
   },
@@ -128,7 +129,8 @@ export const resolvePrThread: Scenario<PrState> = {
     repository: ctx.adoRepo,
   }),
   assert: async (ctx, state) => {
-    const thread = await ctx.rest.getThread(state.repo, state.prId, state.threadId!);
+    if (state.threadId === undefined) throw new Error(`[resolve-pr-thread] threadId not set by setup`);
+    const thread = await ctx.rest.getThread(state.repo, state.prId, state.threadId);
     // ADO returns thread status as either a numeric enum (1=active, 2=fixed,
     // 3=wontFix, 4=closed, 5=byDesign, 6=pending) or its string name. We
     // requested "fixed", so allowlist the resolved terminal states rather than
