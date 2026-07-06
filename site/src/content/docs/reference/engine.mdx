@@ -82,7 +82,7 @@ import { Aside } from '@astrojs/starlight/components';
 <Aside type="caution">
 **Literal values only (with one exception).** The compiler rejects any value that contains ADO macro expressions (`$(...)`, `${{...}}`, `$[...]`) or pipeline command injection markers (`##vso[`). Values are embedded verbatim into the generated YAML — ADO variable expansion does not apply here.
 
-**Exception: Copilot BYOM/BYOK provider keys.** The four Copilot provider environment variables — `COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_API_KEY`, `COPILOT_PROVIDER_BEARER_TOKEN`, and `COPILOT_PROVIDER_WIRE_API` — may carry an ADO macro (`$(...)`) expression so credentials can be sourced from a pipeline variable or a Setup-job output variable. See [Copilot BYOM / BYOK provider configuration](#copilot-byom--byok-provider-configuration).
+**Exception: Copilot provider keys.** The four Copilot provider environment variables — `COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_API_KEY`, `COPILOT_PROVIDER_BEARER_TOKEN`, and `COPILOT_PROVIDER_WIRE_API` — may carry an ADO macro (`$(...)`) expression. Prefer the typed [`provider`](#copilot-model-provider-byok-configuration) block over raw provider env keys. See [Copilot model provider (BYOK) configuration](#copilot-model-provider-byok-configuration).
 
 To pass any other pipeline variable's value to the agent, use a `setup:` step with an `env:` block on the ADO task, where ADO macro expansion is fully supported. See the [front-matter reference](/ado-aw/reference/front-matter/#custom-steps-injection) for custom step injection.
 </Aside>
@@ -173,73 +173,103 @@ Heed it by storing the value with `ado-aw secrets set` (which stores it as a sec
 `engine.github-app-token` is for **Copilot engine authentication only**. It has no effect on `permissions.read` / `permissions.write` (Azure DevOps OAuth tokens), the `gh` CLI, GitHub MCP tool permissions, or any agent write access.
 </Aside>
 
-### Copilot BYOM / BYOK provider configuration
+### Copilot model provider (BYOK) configuration
 
 The Copilot engine can route requests to an external LLM provider — for example
 a private **Azure Copilot Foundry** instance — instead of GitHub's default
-routing. This **Bring Your Own Model / Key (BYOM/BYOK)** mode is activated by
-setting `COPILOT_PROVIDER_BASE_URL` in `engine.env`.
+routing. This **Bring Your Own Key (BYOK)** mode is configured with the
+dedicated **`engine.provider`** block, which the compiler maps to the
+`COPILOT_PROVIDER_*` environment variables the Copilot CLI reads to reach the
+provider.
 
-#### Provider variables
+Prefer `engine.provider` over hand-writing `COPILOT_PROVIDER_*` keys in
+`engine.env`: it is typed and validated, and its `token` sub-block lets the
+compiler **acquire the provider bearer token for you**, minted **in the same
+job** as each engine run so it resolves correctly at runtime.
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `COPILOT_PROVIDER_BASE_URL` | ✅ for BYOM | Base URL of the external provider (e.g. `https://RESOURCE.cognitiveservices.azure.com/openai/v1`). Setting this activates BYOM mode. |
-| `COPILOT_MODEL` | Often required | Model to use (most providers require it). Can also be set via `engine.model`. |
-| `COPILOT_PROVIDER_API_KEY` | Optional | API key for cloud providers. |
-| `COPILOT_PROVIDER_BEARER_TOKEN` | Optional | Bearer token alternative to `COPILOT_PROVIDER_API_KEY`; takes precedence when set. |
-| `COPILOT_PROVIDER_TYPE` | Optional | Provider format: `openai` (default), `azure`, or `anthropic`. |
-| `COPILOT_PROVIDER_WIRE_API` | Optional | Wire API variant: `completions` (default) or `responses`. |
+#### `engine.provider` fields
 
-The four credential/provider keys — `COPILOT_PROVIDER_BASE_URL`,
-`COPILOT_PROVIDER_API_KEY`, `COPILOT_PROVIDER_BEARER_TOKEN`, and
-`COPILOT_PROVIDER_WIRE_API` — are the only `engine.env` values that may carry an
-ADO macro (`$(...)`) expression, so secrets can be sourced from a pipeline
-variable or a Setup-job output instead of being hard-coded.
+| Field | Required | Maps to | Description |
+|-------|----------|---------|-------------|
+| `base-url` | yes | `COPILOT_PROVIDER_BASE_URL` | Base URL of the external provider (e.g. `https://RESOURCE.cognitiveservices.azure.com/openai/v1`). A literal host is auto-added to the AWF network allowlist. |
+| `type` | optional | `COPILOT_PROVIDER_TYPE` | Provider format: `openai` (default), `azure`, or `anthropic`. |
+| `wire-api` | optional | `COPILOT_PROVIDER_WIRE_API` | Wire API variant: `completions` (default) or `responses`. |
+| `token` | optional | `COPILOT_PROVIDER_BEARER_TOKEN` | Compiler-minted bearer token (see below). Mutually exclusive with `api-key`. |
+| `api-key` | optional | `COPILOT_PROVIDER_API_KEY` | Static API key, typically a `$(VAR)` secret pipeline variable. Mutually exclusive with `token`. |
+
+The model itself is set via `engine.model` (or a `COPILOT_MODEL` env var).
+
+#### Compiler-owned token acquisition (`provider.token`)
+
+Set `provider.token` to have the compiler mint the provider bearer token in-job
+via Azure CLI + an ARM service connection:
+
+| `token` field | Required | Description |
+|---------------|----------|-------------|
+| `service-connection` | yes | ARM service connection used to authenticate `az` before minting the token. |
+| `resource` | optional | Azure resource (audience) for `az account get-access-token --resource`. Defaults to `https://cognitiveservices.azure.com`. |
+
+The compiler emits an `AzureCLI@2` step immediately before the Copilot
+invocation in **both** the Agent and Detection jobs. That step runs
+`az account get-access-token` and publishes the result as a **same-job secret**
+pipeline variable (`AW_PROVIDER_BEARER_TOKEN`), which is wired into
+`COPILOT_PROVIDER_BEARER_TOKEN`. Because the token is minted in the same job as
+the engine run, it resolves via a plain `$(...)` macro — no cross-job output
+plumbing, no `dependsOn`.
 
 #### Credential isolation
 
-When any BYOM credential key is present in `engine.env`, the compiler
-automatically enables the AWF **api-proxy sidecar** (`--enable-api-proxy`). With
-it active, the real credential is held inside the proxy container; the agent
-container receives only a placeholder and a proxy URL. The proxy strips the
-client's auth header and injects the real credential on the outbound request, so
-the secret never reaches the Copilot CLI process or the agent sandbox.
-
-This isolation applies to both the Agent and Detection stages.
+When a provider credential is configured (`base-url` + `token`/`api-key`), the
+compiler automatically enables the AWF **api-proxy sidecar**
+(`--enable-api-proxy`) and pre-pulls its container image. The real credential is
+held inside the proxy container; the agent container receives only a placeholder
+and a proxy URL, and the credential keys are passed as `--exclude-env` flags so
+the raw value is never copied into the agent via `--env-all`. This applies to
+both the Agent and Detection (threat-analysis) jobs.
 
 #### Network allowlist
 
-When `COPILOT_PROVIDER_BASE_URL` is a **literal** URL, the compiler automatically
-adds its hostname to the AWF network allowlist. When the value is an expression
-(so the host is unknown at compile time), add the provider hostname explicitly to
-`network.allowed`.
+When `base-url` is a **literal** URL, the compiler automatically adds its
+hostname to the AWF network allowlist. If a literal value cannot be resolved to
+a DNS-safe host, the compiler emits a non-fatal warning telling you to add the
+provider hostname manually via `network.allowed`.
 
-#### Example — Azure Copilot Foundry with a Setup-acquired bearer token
+#### Example — Azure Copilot Foundry with a compiler-minted bearer token
 
 ```yaml
-setup:
-  - task: AzureCLI@2
-    inputs:
-      azureSubscription: my-service-connection
-      scriptType: bash
-      inlineScript: |
-        TOKEN=$(az account get-access-token \
-          --resource https://cognitiveservices.azure.com/ \
-          --query accessToken -o tsv)
-        echo "##vso[task.setvariable variable=FOUNDRY_TOKEN;isOutput=true]$TOKEN"
-    displayName: Acquire Foundry bearer token
-
 engine:
   id: copilot
   model: gpt-4o
-  env:
-    COPILOT_PROVIDER_TYPE: azure
-    COPILOT_PROVIDER_BASE_URL: "https://my-foundry.cognitiveservices.azure.com/openai/v1"
-    COPILOT_PROVIDER_BEARER_TOKEN: "$(Setup.FOUNDRY_TOKEN)"
+  provider:
+    base-url: https://my-foundry.cognitiveservices.azure.com/openai/v1
+    type: azure
+    token:
+      service-connection: my-arm-connection
+      # resource: https://cognitiveservices.azure.com   # optional; this is the default
 ```
 
-Because `COPILOT_PROVIDER_BASE_URL` is a literal URL,
-`my-foundry.cognitiveservices.azure.com` is added to the AWF allowlist
-automatically. If you source the base URL from an expression instead, add the
-host to `network.allowed` manually.
+The compiler mints the token in-job (Agent + Detection) and adds
+`my-foundry.cognitiveservices.azure.com` to the AWF allowlist automatically. No
+`setup:` step or `COPILOT_PROVIDER_*` env keys are needed.
+
+To use a static key instead, drop `token` and set `api-key` to a secret
+variable:
+
+```yaml
+engine:
+  id: copilot
+  provider:
+    base-url: https://api.openai.com/v1
+    type: openai
+    api-key: $(OPENAI_API_KEY)
+```
+
+#### Raw `engine.env COPILOT_PROVIDER_*` (legacy, discouraged)
+
+For back-compat you may still set `COPILOT_PROVIDER_*` keys directly in
+`engine.env`. `engine.provider` and raw `COPILOT_PROVIDER_*` keys are mutually
+exclusive — setting both is a compile error. A **cross-job** macro such as
+`$(Setup.FOUNDRY_TOKEN)` (a value set with `isOutput=true` in a separate
+`setup:` job) does **not** resolve inside a step `env:` block and yields an empty
+token at runtime — use `provider.token` (or a same-job / pipeline /
+variable-group `$(VAR)` secret) instead.

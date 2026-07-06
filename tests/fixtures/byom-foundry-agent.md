@@ -1,18 +1,19 @@
 ---
-name: "BYOM Foundry Agent"
-description: "Exercises Copilot BYOM/BYOK provider env config via engine.env"
+name: "BYOK Foundry Agent"
+description: "Exercises Copilot BYOK provider config via engine.provider"
 engine:
   id: copilot
-  env:
-    COPILOT_PROVIDER_TYPE: azure
-    COPILOT_PROVIDER_BASE_URL: https://my-foundry.cognitiveservices.azure.com/openai/v1
-    COPILOT_PROVIDER_BEARER_TOKEN: $(Setup.FOUNDRY_TOKEN)
-setup:
-  - bash: echo "##vso[task.setvariable variable=FOUNDRY_TOKEN;isOutput=true]token-value"
-    displayName: Acquire Foundry bearer token
+  provider:
+    base-url: https://my-foundry.cognitiveservices.azure.com/openai/v1
+    type: azure
+    token:
+      service-connection: my-arm-connection
 ---
 
-## BYOM Foundry Agent
+## BYOK Foundry Agent
 
 This agent routes Copilot requests to a private Azure Copilot Foundry instance
-via Bring Your Own Model (BYOM) provider environment variables.
+via the dedicated `engine.provider` block. The compiler mints the bearer token
+in-job (Agent + Detection) via `az account get-access-token` and wires it into
+`COPILOT_PROVIDER_BEARER_TOKEN` as a same-job secret.
+

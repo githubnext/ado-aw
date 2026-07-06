@@ -4854,6 +4854,7 @@ safe-outputs:
                 command: None,
                 timeout_minutes: None,
                 github_app_token: None,
+                provider: None,
             }));
         let result = engine_args_for(&fm);
         assert!(result.is_err());
@@ -4880,6 +4881,7 @@ safe-outputs:
                 command: None,
                 timeout_minutes: None,
                 github_app_token: None,
+                provider: None,
             }));
         let result = engine_args_for(&fm);
         assert!(result.is_err());
@@ -4906,6 +4908,7 @@ safe-outputs:
                     command: None,
                     timeout_minutes: None,
                     github_app_token: None,
+                    provider: None,
                 }));
             let result = engine_args_for(&fm);
             assert!(result.is_ok(), "Model name '{}' should be valid", name);

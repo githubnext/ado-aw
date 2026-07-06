@@ -87,7 +87,7 @@ use super::ir::{
 };
 use super::types::{
     ApprovalConfig, ApprovalOnTimeout, CheckoutFetchOpts, FrontMatter, OnConfig, PrMode,
-    Repository as RepoCfg, SELF_CHECKOUT_ALIAS, SupplyChainConfig,
+    ProviderToken, Repository as RepoCfg, SELF_CHECKOUT_ALIAS, SupplyChainConfig,
 };
 
 /// Built pipeline context — the result of running every validation,
@@ -928,6 +928,17 @@ fn build_agent_job(
             app_token,
         )?);
     }
+    // When an external provider token is configured, mint it in-job (same-job
+    // secret) immediately before the Copilot run so COPILOT_PROVIDER_BEARER_TOKEN
+    // resolves via a plain macro. Coexists cleanly with the app-token mint above
+    // (independent secret vars, both plain pre-run steps).
+    if let Some(token) = front_matter
+        .engine
+        .provider()
+        .and_then(|p| p.token.as_ref())
+    {
+        steps.push(Step::Task(provider_token_mint_step(token)));
+    }
     steps.push(Step::Bash(run_agent_step(
         &cfg.allowed_domains,
         &cfg.awf_mounts,
@@ -1161,6 +1172,15 @@ fn build_detection_job(
         steps.push(super::extensions::ado_script::github_app_token_step_typed(
             app_token,
         )?);
+    }
+    // Mint the external provider token in-job (same-job secret) before the
+    // threat-analysis Copilot run, mirroring the Agent job.
+    if let Some(token) = front_matter
+        .engine
+        .provider()
+        .and_then(|p| p.token.as_ref())
+    {
+        steps.push(Step::Task(provider_token_mint_step(token)));
     }
     // Run threat analysis
     steps.push(Step::Bash(run_threat_analysis_step(
@@ -1982,6 +2002,33 @@ fn acr_login_step(registry_base: &str, connection: &str) -> TaskStep {
         ScriptLocation::Inline(format!("az acr login --name {name}\n")),
     )
     .with_display_name("Authenticate to internal container registry")
+    .into_step()
+}
+
+/// `AzureCLI@2` step that mints the external model-provider bearer token
+/// (`engine.provider.token`) **in the same job** as the engine run. Authenticated
+/// by the ARM `service-connection`, it runs `az account get-access-token` for the
+/// configured resource and publishes the result as the same-job secret
+/// [`PROVIDER_BEARER_TOKEN_VAR`] (referenced by `COPILOT_PROVIDER_BEARER_TOKEN`).
+///
+/// Same-job minting is deliberate: it avoids the cross-job `isOutput`/`dependsOn`
+/// plumbing (the #1372 failure) — a plain `$(...)` macro resolves the token. The
+/// AWF api-proxy sidecar (`--exclude-env COPILOT_PROVIDER_BEARER_TOKEN`) keeps the
+/// value out of the sandbox; this step runs outside the sandbox.
+fn provider_token_mint_step(token: &ProviderToken) -> TaskStep {
+    let resource = token.resource();
+    let var = crate::compile::types::PROVIDER_BEARER_TOKEN_VAR;
+    let script = format!(
+        "set -eo pipefail\n\
+         TOKEN=$(az account get-access-token --resource {resource} --query accessToken -o tsv)\n\
+         echo \"##vso[task.setvariable variable={var};issecret=true]$TOKEN\"\n"
+    );
+    AzureCli::new(
+        token.service_connection.as_str(),
+        ScriptType::Bash,
+        ScriptLocation::Inline(script),
+    )
+    .with_display_name("Acquire provider bearer token")
     .into_step()
 }
 
