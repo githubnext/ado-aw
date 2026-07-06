@@ -86,7 +86,13 @@ export interface Scenario<State = unknown> {
    * child process (e.g. BUILD_SOURCESDIRECTORY pointing at a git checkout).
    */
   env?(ctx: ScenarioContext, state: State): Promise<Record<string, string>>;
-  /** Assert the ADO side-effect actually happened. Throw on failure. */
+  /**
+   * Assert the ADO side-effect actually happened. Throw on failure.
+   *
+   * May populate fields on `state` (e.g. an id read from the executor result)
+   * that `cleanup` needs — do this **before** any fallible check so cleanup can
+   * still tear the object down if a later assertion throws.
+   */
   assert(ctx: ScenarioContext, state: State, record: ExecutedRecord): Promise<void>;
   /** Best-effort teardown of everything setup/execute created. */
   cleanup(ctx: ScenarioContext, state: State): Promise<void>;

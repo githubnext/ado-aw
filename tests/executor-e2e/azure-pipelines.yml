@@ -44,14 +44,20 @@ steps:
     fetchDepth: 1
     displayName: Checkout ado-aw
 
+  - task: CargoAuthenticate@0
+    inputs:
+      configFile: ".cargo/config.toml"
+    displayName: Authenticate with cargo (internal feeds)
+
+  - task: RustInstaller@1
+    inputs:
+      rustVersion: ms-stable
+      toolchainFeed: "https://pkgs.dev.azure.com/msazuresphere/4x4/_packaging/RustTools/nuget/v3/index.json"
+      cratesIoFeedOverride: "sparse+https://pkgs.dev.azure.com/msazuresphere/4x4/_packaging/cratesio/Cargo/index/"
+    displayName: Install Rust toolchain
+
   - script: |
       set -euo pipefail
-      if ! command -v cargo >/dev/null 2>&1; then
-        echo "Installing Rust toolchain..."
-        curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
-        # shellcheck disable=SC1091
-        source "$HOME/.cargo/env"
-      fi
       cargo build --release --bin ado-aw
       echo "##vso[task.setvariable variable=ADO_AW_BIN]$(Build.SourcesDirectory)/target/release/ado-aw"
     displayName: Build ado-aw (release, from checkout)

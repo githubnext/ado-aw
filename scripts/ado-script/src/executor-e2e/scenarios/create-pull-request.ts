@@ -18,7 +18,7 @@
  */
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { Scenario, ScenarioContext } from "../scenario.js";
@@ -45,14 +45,17 @@ function runGit(
   cwd: string,
   extraHeader: string,
 ): Promise<{ code: number; stdout: string; stderr: string }> {
+  const timeoutMs = Number(process.env.EXECUTOR_E2E_GIT_TIMEOUT_MS) || 300_000;
   return new Promise((resolve, reject) => {
     // Inject the auth header via GIT_CONFIG_* env vars rather than `-c` on the
     // command line, so the token never appears in the process argv
-    // (/proc/<pid>/cmdline).
+    // (/proc/<pid>/cmdline). GIT_TERMINAL_PROMPT=0 makes auth failures fail
+    // fast instead of blocking on an interactive credential prompt.
     const child = spawn("git", args, {
       cwd,
       env: {
         ...process.env,
+        GIT_TERMINAL_PROMPT: "0",
         GIT_CONFIG_COUNT: "1",
         GIT_CONFIG_KEY_0: "http.extraheader",
         GIT_CONFIG_VALUE_0: `Authorization: ${extraHeader}`,
@@ -60,10 +63,25 @@ function runGit(
     });
     let stdout = "";
     let stderr = "";
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, timeoutMs);
     child.stdout.on("data", (d: Buffer) => (stdout += d.toString()));
     child.stderr.on("data", (d: Buffer) => (stderr += d.toString()));
-    child.on("error", reject);
-    child.on("close", (code) => resolve({ code: code ?? -1, stdout, stderr }));
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (timedOut) {
+        reject(new Error(`git ${args.join(" ")} timed out after ${timeoutMs}ms`));
+        return;
+      }
+      resolve({ code: code ?? -1, stdout, stderr });
+    });
   });
 }
 
@@ -163,6 +181,8 @@ export const createPullRequest: Scenario<CreatePrState> = {
   cleanup: async (ctx, state) => {
     if (state.prId !== undefined) await ctx.rest.abandonPullRequest(state.repo, state.prId);
     await ctx.rest.deleteRef(state.repo, `refs/heads/${state.sourceBranch}`);
+    // Remove the cloned checkout so repeated local runs don't accumulate it.
+    await rm(state.sourcesDir, { recursive: true, force: true });
   },
 };
 

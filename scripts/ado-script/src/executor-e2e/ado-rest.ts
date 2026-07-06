@@ -94,7 +94,11 @@ export class AdoRest {
     if (!text) return undefined;
     const ct = res.headers.get("content-type") ?? "";
     if (ct.includes("application/json")) return JSON.parse(text) as T;
-    return text as unknown as T;
+    // Non-empty, non-JSON body (e.g. an XML/HTML error page) — surface it
+    // loudly rather than silently casting garbage to T.
+    throw new Error(
+      `ADO ${opts.method ?? "GET"} ${path} returned unexpected content-type '${ct}': ${text.slice(0, 200)}`,
+    );
   }
 
   private projPath(rest: string): string {

@@ -103,9 +103,12 @@ export async function runScenario<S>(
     return finish({ ok: true });
   } finally {
     // ---- cleanup (always, best-effort) ----
-    if (setupDone && state !== undefined) {
+    // Guard only on setupDone: a scenario whose setup legitimately returns
+    // void/undefined must still have cleanup run. Scenarios that never reached
+    // a successful setup (SkipError or setup failure) leave setupDone false.
+    if (setupDone) {
       try {
-        await scenario.cleanup(ctx, state);
+        await scenario.cleanup(ctx, state as S);
         ctx.log(`[${tool}] cleanup done`);
       } catch (err) {
         ctx.log(`[${tool}] cleanup WARNING: ${errMessage(err)}`);
