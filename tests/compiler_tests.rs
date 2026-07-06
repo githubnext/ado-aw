@@ -4977,6 +4977,72 @@ fn test_byom_provider_env_compiles_and_merges() {
     );
 }
 
+/// Copilot BYOK via a **static `api-key`** (no compiler mint step): the
+/// `engine.provider.api-key` value maps to `COPILOT_PROVIDER_API_KEY`, BYOK
+/// isolation is still enabled (api-proxy + `--exclude-env`), but NO `AzureCLI@2`
+/// token-mint step is emitted. Exercises the end-to-end compile path for the
+/// api-key branch (the token branch is covered by
+/// `test_byom_provider_env_compiles_and_merges`).
+#[test]
+fn test_byok_provider_api_key_compiles_without_mint_step() {
+    // Reuse the token fixture but swap the `token:` block for a static `api-key`.
+    let compiled = compile_fixture_tree_with_flags(
+        "byom-foundry-agent.md",
+        &[],
+        &[],
+        |contents| {
+            // Line-based rewrite (robust to CRLF/LF): drop the `token:` block and
+            // insert a static `api-key:` in its place.
+            let newline = if contents.contains("\r\n") { "\r\n" } else { "\n" };
+            contents
+                .lines()
+                .filter(|l| {
+                    let t = l.trim();
+                    t != "token:" && t != "service-connection: my-arm-connection"
+                })
+                .map(|l| {
+                    if l.trim() == "type: azure" {
+                        format!("{l}{newline}    api-key: $(FOUNDRY_API_KEY)")
+                    } else {
+                        l.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(newline)
+        },
+    );
+    assert_valid_yaml(&compiled, "byom-foundry-agent.md (api-key)");
+
+    // api-key maps to COPILOT_PROVIDER_API_KEY in both jobs (unquoted macro).
+    assert_eq!(
+        compiled
+            .matches("COPILOT_PROVIDER_API_KEY: $(FOUNDRY_API_KEY)\n")
+            .count(),
+        2,
+        "provider.api-key must map to COPILOT_PROVIDER_API_KEY in both jobs: {compiled}"
+    );
+    // No compiler-owned mint step for the static-key path.
+    assert!(
+        !compiled.contains("Acquire provider bearer token"),
+        "the api-key path must NOT emit the AzureCLI@2 token-mint step: {compiled}"
+    );
+    assert!(
+        !compiled.contains("AW_PROVIDER_BEARER_TOKEN"),
+        "the api-key path must not reference the mint secret var: {compiled}"
+    );
+    // BYOK isolation still engages (credential is present), in both jobs.
+    assert_eq!(
+        compiled.matches("--enable-api-proxy").count(),
+        2,
+        "the api-key path must still enable the api-proxy sidecar in both jobs: {compiled}"
+    );
+    assert_eq!(
+        compiled.matches("--exclude-env COPILOT_PROVIDER_API_KEY").count(),
+        2,
+        "the api-key credential must be excluded from --env-all in both jobs: {compiled}"
+    );
+}
+
 /// A non-BYOK agent must NOT enable the api-proxy sidecar or pre-pull its image —
 /// the isolation plumbing is strictly opt-in via the presence of a
 /// `COPILOT_PROVIDER_*` credential key in `engine.env`.

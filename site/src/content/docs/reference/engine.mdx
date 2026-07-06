@@ -218,6 +218,11 @@ reads and forwards as `Authorization: Bearer <value>`. Because the token is
 minted in the same job as the engine run, it resolves via a plain `$(...)` macro
 — no cross-job output plumbing, no `dependsOn`.
 
+The minted token is a short-lived AAD access token (typically valid ~1 hour). The
+mint step is emitted as the **last step before** the engine invocation to keep it
+fresh; a pool that queues or idles for the full token lifetime between the mint
+step and the run could observe an expired token.
+
 #### Credential isolation
 
 When a provider credential is configured (`base-url` + `token`/`api-key`), the

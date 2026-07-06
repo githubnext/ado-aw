@@ -2059,6 +2059,12 @@ fn acr_login_step(registry_base: &str, connection: &str) -> TaskStep {
 /// plumbing (the #1372 failure) — a plain `$(...)` macro resolves the token. The
 /// AWF api-proxy sidecar (`--exclude-env COPILOT_PROVIDER_API_KEY`) keeps the
 /// value out of the sandbox; this step runs outside the sandbox.
+///
+/// Token lifetime: `az account get-access-token` returns a short-lived AAD token
+/// (typically ~1h). Minting immediately before the Copilot run keeps it fresh for
+/// normal workloads; a job that queues/idles for the full token lifetime *after*
+/// this step (before the run) could see an expired token — mint is intentionally
+/// the last step before the engine invocation to minimise that window.
 fn provider_token_mint_step(token: &ProviderToken) -> TaskStep {
     let resource = token.resource();
     let var = crate::compile::types::PROVIDER_BEARER_TOKEN_VAR;

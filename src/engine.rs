@@ -125,7 +125,7 @@ fn provider_derived_env(engine_config: &EngineConfig) -> Vec<(String, String)> {
     let mut pairs: Vec<(String, String)> = Vec::new();
     pairs.push((
         "COPILOT_PROVIDER_BASE_URL".to_string(),
-        p.base_url.clone(),
+        p.base_url.as_str().to_string(),
     ));
     if let Some(t) = p.provider_type {
         pairs.push(("COPILOT_PROVIDER_TYPE".to_string(), t.as_ado_str().to_string()));
@@ -817,19 +817,38 @@ fn copilot_env(engine_config: &EngineConfig) -> Result<String> {
 ///   [`copilot_byom_credential_keys`]) drives BYOM *activation* and the AWF
 ///   `--exclude-env` isolation flags — only the actual credential-bearing keys.
 pub fn copilot_provider_env(engine_config: &EngineConfig) -> Result<Vec<(String, String)>> {
-    let env_map = effective_engine_env(engine_config);
-    let mut keys: Vec<&String> = env_map
-        .keys()
-        .filter(|k| k.starts_with(COPILOT_PROVIDER_PREFIX))
-        .collect();
-    keys.sort();
+    let mut pairs: Vec<(String, String)> = Vec::new();
 
-    let mut pairs = Vec::with_capacity(keys.len());
-    for key in keys {
-        let value = &env_map[key];
-        validate_engine_env_entry(key, value)?;
-        pairs.push((key.clone(), value.clone()));
+    // Raw `engine.env` provider keys are **user input** → validate each with the
+    // user-input validator, exactly as the agent path does.
+    if let Some(env_map) = engine_config.env() {
+        let mut keys: Vec<&String> = env_map
+            .keys()
+            .filter(|k| k.starts_with(COPILOT_PROVIDER_PREFIX))
+            .collect();
+        keys.sort();
+        for key in keys {
+            let value = &env_map[key];
+            validate_engine_env_entry(key, value)?;
+            pairs.push((key.clone(), value.clone()));
+        }
     }
+
+    // Compiler-derived provider entries (from `engine.provider`) are NOT user
+    // input: their values are either compiler-owned macros (e.g.
+    // `$(AW_PROVIDER_BEARER_TOKEN)`) or already structurally validated at
+    // deserialization (`ProviderBaseUrl`, enum-typed `type`/`wire-api`). They are
+    // deliberately **not** passed through `validate_engine_env_entry` — that
+    // validator is scoped to untrusted `engine.env` values, and coupling a
+    // compiler-generated macro to it would be fragile (a future tightening of the
+    // user-input rules must not break the `provider` path). `engine.provider` and
+    // raw `COPILOT_PROVIDER_*` keys are mutually exclusive (hard error in
+    // `validate_engine_feature_support`), so the two sources never both contribute.
+    for (k, v) in provider_derived_env(engine_config) {
+        pairs.push((k, v));
+    }
+
+    pairs.sort();
     Ok(pairs)
 }
 
@@ -2150,12 +2169,12 @@ mod tests {
 
     #[test]
     fn provider_requires_base_url() {
+        // Empty base-url is rejected at deserialization by the ProviderBaseUrl
+        // newtype.
         let md = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  provider:\n    base-url: \"\"\n    token:\n      service-connection: sc\n---\n";
-        let (fm, _) = parse_markdown(md).unwrap();
-        let err = validate_engine_feature_support(&fm.engine).unwrap_err().to_string();
         assert!(
-            err.contains("base-url is required"),
-            "empty base-url must be rejected: {err}"
+            parse_markdown(md).is_err(),
+            "an empty base-url must be rejected"
         );
     }
 
@@ -2174,27 +2193,33 @@ mod tests {
     #[test]
     fn provider_base_url_rejects_non_https_scheme() {
         // The provider endpoint receives the bearer token, so plaintext HTTP
-        // must be rejected.
+        // must be rejected — at deserialization by the ProviderBaseUrl newtype.
         let md = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  provider:\n    base-url: http://insecure.example.com/v1\n    token:\n      service-connection: sc\n---\n";
-        let (fm, _) = parse_markdown(md).unwrap();
-        let err = validate_engine_feature_support(&fm.engine).unwrap_err().to_string();
         assert!(
-            err.contains("https:// scheme"),
-            "a plaintext http base-url must be rejected: {err}"
+            parse_markdown(md).is_err(),
+            "a plaintext http base-url must be rejected"
         );
     }
 
     #[test]
     fn provider_base_url_rejects_template_expression() {
         // A template expression on base-url would be expanded at ADO
-        // template-compile time and bypass the AWF allowlist host check.
+        // template-compile time and bypass the AWF allowlist host check — the
+        // ProviderBaseUrl newtype rejects it at deserialization.
         let md = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  provider:\n    base-url: \"${{ parameters.externalUrl }}\"\n    token:\n      service-connection: sc\n---\n";
-        let (fm, _) = parse_markdown(md).unwrap();
-        let err = validate_engine_feature_support(&fm.engine).unwrap_err().to_string();
         assert!(
-            err.contains("base-url") && err.contains("template"),
-            "base-url with a template expression must be rejected: {err}"
+            parse_markdown(md).is_err(),
+            "a base-url with a template expression must be rejected"
         );
+    }
+
+    #[test]
+    fn provider_base_url_accepts_macro() {
+        // A macro-bearing base-url is accepted (concrete host unknown at compile
+        // time; the author adds it to network.allowed).
+        let md = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  provider:\n    base-url: \"$(FOUNDRY_BASE_URL)\"\n    token:\n      service-connection: sc\n---\n";
+        let (fm, _) = parse_markdown(md).unwrap();
+        assert!(validate_engine_feature_support(&fm.engine).is_ok());
     }
 
     #[test]

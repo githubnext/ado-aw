@@ -653,13 +653,25 @@ impl ProviderToken {
 /// to route model requests to an external provider (e.g. Azure AI Foundry).
 /// This is the sanctioned surface; raw `engine.env COPILOT_PROVIDER_*` keys stay
 /// supported for back-compat but must not be combined with this block.
+///
+/// **Field validation strategy (parse-don't-validate, AGENTS.md §5):**
+/// `base_url` and `resource` are validated newtypes checked at *deserialization*
+/// time, so a malformed value is rejected structurally before any codegen. The
+/// `resource` newtype's checks are strictest (it is shell-interpolated into the
+/// mint script); `base_url` accepts a literal https URL or an `$(VAR)` macro.
+/// `api_key` stays a raw `String` validated in [`ProviderConfig::validate`]:
+/// its rules are secret-macro-specific (non-empty + no injection), it is neither
+/// shell-interpolated nor host-extracted, and every compile path runs `validate`
+/// via `validate_engine_feature_support` before the value is used.
 #[derive(Debug, Deserialize, Clone, SanitizeConfig)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
     /// Provider base URL → `COPILOT_PROVIDER_BASE_URL`. Required; activates BYOK
     /// routing. A literal host is auto-added to the AWF network allowlist.
+    /// Validated at deserialization (literal https URL or `$(VAR)` macro).
     #[serde(rename = "base-url")]
-    pub base_url: String,
+    #[sanitize_config(skip)]
+    pub base_url: crate::secure::ProviderBaseUrl,
     /// Provider wire format → `COPILOT_PROVIDER_TYPE` (optional).
     #[serde(default, rename = "type")]
     pub provider_type: Option<ProviderType>,
@@ -679,16 +691,12 @@ pub struct ProviderConfig {
 }
 
 impl ProviderConfig {
-    /// Structural (self-contained) validation. Cross-field checks that need the
-    /// wider engine config (Copilot-only gating, `engine.env` conflict) live in
+    /// Cross-field / value validation. `base_url` is already structurally valid
+    /// (its newtype validates at deserialization); this enforces the
+    /// `token` XOR `api-key` rule and the `api-key` value checks. Engine-wide
+    /// checks (Copilot-only gating, `engine.env` conflict) live in
     /// `crate::engine::validate_engine_feature_support`.
     pub fn validate(&self) -> anyhow::Result<()> {
-        if self.base_url.trim().is_empty() {
-            anyhow::bail!(
-                "engine.provider.base-url is required and must be non-empty \
-                 (e.g. https://RESOURCE.cognitiveservices.azure.com/openai/v1)."
-            );
-        }
         if self.token.is_some() && self.api_key.is_some() {
             anyhow::bail!(
                 "engine.provider sets both `token` and `api-key`; they are mutually \
@@ -696,13 +704,11 @@ impl ProviderConfig {
                  OR `api-key` (a static `$(VAR)` secret)."
             );
         }
-        // `base-url` and `api-key` are rendered verbatim into COPILOT_PROVIDER_*
-        // env values. Like the raw engine.env provider-key path they may carry an
-        // ADO macro `$(VAR)`, but NOT a template expression (`${{ }}`, expanded at
-        // ADO template-compile time — which would silently bypass the AWF
-        // allowlist host check), a runtime expression (`$[...]`), pipeline-command
-        // injection (`##vso[`), or a newline.
-        Self::reject_unsafe_provider_value("base-url", &self.base_url)?;
+        // `api-key` is rendered verbatim into COPILOT_PROVIDER_API_KEY. Like the
+        // raw engine.env provider-key path it may carry an ADO macro `$(VAR)`, but
+        // NOT a template/runtime expression, pipeline-command injection, or a
+        // newline — and must be non-empty (an empty credential would make the AWF
+        // sidecar fall back to DefaultAzureCredential → the #1372 403 class).
         if let Some(api_key) = &self.api_key {
             if api_key.trim().is_empty() {
                 anyhow::bail!(
@@ -710,43 +716,23 @@ impl ProviderConfig {
                      macro reference (e.g. `$(OPENAI_API_KEY)`) or omit the field."
                 );
             }
-            Self::reject_unsafe_provider_value("api-key", api_key)?;
-        }
-        // The provider endpoint receives the bearer token / API key, so it must
-        // use TLS. Require an `https://` scheme for a literal base-url; an
-        // `$(VAR)` macro is exempt (the concrete URL is unknown at compile time —
-        // the author is responsible for supplying an https endpoint).
-        if !self.base_url.starts_with("https://") && !self.base_url.trim_start().starts_with("$(") {
-            anyhow::bail!(
-                "engine.provider.base-url must use the https:// scheme (got '{}'). \
-                 The provider endpoint receives the bearer token / API key, so \
-                 plaintext HTTP is not allowed. Use an https:// URL or an $(VAR) macro.",
-                self.base_url
-            );
-        }
-        Ok(())
-    }
-
-    /// Reject ADO template/runtime expressions, pipeline-command injection, and
-    /// newlines in a provider value that is rendered into a `COPILOT_PROVIDER_*`
-    /// env entry. A literal value or an `$(VAR)` macro is allowed.
-    fn reject_unsafe_provider_value(field: &str, value: &str) -> anyhow::Result<()> {
-        if crate::validate::contains_ado_template_expression(value) || value.contains("$[") {
-            anyhow::bail!(
-                "engine.provider.{field} '{value}' contains an ADO template ('${{{{ }}}}') \
-                 or runtime ('$[...]') expression. Use a literal value or a macro '$(VAR)' \
-                 reference (a template expression would be expanded at compile time and \
-                 bypass the AWF network allowlist check)."
-            );
-        }
-        if crate::validate::contains_pipeline_command(value) {
-            anyhow::bail!(
-                "engine.provider.{field} contains pipeline command injection \
-                 ('##vso[' or '##['). This is not allowed."
-            );
-        }
-        if crate::validate::contains_newline(value) {
-            anyhow::bail!("engine.provider.{field} must not contain newline characters.");
+            if crate::validate::contains_ado_template_expression(api_key) || api_key.contains("$[")
+            {
+                anyhow::bail!(
+                    "engine.provider.api-key '{api_key}' contains an ADO template ('${{{{ }}}}') \
+                     or runtime ('$[...]') expression. Use a literal value or a macro '$(VAR)' \
+                     reference."
+                );
+            }
+            if crate::validate::contains_pipeline_command(api_key) {
+                anyhow::bail!(
+                    "engine.provider.api-key contains pipeline command injection \
+                     ('##vso[' or '##['). This is not allowed."
+                );
+            }
+            if crate::validate::contains_newline(api_key) {
+                anyhow::bail!("engine.provider.api-key must not contain newline characters.");
+            }
         }
         Ok(())
     }
