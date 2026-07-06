@@ -150,6 +150,61 @@ pub fn is_valid_arg(s: &str) -> bool {
         })
 }
 
+/// Validate an Azure resource (audience) URL for
+/// `az account get-access-token --resource`.
+///
+/// This value is interpolated into a generated bash script (the provider
+/// token-mint step), so it must be shell-safe. Strict allowlist: URI-shaped
+/// (contains `://`), non-empty, at most 256 characters, and composed only of
+/// characters that appear in an Azure resource audience URI
+/// (`https://cognitiveservices.azure.com`, `api://<guid>`, …). The allowlist
+/// deliberately excludes every shell metacharacter (space, quotes, `$`,
+/// backtick, `(`/`)`, `;`, `&`, `|`, `<`/`>`), so the value cannot break out of
+/// the `$( … )` command substitution it is embedded in.
+pub fn is_valid_provider_resource_url(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 256
+        && s.contains("://")
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '/' | '%' | '~'))
+}
+
+/// Validate an `engine.provider.base-url` value.
+///
+/// The value is rendered verbatim into `COPILOT_PROVIDER_BASE_URL` and its host
+/// is extracted at compile time for the AWF network allowlist. Accepts either:
+/// - a value containing an ADO **macro** `$(...)` (the concrete host is unknown
+///   at compile time; the author adds it to `network.allowed`), or
+/// - a **literal** URL that parses with an `https://` scheme (case-insensitive —
+///   `url::Url` lowercases it) and a host. The provider endpoint receives the
+///   bearer token / API key, so plaintext `http://` is rejected.
+///
+/// Rejects for both forms: ADO **template** `${{ }}` expressions (which would be
+/// expanded at ADO template-compile time and silently bypass the allowlist host
+/// check), **runtime** `$[...]` expressions, pipeline-command injection
+/// (`##vso[` / `##[`), newlines, and empty values.
+pub fn is_valid_provider_base_url(s: &str) -> bool {
+    let t = s.trim();
+    if t.is_empty()
+        || contains_ado_template_expression(t)
+        || t.contains("$[")
+        || contains_pipeline_command(t)
+        || contains_newline(t)
+    {
+        return false;
+    }
+    // Macro-bearing value: the host is unknown at compile time — accept it (the
+    // author is responsible for the concrete https endpoint + network.allowed).
+    if t.contains("$(") {
+        return true;
+    }
+    // Pure literal: require a parseable https URL with a host.
+    match url::Url::parse(t) {
+        Ok(u) => u.scheme() == "https" && u.host_str().is_some(),
+        Err(_) => false,
+    }
+}
+
 // ── Format validators ───────────────────────────────────────────────────────
 
 /// Validate that a string is a valid ADO pipeline parameter name (`[A-Za-z_][A-Za-z0-9_]*`).

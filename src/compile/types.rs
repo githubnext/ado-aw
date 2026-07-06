@@ -309,6 +309,14 @@ impl EngineConfig {
             EngineConfig::Full(opts) => opts.github_app_token.as_ref(),
         }
     }
+
+    /// Get the external model-provider (BYOK) configuration, if specified.
+    pub fn provider(&self) -> Option<&ProviderConfig> {
+        match self {
+            EngineConfig::Simple(_) => None,
+            EngineConfig::Full(opts) => opts.provider.as_ref(),
+        }
+    }
 }
 
 impl SanitizeConfigTrait for EngineConfig {
@@ -361,6 +369,17 @@ pub struct EngineOptions {
     #[serde(default, rename = "github-app-token")]
     #[sanitize_config(skip)]
     pub github_app_token: Option<GithubAppTokenConfig>,
+    /// External model-provider (BYOK) configuration (Copilot only).
+    ///
+    /// A dedicated, typed block that owns the Copilot **model provider**
+    /// settings and maps them to the correct `COPILOT_PROVIDER_*` environment
+    /// variables. When `provider.token` is set, the compiler mints the provider
+    /// bearer token **in the same job** as each engine run (Agent + Detection)
+    /// via `AzureCLI@2` + a service connection — so the token resolves at
+    /// runtime without any cross-job output plumbing. See docs/engine.md.
+    #[serde(default)]
+    #[sanitize_config(skip)]
+    pub provider: Option<ProviderConfig>,
 }
 
 /// GitHub App-backed Copilot engine authentication configuration.
@@ -531,6 +550,188 @@ impl GithubAppTokenConfig {
                      (e.g. https://ghe.example.com/api/v3).",
                     api_url
                 );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Internal same-job secret pipeline-variable name that the provider
+/// token-mint step sets and the engine env references. Compiler-owned (like
+/// `GITHUB_TOKEN`) so it never collides with user config; masked via
+/// `issecret=true`.
+pub const PROVIDER_BEARER_TOKEN_VAR: &str = "AW_PROVIDER_BEARER_TOKEN";
+
+/// Default Azure resource (audience) for `az account get-access-token` when
+/// `provider.token.resource` is omitted — the Azure AI Foundry / Cognitive
+/// Services audience.
+pub const DEFAULT_PROVIDER_TOKEN_RESOURCE: &str = "https://cognitiveservices.azure.com";
+
+/// Copilot provider wire format — maps to `COPILOT_PROVIDER_TYPE`.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderType {
+    /// OpenAI-compatible (`openai`) — the Copilot CLI default.
+    Openai,
+    /// Azure OpenAI / Azure AI Foundry (`azure`).
+    Azure,
+    /// Anthropic (`anthropic`).
+    Anthropic,
+}
+
+impl ProviderType {
+    /// The exact `COPILOT_PROVIDER_TYPE` value.
+    pub fn as_ado_str(&self) -> &'static str {
+        match self {
+            ProviderType::Openai => "openai",
+            ProviderType::Azure => "azure",
+            ProviderType::Anthropic => "anthropic",
+        }
+    }
+}
+
+/// Copilot provider wire-API variant — maps to `COPILOT_PROVIDER_WIRE_API`.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WireApi {
+    /// Chat-completions wire API (`completions`) — the default.
+    Completions,
+    /// Responses wire API (`responses`).
+    Responses,
+}
+
+impl WireApi {
+    /// The exact `COPILOT_PROVIDER_WIRE_API` value.
+    pub fn as_ado_str(&self) -> &'static str {
+        match self {
+            WireApi::Completions => "completions",
+            WireApi::Responses => "responses",
+        }
+    }
+}
+
+/// Compiler-owned provider credential acquisition via Azure CLI.
+///
+/// When set, the compiler emits an in-job `AzureCLI@2` step (authenticated by
+/// the ARM `service-connection`) that runs `az account get-access-token` and
+/// sets the same-job secret [`PROVIDER_BEARER_TOKEN_VAR`], which is wired into
+/// **`COPILOT_PROVIDER_API_KEY`** (the credential env var the AWF api-proxy
+/// sidecar reads and forwards as `Authorization: Bearer <value>` — there is no
+/// `COPILOT_PROVIDER_BEARER_TOKEN` in the sidecar). Because the token is minted
+/// in the same job as the engine run, it resolves via a plain `$(...)` macro —
+/// no cross-job output plumbing (the failure mode in #1372).
+#[derive(Debug, Deserialize, Clone, SanitizeConfig)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderToken {
+    /// ARM service connection used to authenticate `az` before minting the
+    /// token. Validated at deserialization.
+    #[serde(rename = "service-connection")]
+    #[sanitize_config(skip)]
+    pub service_connection: crate::secure::ServiceConnection,
+    /// Azure resource (audience) passed to `az account get-access-token
+    /// --resource`. Defaults to [`DEFAULT_PROVIDER_TOKEN_RESOURCE`]. Validated
+    /// at deserialization to be shell-safe (it is interpolated into the
+    /// generated mint script).
+    #[serde(default)]
+    #[sanitize_config(skip)]
+    pub resource: Option<crate::secure::ProviderResourceUrl>,
+}
+
+impl ProviderToken {
+    /// The effective resource/audience — the `resource` override if set, else
+    /// [`DEFAULT_PROVIDER_TOKEN_RESOURCE`].
+    pub fn resource(&self) -> &str {
+        self.resource
+            .as_deref()
+            .unwrap_or(DEFAULT_PROVIDER_TOKEN_RESOURCE)
+    }
+}
+
+/// External model-provider (BYOK) configuration under `engine.provider`.
+///
+/// Maps to the `COPILOT_PROVIDER_*` environment variables the Copilot CLI reads
+/// to route model requests to an external provider (e.g. Azure AI Foundry).
+/// This is the sanctioned surface; raw `engine.env COPILOT_PROVIDER_*` keys stay
+/// supported for back-compat but must not be combined with this block.
+///
+/// **Field validation strategy (parse-don't-validate, AGENTS.md §5):**
+/// `base_url` and `resource` are validated newtypes checked at *deserialization*
+/// time, so a malformed value is rejected structurally before any codegen. The
+/// `resource` newtype's checks are strictest (it is shell-interpolated into the
+/// mint script); `base_url` accepts a literal https URL or an `$(VAR)` macro.
+/// `api_key` stays a raw `String` validated in [`ProviderConfig::validate`]:
+/// its rules are secret-macro-specific (non-empty + no injection), it is neither
+/// shell-interpolated nor host-extracted, and every compile path runs `validate`
+/// via `validate_engine_feature_support` before the value is used.
+#[derive(Debug, Deserialize, Clone, SanitizeConfig)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderConfig {
+    /// Provider base URL → `COPILOT_PROVIDER_BASE_URL`. Required; activates BYOK
+    /// routing. A literal host is auto-added to the AWF network allowlist.
+    /// Validated at deserialization (literal https URL or `$(VAR)` macro).
+    #[serde(rename = "base-url")]
+    #[sanitize_config(skip)]
+    pub base_url: crate::secure::ProviderBaseUrl,
+    /// Provider wire format → `COPILOT_PROVIDER_TYPE` (optional).
+    #[serde(default, rename = "type")]
+    pub provider_type: Option<ProviderType>,
+    /// Wire-API variant → `COPILOT_PROVIDER_WIRE_API` (optional).
+    #[serde(default, rename = "wire-api")]
+    pub wire_api: Option<WireApi>,
+    /// Compiler-owned credential acquisition (Azure CLI + service connection);
+    /// the minted AAD token is wired into `COPILOT_PROVIDER_API_KEY`.
+    /// Mutually exclusive with [`ProviderConfig::api_key`].
+    #[serde(default)]
+    #[sanitize_config(skip)]
+    pub token: Option<ProviderToken>,
+    /// Static API key → `COPILOT_PROVIDER_API_KEY` (optional). Expected to be a
+    /// single-name secret macro `$(VAR)`. Mutually exclusive with `token`.
+    #[serde(default, rename = "api-key")]
+    pub api_key: Option<String>,
+}
+
+impl ProviderConfig {
+    /// Cross-field / value validation. `base_url` is already structurally valid
+    /// (its newtype validates at deserialization); this enforces the
+    /// `token` XOR `api-key` rule and the `api-key` value checks. Engine-wide
+    /// checks (Copilot-only gating, `engine.env` conflict) live in
+    /// `crate::engine::validate_engine_feature_support`.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.token.is_some() && self.api_key.is_some() {
+            anyhow::bail!(
+                "engine.provider sets both `token` and `api-key`; they are mutually \
+                 exclusive. Use `token` (compiler-minted bearer via a service connection) \
+                 OR `api-key` (a static `$(VAR)` secret)."
+            );
+        }
+        // `api-key` is rendered verbatim into COPILOT_PROVIDER_API_KEY. Like the
+        // raw engine.env provider-key path it may carry an ADO macro `$(VAR)`, but
+        // NOT a template/runtime expression, pipeline-command injection, or a
+        // newline — and must be non-empty (an empty credential would make the AWF
+        // sidecar fall back to DefaultAzureCredential → the #1372 403 class).
+        if let Some(api_key) = &self.api_key {
+            if api_key.trim().is_empty() {
+                anyhow::bail!(
+                    "engine.provider.api-key must not be empty. Provide a secret \
+                     macro reference (e.g. `$(OPENAI_API_KEY)`) or omit the field."
+                );
+            }
+            if crate::validate::contains_ado_template_expression(api_key) || api_key.contains("$[")
+            {
+                anyhow::bail!(
+                    "engine.provider.api-key '{api_key}' contains an ADO template ('${{{{ }}}}') \
+                     or runtime ('$[...]') expression. Use a literal value or a macro '$(VAR)' \
+                     reference."
+                );
+            }
+            if crate::validate::contains_pipeline_command(api_key) {
+                anyhow::bail!(
+                    "engine.provider.api-key contains pipeline command injection \
+                     ('##vso[' or '##['). This is not allowed."
+                );
+            }
+            if crate::validate::contains_newline(api_key) {
+                anyhow::bail!("engine.provider.api-key must not contain newline characters.");
             }
         }
         Ok(())

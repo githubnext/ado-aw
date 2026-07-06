@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 
 use crate::compile::extensions::Declarations;
@@ -96,26 +98,100 @@ pub const COPILOT_BYOM_CREDENTIAL_ENV_KEYS: &[&str] = &[
     "COPILOT_PROVIDER_BEARER_TOKEN",
 ];
 
-/// Returns true when `engine.env` activates Copilot BYOM/BYOK mode — i.e. any
-/// provider credential / base-URL key is present. Used by the pipeline compiler
-/// to enable the AWF api-proxy sidecar (`--enable-api-proxy`) for credential
-/// isolation and to pre-pull the api-proxy container image. Case-sensitive.
-pub fn copilot_byom_active(engine_config: &EngineConfig) -> bool {
-    engine_config.env().is_some_and(|env| {
-        env.keys()
-            .any(|key| COPILOT_BYOM_CREDENTIAL_ENV_KEYS.contains(&key.as_str()))
-    })
-}
-
-/// Return the BYOM credential env keys present in `engine.env`, sorted. These are
-/// passed to AWF's `--exclude-env` so the raw credential is kept out of the
-/// `--env-all` passthrough. Matching is case-sensitive (exact), so the emitted
-/// `--exclude-env <key>` always names the canonical uppercase key AWF and the
-/// Copilot CLI actually use.
-pub fn copilot_byom_credential_keys(engine_config: &EngineConfig) -> Vec<String> {
-    let Some(env_map) = engine_config.env() else {
+/// Derive the `COPILOT_PROVIDER_*` env pairs implied by an `engine.provider`
+/// block. Pure mapping (infallible) — structural validity is enforced earlier by
+/// [`validate_engine_feature_support`]. Empty when no `provider` block is set.
+///
+/// The provider credential is always plumbed as **`COPILOT_PROVIDER_API_KEY`**,
+/// because the AWF api-proxy sidecar (which ado-aw always enables for BYOK) reads
+/// its BYOK credential exclusively from `COPILOT_PROVIDER_API_KEY` and sends it
+/// outbound as `Authorization: Bearer <value>` (verified against AWF v0.27.9
+/// `containers/api-proxy/providers/copilot.js` + `provider-env-constants.js` —
+/// there is no `COPILOT_PROVIDER_BEARER_TOKEN` in the sidecar). Both credential
+/// sources map to this one key:
+/// - `provider.token`  → `$(AW_PROVIDER_BEARER_TOKEN)` (the same-job secret the
+///   in-job `AzureCLI@2` mint step publishes — resolves at runtime with no
+///   cross-job output plumbing). The minted value is an AAD access token; the
+///   sidecar sends it as a bearer token, which Azure AI Foundry accepts.
+/// - `provider.api-key` → the user-supplied static `$(VAR)` secret.
+///
+/// `token` and `api-key` are mutually exclusive (enforced in
+/// [`crate::compile::types::ProviderConfig::validate`]), so this never emits a
+/// duplicate `COPILOT_PROVIDER_API_KEY`.
+fn provider_derived_env(engine_config: &EngineConfig) -> Vec<(String, String)> {
+    let Some(p) = engine_config.provider() else {
         return Vec::new();
     };
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    pairs.push((
+        "COPILOT_PROVIDER_BASE_URL".to_string(),
+        p.base_url.as_str().to_string(),
+    ));
+    if let Some(t) = p.provider_type {
+        pairs.push(("COPILOT_PROVIDER_TYPE".to_string(), t.as_ado_str().to_string()));
+    }
+    if let Some(w) = p.wire_api {
+        pairs.push((
+            "COPILOT_PROVIDER_WIRE_API".to_string(),
+            w.as_ado_str().to_string(),
+        ));
+    }
+    if p.token.is_some() {
+        pairs.push((
+            "COPILOT_PROVIDER_API_KEY".to_string(),
+            format!("$({})", crate::compile::types::PROVIDER_BEARER_TOKEN_VAR),
+        ));
+    } else if let Some(api_key) = &p.api_key {
+        pairs.push(("COPILOT_PROVIDER_API_KEY".to_string(), api_key.clone()));
+    }
+    pairs
+}
+
+/// The effective engine env = raw `engine.env` merged with the
+/// [`provider_derived_env`] `COPILOT_PROVIDER_*` pairs. The two sources are
+/// mutually exclusive (a conflict is a hard error in
+/// [`validate_engine_feature_support`]), so the merge never silently clobbers.
+/// Returned owned so a `provider`-only config still yields the provider vars.
+///
+/// **Pre-condition:** callers rely on [`validate_engine_feature_support`] having
+/// already rejected a `provider` + raw `COPILOT_PROVIDER_*` conflict. This merge
+/// itself does not re-check that; if invoked before validation (e.g. directly in
+/// a unit test) provider-derived pairs win over any colliding raw keys.
+fn effective_engine_env(engine_config: &EngineConfig) -> HashMap<String, String> {
+    let mut map: HashMap<String, String> = engine_config.env().cloned().unwrap_or_default();
+    let derived = provider_derived_env(engine_config);
+    // Self-enforce the pre-condition in debug/test builds: a `provider` block and
+    // a colliding raw `engine.env COPILOT_PROVIDER_*` key must have been rejected
+    // by `validate_engine_feature_support` upstream. No prod overhead.
+    debug_assert!(
+        derived.iter().all(|(k, _)| !map.contains_key(k)),
+        "effective_engine_env: provider-derived key collides with a raw engine.env \
+         COPILOT_PROVIDER_* key — validate_engine_feature_support should have rejected this"
+    );
+    for (k, v) in derived {
+        map.insert(k, v);
+    }
+    map
+}
+
+/// Returns true when `engine.env` (or an `engine.provider` block) activates
+/// Copilot BYOM/BYOK mode — i.e. any provider credential / base-URL key is
+/// present. Used by the pipeline compiler to enable the AWF api-proxy sidecar
+/// (`--enable-api-proxy`) for credential isolation and to pre-pull the api-proxy
+/// container image. Case-sensitive.
+pub fn copilot_byom_active(engine_config: &EngineConfig) -> bool {
+    effective_engine_env(engine_config)
+        .keys()
+        .any(|key| COPILOT_BYOM_CREDENTIAL_ENV_KEYS.contains(&key.as_str()))
+}
+
+/// Return the BYOM credential env keys present in the effective engine env,
+/// sorted. These are passed to AWF's `--exclude-env` so the raw credential is
+/// kept out of the `--env-all` passthrough. Matching is case-sensitive (exact),
+/// so the emitted `--exclude-env <key>` always names the canonical uppercase key
+/// AWF and the Copilot CLI actually use.
+pub fn copilot_byom_credential_keys(engine_config: &EngineConfig) -> Vec<String> {
+    let env_map = effective_engine_env(engine_config);
     let mut keys: Vec<String> = env_map
         .keys()
         .filter(|key| COPILOT_BYOM_CREDENTIAL_ENV_KEYS.contains(&key.as_str()))
@@ -156,14 +232,8 @@ enum ProviderBaseUrlHost {
 /// Classify the literal `COPILOT_PROVIDER_BASE_URL` in `engine_config.env` into a
 /// [`ProviderBaseUrlHost`]. Case-sensitive key match (canonical uppercase).
 fn resolve_provider_base_url_host(engine_config: &EngineConfig) -> ProviderBaseUrlHost {
-    let Some(env_map) = engine_config.env() else {
-        return ProviderBaseUrlHost::None;
-    };
-    let Some(base_url) = env_map
-        .iter()
-        .find(|(k, _)| k.as_str() == "COPILOT_PROVIDER_BASE_URL")
-        .map(|(_, v)| v)
-    else {
+    let env_map = effective_engine_env(engine_config);
+    let Some(base_url) = env_map.get("COPILOT_PROVIDER_BASE_URL") else {
         return ProviderBaseUrlHost::None;
     };
     // Expression-valued base URLs resolve to an unknown host at compile time;
@@ -652,6 +722,27 @@ pub fn validate_engine_feature_support(engine_config: &EngineConfig) -> Result<(
              set engine.id to copilot."
         );
     }
+    if let Some(provider) = engine_config.provider() {
+        if id != "copilot" {
+            anyhow::bail!(
+                "engine.provider is only supported for engine.id = copilot (got '{id}'). \
+                 The COPILOT_PROVIDER_* routing + api-proxy isolation are wired only on the \
+                 Copilot engine path. Remove engine.provider or set engine.id to copilot."
+            );
+        }
+        provider.validate()?;
+        // Single source of truth: reject provider settings declared both in the
+        // typed block and as raw engine.env COPILOT_PROVIDER_* keys.
+        if let Some(env) = engine_config.env()
+            && let Some(conflict) = env.keys().find(|k| k.starts_with(COPILOT_PROVIDER_PREFIX))
+        {
+            anyhow::bail!(
+                "engine.provider is set, so provider settings must not also be declared in \
+                 engine.env (found '{conflict}'). Move all COPILOT_PROVIDER_* config into the \
+                 engine.provider block, or remove engine.provider."
+            );
+        }
+    }
     Ok(())
 }
 
@@ -685,8 +776,10 @@ fn copilot_env(engine_config: &EngineConfig) -> Result<String> {
         "COPILOT_OTEL_FILE_EXPORTER_PATH: \"/tmp/awf-tools/staging/otel.jsonl\"".to_string(),
     ];
 
-    // Wire engine.env — merge user-provided environment variables
-    if let Some(env_map) = engine_config.env() {
+    // Wire engine.env — merge user-provided environment variables plus any
+    // `COPILOT_PROVIDER_*` vars derived from an `engine.provider` block.
+    let env_map = effective_engine_env(engine_config);
+    if !env_map.is_empty() {
         let mut sorted_keys: Vec<&String> = env_map.keys().collect();
         sorted_keys.sort();
 
@@ -724,21 +817,38 @@ fn copilot_env(engine_config: &EngineConfig) -> Result<String> {
 ///   [`copilot_byom_credential_keys`]) drives BYOM *activation* and the AWF
 ///   `--exclude-env` isolation flags — only the actual credential-bearing keys.
 pub fn copilot_provider_env(engine_config: &EngineConfig) -> Result<Vec<(String, String)>> {
-    let Some(env_map) = engine_config.env() else {
-        return Ok(Vec::new());
-    };
-    let mut keys: Vec<&String> = env_map
-        .keys()
-        .filter(|k| k.starts_with(COPILOT_PROVIDER_PREFIX))
-        .collect();
-    keys.sort();
+    let mut pairs: Vec<(String, String)> = Vec::new();
 
-    let mut pairs = Vec::with_capacity(keys.len());
-    for key in keys {
-        let value = &env_map[key];
-        validate_engine_env_entry(key, value)?;
-        pairs.push((key.clone(), value.clone()));
+    // Raw `engine.env` provider keys are **user input** → validate each with the
+    // user-input validator, exactly as the agent path does.
+    if let Some(env_map) = engine_config.env() {
+        let mut keys: Vec<&String> = env_map
+            .keys()
+            .filter(|k| k.starts_with(COPILOT_PROVIDER_PREFIX))
+            .collect();
+        keys.sort();
+        for key in keys {
+            let value = &env_map[key];
+            validate_engine_env_entry(key, value)?;
+            pairs.push((key.clone(), value.clone()));
+        }
     }
+
+    // Compiler-derived provider entries (from `engine.provider`) are NOT user
+    // input: their values are either compiler-owned macros (e.g.
+    // `$(AW_PROVIDER_BEARER_TOKEN)`) or already structurally validated at
+    // deserialization (`ProviderBaseUrl`, enum-typed `type`/`wire-api`). They are
+    // deliberately **not** passed through `validate_engine_env_entry` — that
+    // validator is scoped to untrusted `engine.env` values, and coupling a
+    // compiler-generated macro to it would be fragile (a future tightening of the
+    // user-input rules must not break the `provider` path). `engine.provider` and
+    // raw `COPILOT_PROVIDER_*` keys are mutually exclusive (hard error in
+    // `validate_engine_feature_support`), so the two sources never both contribute.
+    for (k, v) in provider_derived_env(engine_config) {
+        pairs.push((k, v));
+    }
+
+    pairs.sort();
     Ok(pairs)
 }
 
@@ -1975,5 +2085,174 @@ mod tests {
         let result = Engine::Copilot.env(&fm.engine);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("empty key"));
+    }
+
+    // ─── engine.provider (BYOK) block, #1372 ──────────────────────────────
+
+    const PROVIDER_MD: &str = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  provider:\n    base-url: https://my-foundry.cognitiveservices.azure.com/openai/v1\n    type: azure\n    token:\n      service-connection: my-arm-connection\n---\n";
+
+    #[test]
+    fn provider_block_maps_to_copilot_provider_env() {
+        let (fm, _) = parse_markdown(PROVIDER_MD).unwrap();
+        let env = Engine::Copilot.env(&fm.engine).unwrap();
+        assert!(
+            env.contains(
+                r#"COPILOT_PROVIDER_BASE_URL: "https://my-foundry.cognitiveservices.azure.com/openai/v1""#
+            ),
+            "provider.base-url must map to COPILOT_PROVIDER_BASE_URL: {env}"
+        );
+        assert!(
+            env.contains(r#"COPILOT_PROVIDER_TYPE: "azure""#),
+            "provider.type must map to COPILOT_PROVIDER_TYPE: {env}"
+        );
+        // token → same-job mint var, wired into COPILOT_PROVIDER_API_KEY (the
+        // credential env var the AWF sidecar reads). Rendered here as a quoted
+        // macro; the final lock re-serializes it unquoted via the typed EnvValue
+        // path.
+        assert!(
+            env.contains(r#"COPILOT_PROVIDER_API_KEY: "$(AW_PROVIDER_BEARER_TOKEN)""#),
+            "provider.token must wire the minted token to COPILOT_PROVIDER_API_KEY: {env}"
+        );
+        assert!(
+            !env.contains("COPILOT_PROVIDER_BEARER_TOKEN"),
+            "the token must NOT be plumbed as COPILOT_PROVIDER_BEARER_TOKEN (sidecar ignores it): {env}"
+        );
+    }
+
+    #[test]
+    fn provider_token_activates_byom() {
+        let (fm, _) = parse_markdown(PROVIDER_MD).unwrap();
+        assert!(
+            copilot_byom_active(&fm.engine),
+            "an engine.provider.token block must activate BYOM isolation"
+        );
+        // Only the credential keys (base-url + api-key) are excluded — not TYPE.
+        assert_eq!(
+            copilot_byom_credential_keys(&fm.engine),
+            vec![
+                "COPILOT_PROVIDER_API_KEY".to_string(),
+                "COPILOT_PROVIDER_BASE_URL".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn provider_detection_env_inherits_routing() {
+        let (fm, _) = parse_markdown(PROVIDER_MD).unwrap();
+        let pairs = copilot_provider_env(&fm.engine).unwrap();
+        assert!(pairs.iter().any(|(k, v)| k == "COPILOT_PROVIDER_API_KEY"
+            && v == "$(AW_PROVIDER_BEARER_TOKEN)"));
+        assert!(pairs.iter().any(|(k, _)| k == "COPILOT_PROVIDER_BASE_URL"));
+    }
+
+    #[test]
+    fn provider_conflicts_with_raw_env_provider_keys() {
+        let md = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    COPILOT_PROVIDER_TYPE: azure\n  provider:\n    base-url: https://x.example.com/v1\n    token:\n      service-connection: sc\n---\n";
+        let (fm, _) = parse_markdown(md).unwrap();
+        let err = validate_engine_feature_support(&fm.engine).unwrap_err().to_string();
+        assert!(
+            err.contains("must not also be declared in") && err.contains("COPILOT_PROVIDER_TYPE"),
+            "provider + raw engine.env provider key must conflict: {err}"
+        );
+    }
+
+    #[test]
+    fn provider_rejects_token_and_api_key_together() {
+        let md = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  provider:\n    base-url: https://x.example.com/v1\n    api-key: $(MY_KEY)\n    token:\n      service-connection: sc\n---\n";
+        let (fm, _) = parse_markdown(md).unwrap();
+        let err = validate_engine_feature_support(&fm.engine).unwrap_err().to_string();
+        assert!(
+            err.contains("mutually exclusive"),
+            "token + api-key must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn provider_requires_base_url() {
+        // Empty base-url is rejected at deserialization by the ProviderBaseUrl
+        // newtype.
+        let md = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  provider:\n    base-url: \"\"\n    token:\n      service-connection: sc\n---\n";
+        assert!(
+            parse_markdown(md).is_err(),
+            "an empty base-url must be rejected"
+        );
+    }
+
+    #[test]
+    fn provider_token_resource_rejects_shell_metacharacters() {
+        // A resource with a shell-breakout payload must be rejected at
+        // deserialization (the ProviderResourceUrl newtype), never reaching the
+        // generated mint script.
+        let md = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  provider:\n    base-url: https://x.example.com/v1\n    token:\n      service-connection: sc\n      resource: \"https://x));whoami\"\n---\n";
+        assert!(
+            parse_markdown(md).is_err(),
+            "a resource containing shell metacharacters must be rejected"
+        );
+    }
+
+    #[test]
+    fn provider_base_url_rejects_non_https_scheme() {
+        // The provider endpoint receives the bearer token, so plaintext HTTP
+        // must be rejected — at deserialization by the ProviderBaseUrl newtype.
+        let md = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  provider:\n    base-url: http://insecure.example.com/v1\n    token:\n      service-connection: sc\n---\n";
+        assert!(
+            parse_markdown(md).is_err(),
+            "a plaintext http base-url must be rejected"
+        );
+    }
+
+    #[test]
+    fn provider_base_url_rejects_template_expression() {
+        // A template expression on base-url would be expanded at ADO
+        // template-compile time and bypass the AWF allowlist host check — the
+        // ProviderBaseUrl newtype rejects it at deserialization.
+        let md = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  provider:\n    base-url: \"${{ parameters.externalUrl }}\"\n    token:\n      service-connection: sc\n---\n";
+        assert!(
+            parse_markdown(md).is_err(),
+            "a base-url with a template expression must be rejected"
+        );
+    }
+
+    #[test]
+    fn provider_base_url_accepts_macro() {
+        // A macro-bearing base-url is accepted (concrete host unknown at compile
+        // time; the author adds it to network.allowed).
+        let md = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  provider:\n    base-url: \"$(FOUNDRY_BASE_URL)\"\n    token:\n      service-connection: sc\n---\n";
+        let (fm, _) = parse_markdown(md).unwrap();
+        assert!(validate_engine_feature_support(&fm.engine).is_ok());
+    }
+
+    #[test]
+    fn provider_api_key_rejects_empty() {
+        let md = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  provider:\n    base-url: https://x.example.com/v1\n    api-key: \"\"\n---\n";
+        let (fm, _) = parse_markdown(md).unwrap();
+        let err = validate_engine_feature_support(&fm.engine).unwrap_err().to_string();
+        assert!(
+            err.contains("api-key must not be empty"),
+            "an empty api-key must be rejected (would send an empty credential): {err}"
+        );
+    }
+
+    #[test]
+    fn provider_api_key_rejects_injection() {
+        let md = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  provider:\n    base-url: https://x.example.com/v1\n    api-key: \"##vso[task.setvariable variable=x]y\"\n---\n";
+        let (fm, _) = parse_markdown(md).unwrap();
+        let err = validate_engine_feature_support(&fm.engine).unwrap_err().to_string();
+        assert!(
+            err.contains("pipeline command injection"),
+            "api-key with a ##vso injection must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn provider_api_key_maps_without_mint() {
+        let md = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  provider:\n    base-url: https://x.example.com/v1\n    api-key: $(MY_KEY)\n---\n";
+        let (fm, _) = parse_markdown(md).unwrap();
+        let env = Engine::Copilot.env(&fm.engine).unwrap();
+        assert!(env.contains(r#"COPILOT_PROVIDER_API_KEY: "$(MY_KEY)""#), "{env}");
+        assert!(
+            !env.contains("AW_PROVIDER_BEARER_TOKEN"),
+            "api-key path must not reference the bearer mint var: {env}"
+        );
     }
 }

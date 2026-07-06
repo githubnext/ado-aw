@@ -4861,63 +4861,110 @@ fn test_executor_step_has_env_block_with_write_permissions() {
     );
 }
 
-/// Copilot BYOM/BYOK (#1261): provider env keys in `engine.env` may carry ADO
-/// macro expressions (e.g. `$(Setup.FOUNDRY_TOKEN)`), they are merged verbatim
-/// into the agent step's env block, and a literal `COPILOT_PROVIDER_BASE_URL`
-/// host is added to the AWF allow-domains list. Compilation must succeed and
-/// pass integrity checks (no `--skip-integrity`).
+/// Copilot BYOK (#1261, #1372): the dedicated `engine.provider` block maps
+/// to `COPILOT_PROVIDER_*` env vars, a literal `base-url` host is added to the AWF
+/// allow-domains list, and `provider.token` makes the compiler mint the credential
+/// **in-job** (Agent + Detection) via `AzureCLI@2` into `COPILOT_PROVIDER_API_KEY`
+/// (the var the AWF sidecar reads) — resolving via a same-job
+/// `$(AW_PROVIDER_BEARER_TOKEN)` macro with no cross-job plumbing.
+/// Compilation must succeed and pass integrity checks (no `--skip-integrity`).
 #[test]
 fn test_byom_provider_env_compiles_and_merges() {
     let compiled = compile_fixture("byom-foundry-agent.md");
     assert_valid_yaml(&compiled, "byom-foundry-agent.md");
 
-    // Emitted verbatim (unquoted): the typed EnvValue re-serialization renders
-    // an ADO macro without surrounding quotes. Pin the trailing newline so the
-    // assertion fails if quoting is ever (incorrectly) introduced.
+    // engine.provider maps to the correct COPILOT_PROVIDER_* env vars; the bearer
+    // token references the same-job secret the mint step publishes (unquoted
+    // macro), wired into COPILOT_PROVIDER_API_KEY — the credential env var the
+    // AWF sidecar actually reads. Appears in both the Agent and Detection jobs.
+    assert_eq!(
+        compiled
+            .matches("COPILOT_PROVIDER_API_KEY: $(AW_PROVIDER_BEARER_TOKEN)\n")
+            .count(),
+        2,
+        "provider.token must wire COPILOT_PROVIDER_API_KEY to the same-job mint var in both jobs: {compiled}"
+    );
     assert!(
-        compiled.contains("COPILOT_PROVIDER_BEARER_TOKEN: $(Setup.FOUNDRY_TOKEN)\n"),
-        "BYOM provider macro env value must be merged verbatim (unquoted) into the agent step: {compiled}"
+        !compiled.contains("COPILOT_PROVIDER_BEARER_TOKEN"),
+        "the token must NOT be plumbed as COPILOT_PROVIDER_BEARER_TOKEN (the AWF sidecar ignores it): {compiled}"
     );
     assert!(
         compiled.contains("COPILOT_PROVIDER_TYPE: azure"),
-        "Literal provider config value must still be emitted: {compiled}"
+        "provider.type must map to COPILOT_PROVIDER_TYPE: {compiled}"
     );
     assert!(
         compiled.contains("my-foundry.cognitiveservices.azure.com"),
-        "Literal COPILOT_PROVIDER_BASE_URL host must be added to the AWF allow-domains list: {compiled}"
+        "Literal provider.base-url host must be added to the AWF allow-domains list: {compiled}"
+    );
+
+    // The compiler-owned in-job mint step runs before the Copilot invocation in
+    // BOTH the Agent and Detection jobs, authenticated by the service connection.
+    assert_eq!(
+        compiled.matches("displayName: Acquire provider bearer token").count(),
+        2,
+        "provider.token must emit the AzureCLI@2 mint step in both the Agent and Detection jobs: {compiled}"
+    );
+    assert_eq!(
+        compiled.matches("azureSubscription: my-arm-connection").count(),
+        2,
+        "mint step must authenticate via the configured service connection in both jobs: {compiled}"
+    );
+    assert_eq!(
+        compiled
+            .matches("##vso[task.setvariable variable=AW_PROVIDER_BEARER_TOKEN;issecret=true]")
+            .count(),
+        2,
+        "mint step must publish the bearer token as a same-job SECRET var in both jobs: {compiled}"
+    );
+    assert_eq!(
+        compiled
+            .matches("az account get-access-token --resource 'https://cognitiveservices.azure.com'")
+            .count(),
+        2,
+        "mint step must request a token for the default cognitiveservices resource in both jobs: {compiled}"
+    );
+    // Same-job minting: no cross-job Setup output plumbing.
+    assert!(
+        !compiled.contains("$(Setup.FOUNDRY_TOKEN)"),
+        "the broken cross-job Setup-output macro must not appear: {compiled}"
     );
 
     // Credential isolation: the AWF api-proxy sidecar is enabled and the
-    // provider credential env keys are excluded from --env-all passthrough.
-    // This must happen in BOTH the Agent and Detection jobs (the detection
-    // threat-analysis Copilot run inherits the same BYOM routing + isolation,
-    // mirroring gh-aw), so each marker appears exactly twice.
+    // provider credential env keys are excluded from --env-all passthrough, in
+    // BOTH the Agent and Detection jobs (detection inherits BYOK routing +
+    // isolation, mirroring gh-aw), so each marker appears exactly twice.
     assert_eq!(
         compiled.matches("--enable-api-proxy").count(),
         2,
-        "BYOM must enable the AWF api-proxy sidecar in both the Agent and Detection jobs: {compiled}"
+        "BYOK must enable the AWF api-proxy sidecar in both the Agent and Detection jobs: {compiled}"
     );
-    // --exclude-env now lists exactly the provider credential keys present in
-    // engine.env (case-preserving), not a hardcoded set. The fixture defines
-    // COPILOT_PROVIDER_BASE_URL + COPILOT_PROVIDER_BEARER_TOKEN (no API_KEY), so
-    // only those two are excluded, in both the Agent and Detection jobs.
+    // --exclude-env lists exactly the provider credential keys present (derived
+    // from engine.provider): COPILOT_PROVIDER_BASE_URL + COPILOT_PROVIDER_API_KEY
+    // (the minted token is wired into API_KEY, not BEARER_TOKEN), in both jobs.
     for key in [
         "--exclude-env COPILOT_PROVIDER_BASE_URL",
-        "--exclude-env COPILOT_PROVIDER_BEARER_TOKEN",
+        "--exclude-env COPILOT_PROVIDER_API_KEY",
     ] {
         assert_eq!(
             compiled.matches(key).count(),
             2,
-            "BYOM must exclude provider credential from passthrough in both jobs ({key}): {compiled}"
+            "BYOK must exclude provider credential from passthrough in both jobs ({key}): {compiled}"
         );
     }
-    // A credential key NOT present in engine.env must NOT be excluded.
+    // Defense-in-depth: the intermediate same-job mint secret is also excluded
+    // from --env-all in both jobs, so it can never ride the passthrough into the
+    // agent container even if ADO ever exposed it as a process env var.
     assert_eq!(
-        compiled
-            .matches("--exclude-env COPILOT_PROVIDER_API_KEY")
-            .count(),
+        compiled.matches("--exclude-env AW_PROVIDER_BEARER_TOKEN").count(),
+        2,
+        "the intermediate mint secret AW_PROVIDER_BEARER_TOKEN must be excluded in both jobs: {compiled}"
+    );
+    // A credential key NOT configured must NOT be excluded (BEARER_TOKEN is never
+    // used by ado-aw — the sidecar only reads API_KEY).
+    assert_eq!(
+        compiled.matches("--exclude-env COPILOT_PROVIDER_BEARER_TOKEN").count(),
         0,
-        "credential keys absent from engine.env must not be passed to --exclude-env: {compiled}"
+        "COPILOT_PROVIDER_BEARER_TOKEN must never be referenced: {compiled}"
     );
     // The api-proxy container image must be pre-pulled (and :latest-tagged) in
     // both jobs so AWF's --skip-pull finds it locally.
@@ -4926,21 +4973,77 @@ fn test_byom_provider_env_compiles_and_merges() {
             .matches("docker pull ghcr.io/github/gh-aw-firewall/api-proxy:")
             .count(),
         2,
-        "BYOM must pre-pull the api-proxy container image in both the Agent and Detection jobs: {compiled}"
-    );
-    // The Detection threat-analysis step inherits the provider routing env
-    // (COPILOT_PROVIDER_* subset) so it reaches the same external provider.
-    // The bearer-token macro therefore appears twice: agent step + detection step.
-    assert_eq!(
-        compiled
-            .matches("COPILOT_PROVIDER_BEARER_TOKEN: $(Setup.FOUNDRY_TOKEN)\n")
-            .count(),
-        2,
-        "Detection step must inherit the BYOM provider env alongside the agent step: {compiled}"
+        "BYOK must pre-pull the api-proxy container image in both the Agent and Detection jobs: {compiled}"
     );
 }
 
-/// A non-BYOM agent must NOT enable the api-proxy sidecar or pre-pull its image —
+/// Copilot BYOK via a **static `api-key`** (no compiler mint step): the
+/// `engine.provider.api-key` value maps to `COPILOT_PROVIDER_API_KEY`, BYOK
+/// isolation is still enabled (api-proxy + `--exclude-env`), but NO `AzureCLI@2`
+/// token-mint step is emitted. Exercises the end-to-end compile path for the
+/// api-key branch (the token branch is covered by
+/// `test_byom_provider_env_compiles_and_merges`).
+#[test]
+fn test_byok_provider_api_key_compiles_without_mint_step() {
+    // Reuse the token fixture but swap the `token:` block for a static `api-key`.
+    let compiled = compile_fixture_tree_with_flags(
+        "byom-foundry-agent.md",
+        &[],
+        &[],
+        |contents| {
+            // Line-based rewrite (robust to CRLF/LF): drop the `token:` block and
+            // insert a static `api-key:` in its place.
+            let newline = if contents.contains("\r\n") { "\r\n" } else { "\n" };
+            contents
+                .lines()
+                .filter(|l| {
+                    let t = l.trim();
+                    t != "token:" && t != "service-connection: my-arm-connection"
+                })
+                .map(|l| {
+                    if l.trim() == "type: azure" {
+                        format!("{l}{newline}    api-key: $(FOUNDRY_API_KEY)")
+                    } else {
+                        l.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(newline)
+        },
+    );
+    assert_valid_yaml(&compiled, "byom-foundry-agent.md (api-key)");
+
+    // api-key maps to COPILOT_PROVIDER_API_KEY in both jobs (unquoted macro).
+    assert_eq!(
+        compiled
+            .matches("COPILOT_PROVIDER_API_KEY: $(FOUNDRY_API_KEY)\n")
+            .count(),
+        2,
+        "provider.api-key must map to COPILOT_PROVIDER_API_KEY in both jobs: {compiled}"
+    );
+    // No compiler-owned mint step for the static-key path.
+    assert!(
+        !compiled.contains("Acquire provider bearer token"),
+        "the api-key path must NOT emit the AzureCLI@2 token-mint step: {compiled}"
+    );
+    assert!(
+        !compiled.contains("AW_PROVIDER_BEARER_TOKEN"),
+        "the api-key path must not reference the mint secret var: {compiled}"
+    );
+    // BYOK isolation still engages (credential is present), in both jobs.
+    assert_eq!(
+        compiled.matches("--enable-api-proxy").count(),
+        2,
+        "the api-key path must still enable the api-proxy sidecar in both jobs: {compiled}"
+    );
+    assert_eq!(
+        compiled.matches("--exclude-env COPILOT_PROVIDER_API_KEY").count(),
+        2,
+        "the api-key credential must be excluded from --env-all in both jobs: {compiled}"
+    );
+}
+
+/// A non-BYOK agent must NOT enable the api-proxy sidecar or pre-pull its image —
 /// the isolation plumbing is strictly opt-in via the presence of a
 /// `COPILOT_PROVIDER_*` credential key in `engine.env`.
 #[test]
@@ -4949,11 +5052,11 @@ fn test_non_byom_agent_has_no_api_proxy() {
     assert_valid_yaml(&compiled, "minimal-agent.md");
     assert!(
         !compiled.contains("--enable-api-proxy"),
-        "Non-BYOM agent must not enable the api-proxy sidecar: {compiled}"
+        "Non-BYOK agent must not enable the api-proxy sidecar: {compiled}"
     );
     assert!(
         !compiled.contains("api-proxy"),
-        "Non-BYOM agent must not reference the api-proxy image: {compiled}"
+        "Non-BYOK agent must not reference the api-proxy image: {compiled}"
     );
 }
 

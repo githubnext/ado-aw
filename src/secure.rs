@@ -324,6 +324,44 @@ validated_string! {
     }
 }
 
+validated_string! {
+    /// An Azure resource (audience) URL passed to
+    /// `az account get-access-token --resource`. Validated to be a shell-safe,
+    /// URI-shaped value so it can be interpolated into the generated provider
+    /// token-mint bash script without escaping.
+    ProviderResourceUrl, "resource", |value: &str, label: &str| {
+        if validate::is_valid_provider_resource_url(value) {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "{label} '{value}' must be a URI-shaped Azure resource audience \
+                 (contain '://', at most 256 characters) composed only of \
+                 [A-Za-z0-9._:/%~-] — no spaces, quotes, or shell metacharacters"
+            )
+        }
+    }
+}
+
+validated_string! {
+    /// An `engine.provider.base-url` value: either a literal `https://` URL (with
+    /// a host) or a value carrying an ADO `$(...)` macro. Validated at
+    /// deserialization so a malformed / non-https / injection-bearing base URL is
+    /// rejected before it can be rendered into `COPILOT_PROVIDER_BASE_URL` or have
+    /// its host extracted for the AWF network allowlist.
+    ProviderBaseUrl, "base-url", |value: &str, label: &str| {
+        if validate::is_valid_provider_base_url(value) {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "{label} '{value}' must be a literal https:// URL with a host \
+                 (plaintext http:// is not allowed) or an ADO macro '$(VAR)'. \
+                 It must not contain a template ('${{{{ }}}}') or runtime ('$[...]') \
+                 expression, pipeline-command injection ('##vso['), or newlines."
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

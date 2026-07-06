@@ -87,7 +87,7 @@ use super::ir::{
 };
 use super::types::{
     ApprovalConfig, ApprovalOnTimeout, CheckoutFetchOpts, FrontMatter, OnConfig, PrMode,
-    Repository as RepoCfg, SELF_CHECKOUT_ALIAS, SupplyChainConfig,
+    ProviderToken, Repository as RepoCfg, SELF_CHECKOUT_ALIAS, SupplyChainConfig,
 };
 
 /// Built pipeline context — the result of running every validation,
@@ -190,11 +190,27 @@ pub(crate) fn build_pipeline_context(
     let is_copilot = matches!(ctx.engine, crate::engine::Engine::Copilot);
     let byom_active = is_copilot && crate::engine::copilot_byom_active(&front_matter.engine);
     // Actual provider credential keys (user's casing) for AWF `--exclude-env`.
-    let byom_exclude_keys = if is_copilot {
+    let mut byom_exclude_keys = if is_copilot {
         crate::engine::copilot_byom_credential_keys(&front_matter.engine)
     } else {
         Vec::new()
     };
+    // Defense-in-depth: when the compiler mints the provider bearer token, also
+    // exclude the intermediate same-job secret var (AW_PROVIDER_BEARER_TOKEN)
+    // from the AWF `--env-all` passthrough. Today ADO never exposes an
+    // `issecret=true` variable as a process env var, so it is not in the AWF host
+    // env and could not be forwarded anyway — but excluding it explicitly makes
+    // the isolation intent self-documenting and fail-safe rather than relying on
+    // that implicit ADO behaviour.
+    if is_copilot
+        && front_matter
+            .engine
+            .provider()
+            .and_then(|p| p.token.as_ref())
+            .is_some()
+    {
+        byom_exclude_keys.push(crate::compile::types::PROVIDER_BEARER_TOKEN_VAR.to_string());
+    }
     // Provider-only env subset for the Detection step, so the threat-analysis
     // Copilot run inherits the same BYOM/BYOK routing + credential isolation as
     // the main agent (mirrors gh-aw's detection engine-config Env inheritance).
@@ -932,6 +948,17 @@ fn build_agent_job(
             app_token,
         )?);
     }
+    // When an external provider token is configured, mint it in-job (same-job
+    // secret) immediately before the Copilot run so COPILOT_PROVIDER_API_KEY
+    // resolves via a plain macro. Coexists cleanly with the app-token mint above
+    // (independent secret vars, both plain pre-run steps).
+    if let Some(token) = front_matter
+        .engine
+        .provider()
+        .and_then(|p| p.token.as_ref())
+    {
+        steps.push(Step::Task(provider_token_mint_step(token)));
+    }
     steps.push(Step::Bash(run_agent_step(
         &cfg.allowed_domains,
         &cfg.awf_mounts,
@@ -1167,6 +1194,15 @@ fn build_detection_job(
         steps.push(super::extensions::ado_script::github_app_token_step_typed(
             app_token,
         )?);
+    }
+    // Mint the external provider token in-job (same-job secret) before the
+    // threat-analysis Copilot run, mirroring the Agent job.
+    if let Some(token) = front_matter
+        .engine
+        .provider()
+        .and_then(|p| p.token.as_ref())
+    {
+        steps.push(Step::Task(provider_token_mint_step(token)));
     }
     // Run threat analysis
     steps.push(Step::Bash(run_threat_analysis_step(
@@ -2008,6 +2044,44 @@ fn acr_login_step(registry_base: &str, connection: &str) -> TaskStep {
         ScriptLocation::Inline(format!("az acr login --name {name}\n")),
     )
     .with_display_name("Authenticate to internal container registry")
+    .into_step()
+}
+
+/// `AzureCLI@2` step that mints the external model-provider credential
+/// (`engine.provider.token`) **in the same job** as the engine run. Authenticated
+/// by the ARM `service-connection`, it runs `az account get-access-token` for the
+/// configured resource and publishes the result as the same-job secret
+/// [`PROVIDER_BEARER_TOKEN_VAR`], which is referenced by `COPILOT_PROVIDER_API_KEY`
+/// (the credential env var the AWF api-proxy sidecar reads and forwards as
+/// `Authorization: Bearer <value>`).
+///
+/// Same-job minting is deliberate: it avoids the cross-job `isOutput`/`dependsOn`
+/// plumbing (the #1372 failure) — a plain `$(...)` macro resolves the token. The
+/// AWF api-proxy sidecar (`--exclude-env COPILOT_PROVIDER_API_KEY`) keeps the
+/// value out of the sandbox; this step runs outside the sandbox.
+///
+/// Token lifetime: `az account get-access-token` returns a short-lived AAD token
+/// (typically ~1h). Minting immediately before the Copilot run keeps it fresh for
+/// normal workloads; a job that queues/idles for the full token lifetime *after*
+/// this step (before the run) could see an expired token — mint is intentionally
+/// the last step before the engine invocation to minimise that window.
+fn provider_token_mint_step(token: &ProviderToken) -> TaskStep {
+    let resource = token.resource();
+    let var = crate::compile::types::PROVIDER_BEARER_TOKEN_VAR;
+    // `resource` is a validated `ProviderResourceUrl` (shell-safe allowlist, no
+    // single-quotes); single-quoting here is defense-in-depth so the value is
+    // passed to `az` as one literal argument regardless.
+    let script = format!(
+        "set -eo pipefail\n\
+         TOKEN=$(az account get-access-token --resource '{resource}' --query accessToken -o tsv)\n\
+         echo \"##vso[task.setvariable variable={var};issecret=true]$TOKEN\"\n"
+    );
+    AzureCli::new(
+        token.service_connection.as_str(),
+        ScriptType::Bash,
+        ScriptLocation::Inline(script),
+    )
+    .with_display_name("Acquire provider bearer token")
     .into_step()
 }
 
