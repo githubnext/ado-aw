@@ -75,6 +75,7 @@ export function buildAppJwt(
   privateKeyPem: string,
   nowSeconds: number = Math.floor(Date.now() / 1000),
 ): string {
+  const normalizedPrivateKeyPem = normalizePrivateKeyPem(privateKeyPem);
   const header = { alg: "RS256", typ: "JWT" };
   const payload = {
     iat: nowSeconds - JWT_IAT_BACKDATE_SECONDS,
@@ -87,8 +88,34 @@ export function buildAppJwt(
   const signer = createSign("RSA-SHA256");
   signer.update(signingInput);
   signer.end();
-  const signature = base64url(signer.sign(privateKeyPem));
+  const signature = base64url(signer.sign(normalizedPrivateKeyPem));
   return `${signingInput}.${signature}`;
+}
+
+/**
+ * Normalize private-key PEM inputs commonly seen from ADO secret variables:
+ * - escaped newlines (`\\n`, `\\r\\n`, `\\r`)
+ * - CRLF/CR endings
+ * - whitespace-collapsed PEM bodies
+ */
+export function normalizePrivateKeyPem(rawPem: string): string {
+  const normalizedNewlines = rawPem
+    .replace(/\\r\\n/g, "\n")
+    .replace(/\\n/g, "\n")
+    .replace(/\\r/g, "\n")
+    .replace(/\r/g, "\n")
+    .trim();
+  const match = normalizedNewlines.match(
+    /-----BEGIN ([^-]+)-----([\s\S]*?)-----END \1-----/,
+  );
+  if (!match) {
+    return normalizedNewlines;
+  }
+  const label = match[1];
+  const body = match[2] ?? "";
+  const compactBody = body.replace(/\s+/g, "");
+  const wrappedBody = compactBody.match(/.{1,64}/g)?.join("\n") ?? "";
+  return `-----BEGIN ${label}-----\n${wrappedBody}\n-----END ${label}-----`;
 }
 
 /** Parse the repositories env var into a clean list of names. */
