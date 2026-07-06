@@ -56,6 +56,8 @@ const DEFAULT_OUTPUT_VAR = "GITHUB_APP_TOKEN";
 const JWT_TTL_SECONDS = 540;
 /** Small clock-skew backdating for `iat` to tolerate agent/GitHub clock drift. */
 const JWT_IAT_BACKDATE_SECONDS = 60;
+/** RFC 7468 PEM line-wrap width for base64 body lines. */
+const PEM_LINE_LENGTH = 64;
 
 function base64url(input: Buffer | string): string {
   const buf = typeof input === "string" ? Buffer.from(input, "utf8") : input;
@@ -75,6 +77,7 @@ export function buildAppJwt(
   privateKeyPem: string,
   nowSeconds: number = Math.floor(Date.now() / 1000),
 ): string {
+  const normalizedPrivateKeyPem = normalizePrivateKeyPem(privateKeyPem);
   const header = { alg: "RS256", typ: "JWT" };
   const payload = {
     iat: nowSeconds - JWT_IAT_BACKDATE_SECONDS,
@@ -87,8 +90,43 @@ export function buildAppJwt(
   const signer = createSign("RSA-SHA256");
   signer.update(signingInput);
   signer.end();
-  const signature = base64url(signer.sign(privateKeyPem));
+  const signature = base64url(signer.sign(normalizedPrivateKeyPem));
   return `${signingInput}.${signature}`;
+}
+
+/**
+ * Normalize private-key PEM inputs commonly seen from ADO secret variables:
+ * - escaped newlines (`\\n`, `\\r\\n`, `\\r`)
+ * - CRLF/CR endings
+ * - whitespace-collapsed PEM bodies
+ */
+export function normalizePrivateKeyPem(rawPem: string): string {
+  const normalizedNewlines = rawPem
+    .replace(/\\r\\n/g, "\n")
+    .replace(/\\n/g, "\n")
+    .replace(/\\r/g, "\n")
+    .replace(/\r/g, "\n")
+    .trim();
+  const match = normalizedNewlines.match(
+    /-----BEGIN ([A-Z0-9 ]+)-----([\s\S]*?)-----END \1-----/,
+  );
+  if (!match) {
+    return normalizedNewlines;
+  }
+  const label = match[1];
+  const body = match[2]!;
+  const compactBody = body.replace(/\s+/g, "");
+  if (
+    compactBody.length === 0 ||
+    !/^[A-Za-z0-9+/=]+$/.test(compactBody)
+  ) {
+    return normalizedNewlines;
+  }
+  const wrappedBody =
+    compactBody
+      .match(new RegExp(`.{1,${PEM_LINE_LENGTH}}`, "g"))
+      ?.join("\n") ?? "";
+  return `-----BEGIN ${label}-----\n${wrappedBody}\n-----END ${label}-----`;
 }
 
 /** Parse the repositories env var into a clean list of names. */
