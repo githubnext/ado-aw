@@ -2146,6 +2146,19 @@ mod tests {
     }
 
     #[test]
+    fn provider_base_url_rejects_template_expression() {
+        // A template expression on base-url would be expanded at ADO
+        // template-compile time and bypass the AWF allowlist host check.
+        let md = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  provider:\n    base-url: \"${{ parameters.externalUrl }}\"\n    token:\n      service-connection: sc\n---\n";
+        let (fm, _) = parse_markdown(md).unwrap();
+        let err = validate_engine_feature_support(&fm.engine).unwrap_err().to_string();
+        assert!(
+            err.contains("base-url") && err.contains("template"),
+            "base-url with a template expression must be rejected: {err}"
+        );
+    }
+
+    #[test]
     fn provider_api_key_rejects_injection() {
         let md = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  provider:\n    base-url: https://x.example.com/v1\n    api-key: \"##vso[task.setvariable variable=x]y\"\n---\n";
         let (fm, _) = parse_markdown(md).unwrap();

@@ -693,26 +693,39 @@ impl ProviderConfig {
                  OR `api-key` (a static `$(VAR)` secret)."
             );
         }
-        // `api-key` is rendered into COPILOT_PROVIDER_API_KEY; like the raw
-        // engine.env provider-key path it may carry an ADO macro `$(VAR)` but not
-        // a template/runtime expression or pipeline-command injection.
+        // `base-url` and `api-key` are rendered verbatim into COPILOT_PROVIDER_*
+        // env values. Like the raw engine.env provider-key path they may carry an
+        // ADO macro `$(VAR)`, but NOT a template expression (`${{ }}`, expanded at
+        // ADO template-compile time — which would silently bypass the AWF
+        // allowlist host check), a runtime expression (`$[...]`), pipeline-command
+        // injection (`##vso[`), or a newline.
+        Self::reject_unsafe_provider_value("base-url", &self.base_url)?;
         if let Some(api_key) = &self.api_key {
-            if crate::validate::contains_ado_template_expression(api_key) || api_key.contains("$[")
-            {
-                anyhow::bail!(
-                    "engine.provider.api-key '{api_key}' contains an ADO template ('${{{{ }}}}') \
-                     or runtime ('$[...]') expression. Use a macro '$(VAR)' secret reference."
-                );
-            }
-            if crate::validate::contains_pipeline_command(api_key) {
-                anyhow::bail!(
-                    "engine.provider.api-key contains pipeline command injection \
-                     ('##vso[' or '##['). This is not allowed."
-                );
-            }
-            if crate::validate::contains_newline(api_key) {
-                anyhow::bail!("engine.provider.api-key must not contain newline characters.");
-            }
+            Self::reject_unsafe_provider_value("api-key", api_key)?;
+        }
+        Ok(())
+    }
+
+    /// Reject ADO template/runtime expressions, pipeline-command injection, and
+    /// newlines in a provider value that is rendered into a `COPILOT_PROVIDER_*`
+    /// env entry. A literal value or an `$(VAR)` macro is allowed.
+    fn reject_unsafe_provider_value(field: &str, value: &str) -> anyhow::Result<()> {
+        if crate::validate::contains_ado_template_expression(value) || value.contains("$[") {
+            anyhow::bail!(
+                "engine.provider.{field} '{value}' contains an ADO template ('${{{{ }}}}') \
+                 or runtime ('$[...]') expression. Use a literal value or a macro '$(VAR)' \
+                 reference (a template expression would be expanded at compile time and \
+                 bypass the AWF network allowlist check)."
+            );
+        }
+        if crate::validate::contains_pipeline_command(value) {
+            anyhow::bail!(
+                "engine.provider.{field} contains pipeline command injection \
+                 ('##vso[' or '##['). This is not allowed."
+            );
+        }
+        if crate::validate::contains_newline(value) {
+            anyhow::bail!("engine.provider.{field} must not contain newline characters.");
         }
         Ok(())
     }
