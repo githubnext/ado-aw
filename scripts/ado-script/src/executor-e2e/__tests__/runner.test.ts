@@ -21,48 +21,61 @@ function fakeCtx(): ScenarioContext {
   };
 }
 
-/** A scenario whose setup throws — the runner must never reach execute. */
-function guardScenario(setup: () => Promise<never>): Scenario<unknown> {
-  let executed = false;
+/**
+ * A scenario whose setup throws — the runner must never reach execute or run
+ * cleanup. `flags.executed` trips if any post-setup phase runs; `flags.cleaned`
+ * trips if cleanup runs. The runner swallows cleanup errors, so we surface the
+ * violation via the returned flags rather than a throw.
+ */
+function guardScenario(
+  setup: () => Promise<never>,
+  flags: { executed: boolean; cleaned: boolean },
+): Scenario<unknown> {
   return {
     tool: "guard",
     config: () => {
-      executed = true;
+      flags.executed = true;
       return {};
     },
     setup,
     ndjson: async () => {
-      executed = true;
+      flags.executed = true;
       return {};
     },
     assert: async () => {
-      executed = true;
+      flags.executed = true;
     },
     cleanup: async () => {
-      if (executed) throw new Error("cleanup should not run after setup failure");
+      flags.cleaned = true;
     },
   };
 }
 
 describe("runScenario precondition handling", () => {
   it("marks SkipError from setup as skipped, not failed", async () => {
+    const flags = { executed: false, cleaned: false };
     const scenario = guardScenario(async () => {
       throw new SkipError("no wiki");
-    });
+    }, flags);
     const res = await runScenario(fakeCtx(), scenario);
     expect(res.ok).toBe(true);
     expect(res.skipped).toBe(true);
     expect(res.phase).toBe("skipped");
     expect(res.message).toBe("no wiki");
+    expect(flags.executed).toBe(false);
+    expect(flags.cleaned).toBe(false);
   });
 
   it("records a setup failure without reaching execute or cleanup", async () => {
+    const flags = { executed: false, cleaned: false };
     const scenario = guardScenario(async () => {
       throw new Error("boom");
-    });
+    }, flags);
     const res = await runScenario(fakeCtx(), scenario);
     expect(res.ok).toBe(false);
     expect(res.phase).toBe("setup");
     expect(res.message).toBe("boom");
+    expect(flags.executed).toBe(false);
+    expect(flags.cleaned).toBe(false);
   });
 });

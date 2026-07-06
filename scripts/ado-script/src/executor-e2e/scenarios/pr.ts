@@ -49,8 +49,16 @@ async function setupPr(
 
   const state: PrState = { repo, prId: pr.pullRequestId, branch };
   if (withThread) {
-    const thread = await ctx.rest.createThread(repo, pr.pullRequestId, "seed thread for e2e");
-    state.threadId = thread.id;
+    try {
+      const thread = await ctx.rest.createThread(repo, pr.pullRequestId, "seed thread for e2e");
+      state.threadId = thread.id;
+    } catch (err) {
+      // The PR + source branch already exist; setup() throwing leaves
+      // setupDone=false so the runner won't call cleanup. Abandon them here so
+      // a flaky createThread doesn't leak dangling ADO objects, then rethrow.
+      await teardownPr(ctx, state).catch(() => {});
+      throw err;
+    }
   }
   return state;
 }

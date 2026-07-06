@@ -36,13 +36,10 @@ export class AdoRest {
   private readonly authHeader: string;
   private readonly log: (msg: string) => void;
   private readonly timeoutMs: number;
-  /** The write token, exposed for callers that must clone via git over HTTPS. */
-  readonly token: string;
 
   constructor(opts: AdoRestOptions) {
     this.base = opts.orgUrl.replace(/\/+$/, "");
     this.project = opts.project;
-    this.token = opts.token;
     this.authHeader = "Basic " + Buffer.from(":" + opts.token).toString("base64");
     this.log = opts.log ?? (() => {});
     this.timeoutMs = Number(process.env.EXECUTOR_E2E_REST_TIMEOUT_MS) || 30_000;

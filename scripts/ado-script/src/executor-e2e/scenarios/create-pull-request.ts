@@ -103,9 +103,11 @@ async function git(
 export const createPullRequest: Scenario<CreatePrState> = {
   tool: "create-pull-request",
   targetsAdoRepo: true,
-  config: (ctx) => ({
-    "target-branch": "main",
-    "allowed-repositories": [ctx.adoRepo],
+  config: (_ctx, state) => ({
+    // Target the repo's actual default branch (state.targetBranch), which is
+    // also where base_commit was taken from, rather than hardcoding "main".
+    "target-branch": state.targetBranch,
+    "allowed-repositories": [state.repo],
     "delete-source-branch": true,
     "if-no-changes": "error",
     "include-stats": false,

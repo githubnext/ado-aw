@@ -65,7 +65,9 @@ export function renderSourceMarkdown(opts: RenderSourceOptions): string {
 
 /** Serialise one executor NDJSON entry line (name + params). */
 export function renderNdjsonLine(tool: string, entry: Record<string, unknown>): string {
-  return JSON.stringify({ name: tool, ...entry }) + "\n";
+  // Spread `entry` first so the injected tool name is always canonical: a
+  // scenario that accidentally returns a `name` key can't override it.
+  return JSON.stringify({ ...entry, name: tool }) + "\n";
 }
 
 export interface RunExecuteOptions {
