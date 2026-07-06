@@ -36,6 +36,10 @@ variables:
   # skip gracefully. Override at queue time (or via a variable group) to enable.
   E2E_QUEUE_PIPELINE_ID: ""
   E2E_WIKI_NAME: ""
+  # Internal sparse crates.io mirror (Azure Artifacts). Declared in the cargo
+  # config below so CargoAuthenticate@0 can attach credentials, and reused as
+  # RustInstaller's crates.io override so the two never drift.
+  CRATES_IO_FEED: "sparse+https://pkgs.dev.azure.com/msazuresphere/4x4/_packaging/cratesio/Cargo/index/"
   # EXECUTOR_E2E_GITHUB_TOKEN must be provided as a SECRET pipeline variable
   # (fine-grained PAT scoped to Issues:read/write on githubnext/ado-aw ONLY).
 
@@ -43,6 +47,23 @@ steps:
   - checkout: self
     fetchDepth: 1
     displayName: Checkout ado-aw
+
+  - script: |
+      set -euo pipefail
+      mkdir -p .cargo
+      # CargoAuthenticate@0 only attaches credentials to feeds that are
+      # DECLARED in the config file it is given. The checked-in
+      # .cargo/config.toml carries only the Windows MSVC stack setting (inert
+      # on Linux), so append the internal crates.io source replacement here so
+      # the auth task has something to authenticate and `cargo build` fetches
+      # crates from the internal mirror.
+      {
+        printf '\n[source.crates-io]\nreplace-with = "cratesio-internal"\n\n'
+        printf '[source.cratesio-internal]\nregistry = "%s"\n' "$(CRATES_IO_FEED)"
+      } >> .cargo/config.toml
+      echo "----- .cargo/config.toml -----"
+      cat .cargo/config.toml
+    displayName: Write cargo config for internal crates.io feed
 
   - task: CargoAuthenticate@0
     inputs:
@@ -53,7 +74,7 @@ steps:
     inputs:
       rustVersion: ms-stable
       toolchainFeed: "https://pkgs.dev.azure.com/msazuresphere/4x4/_packaging/RustTools/nuget/v3/index.json"
-      cratesIoFeedOverride: "sparse+https://pkgs.dev.azure.com/msazuresphere/4x4/_packaging/cratesio/Cargo/index/"
+      cratesIoFeedOverride: "$(CRATES_IO_FEED)"
     displayName: Install Rust toolchain
 
   - script: |
