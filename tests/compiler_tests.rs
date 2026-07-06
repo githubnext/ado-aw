@@ -4809,9 +4809,10 @@ fn test_executor_step_has_env_block_with_write_permissions() {
 
 /// Copilot BYOK (#1261, #1372): the dedicated `engine.provider` block maps
 /// to `COPILOT_PROVIDER_*` env vars, a literal `base-url` host is added to the AWF
-/// allow-domains list, and `provider.token` makes the compiler mint the bearer
-/// token **in-job** (Agent + Detection) via `AzureCLI@2` — resolving via a
-/// same-job `$(AW_PROVIDER_BEARER_TOKEN)` macro with no cross-job plumbing.
+/// allow-domains list, and `provider.token` makes the compiler mint the credential
+/// **in-job** (Agent + Detection) via `AzureCLI@2` into `COPILOT_PROVIDER_API_KEY`
+/// (the var the AWF sidecar reads) — resolving via a same-job
+/// `$(AW_PROVIDER_BEARER_TOKEN)` macro with no cross-job plumbing.
 /// Compilation must succeed and pass integrity checks (no `--skip-integrity`).
 #[test]
 fn test_byom_provider_env_compiles_and_merges() {
@@ -4820,13 +4821,18 @@ fn test_byom_provider_env_compiles_and_merges() {
 
     // engine.provider maps to the correct COPILOT_PROVIDER_* env vars; the bearer
     // token references the same-job secret the mint step publishes (unquoted
-    // macro). Appears in both the Agent and Detection jobs.
+    // macro), wired into COPILOT_PROVIDER_API_KEY — the credential env var the
+    // AWF sidecar actually reads. Appears in both the Agent and Detection jobs.
     assert_eq!(
         compiled
-            .matches("COPILOT_PROVIDER_BEARER_TOKEN: $(AW_PROVIDER_BEARER_TOKEN)\n")
+            .matches("COPILOT_PROVIDER_API_KEY: $(AW_PROVIDER_BEARER_TOKEN)\n")
             .count(),
         2,
-        "provider.token must wire COPILOT_PROVIDER_BEARER_TOKEN to the same-job mint var in both jobs: {compiled}"
+        "provider.token must wire COPILOT_PROVIDER_API_KEY to the same-job mint var in both jobs: {compiled}"
+    );
+    assert!(
+        !compiled.contains("COPILOT_PROVIDER_BEARER_TOKEN"),
+        "the token must NOT be plumbed as COPILOT_PROVIDER_BEARER_TOKEN (the AWF sidecar ignores it): {compiled}"
     );
     assert!(
         compiled.contains("COPILOT_PROVIDER_TYPE: azure"),
@@ -4879,11 +4885,11 @@ fn test_byom_provider_env_compiles_and_merges() {
         "BYOK must enable the AWF api-proxy sidecar in both the Agent and Detection jobs: {compiled}"
     );
     // --exclude-env lists exactly the provider credential keys present (derived
-    // from engine.provider): COPILOT_PROVIDER_BASE_URL + COPILOT_PROVIDER_BEARER_TOKEN
-    // (no API_KEY), in both jobs.
+    // from engine.provider): COPILOT_PROVIDER_BASE_URL + COPILOT_PROVIDER_API_KEY
+    // (the minted token is wired into API_KEY, not BEARER_TOKEN), in both jobs.
     for key in [
         "--exclude-env COPILOT_PROVIDER_BASE_URL",
-        "--exclude-env COPILOT_PROVIDER_BEARER_TOKEN",
+        "--exclude-env COPILOT_PROVIDER_API_KEY",
     ] {
         assert_eq!(
             compiled.matches(key).count(),
@@ -4891,11 +4897,20 @@ fn test_byom_provider_env_compiles_and_merges() {
             "BYOK must exclude provider credential from passthrough in both jobs ({key}): {compiled}"
         );
     }
-    // A credential key NOT configured must NOT be excluded.
+    // Defense-in-depth: the intermediate same-job mint secret is also excluded
+    // from --env-all in both jobs, so it can never ride the passthrough into the
+    // agent container even if ADO ever exposed it as a process env var.
     assert_eq!(
-        compiled.matches("--exclude-env COPILOT_PROVIDER_API_KEY").count(),
+        compiled.matches("--exclude-env AW_PROVIDER_BEARER_TOKEN").count(),
+        2,
+        "the intermediate mint secret AW_PROVIDER_BEARER_TOKEN must be excluded in both jobs: {compiled}"
+    );
+    // A credential key NOT configured must NOT be excluded (BEARER_TOKEN is never
+    // used by ado-aw — the sidecar only reads API_KEY).
+    assert_eq!(
+        compiled.matches("--exclude-env COPILOT_PROVIDER_BEARER_TOKEN").count(),
         0,
-        "credential keys absent from the provider config must not be passed to --exclude-env: {compiled}"
+        "COPILOT_PROVIDER_BEARER_TOKEN must never be referenced: {compiled}"
     );
     // The api-proxy container image must be pre-pulled (and :latest-tagged) in
     // both jobs so AWF's --skip-pull finds it locally.

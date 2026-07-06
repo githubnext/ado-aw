@@ -102,10 +102,22 @@ pub const COPILOT_BYOM_CREDENTIAL_ENV_KEYS: &[&str] = &[
 /// block. Pure mapping (infallible) — structural validity is enforced earlier by
 /// [`validate_engine_feature_support`]. Empty when no `provider` block is set.
 ///
-/// When `provider.token` is present, `COPILOT_PROVIDER_BEARER_TOKEN` is set to a
-/// **same-job** macro `$(AW_PROVIDER_BEARER_TOKEN)` — the value the in-job
-/// `AzureCLI@2` mint step publishes — so it resolves at runtime without cross-job
-/// output plumbing.
+/// The provider credential is always plumbed as **`COPILOT_PROVIDER_API_KEY`**,
+/// because the AWF api-proxy sidecar (which ado-aw always enables for BYOK) reads
+/// its BYOK credential exclusively from `COPILOT_PROVIDER_API_KEY` and sends it
+/// outbound as `Authorization: Bearer <value>` (verified against AWF v0.27.9
+/// `containers/api-proxy/providers/copilot.js` + `provider-env-constants.js` —
+/// there is no `COPILOT_PROVIDER_BEARER_TOKEN` in the sidecar). Both credential
+/// sources map to this one key:
+/// - `provider.token`  → `$(AW_PROVIDER_BEARER_TOKEN)` (the same-job secret the
+///   in-job `AzureCLI@2` mint step publishes — resolves at runtime with no
+///   cross-job output plumbing). The minted value is an AAD access token; the
+///   sidecar sends it as a bearer token, which Azure AI Foundry accepts.
+/// - `provider.api-key` → the user-supplied static `$(VAR)` secret.
+///
+/// `token` and `api-key` are mutually exclusive (enforced in
+/// [`crate::compile::types::ProviderConfig::validate`]), so this never emits a
+/// duplicate `COPILOT_PROVIDER_API_KEY`.
 fn provider_derived_env(engine_config: &EngineConfig) -> Vec<(String, String)> {
     let Some(p) = engine_config.provider() else {
         return Vec::new();
@@ -126,11 +138,10 @@ fn provider_derived_env(engine_config: &EngineConfig) -> Vec<(String, String)> {
     }
     if p.token.is_some() {
         pairs.push((
-            "COPILOT_PROVIDER_BEARER_TOKEN".to_string(),
+            "COPILOT_PROVIDER_API_KEY".to_string(),
             format!("$({})", crate::compile::types::PROVIDER_BEARER_TOKEN_VAR),
         ));
-    }
-    if let Some(api_key) = &p.api_key {
+    } else if let Some(api_key) = &p.api_key {
         pairs.push(("COPILOT_PROVIDER_API_KEY".to_string(), api_key.clone()));
     }
     pairs
@@ -2075,11 +2086,17 @@ mod tests {
             env.contains(r#"COPILOT_PROVIDER_TYPE: "azure""#),
             "provider.type must map to COPILOT_PROVIDER_TYPE: {env}"
         );
-        // token → same-job mint var (rendered here as a quoted macro; the final
-        // lock re-serializes it unquoted via the typed EnvValue path).
+        // token → same-job mint var, wired into COPILOT_PROVIDER_API_KEY (the
+        // credential env var the AWF sidecar reads). Rendered here as a quoted
+        // macro; the final lock re-serializes it unquoted via the typed EnvValue
+        // path.
         assert!(
-            env.contains(r#"COPILOT_PROVIDER_BEARER_TOKEN: "$(AW_PROVIDER_BEARER_TOKEN)""#),
-            "provider.token must wire the bearer token to the same-job mint var: {env}"
+            env.contains(r#"COPILOT_PROVIDER_API_KEY: "$(AW_PROVIDER_BEARER_TOKEN)""#),
+            "provider.token must wire the minted token to COPILOT_PROVIDER_API_KEY: {env}"
+        );
+        assert!(
+            !env.contains("COPILOT_PROVIDER_BEARER_TOKEN"),
+            "the token must NOT be plumbed as COPILOT_PROVIDER_BEARER_TOKEN (sidecar ignores it): {env}"
         );
     }
 
@@ -2090,12 +2107,12 @@ mod tests {
             copilot_byom_active(&fm.engine),
             "an engine.provider.token block must activate BYOM isolation"
         );
-        // Only the credential keys (base-url + bearer) are excluded — not TYPE.
+        // Only the credential keys (base-url + api-key) are excluded — not TYPE.
         assert_eq!(
             copilot_byom_credential_keys(&fm.engine),
             vec![
+                "COPILOT_PROVIDER_API_KEY".to_string(),
                 "COPILOT_PROVIDER_BASE_URL".to_string(),
-                "COPILOT_PROVIDER_BEARER_TOKEN".to_string(),
             ]
         );
     }
@@ -2104,7 +2121,7 @@ mod tests {
     fn provider_detection_env_inherits_routing() {
         let (fm, _) = parse_markdown(PROVIDER_MD).unwrap();
         let pairs = copilot_provider_env(&fm.engine).unwrap();
-        assert!(pairs.iter().any(|(k, v)| k == "COPILOT_PROVIDER_BEARER_TOKEN"
+        assert!(pairs.iter().any(|(k, v)| k == "COPILOT_PROVIDER_API_KEY"
             && v == "$(AW_PROVIDER_BEARER_TOKEN)"));
         assert!(pairs.iter().any(|(k, _)| k == "COPILOT_PROVIDER_BASE_URL"));
     }

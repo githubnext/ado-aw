@@ -190,11 +190,27 @@ pub(crate) fn build_pipeline_context(
     let is_copilot = matches!(ctx.engine, crate::engine::Engine::Copilot);
     let byom_active = is_copilot && crate::engine::copilot_byom_active(&front_matter.engine);
     // Actual provider credential keys (user's casing) for AWF `--exclude-env`.
-    let byom_exclude_keys = if is_copilot {
+    let mut byom_exclude_keys = if is_copilot {
         crate::engine::copilot_byom_credential_keys(&front_matter.engine)
     } else {
         Vec::new()
     };
+    // Defense-in-depth: when the compiler mints the provider bearer token, also
+    // exclude the intermediate same-job secret var (AW_PROVIDER_BEARER_TOKEN)
+    // from the AWF `--env-all` passthrough. Today ADO never exposes an
+    // `issecret=true` variable as a process env var, so it is not in the AWF host
+    // env and could not be forwarded anyway — but excluding it explicitly makes
+    // the isolation intent self-documenting and fail-safe rather than relying on
+    // that implicit ADO behaviour.
+    if is_copilot
+        && front_matter
+            .engine
+            .provider()
+            .and_then(|p| p.token.as_ref())
+            .is_some()
+    {
+        byom_exclude_keys.push(crate::compile::types::PROVIDER_BEARER_TOKEN_VAR.to_string());
+    }
     // Provider-only env subset for the Detection step, so the threat-analysis
     // Copilot run inherits the same BYOM/BYOK routing + credential isolation as
     // the main agent (mirrors gh-aw's detection engine-config Env inheritance).
@@ -2005,15 +2021,17 @@ fn acr_login_step(registry_base: &str, connection: &str) -> TaskStep {
     .into_step()
 }
 
-/// `AzureCLI@2` step that mints the external model-provider bearer token
+/// `AzureCLI@2` step that mints the external model-provider credential
 /// (`engine.provider.token`) **in the same job** as the engine run. Authenticated
 /// by the ARM `service-connection`, it runs `az account get-access-token` for the
 /// configured resource and publishes the result as the same-job secret
-/// [`PROVIDER_BEARER_TOKEN_VAR`] (referenced by `COPILOT_PROVIDER_BEARER_TOKEN`).
+/// [`PROVIDER_BEARER_TOKEN_VAR`], which is referenced by `COPILOT_PROVIDER_API_KEY`
+/// (the credential env var the AWF api-proxy sidecar reads and forwards as
+/// `Authorization: Bearer <value>`).
 ///
 /// Same-job minting is deliberate: it avoids the cross-job `isOutput`/`dependsOn`
 /// plumbing (the #1372 failure) — a plain `$(...)` macro resolves the token. The
-/// AWF api-proxy sidecar (`--exclude-env COPILOT_PROVIDER_BEARER_TOKEN`) keeps the
+/// AWF api-proxy sidecar (`--exclude-env COPILOT_PROVIDER_API_KEY`) keeps the
 /// value out of the sandbox; this step runs outside the sandbox.
 fn provider_token_mint_step(token: &ProviderToken) -> TaskStep {
     let resource = token.resource();

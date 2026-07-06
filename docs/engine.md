@@ -178,7 +178,7 @@ runtime (raw `engine.env` cross-job macros like `$(Setup.FOUNDRY_TOKEN)` do
 | `base-url` | yes | `COPILOT_PROVIDER_BASE_URL` | Base URL of the external provider (e.g. `https://RESOURCE.cognitiveservices.azure.com/openai/v1`). A literal host is auto-added to the AWF network allowlist. |
 | `type` | optional | `COPILOT_PROVIDER_TYPE` | Provider format: `openai` (default), `azure`, or `anthropic`. |
 | `wire-api` | optional | `COPILOT_PROVIDER_WIRE_API` | Wire API variant: `completions` (default) or `responses`. |
-| `token` | optional | `COPILOT_PROVIDER_BEARER_TOKEN` | Compiler-minted bearer token (see below). Mutually exclusive with `api-key`. |
+| `token` | optional | `COPILOT_PROVIDER_API_KEY` | Compiler-minted credential via Azure CLI (see below). Mutually exclusive with `api-key`. |
 | `api-key` | optional | `COPILOT_PROVIDER_API_KEY` | Static API key, typically a `$(VAR)` secret pipeline variable. Mutually exclusive with `token`. |
 
 The model itself is set via `engine.model` (or a `COPILOT_MODEL` env var).
@@ -197,9 +197,11 @@ The compiler emits an `AzureCLI@2` step immediately before the Copilot
 invocation in **both** the Agent and Detection jobs. That step runs
 `az account get-access-token` and publishes the result as a **same-job secret**
 pipeline variable (`AW_PROVIDER_BEARER_TOKEN`), which is wired into
-`COPILOT_PROVIDER_BEARER_TOKEN`. Because the token is minted in the same job as
-the engine run, it resolves via a plain `$(...)` macro — no cross-job output
-plumbing, no `dependsOn`.
+`COPILOT_PROVIDER_API_KEY` — the credential env var the AWF api-proxy sidecar
+reads and forwards as `Authorization: Bearer <value>` (the sidecar has no
+`COPILOT_PROVIDER_BEARER_TOKEN` concept). Because the token is minted in the same
+job as the engine run, it resolves via a plain `$(...)` macro — no cross-job
+output plumbing, no `dependsOn`.
 
 #### Credential isolation (api-proxy sidecar)
 

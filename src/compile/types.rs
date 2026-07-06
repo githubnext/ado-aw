@@ -610,14 +610,16 @@ impl WireApi {
     }
 }
 
-/// Compiler-owned provider bearer-token acquisition via Azure CLI.
+/// Compiler-owned provider credential acquisition via Azure CLI.
 ///
 /// When set, the compiler emits an in-job `AzureCLI@2` step (authenticated by
 /// the ARM `service-connection`) that runs `az account get-access-token` and
 /// sets the same-job secret [`PROVIDER_BEARER_TOKEN_VAR`], which is wired into
-/// `COPILOT_PROVIDER_BEARER_TOKEN`. Because the token is minted in the same job
-/// as the engine run, it resolves via a plain `$(...)` macro — no cross-job
-/// output plumbing (the failure mode in #1372).
+/// **`COPILOT_PROVIDER_API_KEY`** (the credential env var the AWF api-proxy
+/// sidecar reads and forwards as `Authorization: Bearer <value>` — there is no
+/// `COPILOT_PROVIDER_BEARER_TOKEN` in the sidecar). Because the token is minted
+/// in the same job as the engine run, it resolves via a plain `$(...)` macro —
+/// no cross-job output plumbing (the failure mode in #1372).
 #[derive(Debug, Deserialize, Clone, SanitizeConfig)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderToken {
@@ -664,7 +666,8 @@ pub struct ProviderConfig {
     /// Wire-API variant → `COPILOT_PROVIDER_WIRE_API` (optional).
     #[serde(default, rename = "wire-api")]
     pub wire_api: Option<WireApi>,
-    /// Compiler-owned bearer-token acquisition (Azure CLI + service connection).
+    /// Compiler-owned credential acquisition (Azure CLI + service connection);
+    /// the minted AAD token is wired into `COPILOT_PROVIDER_API_KEY`.
     /// Mutually exclusive with [`ProviderConfig::api_key`].
     #[serde(default)]
     #[sanitize_config(skip)]
