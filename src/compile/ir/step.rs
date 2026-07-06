@@ -201,6 +201,8 @@ pub struct CheckoutStep {
 pub enum CheckoutRepo {
     /// `checkout: self` — the trigger repository.
     Self_,
+    /// `checkout: none` — explicitly disable repository checkout.
+    None,
     /// `checkout: <resource_name>` — a named repository resource.
     Named(String),
 }

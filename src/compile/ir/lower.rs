@@ -980,6 +980,9 @@ fn lower_checkout(c: &CheckoutStep) -> Value {
         CheckoutRepo::Self_ => {
             m.insert(s("checkout"), s("self"));
         }
+        CheckoutRepo::None => {
+            m.insert(s("checkout"), s("none"));
+        }
         CheckoutRepo::Named(name) => {
             m.insert(s("checkout"), s(name));
         }
@@ -1179,14 +1182,12 @@ fn lower_env_value_as_expr_atom(ctx: &LoweringContext<'_>, v: &EnvValue) -> Resu
                  nested inside another — inline the expression body instead"
             )
         }
-        EnvValue::RawYamlScalar(raw) => {
-            match raw {
-                serde_yaml::Value::String(s) => Ok(format!("'{}'", s.replace('\'', "''"))),
-                serde_yaml::Value::Number(n) => Ok(n.to_string()),
-                serde_yaml::Value::Bool(b) => Ok(b.to_string()),
-                other => yaml_value_to_scalar_string(other),
-            }
-        }
+        EnvValue::RawYamlScalar(raw) => match raw {
+            serde_yaml::Value::String(s) => Ok(format!("'{}'", s.replace('\'', "''"))),
+            serde_yaml::Value::Number(n) => Ok(n.to_string()),
+            serde_yaml::Value::Bool(b) => Ok(b.to_string()),
+            other => yaml_value_to_scalar_string(other),
+        },
     }
 }
 
@@ -1625,12 +1626,10 @@ mod tests {
         let body = "dependencies.Agent.result";
         let job_steps = vec![
             Step::Bash(
-                BashStep::new("A", "echo a")
-                    .with_env("R1", EnvValue::runtime_expression(body)),
+                BashStep::new("A", "echo a").with_env("R1", EnvValue::runtime_expression(body)),
             ),
             Step::Bash(
-                BashStep::new("B", "echo b")
-                    .with_env("R2", EnvValue::runtime_expression(body)),
+                BashStep::new("B", "echo b").with_env("R2", EnvValue::runtime_expression(body)),
             ),
         ];
         let mut job = Job::new(JobId::new("J").unwrap(), "J", Pool::VmImage("u".into()));
@@ -2783,5 +2782,20 @@ mod tests {
         let m = v.as_mapping().unwrap();
         assert!(m.get(s("fetchDepth")).is_none());
         assert!(m.get(s("fetchTags")).is_none());
+    }
+
+    #[test]
+    fn lower_checkout_none_emits_checkout_none() {
+        let c = CheckoutStep {
+            repository: CheckoutRepo::None,
+            clean: None,
+            submodules: None,
+            fetch_depth: None,
+            fetch_tags: None,
+            persist_credentials: None,
+        };
+        let v = lower_checkout(&c);
+        let m = v.as_mapping().unwrap();
+        assert_eq!(m.get(s("checkout")).unwrap(), &s("none"));
     }
 }
