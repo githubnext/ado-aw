@@ -102,7 +102,39 @@ A common local development loop for compiler work:
    ```
 </Steps>
 
-If you are working on the docs site itself, run the site from `site/` with your usual Astro workflow after installing dependencies.
+## Work on the docs site
+
+The docs site lives in `site/` and is built with [Astro](https://astro.build/) + [Starlight](https://starlight.astro.build/).
+
+<Steps>
+1. Install dependencies:
+
+   ```bash
+   cd site
+   npm ci
+   ```
+
+2. Start the development server:
+
+   ```bash
+   npm run dev
+   ```
+
+   The site is served at `http://localhost:4321/ado-aw/`. Changes to `.mdx` files reload automatically.
+
+3. Or do a full build to confirm all pages compile and internal links are valid:
+
+   ```bash
+   npm run build:astro
+   ```
+
+   `build:astro` is faster than `npm run build` because it skips the Slidev slide export step. Use it for most content iterations.
+
+</Steps>
+
+:::note
+`npm run build` (without `:astro`) also compiles the intro slide deck under `site/slides/` using Playwright and Chromium. CI runs the full `build` command; use `build:astro` locally unless you are working on slides.
+:::
 
 ## What to verify before submitting changes
 
