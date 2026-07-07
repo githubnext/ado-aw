@@ -72,9 +72,8 @@ steps:
 
   - task: RustInstaller@1
     inputs:
-      # toolchainFeed intentionally omitted to test whether the task resolves
-      # the toolchain from its default source without the internal feed.
       rustVersion: ms-stable
+      toolchainFeed: "https://pkgs.dev.azure.com/msazuresphere/AgentPlayground/_packaging/AgentPlaygroundRustTools%40Local/nuget/v3/index.json"
       cratesIoFeedOverride: "$(CRATES_IO_FEED)"
     displayName: Install Rust toolchain
 
