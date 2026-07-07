@@ -99,6 +99,27 @@ Copilot auth — omit it otherwise. See
 the full field reference (`private-key` override, `api-url` for GHES,
 `skip-token-revocation`).
 
+**Custom model provider (BYOK).** To route the Copilot engine to an external LLM
+provider (e.g. Azure AI Foundry, OpenAI), use the `engine.provider` block. The
+compiler mints the provider credential in-job and auto-adds the provider hostname
+to the AWF network allowlist:
+```yaml
+engine:
+  id: copilot
+  model: gpt-4o   # model name on the external provider
+  provider:
+    base-url: https://my-foundry.cognitiveservices.azure.com/openai/v1
+    type: azure    # openai (default) | azure | anthropic
+    token:
+      service-connection: my-arm-connection  # ARM SC to mint AAD bearer token
+      # resource: https://cognitiveservices.azure.com  # optional; this is the default
+```
+For a static API key instead of a minted token, replace `token:` with
+`api-key: $(MY_KEY_VAR)`. Mutually exclusive with raw `COPILOT_PROVIDER_*` keys
+in `engine.env`. Only add this when the workflow needs a custom model provider.
+See [`docs/engine.md`](../docs/engine.md#copilot-model-provider-byok-configuration)
+for the full reference (`type`, `wire-api`, credential isolation via api-proxy sidecar).
+
 ### Step 3 — Schedule
 
 Use the **fuzzy schedule syntax** (deterministic time scattering based on agent name hash prevents load spikes). Omit `on.schedule` (or omit `on:` entirely) for manual/trigger-only pipelines.
