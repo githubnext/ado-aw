@@ -72,7 +72,10 @@ async function setupPr(
 }
 
 async function teardownPr(ctx: ScenarioContext, state: PrState): Promise<void> {
-  await ctx.rest.abandonPullRequest(state.repo, state.prId);
+  // Attempt both cleanups independently: if abandoning the PR throws (e.g. a
+  // transient network error), the source branch must still be deleted so it is
+  // not left orphaned for the janitor backstop to reap.
+  await ctx.rest.abandonPullRequest(state.repo, state.prId).catch(() => {});
   await ctx.rest.deleteRef(state.repo, `refs/heads/${state.branch}`);
 }
 
@@ -171,8 +174,11 @@ export const submitPrReview: Scenario<PrState> = {
   }),
   assert: async (ctx, state) => {
     const reviewers = await ctx.rest.listReviewers(state.repo, state.prId);
-    const approved = reviewers.some((r) => r.vote > 0);
-    if (!approved) throw new Error(`PR #${state.prId} has no approving reviewer vote`);
+    // The scenario submits event: "approve", which maps to ADO vote=10.
+    // Assert the exact vote so an executor regression producing a different
+    // approving vote (e.g. 5 = "approve with suggestions") is caught.
+    const approved = reviewers.some((r) => r.vote === 10);
+    if (!approved) throw new Error(`PR #${state.prId} has no approving (vote=10) reviewer`);
   },
   cleanup: teardownPr,
 };

@@ -92,6 +92,10 @@ export EXECUTOR_E2E_ADO_REPO="agent-definitions"
 # Optional:
 # export EXECUTOR_E2E_GITHUB_TOKEN="<fine-grained PAT: Issues rw on githubnext/ado-aw>"
 # export E2E_QUEUE_PIPELINE_ID="<noop-target pipeline id>"
+# Optional timeout tuning (milliseconds) for slow environments:
+# export EXECUTOR_E2E_REST_TIMEOUT_MS=30000     # per ADO REST call (default 30000)
+# export EXECUTOR_E2E_EXECUTE_TIMEOUT_MS=600000 # per `ado-aw execute` run (default 600000)
+# export EXECUTOR_E2E_GIT_TIMEOUT_MS=300000     # per git subprocess call (default 300000)
 
 node scripts/ado-script/test-bin/executor-e2e.js
 ```

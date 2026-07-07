@@ -49,6 +49,10 @@ export async function runScenario<S>(
     ctx.log(`[${tool}] setup`);
     try {
       state = await scenario.setup(ctx);
+      // IMPORTANT: cleanup runs ONLY after this point (guarded by setupDone in
+      // the finally block). If setup() throws before this line, cleanup WILL
+      // NOT run — scenarios must inline-teardown any partially created remote
+      // state in their own setup() catch (see setupPr in scenarios/pr.ts).
       setupDone = true;
     } catch (err) {
       if (err instanceof SkipError) {
