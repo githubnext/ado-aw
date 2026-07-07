@@ -68,6 +68,20 @@ describe("loadIssueEnv", () => {
     const env = loadIssueEnv({ ADO_AW_DEBUG_GITHUB_TOKEN: "fallback" } as NodeJS.ProcessEnv);
     expect(env.token).toBe("fallback");
   });
+
+  it("honors an explicit EXECUTOR_E2E_ISSUE_REPO override", () => {
+    const env = loadIssueEnv({
+      EXECUTOR_E2E_ISSUE_REPO: "jamesadevine/ado-aw-issues",
+    } as NodeJS.ProcessEnv);
+    expect(env.repo).toBe("jamesadevine/ado-aw-issues");
+  });
+
+  it("treats an unexpanded ADO macro as unset and falls back to the default", () => {
+    const env = loadIssueEnv({
+      EXECUTOR_E2E_ISSUE_REPO: "$(EXECUTOR_E2E_ISSUE_REPO)",
+    } as NodeJS.ProcessEnv);
+    expect(env.repo).toBe("githubnext/ado-aw");
+  });
 });
 
 describe("fileFailureIssue", () => {

@@ -30,8 +30,12 @@ variables:
   # ADO Git repo (with an initialised main branch) used by the PR/git/
   # create-pull-request scenarios.
   EXECUTOR_E2E_ADO_REPO: agent-definitions
-  # GitHub repo that failure issues are filed against.
-  EXECUTOR_E2E_ISSUE_REPO: githubnext/ado-aw
+  # GitHub repo that failure issues are filed against. NOT defined here on
+  # purpose: a YAML `variables:` entry SHADOWS a same-named pipeline (definition)
+  # variable, so hardcoding it would block per-pipeline overrides. Set
+  # EXECUTOR_E2E_ISSUE_REPO as a pipeline/definition variable to redirect issue
+  # filing (e.g. to a fork you can write to); the harness defaults to
+  # githubnext/ado-aw when it is unset.
   # Optional-precondition scenarios: empty by default so queue-build / wiki
   # skip gracefully. Override at queue time (or via a variable group) to enable.
   E2E_QUEUE_PIPELINE_ID: ""
