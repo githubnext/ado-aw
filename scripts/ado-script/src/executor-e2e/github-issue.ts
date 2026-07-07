@@ -76,7 +76,10 @@ export function renderIssueBody(
     "| --- | --- | --- |",
     ...failed.map(
       (r) =>
-        `| \`${r.tool}\` | ${r.phase ?? "?"} | ${(r.message ?? "").replace(/\|/g, "\\|").slice(0, 400)} |`,
+        // Collapse newlines to spaces so a multi-line message (e.g. an embedded
+        // stderr/partial-output dump) can't terminate the table row and corrupt
+        // the rendered report; escape pipes; then bound the length.
+        `| \`${r.tool}\` | ${r.phase ?? "?"} | ${(r.message ?? "").replace(/\r?\n/g, " ").replace(/\|/g, "\\|").slice(0, 400)} |`,
     ),
     "",
     "## Run",

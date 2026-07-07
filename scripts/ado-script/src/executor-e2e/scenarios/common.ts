@@ -8,11 +8,12 @@ import { SkipError } from "../scenario.js";
 /** Read a numeric field from the executor's success `result` payload. */
 export function numResult(record: ExecutedRecord, key: string): number {
   const value = record.result?.[key];
-  const n = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(n)) {
+  // Require an actual number: Number(null/""/false/[]) all coerce to a finite
+  // 0, which would silently pass an invalid/missing id through the assertion.
+  if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new Error(`executor result.${key} is not a number (got ${JSON.stringify(value)})`);
   }
-  return n;
+  return value;
 }
 
 /** Read a string field from the executor's success `result` payload. */

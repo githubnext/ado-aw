@@ -182,7 +182,10 @@ export class AdoRest {
       `_apis/git/repositories/${AdoRest.seg(repo)}/refs?filter=${encodeURIComponent(refFilter)}&api-version=7.1`,
     );
     const res = await this.request<{ value?: { name: string; objectId: string }[] }>(path);
-    return res?.value?.[0]?.objectId;
+    // `filter` is a prefix match (heads/main also matches heads/main-foo), so
+    // select the exact ref by name rather than trusting the first result.
+    const fullName = `refs/${refFilter}`;
+    return res?.value?.find((r) => r.name === fullName)?.objectId;
   }
 
   /** Delete a ref (branch or tag) by setting its newObjectId to zeros. */
@@ -223,15 +226,20 @@ export class AdoRest {
     const res = await this.request<{ commits?: { commitId: string }[] }>(path, {
       method: "POST",
       body: {
+        // Creating a NEW branch: oldObjectId must be zeros (the ref does not
+        // exist yet) and the commit must declare parents:[baseCommitId] so it
+        // is a child of the base — mirrors the Rust executor's push in
+        // src/safe_outputs/create_pull_request.rs.
         refUpdates: [
           {
             name: branchName.startsWith("refs/") ? branchName : `refs/heads/${branchName}`,
-            oldObjectId: baseCommitId,
+            oldObjectId: "0000000000000000000000000000000000000000",
           },
         ],
         commits: [
           {
             comment,
+            parents: [baseCommitId],
             changes: [
               {
                 changeType: "add",

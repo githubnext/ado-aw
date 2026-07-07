@@ -39,13 +39,22 @@ async function setupPr(
     `deterministic executor e2e ${tool}`,
   );
 
-  const pr = await ctx.rest.createPullRequest(
-    repo,
-    branch,
-    baseBranch,
-    `${ctx.prefix(tool)} (do not merge)`,
-    detBody(ctx, tool),
-  );
+  // From here the source branch exists in ADO. setup() throwing leaves
+  // setupDone=false so the runner won't call cleanup — so any failure after
+  // the push must tear down what was created before rethrowing.
+  let pr: { pullRequestId: number };
+  try {
+    pr = await ctx.rest.createPullRequest(
+      repo,
+      branch,
+      baseBranch,
+      `${ctx.prefix(tool)} (do not merge)`,
+      detBody(ctx, tool),
+    );
+  } catch (err) {
+    await ctx.rest.deleteRef(repo, `refs/heads/${branch}`).catch(() => {});
+    throw err;
+  }
 
   const state: PrState = { repo, prId: pr.pullRequestId, branch };
   if (withThread) {
@@ -53,9 +62,8 @@ async function setupPr(
       const thread = await ctx.rest.createThread(repo, pr.pullRequestId, "seed thread for e2e");
       state.threadId = thread.id;
     } catch (err) {
-      // The PR + source branch already exist; setup() throwing leaves
-      // setupDone=false so the runner won't call cleanup. Abandon them here so
-      // a flaky createThread doesn't leak dangling ADO objects, then rethrow.
+      // Abandon the PR + delete the branch so a flaky createThread doesn't leak
+      // dangling ADO objects, then rethrow.
       await teardownPr(ctx, state).catch(() => {});
       throw err;
     }
