@@ -406,14 +406,8 @@ impl Executor for CreateWikiPageResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safe_outputs::ToolResult;
 
     // ── ToolResult / macro ────────────────────────────────────────────────────
-
-    #[test]
-    fn test_result_has_correct_name() {
-        assert_eq!(CreateWikiPageResult::NAME, "create-wiki-page");
-    }
 
     #[test]
     fn test_params_deserializes() {
@@ -469,6 +463,10 @@ mod tests {
         };
         let result: Result<CreateWikiPageResult, _> = params.try_into();
         assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("path must not be empty"),
+            "expected 'path must not be empty' in error"
+        );
     }
 
     #[test]
@@ -480,6 +478,10 @@ mod tests {
         };
         let result: Result<CreateWikiPageResult, _> = params.try_into();
         assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains(".."),
+            "expected '..' mentioned in error"
+        );
     }
 
     #[test]
@@ -502,6 +504,10 @@ mod tests {
         };
         let result: Result<CreateWikiPageResult, _> = params.try_into();
         assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("at least 10 characters"),
+            "expected 'at least 10 characters' in error"
+        );
     }
 
     #[test]
@@ -823,50 +829,6 @@ wiki-name: "MyProject.wiki"
         let outcome = result.execute_impl(&ctx).await.unwrap();
         assert!(!outcome.success);
         assert!(outcome.message.contains("path-prefix"));
-    }
-
-    #[tokio::test]
-    async fn test_execute_page_already_exists_is_rejected() {
-        // When the page already exists the executor must fail —
-        // editing is not allowed by this tool.
-        use std::collections::HashMap;
-
-        let mut tool_configs = HashMap::new();
-        tool_configs.insert(
-            "create-wiki-page".to_string(),
-            serde_json::json!({ "wiki-name": "Proj.wiki" }),
-        );
-
-        // Build result directly to bypass Stage-1 validation
-        let result = CreateWikiPageResult {
-            name: "create-wiki-page".to_string(),
-            path: "/Agent/Page".to_string(),
-            content: "some content here".to_string(),
-            comment: None,
-        };
-
-        let ctx = crate::safe_outputs::ExecutionContext {
-            ado_org_url: Some("https://dev.azure.com/myorg".to_string()),
-            ado_organization: Some("myorg".to_string()),
-            ado_project: Some("MyProject".to_string()),
-            access_token: Some("fake-token".to_string()),
-            working_directory: std::path::PathBuf::from("."),
-            source_directory: std::path::PathBuf::from("."),
-            tool_configs,
-            repository_id: None,
-            repository_name: None,
-            allowed_repositories: HashMap::new(),
-            agent_stats: None,
-            dry_run: false,
-            ..Default::default()
-        };
-
-        // The GET will fail (network unreachable with a fake host), so the
-        // executor returns an anyhow error. We only need to confirm the
-        // already-exists guard is reachable; the no-network path verifies the
-        // guard logic via the unit test below.
-        let _ = result.execute_impl(&ctx).await;
-        // (we cannot assert success/failure here without a real server)
     }
 
     // ── URL encoding ──────────────────────────────────────────────────────────
