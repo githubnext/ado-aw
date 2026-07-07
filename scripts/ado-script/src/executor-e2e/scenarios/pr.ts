@@ -10,7 +10,7 @@
  * Test-harness module; not shipped in `ado-script.zip`.
  */
 import type { Scenario, ScenarioContext } from "../scenario.js";
-import { defaultBranchShortName, detBody } from "./common.js";
+import { defaultBranchShortName, detBody, Teardown } from "./common.js";
 
 interface PrState {
   repo: string;
@@ -75,8 +75,12 @@ async function teardownPr(ctx: ScenarioContext, state: PrState): Promise<void> {
   // Attempt both cleanups independently: if abandoning the PR throws (e.g. a
   // transient network error), the source branch must still be deleted so it is
   // not left orphaned for the janitor backstop to reap.
-  await ctx.rest.abandonPullRequest(state.repo, state.prId).catch(() => {});
-  await ctx.rest.deleteRef(state.repo, `refs/heads/${state.branch}`);
+  await new Teardown()
+    .add("abandon PR", () => ctx.rest.abandonPullRequest(state.repo, state.prId))
+    .add("delete source branch", () =>
+      ctx.rest.deleteRef(state.repo, `refs/heads/${state.branch}`),
+    )
+    .run();
 }
 
 export const addPrComment: Scenario<PrState> = {

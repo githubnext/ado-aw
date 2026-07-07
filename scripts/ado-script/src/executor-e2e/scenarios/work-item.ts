@@ -4,7 +4,7 @@
  * Test-harness module; not shipped in `ado-script.zip`.
  */
 import type { ExecutedRecord, Scenario, ScenarioContext } from "../scenario.js";
-import { detBody } from "./common.js";
+import { detBody, Teardown } from "./common.js";
 
 const WORK_ITEM_TYPE = "Task";
 
@@ -110,8 +110,12 @@ export const linkWorkItems: Scenario<{ source: number; target: number }> = {
     }
   },
   cleanup: async (ctx, state) => {
-    await ctx.rest.deleteWorkItem(state.source);
-    await ctx.rest.deleteWorkItem(state.target);
+    // Delete both work items independently: a throw deleting the source must
+    // not leave the target orphaned.
+    await new Teardown()
+      .add("delete source work item", () => ctx.rest.deleteWorkItem(state.source))
+      .add("delete target work item", () => ctx.rest.deleteWorkItem(state.target))
+      .run();
   },
 };
 

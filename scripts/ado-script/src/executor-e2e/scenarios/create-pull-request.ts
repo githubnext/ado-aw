@@ -23,7 +23,7 @@ import { join } from "node:path";
 
 import type { Scenario, ScenarioContext } from "../scenario.js";
 import { partialOutput } from "../execute-cli.js";
-import { detBody } from "./common.js";
+import { detBody, Teardown } from "./common.js";
 
 interface CreatePrState {
   repo: string;
@@ -202,10 +202,21 @@ export const createPullRequest: Scenario<CreatePrState> = {
     if (!sha) throw new Error(`source branch '${state.sourceBranch}' was not pushed`);
   },
   cleanup: async (ctx, state) => {
-    if (state.prId !== undefined) await ctx.rest.abandonPullRequest(state.repo, state.prId);
-    await ctx.rest.deleteRef(state.repo, `refs/heads/${state.sourceBranch}`);
-    // Remove the cloned checkout so repeated local runs don't accumulate it.
-    await rm(state.sourcesDir, { recursive: true, force: true });
+    // Attempt each cleanup independently so an early failure never skips the
+    // rest — otherwise a throwing abandonPullRequest would leak the source
+    // branch and the local checkout dir.
+    const teardown = new Teardown();
+    if (state.prId !== undefined) {
+      const prId = state.prId;
+      teardown.add("abandon PR", () => ctx.rest.abandonPullRequest(state.repo, prId));
+    }
+    await teardown
+      .add("delete source branch", () =>
+        ctx.rest.deleteRef(state.repo, `refs/heads/${state.sourceBranch}`),
+      )
+      // Remove the cloned checkout so repeated local runs don't accumulate it.
+      .add("remove local checkout", () => rm(state.sourcesDir, { recursive: true, force: true }))
+      .run();
   },
 };
 

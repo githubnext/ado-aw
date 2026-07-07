@@ -51,3 +51,54 @@ export function requireEnv(name: string, tool: string): string {
   }
   return value;
 }
+
+/**
+ * Runs a series of *independent* teardown steps, guaranteeing every step is
+ * attempted even if an earlier one throws.
+ *
+ * This exists to kill a recurring cleanup bug: writing teardown as sequential
+ * awaits — `await abandonPr(); await deleteBranch();` — silently skips
+ * `deleteBranch()` whenever `abandonPr()` rejects, leaking the branch. Wrapping
+ * each in an ad-hoc `.catch(() => {})` fixes the leak but swallows the failure.
+ *
+ * Instead, register each step and call `run()`: every step runs, failures are
+ * collected, and a single aggregated error is thrown at the end so a genuinely
+ * broken teardown still surfaces (the runner logs it as a cleanup WARNING)
+ * without any step being skipped.
+ *
+ * ```ts
+ * await new Teardown()
+ *   .add("abandon PR", () => ctx.rest.abandonPullRequest(repo, prId))
+ *   .add("delete branch", () => ctx.rest.deleteRef(repo, `refs/heads/${branch}`))
+ *   .run();
+ * ```
+ */
+export class Teardown {
+  private readonly steps: { label: string; fn: () => Promise<unknown> }[] = [];
+
+  /** Register one independent teardown step. Returns `this` for chaining. */
+  add(label: string, fn: () => Promise<unknown>): this {
+    this.steps.push({ label, fn });
+    return this;
+  }
+
+  /**
+   * Run every registered step in order. All steps are attempted regardless of
+   * individual failures; if any threw, a single aggregated error is thrown
+   * after the last step completes.
+   */
+  async run(): Promise<void> {
+    const failures: string[] = [];
+    for (const { label, fn } of this.steps) {
+      try {
+        await fn();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        failures.push(`${label}: ${message}`);
+      }
+    }
+    if (failures.length > 0) {
+      throw new Error(`teardown had ${failures.length} failure(s): ${failures.join("; ")}`);
+    }
+  }
+}
