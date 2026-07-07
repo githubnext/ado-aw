@@ -157,7 +157,9 @@ The fuzzy schedule syntax scatters execution time deterministically based on the
 | `weekly on monday` | Every Monday, scattered time |
 | `weekly on friday around 17:00` | Friday ~5 PM UTC |
 | `hourly` | Every hour, scattered minute |
-| `every 2h` | Every 2 hours |
+| `every 2h` | Every N hours (valid: 1, 2, 3, 4, 6, 8, 12) |
+| `every 3 days` | Every N days, scattered time |
+| `every 2 weeks` | Every N weeks (converted to N×7 days) |
 | `bi-weekly` | Every 14 days |
 | `tri-weekly` | Every 21 days |
 | `daily between 9:00 and 17:00` | Business hours |
@@ -306,7 +308,7 @@ Before finalizing any update, verify:
 
 2. **MCP allow-lists**: Custom MCP servers (with `container:` or `url:`) have explicit `allowed:` lists.
 
-3. **Schedule syntax**: The schedule expression uses valid fuzzy schedule syntax. Valid frequencies: `daily`, `weekly on <day>`, `hourly`, `every Nh`, `every N minutes`, `bi-weekly`, `tri-weekly`. Valid time specs: `around HH:MM`, `between HH:MM and HH:MM`.
+3. **Schedule syntax**: The schedule expression uses valid fuzzy schedule syntax. Valid frequencies: `daily`, `weekly on <day>`, `hourly`, `every Nh`, `every N minutes`, `every N days`, `every N weeks`, `bi-weekly`, `tri-weekly`. Valid time specs: `around HH:MM`, `between HH:MM and HH:MM`.
 
 4. **Repository aliases**: Every repo alias used in agent instructions or safe-output `repository:` fields exists as an entry in `repos:` with `checkout: true` (the default).
 
