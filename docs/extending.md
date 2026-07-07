@@ -11,7 +11,7 @@ When extending the compiler:
 1. **New CLI commands**: add variants to the `Commands` enum in `src/main.rs`, implement dispatch, and add parsing/behavior tests.
 2. **New compile targets**: build a typed `Pipeline` IR in a target wrapper module under `src/compile/` (use existing `standalone_ir.rs`, `onees_ir.rs`, `job_ir.rs`, and `stage_ir.rs` as references). The canonical Setup → Agent → Detection → SafeOutputs → Teardown shape, plus the optional Conclusion job, lives in `src/compile/agentic_pipeline.rs` and is reused by every target — wrappers only set the per-target `PipelineShape` and lift the shared `BuiltPipelineContext` into the right envelope.
 3. **New front matter fields**: add fields to `FrontMatter` or nested config types in `src/compile/types.rs`. Breaking changes require a codemod under `src/compile/codemods/`; see [`docs/codemods.md`](codemods.md).
-4. **New compiler extensions**: implement the `CompilerExtension` `name` / `phase` / `declarations` trio and return typed `Declarations`.
+4. **New compiler extensions**: implement `name()` and `phase()`; override `declarations()` (which defaults to `Ok(Declarations::default())`) when the extension contributes steps, hosts, tools, or other signals.
 5. **New safe-output tools**: add to `src/safe_outputs/`, implement the safe-output data model and executor, and register it in MCP and Stage 3 execution wiring.
 6. **New first-class tools**: create `src/tools/<name>/` with `mod.rs` and `extension.rs` (`CompilerExtension` impl). Add `execute.rs` if the tool has Stage 3 runtime logic. Extend `ToolsConfig` in `types.rs` and collection in `collect_extensions()`.
 7. **New runtimes**: create `src/runtimes/<name>/` with `mod.rs` (config types/helpers) and `extension.rs` (`CompilerExtension` impl). Extend `RuntimesConfig` in `types.rs` and collection in `collect_extensions()`.
@@ -36,7 +36,12 @@ Runtimes, first-class tools, and always-on compiler infrastructure declare compi
 pub trait CompilerExtension {
     fn name(&self) -> &str;
     fn phase(&self) -> ExtensionPhase;
-    fn declarations(&self, ctx: &CompileContext) -> Result<Declarations>;
+    /// Default returns `Ok(Declarations::default())` — override when the
+    /// extension contributes steps, hosts, tools, or other signals.
+    fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
+        let _ = ctx;
+        Ok(Declarations::default())
+    }
 }
 ```
 
