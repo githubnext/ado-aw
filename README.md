@@ -500,9 +500,10 @@ safe-outputs:
   create-work-item:
     work-item-type: Task
     require-approval:
-      approvers: ["my-ado-group"]   # Optional: specific approvers
-      timeout-minutes: 1440         # Optional: 24h default
-      on-timeout: reject            # "reject" (default) or "approve"
+      approvers: ["my-ado-group"]        # Optional: who can approve (empty = anyone with run access)
+      notify-users: ["lead@example.com"] # Optional: who receives a notification email
+      timeout-minutes: 1440              # Optional: 24h; default = ADO job/stage limit
+      on-timeout: reject                 # "reject" (fail-closed, default) or "resume" (auto-approve)
       instructions: "Review carefully before approving."
 ```
 
