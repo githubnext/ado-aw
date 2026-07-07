@@ -102,10 +102,15 @@ export function renderIssueBody(
 
 type FetchImpl = typeof fetch;
 
+/** Default per-request timeout for GitHub API calls, matching AdoRest's 30s. */
+const DEFAULT_GITHUB_TIMEOUT_MS = 30_000;
+
 interface GitHubClientOptions {
   token: string;
   repo: string;
   fetchImpl?: FetchImpl;
+  /** Per-request timeout in ms (defaults to DEFAULT_GITHUB_TIMEOUT_MS). */
+  timeoutMs?: number;
 }
 
 function ghHeaders(token: string): Record<string, string> {
@@ -129,7 +134,12 @@ export async function findOpenIssueByTitle(
   // this comfortably covers the expected scale) to avoid the exact-match
   // .find() missing an existing issue and filing a duplicate.
   const url = `https://api.github.com/search/issues?q=${encodeURIComponent(q)}&per_page=100`;
-  const res = await fetchImpl(url, { headers: ghHeaders(opts.token) });
+  const res = await fetchImpl(url, {
+    headers: ghHeaders(opts.token),
+    // Bound every GitHub call so a hung response can't stall main() indefinitely
+    // after all scenarios complete and burn the ADO job's wall-clock limit.
+    signal: AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_GITHUB_TIMEOUT_MS),
+  });
   if (!res.ok) throw new Error(`GitHub search failed: HTTP ${res.status}`);
   const json = (await res.json()) as { items?: { number: number; title: string }[] };
   return json.items?.find((i) => i.title === title)?.number;
@@ -147,6 +157,7 @@ export async function createGitHubIssue(
     method: "POST",
     headers: { ...ghHeaders(opts.token), "Content-Type": "application/json" },
     body: JSON.stringify({ title, body, labels }),
+    signal: AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_GITHUB_TIMEOUT_MS),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");

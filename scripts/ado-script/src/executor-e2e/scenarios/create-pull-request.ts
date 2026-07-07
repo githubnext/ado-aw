@@ -23,7 +23,7 @@ import { join } from "node:path";
 
 import type { Scenario, ScenarioContext } from "../scenario.js";
 import { partialOutput } from "../execute-cli.js";
-import { detBody, Teardown } from "./common.js";
+import { detBody, numResult, Teardown } from "./common.js";
 
 interface CreatePrState {
   repo: string;
@@ -189,10 +189,7 @@ export const createPullRequest: Scenario<CreatePrState> = {
     patch_sha256: state.patchSha256,
   }),
   assert: async (ctx, state, record) => {
-    const prId = record.result?.pull_request_id;
-    if (typeof prId !== "number") {
-      throw new Error(`create-pull-request result has no numeric pull_request_id`);
-    }
+    const prId = numResult(record, "pull_request_id");
     // Record the PR id up front so cleanup abandons it even if a later
     // assertion (or the getPullRequest call itself) throws.
     state.prId = prId;
