@@ -146,6 +146,7 @@ Available ecosystem identifiers include:
 |------------|----------|
 | `defaults` | Certificate infrastructure, Ubuntu mirrors, common package registries |
 | `github` | GitHub domains (`github.com`, `*.githubusercontent.com`, etc.) |
+| `gh-aw` | GitHub domains needed for AWF/gh-aw binary downloads (`codeload.github.com`, `raw.githubusercontent.com`, etc.) |
 | `local` | Loopback addresses (`localhost`, `127.0.0.1`, `::1`) |
 | `containers` | Docker Hub, GHCR, Quay, Kubernetes |
 | `linux-distros` | Debian, Alpine, Fedora, CentOS, Arch Linux package repositories |
@@ -159,10 +160,17 @@ Available ecosystem identifiers include:
 | `ruby` | RubyGems, Bundler |
 | `swift` | Swift.org, CocoaPods |
 | `terraform` | HashiCorp releases, Terraform registry |
+| `threat-detection` | Copilot API and telemetry domains used by the Detection stage |
+
+**Compound identifier** (expands to a union of component identifiers):
+
+| Identifier | Expands to |
+|------------|------------|
+| `default-safe-outputs` | `defaults` + `dev-tools` + `github` + `local` — the standard set of domains needed for most safe-output execution scenarios |
 
 Additional ecosystems: `bazel`, `chrome`, `clojure`, `dart`, `deno`, `elixir`, `fonts`, `github-actions`, `haskell`, `julia`, `kotlin`, `latex`, `lean`, `lua`, `node-cdns`, `ocaml`, `perl`, `php`, `playwright`, `powershell`, `python-native`, `r`, `scala`, `zig`.
 
-The full domain lists are defined in `src/data/ecosystem_domains.json`.
+The full domain lists for direct identifiers are defined in `src/data/ecosystem_domains.json`. Compound identifiers are defined in `src/ecosystem_domains.rs`.
 
 All hosts (core + MCP-specific + ecosystem expansions + user-specified) are combined into a comma-separated domain list passed to AWF's `--allow-domains` flag.
 
