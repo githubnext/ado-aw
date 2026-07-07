@@ -386,6 +386,10 @@ export class AdoRest {
   }
 
   async putWikiPage(wiki: string, pagePath: string, content: string): Promise<void> {
+    // Unconditional PUT with no If-Match ETag: this only works for CREATING a
+    // new page (or overwriting when the caller doesn't care about concurrency).
+    // ADO requires an ETag to UPDATE an existing page and returns 412 otherwise
+    // — a future caller updating an existing page must add an If-Match header.
     const path = this.projPath(
       `_apis/wiki/wikis/${AdoRest.seg(wiki)}/pages?path=${encodeURIComponent(pagePath)}&api-version=7.1`,
     );

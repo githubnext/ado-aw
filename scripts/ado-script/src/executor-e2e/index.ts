@@ -109,7 +109,8 @@ if (process.env.VITEST !== "true") {
   main().then(
     (code) => process.exit(code),
     (err: unknown) => {
-      log(`executor-e2e crashed: ${(err as Error).message}`);
+      const e = err as Error;
+      log(`executor-e2e crashed: ${e.stack ?? e.message}`);
       process.exit(1);
     },
   );

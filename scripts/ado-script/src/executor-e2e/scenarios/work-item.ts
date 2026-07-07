@@ -4,7 +4,7 @@
  * Test-harness module; not shipped in `ado-script.zip`.
  */
 import type { ExecutedRecord, Scenario, ScenarioContext } from "../scenario.js";
-import { detBody, numResult } from "./common.js";
+import { detBody } from "./common.js";
 
 const WORK_ITEM_TYPE = "Task";
 
@@ -27,8 +27,15 @@ export const createWorkItem: Scenario<{ createdId?: number }> = {
     tags: [],
   }),
   assert: async (ctx, state, record: ExecutedRecord) => {
-    const id = numResult(record, "id");
-    state.createdId = id;
+    // Populate state.createdId BEFORE the fallible numeric check so cleanup can
+    // still delete the work item if the executor returned a non-numeric id
+    // (per the Scenario.assert contract).
+    const rawId = record.result?.["id"];
+    state.createdId = typeof rawId === "number" ? rawId : undefined;
+    if (typeof rawId !== "number" || !Number.isFinite(rawId)) {
+      throw new Error(`executor result.id is not a number (got ${JSON.stringify(rawId)})`);
+    }
+    const id = rawId;
     const wi = await ctx.rest.getWorkItem(id);
     const title = wi.fields["System.Title"];
     if (title !== ctx.prefix("create-work-item")) {

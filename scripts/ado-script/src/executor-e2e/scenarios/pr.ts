@@ -131,15 +131,14 @@ export const resolvePrThread: Scenario<PrState> = {
   assert: async (ctx, state) => {
     if (state.threadId === undefined) throw new Error(`[resolve-pr-thread] threadId not set by setup`);
     const thread = await ctx.rest.getThread(state.repo, state.prId, state.threadId);
-    // ADO returns thread status as either a numeric enum (1=active, 2=fixed,
-    // 3=wontFix, 4=closed, 5=byDesign, 6=pending) or its string name. We
-    // requested "fixed", so allowlist the resolved terminal states rather than
-    // denylisting "active" — an unexpected code must never pass as success.
-    const raw = thread.status;
-    const status = String(raw ?? "").toLowerCase();
-    const resolved = new Set(["2", "3", "4", "5", "fixed", "wontfix", "closed", "bydesign"]);
+    // ADO returns thread status as either a numeric enum (2=fixed) or its
+    // string name. We requested "fixed", so accept ONLY the "fixed" states —
+    // resolving to wontFix/closed/byDesign instead would be an executor
+    // regression the test must catch, not pass.
+    const status = String(thread.status ?? "").toLowerCase();
+    const resolved = new Set(["2", "fixed"]);
     if (!resolved.has(status)) {
-      throw new Error(`thread #${state.threadId} was not resolved (status='${status}')`);
+      throw new Error(`thread #${state.threadId} not resolved to 'fixed' (got '${status}')`);
     }
   },
   cleanup: teardownPr,
