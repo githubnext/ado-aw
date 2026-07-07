@@ -129,9 +129,14 @@ export const uploadWorkitemAttachment: Scenario<{ id: number }> = {
   }),
   assert: async (ctx, state) => {
     const relations = await ctx.rest.getWorkItemRelations(state.id);
-    const hasAttachment = relations.some((r) => r.rel === "AttachedFile");
+    // Assert the specific file we uploaded is attached (ADO surfaces the file
+    // name in the AttachedFile relation attributes), not just that some
+    // attachment exists — the scratch item starts with none.
+    const hasAttachment = relations.some(
+      (r) => r.rel === "AttachedFile" && r.attributes?.["name"] === "attachment.txt",
+    );
     if (!hasAttachment) {
-      throw new Error(`work item #${state.id} has no attached file`);
+      throw new Error(`work item #${state.id} has no 'attachment.txt' attached file`);
     }
   },
   cleanup: async (ctx, state) => ctx.rest.deleteWorkItem(state.id),

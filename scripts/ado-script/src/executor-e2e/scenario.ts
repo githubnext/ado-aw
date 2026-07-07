@@ -68,7 +68,14 @@ export interface Scenario<State = unknown> {
   readonly targetsAdoRepo?: boolean;
   /** Per-tool `safe-outputs: <tool>:` front-matter config fragment. */
   config(ctx: ScenarioContext, state: State): Record<string, unknown>;
-  /** Create ADO preconditions; return remembered state. */
+  /**
+   * Create ADO preconditions; return remembered state.
+   *
+   * When this throws (a non-`SkipError`), the runner will NOT call `cleanup()`
+   * (state is considered unreliable). Any ADO objects partially created before
+   * the throw must therefore be torn down explicitly inside this function
+   * before rethrowing — see `pr.ts` `setupPr` for the pattern.
+   */
   setup(ctx: ScenarioContext): Promise<State>;
   /**
    * Build the executor NDJSON entry (WITHOUT the `name` field — the runner

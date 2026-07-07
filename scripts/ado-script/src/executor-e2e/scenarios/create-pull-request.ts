@@ -51,14 +51,20 @@ function runGit(
     // command line, so the token never appears in the process argv
     // (/proc/<pid>/cmdline). GIT_TERMINAL_PROMPT=0 makes auth failures fail
     // fast instead of blocking on an interactive credential prompt.
+    //
+    // Append at the next free index rather than clobbering GIT_CONFIG_COUNT to
+    // "1", so any GIT_CONFIG_KEY/VALUE_N entries the agent or a variable group
+    // already injected are preserved.
+    const existingCount = Number.parseInt(process.env.GIT_CONFIG_COUNT ?? "0", 10);
+    const idx = Number.isFinite(existingCount) && existingCount > 0 ? existingCount : 0;
     const child = spawn("git", args, {
       cwd,
       env: {
         ...process.env,
         GIT_TERMINAL_PROMPT: "0",
-        GIT_CONFIG_COUNT: "1",
-        GIT_CONFIG_KEY_0: "http.extraheader",
-        GIT_CONFIG_VALUE_0: `Authorization: ${extraHeader}`,
+        GIT_CONFIG_COUNT: String(idx + 1),
+        [`GIT_CONFIG_KEY_${idx}`]: "http.extraheader",
+        [`GIT_CONFIG_VALUE_${idx}`]: `Authorization: ${extraHeader}`,
       },
     });
     let stdout = "";
