@@ -75,6 +75,10 @@ export interface Scenario<State = unknown> {
    * (state is considered unreliable). Any ADO objects partially created before
    * the throw must therefore be torn down explicitly inside this function
    * before rethrowing — see `pr.ts` `setupPr` for the pattern.
+   *
+   * Note: this applies only to failures in `setup()` itself. Once `setup()`
+   * completes, a later throw in `config()`/`ndjson()`/`files()`/`env()` or
+   * `assert()` DOES run `cleanup()` (the runner gates cleanup on `setupDone`).
    */
   setup(ctx: ScenarioContext): Promise<State>;
   /**

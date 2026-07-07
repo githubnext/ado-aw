@@ -22,6 +22,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { Scenario, ScenarioContext } from "../scenario.js";
+import { partialOutput } from "../execute-cli.js";
 import { detBody } from "./common.js";
 
 interface CreatePrState {
@@ -83,7 +84,7 @@ function runGit(
     child.on("close", (code) => {
       clearTimeout(timer);
       if (timedOut) {
-        reject(new Error(`git ${args.join(" ")} timed out after ${timeoutMs}ms`));
+        reject(new Error(`git ${args.join(" ")} timed out after ${timeoutMs}ms${partialOutput(stdout, stderr)}`));
         return;
       }
       resolve({ code: code ?? -1, stdout, stderr });
@@ -149,6 +150,9 @@ export const createPullRequest: Scenario<CreatePrState> = {
 
     // Deterministic edit: add a new file, then capture a git diff (which
     // `git apply --3way` applies cleanly on top of the target branch).
+    // The buildId-scoped path is assumed untracked: `git add -N` on an
+    // already-tracked path is a no-op, so `git diff` would be empty and setup
+    // would (cleanly) fail with "generated patch is empty".
     const relFile = `ado-aw-det/${ctx.buildId}.md`;
     const absFile = join(checkout, relFile);
     await mkdir(join(absFile, ".."), { recursive: true });

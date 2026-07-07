@@ -181,6 +181,14 @@ export async function runExecute(opts: RunExecuteOptions): Promise<RunExecuteRes
   return { exitCode, stdout, stderr, records, record };
 }
 
+/** Append a truncated snapshot of a subprocess's output to a timeout message. */
+export function partialOutput(stdout: string, stderr: string): string {
+  const parts: string[] = [];
+  if (stdout.trim()) parts.push(`\n--- partial stdout ---\n${stdout.slice(0, 500)}`);
+  if (stderr.trim()) parts.push(`\n--- partial stderr ---\n${stderr.slice(0, 500)}`);
+  return parts.join("");
+}
+
 function spawnCollect(
   cmd: string,
   args: string[],
@@ -208,7 +216,9 @@ function spawnCollect(
     child.on("close", (code) => {
       clearTimeout(timer);
       if (timedOut) {
-        reject(new Error(`ado-aw execute timed out after ${timeoutMs}ms`));
+        // Include any accumulated output so a hung run is diagnosable from the
+        // error/issue body rather than only from the raw ADO logs.
+        reject(new Error(`ado-aw execute timed out after ${timeoutMs}ms${partialOutput(stdout, stderr)}`));
         return;
       }
       resolve({ exitCode: code ?? -1, stdout, stderr });
