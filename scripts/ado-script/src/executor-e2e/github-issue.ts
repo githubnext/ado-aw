@@ -37,7 +37,7 @@ export function loadIssueEnv(env: NodeJS.ProcessEnv = process.env): IssueEnv {
   }
   return {
     token: env.EXECUTOR_E2E_GITHUB_TOKEN?.trim() || env.ADO_AW_DEBUG_GITHUB_TOKEN?.trim(),
-    repo: env.EXECUTOR_E2E_ISSUE_REPO?.trim() || DEFAULT_REPO,
+    repo: cleanVar(env.EXECUTOR_E2E_ISSUE_REPO) || DEFAULT_REPO,
     labels,
     buildId: env.BUILD_BUILDID?.trim(),
     buildUrl:
@@ -47,6 +47,19 @@ export function loadIssueEnv(env: NodeJS.ProcessEnv = process.env): IssueEnv {
         : undefined),
     project: env.SYSTEM_TEAMPROJECT?.trim(),
   };
+}
+
+/**
+ * Trim a pipeline env value, treating an UNEXPANDED ADO macro (e.g. the literal
+ * `$(EXECUTOR_E2E_ISSUE_REPO)`) as absent. ADO passes a `$(VAR)` reference
+ * through verbatim when VAR is undefined, so without this guard an unset
+ * override would be used as a bogus repo slug instead of falling back to the
+ * default.
+ */
+function cleanVar(raw: string | undefined): string | undefined {
+  const value = raw?.trim();
+  if (!value || /^\$\(.*\)$/.test(value)) return undefined;
+  return value;
 }
 
 /**
