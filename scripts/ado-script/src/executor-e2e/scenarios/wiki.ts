@@ -28,7 +28,10 @@ async function discoverWiki(ctx: ScenarioContext, tool: string): Promise<string>
 }
 
 function pagePath(ctx: ScenarioContext, tool: string): string {
-  return `/ado-aw-det/${ctx.buildId}/${tool}`;
+  // A single flat segment: ADO wiki does not auto-create ancestor pages, so a
+  // nested path like `/ado-aw-det/<buildId>/<tool>` 404s with
+  // WikiAncestorPageNotFoundException. Encode the hierarchy in the leaf name.
+  return `/ado-aw-det-${ctx.buildId}-${tool}`;
 }
 
 export const createWikiPage: Scenario<WikiState> = {

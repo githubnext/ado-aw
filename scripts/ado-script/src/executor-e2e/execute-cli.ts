@@ -162,6 +162,12 @@ export async function runExecute(opts: RunExecuteOptions): Promise<RunExecuteRes
     SYSTEM_ACCESSTOKEN: opts.token,
     AZURE_DEVOPS_ORG_URL: opts.orgUrl,
     SYSTEM_TEAMPROJECT: opts.project,
+    // The executor resolves relative safe-output file paths (e.g. attachment /
+    // artifact payloads) against BUILD_SOURCESDIRECTORY, falling back to the
+    // process CWD. Default it to the safe-output dir so files staged via
+    // `files()` resolve; scenarios that need a real checkout (create-pull-
+    // request) override this through extraEnv below.
+    BUILD_SOURCESDIRECTORY: safeOutputDir,
     ...opts.extraEnv,
   };
 
