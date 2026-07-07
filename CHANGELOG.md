@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.42.0](https://github.com/githubnext/ado-aw/compare/v0.41.0...v0.42.0) (2026-07-07)
+
+
+### Features
+
+* **engine:** add engine.provider (BYOK) with in-job Azure CLI token minting ([#1377](https://github.com/githubnext/ado-aw/issues/1377)) ([2c4f40b](https://github.com/githubnext/ado-aw/commit/2c4f40bb8e73f2b464a73562eb09a9f40855d4ec))
+* **inspect:** add Copilot model list updater workflow and fix catalog drift ([#1376](https://github.com/githubnext/ado-aw/issues/1376)) ([b620ae6](https://github.com/githubnext/ado-aw/commit/b620ae658bdc0120ba7c9986f6c591ce4ba089ab))
+
+
+### Bug Fixes
+
+* **compile:** disable checkout in conclusion job ([#1382](https://github.com/githubnext/ado-aw/issues/1382)) ([f9b6d9b](https://github.com/githubnext/ado-aw/commit/f9b6d9b6541d873287863a6088c1416802a930b5))
+
 ## [0.41.0](https://github.com/githubnext/ado-aw/compare/v0.40.0...v0.41.0) (2026-07-06)
 
 

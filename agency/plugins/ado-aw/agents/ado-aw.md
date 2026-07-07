@@ -60,10 +60,10 @@ Route the user's request to the matching skill:
 
 The create/update/debug skills load these compiler-version-pinned playbooks:
 
-- Create: https://raw.githubusercontent.com/githubnext/ado-aw/v0.41.0/prompts/create-ado-agentic-workflow.md <!-- x-release-please-version -->
-- Update: https://raw.githubusercontent.com/githubnext/ado-aw/v0.41.0/prompts/update-ado-agentic-workflow.md <!-- x-release-please-version -->
-- Debug: https://raw.githubusercontent.com/githubnext/ado-aw/v0.41.0/prompts/debug-ado-agentic-workflow.md <!-- x-release-please-version -->
-- Full reference: https://raw.githubusercontent.com/githubnext/ado-aw/v0.41.0/AGENTS.md <!-- x-release-please-version -->
+- Create: https://raw.githubusercontent.com/githubnext/ado-aw/v0.42.0/prompts/create-ado-agentic-workflow.md <!-- x-release-please-version -->
+- Update: https://raw.githubusercontent.com/githubnext/ado-aw/v0.42.0/prompts/update-ado-agentic-workflow.md <!-- x-release-please-version -->
+- Debug: https://raw.githubusercontent.com/githubnext/ado-aw/v0.42.0/prompts/debug-ado-agentic-workflow.md <!-- x-release-please-version -->
+- Full reference: https://raw.githubusercontent.com/githubnext/ado-aw/v0.42.0/AGENTS.md <!-- x-release-please-version -->
 
 ## Guardrails
 
