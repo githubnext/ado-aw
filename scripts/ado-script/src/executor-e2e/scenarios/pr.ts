@@ -168,21 +168,29 @@ export const resolvePrThread: Scenario<PrState> = {
 export const submitPrReview: Scenario<PrState> = {
   tool: "submit-pr-review",
   targetsAdoRepo: true,
-  config: (ctx) => ({ "allowed-events": ["approve"], "allowed-repositories": [ctx.adoRepo], max: 1 }),
+  config: (ctx) => ({
+    "allowed-events": ["request-changes"],
+    "allowed-repositories": [ctx.adoRepo],
+    max: 1,
+  }),
   setup: (ctx) => setupPr(ctx, "submit-pr-review", false),
   ndjson: async (ctx, state) => ({
     pull_request_id: state.prId,
-    event: "approve",
+    // Use "request-changes" (vote=-5), not a positive vote: the executor's
+    // self-approval guard blocks approve/approve-with-suggestions on a PR the
+    // authenticated identity created, and the harness (like the real pipeline)
+    // creates and reviews the PR with the SAME identity. A negative vote
+    // exercises the same submit path without tripping the guard.
+    event: "request-changes",
     body: detBody(ctx, "submit-pr-review"),
     repository: ctx.adoRepo,
   }),
   assert: async (ctx, state) => {
     const reviewers = await ctx.rest.listReviewers(state.repo, state.prId);
-    // The scenario submits event: "approve", which maps to ADO vote=10.
-    // Assert the exact vote so an executor regression producing a different
-    // approving vote (e.g. 5 = "approve with suggestions") is caught.
-    const approved = reviewers.some((r) => r.vote === 10);
-    if (!approved) throw new Error(`PR #${state.prId} has no approving (vote=10) reviewer`);
+    // "request-changes" maps to ADO vote=-5. Assert the exact vote so an
+    // executor regression producing a different vote is caught.
+    const voted = reviewers.some((r) => r.vote === -5);
+    if (!voted) throw new Error(`PR #${state.prId} has no request-changes (vote=-5) reviewer`);
   },
   cleanup: teardownPr,
 };
