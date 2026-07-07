@@ -174,6 +174,51 @@ export interface FileIssueOutcome {
 }
 
 /**
+ * On a GitHub auth/permission failure (401/403), probe `GET /user` to report
+ * exactly what went wrong instead of leaving the operator to guess. Turns an
+ * opaque "HTTP 403" into an actionable line naming the target repo, the
+ * authenticated login (or "token invalid/revoked" on 401), and the token's
+ * accepted permissions. Best-effort: never throws.
+ */
+export async function diagnoseGitHubAuthFailure(
+  opts: GitHubClientOptions,
+  status: number,
+  log: (msg: string) => void,
+): Promise<void> {
+  if (status !== 401 && status !== 403) return;
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  try {
+    const res = await fetchImpl("https://api.github.com/user", {
+      headers: ghHeaders(opts.token),
+      signal: AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_GITHUB_TIMEOUT_MS),
+    });
+    const accepted = res.headers.get("x-accepted-github-permissions") ?? "(none reported)";
+    if (res.status === 401) {
+      log(
+        `GitHub token diagnosis: HTTP 401 from /user — the token is invalid, expired, or REVOKED ` +
+          `(GitHub auto-revokes tokens shared in plaintext). Generate a fresh token. Target repo: ${opts.repo}.`,
+      );
+      return;
+    }
+    if (res.ok) {
+      const user = (await res.json()) as { login?: string };
+      log(
+        `GitHub token diagnosis: authenticated as '${user.login ?? "?"}' but got HTTP ${status} filing to ` +
+          `'${opts.repo}'. The token authenticates but lacks Issues:write on that repo (or, for a fine-grained ` +
+          `PAT, its resource-owner/repository-access does not include it). Accepted perms: ${accepted}.`,
+      );
+      return;
+    }
+    log(
+      `GitHub token diagnosis: HTTP ${status} filing to '${opts.repo}'; /user probe returned ${res.status}. ` +
+        `Check the token's Issues:write permission and repository access.`,
+    );
+  } catch (err) {
+    log(`GitHub token diagnosis probe failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/**
  * File (or dedupe) a failure issue. No-op when there are no failures or when no
  * token is configured.
  */
@@ -191,13 +236,31 @@ export async function fileFailureIssue(
   }
 
   const opts: GitHubClientOptions = { token: env.token, repo: env.repo, fetchImpl };
+  // Log the resolved target up front: the repo can come from a definition
+  // variable OR the YAML default, and a wrong target is a common failure cause.
+  log(`filing failure issue to '${env.repo}' (${failed.length} failed scenario(s))`);
   const title = buildIssueTitle(failed);
-  const existing = await findOpenIssueByTitle(opts, title);
-  if (existing !== undefined) {
-    log(`open issue #${existing} already tracks this failure signature; skipping`);
-    return { filed: false, reason: `deduped to #${existing}` };
+  try {
+    const existing = await findOpenIssueByTitle(opts, title);
+    if (existing !== undefined) {
+      log(`open issue #${existing} already tracks this failure signature; skipping`);
+      return { filed: false, reason: `deduped to #${existing}` };
+    }
+    const url = await createGitHubIssue(opts, title, renderIssueBody(results, env), env.labels);
+    log(`filed GitHub issue: ${url}`);
+    return { filed: true, url };
+  } catch (err) {
+    // Surface an actionable diagnosis for auth/permission failures before
+    // rethrowing so the caller's WARNING still carries the raw error too.
+    const status = statusFromError(err);
+    if (status !== undefined) await diagnoseGitHubAuthFailure(opts, status, log);
+    throw err;
   }
-  const url = await createGitHubIssue(opts, title, renderIssueBody(results, env), env.labels);
-  log(`filed GitHub issue: ${url}`);
-  return { filed: true, url };
+}
+
+/** Extract a trailing "HTTP <status>" code from a thrown GitHub client error. */
+function statusFromError(err: unknown): number | undefined {
+  const message = err instanceof Error ? err.message : String(err);
+  const match = message.match(/HTTP (\d{3})/);
+  return match ? Number(match[1]) : undefined;
 }
