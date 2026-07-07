@@ -114,7 +114,7 @@ apply one note to every tool.
 - When **every** configured tool requires approval (no automatic tools),
   execution is **not** split — the single `SafeOutputs` job is gated behind
   `ManualReview` in its entirety. Note this also defers the always-enabled
-  diagnostic outputs (`noop`, `report_incomplete`, `missing-tool`,
+  diagnostic outputs (`noop`, `report-incomplete`, `missing-tool`,
   `missing-data`) until after approval, since they share that one job. If you
   want diagnostics to apply without waiting on a human, leave at least one
   low-impact tool (e.g. `add-pr-comment`) non-gated so the automatic split job
