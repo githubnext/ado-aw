@@ -98,12 +98,15 @@ export const replyToPrComment: Scenario<PrState> = {
   targetsAdoRepo: true,
   config: (ctx) => ({ "allowed-repositories": [ctx.adoRepo], max: 1 }),
   setup: (ctx) => setupPr(ctx, "reply-to-pr-comment", true),
-  ndjson: async (ctx, state) => ({
-    pull_request_id: state.prId,
-    thread_id: state.threadId,
-    content: detBody(ctx, "reply-to-pr-comment"),
-    repository: ctx.adoRepo,
-  }),
+  ndjson: async (ctx, state) => {
+    if (state.threadId === undefined) throw new Error(`[reply-to-pr-comment] threadId not set by setup`);
+    return {
+      pull_request_id: state.prId,
+      thread_id: state.threadId,
+      content: detBody(ctx, "reply-to-pr-comment"),
+      repository: ctx.adoRepo,
+    };
+  },
   assert: async (ctx, state) => {
     if (state.threadId === undefined) throw new Error(`[reply-to-pr-comment] threadId not set by setup`);
     const thread = await ctx.rest.getThread(state.repo, state.prId, state.threadId);
@@ -122,12 +125,15 @@ export const resolvePrThread: Scenario<PrState> = {
     max: 1,
   }),
   setup: (ctx) => setupPr(ctx, "resolve-pr-thread", true),
-  ndjson: async (ctx, state) => ({
-    pull_request_id: state.prId,
-    thread_id: state.threadId,
-    status: "fixed",
-    repository: ctx.adoRepo,
-  }),
+  ndjson: async (ctx, state) => {
+    if (state.threadId === undefined) throw new Error(`[resolve-pr-thread] threadId not set by setup`);
+    return {
+      pull_request_id: state.prId,
+      thread_id: state.threadId,
+      status: "fixed",
+      repository: ctx.adoRepo,
+    };
+  },
   assert: async (ctx, state) => {
     if (state.threadId === undefined) throw new Error(`[resolve-pr-thread] threadId not set by setup`);
     const thread = await ctx.rest.getThread(state.repo, state.prId, state.threadId);

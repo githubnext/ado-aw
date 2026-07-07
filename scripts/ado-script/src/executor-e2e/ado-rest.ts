@@ -28,6 +28,8 @@ interface RequestOptions {
   /** Treat 404 as `undefined` instead of throwing. */
   allow404?: boolean;
   accept?: string;
+  /** Extra request headers (e.g. `If-Match` for a conditional wiki PUT). */
+  headers?: Record<string, string>;
 }
 
 export class AdoRest {
@@ -70,7 +72,7 @@ export class AdoRest {
   }
 
   private async request<T>(path: string, opts: RequestOptions = {}): Promise<T | undefined> {
-    const headers: Record<string, string> = { Accept: opts.accept ?? "application/json" };
+    const headers: Record<string, string> = { Accept: opts.accept ?? "application/json", ...opts.headers };
     let body: string | undefined;
     if (opts.rawBody !== undefined) {
       body = opts.rawBody;
@@ -385,15 +387,26 @@ export class AdoRest {
     return { content: json.content, eTag };
   }
 
-  async putWikiPage(wiki: string, pagePath: string, content: string): Promise<void> {
-    // Unconditional PUT with no If-Match ETag: this only works for CREATING a
-    // new page (or overwriting when the caller doesn't care about concurrency).
-    // ADO requires an ETag to UPDATE an existing page and returns 412 otherwise
-    // — a future caller updating an existing page must add an If-Match header.
+  /**
+   * Create or update a wiki page. ADO requires an `If-Match` ETag to overwrite
+   * an EXISTING page (it returns HTTP 412 for an unconditional PUT to a page
+   * that already exists); creating a new page must omit `If-Match`. Callers
+   * updating a page should first {@link getWikiPage} and pass its `eTag`.
+   */
+  async putWikiPage(
+    wiki: string,
+    pagePath: string,
+    content: string,
+    eTag?: string,
+  ): Promise<void> {
     const path = this.projPath(
       `_apis/wiki/wikis/${AdoRest.seg(wiki)}/pages?path=${encodeURIComponent(pagePath)}&api-version=7.1`,
     );
-    await this.request(path, { method: "PUT", body: { content } });
+    await this.request(path, {
+      method: "PUT",
+      body: { content },
+      headers: eTag ? { "If-Match": eTag } : undefined,
+    });
   }
 
   async deleteWikiPage(wiki: string, pagePath: string): Promise<void> {

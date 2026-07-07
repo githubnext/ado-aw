@@ -56,8 +56,12 @@ export const updateWikiPage: Scenario<WikiState> = {
   setup: async (ctx) => {
     const wiki = await discoverWiki(ctx, "update-wiki-page");
     const path = pagePath(ctx, "update-wiki-page");
-    // Precondition: the page must already exist for update-wiki-page.
-    await ctx.rest.putWikiPage(wiki, path, "original deterministic content");
+    // Precondition: the page must already exist for update-wiki-page. Fetch it
+    // first so a leftover page from a previous failed run is overwritten with a
+    // conditional PUT (ADO returns 412 for an unconditional PUT to an existing
+    // page); when absent, the ETag-less PUT creates it fresh.
+    const existing = await ctx.rest.getWikiPage(wiki, path);
+    await ctx.rest.putWikiPage(wiki, path, "original deterministic content", existing?.eTag);
     return { wiki, path };
   },
   ndjson: async (ctx, state) => ({

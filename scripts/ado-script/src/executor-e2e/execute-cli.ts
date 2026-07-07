@@ -14,7 +14,7 @@
 import { spawn } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 
 import type { ExecutedRecord } from "./scenario.js";
 
@@ -127,8 +127,14 @@ export async function runExecute(opts: RunExecuteOptions): Promise<RunExecuteRes
   );
 
   // Stage any extra files (patch, attachment payloads) relative to the safe-output dir.
+  const safeRoot = resolve(safeOutputDir);
   for (const [rel, contents] of Object.entries(opts.files ?? {})) {
-    const target = join(safeOutputDir, rel);
+    const target = resolve(safeOutputDir, rel);
+    // Safety rail: a scenario's `files()` key must stay within the scratch dir
+    // (reject `../` traversal) even though all current authors are trusted.
+    if (target !== safeRoot && !target.startsWith(safeRoot + sep)) {
+      throw new Error(`refusing to stage file outside the safe-output dir: '${rel}'`);
+    }
     await mkdir(join(target, ".."), { recursive: true });
     await writeFile(target, contents, "utf8");
   }
