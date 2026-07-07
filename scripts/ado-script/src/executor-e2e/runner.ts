@@ -25,7 +25,6 @@ export async function runScenario<S>(
   const start = Date.now();
   const tool = scenario.tool;
   const scenarioDir = join(ctx.workDir, tool);
-  await mkdir(scenarioDir, { recursive: true });
 
   let state: S | undefined;
   let setupDone = false;
@@ -37,6 +36,15 @@ export async function runScenario<S>(
   });
 
   try {
+    // Create the scratch dir with its own catch so a failure here (disk full,
+    // permission error) records a failed result instead of propagating out of
+    // runScenario and aborting runAll's loop over the remaining scenarios.
+    try {
+      await mkdir(scenarioDir, { recursive: true });
+    } catch (err) {
+      return finish({ ok: false, phase: "setup", message: errMessage(err) });
+    }
+
     // ---- setup ----
     ctx.log(`[${tool}] setup`);
     try {

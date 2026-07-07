@@ -308,14 +308,14 @@ export class AdoRest {
     repo: string,
     prId: number,
     threadId: number,
-  ): Promise<{ id: number; status?: string | number; comments?: { id: number; content: string }[] }> {
+  ): Promise<{ id: number; status?: string | number; comments?: { id: number; content?: string | null }[] }> {
     const path = this.projPath(
       `_apis/git/repositories/${AdoRest.seg(repo)}/pullRequests/${prId}/threads/${threadId}?api-version=7.1`,
     );
     const res = await this.request<{
       id: number;
       status?: string | number;
-      comments?: { id: number; content: string }[];
+      comments?: { id: number; content?: string | null }[];
     }>(path);
     if (!res) throw new Error(`getThread(${threadId}) returned no body`);
     return res;

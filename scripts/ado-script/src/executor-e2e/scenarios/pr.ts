@@ -107,7 +107,7 @@ export const replyToPrComment: Scenario<PrState> = {
   assert: async (ctx, state) => {
     if (state.threadId === undefined) throw new Error(`[reply-to-pr-comment] threadId not set by setup`);
     const thread = await ctx.rest.getThread(state.repo, state.prId, state.threadId);
-    const replied = (thread.comments ?? []).some((c) => c.content.includes(`build ${ctx.buildId}`));
+    const replied = (thread.comments ?? []).some((c) => (c.content ?? "").includes(`build ${ctx.buildId}`));
     if (!replied) throw new Error(`reply not found on thread #${state.threadId}`);
   },
   cleanup: teardownPr,
