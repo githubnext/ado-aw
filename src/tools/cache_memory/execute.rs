@@ -258,73 +258,56 @@ async fn process_memory_file(
     Ok(FileOutcome::Copied(metadata.len()))
 }
 
-/// Process agent memory from the safe output directory.
+/// Check that `path` is a real (non-symlink) directory ready for processing.
 ///
-/// Validates and copies sanitized memory files from `source_dir/agent_memory/`
-/// to `output_dir/agent_memory/`.
-pub async fn process_agent_memory(
-    source_dir: &Path,
-    output_dir: &Path,
-    config: &MemoryConfig,
-) -> Result<ExecutionResult> {
-    let memory_source = source_dir.join(AGENT_MEMORY_DIR);
-
-    // Use symlink_metadata (lstat) so we do NOT follow a symlink at the base
-    // directory level — a top-level `agent_memory -> /sensitive/dir` symlink
-    // in the artifact would otherwise bypass all per-file containment checks.
-    match tokio::fs::symlink_metadata(&memory_source).await {
+/// Uses `symlink_metadata` (lstat) so a top-level `agent_memory ->
+/// /sensitive/dir` symlink is caught before any per-file checks.
+/// Returns `Some(result)` to short-circuit (skip), `None` to proceed.
+async fn check_memory_source_dir(path: &Path) -> Result<Option<ExecutionResult>> {
+    match tokio::fs::symlink_metadata(path).await {
         Err(_) => {
             info!("No agent_memory directory found, skipping memory processing");
-            return Ok(ExecutionResult::success("No agent memory to process"));
+            Ok(Some(ExecutionResult::success("No agent memory to process")))
         }
         Ok(m) if m.is_symlink() => {
             warn!(
                 "agent_memory is a symlink — skipping to prevent directory escape: {}",
-                memory_source.display()
+                path.display()
             );
-            return Ok(ExecutionResult::success("No agent memory to process"));
+            Ok(Some(ExecutionResult::success("No agent memory to process")))
         }
         Ok(m) if !m.is_dir() => {
             info!("No agent_memory directory found, skipping memory processing");
-            return Ok(ExecutionResult::success("No agent memory to process"));
+            Ok(Some(ExecutionResult::success("No agent memory to process")))
         }
-        Ok(_) => {} // real directory, proceed
+        Ok(_) => Ok(None), // real directory, proceed
     }
+}
 
-    info!("Processing agent memory from: {}", memory_source.display());
-
-    let files = collect_files(&memory_source, &memory_source).await?;
-
-    if files.is_empty() {
-        info!("Agent memory directory is empty");
-        return Ok(ExecutionResult::success("Agent memory directory is empty"));
-    }
-
-    info!("Found {} file(s) in agent_memory", files.len());
-
-    // Canonicalize the base directory once for containment checks below.
-    // This is required for the symlink-following defense: we compare canonical
-    // resolved paths to ensure no file escapes the memory directory boundary.
-    let canonical_base = tokio::fs::canonicalize(&memory_source).await.with_context(|| {
-        format!(
-            "Cannot verify memory directory containment (symlink defense requires canonical path): {}",
-            memory_source.display()
-        )
-    })?;
-
-    let memory_output = output_dir.join(AGENT_MEMORY_DIR);
+/// Copy `files` from `memory_source` to `memory_output`, accumulating totals.
+///
+/// Logs a line for each skipped file and returns a human-readable summary
+/// message. `canonical_base` is used by [`process_memory_file`] for the
+/// symlink-containment check.
+async fn copy_files_to_output(
+    files: &[PathBuf],
+    memory_source: &Path,
+    canonical_base: &Path,
+    memory_output: &Path,
+    config: &MemoryConfig,
+) -> Result<String> {
     let mut total_size: u64 = 0;
     let mut copied_count = 0;
     let mut skipped_count = 0;
     let mut skipped_reasons: Vec<String> = Vec::new();
 
-    for relative_path in &files {
+    for relative_path in files {
         let source_file = memory_source.join(relative_path);
         let dest_file = memory_output.join(relative_path);
         match process_memory_file(
             relative_path,
             &source_file,
-            &canonical_base,
+            canonical_base,
             &dest_file,
             config,
             total_size,
@@ -342,14 +325,55 @@ pub async fn process_agent_memory(
         }
     }
 
-    let message = format!(
-        "Agent memory processed: {} file(s) copied ({} bytes), {} skipped",
-        copied_count, total_size, skipped_count
-    );
-
     for reason in &skipped_reasons {
         info!("Skipped: {}", reason);
     }
+
+    Ok(format!(
+        "Agent memory processed: {} file(s) copied ({} bytes), {} skipped",
+        copied_count, total_size, skipped_count
+    ))
+}
+
+/// Process agent memory from the safe output directory.
+///
+/// Validates and copies sanitized memory files from `source_dir/agent_memory/`
+/// to `output_dir/agent_memory/`.
+pub async fn process_agent_memory(
+    source_dir: &Path,
+    output_dir: &Path,
+    config: &MemoryConfig,
+) -> Result<ExecutionResult> {
+    let memory_source = source_dir.join(AGENT_MEMORY_DIR);
+
+    if let Some(skip_result) = check_memory_source_dir(&memory_source).await? {
+        return Ok(skip_result);
+    }
+
+    info!("Processing agent memory from: {}", memory_source.display());
+
+    let files = collect_files(&memory_source, &memory_source).await?;
+
+    if files.is_empty() {
+        info!("Agent memory directory is empty");
+        return Ok(ExecutionResult::success("Agent memory directory is empty"));
+    }
+
+    info!("Found {} file(s) in agent_memory", files.len());
+
+    // Canonicalize the base directory once for containment checks in
+    // process_memory_file — canonical paths guard against TOCTOU symlink races.
+    let canonical_base = tokio::fs::canonicalize(&memory_source).await.with_context(|| {
+        format!(
+            "Cannot verify memory directory containment (symlink defense requires canonical path): {}",
+            memory_source.display()
+        )
+    })?;
+
+    let memory_output = output_dir.join(AGENT_MEMORY_DIR);
+    let message =
+        copy_files_to_output(&files, &memory_source, &canonical_base, &memory_output, config)
+            .await?;
 
     info!("{}", message);
     println!("{}", message);
