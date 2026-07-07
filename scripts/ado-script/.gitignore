@@ -16,3 +16,4 @@ conclusion.js
 github-app-token.js
 schema
 *.tsbuildinfo
+test-bin

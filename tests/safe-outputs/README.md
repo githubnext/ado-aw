@@ -12,6 +12,13 @@ end-to-end against a real ADO project at least once a day. A green
 pipeline = Stage 1 (agent) → Stage 2 (threat detection) → Stage 3
 (executor) → ADO REST round-trip all succeeded.
 
+> **See also — deterministic complement.** This suite depends on an LLM
+> (Stage 1) emitting each safe output, so it validates the full agentic
+> flow but is inherently non-deterministic. For a flake-free regression
+> check of the Stage 3 executor alone — crafting the executor's NDJSON
+> directly, with no agent in the loop — see the deterministic suite in
+> [`tests/executor-e2e/`](../executor-e2e/).
+
 ## What's here
 
 | File | Purpose |
