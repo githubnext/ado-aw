@@ -83,6 +83,7 @@ const FIXTURES: &[&str] = &[
     "execution-context-agent.md",
     "supply-chain-agent.md",
     "manual-review-agent.md",
+    "github-app-token-agent.md",
 ];
 
 /// Step display names that the lint expects to find at least once across all
@@ -132,6 +133,8 @@ const REQUIRED_STEP_DISPLAY_NAMES: &[&str] = &[
     "Stage PR-checks execution context (aw-context/pr/checks/*)", // src/compile/extensions/exec_context/pr_checks.rs (activated by on.pr + execution-context.pr.checks.enabled: true)
     "Detect reviewed proposals", // src/compile/agentic_pipeline.rs detect_reviewed_proposals_step (activated by safe-outputs.require-approval)
     "Render safe-outputs summary", // src/compile/agentic_pipeline.rs safe_outputs_summary_step (activated by any safe-output tool)
+    "Mint GitHub App token (Copilot engine auth)", // src/compile/extensions/ado_script.rs github_app_token_step_typed() (activated by engine.github-app-token)
+    "Revoke GitHub App token", // src/compile/extensions/ado_script.rs github_app_token_revoke_step_typed() (activated by engine.github-app-token)
 ];
 
 fn ado_aw_binary() -> PathBuf {
