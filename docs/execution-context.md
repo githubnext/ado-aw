@@ -233,7 +233,7 @@ and tells the agent:
 - ADO MCP tool calls remain possible (the PR id / project / repo are
   still embedded in the fragment).
 - Do NOT produce an empty review or pretend the PR has no changes —
-  surface the failure (e.g. via `report_incomplete`) or fall back to
+  surface the failure (e.g. via `report-incomplete`) or fall back to
   the API.
 
 If neither fragment is appended (Build.Reason ≠ PullRequest), the
@@ -354,7 +354,7 @@ status, plus three example ADO MCP tool calls
 (`build_get_build_by_id`, `build_list_artifacts`, `build_get_log`)
 with the buildId pre-filled. When the upstream did NOT succeed, the
 fragment explicitly nudges the agent to surface the failure (e.g.
-via `report_incomplete`) rather than assume a clean state.
+via `report-incomplete`) rather than assume a clean state.
 
 ## Bash allow-list auto-extension
 
