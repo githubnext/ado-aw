@@ -126,4 +126,57 @@ describe("fileFailureIssue", () => {
     expect(out.url).toBe("https://github.com/x/y/issues/9");
     expect(calls.some((c) => c.startsWith("POST"))).toBe(true);
   });
+
+  it("diagnoses a 403 create failure as authenticated-but-missing-Issues:write", async () => {
+    const logs: string[] = [];
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.includes("search/issues")) {
+        return new Response(JSON.stringify({ items: [] }), { status: 200 });
+      }
+      if (url.endsWith("/user")) {
+        return new Response(JSON.stringify({ login: "octocat" }), {
+          status: 200,
+          headers: { "x-accepted-github-permissions": "issues=write" },
+        });
+      }
+      // create issue
+      return new Response(JSON.stringify({ message: "Resource not accessible" }), { status: 403 });
+    }) as unknown as typeof fetch;
+    await expect(
+      fileFailureIssue(
+        failing,
+        { repo: "some/repo", labels: [], token: "t" },
+        (m) => logs.push(m),
+        fetchMock,
+      ),
+    ).rejects.toThrow(/HTTP 403/);
+    const diag = logs.find((l) => l.includes("token diagnosis"));
+    expect(diag).toContain("authenticated as 'octocat'");
+    expect(diag).toContain("some/repo");
+    expect(diag).toContain("Issues:write");
+  });
+
+  it("diagnoses a 401 search failure as an invalid/revoked token", async () => {
+    const logs: string[] = [];
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.includes("search/issues")) {
+        return new Response(JSON.stringify({ message: "Bad credentials" }), { status: 401 });
+      }
+      if (url.endsWith("/user")) {
+        return new Response(JSON.stringify({ message: "Bad credentials" }), { status: 401 });
+      }
+      return new Response("{}", { status: 201 });
+    }) as unknown as typeof fetch;
+    await expect(
+      fileFailureIssue(
+        failing,
+        { repo: "some/repo", labels: [], token: "t" },
+        (m) => logs.push(m),
+        fetchMock,
+      ),
+    ).rejects.toThrow(/HTTP 401/);
+    const diag = logs.find((l) => l.includes("token diagnosis"));
+    expect(diag).toContain("REVOKED");
+    expect(diag).toContain("some/repo");
+  });
 });
