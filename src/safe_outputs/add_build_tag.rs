@@ -182,6 +182,8 @@ impl Executor for AddBuildTagResult {
         let response = client
             .put(&url)
             .basic_auth("", Some(token))
+            .header(reqwest::header::CONTENT_LENGTH, "0")
+            .body(Vec::<u8>::new())
             .send()
             .await
             .context("Failed to send request")?;
@@ -217,6 +219,52 @@ impl Executor for AddBuildTagResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_execute_sends_explicit_empty_put_body() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/AgentPlayground/_apis/build/builds/42/tags/verified"))
+            .and(query_param("api-version", "7.1"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let result = AddBuildTagResult {
+            name: "add-build-tag".to_string(),
+            build_id: 42,
+            tag: "verified".to_string(),
+        };
+        let mut ctx = ExecutionContext::from_env_lookup(|_| None);
+        ctx.ado_org_url = Some(server.uri());
+        ctx.ado_project = Some("AgentPlayground".to_string());
+        ctx.access_token = Some("token".to_string());
+        ctx.build_id = Some(42);
+
+        let execution = result.execute_impl(&ctx).await.unwrap();
+        assert!(
+            execution.success,
+            "unexpected failure: {}",
+            execution.message
+        );
+
+        let requests = server
+            .received_requests()
+            .await
+            .expect("wiremock request history should be available");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].body, Vec::<u8>::new());
+        assert_eq!(
+            requests[0]
+                .headers
+                .get(reqwest::header::CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok()),
+            Some("0")
+        );
+    }
 
     #[test]
     fn test_params_deserializes() {
