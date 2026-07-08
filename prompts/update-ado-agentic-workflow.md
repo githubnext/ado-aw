@@ -211,7 +211,7 @@ mcp-servers:
       - get_status
 ```
 
-Custom MCPs **must** have an explicit `allowed:` list. Add any required external domains to `network.allowed`.
+Specifying an explicit `allowed:` list for custom MCPs is **strongly recommended** — without it, all tools from that server are accessible to the agent. Add any required external domains to `network.allowed`.
 
 ### Adding Permissions
 
