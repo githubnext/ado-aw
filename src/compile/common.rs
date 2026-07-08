@@ -480,6 +480,7 @@ pub fn validate_variable_groups(front_matter: &FrontMatter) -> Result<()> {
         );
     }
 
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for group in &front_matter.variable_groups {
         if !validate::is_valid_variable_group_name(group) {
             anyhow::bail!(
@@ -488,6 +489,21 @@ pub fn validate_variable_groups(front_matter: &FrontMatter) -> Result<()> {
                  characters, newlines, ADO expressions ('${{{{', '$(', '$['), pipeline commands \
                  ('##vso[', '##['), or the template marker ('{{{{'). Only group names belong \
                  here — never secret values."
+            );
+        }
+
+        // Reject duplicate imports (case-insensitive, whitespace-trimmed): ADO
+        // variable group names are case-insensitive display names, and importing
+        // the same group twice emits redundant `- group:` entries whose
+        // collision behaviour is unspecified. A duplicate is always an authoring
+        // mistake, so fail closed rather than silently emitting it.
+        let key = group.trim().to_ascii_lowercase();
+        if !seen.insert(key) {
+            anyhow::bail!(
+                "variable-groups entry {group:?} is imported more than once — remove the \
+                 duplicate. Azure DevOps variable group names are case-insensitive, so entries \
+                 that differ only by case or surrounding whitespace are treated as the same \
+                 group."
             );
         }
     }
@@ -2776,6 +2792,23 @@ mod tests {
             "---\nname: t\ndescription: d\nvariable-groups:\n  - \"$(evil)\"\n---\n".to_string();
         let (fm, _) = parse_markdown(&src).unwrap();
         assert!(validate_variable_groups(&fm).is_err());
+    }
+
+    #[test]
+    fn validate_variable_groups_rejects_duplicates() {
+        // Exact duplicate, case-only difference, and whitespace-only difference
+        // are all treated as the same group and rejected.
+        for second in ["Shared Secrets", "shared secrets", " Shared Secrets "] {
+            let src = format!(
+                "---\nname: t\ndescription: d\nvariable-groups:\n  - Shared Secrets\n  - \"{second}\"\n---\n"
+            );
+            let (fm, _) = parse_markdown(&src).unwrap();
+            let err = validate_variable_groups(&fm).unwrap_err().to_string();
+            assert!(
+                err.contains("imported more than once"),
+                "duplicate {second:?} must be rejected; err: {err}"
+            );
+        }
     }
 
     fn extension_declarations(extensions: &[Extension], fm: &FrontMatter) -> Vec<Declarations> {

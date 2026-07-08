@@ -485,6 +485,11 @@ Group names that contain ADO expressions (`${{`, `$(`, `$[`), pipeline
 commands (`##vso[`, `##[`), the compiler's template marker (`{{`), or
 control characters (including newlines) are rejected at compile time.
 
+Duplicate imports are also rejected. Azure DevOps variable group names are
+case-insensitive, so two entries that differ only by case or surrounding
+whitespace (e.g. `Shared Secrets` and `shared secrets`) are treated as the
+same group and fail compilation — remove the redundant entry.
+
 ### Target support
 
 `variable-groups:` is only valid for pipeline-level targets — `standalone`
