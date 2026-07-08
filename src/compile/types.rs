@@ -1259,15 +1259,19 @@ impl FrontMatter {
     /// prepare-pr-base feature gate (issue #1413): it drives BOTH the ado-script
     /// bundle download (`AdoScriptExtension::prepare_pr_base_active`, set in
     /// `collect_extensions`) and the Agent-job prepare-step emission
-    /// (`build_agent_job`). The default (`"main"`) matches
-    /// `crate::safe_outputs::CreatePrConfig`'s `default_target_branch`, so the
-    /// step is emitted with the same branch the Stage 3 executor targets.
+    /// (`build_agent_job`). When the `target-branch` key is absent the fallback
+    /// is taken from `crate::safe_outputs::CreatePrConfig`'s default (the same
+    /// value the Stage 3 executor resolves via `get_tool_config`), so the
+    /// prepare step always fetches the branch the executor targets — the two
+    /// cannot drift.
     pub fn create_pr_target_branch(&self) -> Option<String> {
         self.safe_outputs.get("create-pull-request").map(|v| {
             v.get("target-branch")
                 .and_then(|t| t.as_str())
-                .unwrap_or("main")
-                .to_string()
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    crate::safe_outputs::CreatePrConfig::default().target_branch
+                })
         })
     }
 
@@ -4173,6 +4177,63 @@ Body
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
         let noop = fm.safe_outputs.get("noop").unwrap();
         assert_eq!(noop.as_bool(), Some(false));
+    }
+
+    #[test]
+    fn test_create_pr_target_branch_explicit_and_default() {
+        // Explicit target-branch is returned verbatim.
+        let explicit = r#"---
+name: "PR Agent"
+description: "opens a PR"
+safe-outputs:
+  create-pull-request:
+    target-branch: release/2.x
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(explicit).unwrap();
+        assert_eq!(
+            fm.create_pr_target_branch(),
+            Some("release/2.x".to_string())
+        );
+
+        // Bare `create-pull-request: {}` (target-branch key absent) falls back
+        // to the shared CreatePrConfig default — exercises the `.unwrap_or_else`
+        // fallback the integration tests otherwise never hit.
+        let implicit = r#"---
+name: "PR Agent"
+description: "opens a PR"
+safe-outputs:
+  create-pull-request: {}
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(implicit).unwrap();
+        let default_branch =
+            crate::safe_outputs::CreatePrConfig::default().target_branch;
+        assert_eq!(fm.create_pr_target_branch(), Some(default_branch.clone()));
+        // Guard the shared default so a future rename can't silently make the
+        // prepare step fetch a branch the executor doesn't target.
+        assert_eq!(
+            default_branch, "main",
+            "CreatePrConfig default target branch must remain 'main'"
+        );
+
+        // Absent create-pull-request ⇒ None (no prepare step emitted).
+        let absent = r#"---
+name: "WI Agent"
+description: "files a work item"
+safe-outputs:
+  create-work-item:
+    work-item-type: Task
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(absent).unwrap();
+        assert_eq!(fm.create_pr_target_branch(), None);
     }
 
     #[test]

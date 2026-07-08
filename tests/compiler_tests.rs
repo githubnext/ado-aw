@@ -7867,6 +7867,22 @@ fn test_create_pull_request_prepare_step_uses_configured_target_branch() {
     );
 }
 
+/// A bare `create-pull-request: {}` (no `target-branch`) still emits the prepare
+/// step, targeting the default branch (`main`) — exercises the implicit-default
+/// fallback end-to-end.
+#[test]
+fn test_create_pull_request_prepare_step_defaults_target_branch() {
+    let compiled = compile_inline_agent(
+        "prepare-pr-base-implicit",
+        "---\nname: \"PR Agent\"\ndescription: \"opens a PR\"\nsafe-outputs:\n  create-pull-request: {}\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let agent = job_block(&compiled, "Agent");
+    assert!(
+        agent.contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js' --target-branch 'main'"),
+        "bare create-pull-request must emit the prepare step targeting 'main':\n{agent}"
+    );
+}
+
 /// An agent WITHOUT `create-pull-request` emits no prepare-pr-base step and
 /// never downloads the bundle.
 #[test]
