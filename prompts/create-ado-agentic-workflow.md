@@ -167,11 +167,11 @@ Controls where the agent's working directory is set.
 
 | Value | Path | Use when |
 |---|---|---|
-| `root` (default) | `$(Build.SourcesDirectory)` | Only checking out `self` |
-| `repo` (alias: `self`) | `$(Build.SourcesDirectory)/$(Build.Repository.Name)` | Multiple repos checked out |
+| `root` | `$(Build.SourcesDirectory)` | Only checking out `self` — **auto-default when no additional repos** |
+| `repo` (alias: `self`) | `$(Build.SourcesDirectory)/$(Build.Repository.Name)` | Multiple repos checked out — **auto-default when additional repos exist** |
 | *repo-alias* | `$(Build.SourcesDirectory)/<alias>` | Run in a specific checked-out repo |
 
-Only include `workspace:` if non-default. Warn the user if they set `workspace: repo` but have no additional repos in `repos:`.
+The compiler auto-selects the default: `root` when only `self` is checked out, `repo` when one or more additional repos are checked out. Only include `workspace:` explicitly when overriding this auto-selected default. Warn the user if they set `workspace: repo` but have no additional repos in `repos:`.
 
 ### Step 5 — Repositories & Checkout
 
@@ -745,7 +745,7 @@ When generating the agent file:
 
 1. **Produce exactly one `.md` file.** Do not create separate documentation, architecture notes, or runbooks.
 2. **Respect existing repository conventions** for file placement. Look at where existing pipeline YAML files or agent markdown files are located in the repo. If no convention exists, ask the user where they'd like the file placed.
-3. **Omit optional fields when they match defaults** — no `engine:` when only the default `copilot` engine with model `claude-opus-4.7` is needed, no `workspace:` for `root`, no `target:` for `standalone`.
+3. **Omit optional fields when they match defaults** — no `engine:` when only the default `copilot` engine with model `claude-opus-4.7` is needed, no `workspace:` when it matches the auto-selected default (see Step 4), no `target:` for `standalone`.
 4. **`permissions.write` is optional** — the Stage 3 executor defaults to `$(System.AccessToken)`. Only add `permissions.write` when the task requires cross-org writes or named-identity attribution.
 
 ## Compilation
