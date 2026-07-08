@@ -95,6 +95,19 @@ pub struct ExecutionContext {
     /// all artifacts in the build share this container, differentiated by item path.
     /// Required by `upload-pipeline-artifact` to know where to upload bytes.
     pub build_container_id: Option<u64>,
+    /// Orchestration **plan ID** (`SYSTEM_PLANID`) for the current run. Together
+    /// with [`Self::timeline_id`] and [`Self::job_id`] this addresses the
+    /// current job's timeline record, which is the only target for a
+    /// DistributedTask **attachment** create — the API `upload-build-attachment`
+    /// uses (the same mechanism as `##vso[task.addattachment]`). Present only
+    /// while a job is running; there is no equivalent for an arbitrary build.
+    pub plan_id: Option<String>,
+    /// Timeline ID (`SYSTEM_TIMELINEID`) for the current run. See
+    /// [`Self::plan_id`].
+    pub timeline_id: Option<String>,
+    /// Timeline **record ID** of the current job (`SYSTEM_JOBID`) — the record a
+    /// build attachment is attached to. See [`Self::plan_id`].
+    pub job_id: Option<String>,
     /// Human-readable build number (`BUILD_BUILDNUMBER`)
     #[allow(dead_code)]
     pub build_number: Option<String>,
@@ -241,6 +254,9 @@ impl ExecutionContext {
             // Build identification
             build_id: env("BUILD_BUILDID").and_then(|s| s.parse().ok()),
             build_container_id: env("BUILD_CONTAINERID").and_then(|s| s.parse().ok()),
+            plan_id: env("SYSTEM_PLANID"),
+            timeline_id: env("SYSTEM_TIMELINEID"),
+            job_id: env("SYSTEM_JOBID"),
             build_number: env("BUILD_BUILDNUMBER"),
             build_reason: env("BUILD_REASON"),
             definition_name: env("BUILD_DEFINITIONNAME"),
@@ -906,6 +922,37 @@ mod tests {
     fn test_from_env_lookup_build_container_id_none_when_unset() {
         let ctx = ExecutionContext::from_env_lookup(env_from(&[]));
         assert!(ctx.build_container_id.is_none());
+    }
+
+    #[test]
+    fn test_from_env_lookup_timeline_coordinates() {
+        // SYSTEM_PLANID / SYSTEM_TIMELINEID / SYSTEM_JOBID address the current
+        // job's timeline record — the target for a build attachment.
+        let ctx = ExecutionContext::from_env_lookup(env_from(&[
+            ("SYSTEM_PLANID", "11111111-1111-1111-1111-111111111111"),
+            ("SYSTEM_TIMELINEID", "22222222-2222-2222-2222-222222222222"),
+            ("SYSTEM_JOBID", "33333333-3333-3333-3333-333333333333"),
+        ]));
+        assert_eq!(
+            ctx.plan_id.as_deref(),
+            Some("11111111-1111-1111-1111-111111111111")
+        );
+        assert_eq!(
+            ctx.timeline_id.as_deref(),
+            Some("22222222-2222-2222-2222-222222222222")
+        );
+        assert_eq!(
+            ctx.job_id.as_deref(),
+            Some("33333333-3333-3333-3333-333333333333")
+        );
+    }
+
+    #[test]
+    fn test_from_env_lookup_timeline_coordinates_none_when_unset() {
+        let ctx = ExecutionContext::from_env_lookup(env_from(&[]));
+        assert!(ctx.plan_id.is_none());
+        assert!(ctx.timeline_id.is_none());
+        assert!(ctx.job_id.is_none());
     }
 
     #[test]
