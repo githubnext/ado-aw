@@ -149,6 +149,14 @@ agent pool's normal network — no AWF `network.allowed` entry is required.
   `Warning: engine.github-app-token uses pipeline variable '<name>' … Ensure
   '<name>' is stored as a SECRET …`. It is non-blocking — heed it by setting the
   value with `ado-aw secrets set` (which stores it as a secret).
+- **Project-level keys via variable groups.** To manage the private key once
+  at the project level instead of setting it on every pipeline definition,
+  store it in an Azure DevOps **variable group** and import that group with the
+  top-level [`variable-groups:`](front-matter.md#variable-groups-variable-groups)
+  front-matter field. Point `private-key` at the variable the group supplies
+  (e.g. `private-key: AGENTIC_WORKFLOWS_GITHUB_APP_PRIVATE_KEY`). Remember that
+  in ADO the group must be **both** authorized on the pipeline definition **and**
+  imported in YAML — `variable-groups:` provides the import.
 - **GHEC by default; GHES via `api-url`.** The mint/revoke steps target
   `https://api.github.com` unless you set `api-url` to your GitHub Enterprise
   Server `/api/v3` base URL. This is independent of `engine.api-target`, which

@@ -17,6 +17,7 @@ use anyhow::Result;
 use std::path::Path;
 
 use super::agentic_pipeline::build_pipeline_context;
+use super::common::variable_group_vars;
 use super::extensions::{CompileContext, Extension};
 use super::ir::{Pipeline, PipelineBody, PipelineShape};
 use super::types::FrontMatter;
@@ -56,8 +57,9 @@ pub fn build_standalone_pipeline(
         parameters: built.parameters,
         resources: built.resources,
         triggers: built.triggers,
-        variables: Vec::new(),
+        variables: variable_group_vars(front_matter),
         body: PipelineBody::Jobs(built.jobs),
         shape: PipelineShape::Standalone,
     })
 }
+

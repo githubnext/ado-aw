@@ -47,6 +47,20 @@ pub struct Pipeline {
 }
 ```
 
+`PipelineVar` is the top-level `variables:` entry type. It is an enum so a
+literal `- name: … / value: …` entry and an Azure DevOps variable-group import
+(`- group: …`) share one list:
+
+```rust
+pub enum PipelineVar {
+    /// Literal `- name: <name>` / `value: <value>` entry (optionally `isSecret: true`).
+    NameValue { name: String, value: String, is_secret: bool },
+    /// Variable-group import `- group: <name>` — only the group name is carried;
+    /// ado-aw never resolves, logs, or serialises the group's variable values.
+    Group(String),
+}
+```
+
 `PipelineBody` captures whether the emitted document has a top-level `jobs:` block or a top-level `stages:` block:
 
 ```rust

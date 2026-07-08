@@ -448,6 +448,83 @@ pub fn validate_front_matter_identity(front_matter: &FrontMatter) -> Result<()> 
     Ok(())
 }
 
+/// Validate the `variable-groups:` front-matter block (issue #1385).
+///
+/// Enforces two rules before the pipeline is built:
+///
+/// 1. **Target support.** Variable group imports are pipeline-level
+///    `variables:`, which only `standalone` and `1es` pipelines own. An ADO
+///    `job` / `stage` **template** cannot declare pipeline-level `variables:`
+///    (the parent pipeline that includes the template owns them), so a
+///    non-empty `variable-groups:` on those targets is a hard compile-time
+///    error pointing the author at the parent pipeline.
+/// 2. **Name safety.** Each entry must be a safe group-name **reference** (see
+///    [`crate::validate::is_valid_variable_group_name`]). Only group names
+///    belong here — never secret values; ado-aw never resolves, logs, or
+///    serialises a group's variable values.
+pub fn validate_variable_groups(front_matter: &FrontMatter) -> Result<()> {
+    if front_matter.variable_groups.is_empty() {
+        return Ok(());
+    }
+
+    if matches!(
+        front_matter.target,
+        CompileTarget::Job | CompileTarget::Stage
+    ) {
+        anyhow::bail!(
+            "variable-groups: is not supported for target: {target} — an Azure DevOps {target} \
+             template cannot declare pipeline-level `variables:` (the parent pipeline that \
+             includes this template owns them). Import the variable group in that parent \
+             pipeline instead, or compile with target: standalone or target: 1es.",
+            target = front_matter.target.as_str(),
+        );
+    }
+
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for group in &front_matter.variable_groups {
+        if !validate::is_valid_variable_group_name(group) {
+            anyhow::bail!(
+                "variable-groups entry {group:?} is not a valid Azure DevOps variable group \
+                 name: it must be a non-empty group-name reference and must not contain control \
+                 characters, newlines, ADO expressions ('${{{{', '$(', '$['), pipeline commands \
+                 ('##vso[', '##['), or the template marker ('{{{{'). Only group names belong \
+                 here — never secret values."
+            );
+        }
+
+        // Reject duplicate imports (case-insensitive): ADO variable group names
+        // are case-insensitive display names, and importing the same group twice
+        // emits redundant `- group:` entries whose collision behaviour is
+        // unspecified. A duplicate is always an authoring mistake, so fail closed
+        // rather than silently emitting it. (Leading/trailing whitespace is
+        // already rejected by is_valid_variable_group_name above, so the key
+        // needs no .trim().)
+        let key = group.to_ascii_lowercase();
+        if !seen.insert(key) {
+            anyhow::bail!(
+                "variable-groups entry {group:?} is imported more than once — remove the \
+                 duplicate. Azure DevOps variable group names are case-insensitive, so entries \
+                 that differ only by case are treated as the same group."
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Map the validated `variable-groups:` front-matter entries to top-level
+/// [`super::ir::PipelineVar::Group`] imports, preserving declaration order.
+/// Names are already validated by [`validate_variable_groups`] (invoked inside
+/// [`build_pipeline_context`]).
+pub fn variable_group_vars(front_matter: &FrontMatter) -> Vec<super::ir::PipelineVar> {
+    front_matter
+        .variable_groups
+        .iter()
+        .cloned()
+        .map(super::ir::PipelineVar::Group)
+        .collect()
+}
+
 /// Build the final parameters list by combining user-defined parameters
 /// with auto-injected parameters.
 ///
@@ -2675,6 +2752,78 @@ mod tests {
     fn minimal_front_matter() -> FrontMatter {
         let (fm, _) = parse_markdown("---\nname: test-agent\ndescription: test\n---\n").unwrap();
         fm
+    }
+
+    #[test]
+    fn validate_variable_groups_accepts_empty() {
+        let fm = minimal_front_matter();
+        assert!(validate_variable_groups(&fm).is_ok());
+    }
+
+    #[test]
+    fn validate_variable_groups_accepts_standalone_and_onees() {
+        for target in ["standalone", "1es"] {
+            let src = format!(
+                "---\nname: t\ndescription: d\ntarget: {target}\nvariable-groups:\n  - Agentic Workflows\n  - Shared Secrets\n---\n"
+            );
+            let (fm, _) = parse_markdown(&src).unwrap();
+            assert!(
+                validate_variable_groups(&fm).is_ok(),
+                "variable-groups must be accepted for target {target}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_variable_groups_rejects_job_and_stage_targets() {
+        for target in ["job", "stage"] {
+            let src = format!(
+                "---\nname: t\ndescription: d\ntarget: {target}\nvariable-groups:\n  - Agentic Workflows\n---\n"
+            );
+            let (fm, _) = parse_markdown(&src).unwrap();
+            let err = validate_variable_groups(&fm).unwrap_err().to_string();
+            assert!(err.contains("variable-groups"), "err: {err}");
+            assert!(err.contains(&format!("target: {target}")), "err: {err}");
+        }
+    }
+
+    #[test]
+    fn validate_variable_groups_rejects_unsafe_name() {
+        let src =
+            "---\nname: t\ndescription: d\nvariable-groups:\n  - \"$(evil)\"\n---\n".to_string();
+        let (fm, _) = parse_markdown(&src).unwrap();
+        assert!(validate_variable_groups(&fm).is_err());
+    }
+
+    #[test]
+    fn validate_variable_groups_rejects_duplicates() {
+        // Exact duplicate and case-only difference are treated as the same
+        // group (ADO names are case-insensitive) and rejected as duplicates.
+        for second in ["Shared Secrets", "shared secrets"] {
+            let src = format!(
+                "---\nname: t\ndescription: d\nvariable-groups:\n  - Shared Secrets\n  - \"{second}\"\n---\n"
+            );
+            let (fm, _) = parse_markdown(&src).unwrap();
+            let err = validate_variable_groups(&fm).unwrap_err().to_string();
+            assert!(
+                err.contains("imported more than once"),
+                "duplicate {second:?} must be rejected; err: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_variable_groups_rejects_padded_name() {
+        // A single entry with leading/trailing whitespace is rejected at the
+        // name-validation stage (before the duplicate check), because the raw
+        // string is emitted verbatim into the YAML and would not match the ADO
+        // group.
+        let src =
+            "---\nname: t\ndescription: d\nvariable-groups:\n  - \" Shared Secrets \"\n---\n"
+                .to_string();
+        let (fm, _) = parse_markdown(&src).unwrap();
+        let err = validate_variable_groups(&fm).unwrap_err().to_string();
+        assert!(err.contains("is not a valid"), "err: {err}");
     }
 
     fn extension_declarations(extensions: &[Extension], fm: &FrontMatter) -> Vec<Declarations> {

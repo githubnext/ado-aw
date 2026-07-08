@@ -122,6 +122,7 @@ pub(crate) fn build_pipeline_context(
 ) -> Result<BuiltPipelineContext> {
     // ─── Validations (reuse all shared validators) ────────────────
     common::validate_front_matter_identity(front_matter)?;
+    common::validate_variable_groups(front_matter)?;
     common::validate_checkout_self_collision(
         &front_matter.repositories,
         &front_matter.checkout,

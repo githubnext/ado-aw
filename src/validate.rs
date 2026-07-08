@@ -247,6 +247,33 @@ pub fn is_safe_tool_name(name: &str) -> bool {
     !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
+/// Validate an Azure DevOps **variable group** name for a `- group: <name>`
+/// import (issue #1385).
+///
+/// A variable group name is a **reference/identifier**, never a value: ado-aw
+/// emits it verbatim as a top-level `variables:` import and never resolves,
+/// prints, logs, or serialises the group's secret variable values. ADO group
+/// names are human-friendly display names (they may contain spaces), so this
+/// validator is permissive on the character set but rejects anything that could
+/// break out of the emitted YAML scalar or inject pipeline logic:
+///
+/// - empty or whitespace-only names,
+/// - names with leading or trailing whitespace (must be pre-trimmed by the
+///   author so the emitted `- group: <name>` scalar matches the ADO group
+///   exactly),
+/// - control characters (including `\n` / `\r`),
+/// - ADO template / macro / runtime expressions (`${{`, `$(`, `$[`),
+/// - ADO pipeline commands (`##vso[`, `##[`),
+/// - the compiler's own template marker (`{{`).
+pub fn is_valid_variable_group_name(name: &str) -> bool {
+    !name.trim().is_empty()
+        && name == name.trim()
+        && !name.chars().any(|c| c.is_control())
+        && !contains_ado_expression(name)
+        && !contains_pipeline_command(name)
+        && !contains_template_marker(name)
+}
+
 // ── Injection detectors ─────────────────────────────────────────────────────
 
 /// Returns true if the string contains an ADO template expression (`${{`),
@@ -953,6 +980,36 @@ mod tests {
         assert!(!is_safe_tool_name("foo; rm -rf /"));
         assert!(!is_safe_tool_name("tool name"));
         assert!(!is_safe_tool_name("tool\ttab"));
+    }
+
+    #[test]
+    fn test_is_valid_variable_group_name() {
+        // ADO group names are human-friendly display names; spaces and a broad
+        // character set are allowed.
+        assert!(is_valid_variable_group_name("Agentic Workflows"));
+        assert!(is_valid_variable_group_name("Shared Secrets"));
+        // Inner spaces are fine; internal single spaces are part of the name.
+        assert!(is_valid_variable_group_name("kv-backed.group_1"));
+        // Rejected: empty / whitespace-only.
+        assert!(!is_valid_variable_group_name(""));
+        assert!(!is_valid_variable_group_name("   "));
+        // Rejected: leading / trailing whitespace (name must match the ADO
+        // group exactly; the raw string is emitted verbatim into the YAML).
+        assert!(!is_valid_variable_group_name(" Shared Secrets"));
+        assert!(!is_valid_variable_group_name("Shared Secrets "));
+        assert!(!is_valid_variable_group_name(" Shared Secrets "));
+        assert!(!is_valid_variable_group_name("\tShared Secrets"));
+        // Rejected: ADO expressions / macros / runtime expressions.
+        assert!(!is_valid_variable_group_name("$(evil)"));
+        assert!(!is_valid_variable_group_name("${{ variables.x }}"));
+        assert!(!is_valid_variable_group_name("$[ something ]"));
+        // Rejected: pipeline commands.
+        assert!(!is_valid_variable_group_name("##vso[task.setvariable]x"));
+        assert!(!is_valid_variable_group_name("##[warning]x"));
+        // Rejected: compiler template marker and control characters.
+        assert!(!is_valid_variable_group_name("{{ agent }}"));
+        assert!(!is_valid_variable_group_name("line\nbreak"));
+        assert!(!is_valid_variable_group_name("tab\there"));
     }
 
     // ── Injection detectors ─────────────────────────────────────────────

@@ -7735,3 +7735,91 @@ fn test_github_app_token_reuses_staged_bundle_in_agent() {
         count_downloads(&with),
     );
 }
+
+// ─── Variable group imports (issue #1385) ────────────────────────────────
+
+/// A standalone pipeline with `variable-groups:` emits a top-level
+/// `variables:` block containing one `- group: <name>` import per entry, in
+/// declaration order. Only group names appear — never any variable values.
+#[test]
+fn variable_groups_standalone_emits_group_imports_in_order() {
+    let (ok, compiled, stderr) = compile_inline_source(
+        "vg-standalone",
+        "---\nname: vg-standalone\ndescription: variable group import test\nvariable-groups:\n  - Agentic Workflows\n  - Shared Secrets\n---\n\n## Agent\n\nDo work.\n",
+    );
+    assert!(ok, "standalone compile with variable-groups should succeed.\nstderr: {stderr}");
+    assert!(compiled.contains("variables:"), "top-level variables: block must be present:\n{compiled}");
+    assert!(compiled.contains("- group: Agentic Workflows"), "first group import missing:\n{compiled}");
+    assert!(compiled.contains("- group: Shared Secrets"), "second group import missing:\n{compiled}");
+    let first = compiled.find("Agentic Workflows").unwrap();
+    let second = compiled.find("Shared Secrets").unwrap();
+    assert!(first < second, "group imports must preserve declaration order");
+}
+
+/// A 1ES pipeline (`target: 1es`) also emits the `variables:` group import at
+/// the pipeline root, alongside the `extends:` block.
+#[test]
+fn variable_groups_onees_emits_group_imports() {
+    let (ok, compiled, stderr) = compile_inline_source(
+        "vg-onees",
+        "---\nname: vg-onees\ndescription: variable group import test\ntarget: 1es\nvariable-groups:\n  - Agentic Workflows\n---\n\n## Agent\n\nDo work.\n",
+    );
+    assert!(ok, "1es compile with variable-groups should succeed.\nstderr: {stderr}");
+    assert!(compiled.contains("extends:"), "1ES pipeline must still emit extends:\n{compiled}");
+    assert!(compiled.contains("variables:"), "top-level variables: block must be present:\n{compiled}");
+    assert!(compiled.contains("- group: Agentic Workflows"), "group import missing:\n{compiled}");
+}
+
+/// `target: job` cannot carry pipeline-level `variables:`, so a non-empty
+/// `variable-groups:` there is a hard compile-time error naming the target.
+#[test]
+fn variable_groups_rejected_for_job_target() {
+    let (ok, _compiled, stderr) = compile_inline_source(
+        "vg-job",
+        "---\nname: vg-job\ndescription: variable group import test\ntarget: job\nvariable-groups:\n  - Agentic Workflows\n---\n\n## Agent\n\nDo work.\n",
+    );
+    assert!(!ok, "job target with variable-groups must fail to compile");
+    assert!(stderr.contains("variable-groups"), "error must mention variable-groups:\n{stderr}");
+    assert!(stderr.contains("target: job"), "error must name the job target:\n{stderr}");
+}
+
+/// `target: stage` is rejected for the same reason as `target: job`.
+#[test]
+fn variable_groups_rejected_for_stage_target() {
+    let (ok, _compiled, stderr) = compile_inline_source(
+        "vg-stage",
+        "---\nname: vg-stage\ndescription: variable group import test\ntarget: stage\nvariable-groups:\n  - Agentic Workflows\n---\n\n## Agent\n\nDo work.\n",
+    );
+    assert!(!ok, "stage target with variable-groups must fail to compile");
+    assert!(stderr.contains("variable-groups"), "error must mention variable-groups:\n{stderr}");
+    assert!(stderr.contains("target: stage"), "error must name the stage target:\n{stderr}");
+}
+
+/// A group name that carries an ADO macro expression is rejected as an unsafe
+/// reference (defense in depth — only literal group names belong here).
+#[test]
+fn variable_groups_rejects_injection_name() {
+    let (ok, _compiled, stderr) = compile_inline_source(
+        "vg-inject",
+        "---\nname: vg-inject\ndescription: variable group import test\nvariable-groups:\n  - \"$(evil)\"\n---\n\n## Agent\n\nDo work.\n",
+    );
+    assert!(!ok, "an injection-bearing group name must fail to compile");
+    assert!(stderr.contains("variable group name") || stderr.contains("variable-groups entry"),
+        "error must explain the invalid group name:\n{stderr}");
+}
+
+/// A workflow that references a GitHub App private key held in a project-level
+/// variable group can import that group AND mint the token from the same
+/// source — no generated-lock hand-patching required. The compiled lock
+/// contains both the `- group:` import and the `$(...)` macro reference.
+#[test]
+fn variable_groups_with_github_app_token_compiles_without_patch() {
+    let (ok, compiled, stderr) = compile_inline_source(
+        "vg-ghapp",
+        "---\nname: vg-ghapp\ndescription: variable group + github app token\nvariable-groups:\n  - Agentic Workflows\nengine:\n  id: copilot\n  github-app-token:\n    app-id: 1234567\n    owner: octo-org\n    repositories: [octo-repo]\n    private-key: AGENTIC_WORKFLOWS_GITHUB_APP_PRIVATE_KEY\n---\n\n## Agent\n\nDo work.\n",
+    );
+    assert!(ok, "compile with variable-groups + github-app-token should succeed.\nstderr: {stderr}");
+    assert!(compiled.contains("- group: Agentic Workflows"), "group import missing:\n{compiled}");
+    assert!(compiled.contains("$(AGENTIC_WORKFLOWS_GITHUB_APP_PRIVATE_KEY)"),
+        "private-key macro reference missing:\n{compiled}");
+}

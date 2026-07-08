@@ -44,6 +44,12 @@ The output contains the same 3-job chain (Agent → Detection → SafeOutputs) a
 - No triggers, pipeline name, or resource declarations (the parent pipeline owns those)
 - Pool baked in from the front matter `pool:` field (`vmImage` or `name`; defaults to `vmImage: ubuntu-22.04`)
 
+> **Variable groups are not supported here.** ADO `job` / `stage` templates
+> cannot declare pipeline-level `variables:` — the parent pipeline owns them.
+> Declaring [`variable-groups:`](front-matter.md#variable-groups-variable-groups)
+> on `target: job` or `target: stage` is a compile-time error; import the group
+> in the parent pipeline that includes this template instead.
+
 Example front matter:
 ```yaml
 target: job
