@@ -99,6 +99,19 @@ steps:
     workingDirectory: scripts/ado-script
     displayName: Build executor-e2e harness (not shipped in ado-script.zip)
 
+  - task: AzureCLI@2
+    displayName: Acquire ADO token (SC_WRITE_TOKEN)
+    inputs:
+      azureSubscription: agentic-pipelines-write
+      scriptType: bash
+      scriptLocation: inlineScript
+      addSpnToEnvironment: true
+      inlineScript: |
+        ADO_TOKEN=$(az account get-access-token \
+          --resource 499b84ac-1321-427f-aa17-267ca6975798 \
+          --query accessToken -o tsv)
+        echo "##vso[task.setvariable variable=SC_WRITE_TOKEN;issecret=true]$ADO_TOKEN"
+
   - script: |
       set -euo pipefail
       node scripts/ado-script/test-bin/executor-e2e.js
@@ -107,7 +120,7 @@ steps:
       # ADO auth + context. SYSTEM_COLLECTIONURI / SYSTEM_TEAMPROJECT /
       # BUILD_BUILDID are auto-injected; SYSTEM_ACCESSTOKEN must be mapped
       # explicitly so the harness (and the ado-aw binary it spawns) can write.
-      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+      SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)
       EXECUTOR_E2E_ADO_AW_BIN: $(ADO_AW_BIN)
       EXECUTOR_E2E_ADO_REPO: $(EXECUTOR_E2E_ADO_REPO)
       EXECUTOR_E2E_ISSUE_REPO: $(EXECUTOR_E2E_ISSUE_REPO)
