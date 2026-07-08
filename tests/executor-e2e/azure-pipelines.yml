@@ -102,7 +102,7 @@ steps:
   - task: AzureCLI@2
     displayName: Acquire ADO token (SC_WRITE_TOKEN)
     inputs:
-      azureSubscription: agentic-pipelines-write
+      azureSubscription: agent-playground-write
       scriptType: bash
       scriptLocation: inlineScript
       addSpnToEnvironment: true
