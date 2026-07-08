@@ -11,9 +11,9 @@
 //! the hood:
 //!
 //! ```text
-//! PUT {org}/{project}/_apis/distributedtask/hubs/build
+//! PUT {org}/{projectId}/_apis/distributedtask/hubs/build
 //!     /plans/{planId}/timelines/{timelineId}/records/{recordId}
-//!     /attachments/{type}/{name}?api-version=7.1-preview
+//!     /attachments/{type}/{name}?api-version=7.1
 //! ```
 //!
 //! The resulting object *is* a build attachment: it is stored once by
@@ -493,6 +493,13 @@ impl Executor for UploadBuildAttachmentResult {
             .access_token
             .as_ref()
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
+        // The DistributedTask hub route's `{scopeIdentifier}` is the **project
+        // GUID** (SYSTEM_TEAMPROJECTID), not the project name — the name routes
+        // but is rejected with HTTP 400.
+        let project_id = ctx.ado_project_id.as_ref().context(
+            "SYSTEM_TEAMPROJECTID is not set — required as the scope identifier for the build \
+             attachment (timeline attachment) API",
+        )?;
         let plan_id = ctx.plan_id.as_ref().context(
             "SYSTEM_PLANID is not set — required to attach to the current build (build attachments \
              are written to the current job's timeline record)",
@@ -505,20 +512,20 @@ impl Executor for UploadBuildAttachmentResult {
             "SYSTEM_JOBID is not set — required to attach to the current build (build attachments \
              are written to the current job's timeline record)",
         )?;
-        debug!("ADO org: {}, project: {}", org_url, project);
+        debug!("ADO org: {}, project: {} ({})", org_url, project, project_id);
 
         // Build the DistributedTask timeline-attachment URL. This is the write
         // side of a build attachment — the object is read back via the Build ▸
         // Attachments Get/List API by `{type}`/`{name}`. The `build` hub covers
-        // build/YAML pipelines; the route is project-scoped (like the Build
-        // area), unlike the collection-scoped `resources/Containers` upload.
-        // PUT {org}/{project}/_apis/distributedtask/hubs/build/plans/{planId}
+        // build/YAML pipelines. The route's `{scopeIdentifier}` is the project
+        // **GUID**; released api-version is 7.1.
+        // PUT {org}/{projectId}/_apis/distributedtask/hubs/build/plans/{planId}
         //     /timelines/{timelineId}/records/{recordId}
-        //     /attachments/{type}/{name}?api-version=7.1-preview.1
+        //     /attachments/{type}/{name}?api-version=7.1
         let url = format!(
-            "{}/{}/_apis/distributedtask/hubs/build/plans/{}/timelines/{}/records/{}/attachments/{}/{}?api-version=7.1-preview.1",
+            "{}/{}/_apis/distributedtask/hubs/build/plans/{}/timelines/{}/records/{}/attachments/{}/{}?api-version=7.1",
             org_url.trim_end_matches('/'),
-            utf8_percent_encode(project, PATH_SEGMENT),
+            utf8_percent_encode(project_id, PATH_SEGMENT),
             utf8_percent_encode(plan_id, PATH_SEGMENT),
             utf8_percent_encode(timeline_id, PATH_SEGMENT),
             utf8_percent_encode(record_id, PATH_SEGMENT),
@@ -549,9 +556,15 @@ impl Executor for UploadBuildAttachmentResult {
                 );
                 serde_json::Value::Null
             });
+            // The timeline-attachment response carries the attachment URL under
+            // `_links.self.href` (there is no top-level `url` field); fall back
+            // to a top-level `url` defensively for forward compatibility.
             let attachment_url = resp_body
-                .get("url")
+                .get("_links")
+                .and_then(|l| l.get("self"))
+                .and_then(|s| s.get("href"))
                 .and_then(|v| v.as_str())
+                .or_else(|| resp_body.get("url").and_then(|v| v.as_str()))
                 .map(|s| s.to_string());
             info!(
                 "Attached '{}' to build #{} as '{}'",
@@ -1018,6 +1031,7 @@ attachment-type: "agent-artifact"
         let mut ctx = make_ctx(dir.path().to_path_buf(), false);
         ctx.ado_org_url = Some("https://dev.azure.com/org".to_string());
         ctx.ado_project = Some("Proj".to_string());
+        ctx.ado_project_id = Some("00000000-0000-0000-0000-0000000000aa".to_string());
         ctx.access_token = Some("token".to_string());
         ctx.timeline_id = Some("00000000-0000-0000-0000-000000000001".to_string());
         ctx.job_id = Some("00000000-0000-0000-0000-000000000002".to_string());
