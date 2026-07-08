@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { GitResult } from "../git.js";
-import { resolveMergeBase, type GitRunners } from "../merge-base.js";
+import { ensureTargetRefFetched, resolveMergeBase, type GitRunners } from "../merge-base.js";
 
 // Real-shape SHAs (40-char lowercase hex) so the production
 // SHA40 guard in resolveMergeBase accepts them. We keep the
@@ -274,5 +274,54 @@ describe("resolveMergeBase", () => {
     if (!result.ok) {
       expect(result.reason).toContain("not 40-char hex");
     }
+  });
+});
+
+describe("ensureTargetRefFetched", () => {
+  it("resolves at the first depth and reports the merge base", () => {
+    const depthArgsSeen: string[] = [];
+    const runGit: GitRunners["runGit"] = (args) => {
+      if (args[0] === "fetch") depthArgsSeen.push(args[2] ?? "");
+      return { stdout: "", stderr: "", status: 0 };
+    };
+    const gitOk = makeGitOk([
+      { match: (a) => a.join(" ") === "merge-base origin/main HEAD", out: SHA_M },
+    ]);
+
+    const result = ensureTargetRefFetched("main", {}, { runGit, gitOk });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.baseSha).toBe(SHA_M);
+    // Stops after the first depth (does not keep deepening once resolved).
+    expect(depthArgsSeen).toEqual(["--depth=200"]);
+  });
+
+  it("keeps deepening until merge-base resolves, then stops", () => {
+    const depthArgsSeen: string[] = [];
+    const runGit: GitRunners["runGit"] = (args) => {
+      if (args[0] === "fetch") depthArgsSeen.push(args[2] ?? "");
+      return { stdout: "", stderr: "", status: 0 };
+    };
+    let calls = 0;
+    const gitOk: GitRunners["gitOk"] = (a) => {
+      if (a.join(" ") === "merge-base origin/main HEAD") {
+        calls++;
+        // Resolves only on the 3rd depth (--depth=2000).
+        return calls >= 3 ? SHA_M : null;
+      }
+      return null;
+    };
+
+    const result = ensureTargetRefFetched("main", {}, { runGit, gitOk });
+    expect(result.ok).toBe(true);
+    expect(depthArgsSeen).toEqual(["--depth=200", "--depth=500", "--depth=2000"]);
+  });
+
+  it("returns ok:false when no depth resolves the merge base", () => {
+    const runGit: GitRunners["runGit"] = () => ({ stdout: "", stderr: "", status: 0 });
+    const gitOk: GitRunners["gitOk"] = () => null;
+
+    const result = ensureTargetRefFetched("main", {}, { runGit, gitOk });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain("origin/main");
   });
 });

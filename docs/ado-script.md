@@ -68,6 +68,17 @@ pipeline** as runtime helpers. Today it produces thirteen bundles:
   env vars, so a pipeline variable can't shadow them (only the private key /
   minted token ride in masked env). Runs outside AWF. See
   [`engine.md`](engine.md#github-app-backed-copilot-engine-auth).
+- `prepare-pr-base.js` — create-pull-request base-ref preparer that runs in the
+  **Agent job** before the Copilot invocation when `create-pull-request` is
+  configured (issue #1413). Fetches and progressively deepens the configured
+  `target-branch` into `refs/remotes/origin/<target>` and points
+  `refs/remotes/origin/HEAD` at it, so the host-side SafeOutputs MCP server can
+  compute a diff base on shallow-default agent pools without a full-history
+  `checkout: self`. Reuses `shared/merge-base.ts::ensureTargetRefFetched`
+  (the same fetch/deepen logic as the PR execution-context precompute). The
+  non-secret `--target-branch` is an argv flag; the ADO bearer
+  (`SYSTEM_ACCESSTOKEN`) rides in masked env for the authenticated git fetch.
+  Runs outside AWF. See [`safe-outputs.md`](safe-outputs.md#create-pull-request).
 
 > **Internal-only.** `ado-script` is not a user-facing front-matter
 > feature. Authors never write an `ado-script:` block in their agent
@@ -526,6 +537,9 @@ scripts/ado-script/
 │   └── github-app-token/        # github-app-token.js entry point + GitHub App token minter
 │       ├── index.ts             # main(): RS256 JWT → resolve installation → mint installation token → masked GITHUB_APP_TOKEN
 │       └── __tests__/           # unit tests for JWT signing / installation resolution / token minting
+│   └── prepare-pr-base/         # prepare-pr-base.js entry point + create-pull-request base-ref fetch/deepen
+│       ├── index.ts             # main(): fetch/deepen target branch + set origin/HEAD so mcp.rs finds a diff base
+│       └── __tests__/           # unit tests for fetch/deepen + origin/HEAD + benign-failure paths
 ├── test/                        # End-to-end smoke tests (gate, import, exec-context-pr)
 ├── gate.js                      # ncc bundle output (gitignored)
 ├── import.js                    # ncc bundle output (gitignored)
@@ -540,7 +554,8 @@ scripts/ado-script/
 ├── exec-context-repo.js         # ncc bundle output (gitignored)
 ├── conclusion.js                # ncc bundle output (gitignored)
 ├── approval-summary.js          # ncc bundle output (gitignored)
-└── github-app-token.js          # ncc bundle output (gitignored)
+├── github-app-token.js          # ncc bundle output (gitignored)
+└── prepare-pr-base.js           # ncc bundle output (gitignored)
 ```
 
 The release workflow (`.github/workflows/release.yml`) runs

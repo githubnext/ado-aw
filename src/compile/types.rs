@@ -1254,6 +1254,23 @@ impl FrontMatter {
         self.safe_output_tool_names().next().is_some()
     }
 
+    /// The create-pull-request target branch, or `None` when the tool is not
+    /// configured. `Some(target)` is the single source of truth for the
+    /// prepare-pr-base feature gate (issue #1413): it drives BOTH the ado-script
+    /// bundle download (`AdoScriptExtension::prepare_pr_base_active`, set in
+    /// `collect_extensions`) and the Agent-job prepare-step emission
+    /// (`build_agent_job`). The default (`"main"`) matches
+    /// `crate::safe_outputs::CreatePrConfig`'s `default_target_branch`, so the
+    /// step is emitted with the same branch the Stage 3 executor targets.
+    pub fn create_pr_target_branch(&self) -> Option<String> {
+        self.safe_outputs.get("create-pull-request").map(|v| {
+            v.get("target-branch")
+                .and_then(|t| t.as_str())
+                .unwrap_or("main")
+                .to_string()
+        })
+    }
+
     /// Section-level (global) `require-approval` default, if configured.
     pub fn global_require_approval(&self) -> Option<RequireApproval> {
         self.safe_outputs

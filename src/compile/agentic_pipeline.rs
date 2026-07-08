@@ -933,6 +933,19 @@ fn build_agent_job(
     }
 
     // 18. Run copilot (AWF network isolated) — the big one.
+    //     When `create-pull-request` is configured, first fetch/deepen the
+    //     target branch so the host-side SafeOutputs MCP server can compute a
+    //     diff base on shallow-default agent pools (issue #1413). Runs after
+    //     `checkout: self` (step 1) so the clone exists, and before the Copilot
+    //     run so the refs are present when the agent proposes a PR. The
+    //     `prepare-pr-base.js` bundle is staged by the ado-script extension's
+    //     agent-prepare steps (`prepare_pr_base_active` is OR'd into that
+    //     extension's Agent-job download predicate), so it is guaranteed present.
+    if let Some(target_branch) = front_matter.create_pr_target_branch() {
+        steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
+            &target_branch,
+        ));
+    }
     //     When GitHub App auth is configured, mint the installation token
     //     immediately before the Copilot run; `copilot_env` sources
     //     `GITHUB_TOKEN` from the masked same-job `GITHUB_APP_TOKEN` the mint

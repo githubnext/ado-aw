@@ -74,6 +74,54 @@ function fetchTargetAtDepth(
   return result.status === 0;
 }
 
+/** Result of [`ensureTargetRefFetched`]. */
+export type FetchDeepenResult =
+  | { ok: true; baseSha: string }
+  | { ok: false; reason: string };
+
+/**
+ * Fetch `origin/<targetShort>` into the local clone and progressively
+ * deepen it (`--depth=200`, `500`, `2000`, then `--unshallow`) until
+ * `git merge-base origin/<targetShort> HEAD` resolves — i.e. until the
+ * clone carries enough history to reach the merge base of HEAD and the
+ * target branch.
+ *
+ * This isolates the *side effect* that both [`resolveMergeBase`] (which
+ * also returns the SHAs) and the `prepare-pr-base` bundle (which only
+ * needs the deepened clone + `refs/remotes/origin/<target>` populated so
+ * the host-side SafeOutputs MCP server can later compute the base) rely
+ * on. The git call sequence is identical to the loop `resolveMergeBase`
+ * previously inlined, so injected `GitRunners` stubs see the same order.
+ *
+ * `env` is the result of `bearerEnv(token)` — passed to git's fetch
+ * subprocess so the bearer never leaks into argv or to other tools.
+ */
+export function ensureTargetRefFetched(
+  targetShort: string,
+  env: Record<string, string>,
+  runners: GitRunners = defaultRunners,
+): FetchDeepenResult {
+  // Progressive deepening: stop ONLY when merge-base actually resolves
+  // against the deepened target ref.
+  const depths = ["--depth=200", "--depth=500", "--depth=2000", "--unshallow"];
+  for (const depthArg of depths) {
+    if (!fetchTargetAtDepth(runners, targetShort, depthArg, env)) {
+      // Fetch failed at this depth (e.g. --unshallow on an already-
+      // unshallowed repo). Continue to the next depth or bail out after
+      // the loop.
+      continue;
+    }
+    const mb = runners.gitOk(["merge-base", `origin/${targetShort}`, "HEAD"]) ?? "";
+    if (mb.length > 0) {
+      return { ok: true, baseSha: mb };
+    }
+  }
+  return {
+    ok: false,
+    reason: `Could not resolve merge-base against 'origin/${targetShort}' after progressive deepening.`,
+  };
+}
+
 /**
  * Resolve `BASE_SHA` and `HEAD_SHA` for the PR.
  *
@@ -115,21 +163,12 @@ export function resolveMergeBase(
     }
   } else {
     headTipSha = headSha;
-    // Progressive deepening: stop ONLY when merge-base actually
-    // resolves against the deepened target ref.
-    const depths = ["--depth=200", "--depth=500", "--depth=2000", "--unshallow"];
-    for (const depthArg of depths) {
-      if (!fetchTargetAtDepth(runners, targetShort, depthArg, env)) {
-        // Fetch failed at this depth (e.g. --unshallow on an
-        // already-unshallowed repo). Continue to the next depth or
-        // bail out after the loop.
-        continue;
-      }
-      const mb = runners.gitOk(["merge-base", `origin/${targetShort}`, "HEAD"]) ?? "";
-      if (mb.length > 0) {
-        baseSha = mb;
-        break;
-      }
+    // Progressive deepening (extracted into `ensureTargetRefFetched` so
+    // the `prepare-pr-base` bundle can reuse the identical fetch/deepen
+    // sequence for its side effect).
+    const fetched = ensureTargetRefFetched(targetShort, env, runners);
+    if (fetched.ok) {
+      baseSha = fetched.baseSha;
     }
   }
 

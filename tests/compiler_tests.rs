@@ -7823,3 +7823,64 @@ fn variable_groups_with_github_app_token_compiles_without_patch() {
     assert!(compiled.contains("$(AGENTIC_WORKFLOWS_GITHUB_APP_PRIVATE_KEY)"),
         "private-key macro reference missing:\n{compiled}");
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// create-pull-request base-ref prepare step (issue #1413)
+// ─────────────────────────────────────────────────────────────────────
+
+/// When `create-pull-request` is configured, the Agent job runs the
+/// `prepare-pr-base` bundle before the Copilot step, passing the default
+/// target branch and projecting the ADO bearer, so the host-side SafeOutputs
+/// MCP server can compute a diff base on shallow-default pools.
+#[test]
+fn test_create_pull_request_emits_prepare_pr_base_step_in_agent() {
+    let compiled = compile_inline_agent(
+        "prepare-pr-base-default",
+        "---\nname: \"PR Agent\"\ndescription: \"opens a PR\"\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let agent = job_block(&compiled, "Agent");
+    assert!(
+        agent.contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js' --target-branch 'main'"),
+        "Agent job must invoke prepare-pr-base with the target branch:\n{agent}"
+    );
+    assert!(
+        agent.contains("Prepare create-pull-request base ref (fetch/deepen)"),
+        "Agent job must contain the prepare step display name:\n{agent}"
+    );
+    assert!(
+        agent.contains("SYSTEM_ACCESSTOKEN: $(System.AccessToken)"),
+        "prepare-pr-base step must project the ADO bearer:\n{agent}"
+    );
+}
+
+/// The configured `target-branch` is threaded verbatim into the prepare step.
+#[test]
+fn test_create_pull_request_prepare_step_uses_configured_target_branch() {
+    let compiled = compile_inline_agent(
+        "prepare-pr-base-custom",
+        "---\nname: \"PR Agent\"\ndescription: \"opens a PR\"\nsafe-outputs:\n  create-pull-request:\n    target-branch: release/2.x\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let agent = job_block(&compiled, "Agent");
+    assert!(
+        agent.contains("--target-branch 'release/2.x'"),
+        "Agent job must pass the configured target branch:\n{agent}"
+    );
+}
+
+/// An agent WITHOUT `create-pull-request` emits no prepare-pr-base step and
+/// never downloads the bundle.
+#[test]
+fn test_no_create_pull_request_omits_prepare_pr_base_step() {
+    let compiled = compile_inline_agent(
+        "prepare-pr-base-absent",
+        "---\nname: \"WI Agent\"\ndescription: \"files a work item\"\nsafe-outputs:\n  create-work-item:\n    work-item-type: Task\n---\n\n## Agent\n\nDo work.\n",
+    );
+    assert!(
+        !compiled.contains("prepare-pr-base.js"),
+        "prepare-pr-base must not appear without create-pull-request:\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("Prepare create-pull-request base ref"),
+        "prepare step display name must be absent:\n{compiled}"
+    );
+}
