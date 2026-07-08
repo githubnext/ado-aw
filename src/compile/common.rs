@@ -492,18 +492,19 @@ pub fn validate_variable_groups(front_matter: &FrontMatter) -> Result<()> {
             );
         }
 
-        // Reject duplicate imports (case-insensitive, whitespace-trimmed): ADO
-        // variable group names are case-insensitive display names, and importing
-        // the same group twice emits redundant `- group:` entries whose
-        // collision behaviour is unspecified. A duplicate is always an authoring
-        // mistake, so fail closed rather than silently emitting it.
-        let key = group.trim().to_ascii_lowercase();
+        // Reject duplicate imports (case-insensitive): ADO variable group names
+        // are case-insensitive display names, and importing the same group twice
+        // emits redundant `- group:` entries whose collision behaviour is
+        // unspecified. A duplicate is always an authoring mistake, so fail closed
+        // rather than silently emitting it. (Leading/trailing whitespace is
+        // already rejected by is_valid_variable_group_name above, so the key
+        // needs no .trim().)
+        let key = group.to_ascii_lowercase();
         if !seen.insert(key) {
             anyhow::bail!(
                 "variable-groups entry {group:?} is imported more than once — remove the \
                  duplicate. Azure DevOps variable group names are case-insensitive, so entries \
-                 that differ only by case or surrounding whitespace are treated as the same \
-                 group."
+                 that differ only by case are treated as the same group."
             );
         }
     }
