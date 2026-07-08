@@ -244,12 +244,16 @@ pub fn is_safe_tool_name(name: &str) -> bool {
 /// break out of the emitted YAML scalar or inject pipeline logic:
 ///
 /// - empty or whitespace-only names,
+/// - names with leading or trailing whitespace (must be pre-trimmed by the
+///   author so the emitted `- group: <name>` scalar matches the ADO group
+///   exactly),
 /// - control characters (including `\n` / `\r`),
 /// - ADO template / macro / runtime expressions (`${{`, `$(`, `$[`),
 /// - ADO pipeline commands (`##vso[`, `##[`),
 /// - the compiler's own template marker (`{{`).
 pub fn is_valid_variable_group_name(name: &str) -> bool {
     !name.trim().is_empty()
+        && name == name.trim()
         && !name.chars().any(|c| c.is_control())
         && !contains_ado_expression(name)
         && !contains_pipeline_command(name)
@@ -946,10 +950,17 @@ mod tests {
         // character set are allowed.
         assert!(is_valid_variable_group_name("Agentic Workflows"));
         assert!(is_valid_variable_group_name("Shared Secrets"));
+        // Inner spaces are fine; internal single spaces are part of the name.
         assert!(is_valid_variable_group_name("kv-backed.group_1"));
         // Rejected: empty / whitespace-only.
         assert!(!is_valid_variable_group_name(""));
         assert!(!is_valid_variable_group_name("   "));
+        // Rejected: leading / trailing whitespace (name must match the ADO
+        // group exactly; the raw string is emitted verbatim into the YAML).
+        assert!(!is_valid_variable_group_name(" Shared Secrets"));
+        assert!(!is_valid_variable_group_name("Shared Secrets "));
+        assert!(!is_valid_variable_group_name(" Shared Secrets "));
+        assert!(!is_valid_variable_group_name("\tShared Secrets"));
         // Rejected: ADO expressions / macros / runtime expressions.
         assert!(!is_valid_variable_group_name("$(evil)"));
         assert!(!is_valid_variable_group_name("${{ variables.x }}"));

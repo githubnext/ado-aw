@@ -2796,9 +2796,9 @@ mod tests {
 
     #[test]
     fn validate_variable_groups_rejects_duplicates() {
-        // Exact duplicate, case-only difference, and whitespace-only difference
-        // are all treated as the same group and rejected.
-        for second in ["Shared Secrets", "shared secrets", " Shared Secrets "] {
+        // Exact duplicate and case-only difference are treated as the same
+        // group (ADO names are case-insensitive) and rejected as duplicates.
+        for second in ["Shared Secrets", "shared secrets"] {
             let src = format!(
                 "---\nname: t\ndescription: d\nvariable-groups:\n  - Shared Secrets\n  - \"{second}\"\n---\n"
             );
@@ -2809,6 +2809,20 @@ mod tests {
                 "duplicate {second:?} must be rejected; err: {err}"
             );
         }
+    }
+
+    #[test]
+    fn validate_variable_groups_rejects_padded_name() {
+        // A single entry with leading/trailing whitespace is rejected at the
+        // name-validation stage (before the duplicate check), because the raw
+        // string is emitted verbatim into the YAML and would not match the ADO
+        // group.
+        let src =
+            "---\nname: t\ndescription: d\nvariable-groups:\n  - \" Shared Secrets \"\n---\n"
+                .to_string();
+        let (fm, _) = parse_markdown(&src).unwrap();
+        let err = validate_variable_groups(&fm).unwrap_err().to_string();
+        assert!(err.contains("is not a valid"), "err: {err}");
     }
 
     fn extension_declarations(extensions: &[Extension], fm: &FrontMatter) -> Vec<Declarations> {

@@ -483,12 +483,14 @@ engine:
 
 Group names that contain ADO expressions (`${{`, `$(`, `$[`), pipeline
 commands (`##vso[`, `##[`), the compiler's template marker (`{{`), or
-control characters (including newlines) are rejected at compile time.
+control characters (including newlines) are rejected at compile time. Names
+with leading or trailing whitespace are also rejected — the entry is emitted
+verbatim as `- group: <name>`, so it must match the ADO group name exactly.
 
-Duplicate imports are also rejected. Azure DevOps variable group names are
-case-insensitive, so two entries that differ only by case or surrounding
-whitespace (e.g. `Shared Secrets` and `shared secrets`) are treated as the
-same group and fail compilation — remove the redundant entry.
+Duplicate imports are rejected too. Azure DevOps variable group names are
+case-insensitive, so two entries that differ only by case (e.g.
+`Shared Secrets` and `shared secrets`) are treated as the same group and fail
+compilation — remove the redundant entry.
 
 ### Target support
 

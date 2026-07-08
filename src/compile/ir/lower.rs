@@ -2535,8 +2535,12 @@ mod tests {
         let first = yaml.find("Agentic Workflows").unwrap();
         let second = yaml.find("Shared Secrets").unwrap();
         assert!(first < second, "group imports must preserve source order");
-        // Group entries carry no name/value keys.
+        // Group entries carry no name/value keys. (A literal variable would
+        // emit `- name:` / `value:` sequence items; the top-level pipeline
+        // `name: P` mapping key is unrelated, so match the `- name:` item form
+        // to avoid a false collision.)
         assert!(!yaml.contains("value:"));
+        assert!(!yaml.contains("- name:"));
     }
 
     // ─── Template shape wrapping ──────────────────────────────────
