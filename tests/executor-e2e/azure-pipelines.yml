@@ -27,9 +27,16 @@ pool:
   name: AZS-1ES-L-Playground-ubuntu-22.04
 
 variables:
-  # ADO Git repo (with an initialised main branch) used by the PR/git/
-  # create-pull-request scenarios.
-  EXECUTOR_E2E_ADO_REPO: agent-definitions
+  # Keep YAML defaults under private names so same-named pipeline/definition UI
+  # variables (EXECUTOR_E2E_ADO_REPO, E2E_QUEUE_PIPELINE_ID, E2E_WIKI_NAME,
+  # CRATES_IO_FEED) are not shadowed by this block.
+  EFFECTIVE_EXECUTOR_E2E_ADO_REPO: $[ coalesce(variables['EXECUTOR_E2E_ADO_REPO'], 'agent-definitions') ]
+  EFFECTIVE_E2E_QUEUE_PIPELINE_ID: $[ coalesce(variables['E2E_QUEUE_PIPELINE_ID'], '') ]
+  EFFECTIVE_E2E_WIKI_NAME: $[ coalesce(variables['E2E_WIKI_NAME'], '') ]
+  # Internal sparse crates.io mirror (Azure Artifacts). Declared in the cargo
+  # config below so CargoAuthenticate@0 can attach credentials, and reused as
+  # RustInstaller's crates.io override so the two never drift.
+  EFFECTIVE_CRATES_IO_FEED: $[ coalesce(variables['CRATES_IO_FEED'], 'sparse+https://pkgs.dev.azure.com/msazuresphere/AgentPlayground/_packaging/cargo/Cargo/index/') ]
   # GitHub repo that failure issues are filed against. NOT defined here on
   # purpose: a YAML `variables:` entry SHADOWS a same-named pipeline (definition)
   # variable, so hardcoding it would block per-pipeline overrides. Set
@@ -38,12 +45,6 @@ variables:
   # githubnext/ado-aw when it is unset.
   # Optional-precondition scenarios: empty by default so queue-build / wiki
   # skip gracefully. Override at queue time (or via a variable group) to enable.
-  E2E_QUEUE_PIPELINE_ID: ""
-  E2E_WIKI_NAME: ""
-  # Internal sparse crates.io mirror (Azure Artifacts). Declared in the cargo
-  # config below so CargoAuthenticate@0 can attach credentials, and reused as
-  # RustInstaller's crates.io override so the two never drift.
-  CRATES_IO_FEED: "sparse+https://pkgs.dev.azure.com/msazuresphere/AgentPlayground/_packaging/cargo/Cargo/index/"
   # EXECUTOR_E2E_GITHUB_TOKEN must be provided as a SECRET pipeline variable
   # (fine-grained PAT scoped to Issues:read/write on githubnext/ado-aw ONLY).
 
@@ -62,7 +63,7 @@ steps:
       # the auth task has something to authenticate and `cargo build` fetches
       # crates from the internal mirror.
       {
-        printf '\n[registries]\ncargo = { index = "%s" }\n\n' "$(CRATES_IO_FEED)"
+        printf '\n[registries]\ncargo = { index = "%s" }\n\n' "$(EFFECTIVE_CRATES_IO_FEED)"
         printf '[source.crates-io]\nreplace-with = "cargo"\n'
       } >> .cargo/config.toml
       echo "----- .cargo/config.toml -----"
@@ -78,7 +79,7 @@ steps:
     inputs:
       rustVersion: ms-stable
       toolchainFeed: "https://pkgs.dev.azure.com/msazuresphere/AgentPlayground/_packaging/AgentPlaygroundRustTools%40Local/nuget/v3/index.json"
-      cratesIoFeedOverride: "$(CRATES_IO_FEED)"
+      cratesIoFeedOverride: "$(EFFECTIVE_CRATES_IO_FEED)"
     displayName: Install Rust toolchain
 
   - script: |
@@ -122,10 +123,10 @@ steps:
       # explicitly so the harness (and the ado-aw binary it spawns) can write.
       SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)
       EXECUTOR_E2E_ADO_AW_BIN: $(ADO_AW_BIN)
-      EXECUTOR_E2E_ADO_REPO: $(EXECUTOR_E2E_ADO_REPO)
+      EXECUTOR_E2E_ADO_REPO: $(EFFECTIVE_EXECUTOR_E2E_ADO_REPO)
       EXECUTOR_E2E_ISSUE_REPO: $(EXECUTOR_E2E_ISSUE_REPO)
       # Secret PAT for filing failure issues (scoped to githubnext/ado-aw Issues).
       EXECUTOR_E2E_GITHUB_TOKEN: $(EXECUTOR_E2E_GITHUB_TOKEN)
       # Optional-precondition scenarios (skipped when unset):
-      E2E_QUEUE_PIPELINE_ID: $(E2E_QUEUE_PIPELINE_ID)
-      E2E_WIKI_NAME: $(E2E_WIKI_NAME)
+      E2E_QUEUE_PIPELINE_ID: $(EFFECTIVE_E2E_QUEUE_PIPELINE_ID)
+      E2E_WIKI_NAME: $(EFFECTIVE_E2E_WIKI_NAME)
