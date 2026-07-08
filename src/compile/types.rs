@@ -515,8 +515,9 @@ impl GithubAppTokenConfig {
         {
             anyhow::bail!(
                 "engine.github-app-token.private-key '{}' must be an ADO variable name \
-                 containing only letters, digits, '.', '_', or '-' (it names the secret \
-                 variable holding the PEM; omit it to use the default '{}').",
+                 starting with a letter, digit, or '_' and containing only letters, digits, \
+                 '.', '_', or '-' (it names the secret variable holding the PEM; omit it to \
+                 use the default '{}').",
                 private_key,
                 DEFAULT_GITHUB_APP_PRIVATE_KEY_VAR
             );

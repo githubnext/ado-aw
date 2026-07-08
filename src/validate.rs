@@ -230,23 +230,14 @@ pub fn is_valid_env_var_name(name: &str) -> bool {
 /// `variables['...']` lookup key.
 ///
 /// ADO variable names commonly contain letters, digits, `.`, `_`, and `-`
-/// (notably Key Vault-backed variable-group secret names). Rejects empty names,
-/// whitespace/control characters, quotes/backticks, ADO expression and pipeline
-/// command sequences, bracket-escape fragments, and any character outside that
-/// allowlist.
+/// (notably Key Vault-backed variable-group secret names). To avoid accepting
+/// unusual likely-typo names, the first character must be alphanumeric or `_`.
 pub fn is_valid_ado_variable_name(name: &str) -> bool {
-    !name.is_empty()
-        && !name.chars().any(|c| c.is_whitespace() || c.is_control())
-        && !name.contains('\'')
-        && !name.contains('"')
-        && !name.contains('`')
-        && !name.contains("']")
-        && !name.contains("['")
-        && !contains_ado_expression(name)
-        && !contains_pipeline_command(name)
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 /// Returns true if the name contains only ASCII alphanumerics and hyphens.
@@ -826,6 +817,8 @@ mod tests {
         assert!(is_valid_ado_variable_name("1PASSWORD-STYLE-NAME"));
 
         assert!(!is_valid_ado_variable_name(""));
+        assert!(!is_valid_ado_variable_name("-STARTS-WITH-HYPHEN"));
+        assert!(!is_valid_ado_variable_name(".starts-with-dot"));
         assert!(!is_valid_ado_variable_name("not a var"));
         assert!(!is_valid_ado_variable_name("with\nnewline"));
         assert!(!is_valid_ado_variable_name("$(secret)"));
