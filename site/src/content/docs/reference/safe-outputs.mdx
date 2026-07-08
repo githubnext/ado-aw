@@ -34,7 +34,100 @@ Safe output configurations are passed to Stage 3 execution and used when process
 
 :::caution[Compile-time key validation]
 All keys under `safe-outputs:` must match an exact registered tool name (e.g. `create-pull-request`, not `create-pr`). The compiler rejects unknown or misspelled keys with an error listing similar known tools. Key names must use only ASCII letters, digits, and hyphens.
+
+The one exception is `require-approval` — a reserved section-level key that configures the manual-review gate (see [Manual Review](#manual-review-require-approval) below), not a tool name.
 :::
+
+## Manual Review (`require-approval`)
+
+Any safe output can be gated behind a human approval step. When the agent proposes a gated output, the compiler inserts an agentless `ManualReview` job (backed by Azure DevOps `ManualValidation@1`) between Detection and SafeOutputs. A reviewer must approve before the output is applied.
+
+The gate is **fail-closed by default**: if the review period expires without a decision, the run is rejected.
+
+### Per-tool gate
+
+Add `require-approval: true` to any tool's config block:
+
+```yaml
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+    require-approval: true    # pause for human approval before creating the PR
+```
+
+### Section-level (global) gate
+
+Set `require-approval` at the top of `safe-outputs:` to gate every enabled tool:
+
+```yaml
+safe-outputs:
+  require-approval: true          # gates all tools by default
+  create-pull-request:
+    target-branch: main
+  create-work-item:
+    work-item-type: Task
+```
+
+Per-tool settings override the global default. To exempt a specific tool from a global gate, set its `require-approval: false`:
+
+```yaml
+safe-outputs:
+  require-approval: true          # gate everything by default
+  create-pull-request:
+    target-branch: main
+    require-approval: false       # this tool is exempt
+  create-work-item:
+    work-item-type: Task          # still gated by the global default
+```
+
+### Detailed form — approvers, notifications, and timeout
+
+Use the object form to configure who reviews, who is notified, and what happens on timeout:
+
+```yaml
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+    require-approval:
+      approvers: ["my-ado-group", "lead@example.com"]   # who can approve (empty = anyone with run access)
+      notify-users: ["team@example.com"]                 # who receives a notification email
+      timeout-minutes: 1440                              # 24 h; omit to use the ADO job/stage timeout
+      on-timeout: reject                                 # "reject" (fail-closed, default) or "resume" (auto-approve)
+      instructions: "Review the proposed changes carefully before approving."
+```
+
+**Fields:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `approvers` | list | `[]` | ADO users or groups who may approve or reject. Empty = anyone with run permission. |
+| `notify-users` | list | `[]` | ADO users or groups to email when the gate is pending. Empty = no notification sent. |
+| `timeout-minutes` | integer | *(none)* | How long the gate waits before auto-acting. Omit to fall back to the ADO job/stage timeout. |
+| `on-timeout` | `reject` \| `resume` | `reject` | What happens when `timeout-minutes` expires: `reject` fails the run (fail-closed — the safe default); `resume` auto-approves it. |
+| `instructions` | string | *(auto-generated)* | Message shown to reviewers in the ADO UI and email. Supports `$(...)` pipeline variable references. |
+
+:::caution[ADO template expressions blocked in approval config]
+The `approvers`, `notify-users`, and `instructions` fields must be literal strings or `$(...)` pipeline variable references. ADO template expressions (`${{ variables['...'] }}`) are rejected at compile time — they would expand at queue time and could leak variable values into the reviewer UI.
+:::
+
+### Pipeline shape
+
+The compiler adjusts the pipeline shape based on which tools require approval.
+
+**All tools gated:**
+
+```
+Agent → Detection → ManualReview → SafeOutputs
+```
+
+**Mixed — some tools gated, some not:**
+
+```
+Agent → Detection → SafeOutputs              (auto tools run immediately)
+                 ↘ ManualReview → SafeOutputs_Reviewed   (reviewed tools wait for approval)
+```
+
+When the agent does not propose any reviewed output in a given run, the `ManualReview` job is automatically skipped — the pipeline never pauses for a gate it does not need.
 
 ## Available Safe Output Tools
 
