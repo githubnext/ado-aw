@@ -482,8 +482,8 @@ engine:
 ```
 
 Group names that contain ADO expressions (`${{`, `$(`, `$[`), pipeline
-commands (`##vso[`, `##[`), control characters, or newlines are rejected at
-compile time.
+commands (`##vso[`, `##[`), the compiler's template marker (`{{`), or
+control characters (including newlines) are rejected at compile time.
 
 ### Target support
 

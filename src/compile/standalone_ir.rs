@@ -17,6 +17,7 @@ use anyhow::Result;
 use std::path::Path;
 
 use super::agentic_pipeline::build_pipeline_context;
+use super::common::variable_group_vars;
 use super::extensions::{CompileContext, Extension};
 use super::ir::{Pipeline, PipelineBody, PipelineShape};
 use super::types::FrontMatter;
@@ -62,16 +63,3 @@ pub fn build_standalone_pipeline(
     })
 }
 
-/// Map the validated `variable-groups:` front-matter entries to top-level
-/// [`super::ir::PipelineVar::Group`] imports (issue #1385), preserving
-/// declaration order. Names are already validated by
-/// [`crate::compile::common::validate_variable_groups`] (invoked inside
-/// [`build_pipeline_context`]).
-fn variable_group_vars(front_matter: &FrontMatter) -> Vec<super::ir::PipelineVar> {
-    front_matter
-        .variable_groups
-        .iter()
-        .cloned()
-        .map(super::ir::PipelineVar::Group)
-        .collect()
-}

@@ -244,14 +244,13 @@ pub fn is_safe_tool_name(name: &str) -> bool {
 /// break out of the emitted YAML scalar or inject pipeline logic:
 ///
 /// - empty or whitespace-only names,
-/// - control characters and newlines (`\n` / `\r`),
+/// - control characters (including `\n` / `\r`),
 /// - ADO template / macro / runtime expressions (`${{`, `$(`, `$[`),
 /// - ADO pipeline commands (`##vso[`, `##[`),
 /// - the compiler's own template marker (`{{`).
 pub fn is_valid_variable_group_name(name: &str) -> bool {
     !name.trim().is_empty()
         && !name.chars().any(|c| c.is_control())
-        && !contains_newline(name)
         && !contains_ado_expression(name)
         && !contains_pipeline_command(name)
         && !contains_template_marker(name)

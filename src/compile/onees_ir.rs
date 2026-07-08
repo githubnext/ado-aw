@@ -115,12 +115,7 @@ pub fn build_onees_pipeline(
         parameters: built.parameters,
         resources,
         triggers: built.triggers,
-        variables: front_matter
-            .variable_groups
-            .iter()
-            .cloned()
-            .map(super::ir::PipelineVar::Group)
-            .collect(),
+        variables: common::variable_group_vars(front_matter),
         body: PipelineBody::Jobs(jobs),
         shape: PipelineShape::OneEs {
             sdl: OneEsSdlConfig::default(),

@@ -495,6 +495,19 @@ pub fn validate_variable_groups(front_matter: &FrontMatter) -> Result<()> {
     Ok(())
 }
 
+/// Map the validated `variable-groups:` front-matter entries to top-level
+/// [`super::ir::PipelineVar::Group`] imports, preserving declaration order.
+/// Names are already validated by [`validate_variable_groups`] (invoked inside
+/// [`build_pipeline_context`]).
+pub fn variable_group_vars(front_matter: &FrontMatter) -> Vec<super::ir::PipelineVar> {
+    front_matter
+        .variable_groups
+        .iter()
+        .cloned()
+        .map(super::ir::PipelineVar::Group)
+        .collect()
+}
+
 /// Build the final parameters list by combining user-defined parameters
 /// with auto-injected parameters.
 ///
