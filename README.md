@@ -254,7 +254,7 @@ the service connections. Approve the permissions and the pipeline is ready.
 | `name` | string | **required** | Human-readable name for the agent |
 | `description` | string | **required** | One-line summary of the agent's purpose |
 | `target` | `standalone` \| `1es` \| `job` \| `stage` | `standalone` | Pipeline output format. `job` and `stage` generate reusable ADO YAML templates rather than complete pipelines. |
-| `engine` | string or object | `copilot` | Engine identifier or object with `id`, `model`, `timeout-minutes`, etc. |
+| `engine` | string or object | `copilot` | Engine identifier or object with `id`, `model`, `timeout-minutes`, `provider` (BYOK), `github-app-token`, and more. See [engine reference](docs/engine.md). |
 | `on` | object | — | Unified trigger configuration (`schedule`, `pipeline` completion, `pr` triggers). See [schedule syntax](#schedule-syntax). |
 | `pool` | string or object | `vmImage: ubuntu-22.04` (standalone) / `AZS-1ES-L-MMS-ubuntu-22.04` (1ES) | Agent pool |
 | `workspace` | `root` \| `repo` \| `self` \| *alias* | auto | Working directory mode. `self` is an alias for `repo`; any checked-out repo alias is also accepted. |
@@ -512,7 +512,7 @@ See [`docs/safe-outputs.md`](docs/safe-outputs.md) for the full reference.
 ## Network Isolation
 
 Agents run inside [AWF (Agentic Workflow Firewall)](https://github.com/github/gh-aw-firewall)
-containers with L7 domain whitelisting. Only explicitly allowed domains are
+containers with L7 domain allowlisting. Only explicitly allowed domains are
 reachable. The allowlist is built from:
 
 1. **Core domains** — Azure DevOps, GitHub, Microsoft auth, Azure storage
@@ -619,7 +619,7 @@ index to jump to the right page.
   (markdown body + YAML front matter grammar) with every supported field.
 - [`docs/engine.md`](docs/engine.md) — `engine:` configuration (model,
   `timeout-minutes`, `version`, `agent`, `api-target`, `args`, `env`,
-  `command`, `github-app-token`).
+  `provider`, `command`, `github-app-token`).
 - [`docs/tools.md`](docs/tools.md) — `tools:` configuration (`bash` allow-list,
   `edit`, `cache-memory`, `azure-devops` MCP).
 - [`docs/runtimes.md`](docs/runtimes.md) — `runtimes:` configuration (Lean 4,
