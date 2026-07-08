@@ -83,8 +83,8 @@ export const uploadBuildAttachment: Scenario<{
   config: () => ({ "allowed-extensions": ["txt"], max: 1 }),
   setup: async (ctx) => {
     const buildId = await currentBuildId(ctx, "upload-build-attachment");
-    const artifactName = `ado-aw-det-${ctx.buildId}`;
-    const contents = `deterministic build attachment for build ${ctx.buildId}\n`;
+    const artifactName = `ado-aw-det-${buildId}`;
+    const contents = `deterministic build attachment for build ${buildId}\n`;
     return {
       buildId,
       artifactName,
@@ -114,8 +114,8 @@ export const uploadPipelineArtifact: Scenario<{
   config: () => ({ "allowed-extensions": ["txt"], max: 1 }),
   setup: async (ctx) => {
     const buildId = await currentBuildId(ctx, "upload-pipeline-artifact");
-    const artifactName = `ado-aw-det-art-${ctx.buildId}`;
-    const contents = `deterministic pipeline artifact for build ${ctx.buildId}\n`;
+    const artifactName = `ado-aw-det-art-${buildId}`;
+    const contents = `deterministic pipeline artifact for build ${buildId}\n`;
     return {
       buildId,
       artifactName,
