@@ -18,9 +18,10 @@
  * `shared/merge-base.ts::ensureTargetRefFetched` logic that the PR
  * execution-context precompute already uses. It also points
  * `refs/remotes/origin/HEAD` at the target so `mcp.rs`'s symbolic-ref default
- * branch detection resolves the right base. Because the MCP server operates on
- * the same `$(Build.SourcesDirectory)` checkout, the base then resolves with no
- * in-sandbox network.
+ * branch detection resolves the right base. It operates on the `--repo-dir`
+ * the compiler passes (the resolved `self` checkout root, identical to the MCP
+ * server's `bounding_directory`), so the base then resolves with no in-sandbox
+ * network.
  *
  * ## Trust boundary
  *
@@ -37,7 +38,7 @@
  * existing `mcp.rs` diff-base error if truly unrecoverable. Only genuine infra
  * errors (an unusable `BUILD_SOURCESDIRECTORY`) hard-fail.
  *
- *   Invocation: node prepare-pr-base.js --target-branch <name>
+ *   Invocation: node prepare-pr-base.js --target-branch <name> --repo-dir <path>
  *               env: SYSTEM_ACCESSTOKEN (bearer for the git fetch)
  */
 import { bearerEnv, gitOk as defaultGitOk, runGit as defaultRunGit } from "../shared/git.js";
@@ -51,18 +52,29 @@ const defaultRunners: GitRunners = {
 export interface PrepareArgs {
   /** Short target branch name (no `refs/heads/` prefix). */
   targetBranch: string;
+  /**
+   * The `self` checkout root to operate on — the SAME path the host-side
+   * SafeOutputs MCP server uses as its `bounding_directory`. Empty when not
+   * provided (falls back to `BUILD_SOURCESDIRECTORY`, then the process cwd).
+   */
+  repoDir: string;
 }
 
 /**
- * Parse `--target-branch <name>`. Defaults to `main` (matching the compiler's
- * `CreatePrConfig` default) and strips a leading `refs/heads/` so callers may
- * pass either the short name or a full ref.
+ * Parse `--target-branch <name>` and `--repo-dir <path>`. `--target-branch`
+ * defaults to `main` (matching the compiler's `CreatePrConfig` default) and
+ * strips a leading `refs/heads/` so callers may pass either the short name or a
+ * full ref.
  */
 export function parseArgs(argv: string[]): PrepareArgs {
   let targetBranch = "main";
+  let repoDir = "";
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--target-branch") {
       targetBranch = argv[i + 1] ?? "main";
+      i++;
+    } else if (argv[i] === "--repo-dir") {
+      repoDir = argv[i + 1] ?? "";
       i++;
     }
   }
@@ -70,7 +82,7 @@ export function parseArgs(argv: string[]): PrepareArgs {
   if (targetBranch.length === 0) {
     targetBranch = "main";
   }
-  return { targetBranch };
+  return { targetBranch, repoDir };
 }
 
 export function main(
@@ -80,16 +92,19 @@ export function main(
 ): number {
   const targetShort = args.targetBranch;
 
-  // Operate on the same checkout the host-side SafeOutputs MCP server uses
-  // (its `bounding_directory` is `$(Build.SourcesDirectory)`). chdir so every
-  // spawned git runs against that repo regardless of the step's ambient cwd.
-  const repoDir = env.BUILD_SOURCESDIRECTORY;
+  // Operate on the same checkout the host-side SafeOutputs MCP server uses.
+  // Prefer the compiler-supplied `--repo-dir` (the resolved `self` working
+  // directory, which in multi-repo layouts is a `$(Build.Repository.Name)`
+  // subdirectory of `$(Build.SourcesDirectory)`), falling back to
+  // `BUILD_SOURCESDIRECTORY` and finally the ambient cwd. chdir so every
+  // spawned git runs against that repo.
+  const repoDir = args.repoDir.length > 0 ? args.repoDir : env.BUILD_SOURCESDIRECTORY;
   if (repoDir && repoDir.length > 0) {
     try {
       process.chdir(repoDir);
     } catch (err) {
       process.stderr.write(
-        `[prepare-pr-base] fatal: could not chdir to BUILD_SOURCESDIRECTORY ('${repoDir}'): ${(err as Error).message}\n`,
+        `[prepare-pr-base] fatal: could not chdir to repo dir ('${repoDir}'): ${(err as Error).message}\n`,
       );
       return 1;
     }

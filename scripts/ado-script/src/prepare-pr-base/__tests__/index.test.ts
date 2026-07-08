@@ -53,13 +53,20 @@ describe("parseArgs", () => {
   it("falls back to main for an empty value", () => {
     expect(parseArgs(["--target-branch", ""]).targetBranch).toBe("main");
   });
+
+  it("reads --repo-dir and defaults it to empty", () => {
+    expect(parseArgs([]).repoDir).toBe("");
+    expect(
+      parseArgs(["--target-branch", "main", "--repo-dir", "/src/self"]).repoDir,
+    ).toBe("/src/self");
+  });
 });
 
 describe("prepare-pr-base main", () => {
   it("fetches origin/<target> and sets origin/HEAD on success", () => {
     const { runners, calls } = makeRunners({ fetchStatus: 0, mergeBase: SHA_M });
     // No BUILD_SOURCESDIRECTORY → skip chdir (test runs in the repo cwd).
-    const rc = main({ targetBranch: "main" }, {}, runners);
+    const rc = main({ targetBranch: "main", repoDir: "" }, {}, runners);
     expect(rc).toBe(0);
 
     const fetch = calls.find((c) => c[0] === "fetch");
@@ -76,7 +83,7 @@ describe("prepare-pr-base main", () => {
 
   it("threads a non-default target through the fetch refspec and origin/HEAD", () => {
     const { runners, calls } = makeRunners({ fetchStatus: 0, mergeBase: SHA_M });
-    const rc = main({ targetBranch: "release/2.x" }, {}, runners);
+    const rc = main({ targetBranch: "release/2.x", repoDir: "" }, {}, runners);
     expect(rc).toBe(0);
 
     const fetch = calls.find((c) => c[0] === "fetch");
@@ -92,7 +99,7 @@ describe("prepare-pr-base main", () => {
 
   it("exits 0 without setting origin/HEAD when every fetch fails (benign)", () => {
     const { runners, calls } = makeRunners({ fetchStatus: 1, mergeBase: null });
-    const rc = main({ targetBranch: "main" }, {}, runners);
+    const rc = main({ targetBranch: "main", repoDir: "" }, {}, runners);
     // Non-fatal: the agent still runs; mcp.rs surfaces its own error if needed.
     expect(rc).toBe(0);
     expect(calls.some((c) => c[0] === "symbolic-ref")).toBe(false);
@@ -107,7 +114,7 @@ describe("prepare-pr-base main", () => {
       },
       gitOk: (args) => (args[0] === "merge-base" ? SHA_M : null),
     };
-    main({ targetBranch: "main" }, { SYSTEM_ACCESSTOKEN: "tok" }, runners);
+    main({ targetBranch: "main", repoDir: "" }, { SYSTEM_ACCESSTOKEN: "tok" }, runners);
     expect(seenEnvs[0]).toMatchObject({
       GIT_CONFIG_VALUE_0: "Authorization: bearer tok",
     });

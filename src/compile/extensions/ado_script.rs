@@ -588,20 +588,28 @@ fn sh_single_quote(value: &str) -> String {
 /// Agent job before the Copilot invocation when `create-pull-request` is
 /// configured, invoking the `prepare-pr-base` ado-script bundle to fetch and
 /// progressively deepen the target branch (`refs/remotes/origin/<target>`) in
-/// the `$(Build.SourcesDirectory)` checkout. The host-side SafeOutputs MCP
-/// server (`src/mcp.rs`) then resolves a diff base even on shallow-default
-/// agent pools — no forced full-history `checkout: self`, no lock hand-edit.
+/// the `self` checkout. The host-side SafeOutputs MCP server (`src/mcp.rs`)
+/// then resolves a diff base even on shallow-default agent pools — no forced
+/// full-history `checkout: self`, no lock hand-edit.
 ///
-/// The non-secret `--target-branch` is a single-quoted argv flag (immune to
-/// ADO pipeline-variable shadowing); the ADO bearer is projected via
+/// `working_directory` is the resolved `self` checkout root — the SAME path the
+/// MCP server receives as its `bounding_directory` (see
+/// `start_safeoutputs_server_step`). It is passed as `--repo-dir` so the bundle
+/// deepens the exact clone the MCP server later reads (these differ from
+/// `$(Build.SourcesDirectory)` in multi-repo layouts, where `self` lands in a
+/// `$(Build.Repository.Name)` subdirectory).
+///
+/// The non-secret `--target-branch` / `--repo-dir` are single-quoted argv flags
+/// (immune to ADO pipeline-variable shadowing); the ADO bearer is projected via
 /// `apply_bundle_auth` (the bundle uses it for the authenticated git fetch, and
 /// `SYSTEM_ACCESSTOKEN` is the one predefined var ADO does not auto-inject).
 /// The step runs OUTSIDE the AWF sandbox on the build agent's normal network,
 /// so it needs no AWF allowlist entry.
-pub fn prepare_pr_base_step_typed(target_branch: &str) -> Step {
+pub fn prepare_pr_base_step_typed(target_branch: &str, working_directory: &str) -> Step {
     let script = format!(
-        "set -eo pipefail\nnode '{PREPARE_PR_BASE_PATH}' --target-branch {}\n",
-        sh_single_quote(target_branch)
+        "set -eo pipefail\nnode '{PREPARE_PR_BASE_PATH}' --target-branch {} --repo-dir {}\n",
+        sh_single_quote(target_branch),
+        sh_single_quote(working_directory)
     );
     let step = crate::compile::ado_bundle::apply_bundle_auth(
         BashStep::new(
@@ -1459,7 +1467,8 @@ mod tests {
 
     #[test]
     fn prepare_pr_base_step_emits_bundle_invocation_with_target_and_bearer() {
-        let Step::Bash(step) = prepare_pr_base_step_typed("main") else {
+        let Step::Bash(step) = prepare_pr_base_step_typed("main", "$(Build.SourcesDirectory)")
+        else {
             panic!("expected a bash step");
         };
         assert_eq!(
@@ -1478,6 +1487,13 @@ mod tests {
             "target-branch must be a single-quoted argv flag:\n{}",
             step.script
         );
+        // The repo dir (== MCP server bounding_directory) is a single-quoted argv
+        // flag so the bundle deepens the exact clone the MCP server reads.
+        assert!(
+            step.script.contains("--repo-dir '$(Build.SourcesDirectory)'"),
+            "repo-dir must be a single-quoted argv flag:\n{}",
+            step.script
+        );
         // The ADO bearer is projected as a masked secret (bundle uses it for the
         // authenticated git fetch); SYSTEM_ACCESSTOKEN is not auto-injected.
         assert!(matches!(
@@ -1488,12 +1504,33 @@ mod tests {
 
     #[test]
     fn prepare_pr_base_step_quotes_a_non_default_target() {
-        let Step::Bash(step) = prepare_pr_base_step_typed("release/2.x") else {
+        let Step::Bash(step) =
+            prepare_pr_base_step_typed("release/2.x", "$(Build.SourcesDirectory)")
+        else {
             panic!("expected a bash step");
         };
         assert!(
             step.script.contains("--target-branch 'release/2.x'"),
             "non-default target must be passed through single-quoted:\n{}",
+            step.script
+        );
+    }
+
+    #[test]
+    fn prepare_pr_base_step_passes_multi_repo_working_directory_as_repo_dir() {
+        // In multi-repo layouts `self` lands in a $(Build.Repository.Name)
+        // subdirectory; the step must target THAT dir (the MCP server's
+        // bounding_directory), not $(Build.SourcesDirectory).
+        let Step::Bash(step) = prepare_pr_base_step_typed(
+            "main",
+            "$(Build.SourcesDirectory)/$(Build.Repository.Name)",
+        ) else {
+            panic!("expected a bash step");
+        };
+        assert!(
+            step.script
+                .contains("--repo-dir '$(Build.SourcesDirectory)/$(Build.Repository.Name)'"),
+            "repo-dir must carry the resolved self checkout root:\n{}",
             step.script
         );
     }

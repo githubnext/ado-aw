@@ -944,6 +944,7 @@ fn build_agent_job(
     if let Some(target_branch) = front_matter.create_pr_target_branch() {
         steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
             &target_branch,
+            &cfg.working_directory,
         ));
     }
     //     When GitHub App auth is configured, mint the installation token
