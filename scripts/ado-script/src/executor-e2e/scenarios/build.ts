@@ -10,7 +10,8 @@
  */
 import type { Scenario, ScenarioContext } from "../scenario.js";
 import { SkipError } from "../scenario.js";
-import { numResult, requireEnv, strResult } from "./common.js";
+import { numResult, requireEnv, stagedSafeOutputFile, strResult } from "./common.js";
+import type { StagedSafeOutputFile } from "./common.js";
 
 async function currentBuildId(ctx: ScenarioContext, tool: string): Promise<number> {
   const raw = process.env.BUILD_BUILDID?.trim();
@@ -73,16 +74,27 @@ export const queueBuild: Scenario<{ pipelineId: number; queuedBuildId?: number }
   },
 };
 
-export const uploadBuildAttachment: Scenario<{ buildId: number }> = {
+export const uploadBuildAttachment: Scenario<{
+  buildId: number;
+  artifactName: string;
+  staged: StagedSafeOutputFile;
+}> = {
   tool: "upload-build-attachment",
   config: () => ({ "allowed-extensions": ["txt"], max: 1 }),
-  setup: async (ctx) => ({ buildId: await currentBuildId(ctx, "upload-build-attachment") }),
-  files: async (ctx) => ({
-    "build-att.txt": `deterministic build attachment for build ${ctx.buildId}\n`,
-  }),
-  ndjson: async (ctx) => ({
-    artifact_name: `ado-aw-det-${ctx.buildId}`,
-    file_path: "build-att.txt",
+  setup: async (ctx) => {
+    const buildId = await currentBuildId(ctx, "upload-build-attachment");
+    const artifactName = `ado-aw-det-${ctx.buildId}`;
+    const contents = `deterministic build attachment for build ${ctx.buildId}\n`;
+    return {
+      buildId,
+      artifactName,
+      staged: stagedSafeOutputFile("upload-build-attachment", artifactName, "build-att.txt", contents),
+    };
+  },
+  files: async (_ctx, state) => state.staged.files,
+  ndjson: async (_ctx, state) => ({
+    artifact_name: state.artifactName,
+    ...state.staged.result,
   }),
   assert: async (_ctx, _state, record) => {
     // The executor returns an attachment_url only after a successful ADO POST.
@@ -93,16 +105,27 @@ export const uploadBuildAttachment: Scenario<{ buildId: number }> = {
   },
 };
 
-export const uploadPipelineArtifact: Scenario<{ buildId: number }> = {
+export const uploadPipelineArtifact: Scenario<{
+  buildId: number;
+  artifactName: string;
+  staged: StagedSafeOutputFile;
+}> = {
   tool: "upload-pipeline-artifact",
   config: () => ({ "allowed-extensions": ["txt"], max: 1 }),
-  setup: async (ctx) => ({ buildId: await currentBuildId(ctx, "upload-pipeline-artifact") }),
-  files: async (ctx) => ({
-    "artifact.txt": `deterministic pipeline artifact for build ${ctx.buildId}\n`,
-  }),
-  ndjson: async (ctx) => ({
-    artifact_name: `ado-aw-det-art-${ctx.buildId}`,
-    file_path: "artifact.txt",
+  setup: async (ctx) => {
+    const buildId = await currentBuildId(ctx, "upload-pipeline-artifact");
+    const artifactName = `ado-aw-det-art-${ctx.buildId}`;
+    const contents = `deterministic pipeline artifact for build ${ctx.buildId}\n`;
+    return {
+      buildId,
+      artifactName,
+      staged: stagedSafeOutputFile("upload-pipeline-artifact", artifactName, "artifact.txt", contents),
+    };
+  },
+  files: async (_ctx, state) => state.staged.files,
+  ndjson: async (_ctx, state) => ({
+    artifact_name: state.artifactName,
+    ...state.staged.result,
   }),
   assert: async (_ctx, _state, record) => {
     strResult(record, "download_url");
