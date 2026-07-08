@@ -415,7 +415,9 @@ pub struct GithubAppTokenConfig {
     /// [`DEFAULT_GITHUB_APP_PRIVATE_KEY_VAR`] when omitted — the compiler owns
     /// the variable name, exactly like `GITHUB_TOKEN`, so the common case just
     /// runs `ado-aw secrets set GITHUB_APP_PRIVATE_KEY …`. Set this only to
-    /// point at a differently-named secret. The key material is never inlined.
+    /// point at a differently-named secret, including hyphenated Key Vault
+    /// secret names surfaced through ADO variable groups. The key material is
+    /// never inlined.
     #[serde(default, rename = "private-key")]
     pub private_key: Option<String>,
     /// GitHub installation owner (organization or user login) the App is
@@ -488,11 +490,11 @@ impl GithubAppTokenConfig {
     /// name, the GitHub owner/repository name segments, and the optional API
     /// URL. `app-id` must be a non-empty `[A-Za-z0-9._-]` literal (covers
     /// numeric App IDs and alphanumeric/`Iv1.`-style client IDs);
-    /// `private-key` (when set) must be a valid env-var name; `owner` and each
-    /// `repositories` entry must be a single safe path segment; `api-url` (when
-    /// set) must be an `https://` URL with a host.
+    /// `private-key` (when set) must be a valid ADO variable name; `owner` and
+    /// each `repositories` entry must be a single safe path segment; `api-url`
+    /// (when set) must be an `https://` URL with a host.
     pub fn validate(&self) -> anyhow::Result<()> {
-        use crate::validate::{is_safe_path_segment, is_valid_env_var_name};
+        use crate::validate::{is_safe_path_segment, is_valid_ado_variable_name};
         if self.app_id.is_empty()
             || !self.app_id.starts_with(|c: char| c.is_ascii_alphanumeric())
             || !self
@@ -509,12 +511,13 @@ impl GithubAppTokenConfig {
             );
         }
         if let Some(private_key) = &self.private_key
-            && !is_valid_env_var_name(private_key)
+            && !is_valid_ado_variable_name(private_key)
         {
             anyhow::bail!(
                 "engine.github-app-token.private-key '{}' must be an ADO variable name \
-                 matching [A-Za-z_][A-Za-z0-9_]* (it names the secret variable holding the \
-                 PEM; omit it to use the default '{}').",
+                 starting with a letter, digit, or '_' and containing only letters, digits, \
+                 '.', '_', or '-' (it names the secret variable holding the PEM; omit it to \
+                 use the default '{}').",
                 private_key,
                 DEFAULT_GITHUB_APP_PRIVATE_KEY_VAR
             );
@@ -3045,6 +3048,51 @@ github-app-token:
         };
         let err = gat.validate().unwrap_err().to_string();
         assert!(err.contains("private-key"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_github_app_token_validate_accepts_hyphenated_private_key_override() {
+        let gat = GithubAppTokenConfig {
+            app_id: "1234567".to_string(),
+            private_key: Some("AGENTIC-WORKFLOWS-GITHUB-APP-PRIVATE-KEY".to_string()),
+            owner: "octo-org".to_string(),
+            repositories: vec![],
+            api_url: None,
+            skip_token_revocation: false,
+        };
+        gat.validate()
+            .expect("hyphenated ADO variable names are valid macro targets");
+        assert_eq!(
+            gat.private_key_var(),
+            "AGENTIC-WORKFLOWS-GITHUB-APP-PRIVATE-KEY"
+        );
+    }
+
+    #[test]
+    fn test_github_app_token_validate_rejects_private_key_injection_attempts() {
+        for private_key in [
+            "$(SECRET)",
+            "$[variables.SECRET]",
+            "${{ variables.SECRET }}",
+            "##vso[task.setvariable variable=x]y",
+            "##[debug]x",
+            "variables['SECRET']",
+            "SECRET\"",
+        ] {
+            let gat = GithubAppTokenConfig {
+                app_id: "1234567".to_string(),
+                private_key: Some(private_key.to_string()),
+                owner: "octo-org".to_string(),
+                repositories: vec![],
+                api_url: None,
+                skip_token_revocation: false,
+            };
+            let err = gat.validate().unwrap_err().to_string();
+            assert!(
+                err.contains("private-key"),
+                "unexpected error for {private_key:?}: {err}"
+            );
+        }
     }
 
     #[test]

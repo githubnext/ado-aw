@@ -226,6 +226,20 @@ pub fn is_valid_env_var_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// Validate an Azure DevOps variable name used as a `$(...)` macro target or
+/// `variables['...']` lookup key.
+///
+/// ADO variable names commonly contain letters, digits, `.`, `_`, and `-`
+/// (notably Key Vault-backed variable-group secret names). To avoid accepting
+/// unusual likely-typo names, the first character must be alphanumeric or `_`.
+pub fn is_valid_ado_variable_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
 /// Returns true if the name contains only ASCII alphanumerics and hyphens.
 /// This value is embedded inline in a shell command, so control characters
 /// (including newlines) and whitespace must be rejected to prevent corruption.
@@ -791,6 +805,30 @@ mod tests {
         assert!(!is_valid_service_connection("${{ variables.conn }}"));
         assert!(!is_valid_service_connection("conn$[variables.x]"));
         assert!(!is_valid_service_connection("##vso[task.setvariable]"));
+    }
+
+    #[test]
+    fn test_is_valid_ado_variable_name() {
+        assert!(is_valid_ado_variable_name("GITHUB_APP_PRIVATE_KEY"));
+        assert!(is_valid_ado_variable_name(
+            "AGENTIC-WORKFLOWS-GITHUB-APP-PRIVATE-KEY"
+        ));
+        assert!(is_valid_ado_variable_name("Library.Secret-Name_01"));
+        assert!(is_valid_ado_variable_name("1PASSWORD-STYLE-NAME"));
+
+        assert!(!is_valid_ado_variable_name(""));
+        assert!(!is_valid_ado_variable_name("-STARTS-WITH-HYPHEN"));
+        assert!(!is_valid_ado_variable_name(".starts-with-dot"));
+        assert!(!is_valid_ado_variable_name("not a var"));
+        assert!(!is_valid_ado_variable_name("with\nnewline"));
+        assert!(!is_valid_ado_variable_name("$(secret)"));
+        assert!(!is_valid_ado_variable_name("$[variables.secret]"));
+        assert!(!is_valid_ado_variable_name("${{ variables.secret }}"));
+        assert!(!is_valid_ado_variable_name("##vso[task.setvariable]"));
+        assert!(!is_valid_ado_variable_name("##[debug]"));
+        assert!(!is_valid_ado_variable_name("name'"));
+        assert!(!is_valid_ado_variable_name("variables['secret']"));
+        assert!(!is_valid_ado_variable_name("bad/var"));
     }
 
     #[test]
