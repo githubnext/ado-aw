@@ -11,7 +11,7 @@
 //! the hood:
 //!
 //! ```text
-//! PUT {collectionUri}_apis/distributedtask/hubs/build
+//! PUT {org}/{project}/_apis/distributedtask/hubs/build
 //!     /plans/{planId}/timelines/{timelineId}/records/{recordId}
 //!     /attachments/{type}/{name}?api-version=7.1-preview
 //! ```
@@ -507,16 +507,18 @@ impl Executor for UploadBuildAttachmentResult {
         )?;
         debug!("ADO org: {}, project: {}", org_url, project);
 
-        // Build the DistributedTask timeline-attachment URL (collection-scoped;
-        // the `build` hub covers build/YAML pipelines). This is the write side
-        // of a build attachment — the object is read back via the Build ▸
-        // Attachments Get/List API by `{type}`/`{name}`.
-        // PUT {collectionUri}_apis/distributedtask/hubs/build/plans/{planId}
+        // Build the DistributedTask timeline-attachment URL. This is the write
+        // side of a build attachment — the object is read back via the Build ▸
+        // Attachments Get/List API by `{type}`/`{name}`. The `build` hub covers
+        // build/YAML pipelines; the route is project-scoped (like the Build
+        // area), unlike the collection-scoped `resources/Containers` upload.
+        // PUT {org}/{project}/_apis/distributedtask/hubs/build/plans/{planId}
         //     /timelines/{timelineId}/records/{recordId}
         //     /attachments/{type}/{name}?api-version=7.1-preview.1
         let url = format!(
-            "{}/_apis/distributedtask/hubs/build/plans/{}/timelines/{}/records/{}/attachments/{}/{}?api-version=7.1-preview.1",
+            "{}/{}/_apis/distributedtask/hubs/build/plans/{}/timelines/{}/records/{}/attachments/{}/{}?api-version=7.1-preview.1",
             org_url.trim_end_matches('/'),
+            utf8_percent_encode(project, PATH_SEGMENT),
             utf8_percent_encode(plan_id, PATH_SEGMENT),
             utf8_percent_encode(timeline_id, PATH_SEGMENT),
             utf8_percent_encode(record_id, PATH_SEGMENT),
