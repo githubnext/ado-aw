@@ -575,55 +575,71 @@ fn lower_job(job: &Job, stage: Option<&StageId>, graph: &Graph) -> Result<Value>
     if let Some(wrap) = &job.template_dependson_wrap {
         lower_job_template_wrap(&mut m, job, wrap, &ctx)?;
     } else {
-        if !job.depends_on.is_empty() {
-            // Single-dep emits as a scalar `dependsOn: <name>` (matching
-            // base.yml). Multi-dep emits as a sequence.
-            if job.depends_on.len() == 1 {
-                m.insert(s("dependsOn"), s(job.depends_on[0].as_str()));
-            } else {
-                let deps: Vec<Value> = job.depends_on.iter().map(|d| s(d.as_str())).collect();
-                m.insert(s("dependsOn"), Value::Sequence(deps));
-            }
-        }
-        if let Some(cond) = &job.condition {
-            m.insert(s("condition"), s(&lower_condition(&ctx.cond_ctx(), cond)?));
-        }
+        lower_job_depends_on(&mut m, job, &ctx)?;
     }
     if let Some(t) = job.timeout {
         m.insert(s("timeoutInMinutes"), Value::from(minutes_ceil(t)));
     }
-    // Merge any explicit job-level variables with compiler-generated
-    // hoists for `EnvValue::RuntimeExpression` values found in step
-    // env blocks (ADO does not evaluate `$[ ... ]` inside step env, so
-    // each one is hoisted to a job-level variable here and read back
-    // via a `$(name)` macro in the step env).
+    lower_job_variables(&mut m, job, &ctx)?;
+    lower_job_steps(&mut m, job, &ctx)?;
+    Ok(Value::Mapping(m))
+}
+
+/// Emit `dependsOn:` and `condition:` for a job without a template-dependsOn wrap.
+///
+/// Single-dep emits as a scalar `dependsOn: <name>` (matching base.yml).
+/// Multi-dep emits as a sequence.
+fn lower_job_depends_on(m: &mut Mapping, job: &Job, ctx: &LoweringContext<'_>) -> Result<()> {
+    if !job.depends_on.is_empty() {
+        if job.depends_on.len() == 1 {
+            m.insert(s("dependsOn"), s(job.depends_on[0].as_str()));
+        } else {
+            let deps: Vec<Value> = job.depends_on.iter().map(|d| s(d.as_str())).collect();
+            m.insert(s("dependsOn"), Value::Sequence(deps));
+        }
+    }
+    if let Some(cond) = &job.condition {
+        m.insert(s("condition"), s(&lower_condition(&ctx.cond_ctx(), cond)?));
+    }
+    Ok(())
+}
+
+/// Merge explicit job-level variables with compiler-generated hoists for
+/// `EnvValue::RuntimeExpression` values found in step env blocks.
+///
+/// ADO does not evaluate `$[ ... ]` inside step env, so each such value is
+/// hoisted to a job-level variable and read back via a `$(name)` macro in
+/// the step env.
+fn lower_job_variables(m: &mut Mapping, job: &Job, ctx: &LoweringContext<'_>) -> Result<()> {
     let hoisted = collect_runtime_expr_hoists(&job.steps);
     if !job.variables.is_empty() || !hoisted.is_empty() {
         let mut vars = Mapping::new();
         for v in &job.variables {
-            vars.insert(s(&v.name), s(&lower_env_value(&ctx, &v.value)?));
+            vars.insert(s(&v.name), s(&lower_env_value(ctx, &v.value)?));
         }
         for v in &hoisted {
             // An explicit job variable of the same name wins — never
             // clobber an author-declared variable with a hoist.
             let key = s(&v.name);
             if !vars.contains_key(&key) {
-                vars.insert(key, s(&lower_env_value(&ctx, &v.value)?));
+                vars.insert(key, s(&lower_env_value(ctx, &v.value)?));
             }
         }
         m.insert(s("variables"), Value::Mapping(vars));
     }
+    Ok(())
+}
 
+/// Emit either `pool:` + `steps:` (standard jobs) or `templateContext:` (1ES jobs).
+///
+/// 1ES jobs inherit the pool from `extends.parameters.pool` — the per-job
+/// `pool:` key is suppressed. `Step::Publish` entries are lifted into
+/// `templateContext.outputs[]` so the 1ES template publishes the artifact
+/// rather than emitting an inline `- publish:`.
+fn lower_job_steps(m: &mut Mapping, job: &Job, ctx: &LoweringContext<'_>) -> Result<()> {
     if let Some(tc) = &job.template_context {
-        // 1ES jobs inherit the pool from `extends.parameters.pool` —
-        // suppress the per-job `pool:` key. Wrap `steps:` under
-        // `templateContext:` and lift any `Step::Publish` entries into
-        // `templateContext.outputs[]` so the 1ES template publishes
-        // the artifact (rather than the step emitting an inline
-        // `- publish:`).
         let mut tc_map = Mapping::new();
         tc_map.insert(s("type"), s(tc.kind.as_str()));
-
         let mut outputs: Vec<Value> = Vec::new();
         let mut wrapped_steps: Vec<Value> = Vec::with_capacity(job.steps.len());
         for step in &job.steps {
@@ -638,7 +654,7 @@ fn lower_job(job: &Job, stage: Option<&StageId>, graph: &Graph) -> Result<Value>
                 outputs.push(Value::Mapping(out));
                 continue;
             }
-            wrapped_steps.push(lower_step(step, &ctx)?);
+            wrapped_steps.push(lower_step(step, ctx)?);
         }
         if !outputs.is_empty() {
             tc_map.insert(s("outputs"), Value::Sequence(outputs));
@@ -649,11 +665,11 @@ fn lower_job(job: &Job, stage: Option<&StageId>, graph: &Graph) -> Result<Value>
         m.insert(s("pool"), lower_pool(&job.pool));
         let mut steps = Vec::with_capacity(job.steps.len());
         for step in &job.steps {
-            steps.push(lower_step(step, &ctx)?);
+            steps.push(lower_step(step, ctx)?);
         }
         m.insert(s("steps"), Value::Sequence(steps));
     }
-    Ok(Value::Mapping(m))
+    Ok(())
 }
 
 /// Emit dual-branch `${{ if eq/ne(length(parameters.<X>), 0) }}` for
