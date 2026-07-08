@@ -134,6 +134,50 @@ mod tests {
         CacheMemoryExtension::new(CacheMemoryToolConfig::Enabled(true))
     }
 
+    /// Assert that `condition` is `Condition::Custom` with the given string.
+    fn assert_condition_custom(condition: Option<&Condition>, expected: &str) {
+        match condition.expect("condition required") {
+            Condition::Custom(s) => assert_eq!(s, expected),
+            other => panic!("expected Condition::Custom, got {other:?}"),
+        }
+    }
+
+    /// Assert step 0: DownloadPipelineArtifact@2 with clearMemory=false condition.
+    fn assert_download_previous_memory_task(step: &Step) {
+        let t = match step {
+            Step::Task(t) => t,
+            other => panic!("expected Step::Task(DownloadPipelineArtifact@2), got {other:?}"),
+        };
+        assert_eq!(t.task, "DownloadPipelineArtifact@2");
+        assert_eq!(t.display_name, "Download previous agent memory");
+        assert_eq!(t.inputs.get("artifact").map(String::as_str), Some("safe_outputs"));
+        assert!(t.continue_on_error);
+        assert_condition_custom(t.condition.as_ref(), "eq(${{ parameters.clearMemory }}, false)");
+    }
+
+    /// Assert step 1: Bash restore step with clearMemory=false condition.
+    fn assert_restore_memory_bash(step: &Step) {
+        let b = match step {
+            Step::Bash(b) => b,
+            other => panic!("expected Step::Bash(restore...), got {other:?}"),
+        };
+        assert_eq!(b.display_name, "Restore previous agent memory");
+        assert!(b.script.contains("/tmp/awf-tools/staging/agent_memory"));
+        assert!(b.continue_on_error);
+        assert_condition_custom(b.condition.as_ref(), "eq(${{ parameters.clearMemory }}, false)");
+    }
+
+    /// Assert step 2: Bash init step with clearMemory=true condition.
+    fn assert_init_empty_memory_bash(step: &Step) {
+        let b = match step {
+            Step::Bash(b) => b,
+            other => panic!("expected Step::Bash(init...), got {other:?}"),
+        };
+        assert_eq!(b.display_name, "Initialize empty agent memory (clearMemory=true)");
+        assert!(b.script.contains("Memory cleared by pipeline parameter"));
+        assert_condition_custom(b.condition.as_ref(), "eq(${{ parameters.clearMemory }}, true)");
+    }
+
     /// Locks the `declarations()` override: must return exactly three
     /// typed steps (Task + two Bash) in the documented order, with
     /// the right conditions on each. Every step is typed.
@@ -145,56 +189,9 @@ mod tests {
         let decl = ext.declarations(&ctx).unwrap();
         assert_eq!(decl.agent_prepare_steps.len(), 3);
 
-        match &decl.agent_prepare_steps[0] {
-            Step::Task(t) => {
-                assert_eq!(t.task, "DownloadPipelineArtifact@2");
-                assert_eq!(t.display_name, "Download previous agent memory");
-                assert_eq!(
-                    t.inputs.get("artifact").map(String::as_str),
-                    Some("safe_outputs")
-                );
-                assert!(t.continue_on_error);
-                match t.condition.as_ref().expect("condition required") {
-                    Condition::Custom(s) => {
-                        assert_eq!(s, "eq(${{ parameters.clearMemory }}, false)");
-                    }
-                    other => panic!("expected Condition::Custom, got {other:?}"),
-                }
-            }
-            other => panic!("expected Step::Task(DownloadPipelineArtifact@2), got {other:?}"),
-        }
-
-        match &decl.agent_prepare_steps[1] {
-            Step::Bash(b) => {
-                assert_eq!(b.display_name, "Restore previous agent memory");
-                assert!(b.script.contains("/tmp/awf-tools/staging/agent_memory"));
-                assert!(b.continue_on_error);
-                match b.condition.as_ref().expect("condition required") {
-                    Condition::Custom(s) => {
-                        assert_eq!(s, "eq(${{ parameters.clearMemory }}, false)");
-                    }
-                    other => panic!("expected Condition::Custom, got {other:?}"),
-                }
-            }
-            other => panic!("expected Step::Bash(restore...), got {other:?}"),
-        }
-
-        match &decl.agent_prepare_steps[2] {
-            Step::Bash(b) => {
-                assert_eq!(
-                    b.display_name,
-                    "Initialize empty agent memory (clearMemory=true)"
-                );
-                assert!(b.script.contains("Memory cleared by pipeline parameter"));
-                match b.condition.as_ref().expect("condition required") {
-                    Condition::Custom(s) => {
-                        assert_eq!(s, "eq(${{ parameters.clearMemory }}, true)");
-                    }
-                    other => panic!("expected Condition::Custom, got {other:?}"),
-                }
-            }
-            other => panic!("expected Step::Bash(init...), got {other:?}"),
-        }
+        assert_download_previous_memory_task(&decl.agent_prepare_steps[0]);
+        assert_restore_memory_bash(&decl.agent_prepare_steps[1]);
+        assert_init_empty_memory_bash(&decl.agent_prepare_steps[2]);
 
         assert!(decl.prompt_supplement.is_some());
         assert!(decl.mcpg_servers.is_empty());
