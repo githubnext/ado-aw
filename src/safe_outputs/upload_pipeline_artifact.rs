@@ -934,34 +934,6 @@ name-prefix: "ci-"
     }
 
     #[tokio::test]
-    async fn test_rejects_sha256_mismatch() {
-        let dir = tempfile::tempdir().unwrap();
-        let staged = dir.path().join("staged-file.pdf");
-        let content = b"real file content";
-        std::fs::write(&staged, content).unwrap();
-
-        let result = UploadPipelineArtifactResult::new(
-            None,
-            "report".to_string(),
-            "out/report.pdf".to_string(),
-            "staged-file.pdf".to_string(),
-            content.len() as u64,
-            crate::hash::sha256_hex(b"wrong file content"),
-        );
-
-        let ctx = ExecutionContext {
-            working_directory: dir.path().to_path_buf(),
-            build_id: Some(123),
-            dry_run: false,
-            ..Default::default()
-        };
-
-        let exec_result = result.execute_impl(&ctx).await.unwrap();
-        assert!(!exec_result.success);
-        assert!(exec_result.message.contains("SHA-256 mismatch"));
-    }
-
-    #[tokio::test]
     async fn test_rejects_exceeding_max_file_size() {
         let dir = tempfile::tempdir().unwrap();
         let staged = dir.path().join("staged-file.pdf");

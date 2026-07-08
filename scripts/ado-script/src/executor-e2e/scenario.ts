@@ -58,6 +58,11 @@ export interface ScenarioContext {
  * assertion and cleanup.
  */
 export interface Scenario<State = unknown> {
+  /**
+   * Unique harness id for reporting and scratch directories. Defaults to
+   * `tool`; set this when multiple scenarios exercise the same safe-output.
+   */
+  readonly id?: string;
   /** kebab-case safe-output tool name (matches the `safe-outputs:` key). */
   readonly tool: string;
   /**
@@ -97,6 +102,14 @@ export interface Scenario<State = unknown> {
    * child process (e.g. BUILD_SOURCESDIRECTORY pointing at a git checkout).
    */
   env?(ctx: ScenarioContext, state: State): Promise<Record<string, string>>;
+  /**
+   * Some scenarios intentionally submit invalid staged output and should pass
+   * only when the executor rejects it with the expected failure.
+   */
+  readonly expectedFailure?: {
+    readonly status?: string;
+    readonly error: RegExp;
+  };
   /**
    * Assert the ADO side-effect actually happened. Throw on failure.
    *

@@ -135,9 +135,46 @@ export const uploadPipelineArtifact: Scenario<{
   },
 };
 
+export const uploadPipelineArtifactShaMismatch: Scenario<{
+  buildId: number;
+  artifactName: string;
+  staged: StagedSafeOutputFile;
+}> = {
+  id: "upload-pipeline-artifact-sha-mismatch",
+  tool: "upload-pipeline-artifact",
+  config: () => ({ "allowed-extensions": ["txt"], max: 1 }),
+  setup: async (ctx) => {
+    const buildId = await currentBuildId(ctx, "upload-pipeline-artifact-sha-mismatch");
+    const artifactName = `ado-aw-det-art-sha-${buildId}`;
+    const contents = `deterministic pipeline artifact sha mismatch for build ${buildId}\n`;
+    return {
+      buildId,
+      artifactName,
+      staged: stagedSafeOutputFile("upload-pipeline-artifact", artifactName, "artifact.txt", contents),
+    };
+  },
+  files: async (_ctx, state) => state.staged.files,
+  ndjson: async (_ctx, state) => ({
+    artifact_name: state.artifactName,
+    ...state.staged.result,
+    staged_sha256: "0".repeat(64),
+  }),
+  expectedFailure: {
+    status: "failed",
+    error: /SHA-256 mismatch/,
+  },
+  assert: async () => {
+    throw new Error("expected SHA-256 mismatch to be rejected before assertion");
+  },
+  cleanup: async () => {
+    /* rejected before upload; nothing to delete */
+  },
+};
+
 export const buildScenarios: Scenario<unknown>[] = [
   addBuildTag,
   queueBuild,
   uploadBuildAttachment,
   uploadPipelineArtifact,
+  uploadPipelineArtifactShaMismatch,
 ];
