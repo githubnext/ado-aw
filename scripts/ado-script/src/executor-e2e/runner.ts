@@ -24,13 +24,14 @@ export async function runScenario<S>(
 ): Promise<ScenarioResult> {
   const start = Date.now();
   const tool = scenario.tool;
-  const scenarioDir = join(ctx.workDir, tool);
+  const scenarioId = scenario.id ?? tool;
+  const scenarioDir = join(ctx.workDir, scenarioId);
 
   let state: S | undefined;
   let setupDone = false;
 
   const finish = (partial: Omit<ScenarioResult, "tool" | "durationMs">): ScenarioResult => ({
-    tool,
+    tool: scenarioId,
     durationMs: Date.now() - start,
     ...partial,
   });
@@ -46,7 +47,7 @@ export async function runScenario<S>(
     }
 
     // ---- setup ----
-    ctx.log(`[${tool}] setup`);
+    ctx.log(`[${scenarioId}] setup`);
     try {
       state = await scenario.setup(ctx);
       // IMPORTANT: cleanup runs ONLY after this point (guarded by setupDone in
@@ -56,7 +57,7 @@ export async function runScenario<S>(
       setupDone = true;
     } catch (err) {
       if (err instanceof SkipError) {
-        ctx.log(`[${tool}] SKIPPED: ${err.message}`);
+        ctx.log(`[${scenarioId}] SKIPPED: ${err.message}`);
         return finish({ ok: true, skipped: true, phase: "skipped", message: err.message });
       }
       return finish({ ok: false, phase: "setup", message: errMessage(err) });
@@ -105,6 +106,16 @@ export async function runScenario<S>(
       });
     }
     if (result.record.status !== "succeeded") {
+      const expected = scenario.expectedFailure;
+      const error = result.record.error ?? "";
+      if (
+        expected &&
+        (expected.status === undefined || result.record.status === expected.status) &&
+        expected.error.test(error)
+      ) {
+        ctx.log(`[${scenarioId}] expected failure: ${error}`);
+        return finish({ ok: true });
+      }
       return finish({
         ok: false,
         phase: "execute",
@@ -119,7 +130,7 @@ export async function runScenario<S>(
       return finish({ ok: false, phase: "assert", message: errMessage(err) });
     }
 
-    ctx.log(`[${tool}] OK`);
+    ctx.log(`[${scenarioId}] OK`);
     return finish({ ok: true });
   } finally {
     // ---- cleanup (always, best-effort) ----
@@ -129,9 +140,9 @@ export async function runScenario<S>(
     if (setupDone) {
       try {
         await scenario.cleanup(ctx, state as S);
-        ctx.log(`[${tool}] cleanup done`);
+        ctx.log(`[${scenarioId}] cleanup done`);
       } catch (err) {
-        ctx.log(`[${tool}] cleanup WARNING: ${errMessage(err)}`);
+        ctx.log(`[${scenarioId}] cleanup WARNING: ${errMessage(err)}`);
       }
     }
   }

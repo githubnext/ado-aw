@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { Teardown } from "../scenarios/common.js";
+import { stagedSafeOutputFile, Teardown } from "../scenarios/common.js";
 
 describe("Teardown", () => {
   it("runs every step even when an earlier one throws", async () => {
@@ -63,5 +63,43 @@ describe("Teardown", () => {
       })
       .run();
     expect(order).toEqual([1, 2, 3]);
+  });
+});
+
+describe("stagedSafeOutputFile", () => {
+  it("emits the staged result fields required by staged-file executors", () => {
+    const staged = stagedSafeOutputFile(
+      "upload-build-attachment",
+      "ado-aw-det-123",
+      "build-att.txt",
+      "hello\n",
+    );
+
+    expect(staged.result).toEqual({
+      file_path: "build-att.txt",
+      staged_file: "upload-build-attachment-ado-aw-det-123-e2e.txt",
+      file_size: 6,
+      staged_sha256: "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03",
+    });
+    expect(staged.files).toEqual({
+      "build-att.txt": "hello\n",
+      "upload-build-attachment-ado-aw-det-123-e2e.txt": "hello\n",
+    });
+  });
+
+  it("records byte length for UTF-8 content and handles extensionless files", () => {
+    const staged = stagedSafeOutputFile(
+      "upload-pipeline-artifact",
+      "ado-aw-det-art-123",
+      "artifact",
+      "£\n",
+    );
+
+    expect(staged.result.file_size).toBe(3);
+    expect(staged.result.staged_file).toBe("upload-pipeline-artifact-ado-aw-det-art-123-e2e");
+    expect(staged.files).toEqual({
+      artifact: "£\n",
+      "upload-pipeline-artifact-ado-aw-det-art-123-e2e": "£\n",
+    });
   });
 });

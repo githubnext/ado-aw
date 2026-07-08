@@ -1,4 +1,6 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
@@ -77,5 +79,53 @@ describe("runScenario precondition handling", () => {
     expect(res.message).toBe("boom");
     expect(flags.executed).toBe(false);
     expect(flags.cleaned).toBe(false);
+  });
+});
+
+describe("runScenario expected executor failures", () => {
+  it("passes an expected executor rejection without running assertions", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ado-aw-runner-test-"));
+    try {
+      const bin = join(dir, "fake-ado-aw.js");
+      await writeFile(
+        bin,
+        `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+const out = process.argv[process.argv.indexOf("--safe-output-dir") + 1];
+fs.writeFileSync(path.join(out, "safe-outputs-executed.ndjson"), JSON.stringify({
+  name: "upload_pipeline_artifact",
+  status: "failed",
+  error: "SHA-256 mismatch: expected 0000, got abcd",
+}) + "\\n");
+`,
+        { encoding: "utf8", mode: 0o755 },
+      );
+
+      let asserted = false;
+      let cleaned = false;
+      const scenario: Scenario<unknown> = {
+        id: "upload-pipeline-artifact-sha-mismatch",
+        tool: "upload-pipeline-artifact",
+        config: () => ({}),
+        setup: async () => ({}),
+        ndjson: async () => ({}),
+        expectedFailure: { status: "failed", error: /SHA-256 mismatch/ },
+        assert: async () => {
+          asserted = true;
+        },
+        cleanup: async () => {
+          cleaned = true;
+        },
+      };
+
+      const res = await runScenario({ ...fakeCtx(), adoAwBin: bin, workDir: dir }, scenario);
+
+      expect(res).toMatchObject({ ok: true, tool: "upload-pipeline-artifact-sha-mismatch" });
+      expect(asserted).toBe(false);
+      expect(cleaned).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

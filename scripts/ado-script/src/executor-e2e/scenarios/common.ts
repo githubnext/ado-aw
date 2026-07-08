@@ -2,6 +2,9 @@
  * Shared helpers for executor E2E scenarios.
  * Test-harness module; not shipped in `ado-script.zip`.
  */
+import { createHash } from "node:crypto";
+import { extname } from "node:path";
+
 import type { ExecutedRecord, ScenarioContext } from "../scenario.js";
 import { SkipError } from "../scenario.js";
 
@@ -50,6 +53,51 @@ export function requireEnv(name: string, tool: string): string {
     throw new SkipError(`${tool}: ${name} is not set; supply it to enable this scenario`);
   }
   return value;
+}
+
+export interface StagedSafeOutputFile {
+  readonly files: Record<string, string>;
+  readonly result: {
+    readonly file_path: string;
+    readonly staged_file: string;
+    readonly file_size: number;
+    readonly staged_sha256: string;
+  };
+}
+
+/**
+ * Build the post-MCP staging shape consumed by safe-output executors that read
+ * a staged file (`staged_file` + integrity metadata) instead of the raw agent
+ * params.
+ */
+export function stagedSafeOutputFile(
+  tool: string,
+  artifactName: string,
+  filePath: string,
+  contents: string,
+): StagedSafeOutputFile {
+  const extension = extname(filePath)
+    .slice(1)
+    .replace(/[^A-Za-z0-9]/g, "")
+    .slice(0, 16);
+  const stagedFile = extension
+    ? `${tool}-${artifactName}-e2e.${extension}`
+    : `${tool}-${artifactName}-e2e`;
+  const bytes = Buffer.from(contents, "utf8");
+  const files =
+    stagedFile === filePath
+      ? { [stagedFile]: contents }
+      : { [filePath]: contents, [stagedFile]: contents };
+
+  return {
+    files,
+    result: {
+      file_path: filePath,
+      staged_file: stagedFile,
+      file_size: bytes.byteLength,
+      staged_sha256: createHash("sha256").update(bytes).digest("hex"),
+    },
+  };
 }
 
 /**
