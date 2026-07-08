@@ -76,8 +76,10 @@ User-configured runtimes and tools are appended after those always-on extensions
 
 ```rust
 pub struct Declarations {
-    pub agent_prepare_steps: Vec<Step>,
-    pub setup_steps: Vec<Step>,
+    pub agent_prepare_steps: Vec<Step>,   // steps before the agent invocation
+    pub setup_steps: Vec<Step>,           // steps in the Setup job
+    // Reserved for future use — present in the struct but no compile-target reads these yet.
+    // Do not populate them; steps placed here will be silently dropped.
     pub agent_finalize_steps: Vec<Step>,
     pub detection_prepare_steps: Vec<Step>,
     pub safe_outputs_steps: Vec<Step>,
@@ -96,7 +98,7 @@ pub struct Declarations {
 }
 ```
 
-Return `Declarations::default()` and fill only the fields your feature owns. Do not add target-specific special cases when the same information can be declared here.
+Return `Declarations::default()` and fill only the fields your feature owns. The three fields marked "reserved for future use" (`agent_finalize_steps`, `detection_prepare_steps`, `safe_outputs_steps`) exist in the struct but are not currently read by any compile target — steps placed in them will be silently dropped. Do not add target-specific special cases when the same information can be declared here.
 
 ## Building typed steps
 
