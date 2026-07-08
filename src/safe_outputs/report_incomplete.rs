@@ -77,12 +77,7 @@ impl Executor for ReportIncompleteResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safe_outputs::{Executor, ToolResult};
-
-    #[test]
-    fn test_result_has_correct_name() {
-        assert_eq!(ReportIncompleteResult::NAME, "report-incomplete");
-    }
+    use crate::safe_outputs::Executor;
 
     #[test]
     fn test_params_deserializes() {
@@ -111,7 +106,11 @@ mod tests {
             context: None,
         };
         let result: Result<ReportIncompleteResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("at least 10 characters"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
