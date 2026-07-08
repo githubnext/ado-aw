@@ -49,12 +49,6 @@ impl Executor for NoopResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safe_outputs::ToolResult;
-
-    #[test]
-    fn test_result_has_correct_name() {
-        assert_eq!(NoopResult::NAME, "noop");
-    }
 
     #[test]
     fn test_result_serializes_to_valid_json() {

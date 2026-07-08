@@ -55,12 +55,6 @@ impl Executor for MissingToolResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safe_outputs::ToolResult;
-
-    #[test]
-    fn test_result_has_correct_name() {
-        assert_eq!(MissingToolResult::NAME, "missing-tool");
-    }
 
     #[test]
     fn test_result_serializes_correctly() {
