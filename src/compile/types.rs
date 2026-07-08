@@ -1085,6 +1085,25 @@ pub struct FrontMatter {
     /// Network policy for standalone target (ignored in 1ES)
     #[serde(default)]
     pub network: Option<NetworkConfig>,
+    /// Azure DevOps variable group imports (issue #1385).
+    ///
+    /// Each entry is the **name** of a project-level ADO Library variable
+    /// group whose variables should be pulled into the run. The compiler emits
+    /// a top-level `variables:\n  - group: <name>` import for each entry, in
+    /// declaration order (ADO evaluates later groups after earlier ones, so a
+    /// later group wins on key collisions).
+    ///
+    /// Only group **names** belong here — never secret values. ado-aw never
+    /// resolves, prints, logs, or serialises a group's variable values; steps
+    /// still reference secrets by macro (`$(VAR_NAME)`) exactly as before.
+    ///
+    /// In Azure DevOps a group must be **both** authorized for the pipeline
+    /// definition **and** imported in YAML; this field provides the YAML
+    /// import. Not representable in `target: job` / `target: stage` templates
+    /// (the parent pipeline owns pipeline-level `variables:`) — declaring it
+    /// there is a compile-time error.
+    #[serde(default, rename = "variable-groups")]
+    pub variable_groups: Vec<String>,
     /// Custom steps before agent runs (same job)
     #[serde(default)]
     pub steps: Vec<serde_yaml::Value>,

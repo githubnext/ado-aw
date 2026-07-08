@@ -99,6 +99,11 @@ Copilot auth — omit it otherwise. See
 the full field reference (`private-key` override, `api-url` for GHES,
 `skip-token-revocation`).
 
+To manage the private key once at the project level (instead of per pipeline),
+store it in an Azure DevOps **variable group** and import that group with the
+top-level `variable-groups:` field (see Step 17b), pointing `private-key` at the
+variable the group supplies.
+
 **Custom model provider (BYOK).** To route the Copilot engine to an external LLM
 provider (e.g. Azure AI Foundry, OpenAI), use the `engine.provider` block. The
 compiler mints the provider credential in-job and auto-adds the provider hostname
@@ -655,6 +660,33 @@ inlined-imports: true
 **Trade-off**: with `inlined-imports: true`, every change to the agent instructions requires running `ado-aw compile` and committing the updated `.lock.yml`. Omit this field (or set it to `false`) for the typical edit-without-recompile workflow.
 
 You can also reference shared files from the agent body using `{{#runtime-import path/to/file.md}}` markers.
+
+### Step 17b — Variable Groups (advanced, optional)
+
+To consume secrets managed once at the project level (e.g. a shared GitHub App
+private key), import one or more Azure DevOps **variable groups** with the
+top-level `variable-groups:` field:
+
+```yaml
+variable-groups:
+  - Agentic Workflows
+  - Shared Secrets
+```
+
+The compiler emits a top-level `variables:` block with a `- group: <name>`
+import per entry. Notes:
+
+- Put **only group names** here — never secret values. Steps still reference
+  secrets by macro (`$(VAR_NAME)`), e.g. `github-app-token.private-key`.
+- In ADO the group must be **both** authorized on the pipeline definition **and**
+  imported in YAML; this field provides the import (authorization is done in the
+  ADO Library UI).
+- Only valid for `target: standalone` (default) and `target: 1es`. It is a
+  compile-time error on `target: job` / `target: stage` (the parent pipeline
+  owns pipeline-level `variables:`).
+
+See [`docs/front-matter.md`](../docs/front-matter.md#variable-groups-variable-groups)
+for the full reference.
 
 ---
 

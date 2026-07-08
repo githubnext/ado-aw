@@ -423,6 +423,77 @@ becomes a `repos:` entry, with `checkout: false` added for entries
 that weren't listed under `checkout:`. Mixing the legacy fields with
 an existing `repos:` block is rejected; pick one shape.
 
+## Variable Groups (`variable-groups:`)
+
+Import one or more Azure DevOps **variable groups** (ADO "Library" groups)
+into the generated pipeline so a source-clean lock can consume secrets that
+are managed once at the project level — for example a GitHub App private key
+shared across many pipelines:
+
+```yaml
+variable-groups:
+  - Agentic Workflows
+  - Shared Secrets
+```
+
+Each entry is the **name** of a variable group. The compiler emits a
+top-level `variables:` block with one `- group:` import per entry, in
+declaration order:
+
+```yaml
+variables:
+  - group: Agentic Workflows
+  - group: Shared Secrets
+```
+
+Groups are evaluated in order, so a later group wins on key collisions.
+
+### Authorization *and* import are both required
+
+In Azure DevOps, two independent things are needed before a group's
+variables are available to a YAML run:
+
+1. **Authorization** — the pipeline *definition* must be granted permission
+   to use the group (done in the ADO Library UI / API, outside ado-aw).
+2. **YAML import** — the pipeline *YAML* must explicitly pull the group in
+   with `variables: - group: <name>`.
+
+Authorization alone is **not** sufficient — without the YAML import the
+variables are unavailable at runtime. `variable-groups:` provides the YAML
+import; you still have to authorize the group on the pipeline definition.
+
+### Names only — never values
+
+Only group **names** belong in `variable-groups:`. ado-aw never resolves,
+prints, logs, or serialises a group's variable values. Steps continue to
+reference secret variables by macro (`$(VAR_NAME)`) exactly as before — for
+instance `engine.github-app-token.private-key` names a variable that a group
+supplies:
+
+```yaml
+variable-groups:
+  - Agentic Workflows
+engine:
+  id: copilot
+  github-app-token:
+    app-id: 1234567
+    owner: octo-org
+    private-key: AGENTIC_WORKFLOWS_GITHUB_APP_PRIVATE_KEY
+```
+
+Group names that contain ADO expressions (`${{`, `$(`, `$[`), pipeline
+commands (`##vso[`, `##[`), control characters, or newlines are rejected at
+compile time.
+
+### Target support
+
+`variable-groups:` is only valid for pipeline-level targets — `standalone`
+(default) and `1es`. Azure DevOps `job` / `stage` **templates** cannot
+declare pipeline-level `variables:` (the parent pipeline that includes the
+template owns them), so `variable-groups:` on `target: job` or
+`target: stage` is a hard compile-time error. Import the group in the parent
+pipeline that includes the template instead.
+
 ## Inlined Imports
 
 The `inlined-imports:` field controls when `{{#runtime-import ...}}`

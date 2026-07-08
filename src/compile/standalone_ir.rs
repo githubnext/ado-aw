@@ -56,8 +56,22 @@ pub fn build_standalone_pipeline(
         parameters: built.parameters,
         resources: built.resources,
         triggers: built.triggers,
-        variables: Vec::new(),
+        variables: variable_group_vars(front_matter),
         body: PipelineBody::Jobs(built.jobs),
         shape: PipelineShape::Standalone,
     })
+}
+
+/// Map the validated `variable-groups:` front-matter entries to top-level
+/// [`super::ir::PipelineVar::Group`] imports (issue #1385), preserving
+/// declaration order. Names are already validated by
+/// [`crate::compile::common::validate_variable_groups`] (invoked inside
+/// [`build_pipeline_context`]).
+fn variable_group_vars(front_matter: &FrontMatter) -> Vec<super::ir::PipelineVar> {
+    front_matter
+        .variable_groups
+        .iter()
+        .cloned()
+        .map(super::ir::PipelineVar::Group)
+        .collect()
 }

@@ -311,11 +311,26 @@ pub struct CiTrigger {
 }
 
 /// A pipeline-level `variables:` entry.
+///
+/// ADO's top-level `variables:` sequence mixes two entry shapes: literal
+/// `- name: X / value: Y` pairs and variable-group imports (`- group: G`).
+/// This enum models both so the lowering pass can emit the correct YAML for
+/// each; group imports carry only the group **name** — never any variable
+/// value (see issue #1385).
 #[derive(Debug, Clone)]
-pub struct PipelineVar {
-    pub name: String,
-    pub value: String,
-    pub is_secret: bool,
+pub enum PipelineVar {
+    /// A literal `- name: <name>` / `value: <value>` entry, optionally
+    /// flagged `isSecret: true`.
+    NameValue {
+        name: String,
+        value: String,
+        is_secret: bool,
+    },
+    /// A variable-group import: `- group: <name>`. Brings the (project-level,
+    /// often Key Vault-backed) group's variables into the run. Only the group
+    /// name is carried — ado-aw never resolves, logs, or serialises the
+    /// group's variable values.
+    Group(String),
 }
 
 #[cfg(test)]

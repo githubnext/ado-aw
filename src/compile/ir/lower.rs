@@ -466,10 +466,21 @@ fn lower_variables(vars: &[PipelineVar]) -> Value {
     let mut seq = Vec::with_capacity(vars.len());
     for v in vars {
         let mut m = Mapping::new();
-        m.insert(s("name"), s(&v.name));
-        m.insert(s("value"), s(&v.value));
-        if v.is_secret {
-            m.insert(s("isSecret"), Value::Bool(true));
+        match v {
+            PipelineVar::NameValue {
+                name,
+                value,
+                is_secret,
+            } => {
+                m.insert(s("name"), s(name));
+                m.insert(s("value"), s(value));
+                if *is_secret {
+                    m.insert(s("isSecret"), Value::Bool(true));
+                }
+            }
+            PipelineVar::Group(group) => {
+                m.insert(s("group"), s(group));
+            }
         }
         seq.push(Value::Mapping(m));
     }
@@ -2475,12 +2486,12 @@ mod tests {
             resources: Resources::default(),
             triggers: Triggers::default(),
             variables: vec![
-                PipelineVar {
+                PipelineVar::NameValue {
                     name: "PLAIN_VAR".into(),
                     value: "hello".into(),
                     is_secret: false,
                 },
-                PipelineVar {
+                PipelineVar::NameValue {
                     name: "SECRET_VAR".into(),
                     value: "$(SC_TOKEN)".into(),
                     is_secret: true,
@@ -2496,6 +2507,36 @@ mod tests {
         assert!(yaml.contains("value: hello"));
         assert!(yaml.contains("name: SECRET_VAR"));
         assert!(yaml.contains("isSecret: true"));
+    }
+
+    /// A `PipelineVar::Group` lowers to a `- group: <name>` entry, and
+    /// multiple groups preserve declaration order. No `name:`/`value:` keys
+    /// are emitted for a group import (only the group name is carried).
+    #[test]
+    fn lower_variables_emits_group_imports_in_order() {
+        let p = Pipeline {
+            name: "P".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers::default(),
+            variables: vec![
+                PipelineVar::Group("Agentic Workflows".into()),
+                PipelineVar::Group("Shared Secrets".into()),
+            ],
+            body: PipelineBody::Jobs(Vec::new()),
+            shape: PipelineShape::Standalone,
+        };
+        let g = Graph::default();
+        let v = lower_with_graph(&p, &g).unwrap();
+        let yaml = serde_yaml::to_string(&v).unwrap();
+        assert!(yaml.contains("group: Agentic Workflows"));
+        assert!(yaml.contains("group: Shared Secrets"));
+        // Order preserved: first group appears before the second.
+        let first = yaml.find("Agentic Workflows").unwrap();
+        let second = yaml.find("Shared Secrets").unwrap();
+        assert!(first < second, "group imports must preserve source order");
+        // Group entries carry no name/value keys.
+        assert!(!yaml.contains("value:"));
     }
 
     // ─── Template shape wrapping ──────────────────────────────────
