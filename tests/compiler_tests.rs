@@ -7685,6 +7685,16 @@ fn test_github_app_token_literal_app_id_and_api_url() {
     );
 }
 
+#[test]
+fn test_github_app_token_hyphenated_private_key_variable() {
+    let content = "---\nname: \"GH App Hyphen Key\"\ndescription: \"hyphenated key vault variable\"\nengine:\n  id: copilot\n  github-app-token:\n    app-id: 1234567\n    private-key: AGENTIC-WORKFLOWS-GITHUB-APP-PRIVATE-KEY\n    owner: octo-org\n---\n\n## Agent\n\nDo work.\n";
+    let compiled = compile_inline_agent("ghapp-hyphen-key", content);
+    assert!(
+        compiled.contains("GH_APP_PRIVATE_KEY: $(AGENTIC-WORKFLOWS-GITHUB-APP-PRIVATE-KEY)"),
+        "hyphenated private-key override must be preserved as the ADO macro target:\n{compiled}"
+    );
+}
+
 /// When another ado-script bundle feature is active in the Agent job (here a
 /// safe-output activates the approval-summary bundle download), the mint step
 /// must NOT trigger a second bundle download in that job — it reuses the
