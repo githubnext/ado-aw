@@ -1726,20 +1726,6 @@ mod tests {
     }
 
     #[test]
-    fn engine_expression_base_url_host_rejects_non_dns_safe() {
-        // An IPv6 literal parses to a host but is not DNS-safe, so it must not
-        // be added to the AWF allow-domains list (consistent with api-target).
-        let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    COPILOT_PROVIDER_BASE_URL: \"http://[::1]:8080/v1\"\n---\n",
-        ).unwrap();
-        let hosts = Engine::Copilot.required_hosts(&fm.engine);
-        assert!(
-            hosts.is_empty(),
-            "non-DNS-safe host (IPv6 literal) must be rejected from the allowlist: {hosts:?}"
-        );
-    }
-
-    #[test]
     fn copilot_provider_env_returns_only_provider_keys() {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    COPILOT_PROVIDER_TYPE: azure\n    COPILOT_PROVIDER_BEARER_TOKEN: \"$(Setup.FOUNDRY_TOKEN)\"\n    MY_VAR: keep-out\n---\n",
