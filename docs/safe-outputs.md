@@ -338,7 +338,10 @@ Note: The source branch name is auto-generated from a sanitized version of the P
   `repos: ref` (the branch it was checked out at). `self` and repos without a
   known ref fall back to `target-branch`. It is a separate boolean (not a magic
   `target-branch` value) so a real branch name can never be mistaken for a
-  directive.
+  directive. Only branch refs (`refs/heads/*`) are valid PR targets — if an
+  inferred repo is checked out at a **tag** (`refs/tags/*`) the compiler warns
+  and you should give it an explicit `target-branches` entry (a PR cannot target
+  a tag).
 
   **Per-repo target resolution precedence** (for a repo `R`): `target-branches[R]`
   → (if `infer-target-from-checkout-ref`) `R`'s checkout ref → `target-branch` →

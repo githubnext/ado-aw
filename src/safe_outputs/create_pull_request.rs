@@ -2509,6 +2509,35 @@ mod tests {
     }
 
     #[test]
+    fn test_target_branches_sanitizes_both_keys_and_values() {
+        use crate::sanitize::SanitizeConfig;
+        // `#[sanitize_config(sanitize_keys)]` sanitizes BOTH keys and values of
+        // the HashMap (the derive's sanitize_keys branch maps
+        // `(sanitize_config(k), sanitize_config(v))`), so per-repo overrides get
+        // the same normalization pass as the scalar `target_branch`.
+        let mut cfg = CreatePrConfig {
+            target_branches: std::collections::HashMap::from([(
+                "##vso[task.debug]alias".to_string(),
+                "##vso[task.setvariable]branch".to_string(),
+            )]),
+            ..Default::default()
+        };
+        cfg.sanitize_config_fields();
+        let (k, v) = cfg.target_branches.iter().next().unwrap();
+        // sanitize_config neutralizes the VSO command by backtick-wrapping the
+        // `##vso[` marker (same behavior asserted elsewhere), so both key and
+        // value carry the escaped form.
+        assert!(
+            k.contains("`##vso[`"),
+            "target_branches key must be sanitized: {k}"
+        );
+        assert!(
+            v.contains("`##vso[`"),
+            "target_branches value must be sanitized: {v}"
+        );
+    }
+
+    #[test]
     fn test_validate_patch_paths_valid() {
         let patch = r#"diff --git a/src/main.rs b/src/main.rs
 index 1234567..abcdefg 100644

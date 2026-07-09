@@ -1254,27 +1254,6 @@ impl FrontMatter {
         self.safe_output_tool_names().next().is_some()
     }
 
-    /// The create-pull-request target branch, or `None` when the tool is not
-    /// configured. `Some(target)` is the single source of truth for the
-    /// prepare-pr-base feature gate (issue #1413): it drives BOTH the ado-script
-    /// bundle download (`AdoScriptExtension::prepare_pr_base_active`, set in
-    /// `collect_extensions`) and the Agent-job prepare-step emission
-    /// (`build_agent_job`). When the `target-branch` key is absent the fallback
-    /// is taken from `crate::safe_outputs::CreatePrConfig`'s default (the same
-    /// value the Stage 3 executor resolves via `get_tool_config`), so the
-    /// prepare step always fetches the branch the executor targets — the two
-    /// cannot drift.
-    pub fn create_pr_target_branch(&self) -> Option<String> {
-        self.safe_outputs.get("create-pull-request").map(|v| {
-            v.get("target-branch")
-                .and_then(|t| t.as_str())
-                .map(str::to_string)
-                .unwrap_or_else(|| {
-                    crate::safe_outputs::CreatePrConfig::default().target_branch
-                })
-        })
-    }
-
     /// The parsed, sanitized `create-pull-request` config, or `None` when the
     /// tool is not configured. Mirrors Stage 3's `ExecutionContext::get_tool_config`
     /// (deserialize + `sanitize_config_fields`) so the compiler resolves per-repo
@@ -1288,8 +1267,15 @@ impl FrontMatter {
     /// `Default` (`.ok().unwrap_or_default()`). Bailing here would make the two
     /// paths diverge (compile fails / Stage 3 silently defaults); the warning
     /// surfaces the mistake without breaking that symmetry.
+    ///
+    /// A bare `create-pull-request:` (YAML null) is the standard "enable with
+    /// defaults" idiom, so it maps to `CreatePrConfig::default()` silently — it
+    /// is not a malformed config and must not warn.
     pub fn create_pr_config(&self) -> Option<crate::safe_outputs::CreatePrConfig> {
         self.safe_outputs.get("create-pull-request").map(|v| {
+            if v.is_null() {
+                return crate::safe_outputs::CreatePrConfig::default();
+            }
             let mut cfg: crate::safe_outputs::CreatePrConfig = serde_json::from_value(v.clone())
                 .unwrap_or_else(|e| {
                     eprintln!(
@@ -4220,8 +4206,11 @@ Body
     }
 
     #[test]
-    fn test_create_pr_target_branch_explicit_and_default() {
-        // Explicit target-branch is returned verbatim.
+    fn test_create_pr_config_resolves_explicit_and_default_target() {
+        use std::collections::HashMap;
+        let no_refs: HashMap<String, String> = HashMap::new();
+
+        // Explicit target-branch is returned verbatim for self.
         let explicit = r#"---
 name: "PR Agent"
 description: "opens a PR"
@@ -4233,14 +4222,11 @@ safe-outputs:
 Body
 "#;
         let (fm, _) = super::super::common::parse_markdown(explicit).unwrap();
-        assert_eq!(
-            fm.create_pr_target_branch(),
-            Some("release/2.x".to_string())
-        );
+        let cfg = fm.create_pr_config().unwrap();
+        assert_eq!(cfg.resolve_target_branch("self", &no_refs), "release/2.x");
 
         // Bare `create-pull-request: {}` (target-branch key absent) falls back
-        // to the shared CreatePrConfig default — exercises the `.unwrap_or_else`
-        // fallback the integration tests otherwise never hit.
+        // to the shared CreatePrConfig default.
         let implicit = r#"---
 name: "PR Agent"
 description: "opens a PR"
@@ -4251,9 +4237,11 @@ safe-outputs:
 Body
 "#;
         let (fm, _) = super::super::common::parse_markdown(implicit).unwrap();
-        let default_branch =
-            crate::safe_outputs::CreatePrConfig::default().target_branch;
-        assert_eq!(fm.create_pr_target_branch(), Some(default_branch.clone()));
+        let default_branch = crate::safe_outputs::CreatePrConfig::default().target_branch;
+        assert_eq!(
+            fm.create_pr_config().unwrap().resolve_target_branch("self", &no_refs),
+            default_branch
+        );
         // Guard the shared default so a future rename can't silently make the
         // prepare step fetch a branch the executor doesn't target.
         assert_eq!(
@@ -4273,7 +4261,44 @@ safe-outputs:
 Body
 "#;
         let (fm, _) = super::super::common::parse_markdown(absent).unwrap();
-        assert_eq!(fm.create_pr_target_branch(), None);
+        assert!(fm.create_pr_config().is_none());
+    }
+
+    #[test]
+    fn test_create_pr_config_null_maps_to_defaults() {
+        // A bare `create-pull-request:` (YAML null) is the "enable with
+        // defaults" idiom — create_pr_config() returns the default config
+        // (Some, so the prepare step is still emitted) without treating it as a
+        // malformed config.
+        let content = r#"---
+name: "Null PR Agent"
+description: "bare create-pull-request"
+safe-outputs:
+  create-pull-request:
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let cfg = fm
+            .create_pr_config()
+            .expect("bare create-pull-request must still enable the tool");
+        assert_eq!(cfg.target_branch, "main");
+        assert!(cfg.target_branches.is_empty());
+        assert!(!cfg.infer_target_from_checkout_ref);
+        // Absent create-pull-request ⇒ None.
+        let absent = r#"---
+name: "No PR"
+description: "x"
+safe-outputs:
+  create-work-item:
+    work-item-type: Task
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(absent).unwrap();
+        assert!(fm.create_pr_config().is_none());
     }
 
     #[test]

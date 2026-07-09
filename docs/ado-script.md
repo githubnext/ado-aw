@@ -538,12 +538,12 @@ scripts/ado-script/
 │   ├── exec-context-repo/       # exec-context-repo.js entry point + repository identity context
 │   │   ├── index.ts             # main(): stage branch/SHA/tag/commits-since-tag facts → prompt
 │   │   └── __tests__/           # unit tests for identity / tag fallback / sanitisation paths
-│   └── conclusion/              # conclusion.js entry point + Conclusion-job reporter
-│       ├── index.ts             # main(): inspect upstream results + safe-outputs manifest → file/append work items
-│       └── __tests__/           # unit tests for signal detection and work-item filing behaviour
-│   └── github-app-token/        # github-app-token.js entry point + GitHub App token minter
-│       ├── index.ts             # main(): RS256 JWT → resolve installation → mint installation token → masked GITHUB_APP_TOKEN
-│       └── __tests__/           # unit tests for JWT signing / installation resolution / token minting
+│   ├── conclusion/              # conclusion.js entry point + Conclusion-job reporter
+│   │   ├── index.ts             # main(): inspect upstream results + safe-outputs manifest → file/append work items
+│   │   └── __tests__/           # unit tests for signal detection and work-item filing behaviour
+│   ├── github-app-token/        # github-app-token.js entry point + GitHub App token minter
+│   │   ├── index.ts             # main(): RS256 JWT → resolve installation → mint installation token → masked GITHUB_APP_TOKEN
+│   │   └── __tests__/           # unit tests for JWT signing / installation resolution / token minting
 │   └── prepare-pr-base/         # prepare-pr-base.js entry point + create-pull-request base-ref fetch/deepen
 │       ├── index.ts             # main(): fetch/deepen target branch + set origin/HEAD so mcp.rs finds a diff base
 │       └── __tests__/           # unit tests for fetch/deepen + origin/HEAD + benign-failure paths

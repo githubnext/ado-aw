@@ -712,7 +712,7 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
                 // is present for the base-ref prepare step `build_agent_job`
                 // emits before the Copilot run. Same loose-coupling pattern as
                 // `github_app_token_active`.
-                prepare_pr_base_active: front_matter.create_pr_target_branch().is_some(),
+                prepare_pr_base_active: front_matter.create_pr_config().is_some(),
                 pr_trigger_for_synth,
                 supply_chain: front_matter.supply_chain().cloned(),
             }

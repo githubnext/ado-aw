@@ -956,6 +956,26 @@ fn build_agent_job(
             pr_cfg.resolve_target_branch("self", &repo_refs),
         )];
         for alias in &front_matter.checkout {
+            // Warn when target inference would pick a non-branch ref (e.g. a
+            // tag). `resolve_target_branch` would hand back the whole ref, and
+            // Stage 3 builds `refs/heads/<ref>` → a PR into `refs/heads/refs/
+            // tags/v1` that ADO rejects with a generic error. Surface it at
+            // compile time (advisory, not fatal: the repo may be a dependency
+            // checkout the agent never opens a PR against — an explicit
+            // `target-branches:` entry silences this).
+            if pr_cfg.infer_target_from_checkout_ref
+                && !pr_cfg.target_branches.contains_key(alias)
+                && let Some(git_ref) = repo_refs.get(alias)
+                && !git_ref.starts_with("refs/heads/")
+            {
+                eprintln!(
+                    "Warning: create-pull-request infer-target-from-checkout-ref is set, but \
+                    checkout repo '{alias}' is at '{git_ref}', which is not a branch \
+                    (refs/heads/*). A PR into this repo would target an invalid ref. Set an \
+                    explicit `target-branches: {{ {alias}: <branch> }}` if the agent opens a PR \
+                    against it."
+                );
+            }
             repos.push((
                 format!("{}/{}", cfg.working_directory, alias),
                 pr_cfg.resolve_target_branch(alias, &repo_refs),
