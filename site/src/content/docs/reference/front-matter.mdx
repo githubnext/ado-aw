@@ -32,6 +32,8 @@ repos:                           # compact repository declarations (replaces rep
   - name: my-org/templates       # object form for full control
     ref: refs/heads/release/2.x
     checkout: false              # declared as resource only, not checked out by the agent
+variable-groups:               # optional: import ADO Library variable groups into the pipeline
+  - Agentic Workflows          # group display names only — secrets referenced by $(VAR_NAME) in steps
 tools:                         # optional tool configuration
   bash: ["cat", "ls", "grep"]  # explicit bash allow-list; when omitted, all bash tools are allowed (unrestricted)
   edit: true                   # enable file editing tool (default: true)
@@ -442,6 +444,81 @@ rewritten in place to the new shape -- each `repositories:` entry
 becomes a `repos:` entry, with `checkout: false` added for entries
 that weren't listed under `checkout:`. Mixing the legacy fields with
 an existing `repos:` block is rejected; pick one shape.
+
+## Variable Groups (`variable-groups:`)
+
+Import one or more Azure DevOps **variable groups** (ADO Library groups) into
+the generated pipeline so a source-clean lock can reference secrets managed at
+the project level — for example a GitHub App private key shared across many
+pipelines:
+
+```yaml
+variable-groups:
+  - Agentic Workflows
+  - Shared Secrets
+```
+
+Each entry is the **display name** of a variable group. The compiler emits a
+top-level `variables:` block with one `- group:` import per entry, preserving
+declaration order:
+
+```yaml
+variables:
+  - group: Agentic Workflows
+  - group: Shared Secrets
+```
+
+Groups are merged in order when they define the same variable name — later
+groups win on key collisions.
+
+### Authorization and import are both required
+
+In Azure DevOps two independent steps are needed before a group's variables
+are available to a YAML pipeline run:
+
+1. **Authorization** — the pipeline *definition* must be granted permission
+   to use the group (done in the ADO Library UI, outside ado-aw).
+2. **YAML import** — the pipeline *YAML* must explicitly pull the group in
+   with `variables: - group: <name>`.
+
+Authorization alone is not sufficient — without the YAML import the variables
+are unavailable at runtime. `variable-groups:` provides the YAML import; you
+still need to authorize the group on the pipeline definition itself.
+
+### Names only — never values
+
+Only group **names** belong in `variable-groups:`. ado-aw never resolves,
+prints, logs, or serializes a group's variable values. Steps reference secrets
+by macro (`$(VAR_NAME)`) exactly as before. For example, wiring a GitHub App
+private key that lives inside a group:
+
+```yaml
+variable-groups:
+  - Agentic Workflows
+engine:
+  id: copilot
+  github-app-token:
+    app-id: 1234567
+    owner: octo-org
+    private-key: AGENTIC_WORKFLOWS_GITHUB_APP_PRIVATE_KEY
+```
+
+Group names that contain ADO expressions (`${{`, `$(`, `$[`), pipeline
+commands (`##vso[`, `##[`), the compiler's own template marker (`{{`), or
+control characters are rejected at compile time. Leading or trailing whitespace
+is also rejected — the name must match the ADO group display name exactly.
+
+Duplicate entries are rejected. Variable group names are case-insensitive in
+ADO, so `Shared Secrets` and `shared secrets` are treated as the same group;
+remove the redundant entry.
+
+### Target support
+
+`variable-groups:` is only valid for pipeline-level targets — `standalone`
+(default) and `1es`. Using it on `target: job` or `target: stage` is a
+compile-time error: ADO job and stage templates cannot declare pipeline-level
+`variables:` (the parent pipeline that includes the template owns them). Import
+the group in that parent pipeline instead.
 
 ## Custom Steps Injection
 
