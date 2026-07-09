@@ -10,7 +10,7 @@ The `target` field in the front matter determines the output format and executio
 
 Generates a self-contained Azure DevOps pipeline with:
 - Full 3-job pipeline: `Agent` → `Detection` → `SafeOutputs`
-- AWF (Agentic Workflow Firewall) L7 domain whitelisting via Squid proxy + Docker
+- AWF (Agentic Workflow Firewall) L7 domain allowlisting via Squid proxy + Docker
 - MCP Gateway (MCPG) for MCP routing with SafeOutputs HTTP backend
 - Setup/teardown job support
 - All safe output features (create-pull-request, create-work-item, etc.)
