@@ -41,6 +41,8 @@ mod m0002_pool_object_form;
 mod m0003_flatten_work_item_config;
 #[path = "0004_legacy_path_markers.rs"]
 mod m0004_legacy_path_markers;
+#[path = "0005_drop_build_attachment_allowed_build_ids.rs"]
+mod m0005_drop_build_attachment_allowed_build_ids;
 
 #[allow(unused_imports)] // Re-exported for future codemods; only `take_key` is in-tree use.
 pub use helpers::{ConflictPolicy, insert_no_overwrite, rename_key, take_key};
@@ -108,6 +110,7 @@ pub static CODEMODS: &[&Codemod] = &[
     &m0002_pool_object_form::CODEMOD,
     &m0003_flatten_work_item_config::CODEMOD,
     &m0004_legacy_path_markers::CODEMOD,
+    &m0005_drop_build_attachment_allowed_build_ids::CODEMOD,
 ];
 
 /// Result of running the codemod registry on a single front-matter

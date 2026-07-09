@@ -1140,14 +1140,15 @@ uploaded and linked during safe output processing. File size and type restrictio
 
     #[tool(
         name = "upload-build-attachment",
-        description = "Attach a workspace file to an Azure DevOps build as a build attachment via \
-the ADO build attachments REST API. Build attachments are NOT visible in the standard ADO UI — \
-they are only accessible via the REST API or a custom Azure DevOps extension. For files that \
-should appear in the Artifacts tab, use upload-pipeline-artifact instead. \
-Omit `build_id` to target the current pipeline run. When `build_id` is provided, the file is \
-attached to that specific build — useful for posthumously decorating a finished build with a \
-generated report or log bundle. File size, extension, artifact-name and build-id restrictions \
-may apply per the workflow's safe-outputs config."
+        description = "Attach a workspace file to the CURRENT Azure DevOps build as a build \
+attachment. This uses the DistributedTask timeline attachment API — the same mechanism as the \
+`##vso[task.addattachment]` command — so the file can only be attached to the run that is \
+currently executing. Build attachments are NOT visible in the standard ADO UI; they are read \
+back via the REST API or a custom Azure DevOps extension registered for the attachment type. For \
+files that should appear in the Artifacts tab, use upload-pipeline-artifact instead. \
+Omit `build_id` (recommended) to target the current run; if you set it, it MUST equal the current \
+build id — any other value is rejected. File size, extension and artifact-name restrictions may \
+apply per the workflow's safe-outputs config."
     )]
     async fn upload_build_attachment(
         &self,

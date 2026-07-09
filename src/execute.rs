@@ -1217,7 +1217,13 @@ mod tests {
         };
 
         let result = execute_safe_output(&entry, &ctx).await;
-        assert!(result.is_err());
+        // Missing BUILD_BUILDID / ADO context must not succeed. Depending on
+        // whether the test host has BUILD_BUILDID set, this surfaces either as
+        // a hard error (missing staged file / ADO context) or as a clean
+        // unsuccessful ExecutionResult (current run undeterminable).
+        if let Ok(r) = result {
+            assert!(!r.1.success, "expected non-success, got: {:?}", r);
+        }
     }
 
     #[tokio::test]

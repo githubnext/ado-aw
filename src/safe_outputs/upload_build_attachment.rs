@@ -1,12 +1,36 @@
 //! Upload build attachment safe output tool.
 //!
-//! Lets an agent propose attaching a workspace file to an Azure DevOps build
-//! via the **build attachments** REST API
-//! (`PUT /_apis/build/builds/{buildId}/attachments/{type}/{name}`).
+//! Lets an agent propose attaching a workspace file to the **current** Azure
+//! DevOps build as a build attachment.
 //!
-//! When `build_id` is omitted the executor targets the **current** pipeline run
-//! by resolving `BUILD_BUILDID` from the environment — so the same tool covers
-//! both "attach to the run I'm part of" and "attach to a different build".
+//! ## Which API this uses
+//!
+//! A "build attachment" is created via the **DistributedTask timeline
+//! attachment** API — the same mechanism the agent's
+//! `##vso[task.addattachment type=…;name=…]<path>` logging command uses under
+//! the hood:
+//!
+//! ```text
+//! PUT {org}/{projectId}/_apis/distributedtask/hubs/build
+//!     /plans/{planId}/timelines/{timelineId}/records/{recordId}
+//!     /attachments/{type}/{name}?api-version=7.1
+//! ```
+//!
+//! The resulting object *is* a build attachment: it is stored once by
+//! `{type}`/`{name}` and is read back through the Build ▸ Attachments
+//! **Get/List** API (and rendered by ADO extensions that register for a given
+//! attachment `type`). We call the REST endpoint directly (rather than printing
+//! the `##vso` command) so the executor gets a response body — it can surface
+//! `attachment_url` and report a deterministic success/failure instead of the
+//! fire-and-forget `##vso` behaviour.
+//!
+//! **Current-run only.** `planId` / `timelineId` / `recordId` exist only for the
+//! job that is executing, so a build attachment can only be added to the
+//! **current** run. There is no ADO API to attach to an arbitrary other build.
+//! The `build_id` param is therefore accepted only when it is omitted or equals
+//! the current run's `BUILD_BUILDID`; any other value is rejected. (The old
+//! `/_apis/build/builds/{id}/attachments/…` PUT route this tool used never
+//! existed — the Build ▸ Attachments API is read-only.)
 //!
 //! The flow mirrors `create-pull-request`:
 //!
@@ -19,8 +43,8 @@
 //! * **Stage 3 (executor, outside the sandbox):** reads the staged file from
 //!   `ctx.working_directory.join(staged_file)`, applies operator-supplied
 //!   limits (`max-file-size`, `allowed-extensions`, `allowed-artifact-names`,
-//!   `allowed-build-ids`, `name-prefix`, `attachment-type`), resolves the
-//!   target build ID, and PUTs the bytes to the ADO build attachments endpoint.
+//!   `name-prefix`, `attachment-type`), and PUTs the bytes to the timeline
+//!   attachment endpoint for the current job's record.
 
 use ado_aw_derive::SanitizeConfig;
 use log::{debug, info, warn};
@@ -39,14 +63,15 @@ use anyhow::{Context, ensure};
 /// Parameters for attaching a workspace file to an ADO build.
 #[derive(Deserialize, JsonSchema)]
 pub struct UploadBuildAttachmentParams {
-    /// The build ID to attach the file to.  **Omit to target the current
-    /// pipeline run** — the executor resolves the build ID from the
-    /// `BUILD_BUILDID` environment variable automatically.  When provided,
-    /// must be a positive integer.
+    /// Build ID to attach the file to. **Omit to target the current pipeline
+    /// run** (recommended) — the executor resolves it from `BUILD_BUILDID`.
+    /// Build attachments can only be added to the current run, so if you set
+    /// this it MUST equal the current build id; any other (still positive)
+    /// value is rejected at execution time.
     pub build_id: Option<i64>,
 
     /// The artifact name to attach the file under. Used as the `{name}`
-    /// segment of the ADO build attachments URL. ADO requires a non-empty
+    /// segment of the attachment path. ADO requires a non-empty
     /// name made of alphanumerics, `-`, `_`, or `.`. Must be 1-100 characters
     /// and must not start with `.`. Validated at deserialization time via
     /// [`ArtifactName`].
@@ -165,9 +190,6 @@ const DEFAULT_ATTACHMENT_TYPE: &str = "agent-artifact";
 ///       - .log
 ///     allowed-artifact-names:
 ///       - agent-*
-///     allowed-build-ids:
-///       - 12345
-///       - 67890
 ///     name-prefix: "agent-"
 ///     attachment-type: "agent-artifact"
 ///     max: 5
@@ -188,12 +210,6 @@ pub struct UploadBuildAttachmentConfig {
     /// by prefix; otherwise the comparison is exact.
     #[serde(default, rename = "allowed-artifact-names")]
     pub allowed_artifact_names: Vec<String>,
-
-    /// Restrict which build IDs the agent may attach to. Empty means any
-    /// build ID accessible to the executor's token is allowed. This check
-    /// is skipped when `build_id` is omitted (targeting the current build).
-    #[serde(default, rename = "allowed-build-ids")]
-    pub allowed_build_ids: Vec<i64>,
 
     /// Prefix prepended to the agent-supplied artifact name before publishing.
     #[serde(default, rename = "name-prefix")]
@@ -216,7 +232,6 @@ impl Default for UploadBuildAttachmentConfig {
             max_file_size: DEFAULT_MAX_FILE_SIZE,
             allowed_extensions: Vec::new(),
             allowed_artifact_names: Vec::new(),
-            allowed_build_ids: Vec::new(),
             name_prefix: None,
             attachment_type: None,
         }
@@ -239,29 +254,48 @@ impl Executor for UploadBuildAttachmentResult {
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
-        // Resolve the effective build ID: explicit value from the agent, or
-        // fall back to the current pipeline's BUILD_BUILDID.
-        let effective_build_id: i64 = match self.build_id {
-            Some(id) => id,
-            None => {
-                let current = ctx.build_id.context(
-                    "build_id was not specified and BUILD_BUILDID is not set — \
-                     cannot determine which build to attach the artifact to",
-                )?;
-                i64::try_from(current).context("BUILD_BUILDID value overflows i64")?
+        // Resolve the current run's build ID. A build attachment can only ever
+        // be added to the *current* job's timeline record (see module docs), so
+        // `build_id`, when the agent supplies it, must match the current run.
+        let current_build_id: Option<i64> = match ctx.build_id {
+            Some(current) => {
+                Some(i64::try_from(current).context("BUILD_BUILDID value overflows i64")?)
+            }
+            None => None,
+        };
+        let effective_build_id: i64 = match (self.build_id, current_build_id) {
+            // Agent supplied a build_id that differs from the current run — not
+            // possible for a build attachment; fail with a clear message.
+            (Some(requested), Some(current)) if requested != current => {
+                return Ok(ExecutionResult::failure(format!(
+                    "build_id {requested} does not match the current build ({current}). Build \
+                     attachments can only be added to the current run — omit build_id (or set it \
+                     to {current}) to attach to this build."
+                )));
+            }
+            (Some(requested), Some(_current)) => requested,
+            // Agent supplied a build_id but the current build is unknown; we
+            // cannot prove it targets the current run, so refuse.
+            (Some(requested), None) => {
+                return Ok(ExecutionResult::failure(format!(
+                    "build_id {requested} was specified but the current build id (BUILD_BUILDID) \
+                     is not set, so it cannot be confirmed to target the current run. Build \
+                     attachments can only be added to the current run — omit build_id."
+                )));
+            }
+            (None, Some(current)) => current,
+            (None, None) => {
+                return Ok(ExecutionResult::failure(
+                    "Cannot attach a build attachment: BUILD_BUILDID is not set, so the current \
+                     run cannot be determined."
+                        .to_string(),
+                ));
             }
         };
 
         info!(
-            "Attaching '{}' as artifact '{}' to build #{}{}",
-            self.file_path,
-            self.artifact_name,
-            effective_build_id,
-            if self.build_id.is_none() {
-                " (current build)"
-            } else {
-                ""
-            }
+            "Attaching '{}' as artifact '{}' to the current build #{}",
+            self.file_path, self.artifact_name, effective_build_id,
         );
         debug!(
             "upload-build-attachment: build_id={}, artifact_name='{}', file_path='{}'",
@@ -275,21 +309,6 @@ impl Executor for UploadBuildAttachmentResult {
             "Allowed artifact names: {:?}",
             config.allowed_artifact_names
         );
-        debug!("Allowed build IDs: {:?}", config.allowed_build_ids);
-
-        // Check build-id allow-list (if configured).  When the agent omitted
-        // build_id (targeting the current build), skip this check — the
-        // current build is implicitly trusted because the operator chose to
-        // run this pipeline.
-        if self.build_id.is_some()
-            && !config.allowed_build_ids.is_empty()
-            && !config.allowed_build_ids.contains(&effective_build_id)
-        {
-            return Ok(ExecutionResult::failure(format!(
-                "Build ID {} is not in the allowed-build-ids list",
-                effective_build_id
-            )));
-        }
 
         // Validate name-prefix length before applying. A long prefix would
         // be caught later by the final_name.len() > 100 check, but rejecting
@@ -432,16 +451,8 @@ impl Executor for UploadBuildAttachmentResult {
 
         if ctx.dry_run {
             return Ok(ExecutionResult::success(format!(
-                "[dry-run] would attach '{}' ({} bytes) as artifact '{}' to build #{}{}",
-                self.file_path,
-                file_size,
-                final_name,
-                effective_build_id,
-                if self.build_id.is_none() {
-                    " (current build)"
-                } else {
-                    ""
-                }
+                "[dry-run] would attach '{}' ({} bytes) as artifact '{}' to the current build #{}",
+                self.file_path, file_size, final_name, effective_build_id,
             )));
         }
 
@@ -464,7 +475,12 @@ impl Executor for UploadBuildAttachmentResult {
             )));
         }
 
-        // Resolve the ADO API context (org URL, project, token).
+        // Resolve the ADO API context (collection URL, token) and the current
+        // job's timeline coordinates. A build attachment is a DistributedTask
+        // **timeline attachment** on the running job's record (the same object
+        // `##vso[task.addattachment]` creates), so we need the plan / timeline /
+        // record IDs of the current run — these come from the auto-injected
+        // SYSTEM_* predefined variables and only exist for the current job.
         let org_url = ctx
             .ado_org_url
             .as_ref()
@@ -477,15 +493,42 @@ impl Executor for UploadBuildAttachmentResult {
             .access_token
             .as_ref()
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
-        debug!("ADO org: {}, project: {}", org_url, project);
+        // The DistributedTask hub route's `{scopeIdentifier}` is the **project
+        // GUID** (SYSTEM_TEAMPROJECTID), not the project name — the name routes
+        // but is rejected with HTTP 400.
+        let project_id = ctx.ado_project_id.as_ref().context(
+            "SYSTEM_TEAMPROJECTID is not set — required as the scope identifier for the build \
+             attachment (timeline attachment) API",
+        )?;
+        let plan_id = ctx.plan_id.as_ref().context(
+            "SYSTEM_PLANID is not set — required to attach to the current build (build attachments \
+             are written to the current job's timeline record)",
+        )?;
+        let timeline_id = ctx.timeline_id.as_ref().context(
+            "SYSTEM_TIMELINEID is not set — required to attach to the current build (build \
+             attachments are written to the current job's timeline record)",
+        )?;
+        let record_id = ctx.job_id.as_ref().context(
+            "SYSTEM_JOBID is not set — required to attach to the current build (build attachments \
+             are written to the current job's timeline record)",
+        )?;
+        debug!("ADO org: {}, project: {} ({})", org_url, project, project_id);
 
-        // Build the build-attachments URL.
-        // PUT {org_url}/{project}/_apis/build/builds/{buildId}/attachments/{type}/{name}?api-version=7.1-preview.1
+        // Build the DistributedTask timeline-attachment URL. This is the write
+        // side of a build attachment — the object is read back via the Build ▸
+        // Attachments Get/List API by `{type}`/`{name}`. The `build` hub covers
+        // build/YAML pipelines. The route's `{scopeIdentifier}` is the project
+        // **GUID**; released api-version is 7.1.
+        // PUT {org}/{projectId}/_apis/distributedtask/hubs/build/plans/{planId}
+        //     /timelines/{timelineId}/records/{recordId}
+        //     /attachments/{type}/{name}?api-version=7.1
         let url = format!(
-            "{}/{}/_apis/build/builds/{}/attachments/{}/{}?api-version=7.1-preview.1",
+            "{}/{}/_apis/distributedtask/hubs/build/plans/{}/timelines/{}/records/{}/attachments/{}/{}?api-version=7.1",
             org_url.trim_end_matches('/'),
-            utf8_percent_encode(project, PATH_SEGMENT),
-            effective_build_id,
+            utf8_percent_encode(project_id, PATH_SEGMENT),
+            utf8_percent_encode(plan_id, PATH_SEGMENT),
+            utf8_percent_encode(timeline_id, PATH_SEGMENT),
+            utf8_percent_encode(record_id, PATH_SEGMENT),
             utf8_percent_encode(attachment_type, PATH_SEGMENT),
             utf8_percent_encode(&final_name, PATH_SEGMENT),
         );
@@ -513,9 +556,15 @@ impl Executor for UploadBuildAttachmentResult {
                 );
                 serde_json::Value::Null
             });
+            // The timeline-attachment response carries the attachment URL under
+            // `_links.self.href` (there is no top-level `url` field); fall back
+            // to a top-level `url` defensively for forward compatibility.
             let attachment_url = resp_body
-                .get("url")
+                .get("_links")
+                .and_then(|l| l.get("self"))
+                .and_then(|s| s.get("href"))
                 .and_then(|v| v.as_str())
+                .or_else(|| resp_body.get("url").and_then(|v| v.as_str()))
                 .map(|s| s.to_string());
             info!(
                 "Attached '{}' to build #{} as '{}'",
@@ -786,7 +835,6 @@ mod tests {
         assert_eq!(config.max_file_size, 50 * 1024 * 1024);
         assert!(config.allowed_extensions.is_empty());
         assert!(config.allowed_artifact_names.is_empty());
-        assert!(config.allowed_build_ids.is_empty());
         assert!(config.name_prefix.is_none());
         assert!(config.attachment_type.is_none());
     }
@@ -801,9 +849,6 @@ allowed-extensions:
 allowed-artifact-names:
   - agent-*
   - report
-allowed-build-ids:
-  - 100
-  - 200
 name-prefix: "agent-"
 attachment-type: "agent-artifact"
 "#;
@@ -811,9 +856,17 @@ attachment-type: "agent-artifact"
         assert_eq!(config.max_file_size, 1_048_576);
         assert_eq!(config.allowed_extensions, vec![".png", ".pdf"]);
         assert_eq!(config.allowed_artifact_names, vec!["agent-*", "report"]);
-        assert_eq!(config.allowed_build_ids, vec![100, 200]);
         assert_eq!(config.name_prefix, Some("agent-".to_string()));
         assert_eq!(config.attachment_type, Some("agent-artifact".to_string()));
+    }
+
+    /// A stray `allowed-build-ids` key (e.g. from a pre-migration lock the
+    /// codemod hasn't rewritten) must be tolerated and ignored, not error.
+    #[test]
+    fn test_config_ignores_stray_allowed_build_ids() {
+        let yaml = "allowed-build-ids:\n  - 100\n  - 200\n";
+        let config: UploadBuildAttachmentConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.max_file_size, DEFAULT_MAX_FILE_SIZE);
     }
 
     fn make_ctx(working_directory: std::path::PathBuf, dry_run: bool) -> ExecutionContext {
@@ -833,7 +886,7 @@ attachment-type: "agent-artifact"
             allowed_repositories: std::collections::HashMap::new(),
             agent_stats: None,
             dry_run,
-            build_id: None,
+            build_id: Some(1234),
             build_number: None,
             build_reason: None,
             definition_name: None,
@@ -848,6 +901,9 @@ attachment-type: "agent-artifact"
             pull_request_source_branch: None,
             pull_request_target_branch: None,
             build_container_id: None,
+            plan_id: None,
+            timeline_id: None,
+            job_id: None,
             uploaded_pipeline_artifact_keys: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashSet::new(),
             )),
@@ -856,11 +912,12 @@ attachment-type: "agent-artifact"
     }
 
     #[tokio::test]
-    async fn test_executor_reads_staged_file_with_explicit_build_id() {
+    async fn test_executor_reads_staged_file_with_matching_build_id() {
         let dir = tempfile::tempdir().unwrap();
         let staged = "upload-build-attachment-agent-report-deadbeef.pdf";
         std::fs::write(dir.path().join(staged), b"%PDF-1.4 hello").unwrap();
 
+        // Explicit build_id equal to the current run (make_ctx sets 1234) — OK.
         let result = UploadBuildAttachmentResult::new(
             Some(1234),
             "agent-report".to_string(),
@@ -897,7 +954,33 @@ attachment-type: "agent-artifact"
         assert!(outcome.success, "expected success, got: {:?}", outcome);
         assert!(outcome.message.contains("[dry-run]"));
         assert!(outcome.message.contains("#5678"));
-        assert!(outcome.message.contains("(current build)"));
+        assert!(outcome.message.contains("current build"));
+    }
+
+    #[tokio::test]
+    async fn test_executor_rejects_build_id_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = "upload-build-attachment-agent-report-cafef00d.pdf";
+        std::fs::write(dir.path().join(staged), b"hello").unwrap();
+
+        // Explicit build_id 999 while the current run is 1234 — impossible for
+        // a build attachment, so it must fail with a clear message.
+        let result = UploadBuildAttachmentResult::new(
+            Some(999),
+            "agent-report".to_string(),
+            "out/report.pdf".to_string(),
+            staged.to_string(),
+            5,
+            DUMMY_HASH.to_string(),
+        );
+        let ctx = make_ctx(dir.path().to_path_buf(), true);
+        let outcome = result.execute_impl(&ctx).await.unwrap();
+        assert!(!outcome.success);
+        assert!(
+            outcome.message.contains("does not match the current build"),
+            "expected current-build mismatch rejection, got: {}",
+            outcome.message
+        );
     }
 
     #[tokio::test]
@@ -914,12 +997,86 @@ attachment-type: "agent-artifact"
             5,
             DUMMY_HASH.to_string(),
         );
-        let ctx = make_ctx(dir.path().to_path_buf(), true);
-        // ctx.build_id is None — no BUILD_BUILDID
+        let mut ctx = make_ctx(dir.path().to_path_buf(), true);
+        ctx.build_id = None; // no BUILD_BUILDID
+        let outcome = result.execute_impl(&ctx).await.unwrap();
+        assert!(!outcome.success);
+        assert!(
+            outcome.message.contains("BUILD_BUILDID"),
+            "expected BUILD_BUILDID failure, got: {}",
+            outcome.message
+        );
+    }
+
+    #[tokio::test]
+    async fn test_executor_fails_when_plan_id_missing() {
+        // SHA-256 of b"hello" so the non-dry-run integrity check passes and we
+        // reach the timeline-coordinate resolution.
+        const HELLO_SHA: &str =
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        let dir = tempfile::tempdir().unwrap();
+        let staged = "upload-build-attachment-agent-report-0badf00d.txt";
+        std::fs::write(dir.path().join(staged), b"hello").unwrap();
+
+        let result = UploadBuildAttachmentResult::new(
+            None,
+            "agent-report".to_string(),
+            "out/report.txt".to_string(),
+            staged.to_string(),
+            5,
+            HELLO_SHA.to_string(),
+        );
+        // Non-dry-run with org/token set but SYSTEM_PLANID absent — must fail
+        // before any HTTP call, naming the missing variable.
+        let mut ctx = make_ctx(dir.path().to_path_buf(), false);
+        ctx.ado_org_url = Some("https://dev.azure.com/org".to_string());
+        ctx.ado_project = Some("Proj".to_string());
+        ctx.ado_project_id = Some("00000000-0000-0000-0000-0000000000aa".to_string());
+        ctx.access_token = Some("token".to_string());
+        ctx.timeline_id = Some("00000000-0000-0000-0000-000000000001".to_string());
+        ctx.job_id = Some("00000000-0000-0000-0000-000000000002".to_string());
+        // plan_id intentionally left None.
         let err = result.execute_impl(&ctx).await.unwrap_err();
         assert!(
-            err.to_string().contains("BUILD_BUILDID"),
-            "expected BUILD_BUILDID error, got: {}",
+            err.to_string().contains("SYSTEM_PLANID"),
+            "expected SYSTEM_PLANID error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_executor_fails_when_project_id_missing() {
+        // SHA-256 of b"hello" so the integrity check passes and we reach the
+        // scope-identifier resolution.
+        const HELLO_SHA: &str =
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        let dir = tempfile::tempdir().unwrap();
+        let staged = "upload-build-attachment-agent-report-1badf00d.txt";
+        std::fs::write(dir.path().join(staged), b"hello").unwrap();
+
+        let result = UploadBuildAttachmentResult::new(
+            None,
+            "agent-report".to_string(),
+            "out/report.txt".to_string(),
+            staged.to_string(),
+            5,
+            HELLO_SHA.to_string(),
+        );
+        // Non-dry-run with org/token/plan/timeline/job set but
+        // SYSTEM_TEAMPROJECTID absent — must fail before any HTTP call, naming
+        // the missing variable (it is the route's scope identifier).
+        let mut ctx = make_ctx(dir.path().to_path_buf(), false);
+        ctx.ado_org_url = Some("https://dev.azure.com/org".to_string());
+        ctx.ado_project = Some("Proj".to_string());
+        ctx.access_token = Some("token".to_string());
+        ctx.plan_id = Some("00000000-0000-0000-0000-000000000001".to_string());
+        ctx.timeline_id = Some("00000000-0000-0000-0000-000000000002".to_string());
+        ctx.job_id = Some("00000000-0000-0000-0000-000000000003".to_string());
+        // ado_project_id intentionally left None.
+        let err = result.execute_impl(&ctx).await.unwrap_err();
+        assert!(
+            err.to_string().contains("SYSTEM_TEAMPROJECTID"),
+            "expected SYSTEM_TEAMPROJECTID error, got: {}",
             err
         );
     }
@@ -945,92 +1102,13 @@ attachment-type: "agent-artifact"
     }
 
     #[tokio::test]
-    async fn test_executor_rejects_disallowed_build_id() {
-        let dir = tempfile::tempdir().unwrap();
-        let staged = "upload-build-attachment-agent-report-cafef00d.pdf";
-        std::fs::write(dir.path().join(staged), b"hello").unwrap();
-
-        let result = UploadBuildAttachmentResult::new(
-            Some(999),
-            "agent-report".to_string(),
-            "out/report.pdf".to_string(),
-            staged.to_string(),
-            5,
-            DUMMY_HASH.to_string(),
-        );
-        let mut ctx = make_ctx(dir.path().to_path_buf(), true);
-        ctx.tool_configs.insert(
-            "upload-build-attachment".to_string(),
-            serde_json::json!({ "allowed-build-ids": [100, 200] }),
-        );
-        let outcome = result.execute_impl(&ctx).await.unwrap();
-        assert!(!outcome.success);
-        assert!(
-            outcome.message.contains("allowed-build-ids"),
-            "expected allowed-build-ids rejection, got: {}",
-            outcome.message
-        );
-    }
-
-    #[tokio::test]
-    async fn test_executor_skips_build_id_allowlist_for_current_build() {
-        let dir = tempfile::tempdir().unwrap();
-        let staged = "upload-build-attachment-agent-report-aabbccdd.pdf";
-        std::fs::write(dir.path().join(staged), b"hello").unwrap();
-
-        let result = UploadBuildAttachmentResult::new(
-            None, // targeting current build
-            "agent-report".to_string(),
-            "out/report.pdf".to_string(),
-            staged.to_string(),
-            5,
-            DUMMY_HASH.to_string(),
-        );
-        let mut ctx = make_ctx(dir.path().to_path_buf(), true);
-        ctx.build_id = Some(999); // current build not in allowed list
-        ctx.tool_configs.insert(
-            "upload-build-attachment".to_string(),
-            serde_json::json!({ "allowed-build-ids": [100, 200] }),
-        );
-        let outcome = result.execute_impl(&ctx).await.unwrap();
-        assert!(
-            outcome.success,
-            "current build should bypass allowed-build-ids, got: {:?}",
-            outcome
-        );
-    }
-
-    #[tokio::test]
-    async fn test_executor_accepts_allowed_build_id() {
-        let dir = tempfile::tempdir().unwrap();
-        let staged = "upload-build-attachment-agent-report-feedf00d.pdf";
-        std::fs::write(dir.path().join(staged), b"hello").unwrap();
-
-        let result = UploadBuildAttachmentResult::new(
-            Some(100),
-            "agent-report".to_string(),
-            "out/report.pdf".to_string(),
-            staged.to_string(),
-            5,
-            DUMMY_HASH.to_string(),
-        );
-        let mut ctx = make_ctx(dir.path().to_path_buf(), true);
-        ctx.tool_configs.insert(
-            "upload-build-attachment".to_string(),
-            serde_json::json!({ "allowed-build-ids": [100, 200] }),
-        );
-        let outcome = result.execute_impl(&ctx).await.unwrap();
-        assert!(outcome.success, "expected success, got: {:?}", outcome);
-    }
-
-    #[tokio::test]
     async fn test_executor_rejects_oversized_file() {
         let dir = tempfile::tempdir().unwrap();
         let staged = "upload-build-attachment-agent-big-deadbeef.bin";
         std::fs::write(dir.path().join(staged), vec![0u8; 1024]).unwrap();
 
         let result = UploadBuildAttachmentResult::new(
-            Some(1),
+            None,
             "agent-big".to_string(),
             "out/big.bin".to_string(),
             staged.to_string(),
@@ -1058,7 +1136,7 @@ attachment-type: "agent-artifact"
         std::fs::write(dir.path().join(staged), b"MZ hello").unwrap();
 
         let result = UploadBuildAttachmentResult::new(
-            Some(1),
+            None,
             "agent-report".to_string(),
             "out/report.exe".to_string(),
             staged.to_string(),
@@ -1088,7 +1166,7 @@ attachment-type: "agent-artifact"
         std::fs::write(dir.path().join(staged), b"hello").unwrap();
 
         let result = UploadBuildAttachmentResult::new(
-            Some(1),
+            None,
             "evil-report".to_string(),
             "out/report.pdf".to_string(),
             staged.to_string(),
@@ -1116,7 +1194,7 @@ attachment-type: "agent-artifact"
         std::fs::write(dir.path().join(staged), b"hello").unwrap();
 
         let result = UploadBuildAttachmentResult::new(
-            Some(1),
+            None,
             "report".to_string(),
             "out/report.pdf".to_string(),
             staged.to_string(),
@@ -1146,7 +1224,7 @@ attachment-type: "agent-artifact"
         std::fs::write(dir.path().join(staged), vec![0u8; 100]).unwrap();
 
         let result = UploadBuildAttachmentResult::new(
-            Some(1),
+            None,
             "agent-report".to_string(),
             "out/report.pdf".to_string(),
             staged.to_string(),
@@ -1170,8 +1248,9 @@ attachment-type: "agent-artifact"
         let content = b"real file content";
         std::fs::write(dir.path().join(staged), content).unwrap();
 
-        // Record the hash of different content — same size but wrong hash.
-        let wrong_hash = crate::hash::sha256_hex(b"wrong file content");
+        // Record the hash of different content of the SAME length (17 bytes),
+        // so the size check passes and the SHA-256 check is what fires.
+        let wrong_hash = crate::hash::sha256_hex(b"fake file content");
 
         let result = UploadBuildAttachmentResult::new(
             Some(1),

@@ -581,28 +581,36 @@ safe-outputs:
 
 ### upload-build-attachment
 
-Attaches a workspace file to an Azure DevOps build as a **build attachment** via
-the ADO build attachments REST API
-(`PUT /_apis/build/builds/{buildId}/attachments/{type}/{name}`).
+Attaches a workspace file to the **current** Azure DevOps build as a **build
+attachment**.
 
-> **Important:** Build attachments are **not visible** in the standard Azure
-> DevOps build summary UI. They are only accessible via the REST API or through
-> a custom Azure DevOps extension that registers a tab matching the
-> `attachment-type` value. For artifacts that should appear in the **Artifacts
-> tab**, use [`upload-pipeline-artifact`](#upload-pipeline-artifact) instead.
+Build attachments are created via the **DistributedTask timeline attachment**
+API — the same mechanism as the `##vso[task.addattachment type=…;name=…]<path>`
+logging command. The resulting object *is* a build attachment: it is stored once
+by `{type}`/`{name}` and read back through the Build ▸ Attachments **Get/List**
+API (and by ADO extensions that register for a given attachment `type`). The
+executor calls the REST endpoint directly (rather than emitting the `##vso`
+command) so it can report a deterministic success/failure and surface the
+attachment URL.
 
-**Omit `build_id` to target the current pipeline run** — the executor resolves
-the build ID from the `BUILD_BUILDID` environment variable automatically. When
-`build_id` is provided, the file is attached to that specific build — useful for
-posthumously decorating a finished build with a generated report, screenshot, or
-log bundle.
+> **Current run only.** A timeline attachment can only be added to the job that
+> is executing, so this tool always targets the **current** build. There is no
+> ADO API to attach to an arbitrary other build. (The tool previously advertised
+> a `PUT /_apis/build/builds/{id}/attachments/…` route to attach to any build —
+> that route never existed; the Build ▸ Attachments API is read-only.)
+
+> **Not visible in the standard UI.** Build attachments do not appear in the
+> build summary UI; they are read via the REST API or a custom Azure DevOps
+> extension that registers a tab matching the `attachment-type` value. For
+> artifacts that should appear in the **Artifacts tab**, use
+> [`upload-pipeline-artifact`](#upload-pipeline-artifact) instead.
 
 The tool stages the file during Stage 1 (MCP) by copying it into the
-safe-outputs directory; Stage 3 reads the staged copy and uploads it via the REST
-API.
+safe-outputs directory; Stage 3 reads the staged copy and PUTs it to the current
+job's timeline record.
 
 **Agent parameters:**
-- `build_id` *(optional)* - Target build ID. Omit to attach to the current pipeline run. Must be positive when specified.
+- `build_id` *(optional)* - **Omit** to attach to the current run (recommended). If set, it must equal the current build id; any other value is rejected.
 - `artifact_name` - Attachment name (1–100 chars, alphanumeric / `-` / `_` / `.`, no leading `.`)
 - `file_path` - Relative path to the file in the workspace (no directory traversal)
 
@@ -613,24 +621,28 @@ safe-outputs:
     max-file-size: 52428800              # Maximum file size in bytes (default: 50 MB)
     allowed-extensions: []               # Optional — restrict file types (e.g., [".png", ".pdf", ".log"])
     allowed-artifact-names: []           # Optional — restrict names (suffix `*` = prefix match)
-    allowed-build-ids: []                # Optional — restrict target builds (skipped when targeting current build)
     name-prefix: ""                      # Optional — prepended to the agent-supplied artifact name
-    attachment-type: "agent-artifact"    # Optional — {type} segment in the attachments URL (default: "agent-artifact")
+    attachment-type: "agent-artifact"    # Optional — {type} segment in the attachment path (default: "agent-artifact")
     max: 3                               # Maximum per run (default: 3)
 ```
 
+> **Removed:** `allowed-build-ids` is no longer supported here — since a build
+> attachment can only target the current run, the allow-list was meaningless. A
+> [codemod](codemods.md) auto-removes it from source (with a compile warning) on
+> the next `ado-aw compile`. (`allowed-build-ids` remains valid for
+> [`upload-pipeline-artifact`](#upload-pipeline-artifact).)
+
 **Notes:**
 - Single-file only; directory uploads are not supported.
-- When `build_id` is omitted and `allowed-build-ids` is configured, the allow-list check is skipped — the current build is implicitly trusted.
 
-**About `attachment-type`:** This is the `{type}` segment in the ADO build
-attachments URL (`PUT .../attachments/{type}/{name}`). It acts as a category
-label. Azure DevOps extensions can register to display attachments of a specific
-type — for example, the built-in code coverage extension displays attachments
-with type `CodeCoverageSummary`. The default `agent-artifact` is a custom type;
-without a matching ADO extension installed, attachments with this type are only
-accessible via the REST API. Change this only if you have a custom extension
-that displays attachments of a specific type. Most users should use
+**About `attachment-type`:** This is the `{type}` segment in the attachment path
+(`.../attachments/{type}/{name}`). It acts as a category label. Azure DevOps
+extensions can register to display attachments of a specific type — for example,
+the built-in code coverage extension displays attachments with type
+`CodeCoverageSummary`. The default `agent-artifact` is a custom type; without a
+matching ADO extension installed, attachments with this type are only accessible
+via the REST API. Change this only if you have a custom extension that displays
+attachments of a specific type. Most users should use
 [`upload-pipeline-artifact`](#upload-pipeline-artifact) for user-visible
 artifacts instead.
 

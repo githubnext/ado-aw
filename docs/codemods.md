@@ -111,7 +111,8 @@ src/compile/codemods/
 ├── 0001_repos_unified.rs   # Legacy repositories: + checkout: → repos: codemod
 ├── 0002_pool_object_form.rs # Legacy scalar pool → explicit object form codemod
 ├── 0003_flatten_work_item_config.rs # Legacy work-item config flatten codemod
-└── 0004_legacy_path_markers.rs # {{ workspace }} / {{ working_directory }} / {{ trigger_repo_directory }} → explicit ADO path exprs
+├── 0004_legacy_path_markers.rs # {{ workspace }} / {{ working_directory }} / {{ trigger_repo_directory }} → explicit ADO path exprs
+└── 0005_drop_build_attachment_allowed_build_ids.rs # remove no-op upload-build-attachment.allowed-build-ids
 ```
 
 (New codemods are appended as `<NNNN>_<id>.rs` files.)
@@ -391,6 +392,21 @@ in the body, plus checkout-aware path mistakes such as a
 declared-but-not-checked-out repo, or the multi-checkout self subfolder
 form used under a single checkout. These are advisory and never fail
 the compile.
+
+## `upload-build-attachment.allowed-build-ids` removal (`0005_drop_build_attachment_allowed_build_ids`)
+
+A build attachment is a DistributedTask **timeline attachment** on the current
+job's record (the same object `##vso[task.addattachment]` creates), so it can
+only ever be added to the **current** run. The historical
+`safe-outputs.upload-build-attachment.allowed-build-ids` allow-list — which gated
+*which other* build the agent could attach to — is therefore inert: no other
+build is reachable.
+
+This codemod removes the key from `safe-outputs.upload-build-attachment`, and the
+standard codemod compile warning tells the author it was auto-removed. It does
+**not** touch `safe-outputs.upload-pipeline-artifact.allowed-build-ids`, which
+stays meaningful (pipeline artifacts use the Build Artifacts `Create` API, which
+can target an arbitrary build).
 
 ## Tests
 
