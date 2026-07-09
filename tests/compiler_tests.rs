@@ -7881,6 +7881,48 @@ fn test_create_pull_request_prepare_step_defaults_target_branch() {
         agent.contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js' --target-branch 'main'"),
         "bare create-pull-request must emit the prepare step targeting 'main':\n{agent}"
     );
+    // Single `self` checkout ⇒ exactly one --repo-dir (the working directory).
+    assert_eq!(
+        agent.matches("--repo-dir ").count(),
+        1,
+        "self-only agent must emit exactly one --repo-dir:\n{agent}"
+    );
+    assert!(
+        agent.contains("--repo-dir \"$(Build.SourcesDirectory)\""),
+        "self-only --repo-dir must be the working directory:\n{agent}"
+    );
+}
+
+/// Multi-repo: with additional `checkout:` repos, the prepare step deepens the
+/// target branch in the self working dir AND each alias dir — mirroring
+/// `mcp.rs::resolve_git_dir_for_patch` so a PR to any allowed repo works on a
+/// shallow pool.
+#[test]
+fn test_create_pull_request_prepare_step_covers_all_checkout_repos() {
+    let compiled = compile_inline_agent(
+        "prepare-pr-base-multi",
+        "---\nname: \"Multi PR Agent\"\ndescription: \"opens PRs across repos\"\nworkspace: root\nrepos:\n  - my-org/tools\n  - my-org/lib\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let agent = job_block(&compiled, "Agent");
+    // self (working_directory == $(Build.SourcesDirectory) under workspace: root)
+    // + one dir per derived alias (my-org/tools -> tools, my-org/lib -> lib).
+    assert_eq!(
+        agent.matches("--repo-dir ").count(),
+        3,
+        "multi-repo agent must emit one --repo-dir per allowed repo (self + 2 aliases):\n{agent}"
+    );
+    assert!(
+        agent.contains("--repo-dir \"$(Build.SourcesDirectory)\""),
+        "self dir must be covered:\n{agent}"
+    );
+    assert!(
+        agent.contains("--repo-dir \"$(Build.SourcesDirectory)/tools\""),
+        "tools alias dir must be covered:\n{agent}"
+    );
+    assert!(
+        agent.contains("--repo-dir \"$(Build.SourcesDirectory)/lib\""),
+        "lib alias dir must be covered:\n{agent}"
+    );
 }
 
 /// An agent WITHOUT `create-pull-request` emits no prepare-pr-base step and

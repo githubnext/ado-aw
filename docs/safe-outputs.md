@@ -264,18 +264,24 @@ Creates a pull request with code changes made by the agent. When invoked:
 During Stage 3 execution, the repository is validated against the allowed list (from `checkout:` + "self"), then the patch is applied and a PR is created in Azure DevOps.
 
 **Shallow-clone agent pools (automatic):** The diff base for the patch is
-computed at agent time from the checked-out `self` repository. On agent pools
-whose default git fetch is shallow (`fetchDepth: 1`), a bare `checkout: self`
-leaves no `origin/<target-branch>` ref, which would otherwise prevent the diff
-base from being computed. To handle this transparently, whenever
-`create-pull-request` is configured the compiler emits a credentialed
-**prepare step** in the Agent job (before the agent runs) that fetches and
-progressively deepens the configured `target-branch` and points
-`origin/HEAD` at it. This means create-pull-request works on shallow-default
-pools **without** forcing a full-history `checkout: self` and **without**
-hand-editing the compiled lock (so the runtime integrity check keeps passing).
-No configuration is required. See [`docs/ado-script.md`](ado-script.md)
-(`prepare-pr-base.js`).
+computed at agent time from the checked-out repository. On agent pools whose
+default git fetch is shallow (`fetchDepth: 1`), a bare `checkout` leaves no
+`origin/<target-branch>` ref, which would otherwise prevent the diff base from
+being computed. To handle this transparently, whenever `create-pull-request` is
+configured the compiler emits a credentialed **prepare step** in the Agent job
+(before the agent runs) that fetches and progressively deepens the configured
+`target-branch` and points `origin/HEAD` at it — in the `self` checkout **and in
+each additional `checkout:` repo dir**, so a PR to *any* allowed repository works.
+This means create-pull-request works on shallow-default pools **without** forcing
+a full-history checkout and **without** hand-editing the compiled lock (so the
+runtime integrity check keeps passing). No configuration is required. See
+[`docs/ado-script.md`](ado-script.md) (`prepare-pr-base.js`).
+
+> **Branch semantics.** The step deepens the single `target-branch` (the PR's
+> **destination/base**, default `main`), applied uniformly to every repo dir — not
+> the per-repo `repos:` checkout `ref` (which is the source side). Multi-repo PRs
+> therefore all target the same branch name; per-repo target branches are not yet
+> expressible (tracked as a follow-up).
 
 **Stage 3 Execution Architecture (Hybrid Git + ADO API):**
 

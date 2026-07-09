@@ -35,6 +35,12 @@ function makeRunners(opts: {
   return { runners: { runGit, gitOk }, calls };
 }
 
+/** A `chdir` stub that records the dirs it was asked to enter. */
+function recordingChdir(): { chdir: (dir: string) => void; dirs: string[] } {
+  const dirs: string[] = [];
+  return { chdir: (dir: string) => void dirs.push(dir), dirs };
+}
+
 describe("parseArgs", () => {
   it("defaults to main when --target-branch is absent", () => {
     expect(parseArgs([]).targetBranch).toBe("main");
@@ -54,20 +60,32 @@ describe("parseArgs", () => {
     expect(parseArgs(["--target-branch", ""]).targetBranch).toBe("main");
   });
 
-  it("reads --repo-dir and defaults it to empty", () => {
-    expect(parseArgs([]).repoDir).toBe("");
+  it("collects repeated --repo-dir flags in order, defaulting to empty", () => {
+    expect(parseArgs([]).repoDirs).toEqual([]);
     expect(
-      parseArgs(["--target-branch", "main", "--repo-dir", "/src/self"]).repoDir,
-    ).toBe("/src/self");
+      parseArgs([
+        "--target-branch",
+        "main",
+        "--repo-dir",
+        "/src",
+        "--repo-dir",
+        "/src/tools",
+      ]).repoDirs,
+    ).toEqual(["/src", "/src/tools"]);
+  });
+
+  it("ignores empty --repo-dir values", () => {
+    expect(parseArgs(["--repo-dir", "", "--repo-dir", "/src"]).repoDirs).toEqual(["/src"]);
   });
 });
 
 describe("prepare-pr-base main", () => {
   it("fetches origin/<target> and sets origin/HEAD on success", () => {
     const { runners, calls } = makeRunners({ fetchStatus: 0, mergeBase: SHA_M });
-    // No BUILD_SOURCESDIRECTORY → skip chdir (test runs in the repo cwd).
-    const rc = main({ targetBranch: "main", repoDir: "" }, {}, runners);
+    const { chdir, dirs } = recordingChdir();
+    const rc = main({ targetBranch: "main", repoDirs: ["/src"] }, {}, runners, chdir);
     expect(rc).toBe(0);
+    expect(dirs).toEqual(["/src"]);
 
     const fetch = calls.find((c) => c[0] === "fetch");
     expect(fetch).toBeDefined();
@@ -83,7 +101,13 @@ describe("prepare-pr-base main", () => {
 
   it("threads a non-default target through the fetch refspec and origin/HEAD", () => {
     const { runners, calls } = makeRunners({ fetchStatus: 0, mergeBase: SHA_M });
-    const rc = main({ targetBranch: "release/2.x", repoDir: "" }, {}, runners);
+    const { chdir } = recordingChdir();
+    const rc = main(
+      { targetBranch: "release/2.x", repoDirs: ["/src"] },
+      {},
+      runners,
+      chdir,
+    );
     expect(rc).toBe(0);
 
     const fetch = calls.find((c) => c[0] === "fetch");
@@ -97,12 +121,65 @@ describe("prepare-pr-base main", () => {
     ]);
   });
 
+  it("deepens every repo dir (self + aliases) and sets origin/HEAD in each", () => {
+    const { runners, calls } = makeRunners({ fetchStatus: 0, mergeBase: SHA_M });
+    const { chdir, dirs } = recordingChdir();
+    const rc = main(
+      { targetBranch: "main", repoDirs: ["/src", "/src/tools", "/src/lib"] },
+      {},
+      runners,
+      chdir,
+    );
+    expect(rc).toBe(0);
+    // Entered each dir, in order.
+    expect(dirs).toEqual(["/src", "/src/tools", "/src/lib"]);
+    // One fetch + one origin/HEAD set per dir.
+    expect(calls.filter((c) => c[0] === "fetch").length).toBe(3);
+    expect(calls.filter((c) => c[0] === "symbolic-ref").length).toBe(3);
+  });
+
+  it("isolates a per-dir chdir failure — other dirs still processed", () => {
+    const { runners, calls } = makeRunners({ fetchStatus: 0, mergeBase: SHA_M });
+    const dirs: string[] = [];
+    const chdir = (dir: string) => {
+      dirs.push(dir);
+      if (dir === "/src/broken") {
+        throw new Error("no such directory");
+      }
+    };
+    const rc = main(
+      { targetBranch: "main", repoDirs: ["/src", "/src/broken", "/src/lib"] },
+      {},
+      runners,
+      chdir,
+    );
+    expect(rc).toBe(0);
+    // All dirs attempted...
+    expect(dirs).toEqual(["/src", "/src/broken", "/src/lib"]);
+    // ...but only the two good dirs fetched + set origin/HEAD (broken skipped).
+    expect(calls.filter((c) => c[0] === "fetch").length).toBe(2);
+    expect(calls.filter((c) => c[0] === "symbolic-ref").length).toBe(2);
+  });
+
   it("exits 0 without setting origin/HEAD when every fetch fails (benign)", () => {
     const { runners, calls } = makeRunners({ fetchStatus: 1, mergeBase: null });
-    const rc = main({ targetBranch: "main", repoDir: "" }, {}, runners);
+    const { chdir } = recordingChdir();
+    const rc = main({ targetBranch: "main", repoDirs: ["/src"] }, {}, runners, chdir);
     // Non-fatal: the agent still runs; mcp.rs surfaces its own error if needed.
     expect(rc).toBe(0);
     expect(calls.some((c) => c[0] === "symbolic-ref")).toBe(false);
+  });
+
+  it("falls back to BUILD_SOURCESDIRECTORY when no --repo-dir is given", () => {
+    const { runners } = makeRunners({ fetchStatus: 0, mergeBase: SHA_M });
+    const { chdir, dirs } = recordingChdir();
+    main(
+      { targetBranch: "main", repoDirs: [] },
+      { BUILD_SOURCESDIRECTORY: "/agent/src" },
+      runners,
+      chdir,
+    );
+    expect(dirs).toEqual(["/agent/src"]);
   });
 
   it("passes the SYSTEM_ACCESSTOKEN bearer into the git fetch env", () => {
@@ -114,7 +191,13 @@ describe("prepare-pr-base main", () => {
       },
       gitOk: (args) => (args[0] === "merge-base" ? SHA_M : null),
     };
-    main({ targetBranch: "main", repoDir: "" }, { SYSTEM_ACCESSTOKEN: "tok" }, runners);
+    const { chdir } = recordingChdir();
+    main(
+      { targetBranch: "main", repoDirs: ["/src"] },
+      { SYSTEM_ACCESSTOKEN: "tok" },
+      runners,
+      chdir,
+    );
     expect(seenEnvs[0]).toMatchObject({
       GIT_CONFIG_VALUE_0: "Authorization: bearer tok",
     });

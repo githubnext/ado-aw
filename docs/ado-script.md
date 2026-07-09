@@ -70,15 +70,19 @@ pipeline** as runtime helpers. Today it produces thirteen bundles:
   [`engine.md`](engine.md#github-app-backed-copilot-engine-auth).
 - `prepare-pr-base.js` — create-pull-request base-ref preparer that runs in the
   **Agent job** before the Copilot invocation when `create-pull-request` is
-  configured (issue #1413). Fetches and progressively deepens the configured
-  `target-branch` into `refs/remotes/origin/<target>` and points
-  `refs/remotes/origin/HEAD` at it, so the host-side SafeOutputs MCP server can
-  compute a diff base on shallow-default agent pools without a full-history
+  configured (issue #1413). For each allowed create-PR repo dir (`self` +
+  every `checkout:` alias, passed as repeated `--repo-dir` flags in the same form
+  `mcp.rs::resolve_git_dir_for_patch` resolves them), it fetches and progressively
+  deepens the configured `target-branch` into `refs/remotes/origin/<target>` and
+  points `refs/remotes/origin/HEAD` at it, so the host-side SafeOutputs MCP server
+  can compute a diff base on shallow-default agent pools without a full-history
   `checkout: self`. Reuses `shared/merge-base.ts::ensureTargetRefFetched`
   (the same fetch/deepen logic as the PR execution-context precompute). The
-  non-secret `--target-branch` is an argv flag; the ADO bearer
-  (`SYSTEM_ACCESSTOKEN`) rides in masked env for the authenticated git fetch.
-  Runs outside AWF. See [`safe-outputs.md`](safe-outputs.md#create-pull-request).
+  single `--target-branch` (the PR's destination/base) and each `--repo-dir` are
+  non-secret argv flags; the ADO bearer (`SYSTEM_ACCESSTOKEN`) rides in masked env
+  for the authenticated git fetch. Per-dir failures are isolated (logged +
+  skipped). Runs outside AWF. See
+  [`safe-outputs.md`](safe-outputs.md#create-pull-request).
 
 > **Internal-only.** `ado-script` is not a user-facing front-matter
 > feature. Authors never write an `ado-script:` block in their agent

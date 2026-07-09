@@ -942,9 +942,18 @@ fn build_agent_job(
     //     agent-prepare steps (`prepare_pr_base_active` is OR'd into that
     //     extension's Agent-job download predicate), so it is guaranteed present.
     if let Some(target_branch) = front_matter.create_pr_target_branch() {
+        // Deepen every checkout dir the SafeOutputs MCP server may generate a
+        // patch from — one per allowed create-PR repo, mirroring
+        // `mcp.rs::resolve_git_dir_for_patch`: the resolved `working_directory`
+        // (for `self`) and `working_directory/<alias>` for each `checkout:`
+        // alias. A single `self` checkout ⇒ one dir (byte-for-byte unchanged).
+        let mut repo_dirs: Vec<String> = vec![cfg.working_directory.clone()];
+        for alias in &front_matter.checkout {
+            repo_dirs.push(format!("{}/{}", cfg.working_directory, alias));
+        }
         steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
             &target_branch,
-            &cfg.working_directory,
+            &repo_dirs,
         ));
     }
     //     When GitHub App auth is configured, mint the installation token

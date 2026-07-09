@@ -588,28 +588,42 @@ fn sh_single_quote(value: &str) -> String {
 /// Agent job before the Copilot invocation when `create-pull-request` is
 /// configured, invoking the `prepare-pr-base` ado-script bundle to fetch and
 /// progressively deepen the target branch (`refs/remotes/origin/<target>`) in
-/// the `self` checkout. The host-side SafeOutputs MCP server (`src/mcp.rs`)
-/// then resolves a diff base even on shallow-default agent pools — no forced
-/// full-history `checkout: self`, no lock hand-edit.
+/// every allowed create-PR repo dir. The host-side SafeOutputs MCP server
+/// (`src/mcp.rs`) then resolves a diff base even on shallow-default agent pools —
+/// no forced full-history `checkout: self`, no lock hand-edit.
 ///
-/// `working_directory` is the resolved `self` checkout root — the SAME path the
-/// MCP server receives as its `bounding_directory` (see
-/// `start_safeoutputs_server_step`). It is passed as `--repo-dir` so the bundle
-/// deepens the exact clone the MCP server later reads (these differ from
-/// `$(Build.SourcesDirectory)` in multi-repo layouts, where `self` lands in a
-/// `$(Build.Repository.Name)` subdirectory).
+/// `repo_dirs` is the set of checkout dirs the MCP server may generate a patch
+/// from — one per allowed repo, in the SAME form `resolve_git_dir_for_patch`
+/// resolves them: the resolved `working_directory` (for `self`) and
+/// `working_directory/<alias>` for each `checkout:` alias. Passing them as
+/// repeated `--repo-dir` flags lets the bundle deepen each, so a PR to ANY
+/// allowed repo — not just `self` — works on shallow pools.
 ///
-/// The non-secret `--target-branch` / `--repo-dir` are single-quoted argv flags
-/// (immune to ADO pipeline-variable shadowing); the ADO bearer is projected via
+/// The non-secret `--target-branch` is a single-quoted argv flag (immune to ADO
+/// pipeline-variable shadowing); each `--repo-dir` is a double-quoted ADO-macro
+/// path (matching the `import.js --base "$(...)"` convention — single quotes
+/// would trip shellcheck SC2016). The ADO bearer is projected via
 /// `apply_bundle_auth` (the bundle uses it for the authenticated git fetch, and
 /// `SYSTEM_ACCESSTOKEN` is the one predefined var ADO does not auto-inject).
 /// The step runs OUTSIDE the AWF sandbox on the build agent's normal network,
 /// so it needs no AWF allowlist entry.
-pub fn prepare_pr_base_step_typed(target_branch: &str, working_directory: &str) -> Step {
+pub fn prepare_pr_base_step_typed(target_branch: &str, repo_dirs: &[String]) -> Step {
+    // Repo dirs are compiler-generated ADO path macros (`$(Build.SourcesDirectory)`
+    // [+ `/<validated-alias>`]). ADO substitutes the macro before bash runs, and
+    // aliases are validated (no shell metacharacters), so these use DOUBLE quotes
+    // — the established convention for ADO-macro path args (cf. import.js
+    // `--base "$(Build.SourcesDirectory)"`). Single quotes would trip shellcheck
+    // SC2016 ("expressions don't expand in single quotes"). The `target-branch`,
+    // by contrast, is a plain config value with no macro, so it stays
+    // single-quoted (shadow-proof).
+    let repo_dir_flags: String = repo_dirs
+        .iter()
+        .map(|d| format!(" --repo-dir \"{}\"", d))
+        .collect();
     let script = format!(
-        "set -eo pipefail\nnode '{PREPARE_PR_BASE_PATH}' --target-branch {} --repo-dir {}\n",
+        "set -eo pipefail\nnode '{PREPARE_PR_BASE_PATH}' --target-branch {}{}\n",
         sh_single_quote(target_branch),
-        sh_single_quote(working_directory)
+        repo_dir_flags
     );
     let step = crate::compile::ado_bundle::apply_bundle_auth(
         BashStep::new(
@@ -1467,8 +1481,8 @@ mod tests {
 
     #[test]
     fn prepare_pr_base_step_emits_bundle_invocation_with_target_and_bearer() {
-        let Step::Bash(step) = prepare_pr_base_step_typed("main", "$(Build.SourcesDirectory)")
-        else {
+        let dirs = vec!["$(Build.SourcesDirectory)".to_string()];
+        let Step::Bash(step) = prepare_pr_base_step_typed("main", &dirs) else {
             panic!("expected a bash step");
         };
         assert_eq!(
@@ -1487,11 +1501,12 @@ mod tests {
             "target-branch must be a single-quoted argv flag:\n{}",
             step.script
         );
-        // The repo dir (== MCP server bounding_directory) is a single-quoted argv
-        // flag so the bundle deepens the exact clone the MCP server reads.
+        // The repo dir (== MCP server bounding_directory) is a double-quoted argv
+        // flag (ADO-macro path convention) so the bundle deepens the exact clone
+        // the MCP server reads.
         assert!(
-            step.script.contains("--repo-dir '$(Build.SourcesDirectory)'"),
-            "repo-dir must be a single-quoted argv flag:\n{}",
+            step.script.contains("--repo-dir \"$(Build.SourcesDirectory)\""),
+            "repo-dir must be a double-quoted ADO-macro argv flag:\n{}",
             step.script
         );
         // The ADO bearer is projected as a masked secret (bundle uses it for the
@@ -1504,9 +1519,8 @@ mod tests {
 
     #[test]
     fn prepare_pr_base_step_quotes_a_non_default_target() {
-        let Step::Bash(step) =
-            prepare_pr_base_step_typed("release/2.x", "$(Build.SourcesDirectory)")
-        else {
+        let dirs = vec!["$(Build.SourcesDirectory)".to_string()];
+        let Step::Bash(step) = prepare_pr_base_step_typed("release/2.x", &dirs) else {
             panic!("expected a bash step");
         };
         assert!(
@@ -1517,21 +1531,31 @@ mod tests {
     }
 
     #[test]
-    fn prepare_pr_base_step_passes_multi_repo_working_directory_as_repo_dir() {
-        // In multi-repo layouts `self` lands in a $(Build.Repository.Name)
-        // subdirectory; the step must target THAT dir (the MCP server's
-        // bounding_directory), not $(Build.SourcesDirectory).
-        let Step::Bash(step) = prepare_pr_base_step_typed(
-            "main",
-            "$(Build.SourcesDirectory)/$(Build.Repository.Name)",
-        ) else {
+    fn prepare_pr_base_step_emits_one_repo_dir_flag_per_dir() {
+        // Multi-repo: self working_directory + one dir per checkout alias, each a
+        // separate double-quoted `--repo-dir` flag, in order.
+        let dirs = vec![
+            "$(Build.SourcesDirectory)".to_string(),
+            "$(Build.SourcesDirectory)/tools".to_string(),
+            "$(Build.SourcesDirectory)/lib".to_string(),
+        ];
+        let Step::Bash(step) = prepare_pr_base_step_typed("main", &dirs) else {
             panic!("expected a bash step");
         };
+        assert_eq!(
+            step.script.matches("--repo-dir ").count(),
+            3,
+            "one --repo-dir per dir:\n{}",
+            step.script
+        );
+        assert!(step.script.contains("--repo-dir \"$(Build.SourcesDirectory)\""));
         assert!(
             step.script
-                .contains("--repo-dir '$(Build.SourcesDirectory)/$(Build.Repository.Name)'"),
-            "repo-dir must carry the resolved self checkout root:\n{}",
+                .contains("--repo-dir \"$(Build.SourcesDirectory)/tools\"")
+        );
+        assert!(
             step.script
+                .contains("--repo-dir \"$(Build.SourcesDirectory)/lib\"")
         );
     }
 

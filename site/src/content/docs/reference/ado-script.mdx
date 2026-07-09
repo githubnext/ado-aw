@@ -24,7 +24,7 @@ pipelines** as runtime helpers. Today it produces fifteen bundles:
 - **`conclusion.js`** — Conclusion job reporter that files/comments ADO work items for pipeline failures and diagnostic signals (Conclusion job)
 - **`approval-summary.js`** — renders a sanitized per-tool summary of proposed safe outputs into the build's `ado-aw-safe-outputs` summary tab (end of Agent job)
 - **`github-app-token.js`** — mints (and revokes) a GitHub App installation token for the Copilot engine when `engine.github-app-token` is configured (Agent + Detection jobs)
-- **`prepare-pr-base.js`** — fetches/deepens the `create-pull-request` target branch so the SafeOutputs MCP server can compute a diff base on shallow-default agent pools (Agent job)
+- **`prepare-pr-base.js`** — fetches/deepens the `create-pull-request` target branch in the `self` checkout and every additional `checkout:` repo dir, so the SafeOutputs MCP server can compute a diff base for a PR to any allowed repo on shallow-default agent pools (Agent job)
 
 <Aside type="caution" title="Internal-only">
   `ado-script` is not a user-facing front-matter feature. Authors never write an `ado-script:` block in their agent
