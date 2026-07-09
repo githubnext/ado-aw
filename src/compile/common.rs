@@ -678,6 +678,24 @@ pub fn lower_repos(items: &[ReposItem]) -> Result<LoweredRepos> {
             }
         };
 
+        // Reject aliases that aren't safe as a single path segment. The alias
+        // is used unquoted as an ADO `checkout:` value / repository resource
+        // name AND (issue #1413) appended to `$(Build.SourcesDirectory)` inside
+        // a double-quoted bash argument in the prepare-pr-base step. An explicit
+        // `alias=org/repo` (or a repo name whose trailing segment carries odd
+        // characters) could otherwise embed `"`, `$`, `` ` ``, `\`, or a newline
+        // and break the generated shell. `is_safe_path_segment` is the same
+        // allowlist the runtime MCP server applies to a repository alias.
+        if !crate::validate::is_safe_path_segment(&alias) {
+            anyhow::bail!(
+                "Repository alias '{}' contains characters that are not allowed. \
+                Aliases must be a single path segment matching [A-Za-z0-9._-] (no \
+                path separators, leading dot, or shell metacharacters). Set an \
+                explicit `alias:` (or `alias=org/repo` shorthand) with a safe name.",
+                alias
+            );
+        }
+
         // Reject duplicate aliases
         if !seen_aliases.insert(alias.clone()) {
             anyhow::bail!(
@@ -6639,6 +6657,41 @@ safe-outputs:
         })];
         let err = lower_repos(&items).unwrap_err();
         assert!(err.to_string().contains("reserved"), "{err}");
+    }
+
+    #[test]
+    fn test_repos_rejects_shell_unsafe_alias() {
+        // An explicit alias carrying a shell metacharacter is rejected — it
+        // would otherwise be embedded (unquoted / in a double-quoted path) into
+        // generated ADO/bash steps (issue #1413 prepare-pr-base).
+        for bad in ["a\"b", "a$b", "a`b", "a\\b", "a\nb", "a b"] {
+            let items = vec![ReposItem::Full(RepoEntry {
+                name: "org/repo".to_string(),
+                alias: Some(bad.to_string()),
+                repo_type: "git".to_string(),
+                repo_ref: "refs/heads/main".to_string(),
+                checkout: true,
+                fetch_depth: None,
+                fetch_tags: None,
+            })];
+            let err = lower_repos(&items).unwrap_err();
+            assert!(
+                err.to_string().contains("not allowed"),
+                "alias {bad:?} must be rejected: {err}"
+            );
+        }
+
+        // A normal alias still passes.
+        let ok = vec![ReposItem::Full(RepoEntry {
+            name: "org/repo".to_string(),
+            alias: Some("my-tools_2".to_string()),
+            repo_type: "git".to_string(),
+            repo_ref: "refs/heads/main".to_string(),
+            checkout: true,
+            fetch_depth: None,
+            fetch_tags: None,
+        })];
+        assert!(lower_repos(&ok).is_ok());
     }
 
     #[test]

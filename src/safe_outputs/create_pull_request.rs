@@ -402,6 +402,7 @@ pub struct CreatePrConfig {
     /// `checkout:` alias). Highest precedence. Enables opening a PR into a
     /// different base branch per repo in a multi-checkout ("meta repo") setup.
     #[serde(default, rename = "target-branches")]
+    #[sanitize_config(sanitize_keys)]
     pub target_branches: std::collections::HashMap<String, String>,
 
     /// When `true`, a checkout repo with no explicit `target_branches` entry
@@ -484,8 +485,15 @@ fn default_target_branch() -> String {
 
 /// Strip a `refs/heads/` prefix from a git ref, yielding the short branch name.
 /// Other ref forms (already short, or `refs/tags/…`) are returned unchanged.
+/// A degenerate `"refs/heads/"` (empty after stripping) returns the original
+/// string rather than `""`, so a malformed `repos: ref` never yields an empty
+/// target branch (which would produce `target_ref = "refs/heads/"` and a
+/// confusing ADO error). Mirrors the TS guard in `prepare-pr-base/index.ts`.
 pub(crate) fn short_branch(git_ref: &str) -> &str {
-    git_ref.strip_prefix("refs/heads/").unwrap_or(git_ref)
+    git_ref
+        .strip_prefix("refs/heads/")
+        .filter(|s| !s.is_empty())
+        .unwrap_or(git_ref)
 }
 
 impl CreatePrConfig {
@@ -2495,6 +2503,9 @@ mod tests {
         assert_eq!(short_branch("refs/heads/release/2.x"), "release/2.x");
         assert_eq!(short_branch("main"), "main");
         assert_eq!(short_branch("refs/tags/v1"), "refs/tags/v1");
+        // Degenerate `refs/heads/` (empty after strip) returns the original,
+        // never "" — guards against a malformed `repos: ref`.
+        assert_eq!(short_branch("refs/heads/"), "refs/heads/");
     }
 
     #[test]
