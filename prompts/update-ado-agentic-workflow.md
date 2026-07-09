@@ -25,6 +25,7 @@ Read the full agent markdown file. Identify:
 - **Safe outputs** enabled and their configuration
 - **Permissions** (`read` / `write` / both / neither)
 - **Repositories and checkout** configuration
+- **Variable groups** (`variable-groups:`) if present
 - **Steps** (setup, teardown, steps, post-steps)
 - **Network** allow/blocked lists
 - **Agent instructions** (the markdown body after the closing `---`)
@@ -39,9 +40,9 @@ When adding new fields, place them in the conventional front matter order:
 
 ```
 name → description → target → engine → workspace → pool →
-repos → tools → runtimes → mcp-servers → safe-outputs →
+repos → tools → runtimes → inlined-imports → mcp-servers → safe-outputs →
 on (schedule + triggers) → execution-context → steps → post-steps → setup → teardown → network →
-permissions → supply-chain → parameters
+variable-groups → permissions → supply-chain → parameters
 ```
 
 > **`on.pr` knob update**: when changing `on.pr.branches` or
@@ -323,6 +324,8 @@ Before finalizing any update, verify:
 9. **Parameter names**: Runtime `parameters:` names must be valid ADO identifiers.
 
 10. **Engine model**: If `engine:` only sets the default `copilot` engine with model `claude-opus-4.7` and no other settings (timeout, `github-app-token`, `provider`, etc.), the `engine:` field can be omitted entirely.
+
+11. **Variable groups**: `variable-groups:` entries are group names only — never secret values. Adding a group requires **both** the YAML import (this field) and manual authorization in the ADO Library UI. Only valid for `standalone` and `1es` targets; a compile-time error on `job`/`stage` templates.
 
 ---
 
