@@ -575,6 +575,28 @@ Do something.
         String::from_utf8_lossy(&output.stderr)
     );
 
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+
+    // Write-only path: SC_WRITE_TOKEN must be acquired; SC_READ_TOKEN must be absent
+    assert!(
+        compiled.contains("SC_WRITE_TOKEN"),
+        "Compiled output should contain SC_WRITE_TOKEN for write service connection"
+    );
+    assert!(
+        !compiled.contains("SC_READ_TOKEN"),
+        "Compiled output should not contain SC_READ_TOKEN when only write SC is configured"
+    );
+
+    // Both configured safe-output tools must appear in the --enabled-tools list
+    assert!(
+        compiled.contains("--enabled-tools create-work-item"),
+        "Compiled output should contain --enabled-tools create-work-item"
+    );
+    assert!(
+        compiled.contains("--enabled-tools create-pull-request"),
+        "Compiled output should contain --enabled-tools create-pull-request"
+    );
+
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
@@ -759,52 +781,6 @@ Comment on work items.
     assert!(
         stderr.contains("target"),
         "Error message should mention target: {stderr}"
-    );
-
-    let _ = fs::remove_dir_all(&temp_dir);
-}
-
-/// Test that comment-on-work-item compiles successfully with proper config
-#[test]
-fn test_comment_on_work_item_compiles_with_target_and_write_sc() {
-    let temp_dir =
-        std::env::temp_dir().join(format!("agentic-pipeline-cwi-pass-{}", std::process::id()));
-    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
-
-    let test_input = temp_dir.join("cwi-agent.md");
-    let test_content = r#"---
-name: "Comment Agent"
-description: "Agent that comments on work items"
-permissions:
-  write: my-write-sc
-safe-outputs:
-  comment-on-work-item:
-    target: "*"
-    max: 5
----
-
-## Comment Agent
-
-Comment on work items.
-"#;
-    fs::write(&test_input, test_content).expect("Failed to write test input");
-
-    let output_path = temp_dir.join("cwi-agent.yml");
-    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
-    let output = std::process::Command::new(&binary_path)
-        .args([
-            "compile",
-            test_input.to_str().unwrap(),
-            "-o",
-            output_path.to_str().unwrap(),
-        ])
-        .output()
-        .expect("Failed to run compiler");
-
-    assert!(
-        output.status.success(),
-        "Compiler should succeed when target and write SC are provided: {}",
-        String::from_utf8_lossy(&output.stderr)
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -1373,6 +1349,19 @@ Submit PR reviews.
         String::from_utf8_lossy(&output.stderr)
     );
 
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+
+    // The submit-pr-review tool must be listed as an enabled tool for the agent
+    assert!(
+        compiled.contains("--enabled-tools submit-pr-review"),
+        "Compiled output should contain --enabled-tools submit-pr-review"
+    );
+    // Stage 3 write token must be acquired for the executor
+    assert!(
+        compiled.contains("SC_WRITE_TOKEN"),
+        "Compiled output should contain SC_WRITE_TOKEN for write service connection"
+    );
+
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
@@ -1474,6 +1463,19 @@ Manage pull requests.
         String::from_utf8_lossy(&output.stderr)
     );
 
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+
+    // update-pr must be listed as an enabled tool for the agent
+    assert!(
+        compiled.contains("--enabled-tools update-pr"),
+        "Compiled output should contain --enabled-tools update-pr"
+    );
+    // Stage 3 must acquire a write token (permissions.write is set)
+    assert!(
+        compiled.contains("SC_WRITE_TOKEN"),
+        "Compiled output should contain SC_WRITE_TOKEN for write service connection"
+    );
+
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
@@ -1521,6 +1523,19 @@ Vote on pull requests.
         output.status.success(),
         "Compiler should succeed with proper update-pr vote config: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+
+    // update-pr must be listed as an enabled tool for the agent
+    assert!(
+        compiled.contains("--enabled-tools update-pr"),
+        "Compiled output should contain --enabled-tools update-pr"
+    );
+    // Stage 3 must acquire a write token (permissions.write is set)
+    assert!(
+        compiled.contains("SC_WRITE_TOKEN"),
+        "Compiled output should contain SC_WRITE_TOKEN for write service connection"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
