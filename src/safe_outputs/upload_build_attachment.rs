@@ -1045,6 +1045,43 @@ attachment-type: "agent-artifact"
     }
 
     #[tokio::test]
+    async fn test_executor_fails_when_project_id_missing() {
+        // SHA-256 of b"hello" so the integrity check passes and we reach the
+        // scope-identifier resolution.
+        const HELLO_SHA: &str =
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        let dir = tempfile::tempdir().unwrap();
+        let staged = "upload-build-attachment-agent-report-1badf00d.txt";
+        std::fs::write(dir.path().join(staged), b"hello").unwrap();
+
+        let result = UploadBuildAttachmentResult::new(
+            None,
+            "agent-report".to_string(),
+            "out/report.txt".to_string(),
+            staged.to_string(),
+            5,
+            HELLO_SHA.to_string(),
+        );
+        // Non-dry-run with org/token/plan/timeline/job set but
+        // SYSTEM_TEAMPROJECTID absent — must fail before any HTTP call, naming
+        // the missing variable (it is the route's scope identifier).
+        let mut ctx = make_ctx(dir.path().to_path_buf(), false);
+        ctx.ado_org_url = Some("https://dev.azure.com/org".to_string());
+        ctx.ado_project = Some("Proj".to_string());
+        ctx.access_token = Some("token".to_string());
+        ctx.plan_id = Some("00000000-0000-0000-0000-000000000001".to_string());
+        ctx.timeline_id = Some("00000000-0000-0000-0000-000000000002".to_string());
+        ctx.job_id = Some("00000000-0000-0000-0000-000000000003".to_string());
+        // ado_project_id intentionally left None.
+        let err = result.execute_impl(&ctx).await.unwrap_err();
+        assert!(
+            err.to_string().contains("SYSTEM_TEAMPROJECTID"),
+            "expected SYSTEM_TEAMPROJECTID error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
     async fn test_executor_rejects_missing_staged_file() {
         let dir = tempfile::tempdir().unwrap();
         let result = UploadBuildAttachmentResult::new(
@@ -1211,8 +1248,9 @@ attachment-type: "agent-artifact"
         let content = b"real file content";
         std::fs::write(dir.path().join(staged), content).unwrap();
 
-        // Record the hash of different content — same size but wrong hash.
-        let wrong_hash = crate::hash::sha256_hex(b"wrong file content");
+        // Record the hash of different content of the SAME length (17 bytes),
+        // so the size check passes and the SHA-256 check is what fires.
+        let wrong_hash = crate::hash::sha256_hex(b"fake file content");
 
         let result = UploadBuildAttachmentResult::new(
             Some(1),
