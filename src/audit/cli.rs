@@ -70,7 +70,18 @@ struct FetchAuditDataResult {
     from_cache: bool,
 }
 
-async fn fetch_audit_data_inner(opts: AuditOptions<'_>) -> Result<FetchAuditDataResult> {
+/// Resolved ADO context, auth, and output directory for a single audit run.
+struct AuditRunSetup {
+    parsed: crate::audit::url::ParsedBuildRef,
+    artifact_filters: Option<Vec<String>>,
+    ctx: crate::ado::AdoContext,
+    auth: crate::ado::AdoAuth,
+    run_dir: PathBuf,
+}
+
+/// Resolve all pre-flight items for an audit run: parse the build ref, resolve
+/// ADO context and credentials, and create the per-build output directory.
+async fn resolve_run_setup(opts: &AuditOptions<'_>) -> Result<AuditRunSetup> {
     let parsed = parse_build_ref(opts.build_id_or_url)?;
     let artifact_filters = normalize_artifact_filters(opts.artifacts)?;
     let cwd = tokio::fs::canonicalize(".")
@@ -78,63 +89,24 @@ async fn fetch_audit_data_inner(opts: AuditOptions<'_>) -> Result<FetchAuditData
         .context("Could not resolve current directory")?;
     let ctx = resolve_audit_context(&cwd, opts.org, opts.project, &parsed).await?;
     let auth = resolve_auth(opts.pat).await?;
-
     let run_dir = opts.output.join(format!("build-{}", parsed.build_id));
     tokio::fs::create_dir_all(&run_dir)
         .await
         .with_context(|| format!("create audit output directory {}", run_dir.display()))?;
+    Ok(AuditRunSetup {
+        parsed,
+        artifact_filters,
+        ctx,
+        auth,
+        run_dir,
+    })
+}
 
-    if !opts.no_cache
-        && let Some(summary) = load_run_summary(&run_dir).await?
-    {
-        if !opts.json {
-            eprintln!(
-                "Using cached audit from {}",
-                summary.processed_at.to_rfc3339()
-            );
-        }
-        let mut audit = summary.audit_data;
-        let cached_audit_before_postprocess = audit.clone();
-        derive_post_processing(&mut audit, &run_dir).await;
-        // Persist recomputed pipeline_graph + findings back to the
-        // cached snapshot so subsequent runs see the same canonical
-        // AuditData shape; tooling that diffs successive outputs would
-        // otherwise observe drift between the saved file and the
-        // in-memory result.
-        //
-        // NOTE on concurrency: two concurrent `ado-aw audit` runs for
-        // the same build id can race on this `save_run_summary` write.
-        // We do not take a filesystem lock — the failure path is
-        // recorded as a warning (see below) rather than aborting the
-        // audit, and the worst case is that one writer's recomputed
-        // snapshot overwrites the other's. Both writers derive from
-        // the same on-disk artifacts, so the resulting summary is
-        // still internally consistent; only the `processed_at`
-        // timestamp may flip between them.
-        if audit != cached_audit_before_postprocess
-            && let Err(error) = save_run_summary(
-                &run_dir,
-                &RunSummary {
-                    ado_aw_version: env!("CARGO_PKG_VERSION").to_string(),
-                    build_id: parsed.build_id,
-                    processed_at: Utc::now(),
-                    audit_data: audit.clone(),
-                },
-            )
-            .await
-        {
-            warn_and_record(
-                &mut audit,
-                "audit::cli",
-                format!("failed to refresh cached run-summary.json: {error:#}"),
-            );
-        }
-        return Ok(FetchAuditDataResult {
-            audit,
-            run_dir,
-            json: opts.json,
-            from_cache: true,
-        });
+async fn fetch_audit_data_inner(opts: AuditOptions<'_>) -> Result<FetchAuditDataResult> {
+    let setup = resolve_run_setup(&opts).await?;
+
+    if let Some(cached) = try_serve_from_cache(opts.no_cache, opts.json, &setup.run_dir).await? {
+        return Ok(cached);
     }
 
     let client = reqwest::Client::builder()
@@ -142,51 +114,51 @@ async fn fetch_audit_data_inner(opts: AuditOptions<'_>) -> Result<FetchAuditData
         .build()
         .context("Failed to create HTTP client")?;
 
-    let build = get_build(&client, &ctx, &auth, parsed.build_id).await?;
+    let build = get_build(&client, &setup.ctx, &setup.auth, setup.parsed.build_id).await?;
     let mut audit = AuditData {
-        overview: build_overview(&build, &ctx, parsed.build_id, &run_dir),
+        overview: build_overview(&build, &setup.ctx, setup.parsed.build_id, &setup.run_dir),
         ..AuditData::default()
     };
 
-    let filters = artifact_filters.as_deref();
+    let filters = setup.artifact_filters.as_deref();
     let saw_artifact_auth_error = fetch_and_record_artifacts(
         &client,
-        &ctx,
-        &auth,
-        parsed.build_id,
+        &setup.ctx,
+        &setup.auth,
+        setup.parsed.build_id,
         filters,
-        &run_dir,
+        &setup.run_dir,
         &mut audit,
     )
     .await?;
 
-    if saw_artifact_auth_error && !has_any_local_artifacts(&run_dir).await {
+    if saw_artifact_auth_error && !has_any_local_artifacts(&setup.run_dir).await {
         anyhow::bail!(
             "failed to download artifacts and no local cache. Use 'az pipelines runs artifact download --run-id {}' to fetch them manually, then re-run.",
-            parsed.build_id
+            setup.parsed.build_id
         );
     }
 
     run_analyzers(
         &client,
-        &ctx,
-        &auth,
-        parsed.build_id,
+        &setup.ctx,
+        &setup.auth,
+        setup.parsed.build_id,
         filters,
-        &run_dir,
+        &setup.run_dir,
         &mut audit,
     )
     .await;
     populate_performance_metrics(&mut audit);
 
     audit.metrics.error_count = audit.errors.len() as u64;
-    derive_post_processing(&mut audit, &run_dir).await;
+    derive_post_processing(&mut audit, &setup.run_dir).await;
 
     save_run_summary(
-        &run_dir,
+        &setup.run_dir,
         &RunSummary {
             ado_aw_version: env!("CARGO_PKG_VERSION").to_string(),
-            build_id: parsed.build_id,
+            build_id: setup.parsed.build_id,
             processed_at: Utc::now(),
             audit_data: audit.clone(),
         },
@@ -195,10 +167,78 @@ async fn fetch_audit_data_inner(opts: AuditOptions<'_>) -> Result<FetchAuditData
 
     Ok(FetchAuditDataResult {
         audit,
-        run_dir,
+        run_dir: setup.run_dir,
         json: opts.json,
         from_cache: false,
     })
+}
+
+/// Try to serve an audit result from the local on-disk cache.
+///
+/// Returns `Some(result)` when a cache hit is found (version matches, JSON
+/// parses) and the caller should return it directly. Returns `None` when the
+/// cache is disabled (`no_cache`) or misses, signalling that a fresh download
+/// is needed.
+async fn try_serve_from_cache(
+    no_cache: bool,
+    json: bool,
+    run_dir: &Path,
+) -> Result<Option<FetchAuditDataResult>> {
+    if no_cache {
+        return Ok(None);
+    }
+    let Some(summary) = load_run_summary(run_dir).await? else {
+        return Ok(None);
+    };
+    if !json {
+        eprintln!(
+            "Using cached audit from {}",
+            summary.processed_at.to_rfc3339()
+        );
+    }
+    let mut audit = summary.audit_data;
+    let before_postprocess = audit.clone();
+    derive_post_processing(&mut audit, run_dir).await;
+    if audit != before_postprocess {
+        refresh_stale_cached_summary(&mut audit, summary.build_id, run_dir).await;
+    }
+    Ok(Some(FetchAuditDataResult {
+        audit,
+        run_dir: run_dir.to_path_buf(),
+        json,
+        from_cache: true,
+    }))
+}
+
+/// Persist recomputed pipeline_graph + findings back to the cached snapshot
+/// so subsequent runs see the same canonical `AuditData` shape; tooling that
+/// diffs successive outputs would otherwise observe drift between the saved
+/// file and the in-memory result.
+///
+/// NOTE on concurrency: two concurrent `ado-aw audit` runs for the same build
+/// id can race on this write. We do not take a filesystem lock — the failure
+/// path is recorded as a warning rather than aborting the audit, and the worst
+/// case is that one writer's recomputed snapshot overwrites the other's. Both
+/// writers derive from the same on-disk artifacts, so the result is still
+/// internally consistent; only the `processed_at` timestamp may flip.
+async fn refresh_stale_cached_summary(audit: &mut AuditData, build_id: u64, run_dir: &Path) {
+    if let Err(error) = save_run_summary(
+        run_dir,
+        &RunSummary {
+            ado_aw_version: env!("CARGO_PKG_VERSION").to_string(),
+            build_id,
+            processed_at: Utc::now(),
+            audit_data: audit.clone(),
+        },
+    )
+    .await
+    {
+        warn_and_record(
+            audit,
+            "audit::cli",
+            format!("failed to refresh cached run-summary.json: {error:#}"),
+        );
+    }
 }
 
 /// Re-run the audit-time enrichment passes that depend on local state
