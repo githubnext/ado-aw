@@ -14,26 +14,26 @@
  * This bundle runs as a **credentialed Agent-job prepare step on the host**
  * (before the AWF-wrapped Copilot run, using `$(System.AccessToken)`). For each
  * allowed create-pull-request repo dir (`self` + every `checkout:` alias, passed
- * as repeated `--repo-dir` flags in the same form the MCP server resolves them),
- * it fetches the configured target branch into `refs/remotes/origin/<target>` and
- * progressively deepens local history to the merge base — reusing the exact
- * `shared/merge-base.ts::ensureTargetRefFetched` logic that the PR
- * execution-context precompute already uses. It also points each dir's
- * `refs/remotes/origin/HEAD` at the target so `mcp.rs`'s symbolic-ref default
- * branch detection resolves the right base. Because the MCP server operates on
- * those same dirs, the base then resolves with no in-sandbox network.
+ * as repeated `--repo-dir <dir> --target-branch <branch>` pairs in the same form
+ * the MCP server resolves the dirs), it fetches that repo's target branch into
+ * `refs/remotes/origin/<target>` and progressively deepens local history to the
+ * merge base — reusing the exact `shared/merge-base.ts::ensureTargetRefFetched`
+ * logic that the PR execution-context precompute already uses. It also points
+ * each dir's `refs/remotes/origin/HEAD` at its target so `mcp.rs`'s symbolic-ref
+ * default-branch detection resolves the right base. Because the MCP server
+ * operates on those same dirs, the base then resolves with no in-sandbox network.
  *
- * The single `--target-branch` is the create-pull-request **destination/base**
- * branch (default `main`), applied uniformly to every repo dir — NOT the per-repo
- * `checkout:` ref (which is the source/HEAD side).
+ * Each `--target-branch` is the create-pull-request **destination/base** branch
+ * for its `--repo-dir` (which in a multi-checkout "meta repo" setup may differ
+ * per repo) — NOT the per-repo `checkout:` ref (the source/HEAD side).
  *
  * ## Trust boundary
  *
  * Mirrors the exec-context bundles: the bearer (`SYSTEM_ACCESSTOKEN`) is passed
  * to the spawned `git` child via `GIT_CONFIG_*` env vars (see
  * `shared/git.ts::bearerEnv`) — never in argv, never written to `.git/config`.
- * The compiler-owned, non-secret `--target-branch` is an argv flag (immune to
- * ADO pipeline-variable shadowing).
+ * The compiler-owned, non-secret `--repo-dir` / `--target-branch` are argv flags
+ * (immune to ADO pipeline-variable shadowing).
  *
  * ## Posture
  *
@@ -42,8 +42,9 @@
  * existing `mcp.rs` diff-base error if truly unrecoverable. Only genuine infra
  * errors (an unusable `BUILD_SOURCESDIRECTORY`) hard-fail.
  *
- *   Invocation: node prepare-pr-base.js --target-branch <name> \
- *                 --repo-dir <dir> [--repo-dir <dir> ...]
+ *   Invocation: node prepare-pr-base.js \
+ *                 --repo-dir <dir> --target-branch <branch> \
+ *                 [--repo-dir <dir> --target-branch <branch> ...]
  *               env: SYSTEM_ACCESSTOKEN (bearer for the git fetch)
  */
 import { bearerEnv, gitOk as defaultGitOk, runGit as defaultRunGit } from "../shared/git.js";
@@ -54,45 +55,69 @@ const defaultRunners: GitRunners = {
   gitOk: defaultGitOk,
 };
 
+/** A single checkout dir to deepen, with the target branch to deepen there. */
+export interface RepoTarget {
+  /** Checkout dir (as `mcp.rs::resolve_git_dir_for_patch` resolves it). */
+  dir: string;
+  /** Short target branch to fetch/deepen in that dir (no `refs/heads/`). */
+  target: string;
+}
+
 export interface PrepareArgs {
-  /** Short target branch name (no `refs/heads/` prefix). */
-  targetBranch: string;
   /**
-   * The checkout dirs to deepen — one per allowed create-pull-request repo, in
-   * the SAME form the host-side SafeOutputs MCP server resolves them
-   * (`resolve_git_dir_for_patch`): `working_directory` for `self`, and
-   * `working_directory/<alias>` for each `checkout:` alias. Empty when none were
-   * passed (falls back to `[BUILD_SOURCESDIRECTORY]`, then the process cwd).
+   * The checkout dirs to deepen with their per-repo target branch — one per
+   * allowed create-pull-request repo, in the SAME form the host-side SafeOutputs
+   * MCP server resolves them (`resolve_git_dir_for_patch`): `working_directory`
+   * for `self`, and `working_directory/<alias>` for each `checkout:` alias. In a
+   * multi-checkout ("meta repo") setup each dir may carry a different target.
+   * Empty when none were passed (falls back to `[{ BUILD_SOURCESDIRECTORY,
+   * fallbackTarget }]`, then the process cwd).
    */
-  repoDirs: string[];
+  repos: RepoTarget[];
+  /** Target for the fallback dir when no `--repo-dir` was passed. */
+  fallbackTarget: string;
+}
+
+function shortBranch(name: string): string {
+  const s = name.replace(/^refs\/heads\//, "");
+  return s.length > 0 ? s : "main";
 }
 
 /**
- * Parse `--target-branch <name>` and repeated `--repo-dir <path>`.
- * `--target-branch` defaults to `main` (matching the compiler's `CreatePrConfig`
- * default) and strips a leading `refs/heads/` so callers may pass either the
- * short name or a full ref. Every `--repo-dir` is collected in order.
+ * Parse repeated `--repo-dir <path>` / `--target-branch <name>` flags into
+ * ordered `{ dir, target }` pairs. Each `--repo-dir` takes the target from the
+ * `--target-branch` that immediately follows it (compiler emits them adjacent);
+ * a `--target-branch` with no preceding un-paired `--repo-dir` sets the fallback
+ * target. Branch names are normalized to short form (`refs/heads/x` → `x`).
  */
 export function parseArgs(argv: string[]): PrepareArgs {
-  let targetBranch = "main";
-  const repoDirs: string[] = [];
+  const repos: RepoTarget[] = [];
+  let fallbackTarget = "main";
+  let pendingDir: string | null = null;
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === "--target-branch") {
-      targetBranch = argv[i + 1] ?? "main";
+    if (argv[i] === "--repo-dir") {
+      // A previous dir without its own target inherits the fallback.
+      if (pendingDir !== null && pendingDir.length > 0) {
+        repos.push({ dir: pendingDir, target: fallbackTarget });
+      }
+      pendingDir = argv[i + 1] ?? "";
       i++;
-    } else if (argv[i] === "--repo-dir") {
-      const dir = argv[i + 1] ?? "";
-      if (dir.length > 0) {
-        repoDirs.push(dir);
+    } else if (argv[i] === "--target-branch") {
+      const target = shortBranch(argv[i + 1] ?? "main");
+      if (pendingDir !== null && pendingDir.length > 0) {
+        repos.push({ dir: pendingDir, target });
+        pendingDir = null;
+      } else {
+        fallbackTarget = target;
       }
       i++;
     }
   }
-  targetBranch = targetBranch.replace(/^refs\/heads\//, "");
-  if (targetBranch.length === 0) {
-    targetBranch = "main";
+  // A trailing dir with no following --target-branch inherits the fallback.
+  if (pendingDir !== null && pendingDir.length > 0) {
+    repos.push({ dir: pendingDir, target: fallbackTarget });
   }
-  return { targetBranch, repoDirs };
+  return { repos, fallbackTarget };
 }
 
 /**
@@ -153,23 +178,24 @@ export function main(
   runners: GitRunners = defaultRunners,
   chdir: (dir: string) => void = process.chdir.bind(process),
 ): number {
-  const targetShort = args.targetBranch;
-
   // Deepen every checkout dir the MCP server might generate a patch from — one
-  // per allowed create-pull-request repo (`self` + each `checkout:` alias). When
-  // the compiler passed none, fall back to BUILD_SOURCESDIRECTORY then cwd.
-  let repoDirs = args.repoDirs;
-  if (repoDirs.length === 0) {
-    const fallback = env.BUILD_SOURCESDIRECTORY;
-    repoDirs = fallback && fallback.length > 0 ? [fallback] : ["."];
+  // per allowed create-pull-request repo (`self` + each `checkout:` alias), each
+  // with its own target branch. When the compiler passed none, fall back to
+  // BUILD_SOURCESDIRECTORY then cwd (with the fallback target).
+  let repos = args.repos;
+  if (repos.length === 0) {
+    const fallbackDir = env.BUILD_SOURCESDIRECTORY;
+    repos = [
+      { dir: fallbackDir && fallbackDir.length > 0 ? fallbackDir : ".", target: args.fallbackTarget },
+    ];
   }
 
   const fetchEnv = bearerEnv(env.SYSTEM_ACCESSTOKEN);
 
   // Per-dir failures are isolated (logged + skipped) so one unreachable repo
   // never blocks the others or the agent run.
-  for (const repoDir of repoDirs) {
-    prepareOneRepo(repoDir, targetShort, fetchEnv, runners, chdir);
+  for (const { dir, target } of repos) {
+    prepareOneRepo(dir, target, fetchEnv, runners, chdir);
   }
   return 0;
 }

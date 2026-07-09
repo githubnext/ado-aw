@@ -7840,8 +7840,8 @@ fn test_create_pull_request_emits_prepare_pr_base_step_in_agent() {
     );
     let agent = job_block(&compiled, "Agent");
     assert!(
-        agent.contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js' --target-branch 'main'"),
-        "Agent job must invoke prepare-pr-base with the target branch:\n{agent}"
+        agent.contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js' --repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
+        "Agent job must invoke prepare-pr-base with the self dir/target pair:\n{agent}"
     );
     assert!(
         agent.contains("Prepare create-pull-request base ref (fetch/deepen)"),
@@ -7878,7 +7878,7 @@ fn test_create_pull_request_prepare_step_defaults_target_branch() {
     );
     let agent = job_block(&compiled, "Agent");
     assert!(
-        agent.contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js' --target-branch 'main'"),
+        agent.contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js' --repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
         "bare create-pull-request must emit the prepare step targeting 'main':\n{agent}"
     );
     // Single `self` checkout ⇒ exactly one --repo-dir (the working directory).
@@ -7922,6 +7922,33 @@ fn test_create_pull_request_prepare_step_covers_all_checkout_repos() {
     assert!(
         agent.contains("--repo-dir \"$(Build.SourcesDirectory)/lib\""),
         "lib alias dir must be covered:\n{agent}"
+    );
+}
+
+/// Per-repo target branches: with `infer-target-from-checkout-ref`, each checkout
+/// repo's prepare pair targets its OWN `repos: ref`; an explicit `target-branches`
+/// override wins; `self` falls back to the literal `target-branch`.
+#[test]
+fn test_create_pull_request_prepare_step_per_repo_targets() {
+    let compiled = compile_inline_agent(
+        "prepare-pr-base-per-repo",
+        "---\nname: \"Meta PR Agent\"\ndescription: \"per-repo targets\"\nworkspace: root\nrepos:\n  - name: my-org/tools\n    ref: refs/heads/release\n  - name: my-org/docs\n    ref: refs/heads/main\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n    infer-target-from-checkout-ref: true\n    target-branches:\n      docs: gh-pages\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let agent = job_block(&compiled, "Agent");
+    // self ⇒ literal default 'main' (self never infers).
+    assert!(
+        agent.contains("--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
+        "self must target the literal default 'main':\n{agent}"
+    );
+    // tools ⇒ inferred from its checkout ref (refs/heads/release → release).
+    assert!(
+        agent.contains("--repo-dir \"$(Build.SourcesDirectory)/tools\" --target-branch 'release'"),
+        "tools must target its inferred checkout ref 'release':\n{agent}"
+    );
+    // docs ⇒ explicit target-branches override wins over inference.
+    assert!(
+        agent.contains("--repo-dir \"$(Build.SourcesDirectory)/docs\" --target-branch 'gh-pages'"),
+        "docs must target the explicit override 'gh-pages':\n{agent}"
     );
 }
 

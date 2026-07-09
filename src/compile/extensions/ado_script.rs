@@ -592,38 +592,40 @@ fn sh_single_quote(value: &str) -> String {
 /// (`src/mcp.rs`) then resolves a diff base even on shallow-default agent pools —
 /// no forced full-history `checkout: self`, no lock hand-edit.
 ///
-/// `repo_dirs` is the set of checkout dirs the MCP server may generate a patch
-/// from — one per allowed repo, in the SAME form `resolve_git_dir_for_patch`
-/// resolves them: the resolved `working_directory` (for `self`) and
-/// `working_directory/<alias>` for each `checkout:` alias. Passing them as
-/// repeated `--repo-dir` flags lets the bundle deepen each, so a PR to ANY
-/// allowed repo — not just `self` — works on shallow pools.
+/// `repos` is the set of `(dir, target_branch)` pairs the MCP server may
+/// generate a patch from — one per allowed repo, in the SAME dir form
+/// `resolve_git_dir_for_patch` resolves them: the resolved `working_directory`
+/// (for `self`) and `working_directory/<alias>` for each `checkout:` alias, each
+/// paired with THAT repo's resolved create-pull-request target branch (which may
+/// differ per repo in a multi-checkout setup — see
+/// `CreatePrConfig::resolve_target_branch`). Emitting them as repeated
+/// `--repo-dir <dir> --target-branch <branch>` pairs lets the bundle deepen each
+/// dir's own target, so a PR to ANY allowed repo works on shallow pools.
 ///
-/// The non-secret `--target-branch` is a single-quoted argv flag (immune to ADO
-/// pipeline-variable shadowing); each `--repo-dir` is a double-quoted ADO-macro
-/// path (matching the `import.js --base "$(...)"` convention — single quotes
-/// would trip shellcheck SC2016). The ADO bearer is projected via
-/// `apply_bundle_auth` (the bundle uses it for the authenticated git fetch, and
-/// `SYSTEM_ACCESSTOKEN` is the one predefined var ADO does not auto-inject).
-/// The step runs OUTSIDE the AWF sandbox on the build agent's normal network,
-/// so it needs no AWF allowlist entry.
-pub fn prepare_pr_base_step_typed(target_branch: &str, repo_dirs: &[String]) -> Step {
-    // Repo dirs are compiler-generated ADO path macros (`$(Build.SourcesDirectory)`
-    // [+ `/<validated-alias>`]). ADO substitutes the macro before bash runs, and
-    // aliases are validated (no shell metacharacters), so these use DOUBLE quotes
-    // — the established convention for ADO-macro path args (cf. import.js
-    // `--base "$(Build.SourcesDirectory)"`). Single quotes would trip shellcheck
-    // SC2016 ("expressions don't expand in single quotes"). The `target-branch`,
-    // by contrast, is a plain config value with no macro, so it stays
-    // single-quoted (shadow-proof).
-    let repo_dir_flags: String = repo_dirs
+/// Each `--target-branch` is a single-quoted argv flag (a plain literal branch,
+/// shadow-proof); each `--repo-dir` is a double-quoted ADO-macro path (matching
+/// the `import.js --base "$(...)"` convention — single quotes would trip
+/// shellcheck SC2016). The ADO bearer is projected via `apply_bundle_auth` (the
+/// bundle uses it for the authenticated git fetch, and `SYSTEM_ACCESSTOKEN` is
+/// the one predefined var ADO does not auto-inject). The step runs OUTSIDE the
+/// AWF sandbox on the build agent's normal network, so it needs no AWF allowlist
+/// entry.
+pub fn prepare_pr_base_step_typed(repos: &[(String, String)]) -> Step {
+    // Each pair emits `--repo-dir "<dir>" --target-branch '<branch>'`. Repo dirs
+    // are compiler-generated ADO path macros (`$(Build.SourcesDirectory)` [+
+    // `/<validated-alias>`]) — ADO substitutes the macro before bash runs and
+    // aliases are validated, so they use DOUBLE quotes (single quotes would trip
+    // shellcheck SC2016). The target branch is a plain literal, single-quoted
+    // (shadow-proof).
+    let repo_flags: String = repos
         .iter()
-        .map(|d| format!(" --repo-dir \"{}\"", d))
+        .map(|(dir, target)| {
+            format!(" --repo-dir \"{}\" --target-branch {}", dir, sh_single_quote(target))
+        })
         .collect();
     let script = format!(
-        "set -eo pipefail\nnode '{PREPARE_PR_BASE_PATH}' --target-branch {}{}\n",
-        sh_single_quote(target_branch),
-        repo_dir_flags
+        "set -eo pipefail\nnode '{PREPARE_PR_BASE_PATH}'{}\n",
+        repo_flags
     );
     let step = crate::compile::ado_bundle::apply_bundle_auth(
         BashStep::new(
@@ -1481,8 +1483,11 @@ mod tests {
 
     #[test]
     fn prepare_pr_base_step_emits_bundle_invocation_with_target_and_bearer() {
-        let dirs = vec!["$(Build.SourcesDirectory)".to_string()];
-        let Step::Bash(step) = prepare_pr_base_step_typed("main", &dirs) else {
+        let repos = vec![(
+            "$(Build.SourcesDirectory)".to_string(),
+            "main".to_string(),
+        )];
+        let Step::Bash(step) = prepare_pr_base_step_typed(&repos) else {
             panic!("expected a bash step");
         };
         assert_eq!(
@@ -1495,18 +1500,12 @@ mod tests {
             "script must invoke the bundle:\n{}",
             step.script
         );
-        // The non-secret target branch is a single-quoted argv flag (shadow-proof).
-        assert!(
-            step.script.contains("--target-branch 'main'"),
-            "target-branch must be a single-quoted argv flag:\n{}",
-            step.script
-        );
         // The repo dir (== MCP server bounding_directory) is a double-quoted argv
-        // flag (ADO-macro path convention) so the bundle deepens the exact clone
-        // the MCP server reads.
+        // flag (ADO-macro path convention); its target is a single-quoted literal.
         assert!(
-            step.script.contains("--repo-dir \"$(Build.SourcesDirectory)\""),
-            "repo-dir must be a double-quoted ADO-macro argv flag:\n{}",
+            step.script
+                .contains("--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
+            "must emit the dir/target pair (double-quoted dir, single-quoted target):\n{}",
             step.script
         );
         // The ADO bearer is projected as a masked secret (bundle uses it for the
@@ -1519,8 +1518,11 @@ mod tests {
 
     #[test]
     fn prepare_pr_base_step_quotes_a_non_default_target() {
-        let dirs = vec!["$(Build.SourcesDirectory)".to_string()];
-        let Step::Bash(step) = prepare_pr_base_step_typed("release/2.x", &dirs) else {
+        let repos = vec![(
+            "$(Build.SourcesDirectory)".to_string(),
+            "release/2.x".to_string(),
+        )];
+        let Step::Bash(step) = prepare_pr_base_step_typed(&repos) else {
             panic!("expected a bash step");
         };
         assert!(
@@ -1531,31 +1533,41 @@ mod tests {
     }
 
     #[test]
-    fn prepare_pr_base_step_emits_one_repo_dir_flag_per_dir() {
-        // Multi-repo: self working_directory + one dir per checkout alias, each a
-        // separate double-quoted `--repo-dir` flag, in order.
-        let dirs = vec![
-            "$(Build.SourcesDirectory)".to_string(),
-            "$(Build.SourcesDirectory)/tools".to_string(),
-            "$(Build.SourcesDirectory)/lib".to_string(),
+    fn prepare_pr_base_step_emits_a_pair_per_repo_with_per_repo_targets() {
+        // Multi-repo meta setup: self + two aliases, each with its OWN target
+        // branch — one `--repo-dir "<dir>" --target-branch '<branch>'` pair each.
+        let repos = vec![
+            ("$(Build.SourcesDirectory)".to_string(), "main".to_string()),
+            (
+                "$(Build.SourcesDirectory)/tools".to_string(),
+                "release".to_string(),
+            ),
+            (
+                "$(Build.SourcesDirectory)/docs".to_string(),
+                "gh-pages".to_string(),
+            ),
         ];
-        let Step::Bash(step) = prepare_pr_base_step_typed("main", &dirs) else {
+        let Step::Bash(step) = prepare_pr_base_step_typed(&repos) else {
             panic!("expected a bash step");
         };
         assert_eq!(
             step.script.matches("--repo-dir ").count(),
             3,
-            "one --repo-dir per dir:\n{}",
+            "one --repo-dir per repo:\n{}",
             step.script
-        );
-        assert!(step.script.contains("--repo-dir \"$(Build.SourcesDirectory)\""));
-        assert!(
-            step.script
-                .contains("--repo-dir \"$(Build.SourcesDirectory)/tools\"")
         );
         assert!(
             step.script
-                .contains("--repo-dir \"$(Build.SourcesDirectory)/lib\"")
+                .contains("--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'")
+        );
+        assert!(
+            step.script
+                .contains("--repo-dir \"$(Build.SourcesDirectory)/tools\" --target-branch 'release'")
+        );
+        assert!(
+            step.script.contains(
+                "--repo-dir \"$(Build.SourcesDirectory)/docs\" --target-branch 'gh-pages'"
+            )
         );
     }
 

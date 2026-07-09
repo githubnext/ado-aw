@@ -42,40 +42,44 @@ function recordingChdir(): { chdir: (dir: string) => void; dirs: string[] } {
 }
 
 describe("parseArgs", () => {
-  it("defaults to main when --target-branch is absent", () => {
-    expect(parseArgs([]).targetBranch).toBe("main");
+  it("pairs each --repo-dir with the following --target-branch", () => {
+    const args = parseArgs([
+      "--repo-dir",
+      "/src",
+      "--target-branch",
+      "main",
+      "--repo-dir",
+      "/src/tools",
+      "--target-branch",
+      "release",
+    ]);
+    expect(args.repos).toEqual([
+      { dir: "/src", target: "main" },
+      { dir: "/src/tools", target: "release" },
+    ]);
   });
 
-  it("reads the --target-branch value", () => {
-    expect(parseArgs(["--target-branch", "develop"]).targetBranch).toBe("develop");
+  it("strips a leading refs/heads/ from targets", () => {
+    const args = parseArgs([
+      "--repo-dir",
+      "/src",
+      "--target-branch",
+      "refs/heads/release/2.x",
+    ]);
+    expect(args.repos).toEqual([{ dir: "/src", target: "release/2.x" }]);
   });
 
-  it("strips a leading refs/heads/ prefix", () => {
-    expect(parseArgs(["--target-branch", "refs/heads/release/2.x"]).targetBranch).toBe(
-      "release/2.x",
-    );
+  it("uses the fallback target for a --repo-dir with no following --target-branch", () => {
+    // A leading global --target-branch sets the fallback; a bare trailing
+    // --repo-dir inherits it.
+    const args = parseArgs(["--target-branch", "develop", "--repo-dir", "/src"]);
+    expect(args.fallbackTarget).toBe("develop");
+    expect(args.repos).toEqual([{ dir: "/src", target: "develop" }]);
   });
 
-  it("falls back to main for an empty value", () => {
-    expect(parseArgs(["--target-branch", ""]).targetBranch).toBe("main");
-  });
-
-  it("collects repeated --repo-dir flags in order, defaulting to empty", () => {
-    expect(parseArgs([]).repoDirs).toEqual([]);
-    expect(
-      parseArgs([
-        "--target-branch",
-        "main",
-        "--repo-dir",
-        "/src",
-        "--repo-dir",
-        "/src/tools",
-      ]).repoDirs,
-    ).toEqual(["/src", "/src/tools"]);
-  });
-
-  it("ignores empty --repo-dir values", () => {
-    expect(parseArgs(["--repo-dir", "", "--repo-dir", "/src"]).repoDirs).toEqual(["/src"]);
+  it("defaults the fallback target to main", () => {
+    expect(parseArgs([]).fallbackTarget).toBe("main");
+    expect(parseArgs([]).repos).toEqual([]);
   });
 });
 
@@ -83,7 +87,12 @@ describe("prepare-pr-base main", () => {
   it("fetches origin/<target> and sets origin/HEAD on success", () => {
     const { runners, calls } = makeRunners({ fetchStatus: 0, mergeBase: SHA_M });
     const { chdir, dirs } = recordingChdir();
-    const rc = main({ targetBranch: "main", repoDirs: ["/src"] }, {}, runners, chdir);
+    const rc = main(
+      { repos: [{ dir: "/src", target: "main" }], fallbackTarget: "main" },
+      {},
+      runners,
+      chdir,
+    );
     expect(rc).toBe(0);
     expect(dirs).toEqual(["/src"]);
 
@@ -99,43 +108,40 @@ describe("prepare-pr-base main", () => {
     ]);
   });
 
-  it("threads a non-default target through the fetch refspec and origin/HEAD", () => {
-    const { runners, calls } = makeRunners({ fetchStatus: 0, mergeBase: SHA_M });
-    const { chdir } = recordingChdir();
-    const rc = main(
-      { targetBranch: "release/2.x", repoDirs: ["/src"] },
-      {},
-      runners,
-      chdir,
-    );
-    expect(rc).toBe(0);
-
-    const fetch = calls.find((c) => c[0] === "fetch");
-    expect(fetch).toContain("+refs/heads/release/2.x:refs/remotes/origin/release/2.x");
-
-    const sym = calls.find((c) => c[0] === "symbolic-ref");
-    expect(sym).toEqual([
-      "symbolic-ref",
-      "refs/remotes/origin/HEAD",
-      "refs/remotes/origin/release/2.x",
-    ]);
-  });
-
-  it("deepens every repo dir (self + aliases) and sets origin/HEAD in each", () => {
+  it("deepens each repo dir with its OWN target branch (meta-repo)", () => {
     const { runners, calls } = makeRunners({ fetchStatus: 0, mergeBase: SHA_M });
     const { chdir, dirs } = recordingChdir();
     const rc = main(
-      { targetBranch: "main", repoDirs: ["/src", "/src/tools", "/src/lib"] },
+      {
+        repos: [
+          { dir: "/src", target: "main" },
+          { dir: "/src/tools", target: "release" },
+          { dir: "/src/docs", target: "gh-pages" },
+        ],
+        fallbackTarget: "main",
+      },
       {},
       runners,
       chdir,
     );
     expect(rc).toBe(0);
-    // Entered each dir, in order.
-    expect(dirs).toEqual(["/src", "/src/tools", "/src/lib"]);
-    // One fetch + one origin/HEAD set per dir.
-    expect(calls.filter((c) => c[0] === "fetch").length).toBe(3);
-    expect(calls.filter((c) => c[0] === "symbolic-ref").length).toBe(3);
+    expect(dirs).toEqual(["/src", "/src/tools", "/src/docs"]);
+
+    // Each dir fetched + set origin/HEAD to ITS target ref.
+    const fetchRefspecs = calls
+      .filter((c) => c[0] === "fetch")
+      .map((c) => c.find((a) => a.startsWith("+refs/heads/")));
+    expect(fetchRefspecs).toEqual([
+      "+refs/heads/main:refs/remotes/origin/main",
+      "+refs/heads/release:refs/remotes/origin/release",
+      "+refs/heads/gh-pages:refs/remotes/origin/gh-pages",
+    ]);
+    const symTargets = calls.filter((c) => c[0] === "symbolic-ref").map((c) => c[2]);
+    expect(symTargets).toEqual([
+      "refs/remotes/origin/main",
+      "refs/remotes/origin/release",
+      "refs/remotes/origin/gh-pages",
+    ]);
   });
 
   it("isolates a per-dir chdir failure — other dirs still processed", () => {
@@ -148,15 +154,21 @@ describe("prepare-pr-base main", () => {
       }
     };
     const rc = main(
-      { targetBranch: "main", repoDirs: ["/src", "/src/broken", "/src/lib"] },
+      {
+        repos: [
+          { dir: "/src", target: "main" },
+          { dir: "/src/broken", target: "release" },
+          { dir: "/src/lib", target: "main" },
+        ],
+        fallbackTarget: "main",
+      },
       {},
       runners,
       chdir,
     );
     expect(rc).toBe(0);
-    // All dirs attempted...
     expect(dirs).toEqual(["/src", "/src/broken", "/src/lib"]);
-    // ...but only the two good dirs fetched + set origin/HEAD (broken skipped).
+    // Only the two good dirs fetched + set origin/HEAD (broken skipped).
     expect(calls.filter((c) => c[0] === "fetch").length).toBe(2);
     expect(calls.filter((c) => c[0] === "symbolic-ref").length).toBe(2);
   });
@@ -164,22 +176,29 @@ describe("prepare-pr-base main", () => {
   it("exits 0 without setting origin/HEAD when every fetch fails (benign)", () => {
     const { runners, calls } = makeRunners({ fetchStatus: 1, mergeBase: null });
     const { chdir } = recordingChdir();
-    const rc = main({ targetBranch: "main", repoDirs: ["/src"] }, {}, runners, chdir);
+    const rc = main(
+      { repos: [{ dir: "/src", target: "main" }], fallbackTarget: "main" },
+      {},
+      runners,
+      chdir,
+    );
     // Non-fatal: the agent still runs; mcp.rs surfaces its own error if needed.
     expect(rc).toBe(0);
     expect(calls.some((c) => c[0] === "symbolic-ref")).toBe(false);
   });
 
-  it("falls back to BUILD_SOURCESDIRECTORY when no --repo-dir is given", () => {
-    const { runners } = makeRunners({ fetchStatus: 0, mergeBase: SHA_M });
+  it("falls back to BUILD_SOURCESDIRECTORY + fallback target when no repos given", () => {
+    const { runners, calls } = makeRunners({ fetchStatus: 0, mergeBase: SHA_M });
     const { chdir, dirs } = recordingChdir();
     main(
-      { targetBranch: "main", repoDirs: [] },
+      { repos: [], fallbackTarget: "develop" },
       { BUILD_SOURCESDIRECTORY: "/agent/src" },
       runners,
       chdir,
     );
     expect(dirs).toEqual(["/agent/src"]);
+    const fetch = calls.find((c) => c[0] === "fetch");
+    expect(fetch).toContain("+refs/heads/develop:refs/remotes/origin/develop");
   });
 
   it("passes the SYSTEM_ACCESSTOKEN bearer into the git fetch env", () => {
@@ -193,7 +212,7 @@ describe("prepare-pr-base main", () => {
     };
     const { chdir } = recordingChdir();
     main(
-      { targetBranch: "main", repoDirs: ["/src"] },
+      { repos: [{ dir: "/src", target: "main" }], fallbackTarget: "main" },
       { SYSTEM_ACCESSTOKEN: "tok" },
       runners,
       chdir,

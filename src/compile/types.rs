@@ -1275,6 +1275,32 @@ impl FrontMatter {
         })
     }
 
+    /// The parsed, sanitized `create-pull-request` config, or `None` when the
+    /// tool is not configured. Mirrors Stage 3's `ExecutionContext::get_tool_config`
+    /// (deserialize + `sanitize_config_fields`) so the compiler resolves per-repo
+    /// target branches (for prepare-pr-base deepening) from the SAME values the
+    /// Stage 3 executor uses to open the PR — the deepened branch and the PR base
+    /// cannot drift.
+    pub fn create_pr_config(&self) -> Option<crate::safe_outputs::CreatePrConfig> {
+        self.safe_outputs.get("create-pull-request").map(|v| {
+            let mut cfg: crate::safe_outputs::CreatePrConfig =
+                serde_json::from_value(v.clone()).unwrap_or_default();
+            cfg.sanitize_config_fields();
+            cfg
+        })
+    }
+
+    /// Map each checked-out repo alias to its `repos: ref`, for resolving a
+    /// per-repo create-pull-request target branch. `self` is intentionally
+    /// absent (its ref is the runtime trigger branch, not a static `repos:` ref).
+    pub fn checkout_repo_refs(&self) -> std::collections::HashMap<String, String> {
+        self.repositories
+            .iter()
+            .filter(|r| self.checkout.iter().any(|a| a == &r.repository))
+            .map(|r| (r.repository.clone(), r.repo_ref.clone()))
+            .collect()
+    }
+
     /// Section-level (global) `require-approval` default, if configured.
     pub fn global_require_approval(&self) -> Option<RequireApproval> {
         self.safe_outputs

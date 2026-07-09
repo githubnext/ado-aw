@@ -82,6 +82,12 @@ pub struct ExecutionContext {
     /// Allowed repositories for PRs: "self" + checkout list aliases
     /// Maps alias to ADO repo name (e.g., "other-repo" -> "org/other-repo")
     pub allowed_repositories: HashMap<String, String>,
+    /// Per-checkout-alias git ref (from `repos: ref`), used to resolve a
+    /// per-repo `create-pull-request` target branch when
+    /// `infer-target-from-checkout-ref` is set. Maps a checkout alias to its
+    /// ref (full `refs/heads/…` or short). `self` is absent (its ref is the
+    /// runtime trigger branch, not a static `repos:` ref).
+    pub repo_refs: HashMap<String, String>,
     /// Agent execution statistics parsed from OTel JSONL
     pub agent_stats: Option<crate::agent_stats::AgentStats>,
     /// When true, executors validate inputs but skip network calls
@@ -248,6 +254,7 @@ impl ExecutionContext {
             repository_id: env("BUILD_REPOSITORY_ID"),
             repository_name: env("BUILD_REPOSITORY_NAME"),
             allowed_repositories: HashMap::new(),
+            repo_refs: HashMap::new(),
             agent_stats: None,
             dry_run: false,
 

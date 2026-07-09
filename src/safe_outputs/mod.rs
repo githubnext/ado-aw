@@ -828,6 +828,7 @@ mod tests {
         ExecutionContext {
             repository_name: repository_name.map(|s| s.to_string()),
             allowed_repositories: allowed,
+            repo_refs: std::collections::HashMap::new(),
             ..Default::default()
         }
     }

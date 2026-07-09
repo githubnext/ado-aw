@@ -71,17 +71,20 @@ pipeline** as runtime helpers. Today it produces thirteen bundles:
 - `prepare-pr-base.js` — create-pull-request base-ref preparer that runs in the
   **Agent job** before the Copilot invocation when `create-pull-request` is
   configured (issue #1413). For each allowed create-PR repo dir (`self` +
-  every `checkout:` alias, passed as repeated `--repo-dir` flags in the same form
-  `mcp.rs::resolve_git_dir_for_patch` resolves them), it fetches and progressively
-  deepens the configured `target-branch` into `refs/remotes/origin/<target>` and
-  points `refs/remotes/origin/HEAD` at it, so the host-side SafeOutputs MCP server
-  can compute a diff base on shallow-default agent pools without a full-history
-  `checkout: self`. Reuses `shared/merge-base.ts::ensureTargetRefFetched`
-  (the same fetch/deepen logic as the PR execution-context precompute). The
-  single `--target-branch` (the PR's destination/base) and each `--repo-dir` are
-  non-secret argv flags; the ADO bearer (`SYSTEM_ACCESSTOKEN`) rides in masked env
-  for the authenticated git fetch. Per-dir failures are isolated (logged +
-  skipped). Runs outside AWF. See
+  every `checkout:` alias, passed as repeated `--repo-dir <dir> --target-branch
+  <branch>` pairs in the same dir form `mcp.rs::resolve_git_dir_for_patch`
+  resolves), it fetches and progressively deepens THAT repo's resolved target
+  branch into `refs/remotes/origin/<target>` and points
+  `refs/remotes/origin/HEAD` at it, so the host-side SafeOutputs MCP server can
+  compute a diff base on shallow-default agent pools without a full-history
+  `checkout: self`. In a multi-checkout ("meta repo") setup each dir may carry a
+  different target (see `create-pull-request`'s `target-branches` /
+  `infer-target-from-checkout-ref`). Reuses
+  `shared/merge-base.ts::ensureTargetRefFetched` (the same fetch/deepen logic as
+  the PR execution-context precompute). Each `--repo-dir` is a double-quoted
+  ADO-macro path; each `--target-branch` is a single-quoted literal; the ADO
+  bearer (`SYSTEM_ACCESSTOKEN`) rides in masked env for the authenticated git
+  fetch. Per-dir failures are isolated (logged + skipped). Runs outside AWF. See
   [`safe-outputs.md`](safe-outputs.md#create-pull-request).
 
 > **Internal-only.** `ado-script` is not a user-facing front-matter

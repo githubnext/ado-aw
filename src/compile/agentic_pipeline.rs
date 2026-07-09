@@ -941,19 +941,28 @@ fn build_agent_job(
     //     `prepare-pr-base.js` bundle is staged by the ado-script extension's
     //     agent-prepare steps (`prepare_pr_base_active` is OR'd into that
     //     extension's Agent-job download predicate), so it is guaranteed present.
-    if let Some(target_branch) = front_matter.create_pr_target_branch() {
+    if let Some(pr_cfg) = front_matter.create_pr_config() {
         // Deepen every checkout dir the SafeOutputs MCP server may generate a
         // patch from — one per allowed create-PR repo, mirroring
         // `mcp.rs::resolve_git_dir_for_patch`: the resolved `working_directory`
         // (for `self`) and `working_directory/<alias>` for each `checkout:`
-        // alias. A single `self` checkout ⇒ one dir (byte-for-byte unchanged).
-        let mut repo_dirs: Vec<String> = vec![cfg.working_directory.clone()];
+        // alias. Each dir is paired with THAT repo's resolved target branch
+        // (`CreatePrConfig::resolve_target_branch` — explicit override, inferred
+        // checkout ref, or the literal default), so a PR to any repo deepens the
+        // branch it actually targets. A single `self` checkout ⇒ one pair.
+        let repo_refs = front_matter.checkout_repo_refs();
+        let mut repos: Vec<(String, String)> = vec![(
+            cfg.working_directory.clone(),
+            pr_cfg.resolve_target_branch("self", &repo_refs),
+        )];
         for alias in &front_matter.checkout {
-            repo_dirs.push(format!("{}/{}", cfg.working_directory, alias));
+            repos.push((
+                format!("{}/{}", cfg.working_directory, alias),
+                pr_cfg.resolve_target_branch(alias, &repo_refs),
+            ));
         }
         steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
-            &target_branch,
-            &repo_dirs,
+            &repos,
         ));
     }
     //     When GitHub App auth is configured, mint the installation token
