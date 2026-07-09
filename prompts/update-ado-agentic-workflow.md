@@ -25,6 +25,7 @@ Read the full agent markdown file. Identify:
 - **Safe outputs** enabled and their configuration
 - **Permissions** (`read` / `write` / both / neither)
 - **Repositories and checkout** configuration
+- **Variable groups** (`variable-groups:`) if present
 - **Steps** (setup, teardown, steps, post-steps)
 - **Network** allow/blocked lists
 - **Agent instructions** (the markdown body after the closing `---`)
@@ -323,6 +324,8 @@ Before finalizing any update, verify:
 9. **Parameter names**: Runtime `parameters:` names must be valid ADO identifiers.
 
 10. **Engine model**: If `engine:` only sets the default `copilot` engine with model `claude-opus-4.7` and no other settings (timeout, `github-app-token`, `provider`, etc.), the `engine:` field can be omitted entirely.
+
+11. **Variable groups**: `variable-groups:` entries are group names only — never secret values. Adding a group requires **both** the YAML import (this field) and manual authorization in the ADO Library UI. Only valid for `standalone` and `1es` targets; a compile-time error on `job`/`stage` templates.
 
 ---
 
