@@ -99,6 +99,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   │   ├── 0002_pool_object_form.rs # Legacy scalar pool → object form codemod
 │   │   │   ├── 0003_flatten_work_item_config.rs # Legacy work-item config flatten codemod
 │   │   │   ├── 0004_legacy_path_markers.rs # Migrate {{ workspace }}/{{ working_directory }}/{{ trigger_repo_directory }} markers → explicit ADO path exprs (resolved from workspace:/repos:)
+│   │   │   ├── 0005_drop_build_attachment_allowed_build_ids.rs # Remove no-op upload-build-attachment.allowed-build-ids (timeline attachments can only target the current run)
 │   │   │   └── helpers.rs # take_key, insert_no_overwrite, rename_key, ConflictPolicy
 │   │   ├── codemod_integration_test.rs # White-box rewrite-path tests (stub registry injection)
 │   │   ├── types.rs      # Front matter grammar and types
