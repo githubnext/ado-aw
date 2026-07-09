@@ -41,7 +41,7 @@ When adding new fields, place them in the conventional front matter order:
 name → description → target → engine → workspace → pool →
 repos → tools → runtimes → mcp-servers → safe-outputs →
 on (schedule + triggers) → execution-context → steps → post-steps → setup → teardown → network →
-permissions → supply-chain → parameters
+permissions → supply-chain → variable-groups → parameters
 ```
 
 > **`on.pr` knob update**: when changing `on.pr.branches` or
@@ -259,6 +259,34 @@ reminding you to mark the private-key variable secret. See
 [`docs/engine.md`](../docs/engine.md#github-app-backed-copilot-engine-auth).
 Requires recompilation.
 
+### Adding Variable Groups
+
+To consume secrets managed once at the project level (e.g. a shared GitHub App
+private key stored in a variable group), add the `variable-groups:` field:
+
+```yaml
+variable-groups:
+  - Agentic Workflows
+  - Shared Secrets
+```
+
+Each entry is a **variable group name** from the ADO Library. The compiler
+emits a `variables: - group: <name>` import per entry. Notes:
+
+- Put **only group names** here — never secret values. Steps still reference
+  secrets by macro (`$(VAR_NAME)`), e.g., `engine.github-app-token.private-key`.
+- In ADO, the group must be **both** authorized on the pipeline definition
+  **and** imported in YAML. This field provides the YAML import; authorization
+  is done in the ADO Library UI.
+- Only valid for `target: standalone` (default) and `target: 1es`. Using it on
+  `target: job` or `target: stage` is a hard compile-time error — import the
+  group in the parent pipeline instead.
+
+Recompile after adding or removing variable groups.
+
+See [`docs/front-matter.md`](../docs/front-matter.md#variable-groups-variable-groups)
+for the full reference.
+
 ### Adding Pre/Post Steps
 
 **Inline steps** run inside the `Agent` job:
@@ -318,11 +346,13 @@ Before finalizing any update, verify:
 
 7. **Target compatibility**: Both `standalone` and `1es` targets support containerized MCPs via MCPG.
 
-8. **Safe output `target` fields**: `comment-on-work-item` requires an explicit `target` field. `update-work-item` fields require explicit opt-in (`status: true`, `title: true`, etc.).
+8. **Variable group target compatibility**: `variable-groups:` is only valid on `target: standalone` (default) and `target: 1es`. It is a compile-time error on `target: job` / `target: stage`.
 
-9. **Parameter names**: Runtime `parameters:` names must be valid ADO identifiers.
+9. **Safe output `target` fields**: `comment-on-work-item` requires an explicit `target` field. `update-work-item` fields require explicit opt-in (`status: true`, `title: true`, etc.).
 
-10. **Engine model**: If `engine:` only sets the default `copilot` engine with model `claude-opus-4.7` and no other settings (timeout, `github-app-token`, `provider`, etc.), the `engine:` field can be omitted entirely.
+10. **Parameter names**: Runtime `parameters:` names must be valid ADO identifiers.
+
+11. **Engine model**: If `engine:` only sets the default `copilot` engine with model `claude-opus-4.7` and no other settings (timeout, `github-app-token`, `provider`, etc.), the `engine:` field can be omitted entirely.
 
 ---
 
