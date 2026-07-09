@@ -57,6 +57,12 @@ pub enum Bundle {
     /// the Copilot invocation in the Agent and Detection jobs. It authenticates
     /// to the **GitHub** API (not ADO REST), so it needs no ADO bearer.
     GithubAppToken,
+    /// create-pull-request base-ref preparer (issue #1413). Runs in the Agent
+    /// job before the Copilot invocation when `create-pull-request` is
+    /// configured. Fetches/deepens the target branch over the ADO bearer so the
+    /// host-side SafeOutputs MCP server can compute a diff base on
+    /// shallow-default pools.
+    PreparePrBase,
 }
 
 /// The auth contract a bundle requires from the step that invokes it.
@@ -135,6 +141,7 @@ impl Bundle {
         Bundle::ApprovalSummary,
         Bundle::Conclusion,
         Bundle::GithubAppToken,
+        Bundle::PreparePrBase,
     ];
 
     /// The bundle's unpacked on-disk path inside the runtime VM. The Conclusion
@@ -160,6 +167,7 @@ impl Bundle {
             Bundle::ApprovalSummary => paths::APPROVAL_SUMMARY_PATH,
             Bundle::Conclusion => paths::CONCLUSION_PATH,
             Bundle::GithubAppToken => paths::GITHUB_APP_TOKEN_PATH,
+            Bundle::PreparePrBase => paths::PREPARE_PR_BASE_PATH,
         }
     }
 
@@ -176,7 +184,9 @@ impl Bundle {
             | Bundle::ExecContextCiPush
             | Bundle::ExecContextWorkitem
             | Bundle::ExecContextSchedule
-            | Bundle::Conclusion => BundleAuth::Bearer,
+            | Bundle::Conclusion
+            // Fetches/deepens the target branch over the ADO bearer (bearerEnv).
+            | Bundle::PreparePrBase => BundleAuth::Bearer,
             // Pure filesystem / git-without-auth / argv — no bearer.
             Bundle::Import
             | Bundle::ExecContextManual

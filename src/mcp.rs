@@ -1712,6 +1712,59 @@ mod tests {
         assert!(contents.is_empty());
     }
 
+    /// Regression for #1413: after the `prepare-pr-base` bundle sets
+    /// `refs/remotes/origin/HEAD -> refs/remotes/origin/<target>`,
+    /// `find_merge_base` resolves the base via the symbolic-ref probe with NO
+    /// network fetch — exactly the shallow-default-pool path the bundle enables.
+    #[tokio::test]
+    async fn test_find_merge_base_resolves_via_origin_head_symbolic_ref() {
+        use std::process::Command;
+        let dir = tempdir().unwrap();
+        let p = dir.path();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(p)
+                .output()
+                .expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(p.join("a.txt"), "base").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "base"]);
+        let base_sha = git(&["rev-parse", "HEAD"]);
+
+        // Simulate the prepare-pr-base bundle: an origin/main remote-tracking
+        // ref plus the origin/HEAD symbolic ref pointing at it.
+        git(&["update-ref", "refs/remotes/origin/main", &base_sha]);
+        git(&[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ]);
+
+        // Agent adds a commit on top of the base.
+        std::fs::write(p.join("b.txt"), "change").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "agent change"]);
+
+        let base = SafeOutputs::find_merge_base(p).await.expect("resolves base");
+        assert_eq!(
+            base, base_sha,
+            "merge-base must be the origin/main tip resolved via origin/HEAD"
+        );
+    }
+
     #[tokio::test]
     async fn test_new_fails_with_invalid_bounding_directory() {
         let temp_dir = tempdir().unwrap();

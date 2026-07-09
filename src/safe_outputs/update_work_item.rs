@@ -820,6 +820,7 @@ target: 42
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            repo_refs: HashMap::new(),
             agent_stats: None,
             dry_run: false,
             ..Default::default()
@@ -872,6 +873,7 @@ target: 42
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            repo_refs: HashMap::new(),
             agent_stats: None,
             dry_run: false,
             ..Default::default()
@@ -924,6 +926,7 @@ target: 42
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            repo_refs: HashMap::new(),
             agent_stats: None,
             dry_run: false,
             ..Default::default()
@@ -974,6 +977,7 @@ target: 42
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            repo_refs: HashMap::new(),
             agent_stats: None,
             dry_run: false,
             ..Default::default()
@@ -1126,6 +1130,7 @@ allowed-tags:
             source_directory: PathBuf::from("."),
             tool_configs,
             allowed_repositories: HashMap::new(),
+            repo_refs: HashMap::new(),
             agent_stats: None,
             dry_run: false,
             ..Default::default()

@@ -8,7 +8,7 @@ import { Aside } from '@astrojs/starlight/components';
 `ado-script` is the umbrella name for the TypeScript workspace at
 [`scripts/ado-script/`](https://github.com/githubnext/ado-aw/tree/main/scripts/ado-script).
 It produces small, ncc-bundled Node programs that the **compiler injects into emitted
-pipelines** as runtime helpers. Today it produces thirteen bundles:
+pipelines** as runtime helpers. Today it produces fifteen bundles:
 
 - **`gate.js`** — trigger-filter gate evaluator (Setup job)
 - **`import.js`** — runtime prompt resolver described in [Runtime Imports](/ado-aw/reference/runtime-imports/) (Agent job)
@@ -23,6 +23,8 @@ pipelines** as runtime helpers. Today it produces thirteen bundles:
 - **`exec-context-repo.js`** — repository identity precompute that stages branch, SHA, last release tag, and commits-since-tag facts (Agent job)
 - **`conclusion.js`** — Conclusion job reporter that files/comments ADO work items for pipeline failures and diagnostic signals (Conclusion job)
 - **`approval-summary.js`** — renders a sanitized per-tool summary of proposed safe outputs into the build's `ado-aw-safe-outputs` summary tab (end of Agent job)
+- **`github-app-token.js`** — mints (and revokes) a GitHub App installation token for the Copilot engine when `engine.github-app-token` is configured (Agent + Detection jobs)
+- **`prepare-pr-base.js`** — fetches/deepens each allowed create-pull-request repo's target branch (self + every `checkout:` alias, each with its own resolved target) so the SafeOutputs MCP server can compute a diff base for a PR to any allowed repo on shallow-default agent pools (Agent job)
 
 <Aside type="caution" title="Internal-only">
   `ado-script` is not a user-facing front-matter feature. Authors never write an `ado-script:` block in their agent

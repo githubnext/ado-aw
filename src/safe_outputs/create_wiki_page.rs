@@ -714,6 +714,7 @@ wiki-name: "MyProject.wiki"
             repository_id: None,
             repository_name: None,
             allowed_repositories: std::collections::HashMap::new(),
+            repo_refs: std::collections::HashMap::new(),
             agent_stats: None,
             dry_run: false,
             ..Default::default()
@@ -780,6 +781,7 @@ wiki-name: "MyProject.wiki"
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            repo_refs: HashMap::new(),
             agent_stats: None,
             dry_run: false,
             ..Default::default()
@@ -821,6 +823,7 @@ wiki-name: "MyProject.wiki"
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            repo_refs: HashMap::new(),
             agent_stats: None,
             dry_run: false,
             ..Default::default()

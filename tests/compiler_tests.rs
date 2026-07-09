@@ -7823,3 +7823,149 @@ fn variable_groups_with_github_app_token_compiles_without_patch() {
     assert!(compiled.contains("$(AGENTIC_WORKFLOWS_GITHUB_APP_PRIVATE_KEY)"),
         "private-key macro reference missing:\n{compiled}");
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// create-pull-request base-ref prepare step (issue #1413)
+// ─────────────────────────────────────────────────────────────────────
+
+/// When `create-pull-request` is configured, the Agent job runs the
+/// `prepare-pr-base` bundle before the Copilot step, passing the default
+/// target branch and projecting the ADO bearer, so the host-side SafeOutputs
+/// MCP server can compute a diff base on shallow-default pools.
+#[test]
+fn test_create_pull_request_emits_prepare_pr_base_step_in_agent() {
+    let compiled = compile_inline_agent(
+        "prepare-pr-base-default",
+        "---\nname: \"PR Agent\"\ndescription: \"opens a PR\"\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let agent = job_block(&compiled, "Agent");
+    assert!(
+        agent.contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js' --repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
+        "Agent job must invoke prepare-pr-base with the self dir/target pair:\n{agent}"
+    );
+    assert!(
+        agent.contains("Prepare create-pull-request base ref (fetch/deepen)"),
+        "Agent job must contain the prepare step display name:\n{agent}"
+    );
+    assert!(
+        agent.contains("SYSTEM_ACCESSTOKEN: $(System.AccessToken)"),
+        "prepare-pr-base step must project the ADO bearer:\n{agent}"
+    );
+}
+
+/// The configured `target-branch` is threaded verbatim into the prepare step.
+#[test]
+fn test_create_pull_request_prepare_step_uses_configured_target_branch() {
+    let compiled = compile_inline_agent(
+        "prepare-pr-base-custom",
+        "---\nname: \"PR Agent\"\ndescription: \"opens a PR\"\nsafe-outputs:\n  create-pull-request:\n    target-branch: release/2.x\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let agent = job_block(&compiled, "Agent");
+    assert!(
+        agent.contains("--target-branch 'release/2.x'"),
+        "Agent job must pass the configured target branch:\n{agent}"
+    );
+}
+
+/// A bare `create-pull-request: {}` (no `target-branch`) still emits the prepare
+/// step, targeting the default branch (`main`) — exercises the implicit-default
+/// fallback end-to-end.
+#[test]
+fn test_create_pull_request_prepare_step_defaults_target_branch() {
+    let compiled = compile_inline_agent(
+        "prepare-pr-base-implicit",
+        "---\nname: \"PR Agent\"\ndescription: \"opens a PR\"\nsafe-outputs:\n  create-pull-request: {}\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let agent = job_block(&compiled, "Agent");
+    assert!(
+        agent.contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js' --repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
+        "bare create-pull-request must emit the prepare step targeting 'main':\n{agent}"
+    );
+    // Single `self` checkout ⇒ exactly one --repo-dir (the working directory).
+    assert_eq!(
+        agent.matches("--repo-dir ").count(),
+        1,
+        "self-only agent must emit exactly one --repo-dir:\n{agent}"
+    );
+    assert!(
+        agent.contains("--repo-dir \"$(Build.SourcesDirectory)\""),
+        "self-only --repo-dir must be the working directory:\n{agent}"
+    );
+}
+
+/// Multi-repo: with additional `checkout:` repos, the prepare step deepens the
+/// target branch in the self working dir AND each alias dir — mirroring
+/// `mcp.rs::resolve_git_dir_for_patch` so a PR to any allowed repo works on a
+/// shallow pool.
+#[test]
+fn test_create_pull_request_prepare_step_covers_all_checkout_repos() {
+    let compiled = compile_inline_agent(
+        "prepare-pr-base-multi",
+        "---\nname: \"Multi PR Agent\"\ndescription: \"opens PRs across repos\"\nworkspace: root\nrepos:\n  - my-org/tools\n  - my-org/lib\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let agent = job_block(&compiled, "Agent");
+    // self (working_directory == $(Build.SourcesDirectory) under workspace: root)
+    // + one dir per derived alias (my-org/tools -> tools, my-org/lib -> lib).
+    assert_eq!(
+        agent.matches("--repo-dir ").count(),
+        3,
+        "multi-repo agent must emit one --repo-dir per allowed repo (self + 2 aliases):\n{agent}"
+    );
+    assert!(
+        agent.contains("--repo-dir \"$(Build.SourcesDirectory)\""),
+        "self dir must be covered:\n{agent}"
+    );
+    assert!(
+        agent.contains("--repo-dir \"$(Build.SourcesDirectory)/tools\""),
+        "tools alias dir must be covered:\n{agent}"
+    );
+    assert!(
+        agent.contains("--repo-dir \"$(Build.SourcesDirectory)/lib\""),
+        "lib alias dir must be covered:\n{agent}"
+    );
+}
+
+/// Per-repo target branches: with `infer-target-from-checkout-ref`, each checkout
+/// repo's prepare pair targets its OWN `repos: ref`; an explicit `target-branches`
+/// override wins; `self` falls back to the literal `target-branch`.
+#[test]
+fn test_create_pull_request_prepare_step_per_repo_targets() {
+    let compiled = compile_inline_agent(
+        "prepare-pr-base-per-repo",
+        "---\nname: \"Meta PR Agent\"\ndescription: \"per-repo targets\"\nworkspace: root\nrepos:\n  - name: my-org/tools\n    ref: refs/heads/release\n  - name: my-org/docs\n    ref: refs/heads/main\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n    infer-target-from-checkout-ref: true\n    target-branches:\n      docs: gh-pages\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let agent = job_block(&compiled, "Agent");
+    // self ⇒ literal default 'main' (self never infers).
+    assert!(
+        agent.contains("--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
+        "self must target the literal default 'main':\n{agent}"
+    );
+    // tools ⇒ inferred from its checkout ref (refs/heads/release → release).
+    assert!(
+        agent.contains("--repo-dir \"$(Build.SourcesDirectory)/tools\" --target-branch 'release'"),
+        "tools must target its inferred checkout ref 'release':\n{agent}"
+    );
+    // docs ⇒ explicit target-branches override wins over inference.
+    assert!(
+        agent.contains("--repo-dir \"$(Build.SourcesDirectory)/docs\" --target-branch 'gh-pages'"),
+        "docs must target the explicit override 'gh-pages':\n{agent}"
+    );
+}
+
+/// An agent WITHOUT `create-pull-request` emits no prepare-pr-base step and
+/// never downloads the bundle.
+#[test]
+fn test_no_create_pull_request_omits_prepare_pr_base_step() {
+    let compiled = compile_inline_agent(
+        "prepare-pr-base-absent",
+        "---\nname: \"WI Agent\"\ndescription: \"files a work item\"\nsafe-outputs:\n  create-work-item:\n    work-item-type: Task\n---\n\n## Agent\n\nDo work.\n",
+    );
+    assert!(
+        !compiled.contains("prepare-pr-base.js"),
+        "prepare-pr-base must not appear without create-pull-request:\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("Prepare create-pull-request base ref"),
+        "prepare step display name must be absent:\n{compiled}"
+    );
+}

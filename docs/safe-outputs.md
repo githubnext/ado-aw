@@ -263,6 +263,27 @@ Creates a pull request with code changes made by the agent. When invoked:
 
 During Stage 3 execution, the repository is validated against the allowed list (from `checkout:` + "self"), then the patch is applied and a PR is created in Azure DevOps.
 
+**Shallow-clone agent pools (automatic):** The diff base for the patch is
+computed at agent time from the checked-out repository. On agent pools whose
+default git fetch is shallow (`fetchDepth: 1`), a bare `checkout` leaves no
+`origin/<target-branch>` ref, which would otherwise prevent the diff base from
+being computed. To handle this transparently, whenever `create-pull-request` is
+configured the compiler emits a credentialed **prepare step** in the Agent job
+(before the agent runs) that fetches and progressively deepens the configured
+`target-branch` and points `origin/HEAD` at it — in the `self` checkout **and in
+each additional `checkout:` repo dir**, so a PR to *any* allowed repository works.
+This means create-pull-request works on shallow-default pools **without** forcing
+a full-history checkout and **without** hand-editing the compiled lock (so the
+runtime integrity check keeps passing). No configuration is required. See
+[`docs/ado-script.md`](ado-script.md) (`prepare-pr-base.js`).
+
+> **Branch semantics.** The step deepens each repo's resolved `target-branch`
+> (the PR's **destination/base**) — not the per-repo `repos:` checkout `ref` (the
+> source side). By default every repo targets the single `target-branch`; enable
+> `infer-target-from-checkout-ref` (and/or `target-branches`) to give each repo
+> its own base branch in a multi-checkout setup. The deepened branch always
+> matches the branch the PR targets (shared resolution).
+
 **Stage 3 Execution Architecture (Hybrid Git + ADO API):**
 
 ```
@@ -306,7 +327,39 @@ This hybrid approach combines:
 Note: The source branch name is auto-generated from a sanitized version of the PR title plus a unique suffix (e.g., `agent/fix-bug-in-parser-a1b2c3`). This format is human-readable while preventing injection attacks.
 
 **Configuration options (front matter):**
-- `target-branch` - Target branch to merge into (default: "main")
+- `target-branch` - Target (base) branch the PR merges into (default: "main"). A
+  plain literal branch name, applied to every repo unless overridden below.
+- `target-branches` - Optional map of per-repository target-branch overrides,
+  keyed by the repository alias the agent passes to `create-pull-request` (`self`
+  or a `checkout:` alias). Highest precedence. Lets a multi-checkout ("meta repo")
+  agent open a PR into a different base branch per repo.
+- `infer-target-from-checkout-ref` - Optional bool (default: false). When `true`,
+  a checkout repo with no explicit `target-branches` entry targets its own
+  `repos: ref` (the branch it was checked out at). `self` and repos without a
+  known ref fall back to `target-branch`. It is a separate boolean (not a magic
+  `target-branch` value) so a real branch name can never be mistaken for a
+  directive. Only branch refs (`refs/heads/*`) are valid PR targets — if an
+  inferred repo is checked out at a **tag** (`refs/tags/*`) the compiler warns
+  and you should give it an explicit `target-branches` entry (a PR cannot target
+  a tag).
+
+  **Per-repo target resolution precedence** (for a repo `R`): `target-branches[R]`
+  → (if `infer-target-from-checkout-ref`) `R`'s checkout ref → `target-branch` →
+  `main`. The same resolution drives both the credentialed base-ref deepening (so
+  the branch that is fetched/deepened matches the branch the PR targets) and the
+  Stage 3 PR creation. Example (meta repo):
+  ```yaml
+  repos:
+    - name: my-org/service   # checked out at refs/heads/main
+    - name: my-org/docs
+      ref: refs/heads/gh-pages
+  safe-outputs:
+    create-pull-request:
+      target-branch: main                  # self + fallback
+      infer-target-from-checkout-ref: true # service → main, docs → gh-pages (from their refs)
+      target-branches:
+        docs: gh-pages                      # (redundant here; shown as an explicit override)
+  ```
 - `draft` - Whether to create the PR as a draft (default: **true**). Set to `false` to publish the PR immediately. **Note:** `auto-complete` is silently skipped on draft PRs — set `draft: false` when using `auto-complete: true`.
 - `auto-complete` - Set auto-complete on the PR (default: false). Requires `draft: false` to take effect.
 - `delete-source-branch` - Delete source branch after merge (default: true)

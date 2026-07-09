@@ -41,6 +41,14 @@ The execution-context plugin owns that step centrally — but does
 The agent does its own diff/show/log/stat work — it has the objects
 locally and `git` is added to its bash allow-list automatically.
 
+> **Related:** the `create-pull-request` safe output uses the *same*
+> credentialed fetch/deepen approach — via the `prepare-pr-base.js`
+> bundle (which reuses `shared/merge-base.ts::ensureTargetRefFetched`) —
+> so its diff base resolves on shallow-default pools without forcing a
+> full-history `checkout: self`. See
+> [`safe-outputs.md`](safe-outputs.md#create-pull-request) and
+> [`ado-script.md`](ado-script.md).
+
 ## v1 contributors
 
 | Contributor | Trigger                                                  | Output layout                |

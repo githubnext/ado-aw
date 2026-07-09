@@ -390,9 +390,29 @@ pub enum ProtectedFiles {
 /// ```
 #[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
 pub struct CreatePrConfig {
-    /// Target branch to merge into (default: "main")
+    /// Target branch to merge into (default: "main"). This is the literal
+    /// fallback applied to every repo unless overridden by `target_branches`
+    /// or `infer_target_from_checkout_ref`. It is always a plain branch name —
+    /// never a directive — so no branch name can be mistaken for a mode.
     #[serde(default = "default_target_branch", rename = "target-branch")]
     pub target_branch: String,
+
+    /// Explicit per-repository target-branch overrides, keyed by the repository
+    /// alias the agent passes to `create-pull-request` (`"self"` or a
+    /// `checkout:` alias). Highest precedence. Enables opening a PR into a
+    /// different base branch per repo in a multi-checkout ("meta repo") setup.
+    #[serde(default, rename = "target-branches")]
+    #[sanitize_config(sanitize_keys)]
+    pub target_branches: std::collections::HashMap<String, String>,
+
+    /// When `true`, a checkout repo with no explicit `target_branches` entry
+    /// targets its own `repos: ref` (the branch it was checked out at, short
+    /// form). `self` and repos without a known ref fall back to `target_branch`.
+    /// Default `false` (opt-in) — kept a separate boolean rather than a magic
+    /// `target-branch` value so a real branch name can never be misread as a
+    /// directive.
+    #[serde(default, rename = "infer-target-from-checkout-ref")]
+    pub infer_target_from_checkout_ref: bool,
 
     /// Whether to create the PR as a draft (default: true)
     #[serde(default = "default_draft")]
@@ -463,6 +483,48 @@ fn default_target_branch() -> String {
     "main".to_string()
 }
 
+/// Strip a `refs/heads/` prefix from a git ref, yielding the short branch name.
+/// Other ref forms (already short, or `refs/tags/…`) are returned unchanged.
+/// A degenerate `"refs/heads/"` (empty after stripping) returns the original
+/// string rather than `""`, so a malformed `repos: ref` never yields an empty
+/// target branch (which would produce `target_ref = "refs/heads/"` and a
+/// confusing ADO error). Mirrors the TS guard in `prepare-pr-base/index.ts`.
+pub(crate) fn short_branch(git_ref: &str) -> &str {
+    git_ref
+        .strip_prefix("refs/heads/")
+        .filter(|s| !s.is_empty())
+        .unwrap_or(git_ref)
+}
+
+impl CreatePrConfig {
+    /// Resolve the target (base) branch for a PR against `repo_alias`
+    /// (`"self"` or a `checkout:` alias). Shared by the compiler (to deepen the
+    /// right branch per repo dir) and Stage 3 (to open the PR). Precedence:
+    ///
+    /// 1. Explicit `target_branches[repo_alias]`.
+    /// 2. If `infer_target_from_checkout_ref` and `repo_refs` has a ref for
+    ///    `repo_alias` → that ref's short branch. (`self` has no `repos:` ref,
+    ///    so inference never applies to it.)
+    /// 3. `target_branch` (literal default).
+    ///
+    /// `repo_refs` maps a checkout alias to its `repos: ref` (full or short).
+    pub fn resolve_target_branch(
+        &self,
+        repo_alias: &str,
+        repo_refs: &std::collections::HashMap<String, String>,
+    ) -> String {
+        if let Some(explicit) = self.target_branches.get(repo_alias) {
+            return explicit.clone();
+        }
+        if self.infer_target_from_checkout_ref
+            && let Some(git_ref) = repo_refs.get(repo_alias)
+        {
+            return short_branch(git_ref).to_string();
+        }
+        self.target_branch.clone()
+    }
+}
+
 fn default_draft() -> bool {
     true
 }
@@ -487,6 +549,8 @@ impl Default for CreatePrConfig {
     fn default() -> Self {
         Self {
             target_branch: default_target_branch(),
+            target_branches: std::collections::HashMap::new(),
+            infer_target_from_checkout_ref: false,
             draft: true,
             auto_complete: false,
             delete_source_branch: true,
@@ -759,8 +823,15 @@ impl Executor for CreatePrResult {
             )));
         }
 
-        // Use target branch from config
-        let target_branch = &config.target_branch;
+        // Resolve the target (base) branch for THIS repo. In a multi-checkout
+        // ("meta repo") setup the target can differ per repo (explicit
+        // `target-branches` override, or inferred from the repo's checkout ref
+        // when `infer-target-from-checkout-ref` is set); falls back to the
+        // literal `target-branch`. Resolution is shared with the compiler's
+        // prepare-pr-base deepening, so the branch we PR into is the branch that
+        // was fetched/deepened.
+        let target_branch = config.resolve_target_branch(&self.repository, &ctx.repo_refs);
+        let target_branch = target_branch.as_str();
         let mut source_branch = self.source_branch.clone();
         let mut source_ref = format!("refs/heads/{}", source_branch);
         let target_ref = format!("refs/heads/{}", target_branch);
@@ -2381,6 +2452,89 @@ mod tests {
         assert!(config.excluded_files.is_empty());
         assert!(config.allowed_labels.is_empty());
         assert!(config.fallback_record_branch);
+        assert!(config.target_branches.is_empty());
+        assert!(!config.infer_target_from_checkout_ref);
+    }
+
+    #[test]
+    fn test_resolve_target_branch_precedence() {
+        use std::collections::HashMap;
+        let refs: HashMap<String, String> = HashMap::from([
+            ("tools".to_string(), "refs/heads/release".to_string()),
+            ("docs".to_string(), "gh-pages".to_string()),
+        ]);
+
+        // Default: everything falls back to target_branch.
+        let cfg = CreatePrConfig::default();
+        assert_eq!(cfg.resolve_target_branch("self", &refs), "main");
+        assert_eq!(cfg.resolve_target_branch("tools", &refs), "main");
+
+        // Inference on: checkout repos target their own ref (short); self falls
+        // back to target_branch (no repos: ref).
+        let cfg = CreatePrConfig {
+            infer_target_from_checkout_ref: true,
+            ..Default::default()
+        };
+        assert_eq!(cfg.resolve_target_branch("tools", &refs), "release");
+        assert_eq!(cfg.resolve_target_branch("docs", &refs), "gh-pages");
+        assert_eq!(cfg.resolve_target_branch("self", &refs), "main");
+        // A checkout repo with no known ref falls back to target_branch.
+        assert_eq!(cfg.resolve_target_branch("unknown", &refs), "main");
+
+        // Explicit override wins over inference and default.
+        let cfg = CreatePrConfig {
+            target_branch: "develop".to_string(),
+            infer_target_from_checkout_ref: true,
+            target_branches: HashMap::from([
+                ("tools".to_string(), "stable".to_string()),
+                ("self".to_string(), "trunk".to_string()),
+            ]),
+            ..Default::default()
+        };
+        assert_eq!(cfg.resolve_target_branch("tools", &refs), "stable"); // override > infer
+        assert_eq!(cfg.resolve_target_branch("self", &refs), "trunk"); // override for self
+        assert_eq!(cfg.resolve_target_branch("docs", &refs), "gh-pages"); // infer (no override)
+        assert_eq!(cfg.resolve_target_branch("other", &refs), "develop"); // scalar default
+    }
+
+    #[test]
+    fn test_short_branch_strips_heads_prefix() {
+        assert_eq!(short_branch("refs/heads/main"), "main");
+        assert_eq!(short_branch("refs/heads/release/2.x"), "release/2.x");
+        assert_eq!(short_branch("main"), "main");
+        assert_eq!(short_branch("refs/tags/v1"), "refs/tags/v1");
+        // Degenerate `refs/heads/` (empty after strip) returns the original,
+        // never "" — guards against a malformed `repos: ref`.
+        assert_eq!(short_branch("refs/heads/"), "refs/heads/");
+    }
+
+    #[test]
+    fn test_target_branches_sanitizes_both_keys_and_values() {
+        use crate::sanitize::SanitizeConfig;
+        // `#[sanitize_config(sanitize_keys)]` sanitizes BOTH keys and values of
+        // the HashMap (the derive's sanitize_keys branch maps
+        // `(sanitize_config(k), sanitize_config(v))`), so per-repo overrides get
+        // the same normalization pass as the scalar `target_branch`.
+        let mut cfg = CreatePrConfig {
+            target_branches: std::collections::HashMap::from([(
+                "##vso[task.debug]alias".to_string(),
+                "##vso[task.setvariable]branch".to_string(),
+            )]),
+            ..Default::default()
+        };
+        cfg.sanitize_config_fields();
+        let (k, v) = cfg.target_branches.iter().next().unwrap();
+        // sanitize_config neutralizes the VSO command by backtick-wrapping the
+        // `##vso[` marker (same behavior asserted elsewhere), so both key and
+        // value carry the escaped form.
+        assert!(
+            k.contains("`##vso[`"),
+            "target_branches key must be sanitized: {k}"
+        );
+        assert!(
+            v.contains("`##vso[`"),
+            "target_branches value must be sanitized: {v}"
+        );
     }
 
     #[test]
@@ -2944,6 +3098,7 @@ index 0000000..abcdefg
             repository_id: Some("repo-id".to_string()),
             repository_name: Some("test-repo".to_string()),
             allowed_repositories: std::collections::HashMap::new(),
+            repo_refs: std::collections::HashMap::new(),
             agent_stats: None,
             dry_run: false,
             build_id: None,

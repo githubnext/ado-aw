@@ -100,6 +100,13 @@ pub(crate) const CONCLUSION_PATH: &str = "/tmp/ado-aw-scripts/ado-script/conclus
 /// a masked same-job `GITHUB_APP_TOKEN` variable.
 pub(crate) const GITHUB_APP_TOKEN_PATH: &str =
     "/tmp/ado-aw-scripts/ado-script/github-app-token.js";
+/// Path to the prepare-pr-base bundle inside the unpacked `ado-script.zip`.
+/// Runs in the Agent job before the Copilot invocation (issue #1413) when
+/// `create-pull-request` is configured, to fetch/deepen the target branch so
+/// the host-side SafeOutputs MCP server can compute a diff base on
+/// shallow-default agent pools.
+pub(crate) const PREPARE_PR_BASE_PATH: &str =
+    "/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js";
 const RELEASE_BASE_URL: &str = "https://github.com/githubnext/ado-aw/releases/download";
 
 /// Single always-on extension that owns all `ado-script` bundle wiring.
@@ -174,6 +181,13 @@ pub struct AdoScriptExtension {
     /// the flag drives the shared bundle download — the builder never has to
     /// inspect emitted steps to decide whether to download.
     pub github_app_token_active: bool,
+    /// Whether `create-pull-request` is configured (issue #1413). When true the
+    /// Agent-job install/download must fire so that `prepare-pr-base.js` is
+    /// present for the base-ref prepare step that `build_agent_job` emits before
+    /// the Copilot run. Mirrors `github_app_token_active`: the consuming step is
+    /// emitted by `build_agent_job`, not this extension, so the flag drives the
+    /// shared bundle download.
+    pub prepare_pr_base_active: bool,
     /// PR trigger config required to build `PR_SYNTH_SPEC`. `Some(_)`
     /// is the single source of truth for "synthetic-from-ci path is
     /// active for this agent" — `is_some()` replaces what used to be a
@@ -570,6 +584,61 @@ fn sh_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+/// The create-pull-request base-ref prepare step (issue #1413). Runs in the
+/// Agent job before the Copilot invocation when `create-pull-request` is
+/// configured, invoking the `prepare-pr-base` ado-script bundle to fetch and
+/// progressively deepen the target branch (`refs/remotes/origin/<target>`) in
+/// every allowed create-PR repo dir. The host-side SafeOutputs MCP server
+/// (`src/mcp.rs`) then resolves a diff base even on shallow-default agent pools —
+/// no forced full-history `checkout: self`, no lock hand-edit.
+///
+/// `repos` is the set of `(dir, target_branch)` pairs the MCP server may
+/// generate a patch from — one per allowed repo, in the SAME dir form
+/// `resolve_git_dir_for_patch` resolves them: the resolved `working_directory`
+/// (for `self`) and `working_directory/<alias>` for each `checkout:` alias, each
+/// paired with THAT repo's resolved create-pull-request target branch (which may
+/// differ per repo in a multi-checkout setup — see
+/// `CreatePrConfig::resolve_target_branch`). Emitting them as repeated
+/// `--repo-dir <dir> --target-branch <branch>` pairs lets the bundle deepen each
+/// dir's own target, so a PR to ANY allowed repo works on shallow pools.
+///
+/// Each `--target-branch` is a single-quoted argv flag (a plain literal branch,
+/// shadow-proof); each `--repo-dir` is a double-quoted ADO-macro path (matching
+/// the `import.js --base "$(...)"` convention — single quotes would trip
+/// shellcheck SC2016). The ADO bearer is projected via `apply_bundle_auth` (the
+/// bundle uses it for the authenticated git fetch, and `SYSTEM_ACCESSTOKEN` is
+/// the one predefined var ADO does not auto-inject). The step runs OUTSIDE the
+/// AWF sandbox on the build agent's normal network, so it needs no AWF allowlist
+/// entry.
+pub fn prepare_pr_base_step_typed(repos: &[(String, String)]) -> Step {
+    // Each pair emits `--repo-dir "<dir>" --target-branch '<branch>'`. Repo dirs
+    // are compiler-generated ADO path macros (`$(Build.SourcesDirectory)` [+
+    // `/<validated-alias>`]) — ADO substitutes the macro before bash runs and
+    // aliases are validated, so they use DOUBLE quotes (single quotes would trip
+    // shellcheck SC2016). The target branch is a plain literal, single-quoted
+    // (shadow-proof).
+    let repo_flags: String = repos
+        .iter()
+        .map(|(dir, target)| {
+            format!(" --repo-dir \"{}\" --target-branch {}", dir, sh_single_quote(target))
+        })
+        .collect();
+    let script = format!(
+        "set -eo pipefail\nnode '{PREPARE_PR_BASE_PATH}'{}\n",
+        repo_flags
+    );
+    let step = crate::compile::ado_bundle::apply_bundle_auth(
+        BashStep::new(
+            "Prepare create-pull-request base ref (fetch/deepen)",
+            script,
+        )
+        .with_condition(Condition::Succeeded),
+        crate::compile::ado_bundle::Bundle::PreparePrBase,
+        crate::compile::ado_bundle::TokenSource::SystemAccessToken,
+    );
+    Step::Bash(step)
+}
+
 /// The GitHub App token **revocation** step (issue #1316). Runs after the
 /// Copilot invocation in the Agent and Detection jobs (unless
 /// `skip-token-revocation` is set) to delete the minted installation token
@@ -792,6 +861,7 @@ impl CompilerExtension for AdoScriptExtension {
             || self.exec_context_repo_active
             || self.safe_outputs_summary_active
             || self.github_app_token_active
+            || self.prepare_pr_base_active
         {
             agent_prepare_steps.extend(install_and_download_steps_typed(self.supply_chain.as_ref()));
             if import_active {
@@ -997,6 +1067,7 @@ mod tests {
             exec_context_repo_active: false,
             safe_outputs_summary_active: false,
             github_app_token_active: false,
+            prepare_pr_base_active: false,
             pr_trigger_for_synth: None,
             supply_chain: None,
         }
@@ -1068,6 +1139,7 @@ mod tests {
             exec_context_repo_active: false,
             safe_outputs_summary_active: false,
             github_app_token_active: false,
+            prepare_pr_base_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -1126,6 +1198,7 @@ mod tests {
             exec_context_repo_active: false,
             safe_outputs_summary_active: false,
             github_app_token_active: false,
+            prepare_pr_base_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -1409,6 +1482,118 @@ mod tests {
     }
 
     #[test]
+    fn prepare_pr_base_step_emits_bundle_invocation_with_target_and_bearer() {
+        let repos = vec![(
+            "$(Build.SourcesDirectory)".to_string(),
+            "main".to_string(),
+        )];
+        let Step::Bash(step) = prepare_pr_base_step_typed(&repos) else {
+            panic!("expected a bash step");
+        };
+        assert_eq!(
+            step.display_name,
+            "Prepare create-pull-request base ref (fetch/deepen)"
+        );
+        assert!(
+            step.script
+                .contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js'"),
+            "script must invoke the bundle:\n{}",
+            step.script
+        );
+        // The repo dir (== MCP server bounding_directory) is a double-quoted argv
+        // flag (ADO-macro path convention); its target is a single-quoted literal.
+        assert!(
+            step.script
+                .contains("--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
+            "must emit the dir/target pair (double-quoted dir, single-quoted target):\n{}",
+            step.script
+        );
+        // The ADO bearer is projected as a masked secret (bundle uses it for the
+        // authenticated git fetch); SYSTEM_ACCESSTOKEN is not auto-injected.
+        assert!(matches!(
+            step.env.get("SYSTEM_ACCESSTOKEN"),
+            Some(EnvValue::Secret(v)) if v == "System.AccessToken"
+        ));
+    }
+
+    #[test]
+    fn prepare_pr_base_step_quotes_a_non_default_target() {
+        let repos = vec![(
+            "$(Build.SourcesDirectory)".to_string(),
+            "release/2.x".to_string(),
+        )];
+        let Step::Bash(step) = prepare_pr_base_step_typed(&repos) else {
+            panic!("expected a bash step");
+        };
+        assert!(
+            step.script.contains("--target-branch 'release/2.x'"),
+            "non-default target must be passed through single-quoted:\n{}",
+            step.script
+        );
+    }
+
+    #[test]
+    fn prepare_pr_base_step_emits_a_pair_per_repo_with_per_repo_targets() {
+        // Multi-repo meta setup: self + two aliases, each with its OWN target
+        // branch — one `--repo-dir "<dir>" --target-branch '<branch>'` pair each.
+        let repos = vec![
+            ("$(Build.SourcesDirectory)".to_string(), "main".to_string()),
+            (
+                "$(Build.SourcesDirectory)/tools".to_string(),
+                "release".to_string(),
+            ),
+            (
+                "$(Build.SourcesDirectory)/docs".to_string(),
+                "gh-pages".to_string(),
+            ),
+        ];
+        let Step::Bash(step) = prepare_pr_base_step_typed(&repos) else {
+            panic!("expected a bash step");
+        };
+        assert_eq!(
+            step.script.matches("--repo-dir ").count(),
+            3,
+            "one --repo-dir per repo:\n{}",
+            step.script
+        );
+        assert!(
+            step.script
+                .contains("--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'")
+        );
+        assert!(
+            step.script
+                .contains("--repo-dir \"$(Build.SourcesDirectory)/tools\" --target-branch 'release'")
+        );
+        assert!(
+            step.script.contains(
+                "--repo-dir \"$(Build.SourcesDirectory)/docs\" --target-branch 'gh-pages'"
+            )
+        );
+    }
+
+    #[test]
+    fn prepare_pr_base_path_consistent_with_download_dir() {
+        assert!(PREPARE_PR_BASE_PATH.starts_with("/tmp/ado-aw-scripts/ado-script/"));
+        assert!(PREPARE_PR_BASE_PATH.ends_with("prepare-pr-base.js"));
+    }
+
+    #[test]
+    fn declarations_agent_prepare_download_fires_when_only_prepare_pr_base_active() {
+        let mut ext = ext_with(None, None, true);
+        ext.prepare_pr_base_active = true;
+        let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
+        let ctx = CompileContext::for_test(&fm);
+        let steps = ext.declarations(&ctx).unwrap().agent_prepare_steps;
+        // Install + download fire (so prepare-pr-base.js is staged), but no
+        // runtime-import resolver (inlined_imports: true).
+        assert_eq!(steps.len(), 2, "install + download only");
+        assert!(matches!(&steps[0], Step::Task(t) if t.task == "UseNode@1"));
+        assert!(
+            matches!(&steps[1], Step::Bash(b) if b.display_name.contains("Download ado-aw scripts"))
+        );
+    }
+
+    #[test]
     fn declarations_agent_prepare_steps_emits_install_download_and_resolver_when_runtime_imports_active()
      {
         let ext = ext_with(None, None, false);
@@ -1532,6 +1717,7 @@ mod tests {
             exec_context_repo_active: false,
             safe_outputs_summary_active: false,
             github_app_token_active: false,
+            prepare_pr_base_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -2066,6 +2252,7 @@ mod tests {
             exec_context_repo_active: false,
             safe_outputs_summary_active: false,
             github_app_token_active: false,
+            prepare_pr_base_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],

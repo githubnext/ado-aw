@@ -770,6 +770,7 @@ mod tests {
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            repo_refs: HashMap::new(),
             agent_stats: None,
             dry_run: false,
             ..Default::default()
@@ -805,6 +806,7 @@ mod tests {
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            repo_refs: HashMap::new(),
             agent_stats: None,
             dry_run: false,
             ..Default::default()
@@ -1053,6 +1055,7 @@ mod tests {
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            repo_refs: HashMap::new(),
             agent_stats: None,
             dry_run: false,
             ..Default::default()
@@ -1108,6 +1111,7 @@ mod tests {
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            repo_refs: HashMap::new(),
             agent_stats: None,
             dry_run: false,
             ..Default::default()
@@ -1163,6 +1167,7 @@ mod tests {
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            repo_refs: HashMap::new(),
             agent_stats: None,
             dry_run: false,
             ..Default::default()
@@ -1211,6 +1216,7 @@ mod tests {
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            repo_refs: HashMap::new(),
             agent_stats: None,
             dry_run: false,
             ..Default::default()
@@ -1246,6 +1252,7 @@ mod tests {
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            repo_refs: HashMap::new(),
             agent_stats: None,
             dry_run: false,
             ..Default::default()
@@ -1296,6 +1303,7 @@ mod tests {
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            repo_refs: HashMap::new(),
             agent_stats: None,
             dry_run: false,
             ..Default::default()
@@ -1579,6 +1587,7 @@ mod tests {
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            repo_refs: HashMap::new(),
             agent_stats: None,
             dry_run: false,
             ..Default::default()
@@ -1644,6 +1653,7 @@ mod tests {
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            repo_refs: HashMap::new(),
             agent_stats: None,
             dry_run: false,
             ..Default::default()
@@ -1752,6 +1762,7 @@ mod tests {
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            repo_refs: HashMap::new(),
             agent_stats: None,
             dry_run: false,
             ..Default::default()
@@ -1785,6 +1796,7 @@ mod tests {
             repository_id: None,
             repository_name: None,
             allowed_repositories: HashMap::new(),
+            repo_refs: HashMap::new(),
             agent_stats: None,
             dry_run: true,
             ..Default::default()

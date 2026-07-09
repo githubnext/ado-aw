@@ -1254,6 +1254,53 @@ impl FrontMatter {
         self.safe_output_tool_names().next().is_some()
     }
 
+    /// The parsed, sanitized `create-pull-request` config, or `None` when the
+    /// tool is not configured. Mirrors Stage 3's `ExecutionContext::get_tool_config`
+    /// (deserialize + `sanitize_config_fields`) so the compiler resolves per-repo
+    /// target branches (for prepare-pr-base deepening) from the SAME values the
+    /// Stage 3 executor uses to open the PR — the deepened branch and the PR base
+    /// cannot drift.
+    ///
+    /// On a malformed config (e.g. `target-branches: "not-a-map"`) the compiler
+    /// warns and falls back to defaults — deliberately matching Stage 3's
+    /// `get_tool_config`, which also swallows a deserialization error and uses
+    /// `Default` (`.ok().unwrap_or_default()`). Bailing here would make the two
+    /// paths diverge (compile fails / Stage 3 silently defaults); the warning
+    /// surfaces the mistake without breaking that symmetry.
+    ///
+    /// A bare `create-pull-request:` (YAML null) is the standard "enable with
+    /// defaults" idiom, so it maps to `CreatePrConfig::default()` silently — it
+    /// is not a malformed config and must not warn.
+    pub fn create_pr_config(&self) -> Option<crate::safe_outputs::CreatePrConfig> {
+        self.safe_outputs.get("create-pull-request").map(|v| {
+            if v.is_null() {
+                return crate::safe_outputs::CreatePrConfig::default();
+            }
+            let mut cfg: crate::safe_outputs::CreatePrConfig = serde_json::from_value(v.clone())
+                .unwrap_or_else(|e| {
+                    eprintln!(
+                        "Warning: could not parse create-pull-request config ({e}); \
+                        using defaults. Stage 3 will do the same — check the \
+                        `create-pull-request:` block (e.g. `target-branches` must be a map)."
+                    );
+                    crate::safe_outputs::CreatePrConfig::default()
+                });
+            cfg.sanitize_config_fields();
+            cfg
+        })
+    }
+
+    /// Map each checked-out repo alias to its `repos: ref`, for resolving a
+    /// per-repo create-pull-request target branch. `self` is intentionally
+    /// absent (its ref is the runtime trigger branch, not a static `repos:` ref).
+    pub fn checkout_repo_refs(&self) -> std::collections::HashMap<String, String> {
+        self.repositories
+            .iter()
+            .filter(|r| self.checkout.iter().any(|a| a == &r.repository))
+            .map(|r| (r.repository.clone(), r.repo_ref.clone()))
+            .collect()
+    }
+
     /// Section-level (global) `require-approval` default, if configured.
     pub fn global_require_approval(&self) -> Option<RequireApproval> {
         self.safe_outputs
@@ -4156,6 +4203,102 @@ Body
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
         let noop = fm.safe_outputs.get("noop").unwrap();
         assert_eq!(noop.as_bool(), Some(false));
+    }
+
+    #[test]
+    fn test_create_pr_config_resolves_explicit_and_default_target() {
+        use std::collections::HashMap;
+        let no_refs: HashMap<String, String> = HashMap::new();
+
+        // Explicit target-branch is returned verbatim for self.
+        let explicit = r#"---
+name: "PR Agent"
+description: "opens a PR"
+safe-outputs:
+  create-pull-request:
+    target-branch: release/2.x
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(explicit).unwrap();
+        let cfg = fm.create_pr_config().unwrap();
+        assert_eq!(cfg.resolve_target_branch("self", &no_refs), "release/2.x");
+
+        // Bare `create-pull-request: {}` (target-branch key absent) falls back
+        // to the shared CreatePrConfig default.
+        let implicit = r#"---
+name: "PR Agent"
+description: "opens a PR"
+safe-outputs:
+  create-pull-request: {}
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(implicit).unwrap();
+        let default_branch = crate::safe_outputs::CreatePrConfig::default().target_branch;
+        assert_eq!(
+            fm.create_pr_config().unwrap().resolve_target_branch("self", &no_refs),
+            default_branch
+        );
+        // Guard the shared default so a future rename can't silently make the
+        // prepare step fetch a branch the executor doesn't target.
+        assert_eq!(
+            default_branch, "main",
+            "CreatePrConfig default target branch must remain 'main'"
+        );
+
+        // Absent create-pull-request ⇒ None (no prepare step emitted).
+        let absent = r#"---
+name: "WI Agent"
+description: "files a work item"
+safe-outputs:
+  create-work-item:
+    work-item-type: Task
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(absent).unwrap();
+        assert!(fm.create_pr_config().is_none());
+    }
+
+    #[test]
+    fn test_create_pr_config_null_maps_to_defaults() {
+        // A bare `create-pull-request:` (YAML null) is the "enable with
+        // defaults" idiom — create_pr_config() returns the default config
+        // (Some, so the prepare step is still emitted) without treating it as a
+        // malformed config.
+        let content = r#"---
+name: "Null PR Agent"
+description: "bare create-pull-request"
+safe-outputs:
+  create-pull-request:
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let cfg = fm
+            .create_pr_config()
+            .expect("bare create-pull-request must still enable the tool");
+        assert_eq!(cfg.target_branch, "main");
+        assert!(cfg.target_branches.is_empty());
+        assert!(!cfg.infer_target_from_checkout_ref);
+        // Absent create-pull-request ⇒ None.
+        let absent = r#"---
+name: "No PR"
+description: "x"
+safe-outputs:
+  create-work-item:
+    work-item-type: Task
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(absent).unwrap();
+        assert!(fm.create_pr_config().is_none());
     }
 
     #[test]

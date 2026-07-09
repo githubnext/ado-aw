@@ -853,6 +853,11 @@ async fn build_execution_context(
         }
     }
     ctx.allowed_repositories = allowed_repositories;
+    // Per-checkout-alias git refs, so Stage 3 can resolve a per-repo
+    // create-pull-request target branch (infer-target-from-checkout-ref). Uses
+    // the same helper the compiler uses at build time, so the two paths cannot
+    // diverge.
+    ctx.repo_refs = front_matter.checkout_repo_refs();
     ctx.dry_run = dry_run;
 
     // Load agent stats from OTel JSONL if available

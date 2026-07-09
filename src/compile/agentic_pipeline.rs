@@ -933,6 +933,58 @@ fn build_agent_job(
     }
 
     // 18. Run copilot (AWF network isolated) — the big one.
+    //     When `create-pull-request` is configured, first fetch/deepen the
+    //     target branch so the host-side SafeOutputs MCP server can compute a
+    //     diff base on shallow-default agent pools (issue #1413). Runs after
+    //     `checkout: self` (step 1) so the clone exists, and before the Copilot
+    //     run so the refs are present when the agent proposes a PR. The
+    //     `prepare-pr-base.js` bundle is staged by the ado-script extension's
+    //     agent-prepare steps (`prepare_pr_base_active` is OR'd into that
+    //     extension's Agent-job download predicate), so it is guaranteed present.
+    if let Some(pr_cfg) = front_matter.create_pr_config() {
+        // Deepen every checkout dir the SafeOutputs MCP server may generate a
+        // patch from — one per allowed create-PR repo, mirroring
+        // `mcp.rs::resolve_git_dir_for_patch`: the resolved `working_directory`
+        // (for `self`) and `working_directory/<alias>` for each `checkout:`
+        // alias. Each dir is paired with THAT repo's resolved target branch
+        // (`CreatePrConfig::resolve_target_branch` — explicit override, inferred
+        // checkout ref, or the literal default), so a PR to any repo deepens the
+        // branch it actually targets. A single `self` checkout ⇒ one pair.
+        let repo_refs = front_matter.checkout_repo_refs();
+        let mut repos: Vec<(String, String)> = vec![(
+            cfg.working_directory.clone(),
+            pr_cfg.resolve_target_branch("self", &repo_refs),
+        )];
+        for alias in &front_matter.checkout {
+            // Warn when target inference would pick a non-branch ref (e.g. a
+            // tag). `resolve_target_branch` would hand back the whole ref, and
+            // Stage 3 builds `refs/heads/<ref>` → a PR into `refs/heads/refs/
+            // tags/v1` that ADO rejects with a generic error. Surface it at
+            // compile time (advisory, not fatal: the repo may be a dependency
+            // checkout the agent never opens a PR against — an explicit
+            // `target-branches:` entry silences this).
+            if pr_cfg.infer_target_from_checkout_ref
+                && !pr_cfg.target_branches.contains_key(alias)
+                && let Some(git_ref) = repo_refs.get(alias)
+                && !git_ref.starts_with("refs/heads/")
+            {
+                eprintln!(
+                    "Warning: create-pull-request infer-target-from-checkout-ref is set, but \
+                    checkout repo '{alias}' is at '{git_ref}', which is not a branch \
+                    (refs/heads/*). A PR into this repo would target an invalid ref. Set an \
+                    explicit `target-branches: {{ {alias}: <branch> }}` if the agent opens a PR \
+                    against it."
+                );
+            }
+            repos.push((
+                format!("{}/{}", cfg.working_directory, alias),
+                pr_cfg.resolve_target_branch(alias, &repo_refs),
+            ));
+        }
+        steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
+            &repos,
+        ));
+    }
     //     When GitHub App auth is configured, mint the installation token
     //     immediately before the Copilot run; `copilot_env` sources
     //     `GITHUB_TOKEN` from the masked same-job `GITHUB_APP_TOKEN` the mint
