@@ -39,9 +39,9 @@ When adding new fields, place them in the conventional front matter order:
 
 ```
 name → description → target → engine → workspace → pool →
-repos → tools → runtimes → mcp-servers → safe-outputs →
+repos → tools → runtimes → inlined-imports → mcp-servers → safe-outputs →
 on (schedule + triggers) → execution-context → steps → post-steps → setup → teardown → network →
-permissions → supply-chain → parameters
+variable-groups → permissions → supply-chain → parameters
 ```
 
 > **`on.pr` knob update**: when changing `on.pr.branches` or
