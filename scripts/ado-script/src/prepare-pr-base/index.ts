@@ -80,12 +80,12 @@ export interface PrepareArgs {
 
 function shortBranch(name: string): string {
   const s = name.replace(/^refs\/heads\//, "");
-  // Empty after stripping (a degenerate `refs/heads/`) returns the original so
-  // it stays in lock-step with the Rust `short_branch` resolver — a malformed
-  // ref must resolve to the SAME (loudly-failing) branch on both sides rather
-  // than silently diverging. `parseArgs` supplies its own "main" default for a
-  // genuinely absent `--target-branch`.
-  return s.length > 0 ? s : name || "main";
+  // In lock-step with the Rust `short_branch` resolver for every input: a
+  // normal ref → its short form; a degenerate `refs/heads/` (empty after
+  // stripping) → the original string (so a malformed ref fails loudly the same
+  // way on both sides, never silently diverging); and `""` → `""`. `parseArgs`
+  // supplies its own "main" default for a genuinely absent `--target-branch`.
+  return s.length > 0 ? s : name;
 }
 
 /**

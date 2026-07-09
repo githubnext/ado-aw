@@ -1281,10 +1281,24 @@ impl FrontMatter {
     /// target branches (for prepare-pr-base deepening) from the SAME values the
     /// Stage 3 executor uses to open the PR — the deepened branch and the PR base
     /// cannot drift.
+    ///
+    /// On a malformed config (e.g. `target-branches: "not-a-map"`) the compiler
+    /// warns and falls back to defaults — deliberately matching Stage 3's
+    /// `get_tool_config`, which also swallows a deserialization error and uses
+    /// `Default` (`.ok().unwrap_or_default()`). Bailing here would make the two
+    /// paths diverge (compile fails / Stage 3 silently defaults); the warning
+    /// surfaces the mistake without breaking that symmetry.
     pub fn create_pr_config(&self) -> Option<crate::safe_outputs::CreatePrConfig> {
         self.safe_outputs.get("create-pull-request").map(|v| {
-            let mut cfg: crate::safe_outputs::CreatePrConfig =
-                serde_json::from_value(v.clone()).unwrap_or_default();
+            let mut cfg: crate::safe_outputs::CreatePrConfig = serde_json::from_value(v.clone())
+                .unwrap_or_else(|e| {
+                    eprintln!(
+                        "Warning: could not parse create-pull-request config ({e}); \
+                        using defaults. Stage 3 will do the same — check the \
+                        `create-pull-request:` block (e.g. `target-branches` must be a map)."
+                    );
+                    crate::safe_outputs::CreatePrConfig::default()
+                });
             cfg.sanitize_config_fields();
             cfg
         })
