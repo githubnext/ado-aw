@@ -12,30 +12,22 @@ on:
   schedule:
     - cron: "0 8 * * 1"
 
-permissions:
-  contents: read
-
 jobs:
   contract:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      copilot-requests: write
     env:
       CARGO_TERM_COLOR: always
       ADO_AW_COPILOT_CLI_ARTIFACT_DIR: ${{ runner.temp }}/copilot-cli-safeoutputs
-      COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GH_AW_GITHUB_TOKEN || '' }}
+      COPILOT_GITHUB_TOKEN: ${{ github.token }}
       GITHUB_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-
-      - name: Verify trusted Copilot auth is available
-        run: |
-          set -euo pipefail
-          if [ -z "${COPILOT_GITHUB_TOKEN}" ]; then
-            echo "::error::Set COPILOT_GITHUB_TOKEN (or GH_AW_GITHUB_TOKEN) for this workflow."
-            exit 1
-          fi
 
       - name: Select stable Rust toolchain
         run: |
