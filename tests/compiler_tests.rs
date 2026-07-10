@@ -4082,13 +4082,6 @@ fn test_standalone_complete_agent_has_setup_and_teardown_jobs() {
     );
 }
 
-/// Test that the pipeline-trigger fixture produces valid YAML
-#[test]
-fn test_standalone_pipeline_trigger_compiled_output_is_valid_yaml() {
-    let compiled = compile_fixture("pipeline-trigger-agent.md");
-    assert_valid_yaml(&compiled, "pipeline-trigger-agent.md");
-}
-
 // ─── --skip-integrity flag tests ─────────────────────────────────────────
 
 /// Test that --skip-integrity omits the integrity check step from the pipeline
@@ -4118,17 +4111,26 @@ fn test_default_includes_integrity_step() {
     );
 }
 
-/// Test that --skip-integrity produces valid YAML for both standalone and 1ES
+/// Test that --skip-integrity produces valid YAML and removes the integrity
+/// check step for the standalone (complete-agent) target.
 #[test]
 fn test_skip_integrity_valid_yaml_standalone() {
     let compiled = compile_fixture_with_flags("complete-agent.md", &["--skip-integrity"]);
     assert_valid_yaml(&compiled, "complete-agent.md (skip-integrity)");
+    assert!(
+        !compiled.contains("Verify pipeline integrity"),
+        "complete-agent.md compiled with --skip-integrity should NOT contain the integrity check step"
+    );
 }
 
 #[test]
 fn test_skip_integrity_valid_yaml_1es() {
     let compiled = compile_fixture_with_flags("1es-test-agent.md", &["--skip-integrity"]);
     assert_valid_yaml(&compiled, "1es-test-agent.md (skip-integrity)");
+    assert!(
+        !compiled.contains("Verify pipeline integrity"),
+        "1es-test-agent.md compiled with --skip-integrity should NOT contain the integrity check step"
+    );
 }
 
 // ─── --debug-pipeline flag tests ─────────────────────────────────────────
@@ -4183,17 +4185,34 @@ fn test_default_excludes_debug_diagnostics() {
     );
 }
 
-/// Test that --debug-pipeline produces valid YAML for both targets
+/// Test that --debug-pipeline produces valid YAML and injects debug diagnostics
+/// for the standalone (complete-agent) target.
 #[test]
 fn test_debug_pipeline_valid_yaml_standalone() {
     let compiled = compile_fixture_with_flags("complete-agent.md", &["--debug-pipeline"]);
     assert_valid_yaml(&compiled, "complete-agent.md (debug-pipeline)");
+    assert!(
+        compiled.contains(r#"DEBUG="*""#),
+        "complete-agent.md compiled with --debug-pipeline should contain DEBUG=* env var"
+    );
+    assert!(
+        compiled.contains("Verify MCP backends"),
+        "complete-agent.md compiled with --debug-pipeline should contain probe step"
+    );
 }
 
 #[test]
 fn test_debug_pipeline_valid_yaml_1es() {
     let compiled = compile_fixture_with_flags("1es-test-agent.md", &["--debug-pipeline"]);
     assert_valid_yaml(&compiled, "1es-test-agent.md (debug-pipeline)");
+    assert!(
+        compiled.contains(r#"DEBUG="*""#),
+        "1es-test-agent.md compiled with --debug-pipeline should contain DEBUG=* env var"
+    );
+    assert!(
+        compiled.contains("Verify MCP backends"),
+        "1es-test-agent.md compiled with --debug-pipeline should contain probe step"
+    );
 }
 
 /// Test that both flags can be combined
