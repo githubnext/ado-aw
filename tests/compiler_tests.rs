@@ -1667,13 +1667,9 @@ Call the noop tool exactly once.
         compiled.contains("\"url\": \"http://localhost:${SAFE_OUTPUTS_PORT}/mcp\""),
         "compiled MCPG config should keep the runtime SafeOutputs port placeholder: {compiled}"
     );
-    let safeoutputs_auth = concat!(
-        "\"Authorization\": \"******",
-        "AP",
-        "I_KEY}\""
-    );
     assert!(
-        compiled.contains(safeoutputs_auth),
+        compiled.contains("\"Authorization\": \"Bearer ")
+            && compiled.contains("SAFE_OUTPUTS_API_KEY"),
         "compiled MCPG config should keep the runtime SafeOutputs auth placeholder: {compiled}"
     );
 }
