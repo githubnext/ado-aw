@@ -68,16 +68,20 @@ pipeline** as runtime helpers. Today it produces thirteen bundles:
   env vars, so a pipeline variable can't shadow them (only the private key /
   minted token ride in masked env). Runs outside AWF. See
   [`engine.md`](engine.md#github-app-backed-copilot-engine-auth).
-- `prepare-pr-base.js` — create-pull-request base-ref preparer that runs in the
-  **Agent job** before the Copilot invocation when `create-pull-request` is
-  configured (issue #1413). For each allowed create-PR repo dir (`self` +
-  every `checkout:` alias, passed as repeated `--repo-dir <dir> --target-branch
-  <branch>` pairs in the same dir form `mcp.rs::resolve_git_dir_for_patch`
-  resolves), it fetches and progressively deepens THAT repo's resolved target
-  branch into `refs/remotes/origin/<target>` and points
-  `refs/remotes/origin/HEAD` at it, so the host-side SafeOutputs MCP server can
-  compute a diff base on shallow-default agent pools without a full-history
-  `checkout: self`. In a multi-checkout ("meta repo") setup each dir may carry a
+- `prepare-pr-base.js` — create-pull-request base-ref preparer that runs when
+  `create-pull-request` is configured, in **both** the Agent job (before the
+  Copilot invocation, so the host-side SafeOutputs MCP server can compute a diff
+  base — issue #1413) **and** the SafeOutputs job (before `ado-aw execute`, so
+  the Stage 3 executor's `git worktree add` resolves `origin/<target>`; each ADO
+  job has an isolated checkout, so the ref must be re-fetched in the job that
+  builds the worktree — issue #1453). For each allowed create-PR repo dir
+  (`self` + every `checkout:` alias, passed as repeated `--repo-dir <dir>
+  --target-branch <branch>` pairs in the same dir form
+  `mcp.rs::resolve_git_dir_for_patch` resolves), it fetches and progressively
+  deepens THAT repo's resolved target branch into `refs/remotes/origin/<target>`
+  and points `refs/remotes/origin/HEAD` at it, so a PR can be computed/opened on
+  shallow-default agent pools without a full-history `checkout: self`. In a
+  multi-checkout ("meta repo") setup each dir may carry a
   different target (see `create-pull-request`'s `target-branches` /
   `infer-target-from-checkout-ref`). Reuses
   `shared/merge-base.ts::ensureTargetRefFetched` (the same fetch/deepen logic as

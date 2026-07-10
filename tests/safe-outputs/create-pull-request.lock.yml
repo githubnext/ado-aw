@@ -185,7 +185,7 @@ jobs:
   - bash: |
       set -eo pipefail
 
-      AWF_VERSION="0.27.9"
+      AWF_VERSION="0.27.28"
       DOWNLOAD_DIR="$(Pipeline.Workspace)/awf"
       DOWNLOAD_URL="https://github.com/github/gh-aw-firewall/releases/download/v${AWF_VERSION}/awf-linux-x64"
       CHECKSUM_URL="https://github.com/github/gh-aw-firewall/releases/download/v${AWF_VERSION}/checksums.txt"
@@ -202,16 +202,16 @@ jobs:
       chmod +x awf
       echo "##vso[task.prependpath]$(Pipeline.Workspace)/awf"
       ./awf --version
-    displayName: Download AWF (Agentic Workflow Firewall) v0.27.9
+    displayName: Download AWF (Agentic Workflow Firewall) v0.27.28
   - bash: |
       set -eo pipefail
 
-      docker pull ghcr.io/github/gh-aw-firewall/squid:0.27.9
-      docker pull ghcr.io/github/gh-aw-firewall/agent:0.27.9
-      docker tag ghcr.io/github/gh-aw-firewall/squid:0.27.9 ghcr.io/github/gh-aw-firewall/squid:latest
-      docker tag ghcr.io/github/gh-aw-firewall/agent:0.27.9 ghcr.io/github/gh-aw-firewall/agent:latest
-      docker pull ghcr.io/github/gh-aw-mcpg:v0.3.29
-    displayName: Pre-pull AWF and MCPG container images (v0.27.9)
+      docker pull ghcr.io/github/gh-aw-firewall/squid:0.27.28
+      docker pull ghcr.io/github/gh-aw-firewall/agent:0.27.28
+      docker tag ghcr.io/github/gh-aw-firewall/squid:0.27.28 ghcr.io/github/gh-aw-firewall/squid:latest
+      docker tag ghcr.io/github/gh-aw-firewall/agent:0.27.28 ghcr.io/github/gh-aw-firewall/agent:latest
+      docker pull ghcr.io/github/gh-aw-mcpg:v0.4.1
+    displayName: Pre-pull AWF and MCPG container images (v0.27.28)
   - task: UseNode@1
     inputs:
       version: 22.x
@@ -368,7 +368,7 @@ jobs:
         -e MCP_GATEWAY_API_KEY="$(MCP_GATEWAY_API_KEY)" \
         \
         \
-        ghcr.io/github/gh-aw-mcpg:v0.3.29 \
+        ghcr.io/github/gh-aw-mcpg:v0.4.1 \
         --routed --listen 0.0.0.0:80 --config-stdin --log-dir /tmp/gh-aw/mcp-logs \
         > "$GATEWAY_OUTPUT" 2> >(tee /tmp/gh-aw/mcp-logs/stderr.log >&2) &
       MCPG_PID=$!
@@ -615,7 +615,7 @@ jobs:
   - bash: |
       set -eo pipefail
 
-      AWF_VERSION="0.27.9"
+      AWF_VERSION="0.27.28"
       DOWNLOAD_DIR="$(Pipeline.Workspace)/awf"
       DOWNLOAD_URL="https://github.com/github/gh-aw-firewall/releases/download/v${AWF_VERSION}/awf-linux-x64"
       CHECKSUM_URL="https://github.com/github/gh-aw-firewall/releases/download/v${AWF_VERSION}/checksums.txt"
@@ -632,15 +632,15 @@ jobs:
       chmod +x awf
       echo "##vso[task.prependpath]$(Pipeline.Workspace)/awf"
       ./awf --version
-    displayName: Download AWF (Agentic Workflow Firewall) v0.27.9
+    displayName: Download AWF (Agentic Workflow Firewall) v0.27.28
   - bash: |
       set -eo pipefail
 
-      docker pull ghcr.io/github/gh-aw-firewall/squid:0.27.9
-      docker pull ghcr.io/github/gh-aw-firewall/agent:0.27.9
-      docker tag ghcr.io/github/gh-aw-firewall/squid:0.27.9 ghcr.io/github/gh-aw-firewall/squid:latest
-      docker tag ghcr.io/github/gh-aw-firewall/agent:0.27.9 ghcr.io/github/gh-aw-firewall/agent:latest
-    displayName: Pre-pull AWF container images (v0.27.9)
+      docker pull ghcr.io/github/gh-aw-firewall/squid:0.27.28
+      docker pull ghcr.io/github/gh-aw-firewall/agent:0.27.28
+      docker tag ghcr.io/github/gh-aw-firewall/squid:0.27.28 ghcr.io/github/gh-aw-firewall/squid:latest
+      docker tag ghcr.io/github/gh-aw-firewall/agent:0.27.28 ghcr.io/github/gh-aw-firewall/agent:latest
+    displayName: Pre-pull AWF container images (v0.27.28)
   - bash: |
       mkdir -p "$(Build.SourcesDirectory)/safe_outputs"
       cp -a "$(Pipeline.Workspace)/agent_outputs_$(Build.BuildId)/."  "$(Build.SourcesDirectory)/safe_outputs"
@@ -849,6 +849,29 @@ jobs:
   - bash: |
       mkdir -p "$(Agent.TempDirectory)/staging"
     displayName: Prepare output directory
+  - task: UseNode@1
+    inputs:
+      version: 22.x
+    displayName: Install Node.js 22.x
+    timeoutInMinutes: 5
+    condition: succeeded()
+  - bash: |
+      set -eo pipefail
+      mkdir -p /tmp/ado-aw-scripts
+      curl -fsSL "https://github.com/githubnext/ado-aw/releases/download/v0.43.0/checksums.txt" -o /tmp/ado-aw-scripts/checksums.txt
+      curl -fsSL "https://github.com/githubnext/ado-aw/releases/download/v0.43.0/ado-script.zip" -o /tmp/ado-aw-scripts/ado-script.zip
+      cd /tmp/ado-aw-scripts && grep "ado-script.zip" checksums.txt | sha256sum -c -
+      unzip -o /tmp/ado-aw-scripts/ado-script.zip -d /tmp/ado-aw-scripts/
+    displayName: Download ado-aw scripts (v0.43.0)
+    timeoutInMinutes: 5
+    condition: succeeded()
+  - bash: |
+      set -eo pipefail
+      node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js' --repo-dir "$(Build.SourcesDirectory)" --target-branch 'main'
+    displayName: Prepare create-pull-request base ref (fetch/deepen)
+    condition: succeeded()
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: |
       ado-aw execute --source "$(Build.SourcesDirectory)/tests/safe-outputs/create-pull-request.md" --safe-output-dir "$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)" --output-dir "$(Agent.TempDirectory)/staging"
       EXIT_CODE=$?

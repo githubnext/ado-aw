@@ -8,7 +8,7 @@
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -17,6 +17,7 @@ const workspaceDir = resolve(__dirname, "..");
 const gateBundlePath = resolve(__dirname, "../gate.js");
 const importBundlePath = resolve(__dirname, "../import.js");
 const execContextPrBundlePath = resolve(__dirname, "../exec-context-pr.js");
+const preparePrBaseBundlePath = resolve(__dirname, "../prepare-pr-base.js");
 const gateFixturePath = resolve(
   __dirname,
   "fixtures/gate-spec-pr-title-match.json",
@@ -134,6 +135,25 @@ function runGitInRepo(repoDir: string, args: string[]): void {
   if (result.status !== 0) {
     throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
   }
+}
+
+/**
+ * Run `git` in a repo and return its exit status WITHOUT throwing — for the
+ * prepare-pr-base smoke test, which deliberately asserts a command fails
+ * (before the fix) and later succeeds (after it).
+ */
+function gitStatusInRepo(repoDir: string, args: string[]): number | null {
+  return spawnSync("git", args, {
+    cwd: repoDir,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: "smoke",
+      GIT_AUTHOR_EMAIL: "smoke@example.invalid",
+      GIT_COMMITTER_NAME: "smoke",
+      GIT_COMMITTER_EMAIL: "smoke@example.invalid",
+    },
+  }).status;
 }
 
 /**
@@ -287,4 +307,102 @@ describe("exec-context-pr.js smoke", () => {
       expect(promptContent).toContain("PR_ID='not-a-number'");
     });
   }, 30000);
+});
+
+describe("prepare-pr-base.js smoke", () => {
+  it("makes origin/<target> available so the executor's worktree add succeeds on a shallow clone (issue #1453)", () => {
+    // Build the bundle in place (mirrors the import smoke test's self-build) so
+    // the smoke test is self-contained regardless of the build:* chain order.
+    const build = spawnSync(npmCommand(), ["run", "build:prepare-pr-base"], {
+      cwd: workspaceDir,
+      env: { ...process.env },
+      encoding: "utf8",
+      shell: process.platform === "win32",
+    });
+    expect(build.status).toBe(0);
+    expect(existsSync(preparePrBaseBundlePath)).toBe(true);
+
+    withSmokeScratchDir("prepare-pr-base", (dir) => {
+      // The create-pull-request target branch is a NON-default branch, so a
+      // shallow single-branch clone of the default branch never fetches it —
+      // exactly the shallow-default ADO SafeOutputs-job checkout in #1453.
+      const target = "develop";
+
+      // 1. A "remote" repo: default branch `main`, plus `develop` one commit
+      //    ahead of it. HEAD is left on main (the default branch).
+      const originDir = resolve(dir, "origin");
+      mkdirSync(originDir, { recursive: true });
+      runGitInRepo(originDir, ["init", "-q", "-b", "main"]);
+      writeFileSync(resolve(originDir, "README.md"), "root\n", "utf8");
+      runGitInRepo(originDir, ["add", "-A"]);
+      runGitInRepo(originDir, ["commit", "-q", "-m", "root"]);
+      runGitInRepo(originDir, ["checkout", "-q", "-b", target]);
+      writeFileSync(resolve(originDir, "develop.txt"), "develop\n", "utf8");
+      runGitInRepo(originDir, ["add", "-A"]);
+      runGitInRepo(originDir, ["commit", "-q", "-m", "develop commit"]);
+      runGitInRepo(originDir, ["checkout", "-q", "main"]);
+
+      // 2. SHALLOW single-branch clone of `main` only. A `file://` URL (not a
+      //    bare path) forces the transport that honours `--depth`, so the clone
+      //    carries neither `origin/develop` nor enough history to reach it.
+      const checkout = resolve(dir, "checkout");
+      const fileUrl = pathToFileURL(originDir).href;
+      runGitInRepo(dir, [
+        "clone",
+        "--depth",
+        "1",
+        "--single-branch",
+        "--branch",
+        "main",
+        fileUrl,
+        checkout,
+      ]);
+
+      // 3. Precondition — reproduce the exact #1453 failure. Before the prepare
+      //    step, the executor's `git worktree add <wt> origin/develop` fails
+      //    because `origin/develop` is an invalid reference in this checkout.
+      expect(
+        gitStatusInRepo(checkout, ["rev-parse", "--verify", `origin/${target}`]),
+      ).not.toBe(0);
+      expect(
+        gitStatusInRepo(checkout, [
+          "worktree",
+          "add",
+          resolve(dir, "wt-before"),
+          `origin/${target}`,
+        ]),
+      ).not.toBe(0);
+
+      // 4. Run the REAL prepare-pr-base bundle — the same step the compiler now
+      //    emits in the SafeOutputs job before `ado-aw execute` (#1453 fix). A
+      //    local `file://` remote needs no auth, so SYSTEM_ACCESSTOKEN is empty.
+      const prep = spawnSync(
+        process.execPath,
+        [preparePrBaseBundlePath, "--repo-dir", checkout, "--target-branch", target],
+        { env: { ...process.env, SYSTEM_ACCESSTOKEN: "" }, encoding: "utf8" },
+      );
+      expect(prep.status).toBe(0);
+
+      // 5. The fix's effect: `origin/develop` now resolves and `origin/HEAD`
+      //    points at it (so mcp.rs's symbolic-ref default-branch probe also
+      //    resolves the right base).
+      expect(
+        gitStatusInRepo(checkout, ["rev-parse", "--verify", `origin/${target}`]),
+      ).toBe(0);
+      const originHead = spawnSync(
+        "git",
+        ["symbolic-ref", "refs/remotes/origin/HEAD"],
+        { cwd: checkout, encoding: "utf8" },
+      ).stdout.trim();
+      expect(originHead).toBe(`refs/remotes/origin/${target}`);
+
+      // 6. The executor's exact worktree operation now SUCCEEDS, checked out at
+      //    the target branch's tip.
+      const wtAfter = resolve(dir, "wt-after");
+      expect(
+        gitStatusInRepo(checkout, ["worktree", "add", wtAfter, `origin/${target}`]),
+      ).toBe(0);
+      expect(existsSync(resolve(wtAfter, "develop.txt"))).toBe(true);
+    });
+  }, 60000);
 });

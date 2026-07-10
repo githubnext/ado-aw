@@ -268,14 +268,19 @@ computed at agent time from the checked-out repository. On agent pools whose
 default git fetch is shallow (`fetchDepth: 1`), a bare `checkout` leaves no
 `origin/<target-branch>` ref, which would otherwise prevent the diff base from
 being computed. To handle this transparently, whenever `create-pull-request` is
-configured the compiler emits a credentialed **prepare step** in the Agent job
-(before the agent runs) that fetches and progressively deepens the configured
-`target-branch` and points `origin/HEAD` at it — in the `self` checkout **and in
-each additional `checkout:` repo dir**, so a PR to *any* allowed repository works.
-This means create-pull-request works on shallow-default pools **without** forcing
-a full-history checkout and **without** hand-editing the compiled lock (so the
-runtime integrity check keeps passing). No configuration is required. See
-[`docs/ado-script.md`](ado-script.md) (`prepare-pr-base.js`).
+configured the compiler emits a credentialed **prepare step** that fetches and
+progressively deepens the configured `target-branch` and points `origin/HEAD` at
+it — in the `self` checkout **and in each additional `checkout:` repo dir**, so a
+PR to *any* allowed repository works. The prepare step runs in **both** the Agent
+job (before the agent runs, so the host-side SafeOutputs MCP server can compute
+the diff base) **and** the SafeOutputs job (before `ado-aw execute`, so the
+Stage 3 executor's `git worktree add` resolves `origin/<target>` — each ADO job
+has an isolated checkout, so the ref must be re-fetched in the job that builds
+the worktree; issue #1453). This means create-pull-request works on
+shallow-default pools **without** forcing a full-history checkout and **without**
+hand-editing the compiled lock (so the runtime integrity check keeps passing). No
+configuration is required. See [`docs/ado-script.md`](ado-script.md)
+(`prepare-pr-base.js`).
 
 > **Branch semantics.** The step deepens each repo's resolved `target-branch`
 > (the PR's **destination/base**) — not the per-repo `repos:` checkout `ref` (the

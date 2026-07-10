@@ -941,46 +941,14 @@ fn build_agent_job(
     //     `prepare-pr-base.js` bundle is staged by the ado-script extension's
     //     agent-prepare steps (`prepare_pr_base_active` is OR'd into that
     //     extension's Agent-job download predicate), so it is guaranteed present.
-    if let Some(pr_cfg) = front_matter.create_pr_config() {
-        // Deepen every checkout dir the SafeOutputs MCP server may generate a
-        // patch from — one per allowed create-PR repo, mirroring
-        // `mcp.rs::resolve_git_dir_for_patch`: the resolved `working_directory`
-        // (for `self`) and `working_directory/<alias>` for each `checkout:`
-        // alias. Each dir is paired with THAT repo's resolved target branch
-        // (`CreatePrConfig::resolve_target_branch` — explicit override, inferred
-        // checkout ref, or the literal default), so a PR to any repo deepens the
-        // branch it actually targets. A single `self` checkout ⇒ one pair.
-        let repo_refs = front_matter.checkout_repo_refs();
-        let mut repos: Vec<(String, String)> = vec![(
-            cfg.working_directory.clone(),
-            pr_cfg.resolve_target_branch("self", &repo_refs),
-        )];
-        for alias in &front_matter.checkout {
-            // Warn when target inference would pick a non-branch ref (e.g. a
-            // tag). `resolve_target_branch` would hand back the whole ref, and
-            // Stage 3 builds `refs/heads/<ref>` → a PR into `refs/heads/refs/
-            // tags/v1` that ADO rejects with a generic error. Surface it at
-            // compile time (advisory, not fatal: the repo may be a dependency
-            // checkout the agent never opens a PR against — an explicit
-            // `target-branches:` entry silences this).
-            if pr_cfg.infer_target_from_checkout_ref
-                && !pr_cfg.target_branches.contains_key(alias)
-                && let Some(git_ref) = repo_refs.get(alias)
-                && !git_ref.starts_with("refs/heads/")
-            {
-                eprintln!(
-                    "Warning: create-pull-request infer-target-from-checkout-ref is set, but \
-                    checkout repo '{alias}' is at '{git_ref}', which is not a branch \
-                    (refs/heads/*). A PR into this repo would target an invalid ref. Set an \
-                    explicit `target-branches: {{ {alias}: <branch> }}` if the agent opens a PR \
-                    against it."
-                );
-            }
-            repos.push((
-                format!("{}/{}", cfg.working_directory, alias),
-                pr_cfg.resolve_target_branch(alias, &repo_refs),
-            ));
-        }
+    if front_matter.create_pr_config().is_some() {
+        // The prepare step deepens every checkout dir the SafeOutputs MCP server
+        // may generate a patch from — see `create_pr_prepare_repos`. The
+        // compile-time target-inference advisory is emitted here (Agent job)
+        // only, so it never double-prints when the same step is also emitted in
+        // the SafeOutputs job (issue #1453).
+        warn_create_pr_target_inference(front_matter);
+        let repos = create_pr_prepare_repos(front_matter, &cfg.working_directory);
         steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
             &repos,
         ));
@@ -1364,6 +1332,73 @@ fn filter_flags(flag: &str, tools: &[String]) -> String {
     s
 }
 
+/// Build the `(dir, target-branch)` pairs the `prepare-pr-base` bundle must
+/// fetch/deepen — one per allowed `create-pull-request` repo, mirroring
+/// `mcp.rs::resolve_git_dir_for_patch`: `working_directory` (for `self`) and
+/// `working_directory/<alias>` for each `checkout:` alias. Each dir is paired
+/// with THAT repo's resolved target branch
+/// (`CreatePrConfig::resolve_target_branch` — explicit override, inferred
+/// checkout ref, or the literal default), so a PR to any repo deepens the branch
+/// it actually targets. A single `self` checkout ⇒ one pair. Returns an empty
+/// vec when `create-pull-request` is not configured.
+///
+/// Pure (no diagnostics): the compile-time target-inference advisory is emitted
+/// separately by [`warn_create_pr_target_inference`] so it prints exactly once
+/// even though the prepare step is emitted in both the Agent and SafeOutputs
+/// jobs (issue #1453).
+fn create_pr_prepare_repos(
+    front_matter: &FrontMatter,
+    working_directory: &str,
+) -> Vec<(String, String)> {
+    let Some(pr_cfg) = front_matter.create_pr_config() else {
+        return Vec::new();
+    };
+    let repo_refs = front_matter.checkout_repo_refs();
+    let mut repos: Vec<(String, String)> = vec![(
+        working_directory.to_string(),
+        pr_cfg.resolve_target_branch("self", &repo_refs),
+    )];
+    for alias in &front_matter.checkout {
+        repos.push((
+            format!("{working_directory}/{alias}"),
+            pr_cfg.resolve_target_branch(alias, &repo_refs),
+        ));
+    }
+    repos
+}
+
+/// Emit the compile-time advisory when `create-pull-request`'s
+/// `infer-target-from-checkout-ref` would resolve a non-branch ref (e.g. a tag)
+/// as a PR base. `resolve_target_branch` would hand back the whole ref, and
+/// Stage 3 builds `refs/heads/<ref>` → a PR into `refs/heads/refs/tags/v1` that
+/// ADO rejects with a generic error. Advisory, not fatal: the repo may be a
+/// dependency checkout the agent never opens a PR against — an explicit
+/// `target-branches:` entry silences it. Called once (Agent job) so it never
+/// double-prints alongside the SafeOutputs-job prepare step.
+fn warn_create_pr_target_inference(front_matter: &FrontMatter) {
+    let Some(pr_cfg) = front_matter.create_pr_config() else {
+        return;
+    };
+    if !pr_cfg.infer_target_from_checkout_ref {
+        return;
+    }
+    let repo_refs = front_matter.checkout_repo_refs();
+    for alias in &front_matter.checkout {
+        if !pr_cfg.target_branches.contains_key(alias)
+            && let Some(git_ref) = repo_refs.get(alias)
+            && !git_ref.starts_with("refs/heads/")
+        {
+            eprintln!(
+                "Warning: create-pull-request infer-target-from-checkout-ref is set, but \
+                checkout repo '{alias}' is at '{git_ref}', which is not a branch \
+                (refs/heads/*). A PR into this repo would target an invalid ref. Set an \
+                explicit `target-branches: {{ {alias}: <branch> }}` if the agent opens a PR \
+                against it."
+            );
+        }
+    }
+}
+
 fn build_safeoutputs_job(
     front_matter: &FrontMatter,
     cfg: &StandaloneCtx,
@@ -1401,6 +1436,28 @@ fn build_safeoutputs_job(
         "Prepare output directory",
         "mkdir -p \"$(Agent.TempDirectory)/staging\"\n",
     )));
+    // When `create-pull-request` is configured, fetch/deepen each target branch
+    // in THIS job's checkout, immediately before the executor runs (issue
+    // #1453). The prepare step also runs in the Agent job (for the host-side
+    // SafeOutputs MCP diff base), but each ADO job gets an isolated checkout, so
+    // the Agent-job fetch is invisible here — the `create-pull-request` executor
+    // (`ado-aw execute`) builds its worktree from `origin/<target>` in the
+    // SafeOutputs checkout and needs the ref landed locally. Stage the ado-script
+    // bundle in this job (it is otherwise only staged in the Agent/Setup jobs),
+    // then emit the same `prepare-pr-base` step. The bundle auth projects
+    // `System.AccessToken` (the build identity the checkout persists credentials
+    // for), so the git fetch is authenticated regardless of the write token.
+    if front_matter.create_pr_config().is_some() {
+        steps.extend(
+            super::extensions::ado_script::install_and_download_steps_typed(
+                front_matter.supply_chain(),
+            ),
+        );
+        let repos = create_pr_prepare_repos(front_matter, &cfg.working_directory);
+        steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
+            &repos,
+        ));
+    }
     // Execute safe outputs (Stage 3) — typed BashStep with typed env block
     steps.push(Step::Bash(execute_safe_outputs_step(
         &cfg.source_path,
