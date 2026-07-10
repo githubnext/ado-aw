@@ -21,6 +21,8 @@ pool:                          # Optional pool configuration
   vmImage: ubuntu-22.04        # Microsoft-hosted (default for non-1ES targets)
 # pool:                        # Self-hosted pool
 #   name: MySelfHostedPool
+#   demands:                   # Optional ordered Azure Pipelines demands
+#     - CustomCapability -equals required-value
 # pool:                        # 1ES pool format
 #   name: AZS-1ES-L-MMS-ubuntu-22.04
 #   os: linux                  # Operating system: "linux" or "windows". Defaults to "linux".

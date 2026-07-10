@@ -386,6 +386,7 @@ mod tests {
                 name: "AzurePipelines-EO".into(),
                 image: None,
                 os: Some("linux".into()),
+                demands: Vec::new(),
             },
             stage_id: StageId::new("AgentStage").unwrap(),
             stage_display_name: "Agent".into(),

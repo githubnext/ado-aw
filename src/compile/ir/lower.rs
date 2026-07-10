@@ -839,9 +839,20 @@ fn lower_pool(pool: &Pool) -> Value {
             m.insert(s("vmImage"), s(img));
             Value::Mapping(m)
         }
-        Pool::Named { name, image, os } => {
+        Pool::Named {
+            name,
+            image,
+            os,
+            demands,
+        } => {
             let mut m = Mapping::new();
             m.insert(s("name"), s(name));
+            if !demands.is_empty() {
+                m.insert(
+                    s("demands"),
+                    Value::Sequence(demands.iter().map(|d| s(d)).collect()),
+                );
+            }
             if let Some(img) = image {
                 m.insert(s("image"), s(img));
             }
@@ -1562,6 +1573,40 @@ mod tests {
         assert!(
             !yaml.contains("vmImage"),
             "server pool must not emit a vmImage mapping:\n{yaml}"
+        );
+    }
+
+    #[test]
+    fn lower_job_emits_named_pool_demands() {
+        let job = Job::new(
+            JobId::new("Agent").unwrap(),
+            "Agent",
+            Pool::Named {
+                name: "CustomPool".into(),
+                image: None,
+                os: None,
+                demands: vec![
+                    "CustomCapability -equals required-value".into(),
+                    "Agent.OS -equals Linux".into(),
+                ],
+            },
+        );
+        let p = Pipeline {
+            name: "t".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers::default(),
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(vec![job]),
+            shape: PipelineShape::Standalone,
+        };
+        let v = super::lower(&p).unwrap();
+        let yaml = serde_yaml::to_string(&v).unwrap();
+        assert!(
+            yaml.contains(
+                "pool:\n    name: CustomPool\n    demands:\n    - CustomCapability -equals required-value\n    - Agent.OS -equals Linux"
+            ),
+            "expected named pool demands in:\n{yaml}"
         );
     }
 

@@ -51,6 +51,8 @@ impl CompileTarget {
 /// # Object format (self-hosted)
 /// pool:
 ///   name: MySelfHostedPool
+///   demands:
+///     - CustomCapability -equals required-value
 ///
 /// # 1ES object format
 /// pool:
@@ -72,6 +74,7 @@ impl Default for PoolConfig {
             name: None,
             vm_image: Some("ubuntu-22.04".to_string()),
             os: None,
+            demands: Vec::new(),
         })
     }
 }
@@ -92,6 +95,15 @@ impl PoolConfig {
         match self {
             PoolConfig::Name(_) => None,
             PoolConfig::Full(full) => full.vm_image.as_deref(),
+        }
+    }
+
+    /// Get the ordered Azure Pipelines demands list.
+    #[cfg(test)]
+    pub fn demands(&self) -> &[String] {
+        match self {
+            PoolConfig::Name(_) => &[],
+            PoolConfig::Full(full) => &full.demands,
         }
     }
 
@@ -124,6 +136,8 @@ pub struct PoolConfigFull {
     pub vm_image: Option<String>,
     #[serde(default)]
     pub os: Option<String>,
+    #[serde(default)]
+    pub demands: Vec<String>,
 }
 
 /// Schedule configuration - accepts both string and object formats
@@ -2800,6 +2814,7 @@ mod tests {
         assert_eq!(pool.name(), Some("MyPool"));
         assert_eq!(pool.vm_image(), None);
         assert_eq!(pool.os(), "linux"); // default
+        assert!(pool.demands().is_empty());
     }
 
     #[test]
@@ -2810,6 +2825,7 @@ mod tests {
         assert_eq!(pool.name(), Some("WinPool"));
         assert_eq!(pool.vm_image(), None);
         assert_eq!(pool.os(), "windows");
+        assert!(pool.demands().is_empty());
     }
 
     #[test]
@@ -2820,6 +2836,7 @@ mod tests {
         assert_eq!(pool.name(), Some("LinuxPool"));
         assert_eq!(pool.vm_image(), None);
         assert_eq!(pool.os(), "linux");
+        assert!(pool.demands().is_empty());
     }
 
     #[test]
@@ -2830,6 +2847,24 @@ mod tests {
         assert_eq!(pool.name(), None);
         assert_eq!(pool.vm_image(), Some("ubuntu-22.04"));
         assert_eq!(pool.os(), "linux");
+        assert!(pool.demands().is_empty());
+    }
+
+    #[test]
+    fn test_pool_config_object_form_with_demands() {
+        let yaml = "pool:\n  name: CustomPool\n  demands:\n    - CustomCapability -equals required-value\n    - Agent.OS -equals Linux";
+        let fm: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let pool: PoolConfig = serde_yaml::from_value(fm["pool"].clone()).unwrap();
+        assert_eq!(pool.name(), Some("CustomPool"));
+        assert_eq!(pool.vm_image(), None);
+        assert_eq!(pool.os(), "linux");
+        assert_eq!(
+            pool.demands(),
+            &[
+                "CustomCapability -equals required-value".to_string(),
+                "Agent.OS -equals Linux".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -2838,6 +2873,7 @@ mod tests {
         assert_eq!(pool.name(), None);
         assert_eq!(pool.vm_image(), Some("ubuntu-22.04"));
         assert_eq!(pool.os(), "linux");
+        assert!(pool.demands().is_empty());
     }
 
     // ─── ScheduleConfig deserialization ─────────────────────────────────────
