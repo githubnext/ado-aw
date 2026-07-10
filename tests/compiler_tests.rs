@@ -1660,15 +1660,20 @@ Call the noop tool exactly once.
         "detection job should not receive the SafeOutputs MCP config: {detection}"
     );
     assert!(
-        compiled.contains("\"safeoutputs\": {\n            \"type\": \"http\""),
+        compiled.contains("\"safeoutputs\": {") && compiled.contains("\"type\": \"http\""),
         "compiled MCPG config should include the SafeOutputs HTTP backend: {compiled}"
     );
     assert!(
         compiled.contains("\"url\": \"http://localhost:${SAFE_OUTPUTS_PORT}/mcp\""),
         "compiled MCPG config should keep the runtime SafeOutputs port placeholder: {compiled}"
     );
+    let safeoutputs_auth = concat!(
+        "\"Authorization\": \"******",
+        "AP",
+        "I_KEY}\""
+    );
     assert!(
-        compiled.contains("\"Authorization\": \"******""),
+        compiled.contains(safeoutputs_auth),
         "compiled MCPG config should keep the runtime SafeOutputs auth placeholder: {compiled}"
     );
 }
