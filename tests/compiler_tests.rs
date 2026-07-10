@@ -4225,6 +4225,68 @@ fn test_skip_integrity_and_debug_pipeline_combined() {
     );
 }
 
+#[test]
+fn test_copilot_cli_invocation_with_compile_flags_keeps_safeoutputs_callable() {
+    let source = r#"---
+name: "copilot-flags-safeoutputs"
+description: "copilot invocation smoke test"
+engine:
+  id: copilot
+  model: gpt-5-mini
+permissions:
+  write: my-write-sc
+tools:
+  bash: [cat]
+safe-outputs:
+  comment-on-work-item:
+    target: "MyProject\\Backend"
+    max: 1
+---
+
+## Agent
+
+Do work.
+"#;
+
+    let (ok, compiled, stderr) = compile_inline_source_with_flags(
+        "copilot-flags-safeoutputs",
+        source,
+        &["--skip-integrity", "--debug-pipeline"],
+    );
+    assert!(ok, "compile should succeed.\nstderr: {stderr}");
+
+    assert!(
+        compiled.contains("copilot --prompt")
+            && compiled.contains("--additional-mcp-config @")
+            && compiled.contains("--model gpt-5-mini")
+            && compiled.contains("--disable-builtin-mcps")
+            && compiled.contains("--no-ask-user"),
+        "compiled YAML should include copilot CLI invocation with expected compiler-managed flags.\n{compiled}"
+    );
+    assert!(
+        compiled.contains("--allow-tool safeoutputs"),
+        "safeoutputs must remain callable via Copilot CLI allow-tool flags.\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("--allow-all-tools"),
+        "restricted bash config should emit explicit --allow-tool entries instead of --allow-all-tools.\n{compiled}"
+    );
+    assert!(
+        compiled.contains("\"safeoutputs\": {"),
+        "MCP config should include the safeoutputs server so the allow-tool is backed by a callable MCP.\n{compiled}"
+    );
+
+    // The compile-time ado-aw flags should still take effect in the same output.
+    assert!(
+        compiled.contains("Verify MCP backends"),
+        "--debug-pipeline should still include MCP debug probe step"
+    );
+    assert!(
+        !compiled.contains("Verify pipeline integrity"),
+        "--skip-integrity should omit the integrity step"
+    );
+}
+
 /// Test that debug probe step has no unresolved template markers
 #[test]
 fn test_debug_pipeline_no_unresolved_markers() {
@@ -6535,6 +6597,16 @@ fn test_pr_mode_policy_omits_synth_and_emits_trigger_none() {
 
 /// Compile a small inline agent body and return (success, stdout, stderr).
 fn compile_inline_source(name: &str, source: &str) -> (bool, String, String) {
+    compile_inline_source_with_flags(name, source, &[])
+}
+
+/// Compile a small inline agent body with compile flags and return
+/// (success, stdout, stderr).
+fn compile_inline_source_with_flags(
+    name: &str,
+    source: &str,
+    extra_flags: &[&str],
+) -> (bool, String, String) {
     let temp_dir = std::env::temp_dir().join(format!(
         "agentic-pipeline-supply-chain-{name}-{}",
         std::process::id()
@@ -6545,13 +6617,17 @@ fn compile_inline_source(name: &str, source: &str) -> (bool, String, String) {
     fs::write(&input_path, source).unwrap();
 
     let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let mut args = vec![
+        "compile".to_string(),
+        input_path.to_str().unwrap().to_string(),
+        "-o".to_string(),
+        output_path.to_str().unwrap().to_string(),
+    ];
+    for flag in extra_flags {
+        args.push(flag.to_string());
+    }
     let output = std::process::Command::new(&binary_path)
-        .args([
-            "compile",
-            input_path.to_str().unwrap(),
-            "-o",
-            output_path.to_str().unwrap(),
-        ])
+        .args(&args)
         .output()
         .expect("Failed to run compiler");
     let compiled = fs::read_to_string(&output_path).unwrap_or_default();
