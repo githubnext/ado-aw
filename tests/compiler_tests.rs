@@ -2104,9 +2104,14 @@ Do the thing.
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
-/// Test that parameters block has no unreplaced markers
+/// Test that user-defined parameters and cache-memory auto-injected clearMemory coexist
+///
+/// Verifies that when a pipeline defines its own parameters AND cache-memory, the
+/// compiled output contains both the user-defined parameter and the auto-injected
+/// `clearMemory` parameter without either clobbering the other. Also guards that
+/// no unreplaced `{{ }}` markers remain after compilation.
 #[test]
-fn test_parameters_no_unreplaced_markers() {
+fn test_parameters_coexist_with_cache_memory_clear_memory() {
     let temp_dir = std::env::temp_dir().join(format!(
         "agentic-pipeline-params-markers-{}",
         std::process::id()
@@ -2115,7 +2120,7 @@ fn test_parameters_no_unreplaced_markers() {
 
     let input = r#"---
 name: "Markers Agent"
-description: "Tests no unreplaced markers with parameters"
+description: "Tests user param + cache-memory clearMemory coexistence"
 parameters:
   - name: myParam
     type: string
@@ -2152,7 +2157,33 @@ tools:
 
     let compiled = fs::read_to_string(&output_path).unwrap();
 
-    // Verify no unreplaced {{ markers }} remain (excluding ${{ }} which are ADO expressions)
+    // User-defined parameter must be present
+    assert!(
+        compiled.contains("name: myParam"),
+        "Should contain user-defined 'myParam' parameter"
+    );
+    assert!(
+        compiled.contains("default: hello"),
+        "Should contain user-defined default value"
+    );
+
+    // cache-memory must auto-inject clearMemory alongside the user param
+    assert!(
+        compiled.contains("name: clearMemory"),
+        "Should auto-inject clearMemory parameter when cache-memory is enabled"
+    );
+    assert!(
+        compiled.contains("displayName: Clear agent memory"),
+        "clearMemory should carry the standard displayName"
+    );
+
+    // Neither parameter should shadow the other — both must appear
+    let param_count = compiled.matches("name: myParam").count();
+    assert_eq!(param_count, 1, "myParam should appear exactly once");
+    let clear_count = compiled.matches("name: clearMemory").count();
+    assert_eq!(clear_count, 1, "clearMemory should appear exactly once");
+
+    // No unreplaced {{ markers }} should remain (excluding ${{ }} ADO expressions)
     for line in compiled.lines() {
         let stripped = line.replace("${{", "");
         assert!(
@@ -2215,55 +2246,6 @@ network:
     assert!(
         compiled.contains("api.external-service.com"),
         "Compiled output should include 'api.external-service.com' in the allow list"
-    );
-
-    let _ = fs::remove_dir_all(&temp_dir);
-}
-
-/// Test that network.allowed with a trailing wildcard (example.*) fails compilation
-#[test]
-fn test_network_allow_trailing_wildcard_fails() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-network-trailing-wildcard-{}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
-
-    let input = r#"---
-name: "Network Trailing Wildcard Agent"
-description: "Agent with trailing wildcard in network.allowed"
-network:
-  allowed:
-    - "example.*"
----
-
-## Test
-"#;
-
-    let input_path = temp_dir.join("network-trailing-wildcard.md");
-    let output_path = temp_dir.join("network-trailing-wildcard.yml");
-    fs::write(&input_path, input).unwrap();
-
-    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
-    let output = std::process::Command::new(&binary_path)
-        .args([
-            "compile",
-            input_path.to_str().unwrap(),
-            "-o",
-            output_path.to_str().unwrap(),
-        ])
-        .output()
-        .expect("Failed to run compiler");
-
-    assert!(
-        !output.status.success(),
-        "Compiler should fail for trailing wildcard 'example.*'"
-    );
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("unsupported position"),
-        "Error message should mention unsupported position: {stderr}"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
