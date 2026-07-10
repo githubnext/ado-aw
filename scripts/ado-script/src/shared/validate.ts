@@ -30,11 +30,11 @@ export const PROJECT_RE = /^[A-Za-z0-9._ -]+$/;
 // Repository names have no spaces.
 export const REPO_RE = /^[A-Za-z0-9._-]+$/;
 
-// PR target branch is interpolated into a git refspec
+// PR target/source branches are interpolated into git refspecs
 // ("+refs/heads/<short>:refs/remotes/origin/<short>"), so it must be a
 // valid git branch name. The character set is what git itself accepts
 // for `refs/heads/<name>`.
-export const TARGET_BRANCH_RE = /^[A-Za-z0-9._/-]+$/;
+export const PR_BRANCH_RE = /^[A-Za-z0-9._/-]+$/;
 
 export type IdentifierError = {
   /** A one-line reason, safe to embed in the agent prompt verbatim. */
@@ -46,8 +46,10 @@ export type Identifiers = {
   project: string;
   repo: string;
   targetBranch: string;
+  sourceBranch: string;
   /** The short branch name (`refs/heads/foo` -> `foo`). */
   targetShort: string;
+  sourceShort: string;
 };
 
 /**
@@ -83,6 +85,7 @@ export function sanitizeForPrompt(value: string, maxLen = 80): string {
 export function validateIdentifiers(env: NodeJS.ProcessEnv): Identifiers | IdentifierError {
   const prId = env.SYSTEM_PULLREQUEST_PULLREQUESTID ?? "";
   const targetBranch = env.SYSTEM_PULLREQUEST_TARGETBRANCH ?? "";
+  const sourceBranch = env.SYSTEM_PULLREQUEST_SOURCEBRANCH ?? "";
   const project = env.SYSTEM_TEAMPROJECT ?? "";
   const repo = env.BUILD_REPOSITORY_NAME ?? "";
 
@@ -98,17 +101,28 @@ export function validateIdentifiers(env: NodeJS.ProcessEnv): Identifiers | Ident
   if (targetBranch.length === 0) {
     return { reason: "System.PullRequest.TargetBranch is empty; cannot resolve merge-base." };
   }
-  if (!TARGET_BRANCH_RE.test(targetBranch)) {
+  if (!PR_BRANCH_RE.test(targetBranch)) {
     return {
       reason: `PR identifier validation failed (PR_TARGET_BRANCH='${sanitizeForPrompt(targetBranch)}' contains disallowed characters).`,
+    };
+  }
+  if (sourceBranch.length === 0) {
+    return { reason: "System.PullRequest.SourceBranch is empty; cannot resolve merge-base." };
+  }
+  if (!PR_BRANCH_RE.test(sourceBranch)) {
+    return {
+      reason: `PR identifier validation failed (PR_SOURCE_BRANCH='${sanitizeForPrompt(sourceBranch)}' contains disallowed characters).`,
     };
   }
 
   const targetShort = targetBranch.startsWith("refs/heads/")
     ? targetBranch.slice("refs/heads/".length)
     : targetBranch;
+  const sourceShort = sourceBranch.startsWith("refs/heads/")
+    ? sourceBranch.slice("refs/heads/".length)
+    : sourceBranch;
 
-  return { prId, project, repo, targetBranch, targetShort };
+  return { prId, project, repo, targetBranch, sourceBranch, targetShort, sourceShort };
 }
 
 /** Type guard distinguishing the validated identifiers from an error. */

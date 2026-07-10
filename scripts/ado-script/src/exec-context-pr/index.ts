@@ -122,7 +122,7 @@ export function main(env: NodeJS.ProcessEnv = process.env): number {
   const ids = idsOrErr;
 
   const fetchEnv = bearerEnv(env.SYSTEM_ACCESSTOKEN);
-  const mb = resolveMergeBase(ids.targetShort, fetchEnv);
+  const mb = resolveMergeBase(ids.targetShort, fetchEnv, undefined, ids.sourceShort);
   if (!mb.ok) {
     writeFailure(prDir, promptPath, mb.reason, { prId: ids.prId, project: ids.project, repo: ids.repo });
     return 0;

@@ -6,6 +6,7 @@ function env(overrides: Record<string, string> = {}): NodeJS.ProcessEnv {
   return {
     SYSTEM_PULLREQUEST_PULLREQUESTID: "4242",
     SYSTEM_PULLREQUEST_TARGETBRANCH: "refs/heads/main",
+    SYSTEM_PULLREQUEST_SOURCEBRANCH: "refs/heads/feature/x",
     SYSTEM_TEAMPROJECT: "MyProject",
     BUILD_REPOSITORY_NAME: "my-repo",
     ...overrides,
@@ -21,7 +22,9 @@ describe("validateIdentifiers", () => {
       expect(result.project).toBe("MyProject");
       expect(result.repo).toBe("my-repo");
       expect(result.targetBranch).toBe("refs/heads/main");
+      expect(result.sourceBranch).toBe("refs/heads/feature/x");
       expect(result.targetShort).toBe("main");
+      expect(result.sourceShort).toBe("feature/x");
     }
   });
 
@@ -75,6 +78,22 @@ describe("validateIdentifiers", () => {
     }
   });
 
+  it("rejects empty source branch with a dedicated message", () => {
+    const result = validateIdentifiers(env({ SYSTEM_PULLREQUEST_SOURCEBRANCH: "" }));
+    expect(isIdentifierError(result)).toBe(true);
+    if (isIdentifierError(result)) {
+      expect(result.reason).toContain("SourceBranch is empty");
+    }
+  });
+
+  it("rejects source branch with disallowed characters", () => {
+    const result = validateIdentifiers(env({ SYSTEM_PULLREQUEST_SOURCEBRANCH: "refs/heads/feature; rm -rf /" }));
+    expect(isIdentifierError(result)).toBe(true);
+    if (isIdentifierError(result)) {
+      expect(result.reason).toContain("PR_SOURCE_BRANCH=");
+    }
+  });
+
   it("accepts branch names with slashes, dots, dashes, underscores", () => {
     const result = validateIdentifiers(env({ SYSTEM_PULLREQUEST_TARGETBRANCH: "refs/heads/release/v1.2.3-beta_rc" }));
     expect(isIdentifierError(result)).toBe(false);
@@ -84,10 +103,14 @@ describe("validateIdentifiers", () => {
   });
 
   it("handles non-refs/heads/-prefixed branch as a bare name", () => {
-    const result = validateIdentifiers(env({ SYSTEM_PULLREQUEST_TARGETBRANCH: "main" }));
+    const result = validateIdentifiers(env({
+      SYSTEM_PULLREQUEST_TARGETBRANCH: "main",
+      SYSTEM_PULLREQUEST_SOURCEBRANCH: "feature/x",
+    }));
     expect(isIdentifierError(result)).toBe(false);
     if (!isIdentifierError(result)) {
       expect(result.targetShort).toBe("main");
+      expect(result.sourceShort).toBe("feature/x");
     }
   });
 

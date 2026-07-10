@@ -126,7 +126,9 @@ Two paths, both computing the same "merge-base of target tip and PR head":
 
 1. **Synthetic merge commit** — ADO's default PR checkout produces a merge
    commit (`HEAD` has ≥ 2 parents). `HEAD^1` is the target tip; `HEAD^2` is
-   the PR head. The bundle runs `git merge-base HEAD^1 HEAD^2`.
+   the PR head. The bundle runs `git merge-base HEAD^1 HEAD^2`; if that fails
+   in a shallow checkout, it fetches both target and source refs with
+   progressive deepening and retries before failing closed.
 2. **Progressive deepening** — when `HEAD` is a normal commit (shallow clone
    without a merge commit), the bundle fetches the target branch at increasing
    depths (`--depth=200`, `500`, `2000`, `--unshallow`) until
