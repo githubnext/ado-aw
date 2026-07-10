@@ -87,6 +87,26 @@ fn start_server(artifact_dir: &Path) -> ServerGuard {
     panic!("SafeOutputs HTTP server did not become ready within 10 s");
 }
 
+fn noop_contract_source() -> String {
+    format!(
+        r#"---
+name: "Real Copilot CLI SafeOutputs Contract"
+description: "Local contract test for compiler-emitted Copilot CLI flags"
+engine:
+  id: copilot
+  model: gpt-5-mini
+safe-outputs:
+  noop: {{}}
+---
+
+## Contract
+
+Call the `noop` tool exactly once with `context` set to `{PROMPT_CONTEXT}`.
+Do not call any other tool.
+"#
+    )
+}
+
 fn compile_inline_agent(tag: &str, content: &str, artifact_dir: &Path) -> String {
     let temp_dir =
         std::env::temp_dir().join(format!("copilot-cli-safeoutputs-{tag}-{}", std::process::id()));
@@ -185,6 +205,9 @@ fn build_local_copilot_mcp_config(
             .expect("mcpg server entry should be an object")
             .clone();
         server.insert("tools".to_string(), json!(["*"]));
+        if name == "safeoutputs" {
+            server.insert("isDefaultServer".to_string(), json!(true));
+        }
         copilot_servers.insert(name.clone(), serde_json::Value::Object(server));
     }
 
@@ -207,6 +230,43 @@ fn wait_for_ndjson(path: &Path) {
     panic!("safe_outputs.ndjson was not written within 10 s");
 }
 
+#[test]
+#[ignore = "known regression tracked by #1452"]
+fn compile_only_copilot_invocation_explicitly_allows_safeoutputs() {
+    let artifact_dir = tempfile::tempdir().expect("create artifact dir");
+    let compiled = compile_inline_agent(
+        "real-copilot-cli-noop-explicit-safeoutputs-tool",
+        &noop_contract_source(),
+        artifact_dir.path(),
+    );
+    let invocation = extract_agent_invocation(&compiled);
+
+    assert!(
+        invocation.contains("--allow-all-tools"),
+        "expected wildcard tool grant in compiler-emitted invocation: {invocation}"
+    );
+    assert!(
+        invocation.contains("--allow-tool safeoutputs"),
+        "expected explicit safeoutputs grant alongside --allow-all-tools: {invocation}"
+    );
+}
+
+#[test]
+#[ignore = "known regression tracked by #1452"]
+fn compile_only_copilot_config_marks_safeoutputs_as_default_server() {
+    let artifact_dir = tempfile::tempdir().expect("create artifact dir");
+    let compiled = compile_inline_agent(
+        "real-copilot-cli-noop-default-server",
+        &noop_contract_source(),
+        artifact_dir.path(),
+    );
+
+    assert!(
+        compiled.contains(".value.isDefaultServer = true"),
+        "expected generated Copilot MCP config conversion to mark safeoutputs as trusted/default:\n{compiled}"
+    );
+}
+
 /// Contract test for the live Copilot CLI + SafeOutputs path.
 ///
 /// This proves that the compiler-emitted Copilot CLI surface for the Agent job
@@ -222,25 +282,7 @@ fn real_copilot_cli_noop_contract() {
     fs::create_dir_all(&artifact_dir).expect("create artifact dir");
 
     let server = start_server(&artifact_dir);
-    let source = format!(
-        r#"---
-name: "Real Copilot CLI SafeOutputs Contract"
-description: "Local contract test for compiler-emitted Copilot CLI flags"
-engine:
-  id: copilot
-  model: gpt-5-mini
-safe-outputs:
-  noop: {{}}
----
-
-## Contract
-
-Call the `noop` tool exactly once with `context` set to `{PROMPT_CONTEXT}`.
-Do not call any other tool.
-"#
-    );
-
-    let compiled = compile_inline_agent("real-copilot-cli-noop", &source, &artifact_dir);
+    let compiled = compile_inline_agent("real-copilot-cli-noop", &noop_contract_source(), &artifact_dir);
     let invocation = extract_agent_invocation(&compiled);
     fs::write(artifact_dir.join("agent-invocation.txt"), &invocation)
         .expect("write invocation artifact");
@@ -253,6 +295,10 @@ Do not call any other tool.
         invocation.contains("--allow-all-tools"),
         "default tools path should use --allow-all-tools: {invocation}"
     );
+    assert!(
+        invocation.contains("--allow-tool safeoutputs"),
+        "safeoutputs should stay explicitly allowed even on the wildcard path: {invocation}"
+    );
 
     let mcpg_template = extract_mcpg_config_template(&compiled);
     fs::write(artifact_dir.join("mcpg-config.template.json"), &mcpg_template)
@@ -262,6 +308,11 @@ Do not call any other tool.
         &mcpg_template,
         server.port,
         &server.api_key,
+    );
+    assert_eq!(
+        copilot_mcp_config["mcpServers"]["safeoutputs"]["isDefaultServer"],
+        json!(true),
+        "localized Copilot MCP config should trust the compiler-owned safeoutputs server"
     );
     let copilot_mcp_config_path = artifact_dir.join("mcp-config.json");
     fs::write(
