@@ -4287,6 +4287,67 @@ Do work.
     );
 }
 
+#[test]
+fn test_copilot_pinned_cli_repro_emits_problematic_safeoutputs_combo() {
+    // Coverage for issue #1452 repro: with default wildcard bash, the compiled
+    // Copilot invocation emits `--allow-all-tools` without an explicit
+    // `--allow-tool safeoutputs`, and the generated mcp-config conversion does
+    // not stamp `isDefaultServer: true` on the safeoutputs server entry.
+    let source = r#"---
+name: "copilot-pinned-cli-safeoutputs-repro"
+description: "repro for safeoutputs trust/allow behavior"
+engine:
+  id: copilot
+  model: gpt-5-mini
+permissions:
+  write: my-write-sc
+safe-outputs:
+  comment-on-work-item:
+    target: "MyProject\\Backend"
+    max: 1
+---
+
+## Agent
+
+Do work.
+"#;
+
+    let (ok, compiled, stderr) = compile_inline_source_with_flags(
+        "copilot-pinned-cli-safeoutputs-repro",
+        source,
+        &["--skip-integrity", "--debug-pipeline"],
+    );
+    assert!(ok, "compile should succeed.\nstderr: {stderr}");
+
+    // Pin the currently bundled/pinned Copilot CLI contract this repro is about.
+    assert!(
+        compiled.contains("releases/download/v1.0.69"),
+        "expected pinned copilot-cli v1.0.69 install URL in compiled output.\n{compiled}"
+    );
+
+    // Repro combination: wildcard path emits allow-all-tools and drops explicit
+    // safeoutputs allow-tool grant.
+    assert!(
+        compiled.contains("--allow-all-tools"),
+        "expected default wildcard tools path to emit --allow-all-tools.\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("--allow-tool safeoutputs"),
+        "repro requires no explicit --allow-tool safeoutputs on the allow-all path.\n{compiled}"
+    );
+
+    // Repro MCP config conversion: safeoutputs entry gets tools wildcard but no
+    // trusted/default marker.
+    assert!(
+        compiled.contains(".value.tools = [\"*\"]"),
+        "expected MCP config conversion to force tools wildcard.\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("isDefaultServer"),
+        "repro requires generated MCP config conversion to omit isDefaultServer.\n{compiled}"
+    );
+}
+
 /// Test that debug probe step has no unresolved template markers
 #[test]
 fn test_debug_pipeline_no_unresolved_markers() {
