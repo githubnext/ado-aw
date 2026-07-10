@@ -1620,6 +1620,118 @@ Do something.
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
+#[test]
+fn test_compiled_agent_job_copilot_invocation_uses_safeoutputs_mcp_config() {
+    let compiled = compile_inline_agent(
+        "copilot-cli-safeoutputs-default",
+        r#"---
+name: "Copilot CLI SafeOutputs"
+description: "Compile-time contract for default Copilot SafeOutputs wiring"
+engine:
+  id: copilot
+  model: gpt-5-mini
+safe-outputs:
+  noop: {}
+---
+
+## Agent
+
+Call the noop tool exactly once.
+"#,
+    );
+
+    let agent = extract_job_block(&compiled, "Agent").expect("Agent job should exist");
+    let detection =
+        extract_job_block(&compiled, "Detection").expect("Detection job should exist");
+
+    assert!(
+        agent.contains(
+            "/tmp/awf-tools/copilot --prompt \"$(cat /tmp/awf-tools/agent-prompt.md)\" \
+             --additional-mcp-config @/tmp/awf-tools/mcp-config.json"
+        ),
+        "agent job should pass compiler-emitted MCP config to Copilot CLI: {agent}"
+    );
+    assert!(
+        agent.contains("--allow-all-tools"),
+        "default unrestricted tools path should emit --allow-all-tools: {agent}"
+    );
+    assert!(
+        !detection.contains("--additional-mcp-config"),
+        "detection job should not receive the SafeOutputs MCP config: {detection}"
+    );
+    assert!(
+        compiled.contains("\"safeoutputs\": {\n            \"type\": \"http\""),
+        "compiled MCPG config should include the SafeOutputs HTTP backend: {compiled}"
+    );
+    assert!(
+        compiled.contains("\"url\": \"http://localhost:${SAFE_OUTPUTS_PORT}/mcp\""),
+        "compiled MCPG config should keep the runtime SafeOutputs port placeholder: {compiled}"
+    );
+    assert!(
+        compiled.contains("\"Authorization\": \"******""),
+        "compiled MCPG config should keep the runtime SafeOutputs auth placeholder: {compiled}"
+    );
+}
+
+#[test]
+fn test_compiled_agent_job_copilot_invocation_supports_representative_cli_variants() {
+    let compiled = compile_inline_agent(
+        "copilot-cli-safeoutputs-matrix",
+        r#"---
+name: "Copilot CLI Matrix"
+description: "Compile-time contract for representative Copilot CLI surface variants"
+tools:
+  bash:
+    - echo
+engine:
+  id: copilot
+  model: gpt-5-mini
+  agent: my-custom-agent
+  api-target: api.example.com
+  args:
+    - --reasoning-effort=high
+safe-outputs:
+  noop: {}
+---
+
+## Agent
+
+Call the noop tool exactly once.
+"#,
+    );
+
+    let agent = extract_job_block(&compiled, "Agent").expect("Agent job should exist");
+
+    assert!(
+        !agent.contains("--allow-all-tools"),
+        "restricted bash path should not emit --allow-all-tools: {agent}"
+    );
+    assert!(
+        agent.contains("--allow-tool safeoutputs"),
+        "restricted bash path must explicitly allow the SafeOutputs MCP server: {agent}"
+    );
+    assert!(
+        agent.contains("--allow-tool \"shell(echo)\""),
+        "restricted bash path must emit the configured bash allowlist: {agent}"
+    );
+    assert!(
+        agent.contains("--agent my-custom-agent"),
+        "engine.agent should flow through the compiled Copilot CLI invocation: {agent}"
+    );
+    assert!(
+        agent.contains("--api-target api.example.com"),
+        "engine.api-target should flow through the compiled Copilot CLI invocation: {agent}"
+    );
+    assert!(
+        agent.contains("--reasoning-effort=high"),
+        "engine.args should append additive Copilot CLI arguments: {agent}"
+    );
+    assert!(
+        agent.contains("--additional-mcp-config @/tmp/awf-tools/mcp-config.json"),
+        "restricted tools path should still use the compiler-emitted MCP config: {agent}"
+    );
+}
+
 // ==================== Azure DevOps MCP Integration Tests ====================
 
 /// Test that the Azure DevOps MCP fixture compiles successfully with no unreplaced markers

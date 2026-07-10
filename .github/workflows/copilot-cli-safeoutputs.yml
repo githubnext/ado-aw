@@ -1,0 +1,98 @@
+name: Copilot CLI SafeOutputs Contract
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/copilot-cli-safeoutputs.yml"
+  workflow_dispatch:
+  schedule:
+    - cron: "0 8 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      ADO_AW_COPILOT_CLI_ARTIFACT_DIR: ${{ runner.temp }}/copilot-cli-safeoutputs
+      COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GH_AW_GITHUB_TOKEN || '' }}
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Verify trusted Copilot auth is available
+        run: |
+          set -euo pipefail
+          if [ -z "${COPILOT_GITHUB_TOKEN}" ]; then
+            echo "::error::Set COPILOT_GITHUB_TOKEN (or GH_AW_GITHUB_TOKEN) for this workflow."
+            exit 1
+          fi
+
+      - name: Select stable Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Resolve compiler-pinned Copilot CLI version
+        id: copilot-version
+        run: |
+          set -euo pipefail
+          version="$(
+            python3 - <<'PY'
+            import pathlib
+            import re
+
+            text = pathlib.Path("src/engine.rs").read_text()
+            match = re.search(r'pub const COPILOT_CLI_VERSION: &str = "([^"]+)"', text)
+            if not match:
+                raise SystemExit("COPILOT_CLI_VERSION not found")
+            print(match.group(1))
+            PY
+          )"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Install compiler-pinned GitHub Copilot CLI
+        run: |
+          set -euo pipefail
+          version="${{ steps.copilot-version.outputs.version }}"
+          base_url="https://github.com/github/copilot-cli/releases/download/v${version}"
+          temp_dir="$(mktemp -d)"
+          trap 'rm -rf "$temp_dir"' EXIT
+          curl -fsSL --retry 3 --retry-delay 5 \
+            -o "$temp_dir/copilot-linux-x64.tar.gz" \
+            "$base_url/copilot-linux-x64.tar.gz"
+          curl -fsSL --retry 3 --retry-delay 5 \
+            -o "$temp_dir/SHA256SUMS.txt" \
+            "$base_url/SHA256SUMS.txt"
+          expected="$(awk '$2 == "copilot-linux-x64.tar.gz" { print $1; exit }' "$temp_dir/SHA256SUMS.txt" | tr 'A-F' 'a-f')"
+          actual="$(sha256sum "$temp_dir/copilot-linux-x64.tar.gz" | awk '{ print $1 }' | tr 'A-F' 'a-f')"
+          test -n "$expected"
+          test "$expected" = "$actual"
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$temp_dir/copilot-linux-x64.tar.gz" -C "$temp_dir"
+          install -m 0755 "$temp_dir/copilot" "$RUNNER_TEMP/bin/copilot"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/copilot" --version
+
+      - name: Run live Copilot CLI + SafeOutputs contract test
+        run: cargo test --test copilot_cli_safeoutputs_tests real_copilot_cli_noop_contract -- --ignored --nocapture
+
+      - name: Upload contract-test artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: copilot-cli-safeoutputs-contract-artifacts
+          path: ${{ runner.temp }}/copilot-cli-safeoutputs
+          if-no-files-found: ignore
