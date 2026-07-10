@@ -3445,8 +3445,8 @@ mod tests {
             "wildcard bash should emit --allow-all-tools"
         );
         assert!(
-            !params.contains("--allow-tool"),
-            "no individual --allow-tool flags with --allow-all-tools"
+            params.contains("--allow-tool safeoutputs"),
+            "safeoutputs should be explicitly allowed even with --allow-all-tools"
         );
     }
 
@@ -3465,8 +3465,8 @@ mod tests {
             "\"*\" should behave same as \":*\""
         );
         assert!(
-            !params.contains("--allow-tool"),
-            "no individual --allow-tool flags with --allow-all-tools"
+            params.contains("--allow-tool safeoutputs"),
+            "safeoutputs should be explicitly allowed even with --allow-all-tools"
         );
     }
 
@@ -3511,8 +3511,8 @@ mod tests {
             "default (no bash) should emit --allow-all-tools"
         );
         assert!(
-            !params.contains("--allow-tool"),
-            "no individual --allow-tool flags with --allow-all-tools"
+            params.contains("--allow-tool safeoutputs"),
+            "safeoutputs should be explicitly allowed even with --allow-all-tools"
         );
     }
 
@@ -3555,8 +3555,8 @@ mod tests {
             "edit enabled should still emit --allow-all-paths"
         );
         assert!(
-            !params.contains("--allow-tool"),
-            "no individual --allow-tool flags"
+            params.contains("--allow-tool safeoutputs"),
+            "safeoutputs should be explicitly allowed even with --allow-all-tools"
         );
     }
 
@@ -3615,10 +3615,13 @@ mod tests {
             params.contains("--allow-all-tools"),
             "wildcard should use --allow-all-tools"
         );
-        // Should NOT add individual tool flags when --allow-all-tools is active
         assert!(
-            !params.contains("--allow-tool"),
-            "no individual tool flags with --allow-all-tools"
+            params.contains("--allow-tool safeoutputs"),
+            "safeoutputs should be explicitly allowed even with --allow-all-tools"
+        );
+        assert!(
+            !params.contains("shell(lean)"),
+            "runtime shell tools should still be covered by --allow-all-tools"
         );
     }
 
@@ -3636,6 +3639,10 @@ mod tests {
         assert!(
             !params.contains("--allow-tool my-tool"),
             "default (all-tools) mode should not emit individual --allow-tool for MCPs"
+        );
+        assert!(
+            params.contains("--allow-tool safeoutputs"),
+            "compiler-owned safeoutputs should still get an explicit grant"
         );
     }
 
