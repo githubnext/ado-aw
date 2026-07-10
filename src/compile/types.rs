@@ -99,7 +99,6 @@ impl PoolConfig {
     }
 
     /// Get the ordered Azure Pipelines demands list.
-    #[cfg(test)]
     pub fn demands(&self) -> &[String] {
         match self {
             PoolConfig::Name(_) => &[],

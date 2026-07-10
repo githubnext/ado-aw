@@ -850,7 +850,7 @@ fn lower_pool(pool: &Pool) -> Value {
             if !demands.is_empty() {
                 m.insert(
                     s("demands"),
-                    Value::Sequence(demands.iter().map(|d| s(d)).collect()),
+                    Value::Sequence(demands.iter().map(s).collect()),
                 );
             }
             if let Some(img) = image {
@@ -1601,12 +1601,31 @@ mod tests {
             shape: PipelineShape::Standalone,
         };
         let v = super::lower(&p).unwrap();
-        let yaml = serde_yaml::to_string(&v).unwrap();
-        assert!(
-            yaml.contains(
-                "pool:\n    name: CustomPool\n    demands:\n    - CustomCapability -equals required-value\n    - Agent.OS -equals Linux"
-            ),
-            "expected named pool demands in:\n{yaml}"
+        let jobs = v
+            .as_mapping()
+            .and_then(|m| m.get(s("jobs")))
+            .and_then(|v| v.as_sequence())
+            .expect("lowered pipeline should contain jobs sequence");
+        let pool = jobs[0]
+            .as_mapping()
+            .and_then(|m| m.get(s("pool")))
+            .and_then(|v| v.as_mapping())
+            .expect("lowered job should contain pool mapping");
+
+        assert_eq!(pool.get(s("name")).and_then(|v| v.as_str()), Some("CustomPool"));
+        let demands: Vec<&str> = pool
+            .get(s("demands"))
+            .and_then(|v| v.as_sequence())
+            .expect("named pool should contain demands sequence")
+            .iter()
+            .map(|v| v.as_str().expect("demand should be a string"))
+            .collect();
+        assert_eq!(
+            demands,
+            vec![
+                "CustomCapability -equals required-value",
+                "Agent.OS -equals Linux"
+            ]
         );
     }
 

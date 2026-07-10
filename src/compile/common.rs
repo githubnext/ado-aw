@@ -1197,20 +1197,28 @@ pub fn resolve_pool_typed(
                 None => (DEFAULT_ONEES_POOL.to_string(), "linux".to_string()),
                 Some(PoolConfig::Name(name)) => (name.clone(), "linux".to_string()),
                 Some(PoolConfig::Full(full)) => {
-                    if let (Some(name), Some(vm_image)) =
-                        (full.name.as_deref(), full.vm_image.as_deref())
-                    {
-                        anyhow::bail!(
-                            "pool cannot specify both `name` and `vmImage` (got name='{}', vmImage='{}')",
-                            name,
-                            vm_image
-                        );
-                    }
-                    if let Some(vm_image) = full.vm_image.as_deref() {
-                        anyhow::bail!(
-                            "target: 1es does not support `pool.vmImage` ('{}'); use `pool.name` for a 1ES pool",
-                            vm_image
-                        );
+                    match (full.name.as_deref(), full.vm_image.as_deref()) {
+                        (Some(name), Some(vm_image)) if !full.demands.is_empty() => {
+                            anyhow::bail!(
+                                "pool cannot specify both `name` and `vmImage` (got name='{}', vmImage='{}'); `pool.demands` cannot be used with `pool.vmImage`",
+                                name,
+                                vm_image
+                            );
+                        }
+                        (Some(name), Some(vm_image)) => {
+                            anyhow::bail!(
+                                "pool cannot specify both `name` and `vmImage` (got name='{}', vmImage='{}')",
+                                name,
+                                vm_image
+                            );
+                        }
+                        (_, Some(vm_image)) => {
+                            anyhow::bail!(
+                                "target: 1es does not support `pool.vmImage` ('{}'); use `pool.name` for a 1ES pool",
+                                vm_image
+                            );
+                        }
+                        _ => {}
                     }
                     (
                         full.name
@@ -1225,10 +1233,7 @@ pub fn resolve_pool_typed(
                 name,
                 image: None,
                 os: Some(os),
-                demands: match pool {
-                    Some(PoolConfig::Full(full)) => full.demands.clone(),
-                    _ => Vec::new(),
-                },
+                demands: pool.map(PoolConfig::demands).unwrap_or_default().to_vec(),
             })
         }
         _ => {
@@ -1243,6 +1248,11 @@ pub fn resolve_pool_typed(
                     demands: Vec::new(),
                 }),
                 PoolConfig::Full(full) => match (full.name.as_deref(), full.vm_image.as_deref()) {
+                    (Some(name), Some(vm_image)) if !full.demands.is_empty() => anyhow::bail!(
+                        "pool cannot specify both `name` and `vmImage` (got name='{}', vmImage='{}'); `pool.demands` cannot be used with `pool.vmImage`",
+                        name,
+                        vm_image
+                    ),
                     (Some(name), Some(vm_image)) => anyhow::bail!(
                         "pool cannot specify both `name` and `vmImage` (got name='{}', vmImage='{}')",
                         name,
@@ -2825,6 +2835,25 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("pool.demands requires `pool.name`"), "err: {err}");
+    }
+
+    #[test]
+    fn resolve_pool_typed_rejects_demands_with_name_and_vm_image() {
+        let pool = PoolConfig::Full(PoolConfigFull {
+            name: Some("CustomPool".to_string()),
+            vm_image: Some("ubuntu-22.04".to_string()),
+            os: None,
+            demands: vec!["CustomCapability".to_string()],
+        });
+
+        let err = resolve_pool_typed(CompileTarget::Standalone, Some(&pool))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("pool cannot specify both `name` and `vmImage`")
+                && err.contains("`pool.demands` cannot be used with `pool.vmImage`"),
+            "err: {err}"
+        );
     }
 
     #[test]
