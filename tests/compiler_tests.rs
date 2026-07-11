@@ -4160,6 +4160,56 @@ fn test_named_pool_demands_compile_to_1es_shared_pool() {
     );
 }
 
+#[test]
+fn test_1es_pool_demands_require_named_pool() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-1es-default-demands-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("invalid-1es-demands.md");
+    fs::write(
+        &test_input,
+        r#"---
+name: "Invalid 1ES Demands"
+description: "1ES demands without an explicit named pool"
+target: 1es
+pool:
+  demands:
+    - CustomCapability -equals required-value
+---
+
+## Invalid 1ES Demands
+"#,
+    )
+    .expect("Failed to write test input");
+
+    let output_path = temp_dir.join("invalid-1es-demands.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should fail when 1ES pool.demands omits pool.name"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("pool.demands requires `pool.name`") && stderr.contains("default 1ES pool"),
+        "Error message should mention the missing 1ES named pool: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
 /// Test that the complete standalone fixture emits Setup/Teardown jobs and
 /// that the agentic task waits on Setup. The fixture has `setup:`,
 /// `teardown:`, and `post-steps:` sections so all three should appear.
