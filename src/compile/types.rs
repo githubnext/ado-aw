@@ -6,6 +6,11 @@ use crate::sanitize::SanitizeConfig as SanitizeConfigTrait;
 use ado_aw_derive::SanitizeConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::OnceLock;
+
+/// Shared empty overrides map returned by `PoolConfig::overrides()` and
+/// `FrontMatter::pool_overrides()` when no per-job overrides are configured.
+static EMPTY_OVERRIDES: OnceLock<HashMap<String, PoolConfig>> = OnceLock::new();
 
 /// Target platform for compiled pipeline
 #[derive(Debug, Deserialize, Clone, Default, PartialEq)]
@@ -120,11 +125,7 @@ impl PoolConfig {
     /// Returns an empty map for the legacy string form (`Name` variant).
     pub fn overrides(&self) -> &HashMap<String, PoolConfig> {
         match self {
-            PoolConfig::Name(_) => {
-                use std::sync::OnceLock;
-                static EMPTY: OnceLock<HashMap<String, PoolConfig>> = OnceLock::new();
-                EMPTY.get_or_init(HashMap::new)
-            }
+            PoolConfig::Name(_) => EMPTY_OVERRIDES.get_or_init(HashMap::new),
             PoolConfig::Full(full) => &full.overrides,
         }
     }
@@ -1220,12 +1221,10 @@ impl FrontMatter {
     /// Delegates to `pool.overrides` when a full pool object is present;
     /// returns an empty map when `pool:` is absent or in legacy string form.
     pub fn pool_overrides(&self) -> &HashMap<String, PoolConfig> {
-        use std::sync::OnceLock;
-        static EMPTY: OnceLock<HashMap<String, PoolConfig>> = OnceLock::new();
         self.pool
             .as_ref()
             .map(|p| p.overrides())
-            .unwrap_or_else(|| EMPTY.get_or_init(HashMap::new))
+            .unwrap_or_else(|| EMPTY_OVERRIDES.get_or_init(HashMap::new))
     }
 }
 

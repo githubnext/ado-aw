@@ -1310,6 +1310,9 @@ struct SafeOutputsVariant {
     /// (issue #1453 review). Avoids a wasted Node install + bundle fetch +
     /// prepare step in the variant that will never open a PR.
     runs_create_pull_request: bool,
+    /// Whether this is the manual-review-gated `SafeOutputs_Reviewed` variant.
+    /// Used to select the correct pool override without relying on the job name.
+    is_reviewed: bool,
 }
 
 impl SafeOutputsVariant {
@@ -1322,6 +1325,7 @@ impl SafeOutputsVariant {
             artifact: "safe_outputs",
             filter_args: String::new(),
             runs_create_pull_request,
+            is_reviewed: false,
         }
     }
 
@@ -1334,6 +1338,7 @@ impl SafeOutputsVariant {
             artifact: "safe_outputs",
             filter_args: filter_flags("--exclude", reviewed),
             runs_create_pull_request,
+            is_reviewed: false,
         }
     }
 
@@ -1346,6 +1351,7 @@ impl SafeOutputsVariant {
             artifact: "safe_outputs_reviewed",
             filter_args: filter_flags("--only", reviewed),
             runs_create_pull_request,
+            is_reviewed: true,
         }
     }
 }
@@ -1508,7 +1514,7 @@ fn build_safeoutputs_job(
         condition: Some(Condition::Always),
     }));
 
-    let safeoutputs_pool = if variant.base == "SafeOutputs_Reviewed" {
+    let safeoutputs_pool = if variant.is_reviewed {
         cfg.pools.safe_outputs_reviewed.clone()
     } else {
         cfg.pools.safe_outputs.clone()
