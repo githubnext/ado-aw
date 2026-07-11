@@ -1199,16 +1199,10 @@ pub fn resolve_pool_typed(
                 Some(PoolConfig::Full(full)) => {
                     match (full.name.as_deref(), full.vm_image.as_deref()) {
                         (Some(name), Some(vm_image)) => {
-                            let mut message = format!(
+                            anyhow::bail!(
                                 "pool cannot specify both `name` and `vmImage` (got name='{}', vmImage='{}')",
                                 name, vm_image
                             );
-                            if !full.demands.is_empty() {
-                                message.push_str(
-                                    "; `pool.demands` cannot be used with `pool.vmImage`",
-                                );
-                            }
-                            anyhow::bail!(message);
                         }
                         (_, Some(vm_image)) => {
                             anyhow::bail!(

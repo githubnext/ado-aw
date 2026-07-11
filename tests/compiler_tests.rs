@@ -4207,7 +4207,12 @@ pool:
         "Error message should mention the missing 1ES named pool: {stderr}"
     );
 
-    let _ = fs::remove_dir_all(&temp_dir);
+    fs::remove_dir_all(&temp_dir).unwrap_or_else(|e| {
+        panic!(
+            "Failed to remove temp directory {}: {e}",
+            temp_dir.display()
+        )
+    });
 }
 
 /// Test that the complete standalone fixture emits Setup/Teardown jobs and
