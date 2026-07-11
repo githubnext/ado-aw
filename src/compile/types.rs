@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 
 /// Shared empty overrides map returned by `PoolConfig::overrides()` and
 /// `FrontMatter::pool_overrides()` when no per-job overrides are configured.
-static EMPTY_OVERRIDES: OnceLock<HashMap<String, PoolConfig>> = OnceLock::new();
+static EMPTY_OVERRIDES: OnceLock<HashMap<String, PoolConfigFull>> = OnceLock::new();
 
 /// Target platform for compiled pipeline
 #[derive(Debug, Deserialize, Clone, Default, PartialEq)]
@@ -123,7 +123,7 @@ impl PoolConfig {
     /// Get the per-job pool overrides map, if any.
     ///
     /// Returns an empty map for the legacy string form (`Name` variant).
-    pub fn overrides(&self) -> &HashMap<String, PoolConfig> {
+    pub fn overrides(&self) -> &HashMap<String, PoolConfigFull> {
         match self {
             PoolConfig::Name(_) => EMPTY_OVERRIDES.get_or_init(HashMap::new),
             PoolConfig::Full(full) => &full.overrides,
@@ -151,8 +151,12 @@ pub struct PoolConfigFull {
     #[serde(default)]
     pub demands: Vec<String>,
     /// Per-job pool overrides — optional map of canonical job name to
-    /// [`PoolConfig`]. Any entry replaces the resolved default `pool:` for
+    /// [`PoolConfigFull`]. Any entry replaces the resolved default `pool:` for
     /// exactly that job; unspecified jobs inherit `pool:`.
+    ///
+    /// Only the object form is accepted here (a bare pool-name string is not
+    /// supported; use `name:` instead). The top-level `pool:` legacy string is
+    /// handled by a codemod before compilation reaches this point.
     ///
     /// Valid keys: `setup`, `agent`, `detection`, `safe-outputs`,
     /// `safe-outputs-reviewed`, `teardown`, `conclusion`.
@@ -164,7 +168,7 @@ pub struct PoolConfigFull {
     ///
     /// See `docs/front-matter.md` for the full reference.
     #[serde(default)]
-    pub overrides: HashMap<String, PoolConfig>,
+    pub overrides: HashMap<String, PoolConfigFull>,
 }
 
 impl SanitizeConfigTrait for PoolConfigFull {
@@ -1220,7 +1224,7 @@ impl FrontMatter {
     ///
     /// Delegates to `pool.overrides` when a full pool object is present;
     /// returns an empty map when `pool:` is absent or in legacy string form.
-    pub fn pool_overrides(&self) -> &HashMap<String, PoolConfig> {
+    pub fn pool_overrides(&self) -> &HashMap<String, PoolConfigFull> {
         self.pool
             .as_ref()
             .map(|p| p.overrides())

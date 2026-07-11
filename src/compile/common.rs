@@ -8,8 +8,8 @@ use super::extensions::{
     CompilerExtension, Declarations, McpgConfig, McpgGatewayConfig, McpgServerConfig,
 };
 use super::types::{
-    CheckoutFetchOpts, CompileTarget, FrontMatter, PipelineParameter, PoolConfig, ReposItem,
-    Repository, SELF_CHECKOUT_ALIAS,
+    CheckoutFetchOpts, CompileTarget, FrontMatter, PipelineParameter, PoolConfig, PoolConfigFull,
+    ReposItem, Repository, SELF_CHECKOUT_ALIAS,
 };
 use crate::allowed_hosts::{CORE_ALLOWED_HOSTS, mcp_required_hosts};
 use crate::compile::types::McpConfig;
@@ -1319,7 +1319,7 @@ const VALID_POOL_OVERRIDE_KEYS: &[&str] = &[
 pub fn resolve_pool_overrides_typed(
     target: CompileTarget,
     pool: Option<&PoolConfig>,
-    overrides: &HashMap<String, PoolConfig>,
+    overrides: &HashMap<String, PoolConfigFull>,
 ) -> Result<PerJobPools> {
     use crate::compile::ir::job::Pool;
 
@@ -1348,7 +1348,9 @@ pub fn resolve_pool_overrides_typed(
     // Resolve an override for a named key, or fall back to the default.
     let resolve = |key: &str| -> Result<Pool> {
         match overrides.get(key) {
-            Some(override_cfg) => resolve_pool_typed(target.clone(), Some(override_cfg)),
+            Some(override_cfg) => {
+                resolve_pool_typed(target.clone(), Some(&PoolConfig::Full(override_cfg.clone())))
+            }
             None => Ok(default_pool.clone()),
         }
     };
@@ -1356,7 +1358,9 @@ pub fn resolve_pool_overrides_typed(
     let safe_outputs = resolve("safe-outputs")?;
     // safe-outputs-reviewed inherits safe-outputs unless separately specified.
     let safe_outputs_reviewed = match overrides.get("safe-outputs-reviewed") {
-        Some(override_cfg) => resolve_pool_typed(target.clone(), Some(override_cfg))?,
+        Some(override_cfg) => {
+            resolve_pool_typed(target.clone(), Some(&PoolConfig::Full(override_cfg.clone())))?
+        }
         None => safe_outputs.clone(),
     };
 
@@ -7163,11 +7167,25 @@ repos:
         })
     }
 
+    fn vm_image_pool_full(image: &str) -> PoolConfigFull {
+        PoolConfigFull {
+            vm_image: Some(image.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn named_pool_full(name: &str) -> PoolConfigFull {
+        PoolConfigFull {
+            name: Some(name.to_string()),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn pool_overrides_empty_inherits_default() {
         // Empty overrides map → every job uses the default pool.
         let default = vm_image_pool("ubuntu-22.04");
-        let overrides = HashMap::new();
+        let overrides: HashMap<String, PoolConfigFull> = HashMap::new();
         let per_job =
             resolve_pool_overrides_typed(CompileTarget::Standalone, Some(&default), &overrides)
                 .unwrap();
@@ -7185,7 +7203,7 @@ repos:
     fn pool_overrides_detection_only() {
         let default = named_pool("SpecializedPool");
         let mut overrides = HashMap::new();
-        overrides.insert("detection".to_string(), vm_image_pool("ubuntu-22.04"));
+        overrides.insert("detection".to_string(), vm_image_pool_full("ubuntu-22.04"));
         let per_job =
             resolve_pool_overrides_typed(CompileTarget::Standalone, Some(&default), &overrides)
                 .unwrap();
@@ -7208,7 +7226,7 @@ repos:
     fn pool_overrides_safe_outputs_inherits_to_reviewed() {
         let default = named_pool("SpecializedPool");
         let mut overrides = HashMap::new();
-        overrides.insert("safe-outputs".to_string(), vm_image_pool("ubuntu-22.04"));
+        overrides.insert("safe-outputs".to_string(), vm_image_pool_full("ubuntu-22.04"));
         let per_job =
             resolve_pool_overrides_typed(CompileTarget::Standalone, Some(&default), &overrides)
                 .unwrap();
@@ -7222,10 +7240,10 @@ repos:
     fn pool_overrides_safe_outputs_reviewed_independent() {
         let default = named_pool("SpecializedPool");
         let mut overrides = HashMap::new();
-        overrides.insert("safe-outputs".to_string(), vm_image_pool("ubuntu-22.04"));
+        overrides.insert("safe-outputs".to_string(), vm_image_pool_full("ubuntu-22.04"));
         overrides.insert(
             "safe-outputs-reviewed".to_string(),
-            named_pool("ReviewPool"),
+            named_pool_full("ReviewPool"),
         );
         let per_job =
             resolve_pool_overrides_typed(CompileTarget::Standalone, Some(&default), &overrides)
@@ -7249,7 +7267,7 @@ repos:
     fn pool_overrides_rejects_manual_review() {
         let default = vm_image_pool("ubuntu-22.04");
         let mut overrides = HashMap::new();
-        overrides.insert("manual-review".to_string(), vm_image_pool("ubuntu-22.04"));
+        overrides.insert("manual-review".to_string(), vm_image_pool_full("ubuntu-22.04"));
         let err =
             resolve_pool_overrides_typed(CompileTarget::Standalone, Some(&default), &overrides)
                 .unwrap_err()
@@ -7267,11 +7285,11 @@ repos:
     #[test]
     fn pool_overrides_override_with_demands() {
         let default = named_pool("SpecializedPool");
-        let override_pool = PoolConfig::Full(PoolConfigFull {
+        let override_pool = PoolConfigFull {
             name: Some("DetectionPool".to_string()),
             demands: vec!["Agent.OS -equals Linux".to_string()],
             ..Default::default()
-        });
+        };
         let mut overrides = HashMap::new();
         overrides.insert("detection".to_string(), override_pool);
         let per_job =
@@ -7292,11 +7310,11 @@ repos:
     fn pool_overrides_rejects_invalid_pool_combo() {
         // name + vmImage together is always rejected regardless of where it appears.
         let default = vm_image_pool("ubuntu-22.04");
-        let bad_override = PoolConfig::Full(PoolConfigFull {
+        let bad_override = PoolConfigFull {
             name: Some("SomePool".to_string()),
             vm_image: Some("ubuntu-22.04".to_string()),
             ..Default::default()
-        });
+        };
         let mut overrides = HashMap::new();
         overrides.insert("detection".to_string(), bad_override);
         let err =
@@ -7309,7 +7327,7 @@ repos:
     #[test]
     fn pool_overrides_no_default_pool_uses_ubuntu_fallback() {
         // When the top-level pool: is omitted, defaults to ubuntu-22.04.
-        let overrides: HashMap<String, PoolConfig> = HashMap::new();
+        let overrides: HashMap<String, PoolConfigFull> = HashMap::new();
         let per_job = resolve_pool_overrides_typed(CompileTarget::Standalone, None, &overrides)
             .unwrap();
         let expected = crate::compile::ir::job::Pool::VmImage("ubuntu-22.04".to_string());
@@ -7322,16 +7340,16 @@ repos:
         // Override every key to a distinct pool and verify each ends up in the right field.
         let default = vm_image_pool("ubuntu-22.04");
         let mut overrides = HashMap::new();
-        overrides.insert("setup".to_string(), named_pool("SetupPool"));
-        overrides.insert("agent".to_string(), named_pool("AgentPool"));
-        overrides.insert("detection".to_string(), named_pool("DetectionPool"));
-        overrides.insert("safe-outputs".to_string(), named_pool("SafeOutputsPool"));
+        overrides.insert("setup".to_string(), named_pool_full("SetupPool"));
+        overrides.insert("agent".to_string(), named_pool_full("AgentPool"));
+        overrides.insert("detection".to_string(), named_pool_full("DetectionPool"));
+        overrides.insert("safe-outputs".to_string(), named_pool_full("SafeOutputsPool"));
         overrides.insert(
             "safe-outputs-reviewed".to_string(),
-            named_pool("SafeOutputsReviewedPool"),
+            named_pool_full("SafeOutputsReviewedPool"),
         );
-        overrides.insert("teardown".to_string(), named_pool("TeardownPool"));
-        overrides.insert("conclusion".to_string(), named_pool("ConclusionPool"));
+        overrides.insert("teardown".to_string(), named_pool_full("TeardownPool"));
+        overrides.insert("conclusion".to_string(), named_pool_full("ConclusionPool"));
         let per_job =
             resolve_pool_overrides_typed(CompileTarget::Standalone, Some(&default), &overrides)
                 .unwrap();
