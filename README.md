@@ -564,7 +564,7 @@ Commands:
   graph         Query the resolved dependency graph for an agent source file
   whatif        Static reachability: classify jobs skipped if a step or job fails
   lint          Run structural lint checks over an agent source file
-  catalog       List safe-outputs, runtimes, tools, engines, and models
+  catalog       List safe-outputs, runtimes, tools, engines, models, and versions
 
 Options:
   -v, --verbose              Enable info-level logging

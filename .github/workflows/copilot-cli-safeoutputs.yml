@@ -40,18 +40,8 @@ jobs:
         id: copilot-version
         run: |
           set -euo pipefail
-          version="$(
-            python3 - <<'PY'
-            import pathlib
-            import re
-
-            text = pathlib.Path("src/engine.rs").read_text()
-            match = re.search(r'pub const COPILOT_CLI_VERSION: &str = "([^"]+)"', text)
-            if not match:
-                raise SystemExit("COPILOT_CLI_VERSION not found")
-            print(match.group(1))
-            PY
-          )"
+          version="$(cargo run --quiet -- catalog --kind versions --json | jq -r '.versions.copilot_cli')"
+          test -n "$version" && test "$version" != "null"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
       - name: Install compiler-pinned GitHub Copilot CLI

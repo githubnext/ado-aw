@@ -39,7 +39,9 @@ pub use common::ADO_MCP_ENTRYPOINT;
 pub use common::ADO_MCP_IMAGE;
 pub use common::ADO_MCP_PACKAGE;
 pub use common::ADO_MCP_SERVER_NAME;
+pub use common::AWF_VERSION;
 pub use common::HEADER_MARKER;
+pub use common::MCPG_VERSION;
 pub use common::normalize_source_path;
 #[allow(unused_imports)]
 pub use common::parse_markdown;

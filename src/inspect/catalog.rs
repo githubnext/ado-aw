@@ -5,7 +5,8 @@ use std::fmt;
 
 use serde::Serialize;
 
-use crate::engine::DEFAULT_COPILOT_MODEL;
+use crate::compile::{AWF_VERSION, MCPG_VERSION};
+use crate::engine::{COPILOT_CLI_VERSION, DEFAULT_COPILOT_MODEL};
 use crate::safe_outputs::{ALL_KNOWN_SAFE_OUTPUTS, ALWAYS_ON_TOOLS, DEBUG_ONLY_TOOLS};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -28,6 +29,21 @@ pub struct ToolCatalogEntry {
     pub description: String,
 }
 
+/// Pinned semver versions the compiler embeds, surfaced so CI and tooling can
+/// read them deterministically instead of scraping the Rust source. Only
+/// genuine semver version constants are included — container image references
+/// and the default model name are intentionally excluded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VersionCatalog {
+    /// Pinned GitHub Copilot CLI version (`engine::COPILOT_CLI_VERSION`).
+    pub copilot_cli: String,
+    /// Pinned AWF (Agentic Workflow Firewall) binary version
+    /// (`compile::common::AWF_VERSION`).
+    pub awf: String,
+    /// Pinned MCP Gateway version (`compile::common::MCPG_VERSION`).
+    pub mcpg: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct Catalog {
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -40,6 +56,8 @@ pub struct Catalog {
     pub engines: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub versions: Option<VersionCatalog>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,7 +69,7 @@ impl fmt::Display for UnknownCatalogKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "unknown --kind '{}' (expected one of: safe-outputs, runtimes, tools, engines, models)",
+            "unknown --kind '{}' (expected one of: safe-outputs, runtimes, tools, engines, models, versions)",
             self.kind
         )
     }
@@ -66,6 +84,7 @@ pub enum CatalogKind {
     Tools,
     Engines,
     Models,
+    Versions,
 }
 
 impl CatalogKind {
@@ -76,6 +95,7 @@ impl CatalogKind {
             "tools" => Ok(Self::Tools),
             "engines" => Ok(Self::Engines),
             "models" => Ok(Self::Models),
+            "versions" => Ok(Self::Versions),
             other => Err(UnknownCatalogKind {
                 kind: other.to_string(),
             }),
@@ -90,6 +110,7 @@ pub fn catalog() -> Catalog {
         tools: tools(),
         engines: engines(),
         models: models(),
+        versions: Some(versions()),
     }
 }
 
@@ -114,6 +135,10 @@ pub fn catalog_kind(kind: &str) -> Result<Catalog, UnknownCatalogKind> {
         },
         CatalogKind::Models => Catalog {
             models: models(),
+            ..Catalog::default()
+        },
+        CatalogKind::Versions => Catalog {
+            versions: Some(versions()),
             ..Catalog::default()
         },
     })
@@ -161,8 +186,23 @@ pub fn render_text(catalog: &Catalog) -> String {
         for model in &catalog.models {
             out.push_str(&format!("  {model}\n"));
         }
+        out.push('\n');
+    }
+    if let Some(versions) = &catalog.versions {
+        out.push_str("Versions\n");
+        out.push_str(&format!("  copilot-cli {}\n", versions.copilot_cli));
+        out.push_str(&format!("  awf {}\n", versions.awf));
+        out.push_str(&format!("  mcpg {}\n", versions.mcpg));
     }
     out.trim_end().to_string()
+}
+
+fn versions() -> VersionCatalog {
+    VersionCatalog {
+        copilot_cli: COPILOT_CLI_VERSION.to_string(),
+        awf: AWF_VERSION.to_string(),
+        mcpg: MCPG_VERSION.to_string(),
+    }
 }
 
 fn safe_outputs() -> Vec<SafeOutputCatalogEntry> {
@@ -318,5 +358,32 @@ mod tests {
     fn unknown_inspect_catalog_kind_returns_typed_error() {
         let err = catalog_kind("widgets").unwrap_err();
         assert_eq!(err.kind, "widgets");
+    }
+
+    #[test]
+    fn versions_inspect_catalog_kind_returns_pinned_semver_constants() {
+        let catalog = catalog_kind("versions").unwrap();
+        let versions = catalog.versions.expect("versions populated");
+        assert_eq!(versions.copilot_cli, COPILOT_CLI_VERSION);
+        assert_eq!(versions.awf, AWF_VERSION);
+        assert_eq!(versions.mcpg, MCPG_VERSION);
+        // Only the versions category is populated for --kind versions.
+        assert!(catalog.safe_outputs.is_empty());
+        assert!(catalog.models.is_empty());
+    }
+
+    #[test]
+    fn full_catalog_includes_versions() {
+        let catalog = catalog();
+        assert!(catalog.versions.is_some());
+    }
+
+    #[test]
+    fn versions_catalog_serializes_semver_fields_as_json() {
+        let catalog = catalog_kind("versions").unwrap();
+        let value = serde_json::to_value(&catalog).unwrap();
+        assert_eq!(value["versions"]["copilot_cli"], COPILOT_CLI_VERSION);
+        assert_eq!(value["versions"]["awf"], AWF_VERSION);
+        assert_eq!(value["versions"]["mcpg"], MCPG_VERSION);
     }
 }
