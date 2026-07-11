@@ -21,7 +21,6 @@ jobs:
       copilot-requests: write
     env:
       CARGO_TERM_COLOR: always
-      ADO_AW_COPILOT_CLI_ARTIFACT_DIR: ${{ runner.temp }}/copilot-cli-safeoutputs
       COPILOT_GITHUB_TOKEN: ${{ github.token }}
       GITHUB_TOKEN: ${{ github.token }}
     steps:
@@ -79,6 +78,8 @@ jobs:
           "$RUNNER_TEMP/bin/copilot" --version
 
       - name: Run live Copilot CLI + SafeOutputs contract test
+        env:
+          ADO_AW_COPILOT_CLI_ARTIFACT_DIR: ${{ runner.temp }}/copilot-cli-safeoutputs
         run: cargo test --test copilot_cli_safeoutputs_tests real_copilot_cli_noop_contract -- --ignored --nocapture
 
       - name: Upload contract-test artifacts on failure
