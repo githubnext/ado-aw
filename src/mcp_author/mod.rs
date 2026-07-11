@@ -101,7 +101,7 @@ struct WhatIfParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct CatalogParams {
-    /// Optional category: safe-outputs, runtimes, tools, engines, or models.
+    /// Optional category: safe-outputs, runtimes, tools, engines, models, or versions.
     kind: Option<String>,
 }
 
@@ -301,7 +301,7 @@ impl AuthorMcp {
 
     #[tool(
         name = "catalog",
-        description = "List supported safe-outputs, runtimes, tools, engines, and models."
+        description = "List supported safe-outputs, runtimes, tools, engines, models, and pinned versions."
     )]
     async fn catalog(&self, params: Parameters<CatalogParams>) -> Result<CallToolResult, McpError> {
         let catalog = inspect::build_catalog(params.0.kind.as_deref()).map_err(to_mcp_error)?;

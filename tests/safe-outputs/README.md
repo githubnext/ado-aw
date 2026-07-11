@@ -18,6 +18,15 @@ pipeline = Stage 1 (agent) → Stage 2 (threat detection) → Stage 3
 > check of the Stage 3 executor alone — crafting the executor's NDJSON
 > directly, with no agent in the loop — see the deterministic suite in
 > [`tests/executor-e2e/`](../executor-e2e/).
+>
+> **Local Copilot CLI contract.** The ignored Rust test
+> `tests/copilot_cli_safeoutputs_tests.rs::real_copilot_cli_noop_contract`
+> is the customer-focused contract gate for the local agent path: it runs
+> the real Copilot CLI against the compiler-emitted SafeOutputs MCP wiring,
+> asks for a deterministic `noop` call, and proves success by asserting
+> that `safe_outputs.ndjson` contains the expected tool entry. It does
+> **not** cover threat detection, the Stage 3 executor, or Azure DevOps
+> write-path behavior.
 
 ## What's here
 
