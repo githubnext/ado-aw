@@ -31,6 +31,9 @@ target: 1es
 ```
 
 When using `target: 1es`, the pipeline will extend `1es/1ES.Unofficial.PipelineTemplate.yml@1ESPipelinesTemplates`.
+The front matter `pool:` is emitted once as the shared `extends.parameters.pool`
+that all 1ES build jobs inherit. Named-pool `demands:` are preserved there; 1ES
+jobs do not emit per-job `pool:` mappings.
 
 ### `job`
 
@@ -42,7 +45,7 @@ The output contains the same 3-job chain (Agent → Detection → SafeOutputs) a
 `standalone`, with:
 - Job names prefixed with the agent name for uniqueness (e.g., `DailyReview_Agent`)
 - No triggers, pipeline name, or resource declarations (the parent pipeline owns those)
-- Pool baked in from the front matter `pool:` field (`vmImage` or `name`; defaults to `vmImage: ubuntu-22.04`)
+- Pool baked in from the front matter `pool:` field (`vmImage` or `name` with optional `demands`; defaults to `vmImage: ubuntu-22.04`)
 
 > **Variable groups are not supported here.** ADO `job` / `stage` templates
 > cannot declare pipeline-level `variables:` — the parent pipeline owns them.

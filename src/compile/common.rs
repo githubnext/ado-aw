@@ -1197,20 +1197,25 @@ pub fn resolve_pool_typed(
                 None => (DEFAULT_ONEES_POOL.to_string(), "linux".to_string()),
                 Some(PoolConfig::Name(name)) => (name.clone(), "linux".to_string()),
                 Some(PoolConfig::Full(full)) => {
-                    if let (Some(name), Some(vm_image)) =
-                        (full.name.as_deref(), full.vm_image.as_deref())
-                    {
-                        anyhow::bail!(
-                            "pool cannot specify both `name` and `vmImage` (got name='{}', vmImage='{}')",
-                            name,
-                            vm_image
-                        );
-                    }
-                    if let Some(vm_image) = full.vm_image.as_deref() {
-                        anyhow::bail!(
-                            "target: 1es does not support `pool.vmImage` ('{}'); use `pool.name` for a 1ES pool",
-                            vm_image
-                        );
+                    match (full.name.as_deref(), full.vm_image.as_deref()) {
+                        (Some(name), Some(vm_image)) => {
+                            anyhow::bail!(
+                                "pool cannot specify both `name` and `vmImage` (got name='{}', vmImage='{}')",
+                                name, vm_image
+                            );
+                        }
+                        (_, Some(vm_image)) => {
+                            anyhow::bail!(
+                                "target: 1es does not support `pool.vmImage` ('{}'); use `pool.name` for a 1ES pool",
+                                vm_image
+                            );
+                        }
+                        (None, None) if !full.demands.is_empty() => {
+                            anyhow::bail!(
+                                "pool.demands requires `pool.name` and cannot be used with the default 1ES pool"
+                            );
+                        }
+                        _ => {}
                     }
                     (
                         full.name
@@ -1225,6 +1230,7 @@ pub fn resolve_pool_typed(
                 name,
                 image: None,
                 os: Some(os),
+                demands: pool.map(PoolConfig::demands).unwrap_or_default().to_vec(),
             })
         }
         _ => {
@@ -1236,19 +1242,33 @@ pub fn resolve_pool_typed(
                     name: name.clone(),
                     image: None,
                     os: None,
+                    demands: Vec::new(),
                 }),
                 PoolConfig::Full(full) => match (full.name.as_deref(), full.vm_image.as_deref()) {
+                    (Some(name), Some(vm_image)) if !full.demands.is_empty() => anyhow::bail!(
+                        "pool cannot specify both `name` and `vmImage` (got name='{}', vmImage='{}'); `pool.demands` cannot be used with `pool.vmImage`",
+                        name,
+                        vm_image
+                    ),
                     (Some(name), Some(vm_image)) => anyhow::bail!(
                         "pool cannot specify both `name` and `vmImage` (got name='{}', vmImage='{}')",
                         name,
+                        vm_image
+                    ),
+                    (None, Some(vm_image)) if !full.demands.is_empty() => anyhow::bail!(
+                        "pool.demands requires `pool.name` and cannot be used with `pool.vmImage` ('{}')",
                         vm_image
                     ),
                     (Some(name), None) => Ok(Pool::Named {
                         name: name.to_string(),
                         image: None,
                         os: None,
+                        demands: full.demands.clone(),
                     }),
                     (None, Some(vm_image)) => Ok(Pool::VmImage(vm_image.to_string())),
+                    (None, None) if !full.demands.is_empty() => anyhow::bail!(
+                        "pool.demands requires `pool.name` and cannot be used with the default `pool.vmImage`"
+                    ),
                     (None, None) => Ok(Pool::VmImage(DEFAULT_VM_IMAGE_POOL.to_string())),
                 },
             }
@@ -2763,13 +2783,107 @@ mod tests {
     use crate::compile::extensions::{
         CompileContext, CompilerExtension, Declarations, Extension, collect_extensions,
     };
-    use crate::compile::types::{McpConfig, McpOptions, OnConfig, Repository};
+    use crate::compile::types::{McpConfig, McpOptions, OnConfig, PoolConfigFull, Repository};
     use std::collections::HashMap;
 
     /// Helper: create a minimal FrontMatter by parsing YAML
     fn minimal_front_matter() -> FrontMatter {
         let (fm, _) = parse_markdown("---\nname: test-agent\ndescription: test\n---\n").unwrap();
         fm
+    }
+
+    #[test]
+    fn resolve_pool_typed_preserves_named_pool_demands() {
+        let pool = PoolConfig::Full(PoolConfigFull {
+            name: Some("CustomPool".to_string()),
+            vm_image: None,
+            os: None,
+            demands: vec![
+                "CustomCapability -equals required-value".to_string(),
+                "Agent.OS -equals Linux".to_string(),
+            ],
+        });
+
+        let resolved = resolve_pool_typed(CompileTarget::Standalone, Some(&pool)).unwrap();
+        assert_eq!(
+            resolved,
+            crate::compile::ir::job::Pool::Named {
+                name: "CustomPool".to_string(),
+                image: None,
+                os: None,
+                demands: vec![
+                    "CustomCapability -equals required-value".to_string(),
+                    "Agent.OS -equals Linux".to_string(),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_pool_typed_rejects_demands_with_vm_image() {
+        let pool = PoolConfig::Full(PoolConfigFull {
+            name: None,
+            vm_image: Some("ubuntu-22.04".to_string()),
+            os: None,
+            demands: vec!["CustomCapability".to_string()],
+        });
+
+        let err = resolve_pool_typed(CompileTarget::Standalone, Some(&pool))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("pool.demands requires `pool.name`"), "err: {err}");
+    }
+
+    #[test]
+    fn resolve_pool_typed_rejects_demands_with_name_and_vm_image() {
+        let pool = PoolConfig::Full(PoolConfigFull {
+            name: Some("CustomPool".to_string()),
+            vm_image: Some("ubuntu-22.04".to_string()),
+            os: None,
+            demands: vec!["CustomCapability".to_string()],
+        });
+
+        let err = resolve_pool_typed(CompileTarget::Standalone, Some(&pool))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("pool cannot specify both `name` and `vmImage`")
+                && err.contains("`pool.demands` cannot be used with `pool.vmImage`"),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_pool_typed_rejects_demands_with_default_vm_image() {
+        let pool = PoolConfig::Full(PoolConfigFull {
+            name: None,
+            vm_image: None,
+            os: None,
+            demands: vec!["CustomCapability".to_string()],
+        });
+
+        let err = resolve_pool_typed(CompileTarget::Standalone, Some(&pool))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("default `pool.vmImage`"), "err: {err}");
+    }
+
+    #[test]
+    fn resolve_pool_typed_rejects_onees_demands_with_default_pool() {
+        let pool = PoolConfig::Full(PoolConfigFull {
+            name: None,
+            vm_image: None,
+            os: None,
+            demands: vec!["CustomCapability".to_string()],
+        });
+
+        let err = resolve_pool_typed(CompileTarget::OneES, Some(&pool))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("pool.demands requires `pool.name`") && err.contains("default 1ES pool"),
+            "err: {err}"
+        );
     }
 
     #[test]

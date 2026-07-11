@@ -3318,6 +3318,25 @@ fn find_job_mapping<'a>(
     }
 }
 
+fn find_job_mapping_by_display_name<'a>(
+    value: &'a serde_yaml::Value,
+    display_name: &str,
+) -> Option<&'a serde_yaml::Mapping> {
+    match value {
+        serde_yaml::Value::Mapping(map) => {
+            if map.get(yaml_key("displayName")).and_then(|v| v.as_str()) == Some(display_name) {
+                return Some(map);
+            }
+            map.values()
+                .find_map(|child| find_job_mapping_by_display_name(child, display_name))
+        }
+        serde_yaml::Value::Sequence(items) => items
+            .iter()
+            .find_map(|child| find_job_mapping_by_display_name(child, display_name)),
+        _ => None,
+    }
+}
+
 fn find_bash_step_containing<'a>(
     job: &'a serde_yaml::Mapping,
     needle: &str,
@@ -3335,6 +3354,51 @@ fn find_bash_step_containing<'a>(
                 }
             })
         })
+}
+
+fn assert_named_pool_demands(pool: &serde_yaml::Mapping, expected_os: Option<&str>) {
+    assert_eq!(
+        pool.get(yaml_key("name")).and_then(|v| v.as_str()),
+        Some("CustomPool")
+    );
+    let demands: Vec<&str> = pool
+        .get(yaml_key("demands"))
+        .and_then(|v| v.as_sequence())
+        .expect("pool should contain a demands sequence")
+        .iter()
+        .map(|v| v.as_str().expect("demand should be a string"))
+        .collect();
+    assert_eq!(
+        demands,
+        vec![
+            "CustomCapability -equals required-value",
+            "Agent.OS -equals Linux"
+        ]
+    );
+    if let Some(os) = expected_os {
+        assert_eq!(pool.get(yaml_key("os")).and_then(|v| v.as_str()), Some(os));
+    }
+}
+
+fn compile_named_pool_demands_fixture_for_target(target: Option<&str>) -> String {
+    compile_fixture_tree_with_flags(
+        "named-pool-demands-agent.md",
+        &[],
+        &["--skip-integrity"],
+        |contents| {
+            if let Some(target) = target {
+                contents.replacen(
+                    "description: \"Fixture that exercises named pool demands\"\n",
+                    &format!(
+                        "description: \"Fixture that exercises named pool demands\"\ntarget: {target}\n"
+                    ),
+                    1,
+                )
+            } else {
+                contents
+            }
+        },
+    )
 }
 
 #[test]
@@ -4164,6 +4228,104 @@ fn test_standalone_minimal_compiled_output_is_valid_yaml() {
         doc.get("jobs").is_some(),
         "Standalone YAML should have 'jobs' key"
     );
+}
+
+#[test]
+fn test_named_pool_demands_compile_for_standalone_job_and_stage_targets() {
+    for (target, label) in [
+        (None, "standalone"),
+        (Some("job"), "target: job"),
+        (Some("stage"), "target: stage"),
+    ] {
+        let compiled = compile_named_pool_demands_fixture_for_target(target);
+        assert_valid_yaml(&compiled, label);
+        let doc = parse_compiled_yaml(&compiled);
+        let agent = find_job_mapping_by_display_name(&doc, "Agent")
+            .unwrap_or_else(|| panic!("{label}: missing Agent job"));
+        let pool = agent
+            .get(yaml_key("pool"))
+            .and_then(|v| v.as_mapping())
+            .unwrap_or_else(|| panic!("{label}: Agent job should contain pool mapping"));
+        assert_named_pool_demands(pool, None);
+    }
+}
+
+#[test]
+fn test_named_pool_demands_compile_to_1es_shared_pool() {
+    let compiled = compile_named_pool_demands_fixture_for_target(Some("1es"));
+    assert_valid_yaml(&compiled, "target: 1es");
+    let doc = parse_compiled_yaml(&compiled);
+
+    let pool = doc
+        .get(yaml_key("extends"))
+        .and_then(|v| v.as_mapping())
+        .and_then(|m| m.get(yaml_key("parameters")))
+        .and_then(|v| v.as_mapping())
+        .and_then(|m| m.get(yaml_key("pool")))
+        .and_then(|v| v.as_mapping())
+        .expect("1ES output should contain extends.parameters.pool mapping");
+    assert_named_pool_demands(pool, Some("linux"));
+
+    let agent = find_job_mapping(&doc, "Agent").expect("1ES output should contain Agent job");
+    assert!(
+        agent.get(yaml_key("pool")).is_none(),
+        "1ES jobs should inherit extends.parameters.pool rather than emitting per-job pool"
+    );
+}
+
+#[test]
+fn test_1es_pool_demands_require_named_pool() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-1es-default-demands-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("invalid-1es-demands.md");
+    fs::write(
+        &test_input,
+        r#"---
+name: "Invalid 1ES Demands"
+description: "1ES demands without an explicit named pool"
+target: 1es
+pool:
+  demands:
+    - CustomCapability -equals required-value
+---
+
+## Invalid 1ES Demands
+"#,
+    )
+    .expect("Failed to write test input");
+
+    let output_path = temp_dir.join("invalid-1es-demands.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should fail when 1ES pool.demands omits pool.name"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("pool.demands requires `pool.name`") && stderr.contains("default 1ES pool"),
+        "Error message should mention the missing 1ES named pool: {stderr}"
+    );
+
+    fs::remove_dir_all(&temp_dir).unwrap_or_else(|e| {
+        panic!(
+            "Failed to remove temp directory {}: {e}",
+            temp_dir.display()
+        )
+    });
 }
 
 /// Test that the complete standalone fixture emits Setup/Teardown jobs and

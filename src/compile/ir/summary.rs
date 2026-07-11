@@ -148,6 +148,7 @@ pub enum PoolSummary {
         name: String,
         image: Option<String>,
         os: Option<String>,
+        demands: Vec<String>,
     },
     Server,
 }
@@ -340,10 +341,16 @@ fn summarize_pool(p: &super::job::Pool) -> PoolSummary {
         super::job::Pool::VmImage(image) => PoolSummary::VmImage {
             image: image.clone(),
         },
-        super::job::Pool::Named { name, image, os } => PoolSummary::Named {
+        super::job::Pool::Named {
+            name,
+            image,
+            os,
+            demands,
+        } => PoolSummary::Named {
             name: name.clone(),
             image: image.clone(),
             os: os.clone(),
+            demands: demands.clone(),
         },
         super::job::Pool::Server => PoolSummary::Server,
     }
