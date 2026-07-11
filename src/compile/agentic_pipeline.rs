@@ -90,6 +90,10 @@ use super::types::{
     ProviderToken, Repository as RepoCfg, SELF_CHECKOUT_ALIAS, SupplyChainConfig,
 };
 
+/// The `safe-outputs:` key for the create-pull-request tool. Matches the kebab
+/// name `FrontMatter::create_pr_config`/`partition_safe_outputs_by_approval` use.
+const CREATE_PULL_REQUEST_TOOL: &str = "create-pull-request";
+
 /// Built pipeline context — the result of running every validation,
 /// scalar computation, extension declaration fanout, and canonical-
 /// job construction once. Callers wrap the contained data into the
@@ -426,25 +430,37 @@ pub(crate) fn build_canonical_jobs(
     //   - all reviewed tools          → single default job, gated by ManualReview
     //   - mixed (auto + reviewed)     → auto job + reviewed job
     let (auto, reviewed) = front_matter.partition_safe_outputs_by_approval();
+    // Which variant actually runs `create-pull-request` (and thus needs the
+    // `prepare-pr-base` fetch/deepen — issue #1453). In a split it lives in
+    // exactly one variant; the other filters it out, so only the running
+    // variant should pay for the bundle download + prepare step.
+    let create_pr_configured = front_matter.create_pr_config().is_some();
+    let create_pr_reviewed = reviewed.iter().any(|t| t == CREATE_PULL_REQUEST_TOOL);
     if reviewed.is_empty() || auto.is_empty() {
         jobs.push(build_safeoutputs_job(
             front_matter,
             cfg,
             &p,
-            &SafeOutputsVariant::default_single(),
+            &SafeOutputsVariant::default_single(create_pr_configured),
         )?);
     } else {
         jobs.push(build_safeoutputs_job(
             front_matter,
             cfg,
             &p,
-            &SafeOutputsVariant::automatic(&reviewed),
+            &SafeOutputsVariant::automatic(
+                &reviewed,
+                create_pr_configured && !create_pr_reviewed,
+            ),
         )?);
         jobs.push(build_safeoutputs_job(
             front_matter,
             cfg,
             &p,
-            &SafeOutputsVariant::reviewed(&reviewed),
+            &SafeOutputsVariant::reviewed(
+                &reviewed,
+                create_pr_configured && create_pr_reviewed,
+            ),
         )?);
     }
     if let Some(teardown) = build_teardown_job(front_matter, cfg, &p)? {
@@ -1282,36 +1298,49 @@ struct SafeOutputsVariant {
     artifact: &'static str,
     /// Trailing `--only`/`--exclude` flags for `ado-aw execute` (or empty).
     filter_args: String,
+    /// Whether THIS variant actually executes `create-pull-request`. In a
+    /// split-approval config only one of the two variants runs the tool (the
+    /// other filters it out via `--only`/`--exclude`), so only that variant
+    /// needs the `prepare-pr-base` fetch/deepen + the ado-script bundle download
+    /// (issue #1453 review). Avoids a wasted Node install + bundle fetch +
+    /// prepare step in the variant that will never open a PR.
+    runs_create_pull_request: bool,
 }
 
 impl SafeOutputsVariant {
-    /// The default single-job variant: no filter, canonical names.
-    fn default_single() -> Self {
+    /// The default single-job variant: no filter, canonical names. Runs every
+    /// configured tool, so it executes `create-pull-request` iff configured.
+    fn default_single(runs_create_pull_request: bool) -> Self {
         Self {
             base: "SafeOutputs",
             display: "SafeOutputs",
             artifact: "safe_outputs",
             filter_args: String::new(),
+            runs_create_pull_request,
         }
     }
 
-    /// The automatic variant in a split: excludes every reviewed tool.
-    fn automatic(reviewed: &[String]) -> Self {
+    /// The automatic variant in a split: excludes every reviewed tool. Runs
+    /// `create-pull-request` only when it is configured and NOT review-gated.
+    fn automatic(reviewed: &[String], runs_create_pull_request: bool) -> Self {
         Self {
             base: "SafeOutputs",
             display: "SafeOutputs",
             artifact: "safe_outputs",
             filter_args: filter_flags("--exclude", reviewed),
+            runs_create_pull_request,
         }
     }
 
-    /// The reviewed variant in a split: runs only the reviewed tools.
-    fn reviewed(reviewed: &[String]) -> Self {
+    /// The reviewed variant in a split: runs only the reviewed tools. Runs
+    /// `create-pull-request` only when it is configured and review-gated.
+    fn reviewed(reviewed: &[String], runs_create_pull_request: bool) -> Self {
         Self {
             base: "SafeOutputs_Reviewed",
             display: "SafeOutputs (reviewed)",
             artifact: "safe_outputs_reviewed",
             filter_args: filter_flags("--only", reviewed),
+            runs_create_pull_request,
         }
     }
 }
@@ -1447,7 +1476,7 @@ fn build_safeoutputs_job(
     // then emit the same `prepare-pr-base` step. The bundle auth projects
     // `System.AccessToken` (the build identity the checkout persists credentials
     // for), so the git fetch is authenticated regardless of the write token.
-    if front_matter.create_pr_config().is_some() {
+    if variant.runs_create_pull_request {
         steps.extend(
             super::extensions::ado_script::install_and_download_steps_typed(
                 front_matter.supply_chain(),

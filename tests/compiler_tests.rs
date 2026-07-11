@@ -8033,6 +8033,61 @@ fn test_create_pull_request_safeoutputs_prepare_step_covers_all_checkout_repos()
     );
 }
 
+/// Split-approval: when `create-pull-request` is review-gated but another tool
+/// is not, execution splits into an auto `SafeOutputs` job (excludes the PR
+/// tool) and a `SafeOutputs_Reviewed` job (runs only it). The prepare step +
+/// bundle download must appear ONLY in the reviewed job — the auto job never
+/// runs `create-pull-request`, so paying for the fetch/deepen there is wasted
+/// (issue #1453 review).
+#[test]
+fn test_create_pull_request_prepare_step_only_in_running_variant_when_gated() {
+    let compiled = compile_inline_agent(
+        "prepare-pr-base-gated",
+        "---\nname: \"PR Agent\"\ndescription: \"opens a PR\"\nsafe-outputs:\n  add-build-tag:\n    tag: ci\n  create-pull-request:\n    target-branch: main\n    require-approval: true\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let auto = job_block(&compiled, "SafeOutputs");
+    let reviewed = job_block(&compiled, "SafeOutputs_Reviewed");
+    // Reviewed job runs create-pull-request → gets the prepare step + bundle.
+    assert!(
+        reviewed.contains("Prepare create-pull-request base ref (fetch/deepen)"),
+        "reviewed job must contain the prepare step:\n{reviewed}"
+    );
+    assert!(
+        reviewed.contains("/tmp/ado-aw-scripts/ado-script.zip"),
+        "reviewed job must stage the ado-script bundle:\n{reviewed}"
+    );
+    // Auto job excludes create-pull-request → no prepare step, no bundle.
+    assert!(
+        !auto.contains("Prepare create-pull-request base ref"),
+        "auto job must NOT contain the prepare step (it never runs the PR tool):\n{auto}"
+    );
+    assert!(
+        !auto.contains("prepare-pr-base.js"),
+        "auto job must NOT invoke prepare-pr-base:\n{auto}"
+    );
+}
+
+/// The mirror of the gated case: when `create-pull-request` is NOT gated but a
+/// sibling tool is, the PR tool runs in the auto `SafeOutputs` job, so the
+/// prepare step belongs there and NOT in `SafeOutputs_Reviewed`.
+#[test]
+fn test_create_pull_request_prepare_step_in_auto_variant_when_sibling_gated() {
+    let compiled = compile_inline_agent(
+        "prepare-pr-base-auto",
+        "---\nname: \"PR Agent\"\ndescription: \"opens a PR\"\nsafe-outputs:\n  add-build-tag:\n    tag: ci\n    require-approval: true\n  create-pull-request:\n    target-branch: main\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let auto = job_block(&compiled, "SafeOutputs");
+    let reviewed = job_block(&compiled, "SafeOutputs_Reviewed");
+    assert!(
+        auto.contains("Prepare create-pull-request base ref (fetch/deepen)"),
+        "auto job must contain the prepare step (it runs the PR tool):\n{auto}"
+    );
+    assert!(
+        !reviewed.contains("Prepare create-pull-request base ref"),
+        "reviewed job must NOT contain the prepare step:\n{reviewed}"
+    );
+}
+
 /// An agent WITHOUT `create-pull-request` emits no prepare-pr-base step and
 /// never downloads the bundle.
 #[test]
