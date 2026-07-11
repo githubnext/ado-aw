@@ -182,6 +182,38 @@ fn extract_agent_invocation(compiled: &str) -> String {
     line[start + 1..end].to_string()
 }
 
+fn split_shell_words(input: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut chars = input.chars().peekable();
+    let mut quote = None;
+
+    while let Some(ch) = chars.next() {
+        match (quote, ch) {
+            (None, '\'') => quote = Some('\''),
+            (None, '"') => quote = Some('"'),
+            (None, ch) if ch.is_whitespace() => {
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+            }
+            (Some(q), ch) if ch == q => quote = None,
+            (Some('"'), '\\') => {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            (_, ch) => current.push(ch),
+        }
+    }
+
+    assert!(quote.is_none(), "unterminated shell quote in invocation: {input}");
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
 fn build_local_copilot_mcp_config(
     mcpg_template: &str,
     port: u16,
@@ -325,21 +357,37 @@ fn real_copilot_cli_noop_contract() {
     );
     fs::write(&prompt_path, &prompt).expect("write prompt");
 
-    let prefix = "/tmp/awf-tools/copilot --prompt \"$(cat /tmp/awf-tools/agent-prompt.md)\" --additional-mcp-config @/tmp/awf-tools/mcp-config.json ";
-    let suffix = invocation
-        .strip_prefix(prefix)
-        .unwrap_or_else(|| panic!("unexpected compiler-emitted invocation prefix: {invocation}"));
-
     let copilot_bin =
         std::env::var("ADO_AW_COPILOT_CLI_PATH").unwrap_or_else(|_| "copilot".to_string());
+    let invocation_args = split_shell_words(&invocation);
+    assert_eq!(
+        invocation_args.first().map(String::as_str),
+        Some("/tmp/awf-tools/copilot"),
+        "unexpected compiler-emitted Copilot binary in invocation: {invocation}"
+    );
+
     let mut command = Command::new(&copilot_bin);
-    command
-        .arg("--prompt")
-        .arg(&prompt)
-        .arg("--additional-mcp-config")
-        .arg(format!("@{}", copilot_mcp_config_path.display()));
-    for arg in suffix.split_whitespace() {
-        command.arg(arg);
+    let mut args = invocation_args.iter().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--prompt" => {
+                let _ = args.next().unwrap_or_else(|| {
+                    panic!("missing --prompt value in invocation: {invocation}")
+                });
+                command.arg("--prompt").arg(&prompt);
+            }
+            "--additional-mcp-config" => {
+                let _ = args.next().unwrap_or_else(|| {
+                    panic!("missing --additional-mcp-config value in invocation: {invocation}")
+                });
+                command
+                    .arg("--additional-mcp-config")
+                    .arg(format!("@{}", copilot_mcp_config_path.display()));
+            }
+            _ => {
+                command.arg(arg);
+            }
+        }
     }
     command.current_dir(server.output_dir.path());
     command.env("XDG_CONFIG_HOME", artifact_dir.join("xdg"));
