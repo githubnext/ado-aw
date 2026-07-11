@@ -26,6 +26,13 @@ pool:                          # Optional pool configuration
 # pool:                        # 1ES pool format
 #   name: AZS-1ES-L-MMS-ubuntu-22.04
 #   os: linux                  # Operating system: "linux" or "windows". Defaults to "linux".
+# pool-overrides:              # Optional per-job pool overrides (see "Per-Job Pool Overrides" below)
+#   detection:
+#     vmImage: ubuntu-22.04
+#   safe-outputs:
+#     vmImage: ubuntu-22.04
+#   conclusion:
+#     vmImage: ubuntu-22.04
 repos:                           # compact repository declarations (replaces repositories: + checkout:)
   - my-org/my-repo               # shorthand: alias="my-repo", type=git, ref=refs/heads/main, checkout=true
   - reponame=my-org/another-repo # shorthand with explicit alias
@@ -271,7 +278,63 @@ local diagnostics. It is **not** a regular safe-output tool. Use
 `create-issue` to file a GitHub issue from debug pipelines; see
 [`ado-aw-debug.md`](ado-aw-debug.md) for the full reference.
 
-## Workspace Defaults
+## Per-Job Pool Overrides (`pool-overrides:`)
+
+By default the top-level `pool:` is applied to every generated job —
+Setup, Agent, Detection, SafeOutputs, Teardown, and Conclusion. The optional
+`pool-overrides:` map lets you assign a different pool to individual jobs while
+keeping the default for the rest.
+
+```yaml
+pool:
+  name: SpecializedLinuxPool       # default for all jobs
+pool-overrides:
+  detection:
+    vmImage: ubuntu-22.04          # lightweight Microsoft-hosted image
+  safe-outputs:
+    vmImage: ubuntu-22.04
+  conclusion:
+    vmImage: ubuntu-22.04
+```
+
+### Valid keys
+
+| Key | Generated job |
+|---|---|
+| `setup` | Setup (emitted only when `setup:` steps are declared) |
+| `agent` | Agent |
+| `detection` | Detection |
+| `safe-outputs` | SafeOutputs (and SafeOutputs_Reviewed — see below) |
+| `safe-outputs-reviewed` | SafeOutputs_Reviewed only (overrides the `safe-outputs` inheritance) |
+| `teardown` | Teardown (emitted only when `teardown:` steps are declared) |
+| `conclusion` | Conclusion (emitted only when `safe-outputs:` is configured) |
+
+`safe-outputs-reviewed` inherits the `safe-outputs` override unless it has its
+own entry. `manual-review` is **not** a valid key — the ManualReview job is
+agentless and always runs on `pool: server`.
+
+Unknown keys produce a compiler warning and are ignored (forward-compat).
+
+### Constraints
+
+- Each override value accepts the same pool format as the top-level `pool:`
+  (Microsoft-hosted `vmImage:`, self-hosted `name:`, or legacy string form).
+  The same mutual-exclusion rules apply: `name:` and `vmImage:` cannot both
+  be specified; `demands:` requires `name:`.
+- Not supported for `target: 1es` — the 1ES pipeline template controls pool
+  selection. Specifying `pool-overrides:` with `target: 1es` is a compile-time
+  error.
+
+### Trust boundary note
+
+> When a `pool-overrides:` entry points to a different **self-hosted** pool
+> than the default `pool:`, that pool's administrators and agents are trusted
+> with the pipeline artifacts and credentials available to that job. For
+> Detection, SafeOutputs, and Conclusion, this includes the safe-output NDJSON
+> and the write-capable `SC_WRITE_TOKEN`. Using a Microsoft-hosted `vmImage:`
+> override does not change the trust boundary.
+
+
 
 The `workspace:` field controls which directory the agent runs in. When it is
 not set explicitly, the compiler chooses a default based on which repositories

@@ -1169,6 +1169,21 @@ pub struct FrontMatter {
     /// registry. See `docs/supply-chain.md`.
     #[serde(default, rename = "supply-chain")]
     pub supply_chain: Option<SupplyChainConfig>,
+    /// Per-job pool overrides — optional map of canonical job name to
+    /// [`PoolConfig`]. Any entry replaces the resolved default `pool:` for
+    /// exactly that job; unspecified jobs inherit `pool:`.
+    ///
+    /// Valid keys: `setup`, `agent`, `detection`, `safe-outputs`,
+    /// `safe-outputs-reviewed`, `teardown`, `conclusion`.
+    /// `manual-review` is always rejected (agentless job, fixed to `pool: server`).
+    /// Unknown keys emit a compiler warning and are ignored for forward-compat.
+    ///
+    /// Not supported for `target: 1es` (the 1ES template controls pool
+    /// selection); specifying it there is a compile-time error.
+    ///
+    /// See `docs/front-matter.md` for the full reference.
+    #[serde(default, rename = "pool-overrides")]
+    pub pool_overrides: HashMap<String, PoolConfig>,
 }
 
 /// Reserved keys inside the `safe-outputs:` map that configure the section
@@ -1519,6 +1534,9 @@ impl SanitizeConfigTrait for FrontMatter {
         }
         if let Some(ref mut sc) = self.supply_chain {
             sc.sanitize_config_fields();
+        }
+        for pool in self.pool_overrides.values_mut() {
+            pool.sanitize_config_fields();
         }
     }
 }
