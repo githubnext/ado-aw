@@ -3922,7 +3922,6 @@ mod tests {
             byom_exclude_keys: vec![],
             detection_provider_env: vec![],
         };
-        let _p = JobPrefix(None);
         build_canonical_jobs(&fm, &extensions, &cfg, &ext_setup_steps, &ext_agent_prepare, &ext_agent_conditions, None).unwrap()
     }
 

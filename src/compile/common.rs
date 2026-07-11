@@ -1319,7 +1319,7 @@ const VALID_POOL_OVERRIDE_KEYS: &[&str] = &[
 pub fn resolve_pool_overrides_typed(
     target: CompileTarget,
     pool: Option<&PoolConfig>,
-    overrides: &std::collections::HashMap<String, PoolConfig>,
+    overrides: &HashMap<String, PoolConfig>,
 ) -> Result<PerJobPools> {
     use crate::compile::ir::job::Pool;
 
