@@ -182,6 +182,10 @@ fn extract_agent_invocation(compiled: &str) -> String {
     line[start + 1..end].to_string()
 }
 
+/// Splits the compiler-emitted Copilot command line enough for this contract
+/// test: whitespace separates words, single/double quotes group words, and
+/// backslash escapes the next character inside double quotes. It intentionally
+/// does not perform shell expansion or model every shell escape form.
 fn split_shell_words(input: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut current = String::new();
@@ -207,7 +211,9 @@ fn split_shell_words(input: &str) -> Vec<String> {
         }
     }
 
-    assert!(quote.is_none(), "unterminated shell quote in invocation: {input}");
+    if let Some(quote) = quote {
+        panic!("unterminated {quote:?} shell quote in invocation: {input}");
+    }
     if !current.is_empty() {
         words.push(current);
     }
