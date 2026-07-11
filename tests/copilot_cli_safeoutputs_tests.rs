@@ -231,7 +231,6 @@ fn wait_for_ndjson(path: &Path) {
 }
 
 #[test]
-#[ignore = "known regression tracked by #1452"]
 fn compile_only_copilot_invocation_explicitly_allows_safeoutputs() {
     let artifact_dir = tempfile::tempdir().expect("create artifact dir");
     let compiled = compile_inline_agent(
@@ -252,7 +251,6 @@ fn compile_only_copilot_invocation_explicitly_allows_safeoutputs() {
 }
 
 #[test]
-#[ignore = "known regression tracked by #1452"]
 fn compile_only_copilot_config_marks_safeoutputs_as_default_server() {
     let artifact_dir = tempfile::tempdir().expect("create artifact dir");
     let compiled = compile_inline_agent(
