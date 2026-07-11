@@ -2674,9 +2674,10 @@ fn start_mcpg_step(
          #   - Rewrite URLs from 127.0.0.1 to host.docker.internal (AWF container needs\n\
          #     host.docker.internal to reach MCPG on the host; 127.0.0.1 is container loopback)\n\
          #   - Ensure tools: [\"*\"] on each server entry (Copilot CLI requirement)\n\
+         #   - Mark generated MCPG entries as default/trusted servers for Copilot CLI\n\
          #   - Preserve all other fields (headers, type, etc.)\n\
          jq --arg prefix \"http://$(MCP_GATEWAY_DOMAIN):$(MCP_GATEWAY_PORT)\" \\\n  \
-           '.mcpServers |= (to_entries | sort_by(.key) | map(.value.url |= sub(\"^http://[^/]+/\"; \"\\($prefix)/\") | .value.tools = [\"*\"]) | from_entries)' \\\n  \
+           '.mcpServers |= (to_entries | sort_by(.key) | map(.value.url |= sub(\"^http://[^/]+/\"; \"\\($prefix)/\") | .value.tools = [\"*\"] | .value.isDefaultServer = true) | from_entries)' \\\n  \
            \"$GATEWAY_OUTPUT\" > /tmp/awf-tools/mcp-config.json\n\
          \n\
          chmod 600 /tmp/awf-tools/mcp-config.json\n\
@@ -3677,6 +3678,24 @@ mod tests {
         let err = parse_env_block("other: value\n").unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("missing `env:` key"), "got: {msg}");
+    }
+
+    // ── start_mcpg_step ─────────────────────────────────────────────────────
+
+    #[test]
+    fn start_mcpg_step_marks_copilot_mcp_servers_as_default() {
+        let step = start_mcpg_step("", "", false, None).unwrap();
+
+        assert!(
+            step.script.contains(".value.tools = [\"*\"]"),
+            "Copilot mcp-config conversion should preserve wildcard tools: {}",
+            step.script
+        );
+        assert!(
+            step.script.contains(".value.isDefaultServer = true"),
+            "Copilot mcp-config conversion should mark generated MCP servers as default/trusted: {}",
+            step.script
+        );
     }
 
     // ── split_yaml_step_sequence ───────────────────────────────────────────
