@@ -1278,7 +1278,7 @@ pub fn resolve_pool_typed(
 
 /// The resolved per-job pool assignments. Every field holds the effective
 /// [`Pool`] for that canonical job (default pool or an override from
-/// `pool-overrides:`). Built by [`resolve_pool_overrides_typed`].
+/// `pool.overrides:`). Built by [`resolve_pool_overrides_typed`].
 #[derive(Clone, Debug)]
 pub struct PerJobPools {
     pub setup: crate::compile::ir::job::Pool,
@@ -1286,13 +1286,13 @@ pub struct PerJobPools {
     pub detection: crate::compile::ir::job::Pool,
     pub safe_outputs: crate::compile::ir::job::Pool,
     /// Inherits `safe_outputs` unless `safe-outputs-reviewed` is separately
-    /// specified in `pool-overrides:`.
+    /// specified in `pool.overrides:`.
     pub safe_outputs_reviewed: crate::compile::ir::job::Pool,
     pub teardown: crate::compile::ir::job::Pool,
     pub conclusion: crate::compile::ir::job::Pool,
 }
 
-/// Valid canonical job keys for `pool-overrides:`.
+/// Valid canonical job keys for `pool.overrides:`.
 const VALID_POOL_OVERRIDE_KEYS: &[&str] = &[
     "setup",
     "agent",
@@ -1304,10 +1304,10 @@ const VALID_POOL_OVERRIDE_KEYS: &[&str] = &[
 ];
 
 /// Resolve per-job pool assignments from the default `pool:` and the optional
-/// `pool-overrides:` map in the front matter.
+/// `pool.overrides:` map in the front matter.
 ///
 /// For each canonical job, the effective pool is:
-/// 1. The `pool-overrides:` entry for that job (if present and valid), or
+/// 1. The `pool.overrides:` entry for that job (if present and valid), or
 /// 2. The `default` pool.
 ///
 /// `safe-outputs-reviewed` inherits the `safe-outputs` override unless it has
@@ -1327,7 +1327,7 @@ pub fn resolve_pool_overrides_typed(
     for key in ["manual-review", "manualreview", "manual_review"] {
         if overrides.contains_key(key) {
             anyhow::bail!(
-                "pool-overrides: '{}' is not allowed — the ManualReview job is \
+                "pool.overrides: '{}' is not allowed — the ManualReview job is \
                  agentless and must stay on pool: server",
                 key
             );
@@ -1338,7 +1338,7 @@ pub fn resolve_pool_overrides_typed(
     for key in overrides.keys() {
         if !VALID_POOL_OVERRIDE_KEYS.contains(&key.as_str()) {
             eprintln!(
-                "Warning: pool-overrides: unknown key '{}'; valid keys are: {}",
+                "Warning: pool.overrides: unknown key '{}'; valid keys are: {}",
                 key,
                 VALID_POOL_OVERRIDE_KEYS.join(", ")
             );
@@ -2891,12 +2891,11 @@ mod tests {
     fn resolve_pool_typed_preserves_named_pool_demands() {
         let pool = PoolConfig::Full(PoolConfigFull {
             name: Some("CustomPool".to_string()),
-            vm_image: None,
-            os: None,
             demands: vec![
                 "CustomCapability -equals required-value".to_string(),
                 "Agent.OS -equals Linux".to_string(),
             ],
+            ..Default::default()
         });
 
         let resolved = resolve_pool_typed(CompileTarget::Standalone, Some(&pool)).unwrap();
@@ -2917,10 +2916,9 @@ mod tests {
     #[test]
     fn resolve_pool_typed_rejects_demands_with_vm_image() {
         let pool = PoolConfig::Full(PoolConfigFull {
-            name: None,
             vm_image: Some("ubuntu-22.04".to_string()),
-            os: None,
             demands: vec!["CustomCapability".to_string()],
+            ..Default::default()
         });
 
         let err = resolve_pool_typed(CompileTarget::Standalone, Some(&pool))
@@ -2934,8 +2932,8 @@ mod tests {
         let pool = PoolConfig::Full(PoolConfigFull {
             name: Some("CustomPool".to_string()),
             vm_image: Some("ubuntu-22.04".to_string()),
-            os: None,
             demands: vec!["CustomCapability".to_string()],
+            ..Default::default()
         });
 
         let err = resolve_pool_typed(CompileTarget::Standalone, Some(&pool))
@@ -2951,10 +2949,8 @@ mod tests {
     #[test]
     fn resolve_pool_typed_rejects_demands_with_default_vm_image() {
         let pool = PoolConfig::Full(PoolConfigFull {
-            name: None,
-            vm_image: None,
-            os: None,
             demands: vec!["CustomCapability".to_string()],
+            ..Default::default()
         });
 
         let err = resolve_pool_typed(CompileTarget::Standalone, Some(&pool))
@@ -2966,10 +2962,8 @@ mod tests {
     #[test]
     fn resolve_pool_typed_rejects_onees_demands_with_default_pool() {
         let pool = PoolConfig::Full(PoolConfigFull {
-            name: None,
-            vm_image: None,
-            os: None,
             demands: vec!["CustomCapability".to_string()],
+            ..Default::default()
         });
 
         let err = resolve_pool_typed(CompileTarget::OneES, Some(&pool))
@@ -7160,19 +7154,15 @@ repos:
 
     fn vm_image_pool(image: &str) -> PoolConfig {
         PoolConfig::Full(PoolConfigFull {
-            name: None,
             vm_image: Some(image.to_string()),
-            os: None,
-            demands: vec![],
+            ..Default::default()
         })
     }
 
     fn named_pool(name: &str) -> PoolConfig {
         PoolConfig::Full(PoolConfigFull {
             name: Some(name.to_string()),
-            vm_image: None,
-            os: None,
-            demands: vec![],
+            ..Default::default()
         })
     }
 
@@ -7282,9 +7272,8 @@ repos:
         let default = named_pool("SpecializedPool");
         let override_pool = PoolConfig::Full(PoolConfigFull {
             name: Some("DetectionPool".to_string()),
-            vm_image: None,
-            os: None,
             demands: vec!["Agent.OS -equals Linux".to_string()],
+            ..Default::default()
         });
         let mut overrides = HashMap::new();
         overrides.insert("detection".to_string(), override_pool);
@@ -7309,8 +7298,7 @@ repos:
         let bad_override = PoolConfig::Full(PoolConfigFull {
             name: Some("SomePool".to_string()),
             vm_image: Some("ubuntu-22.04".to_string()),
-            os: None,
-            demands: vec![],
+            ..Default::default()
         });
         let mut overrides = HashMap::new();
         overrides.insert("detection".to_string(), bad_override);

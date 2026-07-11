@@ -171,7 +171,7 @@ pub(crate) fn build_pipeline_context(
     let pools = common::resolve_pool_overrides_typed(
         front_matter.target.clone(),
         front_matter.pool.as_ref(),
-        &front_matter.pool_overrides,
+        front_matter.pool_overrides(),
     )?;
 
     let compiler_version = env!("CARGO_PKG_VERSION").to_string();
@@ -3875,7 +3875,7 @@ mod tests {
         let pools = super::super::common::resolve_pool_overrides_typed(
             fm.target.clone(),
             fm.pool.as_ref(),
-            &fm.pool_overrides,
+            fm.pool_overrides(),
         )
         .unwrap();
         let cfg = StandaloneCtx {
@@ -3933,8 +3933,7 @@ mod tests {
     fn pool_overrides_detection_only_flows_to_compiled_job() {
         let source = concat!(
             "---\nname: test\ndescription: test\n",
-            "pool:\n  name: SpecializedPool\n",
-            "pool-overrides:\n  detection:\n    vmImage: ubuntu-22.04\n",
+            "pool:\n  name: SpecializedPool\n  overrides:\n    detection:\n      vmImage: ubuntu-22.04\n",
             "safe-outputs:\n  noop: {}\n",
             "---\nbody\n"
         );
@@ -3958,11 +3957,10 @@ mod tests {
 
     #[test]
     fn pool_overrides_empty_does_not_change_default() {
-        // pool-overrides: {} is identical to no pool-overrides key at all.
+        // pool: {overrides: {}} is identical to pool: with no overrides key.
         let with_overrides = concat!(
             "---\nname: test\ndescription: test\n",
-            "pool:\n  vmImage: ubuntu-22.04\n",
-            "pool-overrides: {}\n",
+            "pool:\n  vmImage: ubuntu-22.04\n  overrides: {}\n",
             "safe-outputs:\n  noop: {}\n",
             "---\nbody\n"
         );
@@ -3988,10 +3986,10 @@ mod tests {
         let source = concat!(
             "---\nname: test\ndescription: test\n",
             "pool:\n  name: SpecializedPool\n",
-            "pool-overrides:\n",
-            "  detection:\n    vmImage: ubuntu-22.04\n",
-            "  safe-outputs:\n    vmImage: ubuntu-22.04\n",
-            "  conclusion:\n    vmImage: ubuntu-22.04\n",
+            "  overrides:\n",
+            "    detection:\n      vmImage: ubuntu-22.04\n",
+            "    safe-outputs:\n      vmImage: ubuntu-22.04\n",
+            "    conclusion:\n      vmImage: ubuntu-22.04\n",
             "safe-outputs:\n  noop: {}\n",
             "---\nbody\n"
         );

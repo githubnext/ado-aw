@@ -65,12 +65,12 @@ pub fn build_onees_pipeline(
 ) -> Result<Pipeline> {
     let agent_display_name = front_matter.name.clone();
 
-    // Reject pool-overrides: on 1ES — the template controls pool selection.
-    if !front_matter.pool_overrides.is_empty() {
+    // Reject pool.overrides: on 1ES — the template controls pool selection.
+    if !front_matter.pool_overrides().is_empty() {
         anyhow::bail!(
-            "pool-overrides: is not supported for target: 1es; \
+            "pool.overrides: is not supported for target: 1es; \
              the 1ES pipeline template manages pool allocation. \
-             Remove pool-overrides: or switch to target: standalone."
+             Remove pool.overrides: or switch to target: standalone."
         );
     }
     // 1ES jobs share the same canonical structure as standalone — the

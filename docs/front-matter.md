@@ -26,13 +26,15 @@ pool:                          # Optional pool configuration
 # pool:                        # 1ES pool format
 #   name: AZS-1ES-L-MMS-ubuntu-22.04
 #   os: linux                  # Operating system: "linux" or "windows". Defaults to "linux".
-# pool-overrides:              # Optional per-job pool overrides (see "Per-Job Pool Overrides" below)
-#   detection:
-#     vmImage: ubuntu-22.04
-#   safe-outputs:
-#     vmImage: ubuntu-22.04
-#   conclusion:
-#     vmImage: ubuntu-22.04
+# pool:                        # Pool with per-job overrides (see "Per-Job Pool Overrides" below)
+#   name: SpecializedPool
+#   overrides:
+#     detection:
+#       vmImage: ubuntu-22.04
+#     safe-outputs:
+#       vmImage: ubuntu-22.04
+#     conclusion:
+#       vmImage: ubuntu-22.04
 repos:                           # compact repository declarations (replaces repositories: + checkout:)
   - my-org/my-repo               # shorthand: alias="my-repo", type=git, ref=refs/heads/main, checkout=true
   - reponame=my-org/another-repo # shorthand with explicit alias
@@ -278,23 +280,23 @@ local diagnostics. It is **not** a regular safe-output tool. Use
 `create-issue` to file a GitHub issue from debug pipelines; see
 [`ado-aw-debug.md`](ado-aw-debug.md) for the full reference.
 
-## Per-Job Pool Overrides (`pool-overrides:`)
+## Per-Job Pool Overrides (`pool.overrides:`)
 
-By default the top-level `pool:` is applied to every generated job —
-Setup, Agent, Detection, SafeOutputs, Teardown, and Conclusion. The optional
-`pool-overrides:` map lets you assign a different pool to individual jobs while
-keeping the default for the rest.
+By default `pool:` is applied to every generated job — Setup, Agent, Detection,
+SafeOutputs, Teardown, and Conclusion. The optional `pool.overrides:` map lets
+you assign a different pool to individual jobs while keeping the default for the
+rest. It is a sub-key of `pool:`, not a separate top-level key.
 
 ```yaml
 pool:
   name: SpecializedLinuxPool       # default for all jobs
-pool-overrides:
-  detection:
-    vmImage: ubuntu-22.04          # lightweight Microsoft-hosted image
-  safe-outputs:
-    vmImage: ubuntu-22.04
-  conclusion:
-    vmImage: ubuntu-22.04
+  overrides:
+    detection:
+      vmImage: ubuntu-22.04        # lightweight Microsoft-hosted image
+    safe-outputs:
+      vmImage: ubuntu-22.04
+    conclusion:
+      vmImage: ubuntu-22.04
 ```
 
 ### Valid keys
@@ -322,12 +324,12 @@ Unknown keys produce a compiler warning and are ignored (forward-compat).
   The same mutual-exclusion rules apply: `name:` and `vmImage:` cannot both
   be specified; `demands:` requires `name:`.
 - Not supported for `target: 1es` — the 1ES pipeline template controls pool
-  selection. Specifying `pool-overrides:` with `target: 1es` is a compile-time
+  selection. Specifying `pool.overrides:` with `target: 1es` is a compile-time
   error.
 
 ### Trust boundary note
 
-> When a `pool-overrides:` entry points to a different **self-hosted** pool
+> When a `pool.overrides:` entry points to a different **self-hosted** pool
 > than the default `pool:`, that pool's administrators and agents are trusted
 > with the pipeline artifacts and credentials available to that job. For
 > Detection, SafeOutputs, and Conclusion, this includes the safe-output NDJSON

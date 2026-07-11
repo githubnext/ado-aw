@@ -71,10 +71,8 @@ pub enum PoolConfig {
 impl Default for PoolConfig {
     fn default() -> Self {
         PoolConfig::Full(PoolConfigFull {
-            name: None,
             vm_image: Some("ubuntu-22.04".to_string()),
-            os: None,
-            demands: Vec::new(),
+            ..Default::default()
         })
     }
 }
@@ -116,6 +114,20 @@ impl PoolConfig {
             PoolConfig::Full(full) => full.os.as_deref().unwrap_or("linux"),
         }
     }
+
+    /// Get the per-job pool overrides map, if any.
+    ///
+    /// Returns an empty map for the legacy string form (`Name` variant).
+    pub fn overrides(&self) -> &HashMap<String, PoolConfig> {
+        match self {
+            PoolConfig::Name(_) => {
+                use std::sync::OnceLock;
+                static EMPTY: OnceLock<HashMap<String, PoolConfig>> = OnceLock::new();
+                EMPTY.get_or_init(HashMap::new)
+            }
+            PoolConfig::Full(full) => &full.overrides,
+        }
+    }
 }
 
 impl SanitizeConfigTrait for PoolConfig {
@@ -127,7 +139,7 @@ impl SanitizeConfigTrait for PoolConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Clone, SanitizeConfig)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct PoolConfigFull {
     #[serde(default)]
     pub name: Option<String>,
@@ -137,6 +149,37 @@ pub struct PoolConfigFull {
     pub os: Option<String>,
     #[serde(default)]
     pub demands: Vec<String>,
+    /// Per-job pool overrides — optional map of canonical job name to
+    /// [`PoolConfig`]. Any entry replaces the resolved default `pool:` for
+    /// exactly that job; unspecified jobs inherit `pool:`.
+    ///
+    /// Valid keys: `setup`, `agent`, `detection`, `safe-outputs`,
+    /// `safe-outputs-reviewed`, `teardown`, `conclusion`.
+    /// `manual-review` is always rejected (agentless job, fixed to `pool: server`).
+    /// Unknown keys emit a compiler warning and are ignored for forward-compat.
+    ///
+    /// Not supported for `target: 1es`; specifying it there is a compile-time
+    /// error.
+    ///
+    /// See `docs/front-matter.md` for the full reference.
+    #[serde(default)]
+    pub overrides: HashMap<String, PoolConfig>,
+}
+
+impl SanitizeConfigTrait for PoolConfigFull {
+    fn sanitize_config_fields(&mut self) {
+        self.name = self.name.as_deref().map(crate::sanitize::sanitize_config);
+        self.vm_image = self.vm_image.as_deref().map(crate::sanitize::sanitize_config);
+        self.os = self.os.as_deref().map(crate::sanitize::sanitize_config);
+        self.demands = self
+            .demands
+            .iter()
+            .map(|s| crate::sanitize::sanitize_config(s))
+            .collect();
+        for pool in self.overrides.values_mut() {
+            pool.sanitize_config_fields();
+        }
+    }
 }
 
 /// Schedule configuration - accepts both string and object formats
@@ -1169,21 +1212,21 @@ pub struct FrontMatter {
     /// registry. See `docs/supply-chain.md`.
     #[serde(default, rename = "supply-chain")]
     pub supply_chain: Option<SupplyChainConfig>,
-    /// Per-job pool overrides — optional map of canonical job name to
-    /// [`PoolConfig`]. Any entry replaces the resolved default `pool:` for
-    /// exactly that job; unspecified jobs inherit `pool:`.
+}
+
+impl FrontMatter {
+    /// Returns the per-job pool overrides map from the pool configuration.
     ///
-    /// Valid keys: `setup`, `agent`, `detection`, `safe-outputs`,
-    /// `safe-outputs-reviewed`, `teardown`, `conclusion`.
-    /// `manual-review` is always rejected (agentless job, fixed to `pool: server`).
-    /// Unknown keys emit a compiler warning and are ignored for forward-compat.
-    ///
-    /// Not supported for `target: 1es` (the 1ES template controls pool
-    /// selection); specifying it there is a compile-time error.
-    ///
-    /// See `docs/front-matter.md` for the full reference.
-    #[serde(default, rename = "pool-overrides")]
-    pub pool_overrides: HashMap<String, PoolConfig>,
+    /// Delegates to `pool.overrides` when a full pool object is present;
+    /// returns an empty map when `pool:` is absent or in legacy string form.
+    pub fn pool_overrides(&self) -> &HashMap<String, PoolConfig> {
+        use std::sync::OnceLock;
+        static EMPTY: OnceLock<HashMap<String, PoolConfig>> = OnceLock::new();
+        self.pool
+            .as_ref()
+            .map(|p| p.overrides())
+            .unwrap_or_else(|| EMPTY.get_or_init(HashMap::new))
+    }
 }
 
 /// Reserved keys inside the `safe-outputs:` map that configure the section
@@ -1535,9 +1578,8 @@ impl SanitizeConfigTrait for FrontMatter {
         if let Some(ref mut sc) = self.supply_chain {
             sc.sanitize_config_fields();
         }
-        for pool in self.pool_overrides.values_mut() {
-            pool.sanitize_config_fields();
-        }
+        // pool overrides are sanitized as part of pool.sanitize_config_fields()
+        // (PoolConfigFull::sanitize_config_fields iterates self.overrides)
     }
 }
 
