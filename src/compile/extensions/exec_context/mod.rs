@@ -996,7 +996,12 @@ mod tests {
         // `agentic_pipeline::agent_job_variables_hoist` populates in
         // production builds. Reproduce a minimal subset here.
         let synth_id = StepId::new("synthPr").unwrap();
-        for name in &["AW_PR_ID", "AW_PR_TARGETBRANCH", "AW_SYNTHETIC_PR"] {
+        for name in &[
+            "AW_PR_ID",
+            "AW_PR_TARGETBRANCH",
+            "AW_PR_SOURCEBRANCH",
+            "AW_SYNTHETIC_PR",
+        ] {
             agent_job.variables.push(JobVariable {
                 name: (*name).into(),
                 value: EnvValue::coalesce(vec![EnvValue::step_output(OutputRef::new(
@@ -1040,6 +1045,10 @@ mod tests {
         assert!(
             yaml.contains("SYSTEM_PULLREQUEST_TARGETBRANCH: $(AW_PR_TARGETBRANCH)"),
             "target branch env must read hoisted AW_PR_TARGETBRANCH; got:\n{yaml}"
+        );
+        assert!(
+            yaml.contains("SYSTEM_PULLREQUEST_SOURCEBRANCH: $(AW_PR_SOURCEBRANCH)"),
+            "source branch env must read hoisted AW_PR_SOURCEBRANCH; got:\n{yaml}"
         );
         // Negative assertion: no cross-job `dependencies.<Job>.outputs[...]`
         // ref must appear in the step's env block — that runtime

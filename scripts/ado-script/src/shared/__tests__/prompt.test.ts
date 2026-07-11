@@ -8,7 +8,9 @@ const ids: Identifiers = {
   project: "MyProject",
   repo: "my-repo",
   targetBranch: "refs/heads/main",
+  sourceBranch: "refs/heads/feature/x",
   targetShort: "main",
+  sourceShort: "feature/x",
 };
 
 describe("successFragment", () => {

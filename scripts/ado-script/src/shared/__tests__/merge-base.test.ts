@@ -58,13 +58,63 @@ describe("resolveMergeBase", () => {
     }
   });
 
-  it("falls back to HEAD^1 when synthetic-merge merge-base cannot resolve", () => {
-    const runGit = makeRunGit([
-      {
-        match: (a) => a.join(" ") === "rev-list --parents -n 1 HEAD",
-        result: { stdout: `${SHA_C} ${SHA_A} ${SHA_B}\n`, stderr: "", status: 0 },
-      },
+  it("deepens target and source refs when synthetic-merge merge-base cannot initially resolve", () => {
+    const depthArgsSeen: string[] = [];
+    const refsSeen: string[] = [];
+    const bearer = {
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "http.extraheader",
+      GIT_CONFIG_VALUE_0: "Authorization: bearer test-token",
+    };
+    const runGit: GitRunners["runGit"] = (args, env) => {
+      if (args.join(" ") === "rev-list --parents -n 1 HEAD") {
+        return { stdout: `${SHA_C} ${SHA_A} ${SHA_B}\n`, stderr: "", status: 0 };
+      }
+      if (args[0] === "fetch") {
+        expect(env).toEqual(bearer);
+        depthArgsSeen.push(args[2] ?? "");
+        refsSeen.push(args[4] ?? "");
+        return { stdout: "", stderr: "", status: 0 };
+      }
+      return { stdout: "", stderr: "no handler", status: 1 };
+    };
+    let mergeBaseCalls = 0;
+    const gitOk: GitRunners["gitOk"] = (args) => {
+      if (args.join(" ") === "rev-parse HEAD") return SHA_C;
+      if (args.join(" ") === "rev-parse HEAD^1") return SHA_A;
+      if (args.join(" ") === "rev-parse HEAD^2") return SHA_B;
+      if (args.join(" ") === `merge-base ${SHA_A} ${SHA_B}`) {
+        mergeBaseCalls++;
+        return mergeBaseCalls < 2 ? null : SHA_M;
+      }
+      return null;
+    };
+
+    const result = resolveMergeBase("main", bearer, { runGit, gitOk }, "feature/x");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.baseSha).toBe(SHA_M);
+      expect(result.headSha).toBe(SHA_B);
+    }
+    expect(depthArgsSeen).toEqual(["--depth=200", "--depth=200"]);
+    expect(refsSeen).toEqual([
+      "+refs/heads/main:refs/remotes/origin/main",
+      "+refs/heads/feature/x:refs/remotes/origin/feature/x",
     ]);
+  });
+
+  it("fails closed when synthetic-merge merge-base cannot resolve after deepening", () => {
+    let fetchCount = 0;
+    const runGit: GitRunners["runGit"] = (args) => {
+      if (args.join(" ") === "rev-list --parents -n 1 HEAD") {
+        return { stdout: `${SHA_C} ${SHA_A} ${SHA_B}\n`, stderr: "", status: 0 };
+      }
+      if (args[0] === "fetch") {
+        fetchCount++;
+        return { stdout: "", stderr: "", status: 0 };
+      }
+      return { stdout: "", stderr: "no handler", status: 1 };
+    };
     const gitOk = makeGitOk([
       { match: (a) => a.join(" ") === "rev-parse HEAD", out: SHA_C },
       { match: (a) => a.join(" ") === "rev-parse HEAD^1", out: SHA_A },
@@ -72,12 +122,12 @@ describe("resolveMergeBase", () => {
       { match: (a) => a.join(" ") === `merge-base ${SHA_A} ${SHA_B}`, out: null },
     ]);
 
-    const result = resolveMergeBase("main", {}, { runGit, gitOk });
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.baseSha).toBe(SHA_A);
-      expect(result.headSha).toBe(SHA_B);
+    const result = resolveMergeBase("main", {}, { runGit, gitOk }, "feature/x");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain("Could not resolve base/head SHAs");
     }
+    expect(fetchCount).toBe(8);
   });
 
   it("uses progressive deepening when HEAD has only 1 parent and stops on first resolution", () => {
