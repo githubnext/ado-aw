@@ -333,8 +333,10 @@ Unknown keys produce a compiler warning and are ignored (forward-compat).
 > than the default `pool:`, that pool's administrators and agents are trusted
 > with the pipeline artifacts and credentials available to that job. For
 > Detection, SafeOutputs, and Conclusion, this includes the safe-output NDJSON
-> and the write-capable `SC_WRITE_TOKEN`. Using a Microsoft-hosted `vmImage:`
-> override does not change the trust boundary.
+> and the write-capable `SC_WRITE_TOKEN`. For `agent` and `setup`, the
+> overridden pool's administrators are trusted with the checked-out source tree
+> and the read-only build token. Using a Microsoft-hosted `vmImage:` override
+> does not change the trust boundary.
 
 
 

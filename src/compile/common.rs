@@ -1323,15 +1323,12 @@ pub fn resolve_pool_overrides_typed(
 ) -> Result<PerJobPools> {
     use crate::compile::ir::job::Pool;
 
-    // Reject the forbidden key first.
-    for key in ["manual-review", "manualreview", "manual_review"] {
-        if overrides.contains_key(key) {
-            anyhow::bail!(
-                "pool.overrides: '{}' is not allowed — the ManualReview job is \
-                 agentless and must stay on pool: server",
-                key
-            );
-        }
+    // Reject the canonical forbidden key first.
+    if overrides.contains_key("manual-review") {
+        anyhow::bail!(
+            "pool.overrides: 'manual-review' is not allowed — the ManualReview job is \
+             agentless and must stay on pool: server"
+        );
     }
 
     // Warn about unknown keys (forward-compat: a future version may add new jobs).

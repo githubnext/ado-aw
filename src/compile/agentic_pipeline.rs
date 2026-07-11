@@ -4012,5 +4012,9 @@ mod tests {
             pool_name(job_pool_by_id(&jobs, "SafeOutputs").unwrap()),
             "ubuntu-22.04"
         );
+        assert_eq!(
+            pool_name(job_pool_by_id(&jobs, "Conclusion").unwrap()),
+            "ubuntu-22.04"
+        );
     }
 }
