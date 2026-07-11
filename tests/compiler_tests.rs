@@ -8242,6 +8242,127 @@ fn test_create_pull_request_prepare_step_per_repo_targets() {
     );
 }
 
+/// Issue #1453: the executor (`ado-aw execute`) that runs `create-pull-request`
+/// lives in the **SafeOutputs** job, which has its own fresh checkout. The
+/// prepare step must therefore ALSO be emitted in the SafeOutputs job —
+/// immediately before the executor and after staging the ado-script bundle —
+/// so `git worktree add origin/<target>` resolves on shallow-default pools.
+#[test]
+fn test_create_pull_request_emits_prepare_pr_base_step_in_safeoutputs() {
+    let compiled = compile_inline_agent(
+        "prepare-pr-base-safeoutputs",
+        "---\nname: \"PR Agent\"\ndescription: \"opens a PR\"\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let safeoutputs = job_block(&compiled, "SafeOutputs");
+    assert!(
+        safeoutputs.contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js' --repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
+        "SafeOutputs job must invoke prepare-pr-base with the self dir/target pair:\n{safeoutputs}"
+    );
+    assert!(
+        safeoutputs.contains("Prepare create-pull-request base ref (fetch/deepen)"),
+        "SafeOutputs job must contain the prepare step display name:\n{safeoutputs}"
+    );
+    // The bundle is otherwise only staged in the Agent/Setup jobs; the
+    // SafeOutputs job must stage it too so the prepare step's script exists.
+    assert!(
+        safeoutputs.contains("/tmp/ado-aw-scripts/ado-script.zip"),
+        "SafeOutputs job must stage the ado-script bundle:\n{safeoutputs}"
+    );
+    // The prepare step must run BEFORE the executor so the ref is landed first.
+    let prepare_at = safeoutputs
+        .find("Prepare create-pull-request base ref")
+        .expect("prepare step present");
+    let execute_at = safeoutputs
+        .find("Execute safe outputs (Stage 3)")
+        .expect("executor present");
+    assert!(
+        prepare_at < execute_at,
+        "prepare step must precede the executor in the SafeOutputs job:\n{safeoutputs}"
+    );
+}
+
+/// The SafeOutputs-job prepare step honours per-repo targets identically to the
+/// Agent-job step (shared `create_pr_prepare_repos` resolver), so the branch it
+/// deepens always matches the branch the executor opens the PR into.
+#[test]
+fn test_create_pull_request_safeoutputs_prepare_step_covers_all_checkout_repos() {
+    let compiled = compile_inline_agent(
+        "prepare-pr-base-safeoutputs-multi",
+        "---\nname: \"Meta PR Agent\"\ndescription: \"per-repo targets\"\nworkspace: root\nrepos:\n  - name: my-org/tools\n    ref: refs/heads/release\n  - name: my-org/docs\n    ref: refs/heads/main\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n    infer-target-from-checkout-ref: true\n    target-branches:\n      docs: gh-pages\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let safeoutputs = job_block(&compiled, "SafeOutputs");
+    assert!(
+        safeoutputs
+            .contains("--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
+        "self must target the literal default 'main' in the SafeOutputs job:\n{safeoutputs}"
+    );
+    assert!(
+        safeoutputs
+            .contains("--repo-dir \"$(Build.SourcesDirectory)/tools\" --target-branch 'release'"),
+        "tools must target its inferred checkout ref 'release':\n{safeoutputs}"
+    );
+    assert!(
+        safeoutputs
+            .contains("--repo-dir \"$(Build.SourcesDirectory)/docs\" --target-branch 'gh-pages'"),
+        "docs must target the explicit override 'gh-pages':\n{safeoutputs}"
+    );
+}
+
+/// Split-approval: when `create-pull-request` is review-gated but another tool
+/// is not, execution splits into an auto `SafeOutputs` job (excludes the PR
+/// tool) and a `SafeOutputs_Reviewed` job (runs only it). The prepare step +
+/// bundle download must appear ONLY in the reviewed job — the auto job never
+/// runs `create-pull-request`, so paying for the fetch/deepen there is wasted
+/// (issue #1453 review).
+#[test]
+fn test_create_pull_request_prepare_step_only_in_running_variant_when_gated() {
+    let compiled = compile_inline_agent(
+        "prepare-pr-base-gated",
+        "---\nname: \"PR Agent\"\ndescription: \"opens a PR\"\nsafe-outputs:\n  add-build-tag:\n    tag: ci\n  create-pull-request:\n    target-branch: main\n    require-approval: true\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let auto = job_block(&compiled, "SafeOutputs");
+    let reviewed = job_block(&compiled, "SafeOutputs_Reviewed");
+    // Reviewed job runs create-pull-request → gets the prepare step + bundle.
+    assert!(
+        reviewed.contains("Prepare create-pull-request base ref (fetch/deepen)"),
+        "reviewed job must contain the prepare step:\n{reviewed}"
+    );
+    assert!(
+        reviewed.contains("/tmp/ado-aw-scripts/ado-script.zip"),
+        "reviewed job must stage the ado-script bundle:\n{reviewed}"
+    );
+    // Auto job excludes create-pull-request → no prepare step, no bundle.
+    assert!(
+        !auto.contains("Prepare create-pull-request base ref"),
+        "auto job must NOT contain the prepare step (it never runs the PR tool):\n{auto}"
+    );
+    assert!(
+        !auto.contains("prepare-pr-base.js"),
+        "auto job must NOT invoke prepare-pr-base:\n{auto}"
+    );
+}
+
+/// The mirror of the gated case: when `create-pull-request` is NOT gated but a
+/// sibling tool is, the PR tool runs in the auto `SafeOutputs` job, so the
+/// prepare step belongs there and NOT in `SafeOutputs_Reviewed`.
+#[test]
+fn test_create_pull_request_prepare_step_in_auto_variant_when_sibling_gated() {
+    let compiled = compile_inline_agent(
+        "prepare-pr-base-auto",
+        "---\nname: \"PR Agent\"\ndescription: \"opens a PR\"\nsafe-outputs:\n  add-build-tag:\n    tag: ci\n    require-approval: true\n  create-pull-request:\n    target-branch: main\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let auto = job_block(&compiled, "SafeOutputs");
+    let reviewed = job_block(&compiled, "SafeOutputs_Reviewed");
+    assert!(
+        auto.contains("Prepare create-pull-request base ref (fetch/deepen)"),
+        "auto job must contain the prepare step (it runs the PR tool):\n{auto}"
+    );
+    assert!(
+        !reviewed.contains("Prepare create-pull-request base ref"),
+        "reviewed job must NOT contain the prepare step:\n{reviewed}"
+    );
+}
+
 /// An agent WITHOUT `create-pull-request` emits no prepare-pr-base step and
 /// never downloads the bundle.
 #[test]
