@@ -4357,11 +4357,31 @@ fn test_standalone_complete_agent_has_setup_and_teardown_jobs() {
     );
 }
 
-/// Test that the pipeline-trigger fixture produces valid YAML
+/// Test that the pipeline-trigger fixture produces valid YAML with correct structure
 #[test]
 fn test_standalone_pipeline_trigger_compiled_output_is_valid_yaml() {
     let compiled = compile_fixture("pipeline-trigger-agent.md");
     assert_valid_yaml(&compiled, "pipeline-trigger-agent.md");
+
+    // Verify pipeline resource block is present
+    assert!(
+        compiled.contains("pipelines:"),
+        "pipeline-trigger output should contain a pipelines resource block"
+    );
+    assert!(
+        compiled.contains("Build Pipeline"),
+        "pipeline-trigger output should reference the upstream pipeline by name"
+    );
+    assert!(
+        compiled.contains("OtherProject"),
+        "pipeline-trigger output should reference the upstream project"
+    );
+    // CI and PR triggers must be disabled — pipeline resource is the only trigger
+    assert!(
+        compiled.contains("trigger: none"),
+        "pipeline-trigger output should disable CI trigger"
+    );
+    assert!(compiled.contains("pr: none"), "pipeline-trigger output should disable PR trigger");
 }
 
 // ─── --skip-integrity flag tests ─────────────────────────────────────────
@@ -4393,17 +4413,27 @@ fn test_default_includes_integrity_step() {
     );
 }
 
-/// Test that --skip-integrity produces valid YAML for both standalone and 1ES
+/// Test that --skip-integrity produces valid YAML and removes the integrity check
+/// for both standalone (complete-agent) and 1ES targets. The minimal-agent
+/// fixture already covers the flag; these tests exercise the richer fixtures.
 #[test]
 fn test_skip_integrity_valid_yaml_standalone() {
     let compiled = compile_fixture_with_flags("complete-agent.md", &["--skip-integrity"]);
     assert_valid_yaml(&compiled, "complete-agent.md (skip-integrity)");
+    assert!(
+        !compiled.contains("Verify pipeline integrity"),
+        "complete-agent.md compiled with --skip-integrity should NOT contain the integrity check step"
+    );
 }
 
 #[test]
 fn test_skip_integrity_valid_yaml_1es() {
     let compiled = compile_fixture_with_flags("1es-test-agent.md", &["--skip-integrity"]);
     assert_valid_yaml(&compiled, "1es-test-agent.md (skip-integrity)");
+    assert!(
+        !compiled.contains("Verify pipeline integrity"),
+        "1es-test-agent.md compiled with --skip-integrity should NOT contain the integrity check step"
+    );
 }
 
 // ─── --debug-pipeline flag tests ─────────────────────────────────────────
@@ -4458,17 +4488,36 @@ fn test_default_excludes_debug_diagnostics() {
     );
 }
 
-/// Test that --debug-pipeline produces valid YAML for both targets
+/// Test that --debug-pipeline produces valid YAML and includes debug diagnostics
+/// for both standalone (complete-agent) and 1ES targets. The minimal-agent
+/// fixture already covers the individual debug signals; these tests exercise
+/// the richer fixtures to confirm no flag interaction regressions.
 #[test]
 fn test_debug_pipeline_valid_yaml_standalone() {
     let compiled = compile_fixture_with_flags("complete-agent.md", &["--debug-pipeline"]);
     assert_valid_yaml(&compiled, "complete-agent.md (debug-pipeline)");
+    assert!(
+        compiled.contains(r#"DEBUG="*""#),
+        "complete-agent.md compiled with --debug-pipeline should contain DEBUG=* env var"
+    );
+    assert!(
+        compiled.contains("Verify MCP backends"),
+        "complete-agent.md compiled with --debug-pipeline should contain probe step"
+    );
 }
 
 #[test]
 fn test_debug_pipeline_valid_yaml_1es() {
     let compiled = compile_fixture_with_flags("1es-test-agent.md", &["--debug-pipeline"]);
     assert_valid_yaml(&compiled, "1es-test-agent.md (debug-pipeline)");
+    assert!(
+        compiled.contains(r#"DEBUG="*""#),
+        "1es-test-agent.md compiled with --debug-pipeline should contain DEBUG=* env var"
+    );
+    assert!(
+        compiled.contains("Verify MCP backends"),
+        "1es-test-agent.md compiled with --debug-pipeline should contain probe step"
+    );
 }
 
 /// Test that both flags can be combined
