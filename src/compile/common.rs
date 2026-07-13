@@ -1195,9 +1195,8 @@ pub fn resolve_pool_typed(
         CompileTarget::OneES => {
             let (name, os) = match pool {
                 None => (DEFAULT_ONEES_POOL.to_string(), "linux".to_string()),
-                Some(PoolConfig::Name(name)) => (name.clone(), "linux".to_string()),
-                Some(PoolConfig::Full(full)) => {
-                    match (full.name.as_deref(), full.vm_image.as_deref()) {
+                Some(full) => {
+                    match (full.name(), full.vm_image()) {
                         (Some(name), Some(vm_image)) => {
                             anyhow::bail!(
                                 "pool cannot specify both `name` and `vmImage` (got name='{}', vmImage='{}')",
@@ -1210,7 +1209,7 @@ pub fn resolve_pool_typed(
                                 vm_image
                             );
                         }
-                        (None, None) if !full.demands.is_empty() => {
+                        (None, None) if !full.demands().is_empty() => {
                             anyhow::bail!(
                                 "pool.demands requires `pool.name` and cannot be used with the default 1ES pool"
                             );
@@ -1218,11 +1217,8 @@ pub fn resolve_pool_typed(
                         _ => {}
                     }
                     (
-                        full.name
-                            .as_deref()
-                            .unwrap_or(DEFAULT_ONEES_POOL)
-                            .to_string(),
-                        full.os.as_deref().unwrap_or("linux").to_string(),
+                        full.name().unwrap_or(DEFAULT_ONEES_POOL).to_string(),
+                        full.os().to_string(),
                     )
                 }
             };
@@ -1234,50 +1230,134 @@ pub fn resolve_pool_typed(
             })
         }
         _ => {
-            let Some(pool) = pool else {
+            let Some(full) = pool else {
                 return Ok(Pool::VmImage(DEFAULT_VM_IMAGE_POOL.to_string()));
             };
-            match pool {
-                PoolConfig::Name(name) => Ok(Pool::Named {
-                    name: name.clone(),
+            match (full.name(), full.vm_image()) {
+                (Some(name), Some(vm_image)) if !full.demands().is_empty() => anyhow::bail!(
+                    "pool cannot specify both `name` and `vmImage` (got name='{}', vmImage='{}'); `pool.demands` cannot be used with `pool.vmImage`",
+                    name,
+                    vm_image
+                ),
+                (Some(name), Some(vm_image)) => anyhow::bail!(
+                    "pool cannot specify both `name` and `vmImage` (got name='{}', vmImage='{}')",
+                    name,
+                    vm_image
+                ),
+                (None, Some(vm_image)) if !full.demands().is_empty() => anyhow::bail!(
+                    "pool.demands requires `pool.name` and cannot be used with `pool.vmImage` ('{}')",
+                    vm_image
+                ),
+                (Some(name), None) => Ok(Pool::Named {
+                    name: name.to_string(),
                     image: None,
                     os: None,
-                    demands: Vec::new(),
+                    demands: full.demands().to_vec(),
                 }),
-                PoolConfig::Full(full) => match (full.name.as_deref(), full.vm_image.as_deref()) {
-                    (Some(name), Some(vm_image)) if !full.demands.is_empty() => anyhow::bail!(
-                        "pool cannot specify both `name` and `vmImage` (got name='{}', vmImage='{}'); `pool.demands` cannot be used with `pool.vmImage`",
-                        name,
-                        vm_image
-                    ),
-                    (Some(name), Some(vm_image)) => anyhow::bail!(
-                        "pool cannot specify both `name` and `vmImage` (got name='{}', vmImage='{}')",
-                        name,
-                        vm_image
-                    ),
-                    (None, Some(vm_image)) if !full.demands.is_empty() => anyhow::bail!(
-                        "pool.demands requires `pool.name` and cannot be used with `pool.vmImage` ('{}')",
-                        vm_image
-                    ),
-                    (Some(name), None) => Ok(Pool::Named {
-                        name: name.to_string(),
-                        image: None,
-                        os: None,
-                        demands: full.demands.clone(),
-                    }),
-                    (None, Some(vm_image)) => Ok(Pool::VmImage(vm_image.to_string())),
-                    (None, None) if !full.demands.is_empty() => anyhow::bail!(
-                        "pool.demands requires `pool.name` and cannot be used with the default `pool.vmImage`"
-                    ),
-                    (None, None) => Ok(Pool::VmImage(DEFAULT_VM_IMAGE_POOL.to_string())),
-                },
+                (None, Some(vm_image)) => Ok(Pool::VmImage(vm_image.to_string())),
+                (None, None) if !full.demands().is_empty() => anyhow::bail!(
+                    "pool.demands requires `pool.name` and cannot be used with the default `pool.vmImage`"
+                ),
+                (None, None) => Ok(Pool::VmImage(DEFAULT_VM_IMAGE_POOL.to_string())),
             }
         }
     }
 }
 
-/// Derive a valid ADO identifier from the agent name for use as a job-name
-/// prefix and stage name. Converts to PascalCase, stripping non-alphanumeric
+/// The resolved per-job pool assignments. Every field holds the effective
+/// [`Pool`] for that canonical job (default pool or an override from
+/// `pool.overrides:`). Built by [`resolve_pool_overrides_typed`].
+#[derive(Clone, Debug)]
+pub struct PerJobPools {
+    pub setup: crate::compile::ir::job::Pool,
+    pub agent: crate::compile::ir::job::Pool,
+    pub detection: crate::compile::ir::job::Pool,
+    pub safe_outputs: crate::compile::ir::job::Pool,
+    /// Inherits `safe_outputs` unless `safe-outputs-reviewed` is separately
+    /// specified in `pool.overrides:`.
+    pub safe_outputs_reviewed: crate::compile::ir::job::Pool,
+    pub teardown: crate::compile::ir::job::Pool,
+    pub conclusion: crate::compile::ir::job::Pool,
+}
+
+/// Valid canonical job keys for `pool.overrides:`.
+const VALID_POOL_OVERRIDE_KEYS: &[&str] = &[
+    "setup",
+    "agent",
+    "detection",
+    "safe-outputs",
+    "safe-outputs-reviewed",
+    "teardown",
+    "conclusion",
+];
+
+/// Resolve per-job pool assignments from the default `pool:` and the optional
+/// `pool.overrides:` map in the front matter.
+///
+/// For each canonical job, the effective pool is:
+/// 1. The `pool.overrides:` entry for that job (if present and valid), or
+/// 2. The `default` pool.
+///
+/// `safe-outputs-reviewed` inherits the `safe-outputs` override unless it has
+/// its own entry.
+///
+/// Unknown keys in `overrides` produce a compiler warning and are ignored
+/// (forward-compat). The `manual-review` key is always rejected with an error
+/// (agentless job, must stay on `pool: server`).
+pub fn resolve_pool_overrides_typed(
+    target: CompileTarget,
+    pool: Option<&PoolConfig>,
+    overrides: &HashMap<String, PoolConfig>,
+) -> Result<PerJobPools> {
+    use crate::compile::ir::job::Pool;
+
+    // Reject the canonical forbidden key first.
+    if overrides.contains_key("manual-review") {
+        anyhow::bail!(
+            "pool.overrides: 'manual-review' is not allowed — the ManualReview job is \
+             agentless and must stay on pool: server"
+        );
+    }
+
+    // Warn about unknown keys (forward-compat: a future version may add new jobs).
+    for key in overrides.keys() {
+        if !VALID_POOL_OVERRIDE_KEYS.contains(&key.as_str()) {
+            eprintln!(
+                "Warning: pool.overrides: unknown key '{}'; valid keys are: {}",
+                key,
+                VALID_POOL_OVERRIDE_KEYS.join(", ")
+            );
+        }
+    }
+
+    // Resolve the default pool once.
+    let default_pool = resolve_pool_typed(target.clone(), pool)?;
+
+    // Resolve an override for a named key, or fall back to the default.
+    let resolve = |key: &str| -> Result<Pool> {
+        match overrides.get(key) {
+            Some(override_cfg) => resolve_pool_typed(target.clone(), Some(override_cfg)),
+            None => Ok(default_pool.clone()),
+        }
+    };
+
+    let safe_outputs = resolve("safe-outputs")?;
+    // safe-outputs-reviewed inherits safe-outputs unless separately specified.
+    let safe_outputs_reviewed = match overrides.get("safe-outputs-reviewed") {
+        Some(override_cfg) => resolve_pool_typed(target.clone(), Some(override_cfg))?,
+        None => safe_outputs.clone(),
+    };
+
+    Ok(PerJobPools {
+        setup: resolve("setup")?,
+        agent: resolve("agent")?,
+        detection: resolve("detection")?,
+        safe_outputs,
+        safe_outputs_reviewed,
+        teardown: resolve("teardown")?,
+        conclusion: resolve("conclusion")?,
+    })
+}
 /// characters.
 ///
 /// Examples:
@@ -2783,7 +2863,7 @@ mod tests {
     use crate::compile::extensions::{
         CompileContext, CompilerExtension, Declarations, Extension, collect_extensions,
     };
-    use crate::compile::types::{McpConfig, McpOptions, OnConfig, PoolConfigFull, Repository};
+    use crate::compile::types::{McpConfig, McpOptions, OnConfig, Repository};
     use std::collections::HashMap;
 
     /// Helper: create a minimal FrontMatter by parsing YAML
@@ -2794,15 +2874,14 @@ mod tests {
 
     #[test]
     fn resolve_pool_typed_preserves_named_pool_demands() {
-        let pool = PoolConfig::Full(PoolConfigFull {
+        let pool = PoolConfig {
             name: Some("CustomPool".to_string()),
-            vm_image: None,
-            os: None,
             demands: vec![
                 "CustomCapability -equals required-value".to_string(),
                 "Agent.OS -equals Linux".to_string(),
             ],
-        });
+            ..Default::default()
+        };
 
         let resolved = resolve_pool_typed(CompileTarget::Standalone, Some(&pool)).unwrap();
         assert_eq!(
@@ -2821,12 +2900,11 @@ mod tests {
 
     #[test]
     fn resolve_pool_typed_rejects_demands_with_vm_image() {
-        let pool = PoolConfig::Full(PoolConfigFull {
-            name: None,
+        let pool = PoolConfig {
             vm_image: Some("ubuntu-22.04".to_string()),
-            os: None,
             demands: vec!["CustomCapability".to_string()],
-        });
+            ..Default::default()
+        };
 
         let err = resolve_pool_typed(CompileTarget::Standalone, Some(&pool))
             .unwrap_err()
@@ -2836,12 +2914,12 @@ mod tests {
 
     #[test]
     fn resolve_pool_typed_rejects_demands_with_name_and_vm_image() {
-        let pool = PoolConfig::Full(PoolConfigFull {
+        let pool = PoolConfig {
             name: Some("CustomPool".to_string()),
             vm_image: Some("ubuntu-22.04".to_string()),
-            os: None,
             demands: vec!["CustomCapability".to_string()],
-        });
+            ..Default::default()
+        };
 
         let err = resolve_pool_typed(CompileTarget::Standalone, Some(&pool))
             .unwrap_err()
@@ -2855,12 +2933,10 @@ mod tests {
 
     #[test]
     fn resolve_pool_typed_rejects_demands_with_default_vm_image() {
-        let pool = PoolConfig::Full(PoolConfigFull {
-            name: None,
-            vm_image: None,
-            os: None,
+        let pool = PoolConfig {
             demands: vec!["CustomCapability".to_string()],
-        });
+            ..Default::default()
+        };
 
         let err = resolve_pool_typed(CompileTarget::Standalone, Some(&pool))
             .unwrap_err()
@@ -2870,12 +2946,10 @@ mod tests {
 
     #[test]
     fn resolve_pool_typed_rejects_onees_demands_with_default_pool() {
-        let pool = PoolConfig::Full(PoolConfigFull {
-            name: None,
-            vm_image: None,
-            os: None,
+        let pool = PoolConfig {
             demands: vec!["CustomCapability".to_string()],
-        });
+            ..Default::default()
+        };
 
         let err = resolve_pool_typed(CompileTarget::OneES, Some(&pool))
             .unwrap_err()
@@ -7059,5 +7133,207 @@ repos:
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].repository, "tools");
         assert_eq!(checkout, vec!["tools"]);
+    }
+
+    // ── resolve_pool_overrides_typed ────────────────────────────────────────
+
+    fn vm_image_pool(image: &str) -> PoolConfig {
+        PoolConfig {
+            vm_image: Some(image.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn named_pool(name: &str) -> PoolConfig {
+        PoolConfig {
+            name: Some(name.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn pool_overrides_empty_inherits_default() {
+        // Empty overrides map → every job uses the default pool.
+        let default = vm_image_pool("ubuntu-22.04");
+        let overrides: HashMap<String, PoolConfig> = HashMap::new();
+        let per_job =
+            resolve_pool_overrides_typed(CompileTarget::Standalone, Some(&default), &overrides)
+                .unwrap();
+        let expected = crate::compile::ir::job::Pool::VmImage("ubuntu-22.04".to_string());
+        assert_eq!(per_job.setup, expected);
+        assert_eq!(per_job.agent, expected);
+        assert_eq!(per_job.detection, expected);
+        assert_eq!(per_job.safe_outputs, expected);
+        assert_eq!(per_job.safe_outputs_reviewed, expected);
+        assert_eq!(per_job.teardown, expected);
+        assert_eq!(per_job.conclusion, expected);
+    }
+
+    #[test]
+    fn pool_overrides_detection_only() {
+        let default = named_pool("SpecializedPool");
+        let mut overrides = HashMap::new();
+        overrides.insert("detection".to_string(), vm_image_pool("ubuntu-22.04"));
+        let per_job =
+            resolve_pool_overrides_typed(CompileTarget::Standalone, Some(&default), &overrides)
+                .unwrap();
+        let specialized = crate::compile::ir::job::Pool::Named {
+            name: "SpecializedPool".to_string(),
+            image: None,
+            os: None,
+            demands: vec![],
+        };
+        assert_eq!(per_job.agent, specialized);
+        assert_eq!(
+            per_job.detection,
+            crate::compile::ir::job::Pool::VmImage("ubuntu-22.04".to_string())
+        );
+        assert_eq!(per_job.safe_outputs, specialized);
+        assert_eq!(per_job.conclusion, specialized);
+    }
+
+    #[test]
+    fn pool_overrides_safe_outputs_inherits_to_reviewed() {
+        let default = named_pool("SpecializedPool");
+        let mut overrides = HashMap::new();
+        overrides.insert("safe-outputs".to_string(), vm_image_pool("ubuntu-22.04"));
+        let per_job =
+            resolve_pool_overrides_typed(CompileTarget::Standalone, Some(&default), &overrides)
+                .unwrap();
+        let ubuntu = crate::compile::ir::job::Pool::VmImage("ubuntu-22.04".to_string());
+        assert_eq!(per_job.safe_outputs, ubuntu);
+        // safe-outputs-reviewed inherits safe-outputs override
+        assert_eq!(per_job.safe_outputs_reviewed, ubuntu);
+    }
+
+    #[test]
+    fn pool_overrides_safe_outputs_reviewed_independent() {
+        let default = named_pool("SpecializedPool");
+        let mut overrides = HashMap::new();
+        overrides.insert("safe-outputs".to_string(), vm_image_pool("ubuntu-22.04"));
+        overrides.insert(
+            "safe-outputs-reviewed".to_string(),
+            named_pool("ReviewPool"),
+        );
+        let per_job =
+            resolve_pool_overrides_typed(CompileTarget::Standalone, Some(&default), &overrides)
+                .unwrap();
+        assert_eq!(
+            per_job.safe_outputs,
+            crate::compile::ir::job::Pool::VmImage("ubuntu-22.04".to_string())
+        );
+        assert_eq!(
+            per_job.safe_outputs_reviewed,
+            crate::compile::ir::job::Pool::Named {
+                name: "ReviewPool".to_string(),
+                image: None,
+                os: None,
+                demands: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn pool_overrides_rejects_manual_review() {
+        let default = vm_image_pool("ubuntu-22.04");
+        let mut overrides = HashMap::new();
+        overrides.insert("manual-review".to_string(), vm_image_pool("ubuntu-22.04"));
+        let err =
+            resolve_pool_overrides_typed(CompileTarget::Standalone, Some(&default), &overrides)
+                .unwrap_err()
+                .to_string();
+        assert!(
+            err.contains("manual-review"),
+            "error should mention key: {err}"
+        );
+        assert!(
+            err.contains("agentless"),
+            "error should explain why: {err}"
+        );
+    }
+
+    #[test]
+    fn pool_overrides_override_with_demands() {
+        let default = named_pool("SpecializedPool");
+        let override_pool = PoolConfig {
+            name: Some("DetectionPool".to_string()),
+            demands: vec!["Agent.OS -equals Linux".to_string()],
+            ..Default::default()
+        };
+        let mut overrides = HashMap::new();
+        overrides.insert("detection".to_string(), override_pool);
+        let per_job =
+            resolve_pool_overrides_typed(CompileTarget::Standalone, Some(&default), &overrides)
+                .unwrap();
+        assert_eq!(
+            per_job.detection,
+            crate::compile::ir::job::Pool::Named {
+                name: "DetectionPool".to_string(),
+                image: None,
+                os: None,
+                demands: vec!["Agent.OS -equals Linux".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn pool_overrides_rejects_invalid_pool_combo() {
+        // name + vmImage together is always rejected regardless of where it appears.
+        let default = vm_image_pool("ubuntu-22.04");
+        let bad_override = PoolConfig {
+            name: Some("SomePool".to_string()),
+            vm_image: Some("ubuntu-22.04".to_string()),
+            ..Default::default()
+        };
+        let mut overrides = HashMap::new();
+        overrides.insert("detection".to_string(), bad_override);
+        let err =
+            resolve_pool_overrides_typed(CompileTarget::Standalone, Some(&default), &overrides)
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("name") && err.contains("vmImage"), "err: {err}");
+    }
+
+    #[test]
+    fn pool_overrides_no_default_pool_uses_ubuntu_fallback() {
+        // When the top-level pool: is omitted, defaults to ubuntu-22.04.
+        let overrides: HashMap<String, PoolConfig> = HashMap::new();
+        let per_job = resolve_pool_overrides_typed(CompileTarget::Standalone, None, &overrides)
+            .unwrap();
+        let expected = crate::compile::ir::job::Pool::VmImage("ubuntu-22.04".to_string());
+        assert_eq!(per_job.agent, expected);
+        assert_eq!(per_job.detection, expected);
+    }
+
+    #[test]
+    fn pool_overrides_each_key_independently() {
+        // Override every key to a distinct pool and verify each ends up in the right field.
+        let default = vm_image_pool("ubuntu-22.04");
+        let mut overrides = HashMap::new();
+        overrides.insert("setup".to_string(), named_pool("SetupPool"));
+        overrides.insert("agent".to_string(), named_pool("AgentPool"));
+        overrides.insert("detection".to_string(), named_pool("DetectionPool"));
+        overrides.insert("safe-outputs".to_string(), named_pool("SafeOutputsPool"));
+        overrides.insert(
+            "safe-outputs-reviewed".to_string(),
+            named_pool("SafeOutputsReviewedPool"),
+        );
+        overrides.insert("teardown".to_string(), named_pool("TeardownPool"));
+        overrides.insert("conclusion".to_string(), named_pool("ConclusionPool"));
+        let per_job =
+            resolve_pool_overrides_typed(CompileTarget::Standalone, Some(&default), &overrides)
+                .unwrap();
+        let pool_name = |p: &crate::compile::ir::job::Pool| match p {
+            crate::compile::ir::job::Pool::Named { name, .. } => name.clone(),
+            crate::compile::ir::job::Pool::VmImage(s) => s.clone(),
+            crate::compile::ir::job::Pool::Server => "server".to_string(),
+        };
+        assert_eq!(pool_name(&per_job.setup), "SetupPool");
+        assert_eq!(pool_name(&per_job.agent), "AgentPool");
+        assert_eq!(pool_name(&per_job.detection), "DetectionPool");
+        assert_eq!(pool_name(&per_job.safe_outputs), "SafeOutputsPool");
+        assert_eq!(pool_name(&per_job.safe_outputs_reviewed), "SafeOutputsReviewedPool");
+        assert_eq!(pool_name(&per_job.teardown), "TeardownPool");
+        assert_eq!(pool_name(&per_job.conclusion), "ConclusionPool");
     }
 }

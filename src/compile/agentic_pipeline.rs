@@ -67,6 +67,7 @@ use super::common::{
     self, ADO_BUILD_ID_SUFFIX, AWF_VERSION, HEADER_MARKER, MCPG_DOMAIN, MCPG_IMAGE, MCPG_PORT,
     MCPG_VERSION,
 };
+use super::common::PerJobPools;
 use super::extensions::{CompileContext, CompilerExtension, Declarations, Extension, McpgConfig};
 use super::ir::condition::{Condition, Expr};
 use super::ir::env::EnvValue;
@@ -167,7 +168,11 @@ pub(crate) fn build_pipeline_context(
     )?;
     let working_directory = common::generate_working_directory(&effective_workspace);
     let trigger_repo_directory = common::generate_trigger_repo_directory(&front_matter.checkout);
-    let pool = common::resolve_pool_typed(front_matter.target.clone(), front_matter.pool.as_ref())?;
+    let pools = common::resolve_pool_overrides_typed(
+        front_matter.target.clone(),
+        front_matter.pool.as_ref(),
+        front_matter.pool_overrides(),
+    )?;
 
     let compiler_version = env!("CARGO_PKG_VERSION").to_string();
 
@@ -327,7 +332,7 @@ pub(crate) fn build_pipeline_context(
 
     // Aggregate config for per-job builders
     let cfg = StandaloneCtx {
-        pool: pool.clone(),
+        pools,
         agent_display_name: agent_display_name.clone(),
         self_checkout_fetch: front_matter
             .checkout_fetch
@@ -502,7 +507,7 @@ impl<'a> JobPrefix<'a> {
 /// every per-job builder. Lives only inside this module; passed by
 /// reference so builders don't take 20+ args each.
 pub(crate) struct StandaloneCtx {
-    pub(crate) pool: Pool,
+    pub(crate) pools: PerJobPools,
     pub(crate) agent_display_name: String,
     /// Fetch tuning for the auto-generated `checkout: self` step, resolved from
     /// a reserved `self` entry in `repos:` (empty ⇒ ADO defaults).
@@ -833,7 +838,7 @@ fn build_setup_job(
         steps.push(Step::RawYaml(yaml));
     }
 
-    let mut job = Job::new(prefix.id("Setup")?, "Setup", cfg.pool.clone());
+    let mut job = Job::new(prefix.id("Setup")?, "Setup", cfg.pools.setup.clone());
     job.steps = steps;
     Ok(Some(job))
 }
@@ -1051,7 +1056,7 @@ fn build_agent_job(
 
     let _ = extensions; // currently unused after typed declarations gather
     let _ = &cfg.agent_display_name; // friendly name is the pipeline `name:`, not the job displayName
-    let mut job = Job::new(prefix.id("Agent")?, "Agent", cfg.pool.clone());
+    let mut job = Job::new(prefix.id("Agent")?, "Agent", cfg.pools.agent.clone());
     if let Some(minutes) = front_matter.engine.timeout_minutes() {
         job.timeout = Some(std::time::Duration::from_secs(60 * (minutes as u64)));
     }
@@ -1280,7 +1285,7 @@ fn build_detection_job(
         condition: Some(Condition::Always),
     }));
 
-    let mut job = Job::new(prefix.id("Detection")?, "Detection", cfg.pool.clone());
+    let mut job = Job::new(prefix.id("Detection")?, "Detection", cfg.pools.detection.clone());
     job.steps = steps;
     Ok(job)
 }
@@ -1305,6 +1310,9 @@ struct SafeOutputsVariant {
     /// (issue #1453 review). Avoids a wasted Node install + bundle fetch +
     /// prepare step in the variant that will never open a PR.
     runs_create_pull_request: bool,
+    /// Whether this is the manual-review-gated `SafeOutputs_Reviewed` variant.
+    /// Used to select the correct pool override without relying on the job name.
+    is_reviewed: bool,
 }
 
 impl SafeOutputsVariant {
@@ -1317,6 +1325,7 @@ impl SafeOutputsVariant {
             artifact: "safe_outputs",
             filter_args: String::new(),
             runs_create_pull_request,
+            is_reviewed: false,
         }
     }
 
@@ -1329,6 +1338,7 @@ impl SafeOutputsVariant {
             artifact: "safe_outputs",
             filter_args: filter_flags("--exclude", reviewed),
             runs_create_pull_request,
+            is_reviewed: false,
         }
     }
 
@@ -1341,6 +1351,7 @@ impl SafeOutputsVariant {
             artifact: "safe_outputs_reviewed",
             filter_args: filter_flags("--only", reviewed),
             runs_create_pull_request,
+            is_reviewed: true,
         }
     }
 }
@@ -1503,7 +1514,12 @@ fn build_safeoutputs_job(
         condition: Some(Condition::Always),
     }));
 
-    let mut job = Job::new(prefix.id(variant.base)?, variant.display, cfg.pool.clone());
+    let safeoutputs_pool = if variant.is_reviewed {
+        cfg.pools.safe_outputs_reviewed.clone()
+    } else {
+        cfg.pools.safe_outputs.clone()
+    };
+    let mut job = Job::new(prefix.id(variant.base)?, variant.display, safeoutputs_pool);
     job.steps = steps;
     // **Marquee**: condition uses typed Expr::StepOutput on Detection's
     // threatAnalysis.SafeToProcess output. Lowering picks the cross-job
@@ -1758,7 +1774,7 @@ fn build_teardown_job(
     for user_step_val in &front_matter.teardown {
         steps.push(Step::RawYaml(step_to_raw_yaml_string(user_step_val)?));
     }
-    let mut job = Job::new(prefix.id("Teardown")?, "Teardown", cfg.pool.clone());
+    let mut job = Job::new(prefix.id("Teardown")?, "Teardown", cfg.pools.teardown.clone());
     job.steps = steps;
     Ok(Some(job))
 }
@@ -1997,7 +2013,7 @@ fi\n"
 
     steps.push(Step::Bash(conclusion_step));
 
-    let mut job = Job::new(prefix.id("Conclusion")?, "Conclusion", cfg.pool.clone());
+    let mut job = Job::new(prefix.id("Conclusion")?, "Conclusion", cfg.pools.conclusion.clone());
     job.variables = conclusion_variables;
     job.steps = steps;
     // Keep Conclusion's "run regardless of upstream result" behavior, but do
@@ -3818,6 +3834,187 @@ mod tests {
         assert!(
             msg.contains("split_yaml_step_sequence failed to parse"),
             "got: {msg}"
+        );
+    }
+
+    // ── pool-overrides integration ──────────────────────────────────────────
+
+    /// Parse front matter from a markdown string, resolve repos, and
+    /// sanitize — mirroring what compile_pipeline_inner does before
+    /// calling build_pipeline_context.
+    fn parse_and_resolve(source: &str) -> super::super::types::FrontMatter {
+        use super::super::common::{parse_markdown, resolve_repos};
+        use crate::sanitize::SanitizeConfig;
+        let (mut fm, _) = parse_markdown(source).unwrap();
+        fm.sanitize_config_fields();
+        let (repos, checkout, fetch) = resolve_repos(&fm).unwrap();
+        fm.repositories = repos;
+        fm.checkout = checkout;
+        fm.checkout_fetch = fetch;
+        fm
+    }
+
+    fn pool_name(pool: &Pool) -> String {
+        match pool {
+            Pool::Named { name, .. } => name.clone(),
+            Pool::VmImage(s) => s.clone(),
+            Pool::Server => "server".to_string(),
+        }
+    }
+
+    fn build_jobs(source: &str) -> Vec<super::super::ir::job::Job> {
+        let fm = parse_and_resolve(source);
+        let ctx = super::super::extensions::CompileContext::for_test(&fm);
+        let extensions = super::super::extensions::collect_extensions(&fm);
+        let decls: Vec<_> = extensions
+            .iter()
+            .map(|e| e.declarations(&ctx).unwrap())
+            .collect();
+        let mut ext_setup_steps = vec![];
+        let mut ext_agent_prepare = vec![];
+        let mut ext_agent_conditions = vec![];
+        for d in &decls {
+            ext_setup_steps.extend(d.setup_steps.clone());
+            ext_agent_prepare.extend(d.agent_prepare_steps.clone());
+            ext_agent_conditions.extend(d.agent_conditions.clone());
+        }
+        let pools = super::super::common::resolve_pool_overrides_typed(
+            fm.target.clone(),
+            fm.pool.as_ref(),
+            fm.pool_overrides(),
+        )
+        .unwrap();
+        let cfg = StandaloneCtx {
+            pools,
+            agent_display_name: fm.name.clone(),
+            self_checkout_fetch: fm
+                .checkout_fetch
+                .get(super::SELF_CHECKOUT_ALIAS)
+                .cloned()
+                .unwrap_or_default(),
+            working_directory: super::super::common::generate_working_directory(
+                &super::super::common::compute_effective_workspace(
+                    &fm.workspace,
+                    &fm.checkout,
+                    &fm.name,
+                )
+                .unwrap(),
+            ),
+            trigger_repo_directory: super::super::common::generate_trigger_repo_directory(
+                &fm.checkout,
+            ),
+            compiler_version: "0.0.0-test".to_string(),
+            engine_install_steps_yaml: String::new(),
+            engine_run: String::new(),
+            engine_run_detection: String::new(),
+            engine_env: "env:\n  GITHUB_TOKEN: $(GITHUB_TOKEN)\n".to_string(),
+            engine_log_dir: "/tmp/logs".to_string(),
+            allowed_domains: String::new(),
+            awf_mounts: "\\".to_string(),
+            awf_path_step_yaml: String::new(),
+            enabled_tools_args: String::new(),
+            mcpg_config_json: "{}".to_string(),
+            mcpg_docker_env: String::new(),
+            mcpg_step_env: String::new(),
+            source_path: "source.md".to_string(),
+            pipeline_path: "source.lock.yml".to_string(),
+            acquire_read_token: String::new(),
+            acquire_write_token: String::new(),
+            executor_ado_env: "env:\n  SYSTEM_ACCESSTOKEN: $(System.AccessToken)\n".to_string(),
+            integrity_check_yaml: String::new(),
+            agent_content_value: String::new(),
+            debug_pipeline: false,
+            byom_active: false,
+            byom_exclude_keys: vec![],
+            detection_provider_env: vec![],
+        };
+        build_canonical_jobs(&fm, &extensions, &cfg, &ext_setup_steps, &ext_agent_prepare, &ext_agent_conditions, None).unwrap()
+    }
+
+    fn job_pool_by_id<'a>(jobs: &'a [super::super::ir::job::Job], id: &str) -> Option<&'a Pool> {
+        jobs.iter().find(|j| j.id.as_ref() == id).map(|j| &j.pool)
+    }
+
+    #[test]
+    fn pool_overrides_detection_only_flows_to_compiled_job() {
+        let source = concat!(
+            "---\nname: test\ndescription: test\n",
+            "pool:\n  name: SpecializedPool\n  overrides:\n    detection:\n      vmImage: ubuntu-22.04\n",
+            "safe-outputs:\n  noop: {}\n",
+            "---\nbody\n"
+        );
+        let jobs = build_jobs(source);
+        // Agent → SpecializedPool
+        assert_eq!(
+            pool_name(job_pool_by_id(&jobs, "Agent").unwrap()),
+            "SpecializedPool"
+        );
+        // Detection → ubuntu-22.04
+        assert_eq!(
+            pool_name(job_pool_by_id(&jobs, "Detection").unwrap()),
+            "ubuntu-22.04"
+        );
+        // SafeOutputs → SpecializedPool (no override)
+        assert_eq!(
+            pool_name(job_pool_by_id(&jobs, "SafeOutputs").unwrap()),
+            "SpecializedPool"
+        );
+    }
+
+    #[test]
+    fn pool_overrides_empty_does_not_change_default() {
+        // pool: {overrides: {}} is identical to pool: with no overrides key.
+        let with_overrides = concat!(
+            "---\nname: test\ndescription: test\n",
+            "pool:\n  vmImage: ubuntu-22.04\n  overrides: {}\n",
+            "safe-outputs:\n  noop: {}\n",
+            "---\nbody\n"
+        );
+        let without_overrides = concat!(
+            "---\nname: test\ndescription: test\n",
+            "pool:\n  vmImage: ubuntu-22.04\n",
+            "safe-outputs:\n  noop: {}\n",
+            "---\nbody\n"
+        );
+        let jobs_with = build_jobs(with_overrides);
+        let jobs_without = build_jobs(without_overrides);
+        for job_id in ["Agent", "Detection", "SafeOutputs"] {
+            assert_eq!(
+                job_pool_by_id(&jobs_with, job_id).unwrap(),
+                job_pool_by_id(&jobs_without, job_id).unwrap(),
+                "pool mismatch for job {job_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn pool_overrides_all_downstream_override() {
+        let source = concat!(
+            "---\nname: test\ndescription: test\n",
+            "pool:\n  name: SpecializedPool\n",
+            "  overrides:\n",
+            "    detection:\n      vmImage: ubuntu-22.04\n",
+            "    safe-outputs:\n      vmImage: ubuntu-22.04\n",
+            "    conclusion:\n      vmImage: ubuntu-22.04\n",
+            "safe-outputs:\n  noop: {}\n",
+            "---\nbody\n"
+        );
+        let jobs = build_jobs(source);
+        assert_eq!(
+            pool_name(job_pool_by_id(&jobs, "Agent").unwrap()),
+            "SpecializedPool"
+        );
+        assert_eq!(
+            pool_name(job_pool_by_id(&jobs, "Detection").unwrap()),
+            "ubuntu-22.04"
+        );
+        assert_eq!(
+            pool_name(job_pool_by_id(&jobs, "SafeOutputs").unwrap()),
+            "ubuntu-22.04"
+        );
+        assert_eq!(
+            pool_name(job_pool_by_id(&jobs, "Conclusion").unwrap()),
+            "ubuntu-22.04"
         );
     }
 }

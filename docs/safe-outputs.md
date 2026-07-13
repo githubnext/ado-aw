@@ -123,6 +123,15 @@ apply one note to every tool.
 The Detection threat gate always runs first, so a flagged run applies nothing —
 automatic or reviewed.
 
+> **Trust boundary note for `pool.overrides:`:** When `pool.overrides:` is used
+> to move Detection, SafeOutputs, or Conclusion onto a different **self-hosted**
+> pool than the Agent job, that pool's administrators and agents are trusted with
+> the pipeline artifacts and credentials available to those jobs — including the
+> safe-output NDJSON and the write-capable `SC_WRITE_TOKEN`. Using a
+> Microsoft-hosted `vmImage:` override does not change the trust boundary.
+> See [`docs/front-matter.md`](front-matter.md#per-job-pool-overrides-pooloverrides)
+> for the full reference.
+
 ### Safe-outputs summary tab
 
 Every run that proposes safe outputs publishes a human-readable **build summary
