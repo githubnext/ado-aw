@@ -13,7 +13,15 @@
 # Register it in msazuresphere/AgentPlayground — see tests/executor-e2e/README.md.
 
 trigger: none
-pr: none
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - src/safe_outputs/**
+      - scripts/ado-script/src/executor-e2e/**
+      - tests/executor-e2e/**
 
 schedules:
   - cron: "0 5 * * *"
