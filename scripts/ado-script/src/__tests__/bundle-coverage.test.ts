@@ -30,8 +30,12 @@ const packageJsonPath = join(here, "..", "..", "package.json");
  * so the release glob (`ado-script/*.js`) never packages it — it is a test
  * harness run only by the executor-e2e pipeline, never downloaded by compiled
  * agentic pipelines at runtime.
+ *
+ * `trigger-e2e` is the analogous deterministic trigger-condition (gate /
+ * synth-PR) E2E harness. Same treatment: its own `build:trigger-e2e` emits to
+ * `test-bin/`, so it is never packaged in `ado-script.zip`.
  */
-const NON_BUNDLE_DIRS = new Set(["shared", "__tests__", "executor-e2e"]);
+const NON_BUNDLE_DIRS = new Set(["shared", "__tests__", "executor-e2e", "trigger-e2e"]);
 
 function listBundleDirs(): string[] {
   return readdirSync(srcDir)
