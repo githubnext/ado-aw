@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.44.1](https://github.com/githubnext/ado-aw/compare/v0.44.0...v0.44.1) (2026-07-13)
+
+
+### Bug Fixes
+
+* **compile:** normalize legacy Azure Repos remotes ([#1495](https://github.com/githubnext/ado-aw/issues/1495)) ([928cd59](https://github.com/githubnext/ado-aw/commit/928cd5986d5a975d30bfed496a93891eb224eb68))
+
 ## [0.44.0](https://github.com/githubnext/ado-aw/compare/v0.43.0...v0.44.0) (2026-07-13)
 
 
