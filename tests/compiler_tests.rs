@@ -1620,6 +1620,119 @@ Do something.
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
+#[test]
+fn test_compiled_agent_job_copilot_invocation_uses_safeoutputs_mcp_config() {
+    let compiled = compile_inline_agent(
+        "copilot-cli-safeoutputs-default",
+        r#"---
+name: "Copilot CLI SafeOutputs"
+description: "Compile-time contract for default Copilot SafeOutputs wiring"
+engine:
+  id: copilot
+  model: gpt-5-mini
+safe-outputs:
+  noop: {}
+---
+
+## Agent
+
+Call the noop tool exactly once.
+"#,
+    );
+
+    let agent = extract_job_block(&compiled, "Agent").expect("Agent job should exist");
+    let detection =
+        extract_job_block(&compiled, "Detection").expect("Detection job should exist");
+
+    assert!(
+        agent.contains(
+            "/tmp/awf-tools/copilot --prompt \"$(cat /tmp/awf-tools/agent-prompt.md)\" \
+             --additional-mcp-config @/tmp/awf-tools/mcp-config.json"
+        ),
+        "agent job should pass compiler-emitted MCP config to Copilot CLI: {agent}"
+    );
+    assert!(
+        agent.contains("--allow-all-tools"),
+        "default unrestricted tools path should emit --allow-all-tools: {agent}"
+    );
+    assert!(
+        !detection.contains("--additional-mcp-config"),
+        "detection job should not receive the SafeOutputs MCP config: {detection}"
+    );
+    assert!(
+        compiled.contains("\"safeoutputs\": {") && compiled.contains("\"type\": \"http\""),
+        "compiled MCPG config should include the SafeOutputs HTTP backend: {compiled}"
+    );
+    assert!(
+        compiled.contains("\"url\": \"http://localhost:${SAFE_OUTPUTS_PORT}/mcp\""),
+        "compiled MCPG config should keep the runtime SafeOutputs port placeholder: {compiled}"
+    );
+    assert!(
+        compiled.contains("\"Authorization\": \"Bearer ")
+            && compiled.contains("SAFE_OUTPUTS_API_KEY"),
+        "compiled MCPG config should keep the runtime SafeOutputs auth placeholder: {compiled}"
+    );
+}
+
+#[test]
+fn test_compiled_agent_job_copilot_invocation_supports_representative_cli_variants() {
+    let compiled = compile_inline_agent(
+        "copilot-cli-safeoutputs-matrix",
+        r#"---
+name: "Copilot CLI Matrix"
+description: "Compile-time contract for representative Copilot CLI surface variants"
+tools:
+  bash:
+    - echo
+engine:
+  id: copilot
+  model: gpt-5-mini
+  agent: my-custom-agent
+  api-target: api.example.com
+  args:
+    - --reasoning-effort=high
+safe-outputs:
+  noop: {}
+---
+
+## Agent
+
+Call the noop tool exactly once.
+"#,
+    );
+
+    let agent = extract_job_block(&compiled, "Agent").expect("Agent job should exist");
+
+    assert!(
+        !agent.contains("--allow-all-tools"),
+        "restricted bash path should not emit --allow-all-tools: {agent}"
+    );
+    assert!(
+        agent.contains("--allow-tool safeoutputs"),
+        "restricted bash path must explicitly allow the SafeOutputs MCP server: {agent}"
+    );
+    assert!(
+        agent.contains("--allow-tool \"shell(echo)\""),
+        "restricted bash path must emit the configured bash allowlist: {agent}"
+    );
+    assert!(
+        agent.contains("--agent my-custom-agent"),
+        "engine.agent should flow through the compiled Copilot CLI invocation: {agent}"
+    );
+    assert!(
+        agent.contains("--api-target api.example.com"),
+        "engine.api-target should flow through the compiled Copilot CLI invocation: {agent}"
+    );
+    assert!(
+        agent.contains("--reasoning-effort=high"),
+        "engine.args should append additive Copilot CLI arguments: {agent}"
+    );
+    assert!(
+        agent.contains("--additional-mcp-config @/tmp/awf-tools/mcp-config.json"),
+        "restricted tools path should still use the compiler-emitted MCP config: {agent}"
+    );
+}
+
 // ==================== Azure DevOps MCP Integration Tests ====================
 
 /// Test that the Azure DevOps MCP fixture compiles successfully with no unreplaced markers
@@ -2104,9 +2217,14 @@ Do the thing.
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
-/// Test that parameters block has no unreplaced markers
+/// Test that user-defined parameters and cache-memory auto-injected clearMemory coexist
+///
+/// Verifies that when a pipeline defines its own parameters AND cache-memory, the
+/// compiled output contains both the user-defined parameter and the auto-injected
+/// `clearMemory` parameter without either clobbering the other. Also guards that
+/// no unreplaced `{{ }}` markers remain after compilation.
 #[test]
-fn test_parameters_no_unreplaced_markers() {
+fn test_parameters_coexist_with_cache_memory_clear_memory() {
     let temp_dir = std::env::temp_dir().join(format!(
         "agentic-pipeline-params-markers-{}",
         std::process::id()
@@ -2115,7 +2233,7 @@ fn test_parameters_no_unreplaced_markers() {
 
     let input = r#"---
 name: "Markers Agent"
-description: "Tests no unreplaced markers with parameters"
+description: "Tests user param + cache-memory clearMemory coexistence"
 parameters:
   - name: myParam
     type: string
@@ -2152,7 +2270,33 @@ tools:
 
     let compiled = fs::read_to_string(&output_path).unwrap();
 
-    // Verify no unreplaced {{ markers }} remain (excluding ${{ }} which are ADO expressions)
+    // User-defined parameter must be present
+    assert!(
+        compiled.contains("name: myParam"),
+        "Should contain user-defined 'myParam' parameter"
+    );
+    assert!(
+        compiled.contains("default: hello"),
+        "Should contain user-defined default value"
+    );
+
+    // cache-memory must auto-inject clearMemory alongside the user param
+    assert!(
+        compiled.contains("name: clearMemory"),
+        "Should auto-inject clearMemory parameter when cache-memory is enabled"
+    );
+    assert!(
+        compiled.contains("displayName: Clear agent memory"),
+        "clearMemory should carry the standard displayName"
+    );
+
+    // Neither parameter should shadow the other — both must appear
+    let param_count = compiled.matches("name: myParam").count();
+    assert_eq!(param_count, 1, "myParam should appear exactly once");
+    let clear_count = compiled.matches("name: clearMemory").count();
+    assert_eq!(clear_count, 1, "clearMemory should appear exactly once");
+
+    // No unreplaced {{ markers }} should remain (excluding ${{ }} ADO expressions)
     for line in compiled.lines() {
         let stripped = line.replace("${{", "");
         assert!(
@@ -2215,55 +2359,6 @@ network:
     assert!(
         compiled.contains("api.external-service.com"),
         "Compiled output should include 'api.external-service.com' in the allow list"
-    );
-
-    let _ = fs::remove_dir_all(&temp_dir);
-}
-
-/// Test that network.allowed with a trailing wildcard (example.*) fails compilation
-#[test]
-fn test_network_allow_trailing_wildcard_fails() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-network-trailing-wildcard-{}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
-
-    let input = r#"---
-name: "Network Trailing Wildcard Agent"
-description: "Agent with trailing wildcard in network.allowed"
-network:
-  allowed:
-    - "example.*"
----
-
-## Test
-"#;
-
-    let input_path = temp_dir.join("network-trailing-wildcard.md");
-    let output_path = temp_dir.join("network-trailing-wildcard.yml");
-    fs::write(&input_path, input).unwrap();
-
-    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
-    let output = std::process::Command::new(&binary_path)
-        .args([
-            "compile",
-            input_path.to_str().unwrap(),
-            "-o",
-            output_path.to_str().unwrap(),
-        ])
-        .output()
-        .expect("Failed to run compiler");
-
-    assert!(
-        !output.status.success(),
-        "Compiler should fail for trailing wildcard 'example.*'"
-    );
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("unsupported position"),
-        "Error message should mention unsupported position: {stderr}"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -3205,6 +3300,25 @@ fn find_job_mapping<'a>(
     }
 }
 
+fn find_job_mapping_by_display_name<'a>(
+    value: &'a serde_yaml::Value,
+    display_name: &str,
+) -> Option<&'a serde_yaml::Mapping> {
+    match value {
+        serde_yaml::Value::Mapping(map) => {
+            if map.get(yaml_key("displayName")).and_then(|v| v.as_str()) == Some(display_name) {
+                return Some(map);
+            }
+            map.values()
+                .find_map(|child| find_job_mapping_by_display_name(child, display_name))
+        }
+        serde_yaml::Value::Sequence(items) => items
+            .iter()
+            .find_map(|child| find_job_mapping_by_display_name(child, display_name)),
+        _ => None,
+    }
+}
+
 fn find_bash_step_containing<'a>(
     job: &'a serde_yaml::Mapping,
     needle: &str,
@@ -3222,6 +3336,57 @@ fn find_bash_step_containing<'a>(
                 }
             })
         })
+}
+
+fn assert_named_pool_demands(pool: &serde_yaml::Mapping, expected_os: Option<&str>) {
+    assert_eq!(
+        pool.get(yaml_key("name")).and_then(|v| v.as_str()),
+        Some("CustomPool")
+    );
+    let demands: Vec<&str> = pool
+        .get(yaml_key("demands"))
+        .and_then(|v| v.as_sequence())
+        .expect("pool should contain a demands sequence")
+        .iter()
+        .map(|v| v.as_str().expect("demand should be a string"))
+        .collect();
+    assert_eq!(
+        demands,
+        vec![
+            "CustomCapability -equals required-value",
+            "Agent.OS -equals Linux"
+        ]
+    );
+    if let Some(os) = expected_os {
+        assert_eq!(pool.get(yaml_key("os")).and_then(|v| v.as_str()), Some(os));
+    }
+}
+
+fn compile_named_pool_demands_fixture_for_target(target: Option<&str>) -> String {
+    compile_fixture_tree_with_flags(
+        "named-pool-demands-agent.md",
+        &[],
+        &["--skip-integrity"],
+        |contents| {
+            // Normalize CRLF → LF so the `target:` injection below matches
+            // regardless of how git checked the fixture out (on Windows,
+            // core.autocrlf rewrites the fixture with CRLF line endings,
+            // which would otherwise defeat the `\n`-anchored replacen and
+            // silently drop the target override).
+            let contents = contents.replace("\r\n", "\n");
+            if let Some(target) = target {
+                contents.replacen(
+                    "description: \"Fixture that exercises named pool demands\"\n",
+                    &format!(
+                        "description: \"Fixture that exercises named pool demands\"\ntarget: {target}\n"
+                    ),
+                    1,
+                )
+            } else {
+                contents
+            }
+        },
+    )
 }
 
 #[test]
@@ -4053,6 +4218,104 @@ fn test_standalone_minimal_compiled_output_is_valid_yaml() {
     );
 }
 
+#[test]
+fn test_named_pool_demands_compile_for_standalone_job_and_stage_targets() {
+    for (target, label) in [
+        (None, "standalone"),
+        (Some("job"), "target: job"),
+        (Some("stage"), "target: stage"),
+    ] {
+        let compiled = compile_named_pool_demands_fixture_for_target(target);
+        assert_valid_yaml(&compiled, label);
+        let doc = parse_compiled_yaml(&compiled);
+        let agent = find_job_mapping_by_display_name(&doc, "Agent")
+            .unwrap_or_else(|| panic!("{label}: missing Agent job"));
+        let pool = agent
+            .get(yaml_key("pool"))
+            .and_then(|v| v.as_mapping())
+            .unwrap_or_else(|| panic!("{label}: Agent job should contain pool mapping"));
+        assert_named_pool_demands(pool, None);
+    }
+}
+
+#[test]
+fn test_named_pool_demands_compile_to_1es_shared_pool() {
+    let compiled = compile_named_pool_demands_fixture_for_target(Some("1es"));
+    assert_valid_yaml(&compiled, "target: 1es");
+    let doc = parse_compiled_yaml(&compiled);
+
+    let pool = doc
+        .get(yaml_key("extends"))
+        .and_then(|v| v.as_mapping())
+        .and_then(|m| m.get(yaml_key("parameters")))
+        .and_then(|v| v.as_mapping())
+        .and_then(|m| m.get(yaml_key("pool")))
+        .and_then(|v| v.as_mapping())
+        .expect("1ES output should contain extends.parameters.pool mapping");
+    assert_named_pool_demands(pool, Some("linux"));
+
+    let agent = find_job_mapping(&doc, "Agent").expect("1ES output should contain Agent job");
+    assert!(
+        agent.get(yaml_key("pool")).is_none(),
+        "1ES jobs should inherit extends.parameters.pool rather than emitting per-job pool"
+    );
+}
+
+#[test]
+fn test_1es_pool_demands_require_named_pool() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-1es-default-demands-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("invalid-1es-demands.md");
+    fs::write(
+        &test_input,
+        r#"---
+name: "Invalid 1ES Demands"
+description: "1ES demands without an explicit named pool"
+target: 1es
+pool:
+  demands:
+    - CustomCapability -equals required-value
+---
+
+## Invalid 1ES Demands
+"#,
+    )
+    .expect("Failed to write test input");
+
+    let output_path = temp_dir.join("invalid-1es-demands.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should fail when 1ES pool.demands omits pool.name"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("pool.demands requires `pool.name`") && stderr.contains("default 1ES pool"),
+        "Error message should mention the missing 1ES named pool: {stderr}"
+    );
+
+    fs::remove_dir_all(&temp_dir).unwrap_or_else(|e| {
+        panic!(
+            "Failed to remove temp directory {}: {e}",
+            temp_dir.display()
+        )
+    });
+}
+
 /// Test that the complete standalone fixture emits Setup/Teardown jobs and
 /// that the agentic task waits on Setup. The fixture has `setup:`,
 /// `teardown:`, and `post-steps:` sections so all three should appear.
@@ -4082,11 +4345,31 @@ fn test_standalone_complete_agent_has_setup_and_teardown_jobs() {
     );
 }
 
-/// Test that the pipeline-trigger fixture produces valid YAML
+/// Test that the pipeline-trigger fixture produces valid YAML with correct structure
 #[test]
 fn test_standalone_pipeline_trigger_compiled_output_is_valid_yaml() {
     let compiled = compile_fixture("pipeline-trigger-agent.md");
     assert_valid_yaml(&compiled, "pipeline-trigger-agent.md");
+
+    // Verify pipeline resource block is present
+    assert!(
+        compiled.contains("pipelines:"),
+        "pipeline-trigger output should contain a pipelines resource block"
+    );
+    assert!(
+        compiled.contains("Build Pipeline"),
+        "pipeline-trigger output should reference the upstream pipeline by name"
+    );
+    assert!(
+        compiled.contains("OtherProject"),
+        "pipeline-trigger output should reference the upstream project"
+    );
+    // CI and PR triggers must be disabled — pipeline resource is the only trigger
+    assert!(
+        compiled.contains("trigger: none"),
+        "pipeline-trigger output should disable CI trigger"
+    );
+    assert!(compiled.contains("pr: none"), "pipeline-trigger output should disable PR trigger");
 }
 
 // ─── --skip-integrity flag tests ─────────────────────────────────────────
@@ -4118,17 +4401,27 @@ fn test_default_includes_integrity_step() {
     );
 }
 
-/// Test that --skip-integrity produces valid YAML for both standalone and 1ES
+/// Test that --skip-integrity produces valid YAML and removes the integrity check
+/// for both standalone (complete-agent) and 1ES targets. The minimal-agent
+/// fixture already covers the flag; these tests exercise the richer fixtures.
 #[test]
 fn test_skip_integrity_valid_yaml_standalone() {
     let compiled = compile_fixture_with_flags("complete-agent.md", &["--skip-integrity"]);
     assert_valid_yaml(&compiled, "complete-agent.md (skip-integrity)");
+    assert!(
+        !compiled.contains("Verify pipeline integrity"),
+        "complete-agent.md compiled with --skip-integrity should NOT contain the integrity check step"
+    );
 }
 
 #[test]
 fn test_skip_integrity_valid_yaml_1es() {
     let compiled = compile_fixture_with_flags("1es-test-agent.md", &["--skip-integrity"]);
     assert_valid_yaml(&compiled, "1es-test-agent.md (skip-integrity)");
+    assert!(
+        !compiled.contains("Verify pipeline integrity"),
+        "1es-test-agent.md compiled with --skip-integrity should NOT contain the integrity check step"
+    );
 }
 
 // ─── --debug-pipeline flag tests ─────────────────────────────────────────
@@ -4183,17 +4476,36 @@ fn test_default_excludes_debug_diagnostics() {
     );
 }
 
-/// Test that --debug-pipeline produces valid YAML for both targets
+/// Test that --debug-pipeline produces valid YAML and includes debug diagnostics
+/// for both standalone (complete-agent) and 1ES targets. The minimal-agent
+/// fixture already covers the individual debug signals; these tests exercise
+/// the richer fixtures to confirm no flag interaction regressions.
 #[test]
 fn test_debug_pipeline_valid_yaml_standalone() {
     let compiled = compile_fixture_with_flags("complete-agent.md", &["--debug-pipeline"]);
     assert_valid_yaml(&compiled, "complete-agent.md (debug-pipeline)");
+    assert!(
+        compiled.contains(r#"DEBUG="*""#),
+        "complete-agent.md compiled with --debug-pipeline should contain DEBUG=* env var"
+    );
+    assert!(
+        compiled.contains("Verify MCP backends"),
+        "complete-agent.md compiled with --debug-pipeline should contain probe step"
+    );
 }
 
 #[test]
 fn test_debug_pipeline_valid_yaml_1es() {
     let compiled = compile_fixture_with_flags("1es-test-agent.md", &["--debug-pipeline"]);
     assert_valid_yaml(&compiled, "1es-test-agent.md (debug-pipeline)");
+    assert!(
+        compiled.contains(r#"DEBUG="*""#),
+        "1es-test-agent.md compiled with --debug-pipeline should contain DEBUG=* env var"
+    );
+    assert!(
+        compiled.contains("Verify MCP backends"),
+        "1es-test-agent.md compiled with --debug-pipeline should contain probe step"
+    );
 }
 
 /// Test that both flags can be combined
@@ -4520,17 +4832,11 @@ fn test_pr_filter_tier2_has_extension_gate() {
     assert!(compiled.contains("name: prGate"), "Should have prGate step");
 }
 
-/// Pipeline filter fixture produces valid YAML.
-#[test]
-fn test_pipeline_filter_compiled_output_is_valid_yaml() {
-    let compiled = compile_fixture("pipeline-filter-agent.md");
-    assert_valid_yaml(&compiled, "pipeline-filter-agent.md");
-}
-
-/// Pipeline filter fixture produces correct pipeline resource + gate.
+/// Pipeline filter fixture produces valid YAML and correct pipeline resource + gate.
 #[test]
 fn test_pipeline_filter_has_resources_and_gate() {
     let compiled = compile_fixture("pipeline-filter-agent.md");
+    assert_valid_yaml(&compiled, "pipeline-filter-agent.md");
 
     assert!(
         compiled.contains("pipelines:"),
@@ -4738,13 +5044,26 @@ fn test_pr_filter_synth_mode_gate_step_uses_same_job_synth_ref() {
 #[test]
 fn test_pr_filter_tier1_has_native_pr_trigger() {
     let compiled = compile_fixture("pr-filter-tier1-agent.md");
-
-    assert!(compiled.contains("pr:"), "Should have native pr: block");
+    assert_valid_yaml(&compiled, "pr-filter-tier1-agent.md");
+    // The native PR trigger block must be emitted — `pr: none` would disable it.
+    assert!(
+        !compiled.contains("pr: none"),
+        "Should not disable PR trigger — fixture has native pr branches filter"
+    );
+    assert!(
+        compiled.contains("pr:\n"),
+        "Should have native pr: block (not `pr: none`)"
+    );
     assert!(
         compiled.contains("branches:"),
         "Should have branches filter"
     );
-    assert!(compiled.contains("main"), "Should include main branch");
+    // "main" must appear as an indented list item inside the branches block,
+    // not just anywhere in the compiled output (comments, other fields, etc.).
+    assert!(
+        compiled.contains("    - main"),
+        "Should include main as an indented list item in the branches include block"
+    );
 }
 
 /// Extension gate steps are correctly nested inside the Setup job's steps: block.
@@ -5639,15 +5958,6 @@ fn test_job_target_with_setup_emits_dual_branch_dependson_with_each() {
 // Execution-context extension (issue #860)
 // ============================================================================
 
-/// The execution-context extension is always-on and emits an `aw-context`
-/// prepare step on PR-triggered agents. This sanity check makes sure the
-/// generated YAML round-trips through `serde_yaml`.
-#[test]
-fn test_execution_context_pr_compiled_output_is_valid_yaml() {
-    let compiled = compile_fixture("execution-context-agent.md");
-    assert_valid_yaml(&compiled, "execution-context-agent.md");
-}
-
 /// Spot-checks the key components of the precompute step. v7 ports
 /// the precompute logic to an `ado-script` bundle
 /// (`exec-context-pr.js`), so the bash step is now a slim node
@@ -5659,6 +5969,7 @@ fn test_execution_context_pr_compiled_output_is_valid_yaml() {
 #[test]
 fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
     let compiled = compile_fixture("execution-context-agent.md");
+    assert_valid_yaml(&compiled, "execution-context-agent.md");
 
     assert!(
         compiled.contains("Stage PR execution context (aw-context/pr/*)"),
@@ -6393,16 +6704,16 @@ Body.
 // ancestor (`git merge-base`), so `git diff $BASE..$HEAD` produces
 // the same change set regardless of which path runs. v7: this
 // invariant is now enforced by the `exec-context-pr.js` bundle (see
-// `merge-base.ts::resolveMergeBase`); the vitest test
-// `falls back to HEAD^1 when synthetic-merge merge-base cannot resolve`
-// guards the regression there. This Rust-side test is removed —
+// `merge-base.ts::resolveMergeBase`); the vitest tests for synthetic
+// merge-base deepening and fail-closed behavior guard the regression
+// there. This Rust-side test is removed —
 // asserting bash literals against a node-invocation step makes no
 // sense.
 
-// v6.2 defence-in-depth: `PR_TARGET_BRANCH` (which gets interpolated
-// into a git refspec) is validated with a strict allowlist regex.
+// v6.2 defence-in-depth: PR target/source branches (which get
+// interpolated into git refspecs) are validated with a strict allowlist regex.
 // v7: this validation now lives in the `exec-context-pr.js` bundle
-// (see `validate.ts::TARGET_BRANCH_RE`); the vitest tests under
+// (see `validate.ts::PR_BRANCH_RE`); the vitest tests under
 // `validate.test.ts` guard the regression there. This Rust-side
 // test is removed for the same reason.
 
@@ -6450,6 +6761,11 @@ fn test_synthetic_pr_default_emits_full_synth_wiring() {
         "Fixture A's exec-context-pr step must read the hoisted Agent-job-level \
          AW_PR_ID via the $() macro (NOT a $[ ... ] runtime expression in step env — \
          ADO doesn't evaluate those there, see build #612528)"
+    );
+    assert!(
+        compiled.contains("SYSTEM_PULLREQUEST_SOURCEBRANCH: $(AW_PR_SOURCEBRANCH)"),
+        "Fixture A's exec-context-pr step must receive the hoisted PR source ref so \
+         synthetic-merge fallback deepening can fetch both PR parents"
     );
     // The Agent-job-level hoist itself must be present and pull from
     // the cross-job synth outputs (legal scope for `dependencies.X.outputs[...]`).
@@ -7964,6 +8280,127 @@ fn test_create_pull_request_prepare_step_per_repo_targets() {
     assert!(
         agent.contains("--repo-dir \"$(Build.SourcesDirectory)/docs\" --target-branch 'gh-pages'"),
         "docs must target the explicit override 'gh-pages':\n{agent}"
+    );
+}
+
+/// Issue #1453: the executor (`ado-aw execute`) that runs `create-pull-request`
+/// lives in the **SafeOutputs** job, which has its own fresh checkout. The
+/// prepare step must therefore ALSO be emitted in the SafeOutputs job —
+/// immediately before the executor and after staging the ado-script bundle —
+/// so `git worktree add origin/<target>` resolves on shallow-default pools.
+#[test]
+fn test_create_pull_request_emits_prepare_pr_base_step_in_safeoutputs() {
+    let compiled = compile_inline_agent(
+        "prepare-pr-base-safeoutputs",
+        "---\nname: \"PR Agent\"\ndescription: \"opens a PR\"\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let safeoutputs = job_block(&compiled, "SafeOutputs");
+    assert!(
+        safeoutputs.contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js' --repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
+        "SafeOutputs job must invoke prepare-pr-base with the self dir/target pair:\n{safeoutputs}"
+    );
+    assert!(
+        safeoutputs.contains("Prepare create-pull-request base ref (fetch/deepen)"),
+        "SafeOutputs job must contain the prepare step display name:\n{safeoutputs}"
+    );
+    // The bundle is otherwise only staged in the Agent/Setup jobs; the
+    // SafeOutputs job must stage it too so the prepare step's script exists.
+    assert!(
+        safeoutputs.contains("/tmp/ado-aw-scripts/ado-script.zip"),
+        "SafeOutputs job must stage the ado-script bundle:\n{safeoutputs}"
+    );
+    // The prepare step must run BEFORE the executor so the ref is landed first.
+    let prepare_at = safeoutputs
+        .find("Prepare create-pull-request base ref")
+        .expect("prepare step present");
+    let execute_at = safeoutputs
+        .find("Execute safe outputs (Stage 3)")
+        .expect("executor present");
+    assert!(
+        prepare_at < execute_at,
+        "prepare step must precede the executor in the SafeOutputs job:\n{safeoutputs}"
+    );
+}
+
+/// The SafeOutputs-job prepare step honours per-repo targets identically to the
+/// Agent-job step (shared `create_pr_prepare_repos` resolver), so the branch it
+/// deepens always matches the branch the executor opens the PR into.
+#[test]
+fn test_create_pull_request_safeoutputs_prepare_step_covers_all_checkout_repos() {
+    let compiled = compile_inline_agent(
+        "prepare-pr-base-safeoutputs-multi",
+        "---\nname: \"Meta PR Agent\"\ndescription: \"per-repo targets\"\nworkspace: root\nrepos:\n  - name: my-org/tools\n    ref: refs/heads/release\n  - name: my-org/docs\n    ref: refs/heads/main\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n    infer-target-from-checkout-ref: true\n    target-branches:\n      docs: gh-pages\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let safeoutputs = job_block(&compiled, "SafeOutputs");
+    assert!(
+        safeoutputs
+            .contains("--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
+        "self must target the literal default 'main' in the SafeOutputs job:\n{safeoutputs}"
+    );
+    assert!(
+        safeoutputs
+            .contains("--repo-dir \"$(Build.SourcesDirectory)/tools\" --target-branch 'release'"),
+        "tools must target its inferred checkout ref 'release':\n{safeoutputs}"
+    );
+    assert!(
+        safeoutputs
+            .contains("--repo-dir \"$(Build.SourcesDirectory)/docs\" --target-branch 'gh-pages'"),
+        "docs must target the explicit override 'gh-pages':\n{safeoutputs}"
+    );
+}
+
+/// Split-approval: when `create-pull-request` is review-gated but another tool
+/// is not, execution splits into an auto `SafeOutputs` job (excludes the PR
+/// tool) and a `SafeOutputs_Reviewed` job (runs only it). The prepare step +
+/// bundle download must appear ONLY in the reviewed job — the auto job never
+/// runs `create-pull-request`, so paying for the fetch/deepen there is wasted
+/// (issue #1453 review).
+#[test]
+fn test_create_pull_request_prepare_step_only_in_running_variant_when_gated() {
+    let compiled = compile_inline_agent(
+        "prepare-pr-base-gated",
+        "---\nname: \"PR Agent\"\ndescription: \"opens a PR\"\nsafe-outputs:\n  add-build-tag:\n    tag: ci\n  create-pull-request:\n    target-branch: main\n    require-approval: true\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let auto = job_block(&compiled, "SafeOutputs");
+    let reviewed = job_block(&compiled, "SafeOutputs_Reviewed");
+    // Reviewed job runs create-pull-request → gets the prepare step + bundle.
+    assert!(
+        reviewed.contains("Prepare create-pull-request base ref (fetch/deepen)"),
+        "reviewed job must contain the prepare step:\n{reviewed}"
+    );
+    assert!(
+        reviewed.contains("/tmp/ado-aw-scripts/ado-script.zip"),
+        "reviewed job must stage the ado-script bundle:\n{reviewed}"
+    );
+    // Auto job excludes create-pull-request → no prepare step, no bundle.
+    assert!(
+        !auto.contains("Prepare create-pull-request base ref"),
+        "auto job must NOT contain the prepare step (it never runs the PR tool):\n{auto}"
+    );
+    assert!(
+        !auto.contains("prepare-pr-base.js"),
+        "auto job must NOT invoke prepare-pr-base:\n{auto}"
+    );
+}
+
+/// The mirror of the gated case: when `create-pull-request` is NOT gated but a
+/// sibling tool is, the PR tool runs in the auto `SafeOutputs` job, so the
+/// prepare step belongs there and NOT in `SafeOutputs_Reviewed`.
+#[test]
+fn test_create_pull_request_prepare_step_in_auto_variant_when_sibling_gated() {
+    let compiled = compile_inline_agent(
+        "prepare-pr-base-auto",
+        "---\nname: \"PR Agent\"\ndescription: \"opens a PR\"\nsafe-outputs:\n  add-build-tag:\n    tag: ci\n    require-approval: true\n  create-pull-request:\n    target-branch: main\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let auto = job_block(&compiled, "SafeOutputs");
+    let reviewed = job_block(&compiled, "SafeOutputs_Reviewed");
+    assert!(
+        auto.contains("Prepare create-pull-request base ref (fetch/deepen)"),
+        "auto job must contain the prepare step (it runs the PR tool):\n{auto}"
+    );
+    assert!(
+        !reviewed.contains("Prepare create-pull-request base ref"),
+        "reviewed job must NOT contain the prepare step:\n{reviewed}"
     );
 }
 

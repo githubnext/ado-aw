@@ -123,6 +123,15 @@ apply one note to every tool.
 The Detection threat gate always runs first, so a flagged run applies nothing —
 automatic or reviewed.
 
+> **Trust boundary note for `pool.overrides:`:** When `pool.overrides:` is used
+> to move Detection, SafeOutputs, or Conclusion onto a different **self-hosted**
+> pool than the Agent job, that pool's administrators and agents are trusted with
+> the pipeline artifacts and credentials available to those jobs — including the
+> safe-output NDJSON and the write-capable `SC_WRITE_TOKEN`. Using a
+> Microsoft-hosted `vmImage:` override does not change the trust boundary.
+> See [`docs/front-matter.md`](front-matter.md#per-job-pool-overrides-pooloverrides)
+> for the full reference.
+
 ### Safe-outputs summary tab
 
 Every run that proposes safe outputs publishes a human-readable **build summary
@@ -268,14 +277,19 @@ computed at agent time from the checked-out repository. On agent pools whose
 default git fetch is shallow (`fetchDepth: 1`), a bare `checkout` leaves no
 `origin/<target-branch>` ref, which would otherwise prevent the diff base from
 being computed. To handle this transparently, whenever `create-pull-request` is
-configured the compiler emits a credentialed **prepare step** in the Agent job
-(before the agent runs) that fetches and progressively deepens the configured
-`target-branch` and points `origin/HEAD` at it — in the `self` checkout **and in
-each additional `checkout:` repo dir**, so a PR to *any* allowed repository works.
-This means create-pull-request works on shallow-default pools **without** forcing
-a full-history checkout and **without** hand-editing the compiled lock (so the
-runtime integrity check keeps passing). No configuration is required. See
-[`docs/ado-script.md`](ado-script.md) (`prepare-pr-base.js`).
+configured the compiler emits a credentialed **prepare step** that fetches and
+progressively deepens the configured `target-branch` and points `origin/HEAD` at
+it — in the `self` checkout **and in each additional `checkout:` repo dir**, so a
+PR to *any* allowed repository works. The prepare step runs in **both** the Agent
+job (before the agent runs, so the host-side SafeOutputs MCP server can compute
+the diff base) **and** the SafeOutputs job (before `ado-aw execute`, so the
+Stage 3 executor's `git worktree add` resolves `origin/<target>` — each ADO job
+has an isolated checkout, so the ref must be re-fetched in the job that builds
+the worktree; issue #1453). This means create-pull-request works on
+shallow-default pools **without** forcing a full-history checkout and **without**
+hand-editing the compiled lock (so the runtime integrity check keeps passing). No
+configuration is required. See [`docs/ado-script.md`](ado-script.md)
+(`prepare-pr-base.js`).
 
 > **Branch semantics.** The step deepens each repo's resolved `target-branch`
 > (the PR's **destination/base**) — not the per-repo `repos:` checkout `ref` (the
@@ -535,9 +549,11 @@ Links two Azure DevOps work items together.
 safe-outputs:
   link-work-items:
     allowed-link-types: []       # Optional — restrict which link types are allowed (empty = all)
-    target: "*"                  # Scoping policy (same as comment-on-work-item target)
+    target: "*"                  # Required — "*" allows any work item ID, or set to a specific ID
     max: 5                       # Maximum per run (default: 5)
 ```
+
+**Note:** The `target` field is required. If omitted, Stage 3 execution fails with an error. Use the same scoping options as `comment-on-work-item`: `"*"` for any work item, a numeric ID for a specific item, a list of IDs, or an area path prefix string.
 
 ### queue-build
 Queues an Azure DevOps pipeline build by definition ID.

@@ -179,6 +179,8 @@ pub enum Pool {
         image: Option<String>,
         /// Optional `os:` field (1ES pool OS).
         os: Option<String>,
+        /// Ordered Azure Pipelines demands for self-hosted pools.
+        demands: Vec<String>,
     },
     /// `server` — an agentless (server) job. Emits the scalar
     /// `pool: server`. Required for server-only tasks such as
@@ -226,11 +228,13 @@ mod tests {
             name: "Pool-A".into(),
             image: None,
             os: None,
+            demands: Vec::new(),
         };
         let d = Pool::Named {
             name: "Pool-B".into(),
             image: None,
             os: None,
+            demands: Vec::new(),
         };
         assert_ne!(c, d, "different pool names should not be equal");
 

@@ -353,13 +353,14 @@ The bundle:
 
 2. **Validates identifiers** with strict allowlist regexes (PR_ID ⊆ digits;
    PROJECT/REPO ⊆ alphanumeric + `._-`; PROJECT additionally allows space;
-   PR_TARGET_BRANCH ⊆ alphanumeric + `._/-`). Writes `error.txt` and the failure
-   prompt fragment on failure.
+   PR_TARGET_BRANCH and PR_SOURCE_BRANCH ⊆ alphanumeric + `._/-`). Writes
+   `error.txt` and the failure prompt fragment on failure.
 
 3. **Detects the merge-commit shape.** If `HEAD` has ≥ 3 tokens in `git rev-list
    --parents HEAD` (ADO's synthetic merge commit for PR builds), uses `HEAD^2` as
-   the PR head and computes `git merge-base HEAD^1 HEAD^2` — no target-branch
-   fetch needed.
+   the PR head and computes `git merge-base HEAD^1 HEAD^2`. If a shallow
+   checkout lacks enough ancestry, it fetches both target and source refs with
+   progressive deepening and retries; unresolved ancestry fails closed.
 
 4. **Otherwise fetches the PR target branch** with progressive deepening: `--depth=200`,
    `500`, `2000`, then `--unshallow`. After each fetch, attempts `git merge-base

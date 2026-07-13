@@ -68,16 +68,20 @@ pipeline** as runtime helpers. Today it produces thirteen bundles:
   env vars, so a pipeline variable can't shadow them (only the private key /
   minted token ride in masked env). Runs outside AWF. See
   [`engine.md`](engine.md#github-app-backed-copilot-engine-auth).
-- `prepare-pr-base.js` — create-pull-request base-ref preparer that runs in the
-  **Agent job** before the Copilot invocation when `create-pull-request` is
-  configured (issue #1413). For each allowed create-PR repo dir (`self` +
-  every `checkout:` alias, passed as repeated `--repo-dir <dir> --target-branch
-  <branch>` pairs in the same dir form `mcp.rs::resolve_git_dir_for_patch`
-  resolves), it fetches and progressively deepens THAT repo's resolved target
-  branch into `refs/remotes/origin/<target>` and points
-  `refs/remotes/origin/HEAD` at it, so the host-side SafeOutputs MCP server can
-  compute a diff base on shallow-default agent pools without a full-history
-  `checkout: self`. In a multi-checkout ("meta repo") setup each dir may carry a
+- `prepare-pr-base.js` — create-pull-request base-ref preparer that runs when
+  `create-pull-request` is configured, in **both** the Agent job (before the
+  Copilot invocation, so the host-side SafeOutputs MCP server can compute a diff
+  base — issue #1413) **and** the SafeOutputs job (before `ado-aw execute`, so
+  the Stage 3 executor's `git worktree add` resolves `origin/<target>`; each ADO
+  job has an isolated checkout, so the ref must be re-fetched in the job that
+  builds the worktree — issue #1453). For each allowed create-PR repo dir
+  (`self` + every `checkout:` alias, passed as repeated `--repo-dir <dir>
+  --target-branch <branch>` pairs in the same dir form
+  `mcp.rs::resolve_git_dir_for_patch` resolves), it fetches and progressively
+  deepens THAT repo's resolved target branch into `refs/remotes/origin/<target>`
+  and points `refs/remotes/origin/HEAD` at it, so a PR can be computed/opened on
+  shallow-default agent pools without a full-history `checkout: self`. In a
+  multi-checkout ("meta repo") setup each dir may carry a
   different target (see `create-pull-request`'s `target-branches` /
   `infer-target-from-checkout-ref`). Reuses
   `shared/merge-base.ts::ensureTargetRefFetched` (the same fetch/deepen logic as
@@ -189,7 +193,8 @@ It performs the work that used to live as ~190 lines of bash heredoc
 inside `src/compile/extensions/exec_context/pr.rs`:
 
 1. **Validate identifiers** — `PR_ID`, `SYSTEM_TEAMPROJECT`,
-   `BUILD_REPOSITORY_NAME`, and `SYSTEM_PULLREQUEST_TARGETBRANCH` are
+   `BUILD_REPOSITORY_NAME`, `SYSTEM_PULLREQUEST_TARGETBRANCH`, and
+   `SYSTEM_PULLREQUEST_SOURCEBRANCH` are
    each matched against a strict allowlist regex (`validate.ts`)
    before any of them are interpolated into a git refspec or the
    agent prompt. On any failure the program writes
@@ -199,10 +204,12 @@ inside `src/compile/extensions/exec_context/pr.rs`:
 2. **Resolve merge-base** — if the checkout is a synthetic
    merge-commit (parent count ≥ 3 per ADO's PR-validation flow),
    `merge-base.ts::resolveMergeBase` computes `git merge-base` over
-   the two parents. Otherwise it fetches the target branch with
-   progressive deepening (`--depth=200/500/2000/--unshallow`) and
-   then `git merge-base` against `HEAD`. Same `BASE_SHA` semantics
-   in both paths (git's true common ancestor).
+   the two parents. If that cannot resolve in a shallow checkout, it
+   fetches both target and source refs with progressive deepening
+   (`--depth=200/500/2000/--unshallow`) and retries the parent
+   merge-base. Otherwise it fetches the target branch with progressive
+   deepening and then runs `git merge-base` against `HEAD`. Same
+   `BASE_SHA` semantics in both paths (git's true common ancestor).
 3. **Stage artefacts** — writes `aw-context/pr/base.sha` and
    `aw-context/pr/head.sha` so the agent can `git diff $(cat
    .../base.sha)..$(cat .../head.sha)` itself.

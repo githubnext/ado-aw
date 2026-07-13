@@ -839,9 +839,20 @@ fn lower_pool(pool: &Pool) -> Value {
             m.insert(s("vmImage"), s(img));
             Value::Mapping(m)
         }
-        Pool::Named { name, image, os } => {
+        Pool::Named {
+            name,
+            image,
+            os,
+            demands,
+        } => {
             let mut m = Mapping::new();
             m.insert(s("name"), s(name));
+            if !demands.is_empty() {
+                m.insert(
+                    s("demands"),
+                    Value::Sequence(demands.iter().map(s).collect()),
+                );
+            }
             if let Some(img) = image {
                 m.insert(s("image"), s(img));
             }
@@ -1562,6 +1573,59 @@ mod tests {
         assert!(
             !yaml.contains("vmImage"),
             "server pool must not emit a vmImage mapping:\n{yaml}"
+        );
+    }
+
+    #[test]
+    fn lower_job_emits_named_pool_demands() {
+        let job = Job::new(
+            JobId::new("Agent").unwrap(),
+            "Agent",
+            Pool::Named {
+                name: "CustomPool".into(),
+                image: None,
+                os: None,
+                demands: vec![
+                    "CustomCapability -equals required-value".into(),
+                    "Agent.OS -equals Linux".into(),
+                ],
+            },
+        );
+        let p = Pipeline {
+            name: "t".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers::default(),
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(vec![job]),
+            shape: PipelineShape::Standalone,
+        };
+        let v = super::lower(&p).unwrap();
+        let jobs = v
+            .as_mapping()
+            .and_then(|m| m.get(s("jobs")))
+            .and_then(|v| v.as_sequence())
+            .expect("lowered pipeline should contain jobs sequence");
+        let pool = jobs[0]
+            .as_mapping()
+            .and_then(|m| m.get(s("pool")))
+            .and_then(|v| v.as_mapping())
+            .expect("lowered job should contain pool mapping");
+
+        assert_eq!(pool.get(s("name")).and_then(|v| v.as_str()), Some("CustomPool"));
+        let demands: Vec<&str> = pool
+            .get(s("demands"))
+            .and_then(|v| v.as_sequence())
+            .expect("named pool should contain demands sequence")
+            .iter()
+            .map(|v| v.as_str().expect("demand should be a string"))
+            .collect();
+        assert_eq!(
+            demands,
+            vec![
+                "CustomCapability -equals required-value",
+                "Agent.OS -equals Linux"
+            ]
         );
     }
 

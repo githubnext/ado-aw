@@ -230,7 +230,7 @@ permissions:
 | Both | Agent can read; executor writes via the ARM-minted token |
 | Neither | Agent has no ADO API access; executor writes via `$(System.AccessToken)` |
 
-`permissions.write` is **optional** — the Stage 3 executor defaults to `$(System.AccessToken)`. Set it only when you need cross-org writes or named-identity attribution instead of `Project Collection Build Service`.
+`permissions.write` is **optional** — the Stage 3 executor defaults to `$(System.AccessToken)`. Set it only when you need cross-org writes or named-identity attribution instead of `Project Collection Build Service`. See [`docs/network.md`](../docs/network.md#permissions-ado-access-tokens) for the full reference.
 
 ### Enabling GitHub App-backed Copilot Auth
 

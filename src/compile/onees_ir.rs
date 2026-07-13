@@ -64,6 +64,15 @@ pub fn build_onees_pipeline(
     debug_pipeline: bool,
 ) -> Result<Pipeline> {
     let agent_display_name = front_matter.name.clone();
+
+    // Reject pool.overrides: on 1ES — the template controls pool selection.
+    if !front_matter.pool_overrides().is_empty() {
+        anyhow::bail!(
+            "pool.overrides: is not supported for target: 1es; \
+             the 1ES pipeline template manages pool allocation. \
+             Remove pool.overrides: or switch to target: standalone."
+        );
+    }
     // 1ES jobs share the same canonical structure as standalone — the
     // builder owns the 5-job graph and per-step bodies. We then wrap
     // it in the 1ES shape and tag each job with `template_context` so

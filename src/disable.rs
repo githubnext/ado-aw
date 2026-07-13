@@ -18,7 +18,8 @@ use log::debug;
 use std::path::{Path, PathBuf};
 
 use crate::ado::{
-    MatchedDefinition, match_definitions, patch_queue_status, resolve_ado_context, resolve_auth,
+    AdoAuth, AdoContext, MatchedDefinition, match_definitions, patch_queue_status,
+    resolve_ado_context, resolve_auth,
 };
 use crate::detect;
 
@@ -100,6 +101,50 @@ pub struct DisableOptions<'a> {
     pub dry_run: bool,
 }
 
+/// Outcome of applying one [`Action`] (used to tally the final summary).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApplyOutcome {
+    Skipped,
+    Patched,
+    Failed,
+}
+
+/// Apply a single action against ADO, print a one-line status, and return the
+/// outcome so the caller can tally results without nesting.
+async fn apply_action(
+    action: Action,
+    client: &reqwest::Client,
+    ado_ctx: &AdoContext,
+    auth: &AdoAuth,
+    dry_run: bool,
+) -> ApplyOutcome {
+    match action {
+        Action::Skip { id, name, reason } => {
+            println!("↻ skip: {} (id={}, {})", name, id, reason);
+            ApplyOutcome::Skipped
+        }
+        Action::Patch { id, name, from, to } => {
+            if dry_run {
+                println!(
+                    "[dry-run] ▶ would patch: {} (id={}, {} → {})",
+                    name, id, from, to
+                );
+                return ApplyOutcome::Patched;
+            }
+            match patch_queue_status(client, ado_ctx, auth, id, to).await {
+                Ok(()) => {
+                    println!("▶ patched: {} (id={}, {} → {})", name, id, from, to);
+                    ApplyOutcome::Patched
+                }
+                Err(e) => {
+                    eprintln!("✗ failed: {} (id={}): {:#}", name, id, e);
+                    ApplyOutcome::Failed
+                }
+            }
+        }
+    }
+}
+
 /// Run the `disable` command.
 pub async fn run(opts: DisableOptions<'_>) -> Result<()> {
     let repo_path: PathBuf = match opts.path {
@@ -165,32 +210,10 @@ pub async fn run(opts: DisableOptions<'_>) -> Result<()> {
     for m in &matched {
         let action = decide_action(m, target);
         debug!("definition {}: action={:?}", m.id, action);
-
-        match action {
-            Action::Skip { id, name, reason } => {
-                println!("↻ skip: {} (id={}, {})", name, id, reason);
-                skipped += 1;
-            }
-            Action::Patch { id, name, from, to } => {
-                if opts.dry_run {
-                    println!(
-                        "[dry-run] ▶ would patch: {} (id={}, {} → {})",
-                        name, id, from, to
-                    );
-                    patched += 1;
-                    continue;
-                }
-                match patch_queue_status(&client, &ado_ctx, &auth, id, to).await {
-                    Ok(()) => {
-                        println!("▶ patched: {} (id={}, {} → {})", name, id, from, to);
-                        patched += 1;
-                    }
-                    Err(e) => {
-                        eprintln!("✗ failed: {} (id={}): {:#}", name, id, e);
-                        failure += 1;
-                    }
-                }
-            }
+        match apply_action(action, &client, &ado_ctx, &auth, opts.dry_run).await {
+            ApplyOutcome::Skipped => skipped += 1,
+            ApplyOutcome::Patched => patched += 1,
+            ApplyOutcome::Failed => failure += 1,
         }
     }
 

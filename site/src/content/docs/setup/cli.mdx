@@ -140,7 +140,7 @@ Options:
 
 ### `catalog`
 
-List the in-tree registries of safe-output tools, runtimes, first-class tools, engines, and models.
+List the in-tree registries of safe-output tools, runtimes, first-class tools, engines, models, and pinned versions.
 
 ```bash
 ado-aw catalog [--kind <category>] [--json]
@@ -148,7 +148,7 @@ ado-aw catalog [--kind <category>] [--json]
 
 Options:
 
-- `--kind safe-outputs|runtimes|tools|engines|models` -- restrict output to one category; omit to see all
+- `--kind safe-outputs|runtimes|tools|engines|models|versions` -- restrict output to one category; omit to see all. `--kind versions` emits the pinned semver versions (`copilot_cli`, `awf`, `mcpg`) as a deterministic source of truth for CI.
 - `--json` -- emit the catalog as JSON
 
 ### `trace <build-id-or-url>`

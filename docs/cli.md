@@ -173,8 +173,9 @@ Both `--all-repos` and `--source` route through `ado-aw`'s `discover_ado_aw_pipe
   - `<source>` - Path to the agent markdown file.
   - `--json` - Emit lint findings as structured JSON instead of the human-readable report.
 
-- `catalog [--kind <safe-outputs|runtimes|tools|engines|models>] [--json]` - List the compiler's in-tree registries for scripting or discovery.
+- `catalog [--kind <safe-outputs|runtimes|tools|engines|models|versions>] [--json]` - List the compiler's in-tree registries for scripting or discovery.
   - `--kind <...>` - Restrict output to one category. When omitted, emits every category.
+  - `--kind versions` - Emit the compiler's pinned **semver** versions (`copilot_cli`, `awf`, `mcpg`) as a single source of truth. CI reads these deterministically instead of scraping the Rust source, e.g. `ado-aw catalog --kind versions --json | jq -r '.versions.copilot_cli'`.
   - `--json` - Emit the catalog as structured JSON instead of the human-readable report.
 
 ### Hidden Build-Time Tools

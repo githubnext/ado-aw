@@ -67,6 +67,7 @@ use super::common::{
     self, ADO_BUILD_ID_SUFFIX, AWF_VERSION, HEADER_MARKER, MCPG_DOMAIN, MCPG_IMAGE, MCPG_PORT,
     MCPG_VERSION,
 };
+use super::common::PerJobPools;
 use super::extensions::{CompileContext, CompilerExtension, Declarations, Extension, McpgConfig};
 use super::ir::condition::{Condition, Expr};
 use super::ir::env::EnvValue;
@@ -89,6 +90,10 @@ use super::types::{
     ApprovalConfig, ApprovalOnTimeout, CheckoutFetchOpts, FrontMatter, OnConfig, PrMode,
     ProviderToken, Repository as RepoCfg, SELF_CHECKOUT_ALIAS, SupplyChainConfig,
 };
+
+/// The `safe-outputs:` key for the create-pull-request tool. Matches the kebab
+/// name `FrontMatter::create_pr_config`/`partition_safe_outputs_by_approval` use.
+const CREATE_PULL_REQUEST_TOOL: &str = "create-pull-request";
 
 /// Built pipeline context — the result of running every validation,
 /// scalar computation, extension declaration fanout, and canonical-
@@ -163,7 +168,11 @@ pub(crate) fn build_pipeline_context(
     )?;
     let working_directory = common::generate_working_directory(&effective_workspace);
     let trigger_repo_directory = common::generate_trigger_repo_directory(&front_matter.checkout);
-    let pool = common::resolve_pool_typed(front_matter.target.clone(), front_matter.pool.as_ref())?;
+    let pools = common::resolve_pool_overrides_typed(
+        front_matter.target.clone(),
+        front_matter.pool.as_ref(),
+        front_matter.pool_overrides(),
+    )?;
 
     let compiler_version = env!("CARGO_PKG_VERSION").to_string();
 
@@ -323,7 +332,7 @@ pub(crate) fn build_pipeline_context(
 
     // Aggregate config for per-job builders
     let cfg = StandaloneCtx {
-        pool: pool.clone(),
+        pools,
         agent_display_name: agent_display_name.clone(),
         self_checkout_fetch: front_matter
             .checkout_fetch
@@ -426,25 +435,37 @@ pub(crate) fn build_canonical_jobs(
     //   - all reviewed tools          → single default job, gated by ManualReview
     //   - mixed (auto + reviewed)     → auto job + reviewed job
     let (auto, reviewed) = front_matter.partition_safe_outputs_by_approval();
+    // Which variant actually runs `create-pull-request` (and thus needs the
+    // `prepare-pr-base` fetch/deepen — issue #1453). In a split it lives in
+    // exactly one variant; the other filters it out, so only the running
+    // variant should pay for the bundle download + prepare step.
+    let create_pr_configured = front_matter.create_pr_config().is_some();
+    let create_pr_reviewed = reviewed.iter().any(|t| t == CREATE_PULL_REQUEST_TOOL);
     if reviewed.is_empty() || auto.is_empty() {
         jobs.push(build_safeoutputs_job(
             front_matter,
             cfg,
             &p,
-            &SafeOutputsVariant::default_single(),
+            &SafeOutputsVariant::default_single(create_pr_configured),
         )?);
     } else {
         jobs.push(build_safeoutputs_job(
             front_matter,
             cfg,
             &p,
-            &SafeOutputsVariant::automatic(&reviewed),
+            &SafeOutputsVariant::automatic(
+                &reviewed,
+                create_pr_configured && !create_pr_reviewed,
+            ),
         )?);
         jobs.push(build_safeoutputs_job(
             front_matter,
             cfg,
             &p,
-            &SafeOutputsVariant::reviewed(&reviewed),
+            &SafeOutputsVariant::reviewed(
+                &reviewed,
+                create_pr_configured && create_pr_reviewed,
+            ),
         )?);
     }
     if let Some(teardown) = build_teardown_job(front_matter, cfg, &p)? {
@@ -486,7 +507,7 @@ impl<'a> JobPrefix<'a> {
 /// every per-job builder. Lives only inside this module; passed by
 /// reference so builders don't take 20+ args each.
 pub(crate) struct StandaloneCtx {
-    pub(crate) pool: Pool,
+    pub(crate) pools: PerJobPools,
     pub(crate) agent_display_name: String,
     /// Fetch tuning for the auto-generated `checkout: self` step, resolved from
     /// a reserved `self` entry in `repos:` (empty ⇒ ADO defaults).
@@ -817,7 +838,7 @@ fn build_setup_job(
         steps.push(Step::RawYaml(yaml));
     }
 
-    let mut job = Job::new(prefix.id("Setup")?, "Setup", cfg.pool.clone());
+    let mut job = Job::new(prefix.id("Setup")?, "Setup", cfg.pools.setup.clone());
     job.steps = steps;
     Ok(Some(job))
 }
@@ -941,46 +962,14 @@ fn build_agent_job(
     //     `prepare-pr-base.js` bundle is staged by the ado-script extension's
     //     agent-prepare steps (`prepare_pr_base_active` is OR'd into that
     //     extension's Agent-job download predicate), so it is guaranteed present.
-    if let Some(pr_cfg) = front_matter.create_pr_config() {
-        // Deepen every checkout dir the SafeOutputs MCP server may generate a
-        // patch from — one per allowed create-PR repo, mirroring
-        // `mcp.rs::resolve_git_dir_for_patch`: the resolved `working_directory`
-        // (for `self`) and `working_directory/<alias>` for each `checkout:`
-        // alias. Each dir is paired with THAT repo's resolved target branch
-        // (`CreatePrConfig::resolve_target_branch` — explicit override, inferred
-        // checkout ref, or the literal default), so a PR to any repo deepens the
-        // branch it actually targets. A single `self` checkout ⇒ one pair.
-        let repo_refs = front_matter.checkout_repo_refs();
-        let mut repos: Vec<(String, String)> = vec![(
-            cfg.working_directory.clone(),
-            pr_cfg.resolve_target_branch("self", &repo_refs),
-        )];
-        for alias in &front_matter.checkout {
-            // Warn when target inference would pick a non-branch ref (e.g. a
-            // tag). `resolve_target_branch` would hand back the whole ref, and
-            // Stage 3 builds `refs/heads/<ref>` → a PR into `refs/heads/refs/
-            // tags/v1` that ADO rejects with a generic error. Surface it at
-            // compile time (advisory, not fatal: the repo may be a dependency
-            // checkout the agent never opens a PR against — an explicit
-            // `target-branches:` entry silences this).
-            if pr_cfg.infer_target_from_checkout_ref
-                && !pr_cfg.target_branches.contains_key(alias)
-                && let Some(git_ref) = repo_refs.get(alias)
-                && !git_ref.starts_with("refs/heads/")
-            {
-                eprintln!(
-                    "Warning: create-pull-request infer-target-from-checkout-ref is set, but \
-                    checkout repo '{alias}' is at '{git_ref}', which is not a branch \
-                    (refs/heads/*). A PR into this repo would target an invalid ref. Set an \
-                    explicit `target-branches: {{ {alias}: <branch> }}` if the agent opens a PR \
-                    against it."
-                );
-            }
-            repos.push((
-                format!("{}/{}", cfg.working_directory, alias),
-                pr_cfg.resolve_target_branch(alias, &repo_refs),
-            ));
-        }
+    if front_matter.create_pr_config().is_some() {
+        // The prepare step deepens every checkout dir the SafeOutputs MCP server
+        // may generate a patch from — see `create_pr_prepare_repos`. The
+        // compile-time target-inference advisory is emitted here (Agent job)
+        // only, so it never double-prints when the same step is also emitted in
+        // the SafeOutputs job (issue #1453).
+        warn_create_pr_target_inference(front_matter);
+        let repos = create_pr_prepare_repos(front_matter, &cfg.working_directory);
         steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
             &repos,
         ));
@@ -1067,7 +1056,7 @@ fn build_agent_job(
 
     let _ = extensions; // currently unused after typed declarations gather
     let _ = &cfg.agent_display_name; // friendly name is the pipeline `name:`, not the job displayName
-    let mut job = Job::new(prefix.id("Agent")?, "Agent", cfg.pool.clone());
+    let mut job = Job::new(prefix.id("Agent")?, "Agent", cfg.pools.agent.clone());
     if let Some(minutes) = front_matter.engine.timeout_minutes() {
         job.timeout = Some(std::time::Duration::from_secs(60 * (minutes as u64)));
     }
@@ -1296,7 +1285,7 @@ fn build_detection_job(
         condition: Some(Condition::Always),
     }));
 
-    let mut job = Job::new(prefix.id("Detection")?, "Detection", cfg.pool.clone());
+    let mut job = Job::new(prefix.id("Detection")?, "Detection", cfg.pools.detection.clone());
     job.steps = steps;
     Ok(job)
 }
@@ -1314,36 +1303,55 @@ struct SafeOutputsVariant {
     artifact: &'static str,
     /// Trailing `--only`/`--exclude` flags for `ado-aw execute` (or empty).
     filter_args: String,
+    /// Whether THIS variant actually executes `create-pull-request`. In a
+    /// split-approval config only one of the two variants runs the tool (the
+    /// other filters it out via `--only`/`--exclude`), so only that variant
+    /// needs the `prepare-pr-base` fetch/deepen + the ado-script bundle download
+    /// (issue #1453 review). Avoids a wasted Node install + bundle fetch +
+    /// prepare step in the variant that will never open a PR.
+    runs_create_pull_request: bool,
+    /// Whether this is the manual-review-gated `SafeOutputs_Reviewed` variant.
+    /// Used to select the correct pool override without relying on the job name.
+    is_reviewed: bool,
 }
 
 impl SafeOutputsVariant {
-    /// The default single-job variant: no filter, canonical names.
-    fn default_single() -> Self {
+    /// The default single-job variant: no filter, canonical names. Runs every
+    /// configured tool, so it executes `create-pull-request` iff configured.
+    fn default_single(runs_create_pull_request: bool) -> Self {
         Self {
             base: "SafeOutputs",
             display: "SafeOutputs",
             artifact: "safe_outputs",
             filter_args: String::new(),
+            runs_create_pull_request,
+            is_reviewed: false,
         }
     }
 
-    /// The automatic variant in a split: excludes every reviewed tool.
-    fn automatic(reviewed: &[String]) -> Self {
+    /// The automatic variant in a split: excludes every reviewed tool. Runs
+    /// `create-pull-request` only when it is configured and NOT review-gated.
+    fn automatic(reviewed: &[String], runs_create_pull_request: bool) -> Self {
         Self {
             base: "SafeOutputs",
             display: "SafeOutputs",
             artifact: "safe_outputs",
             filter_args: filter_flags("--exclude", reviewed),
+            runs_create_pull_request,
+            is_reviewed: false,
         }
     }
 
-    /// The reviewed variant in a split: runs only the reviewed tools.
-    fn reviewed(reviewed: &[String]) -> Self {
+    /// The reviewed variant in a split: runs only the reviewed tools. Runs
+    /// `create-pull-request` only when it is configured and review-gated.
+    fn reviewed(reviewed: &[String], runs_create_pull_request: bool) -> Self {
         Self {
             base: "SafeOutputs_Reviewed",
             display: "SafeOutputs (reviewed)",
             artifact: "safe_outputs_reviewed",
             filter_args: filter_flags("--only", reviewed),
+            runs_create_pull_request,
+            is_reviewed: true,
         }
     }
 }
@@ -1362,6 +1370,73 @@ fn filter_flags(flag: &str, tools: &[String]) -> String {
         s.push_str(&format!(" {flag} {t}"));
     }
     s
+}
+
+/// Build the `(dir, target-branch)` pairs the `prepare-pr-base` bundle must
+/// fetch/deepen — one per allowed `create-pull-request` repo, mirroring
+/// `mcp.rs::resolve_git_dir_for_patch`: `working_directory` (for `self`) and
+/// `working_directory/<alias>` for each `checkout:` alias. Each dir is paired
+/// with THAT repo's resolved target branch
+/// (`CreatePrConfig::resolve_target_branch` — explicit override, inferred
+/// checkout ref, or the literal default), so a PR to any repo deepens the branch
+/// it actually targets. A single `self` checkout ⇒ one pair. Returns an empty
+/// vec when `create-pull-request` is not configured.
+///
+/// Pure (no diagnostics): the compile-time target-inference advisory is emitted
+/// separately by [`warn_create_pr_target_inference`] so it prints exactly once
+/// even though the prepare step is emitted in both the Agent and SafeOutputs
+/// jobs (issue #1453).
+fn create_pr_prepare_repos(
+    front_matter: &FrontMatter,
+    working_directory: &str,
+) -> Vec<(String, String)> {
+    let Some(pr_cfg) = front_matter.create_pr_config() else {
+        return Vec::new();
+    };
+    let repo_refs = front_matter.checkout_repo_refs();
+    let mut repos: Vec<(String, String)> = vec![(
+        working_directory.to_string(),
+        pr_cfg.resolve_target_branch("self", &repo_refs),
+    )];
+    for alias in &front_matter.checkout {
+        repos.push((
+            format!("{working_directory}/{alias}"),
+            pr_cfg.resolve_target_branch(alias, &repo_refs),
+        ));
+    }
+    repos
+}
+
+/// Emit the compile-time advisory when `create-pull-request`'s
+/// `infer-target-from-checkout-ref` would resolve a non-branch ref (e.g. a tag)
+/// as a PR base. `resolve_target_branch` would hand back the whole ref, and
+/// Stage 3 builds `refs/heads/<ref>` → a PR into `refs/heads/refs/tags/v1` that
+/// ADO rejects with a generic error. Advisory, not fatal: the repo may be a
+/// dependency checkout the agent never opens a PR against — an explicit
+/// `target-branches:` entry silences it. Called once (Agent job) so it never
+/// double-prints alongside the SafeOutputs-job prepare step.
+fn warn_create_pr_target_inference(front_matter: &FrontMatter) {
+    let Some(pr_cfg) = front_matter.create_pr_config() else {
+        return;
+    };
+    if !pr_cfg.infer_target_from_checkout_ref {
+        return;
+    }
+    let repo_refs = front_matter.checkout_repo_refs();
+    for alias in &front_matter.checkout {
+        if !pr_cfg.target_branches.contains_key(alias)
+            && let Some(git_ref) = repo_refs.get(alias)
+            && !git_ref.starts_with("refs/heads/")
+        {
+            eprintln!(
+                "Warning: create-pull-request infer-target-from-checkout-ref is set, but \
+                checkout repo '{alias}' is at '{git_ref}', which is not a branch \
+                (refs/heads/*). A PR into this repo would target an invalid ref. Set an \
+                explicit `target-branches: {{ {alias}: <branch> }}` if the agent opens a PR \
+                against it."
+            );
+        }
+    }
 }
 
 fn build_safeoutputs_job(
@@ -1401,6 +1476,28 @@ fn build_safeoutputs_job(
         "Prepare output directory",
         "mkdir -p \"$(Agent.TempDirectory)/staging\"\n",
     )));
+    // When `create-pull-request` is configured, fetch/deepen each target branch
+    // in THIS job's checkout, immediately before the executor runs (issue
+    // #1453). The prepare step also runs in the Agent job (for the host-side
+    // SafeOutputs MCP diff base), but each ADO job gets an isolated checkout, so
+    // the Agent-job fetch is invisible here — the `create-pull-request` executor
+    // (`ado-aw execute`) builds its worktree from `origin/<target>` in the
+    // SafeOutputs checkout and needs the ref landed locally. Stage the ado-script
+    // bundle in this job (it is otherwise only staged in the Agent/Setup jobs),
+    // then emit the same `prepare-pr-base` step. The bundle auth projects
+    // `System.AccessToken` (the build identity the checkout persists credentials
+    // for), so the git fetch is authenticated regardless of the write token.
+    if variant.runs_create_pull_request {
+        steps.extend(
+            super::extensions::ado_script::install_and_download_steps_typed(
+                front_matter.supply_chain(),
+            ),
+        );
+        let repos = create_pr_prepare_repos(front_matter, &cfg.working_directory);
+        steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
+            &repos,
+        ));
+    }
     // Execute safe outputs (Stage 3) — typed BashStep with typed env block
     steps.push(Step::Bash(execute_safe_outputs_step(
         &cfg.source_path,
@@ -1417,7 +1514,12 @@ fn build_safeoutputs_job(
         condition: Some(Condition::Always),
     }));
 
-    let mut job = Job::new(prefix.id(variant.base)?, variant.display, cfg.pool.clone());
+    let safeoutputs_pool = if variant.is_reviewed {
+        cfg.pools.safe_outputs_reviewed.clone()
+    } else {
+        cfg.pools.safe_outputs.clone()
+    };
+    let mut job = Job::new(prefix.id(variant.base)?, variant.display, safeoutputs_pool);
     job.steps = steps;
     // **Marquee**: condition uses typed Expr::StepOutput on Detection's
     // threatAnalysis.SafeToProcess output. Lowering picks the cross-job
@@ -1672,7 +1774,7 @@ fn build_teardown_job(
     for user_step_val in &front_matter.teardown {
         steps.push(Step::RawYaml(step_to_raw_yaml_string(user_step_val)?));
     }
-    let mut job = Job::new(prefix.id("Teardown")?, "Teardown", cfg.pool.clone());
+    let mut job = Job::new(prefix.id("Teardown")?, "Teardown", cfg.pools.teardown.clone());
     job.steps = steps;
     Ok(Some(job))
 }
@@ -1911,7 +2013,7 @@ fi\n"
 
     steps.push(Step::Bash(conclusion_step));
 
-    let mut job = Job::new(prefix.id("Conclusion")?, "Conclusion", cfg.pool.clone());
+    let mut job = Job::new(prefix.id("Conclusion")?, "Conclusion", cfg.pools.conclusion.clone());
     job.variables = conclusion_variables;
     job.steps = steps;
     // Keep Conclusion's "run regardless of upstream result" behavior, but do
@@ -2674,9 +2776,10 @@ fn start_mcpg_step(
          #   - Rewrite URLs from 127.0.0.1 to host.docker.internal (AWF container needs\n\
          #     host.docker.internal to reach MCPG on the host; 127.0.0.1 is container loopback)\n\
          #   - Ensure tools: [\"*\"] on each server entry (Copilot CLI requirement)\n\
+         #   - Mark generated MCPG entries as default/trusted servers for Copilot CLI\n\
          #   - Preserve all other fields (headers, type, etc.)\n\
          jq --arg prefix \"http://$(MCP_GATEWAY_DOMAIN):$(MCP_GATEWAY_PORT)\" \\\n  \
-           '.mcpServers |= (to_entries | sort_by(.key) | map(.value.url |= sub(\"^http://[^/]+/\"; \"\\($prefix)/\") | .value.tools = [\"*\"]) | from_entries)' \\\n  \
+           '.mcpServers |= (to_entries | sort_by(.key) | map(.value.url |= sub(\"^http://[^/]+/\"; \"\\($prefix)/\") | .value.tools = [\"*\"] | .value.isDefaultServer = true) | from_entries)' \\\n  \
            \"$GATEWAY_OUTPUT\" > /tmp/awf-tools/mcp-config.json\n\
          \n\
          chmod 600 /tmp/awf-tools/mcp-config.json\n\
@@ -3679,6 +3782,24 @@ mod tests {
         assert!(msg.contains("missing `env:` key"), "got: {msg}");
     }
 
+    // ── start_mcpg_step ─────────────────────────────────────────────────────
+
+    #[test]
+    fn start_mcpg_step_marks_copilot_mcp_servers_as_default() {
+        let step = start_mcpg_step("", "", false, None).unwrap();
+
+        assert!(
+            step.script.contains(".value.tools = [\"*\"]"),
+            "Copilot mcp-config conversion should preserve wildcard tools: {}",
+            step.script
+        );
+        assert!(
+            step.script.contains(".value.isDefaultServer = true"),
+            "Copilot mcp-config conversion should mark generated MCP servers as default/trusted: {}",
+            step.script
+        );
+    }
+
     // ── split_yaml_step_sequence ───────────────────────────────────────────
 
     #[test]
@@ -3713,6 +3834,187 @@ mod tests {
         assert!(
             msg.contains("split_yaml_step_sequence failed to parse"),
             "got: {msg}"
+        );
+    }
+
+    // ── pool-overrides integration ──────────────────────────────────────────
+
+    /// Parse front matter from a markdown string, resolve repos, and
+    /// sanitize — mirroring what compile_pipeline_inner does before
+    /// calling build_pipeline_context.
+    fn parse_and_resolve(source: &str) -> super::super::types::FrontMatter {
+        use super::super::common::{parse_markdown, resolve_repos};
+        use crate::sanitize::SanitizeConfig;
+        let (mut fm, _) = parse_markdown(source).unwrap();
+        fm.sanitize_config_fields();
+        let (repos, checkout, fetch) = resolve_repos(&fm).unwrap();
+        fm.repositories = repos;
+        fm.checkout = checkout;
+        fm.checkout_fetch = fetch;
+        fm
+    }
+
+    fn pool_name(pool: &Pool) -> String {
+        match pool {
+            Pool::Named { name, .. } => name.clone(),
+            Pool::VmImage(s) => s.clone(),
+            Pool::Server => "server".to_string(),
+        }
+    }
+
+    fn build_jobs(source: &str) -> Vec<super::super::ir::job::Job> {
+        let fm = parse_and_resolve(source);
+        let ctx = super::super::extensions::CompileContext::for_test(&fm);
+        let extensions = super::super::extensions::collect_extensions(&fm);
+        let decls: Vec<_> = extensions
+            .iter()
+            .map(|e| e.declarations(&ctx).unwrap())
+            .collect();
+        let mut ext_setup_steps = vec![];
+        let mut ext_agent_prepare = vec![];
+        let mut ext_agent_conditions = vec![];
+        for d in &decls {
+            ext_setup_steps.extend(d.setup_steps.clone());
+            ext_agent_prepare.extend(d.agent_prepare_steps.clone());
+            ext_agent_conditions.extend(d.agent_conditions.clone());
+        }
+        let pools = super::super::common::resolve_pool_overrides_typed(
+            fm.target.clone(),
+            fm.pool.as_ref(),
+            fm.pool_overrides(),
+        )
+        .unwrap();
+        let cfg = StandaloneCtx {
+            pools,
+            agent_display_name: fm.name.clone(),
+            self_checkout_fetch: fm
+                .checkout_fetch
+                .get(super::SELF_CHECKOUT_ALIAS)
+                .cloned()
+                .unwrap_or_default(),
+            working_directory: super::super::common::generate_working_directory(
+                &super::super::common::compute_effective_workspace(
+                    &fm.workspace,
+                    &fm.checkout,
+                    &fm.name,
+                )
+                .unwrap(),
+            ),
+            trigger_repo_directory: super::super::common::generate_trigger_repo_directory(
+                &fm.checkout,
+            ),
+            compiler_version: "0.0.0-test".to_string(),
+            engine_install_steps_yaml: String::new(),
+            engine_run: String::new(),
+            engine_run_detection: String::new(),
+            engine_env: "env:\n  GITHUB_TOKEN: $(GITHUB_TOKEN)\n".to_string(),
+            engine_log_dir: "/tmp/logs".to_string(),
+            allowed_domains: String::new(),
+            awf_mounts: "\\".to_string(),
+            awf_path_step_yaml: String::new(),
+            enabled_tools_args: String::new(),
+            mcpg_config_json: "{}".to_string(),
+            mcpg_docker_env: String::new(),
+            mcpg_step_env: String::new(),
+            source_path: "source.md".to_string(),
+            pipeline_path: "source.lock.yml".to_string(),
+            acquire_read_token: String::new(),
+            acquire_write_token: String::new(),
+            executor_ado_env: "env:\n  SYSTEM_ACCESSTOKEN: $(System.AccessToken)\n".to_string(),
+            integrity_check_yaml: String::new(),
+            agent_content_value: String::new(),
+            debug_pipeline: false,
+            byom_active: false,
+            byom_exclude_keys: vec![],
+            detection_provider_env: vec![],
+        };
+        build_canonical_jobs(&fm, &extensions, &cfg, &ext_setup_steps, &ext_agent_prepare, &ext_agent_conditions, None).unwrap()
+    }
+
+    fn job_pool_by_id<'a>(jobs: &'a [super::super::ir::job::Job], id: &str) -> Option<&'a Pool> {
+        jobs.iter().find(|j| j.id.as_ref() == id).map(|j| &j.pool)
+    }
+
+    #[test]
+    fn pool_overrides_detection_only_flows_to_compiled_job() {
+        let source = concat!(
+            "---\nname: test\ndescription: test\n",
+            "pool:\n  name: SpecializedPool\n  overrides:\n    detection:\n      vmImage: ubuntu-22.04\n",
+            "safe-outputs:\n  noop: {}\n",
+            "---\nbody\n"
+        );
+        let jobs = build_jobs(source);
+        // Agent → SpecializedPool
+        assert_eq!(
+            pool_name(job_pool_by_id(&jobs, "Agent").unwrap()),
+            "SpecializedPool"
+        );
+        // Detection → ubuntu-22.04
+        assert_eq!(
+            pool_name(job_pool_by_id(&jobs, "Detection").unwrap()),
+            "ubuntu-22.04"
+        );
+        // SafeOutputs → SpecializedPool (no override)
+        assert_eq!(
+            pool_name(job_pool_by_id(&jobs, "SafeOutputs").unwrap()),
+            "SpecializedPool"
+        );
+    }
+
+    #[test]
+    fn pool_overrides_empty_does_not_change_default() {
+        // pool: {overrides: {}} is identical to pool: with no overrides key.
+        let with_overrides = concat!(
+            "---\nname: test\ndescription: test\n",
+            "pool:\n  vmImage: ubuntu-22.04\n  overrides: {}\n",
+            "safe-outputs:\n  noop: {}\n",
+            "---\nbody\n"
+        );
+        let without_overrides = concat!(
+            "---\nname: test\ndescription: test\n",
+            "pool:\n  vmImage: ubuntu-22.04\n",
+            "safe-outputs:\n  noop: {}\n",
+            "---\nbody\n"
+        );
+        let jobs_with = build_jobs(with_overrides);
+        let jobs_without = build_jobs(without_overrides);
+        for job_id in ["Agent", "Detection", "SafeOutputs"] {
+            assert_eq!(
+                job_pool_by_id(&jobs_with, job_id).unwrap(),
+                job_pool_by_id(&jobs_without, job_id).unwrap(),
+                "pool mismatch for job {job_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn pool_overrides_all_downstream_override() {
+        let source = concat!(
+            "---\nname: test\ndescription: test\n",
+            "pool:\n  name: SpecializedPool\n",
+            "  overrides:\n",
+            "    detection:\n      vmImage: ubuntu-22.04\n",
+            "    safe-outputs:\n      vmImage: ubuntu-22.04\n",
+            "    conclusion:\n      vmImage: ubuntu-22.04\n",
+            "safe-outputs:\n  noop: {}\n",
+            "---\nbody\n"
+        );
+        let jobs = build_jobs(source);
+        assert_eq!(
+            pool_name(job_pool_by_id(&jobs, "Agent").unwrap()),
+            "SpecializedPool"
+        );
+        assert_eq!(
+            pool_name(job_pool_by_id(&jobs, "Detection").unwrap()),
+            "ubuntu-22.04"
+        );
+        assert_eq!(
+            pool_name(job_pool_by_id(&jobs, "SafeOutputs").unwrap()),
+            "ubuntu-22.04"
+        );
+        assert_eq!(
+            pool_name(job_pool_by_id(&jobs, "Conclusion").unwrap()),
+            "ubuntu-22.04"
         );
     }
 }

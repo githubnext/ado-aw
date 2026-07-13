@@ -606,9 +606,9 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// List safe-outputs, runtimes, tools, engines, and models.
+    /// List safe-outputs, runtimes, tools, engines, models, and versions.
     Catalog {
-        /// Category to emit: safe-outputs, runtimes, tools, engines, or models.
+        /// Category to emit: safe-outputs, runtimes, tools, engines, models, or versions.
         #[arg(long)]
         kind: Option<String>,
         /// Emit the catalog as JSON.

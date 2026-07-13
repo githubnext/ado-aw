@@ -165,6 +165,10 @@ impl ContextContributor for PrContextContributor {
                 .with_env(
                     "SYSTEM_PULLREQUEST_TARGETBRANCH",
                     EnvValue::pipeline_var("AW_PR_TARGETBRANCH"),
+                )
+                .with_env(
+                    "SYSTEM_PULLREQUEST_SOURCEBRANCH",
+                    EnvValue::pipeline_var("AW_PR_SOURCEBRANCH"),
                 );
         }
         Ok(Some(Step::Bash(step)))

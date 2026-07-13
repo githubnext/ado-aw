@@ -439,6 +439,25 @@ impl Engine {
     }
 }
 
+fn push_unique_tool(allowed_tools: &mut Vec<String>, tool: &str) {
+    if !allowed_tools.iter().any(|existing| existing == tool) {
+        allowed_tools.push(tool.to_string());
+    }
+}
+
+fn collect_extension_allowed_tools(extension_declarations: &[Declarations]) -> Vec<String> {
+    let mut allowed_tools: Vec<String> = Vec::new();
+
+    // Tools from compiler extensions (github, safeoutputs, azure-devops, etc.)
+    for decl in extension_declarations {
+        for tool in &decl.copilot_allow_tools {
+            push_unique_tool(&mut allowed_tools, tool);
+        }
+    }
+
+    allowed_tools
+}
+
 /// Collects the list of allowed tool identifiers when bash is not in wildcard mode.
 ///
 /// Returns a flat `Vec<String>` of fully-qualified tool identifiers ready to be
@@ -449,7 +468,7 @@ fn collect_allowed_tools(
     extension_declarations: &[Declarations],
     edit_enabled: bool,
 ) -> Result<Vec<String>> {
-    let mut allowed_tools = collect_extension_tools(extension_declarations);
+    let mut allowed_tools = collect_extension_allowed_tools(extension_declarations);
     add_mcp_server_tools(front_matter, &mut allowed_tools);
 
     // Intentional: with restricted bash, both --allow-tool write (tool identity)
@@ -474,20 +493,6 @@ fn collect_allowed_tools(
     }
 
     Ok(allowed_tools)
-}
-
-/// Collects deduplicated tool identifiers declared by compiler extensions
-/// (github, safeoutputs, azure-devops, etc.).
-fn collect_extension_tools(extension_declarations: &[Declarations]) -> Vec<String> {
-    let mut tools: Vec<String> = Vec::new();
-    for decl in extension_declarations {
-        for tool in &decl.copilot_allow_tools {
-            if !tools.contains(tool) {
-                tools.push(tool.clone());
-            }
-        }
-    }
-    tools
 }
 
 /// Returns `true` when an MCP server config has a real backing server (container
@@ -598,10 +603,12 @@ fn copilot_args(
         .and_then(|t| t.edit)
         .unwrap_or(true);
 
-    // When --allow-all-tools is active, skip individual tool collection entirely.
-    // --allow-all-tools is a superset that permits all tool calls regardless.
+    // When --allow-all-tools is active, skip user/tool collection but keep
+    // compiler-owned extension grants. Copilot's MCP policy still requires
+    // first-party generated MCP servers (notably safeoutputs) to be explicitly
+    // permitted even when all tool calls are otherwise allowed.
     let allowed_tools: Vec<String> = if use_allow_all_tools {
-        Vec::new()
+        collect_extension_allowed_tools(extension_declarations)
     } else {
         collect_allowed_tools(front_matter, extension_declarations, edit_enabled)?
     };
@@ -661,15 +668,15 @@ fn copilot_args(
 
     if use_allow_all_tools {
         params.push("--allow-all-tools".to_string());
-    } else {
-        for tool in allowed_tools {
-            if tool.contains('(') || tool.contains(')') || tool.contains(' ') {
-                // Use double quotes - the copilot_params are embedded inside a single-quoted
-                // bash string in the AWF command, so single quotes would break quoting.
-                params.push(format!("--allow-tool \"{}\"", tool));
-            } else {
-                params.push(format!("--allow-tool {}", tool));
-            }
+    }
+
+    for tool in allowed_tools {
+        if tool.contains('(') || tool.contains(')') || tool.contains(' ') {
+            // Use double quotes - the copilot_params are embedded inside a single-quoted
+            // bash string in the AWF command, so single quotes would break quoting.
+            params.push(format!("--allow-tool \"{}\"", tool));
+        } else {
+            params.push(format!("--allow-tool {}", tool));
         }
     }
 

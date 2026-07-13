@@ -55,9 +55,9 @@ function countParentTokens(runners: GitRunners): number {
  * `depthArg` is one of `--depth=N` or `--unshallow` — passed
  * verbatim so the caller can iterate the progressive-deepening loop.
  */
-function fetchTargetAtDepth(
+function fetchBranchAtDepth(
   runners: GitRunners,
-  targetShort: string,
+  branchShort: string,
   depthArg: string,
   env: Record<string, string>,
 ): boolean {
@@ -67,7 +67,7 @@ function fetchTargetAtDepth(
       "--no-tags",
       depthArg,
       "origin",
-      `+refs/heads/${targetShort}:refs/remotes/origin/${targetShort}`,
+      `+refs/heads/${branchShort}:refs/remotes/origin/${branchShort}`,
     ],
     env,
   );
@@ -105,7 +105,7 @@ export function ensureTargetRefFetched(
   // against the deepened target ref.
   const depths = ["--depth=200", "--depth=500", "--depth=2000", "--unshallow"];
   for (const depthArg of depths) {
-    if (!fetchTargetAtDepth(runners, targetShort, depthArg, env)) {
+    if (!fetchBranchAtDepth(runners, targetShort, depthArg, env)) {
       // Fetch failed at this depth (e.g. --unshallow on an already-
       // unshallowed repo). Continue to the next depth or bail out after
       // the loop.
@@ -122,6 +122,32 @@ export function ensureTargetRefFetched(
   };
 }
 
+function ensureSyntheticMergeParentsFetched(
+  targetShort: string,
+  sourceShort: string,
+  targetParentSha: string,
+  sourceParentSha: string,
+  env: Record<string, string>,
+  runners: GitRunners,
+): FetchDeepenResult {
+  const depths = ["--depth=200", "--depth=500", "--depth=2000", "--unshallow"];
+  for (const depthArg of depths) {
+    const targetFetched = fetchBranchAtDepth(runners, targetShort, depthArg, env);
+    const sourceFetched = fetchBranchAtDepth(runners, sourceShort, depthArg, env);
+    if (!targetFetched && !sourceFetched) {
+      continue;
+    }
+    const mb = runners.gitOk(["merge-base", targetParentSha, sourceParentSha]) ?? "";
+    if (mb.length > 0) {
+      return { ok: true, baseSha: mb };
+    }
+  }
+  return {
+    ok: false,
+    reason: `Could not resolve merge-base between synthetic PR parents after progressive deepening of 'origin/${targetShort}' and 'origin/${sourceShort}'.`,
+  };
+}
+
 /**
  * Resolve `BASE_SHA` and `HEAD_SHA` for the PR.
  *
@@ -132,7 +158,8 @@ export function ensureTargetRefFetched(
  *     default checkout mode for PR builds), `HEAD^1` is the target tip
  *     at PR preparation time and `HEAD^2` is the PR head. We compute
  *     `merge-base HEAD^1 HEAD^2` to match the deepening path's
- *     semantics. Falls back to `HEAD^1` if `merge-base` cannot resolve.
+ *     semantics. If the shallow checkout lacks enough ancestry, fetch
+ *     the target and source refs with progressive deepening and retry.
  *
  *  2. **Progressive deepening**: when HEAD is a normal commit, fetch
  *     the target branch with `--depth=200`, `500`, `2000`, `--unshallow`
@@ -145,6 +172,7 @@ export function resolveMergeBase(
   targetShort: string,
   env: Record<string, string>,
   runners: GitRunners = defaultRunners,
+  sourceShort = "",
 ): MergeBaseResult {
   const headSha = runners.gitOk(["rev-parse", "HEAD"]) ?? "";
   const parentTokens = countParentTokens(runners);
@@ -159,7 +187,21 @@ export function resolveMergeBase(
     headTipSha = p2;
     if (p1.length > 0 && p2.length > 0) {
       const mergeBase = runners.gitOk(["merge-base", p1, p2]) ?? "";
-      baseSha = mergeBase.length > 0 ? mergeBase : p1;
+      if (mergeBase.length > 0) {
+        baseSha = mergeBase;
+      } else if (sourceShort.length > 0) {
+        const fetched = ensureSyntheticMergeParentsFetched(
+          targetShort,
+          sourceShort,
+          p1,
+          p2,
+          env,
+          runners,
+        );
+        if (fetched.ok) {
+          baseSha = fetched.baseSha;
+        }
+      }
     }
   } else {
     headTipSha = headSha;

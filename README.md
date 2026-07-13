@@ -256,7 +256,7 @@ the service connections. Approve the permissions and the pipeline is ready.
 | `target` | `standalone` \| `1es` \| `job` \| `stage` | `standalone` | Pipeline output format. `job` and `stage` generate reusable ADO YAML templates rather than complete pipelines. |
 | `engine` | string or object | `copilot` | Engine identifier or object with `id`, `model`, `timeout-minutes`, `provider` (BYOK), `github-app-token`, and more. See [engine reference](docs/engine.md). |
 | `on` | object | — | Unified trigger configuration (`schedule`, `pipeline` completion, `pr` triggers). See [schedule syntax](#schedule-syntax). |
-| `pool` | string or object | `vmImage: ubuntu-22.04` (standalone) / `AZS-1ES-L-MMS-ubuntu-22.04` (1ES) | Agent pool |
+| `pool` | string or object | `vmImage: ubuntu-22.04` (standalone) / `AZS-1ES-L-MMS-ubuntu-22.04` (1ES) | Agent pool. Named pools may include ordered Azure Pipelines `demands`; demands cannot be used with `vmImage`. |
 | `workspace` | `root` \| `repo` \| `self` \| *alias* | auto | Working directory mode. `self` is an alias for `repo`; any checked-out repo alias is also accepted. |
 | `repos` | list | — | Compact repository declarations (replaces legacy `repositories:` + `checkout:`) |
 | `variable-groups` | list | — | ADO Library variable group names to import (emits `variables: - group: <name>` in the lock). Not supported on `target: job` or `target: stage`. |
@@ -564,7 +564,7 @@ Commands:
   graph         Query the resolved dependency graph for an agent source file
   whatif        Static reachability: classify jobs skipped if a step or job fails
   lint          Run structural lint checks over an agent source file
-  catalog       List safe-outputs, runtimes, tools, engines, and models
+  catalog       List safe-outputs, runtimes, tools, engines, models, and versions
 
 Options:
   -v, --verbose              Enable info-level logging

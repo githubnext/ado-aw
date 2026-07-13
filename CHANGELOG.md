@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.44.0](https://github.com/githubnext/ado-aw/compare/v0.43.0...v0.44.0) (2026-07-13)
+
+
+### Features
+
+* **cli:** add catalog versions kind and use it in the copilot-cli workflow ([#1471](https://github.com/githubnext/ado-aw/issues/1471)) ([8009dd0](https://github.com/githubnext/ado-aw/commit/8009dd05df0adef2ed06632ea80a551b24ed32d5))
+* **compile:** add pool-overrides for per-job pool configuration ([#1464](https://github.com/githubnext/ado-aw/issues/1464)) ([#1472](https://github.com/githubnext/ado-aw/issues/1472)) ([f1109c6](https://github.com/githubnext/ado-aw/commit/f1109c642803d43cdf6111606418d71944a8f8fc))
+* **compile:** support named pool demands ([#1461](https://github.com/githubnext/ado-aw/issues/1461)) ([77f4f90](https://github.com/githubnext/ado-aw/commit/77f4f90043d67875552afddd0ce317107957f778))
+
+
+### Bug Fixes
+
+* **ado-script:** fail closed for unresolved synthetic PR merge-base ([#1460](https://github.com/githubnext/ado-aw/issues/1460)) ([2e60ec4](https://github.com/githubnext/ado-aw/commit/2e60ec44a0a000edefac5728e536dd5f9b9c48ef))
+* **ci:** avoid runner context in job env ([#1469](https://github.com/githubnext/ado-aw/issues/1469)) ([8ec1166](https://github.com/githubnext/ado-aw/commit/8ec11662e81bff0e792e40707d6055940b42abfb))
+* **compile:** emit prepare-pr-base in the SafeOutputs job ([#1453](https://github.com/githubnext/ado-aw/issues/1453)) ([#1458](https://github.com/githubnext/ado-aw/issues/1458)) ([c5b1404](https://github.com/githubnext/ado-aw/commit/c5b14049bd4a97364eda89c526906d4feab0cf6f))
+* **compile:** trust generated SafeOutputs MCP for Copilot ([#1462](https://github.com/githubnext/ado-aw/issues/1462)) ([2e85e40](https://github.com/githubnext/ado-aw/commit/2e85e4027ba11f869dec1876aaac359dc44856ef))
+
 ## [0.43.0](https://github.com/githubnext/ado-aw/compare/v0.42.0...v0.43.0) (2026-07-09)
 
 
