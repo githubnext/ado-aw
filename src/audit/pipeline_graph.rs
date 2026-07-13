@@ -219,7 +219,7 @@ mod tests {
         let source_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests")
             .join("safe-outputs")
-            .join("create-pull-request.md");
+            .join("canary.md");
         let aw_info = serde_json::json!({
             "source": source_path.display().to_string(),
             "target": "standalone"

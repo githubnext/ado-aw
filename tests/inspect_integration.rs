@@ -27,7 +27,7 @@ fn fixture_copy(fixture_name: &str) -> (tempfile::TempDir, PathBuf) {
 
 #[test]
 fn inspect_emits_pipeline_summary_text() {
-    let (_workspace, src) = fixture_copy("create-pull-request.md");
+    let (_workspace, src) = fixture_copy("canary.md");
     let out = Command::new(binary_path())
         .arg("inspect")
         .arg(&src)
@@ -55,7 +55,7 @@ fn inspect_emits_pipeline_summary_text() {
 
 #[test]
 fn inspect_json_emits_schema_version_one() {
-    let (_workspace, src) = fixture_copy("create-pull-request.md");
+    let (_workspace, src) = fixture_copy("canary.md");
     let out = Command::new(binary_path())
         .arg("inspect")
         .arg(&src)
@@ -85,7 +85,7 @@ fn inspect_json_emits_schema_version_one() {
 
 #[test]
 fn graph_dot_emits_digraph_with_known_edges() {
-    let (_workspace, src) = fixture_copy("create-pull-request.md");
+    let (_workspace, src) = fixture_copy("canary.md");
     let out = Command::new(binary_path())
         .arg("graph")
         .arg("dump")
@@ -119,7 +119,7 @@ fn graph_dot_emits_digraph_with_known_edges() {
 
 #[test]
 fn graph_rejects_unknown_format() {
-    let (_workspace, src) = fixture_copy("create-pull-request.md");
+    let (_workspace, src) = fixture_copy("canary.md");
     let out = Command::new(binary_path())
         .arg("graph")
         .arg("dump")
