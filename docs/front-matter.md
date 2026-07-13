@@ -319,10 +319,11 @@ Unknown keys produce a compiler warning and are ignored (forward-compat).
 
 ### Constraints
 
-- Each override value accepts the same pool format as the top-level `pool:`
-  (Microsoft-hosted `vmImage:`, self-hosted `name:`, or legacy string form).
-  The same mutual-exclusion rules apply: `name:` and `vmImage:` cannot both
-  be specified; `demands:` requires `name:`.
+- Each override value accepts the same **object** pool format as the top-level
+  `pool:` (Microsoft-hosted `vmImage:` or self-hosted `name:`). A bare pool-name
+  string is not accepted here — use `name:`. The same mutual-exclusion rules
+  apply: `name:` and `vmImage:` cannot both be specified; `demands:` requires
+  `name:`.
 - Not supported for `target: 1es` — the 1ES pipeline template controls pool
   selection. Specifying `pool.overrides:` with `target: 1es` is a compile-time
   error.

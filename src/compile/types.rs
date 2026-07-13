@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 
 /// Shared empty overrides map returned by `PoolConfig::overrides()` and
 /// `FrontMatter::pool_overrides()` when no per-job overrides are configured.
-static EMPTY_OVERRIDES: OnceLock<HashMap<String, PoolConfigFull>> = OnceLock::new();
+static EMPTY_OVERRIDES: OnceLock<HashMap<String, PoolConfig>> = OnceLock::new();
 
 /// Target platform for compiled pipeline
 #[derive(Debug, Deserialize, Clone, Default, PartialEq)]
@@ -42,18 +42,20 @@ impl CompileTarget {
     }
 }
 
-/// Pool configuration - accepts both string and object formats
+/// Pool configuration — object form only.
+///
+/// The typed layer accepts only the object form. The legacy scalar shorthand
+/// (`pool: MySelfHostedPool`) is still valid *source* input: codemod
+/// `0002_pool_object_form` rewrites it to `pool: { name: MySelfHostedPool }`
+/// before typed deserialization is reached, so a bare string never lands here.
 ///
 /// Examples:
 /// ```yaml
-/// # Simple legacy string format (self-hosted pool name)
-/// pool: MySelfHostedPool
-///
-/// # Object format (recommended)
+/// # Microsoft-hosted
 /// pool:
-///   vmImage: ubuntu-22.04   # Microsoft-hosted
+///   vmImage: ubuntu-22.04
 ///
-/// # Object format (self-hosted)
+/// # Self-hosted
 /// pool:
 ///   name: MySelfHostedPool
 ///   demands:
@@ -64,84 +66,8 @@ impl CompileTarget {
 ///   name: AZS-1ES-L-MMS-ubuntu-22.04
 ///   os: linux
 /// ```
-#[derive(Debug, Deserialize, Clone)]
-#[serde(untagged)]
-pub enum PoolConfig {
-    /// Simple legacy pool name string (self-hosted)
-    Name(String),
-    /// Full pool configuration object
-    Full(PoolConfigFull),
-}
-
-impl Default for PoolConfig {
-    fn default() -> Self {
-        PoolConfig::Full(PoolConfigFull {
-            vm_image: Some("ubuntu-22.04".to_string()),
-            ..Default::default()
-        })
-    }
-}
-
-impl PoolConfig {
-    /// Get the self-hosted pool name, if configured.
-    #[cfg(test)]
-    pub fn name(&self) -> Option<&str> {
-        match self {
-            PoolConfig::Name(name) => Some(name),
-            PoolConfig::Full(full) => full.name.as_deref(),
-        }
-    }
-
-    /// Get the Microsoft-hosted VM image, if configured.
-    #[cfg(test)]
-    pub fn vm_image(&self) -> Option<&str> {
-        match self {
-            PoolConfig::Name(_) => None,
-            PoolConfig::Full(full) => full.vm_image.as_deref(),
-        }
-    }
-
-    /// Get the ordered Azure Pipelines demands list.
-    pub fn demands(&self) -> &[String] {
-        match self {
-            PoolConfig::Name(_) => &[],
-            PoolConfig::Full(full) => &full.demands,
-        }
-    }
-
-    /// Get the OS (defaults to "linux" if not specified).
-    ///
-    /// Primarily applicable to 1ES pool configuration.
-    #[allow(dead_code)]
-    pub fn os(&self) -> &str {
-        match self {
-            PoolConfig::Name(_) => "linux",
-            PoolConfig::Full(full) => full.os.as_deref().unwrap_or("linux"),
-        }
-    }
-
-    /// Get the per-job pool overrides map, if any.
-    ///
-    /// Returns an empty map for the legacy string form (`Name` variant).
-    pub fn overrides(&self) -> &HashMap<String, PoolConfigFull> {
-        match self {
-            PoolConfig::Name(_) => EMPTY_OVERRIDES.get_or_init(HashMap::new),
-            PoolConfig::Full(full) => &full.overrides,
-        }
-    }
-}
-
-impl SanitizeConfigTrait for PoolConfig {
-    fn sanitize_config_fields(&mut self) {
-        match self {
-            PoolConfig::Name(name) => *name = crate::sanitize::sanitize_config(name),
-            PoolConfig::Full(full) => full.sanitize_config_fields(),
-        }
-    }
-}
-
 #[derive(Debug, Deserialize, Clone, Default)]
-pub struct PoolConfigFull {
+pub struct PoolConfig {
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default, rename = "vmImage")]
@@ -151,7 +77,7 @@ pub struct PoolConfigFull {
     #[serde(default)]
     pub demands: Vec<String>,
     /// Per-job pool overrides — optional map of canonical job name to
-    /// [`PoolConfigFull`]. Any entry replaces the resolved default `pool:` for
+    /// [`PoolConfig`]. Any entry replaces the resolved default `pool:` for
     /// exactly that job; unspecified jobs inherit `pool:`.
     ///
     /// Only the object form is accepted here (a bare pool-name string is not
@@ -168,10 +94,42 @@ pub struct PoolConfigFull {
     ///
     /// See `docs/front-matter.md` for the full reference.
     #[serde(default)]
-    pub overrides: HashMap<String, PoolConfigFull>,
+    pub overrides: HashMap<String, PoolConfig>,
 }
 
-impl SanitizeConfigTrait for PoolConfigFull {
+impl PoolConfig {
+    /// Get the self-hosted pool name, if configured.
+    #[cfg(test)]
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// Get the Microsoft-hosted VM image, if configured.
+    #[cfg(test)]
+    pub fn vm_image(&self) -> Option<&str> {
+        self.vm_image.as_deref()
+    }
+
+    /// Get the ordered Azure Pipelines demands list.
+    pub fn demands(&self) -> &[String] {
+        &self.demands
+    }
+
+    /// Get the OS (defaults to "linux" if not specified).
+    ///
+    /// Primarily applicable to 1ES pool configuration.
+    #[allow(dead_code)]
+    pub fn os(&self) -> &str {
+        self.os.as_deref().unwrap_or("linux")
+    }
+
+    /// Get the per-job pool overrides map.
+    pub fn overrides(&self) -> &HashMap<String, PoolConfig> {
+        &self.overrides
+    }
+}
+
+impl SanitizeConfigTrait for PoolConfig {
     fn sanitize_config_fields(&mut self) {
         self.name = self.name.as_deref().map(crate::sanitize::sanitize_config);
         self.vm_image = self.vm_image.as_deref().map(crate::sanitize::sanitize_config);
@@ -1222,9 +1180,9 @@ pub struct FrontMatter {
 impl FrontMatter {
     /// Returns the per-job pool overrides map from the pool configuration.
     ///
-    /// Delegates to `pool.overrides` when a full pool object is present;
-    /// returns an empty map when `pool:` is absent or in legacy string form.
-    pub fn pool_overrides(&self) -> &HashMap<String, PoolConfigFull> {
+    /// Delegates to `pool.overrides` when a pool object is present;
+    /// returns an empty map when `pool:` is absent.
+    pub fn pool_overrides(&self) -> &HashMap<String, PoolConfig> {
         self.pool
             .as_ref()
             .map(|p| p.overrides())
@@ -1582,7 +1540,7 @@ impl SanitizeConfigTrait for FrontMatter {
             sc.sanitize_config_fields();
         }
         // pool overrides are sanitized as part of pool.sanitize_config_fields()
-        // (PoolConfigFull::sanitize_config_fields iterates self.overrides)
+        // (PoolConfig::sanitize_config_fields iterates self.overrides)
     }
 }
 
@@ -2869,17 +2827,6 @@ mod tests {
     // ─── PoolConfig deserialization ──────────────────────────────────────────
 
     #[test]
-    fn test_pool_config_string_form() {
-        let yaml = "pool: MyPool";
-        let fm: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
-        let pool: PoolConfig = serde_yaml::from_value(fm["pool"].clone()).unwrap();
-        assert_eq!(pool.name(), Some("MyPool"));
-        assert_eq!(pool.vm_image(), None);
-        assert_eq!(pool.os(), "linux"); // default
-        assert!(pool.demands().is_empty());
-    }
-
-    #[test]
     fn test_pool_config_object_form_with_os() {
         let yaml = "pool:\n  name: WinPool\n  os: windows";
         let fm: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
@@ -2930,12 +2877,28 @@ mod tests {
     }
 
     #[test]
-    fn test_pool_config_default_is_vm_image() {
+    fn test_pool_config_default_is_empty() {
+        // The struct default is all-empty; the "no pool -> ubuntu-22.04"
+        // behaviour lives in resolve_pool_typed(None), not the type default.
         let pool = PoolConfig::default();
         assert_eq!(pool.name(), None);
-        assert_eq!(pool.vm_image(), Some("ubuntu-22.04"));
+        assert_eq!(pool.vm_image(), None);
         assert_eq!(pool.os(), "linux");
         assert!(pool.demands().is_empty());
+        assert!(pool.overrides().is_empty());
+    }
+
+    #[test]
+    fn test_legacy_scalar_pool_migrated_by_codemod() {
+        // A legacy scalar `pool: MyPool` source is no longer a typed form, but
+        // it still compiles: codemod 0002_pool_object_form rewrites it to the
+        // object form before typed deserialization. This locks in that legacy
+        // sources are not broken by the object-only typed layer.
+        let content = "---\nname: x\ndescription: y\npool: MyPool\n---\nbody\n";
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let pool = fm.pool.expect("pool present");
+        assert_eq!(pool.name(), Some("MyPool"));
+        assert_eq!(pool.vm_image(), None);
     }
 
     // ─── ScheduleConfig deserialization ─────────────────────────────────────
