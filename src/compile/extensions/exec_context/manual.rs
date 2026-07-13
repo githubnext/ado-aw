@@ -3,7 +3,7 @@
 //!
 //! Activates whenever the agent declares any `parameters:` block (and
 //! the `execution-context.manual.enabled` switch is not `false`).
-//! Runtime gate: `eq(variables['Build.Reason'], 'Manual')`.
+//! Runtime gate: `and(succeeded(), eq(variables['Build.Reason'], 'Manual'))`.
 //!
 //! ## Artefacts (staged by the bundle on success)
 //!
@@ -56,7 +56,7 @@ use crate::compile::types::ManualContextConfig;
 #[cfg(test)]
 use crate::compile::types::FrontMatter;
 
-use super::contributor::ContextContributor;
+use super::contributor::{ContextContributor, succeeded_and};
 
 /// Manual-context contributor.
 pub(super) struct ManualContextContributor {
@@ -152,10 +152,10 @@ impl ContextContributor for ManualContextContributor {
             "Stage manual execution context (aw-context/manual/*)",
             script,
         )
-        .with_condition(Condition::Eq(
+        .with_condition(succeeded_and(Condition::Eq(
             Expr::Variable("Build.Reason".to_string()),
             Expr::Literal("Manual".to_string()),
-        ))
+        )))
         .with_env(
             "BUILD_REQUESTEDFOR",
             EnvValue::ado_macro("Build.RequestedFor")?,
@@ -297,13 +297,17 @@ mod tests {
             other => panic!("expected Step::Bash, got {other:?}"),
         };
 
-        // Condition: gated on Build.Reason == 'Manual'.
+        // Condition: preserve the default success gate and then gate on Manual.
         match &bash.condition {
-            Some(Condition::Eq(Expr::Variable(v), Expr::Literal(l))) => {
+            Some(Condition::And(parts)) => {
+                assert!(matches!(parts.as_slice(), [Condition::Succeeded, _]));
+                let Condition::Eq(Expr::Variable(v), Expr::Literal(l)) = &parts[1] else {
+                    panic!("expected eq(Build.Reason, 'Manual'), got {:?}", parts[1]);
+                };
                 assert_eq!(v, "Build.Reason");
                 assert_eq!(l, "Manual");
             }
-            other => panic!("expected eq(Build.Reason, 'Manual'), got {other:?}"),
+            other => panic!("expected succeeded And condition, got {other:?}"),
         }
 
         // Requestor identity env vars present.

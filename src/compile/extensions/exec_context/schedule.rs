@@ -7,7 +7,7 @@
 //!
 //! Activation: purely config-driven (default OFF) AND `on.schedule`
 //! is configured. Runtime gate:
-//! `eq(variables['Build.Reason'], 'Schedule')`.
+//! `and(succeeded(), eq(variables['Build.Reason'], 'Schedule'))`.
 //!
 //! Reuses `shared/build.ts::listLastSuccessfulBuildOnBranch` (added
 //! in Stage 2) plus `shared/git.ts` deepening (Stage 0) — so this
@@ -21,7 +21,7 @@ use crate::compile::ir::condition::{Condition, Expr};
 use crate::compile::ir::step::{BashStep, Step};
 use crate::compile::types::ScheduleContextConfig;
 
-use super::contributor::ContextContributor;
+use super::contributor::{ContextContributor, succeeded_and};
 
 pub(super) struct ScheduleContextContributor {
     config: ScheduleContextConfig,
@@ -66,10 +66,10 @@ impl ContextContributor for ScheduleContextContributor {
                 "Stage schedule execution context (aw-context/schedule/*)",
                 script,
             )
-            .with_condition(Condition::Eq(
+            .with_condition(succeeded_and(Condition::Eq(
                 Expr::Variable("Build.Reason".to_string()),
                 Expr::Literal("Schedule".to_string()),
-            )),
+            ))),
             Bundle::ExecContextSchedule,
             TokenSource::SystemAccessToken,
         );
@@ -154,11 +154,15 @@ mod tests {
             other => panic!("expected Bash, got {other:?}"),
         };
         match &bash.condition {
-            Some(Condition::Eq(Expr::Variable(v), Expr::Literal(l))) => {
+            Some(Condition::And(parts)) => {
+                assert!(matches!(parts.as_slice(), [Condition::Succeeded, _]));
+                let Condition::Eq(Expr::Variable(v), Expr::Literal(l)) = &parts[1] else {
+                    panic!("expected eq(Build.Reason, 'Schedule'), got {:?}", parts[1]);
+                };
                 assert_eq!(v, "Build.Reason");
                 assert_eq!(l, "Schedule");
             }
-            other => panic!("expected eq(Build.Reason, 'Schedule'), got {other:?}"),
+            other => panic!("expected succeeded And condition, got {other:?}"),
         }
         assert!(matches!(
             bash.env.get("SYSTEM_ACCESSTOKEN"),

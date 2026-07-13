@@ -20,6 +20,12 @@
 //! and lets us evolve the contract freely.
 
 use crate::compile::extensions::CompileContext;
+use crate::compile::ir::condition::Condition;
+
+/// Preserve ADO's implicit step success gate when adding a runtime trigger predicate.
+pub(super) fn succeeded_and(condition: Condition) -> Condition {
+    Condition::And(vec![Condition::Succeeded, condition])
+}
 
 /// A unit of per-trigger execution-context generation.
 ///

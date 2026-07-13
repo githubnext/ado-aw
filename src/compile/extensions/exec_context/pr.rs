@@ -42,8 +42,9 @@
 //!   regex validation, etc.) on top of the same Node-step exposure.
 //! - The token is never written to `.git/config`; `persistCredentials`
 //!   is never `true`; no checkout override is emitted.
-//! - The step is gated by `condition: eq(variables['Build.Reason'],
-//!   'PullRequest')` so it never runs on non-PR builds.
+//! - The step is gated by `condition: and(succeeded(),
+//!   eq(variables['Build.Reason'], 'PullRequest'))` so it never runs
+//!   after an earlier failure or on non-PR builds.
 //!
 //! ## Wiring
 //!
@@ -66,7 +67,7 @@ use crate::compile::ir::env::EnvValue;
 use crate::compile::ir::step::{BashStep, Step};
 use crate::compile::types::PrContextConfig;
 
-use super::contributor::ContextContributor;
+use super::contributor::{ContextContributor, succeeded_and};
 
 /// PR-context contributor. Activates when `on.pr` is configured
 /// (unless explicitly disabled via `execution-context.pr.enabled: false`).
@@ -138,10 +139,10 @@ impl ContextContributor for PrContextContributor {
         } else {
             (
                 "",
-                Condition::Eq(
+                succeeded_and(Condition::Eq(
                     Expr::Variable("Build.Reason".to_string()),
                     Expr::Literal("PullRequest".to_string()),
-                ),
+                )),
             )
         };
         let script = format!("set -euo pipefail\n{prelude}node '{EXEC_CONTEXT_PR_PATH}'\n");
@@ -286,7 +287,7 @@ mod tests {
 
     /// Synth-inactive: the auto-injected `SYSTEM_PULLREQUEST_*` and
     /// `SYSTEM_TEAMPROJECT` / `BUILD_*` context vars are NOT re-projected;
-    /// condition is the typed `Eq(Variable("Build.Reason"), Literal("PullRequest"))`.
+    /// condition preserves the default success gate and then gates on PullRequest.
     #[test]
     fn prepare_step_typed_synth_inactive_uses_plain_macros_and_narrow_condition() {
         let contributor = PrContextContributor::new(PrContextConfig::default(), false);
@@ -323,11 +324,18 @@ mod tests {
         assert!(!bash.env.contains_key("AW_SYNTHETIC_PR"));
 
         match bash.condition.as_ref().expect("condition required") {
-            Condition::Eq(Expr::Variable(name), Expr::Literal(lit)) => {
+            Condition::And(parts) => {
+                assert!(matches!(parts.as_slice(), [Condition::Succeeded, _]));
+                let Condition::Eq(Expr::Variable(name), Expr::Literal(lit)) = &parts[1] else {
+                    panic!(
+                        "expected Condition::Eq(Variable, Literal), got {:?}",
+                        parts[1]
+                    );
+                };
                 assert_eq!(name, "Build.Reason");
                 assert_eq!(lit, "PullRequest");
             }
-            other => panic!("expected Condition::Eq(Variable, Literal), got {other:?}"),
+            other => panic!("expected succeeded And condition, got {other:?}"),
         }
     }
 }
