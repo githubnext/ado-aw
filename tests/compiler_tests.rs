@@ -3386,6 +3386,12 @@ fn compile_named_pool_demands_fixture_for_target(target: Option<&str>) -> String
         &[],
         &["--skip-integrity"],
         |contents| {
+            // Normalize CRLF → LF so the `target:` injection below matches
+            // regardless of how git checked the fixture out (on Windows,
+            // core.autocrlf rewrites the fixture with CRLF line endings,
+            // which would otherwise defeat the `\n`-anchored replacen and
+            // silently drop the target override).
+            let contents = contents.replace("\r\n", "\n");
             if let Some(target) = target {
                 contents.replacen(
                     "description: \"Fixture that exercises named pool demands\"\n",
