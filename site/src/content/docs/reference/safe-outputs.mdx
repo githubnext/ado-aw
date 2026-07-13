@@ -695,7 +695,6 @@ safe-outputs:
     max-file-size: 52428800              # Maximum file size in bytes (default: 50 MB)
     allowed-extensions: []               # Optional -- restrict file types (e.g., [".png", ".pdf", ".log"])
     allowed-artifact-names: []           # Optional -- restrict names (suffix `*` = prefix match)
-    allowed-build-ids: []                # Optional -- restrict target builds (skipped when targeting current build)
     name-prefix: ""                      # Optional -- prepended to the agent-supplied artifact name
     attachment-type: "agent-artifact"    # Optional -- {type} segment in the attachments URL (default: "agent-artifact")
     max: 3                               # Maximum per run (default: 3)
@@ -703,7 +702,7 @@ safe-outputs:
 
 **Notes:**
 - Single-file only; directory uploads are not supported.
-- When `build_id` is omitted and `allowed-build-ids` is configured, the allow-list check is skipped -- the current build is implicitly trusted.
+- **`allowed-build-ids` is not supported** for this tool. Build attachments are a DistributedTask timeline attachment scoped to the current job record — they can only ever be added to the current pipeline run, so a per-build allow-list is meaningless. (If you previously had `allowed-build-ids` in your front matter, `ado-aw compile` removes it automatically via the `drop_build_attachment_allowed_build_ids` codemod.) To restrict uploads to specific builds across runs, use [`upload-pipeline-artifact`](#upload-pipeline-artifact), which still supports `allowed-build-ids`.
 
 **About `attachment-type`:** This is the `{type}` segment in the ADO build
 attachments URL (`PUT .../attachments/{type}/{name}`). It acts as a category
