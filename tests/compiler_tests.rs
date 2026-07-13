@@ -5914,15 +5914,6 @@ fn test_job_target_with_setup_emits_dual_branch_dependson_with_each() {
 // Execution-context extension (issue #860)
 // ============================================================================
 
-/// The execution-context extension is always-on and emits an `aw-context`
-/// prepare step on PR-triggered agents. This sanity check makes sure the
-/// generated YAML round-trips through `serde_yaml`.
-#[test]
-fn test_execution_context_pr_compiled_output_is_valid_yaml() {
-    let compiled = compile_fixture("execution-context-agent.md");
-    assert_valid_yaml(&compiled, "execution-context-agent.md");
-}
-
 /// Spot-checks the key components of the precompute step. v7 ports
 /// the precompute logic to an `ado-script` bundle
 /// (`exec-context-pr.js`), so the bash step is now a slim node
@@ -5934,6 +5925,7 @@ fn test_execution_context_pr_compiled_output_is_valid_yaml() {
 #[test]
 fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
     let compiled = compile_fixture("execution-context-agent.md");
+    assert_valid_yaml(&compiled, "execution-context-agent.md");
 
     assert!(
         compiled.contains("Stage PR execution context (aw-context/pr/*)"),
