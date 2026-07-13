@@ -451,6 +451,8 @@ permissions:
 | Both | Agent can read; executor writes via the ARM-minted token |
 | Neither | Agent has no ADO API access; executor writes via `$(System.AccessToken)` |
 
+See [`docs/network.md`](../docs/network.md#permissions-ado-access-tokens) for the full permissions reference and when to set each option.
+
 ### Step 12 — Triggers (optional)
 
 #### PR Triggers (`on.pr`)
