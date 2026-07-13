@@ -134,6 +134,14 @@ Extract the actual CLI commands from `src/main.rs` (the clap `Commands` enum) an
 verify `docs/cli.md` documents every subcommand with correct arguments, flags,
 and default values.
 
+Also verify the documented `init` scaffold output matches `src/init.rs`. `init`
+writes **both** a dispatcher agent (`.github/agents/ado-aw.agent.md`, from
+`src/data/init-agent.md`) **and** a dispatcher skill
+(`.github/skills/ado-aw/SKILL.md`, from `src/data/init-skill.md`), plus the
+`--agency` plugin tree. If a scaffold file, template, or path changes, ensure
+the `init` bullet in `docs/cli.md` and the `src/data/` + `init.rs` entries in
+the `AGENTS.md` architecture tree list every emitted file.
+
 ### 4. Front matter fields (`docs/front-matter.md` and the pages it links)
 
 Compare the `FrontMatter` struct in `src/compile/types.rs` against the documented

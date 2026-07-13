@@ -7,6 +7,14 @@ const AGENT_TEMPLATE: &str = include_str!("data/init-agent.md");
 const AGENT_DIR: &str = ".github/agents";
 const AGENT_FILENAME: &str = "ado-aw.agent.md";
 
+// The dispatcher skill template is embedded from src/data/init-skill.md. It
+// mirrors the agent (same routing/prompt content) in Copilot skill (SKILL.md)
+// format, matching how gh-aw's `init` emits both an agent and a skill.
+const SKILL_TEMPLATE: &str = include_str!("data/init-skill.md");
+
+const SKILL_DIR: &str = ".github/skills/ado-aw";
+const SKILL_FILENAME: &str = "SKILL.md";
+
 /// Root directory (relative to the target repo) for the generated Agency /
 /// Claude Code plugin. Mirrors the canonical in-repo layout (`agency/plugins/
 /// ado-aw/`) so a scaffolded consumer repo matches how the plugin is checked in
@@ -123,6 +131,24 @@ pub async fn run(path: Option<&std::path::Path>, agency: bool) -> Result<()> {
 
     // Print success message
     println!("✓ Created {}", agent_path.display());
+
+    // Additively scaffold the dispatcher skill (SKILL.md format). This mirrors
+    // gh-aw's `init`, which emits both a dispatcher agent and a dispatcher
+    // skill so Copilot surfaces that consume skills also get the router.
+    let skill_dir = base.join(SKILL_DIR);
+    let skill_path = skill_dir.join(SKILL_FILENAME);
+
+    tokio::fs::create_dir_all(&skill_dir)
+        .await
+        .with_context(|| format!("Failed to create directory: {}", skill_dir.display()))?;
+
+    let skill_content = SKILL_TEMPLATE.replace("{{ compiler_version }}", version);
+
+    tokio::fs::write(&skill_path, skill_content)
+        .await
+        .with_context(|| format!("Failed to write skill file: {}", skill_path.display()))?;
+
+    println!("✓ Created {}", skill_path.display());
 
     // `--agency` is additive: keep the standard agent file above and also emit
     // the Agency / Claude Code plugin.
