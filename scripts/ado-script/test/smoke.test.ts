@@ -223,6 +223,7 @@ describe("exec-context-pr.js smoke", () => {
           AW_AGENT_PROMPT_FILE: agentPromptPath,
           SYSTEM_PULLREQUEST_PULLREQUESTID: "4242",
           SYSTEM_PULLREQUEST_TARGETBRANCH: "refs/heads/main",
+          SYSTEM_PULLREQUEST_SOURCEBRANCH: "refs/heads/feature",
           SYSTEM_TEAMPROJECT: "SmokeProject",
           BUILD_REPOSITORY_NAME: "smoke-repo",
         },

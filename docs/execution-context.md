@@ -474,14 +474,18 @@ under `scripts/ado-script/src/exec-context-pr/`. The bundle:
    discovery — ADO already populates these.
 2. **Validates identifiers** with strict allowlist regexes
    (`PR_ID` ⊆ digits, `PROJECT`/`REPO` ⊆ alphanumeric + `._-`,
-   `PROJECT` additionally allows space, `PR_TARGET_BRANCH` ⊆
+   `PROJECT` additionally allows space, `PR_TARGET_BRANCH` and
+   `PR_SOURCE_BRANCH` ⊆
    alphanumeric + `._/-`). See `validate.ts`. Failure writes
    `error.txt` and appends the failure prompt fragment.
 3. **Detects merge-commit shape.** If `HEAD` has ≥ 3 tokens in
    `git rev-list --parents HEAD` (the synthetic merge commit ADO
    checks out for PR builds), uses `HEAD^2` as the PR head and
    computes `git merge-base HEAD^1 HEAD^2` as the base — same
-   semantics as the deepening path, no target-branch fetch needed.
+   semantics as the deepening path. If a shallow checkout lacks
+   sufficient ancestry, it fetches both the target and source refs
+   with progressive deepening and retries; unresolved ancestry fails
+   closed into `error.txt`.
    Otherwise:
 4. **Fetches the PR target branch with progressive deepening** —
    `--depth=200`, then `500`, then `2000`, then finally `--unshallow`.

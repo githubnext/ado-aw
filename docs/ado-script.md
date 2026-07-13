@@ -193,7 +193,8 @@ It performs the work that used to live as ~190 lines of bash heredoc
 inside `src/compile/extensions/exec_context/pr.rs`:
 
 1. **Validate identifiers** — `PR_ID`, `SYSTEM_TEAMPROJECT`,
-   `BUILD_REPOSITORY_NAME`, and `SYSTEM_PULLREQUEST_TARGETBRANCH` are
+   `BUILD_REPOSITORY_NAME`, `SYSTEM_PULLREQUEST_TARGETBRANCH`, and
+   `SYSTEM_PULLREQUEST_SOURCEBRANCH` are
    each matched against a strict allowlist regex (`validate.ts`)
    before any of them are interpolated into a git refspec or the
    agent prompt. On any failure the program writes
@@ -203,10 +204,12 @@ inside `src/compile/extensions/exec_context/pr.rs`:
 2. **Resolve merge-base** — if the checkout is a synthetic
    merge-commit (parent count ≥ 3 per ADO's PR-validation flow),
    `merge-base.ts::resolveMergeBase` computes `git merge-base` over
-   the two parents. Otherwise it fetches the target branch with
-   progressive deepening (`--depth=200/500/2000/--unshallow`) and
-   then `git merge-base` against `HEAD`. Same `BASE_SHA` semantics
-   in both paths (git's true common ancestor).
+   the two parents. If that cannot resolve in a shallow checkout, it
+   fetches both target and source refs with progressive deepening
+   (`--depth=200/500/2000/--unshallow`) and retries the parent
+   merge-base. Otherwise it fetches the target branch with progressive
+   deepening and then runs `git merge-base` against `HEAD`. Same
+   `BASE_SHA` semantics in both paths (git's true common ancestor).
 3. **Stage artefacts** — writes `aw-context/pr/base.sha` and
    `aw-context/pr/head.sha` so the agent can `git diff $(cat
    .../base.sha)..$(cat .../head.sha)` itself.

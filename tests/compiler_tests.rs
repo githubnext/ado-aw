@@ -3386,6 +3386,12 @@ fn compile_named_pool_demands_fixture_for_target(target: Option<&str>) -> String
         &[],
         &["--skip-integrity"],
         |contents| {
+            // Normalize CRLF → LF so the `target:` injection below matches
+            // regardless of how git checked the fixture out (on Windows,
+            // core.autocrlf rewrites the fixture with CRLF line endings,
+            // which would otherwise defeat the `\n`-anchored replacen and
+            // silently drop the target override).
+            let contents = contents.replace("\r\n", "\n");
             if let Some(target) = target {
                 contents.replacen(
                     "description: \"Fixture that exercises named pool demands\"\n",
@@ -6668,16 +6674,16 @@ Body.
 // ancestor (`git merge-base`), so `git diff $BASE..$HEAD` produces
 // the same change set regardless of which path runs. v7: this
 // invariant is now enforced by the `exec-context-pr.js` bundle (see
-// `merge-base.ts::resolveMergeBase`); the vitest test
-// `falls back to HEAD^1 when synthetic-merge merge-base cannot resolve`
-// guards the regression there. This Rust-side test is removed —
+// `merge-base.ts::resolveMergeBase`); the vitest tests for synthetic
+// merge-base deepening and fail-closed behavior guard the regression
+// there. This Rust-side test is removed —
 // asserting bash literals against a node-invocation step makes no
 // sense.
 
-// v6.2 defence-in-depth: `PR_TARGET_BRANCH` (which gets interpolated
-// into a git refspec) is validated with a strict allowlist regex.
+// v6.2 defence-in-depth: PR target/source branches (which get
+// interpolated into git refspecs) are validated with a strict allowlist regex.
 // v7: this validation now lives in the `exec-context-pr.js` bundle
-// (see `validate.ts::TARGET_BRANCH_RE`); the vitest tests under
+// (see `validate.ts::PR_BRANCH_RE`); the vitest tests under
 // `validate.test.ts` guard the regression there. This Rust-side
 // test is removed for the same reason.
 
@@ -6725,6 +6731,11 @@ fn test_synthetic_pr_default_emits_full_synth_wiring() {
         "Fixture A's exec-context-pr step must read the hoisted Agent-job-level \
          AW_PR_ID via the $() macro (NOT a $[ ... ] runtime expression in step env — \
          ADO doesn't evaluate those there, see build #612528)"
+    );
+    assert!(
+        compiled.contains("SYSTEM_PULLREQUEST_SOURCEBRANCH: $(AW_PR_SOURCEBRANCH)"),
+        "Fixture A's exec-context-pr step must receive the hoisted PR source ref so \
+         synthetic-merge fallback deepening can fetch both PR parents"
     );
     // The Agent-job-level hoist itself must be present and pull from
     // the cross-job synth outputs (legal scope for `dependencies.X.outputs[...]`).
