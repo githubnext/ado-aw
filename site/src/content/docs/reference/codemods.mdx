@@ -20,6 +20,7 @@ and contributors (how to add one).
 | `pool_object_form` | `pool: <string>` → explicit `pool:` object form (`name` / `vmImage`) | 0.30.0 |
 | `flatten_work_item_config` | `safe-outputs.{noop,missing-tool,missing-data}.work-item:` nested block → flat fields (`title-prefix`, `area-path`, `report-as-work-item`, …) | 0.37.0 |
 | `legacy_path_markers` | `{{ workspace }}` / `{{ working_directory }}` / `{{ trigger_repo_directory }}` → explicit ADO path expressions | 0.38.0 |
+| `drop_build_attachment_allowed_build_ids` | `safe-outputs.upload-build-attachment.allowed-build-ids:` → removed (field is inert; build attachments can only target the current run) | 0.42.0 |
 
 If `ado-aw compile` rewrites your source, it prints a warning to stderr naming each codemod that fired and reminding you that front-matter comments are dropped by the round-trip.
 
