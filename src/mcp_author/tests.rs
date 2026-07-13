@@ -11,7 +11,7 @@ fn fixture_path() -> String {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("safe-outputs")
-        .join("create-pull-request.md")
+        .join("canary.md")
         .display()
         .to_string()
 }

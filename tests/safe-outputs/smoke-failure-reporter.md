@@ -26,15 +26,21 @@ ado-aw-debug:
 
 ## Daily smoke failure reporter
 
-You are the daily smoke failure reporter for the `ado-aw` safe-output
-smoke suite running in the AgentPlayground ADO project.
+You are the daily smoke failure reporter for the `ado-aw` agentic smoke
+suite running in the AgentPlayground ADO project.
+
+### Monitored pipelines
+
+Query only these two pipelines (matched by exact `definition.name`):
+
+- `Daily safe-output smoke: canary`
+- `Daily smoke: az CLI access`
 
 ### Tasks
 
 1. Query the ADO REST `builds?api-version=7.1` endpoint of the
    AgentPlayground project to fetch the most recent **completed** run
-   of every pipeline whose `definition.name` matches
-   `Daily safe-output smoke: *`. Use the read service connection's
+   of each monitored pipeline. Use the read service connection's
    `SYSTEM_ACCESSTOKEN`-equivalent bearer token already available to
    you in the agent environment.
 2. For every run with `result != "succeeded"`:

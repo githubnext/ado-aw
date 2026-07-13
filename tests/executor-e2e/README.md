@@ -5,10 +5,11 @@ This directory holds a **deterministic**, non-agentic end-to-end test of the
 
 ## Why this exists
 
-The daily smoke suite in [`tests/safe-outputs/`](../safe-outputs/) exercises
-each safe output end-to-end, but it drives Stage 3 by having an **LLM agent
-(Stage 1) emit the safe output** — so a failure can be the model's fault and the
-suite is inherently flaky.
+The agentic smoke suite in [`tests/safe-outputs/`](../safe-outputs/) exercises
+the full Stage 1 → 2 → 3 pipeline shape, but it drives Stage 3 by having an
+**LLM agent (Stage 1) emit the safe output** — so a failure can be the model's
+fault and the suite is inherently flaky. It also only runs a small number of
+omnibus pipelines rather than one per tool.
 
 This suite removes the LLM from the loop. For every ADO-write safe output it:
 
@@ -41,8 +42,10 @@ gitignored, non-root path) and is **deliberately excluded** from the released
 ## Coverage
 
 All deterministically-assertable ADO-write safe outputs plus the flagship
-`create-pull-request`:
+`create-pull-request`, and the four signal-only tools:
 
+- **Signals:** `noop`, `missing-tool`, `missing-data`, `report-incomplete`
+  (no ADO write path; assert that the executor emits the expected status)
 - **Work items:** `create-work-item`, `update-work-item`,
   `comment-on-work-item`, `link-work-items`, `upload-workitem-attachment`
 - **Wiki:** `create-wiki-page`, `update-wiki-page`
@@ -53,9 +56,12 @@ All deterministically-assertable ADO-write safe outputs plus the flagship
   `upload-pipeline-artifact`
 - **Flagship:** `create-pull-request`
 
-Excluded (nothing to assert or out of scope): the NDJSON-only tools (`noop`,
-`missing-data`, `missing-tool`, `report-incomplete`) and the GitHub-only
-`create-issue`.
+Excluded (out of scope or GitHub-only): the GitHub-only `create-issue`.
+
+> **Coverage note.** The signal scenarios (`noop`, `missing-tool`,
+> `missing-data`, `report-incomplete`) were previously exercised only by
+> now-deleted per-tool agentic smoke pipelines. Adding them here closes
+> the coverage gap while keeping the test deterministic.
 
 ### Scenarios that skip when a precondition is missing
 

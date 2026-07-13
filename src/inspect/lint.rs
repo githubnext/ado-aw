@@ -449,8 +449,8 @@ mod tests {
     async fn create_pull_request_fixture_has_no_unused_output_inspect_lint() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests")
-            .join("safe-outputs")
-            .join("create-pull-request.md");
+            .join("fixtures")
+            .join("complete-agent.md");
         let (_fm, pipeline) = crate::compile::build_pipeline_ir(&fixture).await.unwrap();
         let summary = PipelineSummary::from_pipeline(&pipeline).unwrap();
         let findings = lint(&summary);
