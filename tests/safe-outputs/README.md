@@ -1,42 +1,46 @@
-# Daily safe-output smoke suite
+# Safe-output smoke suite
 
-This directory contains one daily-scheduled agentic-pipeline fixture per
-production safe-output tool plus three infra fixtures. Each `.md` is
-compiled by `ado-aw compile` to a sibling `*.lock.yml`, and each
-`*.lock.yml` is registered as one Azure DevOps pipeline in the
+This directory contains the agentic-pipeline fixtures that exercise the
+full Stage 1 → Stage 2 → Stage 3 pipeline shape against the
 [AgentPlayground](https://dev.azure.com/msazuresphere/AgentPlayground)
-sandbox project.
+ADO sandbox. Each `.md` is compiled by `ado-aw compile` to a sibling
+`*.lock.yml`, and each `*.lock.yml` is registered as one Azure DevOps
+pipeline.
 
-The suite exists so that every safe output we ship is exercised
-end-to-end against a real ADO project at least once a day. A green
-pipeline = Stage 1 (agent) → Stage 2 (threat detection) → Stage 3
-(executor) → ADO REST round-trip all succeeded.
+## Design: canary + infra, not one-per-tool
 
-> **See also — deterministic complement.** This suite depends on an LLM
-> (Stage 1) emitting each safe output, so it validates the full agentic
-> flow but is inherently non-deterministic. For a flake-free regression
-> check of the Stage 3 executor alone — crafting the executor's NDJSON
-> directly, with no agent in the loop — see the deterministic suite in
-> [`tests/executor-e2e/`](../executor-e2e/).
->
-> **Local Copilot CLI contract.** The ignored Rust test
-> `tests/copilot_cli_safeoutputs_tests.rs::real_copilot_cli_noop_contract`
-> is the customer-focused contract gate for the local agent path: it runs
-> the real Copilot CLI against the compiler-emitted SafeOutputs MCP wiring,
-> asks for a deterministic `noop` call, and proves success by asserting
-> that `safe_outputs.ndjson` contains the expected tool entry. It does
-> **not** cover threat detection, the Stage 3 executor, or Azure DevOps
-> write-path behavior.
+The original suite had one daily agentic smoke per safe-output tool.
+That turned out to be unnecessary: the deterministic
+[`tests/executor-e2e/`](../executor-e2e/) suite already exercises every
+tool's Stage 3 ADO REST path directly (without an LLM). The agentic
+smoke only needs to prove:
 
-## What's here
+1. Stage 1: an LLM agent discovers and emits a safe-output call given
+   the MCP tool list.
+2. Stage 2: the threat-detection pass clears the NDJSON output.
+3. Stage 1 → 2 → 3 handoff: the three-job pipeline shape runs
+   end-to-end.
+
+A single successful pipeline run proves all three. The suite is now
+five pipelines:
 
 | File | Purpose |
 | --- | --- |
-| `<tool>.md` / `<tool>.lock.yml` | One per safe output, scheduled `daily around 03:00`. The agent calls exactly one safe-output tool with predictable literal values. |
-| `noop-target.md` / `noop-target.lock.yml` | Trivial `bash: ["echo ok"]` pipeline targeted by the `queue-build` smoke. |
-| `janitor.md` / `janitor.lock.yml` | Weekly-scheduled pipeline that prunes `ado-aw-smoke-*` artifacts older than 30 days. |
-| `smoke-failure-reporter.md` / `smoke-failure-reporter.lock.yml` | Daily ~04:30 pipeline that queries ADO REST, finds failed smoke runs, and files `[smoke-failure] ...` issues against `githubnext/ado-aw` via `ado-aw-debug.create-issue` (PR #492). |
-| `REGISTERED.md` | Contributor-maintained mapping `fixture → ADO pipeline ID`. Filled in during manual handoff. |
+| `canary.md` / `canary.lock.yml` | Daily omnibus canary: the agent emits `noop` + `create-work-item` + `add-build-tag` in one run. Proves the full agentic loop with two distinct ADO write paths. |
+| `azure-cli.md` / `azure-cli.lock.yml` | Daily: verifies the AWF az CLI extension is mounted, the `az devops` subcommand authenticates via `AZURE_DEVOPS_EXT_PAT`, and the sandbox can reach the ADO control plane. |
+| `noop-target.md` / `noop-target.lock.yml` | No-schedule target pipeline queued by the `queue-build` executor-e2e scenario (its ID feeds `E2E_QUEUE_PIPELINE_ID`). |
+| `janitor.md` / `janitor.lock.yml` | Weekly: prunes `ado-aw-smoke-*` artifacts (work items, branches, wiki pages, tags, PRs) older than 30 days from AgentPlayground. |
+| `smoke-failure-reporter.md` / `smoke-failure-reporter.lock.yml` | Daily ~04:30: queries the canary and azure-cli pipelines for failures and files `[smoke-failure] …` issues on `githubnext/ado-aw`. |
+| `REGISTERED.md` | Contributor-maintained `fixture → ADO pipeline ID` mapping. |
+
+> **Deterministic complement.** For a flake-free regression check of
+> the Stage 3 executor with no LLM in the loop, see
+> [`tests/executor-e2e/`](../executor-e2e/). That suite covers all
+> 24 ADO-write and signal safe-output tools deterministically.
+>
+> **Local Copilot CLI contract.** The ignored Rust test
+> `tests/copilot_cli_safeoutputs_tests.rs::real_copilot_cli_noop_contract`
+> is the customer-focused contract gate for the local agent path.
 
 ## Naming convention
 
@@ -44,73 +48,27 @@ Every artifact a smoke creates uses the prefix
 `ado-aw-smoke-$(Build.BuildId)-<tool>`. The janitor deletes anything
 with that prefix older than 30 days, so cleanup is automatic.
 
-## Fixture template
-
-Every Wave 1–4 fixture has the same shape:
-
-```markdown
----
-name: "Daily safe-output smoke: <tool-name>"
-description: "Exercises the <tool-name> safe output once a day"
-on:
-  schedule: daily around 03:00
-target: standalone
-pool:
-  name: AZS-1ES-L-Playground-ubuntu-22.04
-engine:
-  id: copilot
-  model: gpt-5-mini
-  timeout-minutes: 15
-permissions:
-  read: agent-playground-read
-  write: agent-playground-write
-safe-outputs:
-  <tool-name>:
-    # per-tool config from docs/safe-outputs.md
-setup:
-  - bash: |
-      set -euo pipefail
-      echo "Setup for <tool-name>"
-teardown:
-  - bash: |
-      set -euo pipefail
-      # Best-effort prefix cleanup; always exit 0.
----
-
-## Daily smoke for <tool-name>
-
-You are a smoke test. Call exactly one safe-output tool: `<tool-name>`.
-Use these literal values (no improvisation):
-
-- title: "ado-aw-smoke-$(Build.BuildId)-<tool-name>"
-- body: "ok"
-
-Do not call any other tool. After the safe output is emitted, stop.
-```
-
-The prompt must end with the sentence "Do not call any other tool." —
-the `tests/safe_output_coverage_tests.rs` Rust integration test enforces
-this so flake stays low.
-
 ## Adding a new safe output
 
-When you add `src/safeoutputs/<new-tool>.rs`:
+When you add `src/safe_outputs/<new-tool>.rs`:
 
 1. The compiler's `validate_safe_outputs_keys` (in
    `src/compile/common.rs`) ensures any user-written
    `safe-outputs: <typo>:` block fails at compile time with a
    "did you mean …?" suggestion rather than silently dropping the key.
-2. By convention, add a matching daily smoke fixture here at
-   `tests/safe-outputs/<yaml-key>.md` so the new tool gets exercised
-   end-to-end every day. The fixture filename matches the YAML key
-   under `safe-outputs:` (the kebab-case name declared by the
-   `tool_result! { name = "..." }` macro), not the Rust filename.
-3. Compile it (`cargo run -- compile tests/safe-outputs/<yaml-key>.md`)
-   and commit the resulting `.lock.yml` alongside.
-4. Register the new pipeline in AgentPlayground (manual handoff).
-
-Debug-only tools (currently only `create-issue`) are excluded from the
-smoke suite — they're exercised by `smoke-failure-reporter.md`.
+2. **If the tool has an ADO write path** (it calls any ADO REST API),
+   add a scenario in
+   [`scripts/ado-script/src/executor-e2e/scenarios/`](../../scripts/ado-script/src/executor-e2e/scenarios/):
+   set up preconditions, craft the NDJSON, assert the ADO effect, and
+   clean up. Wire it into `index.ts` via the appropriate scenario array.
+3. **If the tool is a signal-only tool** (no ADO side effect — like
+   `noop`, `missing-tool`, `missing-data`, `report-incomplete`), add a
+   scenario in the `signals.ts` file in the same directory instead.
+4. Only add a dedicated agentic smoke here if the new tool requires
+   a fundamentally new kind of agent prompt or MCP wiring that the
+   existing `canary.md` does not exercise.
+5. Debug-only tools (currently only `create-issue`) are excluded from
+   both suites — exercised by `smoke-failure-reporter.md`.
 
 ## Running locally
 
@@ -119,14 +77,30 @@ smoke suite — they're exercised by `smoke-failure-reporter.md`.
 cargo run -- compile tests/safe-outputs/
 
 # Verify a single fixture compiled correctly:
-cargo run -- check tests/safe-outputs/noop.lock.yml
+cargo run -- check tests/safe-outputs/canary.lock.yml
 ```
 
 ## Manual handoff (one-time ADO setup)
 
-See the
-[implementation plan](https://github.com/githubnext/ado-aw/issues?q=label%3Aado-aw-smoke)
-issue (or the originating session plan) for the manual handoff that
-provisions the AgentPlayground sandbox: service connections, perma-PR,
-variable group `ado-aw-daily-smoke`, the `ADO_AW_DEBUG_GITHUB_TOKEN`
-secret on the failure-reporter pipeline, and ADO pipeline registrations.
+In `https://dev.azure.com/msazuresphere/AgentPlayground`:
+
+1. Confirm or create service connections `agent-playground-read` and
+   `agent-playground-write`.
+2. Bulk-register the smoke pipelines with `ado-aw enable`:
+
+   ```powershell
+   ado-aw enable `
+     --org msazuresphere --project AgentPlayground `
+     --service-connection ado-aw-github `
+     --folder '\smoke' `
+     tests/safe-outputs/
+   ```
+
+3. Capture each Pipeline ID and update `REGISTERED.md`.
+4. Provision the `ADO_AW_DEBUG_GITHUB_TOKEN` secret (fine-grained PAT,
+   Issues: read/write on `githubnext/ado-aw`) on the
+   `smoke-failure-reporter` pipeline **only**.
+5. Set `EXECUTOR_E2E_ISSUE_REPO` / `E2E_QUEUE_PIPELINE_ID` on the
+   executor-e2e pipeline using the `noop-target` pipeline ID from
+   step 3.
+6. Trigger one manual run per pipeline to seed the schedule.
