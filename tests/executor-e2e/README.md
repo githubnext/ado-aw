@@ -26,7 +26,7 @@ build.
 
 | File | Purpose |
 | --- | --- |
-| `azure-pipelines.yml` | Hand-authored ADO pipeline (daily + manual). Builds `ado-aw`, builds the harness, runs it against AgentPlayground. |
+| `azure-pipelines.yml` | Hand-authored ADO pipeline (daily + path-filtered CI + manual). Builds `ado-aw`, builds the harness, runs it against AgentPlayground. |
 | `README.md` | This file. |
 
 The harness itself lives in

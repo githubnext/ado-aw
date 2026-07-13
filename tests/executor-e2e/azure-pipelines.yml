@@ -12,7 +12,15 @@
 # This is a hand-authored ADO pipeline (NOT compiled from an agent markdown).
 # Register it in msazuresphere/AgentPlayground — see tests/executor-e2e/README.md.
 
-trigger: none
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - src/safe_outputs/**
+      - scripts/ado-script/src/executor-e2e/**
+      - tests/executor-e2e/**
 pr: none
 
 schedules:
