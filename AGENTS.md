@@ -167,7 +167,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── trace.rs      # `ado-aw trace`: correlate audit telemetry with the local IR graph
 │   │   ├── whatif.rs     # `ado-aw whatif`: static downstream skip classification for failures
 │   │   ├── lint.rs       # `ado-aw lint`: structural workflow lint checks
-│   │   └── catalog.rs    # `ado-aw catalog`: list in-tree registries (tools, runtimes, models, etc.)
+│   │   └── catalog.rs    # `ado-aw catalog`: list in-tree registries (safe-outputs, runtimes, tools, engines, models, pinned versions)
 │   ├── detect.rs         # Agentic workflow detection — discovers compiled pipelines; used by all lifecycle commands
 │   ├── update_check.rs   # Version update check — queries GitHub Releases and prints advisory when newer version is available
 │   ├── ndjson.rs         # NDJSON parsing utilities

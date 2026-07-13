@@ -23,7 +23,7 @@ workflows.
 | `trace_failure` | Trace a build's failed-job chain using audit data plus any local IR graph. | `{ "build_id_or_url": "123", "step": null, "org": null, "project": null, "pat": null }` |
 | `whatif` | Classify downstream jobs if a step or job fails. | `{ "source_path": "...", "failing_id": "Agent" }` |
 | `lint_workflow` | Run structural lint checks. | `{ "source_path": "agents/example.md" }` |
-| `catalog` | List safe-outputs, runtimes, tools, engines, and models. | `{ "kind": "safe-outputs" }` |
+| `catalog` | List safe-outputs, runtimes, tools, engines, models, and pinned versions. | `{ "kind": "safe-outputs" }` |
 | `audit_build` | Download and analyze a build; same shape as `ado-aw audit --json`. | `{ "build_id_or_url": "123", "org": null, "project": null, "pat": null, "artifacts": null, "no_cache": false }` |
 
 ## Trust model
