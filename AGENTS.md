@@ -117,7 +117,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │       ├── lower.rs  # IR → serde_yaml::Value lowering
 │   │       ├── emit.rs   # Thin `lower() + serde_yaml::to_string()` wrapper
 │   │       └── summary.rs # Public, serializable PipelineSummary / GraphSummary for agent-facing tooling (see docs/ir.md Public JSON summary)
-│   ├── init.rs           # Repository initialization for AI-first authoring (incl. `--agency` plugin scaffold, embeds agency/plugins/ado-aw/ via include_str!)
+│   ├── init.rs           # Repository initialization for AI-first authoring: scaffolds a dispatcher agent (.github/agents/ado-aw.agent.md) AND skill (.github/skills/ado-aw/SKILL.md); `--agency` plugin scaffold embeds agency/plugins/ado-aw/ via include_str!
 │   ├── execute.rs        # Stage 3 safe output execution
 │   ├── fuzzy_schedule.rs # Fuzzy schedule parsing
 │   ├── logging.rs        # File-based logging infrastructure
@@ -219,7 +219,8 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │       └── extension.rs # CompilerExtension impl
 │   ├── data/
 │   │   ├── ecosystem_domains.json # Network allowlists per ecosystem
-│   │   ├── init-agent.md     # Dispatcher agent template for `init` command
+│   │   ├── init-agent.md     # Dispatcher agent template for `init` command (→ .github/agents/ado-aw.agent.md)
+│   │   ├── init-skill.md     # Dispatcher skill template for `init` command (→ .github/skills/ado-aw/SKILL.md)
 │   │   └── threat-analysis.md # Threat detection analysis prompt template
 │   └── tools/            # First-class tool implementations (one dir per tool)
 │       ├── mod.rs

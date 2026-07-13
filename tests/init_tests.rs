@@ -34,6 +34,27 @@ fn test_init_creates_agent_file() {
         !content.contains("{{ compiler_version }}"),
         "Version placeholder should be replaced with actual version"
     );
+
+    // `init` additively scaffolds the dispatcher skill (SKILL.md format),
+    // mirroring gh-aw which emits both an agent and a skill.
+    let skill_path = temp_dir.path().join(".github/skills/ado-aw/SKILL.md");
+    assert!(skill_path.exists(), "Skill file should be created");
+
+    let skill_content =
+        fs::read_to_string(&skill_path).expect("Should be able to read skill file");
+    assert!(
+        skill_content.contains("Azure DevOps Agentic Workflows Skill"),
+        "Skill file should contain the expected title"
+    );
+    assert!(
+        skill_content.starts_with("---\nname: ado-aw\n")
+            || skill_content.starts_with("---\r\nname: ado-aw\r\n"),
+        "Skill file should carry the `name: ado-aw` front matter"
+    );
+    assert!(
+        !skill_content.contains("{{ compiler_version }}"),
+        "Version placeholder should be replaced in the skill file"
+    );
 }
 
 /// Test that `init` always overwrites an existing agent file (no --force needed)
@@ -411,6 +432,34 @@ fn test_committed_agent_file_matches_template_output() {
         committed.replace("\r\n", "\n"),
         "committed .github/agents/ado-aw.agent.md is stale — regenerate it with \
          `ado-aw init --force` after editing src/data/init-agent.md"
+    );
+}
+
+/// Guard that the committed `.github/skills/ado-aw/SKILL.md` stays in sync with
+/// its template `src/data/init-skill.md`: running `init` must reproduce the
+/// committed file byte-for-byte. As with the agent file, the committed copy (not
+/// the placeholder-bearing template) is what release-please version-bumps.
+#[test]
+fn test_committed_skill_file_matches_template_output() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let committed = fs::read_to_string(repo_root.join(".github/skills/ado-aw/SKILL.md"))
+        .expect("committed skill file should be readable");
+
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp directory");
+    let output = ado_aw_bin()
+        .args(["init", "--path", temp_dir.path().to_str().unwrap()])
+        .output()
+        .expect("Failed to run ado-aw init");
+    assert!(output.status.success(), "init should succeed");
+
+    let generated = fs::read_to_string(temp_dir.path().join(".github/skills/ado-aw/SKILL.md"))
+        .expect("generated skill file should be readable");
+
+    assert_eq!(
+        generated.replace("\r\n", "\n"),
+        committed.replace("\r\n", "\n"),
+        "committed .github/skills/ado-aw/SKILL.md is stale — regenerate it with \
+         `ado-aw init --force` after editing src/data/init-skill.md"
     );
 }
 
