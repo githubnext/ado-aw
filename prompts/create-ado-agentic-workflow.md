@@ -427,7 +427,7 @@ safe-outputs:
     require-approval:
       approvers: ["my-ado-group", "jane@example.com"]  # Optional: specific approvers
       notify-users: ["jane@example.com"]                # Optional: users to notify
-      timeout-minutes: 1440                             # Optional: 24h default
+      timeout-minutes: 1440                             # Optional: e.g. 1440 for 24h; omit → pipeline/job timeout applies
       on-timeout: reject                                # "reject" (default) or "resume"
       instructions: "Review the proposed PR carefully." # Optional: reviewer instructions
 ```
