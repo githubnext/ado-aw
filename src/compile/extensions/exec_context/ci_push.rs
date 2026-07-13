@@ -7,8 +7,8 @@
 //! the contributor does ADO REST + git fetch deepening work that
 //! adds startup latency, so most agents shouldn't pay for it.
 //!
-//! Runtime gate: `or(eq(Build.Reason, 'IndividualCI'),
-//! eq(Build.Reason, 'BatchedCI'))`. Skips PRs, scheduled runs, and
+//! Runtime gate: `and(succeeded(), or(eq(Build.Reason, 'IndividualCI'),
+//! eq(Build.Reason, 'BatchedCI')))`. Skips PRs, scheduled runs, and
 //! resource triggers at zero cost.
 //!
 //! ## Artefacts (staged by the bundle on success)
@@ -52,7 +52,7 @@ use crate::compile::ir::condition::{Condition, Expr};
 use crate::compile::ir::step::{BashStep, Step};
 use crate::compile::types::CiPushContextConfig;
 
-use super::contributor::ContextContributor;
+use super::contributor::{ContextContributor, succeeded_and};
 
 /// CI-push-context contributor.
 pub(super) struct CiPushContextContributor {
@@ -99,7 +99,7 @@ impl ContextContributor for CiPushContextContributor {
                 "Stage ci-push execution context (aw-context/ci-push/*)",
                 script,
             )
-            .with_condition(Condition::Or(vec![
+            .with_condition(succeeded_and(Condition::Or(vec![
                 Condition::Eq(
                     Expr::Variable("Build.Reason".to_string()),
                     Expr::Literal("IndividualCI".to_string()),
@@ -108,7 +108,7 @@ impl ContextContributor for CiPushContextContributor {
                     Expr::Variable("Build.Reason".to_string()),
                     Expr::Literal("BatchedCI".to_string()),
                 ),
-            ])),
+            ]))),
             Bundle::ExecContextCiPush,
             TokenSource::SystemAccessToken,
         );
@@ -177,10 +177,14 @@ mod tests {
             Step::Bash(b) => b,
             other => panic!("expected Bash, got {other:?}"),
         };
-        // Condition: or(eq(Build.Reason, IndividualCI),
-        //              eq(Build.Reason, BatchedCI))
+        // Condition: and(succeeded(), or(eq(Build.Reason, IndividualCI),
+        //                                eq(Build.Reason, BatchedCI)))
         match &bash.condition {
-            Some(Condition::Or(clauses)) => {
+            Some(Condition::And(parts)) => {
+                assert!(matches!(parts.as_slice(), [Condition::Succeeded, _]));
+                let Condition::Or(clauses) = &parts[1] else {
+                    panic!("expected Or trigger condition, got {:?}", parts[1]);
+                };
                 assert_eq!(clauses.len(), 2);
                 let reasons: Vec<&str> = clauses
                     .iter()
@@ -192,7 +196,7 @@ mod tests {
                 assert!(reasons.contains(&"IndividualCI"));
                 assert!(reasons.contains(&"BatchedCI"));
             }
-            other => panic!("expected Or condition, got {other:?}"),
+            other => panic!("expected succeeded And condition, got {other:?}"),
         }
 
         // Trust boundary: bearer present, projected as a secret via the

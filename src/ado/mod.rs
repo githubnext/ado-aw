@@ -106,6 +106,8 @@ impl AdoContext {
 /// Supports:
 /// - HTTPS: `https://dev.azure.com/{org}/{project}/_git/{repo}`
 /// - HTTPS (legacy): `https://{org}.visualstudio.com/{project}/_git/{repo}`
+/// - HTTPS (legacy collection):
+///   `https://{org}.visualstudio.com/DefaultCollection/{project}/_git/{repo}`
 /// - SSH: `git@ssh.dev.azure.com:v3/{org}/{project}/{repo}`
 /// - SSH (legacy): `git@vs-ssh.visualstudio.com:v3/{org}/{project}/{repo}`
 pub fn parse_ado_remote(remote_url: &str) -> Result<AdoContext> {
@@ -158,11 +160,21 @@ pub fn parse_ado_remote(remote_url: &str) -> Result<AdoContext> {
             .unwrap_or_default();
 
         // Expected: /{project}/_git/{repo}
-        if segments.len() >= 3 && segments[1] == "_git" {
-            let repo_name = segments[2].trim_end_matches(".git");
+        // Also accepts the legacy collection-prefixed shape:
+        // /DefaultCollection/{project}/_git/{repo}
+        let repo_start = if segments
+            .first()
+            .is_some_and(|segment| segment.eq_ignore_ascii_case("DefaultCollection"))
+        {
+            1
+        } else {
+            0
+        };
+        if segments.len() >= repo_start + 3 && segments[repo_start + 1] == "_git" {
+            let repo_name = segments[repo_start + 2].trim_end_matches(".git");
             return Ok(AdoContext {
                 org_url: format!("https://dev.azure.com/{}", org),
-                project: segments[0].to_string(),
+                project: segments[repo_start].to_string(),
                 repo_name: repo_name.to_string(),
             });
         }
@@ -2108,6 +2120,15 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_ado_remote_legacy_visualstudio_default_collection() {
+        let url = "https://myorg.visualstudio.com/DefaultCollection/MyProject/_git/myrepo.git";
+        let ctx = parse_ado_remote(url).unwrap();
+        assert_eq!(ctx.org_url, "https://dev.azure.com/myorg");
+        assert_eq!(ctx.project, "MyProject");
+        assert_eq!(ctx.repo_name, "myrepo");
+    }
+
+    #[test]
     fn test_parse_ado_remote_legacy_ssh() {
         let url = "git@vs-ssh.visualstudio.com:v3/myorg/myproject/myrepo";
         let ctx = parse_ado_remote(url).unwrap();
@@ -2146,6 +2167,18 @@ mod tests {
     fn parse_git_remote_ado_legacy_visualstudio() {
         let source =
             parse_git_remote("https://myorg.visualstudio.com/MyProject/_git/myrepo").unwrap();
+        assert_eq!(source.provider, RepoProvider::AdoGit);
+        assert_eq!(source.owner, "myorg");
+        assert_eq!(source.repo, "myrepo");
+        assert_eq!(source.project.as_deref(), Some("MyProject"));
+    }
+
+    #[test]
+    fn parse_git_remote_ado_legacy_visualstudio_default_collection() {
+        let source = parse_git_remote(
+            "https://myorg.visualstudio.com/DefaultCollection/MyProject/_git/myrepo.git",
+        )
+        .unwrap();
         assert_eq!(source.provider, RepoProvider::AdoGit);
         assert_eq!(source.owner, "myorg");
         assert_eq!(source.repo, "myrepo");

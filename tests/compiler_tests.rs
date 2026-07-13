@@ -219,6 +219,70 @@ fn test_compiled_output_no_unreplaced_markers() {
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
+#[test]
+fn legacy_default_collection_remote_matches_modern_remote_lock_output() {
+    let legacy = compile_lock_with_origin(
+        "https://exampleorg.visualstudio.com/DefaultCollection/Example%20Project/_git/example-repo",
+    );
+    let modern =
+        compile_lock_with_origin("https://dev.azure.com/exampleorg/Example%20Project/_git/example-repo");
+
+    assert_eq!(
+        legacy, modern,
+        "legacy DefaultCollection and modern Azure Repos remotes must compile byte-identical locks"
+    );
+    assert!(legacy.contains("\"org\":\"exampleorg\""));
+    assert!(legacy.contains("\"repo\":\"example-repo\""));
+    assert!(!legacy.contains("\"org\":\"\",\"repo\":\"\""));
+}
+
+fn compile_lock_with_origin(origin: &str) -> String {
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp directory");
+    let agent_path = temp_dir.path().join("agent.md");
+    let output_path = temp_dir.path().join("agent.lock.yml");
+    fs::write(
+        &agent_path,
+        "---\nname: remote-lock-test\ndescription: test\n---\nInspect the repository.\n",
+    )
+    .expect("Failed to write agent markdown");
+
+    let git_init = std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to run git init");
+    assert!(
+        git_init.status.success(),
+        "git init failed: {}",
+        String::from_utf8_lossy(&git_init.stderr)
+    );
+
+    let git_remote = std::process::Command::new("git")
+        .args(["remote", "add", "origin", origin])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to add origin remote");
+    assert!(
+        git_remote.status.success(),
+        "git remote add failed: {}",
+        String::from_utf8_lossy(&git_remote.stderr)
+    );
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args(["compile", "agent.md", "-o", "agent.lock.yml"])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to run compiler");
+    assert!(
+        output.status.success(),
+        "Compiler should succeed for {origin}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    fs::read_to_string(&output_path).expect("Should read compiled YAML")
+}
+
 /// Test that the pipeline-trigger-agent fixture compiles correctly
 ///
 /// Verifies that the `triggers.pipeline` front matter field generates:

@@ -8,7 +8,8 @@
 //! Activates whenever the PR contributor activates (i.e. `on.pr` is
 //! configured AND the PR contributor is not disabled), unless the
 //! `workitem` contributor itself is explicitly disabled. Runtime
-//! gate: same as the PR contributor — `eq(Build.Reason, 'PullRequest')`.
+//! gate: same as the PR contributor —
+//! `and(succeeded(), eq(Build.Reason, 'PullRequest'))`.
 //!
 //! ## Artefacts (staged by the bundle on success)
 //!
@@ -62,7 +63,7 @@ use crate::compile::ir::env::EnvValue;
 use crate::compile::ir::step::{BashStep, Step};
 use crate::compile::types::WorkitemContextConfig;
 
-use super::contributor::ContextContributor;
+use super::contributor::{ContextContributor, succeeded_and};
 
 /// Workitem-context contributor (PR-linked mode only).
 pub(super) struct WorkitemContextContributor {
@@ -135,10 +136,10 @@ impl ContextContributor for WorkitemContextContributor {
         let condition = if self.synthetic_pr_active {
             Condition::Succeeded
         } else {
-            Condition::Eq(
+            succeeded_and(Condition::Eq(
                 Expr::Variable("Build.Reason".to_string()),
                 Expr::Literal("PullRequest".to_string()),
-            )
+            ))
         };
 
         let prelude = if self.synthetic_pr_active {
@@ -296,6 +297,20 @@ mod tests {
             bash.env.get("SYSTEM_ACCESSTOKEN"),
             Some(EnvValue::Secret(v)) if v == "System.AccessToken"
         ));
+        match bash.condition.as_ref().expect("condition required") {
+            Condition::And(parts) => {
+                assert!(matches!(parts.as_slice(), [Condition::Succeeded, _]));
+                let Condition::Eq(Expr::Variable(v), Expr::Literal(l)) = &parts[1] else {
+                    panic!(
+                        "expected Condition::Eq(Variable(Build.Reason), Literal(PullRequest)), got {:?}",
+                        parts[1]
+                    );
+                };
+                assert_eq!(v, "Build.Reason");
+                assert_eq!(l, "PullRequest");
+            }
+            other => panic!("expected succeeded And condition, got {other:?}"),
+        }
         // Non-synth path: the bundle reads the auto-injected PR + context
         // vars directly, so the step re-projects none of them.
         for stripped in [

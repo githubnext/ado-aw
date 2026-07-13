@@ -4,7 +4,7 @@
 //! Activates whenever the agent declares an `on.pipeline` resource
 //! trigger (and the `execution-context.pipeline.enabled` switch is
 //! not `false`). Runtime gate:
-//! `eq(variables['Build.Reason'], 'ResourceTrigger')`.
+//! `and(succeeded(), eq(variables['Build.Reason'], 'ResourceTrigger'))`.
 //!
 //! ## Artefacts (staged by the bundle on success)
 //!
@@ -32,7 +32,7 @@
 //!   bearer for the Build REST API. The token is never written to
 //!   disk, never logged, never passed in argv.
 //! - The step is gated by
-//!   `condition: eq(variables['Build.Reason'], 'ResourceTrigger')`
+//!   `condition: and(succeeded(), eq(variables['Build.Reason'], 'ResourceTrigger'))`
 //!   so it never runs on non-pipeline-completion builds.
 //! - All staged artefacts are short, structured ADO REST output —
 //!   no user-controlled HTML, no free-text fields (the upstream
@@ -46,7 +46,7 @@ use crate::compile::ir::condition::{Condition, Expr};
 use crate::compile::ir::step::{BashStep, Step};
 use crate::compile::types::PipelineContextConfig;
 
-use super::contributor::ContextContributor;
+use super::contributor::{ContextContributor, succeeded_and};
 
 /// Pipeline-context contributor.
 pub(super) struct PipelineContextContributor {
@@ -98,10 +98,10 @@ impl ContextContributor for PipelineContextContributor {
                 "Stage pipeline execution context (aw-context/pipeline/*)",
                 script,
             )
-            .with_condition(Condition::Eq(
+            .with_condition(succeeded_and(Condition::Eq(
                 Expr::Variable("Build.Reason".to_string()),
                 Expr::Literal("ResourceTrigger".to_string()),
-            )),
+            ))),
             Bundle::ExecContextPipeline,
             TokenSource::SystemAccessToken,
         );
@@ -181,13 +181,20 @@ mod tests {
             other => panic!("expected Step::Bash, got {other:?}"),
         };
 
-        // Runtime gate.
+        // Runtime gate preserves the default success gate.
         match &bash.condition {
-            Some(Condition::Eq(Expr::Variable(v), Expr::Literal(l))) => {
+            Some(Condition::And(parts)) => {
+                assert!(matches!(parts.as_slice(), [Condition::Succeeded, _]));
+                let Condition::Eq(Expr::Variable(v), Expr::Literal(l)) = &parts[1] else {
+                    panic!(
+                        "expected eq(Build.Reason, 'ResourceTrigger'), got {:?}",
+                        parts[1]
+                    );
+                };
                 assert_eq!(v, "Build.Reason");
                 assert_eq!(l, "ResourceTrigger");
             }
-            other => panic!("expected eq(Build.Reason, 'ResourceTrigger'), got {other:?}"),
+            other => panic!("expected succeeded And condition, got {other:?}"),
         }
 
         // Bearer present.

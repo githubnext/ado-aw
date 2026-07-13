@@ -27,7 +27,7 @@ use crate::compile::ir::env::EnvValue;
 use crate::compile::ir::step::{BashStep, Step};
 use crate::compile::types::PrChecksContextConfig;
 
-use super::contributor::ContextContributor;
+use super::contributor::{ContextContributor, succeeded_and};
 
 pub(super) struct PrChecksContextContributor {
     config: PrChecksContextConfig,
@@ -88,10 +88,10 @@ impl ContextContributor for PrChecksContextContributor {
             )
         } else {
             (
-                Condition::Eq(
+                succeeded_and(Condition::Eq(
                     Expr::Variable("Build.Reason".to_string()),
                     Expr::Literal("PullRequest".to_string()),
-                ),
+                )),
                 "",
             )
         };
@@ -199,8 +199,8 @@ mod tests {
 
     #[test]
     fn prepare_step_carries_bearer_condition_and_pr_id() {
-        // Non-synth path: condition must be eq(Build.Reason, 'PullRequest'),
-        // PR ID env must be the plain ADO macro (not a pipeline var).
+        // Non-synth path: condition must preserve succeeded() and gate on
+        // PullRequest; PR ID env must not be re-projected.
         let c = PrChecksContextContributor::new(
             PrChecksContextConfig {
                 enabled: Some(true),
@@ -220,15 +220,20 @@ mod tests {
             bash.env.get("SYSTEM_ACCESSTOKEN"),
             Some(EnvValue::Secret(v)) if v == "System.AccessToken"
         ));
-        // Runtime gate: step must only fire on PR builds.
+        // Runtime gate: step must only fire on PR builds after prior success.
         match bash.condition.as_ref().expect("condition required") {
-            Condition::Eq(Expr::Variable(v), Expr::Literal(l)) => {
+            Condition::And(parts) => {
+                assert!(matches!(parts.as_slice(), [Condition::Succeeded, _]));
+                let Condition::Eq(Expr::Variable(v), Expr::Literal(l)) = &parts[1] else {
+                    panic!(
+                        "expected Condition::Eq(Variable(Build.Reason), Literal(PullRequest)), got {:?}",
+                        parts[1]
+                    );
+                };
                 assert_eq!(v, "Build.Reason");
                 assert_eq!(l, "PullRequest");
             }
-            other => panic!(
-                "expected Condition::Eq(Variable(Build.Reason), Literal(PullRequest)), got {other:?}"
-            ),
+            other => panic!("expected succeeded And condition, got {other:?}"),
         }
         // Non-synth path: the bundle reads the auto-injected
         // SYSTEM_PULLREQUEST_PULLREQUESTID (and other context vars) directly,
