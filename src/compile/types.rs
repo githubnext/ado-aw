@@ -99,13 +99,11 @@ pub struct PoolConfig {
 
 impl PoolConfig {
     /// Get the self-hosted pool name, if configured.
-    #[cfg(test)]
     pub fn name(&self) -> Option<&str> {
         self.name.as_deref()
     }
 
     /// Get the Microsoft-hosted VM image, if configured.
-    #[cfg(test)]
     pub fn vm_image(&self) -> Option<&str> {
         self.vm_image.as_deref()
     }
@@ -118,7 +116,6 @@ impl PoolConfig {
     /// Get the OS (defaults to "linux" if not specified).
     ///
     /// Primarily applicable to 1ES pool configuration.
-    #[allow(dead_code)]
     pub fn os(&self) -> &str {
         self.os.as_deref().unwrap_or("linux")
     }

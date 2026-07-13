@@ -1196,7 +1196,7 @@ pub fn resolve_pool_typed(
             let (name, os) = match pool {
                 None => (DEFAULT_ONEES_POOL.to_string(), "linux".to_string()),
                 Some(full) => {
-                    match (full.name.as_deref(), full.vm_image.as_deref()) {
+                    match (full.name(), full.vm_image()) {
                         (Some(name), Some(vm_image)) => {
                             anyhow::bail!(
                                 "pool cannot specify both `name` and `vmImage` (got name='{}', vmImage='{}')",
@@ -1209,7 +1209,7 @@ pub fn resolve_pool_typed(
                                 vm_image
                             );
                         }
-                        (None, None) if !full.demands.is_empty() => {
+                        (None, None) if !full.demands().is_empty() => {
                             anyhow::bail!(
                                 "pool.demands requires `pool.name` and cannot be used with the default 1ES pool"
                             );
@@ -1217,11 +1217,8 @@ pub fn resolve_pool_typed(
                         _ => {}
                     }
                     (
-                        full.name
-                            .as_deref()
-                            .unwrap_or(DEFAULT_ONEES_POOL)
-                            .to_string(),
-                        full.os.as_deref().unwrap_or("linux").to_string(),
+                        full.name().unwrap_or(DEFAULT_ONEES_POOL).to_string(),
+                        full.os().to_string(),
                     )
                 }
             };
@@ -1236,8 +1233,8 @@ pub fn resolve_pool_typed(
             let Some(full) = pool else {
                 return Ok(Pool::VmImage(DEFAULT_VM_IMAGE_POOL.to_string()));
             };
-            match (full.name.as_deref(), full.vm_image.as_deref()) {
-                (Some(name), Some(vm_image)) if !full.demands.is_empty() => anyhow::bail!(
+            match (full.name(), full.vm_image()) {
+                (Some(name), Some(vm_image)) if !full.demands().is_empty() => anyhow::bail!(
                     "pool cannot specify both `name` and `vmImage` (got name='{}', vmImage='{}'); `pool.demands` cannot be used with `pool.vmImage`",
                     name,
                     vm_image
@@ -1247,7 +1244,7 @@ pub fn resolve_pool_typed(
                     name,
                     vm_image
                 ),
-                (None, Some(vm_image)) if !full.demands.is_empty() => anyhow::bail!(
+                (None, Some(vm_image)) if !full.demands().is_empty() => anyhow::bail!(
                     "pool.demands requires `pool.name` and cannot be used with `pool.vmImage` ('{}')",
                     vm_image
                 ),
@@ -1255,10 +1252,10 @@ pub fn resolve_pool_typed(
                     name: name.to_string(),
                     image: None,
                     os: None,
-                    demands: full.demands.clone(),
+                    demands: full.demands().to_vec(),
                 }),
                 (None, Some(vm_image)) => Ok(Pool::VmImage(vm_image.to_string())),
-                (None, None) if !full.demands.is_empty() => anyhow::bail!(
+                (None, None) if !full.demands().is_empty() => anyhow::bail!(
                     "pool.demands requires `pool.name` and cannot be used with the default `pool.vmImage`"
                 ),
                 (None, None) => Ok(Pool::VmImage(DEFAULT_VM_IMAGE_POOL.to_string())),
