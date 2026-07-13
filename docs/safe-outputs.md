@@ -549,9 +549,11 @@ Links two Azure DevOps work items together.
 safe-outputs:
   link-work-items:
     allowed-link-types: []       # Optional — restrict which link types are allowed (empty = all)
-    target: "*"                  # Scoping policy (same as comment-on-work-item target)
+    target: "*"                  # Required — "*" allows any work item ID, or set to a specific ID
     max: 5                       # Maximum per run (default: 5)
 ```
+
+**Note:** The `target` field is required. If omitted, Stage 3 execution fails with an error. Use the same scoping options as `comment-on-work-item`: `"*"` for any work item, a numeric ID for a specific item, a list of IDs, or an area path prefix string.
 
 ### queue-build
 Queues an Azure DevOps pipeline build by definition ID.
