@@ -255,7 +255,7 @@ the service connections. Approve the permissions and the pipeline is ready.
 | `description` | string | **required** | One-line summary of the agent's purpose |
 | `target` | `standalone` \| `1es` \| `job` \| `stage` | `standalone` | Pipeline output format. `job` and `stage` generate reusable ADO YAML templates rather than complete pipelines. |
 | `engine` | string or object | `copilot` | Engine identifier or object with `id`, `model`, `timeout-minutes`, `provider` (BYOK), `github-app-token`, and more. See [engine reference](docs/engine.md). |
-| `on` | object | — | Unified trigger configuration (`schedule`, `pipeline` completion, `pr` triggers). See [schedule syntax](#schedule-syntax). |
+| `on` | object | — | Unified trigger configuration (`schedule`, `pipeline` completion, `pr` triggers). See [trigger configuration](#trigger-configuration). |
 | `pool` | string or object | `vmImage: ubuntu-22.04` (standalone) / `AZS-1ES-L-MMS-ubuntu-22.04` (1ES) | Agent pool. Named pools may include ordered Azure Pipelines `demands`; demands cannot be used with `vmImage`. |
 | `workspace` | `root` \| `repo` \| `self` \| *alias* | auto | Working directory mode. `self` is an alias for `repo`; any checked-out repo alias is also accepted. |
 | `repos` | list | — | Compact repository declarations (replaces legacy `repositories:` + `checkout:`) |
@@ -284,7 +284,12 @@ natural language describing the task, constraints, and expected behavior.
 
 ---
 
-## Schedule Syntax
+## Trigger Configuration
+
+The `on:` field configures when an agent pipeline fires. Three trigger types
+are supported — mix and match as needed.
+
+### on.schedule — recurring schedule
 
 The `on.schedule` field uses a fuzzy syntax that deterministically scatters
 execution times based on the agent name, preventing load spikes.
@@ -340,6 +345,86 @@ on:
       - main
       - release/*
 ```
+
+### on.pr — pull request trigger
+
+Triggers the pipeline on pull request activity. Two independent filter layers are available:
+
+| Layer | Fields | Evaluated | Unmatched builds |
+|-------|--------|-----------|------------------|
+| Native ADO | `branches:`, `paths:` | Before the pipeline starts | Not queued at all |
+| Runtime gate | `filters:` | Inside the Setup job | Build self-cancels cleanly |
+
+Use native ADO filters for broad exclusions; use `filters:` for runtime context
+(PR title, author, labels, changed files, etc.).
+
+```yaml
+# Minimal — trigger on any PR
+on:
+  pr: {}
+
+# Scoped to specific branches and changed files
+on:
+  pr:
+    branches:
+      include: [main, release/*]    # only PRs targeting these branches
+    filters:
+      changed-files:
+        include: ["src/**", "*.ts"] # only when these paths are touched
+      draft: false                  # skip draft PRs
+
+# Gate on a label (agent runs only when "run-agent" label is present)
+on:
+  pr:
+    filters:
+      labels:
+        any-of: ["run-agent"]
+```
+
+**`mode`** controls how PR builds reach the pipeline:
+
+| `mode` | Use when |
+|--------|----------|
+| `synthetic` (default) | No Build Validation branch policy installed. The Setup job finds the open PR via the ADO API. Recommended for most agents. |
+| `policy` | You have installed an ADO Build Validation branch policy. Prevents duplicate CI builds. |
+
+```yaml
+on:
+  pr:
+    mode: policy   # requires a Build Validation branch policy to be configured in ADO
+```
+
+> **ADO Azure Repos note.** ADO ignores the YAML `pr:` block unless a Build
+> Validation branch policy is installed. `mode: synthetic` (the default)
+> works around this by detecting open PRs via the ADO API on every push —
+> the agent runs on PR branches and self-skips on non-PR branches.
+> See [front-matter reference](docs/front-matter.md#pr-triggering-in-azure-repos) for `on.pr` details and all `filters:` options.
+
+### on.pipeline — upstream pipeline completion
+
+Triggers the pipeline when another ADO pipeline finishes.
+
+```yaml
+on:
+  pipeline:
+    name: "CI Build"               # source pipeline name (required)
+    project: "OtherProject"        # only when in a different ADO project
+    branches: [main, release/*]    # omit to trigger on any branch
+
+# With runtime filters
+on:
+  pipeline:
+    name: "CI Build"
+    filters:
+      branch: "refs/heads/main"    # only builds on main
+      time-window:
+        start: "09:00"             # only during business hours (UTC)
+        end:   "17:00"
+```
+
+When `on.pipeline` (or `on.schedule`) is set, CI push and PR triggers are
+suppressed (`trigger: none`, `pr: none`). Add `on.pr:` explicitly to keep
+PR triggers active alongside a schedule or pipeline trigger.
 
 ---
 
