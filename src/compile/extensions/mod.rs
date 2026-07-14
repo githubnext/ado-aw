@@ -650,7 +650,7 @@ pub use crate::runtimes::node::NodeExtension;
 pub use crate::runtimes::python::PythonExtension;
 pub use crate::tools::azure_devops::AzureDevOpsExtension;
 pub use crate::tools::cache_memory::CacheMemoryExtension;
-pub use ado_aw_marker::AdoAwMarkerExtension;
+pub use ado_aw_marker::{AdoAwMarkerExtension, CustomComponentProvenance};
 pub use ado_script::AdoScriptExtension;
 pub use azure_cli::AzureCliExtension;
 pub use exec_context::{
@@ -712,7 +712,9 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
     // `NodeExtension`). The user's pinned Node version then "wins last"
     // on PATH for the rest of the Agent job.
     let mut extensions = vec![
-        Extension::AdoAwMarker(AdoAwMarkerExtension),
+        Extension::AdoAwMarker(AdoAwMarkerExtension::new(
+            Vec::<CustomComponentProvenance>::new(),
+        )),
         Extension::GitHub(GitHubExtension),
         Extension::SafeOutputs(SafeOutputsExtension),
         Extension::AdoScript(Box::new({

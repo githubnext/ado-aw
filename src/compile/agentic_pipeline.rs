@@ -60,7 +60,7 @@
 //! - `Teardown` (optional): user `teardown:` steps.
 //! - `Conclusion` (optional): post-run reporting / work-item filing.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::Path;
 
 use super::common::PerJobPools;
@@ -98,6 +98,7 @@ use super::types::{
 /// The `safe-outputs:` key for the create-pull-request tool. Matches the kebab
 /// name `FrontMatter::create_pr_config`/`partition_safe_outputs_by_approval` use.
 const CREATE_PULL_REQUEST_TOOL: &str = "create-pull-request";
+const CUSTOM_PROPOSALS_STEP_ID: &str = "customProposals";
 
 /// Built pipeline context — the result of running every validation,
 /// scalar computation, extension declaration fanout, and canonical-
@@ -309,7 +310,11 @@ pub(crate) fn build_pipeline_context(
 
     // ─── Top-level pipeline fields ────────────────────────────────
     let parameters = build_parameters(front_matter)?;
-    let resources = build_resources(&front_matter.repositories, &front_matter.on_config);
+    let resources = build_resources(
+        front_matter,
+        &front_matter.repositories,
+        &front_matter.on_config,
+    )?;
     let triggers = build_triggers(&front_matter.on_config, front_matter)?;
 
     // ─── Extension declaration fanout ─────────────────────────────
@@ -428,32 +433,56 @@ pub(crate) fn build_canonical_jobs(
     if let Some(review) = build_manual_review_job(front_matter, cfg, &p)? {
         jobs.push(review);
     }
+    let custom_defs = collect_custom_safe_output_job_defs(front_matter, &p)?;
+    let custom_job_ids: Vec<JobId> = custom_defs.iter().map(|d| d.job_id.clone()).collect();
+    let custom_reviewed_job_ids: Vec<JobId> = custom_defs
+        .iter()
+        .filter(|d| d.reviewed)
+        .map(|d| d.job_id.clone())
+        .collect();
+    for def in &custom_defs {
+        jobs.push(build_custom_safe_output_job(def, front_matter, cfg)?);
+    }
     // Safe-outputs execution. With manual review, execution may split into an
     // automatic job (runs immediately) and a reviewed job (gated behind the
     // ManualReview approval). Partition decides the shape:
     //   - no reviewed tools           → single default job (unchanged)
     //   - all reviewed tools          → single default job, gated by ManualReview
     //   - mixed (auto + reviewed)     → auto job + reviewed job
-    let (auto, reviewed) = front_matter.partition_safe_outputs_by_approval();
+    let (auto_all, reviewed_all) = front_matter.partition_safe_outputs_by_approval();
+    let custom_tool_names = front_matter.custom_safe_output_tool_names();
+    let custom_tool_set: std::collections::HashSet<&str> =
+        custom_tool_names.iter().map(String::as_str).collect();
+    let auto: Vec<String> = auto_all
+        .into_iter()
+        .filter(|tool| !custom_tool_set.contains(tool.as_str()))
+        .collect();
+    let reviewed: Vec<String> = reviewed_all
+        .into_iter()
+        .filter(|tool| !custom_tool_set.contains(tool.as_str()))
+        .collect();
     // Which variant actually runs `create-pull-request` (and thus needs the
     // `prepare-pr-base` fetch/deepen — issue #1453). In a split it lives in
     // exactly one variant; the other filters it out, so only the running
     // variant should pay for the bundle download + prepare step.
     let create_pr_configured = front_matter.create_pr_config().is_some();
     let create_pr_reviewed = reviewed.iter().any(|t| t == CREATE_PULL_REQUEST_TOOL);
+    let safeoutputs_waits_for_review = !reviewed.is_empty() && auto.is_empty();
     if reviewed.is_empty() || auto.is_empty() {
         jobs.push(build_safeoutputs_job(
             front_matter,
             cfg,
             &p,
-            &SafeOutputsVariant::default_single(create_pr_configured),
+            &SafeOutputsVariant::default_single(create_pr_configured)
+                .with_excluded_tools(&custom_tool_names),
         )?);
     } else {
         jobs.push(build_safeoutputs_job(
             front_matter,
             cfg,
             &p,
-            &SafeOutputsVariant::automatic(&reviewed, create_pr_configured && !create_pr_reviewed),
+            &SafeOutputsVariant::automatic(&reviewed, create_pr_configured && !create_pr_reviewed)
+                .with_excluded_tools(&custom_tool_names),
         )?);
         jobs.push(build_safeoutputs_job(
             front_matter,
@@ -471,7 +500,13 @@ pub(crate) fn build_canonical_jobs(
 
     // Wire dependsOn between jobs (graph pass also derives but
     // explicit edges make the YAML match committed lock files).
-    wire_explicit_dependencies(&mut jobs, &p)?;
+    wire_explicit_dependencies(
+        &mut jobs,
+        &p,
+        &custom_reviewed_job_ids,
+        &custom_job_ids,
+        safeoutputs_waits_for_review,
+    )?;
     Ok(jobs)
 }
 
@@ -493,6 +528,14 @@ impl<'a> JobPrefix<'a> {
                 "Agent" | "Detection" | "ManualReview" | "SafeOutputs" | "SafeOutputs_Reviewed",
             ) => JobId::new(format!("{prefix}_{base}")),
             _ => JobId::new(base),
+        }
+    }
+
+    fn custom_id(&self, tool: &str) -> Result<JobId> {
+        let base = format!("Custom_{}", ado_identifier_suffix(tool));
+        match self.0 {
+            Some(prefix) => JobId::new(format!("{prefix}_{base}")),
+            None => JobId::new(base),
         }
     }
 }
@@ -638,7 +681,11 @@ fn yaml_value_as_string(v: &serde_yaml::Value) -> String {
     }
 }
 
-fn build_resources(repos: &[RepoCfg], on: &Option<OnConfig>) -> Resources {
+fn build_resources(
+    front_matter: &FrontMatter,
+    repos: &[RepoCfg],
+    on: &Option<OnConfig>,
+) -> Result<Resources> {
     let mut repositories: Vec<RepositoryResource> = vec![RepositoryResource::SelfRepo {
         clean: true,
         submodules: true,
@@ -649,8 +696,10 @@ fn build_resources(repos: &[RepoCfg], on: &Option<OnConfig>) -> Resources {
             kind: r.repo_type.clone(),
             name: r.name.clone(),
             r#ref: Some(r.repo_ref.clone()),
+            endpoint: r.endpoint.clone(),
         });
     }
+    repositories.extend(custom_repository_resources(front_matter)?);
     // Pipeline-completion triggers surface as `resources.pipelines[]`.
     // Mirrors legacy `generate_pipeline_resources`.
     let mut pipelines: Vec<PipelineResource> = Vec::new();
@@ -675,10 +724,10 @@ fn build_resources(repos: &[RepoCfg], on: &Option<OnConfig>) -> Resources {
             trigger: true,
         });
     }
-    Resources {
+    Ok(Resources {
         repositories,
         pipelines,
-    }
+    })
 }
 
 fn build_triggers(on: &Option<OnConfig>, front_matter: &FrontMatter) -> Result<Triggers> {
@@ -1252,6 +1301,13 @@ fn build_detection_job(
             &reviewed_tools,
         )));
     }
+    let custom_tools = front_matter.custom_safe_output_tool_names();
+    if !custom_tools.is_empty() {
+        steps.push(Step::Bash(detect_custom_proposals_step(
+            &cfg.working_directory,
+            &custom_tools,
+        )?));
+    }
     // Copy logs
     steps.push(Step::Bash(copy_logs_step(&cfg.engine_log_dir, true)));
     // Publish
@@ -1334,6 +1390,16 @@ impl SafeOutputsVariant {
             is_reviewed: true,
         }
     }
+
+    fn with_excluded_tools(mut self, excluded: &[String]) -> Self {
+        if excluded.is_empty() {
+            return self;
+        }
+        let mut flags = self.filter_args;
+        flags.push_str(&filter_flags("--exclude", excluded));
+        self.filter_args = flags;
+        self
+    }
 }
 
 /// Build a ` --<flag> <tool>` run for `ado-aw execute` (leading space so it
@@ -1350,6 +1416,562 @@ fn filter_flags(flag: &str, tools: &[String]) -> String {
         s.push_str(&format!(" {flag} {t}"));
     }
     s
+}
+
+#[derive(Debug, Clone)]
+enum CustomSafeOutputKind {
+    Scripts { entrypoint: String },
+    Jobs { steps: Vec<serde_yaml::Value> },
+}
+
+#[derive(Debug, Clone)]
+struct CustomSafeOutputJobDef {
+    name: String,
+    job_id: JobId,
+    reviewed: bool,
+    max: Option<u64>,
+    env: Vec<(String, String)>,
+    kind: CustomSafeOutputKind,
+    component: Option<CustomComponentRuntime>,
+    schema_digest: String,
+}
+
+#[derive(Debug, Clone)]
+struct CustomComponentRuntime {
+    alias: String,
+    checkout_dir: String,
+    source: String,
+    sha: String,
+    manifest_digest: Option<String>,
+}
+
+fn ado_identifier_suffix(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
+    {
+        out
+    } else {
+        format!("_{out}")
+    }
+}
+
+fn custom_tool_output_var(tool: &str) -> String {
+    format!("HasCustom_{}", ado_identifier_suffix(tool))
+}
+
+fn collect_custom_safe_output_job_defs(
+    front_matter: &FrontMatter,
+    prefix: &JobPrefix<'_>,
+) -> Result<Vec<CustomSafeOutputJobDef>> {
+    let (_, reviewed) = front_matter.partition_safe_outputs_by_approval();
+    let reviewed: std::collections::HashSet<&str> = reviewed.iter().map(String::as_str).collect();
+    let schema_digests = custom_schema_digests(front_matter)?;
+    let mut defs = Vec::new();
+
+    for section in ["scripts", "jobs"] {
+        let Some(section_value) = front_matter.safe_outputs.get(section) else {
+            continue;
+        };
+        let section_obj = section_value.as_object().ok_or_else(|| {
+            anyhow::anyhow!("safe-outputs.{section} must be a mapping of tool definitions")
+        })?;
+        let mut names: Vec<&String> = section_obj.keys().collect();
+        names.sort();
+        for tool_name in names {
+            let tool_value = section_obj
+                .get(tool_name)
+                .expect("tool name collected from map keys");
+            let tool_obj = tool_value.as_object().ok_or_else(|| {
+                anyhow::anyhow!("safe-outputs.{section}.{tool_name} must be a mapping")
+            })?;
+            let env = parse_custom_env(section, tool_name, tool_obj.get("env"))?;
+            let max = match tool_obj.get("max") {
+                Some(v) => Some(v.as_u64().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "safe-outputs.{section}.{tool_name}.max must be a positive integer"
+                    )
+                })?),
+                None => None,
+            };
+            let kind = if section == "scripts" {
+                let entrypoint = tool_obj
+                    .get("entrypoint")
+                    .or_else(|| tool_obj.get("run"))
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "safe-outputs.scripts.{tool_name} requires `run` or `entrypoint`"
+                        )
+                    })?
+                    .to_string();
+                CustomSafeOutputKind::Scripts { entrypoint }
+            } else {
+                let steps = tool_obj
+                    .get("steps")
+                    .and_then(serde_json::Value::as_array)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("safe-outputs.jobs.{tool_name}.steps must be a list")
+                    })?
+                    .iter()
+                    .map(|v| serde_yaml::to_value(v).context("failed to convert custom job step"))
+                    .collect::<Result<Vec<_>>>()?;
+                for step in &steps {
+                    if let Some(Err(message)) = super::ir::tasks::parse::validate_task_step(step) {
+                        eprintln!(
+                            "Warning: safe-outputs.jobs.{tool_name}.steps contains an invalid task input: {message}"
+                        );
+                    }
+                }
+                CustomSafeOutputKind::Jobs { steps }
+            };
+            let schema_digest = schema_digests
+                .get(tool_name)
+                .cloned()
+                .unwrap_or_else(|| crate::hash::sha256_hex(b"{}"));
+            defs.push(CustomSafeOutputJobDef {
+                name: tool_name.clone(),
+                job_id: prefix.custom_id(tool_name)?,
+                reviewed: reviewed.contains(tool_name.as_str()),
+                max,
+                env,
+                kind,
+                component: parse_custom_component_runtime(tool_obj),
+                schema_digest,
+            });
+        }
+    }
+    Ok(defs)
+}
+
+fn custom_schema_digests(
+    front_matter: &FrontMatter,
+) -> Result<std::collections::HashMap<String, String>> {
+    let mut out = std::collections::HashMap::new();
+    for schema in super::custom_tools::generate_custom_tool_schemas(front_matter)? {
+        let bytes = serde_json::to_vec(&schema.input_schema)
+            .context("failed to serialize custom tool schema for digest")?;
+        out.insert(schema.name, crate::hash::sha256_hex(&bytes));
+    }
+    Ok(out)
+}
+
+fn parse_custom_env(
+    section: &str,
+    tool_name: &str,
+    env: Option<&serde_json::Value>,
+) -> Result<Vec<(String, String)>> {
+    let Some(env) = env else {
+        return Ok(Vec::new());
+    };
+    let env_obj = env.as_object().ok_or_else(|| {
+        anyhow::anyhow!("safe-outputs.{section}.{tool_name}.env must be a mapping")
+    })?;
+    let mut pairs = Vec::new();
+    for (name, value) in env_obj {
+        anyhow::ensure!(
+            crate::validate::is_valid_env_var_name(name),
+            "safe-outputs.{section}.{tool_name}.env key `{name}` is not a valid environment variable name"
+        );
+        let var = value.as_str().ok_or_else(|| {
+            anyhow::anyhow!(
+                "safe-outputs.{section}.{tool_name}.env.{name} must name an ADO variable"
+            )
+        })?;
+        anyhow::ensure!(
+            crate::validate::is_valid_ado_variable_name(var),
+            "safe-outputs.{section}.{tool_name}.env.{name} must be a valid ADO variable name"
+        );
+        pairs.push((name.clone(), var.to_string()));
+    }
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(pairs)
+}
+
+fn parse_custom_component_runtime(
+    tool_obj: &serde_json::Map<String, serde_json::Value>,
+) -> Option<CustomComponentRuntime> {
+    let source = tool_obj
+        .get("component-source")
+        .or_else(|| tool_obj.get("source"))
+        .and_then(serde_json::Value::as_str)?;
+    let sha = tool_obj
+        .get("component-sha")
+        .or_else(|| tool_obj.get("sha"))
+        .and_then(serde_json::Value::as_str)?;
+    let mut parts = source.splitn(3, '/');
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    let _path = parts.next()?;
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    let alias = super::imports::alias::alias_identifier(owner, repo);
+    Some(CustomComponentRuntime {
+        checkout_dir: format!("$(Build.SourcesDirectory)/{alias}"),
+        alias,
+        source: source.to_string(),
+        sha: sha.to_string(),
+        manifest_digest: tool_obj
+            .get("manifest-digest")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+    })
+}
+
+fn custom_repository_resources(front_matter: &FrontMatter) -> Result<Vec<RepositoryResource>> {
+    let mut resources = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for section in ["scripts", "jobs"] {
+        let Some(section_value) = front_matter.safe_outputs.get(section) else {
+            continue;
+        };
+        let Some(section_obj) = section_value.as_object() else {
+            continue;
+        };
+        for tool_value in section_obj.values() {
+            let Some(tool_obj) = tool_value.as_object() else {
+                continue;
+            };
+            let Some(component) = parse_custom_component_runtime(tool_obj) else {
+                continue;
+            };
+            if !seen.insert(component.alias.clone()) {
+                continue;
+            }
+            let mut parts = component.source.splitn(3, '/');
+            let owner = parts.next().unwrap_or_default();
+            let repo = parts.next().unwrap_or_default();
+            resources.push(RepositoryResource::Named {
+                identifier: component.alias,
+                kind: "git".to_string(),
+                name: format!("{owner}/{repo}"),
+                r#ref: Some("refs/heads/main".to_string()),
+                endpoint: None,
+            });
+        }
+    }
+    Ok(resources)
+}
+
+fn build_custom_safe_output_job(
+    def: &CustomSafeOutputJobDef,
+    front_matter: &FrontMatter,
+    cfg: &StandaloneCtx,
+) -> Result<Job> {
+    let mut steps = Vec::new();
+    steps.push(checkout_self_step(&cfg.self_checkout_fetch));
+    if let Some(component) = &def.component {
+        steps.push(Step::Checkout(CheckoutStep {
+            repository: CheckoutRepo::Named(component.alias.clone()),
+            clean: None,
+            submodules: None,
+            fetch_depth: Some(1),
+            fetch_tags: Some(false),
+            persist_credentials: None,
+        }));
+        steps.push(Step::Bash(verify_custom_component_checkout_step(component)));
+    }
+    steps.push(Step::Download(DownloadStep {
+        source: "current".to_string(),
+        artifact: "analyzed_outputs_$(Build.BuildId)".to_string(),
+        condition: None,
+    }));
+    if let Some(auth) = feed_auth_step(front_matter.supply_chain()) {
+        steps.push(auth);
+    }
+    steps.extend(download_compiler_step(
+        &cfg.compiler_version,
+        front_matter.supply_chain(),
+    ));
+    steps.push(Step::Bash(prepare_custom_executor_binary_step()));
+
+    match &def.kind {
+        CustomSafeOutputKind::Scripts { entrypoint } => {
+            let config_path = format!("$(Agent.TempDirectory)/ado-aw-custom/{}.json", def.name);
+            let cwd = def
+                .component
+                .as_ref()
+                .map(|c| c.checkout_dir.clone())
+                .unwrap_or_else(|| cfg.working_directory.clone());
+            steps.push(Step::Bash(write_custom_scripts_config_step(
+                def,
+                entrypoint,
+                &cwd,
+                &config_path,
+            )?));
+            steps.push(Step::Bash(custom_scripts_execute_step(
+                &cfg.source_path,
+                &config_path,
+                &def.env,
+            )));
+        }
+        CustomSafeOutputKind::Jobs {
+            steps: component_steps,
+        } => {
+            let proposals_path = format!("$(Agent.TempDirectory)/proposals-{}.json", def.name);
+            let results_path = format!("$(Agent.TempDirectory)/results-{}.json", def.name);
+            steps.push(Step::Bash(custom_jobs_pre_step(
+                &cfg.source_path,
+                &def.name,
+                &proposals_path,
+                &def.env,
+            )));
+            for step in component_steps {
+                steps.push(Step::RawYaml(component_step_with_custom_env(
+                    step,
+                    &def.env,
+                    &proposals_path,
+                    &results_path,
+                )?));
+            }
+            steps.push(Step::Bash(custom_jobs_post_step(
+                &cfg.source_path,
+                def,
+                &proposals_path,
+                &results_path,
+            )));
+        }
+    }
+
+    let custom_pool = if def.reviewed {
+        cfg.pools.safe_outputs_reviewed.clone()
+    } else {
+        cfg.pools.safe_outputs.clone()
+    };
+    let mut job = Job::new(
+        def.job_id.clone(),
+        format!("Custom safe output: {}", def.name),
+        custom_pool,
+    );
+    job.steps = steps;
+    job.condition = Some(custom_job_condition(def)?);
+    Ok(job)
+}
+
+fn custom_job_condition(def: &CustomSafeOutputJobDef) -> Result<Condition> {
+    let mut parts = vec![
+        Condition::Succeeded,
+        Condition::Eq(
+            Expr::StepOutput(OutputRef::new(
+                StepId::new("threatAnalysis")?,
+                "SafeToProcess",
+            )),
+            Expr::Literal("true".to_string()),
+        ),
+        Condition::Eq(
+            Expr::StepOutput(OutputRef::new(
+                StepId::new(CUSTOM_PROPOSALS_STEP_ID)?,
+                custom_tool_output_var(&def.name),
+            )),
+            Expr::Literal("true".to_string()),
+        ),
+    ];
+    if def.reviewed {
+        parts.push(Condition::Eq(
+            Expr::StepOutput(OutputRef::new(
+                StepId::new("reviewedProposals")?,
+                "HasReviewedProposals",
+            )),
+            Expr::Literal("true".to_string()),
+        ));
+    }
+    Ok(Condition::And(parts))
+}
+
+fn verify_custom_component_checkout_step(component: &CustomComponentRuntime) -> BashStep {
+    let script = format!(
+        "set -euo pipefail\n\
+         git -C {dir} checkout --detach {sha}\n\
+         ACTUAL_SHA=$(git -C {dir} rev-parse HEAD)\n\
+         if [ \"$ACTUAL_SHA\" != {sha} ]; then\n  \
+           echo \"##vso[task.complete result=Failed]custom component checkout resolved $ACTUAL_SHA, expected {sha}\"\n  \
+           exit 1\n\
+         fi\n\
+         echo \"Verified custom component checkout at $ACTUAL_SHA\"\n",
+        dir = shell_quote(&component.checkout_dir),
+        sha = shell_quote(&component.sha),
+    );
+    bash("Verify custom component checkout", script)
+}
+
+fn prepare_custom_executor_binary_step() -> BashStep {
+    bash(
+        "Prepare custom safe-output executor",
+        "mkdir -p /tmp/awf-tools\n\
+         AGENTIC_PIPELINES_PATH=\"$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw\"\n\
+         chmod +x \"$AGENTIC_PIPELINES_PATH\"\n\
+         cp \"$AGENTIC_PIPELINES_PATH\" /tmp/awf-tools/ado-aw\n\
+         chmod +x /tmp/awf-tools/ado-aw\n",
+    )
+}
+
+fn write_custom_scripts_config_step(
+    def: &CustomSafeOutputJobDef,
+    entrypoint: &str,
+    cwd: &str,
+    config_path: &str,
+) -> Result<BashStep> {
+    let mut tool = serde_json::Map::new();
+    tool.insert(
+        "entrypoint".to_string(),
+        serde_json::Value::String(entrypoint.to_string()),
+    );
+    tool.insert(
+        "cwd".to_string(),
+        serde_json::Value::String(cwd.to_string()),
+    );
+    if let Some(max) = def.max {
+        tool.insert(
+            "max".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(max)),
+        );
+    }
+    let mut tools = serde_json::Map::new();
+    tools.insert(def.name.clone(), serde_json::Value::Object(tool));
+    let mut root = serde_json::Map::new();
+    root.insert("tools".to_string(), serde_json::Value::Object(tools));
+    let config = serde_json::Value::Object(root);
+    let json = serde_json::to_string_pretty(&config)
+        .context("failed to serialize custom scripts config")?;
+    let script = format!(
+        "mkdir -p \"$(Agent.TempDirectory)/ado-aw-custom\"\n\
+         cat > {config_path} << 'ADO_AW_CUSTOM_CONFIG_JSON'\n\
+{json}\n\
+         ADO_AW_CUSTOM_CONFIG_JSON\n\
+         python3 -m json.tool {config_path} > /dev/null\n",
+        config_path = shell_quote(config_path)
+    );
+    Ok(bash("Write custom safe-output config", script))
+}
+
+fn custom_scripts_execute_step(
+    source_path: &str,
+    config_path: &str,
+    env: &[(String, String)],
+) -> BashStep {
+    let script = format!(
+        "/tmp/awf-tools/ado-aw execute --source {source} --safe-output-dir \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)\" --custom-config {config}\n",
+        source = shell_quote(source_path),
+        config = shell_quote(config_path)
+    );
+    with_custom_secret_env(bash("Execute custom safe output", script), env)
+}
+
+fn custom_jobs_pre_step(
+    source_path: &str,
+    tool: &str,
+    proposals_path: &str,
+    env: &[(String, String)],
+) -> BashStep {
+    let script = format!(
+        "/tmp/awf-tools/ado-aw execute --source {source} --safe-output-dir \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)\" --custom-phase pre --tool {tool} --proposals-out {proposals}\n",
+        source = shell_quote(source_path),
+        tool = shell_quote(tool),
+        proposals = shell_quote(proposals_path)
+    );
+    with_custom_secret_env(bash("Prepare custom safe-output proposals", script), env)
+}
+
+fn custom_jobs_post_step(
+    source_path: &str,
+    def: &CustomSafeOutputJobDef,
+    proposals_path: &str,
+    results_path: &str,
+) -> BashStep {
+    let mut provenance_args = String::new();
+    if let Some(component) = &def.component {
+        provenance_args.push_str(&format!(
+            " --component-sha {} --component-source {}",
+            shell_quote(&component.sha),
+            shell_quote(&component.source)
+        ));
+        if let Some(digest) = &component.manifest_digest {
+            provenance_args.push_str(&format!(" --manifest-digest {}", shell_quote(digest)));
+        }
+    }
+    provenance_args.push_str(&format!(
+        " --schema-digest {}",
+        shell_quote(&def.schema_digest)
+    ));
+    let script = format!(
+        "/tmp/awf-tools/ado-aw execute --source {source} --safe-output-dir \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)\" --custom-phase post --tool {tool} --results-in {results}{provenance_args}\n",
+        source = shell_quote(source_path),
+        tool = shell_quote(&def.name),
+        results = shell_quote(results_path)
+    );
+    with_custom_secret_env(
+        bash("Finalize custom safe-output results", script)
+            .with_env(
+                "ADO_AW_SAFE_OUTPUT_PROPOSALS",
+                EnvValue::literal(proposals_path.to_string()),
+            )
+            .with_env(
+                "ADO_AW_SAFE_OUTPUT_RESULTS",
+                EnvValue::literal(results_path.to_string()),
+            ),
+        &def.env,
+    )
+}
+
+fn with_custom_secret_env(mut step: BashStep, env: &[(String, String)]) -> BashStep {
+    for (name, var) in env {
+        step = step.with_env(name.clone(), EnvValue::secret(var.clone()));
+    }
+    step
+}
+
+fn component_step_with_custom_env(
+    step: &serde_yaml::Value,
+    custom_env: &[(String, String)],
+    proposals_path: &str,
+    results_path: &str,
+) -> Result<String> {
+    let mut step = step.clone();
+    let mapping = step.as_mapping_mut().ok_or_else(|| {
+        anyhow::anyhow!("safe-outputs.jobs.<tool>.steps entries must be YAML mappings")
+    })?;
+    let env_key = serde_yaml::Value::String("env".to_string());
+    if !mapping.contains_key(&env_key) {
+        mapping.insert(
+            env_key.clone(),
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        );
+    }
+    let env_value = mapping
+        .get_mut(&env_key)
+        .expect("env key inserted above when absent");
+    let env_map = env_value.as_mapping_mut().ok_or_else(|| {
+        anyhow::anyhow!("safe-outputs.jobs.<tool>.steps env blocks must be mappings")
+    })?;
+    env_map.insert(
+        serde_yaml::Value::String("ADO_AW_SAFE_OUTPUT_PROPOSALS".to_string()),
+        serde_yaml::Value::String(proposals_path.to_string()),
+    );
+    env_map.insert(
+        serde_yaml::Value::String("ADO_AW_SAFE_OUTPUT_RESULTS".to_string()),
+        serde_yaml::Value::String(results_path.to_string()),
+    );
+    for (name, var) in custom_env {
+        env_map.insert(
+            serde_yaml::Value::String(name.clone()),
+            serde_yaml::Value::String(format!("$({var})")),
+        );
+    }
+    step_to_raw_yaml_string(&step)
+}
+
+fn shell_quote(raw: &str) -> String {
+    format!("'{}'", raw.replace('\'', "'\\''"))
 }
 
 /// Build the `(dir, target-branch)` pairs the `prepare-pr-base` bundle must
@@ -2035,7 +2657,13 @@ fi\n"
 /// from the same `prefix`, so a failure here would indicate an
 /// invalid `JobPrefix` reaching this function — the typed error is
 /// preferable to a panic for any future caller.
-fn wire_explicit_dependencies(jobs: &mut [Job], prefix: &JobPrefix<'_>) -> Result<()> {
+fn wire_explicit_dependencies(
+    jobs: &mut [Job],
+    prefix: &JobPrefix<'_>,
+    custom_reviewed_job_ids: &[JobId],
+    custom_job_ids: &[JobId],
+    safeoutputs_waits_for_review: bool,
+) -> Result<()> {
     let setup_id = prefix.id("Setup")?;
     let agent_id = prefix.id("Agent")?;
     let detection_id = prefix.id("Detection")?;
@@ -2046,7 +2674,6 @@ fn wire_explicit_dependencies(jobs: &mut [Job], prefix: &JobPrefix<'_>) -> Resul
     let conclusion_id = prefix.id("Conclusion")?;
     let has_setup = jobs.iter().any(|j| j.id == setup_id);
     let has_teardown = jobs.iter().any(|j| j.id == teardown_id);
-    let has_review = jobs.iter().any(|j| j.id == manualreview_id);
     // The reviewed execution job only exists in the mixed (split) case.
     let has_reviewed_job = jobs.iter().any(|j| j.id == reviewed_id);
     for j in jobs.iter_mut() {
@@ -2058,12 +2685,22 @@ fn wire_explicit_dependencies(jobs: &mut [Job], prefix: &JobPrefix<'_>) -> Resul
             // Agentless gate: depends on Detection (its condition reads
             // Detection's threatAnalysis.SafeToProcess output).
             j.depends_on = vec![agent_id.clone(), detection_id.clone()];
+        } else if custom_job_ids.iter().any(|id| id == &j.id) {
+            j.depends_on = if custom_reviewed_job_ids.iter().any(|id| id == &j.id) {
+                vec![
+                    agent_id.clone(),
+                    detection_id.clone(),
+                    manualreview_id.clone(),
+                ]
+            } else {
+                vec![agent_id.clone(), detection_id.clone()]
+            };
         } else if j.id == safeoutputs_id {
             // The "SafeOutputs" job is the automatic path. It is gated behind
             // ManualReview only when it is the *sole* execution job (all tools
             // reviewed); in the mixed split it runs immediately after Detection
             // alongside the separate reviewed job.
-            j.depends_on = if has_review && !has_reviewed_job {
+            j.depends_on = if safeoutputs_waits_for_review {
                 vec![
                     agent_id.clone(),
                     detection_id.clone(),
@@ -2106,6 +2743,7 @@ fn wire_explicit_dependencies(jobs: &mut [Job], prefix: &JobPrefix<'_>) -> Resul
                 // skipped or fails.
                 deps.push(reviewed_id.clone());
             }
+            deps.extend(custom_job_ids.iter().cloned());
             if has_teardown {
                 deps.push(teardown_id.clone());
             }
@@ -3360,6 +3998,47 @@ fn detect_reviewed_proposals_step(working_directory: &str, reviewed: &[String]) 
         .with_condition(Condition::Always)
 }
 
+/// Scan the analyzed proposal NDJSON once and publish one output variable per
+/// custom tool. Custom executor jobs use these booleans in their job-level
+/// `condition:` so an empty/no-op custom proposal set does not start a job.
+fn detect_custom_proposals_step(working_directory: &str, tools: &[String]) -> Result<BashStep> {
+    let mut script = format!(
+        "PROPOSALS=$(find \"{working_directory}/safe_outputs\" -name \"safe_outputs.ndjson\" 2>/dev/null | head -n 1)\n\
+         NAMES=\"\"\n\
+         RAW_SCAN=\"false\"\n\
+         if [ -n \"$PROPOSALS\" ] && [ -f \"$PROPOSALS\" ]; then\n  \
+           if command -v jq >/dev/null 2>&1; then\n    \
+             if ! NAMES=$(jq -r 'select(type==\"object\") | .name // empty' \"$PROPOSALS\" 2>/dev/null); then\n      \
+               echo \"##vso[task.logissue type=warning]custom-proposals: jq failed to parse $PROPOSALS; using raw scan\"\n      \
+               RAW_SCAN=\"true\"\n    \
+             fi\n  \
+           else\n    \
+             RAW_SCAN=\"true\"\n  \
+           fi\n\
+         fi\n"
+    );
+    let mut step = bash("Detect custom proposals", "");
+    for tool in tools {
+        let output = custom_tool_output_var(tool);
+        script.push_str(&format!(
+            "{output}=\"false\"\n\
+             if [ -n \"$NAMES\" ] && printf '%s\\n' \"$NAMES\" | grep -Fxq {tool_q}; then\n  \
+               {output}=\"true\"\n\
+             elif [ \"$RAW_SCAN\" = \"true\" ] && [ -n \"$PROPOSALS\" ] && grep -Eq '\"name\"[[:space:]]*:[[:space:]]*\"{tool}\"' \"$PROPOSALS\"; then\n  \
+               {output}=\"true\"\n\
+             fi\n\
+             echo \"##vso[task.setvariable variable={output};isOutput=true]${output}\"\n\
+             echo \"{output} set to: ${output}\"\n",
+            tool_q = shell_quote(tool),
+        ));
+        step = step.with_output(OutputDecl::new(output));
+    }
+    step.script = dedent(&script);
+    Ok(step
+        .with_id(StepId::new(CUSTOM_PROPOSALS_STEP_ID)?)
+        .with_condition(Condition::Always))
+}
+
 fn verify_mcp_backends_step() -> BashStep {
     // Debug-only probe (emitted when --debug-pipeline is on). Probes every
     // MCPG backend via MCP initialize + tools/list to surface broken
@@ -3738,6 +4417,218 @@ const _SUBMODULES_OPT_BIND: Option<SubmodulesOpt> = None;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_front_matter(yaml: &str) -> FrontMatter {
+        serde_yaml::from_str(yaml).expect("front matter should parse")
+    }
+
+    fn test_ctx() -> StandaloneCtx {
+        let test_pool = Pool::VmImage("ubuntu-latest".to_string());
+        StandaloneCtx {
+            pools: PerJobPools {
+                setup: test_pool.clone(),
+                agent: test_pool.clone(),
+                detection: test_pool.clone(),
+                safe_outputs: test_pool.clone(),
+                safe_outputs_reviewed: test_pool.clone(),
+                teardown: test_pool.clone(),
+                conclusion: test_pool.clone(),
+            },
+            agent_display_name: "Test".to_string(),
+            self_checkout_fetch: CheckoutFetchOpts::default(),
+            working_directory: "$(Build.SourcesDirectory)".to_string(),
+            trigger_repo_directory: "$(Build.SourcesDirectory)".to_string(),
+            compiler_version: "0.0.0-test".to_string(),
+            engine_install_steps_yaml: String::new(),
+            engine_run: "echo agent".to_string(),
+            engine_run_detection: "echo detection".to_string(),
+            engine_env: "GITHUB_READ_ONLY: 1".to_string(),
+            engine_log_dir: "/tmp/logs".to_string(),
+            allowed_domains: "example.com".to_string(),
+            awf_mounts: "\\".to_string(),
+            awf_path_step_yaml: String::new(),
+            enabled_tools_args: String::new(),
+            mcpg_config_json: "{}".to_string(),
+            mcpg_docker_env: String::new(),
+            mcpg_step_env: String::new(),
+            source_path: "$(Build.SourcesDirectory)/agents/test.md".to_string(),
+            pipeline_path: "$(Build.SourcesDirectory)/agents/test.lock.yml".to_string(),
+            acquire_read_token: String::new(),
+            acquire_write_token: String::new(),
+            executor_ado_env: "env:\n  SYSTEM_ACCESSTOKEN: $(System.AccessToken)\n".to_string(),
+            integrity_check_yaml: String::new(),
+            agent_content_value: "Test prompt".to_string(),
+            debug_pipeline: false,
+            byom_active: false,
+            byom_exclude_keys: Vec::new(),
+            detection_provider_env: Vec::new(),
+        }
+    }
+
+    fn canonical_jobs_for(yaml: &str) -> Vec<Job> {
+        let fm = test_front_matter(yaml);
+        let cfg = test_ctx();
+        build_canonical_jobs(&fm, &[], &cfg, &[], &[], &[], None).unwrap()
+    }
+
+    fn job_by_id<'a>(jobs: &'a [Job], id: &str) -> &'a Job {
+        jobs.iter().find(|job| job.id.as_str() == id).unwrap()
+    }
+
+    fn step_env_has_secret(step: &Step, name: &str, var: &str) -> bool {
+        let env = match step {
+            Step::Bash(s) => &s.env,
+            Step::Task(s) => &s.env,
+            _ => return false,
+        };
+        matches!(env.get(name), Some(EnvValue::Secret(v)) if v == var)
+    }
+
+    #[test]
+    fn custom_job_scripts_tool_emits_job_config_execute_secret_and_remote_checkout() {
+        let jobs = canonical_jobs_for(
+            r#"
+name: Test
+description: Test
+safe-outputs:
+  scripts:
+    notify-team:
+      run: node notify.js
+      max: 2
+      component-source: octo/tools/components/notify.md
+      component-sha: 0123456789012345678901234567890123456789
+      manifest-digest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      env:
+        API_TOKEN: NOTIFY_TOKEN
+"#,
+        );
+        let custom = job_by_id(&jobs, "Custom_notify_team");
+        assert_eq!(
+            custom
+                .depends_on
+                .iter()
+                .map(|id| id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Agent", "Detection"]
+        );
+        assert!(custom.steps.iter().any(|step| {
+            matches!(
+                step,
+                Step::Checkout(CheckoutStep {
+                    repository: CheckoutRepo::Named(alias),
+                    fetch_depth: Some(1),
+                    ..
+                }) if alias.starts_with("import_octo_tools_")
+            )
+        }));
+        assert!(custom.steps.iter().any(|step| {
+            matches!(step, Step::Bash(s) if s.script.contains("\"notify-team\"") && s.script.contains("\"entrypoint\": \"node notify.js\"") && s.script.contains("\"max\": 2"))
+        }));
+        assert!(custom.steps.iter().any(|step| {
+            matches!(step, Step::Bash(s) if s.script.contains("--custom-config"))
+                && step_env_has_secret(step, "API_TOKEN", "NOTIFY_TOKEN")
+        }));
+        let safeoutputs = job_by_id(&jobs, "SafeOutputs");
+        assert!(safeoutputs.steps.iter().any(|step| {
+            matches!(step, Step::Bash(s) if s.script.contains("--exclude notify-team"))
+        }));
+        let agent = job_by_id(&jobs, "Agent");
+        let detection = job_by_id(&jobs, "Detection");
+        assert!(!agent.steps.iter().any(|step| step_env_has_secret(
+            step,
+            "API_TOKEN",
+            "NOTIFY_TOKEN"
+        )));
+        assert!(!detection.steps.iter().any(|step| step_env_has_secret(
+            step,
+            "API_TOKEN",
+            "NOTIFY_TOKEN"
+        )));
+    }
+
+    #[test]
+    fn custom_job_jobs_tool_emits_pre_component_post_in_order() {
+        let jobs = canonical_jobs_for(
+            r#"
+name: Test
+description: Test
+safe-outputs:
+  jobs:
+    deploy-thing:
+      steps:
+        - bash: echo deploy
+          displayName: Component deploy
+"#,
+        );
+        let custom = job_by_id(&jobs, "Custom_deploy_thing");
+        let pre = custom
+            .steps
+            .iter()
+            .position(
+                |step| matches!(step, Step::Bash(s) if s.script.contains("--custom-phase pre")),
+            )
+            .unwrap();
+        let component = custom
+            .steps
+            .iter()
+            .position(|step| matches!(step, Step::RawYaml(yaml) if yaml.contains("Component deploy") && yaml.contains("ADO_AW_SAFE_OUTPUT_PROPOSALS")))
+            .unwrap();
+        let post = custom
+            .steps
+            .iter()
+            .position(
+                |step| matches!(step, Step::Bash(s) if s.script.contains("--custom-phase post")),
+            )
+            .unwrap();
+        assert!(pre < component && component < post);
+    }
+
+    #[test]
+    fn custom_job_reviewed_tool_depends_on_manual_review() {
+        let jobs = canonical_jobs_for(
+            r#"
+name: Test
+description: Test
+safe-outputs:
+  require-approval: true
+  scripts:
+    gated-tool:
+      run: ./gated
+"#,
+        );
+        let custom = job_by_id(&jobs, "Custom_gated_tool");
+        assert_eq!(
+            custom
+                .depends_on
+                .iter()
+                .map(|id| id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Agent", "Detection", "ManualReview"]
+        );
+        let safeoutputs = job_by_id(&jobs, "SafeOutputs");
+        assert_eq!(
+            safeoutputs
+                .depends_on
+                .iter()
+                .map(|id| id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Agent", "Detection"]
+        );
+    }
+
+    #[test]
+    fn custom_job_no_custom_tools_leaves_canonical_job_names_unchanged() {
+        let jobs = canonical_jobs_for(
+            r#"
+name: Test
+description: Test
+"#,
+        );
+        assert_eq!(
+            jobs.iter().map(|job| job.id.as_str()).collect::<Vec<_>>(),
+            vec!["Agent", "Detection", "SafeOutputs"]
+        );
+    }
 
     // ── fold_agent_conditions (issue #987) ─────────────────────────────────
 

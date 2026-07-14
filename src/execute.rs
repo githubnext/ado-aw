@@ -6,10 +6,12 @@
 use anyhow::{Context, Result};
 use chrono::{SecondsFormat, Utc};
 use log::{debug, error, info, warn};
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 
@@ -23,7 +25,7 @@ use crate::safe_outputs::{
     UpdatePrResult, UpdateWikiPageResult, UpdateWorkItemResult, UploadBuildAttachmentResult,
     UploadPipelineArtifactResult, UploadWorkitemAttachmentResult,
 };
-use crate::sanitize::neutralize_pipeline_commands;
+use crate::sanitize::{SanitizeConfig, neutralize_pipeline_commands, sanitize, sanitize_config};
 
 // Re-export memory types for use by main.rs
 pub use crate::tools::cache_memory::{MemoryConfig, process_agent_memory};
@@ -53,6 +55,902 @@ impl ToolFilter {
         }
         true
     }
+}
+
+/// Additional `ado-aw execute` custom safe-output modes.
+#[derive(Debug, Default, Clone)]
+pub struct CustomExecuteOptions {
+    /// Scripts-style native dispatcher config.
+    pub custom_config: Option<PathBuf>,
+    /// Jobs-style wrapper phase: `pre` or `post`.
+    pub custom_phase: Option<String>,
+    /// Jobs-style custom tool name.
+    pub tool: Option<String>,
+    /// Jobs-style pre output path for selected proposals.
+    pub proposals_out: Option<PathBuf>,
+    /// Jobs-style post input path for component result records.
+    pub results_in: Option<PathBuf>,
+    /// Compiler-owned component provenance.
+    pub component_sha: Option<String>,
+    pub component_source: Option<String>,
+    pub manifest_digest: Option<String>,
+    pub schema_digest: Option<String>,
+}
+
+impl CustomExecuteOptions {
+    /// Whether any custom-mode flag was supplied.
+    pub fn has_any_custom_flag(&self) -> bool {
+        self.custom_config.is_some()
+            || self.custom_phase.is_some()
+            || self.tool.is_some()
+            || self.proposals_out.is_some()
+            || self.results_in.is_some()
+            || self.component_sha.is_some()
+            || self.component_source.is_some()
+            || self.manifest_digest.is_some()
+            || self.schema_digest.is_some()
+    }
+}
+
+const CUSTOM_SCHEMA_VERSION: u32 = 1;
+const DEFAULT_CUSTOM_MAX: usize = 3;
+
+fn default_custom_max() -> usize {
+    DEFAULT_CUSTOM_MAX
+}
+
+fn default_custom_cwd() -> PathBuf {
+    PathBuf::from(".")
+}
+
+/// Scripts-style custom safe-output config emitted by the compiler.
+#[derive(Debug, Deserialize)]
+pub struct CustomScriptsConfig {
+    pub tools: HashMap<String, CustomScriptToolConfig>,
+}
+
+/// One scripts-style custom safe-output handler.
+#[derive(Debug, Deserialize)]
+pub struct CustomScriptToolConfig {
+    pub entrypoint: String,
+    #[serde(default = "default_custom_cwd")]
+    pub cwd: PathBuf,
+    #[serde(default = "default_custom_max")]
+    pub max: usize,
+}
+
+/// Compiler-owned custom component provenance attached to each final record.
+#[derive(Debug, Clone, Serialize)]
+pub struct CustomComponentProvenance {
+    pub source: Option<String>,
+    pub sha: Option<String>,
+    pub manifest_digest: Option<String>,
+    pub schema_digest: Option<String>,
+}
+
+/// Attempt metadata attached to each custom execution record.
+#[derive(Debug, Clone, Serialize)]
+pub struct CustomAttemptMetadata {
+    pub number: u32,
+    pub staged: bool,
+    pub started_at: String,
+    pub ended_at: String,
+}
+
+/// Final custom safe-output execution record.
+///
+/// The top-level `name`, `status`, and `timestamp` fields intentionally mirror
+/// the built-in `ExecutionRecord` so the existing audit reader can continue to
+/// key off `name`/`status` while custom records carry richer provenance.
+#[derive(Debug, Clone, Serialize)]
+pub struct CustomExecutionRecord {
+    pub schema_version: u32,
+    pub tool: String,
+    pub proposal_id: String,
+    pub proposal_index: usize,
+    pub name: String,
+    pub status: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
+    pub component: CustomComponentProvenance,
+    pub attempt: CustomAttemptMetadata,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub timestamp: String,
+}
+
+#[derive(Debug)]
+struct SelectedCustomProposal {
+    proposal_id: String,
+    proposal_index: usize,
+    entry: Value,
+    budget_result: Option<ExecutionResult>,
+}
+
+impl SelectedCustomProposal {
+    fn attempted(&self) -> bool {
+        self.budget_result.is_none()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ScriptResultLine {
+    status: String,
+    message: String,
+    data: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ComponentResultLine {
+    #[serde(rename = "schema_version")]
+    _schema_version: u32,
+    proposal_id: String,
+    status: String,
+    message: String,
+    data: Option<Value>,
+}
+
+struct CustomToolOutcome {
+    result: ExecutionResult,
+    record_status: &'static str,
+}
+
+/// Execute a custom safe-output mode. Built-in execution is untouched unless
+/// at least one custom flag is present.
+pub async fn execute_custom_safe_outputs(
+    source: &Path,
+    safe_output_dir: &Path,
+    dry_run: bool,
+    options: CustomExecuteOptions,
+) -> Result<Vec<ExecutionResult>> {
+    match (
+        options.custom_config.as_ref(),
+        options.custom_phase.as_deref(),
+    ) {
+        (Some(config_path), None) => {
+            execute_custom_scripts(config_path, safe_output_dir, dry_run, &options).await
+        }
+        (None, Some("pre")) => {
+            execute_custom_pre(source, safe_output_dir, dry_run, &options).await?;
+            Ok(Vec::new())
+        }
+        (None, Some("post")) => {
+            execute_custom_post(source, safe_output_dir, dry_run, &options).await
+        }
+        (Some(_), Some(_)) => {
+            anyhow::bail!("--custom-config and --custom-phase are mutually exclusive")
+        }
+        (None, Some(other)) => {
+            anyhow::bail!("Unsupported --custom-phase '{other}' (expected 'pre' or 'post')")
+        }
+        (None, None) => {
+            anyhow::bail!("Custom execute mode requested without --custom-config or --custom-phase")
+        }
+    }
+}
+
+async fn execute_custom_scripts(
+    config_path: &Path,
+    safe_output_dir: &Path,
+    dry_run: bool,
+    options: &CustomExecuteOptions,
+) -> Result<Vec<ExecutionResult>> {
+    if options.tool.is_some() || options.proposals_out.is_some() || options.results_in.is_some() {
+        anyhow::bail!(
+            "--custom-config cannot be combined with --tool, --proposals-out, or --results-in"
+        );
+    }
+
+    let config = load_custom_scripts_config(config_path).await?;
+    let safe_output_path = safe_output_dir.join(SAFE_OUTPUT_FILENAME);
+    let Some(entries) = load_safe_output_entries(&safe_output_path).await? else {
+        return Ok(Vec::new());
+    };
+
+    let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+    let provenance = provenance_from_options(options);
+    let mut budgets: HashMap<String, (usize, usize)> = config
+        .tools
+        .iter()
+        .map(|(name, tool)| (name.clone(), (0, tool.max)))
+        .collect();
+
+    let mut results = Vec::new();
+    for (i, entry) in entries.iter().enumerate() {
+        let Some(tool_name) = entry.get("name").and_then(|name| name.as_str()) else {
+            continue;
+        };
+        let Some(tool_config) = config.tools.get(tool_name) else {
+            continue;
+        };
+
+        let proposal_context = entry.get("context").and_then(|value| value.as_str());
+        let (executed, max) = budgets
+            .get_mut(tool_name)
+            .expect("budget map is initialized from config tools");
+        let context_id = extract_entry_context(entry);
+        let proposal_id = proposal_id(tool_name, i);
+        if let Some(result) =
+            check_budget(entries.len(), i, tool_name, &context_id, *executed, *max)
+        {
+            append_custom_execution_record_for_result(
+                safe_output_dir,
+                tool_name,
+                &proposal_id,
+                i,
+                proposal_context,
+                &result,
+                provenance.clone(),
+                0,
+                dry_run,
+            )
+            .await;
+            results.push(result);
+            continue;
+        }
+        *executed += 1;
+
+        let started_at = now_timestamp();
+        let outcome = if dry_run {
+            let message = format!(
+                "Staged custom tool '{tool_name}' proposal '{proposal_id}'; would run '{}'",
+                sanitize_config(&tool_config.entrypoint)
+            );
+            custom_status_to_outcome("staged", message, None)
+        } else {
+            let cwd = resolve_custom_cwd(config_dir, &tool_config.cwd);
+            run_custom_entrypoint(
+                tool_name,
+                &proposal_id,
+                &tool_config.entrypoint,
+                &cwd,
+                entry,
+            )
+            .await
+        };
+        let ended_at = now_timestamp();
+        log_and_print_entry_result(i, entries.len(), tool_name, &outcome.result);
+        append_custom_execution_record_for_result_with_times(
+            safe_output_dir,
+            tool_name,
+            &proposal_id,
+            i,
+            proposal_context,
+            &outcome.result,
+            provenance.clone(),
+            CustomAttemptMetadata {
+                number: 1,
+                staged: dry_run,
+                started_at,
+                ended_at,
+            },
+            Some(outcome.record_status),
+        )
+        .await;
+        results.push(outcome.result);
+    }
+
+    Ok(results)
+}
+
+async fn execute_custom_pre(
+    source: &Path,
+    safe_output_dir: &Path,
+    dry_run: bool,
+    options: &CustomExecuteOptions,
+) -> Result<()> {
+    let tool = required_custom_tool(options)?;
+    let proposals_out = options
+        .proposals_out
+        .as_ref()
+        .context("--custom-phase pre requires --proposals-out")?;
+    if options.custom_config.is_some() || options.results_in.is_some() {
+        anyhow::bail!("--custom-phase pre cannot be combined with --custom-config or --results-in");
+    }
+
+    let max = load_custom_max(source, tool).await?;
+    let entries = load_entries_or_empty(safe_output_dir).await?;
+    let selected = select_custom_proposals(&entries, tool, max);
+    let attempted: Vec<Value> = selected
+        .iter()
+        .filter(|proposal| proposal.attempted())
+        .map(proposal_with_id)
+        .collect();
+    write_ndjson_values(proposals_out, &attempted).await?;
+
+    if dry_run {
+        // ADO consumes this logging command and exposes the staged contract to
+        // downstream component steps as `ADO_AW_SAFE_OUTPUTS_STAGED=true`.
+        println!("##vso[task.setvariable variable=ADO_AW_SAFE_OUTPUTS_STAGED]true");
+    }
+    println!(
+        "Wrote {} custom proposal(s) for '{}' to {}",
+        attempted.len(),
+        sanitize_config(tool),
+        proposals_out.display()
+    );
+    Ok(())
+}
+
+async fn execute_custom_post(
+    source: &Path,
+    safe_output_dir: &Path,
+    dry_run: bool,
+    options: &CustomExecuteOptions,
+) -> Result<Vec<ExecutionResult>> {
+    let tool = required_custom_tool(options)?;
+    let results_in = options
+        .results_in
+        .as_ref()
+        .context("--custom-phase post requires --results-in")?;
+    if options.custom_config.is_some() || options.proposals_out.is_some() {
+        anyhow::bail!(
+            "--custom-phase post cannot be combined with --custom-config or --proposals-out"
+        );
+    }
+
+    let max = load_custom_max(source, tool).await?;
+    let entries = load_entries_or_empty(safe_output_dir).await?;
+    let selected = select_custom_proposals(&entries, tool, max);
+    let attempted_ids: HashSet<String> = selected
+        .iter()
+        .filter(|proposal| proposal.attempted())
+        .map(|proposal| proposal.proposal_id.clone())
+        .collect();
+    let mut component_results = read_component_results(results_in, &attempted_ids).await?;
+    let provenance = provenance_from_options(options);
+    let mut results = Vec::new();
+
+    for proposal in selected {
+        let proposal_context = proposal
+            .entry
+            .get("context")
+            .and_then(|value| value.as_str());
+        if let Some(result) = proposal.budget_result {
+            append_custom_execution_record_for_result(
+                safe_output_dir,
+                tool,
+                &proposal.proposal_id,
+                proposal.proposal_index,
+                proposal_context,
+                &result,
+                provenance.clone(),
+                0,
+                dry_run,
+            )
+            .await;
+            results.push(result);
+            continue;
+        }
+
+        let started_at = now_timestamp();
+        let outcome = if let Some(line) = component_results.remove(&proposal.proposal_id) {
+            custom_status_to_outcome(&line.status, line.message, line.data)
+        } else {
+            CustomToolOutcome {
+                result: ExecutionResult::failure(format!(
+                    "Missing custom result for proposal_id '{}'",
+                    sanitize(&proposal.proposal_id)
+                )),
+                record_status: "failed",
+            }
+        };
+        let ended_at = now_timestamp();
+        append_custom_execution_record_for_result_with_times(
+            safe_output_dir,
+            tool,
+            &proposal.proposal_id,
+            proposal.proposal_index,
+            proposal_context,
+            &outcome.result,
+            provenance.clone(),
+            CustomAttemptMetadata {
+                number: 1,
+                staged: dry_run || outcome.record_status == "staged",
+                started_at,
+                ended_at,
+            },
+            Some(outcome.record_status),
+        )
+        .await;
+        results.push(outcome.result);
+    }
+
+    Ok(results)
+}
+
+fn required_custom_tool(options: &CustomExecuteOptions) -> Result<&str> {
+    options
+        .tool
+        .as_deref()
+        .context("--custom-phase requires --tool")
+}
+
+async fn load_custom_scripts_config(path: &Path) -> Result<CustomScriptsConfig> {
+    let contents = tokio::fs::read_to_string(path)
+        .await
+        .with_context(|| format!("Failed to read custom config: {}", path.display()))?;
+    serde_json::from_str(&contents)
+        .with_context(|| format!("Failed to parse custom config: {}", path.display()))
+}
+
+async fn load_entries_or_empty(safe_output_dir: &Path) -> Result<Vec<Value>> {
+    let safe_output_path = safe_output_dir.join(SAFE_OUTPUT_FILENAME);
+    Ok(load_safe_output_entries(&safe_output_path)
+        .await?
+        .unwrap_or_default())
+}
+
+async fn load_custom_max(source: &Path, tool: &str) -> Result<usize> {
+    let content = tokio::fs::read_to_string(source)
+        .await
+        .with_context(|| format!("Failed to read source file: {}", source.display()))?;
+    let parsed = crate::compile::parse_markdown_detailed(&content)
+        .with_context(|| format!("Failed to parse source file: {}", source.display()))?;
+    let mut front_matter = parsed.front_matter;
+    front_matter.sanitize_config_fields();
+    Ok(custom_max_from_safe_outputs(
+        &front_matter.safe_outputs,
+        tool,
+    ))
+}
+
+fn custom_max_from_safe_outputs(safe_outputs: &HashMap<String, Value>, tool: &str) -> usize {
+    max_from_value(safe_outputs.get(tool))
+        .or_else(|| nested_custom_max(safe_outputs, "scripts", tool))
+        .or_else(|| nested_custom_max(safe_outputs, "jobs", tool))
+        .unwrap_or(DEFAULT_CUSTOM_MAX)
+}
+
+fn nested_custom_max(
+    safe_outputs: &HashMap<String, Value>,
+    section: &str,
+    tool: &str,
+) -> Option<usize> {
+    safe_outputs
+        .get(section)
+        .and_then(|section| section.get(tool))
+        .and_then(|tool_cfg| max_from_value(Some(tool_cfg)))
+}
+
+fn max_from_value(value: Option<&Value>) -> Option<usize> {
+    value
+        .and_then(|v| v.get("max"))
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+}
+
+fn select_custom_proposals(
+    entries: &[Value],
+    tool: &str,
+    max: usize,
+) -> Vec<SelectedCustomProposal> {
+    let mut selected = Vec::new();
+    let mut executed = 0usize;
+    for (i, entry) in entries.iter().enumerate() {
+        if entry.get("name").and_then(|name| name.as_str()) != Some(tool) {
+            continue;
+        }
+        let context_id = extract_entry_context(entry);
+        let budget_result = check_budget(entries.len(), i, tool, &context_id, executed, max);
+        if budget_result.is_none() {
+            executed += 1;
+        }
+        selected.push(SelectedCustomProposal {
+            proposal_id: proposal_id(tool, i),
+            proposal_index: i,
+            entry: entry.clone(),
+            budget_result,
+        });
+    }
+    selected
+}
+
+fn proposal_id(tool: &str, index: usize) -> String {
+    format!("{}-{}", sanitize_config(tool), index)
+}
+
+fn proposal_with_id(proposal: &SelectedCustomProposal) -> Value {
+    let mut value = proposal.entry.clone();
+    if let Value::Object(ref mut map) = value {
+        map.insert(
+            "proposal_id".to_string(),
+            Value::String(proposal.proposal_id.clone()),
+        );
+        map.insert(
+            "proposal_index".to_string(),
+            Value::Number(serde_json::Number::from(proposal.proposal_index)),
+        );
+    }
+    value
+}
+
+async fn write_ndjson_values(path: &Path, values: &[Value]) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+    }
+    let mut contents = String::new();
+    for value in values {
+        contents.push_str(&serde_json::to_string(value).context("Failed to serialize proposal")?);
+        contents.push('\n');
+    }
+    tokio::fs::write(path, contents)
+        .await
+        .with_context(|| format!("Failed to write proposals file: {}", path.display()))
+}
+
+fn resolve_custom_cwd(config_dir: &Path, cwd: &Path) -> PathBuf {
+    if cwd.is_absolute() {
+        cwd.to_path_buf()
+    } else {
+        config_dir.join(cwd)
+    }
+}
+
+async fn run_custom_entrypoint(
+    tool: &str,
+    proposal_id: &str,
+    entrypoint: &str,
+    cwd: &Path,
+    proposal: &Value,
+) -> CustomToolOutcome {
+    let proposal_json = match serde_json::to_string(proposal) {
+        Ok(json) => json,
+        Err(err) => {
+            return CustomToolOutcome {
+                result: ExecutionResult::failure(format!(
+                    "Failed to serialize custom proposal '{}': {}",
+                    sanitize(proposal_id),
+                    sanitize(&err.to_string())
+                )),
+                record_status: "failed",
+            };
+        }
+    };
+
+    let mut command = if cfg!(windows) {
+        let mut command = Command::new("cmd");
+        command.arg("/C").arg(entrypoint);
+        command
+    } else {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(entrypoint);
+        command
+    };
+    command
+        .current_dir(cwd)
+        .env("AW_PROPOSAL", &proposal_json)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            return CustomToolOutcome {
+                result: ExecutionResult::failure(format!(
+                    "Failed to start custom tool '{}': {}",
+                    sanitize_config(tool),
+                    sanitize(&err.to_string())
+                )),
+                record_status: "failed",
+            };
+        }
+    };
+
+    if let Some(stdin) = child.stdin.as_mut()
+        && let Err(err) = stdin.write_all(proposal_json.as_bytes())
+    {
+        return CustomToolOutcome {
+            result: ExecutionResult::failure(format!(
+                "Failed to write proposal '{}' to custom tool stdin: {}",
+                sanitize(proposal_id),
+                sanitize(&err.to_string())
+            )),
+            record_status: "failed",
+        };
+    }
+
+    let output = match child.wait_with_output() {
+        Ok(output) => output,
+        Err(err) => {
+            return CustomToolOutcome {
+                result: ExecutionResult::failure(format!(
+                    "Failed to wait for custom tool '{}': {}",
+                    sanitize_config(tool),
+                    sanitize(&err.to_string())
+                )),
+                record_status: "failed",
+            };
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let detail = if stderr.trim().is_empty() {
+            stdout.trim()
+        } else {
+            stderr.trim()
+        };
+        return CustomToolOutcome {
+            result: ExecutionResult::failure(format!(
+                "Custom tool '{}' exited with status {}{}",
+                sanitize_config(tool),
+                output.status,
+                if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", sanitize(detail))
+                }
+            )),
+            record_status: "failed",
+        };
+    }
+
+    parse_script_result_stdout(tool, &output.stdout)
+}
+
+fn parse_script_result_stdout(tool: &str, stdout: &[u8]) -> CustomToolOutcome {
+    let stdout = String::from_utf8_lossy(stdout);
+    let lines: Vec<&str> = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.len() != 1 {
+        return CustomToolOutcome {
+            result: ExecutionResult::failure(format!(
+                "Custom tool '{}' must print exactly one JSON line, got {}",
+                sanitize_config(tool),
+                lines.len()
+            )),
+            record_status: "failed",
+        };
+    }
+    let parsed: ScriptResultLine = match serde_json::from_str(lines[0]) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            return CustomToolOutcome {
+                result: ExecutionResult::failure(format!(
+                    "Custom tool '{}' printed malformed result JSON: {}",
+                    sanitize_config(tool),
+                    sanitize(&err.to_string())
+                )),
+                record_status: "failed",
+            };
+        }
+    };
+    custom_status_to_outcome(&parsed.status, parsed.message, parsed.data)
+}
+
+async fn read_component_results(
+    path: &Path,
+    attempted_ids: &HashSet<String>,
+) -> Result<HashMap<String, ComponentResultLine>> {
+    let values = if path.exists() {
+        ndjson::read_ndjson_file(path).await?
+    } else {
+        Vec::new()
+    };
+    let mut results = HashMap::new();
+    for value in values {
+        let schema_version = value.get("schema_version").and_then(|v| v.as_u64());
+        if schema_version != Some(CUSTOM_SCHEMA_VERSION as u64) {
+            anyhow::bail!(
+                "Custom result record has missing or unsupported schema_version: {}",
+                value
+                    .get("schema_version")
+                    .map(Value::to_string)
+                    .unwrap_or_else(|| "<missing>".to_string())
+            );
+        }
+        let line: ComponentResultLine =
+            serde_json::from_value(value).context("Malformed custom result record")?;
+        if !attempted_ids.contains(&line.proposal_id) {
+            anyhow::bail!(
+                "Custom result references unknown proposal_id '{}'",
+                sanitize(&line.proposal_id)
+            );
+        }
+        if results.insert(line.proposal_id.clone(), line).is_some() {
+            anyhow::bail!("Duplicate custom result record for proposal_id");
+        }
+    }
+    Ok(results)
+}
+
+fn custom_status_to_outcome(
+    status: &str,
+    message: String,
+    data: Option<Value>,
+) -> CustomToolOutcome {
+    let message = sanitize(&message);
+    let data = data.map(sanitize_json_value);
+    match status {
+        "success" | "succeeded" => CustomToolOutcome {
+            result: match data {
+                Some(data) => ExecutionResult::success_with_data(message, data),
+                None => ExecutionResult::success(message),
+            },
+            record_status: "succeeded",
+        },
+        "failure" | "failed" => CustomToolOutcome {
+            result: match data {
+                Some(data) => ExecutionResult::failure_with_data(message, data),
+                None => ExecutionResult::failure(message),
+            },
+            record_status: "failed",
+        },
+        "staged" => CustomToolOutcome {
+            result: match data {
+                Some(data) => ExecutionResult::success_with_data(message, data),
+                None => ExecutionResult::success(message),
+            },
+            record_status: "staged",
+        },
+        other => CustomToolOutcome {
+            result: ExecutionResult::failure(format!(
+                "Custom result has unsupported status '{}'",
+                sanitize(other)
+            )),
+            record_status: "failed",
+        },
+    }
+}
+
+fn sanitize_json_value(value: Value) -> Value {
+    match value {
+        Value::String(s) => Value::String(sanitize(&s)),
+        Value::Array(values) => Value::Array(values.into_iter().map(sanitize_json_value).collect()),
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, value)| (sanitize(&key), sanitize_json_value(value)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+fn provenance_from_options(options: &CustomExecuteOptions) -> CustomComponentProvenance {
+    CustomComponentProvenance {
+        source: options.component_source.as_deref().map(sanitize_config),
+        sha: options.component_sha.as_deref().map(sanitize_config),
+        manifest_digest: options.manifest_digest.as_deref().map(sanitize_config),
+        schema_digest: options.schema_digest.as_deref().map(sanitize_config),
+    }
+}
+
+fn now_timestamp() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+fn custom_record_status(result: &ExecutionResult) -> &'static str {
+    if result.is_budget_exhausted() {
+        "budget_exhausted"
+    } else if result.message.starts_with("Staged custom tool") {
+        "staged"
+    } else {
+        execution_record_status(result)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn append_custom_execution_record_for_result(
+    safe_output_dir: &Path,
+    tool: &str,
+    proposal_id: &str,
+    proposal_index: usize,
+    proposal_context: Option<&str>,
+    result: &ExecutionResult,
+    provenance: CustomComponentProvenance,
+    attempt_number: u32,
+    staged: bool,
+) {
+    let timestamp = now_timestamp();
+    append_custom_execution_record_for_result_with_times(
+        safe_output_dir,
+        tool,
+        proposal_id,
+        proposal_index,
+        proposal_context,
+        result,
+        provenance,
+        CustomAttemptMetadata {
+            number: attempt_number,
+            staged,
+            started_at: timestamp.clone(),
+            ended_at: timestamp,
+        },
+        None,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn append_custom_execution_record_for_result_with_times(
+    safe_output_dir: &Path,
+    tool: &str,
+    proposal_id: &str,
+    proposal_index: usize,
+    proposal_context: Option<&str>,
+    result: &ExecutionResult,
+    provenance: CustomComponentProvenance,
+    attempt: CustomAttemptMetadata,
+    record_status_override: Option<&str>,
+) {
+    let status = record_status_override
+        .unwrap_or_else(|| custom_record_status(result))
+        .to_string();
+    let data = result.data.clone().map(sanitize_json_value);
+    let message = sanitize(&result.message);
+    let record = CustomExecutionRecord {
+        schema_version: CUSTOM_SCHEMA_VERSION,
+        tool: sanitize_config(tool),
+        proposal_id: sanitize(proposal_id),
+        proposal_index,
+        name: sanitize_config(tool),
+        status: status.clone(),
+        message: message.clone(),
+        data: data.clone(),
+        component: provenance,
+        attempt,
+        context: proposal_context.map(sanitize),
+        result: if matches!(status.as_str(), "succeeded" | "staged") {
+            data
+        } else {
+            None
+        },
+        error: if matches!(status.as_str(), "succeeded" | "staged") {
+            None
+        } else {
+            Some(message)
+        },
+        timestamp: now_timestamp(),
+    };
+    append_custom_execution_record(safe_output_dir, &record).await;
+}
+
+async fn append_custom_execution_record(safe_output_dir: &Path, record: &CustomExecutionRecord) {
+    if let Err(err) = append_custom_execution_record_impl(safe_output_dir, record).await {
+        warn!(
+            "Failed to append custom execution record for {}: {}",
+            record.tool,
+            neutralize_pipeline_commands(&err.to_string())
+        );
+    }
+}
+
+async fn append_custom_execution_record_impl(
+    safe_output_dir: &Path,
+    record: &CustomExecutionRecord,
+) -> Result<()> {
+    let line = serde_json::to_string(record)
+        .context("Failed to serialize custom execution record")?
+        + "\n";
+    let path = safe_output_dir.join(EXECUTED_NDJSON_FILENAME);
+    let mut file = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&path)
+        .await
+        .with_context(|| format!("Failed to open executed NDJSON file: {}", path.display()))?;
+    file.write_all(line.as_bytes())
+        .await
+        .with_context(|| format!("Failed to append executed NDJSON file: {}", path.display()))?;
+    file.flush()
+        .await
+        .with_context(|| format!("Failed to flush executed NDJSON file: {}", path.display()))?;
+    Ok(())
 }
 
 /// Execute all safe outputs from the NDJSON file in the specified directory
@@ -113,9 +1011,16 @@ pub async fn execute_safe_outputs(
 
     let mut results = Vec::new();
     for (i, entry) in entries.iter().enumerate() {
-        if let Some(result) =
-            process_one_entry(i, entries.len(), entry, &mut budgets, filter, ctx, safe_output_dir)
-                .await
+        if let Some(result) = process_one_entry(
+            i,
+            entries.len(),
+            entry,
+            &mut budgets,
+            filter,
+            ctx,
+            safe_output_dir,
+        )
+        .await
         {
             results.push(result);
         }
@@ -198,8 +1103,13 @@ async fn process_one_entry(
     // Budget is consumed before execution so that failed attempts (target policy rejection,
     // network errors) still count — this prevents unbounded retries against a failing endpoint.
     if let Some(result) = enforce_budget(entry, budgets, total, i) {
-        append_execution_record(safe_output_dir, proposal_tool_name, &result, proposal_context)
-            .await;
+        append_execution_record(
+            safe_output_dir,
+            proposal_tool_name,
+            &result,
+            proposal_context,
+        )
+        .await;
         return Some(result);
     }
 
@@ -748,6 +1658,379 @@ mod tests {
         assert!(f.allows("add-pr-comment"));
     }
 
+    async fn write_success_script(dir: &Path) -> String {
+        tokio::fs::write(
+            dir.join("success.py"),
+            "import json\nprint(json.dumps({'status':'success','message':'ok'}))\n",
+        )
+        .await
+        .unwrap();
+        "python success.py".to_string()
+    }
+
+    fn failing_entrypoint() -> &'static str {
+        if cfg!(windows) { "exit /B 1" } else { "exit 1" }
+    }
+
+    async fn write_safe_outputs(dir: &Path, contents: &str) {
+        tokio::fs::write(dir.join(SAFE_OUTPUT_FILENAME), contents)
+            .await
+            .unwrap();
+    }
+
+    async fn write_custom_config(dir: &Path, entrypoint: &str, max: usize) -> PathBuf {
+        let path = dir.join("custom-config.json");
+        let config = serde_json::json!({
+            "tools": {
+                "send-notification": {
+                    "entrypoint": entrypoint,
+                    "cwd": ".",
+                    "max": max
+                }
+            }
+        });
+        tokio::fs::write(&path, serde_json::to_string(&config).unwrap())
+            .await
+            .unwrap();
+        path
+    }
+
+    async fn write_custom_source(dir: &Path, max: usize) -> PathBuf {
+        let path = dir.join("agent.md");
+        let content = format!(
+            r#"---
+name: Custom executor test
+description: Test custom executor
+safe-outputs:
+  jobs:
+    send-notification:
+      max: {max}
+---
+
+Test body.
+"#
+        );
+        tokio::fs::write(&path, content).await.unwrap();
+        path
+    }
+
+    async fn read_executed_records(dir: &Path) -> Vec<Value> {
+        ndjson::read_ndjson_file(&dir.join(EXECUTED_NDJSON_FILENAME))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_custom_execute_scripts_native_dispatch_success_record() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        write_safe_outputs(
+            temp_dir.path(),
+            r#"{"name":"send-notification","context":"hello"}"#,
+        )
+        .await;
+        let entrypoint = write_success_script(temp_dir.path()).await;
+        let config_path = write_custom_config(temp_dir.path(), &entrypoint, 3).await;
+
+        let results = execute_custom_safe_outputs(
+            Path::new("unused.md"),
+            temp_dir.path(),
+            false,
+            CustomExecuteOptions {
+                custom_config: Some(config_path),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].success);
+        let records = read_executed_records(temp_dir.path()).await;
+        assert_eq!(records[0]["name"], "send-notification");
+        assert_eq!(records[0]["status"], "succeeded");
+        assert_eq!(records[0]["message"], "ok");
+    }
+
+    #[tokio::test]
+    async fn test_custom_execute_scripts_native_dispatch_failure_record() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        write_safe_outputs(temp_dir.path(), r#"{"name":"send-notification"}"#).await;
+        let config_path = write_custom_config(temp_dir.path(), failing_entrypoint(), 3).await;
+
+        let results = execute_custom_safe_outputs(
+            Path::new("unused.md"),
+            temp_dir.path(),
+            false,
+            CustomExecuteOptions {
+                custom_config: Some(config_path),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].success);
+        let records = read_executed_records(temp_dir.path()).await;
+        assert_eq!(records[0]["status"], "failed");
+    }
+
+    #[tokio::test]
+    async fn test_custom_execute_scripts_budget_exhausted_record() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        write_safe_outputs(
+            temp_dir.path(),
+            r#"{"name":"send-notification","context":"first"}
+{"name":"send-notification","context":"second"}
+"#,
+        )
+        .await;
+        let entrypoint = write_success_script(temp_dir.path()).await;
+        let config_path = write_custom_config(temp_dir.path(), &entrypoint, 1).await;
+
+        let results = execute_custom_safe_outputs(
+            Path::new("unused.md"),
+            temp_dir.path(),
+            false,
+            CustomExecuteOptions {
+                custom_config: Some(config_path),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert!(results[1].is_budget_exhausted());
+        let records = read_executed_records(temp_dir.path()).await;
+        assert_eq!(records[1]["status"], "budget_exhausted");
+    }
+
+    #[tokio::test]
+    async fn test_custom_execute_scripts_dry_run_stages_without_spawn() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        write_safe_outputs(temp_dir.path(), r#"{"name":"send-notification"}"#).await;
+        let config_path =
+            write_custom_config(temp_dir.path(), "definitely-not-a-real-command-ado-aw", 3).await;
+
+        let results = execute_custom_safe_outputs(
+            Path::new("unused.md"),
+            temp_dir.path(),
+            true,
+            CustomExecuteOptions {
+                custom_config: Some(config_path),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].success);
+        let records = read_executed_records(temp_dir.path()).await;
+        assert_eq!(records[0]["status"], "staged");
+    }
+
+    #[tokio::test]
+    async fn test_custom_execute_jobs_pre_writes_filtered_proposals_with_ids() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let source = write_custom_source(temp_dir.path(), 2).await;
+        let proposals_out = temp_dir.path().join("proposals.ndjson");
+        write_safe_outputs(
+            temp_dir.path(),
+            r#"{"name":"send-notification","message":"first"}
+{"name":"noop","context":"ignore"}
+{"name":"send-notification","message":"second"}
+"#,
+        )
+        .await;
+
+        execute_custom_safe_outputs(
+            &source,
+            temp_dir.path(),
+            false,
+            CustomExecuteOptions {
+                custom_phase: Some("pre".to_string()),
+                tool: Some("send-notification".to_string()),
+                proposals_out: Some(proposals_out.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let proposals = ndjson::read_ndjson_file(&proposals_out).await.unwrap();
+        assert_eq!(proposals.len(), 2);
+        assert_eq!(proposals[0]["proposal_id"], "send-notification-0");
+        assert_eq!(proposals[1]["proposal_id"], "send-notification-2");
+    }
+
+    #[tokio::test]
+    async fn test_custom_execute_jobs_post_enriches_component_results() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let source = write_custom_source(temp_dir.path(), 2).await;
+        let results_in = temp_dir.path().join("results.ndjson");
+        write_safe_outputs(
+            temp_dir.path(),
+            r#"{"name":"send-notification","context":"first"}
+{"name":"send-notification","context":"second"}
+"#,
+        )
+        .await;
+        tokio::fs::write(
+            &results_in,
+            r#"{"schema_version":1,"proposal_id":"send-notification-0","status":"success","message":"ok0","data":{"url":"https://example.com"}}
+{"schema_version":1,"proposal_id":"send-notification-1","status":"success","message":"ok1"}
+"#,
+        )
+        .await
+        .unwrap();
+
+        let results = execute_custom_safe_outputs(
+            &source,
+            temp_dir.path(),
+            false,
+            CustomExecuteOptions {
+                custom_phase: Some("post".to_string()),
+                tool: Some("send-notification".to_string()),
+                results_in: Some(results_in),
+                component_source: Some("repo/path".to_string()),
+                component_sha: Some("abc123".to_string()),
+                manifest_digest: Some("sha256:manifest".to_string()),
+                schema_digest: Some("sha256:schema".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|result| result.success));
+        let records = read_executed_records(temp_dir.path()).await;
+        assert_eq!(records[0]["component"]["source"], "repo/path");
+        assert_eq!(records[0]["component"]["sha"], "abc123");
+        assert_eq!(records[0]["status"], "succeeded");
+    }
+
+    #[tokio::test]
+    async fn test_custom_execute_jobs_post_missing_result_becomes_failure() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let source = write_custom_source(temp_dir.path(), 2).await;
+        let results_in = temp_dir.path().join("results.ndjson");
+        write_safe_outputs(
+            temp_dir.path(),
+            r#"{"name":"send-notification"}
+{"name":"send-notification"}
+"#,
+        )
+        .await;
+        tokio::fs::write(
+            &results_in,
+            r#"{"schema_version":1,"proposal_id":"send-notification-0","status":"success","message":"ok"}"#,
+        )
+        .await
+        .unwrap();
+
+        let results = execute_custom_safe_outputs(
+            &source,
+            temp_dir.path(),
+            false,
+            CustomExecuteOptions {
+                custom_phase: Some("post".to_string()),
+                tool: Some("send-notification".to_string()),
+                results_in: Some(results_in),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert!(!results[1].success);
+        assert!(results[1].message.contains("Missing custom result"));
+        let records = read_executed_records(temp_dir.path()).await;
+        assert_eq!(records[1]["status"], "failed");
+    }
+
+    #[tokio::test]
+    async fn test_custom_execute_jobs_post_unknown_schema_version_fails_closed() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let source = write_custom_source(temp_dir.path(), 1).await;
+        let results_in = temp_dir.path().join("results.ndjson");
+        write_safe_outputs(temp_dir.path(), r#"{"name":"send-notification"}"#).await;
+        tokio::fs::write(
+            &results_in,
+            r#"{"schema_version":99,"proposal_id":"send-notification-0","status":"success","message":"ok"}"#,
+        )
+        .await
+        .unwrap();
+
+        let result = execute_custom_safe_outputs(
+            &source,
+            temp_dir.path(),
+            false,
+            CustomExecuteOptions {
+                custom_phase: Some("post".to_string()),
+                tool: Some("send-notification".to_string()),
+                results_in: Some(results_in),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_custom_execution_record_serializes_name_and_status() {
+        let record = CustomExecutionRecord {
+            schema_version: 1,
+            tool: "send-notification".to_string(),
+            proposal_id: "send-notification-0".to_string(),
+            proposal_index: 0,
+            name: "send-notification".to_string(),
+            status: "succeeded".to_string(),
+            message: "ok".to_string(),
+            data: None,
+            component: CustomComponentProvenance {
+                source: None,
+                sha: None,
+                manifest_digest: None,
+                schema_digest: None,
+            },
+            attempt: CustomAttemptMetadata {
+                number: 1,
+                staged: false,
+                started_at: "2026-01-01T00:00:00Z".to_string(),
+                ended_at: "2026-01-01T00:00:01Z".to_string(),
+            },
+            context: None,
+            result: None,
+            error: None,
+            timestamp: "2026-01-01T00:00:01Z".to_string(),
+        };
+
+        let value = serde_json::to_value(record).unwrap();
+        assert_eq!(value["name"], "send-notification");
+        assert_eq!(value["status"], "succeeded");
+    }
+
+    #[tokio::test]
+    async fn test_execute_no_custom_flags_normal_path_unaffected_smoke() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        assert!(!CustomExecuteOptions::default().has_any_custom_flag());
+
+        let results = execute_safe_outputs(
+            temp_dir.path(),
+            &ExecutionContext::default(),
+            &ToolFilter::default(),
+        )
+        .await
+        .unwrap();
+
+        assert!(results.is_empty());
+    }
+
     #[test]
     fn test_stdout_print_neutralizes_result_message_pipeline_commands() {
         let message = "Uploaded '##vso[task.setvariable variable=X]y.txt'";
@@ -877,7 +2160,9 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let ctx = ExecutionContext::default();
 
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
+            .await
+            .unwrap();
         assert!(results.is_empty());
     }
 
@@ -893,7 +2178,9 @@ mod tests {
         tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
 
         let ctx = ExecutionContext::default();
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
+            .await
+            .unwrap();
 
         assert_eq!(results.len(), 2);
         assert!(results[0].success);
@@ -913,7 +2200,9 @@ mod tests {
         tokio::fs::write(&safe_output_path, "").await.unwrap();
 
         let ctx = ExecutionContext::default();
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
+            .await
+            .unwrap();
         assert!(results.is_empty());
     }
 
@@ -936,7 +2225,9 @@ mod tests {
             dry_run: true,
             ..Default::default()
         };
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
+            .await
+            .unwrap();
         assert_eq!(results.len(), 2);
 
         let executed_path = temp_dir.path().join(EXECUTED_NDJSON_FILENAME);
@@ -967,7 +2258,9 @@ mod tests {
             dry_run: true,
             ..Default::default()
         };
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
+            .await
+            .unwrap();
         assert_eq!(results.len(), 2);
 
         let manifest = read_executed_manifest(&temp_dir).await;
@@ -988,7 +2281,9 @@ mod tests {
         tokio::fs::write(&safe_output_path, "").await.unwrap();
 
         let ctx = ExecutionContext::default();
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
+            .await
+            .unwrap();
         assert!(results.is_empty());
         assert!(!temp_dir.path().join(EXECUTED_NDJSON_FILENAME).exists());
     }
@@ -1492,7 +2787,9 @@ mod tests {
         tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
 
         let ctx = ExecutionContext::default();
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
+            .await
+            .unwrap();
 
         // One entry processed (as a failure — unknown tool)
         assert_eq!(results.len(), 1);
@@ -1659,7 +2956,9 @@ mod tests {
             ..Default::default()
         };
 
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
+            .await
+            .unwrap();
         assert_eq!(results.len(), 5);
 
         // Second create-work-item should be skipped
@@ -1695,7 +2994,9 @@ mod tests {
             ..Default::default()
         };
 
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
+            .await
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].success, "dry-run should succeed");
         assert!(
@@ -1727,7 +3028,9 @@ mod tests {
             ..Default::default()
         };
 
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
+            .await
+            .unwrap();
         assert_eq!(results.len(), 2);
         // create-work-item goes through Executor trait → dry-run intercepted
         assert!(results[0].message.contains("[DRY-RUN]"));

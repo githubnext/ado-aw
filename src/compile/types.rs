@@ -1091,6 +1091,11 @@ pub struct FrontMatter {
     /// MCP server configurations
     #[serde(default, rename = "mcp-servers")]
     pub mcp_servers: HashMap<String, McpConfig>,
+    /// Reusable workflow imports. Entries may be local paths or SHA-pinned
+    /// cross-repository specs, with optional import-schema inputs.
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub imports: Vec<ImportEntry>,
     /// Per-tool configuration for safe outputs
     #[serde(default, rename = "safe-outputs")]
     pub safe_outputs: HashMap<String, serde_json::Value>,
@@ -1190,11 +1195,183 @@ impl FrontMatter {
     }
 }
 
+/// A single `imports:` entry — either a bare spec string or an object form.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportEntry {
+    /// The import spec string (`uses:` in object form).
+    pub uses: String,
+    /// Non-secret input values for the imported workflow schema.
+    pub with: serde_json::Map<String, serde_json::Value>,
+    /// Optional ADO service connection for GitHub/GHE remote sources.
+    pub endpoint: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for ImportEntry {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de;
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ImportEntryObject {
+            uses: String,
+            #[serde(default)]
+            with: serde_json::Map<String, serde_json::Value>,
+            #[serde(default)]
+            endpoint: Option<String>,
+        }
+
+        struct ImportEntryVisitor;
+
+        impl<'de> de::Visitor<'de> for ImportEntryVisitor {
+            type Value = ImportEntry;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str(
+                    "a string import spec or an object with `uses`, optional `with`, and optional `endpoint`",
+                )
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> std::result::Result<ImportEntry, E> {
+                Ok(ImportEntry {
+                    uses: value.to_string(),
+                    with: serde_json::Map::new(),
+                    endpoint: None,
+                })
+            }
+
+            fn visit_map<M>(self, map: M) -> std::result::Result<ImportEntry, M::Error>
+            where
+                M: de::MapAccess<'de>,
+            {
+                let entry =
+                    ImportEntryObject::deserialize(de::value::MapAccessDeserializer::new(map))?;
+                Ok(ImportEntry {
+                    uses: entry.uses,
+                    with: entry.with,
+                    endpoint: entry.endpoint,
+                })
+            }
+        }
+
+        deserializer.deserialize_any(ImportEntryVisitor)
+    }
+}
+
+/// Parsed import source. The simple local-vs-remote heuristic is:
+/// after removing a trailing optional marker (`?`) and section (`#Section`),
+/// any spec containing `@` is remote and must be `owner/repo/path@<sha>`;
+/// all specs without `@` are treated as local paths for later resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum ImportSource {
+    /// Local import path within the current repository.
+    Local {
+        /// Relative path to the imported markdown file.
+        path: String,
+        /// Optional markdown section selector.
+        section: Option<String>,
+        /// Whether a missing import should be tolerated by later resolution.
+        optional: bool,
+    },
+    /// Cross-repository import pinned to a full commit SHA.
+    Remote(ParsedImportSpec),
+}
+
+/// Parsed cross-repository import spec.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub struct ParsedImportSpec {
+    /// Repository owner/organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Path within the repository.
+    pub path: String,
+    /// Full 40-character commit SHA pin.
+    pub sha: crate::secure::CommitSha,
+    /// Optional markdown section selector.
+    pub section: Option<String>,
+    /// Whether a missing import should be tolerated by later resolution.
+    pub optional: bool,
+}
+
+impl ImportEntry {
+    /// Parse and validate the import spec string.
+    #[allow(dead_code)]
+    pub fn parse_source(&self) -> anyhow::Result<ImportSource> {
+        let raw = self.uses.trim();
+        if raw.is_empty() {
+            anyhow::bail!("import spec must not be empty");
+        }
+
+        let (without_optional, optional) = match raw.strip_suffix('?') {
+            Some(value) => (value, true),
+            None => (raw, false),
+        };
+
+        let (base, section) = match without_optional.split_once('#') {
+            Some((base, section)) => {
+                if section.is_empty() {
+                    anyhow::bail!("import section must not be empty");
+                }
+                (base, Some(section.to_string()))
+            }
+            None => (without_optional, None),
+        };
+
+        if base.is_empty() {
+            anyhow::bail!("import path must not be empty");
+        }
+
+        if !base.contains('@') {
+            return Ok(ImportSource::Local {
+                path: base.to_string(),
+                section,
+                optional,
+            });
+        }
+
+        let (repo_and_path, ref_part) = base
+            .split_once('@')
+            .ok_or_else(|| anyhow::anyhow!("remote import spec must contain `@`"))?;
+        let sha =
+            crate::secure::CommitSha::parse(ref_part.to_string()).map_err(|_| {
+                anyhow::anyhow!(
+                    "cross-repository imports must be pinned to a full 40-character commit SHA, got '{}'",
+                    ref_part
+                )
+            })?;
+
+        let mut parts = repo_and_path.splitn(3, '/');
+        let owner = parts.next().unwrap_or_default();
+        let repo = parts.next().unwrap_or_default();
+        let path = parts.next().unwrap_or_default();
+        if owner.is_empty() || repo.is_empty() || path.is_empty() {
+            anyhow::bail!(
+                "remote import spec must be `owner/repo/path@<40-character-sha>`, got '{}'",
+                raw
+            );
+        }
+
+        Ok(ImportSource::Remote(ParsedImportSpec {
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+            path: path.to_string(),
+            sha,
+            section,
+            optional,
+        }))
+    }
+}
+
 /// Reserved keys inside the `safe-outputs:` map that configure the section
 /// itself rather than naming a safe-output tool. These must never be treated
 /// as tool names (e.g. in `--enabled-tools`, Stage-3 budgets, or unknown-key
 /// validation).
-pub const SAFE_OUTPUT_RESERVED_KEYS: &[&str] = &["require-approval"];
+pub const SAFE_OUTPUT_RESERVED_KEYS: &[&str] = &["require-approval", "scripts", "jobs"];
 
 /// Automatic action a manual-validation gate takes when its pending period
 /// elapses with no human response. Mirrors `ManualValidation@1`'s `onTimeout`.
@@ -1272,6 +1449,38 @@ impl FrontMatter {
             .filter(|k| !SAFE_OUTPUT_RESERVED_KEYS.contains(&k.as_str()))
     }
 
+    /// Names of **custom** safe-output tools declared by imported components
+    /// under the `safe-outputs.scripts.<name>` (entrypoint) and
+    /// `safe-outputs.jobs.<name>` (arbitrary-ADO-steps) sections (decision
+    /// D16). These are agent-callable tools generated from imported manifests,
+    /// distinct from the built-in tools keyed at the top level.
+    pub fn custom_safe_output_tool_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        for section in ["scripts", "jobs"] {
+            if let Some(map) = self.safe_outputs.get(section).and_then(|v| v.as_object()) {
+                names.extend(map.keys().cloned());
+            }
+        }
+        names
+    }
+
+    /// The full set of safe-output tool names for approval-partitioning and
+    /// emission: built-in tools (top-level keys) plus custom tools
+    /// (`scripts`/`jobs`). A top-level key that merely *configures* a custom
+    /// tool (same name) is folded into that custom tool rather than counted as a
+    /// separate built-in.
+    pub fn all_safe_output_tool_names(&self) -> Vec<String> {
+        let custom: std::collections::HashSet<String> =
+            self.custom_safe_output_tool_names().into_iter().collect();
+        let mut names: Vec<String> = self
+            .safe_output_tool_names()
+            .filter(|k| !custom.contains(*k))
+            .cloned()
+            .collect();
+        names.extend(custom);
+        names
+    }
+
     /// Whether the workflow enables **any** safe-output tool.
     ///
     /// Single source of truth for the safe-outputs-summary feature gate: it
@@ -1284,6 +1493,7 @@ impl FrontMatter {
     /// that was never downloaded.
     pub fn has_any_safe_output_tool(&self) -> bool {
         self.safe_output_tool_names().next().is_some()
+            || !self.custom_safe_output_tool_names().is_empty()
     }
 
     /// The parsed, sanitized `create-pull-request` config, or `None` when the
@@ -1360,15 +1570,17 @@ impl FrontMatter {
 
     /// Partition enabled safe-output tool names into `(auto, reviewed)` where
     /// `reviewed` tools require manual approval and `auto` tools do not. Both
-    /// lists are sorted for deterministic emission.
+    /// lists are sorted for deterministic emission. Includes both built-in and
+    /// custom (`scripts`/`jobs`) tools; a custom tool's approval setting is read
+    /// from its top-level per-tool config key (or the section-level default).
     pub fn partition_safe_outputs_by_approval(&self) -> (Vec<String>, Vec<String>) {
         let mut auto = Vec::new();
         let mut reviewed = Vec::new();
-        for tool in self.safe_output_tool_names() {
-            if self.tool_requires_approval(tool).is_some() {
-                reviewed.push(tool.clone());
+        for tool in self.all_safe_output_tool_names() {
+            if self.tool_requires_approval(&tool).is_some() {
+                reviewed.push(tool);
             } else {
-                auto.push(tool.clone());
+                auto.push(tool);
             }
         }
         auto.sort();
@@ -1846,6 +2058,8 @@ pub struct Repository {
     #[serde(default = "default_ref")]
     #[serde(rename = "ref")]
     pub repo_ref: String,
+    #[serde(default)]
+    pub endpoint: Option<String>,
 }
 
 fn default_ref() -> String {
@@ -1871,6 +2085,9 @@ pub struct RepoEntry {
     /// Branch/tag ref. Defaults to `"refs/heads/main"`.
     #[serde(default = "default_ref", rename = "ref")]
     pub repo_ref: String,
+    /// Service connection name for GitHub/GitHub Enterprise repository resources.
+    #[serde(default)]
+    pub endpoint: Option<String>,
     /// Whether the agent job checks out this repository. Defaults to `true`.
     #[serde(default = "default_checkout")]
     pub checkout: bool,
@@ -2775,6 +2992,162 @@ impl SanitizeConfigTrait for LabelFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const IMPORT_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn bare_import(uses: impl Into<String>) -> ImportEntry {
+        ImportEntry {
+            uses: uses.into(),
+            with: serde_json::Map::new(),
+            endpoint: None,
+        }
+    }
+
+    // ─── imports field and spec parsing ─────────────────────────────────────
+
+    #[test]
+    fn test_import_bare_remote_spec_parses_to_remote() {
+        let entry = bare_import(format!("owner/repo/path.md@{IMPORT_SHA}"));
+
+        let source = entry.parse_source().unwrap();
+
+        match source {
+            ImportSource::Remote(spec) => {
+                assert_eq!(spec.owner, "owner");
+                assert_eq!(spec.repo, "repo");
+                assert_eq!(spec.path, "path.md");
+                assert_eq!(spec.sha.as_str(), IMPORT_SHA);
+                assert_eq!(spec.section, None);
+                assert!(!spec.optional);
+            }
+            other => panic!("expected remote import, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_import_object_form_captures_with_and_endpoint() {
+        let entry: ImportEntry = serde_yaml::from_str(&format!(
+            r#"
+uses: acme/shared/deploy.md@{IMPORT_SHA}
+with:
+  region: us-east-1
+  retries: 3
+endpoint: shared-components-connection
+"#
+        ))
+        .unwrap();
+
+        assert_eq!(
+            entry.endpoint.as_deref(),
+            Some("shared-components-connection")
+        );
+        assert_eq!(
+            entry.with.get("region").and_then(|v| v.as_str()),
+            Some("us-east-1")
+        );
+        assert_eq!(entry.with.get("retries").and_then(|v| v.as_i64()), Some(3));
+
+        match entry.parse_source().unwrap() {
+            ImportSource::Remote(spec) => {
+                assert_eq!(spec.owner, "acme");
+                assert_eq!(spec.repo, "shared");
+                assert_eq!(spec.path, "deploy.md");
+                assert_eq!(spec.sha.as_str(), IMPORT_SHA);
+            }
+            other => panic!("expected remote import, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_import_section_and_optional_marker_parse() {
+        let entry = bare_import(format!("owner/repo/path.md@{IMPORT_SHA}#Deploy?"));
+
+        let source = entry.parse_source().unwrap();
+
+        match source {
+            ImportSource::Remote(spec) => {
+                assert_eq!(spec.section.as_deref(), Some("Deploy"));
+                assert!(spec.optional);
+            }
+            other => panic!("expected remote import, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_import_non_sha_remote_refs_are_rejected() {
+        for ref_part in ["main", "v1.0.0", "abc123"] {
+            let entry = bare_import(format!("owner/repo/path.md@{ref_part}"));
+
+            let err = entry.parse_source().unwrap_err().to_string();
+
+            assert!(
+                err.contains(
+                    "cross-repository imports must be pinned to a full 40-character commit SHA"
+                ),
+                "unexpected error for {ref_part}: {err}"
+            );
+            assert!(
+                err.contains(ref_part),
+                "error should include rejected ref {ref_part}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_import_local_bare_path_parses_to_local() {
+        let entry = bare_import("shared/notify.md");
+
+        let source = entry.parse_source().unwrap();
+
+        match source {
+            ImportSource::Local {
+                path,
+                section,
+                optional,
+            } => {
+                assert_eq!(path, "shared/notify.md");
+                assert_eq!(section, None);
+                assert!(!optional);
+            }
+            other => panic!("expected local import, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_imports_field_deserializes_in_front_matter() {
+        let yaml = format!(
+            r#"
+name: Test Agent
+description: Test imports
+imports:
+  - shared/notify.md
+  - uses: acme/shared/deploy.md@{IMPORT_SHA}
+    with:
+      region: us-east-1
+    endpoint: shared-components-connection
+"#
+        );
+
+        let fm: FrontMatter = serde_yaml::from_str(&yaml).unwrap();
+
+        assert_eq!(fm.imports.len(), 2);
+        assert!(matches!(
+            fm.imports[0].parse_source().unwrap(),
+            ImportSource::Local { .. }
+        ));
+        assert_eq!(
+            fm.imports[1].endpoint.as_deref(),
+            Some("shared-components-connection")
+        );
+        assert_eq!(
+            fm.imports[1].with.get("region").and_then(|v| v.as_str()),
+            Some("us-east-1")
+        );
+        assert!(matches!(
+            fm.imports[1].parse_source().unwrap(),
+            ImportSource::Remote(_)
+        ));
+    }
 
     // ─── SupplyChainConfig deserialization + resolution ──────────────────────
 
@@ -3854,6 +4227,38 @@ Body
         let (auto, reviewed) = fm.partition_safe_outputs_by_approval();
         assert_eq!(auto, vec!["create-pull-request"]);
         assert_eq!(reviewed, vec!["add-pr-comment"]);
+    }
+
+    #[test]
+    fn test_custom_tools_included_in_partition_and_names() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+safe-outputs:
+  scripts:
+    send-notification:
+      run: node notify.js
+  jobs:
+    deploy-thing:
+      steps: []
+  send-notification:
+    require-approval: true
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let mut custom = fm.custom_safe_output_tool_names();
+        custom.sort();
+        assert_eq!(custom, vec!["deploy-thing", "send-notification"]);
+        // The top-level `send-notification` key is config, not a separate tool.
+        let mut all = fm.all_safe_output_tool_names();
+        all.sort();
+        assert_eq!(all, vec!["deploy-thing", "send-notification"]);
+        // require-approval on the custom tool routes it to reviewed.
+        let (auto, reviewed) = fm.partition_safe_outputs_by_approval();
+        assert_eq!(auto, vec!["deploy-thing"]);
+        assert_eq!(reviewed, vec!["send-notification"]);
     }
 
     #[test]

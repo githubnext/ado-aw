@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 
 use crate::audit::model::{
-    CreatedItemReport, Finding, RejectedSafeOutputsRollup, SafeOutputExecution,
-    SafeOutputExecutionItem, SafeOutputStatus, SafeOutputSummary, Severity,
+    AwInfo, ComponentProvenance, CreatedItemReport, Finding, RejectedSafeOutputsRollup,
+    SafeOutputExecution, SafeOutputExecutionItem, SafeOutputStatus, SafeOutputSummary, Severity,
 };
 use crate::ndjson::{EXECUTED_NDJSON_FILENAME, SAFE_OUTPUT_FILENAME, read_ndjson_file};
 
@@ -43,6 +43,16 @@ struct ExecutionRecord {
     context: Option<String>,
     result: Option<Value>,
     error: Option<String>,
+    component: Option<ExecutionComponentProvenance>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct ExecutionComponentProvenance {
+    source: Option<String>,
+    sha: Option<String>,
+    manifest_digest: Option<String>,
+    schema_digest: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +80,7 @@ pub async fn analyze_safe_outputs(
     let proposals = load_proposals(proposals_path.as_deref()).await?;
     let detection = load_detection_verdict(detection_path.as_deref()).await?;
     let executions = load_execution_records(&executions_paths).await?;
+    let marker_components = load_marker_custom_components(download_root).await?;
     let detection_gate_fired = detection.as_ref().is_some_and(DetectionVerdict::gate_fired);
 
     let items = if detection_gate_fired {
@@ -132,7 +143,7 @@ pub async fn analyze_safe_outputs(
         })
         .unwrap_or_default();
     let rollup = build_rollup(summary.as_ref(), execution.as_ref(), detection.as_ref());
-    let findings = if detection_gate_fired && proposed_count > 0 {
+    let mut findings = if detection_gate_fired && proposed_count > 0 {
         vec![build_detection_finding(
             detection.as_ref().expect("gate-fired verdict"),
             proposed_count,
@@ -140,6 +151,9 @@ pub async fn analyze_safe_outputs(
     } else {
         Vec::new()
     };
+    if let Some(marker_components) = marker_components.as_deref() {
+        findings.extend(build_provenance_findings(&executions, marker_components));
+    }
 
     Ok(SafeOutputAnalysis {
         summary,
@@ -201,9 +215,7 @@ async fn load_detection_verdict(path: Option<&Path>) -> anyhow::Result<Option<De
     Ok(Some(verdict))
 }
 
-async fn load_execution_records(
-    paths: &[PathBuf],
-) -> anyhow::Result<Vec<IndexedExecutionRecord>> {
+async fn load_execution_records(paths: &[PathBuf]) -> anyhow::Result<Vec<IndexedExecutionRecord>> {
     let mut records = Vec::new();
     for path in paths {
         let values = read_ndjson_file(path).await?;
@@ -227,6 +239,53 @@ async fn load_execution_records(
         }
     }
     Ok(records)
+}
+
+async fn load_marker_custom_components(
+    download_root: &Path,
+) -> anyhow::Result<Option<Vec<ComponentProvenance>>> {
+    // Phase F1 mirrors the compile-time `# ado-aw-metadata` marker into
+    // staging/aw_info.json, so audit can cross-check provenance locally without
+    // fetching component sources from the network.
+    for directory in top_level_dirs_with_prefix(download_root, "agent_outputs_").await? {
+        for candidate in [
+            directory.join("staging").join("aw_info.json"),
+            directory.join("aw_info.json"),
+        ] {
+            if !fs::metadata(&candidate)
+                .await
+                .map(|m| m.is_file())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let contents = tokio::fs::read_to_string(&candidate)
+                .await
+                .with_context(|| format!("Failed to read aw_info file: {}", candidate.display()))?;
+            let aw_info = serde_json::from_str::<AwInfo>(&contents).with_context(|| {
+                format!("Failed to parse aw_info file: {}", candidate.display())
+            })?;
+            return Ok(Some(aw_info.custom_components));
+        }
+    }
+    Ok(None)
+}
+
+impl ExecutionComponentProvenance {
+    fn to_model(&self) -> Option<ComponentProvenance> {
+        Some(ComponentProvenance {
+            source: normalize_optional_string(self.source.clone())?,
+            sha: normalize_optional_string(self.sha.clone())?,
+            manifest_digest: normalize_optional_string(self.manifest_digest.clone())?,
+            schema_digest: normalize_optional_string(self.schema_digest.clone())?,
+        })
+    }
+}
+
+impl ExecutionRecord {
+    fn component_provenance(&self) -> Option<ComponentProvenance> {
+        self.component.as_ref()?.to_model()
+    }
 }
 
 fn build_execution_items(
@@ -323,6 +382,7 @@ fn build_item_from_execution(
         proposal: proposal.proposal.clone(),
         error: error.clone(),
         result: execution.result.clone(),
+        component_provenance: execution.component_provenance(),
         rejection_reason: rejection_reason_for_status(status, error),
         applies_to_whole_batch: false,
     }
@@ -337,6 +397,7 @@ fn build_missing_execution_item(proposal: &ProposalRecord) -> SafeOutputExecutio
         proposal: proposal.proposal.clone(),
         error: error.clone(),
         result: None,
+        component_provenance: None,
         rejection_reason: error,
         applies_to_whole_batch: false,
     }
@@ -352,6 +413,7 @@ fn build_unmatched_execution_item(execution: &ExecutionRecord) -> SafeOutputExec
         proposal: Value::Null,
         error: error.clone(),
         result: execution.result.clone(),
+        component_provenance: execution.component_provenance(),
         rejection_reason: rejection_reason_for_status(status, error),
         applies_to_whole_batch: false,
     }
@@ -368,6 +430,7 @@ fn build_gate_rejected_item(
         proposal: proposal.proposal.clone(),
         error: None,
         result: None,
+        component_provenance: None,
         rejection_reason: Some(aggregate_reason_key(detection)),
         applies_to_whole_batch: true,
     }
@@ -468,6 +531,61 @@ fn build_detection_finding(detection: &DetectionVerdict, proposed_count: u64) ->
             "No items were created; the agent's work is not visible to downstream consumers.",
         )),
     }
+}
+
+fn build_provenance_findings(
+    executions: &[IndexedExecutionRecord],
+    marker_components: &[ComponentProvenance],
+) -> Vec<Finding> {
+    executions
+        .iter()
+        .filter_map(|execution| {
+            let component = execution.record.component_provenance()?;
+            cross_check_provenance(&execution.record.name, &component, marker_components)
+        })
+        .collect()
+}
+
+fn cross_check_provenance(
+    tool: &str,
+    record_component: &ComponentProvenance,
+    marker_components: &[ComponentProvenance],
+) -> Option<Finding> {
+    let Some(expected) = marker_components
+        .iter()
+        .find(|component| component.source == record_component.source)
+    else {
+        return Some(
+            crate::audit::findings::custom_component_provenance_mismatch_finding(
+                tool,
+                &record_component.source,
+                None,
+                record_component,
+                &["source"],
+            ),
+        );
+    };
+
+    let mut mismatched_fields = Vec::new();
+    if expected.sha != record_component.sha {
+        mismatched_fields.push("sha");
+    }
+    if expected.manifest_digest != record_component.manifest_digest {
+        mismatched_fields.push("manifest_digest");
+    }
+    if expected.schema_digest != record_component.schema_digest {
+        mismatched_fields.push("schema_digest");
+    }
+
+    (!mismatched_fields.is_empty()).then(|| {
+        crate::audit::findings::custom_component_provenance_mismatch_finding(
+            tool,
+            &record_component.source,
+            Some(expected),
+            record_component,
+            &mismatched_fields,
+        )
+    })
 }
 
 fn created_item_from_execution_item(item: &SafeOutputExecutionItem) -> Option<CreatedItemReport> {
@@ -661,8 +779,8 @@ fn collect_named_files<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        CreatedItemReport, EXECUTED_NDJSON_FILENAME, SAFE_OUTPUT_FILENAME, SafeOutputStatus,
-        Severity, analyze_safe_outputs,
+        ComponentProvenance, CreatedItemReport, EXECUTED_NDJSON_FILENAME, SAFE_OUTPUT_FILENAME,
+        SafeOutputStatus, Severity, analyze_safe_outputs, cross_check_provenance,
     };
     use serde_json::{Value, json};
     use std::fs;
@@ -727,8 +845,131 @@ mod tests {
                 .iter()
                 .all(|item| item.status == SafeOutputStatus::Executed)
         );
+        assert!(
+            execution
+                .items
+                .iter()
+                .all(|item| item.component_provenance.is_none()),
+            "built-in records must not gain custom component provenance"
+        );
         assert!(analysis.rollup.is_none());
         assert!(analysis.findings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn custom_execution_record_populates_component_provenance() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        write_ndjson(
+            &temp_dir
+                .path()
+                .join("agent_outputs_42")
+                .join("staging")
+                .join(SAFE_OUTPUT_FILENAME),
+            &[json!({"name": "custom_notify", "context": "custom-1"})],
+        );
+        write_json(
+            &temp_dir
+                .path()
+                .join("agent_outputs_42")
+                .join("staging")
+                .join("aw_info.json"),
+            &json!({
+                "schema": "ado-aw/aw_info/1",
+                "custom_components": [{
+                    "source": "org/repo/components/notify",
+                    "sha": "0123456789abcdef0123456789abcdef01234567",
+                    "manifest_digest": "sha256:manifest",
+                    "schema_digest": "sha256:schema"
+                }]
+            }),
+        );
+        write_ndjson(
+            &temp_dir
+                .path()
+                .join("safe_outputs")
+                .join(EXECUTED_NDJSON_FILENAME),
+            &[json!({
+                "schema_version": 1,
+                "tool": "custom_notify",
+                "proposal_id": "custom-1",
+                "proposal_index": 0,
+                "name": "custom_notify",
+                "status": "succeeded",
+                "context": "custom-1",
+                "message": "ok",
+                "component": {
+                    "source": "org/repo/components/notify",
+                    "sha": "0123456789abcdef0123456789abcdef01234567",
+                    "manifest_digest": "sha256:manifest",
+                    "schema_digest": "sha256:schema"
+                },
+                "attempt": {
+                    "number": 1,
+                    "staged": false,
+                    "started_at": "2026-07-13T00:00:00Z",
+                    "ended_at": "2026-07-13T00:00:01Z"
+                },
+                "result": {"status": "ok"}
+            })],
+        );
+
+        let analysis = analyze_safe_outputs(temp_dir.path())
+            .await
+            .expect("analyze custom safe output");
+
+        let execution = analysis.execution.expect("execution");
+        assert_eq!(execution.items.len(), 1);
+        assert_eq!(
+            execution.items[0].component_provenance,
+            Some(ComponentProvenance {
+                source: String::from("org/repo/components/notify"),
+                sha: String::from("0123456789abcdef0123456789abcdef01234567"),
+                manifest_digest: String::from("sha256:manifest"),
+                schema_digest: String::from("sha256:schema"),
+            })
+        );
+        assert!(
+            analysis.findings.is_empty(),
+            "matching marker/runtime provenance should not emit findings"
+        );
+    }
+
+    #[test]
+    fn cross_check_provenance_accepts_matching_marker_component() {
+        let component = ComponentProvenance {
+            source: String::from("org/repo/components/notify"),
+            sha: String::from("sha-a"),
+            manifest_digest: String::from("manifest-a"),
+            schema_digest: String::from("schema-a"),
+        };
+
+        assert!(
+            cross_check_provenance("custom_notify", &component, std::slice::from_ref(&component))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn cross_check_provenance_reports_mismatched_sha() {
+        let marker = ComponentProvenance {
+            source: String::from("org/repo/components/notify"),
+            sha: String::from("sha-expected"),
+            manifest_digest: String::from("manifest-a"),
+            schema_digest: String::from("schema-a"),
+        };
+        let runtime = ComponentProvenance {
+            source: String::from("org/repo/components/notify"),
+            sha: String::from("sha-actual"),
+            manifest_digest: String::from("manifest-a"),
+            schema_digest: String::from("schema-a"),
+        };
+
+        let finding = cross_check_provenance("custom_notify", &runtime, &[marker])
+            .expect("mismatched sha should emit finding");
+        assert_eq!(finding.severity, Severity::High);
+        assert!(finding.title.contains("custom_notify"));
+        assert!(finding.description.contains("sha-expected"));
+        assert!(finding.description.contains("sha-actual"));
     }
 
     #[tokio::test]
@@ -753,14 +994,18 @@ mod tests {
                 .path()
                 .join("safe_outputs")
                 .join(EXECUTED_NDJSON_FILENAME),
-            &[json!({"name": "add_pr_comment", "status": "succeeded", "context": "c-1", "result": {"status": "ok"}})],
+            &[
+                json!({"name": "add_pr_comment", "status": "succeeded", "context": "c-1", "result": {"status": "ok"}}),
+            ],
         );
         write_ndjson(
             &temp_dir
                 .path()
                 .join("safe_outputs_reviewed")
                 .join(EXECUTED_NDJSON_FILENAME),
-            &[json!({"name": "create_pull_request", "status": "succeeded", "context": "pr-1", "result": {"number": 9}})],
+            &[
+                json!({"name": "create_pull_request", "status": "succeeded", "context": "pr-1", "result": {"number": 9}}),
+            ],
         );
 
         let analysis = analyze_safe_outputs(temp_dir.path())

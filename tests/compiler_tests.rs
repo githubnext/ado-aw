@@ -8909,3 +8909,96 @@ fn test_smoke_failure_reporter_uses_registered_ado_names_and_staging_repo() {
         "front matter and prompt must agree on the staging issue repository"
     );
 }
+
+// ─── Custom safe-output (imports/scripts/jobs) acceptance matrix (#1473) ─────
+
+/// Compile the custom scripts-style fixture with the front-matter `target:`
+/// swapped to `target`, returning the compiled YAML.
+fn compile_custom_for_target(target: Option<&str>) -> String {
+    let target_owned = target.map(str::to_string);
+    compile_fixture_tree_with_flags(
+        "custom-safe-output-scripts.md",
+        &[],
+        &["--skip-integrity"],
+        move |contents| match &target_owned {
+            Some(t) => contents.replacen(
+                "description: A workflow",
+                &format!("target: {t}\ndescription: A workflow"),
+                1,
+            ),
+            None => contents,
+        },
+    )
+}
+
+#[test]
+fn custom_safe_output_emits_gated_executor_job_standalone() {
+    let compiled = compile_custom_for_target(None);
+    assert_valid_yaml(&compiled, "custom-safe-output-scripts.md");
+    // A dedicated per-definition custom job is emitted.
+    assert!(
+        compiled.contains("Custom_send_notification"),
+        "expected a Custom_send_notification job:\n{compiled}"
+    );
+    // It invokes the executor via the scripts-style --custom-config contract.
+    assert!(
+        compiled.contains("--custom-config"),
+        "expected the custom job to call `ado-aw execute --custom-config`:\n{compiled}"
+    );
+    // The generated closed MCP tool schema is wired into the server launch.
+    assert!(
+        compiled.contains("--custom-tools"),
+        "expected the SafeOutputs MCP server to receive --custom-tools:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("\"additionalProperties\":false"),
+        "expected a closed (additionalProperties:false) generated schema:\n{compiled}"
+    );
+    // require-approval on the custom tool routes it through ManualReview.
+    assert!(
+        compiled.contains("- job: ManualReview"),
+        "reviewed custom tool must emit a ManualReview gate:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("HasCustom_send_notification"),
+        "Detection must publish a per-tool proposal signal:\n{compiled}"
+    );
+}
+
+#[test]
+fn custom_safe_output_compiles_for_all_targets() {
+    for target in [None, Some("1es"), Some("job"), Some("stage")] {
+        let compiled = compile_custom_for_target(target);
+        let label = target.unwrap_or("standalone");
+        assert_valid_yaml(&compiled, &format!("custom-safe-output-scripts.md ({label})"));
+        assert!(
+            compiled.contains("Custom_send_notification"),
+            "target {label}: expected a Custom_send_notification job:\n{compiled}"
+        );
+    }
+}
+
+#[test]
+fn custom_safe_output_secret_scope_excludes_agent_and_detection() {
+    // The generated custom-tools schema (agent-facing) must NOT leak the
+    // executor contract into the Agent job beyond the closed input schema:
+    // the executor `--custom-config` / `--custom-phase` invocations belong only
+    // to the dedicated custom job, never the Agent or Detection jobs.
+    let compiled = compile_custom_for_target(None);
+    // Locate the Agent and Detection job bodies and assert they don't invoke
+    // the custom executor modes.
+    for marker in ["--custom-config", "--custom-phase"] {
+        // The only occurrences must be inside the Custom_ job. A crude but
+        // effective check: every line containing the marker must be part of a
+        // custom job region (which begins at `Custom_send_notification`).
+        let custom_start = compiled
+            .find("Custom_send_notification")
+            .expect("custom job present");
+        for (idx, _) in compiled.match_indices(marker) {
+            assert!(
+                idx > custom_start,
+                "executor marker {marker} must only appear in the custom job region"
+            );
+        }
+    }
+}

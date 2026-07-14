@@ -39,8 +39,16 @@ repos:                           # compact repository declarations (replaces rep
   - my-org/my-repo               # shorthand: alias="my-repo", type=git, ref=refs/heads/main, checkout=true
   - reponame=my-org/another-repo # shorthand with explicit alias
   - name: my-org/templates       # object form for full control
+    type: github                 # external repo resource type; default is git
     ref: refs/heads/release/2.x
     checkout: false              # declared as resource only, not checked out by the agent
+    endpoint: github-templates   # required for type: github/githubenterprise/bitbucket
+imports:                         # reusable markdown components; see docs/imports.md
+  - ./components/local-guidance.md
+  - uses: octo/shared/components/notify.md@0123456789abcdef0123456789abcdef01234567
+    endpoint: github-shared-components
+    with:                        # non-secret import-schema inputs
+      channel: service-alerts
 tools:                         # optional tool configuration
   bash: ["cat", "ls", "grep"]  # explicit bash allow-list; when omitted, all bash tools are allowed (unrestricted)
   edit: true                   # enable file editing tool (default: true)
@@ -247,6 +255,58 @@ runtime — write it as clear, structured natural-language instructions.
 > report on pipeline failures and surfaces diagnostic signals. See
 > [`docs/conclusion.md`](conclusion.md).
 
+## Reusable Imports (`imports:` / `import-schema:`)
+
+`imports:` lets a workflow reuse local or SHA-pinned cross-repository markdown
+components. Each imported file is parsed as regular ado-aw markdown with YAML
+front matter; the compiler validates optional `import-schema:` inputs, applies
+`${{ ado.aw.import-inputs.<key> }}` substitutions, then merges the imported
+front matter and body into the consumer workflow.
+
+```yaml
+imports:
+  - ./components/local-policy.md
+  - octo/shared-agents/components/notify.md@0123456789abcdef0123456789abcdef01234567
+  - uses: octo/shared-agents/components/deploy.md@89abcdef0123456789abcdef0123456789abcdef
+    endpoint: github-shared-components
+    with:
+      environment: prod
+      region: westus3
+```
+
+Object-form fields:
+
+| Field | Description |
+|-------|-------------|
+| `uses` | Import spec. Local paths are relative to the importing `.md` file. Cross-repo specs use `owner/repo/path@<40-character-sha>`; branches/tags are rejected. |
+| `with` | Non-secret values validated against the imported file's `import-schema:`. |
+| `endpoint` | Azure DevOps service connection for GitHub/GitHub Enterprise runtime repository resources created for imported component sources. |
+
+Import specs may also include `#Section` to import only a markdown heading
+section, and a trailing `?` to make the import optional.
+
+Reusable components declare compile-time inputs with `import-schema:`:
+
+```yaml
+import-schema:
+  channel:
+    type: string
+    required: true
+  severity:
+    type: choice
+    options: [info, warning, critical]
+    default: info
+  labels:
+    type: array
+    items:
+      type: string
+```
+
+Supported types are `string`, `number`, `boolean`, `choice`, `array`, and
+`object` (object properties are currently one level deep). See
+[`imports.md`](imports.md) for the full syntax, cache layout, merge semantics,
+limitations, and custom safe-output component examples.
+
 ## Inline step validation (`setup` / `steps` / `post-steps` / `teardown`)
 
 Inline steps are authored as raw Azure DevOps YAML and are emitted into the
@@ -407,6 +467,7 @@ Object fields:
 | `alias`       | last segment of `name` | Repository alias (maps to ADO `repository:`) |
 | `type`        | `git`                  | ADO repository resource type |
 | `ref`         | `refs/heads/main`      | Branch or tag reference |
+| `endpoint`    | *(none)*               | Azure DevOps service connection. Required for `type: github`, `githubenterprise`, or `bitbucket`; not needed for same-org Azure Repos `git`. |
 | `checkout`    | `true`                 | Whether the agent job clones this repo |
 | `fetch-depth` | *(ADO default)*        | Shallow-clone depth for this repo's checkout (ADO `fetchDepth`). `0` = full history |
 | `fetch-tags`  | *(ADO default)*        | Whether to fetch git tags during checkout (ADO `fetchTags`) |

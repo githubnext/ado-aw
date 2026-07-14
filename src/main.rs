@@ -18,6 +18,7 @@ mod list;
 mod logging;
 mod mcp;
 mod mcp_author;
+mod mcp_custom_tools;
 mod ndjson;
 mod remove;
 mod run;
@@ -200,6 +201,7 @@ enum GraphCmd {
 }
 
 #[derive(Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Compile markdown to pipeline definition (or recompile all detected pipelines)
     Compile {
@@ -242,6 +244,10 @@ enum Commands {
         /// Only expose these safe output tools (can be repeated). If omitted, all tools are exposed.
         #[arg(long = "enabled-tools")]
         enabled_tools: Vec<String>,
+        /// Path to a compiler-generated JSON file of custom safe-output tool
+        /// definitions to register as dynamic MCP tools.
+        #[arg(long = "custom-tools")]
+        custom_tools: Option<PathBuf>,
     },
     /// Run the author-facing MCP server over stdio (IDE/Copilot Chat integration)
     McpAuthor {},
@@ -274,6 +280,33 @@ enum Commands {
         /// tools wait for approval.
         #[arg(long = "exclude")]
         exclude: Vec<String>,
+        /// Compiler-generated scripts-style custom safe-output dispatcher config.
+        #[arg(long = "custom-config")]
+        custom_config: Option<PathBuf>,
+        /// Jobs-style custom safe-output wrapper phase: pre or post.
+        #[arg(long = "custom-phase")]
+        custom_phase: Option<String>,
+        /// Custom safe-output tool name for jobs-style pre/post phases.
+        #[arg(long = "tool")]
+        tool: Option<String>,
+        /// Jobs-style pre phase output path for filtered proposals.
+        #[arg(long = "proposals-out")]
+        proposals_out: Option<PathBuf>,
+        /// Jobs-style post phase input path for component result records.
+        #[arg(long = "results-in")]
+        results_in: Option<PathBuf>,
+        /// Compiler-owned custom component source provenance.
+        #[arg(long = "component-source")]
+        component_source: Option<String>,
+        /// Compiler-owned custom component SHA provenance.
+        #[arg(long = "component-sha")]
+        component_sha: Option<String>,
+        /// Compiler-owned custom component manifest digest provenance.
+        #[arg(long = "manifest-digest")]
+        manifest_digest: Option<String>,
+        /// Compiler-owned custom component schema digest provenance.
+        #[arg(long = "schema-digest")]
+        schema_digest: Option<String>,
     },
     /// Run SafeOutputs MCP server over HTTP (for MCPG integration)
     McpHttp {
@@ -293,6 +326,10 @@ enum Commands {
         /// Only expose these safe output tools (can be repeated). If omitted, all tools are exposed.
         #[arg(long = "enabled-tools")]
         enabled_tools: Vec<String>,
+        /// Path to a compiler-generated JSON file of custom safe-output tool
+        /// definitions to register as dynamic MCP tools.
+        #[arg(long = "custom-tools")]
+        custom_tools: Option<PathBuf>,
     },
     /// Initialize a repository for AI-first agentic workflow authoring
     Init {
@@ -839,9 +876,7 @@ async fn build_execution_context(
     ctx.tool_configs = front_matter
         .safe_outputs
         .iter()
-        .filter(|(k, _)| {
-            !crate::compile::types::SAFE_OUTPUT_RESERVED_KEYS.contains(&k.as_str())
-        })
+        .filter(|(k, _)| !crate::compile::types::SAFE_OUTPUT_RESERVED_KEYS.contains(&k.as_str()))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     // Merge ado-aw-debug.create-issue config under the same tool_configs map
@@ -1080,13 +1115,20 @@ async fn main() -> Result<()> {
             output_directory,
             bounding_directory,
             enabled_tools,
+            custom_tools,
         } => {
             let filter = if enabled_tools.is_empty() {
                 None
             } else {
                 Some(enabled_tools)
             };
-            mcp::run(&output_directory, &bounding_directory, filter.as_deref()).await?;
+            mcp::run(
+                &output_directory,
+                &bounding_directory,
+                filter.as_deref(),
+                custom_tools.as_deref(),
+            )
+            .await?;
         }
         Commands::McpAuthor {} => {
             mcp_author::run_stdio().await?;
@@ -1100,17 +1142,65 @@ async fn main() -> Result<()> {
             dry_run,
             only,
             exclude,
+            custom_config,
+            custom_phase,
+            tool,
+            proposals_out,
+            results_in,
+            component_source,
+            component_sha,
+            manifest_digest,
+            schema_digest,
         } => {
-            run_execute(
-                source,
-                safe_output_dir,
-                output_dir,
-                ado_org_url,
-                ado_project,
-                dry_run,
-                execute::ToolFilter { only, exclude },
-            )
-            .await?;
+            let custom_options = execute::CustomExecuteOptions {
+                custom_config,
+                custom_phase,
+                tool,
+                proposals_out,
+                results_in,
+                component_source,
+                component_sha,
+                manifest_digest,
+                schema_digest,
+            };
+            if custom_options.has_any_custom_flag() {
+                if output_dir.is_some()
+                    || ado_org_url.is_some()
+                    || ado_project.is_some()
+                    || !only.is_empty()
+                    || !exclude.is_empty()
+                {
+                    anyhow::bail!(
+                        "Custom execute modes cannot be combined with --output-dir, --ado-org-url, --ado-project, --only, or --exclude"
+                    );
+                }
+                let results = execute::execute_custom_safe_outputs(
+                    &source,
+                    &safe_output_dir,
+                    dry_run,
+                    custom_options,
+                )
+                .await?;
+                print_execution_summary(&results);
+                let failure_count = results.iter().filter(|r| !r.success).count();
+                let warning_count = results.iter().filter(|r| r.is_warning()).count();
+                if failure_count > 0 {
+                    std::process::exit(1);
+                } else if warning_count > 0 {
+                    std::process::exit(2);
+                }
+            } else {
+                run_execute(
+                    source,
+                    safe_output_dir,
+                    output_dir,
+                    ado_org_url,
+                    ado_project,
+                    dry_run,
+                    execute::ToolFilter { only, exclude },
+                )
+                .await?;
+            }
         }
         Commands::McpHttp {
             bind_address,
@@ -1119,6 +1209,7 @@ async fn main() -> Result<()> {
             output_directory,
             bounding_directory,
             enabled_tools,
+            custom_tools,
         } => {
             let filter = if enabled_tools.is_empty() {
                 None
@@ -1132,6 +1223,7 @@ async fn main() -> Result<()> {
                 port,
                 api_key.as_deref(),
                 filter.as_deref(),
+                custom_tools.as_deref(),
             )
             .await?;
         }

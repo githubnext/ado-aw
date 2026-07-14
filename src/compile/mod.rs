@@ -13,16 +13,18 @@ pub(crate) mod agentic_pipeline;
 #[cfg(test)]
 mod codemod_integration_test;
 pub(crate) mod codemods;
+pub mod custom_tools;
 pub mod extensions;
 pub(crate) mod filter_ir;
 mod gitattributes;
+pub mod imports;
 pub(crate) mod ir;
 mod job;
 mod job_ir;
 mod onees;
 mod onees_ir;
-pub(crate) mod pr_filters;
 mod path_layout_check;
+pub(crate) mod pr_filters;
 pub mod source_path_guard;
 mod stage;
 mod stage_ir;
@@ -142,12 +144,35 @@ async fn compile_pipeline_inner(
 
     let parsed = common::parse_markdown_detailed_with_registry(&content, registry)?;
     let mut front_matter = parsed.front_matter;
-    let markdown_body = parsed.markdown_body;
+    let mut markdown_body = parsed.markdown_body;
     let codemod_report = parsed.codemods;
     let front_matter_mapping = parsed.front_matter_mapping;
     let leading_whitespace = parsed.leading_whitespace;
     let body_raw = parsed.body_raw;
     let source_sha256 = parsed.source_sha256;
+
+    // Resolve and merge cross-repository / local `imports:` (D8/D9). Runs only
+    // when the workflow declares imports, so import-free workflows are
+    // unaffected. The merge is applied to a CLONE of the front-matter mapping —
+    // the original `front_matter_mapping` is preserved untouched so that any
+    // codemod source-rewrite keeps the author's `imports:` in their file rather
+    // than writing the expanded/merged form back to disk.
+    if !front_matter.imports.is_empty() {
+        let base_dir = input_path.parent().unwrap_or_else(|| Path::new("."));
+        let repo_root = find_repo_root(base_dir).unwrap_or_else(|| base_dir.to_path_buf());
+        let fetcher = crate::compile::imports::GhCliFetcher;
+        let mut merged_mapping = front_matter_mapping.clone();
+        markdown_body = crate::compile::imports::merge::merge_imports(
+            &mut merged_mapping,
+            &markdown_body,
+            &front_matter.imports,
+            base_dir,
+            &repo_root,
+            &fetcher,
+        )?;
+        front_matter = serde_yaml::from_value(serde_yaml::Value::Mapping(merged_mapping))
+            .context("Failed to parse front matter after merging imports")?;
+    }
 
     // Sanitize all front matter text fields before any further processing.
     // This neutralizes pipeline command injection (##vso[), strips control
@@ -173,9 +198,7 @@ async fn compile_pipeline_inner(
     // Checkout-aware path-layout advisories (warning-only): surface
     // hand-written paths that won't exist under the resolved checkout
     // layout, plus deprecated directory markers left in the agent body.
-    for warning in
-        path_layout_check::collect_path_layout_warnings(&front_matter, &markdown_body)
-    {
+    for warning in path_layout_check::collect_path_layout_warnings(&front_matter, &markdown_body) {
         eprintln!("Warning: {warning}");
     }
 

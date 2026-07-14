@@ -239,9 +239,7 @@ fn resolve_git_dir_for_patch(
 }
 
 /// Check whether the working tree has uncommitted changes (staged or unstaged).
-async fn check_uncommitted_changes(
-    git_dir: &std::path::Path,
-) -> Result<bool, McpError> {
+async fn check_uncommitted_changes(git_dir: &std::path::Path) -> Result<bool, McpError> {
     use tokio::process::Command;
     let status_output = Command::new("git")
         .args(["status", "--porcelain"])
@@ -395,10 +393,7 @@ fn should_keep_tool(tool_name: &str, enabled_tools: Option<&[String]>) -> bool {
 
 /// Apply the `enabled_tools` filter to `tool_router`, warn about unknown names,
 /// and log the before/after counts.
-fn apply_tool_filter(
-    tool_router: &mut ToolRouter<SafeOutputs>,
-    enabled_tools: Option<&[String]>,
-) {
+fn apply_tool_filter(tool_router: &mut ToolRouter<SafeOutputs>, enabled_tools: Option<&[String]>) {
     let all_tools: Vec<String> = tool_router
         .list_all()
         .iter()
@@ -452,6 +447,12 @@ impl SafeOutputs {
         self.output_directory.join(SAFE_OUTPUT_FILENAME)
     }
 
+    /// Full path to the safe output NDJSON file, for dynamic custom-tool
+    /// handlers registered outside the static tool router.
+    pub(crate) fn custom_output_path(&self) -> PathBuf {
+        self.safe_output_path()
+    }
+
     /// Read the current contents of the safe output file as NDJSON
     async fn read_safe_output_file(&self) -> Result<Vec<Value>> {
         ndjson::read_ndjson_file(&self.safe_output_path()).await
@@ -488,6 +489,7 @@ impl SafeOutputs {
         bounding_directory: impl Into<PathBuf>,
         output_directory: impl Into<PathBuf>,
         enabled_tools: Option<&[String]>,
+        custom_tools: Option<&std::path::Path>,
     ) -> Result<Self> {
         let bounding_dir = bounding_directory.into();
         let output_dir = output_directory.into();
@@ -521,6 +523,13 @@ impl SafeOutputs {
         //   * Everything else — permissive default when `enabled_tools` is
         //     `None`; otherwise filtered against the explicit allowlist.
         apply_tool_filter(&mut tool_router, enabled_tools);
+
+        // Register config-driven custom safe-output tools (if any). These are
+        // added AFTER the built-in filter so a custom tool can never shadow a
+        // built-in (collisions are skipped with a warning).
+        if let Some(path) = custom_tools {
+            crate::mcp_custom_tools::apply_custom_tools(&mut tool_router, path)?;
+        }
 
         Ok(Self {
             bounding_directory: bounding_dir,
@@ -1513,15 +1522,21 @@ pub async fn run(
     output_directory: &str,
     bounding_directory: &str,
     enabled_tools: Option<&[String]>,
+    custom_tools: Option<&std::path::Path>,
 ) -> Result<()> {
     // Create and run the server with STDIO transport
-    let service = SafeOutputs::new(bounding_directory, output_directory, enabled_tools)
-        .await?
-        .serve(stdio())
-        .await
-        .inspect_err(|e| {
-            error!("Error starting MCP server: {}", e);
-        })?;
+    let service = SafeOutputs::new(
+        bounding_directory,
+        output_directory,
+        enabled_tools,
+        custom_tools,
+    )
+    .await?
+    .serve(stdio())
+    .await
+    .inspect_err(|e| {
+        error!("Error starting MCP server: {}", e);
+    })?;
     service
         .waiting()
         .await
@@ -1540,6 +1555,7 @@ pub async fn run_http(
     port: u16,
     api_key: Option<&str>,
     enabled_tools: Option<&[String]>,
+    custom_tools: Option<&std::path::Path>,
 ) -> Result<()> {
     use axum::Router;
     use rmcp::transport::streamable_http_server::{
@@ -1584,7 +1600,8 @@ pub async fn run_http(
     // The factory closure runs on a Tokio worker thread, so we cannot
     // use block_on() inside it — that would panic with "Cannot start
     // a runtime from within a runtime".
-    let safe_outputs_template = SafeOutputs::new(&bounding, &output, enabled_tools).await?;
+    let safe_outputs_template =
+        SafeOutputs::new(&bounding, &output, enabled_tools, custom_tools).await?;
     let mcp_service = StreamableHttpService::new(
         move || Ok(safe_outputs_template.clone()),
         session_manager,
@@ -1659,7 +1676,7 @@ mod tests {
 
     async fn create_test_safe_outputs() -> (SafeOutputs, tempfile::TempDir) {
         let temp_dir = tempdir().unwrap();
-        let safe_outputs = SafeOutputs::new(temp_dir.path(), temp_dir.path(), None)
+        let safe_outputs = SafeOutputs::new(temp_dir.path(), temp_dir.path(), None, None)
             .await
             .unwrap();
         (safe_outputs, temp_dir)
@@ -1763,7 +1780,9 @@ mod tests {
         git(&["add", "."]);
         git(&["commit", "-q", "-m", "agent change"]);
 
-        let base = SafeOutputs::find_merge_base(p).await.expect("resolves base");
+        let base = SafeOutputs::find_merge_base(p)
+            .await
+            .expect("resolves base");
         assert_eq!(
             base, base_sha,
             "merge-base must be the origin/main tip resolved via origin/HEAD"
@@ -1773,7 +1792,7 @@ mod tests {
     #[tokio::test]
     async fn test_new_fails_with_invalid_bounding_directory() {
         let temp_dir = tempdir().unwrap();
-        let result = SafeOutputs::new("/nonexistent/path", temp_dir.path(), None).await;
+        let result = SafeOutputs::new("/nonexistent/path", temp_dir.path(), None, None).await;
 
         assert!(result.is_err());
         assert!(
@@ -1787,7 +1806,7 @@ mod tests {
     #[tokio::test]
     async fn test_new_fails_with_invalid_output_directory() {
         let temp_dir = tempdir().unwrap();
-        let result = SafeOutputs::new(temp_dir.path(), "/nonexistent/path", None).await;
+        let result = SafeOutputs::new(temp_dir.path(), "/nonexistent/path", None, None).await;
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("output_directory"));
@@ -1962,12 +1981,109 @@ mod tests {
         assert_eq!(json["context"], "ctx");
     }
 
+    #[tokio::test]
+    async fn test_safe_outputs_new_exposes_generated_custom_tools() {
+        let fm: crate::compile::types::FrontMatter = serde_yaml::from_str(
+            r#"
+name: Test
+description: Test
+safe-outputs:
+  scripts:
+    send-notification:
+      description: Send a structured notification.
+      run: node notify.js
+      inputs:
+        title: { type: string, required: true, max-length: 120 }
+"#,
+        )
+        .unwrap();
+        let schemas = crate::compile::custom_tools::generate_custom_tool_schemas(&fm).unwrap();
+        let custom_tools_json = crate::compile::custom_tools::custom_tools_json(&schemas).unwrap();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let custom_tools_path = temp_dir.path().join("custom-tools.json");
+        std::fs::write(&custom_tools_path, custom_tools_json).unwrap();
+
+        let so = SafeOutputs::new(
+            temp_dir.path(),
+            temp_dir.path(),
+            None,
+            Some(&custom_tools_path),
+        )
+        .await
+        .unwrap();
+        let tool_names: Vec<String> = so
+            .tool_router
+            .list_all()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+
+        assert!(tool_names.contains(&"send-notification".to_string()));
+        assert!(tool_names.contains(&"noop".to_string()));
+        assert!(tool_names.contains(&"create-work-item".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_custom_tools_do_not_shadow_builtin_routes() {
+        let baseline_dir = tempfile::tempdir().unwrap();
+        let baseline = SafeOutputs::new(baseline_dir.path(), baseline_dir.path(), None, None)
+            .await
+            .unwrap();
+        let baseline_count = baseline.tool_router.list_all().len();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let custom_tools_path = temp_dir.path().join("custom-tools.json");
+        std::fs::write(
+            &custom_tools_path,
+            r#"[
+              {
+                "name": "create-work-item",
+                "description": "custom replacement",
+                "inputSchema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [],
+                  "properties": {}
+                }
+              }
+            ]"#,
+        )
+        .unwrap();
+
+        let so = SafeOutputs::new(
+            temp_dir.path(),
+            temp_dir.path(),
+            None,
+            Some(&custom_tools_path),
+        )
+        .await
+        .unwrap();
+        let tools = so.tool_router.list_all();
+        assert_eq!(tools.len(), baseline_count);
+        assert_eq!(
+            tools
+                .iter()
+                .filter(|tool| tool.name.as_ref() == "create-work-item")
+                .count(),
+            1
+        );
+        let create_work_item = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == "create-work-item")
+            .unwrap();
+        assert_ne!(
+            create_work_item.description.as_deref(),
+            Some("custom replacement")
+        );
+    }
+
     // ─── Tool filtering tests ───────────────────────────────────────────
 
     #[tokio::test]
     async fn test_tool_filtering_none_exposes_all() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), None)
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), None, None)
             .await
             .unwrap();
         let tools = so.tool_router.list_all();
@@ -1979,7 +2095,7 @@ mod tests {
     async fn test_tool_filtering_specific_tools() {
         let temp_dir = tempfile::tempdir().unwrap();
         let enabled = vec!["create-pull-request".to_string()];
-        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled))
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled), None)
             .await
             .unwrap();
         let tools = so.tool_router.list_all();
@@ -2002,7 +2118,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         // Enable only a tool that doesn't exist — should still have always-on tools
         let enabled = vec!["nonexistent-tool".to_string()];
-        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled))
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled), None)
             .await
             .unwrap();
         let tools = so.tool_router.list_all();
@@ -2025,7 +2141,7 @@ mod tests {
             "create-work-item".to_string(),
             "comment-on-work-item".to_string(),
         ];
-        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled))
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled), None)
             .await
             .unwrap();
         let tools = so.tool_router.list_all();
@@ -2068,7 +2184,7 @@ mod tests {
         // Pass an enable list that includes every debug-only tool so they
         // remain in the router for this introspection check.
         let enabled: Vec<String> = DEBUG_ONLY_TOOLS.iter().map(|s| s.to_string()).collect();
-        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled))
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled), None)
             .await
             .unwrap();
         let router_tools: Vec<String> = so
@@ -2094,7 +2210,7 @@ mod tests {
     #[tokio::test]
     async fn test_filter_strips_debug_only_when_no_enabled_list() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), None)
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), None, None)
             .await
             .unwrap();
         let tool_names: Vec<String> = so
@@ -2118,7 +2234,7 @@ mod tests {
     async fn test_filter_keeps_debug_only_when_explicitly_enabled() {
         let temp_dir = tempfile::tempdir().unwrap();
         let enabled = vec!["create-issue".to_string()];
-        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled))
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled), None)
             .await
             .unwrap();
         let tool_names: Vec<String> = so
@@ -2138,7 +2254,7 @@ mod tests {
     async fn test_filter_strips_debug_only_when_other_tool_enabled() {
         let temp_dir = tempfile::tempdir().unwrap();
         let enabled = vec!["create-work-item".to_string()];
-        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled))
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled), None)
             .await
             .unwrap();
         let tool_names: Vec<String> = so

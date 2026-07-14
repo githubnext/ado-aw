@@ -175,6 +175,145 @@ ARM-minted token, e.g. for cross-org writes or named-identity attribution.
 See [`docs/network.md`](network.md) and
 [`docs/ir.md`](ir.md) for the typed SafeOutputs job wiring.
 
+## Custom safe outputs (scripts & jobs)
+
+Reusable components imported with [`imports:`](imports.md) can add custom
+agent-callable safe-output tools under `safe-outputs.scripts.<name>` or
+`safe-outputs.jobs.<name>`. Both mechanisms preserve the standard trust
+boundary:
+
+```text
+Agent MCP proposal → Detection → optional ManualReview → Custom_<tool> executor job
+```
+
+The Agent and Detection jobs see only the generated closed MCP schema and the
+proposal artifact. Secret variables and service credentials named by the custom
+tool are bound only in the dedicated `Custom_<tool>` executor job.
+
+### Shared fields
+
+Both custom forms accept:
+
+| Field | Description |
+|-------|-------------|
+| `description` | Human-readable MCP tool description shown to the agent. |
+| `inputs` | Agent-facing typed input schema. MVP types are scalar only: `string`, `number`, `boolean`, and `choice`. |
+| `max` | Maximum proposals of this custom tool to attempt in one run. Omitted tools default to 3. |
+| `env` | Mapping of environment variable names to Azure DevOps variable names. Values are treated as secret bindings and scoped to the custom executor job. |
+
+The generated MCP schema is closed (`additionalProperties: false`), so extra
+agent-supplied keys are rejected. String inputs default to `maxLength: 4000`;
+set `max-length` per field to choose a smaller bound (up to the compiler's hard
+limit of 8000). `choice` inputs require an `options:` list.
+
+Custom tool names must be safe tool identifiers and cannot collide with built-in
+safe-output names. `require-approval` works for custom tools exactly like it
+does for built-ins: configure it under the tool's top-level name in the consumer
+workflow, or set a section-level default.
+
+```yaml
+safe-outputs:
+  notify-team:
+    require-approval: true
+```
+
+### `safe-outputs.scripts.<name>`
+
+Scripts-style tools declare an entrypoint command with `run:` (or
+`entrypoint:`). The compiled job writes a compiler-generated custom config and
+runs one `ado-aw execute --custom-config <path>` step. The executor owns the
+proposal loop: for each selected proposal it invokes the entrypoint, passes the
+proposal JSON on stdin and in `AW_PROPOSAL`, enforces the budget/staged mode,
+sanitizes the result, and appends the final execution record.
+
+The script must print exactly one JSON line to stdout:
+
+```json
+{"status":"success","message":"sent notification","data":{"id":"123"}}
+```
+
+`status` may be `success`/`succeeded`, `failure`/`failed`, or `staged`.
+
+```yaml
+safe-outputs:
+  scripts:
+    notify-team:
+      description: Send a structured team notification.
+      max: 3
+      run: node tools/notify.js
+      inputs:
+        title:
+          type: string
+          required: true
+          max-length: 120
+        severity:
+          type: choice
+          options: [info, warning, critical]
+      env:
+        NOTIFY_TOKEN: TEAM_NOTIFY_TOKEN
+```
+
+### `safe-outputs.jobs.<name>`
+
+Jobs-style tools declare arbitrary Azure DevOps `steps:`. The compiler wraps
+those steps:
+
+1. `ado-aw execute --custom-phase pre --tool <name>` filters proposals for this
+   tool, applies `max`, assigns stable `proposal_id` values, writes
+   `ADO_AW_SAFE_OUTPUT_PROPOSALS`, and sets `ADO_AW_SAFE_OUTPUTS_STAGED=true`
+   during dry runs.
+2. The component's authored ADO steps run. They read
+   `$ADO_AW_SAFE_OUTPUT_PROPOSALS` and append one result record per attempted
+   proposal to `$ADO_AW_SAFE_OUTPUT_RESULTS`.
+3. `ado-aw execute --custom-phase post --tool <name>` validates and enriches
+   the component results with compiler-owned provenance, sanitizes output, and
+   emits the standard executed-safe-output artifact. Missing, malformed, or
+   duplicate result records fail closed.
+
+Each jobs-style result line must be JSON with `schema_version: 1`,
+`proposal_id`, `status`, `message`, and optional `data`:
+
+```json
+{"schema_version":1,"proposal_id":"deploy-thing-0","status":"success","message":"deployment queued"}
+```
+
+```yaml
+safe-outputs:
+  jobs:
+    create-service-ticket:
+      description: Create an incident ticket in the service desk.
+      max: 2
+      inputs:
+        title:
+          type: string
+          required: true
+          max-length: 160
+        priority:
+          type: choice
+          options: [low, normal, high]
+          required: true
+      env:
+        SERVICE_DESK_TOKEN: SERVICE_DESK_TOKEN
+      steps:
+        - bash: |
+            set -euo pipefail
+            : > "$ADO_AW_SAFE_OUTPUT_RESULTS"
+            while IFS= read -r proposal; do
+              proposal_id=$(echo "$proposal" | jq -r '.proposal_id')
+              title=$(echo "$proposal" | jq -r '.title')
+              jq -cn --arg proposal_id "$proposal_id" --arg title "$title" \
+                '{schema_version:1, proposal_id:$proposal_id, status:"success", message:("created ticket for " + $title)}' \
+                >> "$ADO_AW_SAFE_OUTPUT_RESULTS"
+            done < "$ADO_AW_SAFE_OUTPUT_PROPOSALS"
+          displayName: Create service ticket
+```
+
+For cross-repository components that ship executor files, the custom executor
+job checks out the component repository resource, detaches to the pinned commit
+SHA, verifies `HEAD`, then runs the script or wrapped steps. Prompt-only or
+configuration-only imports are fully inlined at compile time and do not need a
+runtime checkout.
+
 ## Available Safe Output Tools
 
 ### comment-on-work-item
