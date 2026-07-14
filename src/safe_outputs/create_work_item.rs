@@ -220,6 +220,60 @@ fn artifact_link_op(project: &str, repository_id: &str, branch: &str) -> serde_j
     })
 }
 
+/// Resolve the artifact link patch op and a human-readable status message.
+///
+/// Returns `Ok(None)` when artifact linking is disabled.
+/// Returns `Ok(Some((op, message)))` when an op was built.
+/// Returns `Err(ExecutionResult)` when the caller should short-circuit with a failure.
+async fn maybe_build_artifact_link_op(
+    client: &reqwest::Client,
+    config: &ArtifactLinkConfig,
+    ctx: &ExecutionContext,
+    org_url: &str,
+    project: &str,
+    token: &str,
+) -> Result<Option<(serde_json::Value, String)>, ExecutionResult> {
+    if !config.enabled {
+        return Ok(None);
+    }
+
+    let repo_name = match config.repository.as_ref().or(ctx.repository_name.as_ref()) {
+        Some(name) => name,
+        None => {
+            return Ok(Some((
+                serde_json::Value::Null,
+                "skipped: no repository available".to_string(),
+            )));
+        }
+    };
+
+    // Prefer the env-supplied repo ID to avoid an extra API call; fall back to lookup.
+    let repo_id = if config.repository.is_none() {
+        ctx.repository_id.clone()
+    } else {
+        None
+    };
+
+    let repo_id = match repo_id {
+        Some(id) => id,
+        None => {
+            match resolve_repository_id(client, org_url, project, token, repo_name).await {
+                Ok(id) => id,
+                Err(e) => {
+                    return Err(ExecutionResult::failure(format!(
+                        "Failed to resolve repository '{}': {}",
+                        repo_name, e
+                    )));
+                }
+            }
+        }
+    };
+
+    let op = artifact_link_op(project, &repo_id, &config.branch);
+    let message = format!("linked to {}:{}", repo_name, config.branch);
+    Ok(Some((op, message)))
+}
+
 /// Resolve a repository name to its ID via Azure DevOps API
 async fn resolve_repository_id(
     client: &reqwest::Client,
@@ -388,55 +442,24 @@ impl Executor for CreateWorkItemResult {
         let client = reqwest::Client::new();
 
         // Add artifact link if configured (included in creation request)
-        let artifact_link_included = if config.artifact_link.enabled {
-            // Get repository name from config override or context
-            let repo_name = config
-                .artifact_link
-                .repository
-                .as_ref()
-                .or(ctx.repository_name.as_ref());
-
-            if let Some(repo_name) = repo_name {
-                // If we already have the repo ID from environment, use it (avoids extra API call)
-                let repo_id = if config.artifact_link.repository.is_none() {
-                    // Using default repo from environment - check if we have the ID already
-                    ctx.repository_id.clone()
-                } else {
-                    None // Config overrides require lookup
-                };
-
-                let repo_id = match repo_id {
-                    Some(id) => id,
-                    None => {
-                        // Resolve repo name to ID via API
-                        match resolve_repository_id(&client, org_url, project, token, repo_name)
-                            .await
-                        {
-                            Ok(id) => id,
-                            Err(e) => {
-                                return Ok(ExecutionResult::failure(format!(
-                                    "Failed to resolve repository '{}': {}",
-                                    repo_name, e
-                                )));
-                            }
-                        }
-                    }
-                };
-
-                patch_doc.push(artifact_link_op(
-                    project,
-                    &repo_id,
-                    &config.artifact_link.branch,
-                ));
-                Some(format!(
-                    "linked to {}:{}",
-                    repo_name, config.artifact_link.branch
-                ))
-            } else {
-                Some("skipped: no repository available".to_string())
+        let artifact_link_included = match maybe_build_artifact_link_op(
+            &client,
+            &config.artifact_link,
+            ctx,
+            org_url,
+            project,
+            token,
+        )
+        .await
+        {
+            Err(failure) => return Ok(failure),
+            Ok(None) => None,
+            Ok(Some((op, message))) => {
+                if !op.is_null() {
+                    patch_doc.push(op);
+                }
+                Some(message)
             }
-        } else {
-            None
         };
 
         // Make the API call
