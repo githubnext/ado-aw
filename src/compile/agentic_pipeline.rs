@@ -1679,7 +1679,21 @@ fn build_custom_safe_output_job(
             fetch_tags: Some(false),
             persist_credentials: None,
         }));
-        steps.push(Step::Bash(verify_custom_component_checkout_step(component)));
+        // Install Node + download the ado-script bundle, then fetch/verify the
+        // pinned component commit via the checkout-component bundle. An ADO
+        // repository-resource `ref` cannot be a commit SHA, so the shallow
+        // resource checkout above lacks the pinned object; the bundle obtains it
+        // (direct by-SHA fetch → progressive deepening) and verifies a detached
+        // checkout of it, failing closed on any mismatch.
+        steps.extend(
+            super::extensions::ado_script::install_and_download_steps_typed(
+                front_matter.supply_chain.as_ref(),
+            ),
+        );
+        steps.push(super::extensions::ado_script::checkout_component_step_typed(
+            &component.checkout_dir,
+            &component.sha,
+        ));
     }
     steps.push(Step::Download(DownloadStep {
         source: "current".to_string(),
@@ -1786,22 +1800,6 @@ fn custom_job_condition(def: &CustomSafeOutputJobDef) -> Result<Condition> {
         ));
     }
     Ok(Condition::And(parts))
-}
-
-fn verify_custom_component_checkout_step(component: &CustomComponentRuntime) -> BashStep {
-    let script = format!(
-        "set -euo pipefail\n\
-         git -C {dir} checkout --detach {sha}\n\
-         ACTUAL_SHA=$(git -C {dir} rev-parse HEAD)\n\
-         if [ \"$ACTUAL_SHA\" != {sha} ]; then\n  \
-           echo \"##vso[task.complete result=Failed]custom component checkout resolved $ACTUAL_SHA, expected {sha}\"\n  \
-           exit 1\n\
-         fi\n\
-         echo \"Verified custom component checkout at $ACTUAL_SHA\"\n",
-        dir = shell_quote(&component.checkout_dir),
-        sha = shell_quote(&component.sha),
-    );
-    bash("Verify custom component checkout", script)
 }
 
 fn prepare_custom_executor_binary_step() -> BashStep {
@@ -4520,6 +4518,20 @@ safe-outputs:
                     ..
                 }) if alias.starts_with("import_octo_tools_")
             )
+        }));
+        // The pinned SHA is fetched + verified via the checkout-component
+        // ado-script bundle (not a raw `git checkout` that would fail on a
+        // shallow pool), with the ADO bearer projected for the fetch.
+        assert!(custom.steps.iter().any(|step| {
+            matches!(step, Step::Bash(s)
+                if s.script.contains("checkout-component.js")
+                && s.script.contains("--sha '0123456789012345678901234567890123456789'")
+                && s.env.get("SYSTEM_ACCESSTOKEN").is_some())
+        }));
+        // The old raw-git verify approach must be gone.
+        assert!(!custom.steps.iter().any(|step| {
+            matches!(step, Step::Bash(s) if s.script.contains("checkout --detach")
+                && !s.script.contains("checkout-component.js"))
         }));
         assert!(custom.steps.iter().any(|step| {
             matches!(step, Step::Bash(s) if s.script.contains("\"notify-team\"") && s.script.contains("\"entrypoint\": \"node notify.js\"") && s.script.contains("\"max\": 2"))

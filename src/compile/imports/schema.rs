@@ -379,7 +379,7 @@ fn yaml_mapping<'a>(value: &'a YamlValue, path: &str) -> Result<&'a YamlMapping>
         YamlValue::Mapping(mapping) => Ok(mapping),
         _ => anyhow::bail!(
             "import-schema field `{path}` must be a mapping, got {}",
-            yaml_value_kind(value)
+            super::yaml_value_kind(value)
         ),
     }
 }
@@ -389,7 +389,7 @@ fn yaml_sequence<'a>(value: &'a YamlValue, path: &str) -> Result<&'a Vec<YamlVal
         YamlValue::Sequence(sequence) => Ok(sequence),
         _ => anyhow::bail!(
             "import-schema field `{path}` must be a sequence, got {}",
-            yaml_value_kind(value)
+            super::yaml_value_kind(value)
         ),
     }
 }
@@ -399,7 +399,7 @@ fn yaml_string<'a>(value: &'a YamlValue, path: &str) -> Result<&'a str> {
         YamlValue::String(value) => Ok(value),
         _ => anyhow::bail!(
             "import-schema field `{path}` must be a string, got {}",
-            yaml_value_kind(value)
+            super::yaml_value_kind(value)
         ),
     }
 }
@@ -459,18 +459,6 @@ fn dotted_path(prefix: &str, key: &str) -> String {
         key.to_string()
     } else {
         format!("{prefix}.{key}")
-    }
-}
-
-fn yaml_value_kind(value: &YamlValue) -> &'static str {
-    match value {
-        YamlValue::Null => "null",
-        YamlValue::Bool(_) => "boolean",
-        YamlValue::Number(_) => "number",
-        YamlValue::String(_) => "string",
-        YamlValue::Sequence(_) => "sequence/array",
-        YamlValue::Mapping(_) => "mapping/object",
-        YamlValue::Tagged(_) => "tagged value",
     }
 }
 

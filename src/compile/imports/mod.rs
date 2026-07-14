@@ -245,6 +245,24 @@ fn read_remote_manifest(
         let bytes = fs::read(&cache_path)
             .with_context(|| format!("failed to read cached import {}", cache_path.display()))?;
         enforce_manifest_size(bytes.len(), &cache_path.display().to_string())?;
+        // Defense-in-depth: if a digest sidecar exists (written when ado-aw
+        // populated the cache), verify the cached bytes still hash to it. This
+        // detects tampering of the committed cache file — which GitHub collapses
+        // in diffs (`linguist-generated`) — before the manifest is trusted at
+        // compile time. A missing sidecar (older cache) is tolerated.
+        let sidecar = digest_sidecar_path(&cache_path);
+        if let Ok(expected) = fs::read_to_string(&sidecar) {
+            let actual = sha256_hex(&bytes);
+            if actual != expected.trim() {
+                anyhow::bail!(
+                    "cached import {} does not match its recorded digest (expected {}, got {}); \
+                     the committed cache may have been tampered with — delete it to re-fetch",
+                    cache_path.display(),
+                    expected.trim(),
+                    actual
+                );
+            }
+        }
         return Ok(bytes);
     }
 
@@ -266,7 +284,21 @@ fn read_remote_manifest(
     ensure_import_gitattributes(repo_root)?;
     fs::write(&cache_path, &bytes)
         .with_context(|| format!("failed to write cached import {}", cache_path.display()))?;
+    // Record the digest sidecar so a later read can detect cache tampering.
+    fs::write(digest_sidecar_path(&cache_path), sha256_hex(&bytes)).with_context(|| {
+        format!(
+            "failed to write import cache digest sidecar for {}",
+            cache_path.display()
+        )
+    })?;
     Ok(bytes)
+}
+
+/// The `.sha256` sidecar path recording a cached manifest's content digest.
+fn digest_sidecar_path(cache_path: &Path) -> PathBuf {
+    let mut os = cache_path.as_os_str().to_os_string();
+    os.push(".sha256");
+    PathBuf::from(os)
 }
 
 fn enforce_manifest_size(size: usize, source: &str) -> Result<()> {
@@ -355,7 +387,22 @@ fn parse_manifest_bytes(
             let value: serde_yaml::Value =
                 serde_yaml::from_str(&yaml).context("failed to parse import YAML front matter")?;
             match value {
-                serde_yaml::Value::Mapping(_) | serde_yaml::Value::Null => value,
+                serde_yaml::Value::Mapping(ref mapping) => {
+                    // Transitive/nested imports are not yet resolved (only a
+                    // workflow's own top-level `imports:` is). Rather than
+                    // silently ignore a component's own `imports:` — which would
+                    // drop tools/config it depends on with no diagnostic — fail
+                    // loudly until nested resolution lands.
+                    if mapping.contains_key(serde_yaml::Value::String("imports".to_string())) {
+                        anyhow::bail!(
+                            "imported component declares its own `imports:`, but nested \
+                             (transitive) imports are not yet supported; flatten the \
+                             component or inline the nested import"
+                        );
+                    }
+                    value
+                }
+                serde_yaml::Value::Null => value,
                 other => {
                     anyhow::bail!(
                         "import YAML front matter must be a mapping/object, got {}",
@@ -374,7 +421,7 @@ fn parse_manifest_bytes(
     Ok((front_matter, body))
 }
 
-fn yaml_value_kind(value: &serde_yaml::Value) -> &'static str {
+pub(super) fn yaml_value_kind(value: &serde_yaml::Value) -> &'static str {
     match value {
         serde_yaml::Value::Null => "null",
         serde_yaml::Value::Bool(_) => "boolean",
@@ -571,6 +618,60 @@ mod tests {
             .unwrap_err();
 
         assert!(format!("{err:#}").contains("exceeding the 262144 byte limit"));
+    }
+
+    #[test]
+    fn nested_imports_in_component_are_rejected() {
+        let repo = tempfile::tempdir().unwrap();
+        fs::write(
+            repo.path().join("component.md"),
+            b"---\nimports:\n  - other.md\n---\n# Body\n",
+        )
+        .unwrap();
+
+        let err = resolve_imports_with_repo_root(
+            &[import_entry("component.md")],
+            repo.path(),
+            repo.path(),
+            &PanicFetcher,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("nested (transitive) imports are not yet supported"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn tampered_cache_is_rejected_via_digest_sidecar() {
+        let repo = tempfile::tempdir().unwrap();
+        let entry = import_entry(&format!("acme/shared/components/deploy.md@{SHA}"));
+        let fetcher = StaticFetcher {
+            bytes: manifest().to_vec(),
+        };
+        // First resolve populates the cache + digest sidecar.
+        resolve_imports_with_repo_root(std::slice::from_ref(&entry), repo.path(), repo.path(), &fetcher)
+            .unwrap();
+
+        // Tamper with the committed cache file (sidecar still records the
+        // original digest).
+        let cache_file = repo
+            .path()
+            .join(".ado-aw")
+            .join("imports")
+            .join("acme")
+            .join("shared")
+            .join(SHA)
+            .join("components_deploy.md");
+        fs::write(&cache_file, b"---\n{}\n---\n# Tampered\nevil\n").unwrap();
+
+        let err =
+            resolve_imports_with_repo_root(&[entry], repo.path(), repo.path(), &PanicFetcher)
+                .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("does not match its recorded digest"),
+            "got: {err:#}"
+        );
     }
 
     #[test]

@@ -15,6 +15,7 @@ approval-summary.js
 conclusion.js
 github-app-token.js
 prepare-pr-base.js
+checkout-component.js
 schema
 *.tsbuildinfo
 test-bin

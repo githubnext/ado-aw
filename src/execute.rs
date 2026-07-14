@@ -9,11 +9,11 @@ use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
+use tokio::process::Command;
 
 use crate::ndjson::{self, EXECUTED_NDJSON_FILENAME, SAFE_OUTPUT_FILENAME};
 use crate::safe_outputs::{
@@ -647,20 +647,23 @@ async fn run_custom_entrypoint(
         }
     };
 
-    if let Some(stdin) = child.stdin.as_mut()
-        && let Err(err) = stdin.write_all(proposal_json.as_bytes())
-    {
-        return CustomToolOutcome {
-            result: ExecutionResult::failure(format!(
-                "Failed to write proposal '{}' to custom tool stdin: {}",
-                sanitize(proposal_id),
-                sanitize(&err.to_string())
-            )),
-            record_status: "failed",
-        };
+    // Write the proposal to the child's stdin CONCURRENTLY with draining its
+    // stdout/stderr. Writing the whole payload before reading any output would
+    // deadlock if the child emits more than a pipe buffer's worth before
+    // consuming stdin. The payload is ALSO available to the child via the
+    // `AW_PROPOSAL` env var; dropping the stdin handle when the write finishes
+    // signals EOF to a dispatcher that reads stdin. A stdin write error is
+    // non-fatal here (broken pipe if the child ignored stdin) — the child's own
+    // exit status is authoritative and handled below.
+    let stdin_payload = proposal_json.clone();
+    if let Some(mut stdin) = child.stdin.take() {
+        tokio::spawn(async move {
+            let _ = stdin.write_all(stdin_payload.as_bytes()).await;
+            // `stdin` is dropped here, closing the pipe (EOF).
+        });
     }
 
-    let output = match child.wait_with_output() {
+    let output = match child.wait_with_output().await {
         Ok(output) => output,
         Err(err) => {
             return CustomToolOutcome {
@@ -834,10 +837,10 @@ fn now_timestamp() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
-fn custom_record_status(result: &ExecutionResult) -> &'static str {
+fn custom_record_status(result: &ExecutionResult, staged: bool) -> &'static str {
     if result.is_budget_exhausted() {
         "budget_exhausted"
-    } else if result.message.starts_with("Staged custom tool") {
+    } else if staged && result.success {
         "staged"
     } else {
         execution_record_status(result)
@@ -889,8 +892,8 @@ async fn append_custom_execution_record_for_result_with_times(
     record_status_override: Option<&str>,
 ) {
     let status = record_status_override
-        .unwrap_or_else(|| custom_record_status(result))
-        .to_string();
+        .map(str::to_string)
+        .unwrap_or_else(|| custom_record_status(result, attempt.staged).to_string());
     let data = result.data.clone().map(sanitize_json_value);
     let message = sanitize(&result.message);
     let record = CustomExecutionRecord {
