@@ -106,6 +106,15 @@ pipeline** as runtime helpers. Today it produces thirteen bundles:
 > `NON_BUNDLE_DIRS` in `src/__tests__/bundle-coverage.test.ts` so the
 > shipped-bundle guard ignores it. The compiler never references it.
 
+> **Test-only, not shipped: `trigger-e2e`.** The workspace also contains a
+> `src/trigger-e2e/` harness that drives the deterministic trigger-condition
+> (gate / synth-PR) E2E suite. It queues a victim pipeline under a battery of
+> real trigger scenarios, asserts the observable gate decision (build tags +
+> result), and files a GitHub issue on failure. It is **not** a runtime bundle:
+> it is built separately by `npm run build:trigger-e2e` and listed in
+> `NON_BUNDLE_DIRS` so the shipped-bundle guard ignores it. The compiler never
+> references it.
+
 ## What `gate.js` does
 
 `gate.js` is a single-shot Node program that runs as a step in the
