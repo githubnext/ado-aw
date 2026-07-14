@@ -12,7 +12,14 @@
  */
 import { buildGateSpec, encodeGateSpec, encodePrSynthSpec } from "../gate-spec.js";
 import type { TriggerScenario } from "../scenario.js";
-import { createPrContext, requirePrRepo, teardownPrContext, type PrContext } from "./common.js";
+import {
+  createPrContext,
+  excludeSynthSpec,
+  promoteSynthSpec,
+  requirePrRepo,
+  teardownPrContext,
+  type PrContext,
+} from "./common.js";
 
 /** Empty gate spec (no checks) — the gate passes iff it is not bypassed. */
 const EMPTY_GATE = encodeGateSpec(buildGateSpec("pull-request", []));
@@ -30,8 +37,8 @@ const synthPromote: TriggerScenario<PrContext> = {
       sourceBranch: state.sourceRef,
       templateParameters: {
         gateSpec: EMPTY_GATE,
-        // branches include-all (empty) → the PR's target branch matches.
-        prSynthSpec: encodePrSynthSpec({ branches: { include: ["main"] } }),
+        // Promote against the PR's REAL target branch (not a hardcoded "main").
+        prSynthSpec: promoteSynthSpec(state.targetBranch),
       },
     };
   },
@@ -60,8 +67,9 @@ const synthBranchMismatch: TriggerScenario<PrContext> = {
       sourceBranch: state.sourceRef,
       templateParameters: {
         gateSpec: EMPTY_GATE,
-        // Only release/* targets match; the PR targets main → no promotion.
-        prSynthSpec: encodePrSynthSpec({ branches: { include: ["release/*"] } }),
+        // Exclude the PR's REAL target branch so promotion is refused
+        // regardless of the repo's default branch name.
+        prSynthSpec: excludeSynthSpec(state.targetBranch),
       },
     };
   },

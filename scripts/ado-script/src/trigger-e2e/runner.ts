@@ -50,6 +50,10 @@ export async function runScenario<S>(
   const id = scenario.id;
   let state: S | undefined;
   let setupDone = false;
+  // Captured as soon as the victim build is queued, so a queue-phase throw
+  // (e.g. a waitForBuild timeout) still lets the finally block cancel the
+  // orphaned build rather than leaking a running build for the whole suite.
+  let queuedBuildId: number | undefined;
 
   const finish = (partial: Omit<ScenarioResult, "id" | "durationMs">): ScenarioResult => ({
     id,
@@ -75,7 +79,9 @@ export async function runScenario<S>(
     let outcome: BuildOutcome;
     try {
       const queue = scenario.queue(ctx, state);
-      outcome = await runVictim(ctx, queue);
+      outcome = await runVictim(ctx, queue, (buildId) => {
+        queuedBuildId = buildId;
+      });
     } catch (err) {
       return finish({ ok: false, phase: "queue", message: errMessage(err) });
     }
@@ -91,6 +97,21 @@ export async function runScenario<S>(
     ctx.log(`[${id}] OK`);
     return finish({ ok: true });
   } finally {
+    // ---- cancel an orphaned victim build (best-effort) ----
+    // A completed build is a no-op; only a build still running after a
+    // queue-phase failure needs cancelling.
+    if (queuedBuildId !== undefined) {
+      try {
+        const build = await ctx.rest.getBuild(queuedBuildId);
+        if (build.status !== "completed") {
+          await ctx.rest.cancelBuild(queuedBuildId);
+          ctx.log(`[${id}] cancelled orphaned victim build #${queuedBuildId}`);
+        }
+      } catch (err) {
+        ctx.log(`[${id}] orphaned-build cleanup WARNING: ${errMessage(err)}`);
+      }
+    }
+
     // ---- cleanup (always, best-effort) ----
     if (setupDone) {
       try {

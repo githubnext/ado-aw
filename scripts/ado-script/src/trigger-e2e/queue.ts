@@ -19,12 +19,20 @@ function flattenParams(params: Record<string, string | undefined>): Record<strin
   return out;
 }
 
-export async function runVictim(ctx: TriggerContext, queue: VictimQueue): Promise<BuildOutcome> {
+export async function runVictim(
+  ctx: TriggerContext,
+  queue: VictimQueue,
+  onQueued?: (buildId: number) => void,
+): Promise<BuildOutcome> {
   const templateParameters = flattenParams(queue.templateParameters);
   const queued = await ctx.rest.queueBuild(ctx.victimDefinitionId, {
     sourceBranch: queue.sourceBranch,
     templateParameters,
   });
+  // Report the id as soon as the build is queued so the caller can cancel it on
+  // cleanup even if the subsequent `waitForBuild` poll throws (e.g. a timeout)
+  // and never returns a BuildOutcome.
+  onQueued?.(queued.id);
   ctx.log(`  queued victim build #${queued.id}${queue.sourceBranch ? ` on ${queue.sourceBranch}` : ""}`);
 
   const terminal = await ctx.rest.waitForBuild(queued.id);

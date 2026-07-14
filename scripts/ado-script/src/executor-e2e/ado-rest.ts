@@ -378,7 +378,14 @@ export class AdoRest {
       const path = this.projPath(
         `_apis/git/repositories/${AdoRest.seg(repo)}/pullRequests/${prId}/labels?api-version=7.1`,
       );
-      await this.request(path, { method: "POST", body: { name } });
+      try {
+        await this.request(path, { method: "POST", body: { name } });
+      } catch (err) {
+        // Name the specific label that failed so a partial-attach surfaces as a
+        // clear setup error rather than a confusing downstream gate mismatch.
+        const message = err instanceof Error ? err.message : String(err);
+        throw new Error(`setPullRequestLabels: failed to attach label '${name}' to PR ${prId}: ${message}`);
+      }
     }
   }
 

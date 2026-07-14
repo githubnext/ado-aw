@@ -22,18 +22,20 @@ import {
   changedFilesCheck,
   draftCheck,
   encodeGateSpec,
-  encodePrSynthSpec,
   labelsCheck,
   targetBranchCheck,
   timeWindowCheck,
   type Check,
 } from "../gate-spec.js";
 import type { Expected, TriggerScenario, VictimParameters } from "../scenario.js";
-import { createPrContext, requirePrRepo, teardownPrContext, type PrContext } from "./common.js";
+import {
+  createPrContext,
+  promoteSynthSpec,
+  requirePrRepo,
+  teardownPrContext,
+  type PrContext,
+} from "./common.js";
 import type { CreatePrOptions } from "./common.js";
-
-/** Promote-everything synth spec: any active PR on the source branch matches. */
-const PROMOTE_ALL = encodePrSynthSpec({ branches: { include: ["main"] } });
 
 interface FilterScenarioSpec {
   readonly id: string;
@@ -63,7 +65,13 @@ function makeFilterScenario(spec: FilterScenarioSpec): TriggerScenario<PrContext
       const gateSpec = encodeGateSpec(buildGateSpec("pull-request", [check]));
       return {
         sourceBranch: state.sourceRef,
-        templateParameters: { gateSpec, prSynthSpec: PROMOTE_ALL, ...spec.params },
+        // Promote against the PR's REAL target branch (not a hardcoded "main")
+        // so the gate evaluates the filter under test on any default branch.
+        templateParameters: {
+          gateSpec,
+          prSynthSpec: promoteSynthSpec(state.targetBranch),
+          ...spec.params,
+        },
       };
     },
     expected(): Expected {

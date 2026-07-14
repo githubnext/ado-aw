@@ -39,6 +39,14 @@ use std::fmt;
 /// Each variant maps to a specific piece of data available at pipeline runtime,
 /// with known acquisition cost (free pipeline variable vs. REST API call vs.
 /// runtime computation).
+///
+/// SYNC: the deterministic trigger-condition E2E harness hand-maintains a
+/// mirror of `kind()` / `failure_policy()` / `dependencies()` in
+/// `scripts/ado-script/src/trigger-e2e/gate-spec.ts` (the `FACT_META` table) so
+/// it can craft gate specs without invoking the compiler. The `types.gen.ts`
+/// codegen only guards the serialized `GateSpec` *shape*, not fact
+/// policy/dependency values — so when adding a `Fact` variant, or changing a
+/// `failure_policy`/`dependencies`, update `FACT_META` in that file too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Fact {
     // ── Pipeline variables (free — always available) ────────────────────

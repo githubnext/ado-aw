@@ -9,11 +9,15 @@
  *
  * Test-harness module; not shipped in `ado-script.zip`.
  */
-import { buildGateSpec, encodeGateSpec, encodePrSynthSpec, targetBranchCheck } from "../gate-spec.js";
+import { buildGateSpec, encodeGateSpec, targetBranchCheck } from "../gate-spec.js";
 import type { BuildOutcome, TriggerScenario } from "../scenario.js";
-import { createPrContext, requirePrRepo, teardownPrContext, type PrContext } from "./common.js";
-
-const PROMOTE_ALL = encodePrSynthSpec({ branches: { include: ["main"] } });
+import {
+  createPrContext,
+  promoteSynthSpec,
+  requirePrRepo,
+  teardownPrContext,
+  type PrContext,
+} from "./common.js";
 
 const selfCancelOnFilterFail: TriggerScenario<PrContext> = {
   id: "self-cancel-on-filter-fail",
@@ -23,12 +27,13 @@ const selfCancelOnFilterFail: TriggerScenario<PrContext> = {
     return createPrContext(ctx, { id: "self-cancel-on-filter-fail" });
   },
   queue(_ctx, state) {
-    // The PR targets main; require release/* so the target-branch check fails.
+    // The PR targets its default branch; require release/* so the target-branch
+    // check fails. Promote against the real target branch so the gate runs.
     return {
       sourceBranch: state.sourceRef,
       templateParameters: {
         gateSpec: encodeGateSpec(buildGateSpec("pull-request", [targetBranchCheck("release/*")])),
-        prSynthSpec: PROMOTE_ALL,
+        prSynthSpec: promoteSynthSpec(state.targetBranch),
       },
     };
   },

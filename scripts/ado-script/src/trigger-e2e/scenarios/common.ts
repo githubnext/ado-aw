@@ -10,6 +10,7 @@
  * Test-harness module; not shipped in `ado-script.zip`.
  */
 import { Teardown } from "../../executor-e2e/scenarios/common.js";
+import { encodePrSynthSpec } from "../gate-spec.js";
 import { SkipError } from "../scenario.js";
 import type { TriggerContext } from "../scenario.js";
 
@@ -65,9 +66,15 @@ export async function createPrContext(
   const sourceRef = `refs/heads/${branch}`;
 
   // Default file guarantees a real diff even when the scenario needs none.
-  const files = opts.files ?? {
-    [`/ado-aw-trig/${ctx.buildId}/${opts.id}.md`]: `trigger e2e ${opts.id} for build ${ctx.buildId}. Safe to delete.\n`,
-  };
+  // Treat an explicitly-empty `files: {}` the same as omitted so a caller can
+  // never produce a PR with no diff (which ADO would reject) or crash the
+  // first-entry destructuring below.
+  const files =
+    opts.files && Object.keys(opts.files).length > 0
+      ? opts.files
+      : {
+          [`/ado-aw-trig/${ctx.buildId}/${opts.id}.md`]: `trigger e2e ${opts.id} for build ${ctx.buildId}. Safe to delete.\n`,
+        };
 
   // Push the branch with the first file, then add the rest in follow-up pushes.
   const entries = Object.entries(files);
@@ -124,14 +131,6 @@ export async function teardownPrContext(ctx: TriggerContext, pr: PrContext): Pro
     .run();
 }
 
-/** Register cleanup of a queued victim build id (cancel if somehow still running). */
-export async function cancelVictimIfRunning(ctx: TriggerContext, buildId: number): Promise<void> {
-  const build = await ctx.rest.getBuild(buildId).catch(() => undefined);
-  if (build && build.status !== "completed") {
-    await ctx.rest.cancelBuild(buildId).catch(() => {});
-  }
-}
-
 /**
  * Ensure a real ADO Git repo is available for PR creation. PR/synth/gate
  * scenarios need the victim pipeline's own `self` repo (where `exec-context-
@@ -146,4 +145,27 @@ export function requirePrRepo(ctx: TriggerContext): string {
     );
   }
   return repo;
+}
+
+/**
+ * base64 PR_SYNTH_SPEC that promotes a PR targeting `targetBranch`.
+ *
+ * MUST be derived from the PR's real target branch (`PrContext.targetBranch`,
+ * resolved from the repo's default branch), NOT a hardcoded `"main"`: if the
+ * ADO repo's default branch is anything else, a constant `"main"` include would
+ * fail to match the real target and every gate/synth scenario would silently
+ * evaluate the wrong path.
+ */
+export function promoteSynthSpec(targetBranch: string): string {
+  return encodePrSynthSpec({ branches: { include: [targetBranch] } });
+}
+
+/**
+ * base64 PR_SYNTH_SPEC that deliberately does NOT promote a PR targeting
+ * `targetBranch` (excludes exactly that branch, include-all otherwise), so the
+ * "branch mismatch → not promoted" path is exercised robustly regardless of the
+ * repo's actual default branch name.
+ */
+export function excludeSynthSpec(targetBranch: string): string {
+  return encodePrSynthSpec({ branches: { exclude: [targetBranch] } });
 }
