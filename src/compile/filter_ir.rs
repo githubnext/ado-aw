@@ -1008,6 +1008,10 @@ impl Fact {
     /// `Fact` variant is a compile error there until the variant is appended
     /// here, so `ALL` (and therefore the generated `fact-catalog.gen.json`)
     /// can never silently miss a fact.
+    ///
+    /// Maintenance: the `14` length literal is itself a second compile-time
+    /// guard — appending a variant without bumping it is a mismatched-array-
+    /// length error. Keep it equal to the number of `Fact` variants.
     pub const ALL: [Fact; 14] = [
         Fact::PrTitle,
         Fact::AuthorEmail,

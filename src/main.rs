@@ -1425,9 +1425,12 @@ async fn main() -> Result<()> {
                         .parent()
                         .filter(|parent| !parent.as_os_str().is_empty())
                     {
-                        std::fs::create_dir_all(parent)?;
+                        std::fs::create_dir_all(parent).with_context(|| {
+                            format!("creating parent dir for gate schema: {}", parent.display())
+                        })?;
                     }
-                    std::fs::write(&path, &schema)?;
+                    std::fs::write(&path, &schema)
+                        .with_context(|| format!("writing gate schema to {}", path.display()))?;
                 }
                 None => print!("{}", schema),
             }
@@ -1440,9 +1443,12 @@ async fn main() -> Result<()> {
                         .parent()
                         .filter(|parent| !parent.as_os_str().is_empty())
                     {
-                        std::fs::create_dir_all(parent)?;
+                        std::fs::create_dir_all(parent).with_context(|| {
+                            format!("creating parent dir for fact catalog: {}", parent.display())
+                        })?;
                     }
-                    std::fs::write(&path, &catalog)?;
+                    std::fs::write(&path, &catalog)
+                        .with_context(|| format!("writing fact catalog to {}", path.display()))?;
                 }
                 None => print!("{}", catalog),
             }

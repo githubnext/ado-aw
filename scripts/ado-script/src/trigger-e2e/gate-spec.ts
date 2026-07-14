@@ -91,15 +91,40 @@ export function factMetaCatalog(): FactCatalogEntry[] {
   }));
 }
 
-/** Facts referenced directly by a predicate tree (mirror of predicates.ts collectFacts). */
+/**
+ * Facts referenced directly by a predicate tree (mirror of predicates.ts
+ * collectFacts). Switches on the `type` discriminant so each variant's `fact`
+ * field is accessed type-safely: if a future `PredicateSpec` variant renames or
+ * drops `fact`, this fails to compile rather than silently returning
+ * `undefined` and under-specifying the fact list. The `never` default makes a
+ * newly-added variant a compile error too.
+ */
 function predicateFacts(p: PredicateSpec, out: Set<string> = new Set()): Set<string> {
-  const fact = (p as { fact?: unknown }).fact;
-  if (typeof fact === "string") out.add(fact);
-  if (p.type === "time_window") out.add("current_utc_minutes");
-  if (p.type === "and" || p.type === "or") {
-    for (const sub of p.operands) predicateFacts(sub, out);
+  switch (p.type) {
+    case "glob_match":
+    case "equals":
+    case "value_in_set":
+    case "value_not_in_set":
+    case "numeric_range":
+    case "label_set_match":
+    case "file_glob_match":
+      out.add(p.fact);
+      break;
+    case "time_window":
+      out.add("current_utc_minutes");
+      break;
+    case "and":
+    case "or":
+      for (const sub of p.operands) predicateFacts(sub, out);
+      break;
+    case "not":
+      predicateFacts(p.operand, out);
+      break;
+    default: {
+      const _exhaustive: never = p;
+      throw new Error(`gate-spec: unhandled predicate type '${(_exhaustive as { type?: string }).type}'`);
+    }
   }
-  if (p.type === "not") predicateFacts(p.operand, out);
   return out;
 }
 
