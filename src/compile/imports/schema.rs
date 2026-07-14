@@ -429,9 +429,22 @@ fn lookup_input_path<'a>(
     Some(value)
 }
 
+/// Render an import-input value for interpolation into a `${{ ... }}`
+/// placeholder.
+///
+/// **Trust boundary.** Import inputs are non-secret, compile-time author
+/// choices: a component's schema defaults are pinned by commit SHA (reviewed at
+/// import time) and a consumer's `with:` values are committed to the consumer
+/// repo (reviewed at author time). Neither is agent- or runtime-controlled.
+/// As defense-in-depth we still run string values through
+/// [`crate::sanitize::sanitize_config`], which neutralizes Azure DevOps
+/// pipeline logging commands (`##vso[` / `##[`) and strips control characters,
+/// so an interpolated value can never smuggle a pipeline command into a
+/// generated step. Non-string scalars/containers are rendered structurally and
+/// need no neutralization.
 fn render_json_value(value: &JsonValue) -> String {
     match value {
-        JsonValue::String(value) => value.clone(),
+        JsonValue::String(value) => crate::sanitize::sanitize_config(value),
         JsonValue::Number(value) => value.to_string(),
         JsonValue::Bool(value) => value.to_string(),
         JsonValue::Array(_) | JsonValue::Object(_) => {
@@ -647,6 +660,25 @@ import-schema:
                 "config={\"apiKey\":\"secret\"} ",
                 "missing=${{ ado.aw.import-inputs.missing }}"
             )
+        );
+    }
+
+    #[test]
+    fn substitute_inputs_neutralizes_pipeline_commands_in_string_values() {
+        // A string import input containing an ADO logging command must be
+        // neutralized when interpolated (defense-in-depth), so it cannot smuggle
+        // a `##vso[` pipeline command into a generated step.
+        let inputs = json!({ "evil": "##vso[task.setvariable variable=x]y" });
+        let substituted = substitute_inputs("val=${{ ado.aw.import-inputs.evil }}", inputs.as_object().unwrap());
+        // The neutralized form wraps the command in backticks so ADO renders it
+        // as inert text instead of executing it.
+        assert!(
+            substituted.contains("`##vso[`"),
+            "expected neutralized (backtick-wrapped) form: {substituted}"
+        );
+        assert!(
+            !substituted.contains("##vso[task.setvariable"),
+            "the executable command tail must be broken up: {substituted}"
         );
     }
 

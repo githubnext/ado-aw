@@ -217,6 +217,21 @@ fn resolve_local_path(base_dir: &Path, import_path: &str) -> Result<PathBuf> {
     if path.is_absolute() {
         anyhow::bail!("local import path must be relative, got `{}`", import_path);
     }
+    // Reject path-traversal: a `..`/`.` segment (or a backslash) would let a
+    // local import escape the workflow directory and read arbitrary files at
+    // compile time. Mirrors the guard `flatten_import_path` applies to remote
+    // import paths.
+    if import_path.contains('\\')
+        || import_path
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        anyhow::bail!(
+            "local import path `{}` contains an invalid segment; `.`, `..`, empty \
+             segments, and backslashes are not allowed",
+            import_path
+        );
+    }
     Ok(base_dir.join(path))
 }
 
@@ -380,7 +395,9 @@ fn extract_markdown_section(body: &str, section: &str) -> Result<String> {
         .ok_or_else(|| anyhow::anyhow!("import section `{}` was not found", section))?;
     let start_level = markdown_heading(lines[start])
         .map(|(level, _)| level)
-        .expect("line matched heading above");
+        .ok_or_else(|| {
+            anyhow::anyhow!("import section `{}` heading could not be re-parsed", section)
+        })?;
 
     let end = lines
         .iter()
@@ -601,6 +618,24 @@ mod tests {
             err.to_string()
                 .contains("failed to resolve import `missing.md`")
         );
+    }
+
+    #[test]
+    fn local_import_rejects_path_traversal() {
+        let repo = tempfile::tempdir().unwrap();
+        for spec in ["../secret.md", "../../etc/passwd.md", "a/../../b.md", "./x.md"] {
+            let err = resolve_imports_with_repo_root(
+                &[import_entry(spec)],
+                repo.path(),
+                repo.path(),
+                &PanicFetcher,
+            )
+            .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("invalid segment"),
+                "spec `{spec}` should be rejected as traversal, got: {err:#}"
+            );
+        }
     }
 
     #[test]
