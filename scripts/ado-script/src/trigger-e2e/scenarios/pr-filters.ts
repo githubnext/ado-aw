@@ -183,6 +183,19 @@ const specs: FilterScenarioSpec[] = [
   },
   // ── change count ──────────────────────────────────────────────────────
   {
+    id: "change-count-pass",
+    description: "numeric_range min=1 max=10 and the PR changed 2 files → runs",
+    // Two files also exercises the batched multi-file push in createPrContext.
+    pr: {
+      files: {
+        "/src/trig-count-pass-a.txt": "a\n",
+        "/src/trig-count-pass-b.txt": "b\n",
+      },
+    },
+    check: changeCountCheck({ min: 1, max: 10 }),
+    outcome: "pass",
+  },
+  {
     id: "change-count-skip",
     description: "numeric_range min=5 but the PR changed 1 file → self-cancel",
     pr: { files: { "/src/trig-count-skip.txt": "x\n" } },

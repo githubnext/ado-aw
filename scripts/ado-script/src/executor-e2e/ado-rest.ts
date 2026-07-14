@@ -256,6 +256,55 @@ export class AdoRest {
     return commitId;
   }
 
+  /**
+   * Create a NEW branch and a single commit adding one OR MORE files in one
+   * push. Returns the new commit id.
+   *
+   * Prefer this over calling {@link pushAddFileBranch} in a loop: that helper
+   * always uses new-branch semantics (`oldObjectId` = zeros), so a second call
+   * against the now-existing branch would be rejected by ADO with a ref
+   * conflict. Batching every file into a single commit sidesteps that entirely
+   * and still produces a real diff vs. the base for PR scenarios.
+   */
+  async pushAddFilesBranch(
+    repo: string,
+    branchName: string,
+    baseCommitId: string,
+    files: Record<string, string>,
+    comment: string,
+  ): Promise<string> {
+    const entries = Object.entries(files);
+    if (entries.length === 0) throw new Error("pushAddFilesBranch requires at least one file");
+    const path = this.projPath(
+      `_apis/git/repositories/${AdoRest.seg(repo)}/pushes?api-version=7.1`,
+    );
+    const res = await this.request<{ commits?: { commitId: string }[] }>(path, {
+      method: "POST",
+      body: {
+        refUpdates: [
+          {
+            name: branchName.startsWith("refs/") ? branchName : `refs/heads/${branchName}`,
+            oldObjectId: "0000000000000000000000000000000000000000",
+          },
+        ],
+        commits: [
+          {
+            comment,
+            parents: [baseCommitId],
+            changes: entries.map(([filePath, content]) => ({
+              changeType: "add",
+              item: { path: filePath.startsWith("/") ? filePath : `/${filePath}` },
+              newContent: { content, contentType: "rawtext" },
+            })),
+          },
+        ],
+      },
+    });
+    const commitId = res?.commits?.[0]?.commitId;
+    if (!commitId) throw new Error("pushAddFilesBranch returned no commit id");
+    return commitId;
+  }
+
   // ---- Git: pull requests & threads ------------------------------------
 
   async createPullRequest(
@@ -511,14 +560,17 @@ export class AdoRest {
    * Poll a build until it reaches `status === "completed"` (or the timeout
    * elapses). Returns the terminal `{ status, result }`. `result` is one of
    * `succeeded` | `partiallySucceeded` | `failed` | `canceled`.
+   *
+   * Timeout/poll defaults are generic (15 min / 10 s). Callers that need
+   * suite-specific tuning pass explicit `opts` — env-var knobs belong in the
+   * caller, not this shared client.
    */
   async waitForBuild(
     buildId: number,
     opts: { timeoutMs?: number; pollMs?: number } = {},
   ): Promise<{ status: string; result?: string }> {
-    const timeoutMs =
-      opts.timeoutMs ?? (Number(process.env.TRIGGER_E2E_BUILD_TIMEOUT_MS) || 900_000);
-    const pollMs = opts.pollMs ?? (Number(process.env.TRIGGER_E2E_BUILD_POLL_MS) || 10_000);
+    const timeoutMs = opts.timeoutMs ?? 900_000;
+    const pollMs = opts.pollMs ?? 10_000;
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       const build = await this.getBuild(buildId);

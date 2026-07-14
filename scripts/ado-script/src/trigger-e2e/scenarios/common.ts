@@ -67,8 +67,7 @@ export async function createPrContext(
 
   // Default file guarantees a real diff even when the scenario needs none.
   // Treat an explicitly-empty `files: {}` the same as omitted so a caller can
-  // never produce a PR with no diff (which ADO would reject) or crash the
-  // first-entry destructuring below.
+  // never produce a PR with no diff (which ADO would reject).
   const files =
     opts.files && Object.keys(opts.files).length > 0
       ? opts.files
@@ -76,32 +75,13 @@ export async function createPrContext(
           [`/ado-aw-trig/${ctx.buildId}/${opts.id}.md`]: `trigger e2e ${opts.id} for build ${ctx.buildId}. Safe to delete.\n`,
         };
 
-  // Push the branch with the first file, then add the rest in follow-up pushes.
-  const entries = Object.entries(files);
-  const [firstPath, firstContent] = entries[0]!;
-  let baseCommit = baseSha;
-  baseCommit = await ctx.rest.pushAddFileBranch(
-    repo,
-    branch,
-    baseCommit,
-    firstPath,
-    firstContent,
-    `trigger e2e ${opts.id}`,
-  );
+  // Create the source branch + ALL files in a single push. Batching avoids the
+  // ref-conflict a per-file loop would hit: pushAddFileBranch always uses
+  // new-branch semantics, so a second push to the now-existing branch fails.
+  await ctx.rest.pushAddFilesBranch(repo, branch, baseSha, files, `trigger e2e ${opts.id}`);
 
   // From here the source branch exists; a later throw must clean it up.
   try {
-    for (const [path, content] of entries.slice(1)) {
-      baseCommit = await ctx.rest.pushAddFileBranch(
-        repo,
-        sourceRef,
-        baseCommit,
-        path,
-        content,
-        `trigger e2e ${opts.id} (${path})`,
-      );
-    }
-
     const pr = await ctx.rest.createPullRequest(
       repo,
       branch,

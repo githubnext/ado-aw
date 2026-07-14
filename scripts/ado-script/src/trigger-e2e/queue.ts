@@ -19,6 +19,19 @@ function flattenParams(params: Record<string, string | undefined>): Record<strin
   return out;
 }
 
+/**
+ * Resolve the victim-build poll tuning from trigger-e2e env vars, falling back
+ * to `waitForBuild`'s generic defaults when unset. These knobs live HERE (in
+ * trigger-e2e code) rather than in the shared `AdoRest` client so an
+ * executor-e2e run can never be silently retimed by a `TRIGGER_E2E_*` variable
+ * that happens to be set in its shell.
+ */
+function pollOptions(): { timeoutMs?: number; pollMs?: number } {
+  const timeoutMs = Number(process.env.TRIGGER_E2E_BUILD_TIMEOUT_MS) || undefined;
+  const pollMs = Number(process.env.TRIGGER_E2E_BUILD_POLL_MS) || undefined;
+  return { timeoutMs, pollMs };
+}
+
 export async function runVictim(
   ctx: TriggerContext,
   queue: VictimQueue,
@@ -35,7 +48,7 @@ export async function runVictim(
   onQueued?.(queued.id);
   ctx.log(`  queued victim build #${queued.id}${queue.sourceBranch ? ` on ${queue.sourceBranch}` : ""}`);
 
-  const terminal = await ctx.rest.waitForBuild(queued.id);
+  const terminal = await ctx.rest.waitForBuild(queued.id, pollOptions());
   const tags = await ctx.rest.getBuildTags(queued.id);
   ctx.log(
     `  victim build #${queued.id} completed: result=${terminal.result ?? "?"} tags=[${tags.join(", ")}]`,
