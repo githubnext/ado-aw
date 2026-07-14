@@ -52,6 +52,15 @@ export interface CreatePrOptions {
  *
  * Follows the executor-e2e contract: because a `setup()` throw means the runner
  * will NOT call cleanup, this tears down anything it created before rethrowing.
+ *
+ * IMPORTANT for multi-step setup: the runner only calls `cleanup()` once
+ * `setup()` returns (it gates on `setupDone`). If a scenario's `setup()` calls
+ * `createPrContext` successfully and then does *further* work that throws, the
+ * returned `PrContext` is leaked — cleanup never runs. A scenario that needs
+ * post-PR setup steps must wrap them in its own try/catch that calls
+ * `teardownPrContext` before rethrowing (mirroring executor-e2e's `setupPr`).
+ * All current scenarios' `setup()` is exactly `createPrContext`, so none are
+ * exposed today.
  */
 export async function createPrContext(
   ctx: TriggerContext,

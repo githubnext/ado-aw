@@ -127,6 +127,10 @@ In `https://dev.azure.com/msazuresphere/AgentPlayground`:
    It **must** be an ADO Git repo (not GitHub) so `exec-context-pr-synth` can
    discover open PRs in the pipeline's own `self` repo. Note its **definition
    id** for the next step.
+   - **Pool name.** Both `victim-pipeline.yml` and `azure-pipelines.yml`
+     hardcode `pool: { name: AZS-1ES-L-Playground-ubuntu-22.04 }`. If your ADO
+     project uses a different agent pool, edit both files to point at a
+     Linux pool with Node.js 20 available before registering.
 2. **Register the ORCHESTRATOR pipeline.** New pipeline → existing YAML →
    `tests/trigger-e2e/azure-pipelines.yml`. Place both in a `\trigger-e2e`
    folder.
