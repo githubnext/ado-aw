@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -7,6 +9,7 @@ import {
   draftCheck,
   encodeGateSpec,
   encodePrSynthSpec,
+  factMetaCatalog,
   labelsCheck,
   targetBranchCheck,
   titleCheck,
@@ -106,5 +109,24 @@ describe("encoding", () => {
       branches: { include: ["main"], exclude: [] },
       paths: { include: [], exclude: ["docs/**"] },
     });
+  });
+});
+
+describe("FACT_META drift guard vs Rust-generated catalog", () => {
+  // Deep-compares the hand-maintained FACT_META mirror against the committed
+  // fact-catalog.gen.json, which `npm run codegen` regenerates from
+  // filter_ir.rs::generate_fact_catalog and CI drift-checks (ado-script.yml).
+  //
+  // How this closes the drift hole the types.gen.ts import cannot:
+  //   - A Rust change to a fact's failure_policy/dependencies, or a new/removed
+  //     Fact variant, regenerates fact-catalog.gen.json → CI git-diff fails
+  //     until committed → committing makes this test fail until FACT_META is
+  //     updated to match. Neither the policy nor dependency VALUES are visible
+  //     to the types.gen.ts structural codegen, so this is the only guard.
+  it("matches fact-catalog.gen.json exactly (kind, failure_policy, dependencies, order)", () => {
+    const catalog = JSON.parse(
+      readFileSync(new URL("../fact-catalog.gen.json", import.meta.url), "utf8"),
+    );
+    expect(factMetaCatalog()).toEqual(catalog);
   });
 });

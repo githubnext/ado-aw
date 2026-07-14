@@ -45,6 +45,11 @@ interface FactMeta {
  * Fact kind → metadata. Keys are declared in `Fact` enum order, which the
  * evaluator relies on being topological (a dependency always precedes its
  * dependents). `buildGateSpec` emits facts in this iteration order.
+ *
+ * DRIFT GUARD: this table is deep-compared against the Rust-generated
+ * `fact-catalog.gen.json` by `gate-spec.test.ts` (see `factMetaCatalog`), so a
+ * divergence from `filter_ir.rs::Fact` fails a unit test rather than silently
+ * producing wrong specs at runtime.
  */
 const FACT_META: ReadonlyMap<string, FactMeta> = new Map<string, FactMeta>([
   ["pr_title", { policy: "fail_closed", deps: [] }],
@@ -62,6 +67,29 @@ const FACT_META: ReadonlyMap<string, FactMeta> = new Map<string, FactMeta>([
   ["changed_file_count", { policy: "fail_open", deps: ["changed_files"] }],
   ["current_utc_minutes", { policy: "fail_closed", deps: [] }],
 ]);
+
+/** One catalog row: the serialized view of a fact's kind/policy/dependencies. */
+export interface FactCatalogEntry {
+  readonly kind: string;
+  readonly failure_policy: FailurePolicy;
+  readonly dependencies: string[];
+}
+
+/**
+ * `FACT_META` projected into the exact shape of the Rust-generated
+ * `fact-catalog.gen.json` (array, in insertion/declaration order). The
+ * `gate-spec.test.ts` drift test deep-compares this against that committed
+ * catalog so any Rust-side change to a fact's policy/dependencies — or a
+ * new/removed `Fact` — fails a cheap unit test instead of silently producing
+ * wrong specs at runtime.
+ */
+export function factMetaCatalog(): FactCatalogEntry[] {
+  return [...FACT_META].map(([kind, meta]) => ({
+    kind,
+    failure_policy: meta.policy,
+    dependencies: [...meta.deps],
+  }));
+}
 
 /** Facts referenced directly by a predicate tree (mirror of predicates.ts collectFacts). */
 function predicateFacts(p: PredicateSpec, out: Set<string> = new Set()): Set<string> {

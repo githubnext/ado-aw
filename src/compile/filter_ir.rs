@@ -43,10 +43,13 @@ use std::fmt;
 /// SYNC: the deterministic trigger-condition E2E harness hand-maintains a
 /// mirror of `kind()` / `failure_policy()` / `dependencies()` in
 /// `scripts/ado-script/src/trigger-e2e/gate-spec.ts` (the `FACT_META` table) so
-/// it can craft gate specs without invoking the compiler. The `types.gen.ts`
-/// codegen only guards the serialized `GateSpec` *shape*, not fact
-/// policy/dependency values — so when adding a `Fact` variant, or changing a
-/// `failure_policy`/`dependencies`, update `FACT_META` in that file too.
+/// it can craft gate specs without invoking the compiler. This is machine-
+/// guarded: `generate_fact_catalog` emits `fact-catalog.gen.json` (regenerated
+/// by `npm run codegen`, CI drift-checked like `types.gen.ts`), and a
+/// `gate-spec.test.ts` test deep-compares `FACT_META` against it — so a changed
+/// `failure_policy`/`dependencies` or a new/removed `Fact` fails a unit test.
+/// When adding a `Fact` variant, also append it to `Fact::ALL` (the exhaustive
+/// match in `_fact_all_exhaustiveness_reminder` will not compile until you do).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Fact {
     // ── Pipeline variables (free — always available) ────────────────────
@@ -898,6 +901,36 @@ pub fn generate_gate_spec_schema() -> String {
     serde_json::to_string_pretty(&schema).expect("schema serialization")
 }
 
+/// One entry in the machine-generated fact catalog.
+#[derive(serde::Serialize)]
+struct FactCatalogEntry {
+    kind: &'static str,
+    failure_policy: &'static str,
+    dependencies: Vec<&'static str>,
+}
+
+/// Generate the fact catalog JSON: every [`Fact`]'s `kind`, `failure_policy`,
+/// and (kind-named) `dependencies`, in declaration order.
+///
+/// This is the machine-verifiable source of truth for the hand-maintained
+/// `FACT_META` mirror in
+/// `scripts/ado-script/src/trigger-e2e/gate-spec.ts`. It is emitted to a
+/// committed `fact-catalog.gen.json` by `npm run codegen` and drift-checked in
+/// CI exactly like `types.gen.ts`, so a Rust-side change to a fact's policy or
+/// dependencies (or a new/removed `Fact`) forces a catalog regen — which the
+/// trigger-e2e unit test then flags against `FACT_META`.
+pub fn generate_fact_catalog() -> String {
+    let entries: Vec<FactCatalogEntry> = Fact::ALL
+        .iter()
+        .map(|f| FactCatalogEntry {
+            kind: f.kind(),
+            failure_policy: f.failure_policy().as_str(),
+            dependencies: f.dependencies().iter().map(|d| d.kind()).collect(),
+        })
+        .collect();
+    serde_json::to_string_pretty(&entries).expect("fact catalog serialization")
+}
+
 // ─── Codegen ────────────────────────────────────────────────────────────────
 
 // The inline heredoc evaluator has been removed in favor of external script delivery.
@@ -967,6 +1000,55 @@ impl Fact {
             Fact::ChangedFileCount => "changed_file_count",
             Fact::CurrentUtcMinutes => "current_utc_minutes",
         }
+    }
+
+    /// Every `Fact` variant, in declaration order.
+    ///
+    /// Kept complete by `_fact_all_exhaustiveness_reminder` below: adding a
+    /// `Fact` variant is a compile error there until the variant is appended
+    /// here, so `ALL` (and therefore the generated `fact-catalog.gen.json`)
+    /// can never silently miss a fact.
+    pub const ALL: [Fact; 14] = [
+        Fact::PrTitle,
+        Fact::AuthorEmail,
+        Fact::SourceBranch,
+        Fact::TargetBranch,
+        Fact::CommitMessage,
+        Fact::BuildReason,
+        Fact::TriggeredByPipeline,
+        Fact::TriggeringBranch,
+        Fact::PrMetadata,
+        Fact::PrIsDraft,
+        Fact::PrLabels,
+        Fact::ChangedFiles,
+        Fact::ChangedFileCount,
+        Fact::CurrentUtcMinutes,
+    ];
+}
+
+/// Compile-time completeness guard for [`Fact::ALL`].
+///
+/// This wildcard-free match makes adding a `Fact` variant a hard compile error
+/// until the new variant is listed. When you add the arm here, ALSO append the
+/// variant to `Fact::ALL` above — the generated `fact-catalog.gen.json` (and the
+/// TypeScript `FACT_META` mirror it guards) is derived from `Fact::ALL`.
+#[allow(dead_code)]
+fn _fact_all_exhaustiveness_reminder(f: Fact) {
+    match f {
+        Fact::PrTitle
+        | Fact::AuthorEmail
+        | Fact::SourceBranch
+        | Fact::TargetBranch
+        | Fact::CommitMessage
+        | Fact::BuildReason
+        | Fact::TriggeredByPipeline
+        | Fact::TriggeringBranch
+        | Fact::PrMetadata
+        | Fact::PrIsDraft
+        | Fact::PrLabels
+        | Fact::ChangedFiles
+        | Fact::ChangedFileCount
+        | Fact::CurrentUtcMinutes => {}
     }
 }
 
