@@ -1,0 +1,85 @@
+# Deterministic trigger-condition (gate / synth-PR) E2E ORCHESTRATOR pipeline.
+#
+# Builds the trigger-e2e harness from this checkout and runs it against
+# AgentPlayground. The harness creates real PRs and queues the registered
+# VICTIM pipeline (tests/trigger-e2e/victim-pipeline.yml) under a battery of
+# trigger conditions, asserting the gate decision via build tags + result. On
+# any failure it files a GitHub issue on githubnext/ado-aw and fails the build.
+#
+# Unlike the executor-e2e orchestrator, this does NOT build the Rust `ado-aw`
+# binary: trigger conditions are evaluated entirely by the ado-script bundles
+# the victim runs, so the harness only needs Node.
+#
+# This is a hand-authored ADO pipeline (NOT compiled from an agent markdown).
+# Register it in msazuresphere/AgentPlayground — see tests/trigger-e2e/README.md.
+
+trigger: none
+pr: none
+
+schedules:
+  - cron: "0 6 * * *"
+    displayName: Daily deterministic trigger-condition E2E
+    branches:
+      include:
+        - main
+    always: true
+
+pool:
+  name: AZS-1ES-L-Playground-ubuntu-22.04
+
+variables:
+  # Keep YAML defaults under private names so same-named pipeline/definition UI
+  # variables are not shadowed by this block.
+  EFFECTIVE_TRIGGER_E2E_VICTIM_DEFINITION_ID: $[ coalesce(variables['TRIGGER_E2E_VICTIM_DEFINITION_ID'], '') ]
+  EFFECTIVE_TRIGGER_E2E_VICTIM_REPO: $[ coalesce(variables['TRIGGER_E2E_VICTIM_REPO'], '') ]
+  # GitHub repo that failure issues are filed against is intentionally NOT
+  # defined here: a YAML `variables:` entry SHADOWS a same-named pipeline
+  # (definition) variable. Set TRIGGER_E2E_ISSUE_REPO as a pipeline/definition
+  # variable to redirect issue filing; the harness defaults to githubnext/ado-aw.
+  # TRIGGER_E2E_GITHUB_TOKEN must be provided as a SECRET pipeline variable
+  # (fine-grained PAT scoped to Issues:read/write on githubnext/ado-aw ONLY).
+
+steps:
+  - checkout: self
+    fetchDepth: 1
+    displayName: Checkout ado-aw
+
+  - task: UseNode@1
+    inputs:
+      version: "20.x"
+    displayName: Use Node.js 20
+
+  - script: |
+      set -euo pipefail
+      npm ci
+      npm run build:trigger-e2e
+    workingDirectory: scripts/ado-script
+    displayName: Build trigger-e2e harness (not shipped in ado-script.zip)
+
+  - task: AzureCLI@2
+    displayName: Acquire ADO token (SC_WRITE_TOKEN)
+    inputs:
+      azureSubscription: agent-playground-write
+      scriptType: bash
+      scriptLocation: inlineScript
+      addSpnToEnvironment: true
+      inlineScript: |
+        ADO_TOKEN=$(az account get-access-token \
+          --resource 499b84ac-1321-427f-aa17-267ca6975798 \
+          --query accessToken -o tsv)
+        echo "##vso[task.setvariable variable=SC_WRITE_TOKEN;issecret=true]$ADO_TOKEN"
+
+  - script: |
+      set -euo pipefail
+      node scripts/ado-script/test-bin/trigger-e2e.js
+    displayName: Run deterministic trigger-condition E2E scenarios
+    env:
+      # ADO auth + context. SYSTEM_COLLECTIONURI / SYSTEM_TEAMPROJECT /
+      # BUILD_BUILDID are auto-injected; SYSTEM_ACCESSTOKEN must be mapped
+      # explicitly so the harness can queue builds, create PRs, cancel, and tag.
+      SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)
+      TRIGGER_E2E_VICTIM_DEFINITION_ID: $(EFFECTIVE_TRIGGER_E2E_VICTIM_DEFINITION_ID)
+      TRIGGER_E2E_VICTIM_REPO: $(EFFECTIVE_TRIGGER_E2E_VICTIM_REPO)
+      TRIGGER_E2E_ISSUE_REPO: $(TRIGGER_E2E_ISSUE_REPO)
+      # Secret PAT for filing failure issues (scoped to githubnext/ado-aw Issues).
+      TRIGGER_E2E_GITHUB_TOKEN: $(TRIGGER_E2E_GITHUB_TOKEN)

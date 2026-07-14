@@ -256,6 +256,55 @@ export class AdoRest {
     return commitId;
   }
 
+  /**
+   * Create a NEW branch and a single commit adding one OR MORE files in one
+   * push. Returns the new commit id.
+   *
+   * Prefer this over calling {@link pushAddFileBranch} in a loop: that helper
+   * always uses new-branch semantics (`oldObjectId` = zeros), so a second call
+   * against the now-existing branch would be rejected by ADO with a ref
+   * conflict. Batching every file into a single commit sidesteps that entirely
+   * and still produces a real diff vs. the base for PR scenarios.
+   */
+  async pushAddFilesBranch(
+    repo: string,
+    branchName: string,
+    baseCommitId: string,
+    files: Record<string, string>,
+    comment: string,
+  ): Promise<string> {
+    const entries = Object.entries(files);
+    if (entries.length === 0) throw new Error("pushAddFilesBranch requires at least one file");
+    const path = this.projPath(
+      `_apis/git/repositories/${AdoRest.seg(repo)}/pushes?api-version=7.1`,
+    );
+    const res = await this.request<{ commits?: { commitId: string }[] }>(path, {
+      method: "POST",
+      body: {
+        refUpdates: [
+          {
+            name: branchName.startsWith("refs/") ? branchName : `refs/heads/${branchName}`,
+            oldObjectId: "0000000000000000000000000000000000000000",
+          },
+        ],
+        commits: [
+          {
+            comment,
+            parents: [baseCommitId],
+            changes: entries.map(([filePath, content]) => ({
+              changeType: "add",
+              item: { path: filePath.startsWith("/") ? filePath : `/${filePath}` },
+              newContent: { content, contentType: "rawtext" },
+            })),
+          },
+        ],
+      },
+    });
+    const commitId = res?.commits?.[0]?.commitId;
+    if (!commitId) throw new Error("pushAddFilesBranch returned no commit id");
+    return commitId;
+  }
+
   // ---- Git: pull requests & threads ------------------------------------
 
   async createPullRequest(
@@ -264,18 +313,21 @@ export class AdoRest {
     targetRef: string,
     title: string,
     description: string,
+    isDraft?: boolean,
   ): Promise<{ pullRequestId: number }> {
     const path = this.projPath(
       `_apis/git/repositories/${AdoRest.seg(repo)}/pullrequests?api-version=7.1`,
     );
+    const body: Record<string, unknown> = {
+      sourceRefName: sourceRef.startsWith("refs/") ? sourceRef : `refs/heads/${sourceRef}`,
+      targetRefName: targetRef.startsWith("refs/") ? targetRef : `refs/heads/${targetRef}`,
+      title,
+      description,
+    };
+    if (isDraft !== undefined) body.isDraft = isDraft;
     const res = await this.request<{ pullRequestId: number }>(path, {
       method: "POST",
-      body: {
-        sourceRefName: sourceRef.startsWith("refs/") ? sourceRef : `refs/heads/${sourceRef}`,
-        targetRefName: targetRef.startsWith("refs/") ? targetRef : `refs/heads/${targetRef}`,
-        title,
-        description,
-      },
+      body,
     });
     if (!res) throw new Error("createPullRequest returned no body");
     return res;
@@ -365,6 +417,27 @@ export class AdoRest {
     await this.request(path, { method: "PATCH", body: { status: "abandoned" }, allow404: true });
   }
 
+  /**
+   * Attach one or more labels (tags) to a PR. ADO's label endpoint takes a
+   * single `{ name }` per POST, so this loops. Used by the trigger E2E harness
+   * to exercise the gate's `label_set_match` predicate against real PR labels.
+   */
+  async setPullRequestLabels(repo: string, prId: number, labels: string[]): Promise<void> {
+    for (const name of labels) {
+      const path = this.projPath(
+        `_apis/git/repositories/${AdoRest.seg(repo)}/pullRequests/${prId}/labels?api-version=7.1`,
+      );
+      try {
+        await this.request(path, { method: "POST", body: { name } });
+      } catch (err) {
+        // Name the specific label that failed so a partial-attach surfaces as a
+        // clear setup error rather than a confusing downstream gate mismatch.
+        const message = err instanceof Error ? err.message : String(err);
+        throw new Error(`setPullRequestLabels: failed to attach label '${name}' to PR ${prId}: ${message}`);
+      }
+    }
+  }
+
   // ---- Wiki -------------------------------------------------------------
 
   async listWikis(): Promise<{ name: string; id: string; type?: string }[]> {
@@ -450,5 +523,66 @@ export class AdoRest {
   async cancelBuild(buildId: number): Promise<void> {
     const path = this.projPath(`_apis/build/builds/${buildId}?api-version=7.1`);
     await this.request(path, { method: "PATCH", body: { status: "cancelling" }, allow404: true });
+  }
+
+  /**
+   * Queue a new build of a registered definition. `sourceBranch` selects the
+   * branch to build (used by the trigger E2E harness to point a queued build
+   * at a PR's source branch so `exec-context-pr-synth` can discover the open
+   * PR). `templateParameters` supplies the victim pipeline's runtime
+   * parameters (e.g. the base64 GATE_SPEC / PR_SYNTH_SPEC under test).
+   *
+   * Returns the new build id. Note: a build queued via this REST call has
+   * `Build.Reason = Manual`; the victim relies on the synthetic-PR flag (set
+   * by `exec-context-pr-synth` from a real open PR) — not the build reason —
+   * to drive full PR-gate evaluation.
+   */
+  async queueBuild(
+    definitionId: number,
+    opts: { sourceBranch?: string; templateParameters?: Record<string, string> } = {},
+  ): Promise<{ id: number }> {
+    const path = this.projPath(`_apis/build/builds?api-version=7.1`);
+    const body: Record<string, unknown> = { definition: { id: definitionId } };
+    if (opts.sourceBranch) {
+      body.sourceBranch = opts.sourceBranch.startsWith("refs/")
+        ? opts.sourceBranch
+        : `refs/heads/${opts.sourceBranch}`;
+    }
+    if (opts.templateParameters && Object.keys(opts.templateParameters).length > 0) {
+      body.templateParameters = opts.templateParameters;
+    }
+    const res = await this.request<{ id: number }>(path, { method: "POST", body });
+    if (!res) throw new Error(`queueBuild(${definitionId}) returned no body`);
+    return res;
+  }
+
+  /**
+   * Poll a build until it reaches `status === "completed"` (or the timeout
+   * elapses). Returns the terminal `{ status, result }`. `result` is one of
+   * `succeeded` | `partiallySucceeded` | `failed` | `canceled`.
+   *
+   * Timeout/poll defaults are generic (15 min / 10 s). Callers that need
+   * suite-specific tuning pass explicit `opts` — env-var knobs belong in the
+   * caller, not this shared client.
+   */
+  async waitForBuild(
+    buildId: number,
+    opts: { timeoutMs?: number; pollMs?: number } = {},
+  ): Promise<{ status: string; result?: string }> {
+    const timeoutMs = opts.timeoutMs ?? 900_000;
+    const pollMs = opts.pollMs ?? 10_000;
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const build = await this.getBuild(buildId);
+      if (build.status === "completed") {
+        return { status: build.status, result: build.result };
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `waitForBuild(${buildId}) timed out after ${timeoutMs}ms (last status='${build.status ?? "?"}')`,
+        );
+      }
+      await new Promise((r) => setTimeout(r, pollMs));
+    }
   }
 }

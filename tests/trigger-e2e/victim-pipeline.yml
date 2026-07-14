@@ -1,0 +1,150 @@
+# Trigger-condition E2E VICTIM pipeline.
+#
+# A deterministic, parameterized pipeline that runs ONLY the runtime trigger
+# bundles managed by ado-script — `exec-context-pr-synth.js` (CI→PR synthetic
+# promotion) and `gate.js` (PR filter evaluation) — and reports the decision via
+# REST-observable build tags. It runs NO agent workflow.
+#
+# The trigger-e2e harness (scripts/ado-script/src/trigger-e2e/) queues this
+# pipeline many ways: it creates a real PR, then queues a build on the PR's
+# source branch with a per-scenario base64 `gateSpec` / `prSynthSpec` as
+# template parameters, and asserts the resulting build tags + result.
+#
+# ## Registration requirements (see tests/trigger-e2e/README.md)
+#   - MUST be registered against an **ADO Git repo** (BUILD_REPOSITORY_PROVIDER
+#     = TfsGit), because `exec-context-pr-synth` discovers the open PR in the
+#     pipeline's OWN `self` repo. A GitHub-typed repo short-circuits synth.
+#     Register it against the ado-aw Azure Repos mirror so the `self` checkout
+#     also carries `scripts/ado-script/` to build the bundles from source.
+#   - The build identity ($(System.AccessToken)) needs: Code (read) on the repo
+#     (PR/label/iteration lookups), Build (edit build quality / add tags) and
+#     the ability to cancel builds (gate self-cancel). See
+#     docs/safe-output-permissions.md if it hits 401/403.
+#
+# ## Observable build tags
+#   - trig.synth.promoted | trig.synth.skipped | trig.synth.real-pr
+#   - pr-gate.passed (bypass) | pr-gate.skipped + pr-gate.<check> (filter fail)
+#   - trig.should-run.true (gate let the run proceed)
+
+trigger: none
+pr: none
+
+pool:
+  name: AZS-1ES-L-Playground-ubuntu-22.04
+
+parameters:
+  # Required per queue: base64 GateSpec produced by the harness gate-spec.ts.
+  - name: gateSpec
+    type: string
+    default: ""
+  # base64 PrSynthSpec. Default = empty include/exclude (match-all promote).
+  - name: prSynthSpec
+    type: string
+    default: "eyJicmFuY2hlcyI6eyJpbmNsdWRlIjpbXSwiZXhjbHVkZSI6W119LCJwYXRocyI6eyJpbmNsdWRlIjpbXSwiZXhjbHVkZSI6W119fQ=="
+  # Pipeline-variable fact overrides. Defaults reference the synth-resolved
+  # AW_PR_* vars / ADO predefined vars, so an unset override uses the real value.
+  - name: prTitle
+    type: string
+    default: "$(System.PullRequest.Title)"
+  - name: authorEmail
+    type: string
+    default: "$(Build.RequestedForEmail)"
+  - name: sourceBranchFact
+    type: string
+    default: "$(AW_PR_SOURCEBRANCH)"
+  - name: targetBranchFact
+    type: string
+    default: "$(AW_PR_TARGETBRANCH)"
+  - name: commitMessage
+    type: string
+    default: "$(Build.SourceVersionMessage)"
+
+jobs:
+  - job: Trigger
+    displayName: Evaluate trigger conditions
+    steps:
+      - checkout: self
+        # Full history is not needed; the bundles are built from the checkout
+        # and the gate/synth logic uses REST, not git.
+        fetchDepth: 1
+        displayName: Checkout self (ado-aw source)
+
+      - task: UseNode@1
+        inputs:
+          version: "20.x"
+        displayName: Use Node.js 20
+
+      - script: |
+          set -euo pipefail
+          npm ci
+          npm run build:gate
+          npm run build:exec-context-pr-synth
+        workingDirectory: scripts/ado-script
+        displayName: Build gate + synth bundles from checkout
+
+      - script: |
+          set -euo pipefail
+          node scripts/ado-script/exec-context-pr-synth.js
+        displayName: Run exec-context-pr-synth (synthetic PR promotion)
+        env:
+          PR_SYNTH_SPEC: ${{ parameters.prSynthSpec }}
+          # REST auth for active-PR / iteration lookups.
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+      - script: |
+          set -euo pipefail
+          # Classify the synth outcome from the same-job vars synth setVar's.
+          # AW_PR_ID is always set (empty on skip); AW_SYNTHETIC_PR is only set
+          # to "true" on promotion (else left as the literal macro).
+          SYN="$(AW_SYNTHETIC_PR)"
+          PRID="$(AW_PR_ID)"
+          case "$SYN" in '$('*) SYN="" ;; esac
+          case "$PRID" in '$('*) PRID="" ;; esac
+          if [ "$SYN" = "true" ]; then
+            STATE="promoted"
+          elif [ -n "$PRID" ]; then
+            STATE="real-pr"
+          else
+            STATE="skipped"
+          fi
+          echo "synth state: ${STATE} (AW_PR_ID='${PRID}' AW_SYNTHETIC_PR='${SYN}')"
+          echo "##vso[build.addbuildtag]trig.synth.${STATE}"
+        displayName: Tag synth outcome
+
+      - script: |
+          set -euo pipefail
+          node scripts/ado-script/gate.js
+        name: prGate
+        displayName: Evaluate PR filters (gate)
+        env:
+          GATE_SPEC: ${{ parameters.gateSpec }}
+          # Gate context / infra facts.
+          ADO_BUILD_REASON: $(Build.Reason)
+          ADO_BUILD_ID: $(Build.BuildId)
+          ADO_PROJECT: $(System.TeamProject)
+          ADO_REPO_ID: $(Build.Repository.ID)
+          # PR identity: resolved by synth (real or promoted). AW_SYNTHETIC_PR
+          # tells the gate's bypass logic to run full evaluation on a promoted
+          # CI build.
+          ADO_PR_ID: $(AW_PR_ID)
+          AW_SYNTHETIC_PR: $(AW_SYNTHETIC_PR)
+          # Pipeline-variable facts (override-able via template parameters).
+          ADO_PR_TITLE: ${{ parameters.prTitle }}
+          ADO_AUTHOR_EMAIL: ${{ parameters.authorEmail }}
+          ADO_SOURCE_BRANCH: ${{ parameters.sourceBranchFact }}
+          ADO_TARGET_BRANCH: ${{ parameters.targetBranchFact }}
+          ADO_COMMIT_MESSAGE: ${{ parameters.commitMessage }}
+          # REST auth for API facts (labels, changed files) + self-cancel.
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+      - script: |
+          set -euo pipefail
+          # Only reached when the gate did NOT self-cancel (SHOULD_RUN=true or
+          # bypass). SHOULD_RUN is a step-output var of the `prGate` step.
+          RUN="$(prGate.SHOULD_RUN)"
+          echo "gate SHOULD_RUN='${RUN}'"
+          if [ "$RUN" = "true" ]; then
+            echo "##vso[build.addbuildtag]trig.should-run.true"
+          fi
+        # Default condition is succeeded(); a self-cancelled build skips this.
+        displayName: Reflect gate decision

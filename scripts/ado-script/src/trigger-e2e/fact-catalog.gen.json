@@ -1,0 +1,78 @@
+[
+  {
+    "kind": "pr_title",
+    "failure_policy": "fail_closed",
+    "dependencies": []
+  },
+  {
+    "kind": "author_email",
+    "failure_policy": "fail_closed",
+    "dependencies": []
+  },
+  {
+    "kind": "source_branch",
+    "failure_policy": "fail_closed",
+    "dependencies": []
+  },
+  {
+    "kind": "target_branch",
+    "failure_policy": "fail_closed",
+    "dependencies": []
+  },
+  {
+    "kind": "commit_message",
+    "failure_policy": "fail_closed",
+    "dependencies": []
+  },
+  {
+    "kind": "build_reason",
+    "failure_policy": "fail_closed",
+    "dependencies": []
+  },
+  {
+    "kind": "triggered_by_pipeline",
+    "failure_policy": "fail_closed",
+    "dependencies": []
+  },
+  {
+    "kind": "triggering_branch",
+    "failure_policy": "fail_closed",
+    "dependencies": []
+  },
+  {
+    "kind": "pr_metadata",
+    "failure_policy": "skip_dependents",
+    "dependencies": []
+  },
+  {
+    "kind": "pr_is_draft",
+    "failure_policy": "fail_closed",
+    "dependencies": [
+      "pr_metadata"
+    ]
+  },
+  {
+    "kind": "pr_labels",
+    "failure_policy": "fail_open",
+    "dependencies": [
+      "pr_metadata"
+    ]
+  },
+  {
+    "kind": "changed_files",
+    "failure_policy": "fail_open",
+    "dependencies": []
+  },
+  {
+    "kind": "changed_file_count",
+    "failure_policy": "fail_open",
+    "dependencies": [
+      "changed_files"
+    ]
+  },
+  {
+    "kind": "current_utc_minutes",
+    "failure_policy": "fail_closed",
+    "dependencies": []
+  }
+]

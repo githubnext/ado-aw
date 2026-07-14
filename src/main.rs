@@ -574,6 +574,15 @@ enum Commands {
         #[arg(short, long)]
         output: Option<std::path::PathBuf>,
     },
+    /// Export the fact catalog JSON (kind/failure_policy/dependencies for every
+    /// gate `Fact`) — build-time drift guard for the trigger-e2e `FACT_META`
+    /// mirror in the scripts/ado-script TypeScript workspace.
+    #[command(hide = true)]
+    ExportFactCatalog {
+        /// Output path; if omitted, prints to stdout.
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
+    },
     /// Inspect an agent source file's typed IR: jobs, stages, steps, outputs, derived `dependsOn`.
     Inspect {
         /// Path to the agent markdown source.
@@ -999,6 +1008,7 @@ async fn main() -> Result<()> {
         Some(Commands::Audit { .. }) => "audit",
         Some(Commands::Trace { .. }) => "trace",
         Some(Commands::ExportGateSchema { .. }) => "export-gate-schema",
+        Some(Commands::ExportFactCatalog { .. }) => "export-fact-catalog",
         Some(Commands::Inspect { .. }) => "inspect",
         Some(Commands::Graph { .. }) => "graph",
         Some(Commands::Whatif { .. }) => "whatif",
@@ -1415,11 +1425,32 @@ async fn main() -> Result<()> {
                         .parent()
                         .filter(|parent| !parent.as_os_str().is_empty())
                     {
-                        std::fs::create_dir_all(parent)?;
+                        std::fs::create_dir_all(parent).with_context(|| {
+                            format!("creating parent dir for gate schema: {}", parent.display())
+                        })?;
                     }
-                    std::fs::write(&path, &schema)?;
+                    std::fs::write(&path, &schema)
+                        .with_context(|| format!("writing gate schema to {}", path.display()))?;
                 }
                 None => print!("{}", schema),
+            }
+        }
+        Commands::ExportFactCatalog { output } => {
+            let catalog = compile::filter_ir::generate_fact_catalog();
+            match output {
+                Some(path) => {
+                    if let Some(parent) = path
+                        .parent()
+                        .filter(|parent| !parent.as_os_str().is_empty())
+                    {
+                        std::fs::create_dir_all(parent).with_context(|| {
+                            format!("creating parent dir for fact catalog: {}", parent.display())
+                        })?;
+                    }
+                    std::fs::write(&path, &catalog)
+                        .with_context(|| format!("writing fact catalog to {}", path.display()))?;
+                }
+                None => print!("{}", catalog),
             }
         }
         Commands::Inspect { source, json } => {
