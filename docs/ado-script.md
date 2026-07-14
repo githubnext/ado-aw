@@ -617,6 +617,17 @@ The Rust subcommand that emits the schema is intentionally hidden:
 cargo run -- export-gate-schema --output schema/gate-spec.schema.json
 ```
 
+A second hidden command exports the fact catalog JSON (kind/failure_policy/dependencies
+for every gate `Fact`), used as a drift guard for the `FACT_META` mirror in
+`scripts/ado-script/src/trigger-e2e/gate-spec.ts`:
+
+```sh
+cargo run -- export-fact-catalog --output schema/fact-catalog.gen.json
+```
+
+`npm run codegen` runs both export stages. See [`docs/cli.md`](cli.md#hidden-build-time-tools)
+for the full option reference of both hidden commands.
+
 ## How the bundles are wired into emitted pipelines
 
 `AdoScriptExtension`
