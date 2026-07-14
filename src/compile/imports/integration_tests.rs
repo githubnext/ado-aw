@@ -7,15 +7,18 @@ use serde_yaml::{Mapping, Value};
 use super::alias::{import_resource_parent_diagnostic, synthesize_repo_aliases};
 use super::merge::merge_resolved;
 use super::{ImportProvenance, ManifestFetcher, ResolvedImport, resolve_imports};
-use crate::compile::types::{CompileTarget, ImportEntry, ImportSource, ParsedImportSpec};
+use crate::compile::types::{
+    CompileTarget, ImportEndpoint, ImportEntry, ImportSource, ParsedImportSpec,
+};
 use crate::secure::CommitSha;
 
 const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 
 struct PanicFetcher;
 
+#[async_trait::async_trait]
 impl ManifestFetcher for PanicFetcher {
-    fn fetch(&self, _spec: &ParsedImportSpec) -> Result<Vec<u8>> {
+    async fn fetch(&self, _spec: &ParsedImportSpec) -> Result<Vec<u8>> {
         panic!("integration tests must not fetch remote imports")
     }
 }
@@ -97,12 +100,14 @@ fn write_component(dir: &Path, name: &str, content: &str) {
     fs::write(path, content).expect("write component");
 }
 
-fn resolve_local(entries: &[ImportEntry], base_dir: &Path) -> Vec<ResolvedImport> {
-    resolve_imports(entries, base_dir, &PanicFetcher).expect("resolve local imports")
+async fn resolve_local(entries: &[ImportEntry], base_dir: &Path) -> Vec<ResolvedImport> {
+    resolve_imports(entries, base_dir, &PanicFetcher)
+        .await
+        .expect("resolve local imports")
 }
 
-#[test]
-fn imports_integration_local_resolve_then_merge_consumer_wins_and_unions() {
+#[tokio::test]
+async fn imports_integration_local_resolve_then_merge_consumer_wins_and_unions() {
     let repo = temp_repo();
     let workflow_dir = repo.path().join("workflows");
     fs::create_dir_all(&workflow_dir).expect("create workflow dir");
@@ -141,7 +146,7 @@ Consumer guidance.
     .expect("write workflow");
 
     let (mut consumer_fm, consumer_body, entries) = parse_workflow(&workflow_path);
-    let resolved = resolve_local(&entries, &workflow_dir);
+    let resolved = resolve_local(&entries, &workflow_dir).await;
     let merged_body =
         merge_resolved(&mut consumer_fm, &consumer_body, &resolved).expect("merge imports");
 
@@ -161,8 +166,8 @@ Consumer guidance.
     assert_eq!(merged_body, "Imported guidance.\n\nConsumer guidance.");
 }
 
-#[test]
-fn imports_integration_schema_inputs_are_substituted_before_merge() {
+#[tokio::test]
+async fn imports_integration_schema_inputs_are_substituted_before_merge() {
     let repo = temp_repo();
     let workflow_dir = repo.path().join("workflows");
     fs::create_dir_all(&workflow_dir).expect("create workflow dir");
@@ -200,7 +205,7 @@ Consumer body.
     .expect("write workflow");
 
     let (mut consumer_fm, consumer_body, entries) = parse_workflow(&workflow_path);
-    let resolved = resolve_local(&entries, &workflow_dir);
+    let resolved = resolve_local(&entries, &workflow_dir).await;
     let merged_body =
         merge_resolved(&mut consumer_fm, &consumer_body, &resolved).expect("merge imports");
 
@@ -239,8 +244,8 @@ fn imports_integration_remote_specs_must_be_sha_pinned() {
     );
 }
 
-#[test]
-fn imports_integration_merge_conflicts_and_safe_output_configuration() {
+#[tokio::test]
+async fn imports_integration_merge_conflicts_and_safe_output_configuration() {
     let repo = temp_repo();
     let workflow_dir = repo.path().join("workflows");
     fs::create_dir_all(&workflow_dir).expect("create workflow dir");
@@ -257,7 +262,8 @@ fn imports_integration_merge_conflicts_and_safe_output_configuration() {
     let duplicate_tools = resolve_local(
         &[import_entry("tool-one.md"), import_entry("tool-two.md")],
         &workflow_dir,
-    );
+    )
+    .await;
     let err = merge_resolved(&mut ymap("name: consumer"), "", &duplicate_tools)
         .expect_err("duplicate imported tools should fail");
     assert!(err.to_string().contains("tools.edit"), "{err}");
@@ -267,7 +273,7 @@ fn imports_integration_merge_conflicts_and_safe_output_configuration() {
         "notify.md",
         "---\nsafe-outputs:\n  notify:\n    run: notify.js\n---\nnotify\n",
     );
-    let notify = resolve_local(&[import_entry("notify.md")], &workflow_dir);
+    let notify = resolve_local(&[import_entry("notify.md")], &workflow_dir).await;
     let err = merge_resolved(
         &mut ymap("safe-outputs:\n  notify:\n    run: consumer.js"),
         "",
@@ -291,14 +297,15 @@ fn imports_integration_merge_conflicts_and_safe_output_configuration() {
     assert_eq!(map_get(notify_cfg, "require-approval"), &Value::Bool(true));
 }
 
-#[test]
-fn imports_integration_resolve_enforces_import_count_limit() {
+#[tokio::test]
+async fn imports_integration_resolve_enforces_import_count_limit() {
     let repo = temp_repo();
     let entries: Vec<ImportEntry> = (0..21)
         .map(|idx| import_entry(&format!("missing-{idx}.md?")))
         .collect();
 
     let err = resolve_imports(&entries, repo.path(), &PanicFetcher)
+        .await
         .expect_err("more than 20 imports should fail before resolution");
 
     assert!(
@@ -314,7 +321,9 @@ fn imports_integration_remote_alias_synthesis_and_template_diagnostic() {
         entry: ImportEntry {
             uses: format!("octo/components/deploy.md@{SHA}"),
             with: serde_json::Map::new(),
-            endpoint: Some("github-service-connection".to_string()),
+            endpoint: Some(ImportEndpoint::GitHub {
+                name: "github-service-connection".to_string(),
+            }),
         },
         source: ImportSource::Remote(ParsedImportSpec {
             owner: "octo".to_string(),
@@ -323,6 +332,9 @@ fn imports_integration_remote_alias_synthesis_and_template_diagnostic() {
             sha: CommitSha::parse(SHA).expect("valid sha"),
             section: None,
             optional: false,
+            endpoint: Some(ImportEndpoint::GitHub {
+                name: "github-service-connection".to_string(),
+            }),
         }),
         front_matter: Value::Null,
         body: String::new(),

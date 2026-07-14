@@ -13,13 +13,13 @@ pub mod schema;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Deserialize;
 
-use crate::compile::types::{ImportEntry, ImportSource, ParsedImportSpec};
+use crate::compile::types::{ImportEndpoint, ImportEntry, ImportSource, ParsedImportSpec};
 use crate::hash::sha256_hex;
 
 const MAX_IMPORTS_PER_WORKFLOW: usize = 20;
@@ -30,16 +30,21 @@ const IMPORT_GITATTRIBUTES: &str = "# Mark all cached import files as generated\
 * merge=ours\n";
 
 /// Fetches a single SHA-pinned component manifest.
+#[async_trait]
 pub trait ManifestFetcher {
-    fn fetch(&self, spec: &ParsedImportSpec) -> Result<Vec<u8>>;
+    async fn fetch(&self, spec: &ParsedImportSpec) -> Result<Vec<u8>>;
 }
 
 /// GitHub Contents API-backed manifest fetcher using the author's `gh` auth.
+///
+/// Handles both GitHub.com ([`ImportEndpoint::GitHub`]) and GitHub Enterprise
+/// ([`ImportEndpoint::GitHubEnterprise`]) sources; for GHE the target API host
+/// is passed to `gh` via the `GH_HOST` environment variable.
 pub struct GhCliFetcher;
 
+#[async_trait]
 impl ManifestFetcher for GhCliFetcher {
-    fn fetch(&self, spec: &ParsedImportSpec) -> Result<Vec<u8>> {
-        // TODO: Azure Repos manifest fetch (follow-up).
+    async fn fetch(&self, spec: &ParsedImportSpec) -> Result<Vec<u8>> {
         let route = format!(
             "repos/{}/{}/contents/{}?ref={}",
             spec.owner,
@@ -47,9 +52,18 @@ impl ManifestFetcher for GhCliFetcher {
             spec.path,
             spec.sha.as_str()
         );
-        let output = Command::new("gh")
-            .args(["api", &route])
+
+        let mut command = tokio::process::Command::new("gh");
+        command.args(["api", &route]);
+        // GitHub Enterprise: target the configured API host. `GH_HOST` makes
+        // `gh api` resolve the relative route against that instance.
+        if let Some(ImportEndpoint::GitHubEnterprise { host, .. }) = &spec.endpoint {
+            command.env("GH_HOST", host.as_str());
+        }
+
+        let output = command
             .output()
+            .await
             .with_context(|| format!("failed to run `gh api {route}` for import manifest"))?;
 
         if !output.status.success() {
@@ -92,6 +106,157 @@ impl ManifestFetcher for GhCliFetcher {
     }
 }
 
+/// Azure Repos-backed manifest fetcher — the **primary** compile-time source.
+///
+/// Fetches a SHA-pinned manifest from the ADO Git Items API. Endpoint-less
+/// imports resolve against the consumer's own organization (`context_org_url`);
+/// [`ImportEndpoint::AzureReposCrossOrg`] imports resolve against the
+/// organization named in the endpoint. The import spec's `owner` maps to the
+/// ADO **project** and `repo` to the repository name.
+///
+/// `context_org_url` and `auth` are resolved once, best-effort, at construction
+/// time (only when the workflow actually declares an Azure Repos import). A
+/// failure to resolve either is deferred and surfaced **fail-closed** when an
+/// Azure Repos import is actually fetched — an Azure-Repos-typed import never
+/// silently falls back to GitHub.
+pub struct AdoRepoFetcher {
+    client: reqwest::Client,
+    /// Consumer organization collection URL for same-org imports, or the reason
+    /// it could not be resolved.
+    context_org_url: std::result::Result<String, String>,
+    /// Non-interactive ADO auth, or the reason it could not be resolved.
+    auth: std::result::Result<crate::ado::AdoAuth, String>,
+}
+
+impl AdoRepoFetcher {
+    /// Construct a fetcher from a best-effort org URL and auth resolution.
+    pub fn new(
+        context_org_url: std::result::Result<String, String>,
+        auth: std::result::Result<crate::ado::AdoAuth, String>,
+    ) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            context_org_url,
+            auth,
+        }
+    }
+}
+
+#[async_trait]
+impl ManifestFetcher for AdoRepoFetcher {
+    async fn fetch(&self, spec: &ParsedImportSpec) -> Result<Vec<u8>> {
+        let org_url = match &spec.endpoint {
+            None => self.context_org_url.as_deref().map_err(|reason| {
+                anyhow::anyhow!(
+                    "cannot fetch same-org Azure Repos import `{}/{}/{}`: {}. \
+                     Set AZURE_DEVOPS_ORG_URL / SYSTEM_COLLECTIONURI or run from an \
+                     Azure Repos checkout; to import from GitHub, add an `endpoint:`.",
+                    spec.owner,
+                    spec.repo,
+                    spec.path,
+                    reason
+                )
+            })?,
+            Some(ImportEndpoint::AzureReposCrossOrg { org, .. }) => org.as_str(),
+            Some(other) => {
+                // Fail-closed: a GitHub/GHE-typed import must never reach the
+                // Azure Repos fetcher.
+                anyhow::bail!(
+                    "internal routing error: Azure Repos fetcher received a {:?} import",
+                    other
+                );
+            }
+        };
+
+        let auth = self.auth.as_ref().map_err(|reason| {
+            anyhow::anyhow!(
+                "cannot authenticate to Azure Repos for import `{}/{}/{}`: {}",
+                spec.owner,
+                spec.repo,
+                spec.path,
+                reason
+            )
+        })?;
+
+        crate::ado::fetch_git_item(
+            &self.client,
+            org_url,
+            &spec.owner,
+            &spec.repo,
+            &spec.path,
+            spec.sha.as_str(),
+            auth,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to fetch Azure Repos import manifest `{}/{}/{}@{}`",
+                spec.owner,
+                spec.repo,
+                spec.path,
+                spec.sha.as_str()
+            )
+        })
+    }
+}
+
+/// Routes each import to the correct fetcher based on its typed endpoint,
+/// guaranteeing the compile-time fetch source matches the runtime checkout
+/// source (see [`crate::compile::imports::alias`]).
+///
+/// - endpoint-less / [`ImportEndpoint::AzureReposCrossOrg`] → [`AdoRepoFetcher`]
+/// - [`ImportEndpoint::GitHub`] / [`ImportEndpoint::GitHubEnterprise`] → [`GhCliFetcher`]
+///
+/// **Fail-closed:** an Azure-Repos-intended (endpoint-less) import can never be
+/// silently served by GitHub, eliminating the source-confusion class of bug.
+pub struct RoutingFetcher {
+    ado: AdoRepoFetcher,
+    github: GhCliFetcher,
+}
+
+impl RoutingFetcher {
+    pub fn new(ado: AdoRepoFetcher) -> Self {
+        Self {
+            ado,
+            github: GhCliFetcher,
+        }
+    }
+}
+
+/// Which fetcher a given endpoint routes to. Extracted as a pure function so
+/// the source-confusion guard (an Azure-Repos-intended import must never be
+/// served by GitHub, and vice-versa) can be unit-tested without any network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetcherKind {
+    /// Azure Repos (same-org endpoint-less, or cross-org).
+    AzureRepos,
+    /// GitHub.com or GitHub Enterprise.
+    GitHub,
+}
+
+/// Classify an import endpoint to its fetcher. Endpoint-less imports are
+/// same-org Azure Repos (primary); this is the single source of truth that
+/// keeps compile-time fetch routing aligned with the runtime checkout in
+/// [`crate::compile::imports::alias`].
+pub fn route_endpoint(endpoint: &Option<ImportEndpoint>) -> FetcherKind {
+    match endpoint {
+        None | Some(ImportEndpoint::AzureReposCrossOrg { .. }) => FetcherKind::AzureRepos,
+        Some(ImportEndpoint::GitHub { .. }) | Some(ImportEndpoint::GitHubEnterprise { .. }) => {
+            FetcherKind::GitHub
+        }
+    }
+}
+
+#[async_trait]
+impl ManifestFetcher for RoutingFetcher {
+    async fn fetch(&self, spec: &ParsedImportSpec) -> Result<Vec<u8>> {
+        match route_endpoint(&spec.endpoint) {
+            FetcherKind::AzureRepos => self.ado.fetch(spec).await,
+            FetcherKind::GitHub => self.github.fetch(spec).await,
+        }
+    }
+}
+
 /// A resolved import manifest plus source provenance.
 #[derive(Debug, Clone)]
 pub struct ResolvedImport {
@@ -115,12 +280,12 @@ pub struct ImportProvenance {
 /// Prefer [`resolve_imports_with_repo_root`] when the workflow directory is not
 /// the repository root. This function is kept as the simple public entry point
 /// for callers that compile from the repo root.
-pub fn resolve_imports(
+pub async fn resolve_imports(
     entries: &[ImportEntry],
     base_dir: &Path,
     fetcher: &dyn ManifestFetcher,
 ) -> Result<Vec<ResolvedImport>> {
-    resolve_imports_with_repo_root(entries, base_dir, base_dir, fetcher)
+    resolve_imports_with_repo_root(entries, base_dir, base_dir, fetcher).await
 }
 
 /// Resolve top-level imports using an explicit repo root for the committed
@@ -129,7 +294,7 @@ pub fn resolve_imports(
 /// TODO: nested imports (depth<=3). This pass intentionally resolves only the
 /// workflow's declared top-level `imports:` list; transitive resolution will
 /// layer on this entry point in a later merge pass.
-pub fn resolve_imports_with_repo_root(
+pub async fn resolve_imports_with_repo_root(
     entries: &[ImportEntry],
     base_dir: &Path,
     repo_root: &Path,
@@ -146,6 +311,7 @@ pub fn resolve_imports_with_repo_root(
     let mut resolved = Vec::new();
     for entry in entries {
         if let Some(import) = resolve_one(entry, base_dir, repo_root, fetcher)
+            .await
             .with_context(|| format!("failed to resolve import `{}`", entry.uses))?
         {
             resolved.push(import);
@@ -154,7 +320,7 @@ pub fn resolve_imports_with_repo_root(
     Ok(resolved)
 }
 
-fn resolve_one(
+async fn resolve_one(
     entry: &ImportEntry,
     base_dir: &Path,
     repo_root: &Path,
@@ -194,7 +360,7 @@ fn resolve_one(
             }))
         }
         ImportSource::Remote(spec) => {
-            let bytes = read_remote_manifest(repo_root, spec, fetcher)?;
+            let bytes = read_remote_manifest(repo_root, spec, fetcher).await?;
             let digest = sha256_hex(&bytes);
             let (front_matter, body) = parse_manifest_bytes(&bytes, spec.section.as_deref())?;
             Ok(Some(ResolvedImport {
@@ -235,7 +401,7 @@ fn resolve_local_path(base_dir: &Path, import_path: &str) -> Result<PathBuf> {
     Ok(base_dir.join(path))
 }
 
-fn read_remote_manifest(
+async fn read_remote_manifest(
     repo_root: &Path,
     spec: &ParsedImportSpec,
     fetcher: &dyn ManifestFetcher,
@@ -266,7 +432,7 @@ fn read_remote_manifest(
         return Ok(bytes);
     }
 
-    let bytes = fetcher.fetch(spec)?;
+    let bytes = fetcher.fetch(spec).await?;
     enforce_manifest_size(
         bytes.len(),
         &format!("{}/{}/{}", spec.owner, spec.repo, spec.path),
@@ -491,16 +657,18 @@ mod tests {
         bytes: Vec<u8>,
     }
 
+    #[async_trait]
     impl ManifestFetcher for StaticFetcher {
-        fn fetch(&self, _spec: &ParsedImportSpec) -> Result<Vec<u8>> {
+        async fn fetch(&self, _spec: &ParsedImportSpec) -> Result<Vec<u8>> {
             Ok(self.bytes.clone())
         }
     }
 
     struct PanicFetcher;
 
+    #[async_trait]
     impl ManifestFetcher for PanicFetcher {
-        fn fetch(&self, _spec: &ParsedImportSpec) -> Result<Vec<u8>> {
+        async fn fetch(&self, _spec: &ParsedImportSpec) -> Result<Vec<u8>> {
             panic!("fetcher must not be called on cache hit")
         }
     }
@@ -517,8 +685,8 @@ mod tests {
         b"---\nimport-schema:\n  region:\n    type: string\n---\n# Imported\nBody\n"
     }
 
-    #[test]
-    fn local_import_resolves_front_matter_body_and_provenance() {
+    #[tokio::test]
+    async fn local_import_resolves_front_matter_body_and_provenance() {
         let repo = tempfile::tempdir().unwrap();
         let workflow_dir = repo.path().join("workflows");
         fs::create_dir_all(&workflow_dir).unwrap();
@@ -531,6 +699,7 @@ mod tests {
             repo.path(),
             &PanicFetcher,
         )
+        .await
         .unwrap();
 
         assert_eq!(resolved.len(), 1);
@@ -544,8 +713,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn remote_import_fetches_writes_cache_attributes_and_records_digest() {
+    #[tokio::test]
+    async fn remote_import_fetches_writes_cache_attributes_and_records_digest() {
         let repo = tempfile::tempdir().unwrap();
         let entry = import_entry(&format!("acme/shared/components/deploy.md@{SHA}"));
         let fetcher = StaticFetcher {
@@ -553,7 +722,9 @@ mod tests {
         };
 
         let resolved =
-            resolve_imports_with_repo_root(&[entry], repo.path(), repo.path(), &fetcher).unwrap();
+            resolve_imports_with_repo_root(&[entry], repo.path(), repo.path(), &fetcher)
+                .await
+                .unwrap();
 
         let cache_file = repo
             .path()
@@ -584,8 +755,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn remote_import_uses_cache_before_fetching() {
+    #[tokio::test]
+    async fn remote_import_uses_cache_before_fetching() {
         let repo = tempfile::tempdir().unwrap();
         let entry = import_entry(&format!("acme/shared/components/deploy.md@{SHA}"));
         let cache_dir = repo
@@ -600,14 +771,15 @@ mod tests {
 
         let resolved =
             resolve_imports_with_repo_root(&[entry], repo.path(), repo.path(), &PanicFetcher)
+                .await
                 .unwrap();
 
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].body, "# Imported\nBody");
     }
 
-    #[test]
-    fn size_cap_rejects_large_manifest() {
+    #[tokio::test]
+    async fn size_cap_rejects_large_manifest() {
         let repo = tempfile::tempdir().unwrap();
         let entry = import_entry(&format!("acme/shared/component.md@{SHA}"));
         let fetcher = StaticFetcher {
@@ -615,13 +787,14 @@ mod tests {
         };
 
         let err = resolve_imports_with_repo_root(&[entry], repo.path(), repo.path(), &fetcher)
+            .await
             .unwrap_err();
 
         assert!(format!("{err:#}").contains("exceeding the 262144 byte limit"));
     }
 
-    #[test]
-    fn nested_imports_in_component_are_rejected() {
+    #[tokio::test]
+    async fn nested_imports_in_component_are_rejected() {
         let repo = tempfile::tempdir().unwrap();
         fs::write(
             repo.path().join("component.md"),
@@ -635,6 +808,7 @@ mod tests {
             repo.path(),
             &PanicFetcher,
         )
+        .await
         .unwrap_err();
         assert!(
             format!("{err:#}").contains("nested (transitive) imports are not yet supported"),
@@ -642,8 +816,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn tampered_cache_is_rejected_via_digest_sidecar() {
+    #[tokio::test]
+    async fn tampered_cache_is_rejected_via_digest_sidecar() {
         let repo = tempfile::tempdir().unwrap();
         let entry = import_entry(&format!("acme/shared/components/deploy.md@{SHA}"));
         let fetcher = StaticFetcher {
@@ -651,6 +825,7 @@ mod tests {
         };
         // First resolve populates the cache + digest sidecar.
         resolve_imports_with_repo_root(std::slice::from_ref(&entry), repo.path(), repo.path(), &fetcher)
+            .await
             .unwrap();
 
         // Tamper with the committed cache file (sidecar still records the
@@ -667,6 +842,7 @@ mod tests {
 
         let err =
             resolve_imports_with_repo_root(&[entry], repo.path(), repo.path(), &PanicFetcher)
+                .await
                 .unwrap_err();
         assert!(
             format!("{err:#}").contains("does not match its recorded digest"),
@@ -674,8 +850,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn section_selector_extracts_only_that_section() {
+    #[tokio::test]
+    async fn section_selector_extracts_only_that_section() {
         let repo = tempfile::tempdir().unwrap();
         let workflow_dir = repo.path();
         fs::write(
@@ -690,13 +866,14 @@ mod tests {
             repo.path(),
             &PanicFetcher,
         )
+        .await
         .unwrap();
 
         assert_eq!(resolved[0].body, "## Two\ntwo\n### Detail\nkeep");
     }
 
-    #[test]
-    fn optional_missing_local_import_is_skipped_and_required_missing_errors() {
+    #[tokio::test]
+    async fn optional_missing_local_import_is_skipped_and_required_missing_errors() {
         let repo = tempfile::tempdir().unwrap();
 
         let optional = resolve_imports_with_repo_root(
@@ -705,6 +882,7 @@ mod tests {
             repo.path(),
             &PanicFetcher,
         )
+        .await
         .unwrap();
         assert!(optional.is_empty());
 
@@ -714,6 +892,7 @@ mod tests {
             repo.path(),
             &PanicFetcher,
         )
+        .await
         .unwrap_err();
         assert!(
             err.to_string()
@@ -721,8 +900,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn local_import_rejects_path_traversal() {
+    #[tokio::test]
+    async fn local_import_rejects_path_traversal() {
         let repo = tempfile::tempdir().unwrap();
         for spec in ["../secret.md", "../../etc/passwd.md", "a/../../b.md", "./x.md"] {
             let err = resolve_imports_with_repo_root(
@@ -731,6 +910,7 @@ mod tests {
                 repo.path(),
                 &PanicFetcher,
             )
+            .await
             .unwrap_err();
             assert!(
                 format!("{err:#}").contains("invalid segment"),
@@ -739,19 +919,105 @@ mod tests {
         }
     }
 
-    #[test]
-    fn imports_per_workflow_limit_is_enforced() {
+    #[tokio::test]
+    async fn imports_per_workflow_limit_is_enforced() {
         let repo = tempfile::tempdir().unwrap();
         let entries: Vec<ImportEntry> = (0..=MAX_IMPORTS_PER_WORKFLOW)
             .map(|idx| import_entry(&format!("component-{idx}.md?")))
             .collect();
 
         let err = resolve_imports_with_repo_root(&entries, repo.path(), repo.path(), &PanicFetcher)
+            .await
             .unwrap_err();
 
         assert!(
             err.to_string()
                 .contains("imports per workflow must be <= 20")
+        );
+    }
+
+    use crate::compile::types::ImportEndpoint;
+    use crate::secure::{CommitSha, HostName};
+
+    fn remote_spec(endpoint: Option<ImportEndpoint>) -> ParsedImportSpec {
+        ParsedImportSpec {
+            owner: "proj".to_string(),
+            repo: "repo".to_string(),
+            path: "component.md".to_string(),
+            sha: CommitSha::parse(SHA).unwrap(),
+            section: None,
+            optional: false,
+            endpoint,
+        }
+    }
+
+    #[test]
+    fn route_endpoint_maps_azure_repos_sources_to_azure_fetcher() {
+        // Endpoint-less => same-org Azure Repos (the primary, default source).
+        assert_eq!(route_endpoint(&None), FetcherKind::AzureRepos);
+        // Cross-org Azure Repos.
+        assert_eq!(
+            route_endpoint(&Some(ImportEndpoint::AzureReposCrossOrg {
+                name: "conn".to_string(),
+                org: "https://dev.azure.com/other".to_string(),
+            })),
+            FetcherKind::AzureRepos
+        );
+    }
+
+    #[test]
+    fn route_endpoint_maps_github_sources_to_github_fetcher() {
+        assert_eq!(
+            route_endpoint(&Some(ImportEndpoint::GitHub {
+                name: "gh-conn".to_string(),
+            })),
+            FetcherKind::GitHub
+        );
+        assert_eq!(
+            route_endpoint(&Some(ImportEndpoint::GitHubEnterprise {
+                name: "ghe-conn".to_string(),
+                host: HostName::parse("api.acme.ghe.com").unwrap(),
+            })),
+            FetcherKind::GitHub
+        );
+    }
+
+    /// Fail-closed guard: an endpoint-less (same-org Azure Repos) import whose
+    /// org/auth could not be resolved must hard-error — it must NEVER silently
+    /// fall through to GitHub. Regression guard for the source-confusion bug.
+    #[tokio::test]
+    async fn ado_fetcher_endpoint_less_without_org_fails_closed() {
+        let fetcher = AdoRepoFetcher::new(
+            Err("no ADO remote".to_string()),
+            Err("no creds".to_string()),
+        );
+        let err = fetcher
+            .fetch(&remote_spec(None))
+            .await
+            .expect_err("must fail closed without org");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("same-org Azure Repos") && msg.contains("no ADO remote"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    /// A GitHub-typed spec must never be accepted by the Azure Repos fetcher.
+    #[tokio::test]
+    async fn ado_fetcher_rejects_github_typed_spec() {
+        let fetcher = AdoRepoFetcher::new(
+            Ok("https://dev.azure.com/org".to_string()),
+            Ok(crate::ado::AdoAuth::Pat("x".to_string())),
+        );
+        let err = fetcher
+            .fetch(&remote_spec(Some(ImportEndpoint::GitHub {
+                name: "gh".to_string(),
+            })))
+            .await
+            .expect_err("azure fetcher must reject a github-typed import");
+        assert!(
+            format!("{err:#}").contains("internal routing error"),
+            "unexpected error: {err:#}"
         );
     }
 }

@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 
 use super::ResolvedImport;
-use crate::compile::types::{CompileTarget, ImportSource, Repository};
+use crate::compile::types::{CompileTarget, ImportEndpoint, ImportSource, Repository};
 use crate::hash::sha256_hex;
 
 const REPOSITORY_RESOURCE_REF: &str = "refs/heads/main";
@@ -31,7 +31,7 @@ const HASH_SUFFIX_LEN: usize = 12;
 struct RepoKey {
     owner: String,
     repo: String,
-    endpoint: Option<String>,
+    endpoint: Option<ImportEndpoint>,
 }
 
 /// Return the stable compiler-generated repository-resource alias for a remote
@@ -93,33 +93,58 @@ pub fn synthesize_repo_aliases(imports: &[ResolvedImport]) -> Result<Vec<Reposit
                         "{}/{}/{}",
                         key.owner,
                         key.repo,
-                        key.endpoint.as_deref().unwrap_or("")
+                        endpoint_hash_discriminator(key.endpoint.as_ref())
                     ))
                 )
             } else {
                 base_alias
             };
 
+            // Map the typed endpoint to the ADO repository-resource `type` and
+            // the backing service-connection `name`. Endpoint-less imports are
+            // same-org Azure Repos checkouts using `System.AccessToken`
+            // (`type: git`, no endpoint). Cross-org Azure Repos are also
+            // `type: git`, but authenticate through their service connection.
+            let (repo_type, endpoint_name) = match &key.endpoint {
+                None => ("git", None),
+                Some(ImportEndpoint::AzureReposCrossOrg { name, .. }) => {
+                    ("git", Some(name.clone()))
+                }
+                Some(ImportEndpoint::GitHub { name }) => ("github", Some(name.clone())),
+                Some(ImportEndpoint::GitHubEnterprise { name, .. }) => {
+                    ("githubenterprise", Some(name.clone()))
+                }
+            };
+
             Repository {
                 repository: alias,
-                // MVP inference: imports with an explicit endpoint are backed
-                // by a GitHub/GHE service connection; endpoint-less imports are
-                // same-org Azure Repos checkouts using System.AccessToken.
-                repo_type: if key.endpoint.is_some() {
-                    "github".to_string()
-                } else {
-                    "git".to_string()
-                },
+                repo_type: repo_type.to_string(),
                 name: format!("{}/{}", key.owner, key.repo),
                 // NOTE: ADO repository-resource `ref` does not accept commit
                 // SHAs. This branch ref is for resource authorization only;
                 // the executor checkout must pin the exact import SHA at
                 // runtime with `git checkout <sha>`.
                 repo_ref: REPOSITORY_RESOURCE_REF.to_string(),
-                endpoint: key.endpoint,
+                endpoint: endpoint_name,
             }
         })
         .collect())
+}
+
+/// Stable string discriminator for the alias hash suffix so that two imports of
+/// the same `owner/repo` through different endpoints still receive distinct
+/// aliases.
+fn endpoint_hash_discriminator(endpoint: Option<&ImportEndpoint>) -> String {
+    match endpoint {
+        None => String::new(),
+        Some(ImportEndpoint::GitHub { name }) => format!("github:{name}"),
+        Some(ImportEndpoint::GitHubEnterprise { name, host }) => {
+            format!("ghe:{name}:{}", host.as_str())
+        }
+        Some(ImportEndpoint::AzureReposCrossOrg { name, org }) => {
+            format!("azure-repos:{name}:{org}")
+        }
+    }
 }
 
 fn sanitize_identifier_part(value: &str) -> String {
@@ -193,11 +218,14 @@ mod tests {
         sha: &str,
         endpoint: Option<&str>,
     ) -> ResolvedImport {
+        let endpoint = endpoint.map(|name| ImportEndpoint::GitHub {
+            name: name.to_string(),
+        });
         ResolvedImport {
             entry: ImportEntry {
                 uses: format!("{owner}/{repo}/{path}@{sha}"),
                 with: serde_json::Map::new(),
-                endpoint: endpoint.map(str::to_string),
+                endpoint: endpoint.clone(),
             },
             source: ImportSource::Remote(ParsedImportSpec {
                 owner: owner.to_string(),
@@ -206,6 +234,7 @@ mod tests {
                 sha: CommitSha::parse(sha).expect("test sha should be valid"),
                 section: None,
                 optional: false,
+                endpoint,
             }),
             front_matter: serde_yaml::Value::Null,
             body: String::new(),
@@ -287,6 +316,102 @@ mod tests {
         assert_eq!(repos[0].repo_type, "git");
         assert_eq!(repos[0].endpoint, None);
         assert_eq!(repos[0].name, "ado/repo");
+    }
+
+    fn remote_import_with_endpoint(
+        owner: &str,
+        repo: &str,
+        sha: &str,
+        endpoint: ImportEndpoint,
+    ) -> ResolvedImport {
+        let endpoint = Some(endpoint);
+        ResolvedImport {
+            entry: ImportEntry {
+                uses: format!("{owner}/{repo}/component.md@{sha}"),
+                with: serde_json::Map::new(),
+                endpoint: endpoint.clone(),
+            },
+            source: ImportSource::Remote(ParsedImportSpec {
+                owner: owner.to_string(),
+                repo: repo.to_string(),
+                path: "component.md".to_string(),
+                sha: CommitSha::parse(sha).expect("valid sha"),
+                section: None,
+                optional: false,
+                endpoint,
+            }),
+            front_matter: serde_yaml::Value::Null,
+            body: String::new(),
+            provenance: ImportProvenance {
+                source: format!("{owner}/{repo}/component.md"),
+                sha: Some(sha.to_string()),
+                manifest_digest: "digest".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn cross_org_azure_repos_endpoint_synthesizes_git_resource_with_connection() {
+        let imports = vec![remote_import_with_endpoint(
+            "proj",
+            "repo",
+            "5123456789abcdef0123456789abcdef01234567",
+            ImportEndpoint::AzureReposCrossOrg {
+                name: "other-org-conn".to_string(),
+                org: "https://dev.azure.com/other".to_string(),
+            },
+        )];
+
+        let repos = synthesize_repo_aliases(&imports).expect("synthesis should succeed");
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].repo_type, "git");
+        assert_eq!(repos[0].endpoint.as_deref(), Some("other-org-conn"));
+        assert_eq!(repos[0].name, "proj/repo");
+    }
+
+    #[test]
+    fn ghe_endpoint_synthesizes_githubenterprise_resource() {
+        let imports = vec![remote_import_with_endpoint(
+            "octo",
+            "repo",
+            "6123456789abcdef0123456789abcdef01234567",
+            ImportEndpoint::GitHubEnterprise {
+                name: "ghe-conn".to_string(),
+                host: crate::secure::HostName::parse("api.acme.ghe.com").unwrap(),
+            },
+        )];
+
+        let repos = synthesize_repo_aliases(&imports).expect("synthesis should succeed");
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].repo_type, "githubenterprise");
+        assert_eq!(repos[0].endpoint.as_deref(), Some("ghe-conn"));
+    }
+
+    #[test]
+    fn same_repo_different_endpoint_types_get_distinct_resources() {
+        let imports = vec![
+            remote_import_with_endpoint(
+                "o",
+                "r",
+                "7123456789abcdef0123456789abcdef01234567",
+                ImportEndpoint::GitHub {
+                    name: "gh".to_string(),
+                },
+            ),
+            remote_import_with_endpoint(
+                "o",
+                "r",
+                "8123456789abcdef0123456789abcdef01234567",
+                ImportEndpoint::AzureReposCrossOrg {
+                    name: "az".to_string(),
+                    org: "https://dev.azure.com/other".to_string(),
+                },
+            ),
+        ];
+
+        let repos = synthesize_repo_aliases(&imports).expect("synthesis should succeed");
+        assert_eq!(repos.len(), 2);
+        assert_ne!(repos[0].repository, repos[1].repository);
     }
 
     #[test]

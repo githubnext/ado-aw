@@ -160,7 +160,44 @@ async fn compile_pipeline_inner(
     if !front_matter.imports.is_empty() {
         let base_dir = input_path.parent().unwrap_or_else(|| Path::new("."));
         let repo_root = find_repo_root(base_dir).unwrap_or_else(|| base_dir.to_path_buf());
-        let fetcher = crate::compile::imports::GhCliFetcher;
+
+        // Build the routing fetcher: endpoint-less / cross-org Azure Repos
+        // imports resolve via the ADO Git Items API (primary); GitHub/GHE
+        // imports resolve via `gh`. Azure org URL + auth are resolved
+        // best-effort here (only when an Azure Repos import is actually
+        // declared) and any failure is deferred fail-closed to the point the
+        // affected import is fetched — so a GitHub-only import set, or a
+        // workflow with no ADO remote, is unaffected.
+        use crate::compile::types::ImportEndpoint;
+        let has_same_org_azure = front_matter.imports.iter().any(|e| e.endpoint.is_none());
+        let has_any_azure = front_matter.imports.iter().any(|e| {
+            matches!(
+                e.endpoint,
+                None | Some(ImportEndpoint::AzureReposCrossOrg { .. })
+            )
+        });
+
+        let ado_fetcher = if has_any_azure {
+            let context_org_url = if has_same_org_azure {
+                crate::ado::resolve_ado_context(&repo_root, None, None)
+                    .await
+                    .map(|ctx| ctx.org_url)
+                    .map_err(|e| format!("{e:#}"))
+            } else {
+                Err("no same-org Azure Repos import declared".to_string())
+            };
+            let auth = crate::ado::resolve_auth_non_interactive()
+                .await
+                .map_err(|e| format!("{e:#}"));
+            crate::compile::imports::AdoRepoFetcher::new(context_org_url, auth)
+        } else {
+            crate::compile::imports::AdoRepoFetcher::new(
+                Err("no Azure Repos import declared".to_string()),
+                Err("no Azure Repos import declared".to_string()),
+            )
+        };
+        let fetcher = crate::compile::imports::RoutingFetcher::new(ado_fetcher);
+
         let mut merged_mapping = front_matter_mapping.clone();
         markdown_body = crate::compile::imports::merge::merge_imports(
             &mut merged_mapping,
@@ -169,7 +206,8 @@ async fn compile_pipeline_inner(
             base_dir,
             &repo_root,
             &fetcher,
-        )?;
+        )
+        .await?;
         front_matter = serde_yaml::from_value(serde_yaml::Value::Mapping(merged_mapping))
             .context("Failed to parse front matter after merging imports")?;
     }

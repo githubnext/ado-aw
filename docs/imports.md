@@ -21,8 +21,11 @@ with `uses`, optional `with`, and optional `endpoint`:
 
 ```yaml
 imports:
+  # Same-org Azure Repos (the primary, default source — no endpoint):
+  - myproject/shared-agents/components/notify.md@0123456789abcdef0123456789abcdef01234567
+  # Local import:
   - ./components/local-guidance.md
-  - octo/shared-agents/components/notify.md@0123456789abcdef0123456789abcdef01234567
+  # GitHub.com, via an ADO service connection (bare-string endpoint shorthand):
   - uses: octo/shared-agents/components/deploy.md@89abcdef0123456789abcdef0123456789abcdef
     endpoint: github-shared-components
     with:
@@ -42,11 +45,47 @@ imports:
 The optional marker is trailing, so a sectioned optional import looks like
 `owner/repo/component.md@0123...cdef#Usage?`.
 
-`endpoint:` names the Azure DevOps service connection used by the generated
-runtime repository resource for GitHub/GitHub Enterprise component sources. It
-is not used for the compile-time manifest fetch. Azure Repos (`type: git`)
-checkouts do not need an endpoint; GitHub, GitHub Enterprise, and Bitbucket
-repository resources do. See [Repository resource endpoints](network.md#repository-resource-endpoints).
+For a cross-repository spec `owner/repo/path@<sha>`, `owner` maps to the Azure
+DevOps **project** (or GitHub owner) and `repo` to the repository name.
+
+### `endpoint:` — source type and service connection
+
+`endpoint:` selects the **source type** of a cross-repository import and names
+the Azure DevOps service connection the generated runtime repository resource
+authenticates with. It drives **both** the compile-time manifest fetch **and**
+the runtime checkout, so the two can never disagree.
+
+- **Absent** → **same-organization Azure Repos** (the primary, default case for
+  this ADO-native compiler). Fetched at compile time via the ADO Git Items API
+  and checked out at runtime with `System.AccessToken` (`type: git`, no
+  endpoint).
+- **Bare string** (`endpoint: my-connection`) → shorthand for a **GitHub.com**
+  service connection.
+- **Object form** with an explicit `type`:
+
+  | `type` | Extra fields | Source | Runtime `type` |
+  |--------|--------------|--------|----------------|
+  | `github` (default) | — | GitHub.com | `github` |
+  | `ghe` | `host:` (API host, e.g. `api.acme.ghe.com`) | GitHub Enterprise | `githubenterprise` |
+  | `azure-repos` | `org:` (target collection URL, e.g. `https://dev.azure.com/otherorg`) | **Cross-organization** Azure Repos | `git` |
+
+```yaml
+imports:
+  # Cross-org Azure Repos:
+  - uses: otherproject/otherrepo/component.md@0123456789abcdef0123456789abcdef01234567
+    endpoint:
+      name: other-org-repos-connection
+      type: azure-repos
+      org: https://dev.azure.com/otherorg
+  # GitHub Enterprise:
+  - uses: octo/components/deploy.md@89abcdef0123456789abcdef0123456789abcdef
+    endpoint:
+      name: ghe-connection
+      type: ghe
+      host: api.acme.ghe.com
+```
+
+See [Repository resource endpoints](network.md#repository-resource-endpoints).
 
 ## Cross-repository resolution and cache
 
@@ -67,10 +106,28 @@ not vendored into `.ado-aw/imports/`; script-bearing custom safe-output
 components are checked out in their dedicated executor job and verified at the
 pinned SHA before their code runs.
 
+### Compile-time manifest fetch
+
+The manifest fetcher is selected from the import's `endpoint` type so that the
+compile-time fetch always matches the runtime checkout source:
+
+- **Azure Repos** (endpoint-less same-org, or `type: azure-repos` cross-org) —
+  fetched via the ADO Git Items API. Credentials are resolved
+  **non-interactively** in this precedence: `SYSTEM_ACCESSTOKEN` →
+  `AZURE_DEVOPS_EXT_PAT` → `az account get-access-token`. The consumer
+  organization is taken from `AZURE_DEVOPS_ORG_URL` / `SYSTEM_COLLECTIONURI` or
+  the repo's Azure Repos git remote; cross-org imports use the endpoint's
+  `org:`.
+- **GitHub / GitHub Enterprise** (`type: github` / `type: ghe`) — fetched via
+  `gh api` using the compiler host's GitHub auth (`GH_HOST` targets the GHE
+  instance).
+
+Routing is **fail-closed**: an endpoint-less (Azure-Repos-intended) import never
+silently falls back to GitHub, and a GitHub-typed import is never served by the
+Azure Repos fetcher.
+
 Current MVP notes:
 
-- The remote manifest fetcher uses the GitHub Contents API via `gh api` with the
-  compiler host's GitHub auth. Azure Repos manifest fetching is a follow-up.
 - Nested/transitive import resolution is not expanded yet; the current resolver
   processes the workflow's top-level `imports:` list.
 - A workflow may declare at most 20 imports, and each resolved manifest is

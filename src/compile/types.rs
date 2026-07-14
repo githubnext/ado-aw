@@ -1195,6 +1195,153 @@ impl FrontMatter {
     }
 }
 
+/// Typed cross-repository import endpoint.
+///
+/// An **absent** endpoint (`None` on [`ImportEntry`]) denotes a
+/// **same-organization Azure Repos** source — the primary, default case for
+/// this ADO-native compiler. An **explicit** endpoint selects a different
+/// source kind and names the ADO service connection the generated runtime
+/// repository resource authenticates with.
+///
+/// Deserializes from either a bare string (shorthand for a GitHub.com service
+/// connection) or an object with `name`, an optional `type`
+/// (`github` | `ghe` | `azure-repos`, defaulting to `github`), and the
+/// type-specific `host` (GHE) or `org` (cross-org Azure Repos) field.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ImportEndpoint {
+    /// GitHub.com, authenticated at runtime via ADO service connection `name`.
+    GitHub {
+        /// ADO service connection name.
+        name: String,
+    },
+    /// GitHub Enterprise Server at API host `host`, via service connection `name`.
+    GitHubEnterprise {
+        /// ADO service connection name.
+        name: String,
+        /// GHE API host (e.g. `api.acme.ghe.com`).
+        host: crate::secure::HostName,
+    },
+    /// Azure Repos in a *different* organization `org` (a full collection URL,
+    /// e.g. `https://dev.azure.com/otherorg`), via service connection `name`.
+    AzureReposCrossOrg {
+        /// ADO service connection name.
+        name: String,
+        /// Target organization collection URL.
+        org: String,
+    },
+}
+
+impl<'de> Deserialize<'de> for ImportEndpoint {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de;
+
+        struct EndpointVisitor;
+
+        impl<'de> de::Visitor<'de> for EndpointVisitor {
+            type Value = ImportEndpoint;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str(
+                    "a service connection name string, or an object with `name`, optional \
+                     `type` (github|ghe|azure-repos), and a type-specific `host`/`org`",
+                )
+            }
+
+            fn visit_str<E: de::Error>(
+                self,
+                value: &str,
+            ) -> std::result::Result<ImportEndpoint, E> {
+                if value.trim().is_empty() {
+                    return Err(E::custom("import endpoint name must not be empty"));
+                }
+                Ok(ImportEndpoint::GitHub {
+                    name: value.to_string(),
+                })
+            }
+
+            fn visit_map<M>(self, map: M) -> std::result::Result<ImportEndpoint, M::Error>
+            where
+                M: de::MapAccess<'de>,
+            {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct EndpointObject {
+                    name: String,
+                    #[serde(default, rename = "type")]
+                    kind: Option<String>,
+                    #[serde(default)]
+                    host: Option<String>,
+                    #[serde(default)]
+                    org: Option<String>,
+                }
+
+                let obj = EndpointObject::deserialize(de::value::MapAccessDeserializer::new(map))?;
+                if obj.name.trim().is_empty() {
+                    return Err(de::Error::custom("import endpoint `name` must not be empty"));
+                }
+                let kind = obj.kind.as_deref().unwrap_or("github");
+                match kind {
+                    "github" => {
+                        if obj.host.is_some() || obj.org.is_some() {
+                            return Err(de::Error::custom(
+                                "`host`/`org` are not valid for import endpoint type `github`",
+                            ));
+                        }
+                        Ok(ImportEndpoint::GitHub { name: obj.name })
+                    }
+                    "ghe" => {
+                        if obj.org.is_some() {
+                            return Err(de::Error::custom(
+                                "`org` is not valid for import endpoint type `ghe`",
+                            ));
+                        }
+                        let host = obj.host.ok_or_else(|| {
+                            de::Error::custom("import endpoint type `ghe` requires `host`")
+                        })?;
+                        let host = crate::secure::HostName::parse(host)
+                            .map_err(|e| de::Error::custom(e.to_string()))?;
+                        Ok(ImportEndpoint::GitHubEnterprise {
+                            name: obj.name,
+                            host,
+                        })
+                    }
+                    "azure-repos" => {
+                        if obj.host.is_some() {
+                            return Err(de::Error::custom(
+                                "`host` is not valid for import endpoint type `azure-repos`",
+                            ));
+                        }
+                        let org = obj.org.ok_or_else(|| {
+                            de::Error::custom(
+                                "import endpoint type `azure-repos` requires `org` \
+                                 (the target organization collection URL)",
+                            )
+                        })?;
+                        if org.trim().is_empty() {
+                            return Err(de::Error::custom(
+                                "import endpoint `org` must not be empty",
+                            ));
+                        }
+                        Ok(ImportEndpoint::AzureReposCrossOrg {
+                            name: obj.name,
+                            org,
+                        })
+                    }
+                    other => Err(de::Error::custom(format!(
+                        "unknown import endpoint type `{other}`; expected \
+                         `github`, `ghe`, or `azure-repos`"
+                    ))),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(EndpointVisitor)
+    }
+}
+
 /// A single `imports:` entry — either a bare spec string or an object form.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImportEntry {
@@ -1202,8 +1349,8 @@ pub struct ImportEntry {
     pub uses: String,
     /// Non-secret input values for the imported workflow schema.
     pub with: serde_json::Map<String, serde_json::Value>,
-    /// Optional ADO service connection for GitHub/GHE remote sources.
-    pub endpoint: Option<String>,
+    /// Typed remote source endpoint. `None` denotes same-org Azure Repos.
+    pub endpoint: Option<ImportEndpoint>,
 }
 
 impl<'de> Deserialize<'de> for ImportEntry {
@@ -1220,7 +1367,7 @@ impl<'de> Deserialize<'de> for ImportEntry {
             #[serde(default)]
             with: serde_json::Map<String, serde_json::Value>,
             #[serde(default)]
-            endpoint: Option<String>,
+            endpoint: Option<ImportEndpoint>,
         }
 
         struct ImportEntryVisitor;
@@ -1296,6 +1443,9 @@ pub struct ParsedImportSpec {
     pub section: Option<String>,
     /// Whether a missing import should be tolerated by later resolution.
     pub optional: bool,
+    /// Typed source endpoint carried from the [`ImportEntry`]. `None` denotes
+    /// same-org Azure Repos (the primary compile-time fetch source).
+    pub endpoint: Option<ImportEndpoint>,
 }
 
 impl ImportEntry {
@@ -1363,6 +1513,7 @@ impl ImportEntry {
             sha,
             section,
             optional,
+            endpoint: self.endpoint.clone(),
         }))
     }
 }
@@ -3038,8 +3189,10 @@ endpoint: shared-components-connection
         .unwrap();
 
         assert_eq!(
-            entry.endpoint.as_deref(),
-            Some("shared-components-connection")
+            entry.endpoint,
+            Some(ImportEndpoint::GitHub {
+                name: "shared-components-connection".to_string()
+            })
         );
         assert_eq!(
             entry.with.get("region").and_then(|v| v.as_str()),
@@ -3054,6 +3207,100 @@ endpoint: shared-components-connection
                 assert_eq!(spec.path, "deploy.md");
                 assert_eq!(spec.sha.as_str(), IMPORT_SHA);
             }
+            other => panic!("expected remote import, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_import_endpoint_object_github_explicit() {
+        let entry: ImportEntry = serde_yaml::from_str(&format!(
+            "uses: acme/shared/deploy.md@{IMPORT_SHA}\nendpoint:\n  name: gh-conn\n  type: github\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            entry.endpoint,
+            Some(ImportEndpoint::GitHub {
+                name: "gh-conn".to_string()
+            })
+        );
+        // parse_source threads the endpoint into the spec.
+        match entry.parse_source().unwrap() {
+            ImportSource::Remote(spec) => assert_eq!(spec.endpoint, entry.endpoint),
+            other => panic!("expected remote import, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_import_endpoint_object_ghe_requires_host() {
+        let entry: ImportEntry = serde_yaml::from_str(&format!(
+            "uses: acme/shared/deploy.md@{IMPORT_SHA}\n\
+             endpoint:\n  name: ghe-conn\n  type: ghe\n  host: api.acme.ghe.com\n"
+        ))
+        .unwrap();
+        match entry.endpoint {
+            Some(ImportEndpoint::GitHubEnterprise { name, host }) => {
+                assert_eq!(name, "ghe-conn");
+                assert_eq!(host.as_str(), "api.acme.ghe.com");
+            }
+            other => panic!("expected GHE endpoint, got {other:?}"),
+        }
+
+        // `ghe` without `host` must be rejected.
+        let err = serde_yaml::from_str::<ImportEntry>(&format!(
+            "uses: acme/shared/deploy.md@{IMPORT_SHA}\nendpoint:\n  name: ghe-conn\n  type: ghe\n"
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("requires `host`"), "{err}");
+    }
+
+    #[test]
+    fn test_import_endpoint_object_azure_repos_requires_org() {
+        let entry: ImportEntry = serde_yaml::from_str(&format!(
+            "uses: proj/repo/deploy.md@{IMPORT_SHA}\n\
+             endpoint:\n  name: xorg-conn\n  type: azure-repos\n  org: https://dev.azure.com/other\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            entry.endpoint,
+            Some(ImportEndpoint::AzureReposCrossOrg {
+                name: "xorg-conn".to_string(),
+                org: "https://dev.azure.com/other".to_string(),
+            })
+        );
+
+        // `azure-repos` without `org` must be rejected.
+        let err = serde_yaml::from_str::<ImportEntry>(&format!(
+            "uses: proj/repo/deploy.md@{IMPORT_SHA}\n\
+             endpoint:\n  name: xorg-conn\n  type: azure-repos\n"
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("requires `org`"), "{err}");
+    }
+
+    #[test]
+    fn test_import_endpoint_rejects_unknown_type_and_mismatched_fields() {
+        // Unknown type.
+        let err = serde_yaml::from_str::<ImportEntry>(&format!(
+            "uses: o/r/p.md@{IMPORT_SHA}\nendpoint:\n  name: c\n  type: bitbucket\n"
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown import endpoint type"), "{err}");
+
+        // `org` on a github endpoint.
+        let err = serde_yaml::from_str::<ImportEntry>(&format!(
+            "uses: o/r/p.md@{IMPORT_SHA}\nendpoint:\n  name: c\n  type: github\n  org: x\n"
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("not valid for import endpoint type `github`"), "{err}");
+    }
+
+    #[test]
+    fn test_import_endpoint_absent_is_same_org_azure_repos() {
+        let entry: ImportEntry =
+            serde_yaml::from_str(&format!("uses: proj/repo/deploy.md@{IMPORT_SHA}\n")).unwrap();
+        assert_eq!(entry.endpoint, None);
+        match entry.parse_source().unwrap() {
+            ImportSource::Remote(spec) => assert_eq!(spec.endpoint, None),
             other => panic!("expected remote import, got {other:?}"),
         }
     }
@@ -3136,8 +3383,10 @@ imports:
             ImportSource::Local { .. }
         ));
         assert_eq!(
-            fm.imports[1].endpoint.as_deref(),
-            Some("shared-components-connection")
+            fm.imports[1].endpoint,
+            Some(ImportEndpoint::GitHub {
+                name: "shared-components-connection".to_string()
+            })
         );
         assert_eq!(
             fm.imports[1].with.get("region").and_then(|v| v.as_str()),

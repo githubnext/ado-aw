@@ -45,7 +45,7 @@ const EXECUTOR_KEYS: &[&str] = &["steps", "env", "inputs", "run", "entrypoint"];
 ///
 /// Returns the merged markdown body. `consumer_fm` is mutated in place and its
 /// `imports:` key is removed (imports are consumed by this pass).
-pub fn merge_imports(
+pub async fn merge_imports(
     consumer_fm: &mut Mapping,
     consumer_body: &str,
     entries: &[ImportEntry],
@@ -53,7 +53,7 @@ pub fn merge_imports(
     repo_root: &Path,
     fetcher: &dyn ManifestFetcher,
 ) -> Result<String> {
-    let resolved = resolve_imports_with_repo_root(entries, base_dir, repo_root, fetcher)?;
+    let resolved = resolve_imports_with_repo_root(entries, base_dir, repo_root, fetcher).await?;
     merge_resolved(consumer_fm, consumer_body, &resolved)
 }
 
