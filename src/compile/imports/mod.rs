@@ -385,8 +385,8 @@ fn resolve_local_path(base_dir: &Path, import_path: &str) -> Result<PathBuf> {
     }
     // Reject path-traversal: a `..`/`.` segment (or a backslash) would let a
     // local import escape the workflow directory and read arbitrary files at
-    // compile time. Mirrors the guard `flatten_import_path` applies to remote
-    // import paths.
+    // compile time. Mirrors the guard `validate_import_path_segments` applies to
+    // remote import paths.
     if import_path.contains('\\')
         || import_path
             .split('/')
@@ -482,14 +482,22 @@ fn enforce_manifest_size(size: usize, source: &str) -> Result<()> {
 fn cache_path(repo_root: &Path, spec: &ParsedImportSpec) -> Result<PathBuf> {
     validate_cache_segment("owner", &spec.owner)?;
     validate_cache_segment("repo", &spec.repo)?;
-    let flat_path = flatten_import_path(&spec.path)?;
-    Ok(repo_root
+    let mut path = repo_root
         .join(".ado-aw")
         .join("imports")
         .join(&spec.owner)
         .join(&spec.repo)
-        .join(spec.sha.as_str())
-        .join(flat_path))
+        .join(spec.sha.as_str());
+    // Preserve the component's directory structure under the SHA dir (mirrors
+    // the source repo) rather than flattening `/` -> `_`. Flattening is NOT
+    // injective (`a/b.md` and `a_b.md` collide onto the same cache file), which
+    // would silently serve one component's manifest for another from the same
+    // repo+SHA and bypass the digest sidecar. `validate_import_path_segments`
+    // enforces the same traversal guard so joining each segment is safe.
+    for segment in validate_import_path_segments(&spec.path)? {
+        path.push(segment);
+    }
+    Ok(path)
 }
 
 fn validate_cache_segment(label: &str, value: &str) -> Result<()> {
@@ -508,16 +516,22 @@ fn validate_cache_segment(label: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn flatten_import_path(path: &str) -> Result<String> {
-    if path.is_empty()
-        || path.contains('\\')
-        || path
-            .split('/')
-            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+/// Validate a remote import path and return its `/`-separated segments.
+///
+/// Rejects backslashes and any empty / `.` / `..` segment so the returned
+/// segments can be joined onto the cache directory without escaping it.
+fn validate_import_path_segments(path: &str) -> Result<Vec<&str>> {
+    if path.is_empty() || path.contains('\\') {
+        anyhow::bail!("remote import path contains an invalid segment: `{}`", path);
+    }
+    let segments: Vec<&str> = path.split('/').collect();
+    if segments
+        .iter()
+        .any(|segment| segment.is_empty() || *segment == "." || *segment == "..")
     {
         anyhow::bail!("remote import path contains an invalid segment: `{}`", path);
     }
-    Ok(path.replace('/', "_"))
+    Ok(segments)
 }
 
 fn ensure_import_gitattributes(repo_root: &Path) -> Result<()> {
@@ -733,7 +747,8 @@ mod tests {
             .join("acme")
             .join("shared")
             .join(SHA)
-            .join("components_deploy.md");
+            .join("components")
+            .join("deploy.md");
         assert!(cache_file.exists());
         assert_eq!(fs::read(&cache_file).unwrap(), manifest());
         let attributes = fs::read_to_string(
@@ -766,8 +781,8 @@ mod tests {
             .join("acme")
             .join("shared")
             .join(SHA);
-        fs::create_dir_all(&cache_dir).unwrap();
-        fs::write(cache_dir.join("components_deploy.md"), manifest()).unwrap();
+        fs::create_dir_all(cache_dir.join("components")).unwrap();
+        fs::write(cache_dir.join("components").join("deploy.md"), manifest()).unwrap();
 
         let resolved =
             resolve_imports_with_repo_root(&[entry], repo.path(), repo.path(), &PanicFetcher)
@@ -776,6 +791,47 @@ mod tests {
 
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].body, "# Imported\nBody");
+    }
+
+    #[tokio::test]
+    async fn colliding_flattened_paths_get_distinct_cache_files() {
+        // Regression: `a/b.md` and `a_b.md` from the same repo+SHA previously
+        // flattened to the same cache file (`a_b.md`), silently serving one
+        // component's manifest for the other. The preserved directory structure
+        // gives them distinct cache paths.
+        let repo = tempfile::tempdir().unwrap();
+        let slash = import_entry(&format!("acme/shared/a/b.md@{SHA}"));
+        let under = import_entry(&format!("acme/shared/a_b.md@{SHA}"));
+        let fetcher = StaticFetcher {
+            bytes: manifest().to_vec(),
+        };
+        resolve_imports_with_repo_root(
+            std::slice::from_ref(&slash),
+            repo.path(),
+            repo.path(),
+            &fetcher,
+        )
+        .await
+        .unwrap();
+        resolve_imports_with_repo_root(
+            std::slice::from_ref(&under),
+            repo.path(),
+            repo.path(),
+            &fetcher,
+        )
+        .await
+        .unwrap();
+
+        let base = repo
+            .path()
+            .join(".ado-aw")
+            .join("imports")
+            .join("acme")
+            .join("shared")
+            .join(SHA);
+        // `a/b.md` -> nested; `a_b.md` -> flat sibling. Distinct files.
+        assert!(base.join("a").join("b.md").exists());
+        assert!(base.join("a_b.md").exists());
     }
 
     #[tokio::test]
@@ -837,7 +893,8 @@ mod tests {
             .join("acme")
             .join("shared")
             .join(SHA)
-            .join("components_deploy.md");
+            .join("components")
+            .join("deploy.md");
         fs::write(&cache_file, b"---\n{}\n---\n# Tampered\nevil\n").unwrap();
 
         let err =

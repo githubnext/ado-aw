@@ -94,8 +94,11 @@ At compile time, ado-aw fetches the imported **markdown manifest** and stores a
 SHA-keyed copy under:
 
 ```text
-.ado-aw/imports/<owner>/<repo>/<sha>/<flat_path>.md
+.ado-aw/imports/<owner>/<repo>/<sha>/<path>/<file>.md
 ```
+
+The component's directory structure under `<sha>/` mirrors its path in the
+source repository (e.g. `components/deploy.md`).
 
 The cache is intended to be committed. ado-aw also creates
 `.ado-aw/imports/.gitattributes` marking cached imports as generated and using
