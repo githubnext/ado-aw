@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.45.1](https://github.com/githubnext/ado-aw/compare/v0.45.0...v0.45.1) (2026-07-15)
+
+
+### Bug Fixes
+
+* **compile:** downgrade AWF for host access ([#1526](https://github.com/githubnext/ado-aw/issues/1526)) ([663d9c0](https://github.com/githubnext/ado-aw/commit/663d9c01d51f6ca2664e7fdb4e0db656066c95df))
+
 ## [0.45.0](https://github.com/githubnext/ado-aw/compare/v0.44.1...v0.45.0) (2026-07-15)
 
 
