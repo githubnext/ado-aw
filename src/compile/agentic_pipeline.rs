@@ -1444,6 +1444,12 @@ struct CustomComponentRuntime {
     source: String,
     sha: String,
     manifest_digest: Option<String>,
+    /// ADO repository-resource `type` (`git` | `github` | `githubenterprise`),
+    /// resolved from the import's typed endpoint at merge time. Defaults to
+    /// `git` (same-org Azure Repos) when unstamped.
+    repo_type: String,
+    /// Backing service-connection name, when the endpoint names one.
+    endpoint: Option<String>,
 }
 
 fn ado_identifier_suffix(raw: &str) -> String {
@@ -1626,6 +1632,15 @@ fn parse_custom_component_runtime(
             .get("manifest-digest")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
+        repo_type: tool_obj
+            .get("component-repo-type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("git")
+            .to_string(),
+        endpoint: tool_obj
+            .get("component-endpoint")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
     })
 }
 
@@ -1654,7 +1669,11 @@ fn custom_repository_resources(front_matter: &FrontMatter) -> Result<Vec<Reposit
             let repo = parts.next().unwrap_or_default();
             resources.push(RepositoryResource::Named {
                 identifier: component.alias,
-                kind: "git".to_string(),
+                // Resolved from the import's typed endpoint at merge time:
+                // `git` for (same- or cross-org) Azure Repos, `github` /
+                // `githubenterprise` for GitHub sources. The service connection
+                // (when any) rides on `endpoint`.
+                kind: component.repo_type.clone(),
                 name: format!("{owner}/{repo}"),
                 // Omit `ref` so ADO checks out the component repo's actual
                 // default branch (which always exists) for the initial shallow
@@ -1665,7 +1684,7 @@ fn custom_repository_resources(front_matter: &FrontMatter) -> Result<Vec<Reposit
                 // checkout-component bundle (`git fetch <sha>` + detached
                 // checkout), so the initial branch content is irrelevant.
                 r#ref: None,
-                endpoint: None,
+                endpoint: component.endpoint.clone(),
             });
         }
     }
@@ -4546,6 +4565,73 @@ safe-outputs:
                     "ref must be omitted so ADO uses the component repo's default branch"
                 );
                 assert_eq!(*endpoint, None);
+            }
+            other => panic!("expected a Named repository resource, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn custom_component_repo_resource_maps_typed_endpoint_to_kind_and_connection() {
+        // A component imported through a GitHub endpoint must produce a
+        // `github`-typed repository resource wired to its service connection —
+        // not the hardcoded `git` / no-endpoint. `component-repo-type` and
+        // `component-endpoint` are stamped from the typed endpoint at merge time.
+        let fm = test_front_matter(
+            r#"
+name: Test
+description: Test
+safe-outputs:
+  scripts:
+    notify-team:
+      run: node notify.js
+      component-source: octo/tools/components/notify.md
+      component-sha: 0123456789012345678901234567890123456789
+      component-repo-type: github
+      component-endpoint: gh-shared-conn
+"#,
+        );
+        let resources = custom_repository_resources(&fm).unwrap();
+        assert_eq!(resources.len(), 1);
+        match &resources[0] {
+            RepositoryResource::Named {
+                kind,
+                name,
+                r#ref,
+                endpoint,
+                ..
+            } => {
+                assert_eq!(kind, "github");
+                assert_eq!(name, "octo/tools");
+                assert_eq!(*r#ref, None);
+                assert_eq!(endpoint.as_deref(), Some("gh-shared-conn"));
+            }
+            other => panic!("expected a Named repository resource, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn custom_component_repo_resource_ghe_kind_maps_to_githubenterprise() {
+        let fm = test_front_matter(
+            r#"
+name: Test
+description: Test
+safe-outputs:
+  jobs:
+    ticket:
+      steps:
+        - bash: echo hi
+      component-source: octo/tools/components/ticket.md
+      component-sha: 0123456789012345678901234567890123456789
+      component-repo-type: githubenterprise
+      component-endpoint: ghe-conn
+"#,
+        );
+        let resources = custom_repository_resources(&fm).unwrap();
+        assert_eq!(resources.len(), 1);
+        match &resources[0] {
+            RepositoryResource::Named { kind, endpoint, .. } => {
+                assert_eq!(kind, "githubenterprise");
+                assert_eq!(endpoint.as_deref(), Some("ghe-conn"));
             }
             other => panic!("expected a Named repository resource, got {other:?}"),
         }

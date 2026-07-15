@@ -109,7 +109,7 @@ pub fn merge_resolved_imported_body(
     let mut body_parts: Vec<String> = Vec::new();
 
     for (idx, import) in resolved.iter().enumerate() {
-        let (sub_fm, sub_body) =
+        let (mut sub_fm, sub_body) =
             apply_import_inputs(&import.front_matter, &import.body, &import.entry.with)
                 .with_context(|| {
                     format!(
@@ -117,6 +117,13 @@ pub fn merge_resolved_imported_body(
                         import.provenance.source
                     )
                 })?;
+
+        // Stamp compile-time component provenance (source / sha / manifest
+        // digest + resolved repo-type/service-connection from the typed
+        // endpoint) onto this import's custom safe-output tools, so the runtime
+        // executor job can check the component repo out at the pinned SHA. Only
+        // remote imports have a repo to check out.
+        stamp_component_provenance(&mut sub_fm, import);
 
         if let Value::Mapping(component_map) = &sub_fm {
             merge_import_into_acc(
@@ -143,6 +150,72 @@ pub fn merge_resolved_imported_body(
     *consumer_fm = acc;
 
     Ok(body_parts.join("\n\n"))
+}
+
+/// Stamp compiler-owned component provenance onto the custom safe-output tools
+/// (`safe-outputs.scripts.*` / `safe-outputs.jobs.*`) declared by a **remote**
+/// import, so the runtime executor job can check the component repository out at
+/// the pinned commit.
+///
+/// For each such tool, inserts `component-source` (owner/repo/path),
+/// `component-sha`, `manifest-digest`, `component-repo-type`
+/// (`git` | `github` | `githubenterprise`), and — when the endpoint names a
+/// service connection — `component-endpoint`. Local imports (whose components
+/// live in the consumer repo's own checkout) are left untouched.
+fn stamp_component_provenance(component_fm: &mut Value, import: &ResolvedImport) {
+    use crate::compile::types::ImportSource;
+
+    // Only remote imports have a separate repository to check out.
+    if !matches!(import.source, ImportSource::Remote(_)) {
+        return;
+    }
+    let Some(sha) = import.provenance.sha.as_deref() else {
+        return;
+    };
+    let (repo_type, endpoint_name) =
+        crate::compile::imports::alias::endpoint_repo_type_and_connection(
+            import.entry.endpoint.as_ref(),
+        );
+
+    let Value::Mapping(fm_map) = component_fm else {
+        return;
+    };
+    let Some(Value::Mapping(safe_outputs)) = fm_map.get_mut("safe-outputs") else {
+        return;
+    };
+
+    for section in ["scripts", "jobs"] {
+        let Some(Value::Mapping(tools)) = safe_outputs.get_mut(section) else {
+            continue;
+        };
+        for (_tool_name, tool_cfg) in tools.iter_mut() {
+            let Value::Mapping(cfg) = tool_cfg else {
+                continue;
+            };
+            cfg.insert(
+                Value::String("component-source".into()),
+                Value::String(import.provenance.source.clone()),
+            );
+            cfg.insert(
+                Value::String("component-sha".into()),
+                Value::String(sha.to_string()),
+            );
+            cfg.insert(
+                Value::String("manifest-digest".into()),
+                Value::String(import.provenance.manifest_digest.clone()),
+            );
+            cfg.insert(
+                Value::String("component-repo-type".into()),
+                Value::String(repo_type.to_string()),
+            );
+            if let Some(name) = &endpoint_name {
+                cfg.insert(
+                    Value::String("component-endpoint".into()),
+                    Value::String(name.clone()),
+                );
+            }
+        }
+    }
 }
 
 /// Merge one import's mapping into the accumulator, enforcing import-vs-import
@@ -383,6 +456,111 @@ mod tests {
                 manifest_digest: "d".to_string(),
             },
         }
+    }
+
+    const REMOTE_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn remote_resolved(
+        fm_yaml: &str,
+        endpoint: Option<crate::compile::types::ImportEndpoint>,
+    ) -> ResolvedImport {
+        use crate::compile::types::ParsedImportSpec;
+        use crate::secure::CommitSha;
+        ResolvedImport {
+            entry: ImportEntry {
+                uses: format!("octo/repo/notify.md@{REMOTE_SHA}"),
+                with: serde_json::Map::new(),
+                endpoint: endpoint.clone(),
+            },
+            source: ImportSource::Remote(ParsedImportSpec {
+                owner: "octo".to_string(),
+                repo: "repo".to_string(),
+                path: "notify.md".to_string(),
+                sha: CommitSha::parse(REMOTE_SHA).unwrap(),
+                section: None,
+                optional: false,
+                endpoint,
+            }),
+            front_matter: serde_yaml::from_str(fm_yaml).unwrap(),
+            body: String::new(),
+            provenance: ImportProvenance {
+                source: "octo/repo/notify.md".to_string(),
+                sha: Some(REMOTE_SHA.to_string()),
+                manifest_digest: "digest123".to_string(),
+            },
+        }
+    }
+
+    fn scripts_notify_tool(consumer: &Mapping) -> &Mapping {
+        consumer
+            .get(Value::String("safe-outputs".into()))
+            .and_then(Value::as_mapping)
+            .and_then(|so| so.get(Value::String("scripts".into())))
+            .and_then(Value::as_mapping)
+            .and_then(|s| s.get(Value::String("notify".into())))
+            .and_then(Value::as_mapping)
+            .expect("safe-outputs.scripts.notify present")
+    }
+
+    fn tool_str<'a>(tool: &'a Mapping, key: &str) -> Option<&'a str> {
+        tool.get(Value::String(key.into())).and_then(Value::as_str)
+    }
+
+    #[test]
+    fn remote_component_gets_provenance_and_endpoint_stamped() {
+        use crate::compile::types::ImportEndpoint;
+        let mut consumer = ymap("name: consumer");
+        let import = remote_resolved(
+            "safe-outputs:\n  scripts:\n    notify:\n      run: node n.js\n",
+            Some(ImportEndpoint::GitHub {
+                name: "gh-conn".to_string(),
+            }),
+        );
+        merge_resolved_imported_body(&mut consumer, &[import]).unwrap();
+
+        let notify = scripts_notify_tool(&consumer);
+        assert_eq!(tool_str(notify, "component-source"), Some("octo/repo/notify.md"));
+        assert_eq!(tool_str(notify, "component-sha"), Some(REMOTE_SHA));
+        assert_eq!(tool_str(notify, "manifest-digest"), Some("digest123"));
+        assert_eq!(tool_str(notify, "component-repo-type"), Some("github"));
+        assert_eq!(tool_str(notify, "component-endpoint"), Some("gh-conn"));
+    }
+
+    #[test]
+    fn remote_same_org_azure_component_stamps_git_without_endpoint() {
+        let mut consumer = ymap("name: consumer");
+        // Endpoint-less remote import => same-org Azure Repos (`git`, no conn).
+        let import = remote_resolved(
+            "safe-outputs:\n  jobs:\n    notify:\n      steps:\n        - bash: echo hi\n",
+            None,
+        );
+        merge_resolved_imported_body(&mut consumer, &[import]).unwrap();
+
+        let notify = consumer
+            .get(Value::String("safe-outputs".into()))
+            .and_then(Value::as_mapping)
+            .and_then(|so| so.get(Value::String("jobs".into())))
+            .and_then(Value::as_mapping)
+            .and_then(|j| j.get(Value::String("notify".into())))
+            .and_then(Value::as_mapping)
+            .expect("safe-outputs.jobs.notify present");
+        assert_eq!(tool_str(notify, "component-repo-type"), Some("git"));
+        assert_eq!(tool_str(notify, "component-endpoint"), None);
+        assert_eq!(tool_str(notify, "component-sha"), Some(REMOTE_SHA));
+    }
+
+    #[test]
+    fn local_component_is_not_stamped() {
+        let mut consumer = ymap("name: consumer");
+        let import = resolved(
+            "safe-outputs:\n  scripts:\n    notify:\n      run: node n.js\n",
+            "",
+        );
+        merge_resolved_imported_body(&mut consumer, &[import]).unwrap();
+
+        let notify = scripts_notify_tool(&consumer);
+        assert_eq!(tool_str(notify, "component-source"), None);
+        assert_eq!(tool_str(notify, "component-repo-type"), None);
     }
 
     #[test]

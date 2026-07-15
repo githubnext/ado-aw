@@ -47,6 +47,27 @@ pub fn alias_identifier(owner: &str, repo: &str) -> String {
     format!("import_{owner}_{repo}_{digest}")
 }
 
+/// Map a typed import [`ImportEndpoint`] to the ADO repository-resource `type`
+/// and the backing service-connection name (`None` for same-org Azure Repos).
+///
+/// Single source of truth shared by [`synthesize_repo_aliases`] and the
+/// compile-time component-provenance stamping in
+/// [`crate::compile::imports::merge`], so the runtime component checkout uses
+/// the correct repo type + service connection for GitHub / GitHub Enterprise /
+/// cross-org Azure Repos components (not a hardcoded `git` / no-endpoint).
+pub(crate) fn endpoint_repo_type_and_connection(
+    endpoint: Option<&ImportEndpoint>,
+) -> (&'static str, Option<String>) {
+    match endpoint {
+        None => ("git", None),
+        Some(ImportEndpoint::AzureReposCrossOrg { name, .. }) => ("git", Some(name.clone())),
+        Some(ImportEndpoint::GitHub { name }) => ("github", Some(name.clone())),
+        Some(ImportEndpoint::GitHubEnterprise { name, .. }) => {
+            ("githubenterprise", Some(name.clone()))
+        }
+    }
+}
+
 /// Synthesize ADO repository resources for remote imports.
 ///
 /// Local imports are compile-time only and do not need a runtime checkout, so
@@ -101,20 +122,9 @@ pub fn synthesize_repo_aliases(imports: &[ResolvedImport]) -> Result<Vec<Reposit
             };
 
             // Map the typed endpoint to the ADO repository-resource `type` and
-            // the backing service-connection `name`. Endpoint-less imports are
-            // same-org Azure Repos checkouts using `System.AccessToken`
-            // (`type: git`, no endpoint). Cross-org Azure Repos are also
-            // `type: git`, but authenticate through their service connection.
-            let (repo_type, endpoint_name) = match &key.endpoint {
-                None => ("git", None),
-                Some(ImportEndpoint::AzureReposCrossOrg { name, .. }) => {
-                    ("git", Some(name.clone()))
-                }
-                Some(ImportEndpoint::GitHub { name }) => ("github", Some(name.clone())),
-                Some(ImportEndpoint::GitHubEnterprise { name, .. }) => {
-                    ("githubenterprise", Some(name.clone()))
-                }
-            };
+            // the backing service-connection `name` via the shared mapping.
+            let (repo_type, endpoint_name) =
+                endpoint_repo_type_and_connection(key.endpoint.as_ref());
 
             Repository {
                 repository: alias,
