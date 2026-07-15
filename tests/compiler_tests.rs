@@ -191,6 +191,14 @@ fn test_compiled_output_no_unreplaced_markers() {
         compiled.contains("github.com/github/gh-aw-firewall/releases"),
         "Compiled output should reference GitHub Releases for AWF"
     );
+    assert!(
+        compiled.contains("AWF_VERSION=\"0.27.9\""),
+        "Compiled output should download the AWF version compatible with host-access"
+    );
+    assert!(
+        !compiled.contains("AWF_VERSION=\"0.27.32\""),
+        "Compiled output should not download AWF v0.27.32"
+    );
 
     // Verify MCPG references
     assert!(
