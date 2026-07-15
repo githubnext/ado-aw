@@ -138,7 +138,7 @@ Current MVP notes:
 A reusable component can declare non-secret inputs with `import-schema:`.
 Consumers pass values through `with:`. Values are validated at compile time,
 defaults are applied, and placeholders of the form
-`{{ ado.aw.import-inputs.<key> }}` are substituted throughout the imported front
+`{{ inputs.<key> }}` are substituted throughout the imported front
 matter and body before merge.
 
 > **Delimiter.** Import inputs use the compile-time `{{ ... }}` delimiter (the
@@ -147,7 +147,7 @@ matter and body before merge.
 > pipeline YAML and agent prompt, where ADO template-processes any `${{ ... }}`
 > it finds — so reusing that delimiter would be a footgun. A `{{` immediately
 > preceded by `$` is treated as an ADO `${{ ... }}` expression and left
-> untouched. Any `{{ ado.aw.import-inputs.<key> }}` still present after
+> untouched. Any `{{ inputs.<key> }}` still present after
 > substitution (an input the consumer did not supply and the schema did not
 > default) is a **compile-time error**.
 
@@ -195,8 +195,8 @@ safe-outputs:
       env:
         NOTIFY_TOKEN: TEAM_NOTIFY_TOKEN
 ---
-When notifying the team, use channel `{{ ado.aw.import-inputs.channel }}` and
-severity `{{ ado.aw.import-inputs.severity }}`.
+When notifying the team, use channel `{{ inputs.channel }}` and
+severity `{{ inputs.severity }}`.
 ```
 
 Consumer:
@@ -240,7 +240,7 @@ consumer workflow > later import > earlier import
   `steps`, `env`, `inputs`, `run`, or `entrypoint`.
 - Imported markdown bodies are concatenated in declaration order, followed by
   the consumer body. Imported bodies are **inlined into the agent prompt at
-  compile time** (their `{{ ado.aw.import-inputs.* }}` placeholders are already
+  compile time** (their `{{ inputs.* }}` placeholders are already
   substituted); in the default `inlined-imports: false` mode the consumer's own
   body is delivered ahead-of-time as a `{{#runtime-import}}` marker so it can
   still be edited without recompiling, while imported bodies — which can only be
@@ -292,7 +292,7 @@ safe-outputs:
           displayName: Create service ticket
 ---
 Use `create-service-ticket` only when a durable service-desk record is needed
-for `{{ ado.aw.import-inputs.service }}`.
+for `{{ inputs.service }}`.
 ```
 
 Consumer workflow:

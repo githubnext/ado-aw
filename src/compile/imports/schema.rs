@@ -1,5 +1,5 @@
 //! `import-schema` modeling, consumer-`with` validation, and
-//! `{{ ado.aw.import-inputs.<key> }}` substitution.
+//! `{{ inputs.<key> }}` substitution.
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
@@ -9,7 +9,7 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
 
 const IMPORT_SCHEMA_KEY: &str = "import-schema";
-const PLACEHOLDER_PREFIX: &str = "ado.aw.import-inputs.";
+const PLACEHOLDER_PREFIX: &str = "inputs.";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImportSchema {
@@ -61,7 +61,7 @@ pub fn validate_with(
     validate_fields(&schema.fields, with, "")
 }
 
-/// Substitutes `{{ ado.aw.import-inputs.<key> }}` placeholders in text.
+/// Substitutes `{{ inputs.<key> }}` placeholders in text.
 ///
 /// This is an ado-aw **compile-time** replacement in the `{{ ... }}` family
 /// (like `{{ workspace }}`), deliberately NOT the ADO template-expression
@@ -118,16 +118,16 @@ pub fn substitute_inputs(text: &str, inputs: &JsonMap<String, JsonValue>) -> Str
     output
 }
 
-/// Scans `text` for an **unresolved** `{{ ado.aw.import-inputs.<path> }}`
-/// placeholder and returns its expression (e.g. `ado.aw.import-inputs.missing`)
+/// Scans `text` for an **unresolved** `{{ inputs.<path> }}`
+/// placeholder and returns its expression (e.g. `inputs.missing`)
 /// if one remains after substitution.
 ///
 /// Unlike [`substitute_inputs`], this does NOT skip a `$`-preceded `{{`: an
-/// author who mistakenly wrote the old `${{ ado.aw.import-inputs.x }}` form
-/// must also be flagged, because ADO would otherwise template-process it in the
-/// emitted YAML. Any surviving marker of our namespace is a compile-time error
-/// (a body reference to an input not supplied by the consumer `with:` / absent
-/// from the component `import-schema:`).
+/// author who mistakenly wrote a `$`-delimited `${{ inputs.x }}` form must also
+/// be flagged, because ADO would otherwise template-process it in the emitted
+/// YAML. Any surviving marker of the `inputs.` namespace is a compile-time
+/// error (a body reference to an input not supplied by the consumer `with:` /
+/// absent from the component `import-schema:`).
 fn find_input_placeholder_leak(text: &str) -> Option<String> {
     let mut cursor = 0;
     while let Some(relative_start) = text[cursor..].find("{{") {
@@ -203,7 +203,7 @@ pub fn apply_import_inputs(
     let substituted_front_matter = substitute_front_matter(&stripped_front_matter, &inputs);
     let substituted_body = substitute_inputs(body, &inputs);
 
-    // Leftover-placeholder guard: any `{{ ado.aw.import-inputs.<path> }}` still
+    // Leftover-placeholder guard: any `{{ inputs.<path> }}` still
     // present after substitution is a reference to an input the consumer did
     // not supply (via `with:`) and that the component `import-schema:` did not
     // default. Fail closed — an unresolved marker embedded into the pipeline
@@ -707,13 +707,13 @@ import-schema:
             "config": { "apiKey": "secret" }
         });
         let text = concat!(
-            "name={{ado.aw.import-inputs.name}} ",
-            "key={{ ado.aw.import-inputs.config.apiKey }} ",
-            "count={{ ado.aw.import-inputs.count }} ",
-            "enabled={{ ado.aw.import-inputs.enabled }} ",
-            "tags={{ ado.aw.import-inputs.tags }} ",
-            "config={{ ado.aw.import-inputs.config }} ",
-            "missing={{ ado.aw.import-inputs.missing }}"
+            "name={{inputs.name}} ",
+            "key={{ inputs.config.apiKey }} ",
+            "count={{ inputs.count }} ",
+            "enabled={{ inputs.enabled }} ",
+            "tags={{ inputs.tags }} ",
+            "config={{ inputs.config }} ",
+            "missing={{ inputs.missing }}"
         );
 
         let substituted = substitute_inputs(text, inputs.as_object().unwrap());
@@ -727,7 +727,7 @@ import-schema:
                 "enabled=false ",
                 "tags=[\"a\",\"b\"] ",
                 "config={\"apiKey\":\"secret\"} ",
-                "missing={{ ado.aw.import-inputs.missing }}"
+                "missing={{ inputs.missing }}"
             )
         );
     }
@@ -739,18 +739,18 @@ import-schema:
         // syntactically mentions our namespace (that leak is caught later by the
         // guard, not silently substituted here).
         let inputs = json!({ "name": "demo" });
-        let text = "keep ${{ parameters.env }} and {{ ado.aw.import-inputs.name }} and ${{ ado.aw.import-inputs.name }}";
+        let text = "keep ${{ parameters.env }} and {{ inputs.name }} and ${{ inputs.name }}";
         let substituted = substitute_inputs(text, inputs.as_object().unwrap());
         assert_eq!(
             substituted,
-            "keep ${{ parameters.env }} and demo and ${{ ado.aw.import-inputs.name }}"
+            "keep ${{ parameters.env }} and demo and ${{ inputs.name }}"
         );
     }
 
     #[test]
     fn substitute_inputs_preserves_runtime_import_markers() {
         let inputs = json!({ "name": "demo" });
-        let text = "{{#runtime-import agents/x.md}} uses {{ ado.aw.import-inputs.name }}";
+        let text = "{{#runtime-import agents/x.md}} uses {{ inputs.name }}";
         let substituted = substitute_inputs(text, inputs.as_object().unwrap());
         assert_eq!(substituted, "{{#runtime-import agents/x.md}} uses demo");
     }
@@ -761,7 +761,7 @@ import-schema:
         // neutralized when interpolated (defense-in-depth), so it cannot smuggle
         // a `##vso[` pipeline command into a generated step.
         let inputs = json!({ "evil": "##vso[task.setvariable variable=x]y" });
-        let substituted = substitute_inputs("val={{ ado.aw.import-inputs.evil }}", inputs.as_object().unwrap());
+        let substituted = substitute_inputs("val={{ inputs.evil }}", inputs.as_object().unwrap());
         // The neutralized form wraps the command in backticks so ADO renders it
         // as inert text instead of executing it.
         assert!(
@@ -778,11 +778,11 @@ import-schema:
     fn substitute_front_matter_walks_nested_mappings_and_sequences() {
         let fm = yaml(
             r#"
-name: "{{ ado.aw.import-inputs.name }}"
+name: "{{ inputs.name }}"
 steps:
-  - bash: echo {{ ado.aw.import-inputs.config.apiKey }}
+  - bash: echo {{ inputs.config.apiKey }}
 nested:
-  value: before {{ado.aw.import-inputs.name}} after
+  value: before {{inputs.name}} after
 "#,
         );
         let inputs = json!({
@@ -816,16 +816,16 @@ import-schema:
   count:
     type: number
     default: 2
-name: component-{{ ado.aw.import-inputs.name }}
+name: component-{{ inputs.name }}
 variables:
-  count: "{{ ado.aw.import-inputs.count }}"
+  count: "{{ inputs.count }}"
 "#,
         );
         let with = json!({ "name": "demo" });
 
         let (front_matter, body) = apply_import_inputs(
             &fm,
-            "Hello {{ ado.aw.import-inputs.name }} {{ ado.aw.import-inputs.count }}",
+            "Hello {{ inputs.name }} {{ inputs.count }}",
             with.as_object().unwrap(),
         )
         .unwrap();
@@ -851,13 +851,13 @@ variables:
         let with = json!({ "name": "demo" });
         let err = apply_import_inputs(
             &fm,
-            "Hello {{ ado.aw.import-inputs.typo }}",
+            "Hello {{ inputs.typo }}",
             with.as_object().unwrap(),
         )
         .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("unresolved import input placeholder"), "{msg}");
-        assert!(msg.contains("ado.aw.import-inputs.typo"), "{msg}");
+        assert!(msg.contains("inputs.typo"), "{msg}");
     }
 
     #[test]
@@ -868,7 +868,7 @@ variables:
         let with = json!({ "name": "demo" });
         let err = apply_import_inputs(
             &fm,
-            "Hello ${{ ado.aw.import-inputs.name }}",
+            "Hello ${{ inputs.name }}",
             with.as_object().unwrap(),
         )
         .unwrap_err();
