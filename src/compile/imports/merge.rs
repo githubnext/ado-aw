@@ -588,7 +588,6 @@ mod tests {
 
     #[test]
     fn component_cannot_spoof_provenance_keys() {
-        use crate::compile::types::ImportEndpoint;
         // A component authoring compiler-owned provenance keys into its own
         // front matter must NOT influence the checkout. For a same-org
         // (endpoint-less) remote import the compiler resolves no service

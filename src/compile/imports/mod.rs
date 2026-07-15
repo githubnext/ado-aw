@@ -30,8 +30,12 @@ const IMPORT_GITATTRIBUTES: &str = "# Mark all cached import files as generated\
 * merge=ours\n";
 
 /// Fetches a single SHA-pinned component manifest.
+///
+/// `Send + Sync` so a `&dyn ManifestFetcher` can be held across an await in a
+/// `Send` future (e.g. `build_pipeline_ir`, which the `mcp-author` tool router
+/// spawns on a multi-threaded runtime).
 #[async_trait]
-pub trait ManifestFetcher {
+pub trait ManifestFetcher: Send + Sync {
     async fn fetch(&self, spec: &ParsedImportSpec) -> Result<Vec<u8>>;
 }
 
@@ -109,44 +113,93 @@ impl ManifestFetcher for GhCliFetcher {
 /// Azure Repos-backed manifest fetcher — the **primary** compile-time source.
 ///
 /// Fetches a SHA-pinned manifest from the ADO Git Items API. Endpoint-less
-/// imports resolve against the consumer's own organization (`context_org_url`);
+/// imports resolve against the consumer's own organization (from `repo_root`);
 /// [`ImportEndpoint::AzureReposCrossOrg`] imports resolve against the
 /// organization named in the endpoint. The import spec's `owner` maps to the
 /// ADO **project** and `repo` to the repository name.
 ///
-/// `context_org_url` and `auth` are resolved once, best-effort, at construction
-/// time (only when the workflow actually declares an Azure Repos import). A
-/// failure to resolve either is deferred and surfaced **fail-closed** when an
-/// Azure Repos import is actually fetched — an Azure-Repos-typed import never
+/// The consumer org URL and non-interactive auth are resolved **lazily on the
+/// first actual fetch** (and cached), so a fully-vendored committed cache — as
+/// used by `ado-aw check` — performs no `git`/`az` subprocess or network work
+/// (the cache is consulted before `fetch` is ever called). A resolution failure
+/// is surfaced **fail-closed** at fetch time; an Azure-Repos-typed import never
 /// silently falls back to GitHub.
 pub struct AdoRepoFetcher {
     client: reqwest::Client,
-    /// Consumer organization collection URL for same-org imports, or the reason
-    /// it could not be resolved.
-    context_org_url: std::result::Result<String, String>,
-    /// Non-interactive ADO auth, or the reason it could not be resolved.
-    auth: std::result::Result<crate::ado::AdoAuth, String>,
+    /// Repo root used to infer the consumer org for same-org imports.
+    repo_root: PathBuf,
+    /// Lazily-resolved consumer organization collection URL (same-org imports).
+    context_org_url: tokio::sync::OnceCell<std::result::Result<String, String>>,
+    /// Lazily-resolved non-interactive ADO auth.
+    auth: tokio::sync::OnceCell<std::result::Result<crate::ado::AdoAuth, String>>,
 }
 
 impl AdoRepoFetcher {
-    /// Construct a fetcher from a best-effort org URL and auth resolution.
-    pub fn new(
+    /// Construct a fetcher that resolves org/auth lazily on first fetch, using
+    /// `repo_root` to infer the consumer organization for same-org imports.
+    pub fn new(repo_root: PathBuf) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            repo_root,
+            context_org_url: tokio::sync::OnceCell::new(),
+            auth: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    /// Test constructor with the org URL + auth pre-resolved (no subprocess).
+    #[cfg(test)]
+    pub fn with_resolved(
         context_org_url: std::result::Result<String, String>,
         auth: std::result::Result<crate::ado::AdoAuth, String>,
     ) -> Self {
         Self {
             client: reqwest::Client::new(),
-            context_org_url,
-            auth,
+            repo_root: PathBuf::new(),
+            context_org_url: tokio::sync::OnceCell::new_with(Some(context_org_url)),
+            auth: tokio::sync::OnceCell::new_with(Some(auth)),
         }
+    }
+
+    /// Consumer org URL for same-org imports, resolved + cached on first use.
+    async fn context_org_url(&self) -> &std::result::Result<String, String> {
+        self.context_org_url
+            .get_or_init(|| async {
+                crate::ado::resolve_ado_context(&self.repo_root, None, None)
+                    .await
+                    .map(|ctx| ctx.org_url)
+                    .map_err(|e| format!("{e:#}"))
+            })
+            .await
+    }
+
+    /// Non-interactive ADO auth, resolved + cached on first use.
+    async fn auth(&self) -> &std::result::Result<crate::ado::AdoAuth, String> {
+        self.auth
+            .get_or_init(|| async {
+                crate::ado::resolve_auth_non_interactive()
+                    .await
+                    .map_err(|e| format!("{e:#}"))
+            })
+            .await
     }
 }
 
 #[async_trait]
 impl ManifestFetcher for AdoRepoFetcher {
     async fn fetch(&self, spec: &ParsedImportSpec) -> Result<Vec<u8>> {
+        // Fail-closed BEFORE any lazy org/auth resolution: a GitHub/GHE-typed
+        // import must never reach the Azure Repos fetcher.
+        if let Some(other @ (ImportEndpoint::GitHub { .. } | ImportEndpoint::GitHubEnterprise { .. })) =
+            &spec.endpoint
+        {
+            anyhow::bail!(
+                "internal routing error: Azure Repos fetcher received a {:?} import",
+                other
+            );
+        }
+
         let org_url = match &spec.endpoint {
-            None => self.context_org_url.as_deref().map_err(|reason| {
+            None => self.context_org_url().await.as_deref().map_err(|reason| {
                 anyhow::anyhow!(
                     "cannot fetch same-org Azure Repos import `{}/{}/{}`: {}. \
                      Set AZURE_DEVOPS_ORG_URL / SYSTEM_COLLECTIONURI or run from an \
@@ -158,17 +211,10 @@ impl ManifestFetcher for AdoRepoFetcher {
                 )
             })?,
             Some(ImportEndpoint::AzureReposCrossOrg { org, .. }) => org.as_str(),
-            Some(other) => {
-                // Fail-closed: a GitHub/GHE-typed import must never reach the
-                // Azure Repos fetcher.
-                anyhow::bail!(
-                    "internal routing error: Azure Repos fetcher received a {:?} import",
-                    other
-                );
-            }
+            Some(_) => unreachable!("github/ghe rejected above"),
         };
 
-        let auth = self.auth.as_ref().map_err(|reason| {
+        let auth = self.auth().await.as_ref().map_err(|reason| {
             anyhow::anyhow!(
                 "cannot authenticate to Azure Repos for import `{}/{}/{}`: {}",
                 spec.owner,
@@ -1044,7 +1090,7 @@ mod tests {
     /// fall through to GitHub. Regression guard for the source-confusion bug.
     #[tokio::test]
     async fn ado_fetcher_endpoint_less_without_org_fails_closed() {
-        let fetcher = AdoRepoFetcher::new(
+        let fetcher = AdoRepoFetcher::with_resolved(
             Err("no ADO remote".to_string()),
             Err("no creds".to_string()),
         );
@@ -1062,7 +1108,7 @@ mod tests {
     /// A GitHub-typed spec must never be accepted by the Azure Repos fetcher.
     #[tokio::test]
     async fn ado_fetcher_rejects_github_typed_spec() {
-        let fetcher = AdoRepoFetcher::new(
+        let fetcher = AdoRepoFetcher::with_resolved(
             Ok("https://dev.azure.com/org".to_string()),
             Ok(crate::ado::AdoAuth::Pat("x".to_string())),
         );

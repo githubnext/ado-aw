@@ -963,39 +963,13 @@ async fn resolve_and_merge_imports(
 
     // Build the routing fetcher: endpoint-less / cross-org Azure Repos imports
     // resolve via the ADO Git Items API (primary); GitHub/GHE imports resolve
-    // via `gh`. Azure org URL + auth are resolved best-effort here (only when an
-    // Azure Repos import is actually declared) and any failure is deferred
-    // fail-closed to the point the affected import is fetched — so a GitHub-only
-    // import set, a workflow with no ADO remote, or (crucially for `check`) a
-    // fully-vendored committed cache is unaffected.
-    use crate::compile::types::ImportEndpoint;
-    let has_same_org_azure = front_matter.imports.iter().any(|e| e.endpoint.is_none());
-    let has_any_azure = front_matter.imports.iter().any(|e| {
-        matches!(
-            e.endpoint,
-            None | Some(ImportEndpoint::AzureReposCrossOrg { .. })
-        )
-    });
-
-    let ado_fetcher = if has_any_azure {
-        let context_org_url = if has_same_org_azure {
-            crate::ado::resolve_ado_context(&repo_root, None, None)
-                .await
-                .map(|ctx| ctx.org_url)
-                .map_err(|e| format!("{e:#}"))
-        } else {
-            Err("no same-org Azure Repos import declared".to_string())
-        };
-        let auth = crate::ado::resolve_auth_non_interactive()
-            .await
-            .map_err(|e| format!("{e:#}"));
-        crate::compile::imports::AdoRepoFetcher::new(context_org_url, auth)
-    } else {
-        crate::compile::imports::AdoRepoFetcher::new(
-            Err("no Azure Repos import declared".to_string()),
-            Err("no Azure Repos import declared".to_string()),
-        )
-    };
+    // via `gh`. The Azure fetcher resolves its org URL + auth LAZILY on the
+    // first actual fetch (see `AdoRepoFetcher`), so a GitHub-only import set, a
+    // workflow with no ADO remote, or — crucially for `check`/`inspect` — a
+    // fully-vendored committed cache performs no `git`/`az` work at all (the
+    // cache is consulted before any fetch), and any resolution failure surfaces
+    // fail-closed only when an uncached Azure import is actually fetched.
+    let ado_fetcher = crate::compile::imports::AdoRepoFetcher::new(repo_root.clone());
     let fetcher = crate::compile::imports::RoutingFetcher::new(ado_fetcher);
 
     let mut merged_mapping = front_matter_mapping.clone();
@@ -1035,7 +1009,18 @@ pub async fn build_pipeline_ir(input_path: &Path) -> Result<(FrontMatter, ir::Pi
 
     let parsed = common::parse_markdown_detailed(&content)?;
     let mut front_matter = parsed.front_matter;
-    let markdown_body = parsed.markdown_body;
+
+    // Resolve + merge `imports:` so `inspect`/`graph`/`whatif`/`lint`/`trace`
+    // reason about the same fully-merged pipeline `compile` and `check` produce
+    // (imported tools, safe-outputs, custom jobs, and inlined bodies). Reads the
+    // vendored SHA-keyed cache, so it stays offline when the cache is present.
+    let (imported_prompt_body, markdown_body) = resolve_and_merge_imports(
+        &mut front_matter,
+        &parsed.front_matter_mapping,
+        &parsed.markdown_body,
+        input_path,
+    )
+    .await?;
 
     use crate::sanitize::SanitizeConfig;
     front_matter.sanitize_config_fields();
@@ -1053,7 +1038,8 @@ pub async fn build_pipeline_ir(input_path: &Path) -> Result<(FrontMatter, ir::Pi
     let output_path = input_path.with_extension("lock.yml");
 
     let extensions = extensions::collect_extensions(&front_matter);
-    let ctx = extensions::CompileContext::new(&front_matter, input_path).await?;
+    let mut ctx = extensions::CompileContext::new(&front_matter, input_path).await?;
+    ctx.imported_prompt_body = imported_prompt_body;
 
     let pipeline = match front_matter.target {
         CompileTarget::Standalone => standalone_ir::build_standalone_pipeline(
