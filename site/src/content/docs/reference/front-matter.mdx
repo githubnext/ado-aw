@@ -23,9 +23,18 @@ pool:                          # Microsoft-hosted agent (default for standalone 
 # pool: MySelfHostedPool       # String form -- legacy shorthand for a self-hosted pool name
 # pool:                        # Self-hosted pool object form
 #   name: MySelfHostedPool
+#   demands:                   # optional Azure Pipelines demands (not supported with vmImage)
+#     - CustomCapability -equals required-value
 # pool:                        # 1ES pool object form (set os: when needed)
 #   name: AZS-1ES-L-MMS-ubuntu-22.04
 #   os: linux                  # Operating system: "linux" or "windows". Defaults to "linux".
+# pool:                        # Per-job pool overrides (not supported for target: 1es)
+#   vmImage: ubuntu-22.04
+#   overrides:                 # map of job name → pool config; unspecified jobs inherit the default pool
+#     agent:
+#       vmImage: ubuntu-22.04-gpu  # run the AI agent on a GPU pool
+#     conclusion:
+#       name: MySelfHostedPool
 repos:                           # compact repository declarations (replaces repositories: + checkout:)
   - my-org/my-repo               # shorthand: alias="my-repo", type=git, ref=refs/heads/main, checkout=true
   - reponame=my-org/another-repo # shorthand with explicit alias
@@ -335,6 +344,79 @@ default):
 
 Set `workspace:` explicitly to `root`, `repo` (alias `self`), or a specific
 checked-out repository alias to override this behavior.
+
+## Pool Configuration (`pool:`)
+
+The `pool:` field selects the Azure Pipelines agent pool (and optionally the
+image) that jobs run on. There are three supported forms:
+
+```yaml
+# Microsoft-hosted agent pool — vmImage shorthand
+pool:
+  vmImage: ubuntu-22.04          # ubuntu-22.04, windows-2022, macos-latest, ...
+
+# Self-hosted pool by name
+pool:
+  name: MySelfHostedPool
+
+# 1ES pool object form (required for target: 1es)
+pool:
+  name: AZS-1ES-L-MMS-ubuntu-22.04
+  os: linux                      # "linux" or "windows". Defaults to "linux".
+```
+
+The legacy bare-string form (`pool: MySelfHostedPool`) is still accepted at
+parse time and is automatically normalized to `pool: { name: ... }` by a
+compiler codemod.
+
+### Named pool demands
+
+Self-hosted pools support [Azure Pipelines
+demands](https://learn.microsoft.com/en-us/azure/devops/pipelines/process/demands)
+to require specific agent capabilities. Demands cannot be used with `vmImage`.
+
+```yaml
+pool:
+  name: MySelfHostedPool
+  demands:
+    - CustomCapability -equals required-value
+    - Agent.OS -equals Linux
+```
+
+### Per-job pool overrides (`pool.overrides`)
+
+By default every job in the compiled pipeline uses the same pool.
+`pool.overrides` lets you assign a different pool to specific jobs — for
+example, to run the Agent job on a GPU-equipped Linux pool while the rest of
+the pipeline uses a standard Windows image:
+
+```yaml
+pool:
+  vmImage: windows-2022          # default pool for all jobs
+  overrides:
+    agent:
+      vmImage: ubuntu-22.04      # Agent job runs on Linux
+    conclusion:
+      name: MySelfHostedPool     # Conclusion job runs on a self-hosted pool
+```
+
+**Valid job keys** for `overrides`:
+
+| Key | Job |
+|-----|-----|
+| `setup` | Pre-agent setup job |
+| `agent` | Stage 1 — the AI agent |
+| `detection` | Stage 2 — threat analysis |
+| `safe-outputs` | Stage 3 — safe output executor |
+| `safe-outputs-reviewed` | Stage 3 gated variant (when `require-approval` is set) |
+| `teardown` | Post-executor teardown job |
+| `conclusion` | Conclusion job (requires `safe-outputs:` to be configured) |
+
+`manual-review` is always rejected — it is an agentless job fixed to
+`pool: server`.
+
+`pool.overrides` is not supported for `target: 1es`; specifying it there
+is a compile-time error.
 
 ## Repositories (`repos:`)
 
