@@ -118,6 +118,66 @@ impl Default for CommentOnWorkItemConfig {
     }
 }
 
+/// Validate that a work item is allowed by the configured target policy.
+///
+/// Returns `Ok(None)` when the work item is allowed, `Ok(Some(msg))` when it is
+/// rejected by policy (the caller should return `ExecutionResult::failure(msg)`),
+/// or `Err(…)` on an unexpected infrastructure failure.
+async fn validate_target_policy(
+    target: &CommentTarget,
+    client: &reqwest::Client,
+    org_url: &str,
+    project: &str,
+    token: &str,
+    work_item_id: i64,
+) -> anyhow::Result<Option<String>> {
+    match target.allows_id(work_item_id) {
+        Some(true) => {
+            debug!("Work item #{} allowed by target policy", work_item_id);
+            Ok(None)
+        }
+        Some(false) => Ok(Some(format!(
+            "Work item #{} is not in the allowed target set",
+            work_item_id
+        ))),
+        None => {
+            // Area path validation — `allows_id` returns `None` only for
+            // `StringTarget(s != "*")`, so `area_path_prefix` is always `Some` here.
+            let prefix = target
+                .area_path_prefix()
+                .expect("allows_id returned None but area_path_prefix is also None");
+            debug!(
+                "Validating area path for work item #{} against prefix '{}'",
+                work_item_id, prefix
+            );
+            match get_work_item_area_path(client, org_url, project, token, work_item_id).await {
+                Ok(area_path) => {
+                    // ADO area paths are case-insensitive and use backslash separators.
+                    // Require the match to land on a path boundary so that prefix "4x4"
+                    // doesn't accidentally match "4x4Production".
+                    let ap = area_path.to_lowercase();
+                    let pf = prefix.to_lowercase();
+                    let is_match =
+                        ap == pf || (ap.starts_with(&*pf) && ap[pf.len()..].starts_with('\\'));
+                    if is_match {
+                        debug!("Area path '{}' validated against '{}'", area_path, prefix);
+                        Ok(None)
+                    } else {
+                        Ok(Some(format!(
+                            "Work item #{} has area path '{}' which is not under allowed prefix '{}'",
+                            work_item_id, area_path, prefix
+                        )))
+                    }
+                }
+                Err(e) => Ok(Some(format!(
+                    "Failed to validate area path for work item #{}: {}",
+                    work_item_id, e
+                ))),
+            }
+        }
+    }
+}
+
 /// Fetch a work item's area path from the ADO API
 async fn get_work_item_area_path(
     client: &reqwest::Client,
@@ -216,57 +276,11 @@ impl Executor for CommentOnWorkItemResult {
         let client = reqwest::Client::new();
 
         // Validate work item ID against target policy
-        match target.allows_id(self.work_item_id) {
-            Some(true) => {
-                debug!("Work item #{} allowed by target policy", self.work_item_id);
-            }
-            Some(false) => {
-                return Ok(ExecutionResult::failure(format!(
-                    "Work item #{} is not in the allowed target set",
-                    self.work_item_id
-                )));
-            }
-            None => {
-                // Area path validation — need to fetch the work item.
-                // Invariant: allows_id returns None only for StringTarget(s != "*"),
-                // and area_path_prefix returns Some for exactly that case.
-                let prefix = match target.area_path_prefix() {
-                    Some(p) => p,
-                    None => {
-                        unreachable!("allows_id returned None but area_path_prefix is also None")
-                    }
-                };
-                debug!(
-                    "Validating area path for work item #{} against prefix '{}'",
-                    self.work_item_id, prefix
-                );
-                match get_work_item_area_path(&client, org_url, project, token, self.work_item_id)
-                    .await
-                {
-                    Ok(area_path) => {
-                        // ADO area paths are case-insensitive and use backslash separators.
-                        // Require the match to land on a path boundary so that prefix "4x4"
-                        // doesn't accidentally match "4x4Production".
-                        let ap = area_path.to_lowercase();
-                        let pf = prefix.to_lowercase();
-                        let is_match =
-                            ap == pf || (ap.starts_with(&*pf) && ap[pf.len()..].starts_with('\\'));
-                        if !is_match {
-                            return Ok(ExecutionResult::failure(format!(
-                                "Work item #{} has area path '{}' which is not under allowed prefix '{}'",
-                                self.work_item_id, area_path, prefix
-                            )));
-                        }
-                        debug!("Area path '{}' validated against '{}'", area_path, prefix);
-                    }
-                    Err(e) => {
-                        return Ok(ExecutionResult::failure(format!(
-                            "Failed to validate area path for work item #{}: {}",
-                            self.work_item_id, e
-                        )));
-                    }
-                }
-            }
+        if let Some(rejection_msg) =
+            validate_target_policy(target, &client, org_url, project, token, self.work_item_id)
+                .await?
+        {
+            return Ok(ExecutionResult::failure(rejection_msg));
         }
 
         // Build the Azure DevOps REST API URL for adding a comment
