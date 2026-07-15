@@ -159,74 +159,21 @@ async fn compile_pipeline_inner(
     let body_raw = parsed.body_raw;
     let source_sha256 = parsed.source_sha256;
 
-    // Substituted, joined bodies of any imported components. Inlined into the
-    // agent prompt at compile time (they cannot be delivered by the default
-    // runtime-import path, which reads the consumer's own source). Empty when
-    // the workflow declares no imports.
-    let mut imported_prompt_body = String::new();
-
     // Resolve and merge cross-repository / local `imports:` (D8/D9). Runs only
     // when the workflow declares imports, so import-free workflows are
     // unaffected. The merge is applied to a CLONE of the front-matter mapping —
     // the original `front_matter_mapping` is preserved untouched so that any
     // codemod source-rewrite keeps the author's `imports:` in their file rather
     // than writing the expanded/merged form back to disk.
-    if !front_matter.imports.is_empty() {
-        let base_dir = input_path.parent().unwrap_or_else(|| Path::new("."));
-        let repo_root = find_repo_root(base_dir).unwrap_or_else(|| base_dir.to_path_buf());
-
-        // Build the routing fetcher: endpoint-less / cross-org Azure Repos
-        // imports resolve via the ADO Git Items API (primary); GitHub/GHE
-        // imports resolve via `gh`. Azure org URL + auth are resolved
-        // best-effort here (only when an Azure Repos import is actually
-        // declared) and any failure is deferred fail-closed to the point the
-        // affected import is fetched — so a GitHub-only import set, or a
-        // workflow with no ADO remote, is unaffected.
-        use crate::compile::types::ImportEndpoint;
-        let has_same_org_azure = front_matter.imports.iter().any(|e| e.endpoint.is_none());
-        let has_any_azure = front_matter.imports.iter().any(|e| {
-            matches!(
-                e.endpoint,
-                None | Some(ImportEndpoint::AzureReposCrossOrg { .. })
-            )
-        });
-
-        let ado_fetcher = if has_any_azure {
-            let context_org_url = if has_same_org_azure {
-                crate::ado::resolve_ado_context(&repo_root, None, None)
-                    .await
-                    .map(|ctx| ctx.org_url)
-                    .map_err(|e| format!("{e:#}"))
-            } else {
-                Err("no same-org Azure Repos import declared".to_string())
-            };
-            let auth = crate::ado::resolve_auth_non_interactive()
-                .await
-                .map_err(|e| format!("{e:#}"));
-            crate::compile::imports::AdoRepoFetcher::new(context_org_url, auth)
-        } else {
-            crate::compile::imports::AdoRepoFetcher::new(
-                Err("no Azure Repos import declared".to_string()),
-                Err("no Azure Repos import declared".to_string()),
-            )
-        };
-        let fetcher = crate::compile::imports::RoutingFetcher::new(ado_fetcher);
-
-        let mut merged_mapping = front_matter_mapping.clone();
-        let (imported, combined) = crate::compile::imports::merge::merge_imports(
-            &mut merged_mapping,
-            &markdown_body,
-            &front_matter.imports,
-            base_dir,
-            &repo_root,
-            &fetcher,
-        )
-        .await?;
-        imported_prompt_body = imported;
-        markdown_body = combined;
-        front_matter = serde_yaml::from_value(serde_yaml::Value::Mapping(merged_mapping))
-            .context("Failed to parse front matter after merging imports")?;
-    }
+    //
+    // `imported_prompt_body` is the substituted, joined bodies of any imported
+    // components, inlined into the agent prompt at compile time (they cannot be
+    // delivered by the default runtime-import path, which reads the consumer's
+    // own source). Empty when the workflow declares no imports.
+    let (imported_prompt_body, merged_body) =
+        resolve_and_merge_imports(&mut front_matter, &front_matter_mapping, &markdown_body, input_path)
+            .await?;
+    markdown_body = merged_body;
 
     // Sanitize all front matter text fields before any further processing.
     // This neutralizes pipeline command injection (##vso[), strips control
@@ -685,7 +632,18 @@ pub async fn check_pipeline(pipeline_path: &str) -> Result<()> {
     }
 
     let mut front_matter = parsed.front_matter;
-    let markdown_body = parsed.markdown_body;
+
+    // Resolve + merge `imports:` so `check` validates the same fully-merged
+    // pipeline that `compile` produces. Reads the committed `.ado-aw/imports`
+    // cache (SHA-keyed), so this is offline when the cache is vendored. Uses the
+    // absolute `source_path` so the repo root (holding the cache) resolves.
+    let (imported_prompt_body, markdown_body) = resolve_and_merge_imports(
+        &mut front_matter,
+        &parsed.front_matter_mapping,
+        &parsed.markdown_body,
+        &source_path,
+    )
+    .await?;
 
     use crate::sanitize::SanitizeConfig;
     front_matter.sanitize_config_fields();
@@ -709,10 +667,7 @@ pub async fn check_pipeline(pipeline_path: &str) -> Result<()> {
             pipeline_path,
             &front_matter,
             &markdown_body,
-            // `check_pipeline` does not resolve `imports:` (pre-existing: it
-            // also skips the front-matter merge), so there is no imported
-            // prompt body to inline here.
-            "",
+            &imported_prompt_body,
             false,
             false,
         )
@@ -976,6 +931,86 @@ pub fn find_repo_root(start: &Path) -> Option<PathBuf> {
             return None;
         }
     }
+}
+
+/// Resolve and merge the workflow's `imports:` into `front_matter` and the body.
+///
+/// Shared by [`compile_pipeline_inner`] and [`check_pipeline`] so that `check`
+/// validates the *same* fully-merged pipeline that `compile` produces. Mutates
+/// `front_matter` in place (imported front matter merged, `imports:` consumed)
+/// and returns `(imported_prompt_body, merged_markdown_body)`:
+/// - `imported_prompt_body` — the substituted, joined bodies of imported
+///   components, inlined into the agent prompt at compile time.
+/// - `merged_markdown_body` — imported bodies + the consumer body.
+///
+/// A no-op returning `(String::new(), markdown_body)` when there are no imports.
+///
+/// `source_path` is the absolute path of the agent source `.md`; its parent is
+/// the base directory for local imports and the anchor for locating the repo
+/// root (which holds the committed `.ado-aw/imports` cache).
+async fn resolve_and_merge_imports(
+    front_matter: &mut FrontMatter,
+    front_matter_mapping: &serde_yaml::Mapping,
+    markdown_body: &str,
+    source_path: &Path,
+) -> Result<(String, String)> {
+    if front_matter.imports.is_empty() {
+        return Ok((String::new(), markdown_body.to_string()));
+    }
+
+    let base_dir = source_path.parent().unwrap_or_else(|| Path::new("."));
+    let repo_root = find_repo_root(base_dir).unwrap_or_else(|| base_dir.to_path_buf());
+
+    // Build the routing fetcher: endpoint-less / cross-org Azure Repos imports
+    // resolve via the ADO Git Items API (primary); GitHub/GHE imports resolve
+    // via `gh`. Azure org URL + auth are resolved best-effort here (only when an
+    // Azure Repos import is actually declared) and any failure is deferred
+    // fail-closed to the point the affected import is fetched — so a GitHub-only
+    // import set, a workflow with no ADO remote, or (crucially for `check`) a
+    // fully-vendored committed cache is unaffected.
+    use crate::compile::types::ImportEndpoint;
+    let has_same_org_azure = front_matter.imports.iter().any(|e| e.endpoint.is_none());
+    let has_any_azure = front_matter.imports.iter().any(|e| {
+        matches!(
+            e.endpoint,
+            None | Some(ImportEndpoint::AzureReposCrossOrg { .. })
+        )
+    });
+
+    let ado_fetcher = if has_any_azure {
+        let context_org_url = if has_same_org_azure {
+            crate::ado::resolve_ado_context(&repo_root, None, None)
+                .await
+                .map(|ctx| ctx.org_url)
+                .map_err(|e| format!("{e:#}"))
+        } else {
+            Err("no same-org Azure Repos import declared".to_string())
+        };
+        let auth = crate::ado::resolve_auth_non_interactive()
+            .await
+            .map_err(|e| format!("{e:#}"));
+        crate::compile::imports::AdoRepoFetcher::new(context_org_url, auth)
+    } else {
+        crate::compile::imports::AdoRepoFetcher::new(
+            Err("no Azure Repos import declared".to_string()),
+            Err("no Azure Repos import declared".to_string()),
+        )
+    };
+    let fetcher = crate::compile::imports::RoutingFetcher::new(ado_fetcher);
+
+    let mut merged_mapping = front_matter_mapping.clone();
+    let (imported, combined) = crate::compile::imports::merge::merge_imports(
+        &mut merged_mapping,
+        markdown_body,
+        &front_matter.imports,
+        base_dir,
+        &repo_root,
+        &fetcher,
+    )
+    .await?;
+    *front_matter = serde_yaml::from_value(serde_yaml::Value::Mapping(merged_mapping))
+        .context("Failed to parse front matter after merging imports")?;
+    Ok((imported, combined))
 }
 
 /// Public, read-only entry point that returns the typed [`ir::Pipeline`]
