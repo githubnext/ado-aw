@@ -161,6 +161,22 @@ for _ in $(seq 1 30); do
 done
 jq -e '.mcpServers.safeoutputs.url' "${RUNTIME_DIR}/gateway-output.json" >/dev/null
 
+MCPG_PROBE_STATUS="$(
+  curl --noproxy '*' -sS \
+    -o "${ARTIFACT_DIR}/mcpg-safeoutputs-probe.json" \
+    -w '%{http_code}' \
+    -X POST "http://127.0.0.1:${MCP_GATEWAY_PORT}/mcp/safeoutputs" \
+    -H "Authorization: ${MCP_GATEWAY_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json, text/event-stream" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"ado-aw-contract-probe","version":"1.0"}}}'
+)"
+if [[ ! "${MCPG_PROBE_STATUS}" =~ ^2 ]]; then
+  echo "MCPG SafeOutputs probe failed with HTTP ${MCPG_PROBE_STATUS}" >&2
+  cat "${ARTIFACT_DIR}/mcpg-safeoutputs-probe.json" >&2 || true
+  exit 1
+fi
+
 jq \
   --arg prefix "http://${MCP_GATEWAY_CONTAINER}:${MCP_GATEWAY_PORT}" \
   '.mcpServers |= (

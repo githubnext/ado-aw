@@ -1575,7 +1575,15 @@ pub async fn run_http(
         bind_address, port
     );
 
-    let config = StreamableHttpServerConfig::default();
+    let mut config = StreamableHttpServerConfig::default();
+    config.allowed_hosts.push(bind_address.to_string());
+    if !bind_address.is_loopback() {
+        // MCPG reaches a bridge-bound server through Docker's canonical host
+        // alias. Keep rmcp's DNS-rebinding protection fail-closed by allowing
+        // only this explicit alias in addition to the listener IP and default
+        // loopback hosts.
+        config.allowed_hosts.push("host.docker.internal".to_string());
+    }
 
     let session_manager = Arc::new(LocalSessionManager::default());
 
