@@ -1656,7 +1656,15 @@ fn custom_repository_resources(front_matter: &FrontMatter) -> Result<Vec<Reposit
                 identifier: component.alias,
                 kind: "git".to_string(),
                 name: format!("{owner}/{repo}"),
-                r#ref: Some("refs/heads/main".to_string()),
+                // Omit `ref` so ADO checks out the component repo's actual
+                // default branch (which always exists) for the initial shallow
+                // checkout. A hardcoded `refs/heads/main` hard-fails the
+                // checkout step for any repo whose default branch is not `main`
+                // (ADO: "Couldn't find remote ref …", no fallback). The exact
+                // import commit is pinned separately at runtime by the
+                // checkout-component bundle (`git fetch <sha>` + detached
+                // checkout), so the initial branch content is irrelevant.
+                r#ref: None,
                 endpoint: None,
             });
         }
@@ -4498,6 +4506,49 @@ mod tests {
             _ => return false,
         };
         matches!(env.get(name), Some(EnvValue::Secret(v)) if v == var)
+    }
+
+    #[test]
+    fn custom_component_repo_resource_omits_ref_for_default_branch() {
+        // Regression: the imported-component repository resource must NOT pin a
+        // hardcoded `refs/heads/main` ref (ADO hard-fails the checkout for repos
+        // whose default branch differs). Omitting `ref` makes ADO use the repo's
+        // actual default branch; the exact SHA is pinned at runtime by the
+        // checkout-component bundle.
+        let fm = test_front_matter(
+            r#"
+name: Test
+description: Test
+safe-outputs:
+  scripts:
+    notify-team:
+      run: node notify.js
+      component-source: octo/tools/components/notify.md
+      component-sha: 0123456789012345678901234567890123456789
+      manifest-digest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+"#,
+        );
+        let resources = custom_repository_resources(&fm).unwrap();
+        assert_eq!(resources.len(), 1);
+        match &resources[0] {
+            RepositoryResource::Named {
+                identifier,
+                kind,
+                name,
+                r#ref,
+                endpoint,
+            } => {
+                assert!(identifier.starts_with("import_octo_tools_"), "{identifier}");
+                assert_eq!(kind, "git");
+                assert_eq!(name, "octo/tools");
+                assert_eq!(
+                    *r#ref, None,
+                    "ref must be omitted so ADO uses the component repo's default branch"
+                );
+                assert_eq!(*endpoint, None);
+            }
+            other => panic!("expected a Named repository resource, got {other:?}"),
+        }
     }
 
     #[test]
