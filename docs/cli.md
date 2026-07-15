@@ -186,6 +186,8 @@ These commands are not shown in `--help` but are available for contributors work
 - `export-gate-schema` - Export the gate spec JSON Schema used by the `scripts/ado-script` TypeScript workspace for type codegen. Outputs JSON to stdout or to a file.
   - `--output, -o <path>` - Write the schema to a file instead of stdout. Parent directories are created automatically.
   - See [`docs/ado-script.md`](ado-script.md) for how this command fits into the ado-script build workflow (`cargo run -- export-gate-schema --output schema/gate-spec.schema.json`).
+- `export-fact-catalog` - Export the fact catalog JSON (kind, failure_policy, and dependencies for every gate `Fact`) — build-time drift guard for the trigger-e2e `FACT_META` mirror in the `scripts/ado-script` TypeScript workspace.
+  - `--output, -o <path>` - Write the catalog to a file instead of stdout.
 
 ## Pipeline IR Reference
 
