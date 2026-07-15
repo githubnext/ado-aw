@@ -110,6 +110,11 @@ EOF
 
 If you find meaningful gaps, implement them directly in `tests/**` instead of filing an issue.
 For this workflow, **high-value** means coverage for security-sensitive paths, error-handling branches, or previously untested public behavior.
+Only edit test files under `tests/**`. Treat `src/**`, workflow files, and other
+production/configuration files as read-only while diagnosing coverage gaps. If a
+useful test exposes a production bug or requires a production-code fix, do not
+include that source change in this workflow's PR; skip that candidate and choose
+a test-only gap or emit `noop`.
 
 Scope limits per run:
 - Add or update at most **3** high-value tests.
@@ -121,7 +126,11 @@ Before opening a PR, run:
 ```bash
 cargo test 2>&1
 cargo clippy --all-targets --all-features 2>&1
+git diff --name-only
 ```
+
+If `git diff --name-only` lists anything outside `tests/**`, revert those files
+before calling `create-pull-request`.
 
 Open at most one pull request via `create-pull-request` when tests were added and checks passed.
 Note: this repository requires `GH_AW_CI_TRIGGER_TOKEN` for PR CI triggers when using `create-pull-request`.
