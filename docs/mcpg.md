@@ -69,6 +69,9 @@ egress outside the agent's Squid policy.
 4. **AWF attaches `awmg-mcpg` to `awf-net`** (`--topology-attach awmg-mcpg`
    on the Agent's AWF invocation) so the agent, running inside the
    network-isolated container, can reach it directly at `awmg-mcpg:8080`.
+   The Agent command appends `awmg-mcpg` to both `NO_PROXY` and `no_proxy`
+   so Copilot connects directly over `awf-net` instead of sending this
+   internal request through Squid.
    The agent itself has no route to the host and cannot reach
    `host.docker.internal`.
 5. MCPG routes tool calls to the appropriate upstream (SafeOutputs or custom

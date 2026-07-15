@@ -219,6 +219,17 @@ fn test_compiled_output_no_unreplaced_markers() {
         2,
         "Agent and Detection must both use strict topology isolation"
     );
+    assert_eq!(
+        compiled
+            .matches("export NO_PROXY=\"${NO_PROXY:+$NO_PROXY,}awmg-mcpg\"")
+            .count(),
+        1,
+        "only Agent must bypass Squid for the topology-attached MCPG endpoint"
+    );
+    assert!(
+        compiled.contains("export no_proxy=\"$NO_PROXY\""),
+        "Agent must keep lowercase no_proxy synchronized for Node HTTP clients"
+    );
     assert!(
         !compiled.contains("--enable-host-access")
             && !compiled.contains("--legacy-security")

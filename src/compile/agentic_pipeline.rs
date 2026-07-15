@@ -2833,6 +2833,10 @@ fn run_agent_step(
     };
     let image_flags_block = awf_image_flags(supply_chain);
     let exclude_env_block = awf_exclude_env_flags(byom_exclude_keys);
+    let routed_engine_run = format!(
+        "export NO_PROXY=\"${{NO_PROXY:+$NO_PROXY,}}{MCPG_CONTAINER_NAME}\"; \
+         export no_proxy=\"$NO_PROXY\"; {engine_run}"
+    );
     let script = format!(
         "set -o pipefail\n\
          \n\
@@ -2864,7 +2868,7 @@ fn run_agent_step(
            --container-workdir \"{working_directory}\" \\\n  \
            --log-level info \\\n  \
            --proxy-logs-dir \"$(Agent.TempDirectory)/staging/logs/firewall\" \\\n  \
-           -- '{engine_run}' \\\n  \
+           -- '{routed_engine_run}' \\\n  \
            2>&1 \\\n  \
            | sed -u 's/##vso\\[/[VSO-FILTERED] vso[/g; s/##\\[/[VSO-FILTERED] [/g' \\\n  \
            | tee \"$AGENT_OUTPUT_FILE\" \\\n  \

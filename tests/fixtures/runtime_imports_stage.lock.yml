@@ -462,7 +462,7 @@ stages:
           --container-workdir "$(Build.SourcesDirectory)" \
           --log-level info \
           --proxy-logs-dir "$(Agent.TempDirectory)/staging/logs/firewall" \
-          -- '/tmp/awf-tools/copilot --prompt "$(cat /tmp/awf-tools/agent-prompt.md)" --additional-mcp-config @/tmp/awf-tools/mcp-config.json --model claude-opus-4.7 --disable-builtin-mcps --no-ask-user --allow-all-tools --allow-tool github --allow-tool safeoutputs --allow-all-paths' \
+          -- 'export NO_PROXY="${NO_PROXY:+$NO_PROXY,}awmg-mcpg"; export no_proxy="$NO_PROXY"; /tmp/awf-tools/copilot --prompt "$(cat /tmp/awf-tools/agent-prompt.md)" --additional-mcp-config @/tmp/awf-tools/mcp-config.json --model claude-opus-4.7 --disable-builtin-mcps --no-ask-user --allow-all-tools --allow-tool github --allow-tool safeoutputs --allow-all-paths' \
           2>&1 \
           | sed -u 's/##vso\[/[VSO-FILTERED] vso[/g; s/##\[/[VSO-FILTERED] [/g' \
           | tee "$AGENT_OUTPUT_FILE" \
