@@ -372,10 +372,13 @@ mod tests {
         // `false` for a value that would actually be rewritten.
         let input = "{{ bad {{ workspace }} }}";
         assert!(contains_template_marker(input, "workspace"));
-        assert_ne!(
+        // The outer `{{ bad ... }}` span does not match because its interior
+        // (`"bad {{ workspace"`) is not the marker name. Only the inner
+        // `{{ workspace }}` is replaced, leaving the surrounding braces intact.
+        assert_eq!(
             replace_marker(input, "workspace", "REPL"),
-            input,
-            "replace_marker should substitute the inner marker"
+            "{{ bad REPL }}",
+            "replace_marker should substitute only the inner {{ workspace }} marker"
         );
     }
 }
