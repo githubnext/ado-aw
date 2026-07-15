@@ -856,10 +856,20 @@ mod tests {
 
     #[test]
     fn test_parse_hourly() {
-        assert!(matches!(
-            parse_fuzzy_schedule("hourly").unwrap(),
-            FuzzySchedule::Hourly
-        ));
+        let schedule = parse_fuzzy_schedule("hourly").unwrap();
+        assert!(matches!(schedule, FuzzySchedule::Hourly));
+        // Cron must be "M * * * *" — every hour at a hash-scattered minute.
+        // A regression that emits "0 * * * *" (fixed minute) or changes the
+        // field count would silently break the scattering contract.
+        let cron = generate_cron(&schedule, "test/workflow");
+        let parts: Vec<&str> = cron.split_whitespace().collect();
+        assert_eq!(parts.len(), 5, "Hourly cron must have 5 fields");
+        let minute: u32 = parts[0].parse().expect("minute field must be a number");
+        assert!(minute < 60, "Scattered minute must be in [0, 59], got {minute}");
+        assert_eq!(parts[1], "*", "Hour field must be * for hourly schedule");
+        assert_eq!(parts[2], "*", "Day-of-month must be * for hourly schedule");
+        assert_eq!(parts[3], "*", "Month must be * for hourly schedule");
+        assert_eq!(parts[4], "*", "Day-of-week must be * for hourly schedule");
     }
 
     #[test]
@@ -884,14 +894,34 @@ mod tests {
 
     #[test]
     fn test_parse_special_periods() {
-        assert!(matches!(
-            parse_fuzzy_schedule("bi-weekly").unwrap(),
-            FuzzySchedule::BiWeekly
-        ));
-        assert!(matches!(
-            parse_fuzzy_schedule("tri-weekly").unwrap(),
-            FuzzySchedule::TriWeekly
-        ));
+        // Verify parse and cron structure for bi-weekly and tri-weekly schedules.
+        // The key assertion is the day-of-month step (*/14 / */21) — a regression
+        // that swaps these or omits the step would silently change schedule frequency.
+        let bi = parse_fuzzy_schedule("bi-weekly").unwrap();
+        assert!(matches!(bi, FuzzySchedule::BiWeekly));
+        let bi_cron = generate_cron(&bi, "test/workflow");
+        let bi_parts: Vec<&str> = bi_cron.split_whitespace().collect();
+        assert_eq!(bi_parts.len(), 5, "Bi-weekly cron must have 5 fields");
+        let bi_min: u32 = bi_parts[0].parse().expect("minute field must be a number");
+        assert!(bi_min < 60, "Scattered minute must be in [0, 59], got {bi_min}");
+        let bi_hr: u32 = bi_parts[1].parse().expect("hour field must be a number");
+        assert!(bi_hr < 24, "Scattered hour must be in [0, 23], got {bi_hr}");
+        assert_eq!(bi_parts[2], "*/14", "Bi-weekly step must be */14");
+        assert_eq!(bi_parts[3], "*");
+        assert_eq!(bi_parts[4], "*");
+
+        let tri = parse_fuzzy_schedule("tri-weekly").unwrap();
+        assert!(matches!(tri, FuzzySchedule::TriWeekly));
+        let tri_cron = generate_cron(&tri, "test/workflow");
+        let tri_parts: Vec<&str> = tri_cron.split_whitespace().collect();
+        assert_eq!(tri_parts.len(), 5, "Tri-weekly cron must have 5 fields");
+        let tri_min: u32 = tri_parts[0].parse().expect("minute field must be a number");
+        assert!(tri_min < 60, "Scattered minute must be in [0, 59], got {tri_min}");
+        let tri_hr: u32 = tri_parts[1].parse().expect("hour field must be a number");
+        assert!(tri_hr < 24, "Scattered hour must be in [0, 23], got {tri_hr}");
+        assert_eq!(tri_parts[2], "*/21", "Tri-weekly step must be */21");
+        assert_eq!(tri_parts[3], "*");
+        assert_eq!(tri_parts[4], "*");
     }
 
     #[test]
