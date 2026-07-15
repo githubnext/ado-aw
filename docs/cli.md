@@ -187,6 +187,10 @@ These commands are not shown in `--help` but are available for contributors work
   - `--output, -o <path>` - Write the schema to a file instead of stdout. Parent directories are created automatically.
   - See [`docs/ado-script.md`](ado-script.md) for how this command fits into the ado-script build workflow (`cargo run -- export-gate-schema --output schema/gate-spec.schema.json`).
 
+- `export-fact-catalog` - Export a JSON catalog of every gate `Fact` (kind, failure policy, dependencies). Used as a build-time drift guard: the `scripts/ado-script/src/trigger-e2e/` harness mirrors the output as `fact-catalog.gen.json` so TypeScript-side gate logic stays in sync with the Rust `filter_ir` definitions.
+  - `--output, -o <path>` - Write the catalog to a file instead of stdout. Parent directories are created automatically.
+  - Usage: `cargo run -- export-fact-catalog --output scripts/ado-script/src/trigger-e2e/fact-catalog.gen.json`
+
 ## Pipeline IR Reference
 
 The compiler builds typed Azure DevOps pipeline IR and lowers it through one YAML emitter. The canonical Setup → Agent → Detection → SafeOutputs → Teardown shape, plus the optional always-running Conclusion job when `safe-outputs:` is configured, lives in `agentic_pipeline.rs` (shared by every target); target-specific builders (`standalone_ir.rs`, `onees_ir.rs`, `job_ir.rs`, and `stage_ir.rs`) own only the per-target envelope (pipeline shape, template parameters, 1ES wrapping).
