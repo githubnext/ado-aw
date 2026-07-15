@@ -4360,8 +4360,9 @@ Body
     }
 
     #[test]
-    fn test_front_matter_safe_outputs_triggers_conclusion_job() {
-        // Any non-empty safe-outputs triggers the conclusion job
+    fn test_front_matter_safe_outputs_noop_object_form() {
+        // `noop: {}` must parse as an empty mapping — distinct from
+        // `noop: false` (disable) and bare `noop:` (null/default).
         let content = r#"---
 name: "Test Agent"
 description: "Test"
@@ -4372,6 +4373,11 @@ safe-outputs:
 Body
 "#;
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
-        assert!(!fm.safe_outputs.is_empty(), "safe_outputs should be non-empty");
+        let noop = fm.safe_outputs.get("noop").expect("noop key must be present");
+        assert!(
+            noop.is_object(),
+            "noop: {{}} must parse as an object, not bool or null; got: {:?}",
+            noop
+        );
     }
 }
