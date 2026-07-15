@@ -46,6 +46,10 @@ agent files, and any tool that ingests repo context), so they must be
 > **Out of scope — do not touch:** `README.md` and other human-facing site
 > content are owned by the separate `docs-writer` workflow. Never edit files
 > outside `AGENTS.md` and `docs/**` in this workflow.
+> Treat Rust, TypeScript, YAML, and other non-documentation files as read-only
+> evidence. If fixing documentation drift appears to require a source-code
+> change, do not make that code change in this workflow; either document the
+> current behavior accurately or emit `noop` / `report-incomplete`.
 
 ## Documentation Model
 
@@ -227,6 +231,10 @@ There is no build step for these markdown docs, but before opening a PR:
 - Confirm all links you added or moved resolve to real files/anchors.
 - Confirm all modified files are within `AGENTS.md`, `docs/**`, or `prompts/**`.
   If a needed fix is outside this scope, do not edit it in this workflow.
+- Before calling `create-pull-request`, run `git diff --name-only` and remove or
+  revert any source-code/configuration changes outside the allowed documentation
+  paths. The safe-output allowlist is a backstop, not a substitute for this
+  check.
 
 ## Pull Request Format
 
