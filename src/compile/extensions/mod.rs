@@ -119,7 +119,8 @@ pub struct CompileContext<'a> {
     pub input_path: Option<&'a Path>,
     /// Substituted, joined bodies of any imported components, inlined into the
     /// agent prompt at compile time. Empty when the workflow declares no
-    /// imports (or on paths that do not resolve imports, e.g. `check`).
+    /// imports (or on paths that do not resolve imports, e.g. `build_pipeline_ir`
+    /// for `inspect`/`graph`). Both `compile` and `check` resolve imports.
     pub imported_prompt_body: String,
 }
 

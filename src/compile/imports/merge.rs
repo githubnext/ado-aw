@@ -153,29 +153,31 @@ pub fn merge_resolved_imported_body(
 }
 
 /// Stamp compiler-owned component provenance onto the custom safe-output tools
-/// (`safe-outputs.scripts.*` / `safe-outputs.jobs.*`) declared by a **remote**
-/// import, so the runtime executor job can check the component repository out at
-/// the pinned commit.
+/// (`safe-outputs.scripts.*` / `safe-outputs.jobs.*`) declared by an import, so
+/// the runtime executor job can check the component repository out at the pinned
+/// commit — while ensuring the compiler **fully owns** these keys.
 ///
-/// For each such tool, inserts `component-source` (owner/repo/path),
-/// `component-sha`, `manifest-digest`, `component-repo-type`
-/// (`git` | `github` | `githubenterprise`), and — when the endpoint names a
-/// service connection — `component-endpoint`. Local imports (whose components
-/// live in the consumer repo's own checkout) are left untouched.
+/// The `component-*` keys are compiler-owned provenance. For **every** imported
+/// component (local or remote) any author-provided `component-*` value is first
+/// **stripped**, so a component cannot spoof its own checkout (e.g. inject a
+/// `component-endpoint` service connection or redirect `component-source`).
+/// Then, for **remote** imports only, the compiler-resolved values are stamped:
+/// `component-source` (owner/repo/path), `component-sha`, `manifest-digest`,
+/// `component-repo-type` (`git` | `github` | `githubenterprise`), and — when the
+/// endpoint names a service connection — `component-endpoint`. Local imports
+/// (whose components live in the consumer repo's own checkout) end up with no
+/// provenance keys and thus synthesize no separate checkout resource.
 fn stamp_component_provenance(component_fm: &mut Value, import: &ResolvedImport) {
     use crate::compile::types::ImportSource;
 
-    // Only remote imports have a separate repository to check out.
-    if !matches!(import.source, ImportSource::Remote(_)) {
-        return;
-    }
-    let Some(sha) = import.provenance.sha.as_deref() else {
-        return;
-    };
-    let (repo_type, endpoint_name) =
-        crate::compile::imports::alias::endpoint_repo_type_and_connection(
-            import.entry.endpoint.as_ref(),
-        );
+    /// Compiler-owned provenance keys — never author-settable.
+    const PROVENANCE_KEYS: [&str; 5] = [
+        "component-source",
+        "component-sha",
+        "manifest-digest",
+        "component-repo-type",
+        "component-endpoint",
+    ];
 
     let Value::Mapping(fm_map) = component_fm else {
         return;
@@ -183,6 +185,17 @@ fn stamp_component_provenance(component_fm: &mut Value, import: &ResolvedImport)
     let Some(Value::Mapping(safe_outputs)) = fm_map.get_mut("safe-outputs") else {
         return;
     };
+
+    // Remote imports carry a repo + pinned SHA to check out; local imports do
+    // not (their components live in the consumer's own checkout).
+    let remote_sha = match &import.source {
+        ImportSource::Remote(_) => import.provenance.sha.as_deref(),
+        _ => None,
+    };
+    let (repo_type, endpoint_name) =
+        crate::compile::imports::alias::endpoint_repo_type_and_connection(
+            import.entry.endpoint.as_ref(),
+        );
 
     for section in ["scripts", "jobs"] {
         let Some(Value::Mapping(tools)) = safe_outputs.get_mut(section) else {
@@ -192,27 +205,37 @@ fn stamp_component_provenance(component_fm: &mut Value, import: &ResolvedImport)
             let Value::Mapping(cfg) = tool_cfg else {
                 continue;
             };
-            cfg.insert(
-                Value::String("component-source".into()),
-                Value::String(import.provenance.source.clone()),
-            );
-            cfg.insert(
-                Value::String("component-sha".into()),
-                Value::String(sha.to_string()),
-            );
-            cfg.insert(
-                Value::String("manifest-digest".into()),
-                Value::String(import.provenance.manifest_digest.clone()),
-            );
-            cfg.insert(
-                Value::String("component-repo-type".into()),
-                Value::String(repo_type.to_string()),
-            );
-            if let Some(name) = &endpoint_name {
+
+            // Strip any author-provided provenance first (compiler fully owns
+            // these keys).
+            for key in PROVENANCE_KEYS {
+                cfg.remove(Value::String(key.to_string()));
+            }
+
+            // Stamp compiler-resolved provenance for remote imports only.
+            if let Some(sha) = remote_sha {
                 cfg.insert(
-                    Value::String("component-endpoint".into()),
-                    Value::String(name.clone()),
+                    Value::String("component-source".into()),
+                    Value::String(import.provenance.source.clone()),
                 );
+                cfg.insert(
+                    Value::String("component-sha".into()),
+                    Value::String(sha.to_string()),
+                );
+                cfg.insert(
+                    Value::String("manifest-digest".into()),
+                    Value::String(import.provenance.manifest_digest.clone()),
+                );
+                cfg.insert(
+                    Value::String("component-repo-type".into()),
+                    Value::String(repo_type.to_string()),
+                );
+                if let Some(name) = &endpoint_name {
+                    cfg.insert(
+                        Value::String("component-endpoint".into()),
+                        Value::String(name.clone()),
+                    );
+                }
             }
         }
     }
@@ -561,6 +584,50 @@ mod tests {
         let notify = scripts_notify_tool(&consumer);
         assert_eq!(tool_str(notify, "component-source"), None);
         assert_eq!(tool_str(notify, "component-repo-type"), None);
+    }
+
+    #[test]
+    fn component_cannot_spoof_provenance_keys() {
+        use crate::compile::types::ImportEndpoint;
+        // A component authoring compiler-owned provenance keys into its own
+        // front matter must NOT influence the checkout. For a same-org
+        // (endpoint-less) remote import the compiler resolves no service
+        // connection, so a pre-set `component-endpoint` must be stripped
+        // (compiler fully owns the key). A spoofed `component-source` must be
+        // overwritten with the real source.
+        let mut consumer = ymap("name: consumer");
+        let import = remote_resolved(
+            "safe-outputs:\n  scripts:\n    notify:\n      run: node n.js\n      \
+             component-endpoint: attacker-conn\n      component-source: evil/repo/x.md\n",
+            None,
+        );
+        merge_resolved_imported_body(&mut consumer, &[import]).unwrap();
+
+        let notify = scripts_notify_tool(&consumer);
+        // Spoofed endpoint stripped (same-org => no connection).
+        assert_eq!(tool_str(notify, "component-endpoint"), None);
+        // Spoofed source overwritten with the compiler-resolved provenance.
+        assert_eq!(tool_str(notify, "component-source"), Some("octo/repo/notify.md"));
+        assert_eq!(tool_str(notify, "component-repo-type"), Some("git"));
+    }
+
+    #[test]
+    fn remote_endpoint_overwrites_author_provided_component_endpoint() {
+        use crate::compile::types::ImportEndpoint;
+        // When the import DOES resolve a connection, the compiler value wins
+        // over any author-provided one.
+        let mut consumer = ymap("name: consumer");
+        let import = remote_resolved(
+            "safe-outputs:\n  scripts:\n    notify:\n      run: node n.js\n      \
+             component-endpoint: attacker-conn\n",
+            Some(ImportEndpoint::GitHub {
+                name: "real-conn".to_string(),
+            }),
+        );
+        merge_resolved_imported_body(&mut consumer, &[import]).unwrap();
+
+        let notify = scripts_notify_tool(&consumer);
+        assert_eq!(tool_str(notify, "component-endpoint"), Some("real-conn"));
     }
 
     #[test]
