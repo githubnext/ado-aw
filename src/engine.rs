@@ -469,30 +469,7 @@ fn collect_allowed_tools(
     edit_enabled: bool,
 ) -> Result<Vec<String>> {
     let mut allowed_tools = collect_extension_allowed_tools(extension_declarations);
-
-    // Tools from user-defined MCP servers (sorted for deterministic output).
-    // Only add --allow-tool for MCPs that will actually produce an MCPG entry (i.e.,
-    // WithOptions that have a container or url). McpConfig::Enabled(true) has no backing
-    // server in MCPG, so granting the permission would cause confusing runtime errors.
-    let mut sorted_mcps: Vec<_> = front_matter.mcp_servers.iter().collect();
-    sorted_mcps.sort_by_key(|(a, _)| *a);
-    for (name, config) in sorted_mcps {
-        // Skip servers already provided by extensions (case-insensitive to match
-        // generate_mcpg_config's eq_ignore_ascii_case guard for reserved names)
-        if allowed_tools.iter().any(|t| t.eq_ignore_ascii_case(name)) {
-            continue;
-        }
-        // Only add MCPs that have a backing server (container or url)
-        let has_backing_server = match config {
-            McpConfig::Enabled(_) => false,
-            McpConfig::WithOptions(opts) => {
-                opts.enabled.unwrap_or(true) && (opts.container.is_some() || opts.url.is_some())
-            }
-        };
-        if has_backing_server {
-            allowed_tools.push(name.clone());
-        }
-    }
+    add_mcp_server_tools(front_matter, &mut allowed_tools);
 
     // Intentional: with restricted bash, both --allow-tool write (tool identity)
     // and --allow-all-paths (path scope) are emitted. --allow-all-tools subsumes
@@ -501,38 +478,10 @@ fn collect_allowed_tools(
         allowed_tools.push("write".to_string());
     }
 
-    // Bash tool: use the explicitly configured list.
-    // When bash is None (not specified), use_allow_all_tools is true and this
-    // function is not called — that invariant is upheld by the caller.
-    let mut bash_commands: Vec<String> =
-        match front_matter.tools.as_ref().and_then(|t| t.bash.as_ref()) {
-            Some(cmds) if cmds.is_empty() => {
-                // Explicitly disabled: no bash commands
-                vec![]
-            }
-            Some(cmds) => {
-                // Explicit list of commands
-                cmds.clone()
-            }
-            None => {
-                // Invariant: bash=None → use_allow_all_tools=true → this function is
-                // not called. Panic if the invariant is ever broken.
-                unreachable!("bash=None should imply use_allow_all_tools=true")
-            }
-        };
-
-    // Auto-add extension-declared bash commands (runtimes + first-party tools)
-    for decl in extension_declarations {
-        for cmd in &decl.bash_commands {
-            if !bash_commands.contains(cmd) {
-                bash_commands.push(cmd.clone());
-            }
-        }
-    }
-
-    for cmd in &bash_commands {
-        // Reject single quotes in bash commands — copilot_params are embedded inside
-        // a single-quoted bash string in the AWF command.
+    let bash_commands = build_bash_command_list(front_matter, extension_declarations);
+    for cmd in bash_commands {
+        // Reject single quotes — copilot_params are embedded inside a single-quoted
+        // bash string in the AWF command.
         if cmd.contains('\'') {
             anyhow::bail!(
                 "Bash command '{}' contains a single quote, which is not allowed \
@@ -544,6 +493,62 @@ fn collect_allowed_tools(
     }
 
     Ok(allowed_tools)
+}
+
+/// Returns `true` when an MCP server config has a real backing server (container
+/// or URL). `McpConfig::Enabled(true)` has no backing server in MCPG, so granting
+/// its permission would cause confusing runtime errors.
+fn mcp_server_has_backing_server(config: &McpConfig) -> bool {
+    match config {
+        McpConfig::Enabled(_) => false,
+        McpConfig::WithOptions(opts) => {
+            opts.enabled.unwrap_or(true) && (opts.container.is_some() || opts.url.is_some())
+        }
+    }
+}
+
+/// Appends user-defined MCP server names to `allowed_tools` (sorted for
+/// deterministic output), skipping any server already provided by an extension
+/// and any server without a backing MCPG entry.
+fn add_mcp_server_tools(front_matter: &FrontMatter, allowed_tools: &mut Vec<String>) {
+    let mut sorted_mcps: Vec<_> = front_matter.mcp_servers.iter().collect();
+    sorted_mcps.sort_by_key(|(a, _)| *a);
+    for (name, config) in sorted_mcps {
+        // Skip servers already provided by extensions (case-insensitive to match
+        // generate_mcpg_config's eq_ignore_ascii_case guard for reserved names)
+        if allowed_tools.iter().any(|t| t.eq_ignore_ascii_case(name)) {
+            continue;
+        }
+        if mcp_server_has_backing_server(config) {
+            allowed_tools.push(name.clone());
+        }
+    }
+}
+
+/// Builds the deduplicated bash command list from the front-matter configuration
+/// augmented with any extension-declared commands (runtimes + first-party tools).
+///
+/// When bash is `None`, `use_allow_all_tools` is `true` and this function is never
+/// called — the caller upholds that invariant.
+fn build_bash_command_list(
+    front_matter: &FrontMatter,
+    extension_declarations: &[Declarations],
+) -> Vec<String> {
+    let mut bash_commands: Vec<String> =
+        match front_matter.tools.as_ref().and_then(|t| t.bash.as_ref()) {
+            Some(cmds) if cmds.is_empty() => vec![],
+            Some(cmds) => cmds.clone(),
+            // Invariant: bash=None → use_allow_all_tools=true → not called.
+            None => unreachable!("bash=None should imply use_allow_all_tools=true"),
+        };
+    for decl in extension_declarations {
+        for cmd in &decl.bash_commands {
+            if !bash_commands.contains(cmd) {
+                bash_commands.push(cmd.clone());
+            }
+        }
+    }
+    bash_commands
 }
 
 /// Validates a single `engine.args` entry.
