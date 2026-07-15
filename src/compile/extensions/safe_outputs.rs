@@ -1,4 +1,5 @@
 use super::{CompileContext, CompilerExtension, Declarations, ExtensionPhase, McpgServerConfig};
+use crate::compile::common::MCPG_HOST_DOMAIN;
 use anyhow::Result;
 use std::collections::BTreeMap;
 
@@ -33,7 +34,9 @@ impl CompilerExtension for SafeOutputsExtension {
                     entrypoint_args: None,
                     mounts: None,
                     args: None,
-                    url: Some("http://localhost:${SAFE_OUTPUTS_PORT}/mcp".to_string()),
+                    url: Some(format!(
+                        "http://{MCPG_HOST_DOMAIN}:${{SAFE_OUTPUTS_PORT}}/mcp"
+                    )),
                     headers: Some(BTreeMap::from([(
                         "Authorization".to_string(),
                         "Bearer ${SAFE_OUTPUTS_API_KEY}".to_string(),

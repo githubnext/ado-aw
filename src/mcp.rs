@@ -1536,6 +1536,7 @@ pub async fn run(
 pub async fn run_http(
     output_directory: &str,
     bounding_directory: &str,
+    bind_address: std::net::IpAddr,
     port: u16,
     api_key: Option<&str>,
     enabled_tools: Option<&[String]>,
@@ -1569,7 +1570,10 @@ pub async fn run_http(
         }
     };
 
-    info!("Starting SafeOutputs HTTP server on port {}", port);
+    info!(
+        "Starting SafeOutputs HTTP server on {}:{}",
+        bind_address, port
+    );
 
     let config = StreamableHttpServerConfig::default();
 
@@ -1629,7 +1633,7 @@ pub async fn run_http(
             },
         ));
 
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let addr = std::net::SocketAddr::new(bind_address, port);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!("SafeOutputs HTTP server listening on {}", addr);
 

@@ -38,9 +38,13 @@ five pipelines:
 > [`tests/executor-e2e/`](../executor-e2e/). That suite covers all
 > 24 ADO-write and signal safe-output tools deterministically.
 >
-> **Local Copilot CLI contract.** The ignored Rust test
-> `tests/copilot_cli_safeoutputs_tests.rs::real_copilot_cli_noop_contract`
-> is the customer-focused contract gate for the local agent path.
+> **Live GitHub Actions contract.** [`tests/awf-copilot-safeoutputs/run.sh`](../awf-copilot-safeoutputs/run.sh)
+> (driven by [`.github/workflows/copilot-cli-safeoutputs.yml`](../../.github/workflows/copilot-cli-safeoutputs.yml))
+> is the customer-focused contract gate for the local agent path: it manually
+> starts real SafeOutputs/MCPG and runs the Copilot CLI inside AWF's strict
+> network topology, asserting one `noop` NDJSON record. It never invokes
+> `ado-aw compile` — compiler topology coverage is a separate concern, tested
+> in [`tests/compiler_tests.rs`](../compiler_tests.rs).
 
 ## Naming convention
 

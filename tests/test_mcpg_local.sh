@@ -50,7 +50,7 @@ if [ "${1:-}" != "--skip-compile" ]; then
     FIXTURE="$SCRIPT_DIR/fixtures/minimal-agent.md"
     OUTPUT_YAML="$TEMP_DIR/minimal-agent.yml"
 
-    "$BINARY" compile "$FIXTURE" -o "$OUTPUT_YAML"
+    "$BINARY" compile --force "$FIXTURE" -o "$OUTPUT_YAML"
 
     if [ ! -f "$OUTPUT_YAML" ]; then
         fail "Compiled YAML not created"
@@ -69,16 +69,29 @@ if [ "${1:-}" != "--skip-compile" ]; then
         fail "MCPG config file reference missing"
     fi
 
-    if grep -q 'host.docker.internal' "$OUTPUT_YAML"; then
-        pass "host.docker.internal reference present"
+    if grep -q 'http://host.docker.internal:${SAFE_OUTPUTS_PORT}/mcp' "$OUTPUT_YAML"; then
+        pass "Trusted MCPG host-backend reference present"
     else
-        fail "host.docker.internal reference missing"
+        fail "Trusted MCPG host-backend reference missing"
     fi
 
-    if grep -q 'enable-host-access' "$OUTPUT_YAML"; then
-        pass "AWF --enable-host-access flag present"
+    if grep -q -- '--network-isolation' "$OUTPUT_YAML" &&
+        grep -q -- '--topology-attach "awmg-mcpg"' "$OUTPUT_YAML"; then
+        pass "AWF strict topology flags present"
     else
-        fail "AWF --enable-host-access flag missing"
+        fail "AWF strict topology flags missing"
+    fi
+
+    if grep -q -- '--enable-host-access\|--legacy-security\|sudo -E .*awf' "$OUTPUT_YAML"; then
+        fail "Legacy AWF security flags found"
+    else
+        pass "No legacy AWF security flags"
+    fi
+
+    if grep -q -- '--bind-address "$SAFE_OUTPUTS_BIND_ADDRESS"' "$OUTPUT_YAML"; then
+        pass "SafeOutputs bridge binding present"
+    else
+        fail "SafeOutputs bridge binding missing"
     fi
 
     if grep -q 'SafeOutputs HTTP server' "$OUTPUT_YAML"; then

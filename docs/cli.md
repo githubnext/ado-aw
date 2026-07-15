@@ -27,6 +27,7 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - `--enabled-tools <name>` - Restrict available tools to those named (repeatable)
 - `mcp-author` - Run the author-facing stdio MCP server for IDE/Copilot Chat integrations. See [`mcp-author.md`](mcp-author.md) for the full tool surface and trust model.
 - `mcp-http <output_directory> <bounding_directory>` - Run SafeOutputs as an HTTP MCP server (for MCPG integration)
+  - `--bind-address <ip>` - Listener IP address (default: `127.0.0.1`; compiled pipelines use the Docker bridge gateway)
   - `--port <port>` - Port to listen on (default: 8100)
   - `--api-key <key>` - API key for authentication (auto-generated if not provided)
   - `--enabled-tools <name>` - Restrict available tools to those named (repeatable)

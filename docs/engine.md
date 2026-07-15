@@ -221,18 +221,23 @@ step and the run could observe an expired token.
 
 #### Credential isolation (api-proxy sidecar)
 
-When a provider credential is configured (`base-url` + `token`/`api-key`), the
-compiler automatically enables the AWF **api-proxy sidecar**
-(`--enable-api-proxy`) on the agent step and pre-pulls its container image. With
-the sidecar active:
+AWF 0.27.32+ **always** enables its api-proxy sidecar (the old
+`--enable-api-proxy` flag is deprecated and no longer needed), and the
+compiler always pre-pulls the `api-proxy` container image alongside `squid`
+and `agent` for both the Agent and Detection jobs, regardless of whether a
+provider credential is configured. When a provider credential *is* configured
+(`base-url` + `token`/`api-key`), the compiler additionally passes the
+credential env keys as AWF `--exclude-env` flags on the agent step. With the
+sidecar active:
 
 - The **real** credential is read by the AWF host process and held inside the
   proxy container; the agent container receives only a placeholder value and a
   proxy URL. The proxy strips the client's auth header and injects the real
   credential on the outbound request, so the secret never reaches the Copilot
   CLI process or the agent sandbox.
-- The credential keys are additionally passed as AWF `--exclude-env` flags so the
-  raw value is never copied into the agent via `--env-all` (defense-in-depth).
+- The `--exclude-env` flags are defense-in-depth: they keep the raw credential
+  value out of the agent via `--env-all` passthrough, on top of the sidecar's
+  placeholder override.
 
 This isolation applies to **both** the Agent stage and the Detection
 (threat-analysis) stage: the detection Copilot run inherits the same

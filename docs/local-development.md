@@ -38,13 +38,21 @@ echo "Working directory: $WORK_DIR"
 
 ### 2. Start the SafeOutputs HTTP server
 
+The compiled pipeline binds SafeOutputs only to the Docker bridge gateway
+address (via `--bind-address`), never to all interfaces, so MCPG can reach it
+without exposing it elsewhere. Resolve the same address locally:
+
 ```bash
+# Resolve the Docker bridge gateway (same address MCPG uses to reach the host)
+export SAFE_OUTPUTS_BIND_ADDRESS=$(docker network inspect bridge | jq -er '.[0].IPAM.Config[0].Gateway')
+
 # Pick a port and generate an API key
 export SO_PORT=8100
 export SO_API_KEY=$(openssl rand -hex 32)
 
-# Start in the background
+# Start in the background, bound only to the bridge gateway address
 cargo run -- mcp-http \
+  --bind-address "$SAFE_OUTPUTS_BIND_ADDRESS" \
   --port "$SO_PORT" \
   --api-key "$SO_API_KEY" \
   "$WORK_DIR" \
@@ -54,7 +62,7 @@ export SO_PID=$!
 echo "SafeOutputs PID: $SO_PID"
 
 # Wait for health check
-until curl -sf "http://127.0.0.1:$SO_PORT/health" > /dev/null 2>&1; do
+until curl -sf "http://$SAFE_OUTPUTS_BIND_ADDRESS:$SO_PORT/health" > /dev/null 2>&1; do
   sleep 1
 done
 echo "SafeOutputs ready"
@@ -90,12 +98,18 @@ cat > "$WORK_DIR/mcpg-config.json" <<EOF
 }
 EOF
 
-# Start MCPG container (macOS/Windows — use host.docker.internal)
-docker run -i --rm --name ado-aw-mcpg \
-  -p "$MCPG_PORT:$MCPG_PORT" \
+# Start MCPG on Docker's default bridge network, published to localhost —
+# this mirrors the topology-compatible shape the compiled pipeline uses
+# (bridge network + --add-host, never --network host).
+# The local Copilot process runs on the host, so the config above advertises
+# 127.0.0.1; compiled AWF pipelines advertise awmg-mcpg instead.
+docker run -i --rm --name awmg-mcpg \
+  --network bridge \
+  -p "127.0.0.1:$MCPG_PORT:$MCPG_PORT" \
+  --add-host "host.docker.internal:$SAFE_OUTPUTS_BIND_ADDRESS" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   --entrypoint /app/awmg \
-  ghcr.io/github/gh-aw-mcpg:v0.3.12 \
+  ghcr.io/github/gh-aw-mcpg:v0.4.1 \
   --routed --listen "0.0.0.0:$MCPG_PORT" --config-stdin \
   < "$WORK_DIR/mcpg-config.json" \
   > "$WORK_DIR/gateway-output.json" 2>"$WORK_DIR/mcpg-stderr.log" &
@@ -118,7 +132,7 @@ cat > "$WORK_DIR/mcp-config.json" <<EOF
   "mcpServers": {
     "safeoutputs": {
       "type": "http",
-      "url": "http://127.0.0.1:$SO_PORT/mcp",
+      "url": "http://$SAFE_OUTPUTS_BIND_ADDRESS:$SO_PORT/mcp",
       "headers": {
         "Authorization": "Bearer $SO_API_KEY"
       },
@@ -186,7 +200,7 @@ cargo run -- execute \
 kill "$SO_PID" 2>/dev/null
 
 # Stop MCPG (if started)
-docker stop ado-aw-mcpg 2>/dev/null
+docker stop awmg-mcpg 2>/dev/null
 
 echo "Done. Output files in: $WORK_DIR"
 ```

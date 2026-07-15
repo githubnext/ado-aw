@@ -104,13 +104,13 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_allowed_domains_host_docker_internal_always_present() {
+    fn test_generate_allowed_domains_host_docker_internal_not_injected() {
         let fm = minimal_front_matter();
         let exts = super::super::extensions::collect_extensions(&fm);
         let domains = allowed_domains(&fm, &exts).unwrap();
         assert!(
-            domains.contains("host.docker.internal"),
-            "host.docker.internal must always be in the allowlist"
+            !domains.contains("host.docker.internal"),
+            "host.docker.internal is reserved for trusted MCPG and must not be agent-accessible"
         );
     }
 

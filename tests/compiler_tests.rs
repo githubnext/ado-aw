@@ -192,12 +192,12 @@ fn test_compiled_output_no_unreplaced_markers() {
         "Compiled output should reference GitHub Releases for AWF"
     );
     assert!(
-        compiled.contains("AWF_VERSION=\"0.27.9\""),
-        "Compiled output should download the AWF version compatible with host-access"
+        compiled.contains("AWF_VERSION=\"0.27.32\""),
+        "Compiled output should download the AWF version that provides strict topology isolation"
     );
     assert!(
-        !compiled.contains("AWF_VERSION=\"0.27.32\""),
-        "Compiled output should not download AWF v0.27.32"
+        !compiled.contains("AWF_VERSION=\"0.27.9\""),
+        "Compiled output must not fall back to the legacy host-access AWF version"
     );
 
     // Verify MCPG references
@@ -207,12 +207,36 @@ fn test_compiled_output_no_unreplaced_markers() {
     );
     assert!(
         compiled.contains("host.docker.internal"),
-        "Compiled output should reference host.docker.internal for MCPG"
+        "Compiled output should expose the host alias only to trusted MCPG"
+    );
+    assert_eq!(
+        compiled.matches("--topology-attach \"awmg-mcpg\"").count(),
+        1,
+        "only Agent AWF should attach the trusted MCPG container"
+    );
+    assert_eq!(
+        compiled.matches("--network-isolation").count(),
+        2,
+        "Agent and Detection must both use strict topology isolation"
     );
     assert!(
-        compiled.contains("--enable-host-access"),
-        "Compiled output should include --enable-host-access for AWF"
+        !compiled.contains("--enable-host-access")
+            && !compiled.contains("--legacy-security")
+            && !compiled.contains("sudo -E \"$(Pipeline.Workspace)/awf/awf\""),
+        "Generated AWF invocations must not use legacy host security"
     );
+    assert!(
+        compiled.contains("--name awmg-mcpg")
+            && compiled.contains("--network bridge")
+            && compiled.contains("-p 127.0.0.1:8080:8080"),
+        "MCPG must use the stable bridge-network topology"
+    );
+    for line in compiled.lines().filter(|line| line.contains("--allow-domains")) {
+        assert!(
+            !line.contains("host.docker.internal"),
+            "the agent egress allowlist must not expose the host: {line}"
+        );
+    }
 
     // Verify no legacy MCP firewall references
     assert!(
@@ -1736,13 +1760,22 @@ Call the noop tool exactly once.
         "compiled MCPG config should include the SafeOutputs HTTP backend: {compiled}"
     );
     assert!(
-        compiled.contains("\"url\": \"http://localhost:${SAFE_OUTPUTS_PORT}/mcp\""),
+        compiled.contains(
+            "\"url\": \"http://host.docker.internal:${SAFE_OUTPUTS_PORT}/mcp\""
+        ),
         "compiled MCPG config should keep the runtime SafeOutputs port placeholder: {compiled}"
     );
     assert!(
         compiled.contains("\"Authorization\": \"Bearer ")
             && compiled.contains("SAFE_OUTPUTS_API_KEY"),
         "compiled MCPG config should keep the runtime SafeOutputs auth placeholder: {compiled}"
+    );
+    assert!(
+        compiled.contains("--bind-address \"$SAFE_OUTPUTS_BIND_ADDRESS\"")
+            && compiled.contains(
+                "--add-host host.docker.internal:$(SAFE_OUTPUTS_BIND_ADDRESS)"
+            ),
+        "SafeOutputs must bind to the same bridge gateway exposed only to MCPG: {compiled}"
     );
 }
 
@@ -5335,14 +5368,12 @@ fn test_byom_provider_env_compiles_and_merges() {
         "the broken cross-job Setup-output macro must not appear: {compiled}"
     );
 
-    // Credential isolation: the AWF api-proxy sidecar is enabled and the
-    // provider credential env keys are excluded from --env-all passthrough, in
-    // BOTH the Agent and Detection jobs (detection inherits BYOK routing +
-    // isolation, mirroring gh-aw), so each marker appears exactly twice.
-    assert_eq!(
-        compiled.matches("--enable-api-proxy").count(),
-        2,
-        "BYOK must enable the AWF api-proxy sidecar in both the Agent and Detection jobs: {compiled}"
+    // AWF enables api-proxy in strict mode. ado-aw must not emit the deprecated
+    // enable flag, while provider credential keys remain excluded from
+    // --env-all in both Agent and Detection.
+    assert!(
+        !compiled.contains("--enable-api-proxy"),
+        "BYOK must rely on AWF's always-on api-proxy: {compiled}"
     );
     // --exclude-env lists exactly the provider credential keys present (derived
     // from engine.provider): COPILOT_PROVIDER_BASE_URL + COPILOT_PROVIDER_API_KEY
@@ -5372,8 +5403,8 @@ fn test_byom_provider_env_compiles_and_merges() {
         0,
         "COPILOT_PROVIDER_BEARER_TOKEN must never be referenced: {compiled}"
     );
-    // The api-proxy container image must be pre-pulled (and :latest-tagged) in
-    // both jobs so AWF's --skip-pull finds it locally.
+    // The api-proxy image must be pre-pulled in both jobs so --skip-pull finds
+    // the exact version selected by --image-tag.
     assert_eq!(
         compiled
             .matches("docker pull ghcr.io/github/gh-aw-firewall/api-proxy:")
@@ -5436,11 +5467,9 @@ fn test_byok_provider_api_key_compiles_without_mint_step() {
         !compiled.contains("AW_PROVIDER_BEARER_TOKEN"),
         "the api-key path must not reference the mint secret var: {compiled}"
     );
-    // BYOK isolation still engages (credential is present), in both jobs.
-    assert_eq!(
-        compiled.matches("--enable-api-proxy").count(),
-        2,
-        "the api-key path must still enable the api-proxy sidecar in both jobs: {compiled}"
+    assert!(
+        !compiled.contains("--enable-api-proxy"),
+        "the api-key path must rely on AWF's always-on api-proxy: {compiled}"
     );
     assert_eq!(
         compiled.matches("--exclude-env COPILOT_PROVIDER_API_KEY").count(),
@@ -5449,20 +5478,27 @@ fn test_byok_provider_api_key_compiles_without_mint_step() {
     );
 }
 
-/// A non-BYOK agent must NOT enable the api-proxy sidecar or pre-pull its image —
-/// the isolation plumbing is strictly opt-in via the presence of a
-/// `COPILOT_PROVIDER_*` credential key in `engine.env`.
+/// AWF strict mode enables api-proxy for every run, including ordinary Copilot
+/// auth with no external provider.
 #[test]
-fn test_non_byom_agent_has_no_api_proxy() {
+fn test_non_byom_agent_uses_always_on_api_proxy() {
     let compiled = compile_fixture("minimal-agent.md");
     assert_valid_yaml(&compiled, "minimal-agent.md");
     assert!(
         !compiled.contains("--enable-api-proxy"),
-        "Non-BYOK agent must not enable the api-proxy sidecar: {compiled}"
+        "ado-aw must not emit AWF's deprecated api-proxy flag: {compiled}"
     );
-    assert!(
-        !compiled.contains("api-proxy"),
-        "Non-BYOK agent must not reference the api-proxy image: {compiled}"
+    assert_eq!(
+        compiled
+            .matches("docker pull ghcr.io/github/gh-aw-firewall/api-proxy:")
+            .count(),
+        2,
+        "Agent and Detection must pre-pull the always-on api-proxy image: {compiled}"
+    );
+    assert_eq!(
+        compiled.matches("--image-tag \"").count(),
+        2,
+        "Agent and Detection must select the exact pre-pulled AWF image tag: {compiled}"
     );
 }
 
@@ -6986,9 +7022,8 @@ fn test_supply_chain_full_reroutes_all_artifacts() {
         !compiled.contains("github.com/github/gh-aw-firewall/releases"),
         "AWF GitHub release URLs must be gone in feed mode"
     );
-    // (b) No GHCR image *pulls* remain — every pull comes from the internal
-    // registry. The local `:latest` aliases intentionally keep the GHCR names
-    // that AWF resolves by default with `--skip-pull` (see (d2) below).
+    // (b) No GHCR image pulls remain — every pull comes from the internal
+    // registry selected directly on the AWF invocation.
     assert!(
         !compiled.contains("docker pull ghcr.io"),
         "no image may be pulled from GHCR in registry mode"
@@ -7040,6 +7075,10 @@ fn test_supply_chain_full_reroutes_all_artifacts() {
         "AWF images must be pulled from the internal registry base path (artifact name only)"
     );
     assert!(
+        compiled.contains("docker pull myacr.azurecr.io/oss-mirror/api-proxy:"),
+        "the always-on api-proxy must be pulled from the internal registry"
+    );
+    assert!(
         compiled.contains("myacr.azurecr.io/oss-mirror/gh-aw-mcpg:"),
         "MCPG image must be rewritten onto the internal registry base path (pull + docker run)"
     );
@@ -7048,21 +7087,23 @@ fn test_supply_chain_full_reroutes_all_artifacts() {
         "the original GHCR `github/...` prefix must not be carried under the internal base path"
     );
 
-    // (d2) The local `:latest` aliases must be tagged under the GHCR names AWF
-    // resolves by default with `--skip-pull` — tagged from the internally
-    // pulled image, never pulled from GHCR. Regression guard for the firewall
-    // failing to find its images at runtime. Use version-agnostic split
-    // assertions so an AWF_VERSION bump (unimportable in a binary-only crate)
-    // does not break the test.
-    assert!(
-        compiled.contains("docker tag myacr.azurecr.io/oss-mirror/squid:")
-            && compiled.contains(" ghcr.io/github/gh-aw-firewall/squid:latest"),
-        "AWF squid image must be re-tagged to the GHCR :latest name AWF expects"
+    // (d2) AWF resolves the exact mirrored version directly; mutable aliases
+    // must not be created on a persistent runner.
+    assert_eq!(
+        compiled
+            .matches("--image-registry \"myacr.azurecr.io/oss-mirror\"")
+            .count(),
+        2,
+        "Agent and Detection must use the configured AWF image registry"
+    );
+    assert_eq!(
+        compiled.matches("--image-tag \"").count(),
+        2,
+        "Agent and Detection must select a pinned AWF image tag"
     );
     assert!(
-        compiled.contains("docker tag myacr.azurecr.io/oss-mirror/agent:")
-            && compiled.contains(" ghcr.io/github/gh-aw-firewall/agent:latest"),
-        "AWF agent image must be re-tagged to the GHCR :latest name AWF expects"
+        !compiled.contains("docker tag ") && !compiled.contains(":latest"),
+        "internal registry mode must not create mutable image aliases"
     );
 
     // (e) Checksum verification is retained.

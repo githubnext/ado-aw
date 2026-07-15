@@ -99,4 +99,4 @@ network:
 2. **Containerization**: Stdio MCP servers run as isolated Docker containers (per MCPG spec §3.2.1)
 3. **Environment Isolation**: MCP containers are spawned by MCPG with only the configured environment variables
 4. **MCPG Gateway**: All MCP traffic flows through the MCP Gateway which enforces tool-level filtering
-5. **Network Isolation**: MCP containers run within the same AWF-isolated network. Users must explicitly allow external domains via `network.allowed`
+5. **Trusted egress**: MCPG and the stdio/HTTP backends it spawns are trusted infrastructure that runs outside the agent's Squid-enforced allowlist — they have direct network egress and are not subject to `network.allowed`/`network.blocked`. Only the Copilot agent process itself is confined to the AWF sandbox and its domain allowlist; see [`docs/mcpg.md`](mcpg.md) and [`docs/network.md`](network.md) for the topology.
