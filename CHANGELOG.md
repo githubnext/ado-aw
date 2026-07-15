@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.45.0](https://github.com/githubnext/ado-aw/compare/v0.44.1...v0.45.0) (2026-07-15)
+
+
+### Features
+
+* **init:** scaffold dispatcher skill alongside the agent ([#1499](https://github.com/githubnext/ado-aw/issues/1499)) ([a2bd920](https://github.com/githubnext/ado-aw/commit/a2bd920f02fe76961e070caecc8da565d11d76e6))
+
+
+### Bug Fixes
+
+* **executor-e2e:** trigger only PR validation ([#1501](https://github.com/githubnext/ado-aw/issues/1501)) ([8781d31](https://github.com/githubnext/ado-aw/commit/8781d317cf314870c0f44bc38f157f359d59acb0))
+
 ## [0.44.1](https://github.com/githubnext/ado-aw/compare/v0.44.0...v0.44.1) (2026-07-13)
 
 
