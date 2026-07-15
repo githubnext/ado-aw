@@ -260,8 +260,11 @@ runtime — write it as clear, structured natural-language instructions.
 `imports:` lets a workflow reuse local or SHA-pinned cross-repository markdown
 components. Each imported file is parsed as regular ado-aw markdown with YAML
 front matter; the compiler validates optional `import-schema:` inputs, applies
-`${{ ado.aw.import-inputs.<key> }}` substitutions, then merges the imported
-front matter and body into the consumer workflow.
+`{{ ado.aw.import-inputs.<key> }}` substitutions (a compile-time `{{ ... }}`
+replacement — not the ADO `${{ ... }}` template delimiter), then merges the
+imported front matter and body into the consumer workflow. Imported **body**
+content is inlined into the agent prompt at compile time (ahead of the
+consumer's own body); see [`imports.md`](imports.md) for the full reference.
 
 ```yaml
 imports:

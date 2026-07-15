@@ -138,8 +138,18 @@ Current MVP notes:
 A reusable component can declare non-secret inputs with `import-schema:`.
 Consumers pass values through `with:`. Values are validated at compile time,
 defaults are applied, and placeholders of the form
-`${{ ado.aw.import-inputs.<key> }}` are substituted throughout the imported front
+`{{ ado.aw.import-inputs.<key> }}` are substituted throughout the imported front
 matter and body before merge.
+
+> **Delimiter.** Import inputs use the compile-time `{{ ... }}` delimiter (the
+> same family as `{{ workspace }}`), **not** the Azure DevOps template-expression
+> delimiter `${{ ... }}`. The substituted output is embedded directly into the
+> pipeline YAML and agent prompt, where ADO template-processes any `${{ ... }}`
+> it finds — so reusing that delimiter would be a footgun. A `{{` immediately
+> preceded by `$` is treated as an ADO `${{ ... }}` expression and left
+> untouched. Any `{{ ado.aw.import-inputs.<key> }}` still present after
+> substitution (an input the consumer did not supply and the schema did not
+> default) is a **compile-time error**.
 
 Supported schema types are `string`, `number`, `boolean`, `choice`, `array`, and
 `object`. `choice` uses an `options:` list. `array` uses an `items:` schema.
@@ -185,8 +195,8 @@ safe-outputs:
       env:
         NOTIFY_TOKEN: TEAM_NOTIFY_TOKEN
 ---
-When notifying the team, use channel `${{ ado.aw.import-inputs.channel }}` and
-severity `${{ ado.aw.import-inputs.severity }}`.
+When notifying the team, use channel `{{ ado.aw.import-inputs.channel }}` and
+severity `{{ ado.aw.import-inputs.severity }}`.
 ```
 
 Consumer:
@@ -229,7 +239,12 @@ consumer workflow > later import > earlier import
   `require-approval`, but may not replace executor-defining fields such as
   `steps`, `env`, `inputs`, `run`, or `entrypoint`.
 - Imported markdown bodies are concatenated in declaration order, followed by
-  the consumer body.
+  the consumer body. Imported bodies are **inlined into the agent prompt at
+  compile time** (their `{{ ado.aw.import-inputs.* }}` placeholders are already
+  substituted); in the default `inlined-imports: false` mode the consumer's own
+  body is delivered ahead-of-time as a `{{#runtime-import}}` marker so it can
+  still be edited without recompiling, while imported bodies — which can only be
+  substituted at compile time — precede it inline.
 - `import-schema:` and `imports:` are consumed by the merge and do not appear in
   the merged workflow.
 
@@ -277,7 +292,7 @@ safe-outputs:
           displayName: Create service ticket
 ---
 Use `create-service-ticket` only when a durable service-desk record is needed
-for `${{ ado.aw.import-inputs.service }}`.
+for `{{ ado.aw.import-inputs.service }}`.
 ```
 
 Consumer workflow:

@@ -41,10 +41,19 @@ const SEQUENCE_KEYS: &[&str] = &["parameters", "repos", "variable-groups"];
 const EXECUTOR_KEYS: &[&str] = &["steps", "env", "inputs", "run", "entrypoint"];
 
 /// Resolve the consumer's imports, apply their `import-schema` inputs, and
-/// merge their front matter + body into `consumer_fm` / the returned body.
+/// merge their front matter + body into `consumer_fm` / the returned bodies.
 ///
-/// Returns the merged markdown body. `consumer_fm` is mutated in place and its
-/// `imports:` key is removed (imports are consumed by this pass).
+/// Returns `(imported_body, combined_body)`:
+/// - `imported_body` is the substituted, joined bodies of the imported
+///   components (declaration order), with the consumer body NOT appended.
+///   This is inlined into the agent prompt at compile time because imported
+///   component bodies are only substituted here — they cannot be delivered by
+///   the default runtime-import path (which reads the consumer's own source).
+/// - `combined_body` additionally appends the consumer body, and is what
+///   `inlined-imports: true` folds into the compiled YAML.
+///
+/// `consumer_fm` is mutated in place and its `imports:` key is removed (imports
+/// are consumed by this pass).
 pub async fn merge_imports(
     consumer_fm: &mut Mapping,
     consumer_body: &str,
@@ -52,15 +61,44 @@ pub async fn merge_imports(
     base_dir: &Path,
     repo_root: &Path,
     fetcher: &dyn ManifestFetcher,
-) -> Result<String> {
+) -> Result<(String, String)> {
     let resolved = resolve_imports_with_repo_root(entries, base_dir, repo_root, fetcher).await?;
-    merge_resolved(consumer_fm, consumer_body, &resolved)
+    let imported_body = merge_resolved_imported_body(consumer_fm, &resolved)?;
+    let combined_body = join_bodies(&imported_body, consumer_body);
+    Ok((imported_body, combined_body))
+}
+
+/// Join the imported-body prefix with the consumer body using the same
+/// `\n\n` separator as the merge accumulator, tolerating either side being
+/// empty.
+fn join_bodies(imported_body: &str, consumer_body: &str) -> String {
+    let consumer_trimmed = consumer_body.trim();
+    match (imported_body.is_empty(), consumer_trimmed.is_empty()) {
+        (true, _) => consumer_trimmed.to_string(),
+        (false, true) => imported_body.to_string(),
+        (false, false) => format!("{imported_body}\n\n{consumer_trimmed}"),
+    }
 }
 
 /// Merge already-resolved imports (test-friendly seam that takes no fetcher).
+///
+/// Returns the combined body (imported bodies in declaration order, then the
+/// consumer body). Front matter is merged into `consumer_fm`.
 pub fn merge_resolved(
     consumer_fm: &mut Mapping,
     consumer_body: &str,
+    resolved: &[ResolvedImport],
+) -> Result<String> {
+    let imported_body = merge_resolved_imported_body(consumer_fm, resolved)?;
+    Ok(join_bodies(&imported_body, consumer_body))
+}
+
+/// Merge resolved imports' front matter into `consumer_fm` and return the
+/// substituted, joined **imported** bodies (declaration order) — the consumer
+/// body is NOT appended here (see [`merge_imports`] for why the imported body
+/// is tracked separately from the consumer body).
+pub fn merge_resolved_imported_body(
+    consumer_fm: &mut Mapping,
     resolved: &[ResolvedImport],
 ) -> Result<String> {
     // Accumulate imported front matter in declaration order (import-vs-import
@@ -104,11 +142,6 @@ pub fn merge_resolved(
     acc.remove(Value::String("imports".to_string()));
     *consumer_fm = acc;
 
-    // Body: imported bodies (declaration order) then the consumer body.
-    let consumer_trimmed = consumer_body.trim();
-    if !consumer_trimmed.is_empty() {
-        body_parts.push(consumer_trimmed.to_string());
-    }
     Ok(body_parts.join("\n\n"))
 }
 
@@ -366,6 +399,33 @@ mod tests {
             consumer[Value::String("target".into())],
             Value::String("1es".into())
         );
+    }
+
+    #[test]
+    fn imported_body_and_combined_body_split_correctly() {
+        // merge_resolved_imported_body returns ONLY the imported bodies; the
+        // combined form (via merge_resolved) additionally appends the consumer
+        // body. Imports-first ordering.
+        let mut fm = ymap("name: consumer");
+        let imports = vec![resolved("{}", "Import A."), resolved("{}", "Import B.")];
+        let imported = merge_resolved_imported_body(&mut fm, &imports).unwrap();
+        assert_eq!(imported, "Import A.\n\nImport B.");
+
+        let mut fm2 = ymap("name: consumer");
+        let combined = merge_resolved(&mut fm2, "Consumer body.", &imports).unwrap();
+        assert_eq!(combined, "Import A.\n\nImport B.\n\nConsumer body.");
+    }
+
+    #[test]
+    fn imported_body_empty_when_no_import_bodies() {
+        let mut fm = ymap("name: consumer");
+        let imports = vec![resolved("tools:\n  edit: {}", "")];
+        let imported = merge_resolved_imported_body(&mut fm, &imports).unwrap();
+        assert_eq!(imported, "");
+        // Combined with a consumer body yields just the consumer body.
+        let mut fm2 = ymap("name: consumer");
+        let combined = merge_resolved(&mut fm2, "Only consumer.", &imports).unwrap();
+        assert_eq!(combined, "Only consumer.");
     }
 
     #[test]

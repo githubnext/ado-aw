@@ -181,11 +181,11 @@ import-schema:
     required: true
 safe-outputs:
   deploy:
-    run: "deploy --to ${{ ado.aw.import-inputs.destination }}"
+    run: "deploy --to {{ ado.aw.import-inputs.destination }}"
     env:
-      DESTINATION: "${{ ado.aw.import-inputs.destination }}"
+      DESTINATION: "{{ ado.aw.import-inputs.destination }}"
 ---
-Deploy to ${{ ado.aw.import-inputs.destination }}.
+Deploy to {{ ado.aw.import-inputs.destination }}.
 "#,
     );
     let workflow_path = workflow_dir.join("agent.md");

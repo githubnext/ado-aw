@@ -57,12 +57,20 @@ pub use types::{CompileTarget, FrontMatter};
 #[async_trait]
 pub trait Compiler: Send + Sync {
     /// Compile the front matter and markdown body into pipeline YAML.
+    ///
+    /// `imported_prompt_body` carries the substituted, joined bodies of any
+    /// imported components (empty when there are no imports). It is inlined
+    /// into the agent prompt at compile time — imported bodies cannot be
+    /// delivered by the default runtime-import path (which reads only the
+    /// consumer's own source file).
+    #[allow(clippy::too_many_arguments)]
     async fn compile(
         &self,
         input_path: &Path,
         output_path: &Path,
         front_matter: &FrontMatter,
         markdown_body: &str,
+        imported_prompt_body: &str,
         skip_integrity: bool,
         debug_pipeline: bool,
     ) -> Result<String>;
@@ -151,6 +159,12 @@ async fn compile_pipeline_inner(
     let body_raw = parsed.body_raw;
     let source_sha256 = parsed.source_sha256;
 
+    // Substituted, joined bodies of any imported components. Inlined into the
+    // agent prompt at compile time (they cannot be delivered by the default
+    // runtime-import path, which reads the consumer's own source). Empty when
+    // the workflow declares no imports.
+    let mut imported_prompt_body = String::new();
+
     // Resolve and merge cross-repository / local `imports:` (D8/D9). Runs only
     // when the workflow declares imports, so import-free workflows are
     // unaffected. The merge is applied to a CLONE of the front-matter mapping —
@@ -199,7 +213,7 @@ async fn compile_pipeline_inner(
         let fetcher = crate::compile::imports::RoutingFetcher::new(ado_fetcher);
 
         let mut merged_mapping = front_matter_mapping.clone();
-        markdown_body = crate::compile::imports::merge::merge_imports(
+        let (imported, combined) = crate::compile::imports::merge::merge_imports(
             &mut merged_mapping,
             &markdown_body,
             &front_matter.imports,
@@ -208,6 +222,8 @@ async fn compile_pipeline_inner(
             &fetcher,
         )
         .await?;
+        imported_prompt_body = imported;
+        markdown_body = combined;
         front_matter = serde_yaml::from_value(serde_yaml::Value::Mapping(merged_mapping))
             .context("Failed to parse front matter after merging imports")?;
     }
@@ -280,6 +296,7 @@ async fn compile_pipeline_inner(
             &yaml_output_path,
             &front_matter,
             &markdown_body,
+            &imported_prompt_body,
             skip_integrity,
             debug_pipeline,
         )
@@ -692,6 +709,10 @@ pub async fn check_pipeline(pipeline_path: &str) -> Result<()> {
             pipeline_path,
             &front_matter,
             &markdown_body,
+            // `check_pipeline` does not resolve `imports:` (pre-existing: it
+            // also skips the front-matter merge), so there is no imported
+            // prompt body to inline here.
+            "",
             false,
             false,
         )

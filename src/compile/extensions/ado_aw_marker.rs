@@ -275,6 +275,7 @@ mod tests {
             engine: crate::engine::Engine::Copilot,
             compile_dir: None,
             input_path: Some(input_path),
+            imported_prompt_body: String::new(),
         };
         let steps = agent_prepare_steps(&ctx);
         assert_eq!(steps.len(), 2);
@@ -324,6 +325,7 @@ mod tests {
             engine: crate::engine::Engine::Copilot,
             compile_dir: None,
             input_path: Some(input_path),
+            imported_prompt_body: String::new(),
         };
         let steps = agent_prepare_steps(&ctx);
         assert_eq!(steps.len(), 2);
@@ -405,6 +407,7 @@ mod tests {
             engine: crate::engine::Engine::Copilot,
             compile_dir: None,
             input_path: Some(input_path),
+            imported_prompt_body: String::new(),
         };
         let steps = agent_prepare_steps(&ctx);
         assert_eq!(steps.len(), 2);
@@ -428,6 +431,7 @@ mod tests {
             engine: crate::engine::Engine::Copilot,
             compile_dir: None,
             input_path: Some(input_path),
+            imported_prompt_body: String::new(),
         };
         let component = CustomComponentProvenance {
             source: "org/repo/components/create-pr".to_string(),
@@ -497,6 +501,7 @@ mod tests {
             engine: crate::engine::Engine::Copilot,
             compile_dir: None,
             input_path: Some(input_path),
+            imported_prompt_body: String::new(),
         };
         let steps = agent_prepare_steps(&ctx);
         assert_eq!(steps.len(), 2);
@@ -539,6 +544,7 @@ mod tests {
                 engine: crate::engine::Engine::Copilot,
                 compile_dir: None,
                 input_path: Some(input_path),
+                imported_prompt_body: String::new(),
             };
             let steps = agent_prepare_steps(&ctx);
             assert_eq!(steps.len(), 2, "target={raw_target}");
@@ -577,6 +583,7 @@ mod tests {
             engine: crate::engine::Engine::Copilot,
             compile_dir: None,
             input_path: Some(input_path),
+            imported_prompt_body: String::new(),
         };
         let decl = AdoAwMarkerExtension::default().declarations(&ctx).unwrap();
         assert_eq!(decl.agent_prepare_steps.len(), 2);
@@ -613,6 +620,7 @@ mod tests {
             engine: crate::engine::Engine::Copilot,
             compile_dir: None,
             input_path: Some(input_path),
+            imported_prompt_body: String::new(),
         };
         let steps = agent_prepare_steps(&ctx);
         assert_eq!(steps.len(), 2);
@@ -653,6 +661,7 @@ mod tests {
             engine: crate::engine::Engine::Copilot,
             compile_dir: None,
             input_path: Some(input_path),
+            imported_prompt_body: String::new(),
         };
         let steps = agent_prepare_steps(&ctx);
         assert_eq!(steps.len(), 2);
@@ -703,6 +712,7 @@ mod tests {
             engine: crate::engine::Engine::Copilot,
             compile_dir: None,
             input_path: Some(input_path),
+            imported_prompt_body: String::new(),
         };
         let steps = agent_prepare_steps(&ctx);
         assert_eq!(steps.len(), 2);

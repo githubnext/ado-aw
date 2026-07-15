@@ -304,6 +304,7 @@ pub(crate) fn build_pipeline_context(
         front_matter,
         input_path,
         markdown_body,
+        &ctx.imported_prompt_body,
         &source_path,
         &trigger_repo_directory,
     )?;
@@ -4359,12 +4360,21 @@ fn step_value_to_dash_yaml(v: serde_yaml::Value) -> Result<String> {
     Ok(out)
 }
 
-/// Build the agent prompt body — either inlined imports or a
-/// runtime-import marker. Mirrors `compile_shared`'s logic.
+/// Build the agent prompt body.
+///
+/// In `inlined-imports: true` mode the entire body (imported + consumer) is
+/// already in `markdown_body`, so it is resolved inline verbatim. In the
+/// default mode the consumer body is delivered by a `{{#runtime-import}}`
+/// marker (so authors can edit it without recompiling), but any imported
+/// component bodies (`imported_prompt_body`) are inlined **ahead** of that
+/// marker: they were substituted at compile time and cannot be re-derived at
+/// runtime from the consumer's own source. Mirrors gh-aw, which compile-inlines
+/// input-bearing imports and runtime-imports only the main body.
 fn build_agent_content(
     front_matter: &FrontMatter,
     input_path: &Path,
     markdown_body: &str,
+    imported_prompt_body: &str,
     source_path: &str,
     trigger_repo_directory: &str,
 ) -> Result<String> {
@@ -4395,7 +4405,15 @@ fn build_agent_content(
         "runtime-import: agent source path '{}' contains '}}', which is not supported by the runtime resolver (rename the path to remove '}}' characters, or set `inlined-imports: true`)",
         marker_path
     );
-    Ok(format!("{{{{#runtime-import {}}}}}", marker_path))
+    let consumer_marker = format!("{{{{#runtime-import {}}}}}", marker_path);
+
+    // Prepend the compile-time-substituted imported component bodies (if any)
+    // ahead of the consumer's runtime-import marker (imports-first ordering).
+    if imported_prompt_body.trim().is_empty() {
+        Ok(consumer_marker)
+    } else {
+        Ok(format!("{imported_prompt_body}\n\n{consumer_marker}"))
+    }
 }
 
 // Suppress unused warnings on imports retained for clarity / future use.
@@ -5010,5 +5028,59 @@ description: Test
             pool_name(job_pool_by_id(&jobs, "Conclusion").unwrap()),
             "ubuntu-22.04"
         );
+    }
+
+    // ─── build_agent_content: imported-body delivery ─────────────────────────
+
+    #[test]
+    fn build_agent_content_default_mode_inlines_imported_body_before_marker() {
+        let fm = test_front_matter("name: t\ndescription: d\n");
+        let out = build_agent_content(
+            &fm,
+            std::path::Path::new("agents/test.md"),
+            // markdown_body (combined) is ignored in default mode.
+            "IGNORED COMBINED BODY",
+            "Imported guidance line.",
+            "$(Build.SourcesDirectory)/agents/test.md",
+            "$(Build.SourcesDirectory)",
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            "Imported guidance line.\n\n{{#runtime-import agents/test.md}}"
+        );
+    }
+
+    #[test]
+    fn build_agent_content_default_mode_without_imports_is_marker_only() {
+        let fm = test_front_matter("name: t\ndescription: d\n");
+        let out = build_agent_content(
+            &fm,
+            std::path::Path::new("agents/test.md"),
+            "IGNORED",
+            "",
+            "$(Build.SourcesDirectory)/agents/test.md",
+            "$(Build.SourcesDirectory)",
+        )
+        .unwrap();
+        assert_eq!(out, "{{#runtime-import agents/test.md}}");
+    }
+
+    #[test]
+    fn build_agent_content_inlined_mode_uses_combined_body() {
+        // In inlined mode the combined body (imported + consumer) is already in
+        // markdown_body and is emitted verbatim; the separate
+        // imported_prompt_body arg is not appended a second time.
+        let fm = test_front_matter("name: t\ndescription: d\ninlined-imports: true\n");
+        let out = build_agent_content(
+            &fm,
+            std::path::Path::new("agents/test.md"),
+            "Imported guidance line.\n\nConsumer body.",
+            "Imported guidance line.",
+            "$(Build.SourcesDirectory)/agents/test.md",
+            "$(Build.SourcesDirectory)",
+        )
+        .unwrap();
+        assert_eq!(out, "Imported guidance line.\n\nConsumer body.");
     }
 }
