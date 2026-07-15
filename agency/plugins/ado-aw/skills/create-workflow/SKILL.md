@@ -15,7 +15,7 @@ You are creating a **new** ado-aw agentic workflow.
 2. Load the **entire** content of the authoritative, version-pinned playbook and
    follow its instructions precisely:
 
-   https://raw.githubusercontent.com/githubnext/ado-aw/v0.44.1/prompts/create-ado-agentic-workflow.md <!-- x-release-please-version -->
+   https://raw.githubusercontent.com/githubnext/ado-aw/v0.45.0/prompts/create-ado-agentic-workflow.md <!-- x-release-please-version -->
 
 3. While authoring, use the read-only MCP tools to stay grounded:
    - `catalog` — discover available safe-outputs, runtimes, tools, engines, models.
