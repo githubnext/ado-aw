@@ -163,6 +163,7 @@ jq -e '.mcpServers.safeoutputs.url' "${RUNTIME_DIR}/gateway-output.json" >/dev/n
 
 MCPG_PROBE_STATUS="$(
   curl --noproxy '*' -sS \
+    -D "${ARTIFACT_DIR}/mcpg-safeoutputs-probe-headers.txt" \
     -o "${ARTIFACT_DIR}/mcpg-safeoutputs-probe.json" \
     -w '%{http_code}' \
     -X POST "http://127.0.0.1:${MCP_GATEWAY_PORT}/mcp/safeoutputs" \
@@ -174,6 +175,34 @@ MCPG_PROBE_STATUS="$(
 if [[ ! "${MCPG_PROBE_STATUS}" =~ ^2 ]]; then
   echo "MCPG SafeOutputs probe failed with HTTP ${MCPG_PROBE_STATUS}" >&2
   cat "${ARTIFACT_DIR}/mcpg-safeoutputs-probe.json" >&2 || true
+  exit 1
+fi
+
+MCPG_PROBE_SESSION="$(
+  grep -i '^mcp-session-id:' "${ARTIFACT_DIR}/mcpg-safeoutputs-probe-headers.txt" |
+    tr -d '\r' |
+    awk '{print $2}'
+)"
+if [[ -z "${MCPG_PROBE_SESSION}" ]]; then
+  echo "MCPG SafeOutputs probe did not return a session ID" >&2
+  exit 1
+fi
+
+MCPG_TOOLS_STATUS="$(
+  curl --noproxy '*' -sS \
+    -o "${ARTIFACT_DIR}/mcpg-safeoutputs-tools.json" \
+    -w '%{http_code}' \
+    -X POST "http://127.0.0.1:${MCP_GATEWAY_PORT}/mcp/safeoutputs" \
+    -H "Authorization: ${MCP_GATEWAY_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json, text/event-stream" \
+    -H "Mcp-Session-Id: ${MCPG_PROBE_SESSION}" \
+    -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+)"
+if [[ ! "${MCPG_TOOLS_STATUS}" =~ ^2 ]] ||
+  ! grep -q '"name":"noop"' "${ARTIFACT_DIR}/mcpg-safeoutputs-tools.json"; then
+  echo "MCPG SafeOutputs tools/list did not expose noop (HTTP ${MCPG_TOOLS_STATUS})" >&2
+  cat "${ARTIFACT_DIR}/mcpg-safeoutputs-tools.json" >&2 || true
   exit 1
 fi
 
@@ -195,8 +224,8 @@ chmod 600 "${TOOLS_DIR}/mcp-config.json"
 
 install -m 0755 "${COPILOT_BIN}" "${TOOLS_DIR}/copilot"
 cat >"${TOOLS_DIR}/agent-prompt.md" <<EOF
-Call the safeoutputs noop tool exactly once with context "${CONTRACT_CONTEXT}".
-Do not call any other tool. Stop immediately after the noop tool succeeds.
+Call the noop tool exactly once with context "${CONTRACT_CONTEXT}".
+Do not call any other tool. Stop immediately after the tool call.
 EOF
 chmod 600 "${TOOLS_DIR}/agent-prompt.md"
 
