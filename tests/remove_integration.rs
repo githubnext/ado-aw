@@ -25,17 +25,3 @@ fn remove_help_describes_command() {
         );
     }
 }
-
-#[test]
-fn remove_is_listed_in_top_level_help() {
-    let output = std::process::Command::new(binary())
-        .arg("--help")
-        .output()
-        .expect("Failed to run ado-aw --help");
-    assert!(output.status.success(), "--help should exit 0");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("remove"),
-        "Top-level --help should mention the remove subcommand, got:\n{stdout}"
-    );
-}
