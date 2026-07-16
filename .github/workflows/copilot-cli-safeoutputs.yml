@@ -15,7 +15,9 @@ on:
 jobs:
   contract:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    # Match the Linux release build floor: the mounted binary runs inside the
+    # Ubuntu 22-based AWF agent image.
+    runs-on: ubuntu-22.04
     timeout-minutes: 20
     permissions:
       contents: read
