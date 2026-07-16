@@ -3,8 +3,8 @@
 #
 # This script validates the ado-aw components that interface with MCPG:
 #   1. Compiles a sample agent and verifies MCPG markers in output YAML
-#   2. Starts the SafeOutputs HTTP server
-#   3. Sends MCP requests via curl (simulating MCPG forwarding)
+#   2. Starts the optional SafeOutputs HTTP server directly
+#   3. Sends MCP requests via curl
 #   4. Verifies NDJSON safe output files are created
 #
 # Usage:
@@ -69,10 +69,11 @@ if [ "${1:-}" != "--skip-compile" ]; then
         fail "MCPG config file reference missing"
     fi
 
-    if grep -q 'http://host.docker.internal:${SAFE_OUTPUTS_PORT}/mcp' "$OUTPUT_YAML"; then
-        pass "Trusted MCPG host-backend reference present"
+    if grep -q '"entrypoint": "/usr/local/bin/ado-aw"' "$OUTPUT_YAML" &&
+        grep -q '"/tmp/awf-tools/staging:/safeoutputs:rw"' "$OUTPUT_YAML"; then
+        pass "SafeOutputs stdio container configuration present"
     else
-        fail "Trusted MCPG host-backend reference missing"
+        fail "SafeOutputs stdio container configuration missing"
     fi
 
     if grep -q -- '--network-isolation' "$OUTPUT_YAML" &&
@@ -88,16 +89,17 @@ if [ "${1:-}" != "--skip-compile" ]; then
         pass "No legacy AWF security flags"
     fi
 
-    if grep -q -- '--bind-address "$SAFE_OUTPUTS_BIND_ADDRESS"' "$OUTPUT_YAML"; then
-        pass "SafeOutputs bridge binding present"
+    if grep -q '"none"' "$OUTPUT_YAML" &&
+        grep -q '"no-new-privileges"' "$OUTPUT_YAML"; then
+        pass "SafeOutputs container hardening present"
     else
-        fail "SafeOutputs bridge binding missing"
+        fail "SafeOutputs container hardening missing"
     fi
 
-    if grep -q 'SafeOutputs HTTP server' "$OUTPUT_YAML"; then
-        pass "SafeOutputs HTTP server step present"
+    if grep -q 'SAFE_OUTPUTS_BIND_ADDRESS\|host.docker.internal' "$OUTPUT_YAML"; then
+        fail "Legacy SafeOutputs host HTTP plumbing found"
     else
-        fail "SafeOutputs HTTP server step missing"
+        pass "No SafeOutputs host HTTP plumbing"
     fi
 
     # Verify no unreplaced markers

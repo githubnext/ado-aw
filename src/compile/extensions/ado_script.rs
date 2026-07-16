@@ -103,7 +103,7 @@ pub(crate) const GITHUB_APP_TOKEN_PATH: &str =
 /// Path to the prepare-pr-base bundle inside the unpacked `ado-script.zip`.
 /// Runs in the Agent job before the Copilot invocation (issue #1413) when
 /// `create-pull-request` is configured, to fetch/deepen the target branch so
-/// the host-side SafeOutputs MCP server can compute a diff base on
+/// the containerized SafeOutputs MCP server can compute a diff base on
 /// shallow-default agent pools.
 pub(crate) const PREPARE_PR_BASE_PATH: &str =
     "/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js";
@@ -588,7 +588,7 @@ fn sh_single_quote(value: &str) -> String {
 /// Agent job before the Copilot invocation when `create-pull-request` is
 /// configured, invoking the `prepare-pr-base` ado-script bundle to fetch and
 /// progressively deepen the target branch (`refs/remotes/origin/<target>`) in
-/// every allowed create-PR repo dir. The host-side SafeOutputs MCP server
+/// every allowed create-PR repo dir. The containerized SafeOutputs MCP server
 /// (`src/mcp.rs`) then resolves a diff base even on shallow-default agent pools —
 /// no forced full-history `checkout: self`, no lock hand-edit.
 ///

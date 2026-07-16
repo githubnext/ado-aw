@@ -12,7 +12,7 @@ The `ado-aw` compiler binary is distributed via [GitHub Releases](https://github
 
 ## Default Allowed Domains
 
-The following domains are always allowed. They are defined in `CORE_ALLOWED_HOSTS` in `allowed_hosts.rs`. `host.docker.internal` is deliberately **not** on this list — the agent has no route to the host under AWF's strict network topology. The trusted `awmg-mcpg` container resolves `host.docker.internal` outside the agent sandbox to reach host-side SafeOutputs; see [`docs/mcpg.md`](mcpg.md):
+The following domains are always allowed. They are defined in `CORE_ALLOWED_HOSTS` in `allowed_hosts.rs`. `host.docker.internal` is deliberately **not** on this list — the agent has no route to the host under AWF's strict network topology, and SafeOutputs no longer runs as a host-side process at all: MCPG spawns it as a hardened, network-isolated (`--network none`) sibling stdio container; see [`docs/mcpg.md`](mcpg.md):
 
 | Host Pattern | Purpose |
 |-------------|---------|

@@ -54,8 +54,7 @@ pub static CORE_ALLOWED_HOSTS: &[&str] = &[
     // ===== Agency / Copilot configuration =====
     "config.edge.skype.com",
     // Note: 168.63.129.16 (Azure DNS) is handled separately as it's an IP
-    // host.docker.internal is intentionally not agent-accessible. Trusted MCPG
-    // uses it outside AWF to reach host-side SafeOutputs.
+    // host.docker.internal is intentionally not agent-accessible.
 ];
 
 /// Hosts required by specific MCP servers.

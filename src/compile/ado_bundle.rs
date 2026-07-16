@@ -60,7 +60,7 @@ pub enum Bundle {
     /// create-pull-request base-ref preparer (issue #1413). Runs in the Agent
     /// job before the Copilot invocation when `create-pull-request` is
     /// configured. Fetches/deepens the target branch over the ADO bearer so the
-    /// host-side SafeOutputs MCP server can compute a diff base on
+    /// containerized SafeOutputs MCP server can compute a diff base on
     /// shallow-default pools.
     PreparePrBase,
 }

@@ -126,10 +126,50 @@ jobs:
       {
         "mcpServers": {
           "safeoutputs": {
-            "type": "http",
-            "url": "http://host.docker.internal:${SAFE_OUTPUTS_PORT}/mcp",
-            "headers": {
-              "Authorization": "Bearer ${SAFE_OUTPUTS_API_KEY}"
+            "type": "stdio",
+            "container": "ghcr.io/github/gh-aw-firewall/agent:0.27.32",
+            "entrypoint": "/usr/local/bin/ado-aw",
+            "entrypointArgs": [
+              "mcp",
+              "--enabled-tools",
+              "add-build-tag",
+              "--enabled-tools",
+              "create-work-item",
+              "--enabled-tools",
+              "missing-data",
+              "--enabled-tools",
+              "missing-tool",
+              "--enabled-tools",
+              "noop",
+              "--enabled-tools",
+              "report-incomplete",
+              "/safeoutputs",
+              "$(Build.SourcesDirectory)"
+            ],
+            "mounts": [
+              "/tmp/awf-tools/ado-aw:/usr/local/bin/ado-aw:ro",
+              "$(Build.SourcesDirectory):$(Build.SourcesDirectory):rw",
+              "/tmp/awf-tools/staging:/safeoutputs:rw"
+            ],
+            "args": [
+              "--network",
+              "none",
+              "--user",
+              "${MCP_RUNNER_UID}:${MCP_RUNNER_GID}",
+              "--cap-drop",
+              "ALL",
+              "--security-opt",
+              "no-new-privileges",
+              "--read-only",
+              "--tmpfs",
+              "/tmp:rw,nosuid,nodev,noexec",
+              "--pids-limit",
+              "256",
+              "-w",
+              "$(Build.SourcesDirectory)"
+            ],
+            "env": {
+              "HOME": "/tmp"
             }
           }
         },
@@ -288,57 +328,12 @@ jobs:
     displayName: Append Azure CLI prompt
     condition: ne(variables['AW_AZ_MOUNTS'], '')
   - bash: |
-      set -euo pipefail
-
-      SAFE_OUTPUTS_PORT=8100
-      SAFE_OUTPUTS_API_KEY=$(openssl rand -base64 45 | tr -d '/+=')
-      if ! SAFE_OUTPUTS_BIND_ADDRESS=$(docker network inspect bridge 2>/dev/null | jq -er '.[0].IPAM.Config[0].Gateway // empty' 2>/dev/null); then
-        echo "##vso[task.logissue type=error]Could not resolve the Docker bridge gateway required by SafeOutputs"
-        exit 1
-      fi
-      echo "##vso[task.setvariable variable=SAFE_OUTPUTS_PORT]$SAFE_OUTPUTS_PORT"
-      echo "##vso[task.setvariable variable=SAFE_OUTPUTS_API_KEY;issecret=true]$SAFE_OUTPUTS_API_KEY"
-      echo "##vso[task.setvariable variable=SAFE_OUTPUTS_BIND_ADDRESS]$SAFE_OUTPUTS_BIND_ADDRESS"
-
-      mkdir -p "$(Agent.TempDirectory)/staging/logs"
-
-      # Start SafeOutputs as HTTP server in the background
-      # NOTE: --enabled-tools add-build-tag --enabled-tools create-work-item --enabled-tools missing-data --enabled-tools missing-tool --enabled-tools noop --enabled-tools report-incomplete  expands to either "" or "--enabled-tools X ... "
-      # (with trailing space). The value MUST be newline-free; is_safe_tool_name enforces this.
-      # Positional args (output_directory, bounding_directory) MUST come after all named
-      # options — clap parses them positionally and reordering would break the command.
-      nohup /tmp/awf-tools/ado-aw mcp-http \
-        --bind-address "$SAFE_OUTPUTS_BIND_ADDRESS" \
-        --port "$SAFE_OUTPUTS_PORT" \
-        --api-key "$SAFE_OUTPUTS_API_KEY" \
-        --enabled-tools add-build-tag --enabled-tools create-work-item --enabled-tools missing-data --enabled-tools missing-tool --enabled-tools noop --enabled-tools report-incomplete "/tmp/awf-tools/staging" \
-        "$(Build.SourcesDirectory)" \
-        > "$(Agent.TempDirectory)/staging/logs/safeoutputs.log" 2>&1 &
-      SAFE_OUTPUTS_PID=$!
-      echo "##vso[task.setvariable variable=SAFE_OUTPUTS_PID]$SAFE_OUTPUTS_PID"
-      echo "SafeOutputs HTTP server started on $SAFE_OUTPUTS_BIND_ADDRESS:$SAFE_OUTPUTS_PORT (PID: $SAFE_OUTPUTS_PID)"
-
-      # Wait for server to be ready
-      READY=false
-      # shellcheck disable=SC2034 # i is intentionally unused; wait-N-times loop
-      for i in $(seq 1 30); do
-        if curl --noproxy '*' -sf "http://$SAFE_OUTPUTS_BIND_ADDRESS:$SAFE_OUTPUTS_PORT/health" > /dev/null 2>&1; then
-          echo "SafeOutputs HTTP server is ready"
-          READY=true
-          break
-        fi
-        sleep 1
-      done
-      if [ "$READY" != "true" ]; then
-        echo "##vso[task.complete result=Failed]SafeOutputs HTTP server did not become ready within 30s"
-        exit 1
-      fi
-    displayName: Start SafeOutputs HTTP server
-  - bash: |
       # Substitute runtime values into MCPG config
+      MCP_RUNNER_UID=$(id -u)
+      MCP_RUNNER_GID=$(id -g)
       MCPG_CONFIG=$(sed \
-        -e "s|\${SAFE_OUTPUTS_PORT}|$(SAFE_OUTPUTS_PORT)|g" \
-        -e "s|\${SAFE_OUTPUTS_API_KEY}|$(SAFE_OUTPUTS_API_KEY)|g" \
+        -e "s|\${MCP_RUNNER_UID}|$MCP_RUNNER_UID|g" \
+        -e "s|\${MCP_RUNNER_GID}|$MCP_RUNNER_GID|g" \
         -e "s|\${MCP_GATEWAY_API_KEY}|$(MCP_GATEWAY_API_KEY)|g" \
         /tmp/awf-tools/staging/mcpg-config.json)
 
@@ -360,12 +355,10 @@ jobs:
       # here because the pipeline agent is already trusted and network-isolated by AWF.
       #
       # stdout → gateway-output.json (machine-readable config, read after health check)
-      # shellcheck disable=SC2046 # $(SAFE_OUTPUTS_BIND_ADDRESS) is an ADO macro substituted before bash sees it
       echo "$MCPG_CONFIG" | docker run -i --rm \
         --name awmg-mcpg \
         --network bridge \
         -p 127.0.0.1:8080:8080 \
-        --add-host host.docker.internal:$(SAFE_OUTPUTS_BIND_ADDRESS) \
         --entrypoint /app/awmg \
         -v /var/run/docker.sock:/var/run/docker.sock \
         -e MCP_GATEWAY_PORT="$(MCP_GATEWAY_PORT)" \
@@ -505,15 +498,8 @@ jobs:
       # Stop MCPG container
       echo "Stopping MCPG..."
       docker stop awmg-mcpg 2>/dev/null || true
-      echo "MCPG stopped"
-
-      # Stop SafeOutputs HTTP server
-      if [ -n "$(SAFE_OUTPUTS_PID)" ]; then
-        echo "Stopping SafeOutputs (PID: $(SAFE_OUTPUTS_PID))..."
-        kill "$(SAFE_OUTPUTS_PID)" 2>/dev/null || true
-        echo "SafeOutputs stopped"
-      fi
-    displayName: Stop MCPG and SafeOutputs
+      echo "MCPG and stdio child containers stopped"
+    displayName: Stop MCPG
     condition: always()
   - bash: |
       # Copy all logs to output directory for artifact upload

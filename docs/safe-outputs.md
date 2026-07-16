@@ -281,7 +281,7 @@ configured the compiler emits a credentialed **prepare step** that fetches and
 progressively deepens the configured `target-branch` and points `origin/HEAD` at
 it — in the `self` checkout **and in each additional `checkout:` repo dir**, so a
 PR to *any* allowed repository works. The prepare step runs in **both** the Agent
-job (before the agent runs, so the host-side SafeOutputs MCP server can compute
+job (before the agent runs, so the containerized SafeOutputs MCP server can compute
 the diff base) **and** the SafeOutputs job (before `ado-aw execute`, so the
 Stage 3 executor's `git worktree add` resolves `origin/<target>` — each ADO job
 has an isolated checkout, so the ref must be re-fetched in the job that builds

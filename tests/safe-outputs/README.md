@@ -41,8 +41,11 @@ five pipelines:
 > **Live GitHub Actions contract.** [`tests/awf-copilot-safeoutputs/run.sh`](../awf-copilot-safeoutputs/run.sh)
 > (driven by [`.github/workflows/copilot-cli-safeoutputs.yml`](../../.github/workflows/copilot-cli-safeoutputs.yml))
 > is the customer-focused contract gate for the local agent path: it manually
-> starts real SafeOutputs/MCPG and runs the Copilot CLI inside AWF's strict
-> network topology, asserting one `noop` NDJSON record. It never invokes
+> starts real MCPG and runs the Copilot CLI inside AWF's strict network
+> topology, with SafeOutputs wired as MCPG's hardened stdio child container —
+> mirroring the containerized shape compiled pipelines use (`ado-aw mcp`
+> spawned via the pinned AWF `agent` image, `--network none`, no host-side
+> HTTP server) — asserting one `noop` NDJSON record. It never invokes
 > `ado-aw compile` — compiler topology coverage is a separate concern, tested
 > in [`tests/compiler_tests.rs`](../compiler_tests.rs).
 

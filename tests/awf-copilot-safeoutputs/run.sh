@@ -12,16 +12,15 @@ umask 077
 : "${COPILOT_GITHUB_TOKEN:?COPILOT_GITHUB_TOKEN is required}"
 
 readonly CONTRACT_CONTEXT="awf-copilot-safeoutputs-contract"
-readonly SAFE_OUTPUTS_PORT=8100
 readonly MCP_GATEWAY_PORT=8080
 readonly MCP_GATEWAY_CONTAINER="awmg-mcpg"
 readonly MCPG_IMAGE="ghcr.io/github/gh-aw-mcpg:v${MCPG_VERSION}"
+readonly SAFEOUTPUTS_IMAGE="ghcr.io/github/gh-aw-firewall/agent:${AWF_VERSION}"
 readonly ARTIFACT_DIR="${ADO_AW_COPILOT_CLI_ARTIFACT_DIR}"
 
 RUNTIME_DIR="$(mktemp -d /tmp/ado-aw-awf-contract.XXXXXX)"
-SAFE_OUTPUTS_DIR="${RUNTIME_DIR}/safeoutputs"
+SAFE_OUTPUTS_DIR="$(mktemp -d /tmp/ado-aw-safeoutputs.XXXXXX)"
 TOOLS_DIR="/tmp/awf-tools"
-SAFE_OUTPUTS_PID=""
 MCPG_PID=""
 
 mkdir -p "${ARTIFACT_DIR}" "${SAFE_OUTPUTS_DIR}" "${TOOLS_DIR}"
@@ -34,15 +33,11 @@ cleanup() {
     kill "${MCPG_PID}" >/dev/null 2>&1 || true
     wait "${MCPG_PID}" >/dev/null 2>&1 || true
   fi
-  if [[ -n "${SAFE_OUTPUTS_PID}" ]]; then
-    kill "${SAFE_OUTPUTS_PID}" >/dev/null 2>&1 || true
-    wait "${SAFE_OUTPUTS_PID}" >/dev/null 2>&1 || true
-  fi
   docker ps -a > "${ARTIFACT_DIR}/docker-ps.txt" 2>&1 || true
   if [[ -f "${SAFE_OUTPUTS_DIR}/safe_outputs.ndjson" ]]; then
     cp "${SAFE_OUTPUTS_DIR}/safe_outputs.ndjson" "${ARTIFACT_DIR}/safe_outputs.ndjson"
   fi
-  rm -rf "${RUNTIME_DIR}"
+  rm -rf "${RUNTIME_DIR}" "${SAFE_OUTPUTS_DIR}"
   return "${status}"
 }
 trap cleanup EXIT
@@ -77,42 +72,49 @@ for binary in "${ADO_AW_BIN}" "${AWF_BIN}" "${COPILOT_BIN}"; do
   }
 done
 
-SAFE_OUTPUTS_BIND_ADDRESS="$(
-  docker network inspect bridge |
-    jq -er '.[0].IPAM.Config[0].Gateway // empty'
-)"
-SAFE_OUTPUTS_API_KEY="$(openssl rand -base64 45 | tr -d '/+=')"
 MCP_GATEWAY_API_KEY="$(openssl rand -base64 45 | tr -d '/+=')"
+install -m 0755 "${ADO_AW_BIN}" "${TOOLS_DIR}/ado-aw"
 
-"${ADO_AW_BIN}" mcp-http \
-  --bind-address "${SAFE_OUTPUTS_BIND_ADDRESS}" \
-  --port "${SAFE_OUTPUTS_PORT}" \
-  --api-key "${SAFE_OUTPUTS_API_KEY}" \
-  --enabled-tools noop \
-  "${SAFE_OUTPUTS_DIR}" \
-  "${RUNTIME_DIR}" \
-  >"${ARTIFACT_DIR}/safeoutputs.stdout.log" \
-  2>"${ARTIFACT_DIR}/safeoutputs.stderr.log" &
-SAFE_OUTPUTS_PID=$!
-
-wait_for_http \
-  "SafeOutputs" \
-  "http://${SAFE_OUTPUTS_BIND_ADDRESS}:${SAFE_OUTPUTS_PORT}/health" \
-  "${SAFE_OUTPUTS_PID}" \
-  "${ARTIFACT_DIR}/safeoutputs.stderr.log"
+for image in squid agent api-proxy; do
+  docker pull "ghcr.io/github/gh-aw-firewall/${image}:${AWF_VERSION}"
+done
+docker pull "${MCPG_IMAGE}"
 
 jq -n \
-  --arg safeoutputs_url "http://host.docker.internal:${SAFE_OUTPUTS_PORT}/mcp" \
-  --arg safeoutputs_key "${SAFE_OUTPUTS_API_KEY}" \
+  --arg safeoutputs_image "${SAFEOUTPUTS_IMAGE}" \
+  --arg ado_aw_bin "${TOOLS_DIR}/ado-aw" \
+  --arg runtime_dir "${RUNTIME_DIR}" \
+  --arg safeoutputs_dir "${SAFE_OUTPUTS_DIR}" \
+  --arg runner_uid "$(id -u)" \
+  --arg runner_gid "$(id -g)" \
   --arg gateway_key "${MCP_GATEWAY_API_KEY}" \
   --arg gateway_domain "${MCP_GATEWAY_CONTAINER}" \
   --argjson gateway_port "${MCP_GATEWAY_PORT}" \
   '{
     mcpServers: {
       safeoutputs: {
-        type: "http",
-        url: $safeoutputs_url,
-        headers: {Authorization: ("Bearer " + $safeoutputs_key)}
+        type: "stdio",
+        container: $safeoutputs_image,
+        entrypoint: "/usr/local/bin/ado-aw",
+        entrypointArgs: [
+          "mcp", "--enabled-tools", "noop", "/safeoutputs", $runtime_dir
+        ],
+        mounts: [
+          ($ado_aw_bin + ":/usr/local/bin/ado-aw:ro"),
+          ($runtime_dir + ":" + $runtime_dir + ":rw"),
+          ($safeoutputs_dir + ":/safeoutputs:rw")
+        ],
+        args: [
+          "--network", "none",
+          "--user", ($runner_uid + ":" + $runner_gid),
+          "--cap-drop", "ALL",
+          "--security-opt", "no-new-privileges",
+          "--read-only",
+          "--tmpfs", "/tmp:rw,nosuid,nodev,noexec",
+          "--pids-limit", "256",
+          "-w", $runtime_dir
+        ],
+        env: {HOME: "/tmp"}
       }
     },
     gateway: {
@@ -124,13 +126,11 @@ jq -n \
   }' >"${RUNTIME_DIR}/mcpg-config.json"
 
 docker rm -f "${MCP_GATEWAY_CONTAINER}" >/dev/null 2>&1 || true
-docker pull "${MCPG_IMAGE}"
 
 docker run -i --rm \
   --name "${MCP_GATEWAY_CONTAINER}" \
   --network bridge \
   -p "127.0.0.1:${MCP_GATEWAY_PORT}:${MCP_GATEWAY_PORT}" \
-  --add-host "host.docker.internal:${SAFE_OUTPUTS_BIND_ADDRESS}" \
   --entrypoint /app/awmg \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -e "MCP_GATEWAY_PORT=${MCP_GATEWAY_PORT}" \
@@ -228,10 +228,6 @@ Call the noop tool exactly once with context "${CONTRACT_CONTEXT}".
 Do not call any other tool. Stop immediately after the tool call.
 EOF
 chmod 600 "${TOOLS_DIR}/agent-prompt.md"
-
-for image in squid agent api-proxy; do
-  docker pull "ghcr.io/github/gh-aw-firewall/${image}:${AWF_VERSION}"
-done
 
 readonly ALLOWED_DOMAINS="api.business.githubcopilot.com,api.enterprise.githubcopilot.com,api.github.com,api.githubcopilot.com,api.individual.githubcopilot.com,config.edge.skype.com,copilot-proxy.githubusercontent.com,github.com,telemetry.enterprise.githubcopilot.com,*.copilot.github.com,*.githubcopilot.com"
 # shellcheck disable=SC2016 # AWF expands the engine command inside the sandbox.

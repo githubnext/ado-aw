@@ -4,9 +4,8 @@ use std::time::Duration;
 
 // Integration tests for the SafeOutputs HTTP server (`mcp-http` subcommand).
 //
-// These tests validate the HTTP transport layer that MCPG uses to reach
-// SafeOutputs. They do NOT require Docker or the MCPG gateway — they test
-// the ado-aw HTTP server directly.
+// These tests validate the optional HTTP transport directly. Compiled
+// pipelines use the stdio transport through an MCPG-spawned container.
 
 /// Guard that kills the child process on drop (even on panic).
 struct ServerGuard {
@@ -84,12 +83,7 @@ fn start_server_at(bind_address: &str) -> ServerGuard {
     });
 
     // Wait for the server to become ready (up to 5 s)
-    let connect_address = if bind_address == "0.0.0.0" {
-        "127.0.0.1"
-    } else {
-        bind_address
-    };
-    let health_url = format!("http://{connect_address}:{port}/health");
+    let health_url = format!("http://{bind_address}:{port}/health");
     let client = reqwest::blocking::Client::builder()
         .no_proxy()
         .build()
@@ -206,41 +200,6 @@ fn test_explicit_bind_address_is_used() {
         .send()
         .unwrap();
     assert_eq!(resp.status(), 200);
-}
-
-#[test]
-fn test_docker_host_alias_is_allowed_for_bridge_bind() {
-    let server = start_server_at("0.0.0.0");
-    let client = reqwest::blocking::Client::builder()
-        .no_proxy()
-        .build()
-        .unwrap();
-    let resp = client
-        .post(format!("http://127.0.0.1:{}/mcp", server.port))
-        .header("Host", format!("host.docker.internal:{}", server.port))
-        .header(
-            "Authorization",
-            ["Bearer", server.api_key.as_str()].join(" "),
-        )
-        .header("Content-Type", "application/json")
-        .header("Accept", "text/event-stream, application/json")
-        .json(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-03-26",
-                "capabilities": {},
-                "clientInfo": { "name": "docker-mcpg-test", "version": "1.0" }
-            }
-        }))
-        .send()
-        .unwrap();
-    assert!(
-        resp.status().is_success(),
-        "Docker host alias should pass rmcp host validation, got {}",
-        resp.status()
-    );
 }
 
 #[test]

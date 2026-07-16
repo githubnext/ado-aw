@@ -65,7 +65,7 @@ use std::path::Path;
 
 use super::common::{
     self, ADO_BUILD_ID_SUFFIX, AWF_VERSION, HEADER_MARKER, MCPG_CONTAINER_NAME, MCPG_DOMAIN,
-    MCPG_HOST_DOMAIN, MCPG_IMAGE, MCPG_PORT, MCPG_VERSION,
+    MCPG_IMAGE, MCPG_PORT, MCPG_VERSION, image_ref,
 };
 use super::common::PerJobPools;
 use super::extensions::{CompileContext, CompilerExtension, Declarations, Extension, McpgConfig};
@@ -245,7 +245,6 @@ pub(crate) fn build_pipeline_context(
         common::generate_allowed_domains(front_matter, extensions, &extension_declarations)?;
     let awf_mounts = common::generate_awf_mounts(extensions, &extension_declarations);
     let awf_path_step_yaml = common::generate_awf_path_step(&awf_paths);
-    let enabled_tools_args = common::generate_enabled_tools_args(front_matter);
 
     // MCPG config
     let mcpg_config_obj = common::generate_mcpg_config(front_matter, &extension_declarations)?;
@@ -349,7 +348,6 @@ pub(crate) fn build_pipeline_context(
         allowed_domains,
         awf_mounts,
         awf_path_step_yaml,
-        enabled_tools_args,
         mcpg_config_json,
         mcpg_docker_env,
         mcpg_step_env,
@@ -530,8 +528,6 @@ pub(crate) struct StandaloneCtx {
     pub(crate) awf_mounts: String,
     /// `awf_path_step` YAML body (or empty when no path prepends).
     pub(crate) awf_path_step_yaml: String,
-    /// `--enabled-tools` args for SafeOutputs HTTP server (with trailing space).
-    pub(crate) enabled_tools_args: String,
     pub(crate) mcpg_config_json: String,
     /// `-e KEY=...` docker flags for MCPG.
     pub(crate) mcpg_docker_env: String,
@@ -925,13 +921,7 @@ fn build_agent_job(
     // 14. AWF path step (when extensions declare path prepends)
     push_raw_yaml_if_nonempty(&mut steps, &cfg.awf_path_step_yaml)?;
 
-    // 15. SafeOutputs HTTP server
-    steps.push(Step::Bash(start_safeoutputs_server_step(
-        &cfg.enabled_tools_args,
-        &cfg.working_directory,
-    )));
-
-    // 16. MCP Gateway (MCPG)
+    // 15. MCP Gateway (MCPG), which launches SafeOutputs as a stdio child.
     steps.push(Step::Bash(start_mcpg_step(
         &cfg.mcpg_docker_env,
         &cfg.mcpg_step_env,
@@ -939,14 +929,14 @@ fn build_agent_job(
         front_matter.supply_chain(),
     )?));
 
-    // 17. Verify MCP backends (debug-only)
+    // 16. Verify MCP backends (debug-only)
     if cfg.debug_pipeline {
         steps.push(Step::Bash(verify_mcp_backends_step()));
     }
 
-    // 18. Run copilot (AWF network isolated) — the big one.
+    // 17. Run copilot (AWF network isolated) — the big one.
     //     When `create-pull-request` is configured, first fetch/deepen the
-    //     target branch so the host-side SafeOutputs MCP server can compute a
+    //     target branch so the containerized SafeOutputs MCP server can compute a
     //     diff base on shallow-default agent pools (issue #1413). Runs after
     //     `checkout: self` (step 1) so the clone exists, and before the Copilot
     //     run so the refs are present when the agent proposes a PR. The
@@ -1465,7 +1455,7 @@ fn build_safeoutputs_job(
     )));
     // When `create-pull-request` is configured, fetch/deepen each target branch
     // in THIS job's checkout, immediately before the executor runs (issue
-    // #1453). The prepare step also runs in the Agent job (for the host-side
+    // #1453). The prepare step also runs in the Agent job (for the containerized
     // SafeOutputs MCP diff base), but each ADO job gets an isolated checkout, so
     // the Agent-job fetch is invisible here — the `create-pull-request` executor
     // (`ado-aw execute`) builds its worktree from `origin/<target>` in the
@@ -2132,30 +2122,6 @@ fn checkout_none_step() -> Step {
     })
 }
 
-/// Rewrite a GHCR image reference onto an internal registry when one is
-/// configured. `base` is the GHCR path (e.g.
-/// `ghcr.io/github/gh-aw-firewall/squid`), `tag` the image tag. When
-/// `registry` is `None` the GHCR reference is returned unchanged.
-///
-/// The internal registry may have an entirely different namespace than GHCR
-/// (teams generally cannot publish under `github/...`), so only the original
-/// **artifact name** — the final path segment of `base` (`squid`, `agent`,
-/// `gh-aw-mcpg`) — is preserved directly under the configured registry base
-/// path. This is the contract: artifact names stay the same, the prefix is
-/// whatever the user provides.
-///
-/// Centralised so the pre-pull step and the `docker run` invocation in
-/// `start_mcpg_step` cannot drift on the rewritten reference.
-fn image_ref(base: &str, tag: &str, registry: Option<&str>) -> String {
-    match registry {
-        Some(reg) => {
-            let name = base.rsplit('/').next().unwrap_or(base);
-            format!("{reg}/{name}:{tag}")
-        }
-        None => format!("{base}:{tag}"),
-    }
-}
-
 /// Derive the ACR registry name (used by `az acr login --name`) from a
 /// registry base path. Takes the host portion (before the first `/`), then
 /// strips a trailing `.azurecr.io` when present; otherwise returns the portion
@@ -2558,57 +2524,6 @@ fn prepull_images_step(
     steps
 }
 
-fn start_safeoutputs_server_step(enabled_tools_args: &str, working_directory: &str) -> BashStep {
-    let script = format!(
-        "set -euo pipefail\n\
-         \n\
-         SAFE_OUTPUTS_PORT=8100\n\
-         SAFE_OUTPUTS_API_KEY=$(openssl rand -base64 45 | tr -d '/+=')\n\
-         if ! SAFE_OUTPUTS_BIND_ADDRESS=$(docker network inspect bridge 2>/dev/null | jq -er '.[0].IPAM.Config[0].Gateway // empty' 2>/dev/null); then\n  \
-           echo \"##vso[task.logissue type=error]Could not resolve the Docker bridge gateway required by SafeOutputs\"\n  \
-           exit 1\n\
-         fi\n\
-         echo \"##vso[task.setvariable variable=SAFE_OUTPUTS_PORT]$SAFE_OUTPUTS_PORT\"\n\
-         echo \"##vso[task.setvariable variable=SAFE_OUTPUTS_API_KEY;issecret=true]$SAFE_OUTPUTS_API_KEY\"\n\
-         echo \"##vso[task.setvariable variable=SAFE_OUTPUTS_BIND_ADDRESS]$SAFE_OUTPUTS_BIND_ADDRESS\"\n\
-         \n\
-         mkdir -p \"$(Agent.TempDirectory)/staging/logs\"\n\
-         \n\
-         # Start SafeOutputs as HTTP server in the background\n\
-         # NOTE: {enabled_tools_args} expands to either \"\" or \"--enabled-tools X ... \"\n\
-         # (with trailing space). The value MUST be newline-free; is_safe_tool_name enforces this.\n\
-         # Positional args (output_directory, bounding_directory) MUST come after all named\n\
-         # options — clap parses them positionally and reordering would break the command.\n\
-         nohup /tmp/awf-tools/ado-aw mcp-http \\\n  \
-           --bind-address \"$SAFE_OUTPUTS_BIND_ADDRESS\" \\\n  \
-           --port \"$SAFE_OUTPUTS_PORT\" \\\n  \
-           --api-key \"$SAFE_OUTPUTS_API_KEY\" \\\n  \
-           {enabled_tools_args}\"/tmp/awf-tools/staging\" \\\n  \
-           \"{working_directory}\" \\\n  \
-           > \"$(Agent.TempDirectory)/staging/logs/safeoutputs.log\" 2>&1 &\n\
-         SAFE_OUTPUTS_PID=$!\n\
-         echo \"##vso[task.setvariable variable=SAFE_OUTPUTS_PID]$SAFE_OUTPUTS_PID\"\n\
-         echo \"SafeOutputs HTTP server started on $SAFE_OUTPUTS_BIND_ADDRESS:$SAFE_OUTPUTS_PORT (PID: $SAFE_OUTPUTS_PID)\"\n\
-         \n\
-         # Wait for server to be ready\n\
-         READY=false\n\
-         # shellcheck disable=SC2034 # i is intentionally unused; wait-N-times loop\n\
-         for i in $(seq 1 30); do\n  \
-           if curl --noproxy '*' -sf \"http://$SAFE_OUTPUTS_BIND_ADDRESS:$SAFE_OUTPUTS_PORT/health\" > /dev/null 2>&1; then\n    \
-             echo \"SafeOutputs HTTP server is ready\"\n    \
-             READY=true\n    \
-             break\n  \
-           fi\n  \
-           sleep 1\n\
-         done\n\
-         if [ \"$READY\" != \"true\" ]; then\n  \
-           echo \"##vso[task.complete result=Failed]SafeOutputs HTTP server did not become ready within 30s\"\n  \
-           exit 1\n\
-         fi\n"
-    );
-    bash("Start SafeOutputs HTTP server", script)
-}
-
 fn start_mcpg_step(
     mcpg_docker_env: &str,
     mcpg_step_env: &str,
@@ -2662,9 +2577,11 @@ fn start_mcpg_step(
     };
     let script = format!(
         "# Substitute runtime values into MCPG config\n\
+         MCP_RUNNER_UID=$(id -u)\n\
+         MCP_RUNNER_GID=$(id -g)\n\
          MCPG_CONFIG=$(sed \\\n  \
-           -e \"s|\\${{SAFE_OUTPUTS_PORT}}|$(SAFE_OUTPUTS_PORT)|g\" \\\n  \
-           -e \"s|\\${{SAFE_OUTPUTS_API_KEY}}|$(SAFE_OUTPUTS_API_KEY)|g\" \\\n  \
+           -e \"s|\\${{MCP_RUNNER_UID}}|$MCP_RUNNER_UID|g\" \\\n  \
+           -e \"s|\\${{MCP_RUNNER_GID}}|$MCP_RUNNER_GID|g\" \\\n  \
            -e \"s|\\${{MCP_GATEWAY_API_KEY}}|$(MCP_GATEWAY_API_KEY)|g\" \\\n  \
            /tmp/awf-tools/staging/mcpg-config.json)\n\
          \n\
@@ -2686,12 +2603,10 @@ fn start_mcpg_step(
          # here because the pipeline agent is already trusted and network-isolated by AWF.\n\
          #\n\
          # stdout → gateway-output.json (machine-readable config, read after health check)\n\
-         # shellcheck disable=SC2046 # $(SAFE_OUTPUTS_BIND_ADDRESS) is an ADO macro substituted before bash sees it\n\
          echo \"$MCPG_CONFIG\" | docker run -i --rm \\\n  \
            --name {MCPG_CONTAINER_NAME} \\\n  \
            --network bridge \\\n  \
            -p 127.0.0.1:{MCPG_PORT}:{MCPG_PORT} \\\n  \
-           --add-host {MCPG_HOST_DOMAIN}:$(SAFE_OUTPUTS_BIND_ADDRESS) \\\n  \
            --entrypoint /app/awmg \\\n  \
            -v /var/run/docker.sock:/var/run/docker.sock \\\n  \
            -e MCP_GATEWAY_PORT=\"$(MCP_GATEWAY_PORT)\" \\\n  \
@@ -2984,16 +2899,9 @@ fn stop_mcpg_step() -> BashStep {
         "# Stop MCPG container\n\
          echo \"Stopping MCPG...\"\n\
          docker stop {MCPG_CONTAINER_NAME} 2>/dev/null || true\n\
-         echo \"MCPG stopped\"\n\
-         \n\
-         # Stop SafeOutputs HTTP server\n\
-         if [ -n \"$(SAFE_OUTPUTS_PID)\" ]; then\n  \
-           echo \"Stopping SafeOutputs (PID: $(SAFE_OUTPUTS_PID))...\"\n  \
-           kill \"$(SAFE_OUTPUTS_PID)\" 2>/dev/null || true\n  \
-           echo \"SafeOutputs stopped\"\n\
-         fi\n"
+         echo \"MCPG and stdio child containers stopped\"\n"
     );
-    bash("Stop MCPG and SafeOutputs", script).with_condition(Condition::Always)
+    bash("Stop MCPG", script).with_condition(Condition::Always)
 }
 
 fn copy_logs_step(engine_log_dir: &str, is_detection: bool) -> BashStep {
@@ -3905,7 +3813,6 @@ mod tests {
             allowed_domains: String::new(),
             awf_mounts: "\\".to_string(),
             awf_path_step_yaml: String::new(),
-            enabled_tools_args: String::new(),
             mcpg_config_json: "{}".to_string(),
             mcpg_docker_env: String::new(),
             mcpg_step_env: String::new(),

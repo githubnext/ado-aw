@@ -1506,9 +1506,6 @@ pub const MCPG_DOMAIN: &str = "awmg-mcpg";
 /// Stable MCPG container name passed to AWF's topology attachment.
 pub const MCPG_CONTAINER_NAME: &str = MCPG_DOMAIN;
 
-/// Host alias used only by trusted MCPG to reach host-side HTTP backends.
-pub const MCPG_HOST_DOMAIN: &str = "host.docker.internal";
-
 /// Docker base image for the Azure DevOps MCP container.
 pub const ADO_MCP_IMAGE: &str = "node:20-slim";
 
@@ -1520,6 +1517,20 @@ pub const ADO_MCP_PACKAGE: &str = "@azure-devops/mcp";
 
 /// Reserved MCPG server name for the auto-configured ADO MCP.
 pub const ADO_MCP_SERVER_NAME: &str = "azure-devops";
+
+/// Rewrite a GHCR image reference onto an internal registry when configured.
+///
+/// Only the final artifact name is preserved under the configured registry
+/// base, matching the `supply-chain.registry` mirror contract.
+pub(crate) fn image_ref(base: &str, tag: &str, registry: Option<&str>) -> String {
+    match registry {
+        Some(reg) => {
+            let name = base.rsplit('/').next().unwrap_or(base);
+            format!("{reg}/{name}:{tag}")
+        }
+        None => format!("{base}:{tag}"),
+    }
+}
 
 /// Generate the agent markdown source path for Stage 3 execution.
 ///
@@ -2367,8 +2378,9 @@ fn try_add_user_mcp(
 /// Generate MCPG configuration from front matter.
 ///
 /// Converts the front matter `mcp-servers` definitions into MCPG-compatible JSON.
-/// SafeOutputs is always included as an HTTP backend. Extension-contributed MCPG
-/// entries (e.g., azure-devops) are included via the `extensions` parameter.
+/// SafeOutputs is always included as a hardened stdio container. Other
+/// extension-contributed MCPG entries (e.g., azure-devops) are included via the
+/// `extensions` parameter.
 pub fn generate_mcpg_config(
     front_matter: &FrontMatter,
     extension_declarations: &[Declarations],
@@ -2381,6 +2393,70 @@ pub fn generate_mcpg_config(
             mcp_servers.insert(name.clone(), config.clone());
         }
     }
+
+    let effective_workspace = compute_effective_workspace(
+        &front_matter.workspace,
+        &front_matter.checkout,
+        &front_matter.name,
+    )?;
+    let working_directory = generate_working_directory(&effective_workspace);
+    let registry_base = front_matter
+        .supply_chain()
+        .and_then(|sc| sc.registry.as_ref())
+        .map(|registry| registry.name.as_str());
+    let safeoutputs_image = image_ref(
+        "ghcr.io/github/gh-aw-firewall/agent",
+        AWF_VERSION,
+        registry_base,
+    );
+    let mut safeoutputs_entrypoint_args = vec!["mcp".to_string()];
+    safeoutputs_entrypoint_args.extend(
+        generate_enabled_tools_args(front_matter)
+            .split_whitespace()
+            .map(str::to_string),
+    );
+    safeoutputs_entrypoint_args.extend([
+        "/safeoutputs".to_string(),
+        working_directory.clone(),
+    ]);
+    mcp_servers.insert(
+        "safeoutputs".to_string(),
+        McpgServerConfig {
+            server_type: "stdio".to_string(),
+            container: Some(safeoutputs_image),
+            entrypoint: Some("/usr/local/bin/ado-aw".to_string()),
+            entrypoint_args: Some(safeoutputs_entrypoint_args),
+            mounts: Some(vec![
+                "/tmp/awf-tools/ado-aw:/usr/local/bin/ado-aw:ro".to_string(),
+                format!("{working_directory}:{working_directory}:rw"),
+                "/tmp/awf-tools/staging:/safeoutputs:rw".to_string(),
+            ]),
+            args: Some(vec![
+                "--network".to_string(),
+                "none".to_string(),
+                "--user".to_string(),
+                "${MCP_RUNNER_UID}:${MCP_RUNNER_GID}".to_string(),
+                "--cap-drop".to_string(),
+                "ALL".to_string(),
+                "--security-opt".to_string(),
+                "no-new-privileges".to_string(),
+                "--read-only".to_string(),
+                "--tmpfs".to_string(),
+                "/tmp:rw,nosuid,nodev,noexec".to_string(),
+                "--pids-limit".to_string(),
+                "256".to_string(),
+                "-w".to_string(),
+                working_directory,
+            ]),
+            url: None,
+            headers: None,
+            env: Some(std::collections::BTreeMap::from([(
+                "HOME".to_string(),
+                "/tmp".to_string(),
+            )])),
+            tools: None,
+        },
+    );
 
     for (name, config) in &front_matter.mcp_servers {
         try_add_user_mcp(name, config, &mut mcp_servers)?;
@@ -5854,39 +5930,62 @@ safe-outputs:
     }
 
     #[test]
-    fn test_generate_mcpg_config_safeoutputs_variable_placeholders() {
+    fn test_generate_mcpg_config_safeoutputs_runtime_placeholders() {
         let fm = minimal_front_matter();
         let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         let so = config.mcp_servers.get("safeoutputs").unwrap();
 
-        // URL should reference the runtime-substituted port
-        let url = so.url.as_ref().unwrap();
+        let args = so.args.as_ref().unwrap();
         assert!(
-            url.contains("${SAFE_OUTPUTS_PORT}"),
-            "SafeOutputs URL should use ${{SAFE_OUTPUTS_PORT}} placeholder, got: {url}"
+            args.contains(&"${MCP_RUNNER_UID}:${MCP_RUNNER_GID}".to_string()),
+            "SafeOutputs should run as the runtime ADO agent UID/GID: {args:?}"
         );
-
-        // Auth header should reference the runtime-substituted API key
-        let headers = so.headers.as_ref().unwrap();
-        let auth = headers.get("Authorization").unwrap();
+        let entrypoint_args = so.entrypoint_args.as_ref().unwrap();
         assert!(
-            auth.contains("${SAFE_OUTPUTS_API_KEY}"),
-            "SafeOutputs auth header should use ${{SAFE_OUTPUTS_API_KEY}} placeholder, got: {auth}"
+            entrypoint_args.starts_with(&["mcp".to_string()]),
+            "SafeOutputs should use the stdio MCP subcommand: {entrypoint_args:?}"
         );
     }
 
     #[test]
-    fn test_generate_mcpg_config_safeoutputs_is_http_type() {
+    fn test_generate_mcpg_config_safeoutputs_is_hardened_stdio_container() {
         let fm = minimal_front_matter();
         let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         let so = config.mcp_servers.get("safeoutputs").unwrap();
-        assert_eq!(so.server_type, "http");
+        assert_eq!(so.server_type, "stdio");
         assert!(
-            so.container.is_none(),
-            "HTTP backend should have no container"
+            so.container
+                .as_deref()
+                .is_some_and(|image| image.contains("gh-aw-firewall/agent:")),
+            "SafeOutputs should reuse the pinned AWF agent image"
         );
-        assert!(so.args.is_none(), "HTTP backend should have no args");
-        assert!(so.url.is_some(), "HTTP backend must have a URL");
+        assert_eq!(so.entrypoint.as_deref(), Some("/usr/local/bin/ado-aw"));
+        assert!(so.url.is_none(), "stdio backend should have no URL");
+        assert!(so.headers.is_none(), "stdio backend should need no bearer");
+        let args = so.args.as_ref().unwrap();
+        for required in [
+            "none",
+            "ALL",
+            "no-new-privileges",
+            "--read-only",
+            "/tmp:rw,nosuid,nodev,noexec",
+        ] {
+            assert!(
+                args.iter().any(|arg| arg == required),
+                "SafeOutputs hardening args should contain {required}: {args:?}"
+            );
+        }
+        let mounts = so.mounts.as_ref().unwrap();
+        assert!(
+            mounts
+                .iter()
+                .any(|mount| mount == "/tmp/awf-tools/ado-aw:/usr/local/bin/ado-aw:ro")
+        );
+        assert!(
+            mounts
+                .iter()
+                .any(|mount| mount == "/tmp/awf-tools/staging:/safeoutputs:rw")
+        );
     }
 
     #[test]
@@ -5942,14 +6041,15 @@ safe-outputs:
             })),
         );
         let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
-        // The reserved entry should still be the HTTP backend, not the user's container
+        // The reserved entry should still be the compiler-owned stdio backend,
+        // not the user's container.
         let so = config.mcp_servers.get("safeoutputs").unwrap();
         assert_eq!(
-            so.server_type, "http",
-            "safeoutputs should remain HTTP backend"
+            so.server_type, "stdio",
+            "safeoutputs should remain the compiler-owned stdio backend"
         );
         assert!(
-            so.container.is_none(),
+            so.container.as_deref() != Some("evil:latest"),
             "User container should not overwrite safeoutputs"
         );
     }
@@ -5970,8 +6070,8 @@ safe-outputs:
         let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         // The user-defined "SafeOutputs" must not overwrite the built-in entry
         let so = config.mcp_servers.get("safeoutputs").unwrap();
-        assert_eq!(so.server_type, "http");
-        assert!(so.url.as_ref().unwrap().contains(MCPG_HOST_DOMAIN));
+        assert_eq!(so.server_type, "stdio");
+        assert_eq!(so.entrypoint.as_deref(), Some("/usr/local/bin/ado-aw"));
         // No stdio entry should have been added under any casing
         assert_eq!(config.mcp_servers.len(), 1);
     }

@@ -110,7 +110,7 @@ mod tests {
         let domains = allowed_domains(&fm, &exts).unwrap();
         assert!(
             !domains.contains("host.docker.internal"),
-            "host.docker.internal is reserved for trusted MCPG and must not be agent-accessible"
+            "containerized SafeOutputs must not require host access"
         );
     }
 

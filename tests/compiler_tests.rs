@@ -1,6 +1,14 @@
 use std::fs;
 use std::path::PathBuf;
 
+fn compiled_has_enabled_tool(compiled: &str, tool: &str) -> bool {
+    let lines: Vec<&str> = compiled.lines().map(str::trim).collect();
+    lines.windows(2).any(|pair| {
+        pair[0] == "\"--enabled-tools\","
+            && pair[1].trim_end_matches(',').trim_matches('"') == tool
+    })
+}
+
 // `assert_required_markers`, `assert_pool_config`, `assert_compiler_download`,
 // `assert_awf_download`, `assert_mcpg_integration`, and `test_compiled_yaml_structure`
 // validated the legacy `src/data/base.yml` template. The standalone target
@@ -206,8 +214,13 @@ fn test_compiled_output_no_unreplaced_markers() {
         "Compiled output should reference MCPG Docker image"
     );
     assert!(
-        compiled.contains("host.docker.internal"),
-        "Compiled output should expose the host alias only to trusted MCPG"
+        !compiled.contains("host.docker.internal"),
+        "Containerized SafeOutputs must not require a host bridge alias"
+    );
+    assert!(
+        compiled.contains("\"entrypoint\": \"/usr/local/bin/ado-aw\"")
+            && compiled.contains("\"/tmp/awf-tools/staging:/safeoutputs:rw\""),
+        "Compiled output should run the mounted ado-aw binary as an MCPG stdio child"
     );
     assert_eq!(
         compiled.matches("--topology-attach \"awmg-mcpg\"").count(),
@@ -696,11 +709,11 @@ Do something.
 
     // Both configured safe-output tools must appear in the --enabled-tools list
     assert!(
-        compiled.contains("--enabled-tools create-work-item"),
+        compiled_has_enabled_tool(&compiled, "create-work-item"),
         "Compiled output should contain --enabled-tools create-work-item"
     );
     assert!(
-        compiled.contains("--enabled-tools create-pull-request"),
+        compiled_has_enabled_tool(&compiled, "create-pull-request"),
         "Compiled output should contain --enabled-tools create-pull-request"
     );
 
@@ -1460,7 +1473,7 @@ Submit PR reviews.
 
     // The submit-pr-review tool must be listed as an enabled tool for the agent
     assert!(
-        compiled.contains("--enabled-tools submit-pr-review"),
+        compiled_has_enabled_tool(&compiled, "submit-pr-review"),
         "Compiled output should contain --enabled-tools submit-pr-review"
     );
     // Stage 3 write token must be acquired for the executor
@@ -1574,7 +1587,7 @@ Manage pull requests.
 
     // update-pr must be listed as an enabled tool for the agent
     assert!(
-        compiled.contains("--enabled-tools update-pr"),
+        compiled_has_enabled_tool(&compiled, "update-pr"),
         "Compiled output should contain --enabled-tools update-pr"
     );
     // Stage 3 must acquire a write token (permissions.write is set)
@@ -1636,7 +1649,7 @@ Vote on pull requests.
 
     // update-pr must be listed as an enabled tool for the agent
     assert!(
-        compiled.contains("--enabled-tools update-pr"),
+        compiled_has_enabled_tool(&compiled, "update-pr"),
         "Compiled output should contain --enabled-tools update-pr"
     );
     // Stage 3 must acquire a write token (permissions.write is set)
@@ -1700,27 +1713,27 @@ Do something.
 
     // Configured safe-output tools must appear as --enabled-tools flags
     assert!(
-        compiled.contains("--enabled-tools create-pull-request"),
+        compiled_has_enabled_tool(&compiled, "create-pull-request"),
         "Compiled output should contain --enabled-tools create-pull-request"
     );
     assert!(
-        compiled.contains("--enabled-tools create-work-item"),
+        compiled_has_enabled_tool(&compiled, "create-work-item"),
         "Compiled output should contain --enabled-tools create-work-item"
     );
 
     // Always-on diagnostic tools must also appear
     assert!(
-        compiled.contains("--enabled-tools noop"),
+        compiled_has_enabled_tool(&compiled, "noop"),
         "Compiled output should contain --enabled-tools noop"
     );
     assert!(
-        compiled.contains("--enabled-tools missing-data"),
+        compiled_has_enabled_tool(&compiled, "missing-data"),
         "Compiled output should contain --enabled-tools missing-data"
     );
 
     // Tools NOT in safe-outputs should NOT appear (verifies filtering is selective)
     assert!(
-        !compiled.contains("--enabled-tools update-wiki-page"),
+        !compiled_has_enabled_tool(&compiled, "update-wiki-page"),
         "Non-configured tools should not appear in --enabled-tools"
     );
 
@@ -1767,26 +1780,22 @@ Call the noop tool exactly once.
         "detection job should not receive the SafeOutputs MCP config: {detection}"
     );
     assert!(
-        compiled.contains("\"safeoutputs\": {") && compiled.contains("\"type\": \"http\""),
-        "compiled MCPG config should include the SafeOutputs HTTP backend: {compiled}"
+        compiled.contains("\"safeoutputs\": {")
+            && compiled.contains("\"type\": \"stdio\"")
+            && compiled.contains("\"entrypoint\": \"/usr/local/bin/ado-aw\""),
+        "compiled MCPG config should include the SafeOutputs stdio container: {compiled}"
     );
     assert!(
-        compiled.contains(
-            "\"url\": \"http://host.docker.internal:${SAFE_OUTPUTS_PORT}/mcp\""
-        ),
-        "compiled MCPG config should keep the runtime SafeOutputs port placeholder: {compiled}"
+        compiled.contains("\"${MCP_RUNNER_UID}:${MCP_RUNNER_GID}\"")
+            && compiled.contains("\"none\"")
+            && compiled.contains("\"no-new-privileges\""),
+        "compiled SafeOutputs child should carry runtime identity and container hardening: {compiled}"
     );
     assert!(
-        compiled.contains("\"Authorization\": \"Bearer ")
-            && compiled.contains("SAFE_OUTPUTS_API_KEY"),
-        "compiled MCPG config should keep the runtime SafeOutputs auth placeholder: {compiled}"
-    );
-    assert!(
-        compiled.contains("--bind-address \"$SAFE_OUTPUTS_BIND_ADDRESS\"")
-            && compiled.contains(
-                "--add-host host.docker.internal:$(SAFE_OUTPUTS_BIND_ADDRESS)"
-            ),
-        "SafeOutputs must bind to the same bridge gateway exposed only to MCPG: {compiled}"
+        !compiled.contains("SAFE_OUTPUTS_API_KEY")
+            && !compiled.contains("SAFE_OUTPUTS_BIND_ADDRESS")
+            && !compiled.contains("host.docker.internal"),
+        "containerized SafeOutputs should not retain host HTTP plumbing: {compiled}"
     );
 }
 
@@ -5763,7 +5772,7 @@ fn test_compile_ado_aw_debug_fixture() {
 
     // --enabled-tools includes create-issue
     assert!(
-        compiled.contains("--enabled-tools create-issue"),
+        compiled_has_enabled_tool(&compiled, "create-issue"),
         "Compiler must add --enabled-tools create-issue when ado-aw-debug.create-issue is set"
     );
 }
