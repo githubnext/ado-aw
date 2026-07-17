@@ -8292,8 +8292,12 @@ fn test_create_pull_request_emits_prepare_pr_base_step_in_agent() {
     );
     let agent = job_block(&compiled, "Agent");
     assert!(
-        agent.contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js' --mode patch-base --repo-dir \"$(Build.SourcesDirectory)\" --source-ref \"$(Build.SourceBranch)\" --target-branch 'main'"),
-        "Agent job must invoke patch-base with the self source/target:\n{agent}"
+        agent.contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js' --mode patch-base --repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
+        "Agent job must invoke patch-base without shell-expanding the runtime self source ref:\n{agent}"
+    );
+    assert!(
+        !agent.contains("--source-ref \"$(Build.SourceBranch)\""),
+        "self source ref must be read from BUILD_SOURCEBRANCH in Node, not expanded by bash:\n{agent}"
     );
     assert!(
         agent.contains("Prepare create-pull-request patch base"),
@@ -8330,7 +8334,7 @@ fn test_create_pull_request_prepare_step_defaults_target_branch() {
     );
     let agent = job_block(&compiled, "Agent");
     assert!(
-        agent.contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js' --mode patch-base --repo-dir \"$(Build.SourcesDirectory)\" --source-ref \"$(Build.SourceBranch)\" --target-branch 'main'"),
+        agent.contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js' --mode patch-base --repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
         "bare create-pull-request must emit the prepare step targeting 'main':\n{agent}"
     );
     // Single `self` checkout ⇒ exactly one --repo-dir (the working directory).
@@ -8389,7 +8393,7 @@ fn test_create_pull_request_prepare_step_per_repo_targets() {
     let agent = job_block(&compiled, "Agent");
     // self ⇒ literal default 'main' (self never infers).
     assert!(
-        agent.contains("--repo-dir \"$(Build.SourcesDirectory)\" --source-ref \"$(Build.SourceBranch)\" --target-branch 'main'"),
+        agent.contains("--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
         "self must target the literal default 'main':\n{agent}"
     );
     // tools ⇒ inferred from its checkout ref (refs/heads/release → release).

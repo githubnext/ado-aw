@@ -210,6 +210,24 @@ describe("prepare-pr-base main", () => {
     ]);
   });
 
+  it("does not send the ADO bearer to a non-Azure origin", async () => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const { deps, calls } = dependencies({
+      remote: "https://github.com/example/repo.git",
+    });
+    await main(
+      {
+        mode: "target-worktree",
+        repos: [{ dir: "/src", target: "main" }],
+        fallbackTarget: "main",
+      },
+      { SYSTEM_ACCESSTOKEN: "secret-token" },
+      deps,
+    );
+    const fetch = calls.find((call) => call.args[0] === "fetch");
+    expect(fetch?.env).toEqual({});
+  });
+
   it("isolates a checkout-directory failure and processes later repos", async () => {
     vi.spyOn(process.stdout, "write").mockImplementation(() => true);
     const visited: string[] = [];

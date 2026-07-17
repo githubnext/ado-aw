@@ -1391,7 +1391,7 @@ fn create_pr_prepare_repos(
     front_matter: &FrontMatter,
     working_directory: &str,
 ) -> Vec<super::extensions::ado_script::PreparePrBaseRepo> {
-    use super::extensions::ado_script::{PreparePrBaseRepo, PreparePrSourceRef};
+    use super::extensions::ado_script::PreparePrBaseRepo;
 
     let Some(pr_cfg) = front_matter.create_pr_config() else {
         return Vec::new();
@@ -1399,9 +1399,10 @@ fn create_pr_prepare_repos(
     let repo_refs = front_matter.checkout_repo_refs();
     let mut repos = vec![PreparePrBaseRepo {
         dir: working_directory.to_string(),
-        source_ref: Some(PreparePrSourceRef::AdoMacro(
-            "$(Build.SourceBranch)".to_string(),
-        )),
+        // Read BUILD_SOURCEBRANCH directly in the Node process. Embedding the
+        // runtime branch value into bash argv would make valid `$()`/backtick
+        // ref characters subject to shell command substitution.
+        source_ref: None,
         target_branch: pr_cfg.resolve_target_branch("self", &repo_refs),
     }];
     for alias in &front_matter.checkout {
@@ -1409,8 +1410,7 @@ fn create_pr_prepare_repos(
             dir: format!("{working_directory}/{alias}"),
             source_ref: repo_refs
                 .get(alias)
-                .cloned()
-                .map(PreparePrSourceRef::Literal),
+                .cloned(),
             target_branch: pr_cfg.resolve_target_branch(alias, &repo_refs),
         });
     }

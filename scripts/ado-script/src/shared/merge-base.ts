@@ -1,7 +1,6 @@
 import { gitOk as defaultGitOk, runGit as defaultRunGit, type GitResult } from "./git.js";
 
 const SHA40_RE = /^[0-9a-f]{40}$/i;
-const SAFE_REF_RE = /^[A-Za-z0-9._/-]+$/;
 const TARGETED_DEPTH_LIMIT = 10_000;
 const BOUNDED_DEPTHS = [200, 500, 2000] as const;
 const SOURCE_TRACKING_REF = "refs/remotes/origin/ado-aw-prepare-source";
@@ -91,28 +90,50 @@ export type ExactMergeBaseMetadata = {
 };
 
 function validRef(value: string): boolean {
-  return (
-    value.length > 0 &&
-    !value.startsWith("-") &&
-    SAFE_REF_RE.test(value) &&
-    !value.includes("..") &&
-    !value.includes("@{")
-  );
+  if (
+    !value.startsWith("refs/") ||
+    value.endsWith("/") ||
+    value.endsWith(".") ||
+    value.includes("//") ||
+    value.includes("..") ||
+    value.includes("@{")
+  ) {
+    return false;
+  }
+  for (const segment of value.split("/")) {
+    if (!segment || segment.startsWith(".") || segment.endsWith(".lock")) {
+      return false;
+    }
+  }
+  for (const char of value) {
+    const code = char.codePointAt(0) ?? 0;
+    if (
+      code <= 0x20 ||
+      code === 0x7f ||
+      ["~", "^", ":", "?", "*", "[", "\\"].includes(char)
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function sourceRefspec(sourceRef: string): string | null {
   if (SHA40_RE.test(sourceRef)) {
     return `+${sourceRef}:${SOURCE_TRACKING_REF}`;
   }
-  if (!validRef(sourceRef)) return null;
   const full = sourceRef.startsWith("refs/")
     ? sourceRef
     : `refs/heads/${sourceRef}`;
+  if (!validRef(full)) return null;
   return `+${full}:${SOURCE_TRACKING_REF}`;
 }
 
 function targetRefspec(targetShort: string, source = `refs/heads/${targetShort}`): string | null {
-  if (!validRef(targetShort) || (!SHA40_RE.test(source) && !validRef(source))) {
+  if (
+    !validRef(`refs/heads/${targetShort}`) ||
+    (!SHA40_RE.test(source) && !validRef(source))
+  ) {
     return null;
   }
   return `+${source}:refs/remotes/origin/${targetShort}`;
@@ -132,6 +153,10 @@ function checkedDepth(count: number): number | null {
     return null;
   }
   return count + 1;
+}
+
+function isShallowRepository(runners: GitRunners): boolean {
+  return runners.gitOk(["rev-parse", "--is-shallow-repository"]) !== "false";
 }
 
 /**
@@ -169,25 +194,38 @@ export function ensureExactMergeBaseFetched(
   if (!sourceSpec || !targetSpec) {
     return { ok: false, reason: "Could not construct safe exact-commit fetch refspecs." };
   }
-  const sourceFetch = runners.runGit(
-    ["fetch", "--no-tags", `--depth=${sourceDepth}`, "origin", sourceSpec],
-    env,
-  );
-  if (sourceFetch.status !== 0) {
-    return {
-      ok: false,
-      reason: `Exact source fetch failed at depth ${sourceDepth}: ${sourceFetch.stderr.trim()}`,
-    };
-  }
-  const targetFetch = runners.runGit(
-    ["fetch", "--no-tags", `--depth=${targetDepth}`, "origin", targetSpec],
-    env,
-  );
-  if (targetFetch.status !== 0) {
-    return {
-      ok: false,
-      reason: `Exact target fetch failed at depth ${targetDepth}: ${targetFetch.stderr.trim()}`,
-    };
+  if (isShallowRepository(runners)) {
+    const sourceFetch = runners.runGit(
+      ["fetch", "--no-tags", `--depth=${sourceDepth}`, "origin", sourceSpec],
+      env,
+    );
+    if (sourceFetch.status !== 0) {
+      return {
+        ok: false,
+        reason: `Exact source fetch failed at depth ${sourceDepth}: ${sourceFetch.stderr.trim()}`,
+      };
+    }
+    const targetFetch = runners.runGit(
+      ["fetch", "--no-tags", `--depth=${targetDepth}`, "origin", targetSpec],
+      env,
+    );
+    if (targetFetch.status !== 0) {
+      return {
+        ok: false,
+        reason: `Exact target fetch failed at depth ${targetDepth}: ${targetFetch.stderr.trim()}`,
+      };
+    }
+  } else {
+    const targetFetch = runners.runGit(
+      ["fetch", "--no-tags", "origin", targetSpec],
+      env,
+    );
+    if (targetFetch.status !== 0) {
+      return {
+        ok: false,
+        reason: `Exact target fetch failed: ${targetFetch.stderr.trim()}`,
+      };
+    }
   }
 
   const bases = localMergeBases(targetShort, runners);
@@ -216,6 +254,17 @@ export function ensureRefsForMergeBaseFetched(
   if (!sourceSpec || !targetSpec) {
     return { ok: false, reason: "Source or target ref is not safe to fetch." };
   }
+  if (!isShallowRepository(runners)) {
+    const fetched = runners.runGit(["fetch", "--no-tags", "origin", targetSpec], env);
+    if (fetched.status === 0) {
+      const bases = localMergeBases(targetShort, runners);
+      if (bases.length > 0) return { ok: true, baseSha: bases[0]! };
+    }
+    return {
+      ok: false,
+      reason: `Could not resolve merge-base after fetching full-checkout target 'origin/${targetShort}'.`,
+    };
+  }
   for (const depth of BOUNDED_DEPTHS) {
     const specs = sourceSpec === targetSpec ? [sourceSpec] : [sourceSpec, targetSpec];
     const fetched = runners.runGit(
@@ -242,8 +291,9 @@ export function ensureTargetTipFetched(
 ): FetchDeepenResult {
   const spec = targetRefspec(targetShort);
   if (!spec) return { ok: false, reason: "Target branch is not safe to fetch." };
+  const depthArgs = isShallowRepository(runners) ? ["--depth=1"] : [];
   const fetched = runners.runGit(
-    ["fetch", "--no-tags", "--depth=1", "origin", spec],
+    ["fetch", "--no-tags", ...depthArgs, "origin", spec],
     env,
   );
   if (fetched.status !== 0) {

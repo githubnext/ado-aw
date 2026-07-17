@@ -607,15 +607,9 @@ impl PreparePrBaseMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PreparePrSourceRef {
-    AdoMacro(String),
-    Literal(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparePrBaseRepo {
     pub dir: String,
-    pub source_ref: Option<PreparePrSourceRef>,
+    pub source_ref: Option<String>,
     pub target_branch: String,
 }
 
@@ -630,10 +624,7 @@ pub fn prepare_pr_base_step_typed(
         .iter()
         .map(|repo| {
             let source_flag = match (&repo.source_ref, mode) {
-                (Some(PreparePrSourceRef::AdoMacro(source)), PreparePrBaseMode::PatchBase) => {
-                    format!(" --source-ref \"{source}\"")
-                }
-                (Some(PreparePrSourceRef::Literal(source)), PreparePrBaseMode::PatchBase) => {
+                (Some(source), PreparePrBaseMode::PatchBase) => {
                     format!(" --source-ref {}", sh_single_quote(source))
                 }
                 _ => String::new(),
@@ -1505,9 +1496,7 @@ mod tests {
     fn prepare_pr_base_step_emits_bundle_invocation_with_target_and_bearer() {
         let repos = vec![PreparePrBaseRepo {
             dir: "$(Build.SourcesDirectory)".to_string(),
-            source_ref: Some(PreparePrSourceRef::AdoMacro(
-                "$(Build.SourceBranch)".to_string(),
-            )),
+            source_ref: None,
             target_branch: "main".to_string(),
         }];
         let Step::Bash(step) =
@@ -1527,7 +1516,7 @@ mod tests {
         assert!(
             step.script.contains(
                 "--mode patch-base --repo-dir \"$(Build.SourcesDirectory)\" \
-                 --source-ref \"$(Build.SourceBranch)\" --target-branch 'main'"
+                 --target-branch 'main'"
             ),
             "must emit typed mode/source/target flags:\n{}",
             step.script
@@ -1544,9 +1533,7 @@ mod tests {
     fn prepare_pr_base_step_quotes_a_non_default_target() {
         let repos = vec![PreparePrBaseRepo {
             dir: "$(Build.SourcesDirectory)".to_string(),
-            source_ref: Some(PreparePrSourceRef::Literal(
-                "refs/heads/feature".to_string(),
-            )),
+            source_ref: Some("refs/heads/feature".to_string()),
             target_branch: "release/2.x".to_string(),
         }];
         let Step::Bash(step) =
@@ -1569,23 +1556,17 @@ mod tests {
         let repos = vec![
             PreparePrBaseRepo {
                 dir: "$(Build.SourcesDirectory)".to_string(),
-                source_ref: Some(PreparePrSourceRef::AdoMacro(
-                    "$(Build.SourceBranch)".to_string(),
-                )),
+                source_ref: None,
                 target_branch: "main".to_string(),
             },
             PreparePrBaseRepo {
                 dir: "$(Build.SourcesDirectory)/tools".to_string(),
-                source_ref: Some(PreparePrSourceRef::Literal(
-                    "refs/heads/release".to_string(),
-                )),
+                source_ref: Some("refs/heads/release".to_string()),
                 target_branch: "release".to_string(),
             },
             PreparePrBaseRepo {
                 dir: "$(Build.SourcesDirectory)/docs".to_string(),
-                source_ref: Some(PreparePrSourceRef::Literal(
-                    "refs/heads/main".to_string(),
-                )),
+                source_ref: Some("refs/heads/main".to_string()),
                 target_branch: "gh-pages".to_string(),
             },
         ];
@@ -1602,7 +1583,7 @@ mod tests {
         );
         assert!(
             step.script.contains(
-                "--repo-dir \"$(Build.SourcesDirectory)\" --source-ref \"$(Build.SourceBranch)\" --target-branch 'main'"
+                "--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"
             )
         );
         assert!(
@@ -1621,9 +1602,7 @@ mod tests {
     fn prepare_pr_base_target_worktree_omits_source_ref() {
         let repos = vec![PreparePrBaseRepo {
             dir: "$(Build.SourcesDirectory)".to_string(),
-            source_ref: Some(PreparePrSourceRef::AdoMacro(
-                "$(Build.SourceBranch)".to_string(),
-            )),
+            source_ref: None,
             target_branch: "main".to_string(),
         }];
         let Step::Bash(step) =

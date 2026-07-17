@@ -44,12 +44,20 @@ export function parseAdoRepoUrl(raw: string): AdoRepoIdentity | null {
     repoPart = parts[3] ?? "";
     collectionUri = `https://dev.azure.com/${orgPart}/`;
   } else if (host.endsWith(".visualstudio.com")) {
-    if (parts.length !== 3 || parts[1]?.toLowerCase() !== "_git") return null;
+    const hasDefaultCollection =
+      parts.length === 4 &&
+      parts[0]?.toLowerCase() === "defaultcollection" &&
+      parts[2]?.toLowerCase() === "_git";
+    const directProject =
+      parts.length === 3 && parts[1]?.toLowerCase() === "_git";
+    if (!hasDefaultCollection && !directProject) return null;
     organization = host.slice(0, -".visualstudio.com".length);
     if (organization.length === 0) return null;
-    projectPart = parts[0] ?? "";
-    repoPart = parts[2] ?? "";
-    collectionUri = `https://${organization}.visualstudio.com/`;
+    projectPart = parts[hasDefaultCollection ? 1 : 0] ?? "";
+    repoPart = parts[hasDefaultCollection ? 3 : 2] ?? "";
+    collectionUri = hasDefaultCollection
+      ? `https://${organization}.visualstudio.com/DefaultCollection/`
+      : `https://${organization}.visualstudio.com/`;
   } else {
     return null;
   }

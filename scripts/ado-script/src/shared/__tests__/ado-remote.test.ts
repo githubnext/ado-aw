@@ -31,6 +31,19 @@ describe("parseAdoRepoUrl", () => {
     });
   });
 
+  it("parses legacy DefaultCollection visualstudio.com remotes", () => {
+    expect(
+      parseAdoRepoUrl(
+        "https://myorg.visualstudio.com/DefaultCollection/Project/_git/repo",
+      ),
+    ).toEqual({
+      collectionUri: "https://myorg.visualstudio.com/DefaultCollection/",
+      organization: "myorg",
+      project: "Project",
+      repository: "repo",
+    });
+  });
+
   it("rejects non-ADO and malformed remotes", () => {
     expect(parseAdoRepoUrl("https://github.com/org/repo.git")).toBeNull();
     expect(parseAdoRepoUrl("not a url")).toBeNull();

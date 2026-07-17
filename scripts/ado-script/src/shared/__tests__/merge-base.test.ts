@@ -490,4 +490,78 @@ describe("targeted shallow history helpers", () => {
       ],
     ]);
   });
+
+  it("preserves a full checkout by omitting depth-limited fetch arguments", () => {
+    const calls: string[][] = [];
+    const runners: GitRunners = {
+      runGit: (args) => {
+        calls.push(args);
+        return { stdout: "", stderr: "", status: 0 };
+      },
+      gitOk: (args) => {
+        if (args.join(" ") === "rev-parse --is-shallow-repository") return "false";
+        if (args.join(" ") === "merge-base --all origin/main HEAD") return SHA_M;
+        if (args.join(" ") === "rev-parse origin/main") return SHA_B;
+        return null;
+      },
+    };
+    expect(
+      ensureExactMergeBaseFetched(
+        "main",
+        {
+          commonCommit: SHA_M,
+          aheadCount: 7,
+          behindCount: 5,
+          sourceCommit: SHA_A,
+          targetCommit: SHA_B,
+        },
+        {},
+        runners,
+      ),
+    ).toEqual({ ok: true, baseSha: SHA_M });
+    expect(calls).toEqual([
+      [
+        "fetch",
+        "--no-tags",
+        "origin",
+        `+${SHA_B}:refs/remotes/origin/main`,
+      ],
+    ]);
+
+    calls.length = 0;
+    expect(ensureTargetTipFetched("main", {}, runners).ok).toBe(true);
+    expect(calls[0]).toEqual([
+      "fetch",
+      "--no-tags",
+      "origin",
+      "+refs/heads/main:refs/remotes/origin/main",
+    ]);
+  });
+
+  it("accepts valid Git ref punctuation and Unicode without shell parsing", () => {
+    const calls: string[][] = [];
+    const runners: GitRunners = {
+      runGit: (args) => {
+        calls.push(args);
+        return { stdout: "", stderr: "", status: 0 };
+      },
+      gitOk: (args) =>
+        args.join(" ") === "merge-base --all origin/release+次 HEAD"
+          ? SHA_M
+          : null,
+    };
+    const result = ensureRefsForMergeBaseFetched(
+      "refs/heads/team's+候補@x",
+      "release+次",
+      {},
+      runners,
+    );
+    expect(result.ok).toBe(true);
+    expect(calls[0]).toContain(
+      "+refs/heads/team's+候補@x:refs/remotes/origin/ado-aw-prepare-source",
+    );
+    expect(calls[0]).toContain(
+      "+refs/heads/release+次:refs/remotes/origin/release+次",
+    );
+  });
 });

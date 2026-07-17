@@ -163,10 +163,12 @@ async function preparePatchBase(
 
   const remote = runners.gitOk(["remote", "get-url", "origin"]) ?? "";
   const identity = parseAdoRepoUrl(remote);
+  const sameOrgAdo = identity !== null && isCurrentAdoOrganization(identity, env);
+  const repoFetchEnv = sameOrgAdo ? fetchEnv : {};
   const restDisabled = env.ADO_AW_PREPARE_PR_BASE_DISABLE_REST === "1";
   if (restDisabled) {
     restReason = "ADO REST disabled for deterministic fallback testing";
-  } else if (identity && isCurrentAdoOrganization(identity, env)) {
+  } else if (identity && sameOrgAdo) {
     try {
       const metadata = await deps.getCommitDiffMetadata(
         identity.project,
@@ -174,7 +176,12 @@ async function preparePatchBase(
         repo.target,
         headSha,
       );
-      const exact = ensureExactMergeBaseFetched(repo.target, metadata, fetchEnv, runners);
+      const exact = ensureExactMergeBaseFetched(
+        repo.target,
+        metadata,
+        repoFetchEnv,
+        runners,
+      );
       if (exact.ok) {
         pointOriginHead(repo.dir, repo.target, runners);
         process.stdout.write(
@@ -193,7 +200,7 @@ async function preparePatchBase(
   const bounded = ensureRefsForMergeBaseFetched(
     sourceRef,
     repo.target,
-    fetchEnv,
+    repoFetchEnv,
     runners,
   );
   if (!bounded.ok) {
@@ -210,10 +217,15 @@ async function preparePatchBase(
 
 function prepareTargetWorktree(
   repo: RepoTarget,
+  env: NodeJS.ProcessEnv,
   fetchEnv: Record<string, string>,
   deps: PrepareDependencies,
 ): boolean {
-  const fetched = ensureTargetTipFetched(repo.target, fetchEnv, deps.runners);
+  const remote = deps.runners.gitOk(["remote", "get-url", "origin"]) ?? "";
+  const identity = parseAdoRepoUrl(remote);
+  const repoFetchEnv =
+    identity && isCurrentAdoOrganization(identity, env) ? fetchEnv : {};
+  const fetched = ensureTargetTipFetched(repo.target, repoFetchEnv, deps.runners);
   if (!fetched.ok) {
     warnRepo(repo.dir, repo.target, fetched.reason);
     return false;
@@ -251,7 +263,7 @@ export async function main(
       continue;
     }
     if (args.mode === "target-worktree") {
-      prepareTargetWorktree(repo, fetchEnv, deps);
+      prepareTargetWorktree(repo, env, fetchEnv, deps);
     } else {
       await preparePatchBase(repo, env, fetchEnv, deps);
     }

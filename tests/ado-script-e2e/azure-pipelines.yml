@@ -84,18 +84,45 @@ jobs:
 
   - job: ExplicitFullHistory
     displayName: Verify fetchDepth zero contract
+    dependsOn: BuildCandidate
     steps:
       - checkout: restFixture
         fetchDepth: 0
         fetchTags: false
         path: s/fixture-full
 
+      - download: current
+        artifact: candidate-bundle
+
+      - task: UseNode@1
+        inputs:
+          version: "20.x"
+        displayName: Use Node.js 20
+
       - script: |
           set -euo pipefail
-          cd "$(Pipeline.Workspace)/s/fixture-full"
+          REPO="$(Pipeline.Workspace)/s/fixture-full"
+          BUNDLE="$(Pipeline.Workspace)/candidate-bundle/prepare-pr-base.js"
+          cd "$REPO"
           test "$(git rev-parse --is-shallow-repository)" = "false"
           test "$(git rev-list --count HEAD)" = "2106"
-        displayName: Assert explicit full history
+
+          node "$BUNDLE" \
+            --mode patch-base \
+            --repo-dir "$REPO" \
+            --source-ref refs/heads/e2e/rest-source \
+            --target-branch e2e/rest-target
+          test "$(git rev-parse --is-shallow-repository)" = "false"
+          test "$(git merge-base HEAD origin/e2e/rest-target)" = "$(REST_BASE)"
+
+          node "$BUNDLE" \
+            --mode target-worktree \
+            --repo-dir "$REPO" \
+            --target-branch e2e/rest-target
+          test "$(git rev-parse --is-shallow-repository)" = "false"
+        displayName: Assert explicit full history remains complete
+        env:
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
 
   - job: RestGuidedShallow
     displayName: Resolve deep divergence via ADO metadata
