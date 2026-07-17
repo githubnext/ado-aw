@@ -236,7 +236,11 @@ fn test_auth_accepts_correct_token() {
         }),
         None,
     );
-    assert_ne!(resp.status(), 401, "Correct API key should not be rejected");
+    assert!(
+        resp.status().is_success(),
+        "Correct API key must be accepted with a 2xx response, got {}",
+        resp.status()
+    );
 }
 
 #[test]
