@@ -79,8 +79,8 @@ describe("resolveMergeBase", () => {
       }
       if (args[0] === "fetch") {
         expect(env).toEqual(bearer);
-        depthArgsSeen.push(args[2] ?? "");
-        refsSeen.push(...args.slice(4));
+        depthArgsSeen.push(args.find((arg) => arg.startsWith("--depth=")) ?? "");
+        refsSeen.push(...args.filter((arg) => arg.startsWith("+")));
         return { stdout: "", stderr: "", status: 0 };
       }
       return { stdout: "", stderr: "no handler", status: 1 };
@@ -338,7 +338,9 @@ describe("ensureTargetRefFetched", () => {
   it("resolves at the first depth and reports the merge base", () => {
     const depthArgsSeen: string[] = [];
     const runGit: GitRunners["runGit"] = (args) => {
-      if (args[0] === "fetch") depthArgsSeen.push(args[2] ?? "");
+      if (args[0] === "fetch") {
+        depthArgsSeen.push(args.find((arg) => arg.startsWith("--depth=")) ?? "");
+      }
       return { stdout: "", stderr: "", status: 0 };
     };
     const gitOk = makeGitOk([
@@ -355,7 +357,9 @@ describe("ensureTargetRefFetched", () => {
   it("keeps deepening until merge-base resolves, then stops", () => {
     const depthArgsSeen: string[] = [];
     const runGit: GitRunners["runGit"] = (args) => {
-      if (args[0] === "fetch") depthArgsSeen.push(args[2] ?? "");
+      if (args[0] === "fetch") {
+        depthArgsSeen.push(args.find((arg) => arg.startsWith("--depth=")) ?? "");
+      }
       return { stdout: "", stderr: "", status: 0 };
     };
     let calls = 0;
@@ -484,6 +488,7 @@ describe("targeted shallow history helpers", () => {
       [
         "fetch",
         "--no-tags",
+        "--no-recurse-submodules",
         "--depth=1",
         "origin",
         "+refs/heads/main:refs/remotes/origin/main",
@@ -523,6 +528,7 @@ describe("targeted shallow history helpers", () => {
       [
         "fetch",
         "--no-tags",
+        "--no-recurse-submodules",
         "origin",
         `+${SHA_B}:refs/remotes/origin/main`,
       ],
@@ -533,6 +539,7 @@ describe("targeted shallow history helpers", () => {
     expect(calls[0]).toEqual([
       "fetch",
       "--no-tags",
+      "--no-recurse-submodules",
       "origin",
       "+refs/heads/main:refs/remotes/origin/main",
     ]);
@@ -563,5 +570,24 @@ describe("targeted shallow history helpers", () => {
     expect(calls[0]).toContain(
       "+refs/heads/release+次:refs/remotes/origin/release+次",
     );
+  });
+
+  it("never shortens an existing shallow history depth", () => {
+    const calls: string[][] = [];
+    const runners: GitRunners = {
+      runGit: (args) => {
+        calls.push(args);
+        return { stdout: "", stderr: "", status: 0 };
+      },
+      gitOk: (args) => {
+        if (args.join(" ") === "rev-list --count HEAD") return "500";
+        if (args.join(" ") === "merge-base --all origin/main HEAD") return SHA_M;
+        if (args.join(" ") === "rev-parse origin/main") return SHA_B;
+        return null;
+      },
+    };
+    expect(ensureTargetTipFetched("main", {}, runners).ok).toBe(true);
+    expect(calls[0]).toContain("--depth=500");
+    expect(calls[0]).toContain("--no-recurse-submodules");
   });
 });

@@ -67,6 +67,7 @@ function fetchBranchAtDepth(
     [
       "fetch",
       "--no-tags",
+      "--no-recurse-submodules",
       `--depth=${depth}`,
       "origin",
       `+refs/heads/${branchShort}:refs/remotes/origin/${branchShort}`,
@@ -159,6 +160,12 @@ function isShallowRepository(runners: GitRunners): boolean {
   return runners.gitOk(["rev-parse", "--is-shallow-repository"]) !== "false";
 }
 
+function currentHistoryFloor(runners: GitRunners): number {
+  const raw = runners.gitOk(["rev-list", "--count", "HEAD"]) ?? "";
+  const count = Number(raw);
+  return Number.isSafeInteger(count) && count > 0 ? count : 1;
+}
+
 /**
  * Fetch exactly enough source and target history to make an Azure
  * server-computed common commit locally verifiable.
@@ -195,29 +202,46 @@ export function ensureExactMergeBaseFetched(
     return { ok: false, reason: "Could not construct safe exact-commit fetch refspecs." };
   }
   if (isShallowRepository(runners)) {
+    const historyFloor = currentHistoryFloor(runners);
+    const effectiveSourceDepth = Math.max(sourceDepth, historyFloor);
+    const effectiveTargetDepth = Math.max(targetDepth, historyFloor);
     const sourceFetch = runners.runGit(
-      ["fetch", "--no-tags", `--depth=${sourceDepth}`, "origin", sourceSpec],
+      [
+        "fetch",
+        "--no-tags",
+        "--no-recurse-submodules",
+        `--depth=${effectiveSourceDepth}`,
+        "origin",
+        sourceSpec,
+      ],
       env,
     );
     if (sourceFetch.status !== 0) {
       return {
         ok: false,
-        reason: `Exact source fetch failed at depth ${sourceDepth}: ${sourceFetch.stderr.trim()}`,
+        reason: `Exact source fetch failed at depth ${effectiveSourceDepth}: ${sourceFetch.stderr.trim()}`,
       };
     }
     const targetFetch = runners.runGit(
-      ["fetch", "--no-tags", `--depth=${targetDepth}`, "origin", targetSpec],
+      [
+        "fetch",
+        "--no-tags",
+        "--no-recurse-submodules",
+        `--depth=${effectiveTargetDepth}`,
+        "origin",
+        targetSpec,
+      ],
       env,
     );
     if (targetFetch.status !== 0) {
       return {
         ok: false,
-        reason: `Exact target fetch failed at depth ${targetDepth}: ${targetFetch.stderr.trim()}`,
+        reason: `Exact target fetch failed at depth ${effectiveTargetDepth}: ${targetFetch.stderr.trim()}`,
       };
     }
   } else {
     const targetFetch = runners.runGit(
-      ["fetch", "--no-tags", "origin", targetSpec],
+      ["fetch", "--no-tags", "--no-recurse-submodules", "origin", targetSpec],
       env,
     );
     if (targetFetch.status !== 0) {
@@ -255,7 +279,10 @@ export function ensureRefsForMergeBaseFetched(
     return { ok: false, reason: "Source or target ref is not safe to fetch." };
   }
   if (!isShallowRepository(runners)) {
-    const fetched = runners.runGit(["fetch", "--no-tags", "origin", targetSpec], env);
+    const fetched = runners.runGit(
+      ["fetch", "--no-tags", "--no-recurse-submodules", "origin", targetSpec],
+      env,
+    );
     if (fetched.status === 0) {
       const bases = localMergeBases(targetShort, runners);
       if (bases.length > 0) return { ok: true, baseSha: bases[0]! };
@@ -265,10 +292,19 @@ export function ensureRefsForMergeBaseFetched(
       reason: `Could not resolve merge-base after fetching full-checkout target 'origin/${targetShort}'.`,
     };
   }
-  for (const depth of BOUNDED_DEPTHS) {
+  const historyFloor = currentHistoryFloor(runners);
+  const depths = [...new Set(BOUNDED_DEPTHS.map((depth) => Math.max(depth, historyFloor)))];
+  for (const depth of depths) {
     const specs = sourceSpec === targetSpec ? [sourceSpec] : [sourceSpec, targetSpec];
     const fetched = runners.runGit(
-      ["fetch", "--no-tags", `--depth=${depth}`, "origin", ...specs],
+      [
+        "fetch",
+        "--no-tags",
+        "--no-recurse-submodules",
+        `--depth=${depth}`,
+        "origin",
+        ...specs,
+      ],
       env,
     );
     if (fetched.status !== 0) continue;
@@ -291,9 +327,11 @@ export function ensureTargetTipFetched(
 ): FetchDeepenResult {
   const spec = targetRefspec(targetShort);
   if (!spec) return { ok: false, reason: "Target branch is not safe to fetch." };
-  const depthArgs = isShallowRepository(runners) ? ["--depth=1"] : [];
+  const depthArgs = isShallowRepository(runners)
+    ? [`--depth=${currentHistoryFloor(runners)}`]
+    : [];
   const fetched = runners.runGit(
-    ["fetch", "--no-tags", ...depthArgs, "origin", spec],
+    ["fetch", "--no-tags", "--no-recurse-submodules", ...depthArgs, "origin", spec],
     env,
   );
   if (fetched.status !== 0) {
@@ -359,7 +397,15 @@ function ensureSyntheticMergeParentsFetched(
   }
   for (const depth of BOUNDED_DEPTHS) {
     const fetched = runners.runGit(
-      ["fetch", "--no-tags", `--depth=${depth}`, "origin", sourceSpec, targetSpec],
+      [
+        "fetch",
+        "--no-tags",
+        "--no-recurse-submodules",
+        `--depth=${Math.max(depth, currentHistoryFloor(runners))}`,
+        "origin",
+        sourceSpec,
+        targetSpec,
+      ],
       env,
     );
     if (fetched.status !== 0) continue;

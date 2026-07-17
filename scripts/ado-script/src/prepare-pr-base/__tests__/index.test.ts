@@ -154,6 +154,7 @@ describe("prepare-pr-base main", () => {
     const fetches = calls.filter((call) => call.args[0] === "fetch");
     expect(fetches).toHaveLength(2);
     expect(fetches[0]!.args).toContain("--depth=8");
+    expect(fetches[0]!.args).toContain("--no-recurse-submodules");
     expect(fetches[0]!.args).toContain(
       `+${HEAD}:refs/remotes/origin/ado-aw-prepare-source`,
     );
@@ -204,6 +205,7 @@ describe("prepare-pr-base main", () => {
     expect(fetches[0]!.args).toEqual([
       "fetch",
       "--no-tags",
+      "--no-recurse-submodules",
       "--depth=1",
       "origin",
       "+refs/heads/develop:refs/remotes/origin/develop",
