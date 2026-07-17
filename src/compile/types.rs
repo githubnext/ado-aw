@@ -1871,10 +1871,11 @@ impl CheckoutFetchOpts {
         self.fetch_depth.is_none() && self.fetch_tags.is_none()
     }
 
-    /// The `fetchDepth` value to emit: `Some(0)` (full history) collapses to
-    /// `None` so no `fetchDepth` key is written.
+    /// The `fetchDepth` value to emit. `Some(0)` must remain explicit because
+    /// Azure DevOps interprets omission as "use the pipeline setting", which
+    /// may still be a shallow checkout.
     pub fn depth_for_emit(&self) -> Option<u32> {
-        self.fetch_depth.filter(|d| *d != 0)
+        self.fetch_depth
     }
 }
 

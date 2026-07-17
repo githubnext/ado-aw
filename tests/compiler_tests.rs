@@ -7791,6 +7791,33 @@ repos:
     );
 }
 
+/// `fetch-depth: 0` is an explicit ADO override for full history. It must be
+/// emitted literally rather than collapsed to a bare checkout, because a bare
+/// checkout defers to the pipeline UI's shallow-fetch setting.
+#[test]
+fn test_repos_self_entry_emits_explicit_zero_fetch_depth() {
+    let source = r#"---
+name: "Self Full History"
+description: "explicitly disables shallow fetch"
+repos:
+  - name: self
+    fetch-depth: 0
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("self-full-history", source);
+    assert!(ok, "self full-history tuning should compile: {stderr}");
+
+    let self_checkouts = compiled.matches("- checkout: self").count();
+    assert!(self_checkouts >= 2, "expected multiple self checkouts:\n{compiled}");
+    assert_eq!(
+        compiled.matches("fetchDepth: 0").count(),
+        self_checkouts,
+        "each self checkout must explicitly override the ADO pipeline setting:\n{compiled}"
+    );
+}
+
 /// `fetch-depth` / `fetch-tags` on a named `repos:` entry tune that
 /// repository's checkout step (which lands in the Agent job).
 #[test]
@@ -7822,6 +7849,28 @@ repos:
     assert!(
         !agent.contains("- checkout: self\n  fetchDepth"),
         "checkout: self must stay untuned when only a named repo is tuned:\n{agent}"
+    );
+}
+
+#[test]
+fn test_repos_named_entry_emits_explicit_zero_fetch_depth() {
+    let source = r#"---
+name: "Named Full History"
+description: "explicitly disables shallow fetch for one named repo"
+repos:
+  - name: my-org/monorepo
+    fetch-depth: 0
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("named-full-history", source);
+    assert!(ok, "named full-history tuning should compile: {stderr}");
+
+    let agent = job_block(&compiled, "Agent");
+    assert!(
+        agent.contains("- checkout: monorepo") && agent.contains("fetchDepth: 0"),
+        "named checkout must explicitly emit fetchDepth: 0:\n{agent}"
     );
 }
 
