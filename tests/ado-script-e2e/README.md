@@ -16,8 +16,28 @@ Its normal test refs are immutable:
 Both pairs diverge from commit
 `52cfa195595a85eedc7ad405575bd92be93fb0e3`.
 
-Register `tests/ado-script-e2e/azure-pipelines.yml` as a GitHub-backed pipeline
-in the `AgentPlayground` project. The build identity needs Code Read on the
-fixture repository. The pipeline is path-filtered for relevant PR changes,
-manual queues, and (after the permanent suite is complete) a daily `main`
-schedule.
+The registered definition is `\ado-script-e2e\ado-script e2e` (ID `2544`) in
+the `AgentPlayground` project. It uses Microsoft-hosted Ubuntu because the test
+needs only Node and Git; it does not depend on the internal executor E2E pool.
+The build identity needs Code Read on the fixture repository and each resource
+checkout must be authorized for the definition.
+
+Coverage:
+
+- `ExplicitFullHistory` proves YAML `fetchDepth: 0` overrides the pipeline
+  setting and produces a non-shallow checkout.
+- `RestGuidedShallow` proves a 2105/2105 divergence resolves through ADO
+  `commonCommit` / ahead / behind metadata while the checkout remains shallow.
+- `BoundedFallbackShallow` disables REST and exercises the 200/500/2000
+  dual-ref fallback.
+- `TargetWorktreeShallow` proves the SafeOutputs mode fetches only the target
+  tip and does not make the merge-base locally reachable.
+
+The pre-fix baseline is build
+[`623611`](https://dev.azure.com/msazuresphere/AgentPlayground/_build/results?buildId=623611).
+It records Azure's depth-1 checkout and the target-only bundle warning before
+failing with an unresolved merge-base.
+
+The pipeline is path-filtered for relevant GitHub PR changes, manually
+queueable, and scheduled daily on `main`. Because excluded PRs receive no
+status, it is intentionally not configured as a global required GitHub check.
