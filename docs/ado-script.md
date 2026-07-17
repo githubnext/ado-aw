@@ -74,21 +74,16 @@ pipeline** as runtime helpers. Today it produces thirteen bundles:
   base — issue #1413) **and** the SafeOutputs job (before `ado-aw execute`, so
   the Stage 3 executor's `git worktree add` resolves `origin/<target>`; each ADO
   job has an isolated checkout, so the ref must be re-fetched in the job that
-  builds the worktree — issue #1453). For each allowed create-PR repo dir
-  (`self` + every `checkout:` alias, passed as repeated `--repo-dir <dir>
-  --target-branch <branch>` pairs in the same dir form
-  `mcp.rs::resolve_git_dir_for_patch` resolves), it fetches and progressively
-  deepens THAT repo's resolved target branch into `refs/remotes/origin/<target>`
-  and points `refs/remotes/origin/HEAD` at it, so a PR can be computed/opened on
-  shallow-default agent pools without a full-history `checkout: self`. In a
-  multi-checkout ("meta repo") setup each dir may carry a
-  different target (see `create-pull-request`'s `target-branches` /
-  `infer-target-from-checkout-ref`). Reuses
-  `shared/merge-base.ts::ensureTargetRefFetched` (the same fetch/deepen logic as
-  the PR execution-context precompute). Each `--repo-dir` is a double-quoted
-  ADO-macro path; each `--target-branch` is a single-quoted literal; the ADO
-  bearer (`SYSTEM_ACCESSTOKEN`) rides in masked env for the authenticated git
-  fetch. Per-dir failures are isolated (logged + skipped). Runs outside AWF. See
+  builds the worktree — issue #1453). Agent `patch-base` mode uses ADO
+  `getCommitDiffs` metadata (`commonCommit`, ahead, behind) to fetch the exact
+  shallow source/target ranges and verifies the base locally. Ineligible or
+  unavailable REST falls back to bounded dual-ref depths 200/500/2000, never an
+  automatic full-history fetch. SafeOutputs `target-worktree` mode fetches only
+  the target tip at depth 1. Each allowed repo is passed as a typed
+  `--repo-dir` / `--source-ref` / `--target-branch` tuple; per-dir failures are
+  isolated and surfaced as ADO warnings. The bearer
+  (`SYSTEM_ACCESSTOKEN`) remains in masked env and spawned-git
+  `GIT_CONFIG_*`, never argv or `.git/config`. Runs outside AWF. See
   [`safe-outputs.md`](safe-outputs.md#create-pull-request).
 
 > **Internal-only.** `ado-script` is not a user-facing front-matter
@@ -216,10 +211,10 @@ inside `src/compile/extensions/exec_context/pr.rs`:
    merge-commit (parent count ≥ 3 per ADO's PR-validation flow),
    `merge-base.ts::resolveMergeBase` computes `git merge-base` over
    the two parents. If that cannot resolve in a shallow checkout, it
-   fetches both target and source refs with progressive deepening
-   (`--depth=200/500/2000/--unshallow`) and retries the parent
-   merge-base. Otherwise it fetches the target branch with progressive
-   deepening and then runs `git merge-base` against `HEAD`. Same
+   fetches both target and source refs with bounded deepening
+   (`--depth=200/500/2000`) and retries the parent merge-base. Otherwise
+   it fetches both source and target at the same bounded depths and then
+   runs `git merge-base` against `HEAD`. Same
    `BASE_SHA` semantics in both paths (git's true common ancestor).
 3. **Stage artefacts** — writes `aw-context/pr/base.sha` and
    `aw-context/pr/head.sha` so the agent can `git diff $(cat

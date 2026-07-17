@@ -29,7 +29,7 @@ historically rebuilt the same ~120 lines of bash to work around this.
 The execution-context plugin owns that step centrally — but does
 *only* the part the agent cannot do for itself:
 
-- Fetches the PR target branch with progressive deepening until
+- Fetches the PR source and target refs with bounded deepening until
   `git merge-base` resolves (requires the bearer; cannot happen
   inside the agent's sandbox).
 - Writes the resolved `base.sha` and `head.sha` so the agent can
@@ -484,11 +484,11 @@ under `scripts/ado-script/src/exec-context-pr/`. The bundle:
    computes `git merge-base HEAD^1 HEAD^2` as the base — same
    semantics as the deepening path. If a shallow checkout lacks
    sufficient ancestry, it fetches both the target and source refs
-   with progressive deepening and retries; unresolved ancestry fails
+   with bounded deepening and retries; unresolved ancestry fails
    closed into `error.txt`.
    Otherwise:
-4. **Fetches the PR target branch with progressive deepening** —
-   `--depth=200`, then `500`, then `2000`, then finally `--unshallow`.
+4. **Fetches source and target with bounded deepening** —
+   `--depth=200`, then `500`, then `2000`.
    After each successful fetch, attempts `git merge-base
    origin/<target> HEAD` and continues to the next depth if it
    cannot resolve yet. See `merge-base.ts`.
@@ -540,7 +540,7 @@ preserves the Stage 1 read-only invariant with these design choices:
 | Mechanism                                                 | Decision |
 |-----------------------------------------------------------|----------|
 | Override `checkout: self` with `persistCredentials: true` | **Rejected.** It would write the build identity's bearer into `.git/config` inside the workspace, which is then mounted into the AWF sandbox where the agent could read and exfiltrate it. |
-| Override `checkout: self` with `fetchDepth: 0`            | **Rejected.** Unnecessary — the precompute fetches exactly the refs it needs. |
+| Override `checkout: self` with `fetchDepth: 0`            | **Not automatic.** Authors may opt into explicit full history, but it can be very expensive; the precompute normally uses bounded source/target fetches. |
 | In-step `SYSTEM_ACCESSTOKEN` + `GIT_CONFIG_*` bearer env  | **Adopted.** `SYSTEM_ACCESSTOKEN` is mapped from `$(System.AccessToken)` only into the `node exec-context-pr.js` step's process env. The bundle's `git.ts::bearerEnv` then injects `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_0` / `GIT_CONFIG_VALUE_0` into the *spawned `git` child process's* env only — not into the Node process's own env, and never via `git -c` on argv. The token never appears in process listings and is never written to disk. After the Node process exits, the bearer is gone from the runtime environment the agent inherits. |
 
 After the precompute step exits, the bearer is gone from the runtime
