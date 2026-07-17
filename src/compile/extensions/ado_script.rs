@@ -1420,7 +1420,11 @@ mod tests {
             api_url: None,
             skip_token_revocation: false,
         };
-        assert!(github_app_token_step_typed(&cfg).is_err());
+        let err = github_app_token_step_typed(&cfg).unwrap_err();
+        assert!(
+            err.to_string().contains("app-id"),
+            "expected app-id validation error, got: {err}"
+        );
     }
 
     #[test]
@@ -1473,12 +1477,20 @@ mod tests {
             api_url: Some("http://insecure.example.com/api/v3".to_string()),
             skip_token_revocation: false,
         };
-        assert!(github_app_token_revoke_step_typed(&cfg).is_err());
+        let err = github_app_token_revoke_step_typed(&cfg).unwrap_err();
+        assert!(
+            err.to_string().contains("api-url") && err.to_string().contains("https://"),
+            "expected https-only api-url rejection, got: {err}"
+        );
     }
 
     #[test]
     fn github_app_token_eval_path_consistent_with_download_dir() {
         assert!(GITHUB_APP_TOKEN_PATH.starts_with("/tmp/ado-aw-scripts/ado-script/"));
+        assert!(
+            GITHUB_APP_TOKEN_PATH.ends_with("github-app-token.js"),
+            "GITHUB_APP_TOKEN_PATH must end with github-app-token.js; got: {GITHUB_APP_TOKEN_PATH}"
+        );
     }
 
     #[test]
