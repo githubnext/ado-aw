@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import type { GitResult } from "../git.js";
-import { ensureTargetRefFetched, resolveMergeBase, type GitRunners } from "../merge-base.js";
+import {
+  ensureExactMergeBaseFetched,
+  ensureRefsForMergeBaseFetched,
+  ensureTargetRefFetched,
+  ensureTargetTipFetched,
+  resolveMergeBase,
+  type GitRunners,
+} from "../merge-base.js";
 
 // Real-shape SHAs (40-char lowercase hex) so the production
 // SHA40 guard in resolveMergeBase accepts them. We keep the
@@ -73,7 +80,7 @@ describe("resolveMergeBase", () => {
       if (args[0] === "fetch") {
         expect(env).toEqual(bearer);
         depthArgsSeen.push(args[2] ?? "");
-        refsSeen.push(args[4] ?? "");
+        refsSeen.push(...args.slice(4));
         return { stdout: "", stderr: "", status: 0 };
       }
       return { stdout: "", stderr: "no handler", status: 1 };
@@ -96,10 +103,10 @@ describe("resolveMergeBase", () => {
       expect(result.baseSha).toBe(SHA_M);
       expect(result.headSha).toBe(SHA_B);
     }
-    expect(depthArgsSeen).toEqual(["--depth=200", "--depth=200"]);
+    expect(depthArgsSeen).toEqual(["--depth=200"]);
     expect(refsSeen).toEqual([
+      "+refs/heads/feature/x:refs/remotes/origin/ado-aw-prepare-source",
       "+refs/heads/main:refs/remotes/origin/main",
-      "+refs/heads/feature/x:refs/remotes/origin/feature/x",
     ]);
   });
 
@@ -127,7 +134,7 @@ describe("resolveMergeBase", () => {
     if (!result.ok) {
       expect(result.reason).toContain("Could not resolve base/head SHAs");
     }
-    expect(fetchCount).toBe(8);
+    expect(fetchCount).toBe(3);
   });
 
   it("uses progressive deepening when HEAD has only 1 parent and stops on first resolution", () => {
@@ -150,7 +157,7 @@ describe("resolveMergeBase", () => {
     };
     const gitOk = makeGitOk([
       { match: (a) => a.join(" ") === "rev-parse HEAD", out: SHA_C },
-      { match: (a) => a.join(" ") === "merge-base origin/main HEAD", out: SHA_M },
+      { match: (a) => a.join(" ") === "merge-base --all origin/main HEAD", out: SHA_M },
     ]);
 
     const result = resolveMergeBase("main", {}, { runGit: runGitTracking, gitOk });
@@ -176,7 +183,7 @@ describe("resolveMergeBase", () => {
     ]);
     const gitOk: GitRunners["gitOk"] = (args) => {
       if (args.join(" ") === "rev-parse HEAD") return SHA_C;
-      if (args.join(" ") === "merge-base origin/main HEAD") {
+      if (args.join(" ") === "merge-base --all origin/main HEAD") {
         mergeBaseCalls++;
         // First two attempts fail; third succeeds
         return mergeBaseCalls < 3 ? null : SHA_M;
@@ -217,7 +224,7 @@ describe("resolveMergeBase", () => {
     }
   });
 
-  it("skips depths where fetch fails (e.g. --unshallow on already-unshallow repo)", () => {
+  it("skips bounded depths where fetch fails", () => {
     let fetchAttempts = 0;
     let mergeBaseAttempts = 0;
     const runGit: GitRunners["runGit"] = (args) => {
@@ -233,7 +240,7 @@ describe("resolveMergeBase", () => {
     };
     const gitOk: GitRunners["gitOk"] = (args) => {
       if (args.join(" ") === "rev-parse HEAD") return SHA_C;
-      if (args.join(" ") === "merge-base origin/main HEAD") {
+      if (args.join(" ") === "merge-base --all origin/main HEAD") {
         mergeBaseAttempts++;
         return SHA_M;
       }
@@ -260,7 +267,7 @@ describe("resolveMergeBase", () => {
     };
     const gitOk = makeGitOk([
       { match: (a) => a.join(" ") === "rev-parse HEAD", out: SHA_C },
-      { match: (a) => a.join(" ") === "merge-base origin/main HEAD", out: SHA_M },
+      { match: (a) => a.join(" ") === "merge-base --all origin/main HEAD", out: SHA_M },
     ]);
 
     const bearer = {
@@ -335,7 +342,7 @@ describe("ensureTargetRefFetched", () => {
       return { stdout: "", stderr: "", status: 0 };
     };
     const gitOk = makeGitOk([
-      { match: (a) => a.join(" ") === "merge-base origin/main HEAD", out: SHA_M },
+      { match: (a) => a.join(" ") === "merge-base --all origin/main HEAD", out: SHA_M },
     ]);
 
     const result = ensureTargetRefFetched("main", {}, { runGit, gitOk });
@@ -353,7 +360,7 @@ describe("ensureTargetRefFetched", () => {
     };
     let calls = 0;
     const gitOk: GitRunners["gitOk"] = (a) => {
-      if (a.join(" ") === "merge-base origin/main HEAD") {
+      if (a.join(" ") === "merge-base --all origin/main HEAD") {
         calls++;
         // Resolves only on the 3rd depth (--depth=2000).
         return calls >= 3 ? SHA_M : null;
@@ -373,5 +380,114 @@ describe("ensureTargetRefFetched", () => {
     const result = ensureTargetRefFetched("main", {}, { runGit, gitOk });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toContain("origin/main");
+  });
+});
+
+describe("targeted shallow history helpers", () => {
+  it("fetches exact source/target SHAs at count-derived depths and verifies the base", () => {
+    const calls: string[][] = [];
+    const runners: GitRunners = {
+      runGit: (args) => {
+        calls.push(args);
+        return { stdout: "", stderr: "", status: 0 };
+      },
+      gitOk: (args) =>
+        args.join(" ") === "merge-base --all origin/main HEAD" ? SHA_M : null,
+    };
+    const result = ensureExactMergeBaseFetched(
+      "main",
+      {
+        commonCommit: SHA_M,
+        aheadCount: 7,
+        behindCount: 5,
+        sourceCommit: SHA_A,
+        targetCommit: SHA_B,
+      },
+      {},
+      runners,
+    );
+    expect(result).toEqual({ ok: true, baseSha: SHA_M });
+    expect(calls[0]).toContain("--depth=8");
+    expect(calls[0]).toContain(
+      `+${SHA_A}:refs/remotes/origin/ado-aw-prepare-source`,
+    );
+    expect(calls[1]).toContain("--depth=6");
+    expect(calls[1]).toContain(`+${SHA_B}:refs/remotes/origin/main`);
+  });
+
+  it("rejects an API-directed fetch beyond the automatic safety limit", () => {
+    let fetches = 0;
+    const runners: GitRunners = {
+      runGit: () => {
+        fetches++;
+        return { stdout: "", stderr: "", status: 0 };
+      },
+      gitOk: () => null,
+    };
+    const result = ensureExactMergeBaseFetched(
+      "main",
+      {
+        commonCommit: SHA_M,
+        aheadCount: 10_000,
+        behindCount: 0,
+        sourceCommit: SHA_A,
+        targetCommit: SHA_B,
+      },
+      {},
+      runners,
+    );
+    expect(result.ok).toBe(false);
+    expect(fetches).toBe(0);
+  });
+
+  it("fetches both refs in one bounded command and never unshallows", () => {
+    const calls: string[][] = [];
+    const runners: GitRunners = {
+      runGit: (args) => {
+        calls.push(args);
+        return { stdout: "", stderr: "", status: 0 };
+      },
+      gitOk: (args) =>
+        args.join(" ") === "merge-base --all origin/main HEAD" ? SHA_M : null,
+    };
+    const result = ensureRefsForMergeBaseFetched(
+      "refs/heads/feature",
+      "main",
+      {},
+      runners,
+    );
+    expect(result.ok).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("--depth=200");
+    expect(calls[0]).toContain(
+      "+refs/heads/feature:refs/remotes/origin/ado-aw-prepare-source",
+    );
+    expect(calls[0]).toContain("+refs/heads/main:refs/remotes/origin/main");
+    expect(calls.flat()).not.toContain("--unshallow");
+  });
+
+  it("fetches only the target tip for SafeOutputs", () => {
+    const calls: string[][] = [];
+    const runners: GitRunners = {
+      runGit: (args) => {
+        calls.push(args);
+        return { stdout: "", stderr: "", status: 0 };
+      },
+      gitOk: (args) =>
+        args.join(" ") === "rev-parse origin/main" ? SHA_B : null,
+    };
+    expect(ensureTargetTipFetched("main", {}, runners)).toEqual({
+      ok: true,
+      baseSha: SHA_B,
+    });
+    expect(calls).toEqual([
+      [
+        "fetch",
+        "--no-tags",
+        "--depth=1",
+        "origin",
+        "+refs/heads/main:refs/remotes/origin/main",
+      ],
+    ]);
   });
 });

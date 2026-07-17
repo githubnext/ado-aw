@@ -1830,9 +1830,9 @@ pub struct RepoEntry {
     #[serde(default = "default_checkout")]
     pub checkout: bool,
     /// Shallow-clone depth for this repository's checkout step. Maps to ADO
-    /// `fetchDepth`. `0` means full history (no `fetchDepth` emitted). When
-    /// omitted, the ADO default applies. Also settable on a reserved `self`
-    /// entry to tune the auto-generated `checkout: self`.
+    /// `fetchDepth`. `0` explicitly disables shallow fetch. When omitted, the
+    /// ADO pipeline setting applies. Also settable on a reserved `self` entry
+    /// to tune the auto-generated `checkout: self`.
     #[serde(default, rename = "fetch-depth")]
     pub fetch_depth: Option<u32>,
     /// Whether to fetch git tags during this repository's checkout step. Maps

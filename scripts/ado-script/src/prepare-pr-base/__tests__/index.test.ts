@@ -1,224 +1,255 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { CommitDiffMetadata } from "../../shared/ado-client.js";
 import type { GitResult } from "../../shared/git.js";
 import type { GitRunners } from "../../shared/merge-base.js";
-import { main, parseArgs } from "../index.js";
+import {
+  main,
+  parseArgs,
+  type PrepareArgs,
+  type PrepareDependencies,
+} from "../index.js";
 
-const SHA_M = "d".repeat(40);
+const HEAD = "a".repeat(40);
+const TARGET = "b".repeat(40);
+const BASE = "c".repeat(40);
 
-/**
- * Build a `GitRunners` pair that records every `runGit` invocation and lets a
- * matcher decide the result. `gitOk` answers `merge-base` queries.
- */
-function makeRunners(opts: {
-  fetchStatus: number;
-  symbolicStatus?: number;
+function metadata(overrides: Partial<CommitDiffMetadata> = {}): CommitDiffMetadata {
+  return {
+    commonCommit: BASE,
+    aheadCount: 7,
+    behindCount: 5,
+    sourceCommit: HEAD,
+    targetCommit: TARGET,
+    ...overrides,
+  };
+}
+
+function dependencies(opts: {
+  remote?: string;
+  fetchStatus?: number;
   mergeBase?: string | null;
-}): { runners: GitRunners; calls: string[][] } {
-  const calls: string[][] = [];
-  const runGit: GitRunners["runGit"] = (args) => {
-    calls.push(args);
-    let result: GitResult = { stdout: "", stderr: "", status: 1 };
-    if (args[0] === "fetch") {
-      result = { stdout: "", stderr: "", status: opts.fetchStatus };
-    } else if (args[0] === "symbolic-ref") {
-      result = { stdout: "", stderr: "", status: opts.symbolicStatus ?? 0 };
-    }
-    return result;
+  targetSha?: string | null;
+  metadata?: CommitDiffMetadata;
+  metadataError?: unknown;
+  chdir?: (dir: string) => void;
+} = {}): {
+  deps: PrepareDependencies;
+  calls: Array<{ args: string[]; env?: Record<string, string> }>;
+  dirs: string[];
+} {
+  const calls: Array<{ args: string[]; env?: Record<string, string> }> = [];
+  const dirs: string[] = [];
+  const runners: GitRunners = {
+    runGit: (args, env) => {
+      calls.push({ args, env });
+      let result: GitResult = { stdout: "", stderr: "", status: 1 };
+      if (args[0] === "fetch") {
+        result = {
+          stdout: "",
+          stderr: opts.fetchStatus === 0 || opts.fetchStatus === undefined ? "" : "fetch failed",
+          status: opts.fetchStatus ?? 0,
+        };
+      } else if (args[0] === "symbolic-ref") {
+        result = { stdout: "", stderr: "", status: 0 };
+      }
+      return result;
+    },
+    gitOk: (args) => {
+      const command = args.join(" ");
+      if (command === "rev-parse HEAD") return HEAD;
+      if (command === "remote get-url origin") {
+        return opts.remote ?? "https://dev.azure.com/org/project/_git/repo";
+      }
+      if (command.startsWith("merge-base --all ")) {
+        return opts.mergeBase === undefined ? BASE : opts.mergeBase;
+      }
+      if (command.startsWith("rev-parse origin/")) {
+        return opts.targetSha === undefined ? TARGET : opts.targetSha;
+      }
+      return null;
+    },
   };
-  const gitOk: GitRunners["gitOk"] = (args) => {
-    if (args[0] === "merge-base") {
-      return opts.mergeBase === undefined ? SHA_M : opts.mergeBase;
-    }
-    return null;
+  const getCommitDiffMetadata = vi.fn(async () => {
+    if (opts.metadataError !== undefined) throw opts.metadataError;
+    return opts.metadata ?? metadata();
+  });
+  const chdir = opts.chdir ?? ((dir: string) => void dirs.push(dir));
+  return {
+    deps: { runners, chdir, getCommitDiffMetadata },
+    calls,
+    dirs,
   };
-  return { runners: { runGit, gitOk }, calls };
 }
 
-/** A `chdir` stub that records the dirs it was asked to enter. */
-function recordingChdir(): { chdir: (dir: string) => void; dirs: string[] } {
-  const dirs: string[] = [];
-  return { chdir: (dir: string) => void dirs.push(dir), dirs };
+function patchArgs(): PrepareArgs {
+  return {
+    mode: "patch-base",
+    repos: [
+      {
+        dir: "/src",
+        sourceRef: "refs/heads/feature",
+        target: "main",
+      },
+    ],
+    fallbackTarget: "main",
+  };
 }
+
+afterEach(() => vi.restoreAllMocks());
 
 describe("parseArgs", () => {
-  it("pairs each --repo-dir with the following --target-branch", () => {
-    const args = parseArgs([
-      "--repo-dir",
-      "/src",
-      "--target-branch",
-      "main",
-      "--repo-dir",
-      "/src/tools",
-      "--target-branch",
-      "release",
-    ]);
-    expect(args.repos).toEqual([
-      { dir: "/src", target: "main" },
-      { dir: "/src/tools", target: "release" },
-    ]);
+  it("parses mode and per-repository source/target triples", () => {
+    expect(
+      parseArgs([
+        "--mode",
+        "patch-base",
+        "--repo-dir",
+        "/src",
+        "--source-ref",
+        "refs/heads/feature",
+        "--target-branch",
+        "refs/heads/main",
+      ]),
+    ).toEqual(patchArgs());
   });
 
-  it("strips a leading refs/heads/ from targets", () => {
-    const args = parseArgs([
-      "--repo-dir",
-      "/src",
-      "--target-branch",
-      "refs/heads/release/2.x",
-    ]);
-    expect(args.repos).toEqual([{ dir: "/src", target: "release/2.x" }]);
+  it("allows target-worktree entries without a source ref", () => {
+    expect(
+      parseArgs([
+        "--mode",
+        "target-worktree",
+        "--repo-dir",
+        "/src",
+        "--target-branch",
+        "develop",
+      ]),
+    ).toEqual({
+      mode: "target-worktree",
+      repos: [{ dir: "/src", target: "develop", sourceRef: undefined }],
+      fallbackTarget: "main",
+      fallbackSourceRef: undefined,
+    });
   });
 
-  it("uses the fallback target for a --repo-dir with no following --target-branch", () => {
-    // A leading global --target-branch sets the fallback; a bare trailing
-    // --repo-dir inherits it.
-    const args = parseArgs(["--target-branch", "develop", "--repo-dir", "/src"]);
-    expect(args.fallbackTarget).toBe("develop");
-    expect(args.repos).toEqual([{ dir: "/src", target: "develop" }]);
-  });
-
-  it("defaults the fallback target to main", () => {
-    expect(parseArgs([]).fallbackTarget).toBe("main");
-    expect(parseArgs([]).repos).toEqual([]);
+  it("rejects unknown modes", () => {
+    expect(() => parseArgs(["--mode", "everything"])).toThrow(/Unsupported/);
   });
 });
 
 describe("prepare-pr-base main", () => {
-  it("fetches origin/<target> and sets origin/HEAD on success", () => {
-    const { runners, calls } = makeRunners({ fetchStatus: 0, mergeBase: SHA_M });
-    const { chdir, dirs } = recordingChdir();
-    const rc = main(
-      { repos: [{ dir: "/src", target: "main" }], fallbackTarget: "main" },
-      {},
-      runners,
-      chdir,
+  it("uses ADO metadata to fetch exact shallow source and target ranges", async () => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const { deps, calls, dirs } = dependencies();
+    const rc = await main(
+      patchArgs(),
+      {
+        SYSTEM_COLLECTIONURI: "https://dev.azure.com/org/",
+        SYSTEM_ACCESSTOKEN: "token",
+      },
+      deps,
     );
     expect(rc).toBe(0);
     expect(dirs).toEqual(["/src"]);
-
-    const fetch = calls.find((c) => c[0] === "fetch");
-    expect(fetch).toBeDefined();
-    expect(fetch).toContain("+refs/heads/main:refs/remotes/origin/main");
-
-    const sym = calls.find((c) => c[0] === "symbolic-ref");
-    expect(sym).toEqual([
-      "symbolic-ref",
-      "refs/remotes/origin/HEAD",
-      "refs/remotes/origin/main",
-    ]);
+    const fetches = calls.filter((call) => call.args[0] === "fetch");
+    expect(fetches).toHaveLength(2);
+    expect(fetches[0]!.args).toContain("--depth=8");
+    expect(fetches[0]!.args).toContain(
+      `+${HEAD}:refs/remotes/origin/ado-aw-prepare-source`,
+    );
+    expect(fetches[1]!.args).toContain("--depth=6");
+    expect(fetches[1]!.args).toContain(
+      `+${TARGET}:refs/remotes/origin/main`,
+    );
+    expect(fetches[0]!.env).toMatchObject({
+      GIT_CONFIG_VALUE_0: "Authorization: bearer token",
+    });
+    expect(calls.some((call) => call.args[0] === "symbolic-ref")).toBe(true);
   });
 
-  it("deepens each repo dir with its OWN target branch (meta-repo)", () => {
-    const { runners, calls } = makeRunners({ fetchStatus: 0, mergeBase: SHA_M });
-    const { chdir, dirs } = recordingChdir();
-    const rc = main(
-      {
-        repos: [
-          { dir: "/src", target: "main" },
-          { dir: "/src/tools", target: "release" },
-          { dir: "/src/docs", target: "gh-pages" },
-        ],
-        fallbackTarget: "main",
-      },
-      {},
-      runners,
-      chdir,
+  it("falls back to bounded dual-ref fetch when ADO REST is unavailable", async () => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const error = Object.assign(new Error("forbidden"), { statusCode: 403 });
+    const { deps, calls } = dependencies({ metadataError: error });
+    await main(
+      patchArgs(),
+      { SYSTEM_COLLECTIONURI: "https://dev.azure.com/org/" },
+      deps,
     );
-    expect(rc).toBe(0);
-    expect(dirs).toEqual(["/src", "/src/tools", "/src/docs"]);
-
-    // Each dir fetched + set origin/HEAD to ITS target ref.
-    const fetchRefspecs = calls
-      .filter((c) => c[0] === "fetch")
-      .map((c) => c.find((a) => a.startsWith("+refs/heads/")));
-    expect(fetchRefspecs).toEqual([
+    const fetches = calls.filter((call) => call.args[0] === "fetch");
+    expect(fetches).toHaveLength(1);
+    expect(fetches[0]!.args).toContain("--depth=200");
+    expect(fetches[0]!.args).toContain(
+      "+refs/heads/feature:refs/remotes/origin/ado-aw-prepare-source",
+    );
+    expect(fetches[0]!.args).toContain(
       "+refs/heads/main:refs/remotes/origin/main",
-      "+refs/heads/release:refs/remotes/origin/release",
-      "+refs/heads/gh-pages:refs/remotes/origin/gh-pages",
-    ]);
-    const symTargets = calls.filter((c) => c[0] === "symbolic-ref").map((c) => c[2]);
-    expect(symTargets).toEqual([
-      "refs/remotes/origin/main",
-      "refs/remotes/origin/release",
-      "refs/remotes/origin/gh-pages",
+    );
+  });
+
+  it("target-worktree fetches only the target tip at depth one", async () => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const { deps, calls } = dependencies();
+    await main(
+      {
+        mode: "target-worktree",
+        repos: [{ dir: "/src", target: "develop" }],
+        fallbackTarget: "main",
+      },
+      {},
+      deps,
+    );
+    const fetches = calls.filter((call) => call.args[0] === "fetch");
+    expect(fetches).toHaveLength(1);
+    expect(fetches[0]!.args).toEqual([
+      "fetch",
+      "--no-tags",
+      "--depth=1",
+      "origin",
+      "+refs/heads/develop:refs/remotes/origin/develop",
     ]);
   });
 
-  it("isolates a per-dir chdir failure — other dirs still processed", () => {
-    const { runners, calls } = makeRunners({ fetchStatus: 0, mergeBase: SHA_M });
-    const dirs: string[] = [];
-    const chdir = (dir: string) => {
-      dirs.push(dir);
-      if (dir === "/src/broken") {
-        throw new Error("no such directory");
-      }
-    };
-    const rc = main(
+  it("isolates a checkout-directory failure and processes later repos", async () => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const visited: string[] = [];
+    const { deps, calls } = dependencies({
+      chdir: (dir) => {
+        visited.push(dir);
+        if (dir === "/broken") throw new Error("missing");
+      },
+    });
+    await main(
       {
+        mode: "target-worktree",
         repos: [
-          { dir: "/src", target: "main" },
-          { dir: "/src/broken", target: "release" },
-          { dir: "/src/lib", target: "main" },
+          { dir: "/broken", target: "main" },
+          { dir: "/good", target: "main" },
         ],
         fallbackTarget: "main",
       },
       {},
-      runners,
-      chdir,
+      deps,
     );
-    expect(rc).toBe(0);
-    expect(dirs).toEqual(["/src", "/src/broken", "/src/lib"]);
-    // Only the two good dirs fetched + set origin/HEAD (broken skipped).
-    expect(calls.filter((c) => c[0] === "fetch").length).toBe(2);
-    expect(calls.filter((c) => c[0] === "symbolic-ref").length).toBe(2);
+    expect(visited).toEqual(["/broken", "/good"]);
+    expect(calls.filter((call) => call.args[0] === "fetch")).toHaveLength(1);
   });
 
-  it("exits 0 without setting origin/HEAD when every fetch fails (benign)", () => {
-    const { runners, calls } = makeRunners({ fetchStatus: 1, mergeBase: null });
-    const { chdir } = recordingChdir();
-    const rc = main(
-      { repos: [{ dir: "/src", target: "main" }], fallbackTarget: "main" },
-      {},
-      runners,
-      chdir,
-    );
-    // Non-fatal: the agent still runs; mcp.rs surfaces its own error if needed.
-    expect(rc).toBe(0);
-    expect(calls.some((c) => c[0] === "symbolic-ref")).toBe(false);
-  });
-
-  it("falls back to BUILD_SOURCESDIRECTORY + fallback target when no repos given", () => {
-    const { runners, calls } = makeRunners({ fetchStatus: 0, mergeBase: SHA_M });
-    const { chdir, dirs } = recordingChdir();
-    main(
-      { repos: [], fallbackTarget: "develop" },
-      { BUILD_SOURCESDIRECTORY: "/agent/src" },
-      runners,
-      chdir,
+  it("uses BUILD_SOURCESDIRECTORY and BUILD_SOURCEBRANCH for legacy no-arg calls", async () => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const { deps, dirs } = dependencies({ remote: "https://github.com/org/repo" });
+    await main(
+      {
+        mode: "patch-base",
+        repos: [],
+        fallbackTarget: "develop",
+      },
+      {
+        BUILD_SOURCESDIRECTORY: "/agent/src",
+        BUILD_SOURCEBRANCH: "refs/heads/feature",
+      },
+      deps,
     );
     expect(dirs).toEqual(["/agent/src"]);
-    const fetch = calls.find((c) => c[0] === "fetch");
-    expect(fetch).toContain("+refs/heads/develop:refs/remotes/origin/develop");
-  });
-
-  it("passes the SYSTEM_ACCESSTOKEN bearer into the git fetch env", () => {
-    const seenEnvs: Array<Record<string, string> | undefined> = [];
-    const runners: GitRunners = {
-      runGit: (args, env) => {
-        if (args[0] === "fetch") seenEnvs.push(env);
-        return { stdout: "", stderr: "", status: 0 };
-      },
-      gitOk: (args) => (args[0] === "merge-base" ? SHA_M : null),
-    };
-    const { chdir } = recordingChdir();
-    main(
-      { repos: [{ dir: "/src", target: "main" }], fallbackTarget: "main" },
-      { SYSTEM_ACCESSTOKEN: "tok" },
-      runners,
-      chdir,
-    );
-    expect(seenEnvs[0]).toMatchObject({
-      GIT_CONFIG_VALUE_0: "Authorization: bearer tok",
-    });
   });
 });

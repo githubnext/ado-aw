@@ -8292,11 +8292,11 @@ fn test_create_pull_request_emits_prepare_pr_base_step_in_agent() {
     );
     let agent = job_block(&compiled, "Agent");
     assert!(
-        agent.contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js' --repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
-        "Agent job must invoke prepare-pr-base with the self dir/target pair:\n{agent}"
+        agent.contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js' --mode patch-base --repo-dir \"$(Build.SourcesDirectory)\" --source-ref \"$(Build.SourceBranch)\" --target-branch 'main'"),
+        "Agent job must invoke patch-base with the self source/target:\n{agent}"
     );
     assert!(
-        agent.contains("Prepare create-pull-request base ref (fetch/deepen)"),
+        agent.contains("Prepare create-pull-request patch base"),
         "Agent job must contain the prepare step display name:\n{agent}"
     );
     assert!(
@@ -8330,7 +8330,7 @@ fn test_create_pull_request_prepare_step_defaults_target_branch() {
     );
     let agent = job_block(&compiled, "Agent");
     assert!(
-        agent.contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js' --repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
+        agent.contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js' --mode patch-base --repo-dir \"$(Build.SourcesDirectory)\" --source-ref \"$(Build.SourceBranch)\" --target-branch 'main'"),
         "bare create-pull-request must emit the prepare step targeting 'main':\n{agent}"
     );
     // Single `self` checkout ⇒ exactly one --repo-dir (the working directory).
@@ -8389,17 +8389,17 @@ fn test_create_pull_request_prepare_step_per_repo_targets() {
     let agent = job_block(&compiled, "Agent");
     // self ⇒ literal default 'main' (self never infers).
     assert!(
-        agent.contains("--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
+        agent.contains("--repo-dir \"$(Build.SourcesDirectory)\" --source-ref \"$(Build.SourceBranch)\" --target-branch 'main'"),
         "self must target the literal default 'main':\n{agent}"
     );
     // tools ⇒ inferred from its checkout ref (refs/heads/release → release).
     assert!(
-        agent.contains("--repo-dir \"$(Build.SourcesDirectory)/tools\" --target-branch 'release'"),
+        agent.contains("--repo-dir \"$(Build.SourcesDirectory)/tools\" --source-ref 'refs/heads/release' --target-branch 'release'"),
         "tools must target its inferred checkout ref 'release':\n{agent}"
     );
     // docs ⇒ explicit target-branches override wins over inference.
     assert!(
-        agent.contains("--repo-dir \"$(Build.SourcesDirectory)/docs\" --target-branch 'gh-pages'"),
+        agent.contains("--repo-dir \"$(Build.SourcesDirectory)/docs\" --source-ref 'refs/heads/main' --target-branch 'gh-pages'"),
         "docs must target the explicit override 'gh-pages':\n{agent}"
     );
 }
@@ -8417,11 +8417,11 @@ fn test_create_pull_request_emits_prepare_pr_base_step_in_safeoutputs() {
     );
     let safeoutputs = job_block(&compiled, "SafeOutputs");
     assert!(
-        safeoutputs.contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js' --repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
+        safeoutputs.contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js' --mode target-worktree --repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
         "SafeOutputs job must invoke prepare-pr-base with the self dir/target pair:\n{safeoutputs}"
     );
     assert!(
-        safeoutputs.contains("Prepare create-pull-request base ref (fetch/deepen)"),
+        safeoutputs.contains("Prepare create-pull-request target worktree ref"),
         "SafeOutputs job must contain the prepare step display name:\n{safeoutputs}"
     );
     // The bundle is otherwise only staged in the Agent/Setup jobs; the
@@ -8432,7 +8432,7 @@ fn test_create_pull_request_emits_prepare_pr_base_step_in_safeoutputs() {
     );
     // The prepare step must run BEFORE the executor so the ref is landed first.
     let prepare_at = safeoutputs
-        .find("Prepare create-pull-request base ref")
+        .find("Prepare create-pull-request target worktree ref")
         .expect("prepare step present");
     let execute_at = safeoutputs
         .find("Execute safe outputs (Stage 3)")
@@ -8486,7 +8486,7 @@ fn test_create_pull_request_prepare_step_only_in_running_variant_when_gated() {
     let reviewed = job_block(&compiled, "SafeOutputs_Reviewed");
     // Reviewed job runs create-pull-request → gets the prepare step + bundle.
     assert!(
-        reviewed.contains("Prepare create-pull-request base ref (fetch/deepen)"),
+        reviewed.contains("Prepare create-pull-request target worktree ref"),
         "reviewed job must contain the prepare step:\n{reviewed}"
     );
     assert!(
@@ -8495,7 +8495,7 @@ fn test_create_pull_request_prepare_step_only_in_running_variant_when_gated() {
     );
     // Auto job excludes create-pull-request → no prepare step, no bundle.
     assert!(
-        !auto.contains("Prepare create-pull-request base ref"),
+        !auto.contains("Prepare create-pull-request target worktree ref"),
         "auto job must NOT contain the prepare step (it never runs the PR tool):\n{auto}"
     );
     assert!(
@@ -8516,11 +8516,11 @@ fn test_create_pull_request_prepare_step_in_auto_variant_when_sibling_gated() {
     let auto = job_block(&compiled, "SafeOutputs");
     let reviewed = job_block(&compiled, "SafeOutputs_Reviewed");
     assert!(
-        auto.contains("Prepare create-pull-request base ref (fetch/deepen)"),
+        auto.contains("Prepare create-pull-request target worktree ref"),
         "auto job must contain the prepare step (it runs the PR tool):\n{auto}"
     );
     assert!(
-        !reviewed.contains("Prepare create-pull-request base ref"),
+        !reviewed.contains("Prepare create-pull-request target worktree ref"),
         "reviewed job must NOT contain the prepare step:\n{reviewed}"
     );
 }
@@ -8538,7 +8538,8 @@ fn test_no_create_pull_request_omits_prepare_pr_base_step() {
         "prepare-pr-base must not appear without create-pull-request:\n{compiled}"
     );
     assert!(
-        !compiled.contains("Prepare create-pull-request base ref"),
+        !compiled.contains("Prepare create-pull-request patch base")
+            && !compiled.contains("Prepare create-pull-request target worktree ref"),
         "prepare step display name must be absent:\n{compiled}"
     );
 }

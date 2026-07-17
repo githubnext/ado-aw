@@ -1,216 +1,281 @@
 /**
- * prepare-pr-base — make the create-pull-request diff base available on
- * shallow-default Azure DevOps agent pools (issue #1413).
+ * Prepare local refs required by create-pull-request on shallow Azure
+ * Pipelines checkouts.
  *
- * ## Why this exists
+ * `patch-base` runs in the Agent job. For same-organization Azure Repos it
+ * asks ADO for the exact common commit and divergence counts, fetches only the
+ * source/target ranges needed to reach that base, and verifies the result
+ * locally. Other remotes use bounded dual-ref deepening (200/500/2000).
  *
- * The `create-pull-request` safe-output patch is generated at agent time by the
- * host-side SafeOutputs MCP server (`src/mcp.rs::find_merge_base`), which only
- * inspects **existing local refs** and never fetches. On an agent pool whose
- * default git fetch is shallow (`fetchDepth: 1`), `checkout: self` leaves no
- * `refs/remotes/origin/<target>` ref and too little history, so the server
- * cannot compute a merge base and the PR can't be opened.
- *
- * This bundle runs as a **credentialed Agent-job prepare step on the host**
- * (before the AWF-wrapped Copilot run, using `$(System.AccessToken)`). For each
- * allowed create-pull-request repo dir (`self` + every `checkout:` alias, passed
- * as repeated `--repo-dir <dir> --target-branch <branch>` pairs in the same form
- * the MCP server resolves the dirs), it fetches that repo's target branch into
- * `refs/remotes/origin/<target>` and progressively deepens local history to the
- * merge base — reusing the exact `shared/merge-base.ts::ensureTargetRefFetched`
- * logic that the PR execution-context precompute already uses. It also points
- * each dir's `refs/remotes/origin/HEAD` at its target so `mcp.rs`'s symbolic-ref
- * default-branch detection resolves the right base. Because the MCP server
- * operates on those same dirs, the base then resolves with no in-sandbox network.
- *
- * Each `--target-branch` is the create-pull-request **destination/base** branch
- * for its `--repo-dir` (which in a multi-checkout "meta repo" setup may differ
- * per repo) — NOT the per-repo `checkout:` ref (the source/HEAD side).
- *
- * ## Trust boundary
- *
- * Mirrors the exec-context bundles: the bearer (`SYSTEM_ACCESSTOKEN`) is passed
- * to the spawned `git` child via `GIT_CONFIG_*` env vars (see
- * `shared/git.ts::bearerEnv`) — never in argv, never written to `.git/config`.
- * The compiler-owned, non-secret `--repo-dir` / `--target-branch` are argv flags
- * (immune to ADO pipeline-variable shadowing).
- *
- * ## Posture
- *
- * Benign fetch failures (e.g. a pool that refuses shallow deepening) are logged
- * and the step still exits 0 so the agent runs; the agent then simply hits the
- * existing `mcp.rs` diff-base error if truly unrecoverable. Only genuine infra
- * errors (an unusable `BUILD_SOURCESDIRECTORY`) hard-fail.
- *
- *   Invocation: node prepare-pr-base.js \
- *                 --repo-dir <dir> --target-branch <branch> \
- *                 [--repo-dir <dir> --target-branch <branch> ...]
- *               env: SYSTEM_ACCESSTOKEN (bearer for the git fetch)
+ * `target-worktree` runs in SafeOutputs. It only fetches the target tip needed
+ * by the executor's `git worktree add`.
  */
+import {
+  getCommitDiffMetadata as defaultGetCommitDiffMetadata,
+  httpStatusCode,
+  type CommitDiffMetadata,
+} from "../shared/ado-client.js";
+import {
+  isCurrentAdoOrganization,
+  parseAdoRepoUrl,
+} from "../shared/ado-remote.js";
 import { bearerEnv, gitOk as defaultGitOk, runGit as defaultRunGit } from "../shared/git.js";
-import { ensureTargetRefFetched, type GitRunners } from "../shared/merge-base.js";
+import {
+  ensureExactMergeBaseFetched,
+  ensureRefsForMergeBaseFetched,
+  ensureTargetTipFetched,
+  type GitRunners,
+} from "../shared/merge-base.js";
+import { logWarning } from "../shared/vso-logger.js";
 
 const defaultRunners: GitRunners = {
   runGit: defaultRunGit,
   gitOk: defaultGitOk,
 };
 
-/** A single checkout dir to deepen, with the target branch to deepen there. */
+export type PrepareMode = "patch-base" | "target-worktree";
+
 export interface RepoTarget {
-  /** Checkout dir (as `mcp.rs::resolve_git_dir_for_patch` resolves it). */
   dir: string;
-  /** Short target branch to fetch/deepen in that dir (no `refs/heads/`). */
   target: string;
+  sourceRef?: string;
 }
 
 export interface PrepareArgs {
-  /**
-   * The checkout dirs to deepen with their per-repo target branch — one per
-   * allowed create-pull-request repo, in the SAME form the host-side SafeOutputs
-   * MCP server resolves them (`resolve_git_dir_for_patch`): `working_directory`
-   * for `self`, and `working_directory/<alias>` for each `checkout:` alias. In a
-   * multi-checkout ("meta repo") setup each dir may carry a different target.
-   * Empty when none were passed (falls back to `[{ BUILD_SOURCESDIRECTORY,
-   * fallbackTarget }]`, then the process cwd).
-   */
+  mode: PrepareMode;
   repos: RepoTarget[];
-  /** Target for the fallback dir when no `--repo-dir` was passed. */
   fallbackTarget: string;
+  fallbackSourceRef?: string;
 }
 
-function shortBranch(name: string): string {
-  const s = name.replace(/^refs\/heads\//, "");
-  // In lock-step with the Rust `short_branch` resolver for every input: a
-  // normal ref → its short form; a degenerate `refs/heads/` (empty after
-  // stripping) → the original string (so a malformed ref fails loudly the same
-  // way on both sides, never silently diverging); and `""` → `""`. `parseArgs`
-  // supplies its own "main" default for a genuinely absent `--target-branch`.
-  return s.length > 0 ? s : name;
+export interface PrepareDependencies {
+  runners: GitRunners;
+  chdir: (dir: string) => void;
+  getCommitDiffMetadata: (
+    project: string,
+    repository: string,
+    targetBranch: string,
+    sourceCommit: string,
+  ) => Promise<CommitDiffMetadata>;
 }
 
-/**
- * Parse repeated `--repo-dir <path>` / `--target-branch <name>` flags into
- * ordered `{ dir, target }` pairs. Each `--repo-dir` takes the target from the
- * `--target-branch` that immediately follows it (compiler emits them adjacent);
- * a `--target-branch` with no preceding un-paired `--repo-dir` sets the fallback
- * target. Branch names are normalized to short form (`refs/heads/x` → `x`).
- */
+const defaultDependencies: PrepareDependencies = {
+  runners: defaultRunners,
+  chdir: process.chdir.bind(process),
+  getCommitDiffMetadata: defaultGetCommitDiffMetadata,
+};
+
+function shortTargetBranch(name: string): string {
+  const short = name.replace(/^refs\/heads\//, "");
+  return short.length > 0 ? short : name;
+}
+
+function oneLine(value: unknown, maxLength = 500): string {
+  const text = String(value instanceof Error ? value.message : value)
+    .replace(/[\r\n]+/g, " ")
+    .trim();
+  return text.length <= maxLength ? text : `${text.slice(0, maxLength)}...`;
+}
+
+function flushPending(
+  repos: RepoTarget[],
+  pending: Partial<RepoTarget> | null,
+  fallbackTarget: string,
+  fallbackSourceRef?: string,
+): void {
+  if (!pending?.dir) return;
+  repos.push({
+    dir: pending.dir,
+    target: pending.target ?? fallbackTarget,
+    sourceRef: pending.sourceRef ?? fallbackSourceRef,
+  });
+}
+
 export function parseArgs(argv: string[]): PrepareArgs {
   const repos: RepoTarget[] = [];
+  let mode: PrepareMode = "patch-base";
   let fallbackTarget = "main";
-  let pendingDir: string | null = null;
+  let fallbackSourceRef: string | undefined;
+  let pending: Partial<RepoTarget> | null = null;
+
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === "--repo-dir") {
-      // A previous dir without its own target inherits the fallback.
-      if (pendingDir !== null && pendingDir.length > 0) {
-        repos.push({ dir: pendingDir, target: fallbackTarget });
+    const flag = argv[i];
+    const value = argv[i + 1] ?? "";
+    if (flag === "--mode") {
+      if (value !== "patch-base" && value !== "target-worktree") {
+        throw new Error(`Unsupported prepare-pr-base mode '${value}'.`);
       }
-      pendingDir = argv[i + 1] ?? "";
+      mode = value;
       i++;
-    } else if (argv[i] === "--target-branch") {
-      const target = shortBranch(argv[i + 1] ?? "main");
-      if (pendingDir !== null && pendingDir.length > 0) {
-        repos.push({ dir: pendingDir, target });
-        pendingDir = null;
-      } else {
-        fallbackTarget = target;
-      }
+    } else if (flag === "--repo-dir") {
+      flushPending(repos, pending, fallbackTarget, fallbackSourceRef);
+      pending = { dir: value };
+      i++;
+    } else if (flag === "--source-ref") {
+      if (pending?.dir) pending.sourceRef = value;
+      else fallbackSourceRef = value;
+      i++;
+    } else if (flag === "--target-branch") {
+      const target = shortTargetBranch(value || "main");
+      if (pending?.dir) pending.target = target;
+      else fallbackTarget = target;
       i++;
     }
   }
-  // A trailing dir with no following --target-branch inherits the fallback.
-  if (pendingDir !== null && pendingDir.length > 0) {
-    repos.push({ dir: pendingDir, target: fallbackTarget });
-  }
-  return { repos, fallbackTarget };
+  flushPending(repos, pending, fallbackTarget, fallbackSourceRef);
+  return { mode, repos, fallbackTarget, fallbackSourceRef };
 }
 
-/**
- * Deepen `origin/<targetShort>` in a single checkout dir and point that dir's
- * `origin/HEAD` at it. Returns `true` when the base resolved. Never throws — a
- * dir that isn't a git repo (a quirky-workspace path the MCP would also fail on)
- * or a fetch that can't reach the base is a benign, isolated skip.
- */
-function prepareOneRepo(
+function pointOriginHead(
   repoDir: string,
-  targetShort: string,
-  fetchEnv: Record<string, string>,
+  target: string,
   runners: GitRunners,
-  chdir: (dir: string) => void,
-): boolean {
-  try {
-    chdir(repoDir);
-  } catch (err) {
-    // Non-fatal: the MCP server would fail on this same path too. Skip and let
-    // other repos proceed.
-    process.stdout.write(
-      `[prepare-pr-base] note: skipping '${repoDir}' (could not chdir: ${(err as Error).message}).\n`,
-    );
-    return false;
-  }
-
-  const fetched = ensureTargetRefFetched(targetShort, fetchEnv, runners);
-  if (!fetched.ok) {
-    process.stdout.write(
-      `[prepare-pr-base] warning: ${fetched.reason} create-pull-request may fail to compute a diff base for '${repoDir}' on this pool.\n`,
-    );
-    return false;
-  }
-
-  // Point origin/HEAD at the fetched target so mcp.rs's
-  // `git symbolic-ref refs/remotes/origin/HEAD` default-branch probe resolves
-  // to origin/<target> even when the target is not main/master.
+): void {
   const sym = runners.runGit([
     "symbolic-ref",
     "refs/remotes/origin/HEAD",
-    `refs/remotes/origin/${targetShort}`,
+    `refs/remotes/origin/${target}`,
   ]);
   if (sym.status !== 0) {
     process.stdout.write(
-      `[prepare-pr-base] note: could not set refs/remotes/origin/HEAD -> origin/${targetShort} in '${repoDir}' (${sym.stderr.trim()}); relying on origin/${targetShort} directly.\n`,
+      `[prepare-pr-base] note: could not set origin/HEAD for '${repoDir}' (${oneLine(sym.stderr)}).\n`,
     );
   }
+}
 
+function warnRepo(repoDir: string, target: string, reason: string): void {
+  logWarning(
+    `[prepare-pr-base] '${repoDir}' target '${target}': ${oneLine(reason)} ` +
+      "create-pull-request may fail. Set this checkout's fetch-depth to 0 only if the repository can afford full history.",
+  );
+}
+
+async function preparePatchBase(
+  repo: RepoTarget,
+  env: NodeJS.ProcessEnv,
+  fetchEnv: Record<string, string>,
+  deps: PrepareDependencies,
+): Promise<boolean> {
+  const { runners } = deps;
+  const headSha = runners.gitOk(["rev-parse", "HEAD"]) ?? "";
+  const sourceRef = repo.sourceRef ?? env.BUILD_SOURCEBRANCH ?? headSha;
+  let restReason = "origin is not an eligible same-organization Azure Repos remote";
+
+  const remote = runners.gitOk(["remote", "get-url", "origin"]) ?? "";
+  const identity = parseAdoRepoUrl(remote);
+  const restDisabled = env.ADO_AW_PREPARE_PR_BASE_DISABLE_REST === "1";
+  if (restDisabled) {
+    restReason = "ADO REST disabled for deterministic fallback testing";
+  } else if (identity && isCurrentAdoOrganization(identity, env)) {
+    try {
+      const metadata = await deps.getCommitDiffMetadata(
+        identity.project,
+        identity.repository,
+        repo.target,
+        headSha,
+      );
+      const exact = ensureExactMergeBaseFetched(repo.target, metadata, fetchEnv, runners);
+      if (exact.ok) {
+        pointOriginHead(repo.dir, repo.target, runners);
+        process.stdout.write(
+          `[prepare-pr-base] base ready in '${repo.dir}' via ado-rest ` +
+            `(merge-base=${exact.baseSha}, ahead=${metadata.aheadCount}, behind=${metadata.behindCount}).\n`,
+        );
+        return true;
+      }
+      restReason = exact.reason;
+    } catch (err) {
+      const status = httpStatusCode(err);
+      restReason = `${status ? `ADO REST ${status}: ` : "ADO REST unavailable: "}${oneLine(err)}`;
+    }
+  }
+
+  const bounded = ensureRefsForMergeBaseFetched(
+    sourceRef,
+    repo.target,
+    fetchEnv,
+    runners,
+  );
+  if (!bounded.ok) {
+    warnRepo(repo.dir, repo.target, `${restReason}; ${bounded.reason}`);
+    return false;
+  }
+  pointOriginHead(repo.dir, repo.target, runners);
   process.stdout.write(
-    `[prepare-pr-base] base ref ready in '${repoDir}': origin/${targetShort} fetched/deepened (merge-base=${fetched.baseSha}).\n`,
+    `[prepare-pr-base] base ready in '${repo.dir}' via bounded git fetch ` +
+      `(merge-base=${bounded.baseSha}; REST=${oneLine(restReason)}).\n`,
   );
   return true;
 }
 
-export function main(
+function prepareTargetWorktree(
+  repo: RepoTarget,
+  fetchEnv: Record<string, string>,
+  deps: PrepareDependencies,
+): boolean {
+  const fetched = ensureTargetTipFetched(repo.target, fetchEnv, deps.runners);
+  if (!fetched.ok) {
+    warnRepo(repo.dir, repo.target, fetched.reason);
+    return false;
+  }
+  pointOriginHead(repo.dir, repo.target, deps.runners);
+  process.stdout.write(
+    `[prepare-pr-base] target tip ready in '${repo.dir}' ` +
+      `(origin/${repo.target}=${fetched.baseSha}).\n`,
+  );
+  return true;
+}
+
+export async function main(
   args: PrepareArgs,
   env: NodeJS.ProcessEnv = process.env,
-  runners: GitRunners = defaultRunners,
-  chdir: (dir: string) => void = process.chdir.bind(process),
-): number {
-  // Deepen every checkout dir the MCP server might generate a patch from — one
-  // per allowed create-pull-request repo (`self` + each `checkout:` alias), each
-  // with its own target branch. When the compiler passed none, fall back to
-  // BUILD_SOURCESDIRECTORY then cwd (with the fallback target).
+  deps: PrepareDependencies = defaultDependencies,
+): Promise<number> {
   let repos = args.repos;
   if (repos.length === 0) {
-    const fallbackDir = env.BUILD_SOURCESDIRECTORY;
     repos = [
-      { dir: fallbackDir && fallbackDir.length > 0 ? fallbackDir : ".", target: args.fallbackTarget },
+      {
+        dir: env.BUILD_SOURCESDIRECTORY || ".",
+        target: args.fallbackTarget,
+        sourceRef: args.fallbackSourceRef ?? env.BUILD_SOURCEBRANCH,
+      },
     ];
   }
-
   const fetchEnv = bearerEnv(env.SYSTEM_ACCESSTOKEN);
 
-  // Per-dir failures are isolated (logged + skipped) so one unreachable repo
-  // never blocks the others or the agent run.
-  for (const { dir, target } of repos) {
-    prepareOneRepo(dir, target, fetchEnv, runners, chdir);
+  for (const repo of repos) {
+    try {
+      deps.chdir(repo.dir);
+    } catch (err) {
+      warnRepo(repo.dir, repo.target, `could not enter checkout: ${oneLine(err)}`);
+      continue;
+    }
+    if (args.mode === "target-worktree") {
+      prepareTargetWorktree(repo, fetchEnv, deps);
+    } else {
+      await preparePatchBase(repo, env, fetchEnv, deps);
+    }
   }
   return 0;
 }
 
-// CLI entry guard: only run when invoked directly (not when imported by tests).
 if (
   typeof process !== "undefined" &&
   process.argv[1] &&
-  /prepare-pr-base(\/index)?\.js$/.test(process.argv[1])
+  /prepare-pr-base(\/index)?\.js$/.test(process.argv[1].replace(/\\/g, "/"))
 ) {
-  const args = parseArgs(process.argv.slice(2));
-  process.exit(main(args));
+  let args: PrepareArgs;
+  try {
+    args = parseArgs(process.argv.slice(2));
+  } catch (err) {
+    process.stderr.write(`[prepare-pr-base] ${oneLine(err)}\n`);
+    process.exit(1);
+  }
+  void main(args).then(
+    (code) => process.exit(code),
+    (err) => {
+      process.stderr.write(`[prepare-pr-base] fatal: ${oneLine(err)}\n`);
+      process.exit(1);
+    },
+  );
 }

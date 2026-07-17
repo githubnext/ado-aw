@@ -584,55 +584,75 @@ fn sh_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-/// The create-pull-request base-ref prepare step (issue #1413). Runs in the
-/// Agent job before the Copilot invocation when `create-pull-request` is
-/// configured, invoking the `prepare-pr-base` ado-script bundle to fetch and
-/// progressively deepen the target branch (`refs/remotes/origin/<target>`) in
-/// every allowed create-PR repo dir. The host-side SafeOutputs MCP server
-/// (`src/mcp.rs`) then resolves a diff base even on shallow-default agent pools —
-/// no forced full-history `checkout: self`, no lock hand-edit.
-///
-/// `repos` is the set of `(dir, target_branch)` pairs the MCP server may
-/// generate a patch from — one per allowed repo, in the SAME dir form
-/// `resolve_git_dir_for_patch` resolves them: the resolved `working_directory`
-/// (for `self`) and `working_directory/<alias>` for each `checkout:` alias, each
-/// paired with THAT repo's resolved create-pull-request target branch (which may
-/// differ per repo in a multi-checkout setup — see
-/// `CreatePrConfig::resolve_target_branch`). Emitting them as repeated
-/// `--repo-dir <dir> --target-branch <branch>` pairs lets the bundle deepen each
-/// dir's own target, so a PR to ANY allowed repo works on shallow pools.
-///
-/// Each `--target-branch` is a single-quoted argv flag (a plain literal branch,
-/// shadow-proof); each `--repo-dir` is a double-quoted ADO-macro path (matching
-/// the `import.js --base "$(...)"` convention — single quotes would trip
-/// shellcheck SC2016). The ADO bearer is projected via `apply_bundle_auth` (the
-/// bundle uses it for the authenticated git fetch, and `SYSTEM_ACCESSTOKEN` is
-/// the one predefined var ADO does not auto-inject). The step runs OUTSIDE the
-/// AWF sandbox on the build agent's normal network, so it needs no AWF allowlist
-/// entry.
-pub fn prepare_pr_base_step_typed(repos: &[(String, String)]) -> Step {
-    // Each pair emits `--repo-dir "<dir>" --target-branch '<branch>'`. Repo dirs
-    // are compiler-generated ADO path macros (`$(Build.SourcesDirectory)` [+
-    // `/<validated-alias>`]) — ADO substitutes the macro before bash runs and
-    // aliases are validated, so they use DOUBLE quotes (single quotes would trip
-    // shellcheck SC2016). The target branch is a plain literal, single-quoted
-    // (shadow-proof).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreparePrBaseMode {
+    PatchBase,
+    TargetWorktree,
+}
+
+impl PreparePrBaseMode {
+    fn as_arg(self) -> &'static str {
+        match self {
+            Self::PatchBase => "patch-base",
+            Self::TargetWorktree => "target-worktree",
+        }
+    }
+
+    fn display_name(self) -> &'static str {
+        match self {
+            Self::PatchBase => "Prepare create-pull-request patch base",
+            Self::TargetWorktree => "Prepare create-pull-request target worktree ref",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreparePrSourceRef {
+    AdoMacro(String),
+    Literal(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparePrBaseRepo {
+    pub dir: String,
+    pub source_ref: Option<PreparePrSourceRef>,
+    pub target_branch: String,
+}
+
+/// Emit one of the two create-pull-request preparation modes. The Agent job
+/// uses `PatchBase` to recover and verify the merge-base; SafeOutputs uses
+/// `TargetWorktree` to fetch only the target tip required by `git worktree add`.
+pub fn prepare_pr_base_step_typed(
+    mode: PreparePrBaseMode,
+    repos: &[PreparePrBaseRepo],
+) -> Step {
     let repo_flags: String = repos
         .iter()
-        .map(|(dir, target)| {
-            format!(" --repo-dir \"{}\" --target-branch {}", dir, sh_single_quote(target))
+        .map(|repo| {
+            let source_flag = match (&repo.source_ref, mode) {
+                (Some(PreparePrSourceRef::AdoMacro(source)), PreparePrBaseMode::PatchBase) => {
+                    format!(" --source-ref \"{source}\"")
+                }
+                (Some(PreparePrSourceRef::Literal(source)), PreparePrBaseMode::PatchBase) => {
+                    format!(" --source-ref {}", sh_single_quote(source))
+                }
+                _ => String::new(),
+            };
+            format!(
+                " --repo-dir \"{}\"{} --target-branch {}",
+                repo.dir,
+                source_flag,
+                sh_single_quote(&repo.target_branch)
+            )
         })
         .collect();
     let script = format!(
-        "set -eo pipefail\nnode '{PREPARE_PR_BASE_PATH}'{}\n",
-        repo_flags
+        "set -eo pipefail\nnode '{PREPARE_PR_BASE_PATH}' --mode {}{}\n",
+        mode.as_arg(),
+        repo_flags,
     );
     let step = crate::compile::ado_bundle::apply_bundle_auth(
-        BashStep::new(
-            "Prepare create-pull-request base ref (fetch/deepen)",
-            script,
-        )
-        .with_condition(Condition::Succeeded),
+        BashStep::new(mode.display_name(), script).with_condition(Condition::Succeeded),
         crate::compile::ado_bundle::Bundle::PreparePrBase,
         crate::compile::ado_bundle::TokenSource::SystemAccessToken,
     );
@@ -1483,17 +1503,19 @@ mod tests {
 
     #[test]
     fn prepare_pr_base_step_emits_bundle_invocation_with_target_and_bearer() {
-        let repos = vec![(
-            "$(Build.SourcesDirectory)".to_string(),
-            "main".to_string(),
-        )];
-        let Step::Bash(step) = prepare_pr_base_step_typed(&repos) else {
+        let repos = vec![PreparePrBaseRepo {
+            dir: "$(Build.SourcesDirectory)".to_string(),
+            source_ref: Some(PreparePrSourceRef::AdoMacro(
+                "$(Build.SourceBranch)".to_string(),
+            )),
+            target_branch: "main".to_string(),
+        }];
+        let Step::Bash(step) =
+            prepare_pr_base_step_typed(PreparePrBaseMode::PatchBase, &repos)
+        else {
             panic!("expected a bash step");
         };
-        assert_eq!(
-            step.display_name,
-            "Prepare create-pull-request base ref (fetch/deepen)"
-        );
+        assert_eq!(step.display_name, "Prepare create-pull-request patch base");
         assert!(
             step.script
                 .contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js'"),
@@ -1503,9 +1525,11 @@ mod tests {
         // The repo dir (== MCP server bounding_directory) is a double-quoted argv
         // flag (ADO-macro path convention); its target is a single-quoted literal.
         assert!(
-            step.script
-                .contains("--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
-            "must emit the dir/target pair (double-quoted dir, single-quoted target):\n{}",
+            step.script.contains(
+                "--mode patch-base --repo-dir \"$(Build.SourcesDirectory)\" \
+                 --source-ref \"$(Build.SourceBranch)\" --target-branch 'main'"
+            ),
+            "must emit typed mode/source/target flags:\n{}",
             step.script
         );
         // The ADO bearer is projected as a masked secret (bundle uses it for the
@@ -1518,11 +1542,16 @@ mod tests {
 
     #[test]
     fn prepare_pr_base_step_quotes_a_non_default_target() {
-        let repos = vec![(
-            "$(Build.SourcesDirectory)".to_string(),
-            "release/2.x".to_string(),
-        )];
-        let Step::Bash(step) = prepare_pr_base_step_typed(&repos) else {
+        let repos = vec![PreparePrBaseRepo {
+            dir: "$(Build.SourcesDirectory)".to_string(),
+            source_ref: Some(PreparePrSourceRef::Literal(
+                "refs/heads/feature".to_string(),
+            )),
+            target_branch: "release/2.x".to_string(),
+        }];
+        let Step::Bash(step) =
+            prepare_pr_base_step_typed(PreparePrBaseMode::PatchBase, &repos)
+        else {
             panic!("expected a bash step");
         };
         assert!(
@@ -1530,6 +1559,7 @@ mod tests {
             "non-default target must be passed through single-quoted:\n{}",
             step.script
         );
+        assert!(step.script.contains("--source-ref 'refs/heads/feature'"));
     }
 
     #[test]
@@ -1537,17 +1567,31 @@ mod tests {
         // Multi-repo meta setup: self + two aliases, each with its OWN target
         // branch — one `--repo-dir "<dir>" --target-branch '<branch>'` pair each.
         let repos = vec![
-            ("$(Build.SourcesDirectory)".to_string(), "main".to_string()),
-            (
-                "$(Build.SourcesDirectory)/tools".to_string(),
-                "release".to_string(),
-            ),
-            (
-                "$(Build.SourcesDirectory)/docs".to_string(),
-                "gh-pages".to_string(),
-            ),
+            PreparePrBaseRepo {
+                dir: "$(Build.SourcesDirectory)".to_string(),
+                source_ref: Some(PreparePrSourceRef::AdoMacro(
+                    "$(Build.SourceBranch)".to_string(),
+                )),
+                target_branch: "main".to_string(),
+            },
+            PreparePrBaseRepo {
+                dir: "$(Build.SourcesDirectory)/tools".to_string(),
+                source_ref: Some(PreparePrSourceRef::Literal(
+                    "refs/heads/release".to_string(),
+                )),
+                target_branch: "release".to_string(),
+            },
+            PreparePrBaseRepo {
+                dir: "$(Build.SourcesDirectory)/docs".to_string(),
+                source_ref: Some(PreparePrSourceRef::Literal(
+                    "refs/heads/main".to_string(),
+                )),
+                target_branch: "gh-pages".to_string(),
+            },
         ];
-        let Step::Bash(step) = prepare_pr_base_step_typed(&repos) else {
+        let Step::Bash(step) =
+            prepare_pr_base_step_typed(PreparePrBaseMode::PatchBase, &repos)
+        else {
             panic!("expected a bash step");
         };
         assert_eq!(
@@ -1557,18 +1601,42 @@ mod tests {
             step.script
         );
         assert!(
-            step.script
-                .contains("--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'")
-        );
-        assert!(
-            step.script
-                .contains("--repo-dir \"$(Build.SourcesDirectory)/tools\" --target-branch 'release'")
+            step.script.contains(
+                "--repo-dir \"$(Build.SourcesDirectory)\" --source-ref \"$(Build.SourceBranch)\" --target-branch 'main'"
+            )
         );
         assert!(
             step.script.contains(
-                "--repo-dir \"$(Build.SourcesDirectory)/docs\" --target-branch 'gh-pages'"
+                "--repo-dir \"$(Build.SourcesDirectory)/tools\" --source-ref 'refs/heads/release' --target-branch 'release'"
             )
         );
+        assert!(
+            step.script.contains(
+                "--repo-dir \"$(Build.SourcesDirectory)/docs\" --source-ref 'refs/heads/main' --target-branch 'gh-pages'"
+            )
+        );
+    }
+
+    #[test]
+    fn prepare_pr_base_target_worktree_omits_source_ref() {
+        let repos = vec![PreparePrBaseRepo {
+            dir: "$(Build.SourcesDirectory)".to_string(),
+            source_ref: Some(PreparePrSourceRef::AdoMacro(
+                "$(Build.SourceBranch)".to_string(),
+            )),
+            target_branch: "main".to_string(),
+        }];
+        let Step::Bash(step) =
+            prepare_pr_base_step_typed(PreparePrBaseMode::TargetWorktree, &repos)
+        else {
+            panic!("expected a bash step");
+        };
+        assert_eq!(
+            step.display_name,
+            "Prepare create-pull-request target worktree ref"
+        );
+        assert!(step.script.contains("--mode target-worktree"));
+        assert!(!step.script.contains("--source-ref"));
     }
 
     #[test]
