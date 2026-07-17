@@ -269,7 +269,9 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │           ├── github-app-token/ # GitHub App token minter (bundled to github-app-token.js; mints installation token in Agent + Detection when engine.github-app-token is set)
 │           ├── executor-e2e/ # Stage 3 safe-output E2E test harness (not a bundle; runs deterministic scenarios against a real ADO project and files a GitHub issue on failure)
 │           ├── prepare-pr-base/ # create-pull-request base-ref preparer (bundled to prepare-pr-base.js; fetches/deepens target branch so mcp.rs finds a diff base on shallow-default pools — issue #1413; emitted in BOTH the Agent job and the SafeOutputs job before the executor's worktree add — issue #1453)
-│           └── shared/   # Shared modules across bundles (auth, ado-client, env-facts, types.gen.ts)
+│           ├── shared/   # Shared modules across bundles (auth, ado-client, env-facts, types.gen.ts)
+│           ├── trigger-e2e/ # Test-only: FACT_META gate-spec table + trigger-evaluation E2E scenarios; not a bundle; not shipped (see docs/ado-script.md)
+│           └── __tests__/ # Top-level bundle-coverage test (bundle-coverage.test.ts); verifies every src/ bundle subdirectory is accounted for
 ├── tests/                # Integration tests and fixtures
 ├── docs/                 # Per-concept reference documentation (see index below)
 ├── Cargo.toml            # Rust dependencies
@@ -353,7 +355,7 @@ index to jump to the right page.
   `check`, `mcp`, `mcp-http`, `execute`, `secrets`, `enable`, `disable`,
   `remove`, `list`, `status`, `run`, `audit`, `mcp-author`, `trace`,
   `inspect`, `graph`, `whatif`, `lint`, `catalog`; `configure` is a
-  deprecated hidden alias and `export-gate-schema` is a hidden build-time tool).
+  deprecated hidden alias, and `export-gate-schema` / `export-fact-catalog` are hidden build-time tools).
 - [`docs/agency-plugin.md`](docs/agency-plugin.md) — the Agency / Claude Code
   plugin (`agency/plugins/ado-aw/`): canonical layout, six skills, `mcp-author`
   wiring, the self-contained root marketplace catalogs, `init --agency`
