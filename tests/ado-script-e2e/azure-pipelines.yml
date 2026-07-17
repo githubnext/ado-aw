@@ -1,0 +1,102 @@
+# Azure-native regression coverage for prepare-pr-base.
+#
+# The initial baseline job intentionally fails with the current target-only
+# implementation on the deep divergent fixture. It will be expanded into the
+# permanent REST-guided + bounded-fallback suite as part of issue #1541.
+
+trigger: none
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - src/compile/agentic_pipeline.rs
+      - src/compile/extensions/ado_script.rs
+      - src/compile/types.rs
+      - src/compile/ir/lower.rs
+      - scripts/ado-script/package.json
+      - scripts/ado-script/package-lock.json
+      - scripts/ado-script/src/prepare-pr-base/**
+      - scripts/ado-script/src/shared/ado-client.ts
+      - scripts/ado-script/src/shared/git.ts
+      - scripts/ado-script/src/shared/merge-base.ts
+      - tests/ado-script-e2e/**
+
+resources:
+  repositories:
+    - repository: fixture
+      type: git
+      name: ado-aw-e2e-fixture
+      ref: refs/heads/e2e/rest-source
+
+pool:
+  name: AZS-1ES-L-Playground-ubuntu-22.04
+
+jobs:
+  - job: CurrentBundleBaseline
+    displayName: Reproduce target-only shallow merge-base failure
+    steps:
+      - checkout: self
+        fetchDepth: 1
+        fetchTags: false
+        path: s/ado-aw
+
+      - checkout: fixture
+        fetchDepth: 1
+        fetchTags: false
+        path: s/fixture
+
+      - task: UseNode@1
+        inputs:
+          version: "20.x"
+        displayName: Use Node.js 20
+
+      - script: |
+          set -euo pipefail
+          npm ci
+          npm run build:prepare-pr-base
+        workingDirectory: $(Pipeline.Workspace)/s/ado-aw/scripts/ado-script
+        displayName: Build candidate prepare-pr-base bundle
+
+      - script: |
+          set -euo pipefail
+
+          REPO="$(Pipeline.Workspace)/s/fixture"
+          EXPECTED_BASE="52cfa195595a85eedc7ad405575bd92be93fb0e3"
+
+          cd "$REPO"
+          echo "Build.SourceBranch=$(Build.SourceBranch)"
+          echo "Build.SourceVersion=$(Build.SourceVersion)"
+          echo "Build.Repository.ID=$(Build.Repository.ID)"
+          echo "origin=$(git remote get-url origin)"
+          echo "fetch refspecs:"
+          git config --get-all remote.origin.fetch || true
+          echo "shallow=$(git rev-parse --is-shallow-repository)"
+          if [ -f .git/shallow ]; then
+            echo ".git/shallow:"
+            cat .git/shallow
+          fi
+
+          test "$(git rev-parse --is-shallow-repository)" = "true"
+          if git merge-base HEAD origin/e2e/rest-target >/dev/null 2>&1; then
+            echo "Fixture precondition failed: merge-base already resolves."
+            exit 1
+          fi
+
+          node "$(Pipeline.Workspace)/s/ado-aw/scripts/ado-script/prepare-pr-base.js" \
+            --repo-dir "$REPO" \
+            --target-branch e2e/rest-target
+
+          if ACTUAL_BASE="$(git merge-base HEAD origin/e2e/rest-target 2>/dev/null)"; then
+            echo "Unexpected current-bundle success: $ACTUAL_BASE"
+            test "$ACTUAL_BASE" = "$EXPECTED_BASE"
+            exit 0
+          fi
+
+          echo "Current bundle reproduced #1541: merge-base remains unresolved."
+          exit 1
+        displayName: Reproduce issue 1541 on Azure checkout
+        env:
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
