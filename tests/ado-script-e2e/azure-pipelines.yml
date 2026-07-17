@@ -32,7 +32,7 @@ resources:
       ref: refs/heads/e2e/rest-source
 
 pool:
-  name: AZS-1ES-L-Playground-ubuntu-22.04
+  vmImage: ubuntu-22.04
 
 jobs:
   - job: CurrentBundleBaseline
