@@ -16,7 +16,7 @@ After the manual-handoff registration step is complete, fill in the
 | `azure-cli.md` | `daily around 03:00` | `TBD` | Verifies AWF az CLI mount + ADO auth via `AZURE_DEVOPS_EXT_PAT`. |
 | `noop-target.md` | _no schedule_ | `TBD` | Target of the `queue-build` executor-e2e scenario. Its Pipeline ID must be set as `E2E_QUEUE_PIPELINE_ID` on the executor-e2e pipeline. |
 | `janitor.md` | `weekly on monday around 02:00` | `TBD` | Prunes `ado-aw-smoke-*` artifacts older than 30 days. |
-| `smoke-failure-reporter.md` | `daily around 04:30` | `TBD` | Files `[smoke-failure] …` issues on `githubnext/ado-aw`. Requires the `ADO_AW_DEBUG_GITHUB_TOKEN` secret pipeline variable, **only on this pipeline**. |
+| `smoke-failure-reporter.md` | `daily around 04:30` | `TBD` | Files `[smoke-failure] …` issues on `jamesadevine/ado-aw-issues`. Requires the `ADO_AW_DEBUG_GITHUB_TOKEN` secret pipeline variable, **only on this pipeline**. |
 
 ## Manual-handoff checklist
 
@@ -30,9 +30,10 @@ the following one-time setup in
    `githubnext/ado-aw` checkout:
 
    ```powershell
-   ado-aw enable `
+   cargo run -- enable `
      --org msazuresphere --project AgentPlayground `
-     --service-connection ado-aw-github `
+     --service-connection github.com_githubnext `
+     --also-set-token `
      --folder '\smoke' `
      tests/safe-outputs/
    ```
@@ -49,7 +50,8 @@ the following one-time setup in
 5. Provision pipeline variable `ADO_AW_DEBUG_GITHUB_TOKEN` (secret) on
    the `smoke-failure-reporter` pipeline **only**. Use a GitHub
    fine-grained PAT scoped to `Issues: Read and write` on
-   `githubnext/ado-aw` only.
+   `jamesadevine/ado-aw-issues` only. Confirm the target repository has the
+   `pipeline-failure` and `ado-aw-smoke` labels.
 
    ```powershell
    ado-aw secrets set ADO_AW_DEBUG_GITHUB_TOKEN `
@@ -65,3 +67,8 @@ the following one-time setup in
    ```powershell
    ado-aw run --org msazuresphere --project AgentPlayground tests/safe-outputs/
    ```
+
+For the AgentPlayground replacement-first migration, create side-by-side
+definitions explicitly with `az pipelines create --skip-run true`.
+`ado-aw enable` intentionally reuses an existing definition with the same YAML
+path, so it cannot create replacements while the legacy definitions remain.

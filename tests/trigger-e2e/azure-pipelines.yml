@@ -4,7 +4,8 @@
 # AgentPlayground. The harness creates real PRs and queues the registered
 # VICTIM pipeline (tests/trigger-e2e/victim-pipeline.yml) under a battery of
 # trigger conditions, asserting the gate decision via build tags + result. On
-# any failure it files a GitHub issue on githubnext/ado-aw and fails the build.
+# any failure it files a GitHub issue on the configured issue repository and
+# fails the build.
 #
 # Unlike the executor-e2e orchestrator, this does NOT build the Rust `ado-aw`
 # binary: trigger conditions are evaluated entirely by the ado-script bundles
@@ -37,11 +38,13 @@ variables:
   # (definition) variable. Set TRIGGER_E2E_ISSUE_REPO as a pipeline/definition
   # variable to redirect issue filing; the harness defaults to githubnext/ado-aw.
   # TRIGGER_E2E_GITHUB_TOKEN must be provided as a SECRET pipeline variable
-  # (fine-grained PAT scoped to Issues:read/write on githubnext/ado-aw ONLY).
+  # scoped to Issues:read/write on the configured issue repository.
 
 steps:
   - checkout: self
-    fetchDepth: 1
+    # Mirror synchronization is fast-forward-only and therefore needs enough
+    # history to prove ancestry against the current ADO mirror main.
+    fetchDepth: 0
     displayName: Checkout ado-aw
 
   - task: UseNode@1
@@ -80,6 +83,7 @@ steps:
       SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)
       TRIGGER_E2E_VICTIM_DEFINITION_ID: $(EFFECTIVE_TRIGGER_E2E_VICTIM_DEFINITION_ID)
       TRIGGER_E2E_VICTIM_REPO: $(EFFECTIVE_TRIGGER_E2E_VICTIM_REPO)
+      TRIGGER_E2E_SYNC_MIRROR: "true"
       TRIGGER_E2E_ISSUE_REPO: $(TRIGGER_E2E_ISSUE_REPO)
-      # Secret PAT for filing failure issues (scoped to githubnext/ado-aw Issues).
+      # Secret PAT for filing failure issues on the configured repository.
       TRIGGER_E2E_GITHUB_TOKEN: $(TRIGGER_E2E_GITHUB_TOKEN)

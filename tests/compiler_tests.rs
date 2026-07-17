@@ -8547,3 +8547,32 @@ fn test_no_create_pull_request_omits_prepare_pr_base_step() {
         "prepare step display name must be absent:\n{compiled}"
     );
 }
+
+#[test]
+fn test_smoke_failure_reporter_uses_registered_ado_names_and_staging_repo() {
+    let reporter_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("safe-outputs")
+        .join("smoke-failure-reporter.md");
+    let reporter = fs::read_to_string(reporter_path).expect("read smoke-failure-reporter fixture");
+
+    for definition_name in [
+        "Daily safe-output smoke canary",
+        "Daily smoke az CLI access",
+    ] {
+        assert!(
+            reporter.contains(&format!("- `{definition_name}`")),
+            "reporter must query the ADO-safe definition name '{definition_name}'"
+        );
+    }
+    assert!(
+        !reporter.contains("Daily safe-output smoke: canary")
+            && !reporter.contains("Daily smoke: az CLI access"),
+        "reporter must not query colon-containing front-matter names"
+    );
+    assert!(
+        reporter.contains("target-repo: jamesadevine/ado-aw-issues")
+            && reporter.contains("Search open issues on `jamesadevine/ado-aw-issues`"),
+        "front matter and prompt must agree on the staging issue repository"
+    );
+}
