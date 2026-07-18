@@ -87,7 +87,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   │   │   ├── manual.rs # ManualContextContributor — manually queued build context facts
 │   │   │   │   ├── pipeline.rs # PipelineContextContributor — shared pipeline/run metadata facts
 │   │   │   │   ├── pr.rs     # PrContextContributor — stages aw-context/pr/* for PR builds
-│   │   │   │   ├── pr_checks.rs # PrChecksContextContributor — PR validation / policy-check facts
+│   │   │   │   ├── pr_checks.rs # PrChecksContextContributor — stages aw-context/pr/checks/{failing,succeeded}.json (Build Validation runs on the PR); opt-in via pr.checks.enabled: true
 │   │   │   │   ├── repo.rs   # RepoContextContributor — repository identity / remote facts
 │   │   │   │   ├── schedule.rs # ScheduleContextContributor — scheduled-run context facts
 │   │   │   │   └── workitem.rs # WorkItemContextContributor — linked work-item context facts
@@ -268,6 +268,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │           ├── approval-summary/ # Safe-outputs summary renderer (bundled to approval-summary.js; end-of-Agent-job summary tab)
 │           ├── github-app-token/ # GitHub App token minter (bundled to github-app-token.js; mints installation token in Agent + Detection when engine.github-app-token is set)
 │           ├── executor-e2e/ # Stage 3 safe-output E2E test harness (not a bundle; runs deterministic scenarios against a real ADO project and files a GitHub issue on failure)
+│           ├── trigger-e2e/ # Trigger/gate E2E test harness (not a bundle; FACT_META drift guard between Rust Fact registry and TypeScript mirror; used by export-fact-catalog command)
 │           ├── prepare-pr-base/ # create-pull-request base-ref preparer (bundled to prepare-pr-base.js; fetches/deepens target branch so mcp.rs finds a diff base on shallow-default pools — issue #1413; emitted in BOTH the Agent job and the SafeOutputs job before the executor's worktree add — issue #1453)
 │           └── shared/   # Shared modules across bundles (auth, ado-client, env-facts, types.gen.ts)
 ├── tests/                # Integration tests and fixtures
