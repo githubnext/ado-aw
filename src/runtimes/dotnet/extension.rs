@@ -238,7 +238,12 @@ mod tests {
         .unwrap();
         let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
         let ext = DotnetExtension::new(dotnet.clone());
-        assert!(ext.declarations(&ctx_from(&fm)).is_err());
+        let err = ext.declarations(&ctx_from(&fm)).unwrap_err();
+        assert!(
+            err.to_string().contains("ADO expression"),
+            "expected injection error in feed-url, got: {err}"
+        );
+        assert!(err.to_string().contains("runtimes.dotnet.feed-url"), "got: {err}");
     }
 
     #[test]
@@ -249,7 +254,12 @@ mod tests {
         .unwrap();
         let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
         let ext = DotnetExtension::new(dotnet.clone());
-        assert!(ext.declarations(&ctx_from(&fm)).is_err());
+        let err = ext.declarations(&ctx_from(&fm)).unwrap_err();
+        assert!(
+            err.to_string().contains("ADO expression"),
+            "expected injection error, got: {err}"
+        );
+        assert!(err.to_string().contains("runtimes.dotnet.version"), "got: {err}");
     }
 
     #[test]
