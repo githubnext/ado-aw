@@ -267,9 +267,10 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │           ├── conclusion/ # Conclusion-job reporter source (bundled to conclusion.js)
 │           ├── approval-summary/ # Safe-outputs summary renderer (bundled to approval-summary.js; end-of-Agent-job summary tab)
 │           ├── github-app-token/ # GitHub App token minter (bundled to github-app-token.js; mints installation token in Agent + Detection when engine.github-app-token is set)
+│           ├── trigger-e2e/ # test-only: FACT_META gate-spec table + trigger-evaluation E2E scenarios (not a bundle); drift-guarded by `export-fact-catalog` + `fact-catalog.gen.json`
 │           ├── executor-e2e/ # Stage 3 safe-output E2E test harness (not a bundle; runs deterministic scenarios against a real ADO project and files a GitHub issue on failure)
 │           ├── prepare-pr-base/ # create-pull-request base-ref preparer (bundled to prepare-pr-base.js; fetches/deepens target branch so mcp.rs finds a diff base on shallow-default pools — issue #1413; emitted in BOTH the Agent job and the SafeOutputs job before the executor's worktree add — issue #1453)
-│           └── shared/   # Shared modules across bundles (auth, ado-client, env-facts, types.gen.ts)
+│           └── shared/   # Shared modules across bundles (auth, ado-client, env-facts, git, policy, types.gen.ts, and more)
 ├── tests/                # Integration tests and fixtures
 ├── docs/                 # Per-concept reference documentation (see index below)
 ├── Cargo.toml            # Rust dependencies
