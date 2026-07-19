@@ -1059,8 +1059,9 @@ mod tests {
             vote: None,
             description: None,
         };
-        let result: Result<UpdatePrResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err: Result<UpdatePrResult, _> = params.try_into();
+        let err = err.unwrap_err().to_string();
+        assert!(err.contains("operation must be one of"), "got: {err}");
     }
 
     #[test]

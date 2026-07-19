@@ -551,8 +551,9 @@ mod tests {
             line: None,
             status: "active".to_string(),
         };
-        let result: Result<AddPrCommentResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err: Result<AddPrCommentResult, _> = params.try_into();
+        let err = err.unwrap_err().to_string();
+        assert!(err.contains("pull_request_id must be positive"), "got: {err}");
     }
 
     #[test]
@@ -566,8 +567,9 @@ mod tests {
             line: None,
             status: "active".to_string(),
         };
-        let result: Result<AddPrCommentResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err: Result<AddPrCommentResult, _> = params.try_into();
+        let err = err.unwrap_err().to_string();
+        assert!(err.contains("content must be at least 10 characters"), "got: {err}");
     }
 
     #[test]
@@ -581,8 +583,9 @@ mod tests {
             line: None,
             status: "active".to_string(),
         };
-        let result: Result<AddPrCommentResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err: Result<AddPrCommentResult, _> = params.try_into();
+        let err = err.unwrap_err().to_string();
+        assert!(err.contains("pipeline command"), "got: {err}");
     }
 
     #[test]
@@ -626,8 +629,9 @@ mod tests {
             line: Some(10),
             status: "active".to_string(),
         };
-        let result: Result<AddPrCommentResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err: Result<AddPrCommentResult, _> = params.try_into();
+        let err = err.unwrap_err().to_string();
+        assert!(err.contains("line requires file_path"), "got: {err}");
     }
 
     #[test]
