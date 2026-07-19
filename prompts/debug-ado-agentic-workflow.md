@@ -299,7 +299,7 @@ network:
 - **Invalid engine or model**: The `engine:` field is an engine identifier (e.g., `copilot`), not a model name. To specify a model, use the object form. Check that the engine identifier is valid and the model name is correct:
   ```yaml
   # Wrong — model name as engine identifier
-  engine: claude-opus-4.5
+  engine: claude-opus-4.7
 
   # Correct — engine identifier with model
   engine:
