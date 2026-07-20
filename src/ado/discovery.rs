@@ -443,17 +443,22 @@ async fn classify_definition(
     if let Some(local_path) = local_match
         && let Some(meta) = parse_local_lock(&local_path).await
     {
-        return DiscoveredPipeline {
-            definition_id: def.id,
-            definition_name: def.name,
-            repository_url,
-            queue_status: def.queue_status,
-            markers: vec![meta],
-            status: DiscoveryStatus::Direct,
-        };
+        return make_discovered_pipeline(def, repository_url, vec![meta], DiscoveryStatus::Direct);
     }
 
-    match preview_pipeline(client, ctx, auth, def.id).await {
+    let def_id = def.id;
+    let preview_result = preview_pipeline(client, ctx, auth, def_id).await;
+    classify_preview_result(def, repository_url, preview_result)
+}
+
+/// Map a [`preview_pipeline`] result to a [`DiscoveredPipeline`], choosing
+/// the appropriate [`DiscoveryStatus`] for each outcome.
+fn classify_preview_result(
+    def: DefinitionSummary,
+    repository_url: Option<String>,
+    result: Result<String, PreviewError>,
+) -> DiscoveredPipeline {
+    match result {
         Ok(final_yaml) => {
             let markers = parse_marker_step(&final_yaml);
             let status = if markers.is_empty() {
@@ -463,31 +468,14 @@ async fn classify_definition(
             } else {
                 DiscoveryStatus::Consumer
             };
-            DiscoveredPipeline {
-                definition_id: def.id,
-                definition_name: def.name,
-                repository_url,
-                queue_status: def.queue_status,
-                markers,
-                status,
-            }
+            make_discovered_pipeline(def, repository_url, markers, status)
         }
-        Err(PreviewError::RequiredParams) => DiscoveredPipeline {
-            definition_id: def.id,
-            definition_name: def.name,
-            repository_url,
-            queue_status: def.queue_status,
-            markers: vec![],
-            status: DiscoveryStatus::UnknownRequiredParams,
-        },
-        Err(PreviewError::Forbidden) => DiscoveredPipeline {
-            definition_id: def.id,
-            definition_name: def.name,
-            repository_url,
-            queue_status: def.queue_status,
-            markers: vec![],
-            status: DiscoveryStatus::UnknownForbidden,
-        },
+        Err(PreviewError::RequiredParams) => {
+            make_discovered_pipeline(def, repository_url, vec![], DiscoveryStatus::UnknownRequiredParams)
+        }
+        Err(PreviewError::Forbidden) => {
+            make_discovered_pipeline(def, repository_url, vec![], DiscoveryStatus::UnknownForbidden)
+        }
         Err(PreviewError::NotFound) => {
             // Definition was deleted between `list_definitions` and the
             // Preview call (TOCTOU race with a concurrent delete).
@@ -498,23 +486,29 @@ async fn classify_definition(
                 "Definition {} ({}) disappeared between list and preview (404); skipping",
                 def.id, def.name
             );
-            DiscoveredPipeline {
-                definition_id: def.id,
-                definition_name: def.name,
-                repository_url,
-                queue_status: def.queue_status,
-                markers: vec![],
-                status: DiscoveryStatus::NotFound,
-            }
+            make_discovered_pipeline(def, repository_url, vec![], DiscoveryStatus::NotFound)
         }
-        Err(e) => DiscoveredPipeline {
-            definition_id: def.id,
-            definition_name: def.name,
-            repository_url,
-            queue_status: def.queue_status,
-            markers: vec![],
-            status: DiscoveryStatus::PreviewFailed(e.to_string()),
-        },
+        Err(e) => {
+            make_discovered_pipeline(def, repository_url, vec![], DiscoveryStatus::PreviewFailed(e.to_string()))
+        }
+    }
+}
+
+/// Construct a [`DiscoveredPipeline`] from a consumed [`DefinitionSummary`]
+/// plus the resolved `repository_url`, `markers`, and `status`.
+fn make_discovered_pipeline(
+    def: DefinitionSummary,
+    repository_url: Option<String>,
+    markers: Vec<MarkerMetadata>,
+    status: DiscoveryStatus,
+) -> DiscoveredPipeline {
+    DiscoveredPipeline {
+        definition_id: def.id,
+        definition_name: def.name,
+        repository_url,
+        queue_status: def.queue_status,
+        markers,
+        status,
     }
 }
 
