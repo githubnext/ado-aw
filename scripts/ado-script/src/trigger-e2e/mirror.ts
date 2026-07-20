@@ -33,6 +33,24 @@ export interface MirrorGitResult {
 
 export type MirrorGitRunner = (request: MirrorGitRequest) => Promise<MirrorGitResult>;
 
+export function mirrorGitEnv(
+  requestEnv: Record<string, string>,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...baseEnv,
+    ...requestEnv,
+    GIT_TERMINAL_PROMPT: "0",
+  };
+  // Git treats any non-empty trace value — including "0" — as enabled.
+  // Remove ambient tracing completely so bearer-bearing HTTP headers cannot
+  // enter captured stderr or displace the actionable error tail.
+  delete env.GIT_TRACE;
+  delete env.GIT_TRACE_CURL;
+  delete env.GIT_CURL_VERBOSE;
+  return env;
+}
+
 function cleanVar(raw: string | undefined): string | undefined {
   const value = raw?.trim();
   if (!value || /^\$\(.*\)$/.test(value)) return undefined;
@@ -84,14 +102,7 @@ function runGit(request: MirrorGitRequest): Promise<MirrorGitResult> {
   return new Promise((resolve, reject) => {
     const child = spawn("git", request.args, {
       cwd: request.cwd,
-      env: {
-        ...process.env,
-        ...request.env,
-        GIT_TERMINAL_PROMPT: "0",
-        GIT_TRACE: "0",
-        GIT_TRACE_CURL: "0",
-        GIT_CURL_VERBOSE: "0",
-      },
+      env: mirrorGitEnv(request.env),
     });
     let stdout = "";
     let stderr = "";
@@ -142,7 +153,7 @@ function diagnostic(result: MirrorGitResult, secret: string): string {
   if (!text) return "(no output)";
   return text.length <= MAX_DIAGNOSTIC_CHARS
     ? text
-    : `${text.slice(0, MAX_DIAGNOSTIC_CHARS)}…`;
+    : `…${text.slice(-MAX_DIAGNOSTIC_CHARS)}`;
 }
 
 async function git(

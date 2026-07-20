@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   loadMirrorSyncConfig,
+  mirrorGitEnv,
   mirrorRepoUrl,
   runMirrorSyncPreflight,
   type MirrorGitRequest,
@@ -41,6 +42,25 @@ function successRunner(calls: MirrorGitRequest[]): MirrorGitRunner {
 }
 
 describe("trigger mirror sync", () => {
+  it("removes ambient git tracing while preserving bearer auth", () => {
+    expect(
+      mirrorGitEnv(
+        { GIT_CONFIG_COUNT: "1", GIT_CONFIG_VALUE_0: "Authorization: bearer secret" },
+        {
+          PATH: "/bin",
+          GIT_TRACE: "1",
+          GIT_TRACE_CURL: "true",
+          GIT_CURL_VERBOSE: "1",
+        },
+      ),
+    ).toEqual({
+      PATH: "/bin",
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_VALUE_0: "Authorization: bearer secret",
+      GIT_TERMINAL_PROMPT: "0",
+    });
+  });
+
   it("is disabled unless explicitly opted in", async () => {
     const runner = vi.fn<MirrorGitRunner>();
     const result = await runMirrorSyncPreflight({}, () => {}, runner);
@@ -121,6 +141,27 @@ describe("trigger mirror sync", () => {
     expect(result?.ok).toBe(false);
     expect(result?.message).toContain("non-fast-forward");
     expect(calls.some((call) => call.args[0] === "ls-remote")).toBe(false);
+  });
+
+  it("reports the actionable error tail and redacts the bearer", async () => {
+    const runner: MirrorGitRunner = async (request) => {
+      if (request.args[0] === "rev-parse" && request.args[1] === "--is-shallow-repository") {
+        return { status: 0, stdout: "false\n", stderr: "" };
+      }
+      if (request.args[0] === "rev-parse") {
+        return { status: 0, stdout: `${HEAD}\n`, stderr: "" };
+      }
+      return {
+        status: 1,
+        stdout: "",
+        stderr: `${"trace noise\n".repeat(300)}Authorization: bearer secret-token\nfatal: non-fast-forward`,
+      };
+    };
+
+    const result = await runMirrorSyncPreflight(baseEnv(), () => {}, runner);
+    expect(result?.ok).toBe(false);
+    expect(result?.message).toContain("fatal: non-fast-forward");
+    expect(result?.message).not.toContain("secret-token");
   });
 
   it("fails when the verified remote SHA differs", async () => {
