@@ -173,14 +173,18 @@ In `https://dev.azure.com/msazuresphere/AgentPlayground`:
    orchestrator:
    - `TRIGGER_E2E_VICTIM_DEFINITION_ID=<victim-pipeline-id>`
    - `TRIGGER_E2E_VICTIM_REPO=ado-aw-mirror`
-5. **Grant the VICTIM build identity** Code (read) on the repo, Build (add
-   tags / edit build quality), and permission to cancel builds (gate
-   self-cancel). See [`docs/safe-output-permissions.md`](../../docs/safe-output-permissions.md)
-   if it hits 401/403.
+5. **Grant the VICTIM build identity** Code Read on `ado-aw-mirror` for
+   checkout and synth PR lookups.
 6. **Grant the principal behind `agent-playground-write`** Contribute, Create
    branch, delete refs, and Contribute to PRs on `ado-aw-mirror`, plus Queue
-   builds on the victim definition. This same principal performs mirror sync
-   and creates the transient PR context.
+   builds on the victim definition. Grant it project-level **Stop builds**:
+   current-build cancellation is checked against a build-instance token and
+   does not inherit a definition-scoped Stop permission. Authorize the
+   `agent-playground-write` service connection for both the orchestrator and
+   victim definitions. This same identity performs mirror sync, creates the
+   transient PR context, and supplies the gate's short-lived bearer.
+   See [`docs/safe-output-permissions.md`](../../docs/safe-output-permissions.md)
+   if either identity hits 401/403.
 7. **Set the GitHub PAT secret** on the orchestrator only:
    ```powershell
    ado-aw secrets set TRIGGER_E2E_GITHUB_TOKEN `
