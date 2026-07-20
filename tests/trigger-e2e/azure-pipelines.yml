@@ -33,6 +33,7 @@ variables:
   # variables are not shadowed by this block.
   EFFECTIVE_TRIGGER_E2E_VICTIM_DEFINITION_ID: $[ coalesce(variables['TRIGGER_E2E_VICTIM_DEFINITION_ID'], '') ]
   EFFECTIVE_TRIGGER_E2E_VICTIM_REPO: $[ coalesce(variables['TRIGGER_E2E_VICTIM_REPO'], '') ]
+  EFFECTIVE_TRIGGER_E2E_CONCURRENCY: $[ coalesce(variables['TRIGGER_E2E_CONCURRENCY'], '4') ]
   # GitHub repo that failure issues are filed against is intentionally NOT
   # defined here: a YAML `variables:` entry SHADOWS a same-named pipeline
   # (definition) variable. Set TRIGGER_E2E_ISSUE_REPO as a pipeline/definition
@@ -83,6 +84,7 @@ steps:
       SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)
       TRIGGER_E2E_VICTIM_DEFINITION_ID: $(EFFECTIVE_TRIGGER_E2E_VICTIM_DEFINITION_ID)
       TRIGGER_E2E_VICTIM_REPO: $(EFFECTIVE_TRIGGER_E2E_VICTIM_REPO)
+      TRIGGER_E2E_CONCURRENCY: $(EFFECTIVE_TRIGGER_E2E_CONCURRENCY)
       TRIGGER_E2E_SYNC_MIRROR: "true"
       TRIGGER_E2E_ISSUE_REPO: $(TRIGGER_E2E_ISSUE_REPO)
       # Secret PAT for filing failure issues on the configured repository.

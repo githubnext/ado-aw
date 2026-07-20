@@ -75,7 +75,7 @@ pub enum Fact {
     PrMetadata,
     /// PR draft status — extracted from PrMetadata
     PrIsDraft,
-    /// PR labels list — extracted from PrMetadata
+    /// PR labels list from the dedicated labels endpoint
     PrLabels,
 
     // ── Iteration API-derived (separate API call) ───────────────────────
@@ -106,7 +106,7 @@ impl Fact {
             // API-derived facts
             Fact::PrMetadata => &[],
             Fact::PrIsDraft => &[Fact::PrMetadata],
-            Fact::PrLabels => &[Fact::PrMetadata],
+            Fact::PrLabels => &[],
 
             // Iteration API
             Fact::ChangedFiles => &[],
@@ -1689,7 +1689,7 @@ mod tests {
     #[test]
     fn test_api_derived_facts_have_dependencies() {
         assert_eq!(Fact::PrIsDraft.dependencies(), &[Fact::PrMetadata]);
-        assert_eq!(Fact::PrLabels.dependencies(), &[Fact::PrMetadata]);
+        assert!(Fact::PrLabels.dependencies().is_empty());
         // Iteration API: ChangedFileCount depends on ChangedFiles
         assert_eq!(Fact::ChangedFileCount.dependencies(), &[Fact::ChangedFiles]);
     }
@@ -2176,10 +2176,13 @@ mod tests {
         assert_eq!(spec.context.tag_prefix, "pr-gate");
         assert_eq!(spec.context.step_name, "prGate");
         assert_eq!(spec.context.bypass_label, "PR");
-        // Facts should include pr_title, pr_metadata (dep of pr_labels), pr_labels
-        assert_eq!(spec.facts.len(), 3, "exactly 3 facts required for title + labels checks");
+        // Labels use their dedicated endpoint and no longer require PR metadata.
+        assert_eq!(
+            spec.facts.len(),
+            2,
+            "exactly 2 facts required for title + labels checks"
+        );
         assert!(spec.facts.iter().any(|f| f.kind == "pr_title"));
-        assert!(spec.facts.iter().any(|f| f.kind == "pr_metadata"));
         assert!(spec.facts.iter().any(|f| f.kind == "pr_labels"));
         // Checks
         assert_eq!(spec.checks.len(), 2);

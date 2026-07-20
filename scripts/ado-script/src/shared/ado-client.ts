@@ -172,6 +172,17 @@ export async function getPullRequestById(
   });
 }
 
+export async function getPullRequestLabels(
+  project: string,
+  repoId: string,
+  prId: number,
+): Promise<Array<{ name?: string }>> {
+  return withRetry("getPullRequestLabels", async () => {
+    const git = await (await getWebApi()).getGitApi();
+    return (await git.getPullRequestLabels(repoId, prId, project)) ?? [];
+  });
+}
+
 /**
  * Lists active pull requests whose `sourceRefName` matches the given
  * value. Used by `exec-context-pr-synth` to discover the open PR for

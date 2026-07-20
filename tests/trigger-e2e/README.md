@@ -109,6 +109,18 @@ the suite before any victim build is queued. No force push is used. When
 `TRIGGER_E2E_VICTIM_REPO` is unset, synchronization is skipped and the
 existing bypass-only baseline still runs.
 
+## Scenario concurrency
+
+Scenarios run with bounded concurrency rather than waiting for every victim
+pipeline to finish before queueing the next one. The default is **4**
+concurrent scenarios, which substantially reduces queue-bound wall time while
+leaving capacity in the 16-agent pool for other validations.
+
+Set `TRIGGER_E2E_CONCURRENCY` on the orchestrator definition to an integer from
+`1` through `8` to tune it. Results remain in declaration order, and each
+scenario still owns its unique branch, PR, victim build, assertion, and
+unconditional cleanup.
+
 ## Running locally
 
 You need a write-capable ADO token (PAT) and a registered victim pipeline id:
@@ -125,6 +137,7 @@ export TRIGGER_E2E_VICTIM_REPO="<ADO Git repo backing the victim's self>"
 # export TRIGGER_E2E_GITHUB_TOKEN="<fine-grained PAT: Issues rw on jamesadevine/ado-aw-issues>"
 # export TRIGGER_E2E_ISSUE_REPO="jamesadevine/ado-aw-issues"
 # export TRIGGER_E2E_SYNC_MIRROR="true" # requires a full main checkout
+# export TRIGGER_E2E_CONCURRENCY=4       # 1..8, default 4
 # export TRIGGER_E2E_BUILD_TIMEOUT_MS=900000   # per victim build (default 900000)
 # export TRIGGER_E2E_BUILD_POLL_MS=10000       # poll interval (default 10000)
 

@@ -7,6 +7,7 @@ const { mockGitApi, mockBuildApi, mockWebApi, mockGetWebApi } = vi.hoisted(() =>
     getBranch: vi.fn(),
     getCommitDiffs: vi.fn(),
     getPullRequestById: vi.fn(),
+    getPullRequestLabels: vi.fn(),
     getPullRequestIterations: vi.fn(),
     getPullRequestIterationChanges: vi.fn(),
   };
@@ -29,6 +30,7 @@ vi.mock("../auth.js", () => ({
 import {
   getCommitDiffMetadata,
   getPullRequestById,
+  getPullRequestLabels,
   getPullRequestIterations,
   getIterationChanges,
   cancelBuild,
@@ -40,6 +42,7 @@ describe("ado-client", () => {
     mockGitApi.getBranch.mockReset();
     mockGitApi.getCommitDiffs.mockReset();
     mockGitApi.getPullRequestById.mockReset();
+    mockGitApi.getPullRequestLabels.mockReset();
     mockGitApi.getPullRequestIterations.mockReset();
     mockGitApi.getPullRequestIterationChanges.mockReset();
     mockBuildApi.updateBuild.mockReset();
@@ -55,6 +58,21 @@ describe("ado-client", () => {
     const result = await getPullRequestById("p", "r", 42);
     expect(mockGitApi.getPullRequestById).toHaveBeenCalledWith(42, "p");
     expect(result).toEqual({ pullRequestId: 42 });
+  });
+
+  it("getPullRequestLabels calls the dedicated labels endpoint", async () => {
+    mockGitApi.getPullRequestLabels.mockResolvedValue([
+      { name: "run-agent" },
+      { name: "security" },
+    ]);
+    const result = await getPullRequestLabels("p", "r", 42);
+    expect(mockGitApi.getPullRequestLabels).toHaveBeenCalledWith("r", 42, "p");
+    expect(result).toEqual([{ name: "run-agent" }, { name: "security" }]);
+  });
+
+  it("getPullRequestLabels normalizes an empty SDK response", async () => {
+    mockGitApi.getPullRequestLabels.mockResolvedValue(null);
+    await expect(getPullRequestLabels("p", "r", 42)).resolves.toEqual([]);
   });
 
   it("getCommitDiffMetadata pins the target branch tip and orients the diff correctly", async () => {

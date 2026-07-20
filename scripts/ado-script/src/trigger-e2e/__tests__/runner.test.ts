@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { AdoRest } from "../../executor-e2e/ado-rest.js";
-import { runScenario } from "../runner.js";
+import { runAll, runScenario, scenarioConcurrency } from "../runner.js";
 import { SkipError } from "../scenario.js";
 import type { TriggerContext, TriggerScenario } from "../scenario.js";
 
@@ -140,5 +140,73 @@ describe("runScenario", () => {
     const res = await runScenario(ctx, scenario({ expected: () => ({ result: "succeeded" }) }));
     expect(res.ok).toBe(true);
     expect(rest.cancelBuild).not.toHaveBeenCalled();
+  });
+});
+
+describe("scenarioConcurrency", () => {
+  it("defaults to four, including for an unexpanded ADO macro", () => {
+    expect(scenarioConcurrency({})).toBe(4);
+    expect(scenarioConcurrency({ TRIGGER_E2E_CONCURRENCY: "$(TRIGGER_E2E_CONCURRENCY)" })).toBe(4);
+  });
+
+  it("accepts an explicit bounded integer", () => {
+    expect(scenarioConcurrency({ TRIGGER_E2E_CONCURRENCY: "6" })).toBe(6);
+  });
+
+  it.each(["0", "9", "1.5", "many"])("rejects invalid value %s", (value) => {
+    expect(() => scenarioConcurrency({ TRIGGER_E2E_CONCURRENCY: value })).toThrow(
+      "TRIGGER_E2E_CONCURRENCY",
+    );
+  });
+});
+
+describe("runAll", () => {
+  it("runs scenarios concurrently while preserving declaration order", async () => {
+    const { ctx } = makeCtx({ result: "succeeded" });
+    let active = 0;
+    let maxActive = 0;
+
+    const delayed = (id: string, delayMs: number): TriggerScenario<string> =>
+      scenario({
+        id,
+        setup: async () => {
+          active += 1;
+          maxActive = Math.max(maxActive, active);
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+          active -= 1;
+          return id;
+        },
+      });
+
+    const results = await runAll(
+      ctx,
+      [delayed("first", 30), delayed("second", 5), delayed("third", 5)],
+      2,
+    );
+
+    expect(maxActive).toBe(2);
+    expect(results.map((result) => result.id)).toEqual(["first", "second", "third"]);
+    expect(results.every((result) => result.ok)).toBe(true);
+  });
+
+  it("never exceeds the requested concurrency", async () => {
+    const { ctx } = makeCtx({ result: "succeeded" });
+    let active = 0;
+    let maxActive = 0;
+    const scenarios = Array.from({ length: 7 }, (_, index) =>
+      scenario({
+        id: `s-${index}`,
+        setup: async () => {
+          active += 1;
+          maxActive = Math.max(maxActive, active);
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          active -= 1;
+          return "state";
+        },
+      }),
+    );
+
+    await runAll(ctx, scenarios, 3);
+    expect(maxActive).toBe(3);
   });
 });

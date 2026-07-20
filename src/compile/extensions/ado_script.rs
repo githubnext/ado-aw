@@ -2378,7 +2378,7 @@ mod tests {
 
         // Three checks together cover the three identifiers that
         // read from the synth-emitted `AW_PR_*` variables:
-        //   - LabelSetMatch (PrLabels → PrMetadata) → ADO_PR_ID
+        //   - LabelSetMatch (PrLabels) → ADO_PR_ID
         //   - SourceBranch fact → ADO_SOURCE_BRANCH
         //   - TargetBranch fact → ADO_TARGET_BRANCH
         let checks = vec![

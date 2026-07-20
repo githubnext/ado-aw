@@ -7,7 +7,6 @@ import type { FactSpec } from "../types.gen.js";
 // the call sites (matches how the compiler emits it in production).
 const DEFAULT_DEPS: Record<string, readonly string[]> = {
   pr_is_draft: ["pr_metadata"],
-  pr_labels: ["pr_metadata"],
   changed_file_count: ["changed_files"],
 };
 
@@ -57,15 +56,13 @@ describe("PolicyTracker", () => {
     expect(t.verdictForMissingFacts(["pr_is_draft"])).toBe("skip");
   });
 
-  it("transitive skip: pr_metadata fails skip_dependents → pr_labels skipped", () => {
+  it("pr_metadata failure does not suppress independent pr_labels", () => {
     const t = new PolicyTracker([
       spec("pr_metadata", "skip_dependents"),
       spec("pr_labels", "fail_open"),
     ]);
     t.recordFactFailure("pr_metadata", "API error");
-    // Even though pr_labels is fail_open, the *skip* propagates because
-    // its dep failed with skip_dependents. The skip dominates.
-    expect(t.verdictForMissingFacts(["pr_labels"])).toBe("skip");
+    expect(t.verdictForMissingFacts(["pr_labels"])).toBe("evaluate");
   });
 
   it("transitive skip: changed_files fails skip_dependents → changed_file_count skipped", () => {
