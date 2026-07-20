@@ -67,10 +67,12 @@ async function acquireOne(
       return md.isDraft ? "true" : "false";
     }
     case "pr_labels": {
-      const md = facts.get("pr_metadata") as
-        | { labels?: { name?: string }[] }
-        | undefined;
-      const labels = md?.labels ?? [];
+      requireAdoCtx(ctx, "pr_labels");
+      const labels = await adoClient.getPullRequestLabels(
+        ctx.project,
+        ctx.repoId,
+        ctx.prId,
+      );
       return labels.map((l) => l.name ?? "");
     }
     case "changed_files": {

@@ -96,8 +96,8 @@ jobs:
           # Classify the synth outcome from the same-job vars synth setVar's.
           # AW_PR_ID is always set (empty on skip); AW_SYNTHETIC_PR is only set
           # to "true" on promotion (else left as the literal macro).
-          SYN="$(AW_SYNTHETIC_PR)"
-          PRID="$(AW_PR_ID)"
+          SYN="${AW_SYNTHETIC_PR}"
+          PRID="${AW_PR_ID}"
           case "$SYN" in '$('*) SYN="" ;; esac
           case "$PRID" in '$('*) PRID="" ;; esac
           if [ "$SYN" = "true" ]; then
@@ -110,6 +110,12 @@ jobs:
           echo "synth state: ${STATE} (AW_PR_ID='${PRID}' AW_SYNTHETIC_PR='${SYN}')"
           echo "##vso[build.addbuildtag]trig.synth.${STATE}"
         displayName: Tag synth outcome
+        env:
+          # Map ADO macros into environment values instead of embedding them
+          # in Bash command substitutions. Undefined macros remain literal
+          # `$(NAME)` strings and are normalized by the case guards above.
+          AW_SYNTHETIC_PR: $(AW_SYNTHETIC_PR)
+          AW_PR_ID: $(AW_PR_ID)
 
       - script: |
           set -euo pipefail

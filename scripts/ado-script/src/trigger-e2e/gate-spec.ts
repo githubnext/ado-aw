@@ -62,7 +62,7 @@ const FACT_META: ReadonlyMap<string, FactMeta> = new Map<string, FactMeta>([
   ["triggering_branch", { policy: "fail_closed", deps: [] }],
   ["pr_metadata", { policy: "skip_dependents", deps: [] }],
   ["pr_is_draft", { policy: "fail_closed", deps: ["pr_metadata"] }],
-  ["pr_labels", { policy: "fail_open", deps: ["pr_metadata"] }],
+  ["pr_labels", { policy: "fail_open", deps: [] }],
   ["changed_files", { policy: "fail_open", deps: [] }],
   ["changed_file_count", { policy: "fail_open", deps: ["changed_files"] }],
   ["current_utc_minutes", { policy: "fail_closed", deps: [] }],
