@@ -329,8 +329,7 @@ describe("prepare-pr-base.js smoke", () => {
       // exactly the shallow-default ADO SafeOutputs-job checkout in #1453.
       const target = "develop";
 
-      // 1. A "remote" repo: default branch `main`, plus `develop` one commit
-      //    ahead of it. HEAD is left on main (the default branch).
+      // 1. A "remote" repo with genuinely divergent source/target histories.
       const originDir = resolve(dir, "origin");
       mkdirSync(originDir, { recursive: true });
       runGitInRepo(originDir, ["init", "-q", "-b", "main"]);
@@ -342,6 +341,14 @@ describe("prepare-pr-base.js smoke", () => {
       runGitInRepo(originDir, ["add", "-A"]);
       runGitInRepo(originDir, ["commit", "-q", "-m", "develop commit"]);
       runGitInRepo(originDir, ["checkout", "-q", "main"]);
+      writeFileSync(resolve(originDir, "main.txt"), "main\n", "utf8");
+      runGitInRepo(originDir, ["add", "-A"]);
+      runGitInRepo(originDir, ["commit", "-q", "-m", "main commit"]);
+      const expectedBase = spawnSync(
+        "git",
+        ["merge-base", "main", target],
+        { cwd: originDir, encoding: "utf8" },
+      ).stdout.trim();
 
       // 2. SHALLOW single-branch clone of `main` only. A `file://` URL (not a
       //    bare path) forces the transport that honours `--depth`, so the clone
@@ -379,7 +386,17 @@ describe("prepare-pr-base.js smoke", () => {
       //    local `file://` remote needs no auth, so SYSTEM_ACCESSTOKEN is empty.
       const prep = spawnSync(
         process.execPath,
-        [preparePrBaseBundlePath, "--repo-dir", checkout, "--target-branch", target],
+        [
+          preparePrBaseBundlePath,
+          "--mode",
+          "patch-base",
+          "--repo-dir",
+          checkout,
+          "--source-ref",
+          "refs/heads/main",
+          "--target-branch",
+          target,
+        ],
         { env: { ...process.env, SYSTEM_ACCESSTOKEN: "" }, encoding: "utf8" },
       );
       expect(prep.status).toBe(0);
@@ -396,6 +413,12 @@ describe("prepare-pr-base.js smoke", () => {
         { cwd: checkout, encoding: "utf8" },
       ).stdout.trim();
       expect(originHead).toBe(`refs/remotes/origin/${target}`);
+      const actualBase = spawnSync(
+        "git",
+        ["merge-base", "HEAD", `origin/${target}`],
+        { cwd: checkout, encoding: "utf8" },
+      ).stdout.trim();
+      expect(actualBase).toBe(expectedBase);
 
       // 6. The executor's exact worktree operation now SUCCEEDS, checked out at
       //    the target branch's tip.

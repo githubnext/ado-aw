@@ -4,6 +4,8 @@ import { BuildStatus } from "azure-devops-node-api/interfaces/BuildInterfaces.js
 // Mock the auth module before importing ado-client
 const { mockGitApi, mockBuildApi, mockWebApi, mockGetWebApi } = vi.hoisted(() => {
   const mockGitApi = {
+    getBranch: vi.fn(),
+    getCommitDiffs: vi.fn(),
     getPullRequestById: vi.fn(),
     getPullRequestIterations: vi.fn(),
     getPullRequestIterationChanges: vi.fn(),
@@ -25,6 +27,7 @@ vi.mock("../auth.js", () => ({
 }));
 
 import {
+  getCommitDiffMetadata,
   getPullRequestById,
   getPullRequestIterations,
   getIterationChanges,
@@ -34,6 +37,8 @@ import {
 
 describe("ado-client", () => {
   beforeEach(() => {
+    mockGitApi.getBranch.mockReset();
+    mockGitApi.getCommitDiffs.mockReset();
     mockGitApi.getPullRequestById.mockReset();
     mockGitApi.getPullRequestIterations.mockReset();
     mockGitApi.getPullRequestIterationChanges.mockReset();
@@ -50,6 +55,49 @@ describe("ado-client", () => {
     const result = await getPullRequestById("p", "r", 42);
     expect(mockGitApi.getPullRequestById).toHaveBeenCalledWith(42, "p");
     expect(result).toEqual({ pullRequestId: 42 });
+  });
+
+  it("getCommitDiffMetadata pins the target branch tip and orients the diff correctly", async () => {
+    const source = "a".repeat(40);
+    const target = "b".repeat(40);
+    const common = "c".repeat(40);
+    mockGitApi.getBranch.mockResolvedValue({ commit: { commitId: target } });
+    mockGitApi.getCommitDiffs.mockResolvedValue({
+      commonCommit: common,
+      aheadCount: 7,
+      behindCount: 5,
+    });
+
+    const result = await getCommitDiffMetadata("project", "repo", "release/2.x", source);
+    expect(mockGitApi.getBranch).toHaveBeenCalledWith("repo", "release/2.x", "project");
+    expect(mockGitApi.getCommitDiffs).toHaveBeenCalledWith(
+      "repo",
+      "project",
+      true,
+      1,
+      0,
+      expect.objectContaining({ version: target }),
+      expect.objectContaining({ version: source }),
+    );
+    expect(result).toEqual({
+      commonCommit: common,
+      aheadCount: 7,
+      behindCount: 5,
+      sourceCommit: source,
+      targetCommit: target,
+    });
+  });
+
+  it("getCommitDiffMetadata rejects incomplete or invalid metadata", async () => {
+    mockGitApi.getBranch.mockResolvedValue({ commit: { commitId: "b".repeat(40) } });
+    mockGitApi.getCommitDiffs.mockResolvedValue({
+      commonCommit: "not-a-sha",
+      aheadCount: -1,
+      behindCount: 0,
+    });
+    await expect(
+      getCommitDiffMetadata("project", "repo", "main", "a".repeat(40)),
+    ).rejects.toThrow(/commonCommit/);
   });
 
   it("getPullRequestIterations calls SDK with (repoId, prId, project)", async () => {

@@ -3,6 +3,7 @@ export * as vso from "./vso-logger.js";
 export * as envFacts from "./env-facts.js";
 export * as policy from "./policy.js";
 export * as adoClient from "./ado-client.js";
+export * as adoRemote from "./ado-remote.js";
 // Promoted from exec-context-pr/ during Stage 0 of the contributor
 // build-out so upcoming contributors (`pipeline`, `ci-push`,
 // `workitem`, ...) can reuse them without fragmenting the workspace

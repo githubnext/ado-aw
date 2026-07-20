@@ -360,11 +360,12 @@ The bundle:
    --parents HEAD` (ADO's synthetic merge commit for PR builds), uses `HEAD^2` as
    the PR head and computes `git merge-base HEAD^1 HEAD^2`. If a shallow
    checkout lacks enough ancestry, it fetches both target and source refs with
-   progressive deepening and retries; unresolved ancestry fails closed.
+   bounded deepening and retries; unresolved ancestry fails closed.
 
-4. **Otherwise fetches the PR target branch** with progressive deepening: `--depth=200`,
-   `500`, `2000`, then `--unshallow`. After each fetch, attempts `git merge-base
-   origin/<target> HEAD` and proceeds to the next depth if it cannot resolve yet.
+4. **Otherwise fetches source and target together** at bounded depths
+   `--depth=200`, `500`, and `2000`. After each fetch, attempts
+   `git merge-base origin/<target> HEAD` and proceeds to the next depth if it
+   cannot resolve yet. It never automatically unshallows the repository.
 
 5. **Writes `base.sha` and `head.sha`** on success and appends the success prompt
    fragment to `/tmp/awf-tools/agent-prompt.md`.
@@ -405,7 +406,7 @@ bearer. `ado-aw` preserves the Stage 1 read-only invariant:
 | Mechanism | Decision |
 |-----------|----------|
 | Override `checkout: self` with `persistCredentials: true` | **Rejected.** Writes the bearer into `.git/config` inside the workspace, which is then mounted into the AWF sandbox. |
-| Override `checkout: self` with `fetchDepth: 0` | **Rejected.** Unnecessary — the precompute fetches exactly the refs it needs. |
+| Override `checkout: self` with `fetchDepth: 0` | **Not automatic.** Authors may opt into explicit full history, but it can be expensive; the precompute normally uses bounded source/target fetches. |
 | In-step `SYSTEM_ACCESSTOKEN` + `GIT_CONFIG_*` bearer env | **Adopted.** The token is mapped only into the `exec-context-pr.js` step's `env:` block. The bundle's `git.ts::bearerEnv` injects `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_0` / `GIT_CONFIG_VALUE_0` into the *spawned `git` child's* env only — never into the Node process's global `process.env`, never via `git -c` on argv. After the Node process exits, the bearer is gone. |
 
 The compile-time test `test_execution_context_pr_does_not_leak_system_accesstoken`

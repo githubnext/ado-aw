@@ -1830,9 +1830,9 @@ pub struct RepoEntry {
     #[serde(default = "default_checkout")]
     pub checkout: bool,
     /// Shallow-clone depth for this repository's checkout step. Maps to ADO
-    /// `fetchDepth`. `0` means full history (no `fetchDepth` emitted). When
-    /// omitted, the ADO default applies. Also settable on a reserved `self`
-    /// entry to tune the auto-generated `checkout: self`.
+    /// `fetchDepth`. `0` explicitly disables shallow fetch. When omitted, the
+    /// ADO pipeline setting applies. Also settable on a reserved `self` entry
+    /// to tune the auto-generated `checkout: self`.
     #[serde(default, rename = "fetch-depth")]
     pub fetch_depth: Option<u32>,
     /// Whether to fetch git tags during this repository's checkout step. Maps
@@ -1871,10 +1871,11 @@ impl CheckoutFetchOpts {
         self.fetch_depth.is_none() && self.fetch_tags.is_none()
     }
 
-    /// The `fetchDepth` value to emit: `Some(0)` (full history) collapses to
-    /// `None` so no `fetchDepth` key is written.
+    /// The `fetchDepth` value to emit. `Some(0)` must remain explicit because
+    /// Azure DevOps interprets omission as "use the pipeline setting", which
+    /// may still be a shallow checkout.
     pub fn depth_for_emit(&self) -> Option<u32> {
-        self.fetch_depth.filter(|d| *d != 0)
+        self.fetch_depth
     }
 }
 

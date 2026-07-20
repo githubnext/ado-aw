@@ -1,0 +1,252 @@
+# Azure-native regression coverage for prepare-pr-base.
+#
+# GitHub Actions validates the TypeScript and local Git algorithm. This lane
+# validates the boundary GitHub Actions cannot model: Azure Pipelines checkout
+# semantics, Azure Repos resource auth, predefined variables, and
+# $(System.AccessToken).
+
+trigger: none
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - src/compile/agentic_pipeline.rs
+      - src/compile/extensions/ado_script.rs
+      - src/compile/types.rs
+      - src/compile/ir/lower.rs
+      - scripts/ado-script/package.json
+      - scripts/ado-script/package-lock.json
+      - scripts/ado-script/src/prepare-pr-base/**
+      - scripts/ado-script/src/shared/ado-client.ts
+      - scripts/ado-script/src/shared/ado-remote.ts
+      - scripts/ado-script/src/shared/auth.ts
+      - scripts/ado-script/src/shared/git.ts
+      - scripts/ado-script/src/shared/merge-base.ts
+      - tests/ado-script-e2e/**
+
+schedules:
+  - cron: "0 7 * * *"
+    displayName: Daily Azure checkout regression
+    branches:
+      include:
+        - main
+    always: true
+
+resources:
+  repositories:
+    - repository: restFixture
+      type: git
+      name: ado-aw-e2e-fixture
+      ref: refs/heads/e2e/rest-source
+    - repository: fallbackFixture
+      type: git
+      name: ado-aw-e2e-fixture
+      ref: refs/heads/e2e/fallback-source
+
+pool:
+  vmImage: ubuntu-22.04
+
+variables:
+  REST_BASE: 52cfa195595a85eedc7ad405575bd92be93fb0e3
+  REST_SOURCE: 6dbbbb7581e24838d724df106795b26c2049d4d1
+  REST_TARGET: 8fdffd1069b273d8f089ad5afa82b53a55a8a609
+  FALLBACK_BASE: 52cfa195595a85eedc7ad405575bd92be93fb0e3
+
+jobs:
+  - job: BuildCandidate
+    displayName: Build candidate bundle
+    steps:
+      - checkout: self
+        fetchDepth: 1
+        fetchTags: false
+        path: s/ado-aw
+
+      - task: UseNode@1
+        inputs:
+          version: "20.x"
+        displayName: Use Node.js 20
+
+      - script: |
+          set -euo pipefail
+          npm ci
+          npm run build:prepare-pr-base
+          mkdir -p "$(Build.ArtifactStagingDirectory)/candidate"
+          cp prepare-pr-base.js "$(Build.ArtifactStagingDirectory)/candidate/"
+        workingDirectory: $(Pipeline.Workspace)/s/ado-aw/scripts/ado-script
+        displayName: Build prepare-pr-base.js
+
+      - publish: $(Build.ArtifactStagingDirectory)/candidate
+        artifact: candidate-bundle
+        displayName: Publish candidate bundle
+
+  - job: ExplicitFullHistory
+    displayName: Verify fetchDepth zero contract
+    dependsOn: BuildCandidate
+    steps:
+      - checkout: restFixture
+        fetchDepth: 0
+        fetchTags: false
+        path: s/fixture-full
+
+      - download: current
+        artifact: candidate-bundle
+
+      - task: UseNode@1
+        inputs:
+          version: "20.x"
+        displayName: Use Node.js 20
+
+      - script: |
+          set -euo pipefail
+          REPO="$(Pipeline.Workspace)/s/fixture-full"
+          BUNDLE="$(Pipeline.Workspace)/candidate-bundle/prepare-pr-base.js"
+          cd "$REPO"
+          test "$(git rev-parse --is-shallow-repository)" = "false"
+          test "$(git rev-list --count HEAD)" = "2106"
+
+          node "$BUNDLE" \
+            --mode patch-base \
+            --repo-dir "$REPO" \
+            --source-ref refs/heads/e2e/rest-source \
+            --target-branch e2e/rest-target
+          test "$(git rev-parse --is-shallow-repository)" = "false"
+          test "$(git merge-base HEAD origin/e2e/rest-target)" = "$(REST_BASE)"
+
+          node "$BUNDLE" \
+            --mode target-worktree \
+            --repo-dir "$REPO" \
+            --target-branch e2e/rest-target
+          test "$(git rev-parse --is-shallow-repository)" = "false"
+        displayName: Assert explicit full history remains complete
+        env:
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+  - job: RestGuidedShallow
+    displayName: Resolve deep divergence via ADO metadata
+    dependsOn: BuildCandidate
+    steps:
+      - checkout: restFixture
+        fetchDepth: 1
+        fetchTags: false
+        path: s/fixture-rest
+
+      - download: current
+        artifact: candidate-bundle
+
+      - task: UseNode@1
+        inputs:
+          version: "20.x"
+        displayName: Use Node.js 20
+
+      - script: |
+          set -euo pipefail
+          REPO="$(Pipeline.Workspace)/s/fixture-rest"
+          BUNDLE="$(Pipeline.Workspace)/candidate-bundle/prepare-pr-base.js"
+          BASE="$(REST_BASE)"
+          cd "$REPO"
+
+          test "$(git rev-parse HEAD)" = "$(REST_SOURCE)"
+          test "$(git rev-parse --is-shallow-repository)" = "true"
+          if git merge-base HEAD origin/e2e/rest-target >/dev/null 2>&1; then
+            echo "Fixture precondition failed: merge-base already resolves."
+            exit 1
+          fi
+
+          OUTPUT="$(node "$BUNDLE" \
+            --mode patch-base \
+            --repo-dir "$REPO" \
+            --source-ref refs/heads/e2e/rest-source \
+            --target-branch e2e/rest-target)"
+          printf '%s\n' "$OUTPUT"
+
+          echo "$OUTPUT" | grep -F "via ado-rest"
+          echo "$OUTPUT" | grep -F "ahead=2105, behind=2105"
+          test "$(git rev-parse origin/e2e/rest-target)" = "$(REST_TARGET)"
+          test "$(git merge-base HEAD origin/e2e/rest-target)" = "$BASE"
+          test "$(git rev-parse --is-shallow-repository)" = "true"
+          test "$(git rev-list --count "$BASE..HEAD")" = "2105"
+          test "$(git rev-list --count "$BASE..origin/e2e/rest-target")" = "2105"
+        displayName: Run REST-guided shallow recovery
+        env:
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+  - job: BoundedFallbackShallow
+    displayName: Resolve short divergence without REST
+    dependsOn: BuildCandidate
+    steps:
+      - checkout: fallbackFixture
+        fetchDepth: 1
+        fetchTags: false
+        path: s/fixture-fallback
+
+      - download: current
+        artifact: candidate-bundle
+
+      - task: UseNode@1
+        inputs:
+          version: "20.x"
+        displayName: Use Node.js 20
+
+      - script: |
+          set -euo pipefail
+          REPO="$(Pipeline.Workspace)/s/fixture-fallback"
+          BUNDLE="$(Pipeline.Workspace)/candidate-bundle/prepare-pr-base.js"
+          cd "$REPO"
+
+          test "$(git rev-parse --is-shallow-repository)" = "true"
+          OUTPUT="$(node "$BUNDLE" \
+            --mode patch-base \
+            --repo-dir "$REPO" \
+            --source-ref refs/heads/e2e/fallback-source \
+            --target-branch e2e/fallback-target)"
+          printf '%s\n' "$OUTPUT"
+
+          echo "$OUTPUT" | grep -F "via bounded git fetch"
+          test "$(git merge-base HEAD origin/e2e/fallback-target)" = "$(FALLBACK_BASE)"
+        displayName: Run bounded git fallback
+        env:
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          ADO_AW_PREPARE_PR_BASE_DISABLE_REST: "1"
+
+  - job: TargetWorktreeShallow
+    displayName: Fetch only the SafeOutputs target tip
+    dependsOn: BuildCandidate
+    steps:
+      - checkout: restFixture
+        fetchDepth: 1
+        fetchTags: false
+        path: s/fixture-target
+
+      - download: current
+        artifact: candidate-bundle
+
+      - task: UseNode@1
+        inputs:
+          version: "20.x"
+        displayName: Use Node.js 20
+
+      - script: |
+          set -euo pipefail
+          REPO="$(Pipeline.Workspace)/s/fixture-target"
+          BUNDLE="$(Pipeline.Workspace)/candidate-bundle/prepare-pr-base.js"
+          cd "$REPO"
+
+          OUTPUT="$(node "$BUNDLE" \
+            --mode target-worktree \
+            --repo-dir "$REPO" \
+            --target-branch e2e/rest-target)"
+          printf '%s\n' "$OUTPUT"
+
+          echo "$OUTPUT" | grep -F "target tip ready"
+          test "$(git rev-parse origin/e2e/rest-target)" = "$(REST_TARGET)"
+          test "$(git rev-parse --is-shallow-repository)" = "true"
+          if git merge-base HEAD origin/e2e/rest-target >/dev/null 2>&1; then
+            echo "target-worktree fetched source history unexpectedly."
+            exit 1
+          fi
+        displayName: Run target-worktree preparation
+        env:
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)

@@ -2894,6 +2894,21 @@ mod tests {
     }
 
     #[test]
+    fn lower_checkout_emits_zero_fetch_depth_explicitly() {
+        let c = CheckoutStep {
+            repository: CheckoutRepo::Self_,
+            clean: None,
+            submodules: None,
+            fetch_depth: Some(0),
+            fetch_tags: None,
+            persist_credentials: None,
+        };
+        let v = lower_checkout(&c);
+        let m = v.as_mapping().unwrap();
+        assert_eq!(m.get(s("fetchDepth")).unwrap(), &Value::from(0u32));
+    }
+
+    #[test]
     fn lower_checkout_omits_fetch_keys_when_none() {
         let c = CheckoutStep {
             repository: CheckoutRepo::Self_,
