@@ -20,6 +20,7 @@
  *   - TRIGGER_E2E_GITHUB_TOKEN — scoped PAT for issue filing
  *   - TRIGGER_E2E_ISSUE_REPO — GitHub repo for issues (default githubnext/ado-aw)
  *   - TRIGGER_E2E_BUILD_TIMEOUT_MS / TRIGGER_E2E_BUILD_POLL_MS — poll tuning
+ *   - TRIGGER_E2E_CONCURRENCY — concurrent scenarios (default 4, max 8)
  *
  * Test-harness module; not shipped in `ado-script.zip`.
  */

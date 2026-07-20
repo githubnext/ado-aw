@@ -1,10 +1,10 @@
 /**
  * Scenario runner for the trigger-condition E2E harness.
  *
- * Runs scenarios sequentially (deterministic ordering; queuing many victim
- * builds in parallel would contend for the agent pool). Each scenario is fully
- * isolated: a failure or skip never prevents later scenarios from running, and
- * cleanup always runs once `setup` succeeded.
+ * Runs isolated scenarios with bounded concurrency. Results retain declaration
+ * order even though setup, victim builds, assertions, and cleanup overlap.
+ * A failure or skip never prevents later scenarios from running, and cleanup
+ * always runs once `setup` succeeded.
  *
  * Test-harness module; not shipped in `ado-script.zip`.
  */
@@ -18,8 +18,25 @@ import type {
   TriggerScenario,
 } from "./scenario.js";
 
+const DEFAULT_SCENARIO_CONCURRENCY = 4;
+const MAX_SCENARIO_CONCURRENCY = 8;
+
 function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/** Resolve the bounded victim-build concurrency for this harness run. */
+export function scenarioConcurrency(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.TRIGGER_E2E_CONCURRENCY?.trim();
+  if (!raw || /^\$\(.*\)$/.test(raw)) return DEFAULT_SCENARIO_CONCURRENCY;
+
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > MAX_SCENARIO_CONCURRENCY) {
+    throw new Error(
+      `TRIGGER_E2E_CONCURRENCY must be an integer from 1 to ${MAX_SCENARIO_CONCURRENCY} (got '${raw}')`,
+    );
+  }
+  return parsed;
 }
 
 /** Default declarative assertion: build result + required/forbidden tags. */
@@ -127,10 +144,30 @@ export async function runScenario<S>(
 export async function runAll(
   ctx: TriggerContext,
   scenarios: TriggerScenario<unknown>[],
+  concurrency = scenarioConcurrency(),
 ): Promise<ScenarioResult[]> {
-  const results: ScenarioResult[] = [];
-  for (const scenario of scenarios) {
-    results.push(await runScenario(ctx, scenario));
+  if (scenarios.length === 0) return [];
+
+  const workerCount = Math.min(concurrency, scenarios.length);
+  const results = new Array<ScenarioResult>(scenarios.length);
+  let nextIndex = 0;
+
+  ctx.log(
+    `Running ${scenarios.length} trigger scenarios with concurrency ${workerCount}`,
+  );
+
+  const worker = async (): Promise<void> => {
+    while (true) {
+      const index = nextIndex++;
+      if (index >= scenarios.length) return;
+      results[index] = await runScenario(ctx, scenarios[index]!);
+    }
+  };
+
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+  if (results.some((result) => result === undefined)) {
+    throw new Error("trigger scenario worker completed without recording every result");
   }
   return results;
 }
