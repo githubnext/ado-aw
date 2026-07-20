@@ -1,6 +1,6 @@
 ---
 name: "ado-aw smoke failure reporter"
-description: "Files [smoke-failure] issues on githubnext/ado-aw for failed daily smoke pipelines"
+description: "Files [smoke-failure] issues on jamesadevine/ado-aw-issues for failed daily smoke pipelines"
 on:
   schedule: daily around 04:30
 target: standalone
@@ -15,7 +15,7 @@ permissions:
   write: agent-playground-write
 ado-aw-debug:
   create-issue:
-    target-repo: githubnext/ado-aw
+    target-repo: jamesadevine/ado-aw-issues
     title-prefix: "[smoke-failure] "
     labels:
       - pipeline-failure
@@ -33,8 +33,8 @@ suite running in the AgentPlayground ADO project.
 
 Query only these two pipelines (matched by exact `definition.name`):
 
-- `Daily safe-output smoke: canary`
-- `Daily smoke: az CLI access`
+- `Daily safe-output smoke canary`
+- `Daily smoke az CLI access`
 
 ### Tasks
 
@@ -44,7 +44,7 @@ Query only these two pipelines (matched by exact `definition.name`):
    `SYSTEM_ACCESSTOKEN`-equivalent bearer token already available to
    you in the agent environment.
 2. For every run with `result != "succeeded"`:
-   1. Search open issues on `githubnext/ado-aw` for one whose title
+   1. Search open issues on `jamesadevine/ado-aw-issues` for one whose title
       starts with `[smoke-failure] <pipeline-name>`. If one already
       exists, skip this pipeline.
    2. Otherwise, call the `create-issue` safe output **exactly once
@@ -68,7 +68,7 @@ Query only these two pipelines (matched by exact `definition.name`):
   `report-incomplete` for the remainder.
 - Do **not** call `create-issue` with a `target_repo` parameter. The
   agent has no override; the target is fixed by the operator at
-  `githubnext/ado-aw`.
+  `jamesadevine/ado-aw-issues`.
 - The `ADO_AW_DEBUG_GITHUB_TOKEN` PAT is not visible to you. Stage 3
   uses it to authenticate against GitHub.
 

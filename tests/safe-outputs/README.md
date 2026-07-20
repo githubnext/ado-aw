@@ -30,7 +30,7 @@ five pipelines:
 | `azure-cli.md` / `azure-cli.lock.yml` | Daily: verifies the AWF az CLI extension is mounted, the `az devops` subcommand authenticates via `AZURE_DEVOPS_EXT_PAT`, and the sandbox can reach the ADO control plane. |
 | `noop-target.md` / `noop-target.lock.yml` | No-schedule target pipeline queued by the `queue-build` executor-e2e scenario (its ID feeds `E2E_QUEUE_PIPELINE_ID`). |
 | `janitor.md` / `janitor.lock.yml` | Weekly: prunes `ado-aw-smoke-*` artifacts (work items, branches, wiki pages, tags, PRs) older than 30 days from AgentPlayground. |
-| `smoke-failure-reporter.md` / `smoke-failure-reporter.lock.yml` | Daily ~04:30: queries the canary and azure-cli pipelines for failures and files `[smoke-failure] …` issues on `githubnext/ado-aw`. |
+| `smoke-failure-reporter.md` / `smoke-failure-reporter.lock.yml` | Daily ~04:30: queries the canary and azure-cli pipelines for failures and files `[smoke-failure] …` issues on `jamesadevine/ado-aw-issues` while canonical-repo credentials are unavailable. |
 | `REGISTERED.md` | Contributor-maintained `fixture → ADO pipeline ID` mapping. |
 
 > **Deterministic complement.** For a flake-free regression check of
@@ -89,18 +89,27 @@ In `https://dev.azure.com/msazuresphere/AgentPlayground`:
 2. Bulk-register the smoke pipelines with `ado-aw enable`:
 
    ```powershell
-   ado-aw enable `
+   cargo run -- enable `
      --org msazuresphere --project AgentPlayground `
-     --service-connection ado-aw-github `
+     --service-connection github.com_githubnext `
+     --also-set-token `
      --folder '\smoke' `
      tests/safe-outputs/
    ```
 
 3. Capture each Pipeline ID and update `REGISTERED.md`.
 4. Provision the `ADO_AW_DEBUG_GITHUB_TOKEN` secret (fine-grained PAT,
-   Issues: read/write on `githubnext/ado-aw`) on the
-   `smoke-failure-reporter` pipeline **only**.
-5. Set `EXECUTOR_E2E_ISSUE_REPO` / `E2E_QUEUE_PIPELINE_ID` on the
+   Issues: read/write on `jamesadevine/ado-aw-issues`) on the
+   `smoke-failure-reporter` pipeline **only**. Confirm the staging repository
+   has the `pipeline-failure` and `ado-aw-smoke` labels.
+5. Set `EXECUTOR_E2E_ISSUE_REPO=jamesadevine/ado-aw-issues` and
+   `E2E_QUEUE_PIPELINE_ID` on the
    executor-e2e pipeline using the `noop-target` pipeline ID from
    step 3.
 6. Trigger one manual run per pipeline to seed the schedule.
+
+> **Existing-definition cutover.** `ado-aw enable` matches definitions by YAML
+> path and will reuse the four legacy registrations. To create side-by-side
+> replacements before deleting the old definitions, register the five YAML
+> paths explicitly with `az pipelines create --skip-run true`, configure and
+> validate the returned IDs, then retire the legacy IDs.
