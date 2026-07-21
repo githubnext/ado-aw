@@ -5,13 +5,15 @@ description: "Reference for AWF network isolation, allowed domains, ecosystem id
 
 ## Network Isolation (AWF)
 
-Network isolation is provided by AWF (Agentic Workflow Firewall), which provides L7 (HTTP/HTTPS) egress control using Squid proxy and Docker containers. AWF restricts network access to an allowlist of approved domains.
+Network isolation is provided by AWF (Agentic Workflow Firewall), which provides L7 (HTTP/HTTPS) egress filtering using a rootless Docker topology. AWF restricts network access to an allowlist of approved domains.
+
+Generated pipelines run AWF in **strict topology mode**: both the Agent and Detection jobs invoke AWF rootlessly with `--network-isolation` — there is no `sudo`, `--enable-host-access`, or legacy-security fallback. The Agent additionally passes `--topology-attach awmg-mcpg` so the trusted MCP Gateway container is reachable inside AWF's internal network; the agent has no route to the build-agent host. Detection runs without MCPG attachment.
 
 The `ado-aw` compiler binary is distributed via [GitHub Releases](https://github.com/githubnext/ado-aw/releases) with SHA256 checksum verification. The AWF binary is distributed via [GitHub Releases](https://github.com/github/gh-aw-firewall/releases) with SHA256 checksum verification. Docker is sourced via the `DockerInstaller@0` ADO task.
 
 ## Default Allowed Domains
 
-The following domains are always allowed. Most are defined in `CORE_ALLOWED_HOSTS` in `allowed_hosts.rs`; `host.docker.internal` is the exception — it is added by `generate_allowed_domains` (`src/compile/common.rs`) for any target that uses AWF (`standalone` and `1es` targets), but not for `job` or `stage` targets. AWF-sandboxed agents need `host.docker.internal` to reach MCPG and SafeOutputs MCP servers running on the host:
+The following domains are always allowed, defined in `CORE_ALLOWED_HOSTS` in `allowed_hosts.rs`. Under AWF's strict topology, `host.docker.internal` is deliberately **not** on this list — the agent has no route to the build-agent host, and SafeOutputs runs as a hardened sibling container inside MCPG, not as a host-side process:
 
 | Host Pattern | Purpose |
 |-------------|---------|
@@ -47,7 +49,6 @@ The following domains are always allowed. Most are defined in `CORE_ALLOWED_HOST
 | `dc.services.visualstudio.com` | Visual Studio telemetry |
 | `rt.services.visualstudio.com` | Visual Studio runtime telemetry |
 | `config.edge.skype.com` | Configuration |
-| `host.docker.internal` | MCP Gateway (MCPG) and SafeOutputs on host — added for AWF targets (`standalone`, `1es`), not part of `CORE_ALLOWED_HOSTS` |
 | `aka.ms` | Microsoft link shortener (used by `az` subcommand help/metadata) — contributed by the always-on Azure CLI extension |
 
 ## Adding Additional Hosts
@@ -91,7 +92,7 @@ Additional ecosystems: `bazel`, `chrome`, `clojure`, `dart`, `deno`, `elixir`, `
 
 The full domain lists are defined in `src/data/ecosystem_domains.json`.
 
-All hosts (core + MCP-specific + ecosystem expansions + user-specified) are combined into a comma-separated domain list passed to AWF's `--allow-domains` flag.
+All hosts (core + ecosystem expansions + user-specified) are combined into a comma-separated domain list passed to AWF's `--allow-domains` flag.
 
 ### Blocking Hosts
 
