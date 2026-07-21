@@ -462,8 +462,11 @@ mod tests {
             body: None,
             repository: Some("self".to_string()),
         };
-        let result: Result<SubmitPrReviewResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = <SubmitPrReviewResult as TryFrom<_>>::try_from(params).unwrap_err();
+        assert!(
+            err.to_string().contains("pull_request_id must be a positive integer"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -474,8 +477,11 @@ mod tests {
             body: None,
             repository: Some("self".to_string()),
         };
-        let result: Result<SubmitPrReviewResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = <SubmitPrReviewResult as TryFrom<_>>::try_from(params).unwrap_err();
+        assert!(
+            err.to_string().contains("event must be one of"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -486,8 +492,11 @@ mod tests {
             body: None,
             repository: Some("self".to_string()),
         };
-        let result: Result<SubmitPrReviewResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = <SubmitPrReviewResult as TryFrom<_>>::try_from(params).unwrap_err();
+        assert!(
+            err.to_string().contains("body is required when event is 'request-changes'"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -498,8 +507,11 @@ mod tests {
             body: None,
             repository: Some("##vso[task.setvariable variable=x]y".to_string()),
         };
-        let result: Result<SubmitPrReviewResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = <SubmitPrReviewResult as TryFrom<_>>::try_from(params).unwrap_err();
+        assert!(
+            err.to_string().contains("repository") || err.to_string().contains("##vso["),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

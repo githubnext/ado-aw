@@ -418,8 +418,11 @@ mod tests {
             file_path: "src/../secret".to_string(),
             comment: None,
         };
-        let result: Result<UploadWorkitemAttachmentResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = <UploadWorkitemAttachmentResult as TryFrom<_>>::try_from(params).unwrap_err();
+        assert!(
+            err.to_string().contains("path-traversal"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -429,8 +432,11 @@ mod tests {
             file_path: "src\\..\\secret.txt".to_string(),
             comment: None,
         };
-        let result: Result<UploadWorkitemAttachmentResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = <UploadWorkitemAttachmentResult as TryFrom<_>>::try_from(params).unwrap_err();
+        assert!(
+            err.to_string().contains("path-traversal"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -440,8 +446,11 @@ mod tests {
             file_path: "\\etc\\passwd".to_string(),
             comment: None,
         };
-        let result: Result<UploadWorkitemAttachmentResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = <UploadWorkitemAttachmentResult as TryFrom<_>>::try_from(params).unwrap_err();
+        assert!(
+            err.to_string().contains("relative path") || err.to_string().contains("no leading"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -475,8 +484,11 @@ mod tests {
             file_path: "/etc/passwd".to_string(),
             comment: None,
         };
-        let result: Result<UploadWorkitemAttachmentResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = <UploadWorkitemAttachmentResult as TryFrom<_>>::try_from(params).unwrap_err();
+        assert!(
+            err.to_string().contains("relative path") || err.to_string().contains("no leading"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -486,8 +498,11 @@ mod tests {
             file_path: "output\n/report.pdf".to_string(),
             comment: None,
         };
-        let result: Result<UploadWorkitemAttachmentResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = <UploadWorkitemAttachmentResult as TryFrom<_>>::try_from(params).unwrap_err();
+        assert!(
+            err.to_string().contains("newline") || err.to_string().contains("carriage"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -497,8 +512,11 @@ mod tests {
             file_path: "output\r/report.pdf".to_string(),
             comment: None,
         };
-        let result: Result<UploadWorkitemAttachmentResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = <UploadWorkitemAttachmentResult as TryFrom<_>>::try_from(params).unwrap_err();
+        assert!(
+            err.to_string().contains("newline") || err.to_string().contains("carriage"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
