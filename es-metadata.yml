@@ -1,0 +1,8 @@
+schemaVersion: 0.0.1
+isProduction: false
+accountableOwners:
+  service: ba908dea-38f6-4994-86e9-9e34eae8d29d
+routing:
+  defaultAreaPath:
+    org: msazuresphere
+    path: 4x4\Gen1\Incoming

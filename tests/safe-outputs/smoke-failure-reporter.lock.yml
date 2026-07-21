@@ -623,7 +623,7 @@ jobs:
     displayName: Prepare safe outputs for analysis
   - bash: |
       # Write threat analysis prompt to /tmp (accessible inside AWF container)
-      cat > "/tmp/awf-tools/threat-analysis-prompt.md" << 'THREAT_ANALYSIS_EOF_6e6028ecc807'
+      cat > "/tmp/awf-tools/threat-analysis-prompt.md" << 'THREAT_ANALYSIS_EOF_13f2a688652c'
       # Threat Detection Analysis
 
       You are a security analyst tasked with analyzing agent output and code changes for potential security threats.
@@ -633,7 +633,7 @@ jobs:
       The pipeline prompt file is available at: $(Build.SourcesDirectory)/tests/safe-outputs/smoke-failure-reporter.md
       Load and read this file to understand the intent and context of the pipeline. The pipeline information includes:
       - pipeline name: ado-aw smoke failure reporter
-      - pipeline description: Files [smoke-failure] issues on githubnext/ado-aw for failed daily smoke pipelines
+      - pipeline description: Files [smoke-failure] issues on jamesadevine/ado-aw-issues for failed daily smoke pipelines
       - Full pipeline instructions and context in the prompt file
       Use this information to understand the pipeline's intended purpose and legitimate use cases.
 
@@ -661,7 +661,7 @@ jobs:
       - Focus on actual security risks rather than style issues
       - If you're uncertain about a potential threat, err on the side of caution
       - Provide clear, actionable reasons for any threats detected
-      THREAT_ANALYSIS_EOF_6e6028ecc807
+      THREAT_ANALYSIS_EOF_13f2a688652c
 
       echo "Threat analysis prompt:"
       cat "/tmp/awf-tools/threat-analysis-prompt.md"

@@ -6,8 +6,8 @@
 # (scripts/ado-script/src/executor-e2e/) sets up preconditions via the ADO REST
 # API, crafts the executor's NDJSON input directly, runs the real `ado-aw
 # execute` binary built from this checkout, asserts the effect via REST, and
-# cleans up. On any failure it files a GitHub issue on githubnext/ado-aw and
-# fails the build.
+# cleans up. On any failure it files a GitHub issue on the configured issue
+# repository and fails the build.
 #
 # This is a hand-authored ADO pipeline (NOT compiled from an agent markdown).
 # Register it in msazuresphere/AgentPlayground — see tests/executor-e2e/README.md.
@@ -54,7 +54,7 @@ variables:
   # Optional-precondition scenarios: empty by default so queue-build / wiki
   # skip gracefully. Override at queue time (or via a variable group) to enable.
   # EXECUTOR_E2E_GITHUB_TOKEN must be provided as a SECRET pipeline variable
-  # (fine-grained PAT scoped to Issues:read/write on githubnext/ado-aw ONLY).
+  # scoped to Issues:read/write on the configured issue repository.
 
 steps:
   - checkout: self
@@ -133,7 +133,7 @@ steps:
       EXECUTOR_E2E_ADO_AW_BIN: $(ADO_AW_BIN)
       EXECUTOR_E2E_ADO_REPO: $(EFFECTIVE_EXECUTOR_E2E_ADO_REPO)
       EXECUTOR_E2E_ISSUE_REPO: $(EXECUTOR_E2E_ISSUE_REPO)
-      # Secret PAT for filing failure issues (scoped to githubnext/ado-aw Issues).
+      # Secret PAT for filing failure issues on the configured repository.
       EXECUTOR_E2E_GITHUB_TOKEN: $(EXECUTOR_E2E_GITHUB_TOKEN)
       # Optional-precondition scenarios (skipped when unset):
       E2E_QUEUE_PIPELINE_ID: $(EFFECTIVE_E2E_QUEUE_PIPELINE_ID)

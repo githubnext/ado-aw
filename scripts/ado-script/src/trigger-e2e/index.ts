@@ -20,11 +20,13 @@
  *   - TRIGGER_E2E_GITHUB_TOKEN — scoped PAT for issue filing
  *   - TRIGGER_E2E_ISSUE_REPO — GitHub repo for issues (default githubnext/ado-aw)
  *   - TRIGGER_E2E_BUILD_TIMEOUT_MS / TRIGGER_E2E_BUILD_POLL_MS — poll tuning
+ *   - TRIGGER_E2E_CONCURRENCY — concurrent scenarios (default 4, max 8)
  *
  * Test-harness module; not shipped in `ado-script.zip`.
  */
 import { AdoRest } from "../executor-e2e/ado-rest.js";
 import { fileFailureIssue, loadIssueEnv } from "./github-issue.js";
+import { runMirrorSyncPreflight } from "./mirror.js";
 import { runAll } from "./runner.js";
 import { allScenarios } from "./scenarios/index.js";
 import type { ScenarioResult, TriggerContext } from "./scenario.js";
@@ -87,12 +89,18 @@ export async function main(): Promise<number> {
     prefix: (id) => `ado-aw-trig-${buildId}-${id}`,
   };
 
-  log(
-    `Running ${allScenarios.length} trigger E2E scenarios against ${orgUrl}${project} ` +
-      `(victim def #${victimDefinitionId}${adoRepo ? `, repo ${adoRepo}` : ", no PR repo — PR scenarios will skip"})`,
-  );
-
-  const results = await runAll(ctx, allScenarios);
+  const preflight = await runMirrorSyncPreflight(process.env, log);
+  let results: ScenarioResult[];
+  if (preflight && !preflight.ok) {
+    results = [preflight];
+  } else {
+    log(
+      `Running ${allScenarios.length} trigger E2E scenarios against ${orgUrl}${project} ` +
+        `(victim def #${victimDefinitionId}${adoRepo ? `, repo ${adoRepo}` : ", no PR repo — PR scenarios will skip"})`,
+    );
+    const scenarioResults = await runAll(ctx, allScenarios);
+    results = preflight ? [preflight, ...scenarioResults] : scenarioResults;
+  }
   log(summarise(results));
 
   const issueEnv = loadIssueEnv();

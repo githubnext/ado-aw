@@ -78,7 +78,7 @@ on `PrMetadata` being acquired first.
 |------|--------|-----------|------------|
 | `PrMetadata` | `GET pullRequests/{id}` | `PR_DATA` | -- |
 | `PrIsDraft` | `json .isDraft` from `PR_DATA` | `IS_DRAFT` | `PrMetadata` |
-| `PrLabels` | `json .labels[].name` from `PR_DATA` | `PR_LABELS` | `PrMetadata` |
+| `PrLabels` | `GET pullRequests/{id}/labels` | `PR_LABELS` | -- |
 
 #### Iteration API-Derived
 
@@ -176,7 +176,7 @@ Maps each field of `PrFilters` to a `FilterCheck`:
 | `source_branch` | `GlobMatch` | `SourceBranch` | `source-branch-mismatch` |
 | `target_branch` | `GlobMatch` | `TargetBranch` | `target-branch-mismatch` |
 | `commit_message` | `GlobMatch` | `CommitMessage` | `commit-message-mismatch` |
-| `labels` | `LabelSetMatch` | `PrLabels` (-> `PrMetadata`) | `labels-mismatch` |
+| `labels` | `LabelSetMatch` | `PrLabels` | `labels-mismatch` |
 | `draft` | `Equality` | `PrIsDraft` (-> `PrMetadata`) | `draft-mismatch` |
 | `changed_files` | `FileGlobMatch` | `ChangedFiles` | `changed-files-mismatch` |
 | `time_window` | `TimeWindow` | `CurrentUtcMinutes` | `time-window-mismatch` |

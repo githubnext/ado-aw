@@ -7050,9 +7050,10 @@ safe-outputs:
         assert_eq!(repos.len(), 1);
         assert_eq!(checkout, vec!["monorepo"]);
         let opts = fetch.get("monorepo").unwrap();
-        // `0` is preserved as the resolved value; depth_for_emit collapses it.
+        // `0` is preserved and emitted explicitly so it overrides any shallow
+        // fetch depth configured in the Azure DevOps pipeline UI.
         assert_eq!(opts.fetch_depth, Some(0));
-        assert_eq!(opts.depth_for_emit(), None);
+        assert_eq!(opts.depth_for_emit(), Some(0));
         assert_eq!(opts.fetch_tags, Some(false));
     }
 

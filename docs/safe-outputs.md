@@ -272,31 +272,32 @@ Creates a pull request with code changes made by the agent. When invoked:
 
 During Stage 3 execution, the repository is validated against the allowed list (from `checkout:` + "self"), then the patch is applied and a PR is created in Azure DevOps.
 
-**Shallow-clone agent pools (automatic):** The diff base for the patch is
-computed at agent time from the checked-out repository. On agent pools whose
-default git fetch is shallow (`fetchDepth: 1`), a bare `checkout` leaves no
-`origin/<target-branch>` ref, which would otherwise prevent the diff base from
-being computed. To handle this transparently, whenever `create-pull-request` is
-configured the compiler emits a credentialed **prepare step** that fetches and
-progressively deepens the configured `target-branch` and points `origin/HEAD` at
-it — in the `self` checkout **and in each additional `checkout:` repo dir**, so a
-PR to *any* allowed repository works. The prepare step runs in **both** the Agent
-job (before the agent runs, so the containerized SafeOutputs MCP server can compute
-the diff base) **and** the SafeOutputs job (before `ado-aw execute`, so the
-Stage 3 executor's `git worktree add` resolves `origin/<target>` — each ADO job
-has an isolated checkout, so the ref must be re-fetched in the job that builds
-the worktree; issue #1453). This means create-pull-request works on
-shallow-default pools **without** forcing a full-history checkout and **without**
-hand-editing the compiled lock (so the runtime integrity check keeps passing). No
-configuration is required. See [`docs/ado-script.md`](ado-script.md)
+**Shallow-clone agent pools (automatic):** The diff base is computed at agent
+time from the checked-out repository. For same-organization Azure Repos,
+`prepare-pr-base.js` asks the ADO Diffs API for the exact `commonCommit`,
+`aheadCount`, and `behindCount`, then fetches only the source and target ranges
+needed to make that base locally reachable. It verifies the server result with
+`git merge-base --all` before the containerized SafeOutputs MCP server can
+generate a patch. Non-Azure/cross-organization/unavailable-REST cases use bounded
+dual-ref depths 200/500/2000 and fail clearly rather than silently fetching full
+history.
+
+The compiler emits separate modes in the two isolated ADO jobs:
+
+- **Agent — `patch-base`:** prepares and verifies both sides of the merge-base.
+- **SafeOutputs — `target-worktree`:** fetches only `origin/<target>` at depth 1
+  for the executor's `git worktree add` (issue #1453).
+
+No full-history checkout or `--unshallow` fallback is forced. Authors can
+explicitly set `repos: [{ name: self, fetch-depth: 0 }]` when they accept that
+potentially large cost. The generated lock remains source-controlled and the
+runtime integrity check stays enabled. See [`docs/ado-script.md`](ado-script.md)
 (`prepare-pr-base.js`).
 
-> **Branch semantics.** The step deepens each repo's resolved `target-branch`
-> (the PR's **destination/base**) — not the per-repo `repos:` checkout `ref` (the
-> source side). By default every repo targets the single `target-branch`; enable
-> `infer-target-from-checkout-ref` (and/or `target-branches`) to give each repo
-> its own base branch in a multi-checkout setup. The deepened branch always
-> matches the branch the PR targets (shared resolution).
+> **Branch semantics.** Each repo carries its checkout source ref and its
+> resolved PR destination. By default every repo targets the single
+> `target-branch`; enable `infer-target-from-checkout-ref` (and/or
+> `target-branches`) to give each repo its own base branch.
 
 **Stage 3 Execution Architecture (Hybrid Git + ADO API):**
 

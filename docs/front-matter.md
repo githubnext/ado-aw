@@ -408,10 +408,11 @@ Object fields:
 
 ### Tuning checkout fetch behavior (`fetch-depth` / `fetch-tags`)
 
-On large monorepos the checkout step can dominate the run: ADO's default
-`checkout` performs a full-history clone **and** `git fetch --tags`, which may
-take tens of minutes. `fetch-depth` and `fetch-tags` let you tune this
-per-repository:
+On large monorepos the checkout step can dominate the run. Azure DevOps can
+apply a pipeline-level shallow-fetch setting (newer pipelines commonly use
+depth 1), while tag syncing can also add substantial transfer. `fetch-depth`
+and `fetch-tags` let source-controlled YAML override those settings per
+repository:
 
 ```yaml
 repos:
@@ -420,7 +421,9 @@ repos:
     fetch-tags: false   # skip the (often huge) tag fetch
 ```
 
-- `fetch-depth: 0` means **full history** (no `fetchDepth` is emitted).
+- `fetch-depth: 0` explicitly emits `fetchDepth: 0`, disabling shallow fetch
+  even when the pipeline UI is configured for depth 1. Full history can be
+  very expensive in a large or old repository.
 - When a field is omitted the ADO default applies, so agents that don't set
   these compile **unchanged**.
 - Setting `fetch-depth`/`fetch-tags` on an entry with `checkout: false` has no

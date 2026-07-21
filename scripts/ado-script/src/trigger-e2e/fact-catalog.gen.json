@@ -54,9 +54,7 @@
   {
     "kind": "pr_labels",
     "failure_policy": "fail_open",
-    "dependencies": [
-      "pr_metadata"
-    ]
+    "dependencies": []
   },
   {
     "kind": "changed_files",

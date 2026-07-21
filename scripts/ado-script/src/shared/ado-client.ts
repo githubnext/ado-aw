@@ -10,7 +10,10 @@ import type {
   GitPullRequestIteration,
   GitPullRequestIterationChanges,
 } from "azure-devops-node-api/interfaces/GitInterfaces.js";
-import { PullRequestStatus } from "azure-devops-node-api/interfaces/GitInterfaces.js";
+import {
+  GitVersionType,
+  PullRequestStatus,
+} from "azure-devops-node-api/interfaces/GitInterfaces.js";
 import { BuildStatus, type Build } from "azure-devops-node-api/interfaces/BuildInterfaces.js";
 
 const SLEEP_MS = 1000;
@@ -23,6 +26,8 @@ const ITERATION_CHANGES_PAGE_SIZE = 100;
 // to advance the skip cursor. 100 pages × 100 entries = 10 000 changed
 // files, which is well beyond any realistic PR.
 const MAX_ITERATION_CHANGE_PAGES = 100;
+const SHA40_RE = /^[0-9a-f]{40}$/i;
+const MAX_COMMIT_DIFF_COUNT = 1_000_000;
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
@@ -60,17 +65,19 @@ function withTimeout<T>(label: string, ms: number, fn: () => Promise<T>): Promis
 
 function isTransient(err: unknown): boolean {
   if (err instanceof TimeoutError) return true;
-  if (err && typeof err === "object") {
-    const e = err as Record<string, any>;
-    const sc =
-      typeof e.statusCode === "number"
-        ? e.statusCode
-        : typeof e.response?.status === "number"
-          ? e.response.status
-          : undefined;
-    if (typeof sc === "number" && sc >= 500 && sc < 600) return true;
-  }
+  const sc = httpStatusCode(err);
+  if (typeof sc === "number" && sc >= 500 && sc < 600) return true;
   return false;
+}
+
+export function httpStatusCode(err: unknown): number | undefined {
+  if (!err || typeof err !== "object") return undefined;
+  const e = err as Record<string, any>;
+  return typeof e.statusCode === "number"
+    ? e.statusCode
+    : typeof e.response?.status === "number"
+      ? e.response.status
+      : undefined;
 }
 
 export async function withRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
@@ -85,6 +92,75 @@ export async function withRetry<T>(label: string, fn: () => Promise<T>): Promise
   }
 }
 
+export interface CommitDiffMetadata {
+  commonCommit: string;
+  aheadCount: number;
+  behindCount: number;
+  sourceCommit: string;
+  targetCommit: string;
+}
+
+function requireSha(label: string, value: string | undefined): string {
+  if (!value || !SHA40_RE.test(value)) {
+    throw new Error(`${label} is not a 40-character commit SHA`);
+  }
+  return value.toLowerCase();
+}
+
+function requireCount(label: string, value: number | undefined): number {
+  if (
+    !Number.isSafeInteger(value) ||
+    value === undefined ||
+    value < 0 ||
+    value > MAX_COMMIT_DIFF_COUNT
+  ) {
+    throw new Error(`${label} is not a valid commit count`);
+  }
+  return value;
+}
+
+/**
+ * Ask Azure Repos for the exact common commit and divergence counts between a
+ * target branch tip and the checked-out source commit. The target tip is first
+ * resolved to a SHA so a branch update cannot change the comparison midway
+ * through the two REST calls.
+ */
+export async function getCommitDiffMetadata(
+  project: string,
+  repositoryId: string,
+  targetBranch: string,
+  sourceCommit: string,
+): Promise<CommitDiffMetadata> {
+  const sourceSha = requireSha("sourceCommit", sourceCommit);
+  return withRetry("getCommitDiffMetadata", async () => {
+    const git = await (await getWebApi()).getGitApi();
+    const branch = await git.getBranch(repositoryId, targetBranch, project);
+    const targetSha = requireSha("target branch commit", branch.commit?.commitId);
+    const result = await git.getCommitDiffs(
+      repositoryId,
+      project,
+      true,
+      1,
+      0,
+      {
+        version: targetSha,
+        versionType: GitVersionType.Commit,
+      },
+      {
+        version: sourceSha,
+        versionType: GitVersionType.Commit,
+      },
+    );
+    return {
+      commonCommit: requireSha("commonCommit", result.commonCommit),
+      aheadCount: requireCount("aheadCount", result.aheadCount),
+      behindCount: requireCount("behindCount", result.behindCount),
+      sourceCommit: sourceSha,
+      targetCommit: targetSha,
+    };
+  });
+}
+
 export async function getPullRequestById(
   project: string,
   _repoId: string,
@@ -93,6 +169,17 @@ export async function getPullRequestById(
   return withRetry("getPullRequestById", async () => {
     const git = await (await getWebApi()).getGitApi();
     return git.getPullRequestById(prId, project);
+  });
+}
+
+export async function getPullRequestLabels(
+  project: string,
+  repoId: string,
+  prId: number,
+): Promise<Array<{ name?: string }>> {
+  return withRetry("getPullRequestLabels", async () => {
+    const git = await (await getWebApi()).getGitApi();
+    return (await git.getPullRequestLabels(repoId, prId, project)) ?? [];
   });
 }
 

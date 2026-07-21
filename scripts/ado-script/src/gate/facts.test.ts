@@ -6,12 +6,14 @@ const {
   mockReadEnvFact,
   mockIsPipelineVarFact,
   mockGetPullRequestById,
+  mockGetPullRequestLabels,
   mockGetPullRequestIterations,
   mockGetIterationChanges,
 } = vi.hoisted(() => ({
   mockReadEnvFact: vi.fn(),
   mockIsPipelineVarFact: vi.fn(),
   mockGetPullRequestById: vi.fn(),
+  mockGetPullRequestLabels: vi.fn(),
   mockGetPullRequestIterations: vi.fn(),
   mockGetIterationChanges: vi.fn(),
 }));
@@ -23,6 +25,7 @@ vi.mock("../shared/env-facts.js", () => ({
 
 vi.mock("../shared/ado-client.js", () => ({
   getPullRequestById: mockGetPullRequestById,
+  getPullRequestLabels: mockGetPullRequestLabels,
   getPullRequestIterations: mockGetPullRequestIterations,
   getIterationChanges: mockGetIterationChanges,
 }));
@@ -72,6 +75,7 @@ describe("acquireFacts", () => {
     mockReadEnvFact.mockReset();
     mockIsPipelineVarFact.mockReset().mockReturnValue(false);
     mockGetPullRequestById.mockReset();
+    mockGetPullRequestLabels.mockReset();
     mockGetPullRequestIterations.mockReset();
     mockGetIterationChanges.mockReset();
   });
@@ -166,11 +170,13 @@ describe("acquireFacts", () => {
     expect(mockGetPullRequestById).not.toHaveBeenCalled();
   });
 
-  it("derives pr_labels from cached pr_metadata", async () => {
-    mockGetPullRequestById.mockResolvedValue({
-      pullRequestId: 42,
-      labels: [{ name: "ready" }, { name: "security" }, {}],
-    });
+  it("acquires pr_labels from the dedicated labels endpoint", async () => {
+    mockGetPullRequestById.mockResolvedValue({ pullRequestId: 42 });
+    mockGetPullRequestLabels.mockResolvedValue([
+      { name: "ready" },
+      { name: "security" },
+      {},
+    ]);
     const { tracker } = makeTracker();
 
     const facts = await acquireFacts(
@@ -178,6 +184,7 @@ describe("acquireFacts", () => {
       tracker,
     );
 
+    expect(mockGetPullRequestLabels).toHaveBeenCalledWith("project", "repo", 42);
     expect(facts.get("pr_labels")).toEqual(["ready", "security", ""]);
   });
 

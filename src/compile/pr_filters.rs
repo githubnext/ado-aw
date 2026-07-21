@@ -30,7 +30,7 @@ mod tests {
     // for all filter gate generation.
 
     #[test]
-    fn test_gate_step_includes_api_facts_for_tier2() {
+    fn test_gate_step_includes_dedicated_labels_fact_for_tier2() {
         use crate::compile::filter_ir::{GateContext, build_gate_spec, lower_pr_filters};
         let filters = PrFilters {
             labels: Some(LabelFilter {
@@ -42,8 +42,8 @@ mod tests {
         let checks = lower_pr_filters(&filters);
         let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
         assert!(
-            spec.facts.iter().any(|f| f.kind == "pr_metadata"),
-            "should require pr_metadata fact"
+            !spec.facts.iter().any(|f| f.kind == "pr_metadata"),
+            "labels use the dedicated endpoint and should not require pr_metadata"
         );
         assert!(
             spec.facts.iter().any(|f| f.kind == "pr_labels"),

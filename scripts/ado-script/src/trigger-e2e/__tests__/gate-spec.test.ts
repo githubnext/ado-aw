@@ -28,15 +28,13 @@ describe("buildGateSpec fact derivation", () => {
     expect(spec.context.bypass_label).toBe("PR");
   });
 
-  it("derives pr_metadata (skip_dependents) before pr_labels (fail_open) for a labels check", () => {
+  it("derives independent fail-open pr_labels for a labels check", () => {
     const spec = buildGateSpec("pull-request", [labelsCheck({ anyOf: ["run-agent"] })]);
     const kinds = spec.facts.map((f) => f.kind);
-    expect(kinds).toEqual(["pr_metadata", "pr_labels"]);
+    expect(kinds).toEqual(["pr_labels"]);
     const meta = Object.fromEntries(spec.facts.map((f) => [f.kind, f]));
-    expect(meta.pr_metadata!.failure_policy).toBe("skip_dependents");
-    expect(meta.pr_metadata!.dependencies).toEqual([]);
     expect(meta.pr_labels!.failure_policy).toBe("fail_open");
-    expect(meta.pr_labels!.dependencies).toEqual(["pr_metadata"]);
+    expect(meta.pr_labels!.dependencies).toEqual([]);
   });
 
   it("derives pr_metadata before pr_is_draft (fail_closed) for a draft check", () => {

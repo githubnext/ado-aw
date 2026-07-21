@@ -952,6 +952,7 @@ fn build_agent_job(
         warn_create_pr_target_inference(front_matter);
         let repos = create_pr_prepare_repos(front_matter, &cfg.working_directory);
         steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
+            super::extensions::ado_script::PreparePrBaseMode::PatchBase,
             &repos,
         ));
     }
@@ -1366,20 +1367,29 @@ fn filter_flags(flag: &str, tools: &[String]) -> String {
 fn create_pr_prepare_repos(
     front_matter: &FrontMatter,
     working_directory: &str,
-) -> Vec<(String, String)> {
+) -> Vec<super::extensions::ado_script::PreparePrBaseRepo> {
+    use super::extensions::ado_script::PreparePrBaseRepo;
+
     let Some(pr_cfg) = front_matter.create_pr_config() else {
         return Vec::new();
     };
     let repo_refs = front_matter.checkout_repo_refs();
-    let mut repos: Vec<(String, String)> = vec![(
-        working_directory.to_string(),
-        pr_cfg.resolve_target_branch("self", &repo_refs),
-    )];
+    let mut repos = vec![PreparePrBaseRepo {
+        dir: working_directory.to_string(),
+        // Read BUILD_SOURCEBRANCH directly in the Node process. Embedding the
+        // runtime branch value into bash argv would make valid `$()`/backtick
+        // ref characters subject to shell command substitution.
+        source_ref: None,
+        target_branch: pr_cfg.resolve_target_branch("self", &repo_refs),
+    }];
     for alias in &front_matter.checkout {
-        repos.push((
-            format!("{working_directory}/{alias}"),
-            pr_cfg.resolve_target_branch(alias, &repo_refs),
-        ));
+        repos.push(PreparePrBaseRepo {
+            dir: format!("{working_directory}/{alias}"),
+            source_ref: repo_refs
+                .get(alias)
+                .cloned(),
+            target_branch: pr_cfg.resolve_target_branch(alias, &repo_refs),
+        });
     }
     repos
 }
@@ -1472,6 +1482,7 @@ fn build_safeoutputs_job(
         );
         let repos = create_pr_prepare_repos(front_matter, &cfg.working_directory);
         steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
+            super::extensions::ado_script::PreparePrBaseMode::TargetWorktree,
             &repos,
         ));
     }

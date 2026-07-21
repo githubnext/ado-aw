@@ -17,9 +17,10 @@
 #     Register it against the ado-aw Azure Repos mirror so the `self` checkout
 #     also carries `scripts/ado-script/` to build the bundles from source.
 #   - The build identity ($(System.AccessToken)) needs: Code (read) on the repo
-#     (PR/label/iteration lookups), Build (edit build quality / add tags) and
-#     the ability to cancel builds (gate self-cancel). See
-#     docs/safe-output-permissions.md if it hits 401/403.
+#     for checkout and synth PR lookups. Gate evaluation uses a short-lived ADO
+#     token minted from `agent-playground-write`; that dedicated identity needs
+#     repo Read plus project-level Stop builds for gate self-cancel. See
+#     docs/safe-output-permissions.md if either path hits 401/403.
 #
 # ## Observable build tags
 #   - trig.synth.promoted | trig.synth.skipped | trig.synth.real-pr
@@ -82,6 +83,20 @@ jobs:
         workingDirectory: scripts/ado-script
         displayName: Build gate + synth bundles from checkout
 
+      - task: AzureCLI@2
+        displayName: Acquire ADO token for gate self-cancel
+        inputs:
+          azureSubscription: agent-playground-write
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            ADO_TOKEN=$(az account get-access-token \
+              --resource 499b84ac-1321-427f-aa17-267ca6975798 \
+              --query accessToken -o tsv)
+            test -n "$ADO_TOKEN"
+            echo "##vso[task.setvariable variable=SC_WRITE_TOKEN;issecret=true]$ADO_TOKEN"
+
       - script: |
           set -euo pipefail
           node scripts/ado-script/exec-context-pr-synth.js
@@ -96,8 +111,8 @@ jobs:
           # Classify the synth outcome from the same-job vars synth setVar's.
           # AW_PR_ID is always set (empty on skip); AW_SYNTHETIC_PR is only set
           # to "true" on promotion (else left as the literal macro).
-          SYN="$(AW_SYNTHETIC_PR)"
-          PRID="$(AW_PR_ID)"
+          SYN="${AW_SYNTHETIC_PR}"
+          PRID="${AW_PR_ID}"
           case "$SYN" in '$('*) SYN="" ;; esac
           case "$PRID" in '$('*) PRID="" ;; esac
           if [ "$SYN" = "true" ]; then
@@ -110,6 +125,12 @@ jobs:
           echo "synth state: ${STATE} (AW_PR_ID='${PRID}' AW_SYNTHETIC_PR='${SYN}')"
           echo "##vso[build.addbuildtag]trig.synth.${STATE}"
         displayName: Tag synth outcome
+        env:
+          # Map ADO macros into environment values instead of embedding them
+          # in Bash command substitutions. Undefined macros remain literal
+          # `$(NAME)` strings and are normalized by the case guards above.
+          AW_SYNTHETIC_PR: $(AW_SYNTHETIC_PR)
+          AW_PR_ID: $(AW_PR_ID)
 
       - script: |
           set -euo pipefail
@@ -134,8 +155,9 @@ jobs:
           ADO_SOURCE_BRANCH: ${{ parameters.sourceBranchFact }}
           ADO_TARGET_BRANCH: ${{ parameters.targetBranchFact }}
           ADO_COMMIT_MESSAGE: ${{ parameters.commitMessage }}
-          # REST auth for API facts (labels, changed files) + self-cancel.
-          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          # Dedicated short-lived write identity for API facts + self-cancel.
+          # The token is mapped only into this gate step.
+          SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)
 
       - script: |
           set -euo pipefail

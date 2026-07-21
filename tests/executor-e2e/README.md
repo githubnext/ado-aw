@@ -20,8 +20,10 @@ This suite removes the LLM from the loop. For every ADO-write safe output it:
 4. asserts the effect via the ADO REST API,
 5. cleans up every object it created,
 
-and, on any failure, files a GitHub issue on `githubnext/ado-aw` and fails the
-build.
+and, on any failure, files a GitHub issue on the configured issue repository
+and fails the build. AgentPlayground currently uses
+`jamesadevine/ado-aw-issues` because a canonical-repository credential is not
+available.
 
 ## What's here
 
@@ -96,7 +98,8 @@ export SYSTEM_ACCESSTOKEN="<write-capable-PAT>"
 export EXECUTOR_E2E_ADO_AW_BIN="$PWD/target/release/ado-aw"
 export EXECUTOR_E2E_ADO_REPO="agent-definitions"
 # Optional:
-# export EXECUTOR_E2E_GITHUB_TOKEN="<fine-grained PAT: Issues rw on githubnext/ado-aw>"
+# export EXECUTOR_E2E_GITHUB_TOKEN="<fine-grained PAT: Issues rw on jamesadevine/ado-aw-issues>"
+# export EXECUTOR_E2E_ISSUE_REPO="jamesadevine/ado-aw-issues"
 # export E2E_QUEUE_PIPELINE_ID="<noop-target pipeline id>"
 # Optional timeout tuning (milliseconds) for slow environments:
 # export EXECUTOR_E2E_REST_TIMEOUT_MS=30000     # per ADO REST call (default 30000)
@@ -113,12 +116,17 @@ no current build. The harness exits non-zero if any scenario fails.
 
 In `https://dev.azure.com/msazuresphere/AgentPlayground`:
 
-1. **Register the pipeline.** New pipeline → Azure Repos/GitHub → existing YAML
-   → `tests/executor-e2e/azure-pipelines.yml`. Place it in a `\executor-e2e`
-   folder.
-2. **Grant the build identity write access** on the `agent-definitions` repo
-   (Contribute, Create branch, Contribute to PRs) and on Build (add tags) — the
-   pipeline uses `$(System.AccessToken)`. See
+> Current registration: definition `2550` in `\executor-e2e`, with
+> `E2E_QUEUE_PIPELINE_ID=2547`.
+
+1. **Register the pipeline.** New pipeline → GitHub through the
+   `githubnext` service connection → existing YAML →
+   `tests/executor-e2e/azure-pipelines.yml`. Place it in a `\executor-e2e`
+   folder and skip the first run until variables are configured.
+2. **Grant the principal behind `agent-playground-write` write access** on the
+   `agent-definitions` repo (Contribute, Create branch, Contribute to PRs) and
+   on Build (add tags). The YAML maps its AAD token to
+   `SYSTEM_ACCESSTOKEN` through `SC_WRITE_TOKEN`. See
    [`docs/safe-output-permissions.md`](../../docs/safe-output-permissions.md) if
    Stage 3 hits 401/403.
 3. **Set the GitHub PAT secret** on this pipeline only:
@@ -126,9 +134,12 @@ In `https://dev.azure.com/msazuresphere/AgentPlayground`:
    ado-aw secrets set EXECUTOR_E2E_GITHUB_TOKEN `
      --org msazuresphere --project AgentPlayground `
      --definition-ids <executor-e2e-pipeline-id> `
-     --value <fine-grained-pat-Issues-rw-on-githubnext/ado-aw>
+     --value <fine-grained-pat-Issues-rw-on-jamesadevine/ado-aw-issues>
    ```
    Do **not** place this token in a shared variable group.
-4. *(Optional)* Set `E2E_QUEUE_PIPELINE_ID` (the `noop-target` pipeline id) and
-   `E2E_WIKI_NAME` to enable the queue-build and wiki scenarios.
-5. **Trigger one manual run** to seed the schedule.
+4. Set `EXECUTOR_E2E_ISSUE_REPO=jamesadevine/ado-aw-issues`.
+   Confirm the target repository has `executor-e2e-failure` and
+   `pipeline-failure` labels.
+5. Set `E2E_QUEUE_PIPELINE_ID` to the replacement `noop-target` definition ID.
+   *(Optional)* Set `E2E_WIKI_NAME` to enable the wiki scenarios.
+6. **Trigger one manual run** to seed the schedule.
