@@ -643,7 +643,11 @@ mod tests {
             tags: None,
         };
         let result: Result<UpdateWorkItemResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("255 characters or fewer"),
+            "Expected title length error, got: {err}"
+        );
     }
 
     #[test]
