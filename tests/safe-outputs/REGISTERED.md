@@ -3,20 +3,37 @@
 Contributor-maintained mapping from smoke fixture → registered ADO
 pipeline ID in
 [AgentPlayground](https://dev.azure.com/msazuresphere/AgentPlayground).
-After the manual-handoff registration step is complete, fill in the
-`Pipeline ID` column and open a docs-only PR with the updates.
-
-> ⚠️ `TBD` rows mean the fixture has been authored and committed but
-> the corresponding ADO pipeline has not been registered yet. While any
-> row is `TBD`, that pipeline is **not** exercised in production.
+The table records the active definitions after the July 2026 replacement-first
+cutover.
 
 | Fixture | Schedule | Pipeline ID | Notes |
 | --- | --- | --- | --- |
-| `canary.md` | `daily around 03:00` | `TBD` | Omnibus: noop + create-work-item + add-build-tag in one agentic run. Proves Stage 1 → 2 → 3 end-to-end. |
-| `azure-cli.md` | `daily around 03:00` | `TBD` | Verifies AWF az CLI mount + ADO auth via `AZURE_DEVOPS_EXT_PAT`. |
-| `noop-target.md` | _no schedule_ | `TBD` | Target of the `queue-build` executor-e2e scenario. Its Pipeline ID must be set as `E2E_QUEUE_PIPELINE_ID` on the executor-e2e pipeline. |
-| `janitor.md` | `weekly on monday around 02:00` | `TBD` | Prunes `ado-aw-smoke-*` artifacts older than 30 days. |
-| `smoke-failure-reporter.md` | `daily around 04:30` | `TBD` | Files `[smoke-failure] …` issues on `jamesadevine/ado-aw-issues`. Requires the `ADO_AW_DEBUG_GITHUB_TOKEN` secret pipeline variable, **only on this pipeline**. |
+| `canary.md` | `daily around 03:00` | `2545` | Omnibus: noop + create-work-item + add-build-tag in one agentic run. Proves Stage 1 → 2 → 3 end-to-end. |
+| `azure-cli.md` | `daily around 03:00` | `2546` | Verifies AWF az CLI mount + ADO auth via `AZURE_DEVOPS_EXT_PAT`. |
+| `noop-target.md` | _no schedule_ | `2547` | Target of the `queue-build` executor-e2e scenario. `E2E_QUEUE_PIPELINE_ID=2547` on executor definition `2550`. |
+| `janitor.md` | `weekly on monday around 02:00` | `2548` | Prunes `ado-aw-smoke-*` artifacts older than 30 days. |
+| `smoke-failure-reporter.md` | `daily around 04:30` | `2549` | Files `[smoke-failure] …` issues on `jamesadevine/ado-aw-issues`. Requires the `ADO_AW_DEBUG_GITHUB_TOKEN` secret pipeline variable, **only on this pipeline**. |
+
+## Deterministic E2E definitions
+
+| Pipeline | Folder | Pipeline ID | Notes |
+| --- | --- | ---: | --- |
+| ado-script e2e | `\ado-script-e2e` | `2544` | Azure-native checkout regression suite. |
+| executor e2e | `\executor-e2e` | `2550` | Deterministic Stage 3 coverage for every non-debug safe output. |
+| trigger e2e | `\trigger-e2e` | `2551` | Concurrent gate/synthetic-PR orchestrator. |
+| trigger e2e victim | `\trigger-e2e` | `2552` | Azure Repos-backed victim using `ado-aw-mirror`. |
+
+All GitHub-backed definitions use the `githubnext` service connection. The
+mirror and every AgentPlayground test repository carry root
+`es-metadata.yml` inventory metadata so repository inventory automation keeps
+them enabled.
+
+## Retired definitions
+
+The cutover deleted legacy definitions `2506`, `2513` through `2538`, and
+`2541`. Per-tool agentic coverage is now split between canary `2545` (full
+Agent → Detection → SafeOutputs handoff) and executor E2E `2550`
+(deterministic per-tool execution and effect assertions).
 
 ## Manual-handoff checklist
 
@@ -32,7 +49,7 @@ the following one-time setup in
    ```powershell
    cargo run -- enable `
      --org msazuresphere --project AgentPlayground `
-     --service-connection github.com_githubnext `
+     --service-connection githubnext `
      --also-set-token `
      --folder '\smoke' `
      tests/safe-outputs/
