@@ -54,8 +54,7 @@ URL-encoded project segments are decoded before the ADO context is resolved. `t=
 │   │   └── otel.jsonl                # Copilot OTel (when emitted)
 │   └── logs/
 │       ├── firewall/                 # AWF Squid proxy logs
-│       ├── mcpg/                     # MCP Gateway logs
-│       ├── safeoutputs.log           # SafeOutputs HTTP server log
+│       ├── mcpg/                     # MCP Gateway logs (includes the SafeOutputs stdio child's stdout/stderr)
 │       └── agent-output.txt          # Filtered agent stdout
 ├── analyzed_outputs[_<BuildId>]/     # Downloaded artifact (Detection stage)
 │   ├── threat-analysis.json          # Aggregate verdict + reasons

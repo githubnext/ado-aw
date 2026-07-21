@@ -174,12 +174,11 @@ fn effective_engine_env(engine_config: &EngineConfig) -> HashMap<String, String>
     map
 }
 
-/// Returns true when `engine.env` (or an `engine.provider` block) activates
-/// Copilot BYOM/BYOK mode — i.e. any provider credential / base-URL key is
-/// present. Used by the pipeline compiler to enable the AWF api-proxy sidecar
-/// (`--enable-api-proxy`) for credential isolation and to pre-pull the api-proxy
-/// container image. Case-sensitive.
-pub fn copilot_byom_active(engine_config: &EngineConfig) -> bool {
+/// Test helper for the provider-credential activation predicate. AWF's API
+/// proxy is always enabled; production compilation only needs the exact
+/// credential-key list returned by [`copilot_byom_credential_keys`].
+#[cfg(test)]
+fn copilot_byom_active(engine_config: &EngineConfig) -> bool {
     effective_engine_env(engine_config)
         .keys()
         .any(|key| COPILOT_BYOM_CREDENTIAL_ENV_KEYS.contains(&key.as_str()))

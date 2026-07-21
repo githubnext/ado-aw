@@ -4,9 +4,8 @@ use std::time::Duration;
 
 // Integration tests for the SafeOutputs HTTP server (`mcp-http` subcommand).
 //
-// These tests validate the HTTP transport layer that MCPG uses to reach
-// SafeOutputs. They do NOT require Docker or the MCPG gateway — they test
-// the ado-aw HTTP server directly.
+// These tests validate the optional HTTP transport directly. Compiled
+// pipelines use the stdio transport through an MCPG-spawned container.
 
 /// Guard that kills the child process on drop (even on panic).
 struct ServerGuard {
@@ -25,17 +24,21 @@ impl Drop for ServerGuard {
     }
 }
 
-/// Helper: find a free TCP port on localhost.
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+/// Helper: find a free TCP port on the requested loopback address.
+fn free_port(bind_address: &str) -> u16 {
+    let listener = std::net::TcpListener::bind((bind_address, 0)).unwrap();
     listener.local_addr().unwrap().port()
 }
 
 /// Start SafeOutputs HTTP server as a subprocess. Returns a guard that stops
 /// the server on drop.
 fn start_server() -> ServerGuard {
+    start_server_at("127.0.0.1")
+}
+
+fn start_server_at(bind_address: &str) -> ServerGuard {
     let binary_path = env!("CARGO_BIN_EXE_ado-aw");
-    let port = free_port();
+    let port = free_port(bind_address);
     let api_key = "test-api-key-12345".to_string();
     let temp_dir = tempfile::tempdir().unwrap();
     let dir_path = temp_dir.path().to_str().unwrap().to_string();
@@ -43,6 +46,8 @@ fn start_server() -> ServerGuard {
     let mut cmd = Command::new(binary_path);
     cmd.args([
         "mcp-http",
+        "--bind-address",
+        bind_address,
         "--port",
         &port.to_string(),
         "--api-key",
@@ -78,8 +83,11 @@ fn start_server() -> ServerGuard {
     });
 
     // Wait for the server to become ready (up to 5 s)
-    let health_url = format!("http://127.0.0.1:{}/health", port);
-    let client = reqwest::blocking::Client::new();
+    let health_url = format!("http://{bind_address}:{port}/health");
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap();
     for _ in 0..50 {
         if client.get(&health_url).send().is_ok() {
             return ServerGuard {
@@ -178,6 +186,20 @@ fn test_health_endpoint_returns_ok() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.text().unwrap(), "ok");
+}
+
+#[test]
+fn test_explicit_bind_address_is_used() {
+    let server = start_server_at("127.0.0.2");
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap();
+    let resp = client
+        .get(format!("http://127.0.0.2:{}/health", server.port))
+        .send()
+        .unwrap();
+    assert_eq!(resp.status(), 200);
 }
 
 #[test]

@@ -15,7 +15,10 @@ on:
 jobs:
   contract:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    # Match the Linux release build floor: the mounted binary runs inside the
+    # Ubuntu 22-based AWF agent image.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
     permissions:
       contents: read
       copilot-requests: write
@@ -36,18 +39,33 @@ jobs:
           rustc --version
           cargo --version
 
-      - name: Resolve compiler-pinned Copilot CLI version
-        id: copilot-version
+      - name: Build SafeOutputs runtime and resolve source-pinned versions
+        id: versions
         run: |
           set -euo pipefail
-          version="$(cargo run --quiet -- catalog --kind versions --json | jq -r '.versions.copilot_cli')"
-          test -n "$version" && test "$version" != "null"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          cargo build --quiet --bin ado-aw
+
+          read_version() {
+            local constant="$1"
+            local source="$2"
+            awk -F'"' -v prefix="pub const ${constant}: &str = " \
+              'index($0, prefix) == 1 { print $2; exit }' "$source"
+          }
+
+          while IFS=: read -r key constant source; do
+            version="$(read_version "$constant" "$source")"
+            test -n "$version" && test "$version" != "null"
+            echo "${key}=${version}" >> "$GITHUB_OUTPUT"
+          done <<'VERSIONS'
+          copilot_cli:COPILOT_CLI_VERSION:src/engine.rs
+          awf:AWF_VERSION:src/compile/common.rs
+          mcpg:MCPG_VERSION:src/compile/common.rs
+          VERSIONS
 
       - name: Install compiler-pinned GitHub Copilot CLI
         run: |
           set -euo pipefail
-          version="${{ steps.copilot-version.outputs.version }}"
+          version="${{ steps.versions.outputs.copilot_cli }}"
           base_url="https://github.com/github/copilot-cli/releases/download/v${version}"
           temp_dir="$(mktemp -d)"
           trap 'rm -rf "$temp_dir"' EXIT
@@ -67,10 +85,35 @@ jobs:
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/bin/copilot" --version
 
-      - name: Run live Copilot CLI + SafeOutputs contract test
+      - name: Install compiler-pinned AWF
+        run: |
+          set -euo pipefail
+          version="${{ steps.versions.outputs.awf }}"
+          base_url="https://github.com/github/gh-aw-firewall/releases/download/v${version}"
+          temp_dir="$(mktemp -d)"
+          trap 'rm -rf "$temp_dir"' EXIT
+          curl -fsSL --retry 3 --retry-delay 5 \
+            -o "$temp_dir/awf-linux-x64" \
+            "$base_url/awf-linux-x64"
+          curl -fsSL --retry 3 --retry-delay 5 \
+            -o "$temp_dir/checksums.txt" \
+            "$base_url/checksums.txt"
+          expected="$(awk '$2 == "awf-linux-x64" { print $1; exit }' "$temp_dir/checksums.txt" | tr 'A-F' 'a-f')"
+          actual="$(sha256sum "$temp_dir/awf-linux-x64" | awk '{ print $1 }' | tr 'A-F' 'a-f')"
+          test -n "$expected"
+          test "$expected" = "$actual"
+          install -m 0755 "$temp_dir/awf-linux-x64" "$RUNNER_TEMP/bin/awf"
+          "$RUNNER_TEMP/bin/awf" --version
+
+      - name: Run handwritten AWF + Copilot + SafeOutputs contract
         env:
           ADO_AW_COPILOT_CLI_ARTIFACT_DIR: ${{ runner.temp }}/copilot-cli-safeoutputs
-        run: cargo test --test copilot_cli_safeoutputs_tests real_copilot_cli_noop_contract -- --ignored --nocapture
+          ADO_AW_BIN: ${{ github.workspace }}/target/debug/ado-aw
+          AWF_BIN: ${{ runner.temp }}/bin/awf
+          COPILOT_BIN: ${{ runner.temp }}/bin/copilot
+          AWF_VERSION: ${{ steps.versions.outputs.awf }}
+          MCPG_VERSION: ${{ steps.versions.outputs.mcpg }}
+        run: bash tests/awf-copilot-safeoutputs/run.sh
 
       - name: Upload contract-test artifacts on failure
         if: failure()

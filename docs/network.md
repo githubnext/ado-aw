@@ -6,11 +6,13 @@ _Part of the [ado-aw documentation](../AGENTS.md)._
 
 Network isolation is provided by AWF (Agentic Workflow Firewall), which provides L7 (HTTP/HTTPS) egress control using Squid proxy and Docker containers. AWF restricts network access to an allowlist of approved domains.
 
+Generated pipelines run AWF v0.27.32+ in **strict topology mode**: both the Agent and Detection jobs invoke AWF rootlessly with an explicit `--network-isolation` flag — there is no `sudo`, `--enable-host-access`, or `--legacy-security` fallback, and no author-facing knob to opt back into the legacy topology. The Agent additionally passes `--topology-attach awmg-mcpg` so the trusted MCPG container is attached to AWF's internal `awf-net`, and appends that hostname to `NO_PROXY`/`no_proxy` so MCP traffic bypasses Squid; Detection has no MCPG attachment. See [`docs/mcpg.md`](mcpg.md) for the MCPG topology and [`docs/mcp.md`](mcp.md) for MCP server configuration.
+
 The `ado-aw` compiler binary is distributed via [GitHub Releases](https://github.com/githubnext/ado-aw/releases) with SHA256 checksum verification. The AWF binary is distributed via [GitHub Releases](https://github.com/github/gh-aw-firewall/releases) with SHA256 checksum verification. Docker is sourced via the `DockerInstaller@0` ADO task.
 
 ## Default Allowed Domains
 
-The following domains are always allowed. Most are defined in `CORE_ALLOWED_HOSTS` in `allowed_hosts.rs`; `host.docker.internal` is the exception — it is added by the standalone compiler in `generate_allowed_domains` (`src/compile/common.rs`) because standalone pipelines always use MCPG, which needs host access from the AWF container:
+The following domains are always allowed. They are defined in `CORE_ALLOWED_HOSTS` in `allowed_hosts.rs`. `host.docker.internal` is deliberately **not** on this list — the agent has no route to the host under AWF's strict network topology, and SafeOutputs no longer runs as a host-side process at all: MCPG spawns it as a hardened, network-isolated (`--network none`) sibling stdio container; see [`docs/mcpg.md`](mcpg.md):
 
 | Host Pattern | Purpose |
 |-------------|---------|
@@ -46,7 +48,6 @@ The following domains are always allowed. Most are defined in `CORE_ALLOWED_HOST
 | `dc.services.visualstudio.com` | Visual Studio telemetry |
 | `rt.services.visualstudio.com` | Visual Studio runtime telemetry |
 | `config.edge.skype.com` | Configuration |
-| `host.docker.internal` | MCP Gateway (MCPG) on host — added by the standalone compiler, not part of `CORE_ALLOWED_HOSTS` |
 | `aka.ms` | Microsoft link shortener (used by `az` subcommand metadata) — contributed by the always-on Azure CLI extension |
 
 ## Always-on Azure CLI (`az`)

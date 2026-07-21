@@ -3,6 +3,7 @@
 # Install scripts must always be LF (executed on Linux/macOS via curl|sh).
 scripts/install/*.sh text eol=lf
 scripts/install/*.ps1 text eol=lf
+tests/awf-copilot-safeoutputs/*.sh text eol=lf
 # Agency plugin is a Linux/macOS-consumed artifact (and release-please rewrites
 # it on Linux CI) — keep every text file LF.
 agency/plugins/** text eol=lf

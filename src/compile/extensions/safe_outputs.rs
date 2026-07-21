@@ -1,13 +1,13 @@
-use super::{CompileContext, CompilerExtension, Declarations, ExtensionPhase, McpgServerConfig};
+use super::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
 use anyhow::Result;
-use std::collections::BTreeMap;
 
 // ─── SafeOutputs (always-on, internal) ───────────────────────────────
 
 /// SafeOutputs MCP extension.
 ///
-/// Always-on internal extension that configures the SafeOutputs HTTP
-/// backend in MCPG and appends prompt guidance for the agent.
+/// Always-on internal extension that appends SafeOutputs prompt guidance and
+/// grants the compiler-owned MCPG server to the agent. The working-directory
+/// aware stdio container entry is assembled centrally by `generate_mcpg_config`.
 pub struct SafeOutputsExtension;
 
 impl CompilerExtension for SafeOutputsExtension {
@@ -19,29 +19,10 @@ impl CompilerExtension for SafeOutputsExtension {
         ExtensionPhase::Tool
     }
 
-    /// Typed-IR view. SafeOutputs contributes only static
-    /// signals — an MCPG HTTP backend, a prompt supplement, and a
+    /// Typed-IR view. SafeOutputs contributes static prompt guidance and a
     /// single `--allow-tool safeoutputs` flag.
     fn declarations(&self, _ctx: &CompileContext) -> Result<Declarations> {
         Ok(Declarations {
-            mcpg_servers: vec![(
-                "safeoutputs".to_string(),
-                McpgServerConfig {
-                    server_type: "http".to_string(),
-                    container: None,
-                    entrypoint: None,
-                    entrypoint_args: None,
-                    mounts: None,
-                    args: None,
-                    url: Some("http://localhost:${SAFE_OUTPUTS_PORT}/mcp".to_string()),
-                    headers: Some(BTreeMap::from([(
-                        "Authorization".to_string(),
-                        "Bearer ${SAFE_OUTPUTS_API_KEY}".to_string(),
-                    )])),
-                    env: None,
-                    tools: None,
-                },
-            )],
             copilot_allow_tools: vec!["safeoutputs".to_string()],
             prompt_supplement: Some(
                 r#"
@@ -70,13 +51,12 @@ mod tests {
     }
 
     #[test]
-    fn declarations_carries_mcpg_prompt_and_allowtool() {
+    fn declarations_carries_prompt_and_allowtool() {
         let fm = parse_fm("name: t\ndescription: x\n");
         let ctx = CompileContext::for_test(&fm);
         let decl = SafeOutputsExtension.declarations(&ctx).unwrap();
         assert_eq!(decl.copilot_allow_tools, vec!["safeoutputs".to_string()]);
-        assert_eq!(decl.mcpg_servers.len(), 1);
-        assert_eq!(decl.mcpg_servers[0].0, "safeoutputs");
+        assert!(decl.mcpg_servers.is_empty());
         assert!(decl.prompt_supplement.is_some());
         assert!(decl.agent_prepare_steps.is_empty());
     }

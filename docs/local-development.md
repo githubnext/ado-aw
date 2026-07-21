@@ -6,8 +6,15 @@
 # Local Development Guide
 
 This guide explains how to run an agentic pipeline locally for development and
-testing. The workflow mirrors what the compiled Azure DevOps pipeline does, but
-each step is run manually on your machine.
+testing using the optional `ado-aw mcp-http` command, which remains supported
+for direct/local use. **This is not what compiled pipelines run.** Since the
+containerized SafeOutputs architecture landed, compiled pipelines spawn
+SafeOutputs as a hardened stdio child container through MCPG (`ado-aw mcp`,
+`--network none`, non-root, read-only rootfs) — there is no host-side HTTP
+server, bridge-gateway resolution, or `host.docker.internal` mapping in CI.
+See [`docs/mcpg.md`](mcpg.md) for that shape. The manual `mcp-http` workflow
+below is a simpler, still-supported way to exercise an agent's prompt + MCP
+wiring by hand without a full pipeline replica.
 
 ## Prerequisites
 
@@ -21,7 +28,8 @@ each step is run manually on your machine.
 A pipeline execution has three stages:
 
 1. **SafeOutputs MCP server** — receives tool calls from the agent and writes
-   them as NDJSON records
+   them as NDJSON records. Locally this guide uses `ado-aw mcp-http`; compiled
+   pipelines use `ado-aw mcp` as a stdio child spawned by MCPG instead.
 2. **Agent execution** — Copilot CLI runs with a prompt and MCP config,
    interacting with SafeOutputs (and optionally other MCPs via MCPG)
 3. **Safe output execution** — processes the NDJSON records and makes real ADO
@@ -36,15 +44,23 @@ export WORK_DIR=$(mktemp -d)
 echo "Working directory: $WORK_DIR"
 ```
 
-### 2. Start the SafeOutputs HTTP server
+### 2. Start the SafeOutputs HTTP server (local-only; optional `mcp-http`)
+
+This step is specific to the local manual workflow. Resolve the Docker bridge
+gateway address so a locally-run MCPG container (started outside AWF) can
+reach the host-side server:
 
 ```bash
+# Resolve the Docker bridge gateway (same address MCPG uses to reach the host)
+export SAFE_OUTPUTS_BIND_ADDRESS=$(docker network inspect bridge | jq -er '.[0].IPAM.Config[0].Gateway')
+
 # Pick a port and generate an API key
 export SO_PORT=8100
 export SO_API_KEY=$(openssl rand -hex 32)
 
-# Start in the background
+# Start in the background, bound only to the bridge gateway address
 cargo run -- mcp-http \
+  --bind-address "$SAFE_OUTPUTS_BIND_ADDRESS" \
   --port "$SO_PORT" \
   --api-key "$SO_API_KEY" \
   "$WORK_DIR" \
@@ -54,7 +70,7 @@ export SO_PID=$!
 echo "SafeOutputs PID: $SO_PID"
 
 # Wait for health check
-until curl -sf "http://127.0.0.1:$SO_PORT/health" > /dev/null 2>&1; do
+until curl -sf "http://$SAFE_OUTPUTS_BIND_ADDRESS:$SO_PORT/health" > /dev/null 2>&1; do
   sleep 1
 done
 echo "SafeOutputs ready"
@@ -69,8 +85,12 @@ Skip this step if your agent only uses SafeOutputs (no `mcp-servers:` or
 export MCPG_PORT=8080
 export MCPG_API_KEY=$(openssl rand -hex 32)
 
-# Generate MCPG config — adapt the JSON to your agent's mcp-servers front matter.
-# See the compiled pipeline's mcpg-config.json for the expected format.
+# Generate MCPG config for this manual local flow. Note: compiled pipelines
+# wire "safeoutputs" as a hardened stdio child container (`type: "stdio"`,
+# container: the pinned AWF `agent` image, entrypoint: ado-aw mcp ...; see
+# docs/mcpg.md), not the HTTP backend shown below -- the HTTP shape here is
+# specific to this local/manual workflow, which runs SafeOutputs as a plain
+# host process for simplicity.
 cat > "$WORK_DIR/mcpg-config.json" <<EOF
 {
   "mcpServers": {
@@ -90,12 +110,19 @@ cat > "$WORK_DIR/mcpg-config.json" <<EOF
 }
 EOF
 
-# Start MCPG container (macOS/Windows — use host.docker.internal)
-docker run -i --rm --name ado-aw-mcpg \
-  -p "$MCPG_PORT:$MCPG_PORT" \
+# Start MCPG on Docker's default bridge network, published to localhost.
+# The bridge network + docker-socket + port-mapping shape below matches what
+# compiled pipelines do for the MCPG container itself; only the SafeOutputs
+# backend type differs (HTTP here vs. stdio child container in CI).
+# The local Copilot process runs on the host, so the config above advertises
+# 127.0.0.1; compiled AWF pipelines advertise awmg-mcpg instead.
+docker run -i --rm --name awmg-mcpg \
+  --network bridge \
+  -p "127.0.0.1:$MCPG_PORT:$MCPG_PORT" \
+  --add-host "host.docker.internal:$SAFE_OUTPUTS_BIND_ADDRESS" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   --entrypoint /app/awmg \
-  ghcr.io/github/gh-aw-mcpg:v0.3.12 \
+  ghcr.io/github/gh-aw-mcpg:v0.4.1 \
   --routed --listen "0.0.0.0:$MCPG_PORT" --config-stdin \
   < "$WORK_DIR/mcpg-config.json" \
   > "$WORK_DIR/gateway-output.json" 2>"$WORK_DIR/mcpg-stderr.log" &
@@ -118,7 +145,7 @@ cat > "$WORK_DIR/mcp-config.json" <<EOF
   "mcpServers": {
     "safeoutputs": {
       "type": "http",
-      "url": "http://127.0.0.1:$SO_PORT/mcp",
+      "url": "http://$SAFE_OUTPUTS_BIND_ADDRESS:$SO_PORT/mcp",
       "headers": {
         "Authorization": "Bearer $SO_API_KEY"
       },
@@ -186,7 +213,7 @@ cargo run -- execute \
 kill "$SO_PID" 2>/dev/null
 
 # Stop MCPG (if started)
-docker stop ado-aw-mcpg 2>/dev/null
+docker stop awmg-mcpg 2>/dev/null
 
 echo "Done. Output files in: $WORK_DIR"
 ```

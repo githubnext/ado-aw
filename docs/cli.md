@@ -23,10 +23,11 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - `<pipeline>` - Path to the pipeline YAML file to verify
   - The source markdown path is auto-detected from the `@ado-aw` header in the pipeline file
   - Useful for CI checks to ensure pipelines are regenerated after source changes
-- `mcp <output_directory> <bounding_directory>` - Run SafeOutputs as a stdio MCP server
+- `mcp <output_directory> <bounding_directory>` - Run SafeOutputs as a stdio MCP server. **This is what compiled pipelines use**: MCPG spawns it as a hardened, network-isolated sibling container entrypoint (see [`docs/mcpg.md`](mcpg.md)).
   - `--enabled-tools <name>` - Restrict available tools to those named (repeatable)
 - `mcp-author` - Run the author-facing stdio MCP server for IDE/Copilot Chat integrations. See [`mcp-author.md`](mcp-author.md) for the full tool surface and trust model.
-- `mcp-http <output_directory> <bounding_directory>` - Run SafeOutputs as an HTTP MCP server (for MCPG integration)
+- `mcp-http <output_directory> <bounding_directory>` - Run SafeOutputs as an HTTP MCP server (for direct/local MCPG integration or manual testing). **Optional and not compiler-emitted** — compiled pipelines no longer start this server; see [`docs/local-development.md`](local-development.md).
+  - `--bind-address <ip>` - Listener IP address (default: `127.0.0.1`)
   - `--port <port>` - Port to listen on (default: 8100)
   - `--api-key <key>` - API key for authentication (auto-generated if not provided)
   - `--enabled-tools <name>` - Restrict available tools to those named (repeatable)

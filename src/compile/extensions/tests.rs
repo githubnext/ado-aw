@@ -326,7 +326,7 @@ fn test_ado_mcpg_servers_with_inferred_org() {
             .unwrap()
             .contains(&"myorg".to_string())
     );
-    // Must use --network host so AWF iptables don't block outbound
+    // Trusted MCP backends retain direct host-network egress outside AWF.
     let args = servers[0].1.args.as_ref().expect("args should be set");
     assert_eq!(args, &vec!["--network".to_string(), "host".to_string()]);
 }

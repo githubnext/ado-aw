@@ -439,7 +439,9 @@ Following the gh-aw security model:
    environment via AWF — see [`docs/network.md`](docs/network.md). **Scope
    note:** AWF's L7 allowlist wraps *only* the agent's copilot command
    (`awf … --allow-domains … -- '<engine_run>'` in
-   `src/compile/agentic_pipeline.rs::run_agent_step`). All other ADO steps —
+   `src/compile/agentic_pipeline.rs::run_agent_step`). AWF runs rootlessly in
+   strict topology mode; the Agent reaches trusted MCPG through
+   `--topology-attach awmg-mcpg`, not through host access. All other ADO steps —
    binary/bundle downloads, `docker pull`, ACR/NuGet auth (including the
    `supply-chain:` mirror fetches) — run *outside* the sandbox with the build
    agent pool's normal network, so they do **not** need entries in the AWF

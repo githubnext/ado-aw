@@ -277,8 +277,8 @@ time from the checked-out repository. For same-organization Azure Repos,
 `prepare-pr-base.js` asks the ADO Diffs API for the exact `commonCommit`,
 `aheadCount`, and `behindCount`, then fetches only the source and target ranges
 needed to make that base locally reachable. It verifies the server result with
-`git merge-base --all` before the host-side SafeOutputs MCP server can generate
-a patch. Non-Azure/cross-organization/unavailable-REST cases use bounded
+`git merge-base --all` before the containerized SafeOutputs MCP server can
+generate a patch. Non-Azure/cross-organization/unavailable-REST cases use bounded
 dual-ref depths 200/500/2000 and fail clearly rather than silently fetching full
 history.
 

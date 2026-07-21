@@ -64,8 +64,8 @@ use anyhow::Result;
 use std::path::Path;
 
 use super::common::{
-    self, ADO_BUILD_ID_SUFFIX, AWF_VERSION, HEADER_MARKER, MCPG_DOMAIN, MCPG_IMAGE, MCPG_PORT,
-    MCPG_VERSION,
+    self, ADO_BUILD_ID_SUFFIX, AWF_VERSION, HEADER_MARKER, MCPG_CONTAINER_NAME, MCPG_DOMAIN,
+    MCPG_IMAGE, MCPG_PORT, MCPG_VERSION, image_ref,
 };
 use super::common::PerJobPools;
 use super::extensions::{CompileContext, CompilerExtension, Declarations, Extension, McpgConfig};
@@ -194,11 +194,10 @@ pub(crate) fn build_pipeline_context(
     let engine_log_dir = ctx.engine.log_dir().to_string();
 
     let mut engine_env = ctx.engine.env(&front_matter.engine)?;
-    // BYOM/BYOK isolation is Copilot-specific: gate on the engine type so a
+    // BYOM/BYOK credential exclusion is Copilot-specific: gate on the engine type so a
     // future non-Copilot engine whose env happens to contain a COPILOT_PROVIDER_*
-    // key never erroneously activates the api-proxy sidecar.
+    // key is never treated as a Copilot provider credential.
     let is_copilot = matches!(ctx.engine, crate::engine::Engine::Copilot);
-    let byom_active = is_copilot && crate::engine::copilot_byom_active(&front_matter.engine);
     // Actual provider credential keys (user's casing) for AWF `--exclude-env`.
     let mut byom_exclude_keys = if is_copilot {
         crate::engine::copilot_byom_credential_keys(&front_matter.engine)
@@ -246,7 +245,6 @@ pub(crate) fn build_pipeline_context(
         common::generate_allowed_domains(front_matter, extensions, &extension_declarations)?;
     let awf_mounts = common::generate_awf_mounts(extensions, &extension_declarations);
     let awf_path_step_yaml = common::generate_awf_path_step(&awf_paths);
-    let enabled_tools_args = common::generate_enabled_tools_args(front_matter);
 
     // MCPG config
     let mcpg_config_obj = common::generate_mcpg_config(front_matter, &extension_declarations)?;
@@ -350,7 +348,6 @@ pub(crate) fn build_pipeline_context(
         allowed_domains,
         awf_mounts,
         awf_path_step_yaml,
-        enabled_tools_args,
         mcpg_config_json,
         mcpg_docker_env,
         mcpg_step_env,
@@ -362,7 +359,6 @@ pub(crate) fn build_pipeline_context(
         integrity_check_yaml,
         agent_content_value,
         debug_pipeline,
-        byom_active,
         byom_exclude_keys,
         detection_provider_env,
     };
@@ -532,8 +528,6 @@ pub(crate) struct StandaloneCtx {
     pub(crate) awf_mounts: String,
     /// `awf_path_step` YAML body (or empty when no path prepends).
     pub(crate) awf_path_step_yaml: String,
-    /// `--enabled-tools` args for SafeOutputs HTTP server (with trailing space).
-    pub(crate) enabled_tools_args: String,
     pub(crate) mcpg_config_json: String,
     /// `-e KEY=...` docker flags for MCPG.
     pub(crate) mcpg_docker_env: String,
@@ -553,11 +547,8 @@ pub(crate) struct StandaloneCtx {
     /// `{{#runtime-import ...}}` marker).
     pub(crate) agent_content_value: String,
     pub(crate) debug_pipeline: bool,
-    /// True when `engine.env` activates Copilot BYOM/BYOK mode. Pre-pulls the
-    /// api-proxy container image in the Agent and Detection jobs.
-    pub(crate) byom_active: bool,
     /// Actual provider credential env keys present to pass to AWF `--exclude-env`;
-    /// non-empty ⇒ enable the api-proxy sidecar. Empty for non-BYOM.
+    /// empty for non-BYOM. AWF's API proxy itself is always enabled.
     pub(crate) byom_exclude_keys: Vec<String>,
     /// Provider-only (`COPILOT_PROVIDER_*`) subset of `engine.env` as validated
     /// raw `(key, value)` pairs (empty when none). Applied to the Detection
@@ -918,12 +909,8 @@ fn build_agent_job(
     // 11. Download AWF
     steps.extend(download_awf_step(front_matter.supply_chain()));
 
-    // 12. Pre-pull AWF + MCPG container images (+ api-proxy when BYOM is active)
-    steps.extend(prepull_images_step(
-        true,
-        cfg.byom_active,
-        front_matter.supply_chain(),
-    ));
+    // 12. Pre-pull AWF + MCPG container images.
+    steps.extend(prepull_images_step(true, front_matter.supply_chain()));
 
     // 13. Extension prepare steps (typed) + user steps (RawYaml)
     steps.extend(ext_agent_prepare.iter().cloned());
@@ -934,13 +921,7 @@ fn build_agent_job(
     // 14. AWF path step (when extensions declare path prepends)
     push_raw_yaml_if_nonempty(&mut steps, &cfg.awf_path_step_yaml)?;
 
-    // 15. SafeOutputs HTTP server
-    steps.push(Step::Bash(start_safeoutputs_server_step(
-        &cfg.enabled_tools_args,
-        &cfg.working_directory,
-    )));
-
-    // 16. MCP Gateway (MCPG)
+    // 15. MCP Gateway (MCPG), which launches SafeOutputs as a stdio child.
     steps.push(Step::Bash(start_mcpg_step(
         &cfg.mcpg_docker_env,
         &cfg.mcpg_step_env,
@@ -948,14 +929,14 @@ fn build_agent_job(
         front_matter.supply_chain(),
     )?));
 
-    // 17. Verify MCP backends (debug-only)
+    // 16. Verify MCP backends (debug-only)
     if cfg.debug_pipeline {
         steps.push(Step::Bash(verify_mcp_backends_step()));
     }
 
-    // 18. Run copilot (AWF network isolated) — the big one.
+    // 17. Run copilot (AWF network isolated) — the big one.
     //     When `create-pull-request` is configured, first fetch/deepen the
-    //     target branch so the host-side SafeOutputs MCP server can compute a
+    //     target branch so the containerized SafeOutputs MCP server can compute a
     //     diff base on shallow-default agent pools (issue #1413). Runs after
     //     `checkout: self` (step 1) so the clone exists, and before the Copilot
     //     run so the refs are present when the agent proposes a PR. The
@@ -1009,6 +990,7 @@ fn build_agent_job(
         &cfg.engine_run,
         &cfg.engine_env,
         &cfg.byom_exclude_keys,
+        front_matter.supply_chain(),
     )?));
 
     // 18a. Revoke the GitHub App token (best-effort, always) once the Copilot
@@ -1187,14 +1169,8 @@ fn build_detection_job(
     steps.push(Step::Task(DockerInstaller::new("26.1.4").into_step()));
     // Download AWF
     steps.extend(download_awf_step(front_matter.supply_chain()));
-    // Pre-pull AWF (no MCPG image for detection). Pull the api-proxy image when
-    // BYOM is active so the detection Copilot run gets the same credential
-    // isolation as the main agent.
-    steps.extend(prepull_images_step(
-        false,
-        cfg.byom_active,
-        front_matter.supply_chain(),
-    ));
+    // Pre-pull AWF (no MCPG image for detection).
+    steps.extend(prepull_images_step(false, front_matter.supply_chain()));
     // Prepare safe outputs for analysis
     steps.push(Step::Bash(prepare_safe_outputs_for_analysis(
         &cfg.working_directory,
@@ -1255,6 +1231,7 @@ fn build_detection_job(
         &cfg.byom_exclude_keys,
         &cfg.detection_provider_env,
         crate::engine::github_token_source_var(&front_matter.engine),
+        front_matter.supply_chain(),
     )?));
     // Revoke the GitHub App token (best-effort, always) after threat analysis.
     if let Some(app_token) = front_matter.engine.github_app_token()
@@ -1488,7 +1465,7 @@ fn build_safeoutputs_job(
     )));
     // When `create-pull-request` is configured, fetch/deepen each target branch
     // in THIS job's checkout, immediately before the executor runs (issue
-    // #1453). The prepare step also runs in the Agent job (for the host-side
+    // #1453). The prepare step also runs in the Agent job (for the containerized
     // SafeOutputs MCP diff base), but each ADO job gets an isolated checkout, so
     // the Agent-job fetch is invisible here — the `create-pull-request` executor
     // (`ado-aw execute`) builds its worktree from `origin/<target>` in the
@@ -2156,30 +2133,6 @@ fn checkout_none_step() -> Step {
     })
 }
 
-/// Rewrite a GHCR image reference onto an internal registry when one is
-/// configured. `base` is the GHCR path (e.g.
-/// `ghcr.io/github/gh-aw-firewall/squid`), `tag` the image tag. When
-/// `registry` is `None` the GHCR reference is returned unchanged.
-///
-/// The internal registry may have an entirely different namespace than GHCR
-/// (teams generally cannot publish under `github/...`), so only the original
-/// **artifact name** — the final path segment of `base` (`squid`, `agent`,
-/// `gh-aw-mcpg`) — is preserved directly under the configured registry base
-/// path. This is the contract: artifact names stay the same, the prefix is
-/// whatever the user provides.
-///
-/// Centralised so the pre-pull step and the `docker run` invocation in
-/// `start_mcpg_step` cannot drift on the rewritten reference.
-fn image_ref(base: &str, tag: &str, registry: Option<&str>) -> String {
-    match registry {
-        Some(reg) => {
-            let name = base.rsplit('/').next().unwrap_or(base);
-            format!("{reg}/{name}:{tag}")
-        }
-        None => format!("{base}:{tag}"),
-    }
-}
-
 /// Derive the ACR registry name (used by `az acr login --name`) from a
 /// registry base path. Takes the host portion (before the first `/`), then
 /// strips a trailing `.azurecr.io` when present; otherwise returns the portion
@@ -2532,7 +2485,6 @@ fn download_awf_step(supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
 
 fn prepull_images_step(
     include_mcpg: bool,
-    include_api_proxy: bool,
     supply_chain: Option<&SupplyChainConfig>,
 ) -> Vec<Step> {
     let registry = supply_chain.and_then(|sc| sc.registry.as_ref());
@@ -2548,39 +2500,19 @@ fn prepull_images_step(
         AWF_VERSION,
         registry_base,
     );
-    // The local `:latest` aliases must ALWAYS carry the GHCR image names that
-    // AWF resolves by default when invoked with `--skip-pull` (run_agent_step
-    // passes no `--awf-*-image` flags). Tagging them onto the internal
-    // registry would leave AWF's expected `ghcr.io/.../{squid,agent}:latest`
-    // names absent from the local Docker cache, so the firewall containers
-    // would fail to start. Hence `None` here regardless of pull source.
-    let squid_latest = image_ref("ghcr.io/github/gh-aw-firewall/squid", "latest", None);
-    let agent_latest = image_ref("ghcr.io/github/gh-aw-firewall/agent", "latest", None);
+    let api_proxy = image_ref(
+        "ghcr.io/github/gh-aw-firewall/api-proxy",
+        AWF_VERSION,
+        registry_base,
+    );
 
     let mut script = format!(
         "set -eo pipefail\n\
          \n\
          docker pull {squid}\n\
          docker pull {agent}\n\
-         docker tag {squid} {squid_latest}\n\
-         docker tag {agent} {agent_latest}\n"
+         docker pull {api_proxy}\n"
     );
-    // Copilot BYOM/BYOK credential isolation: AWF starts the api-proxy sidecar
-    // when `--enable-api-proxy` is passed (see run_agent_step). Pre-pull and
-    // `:latest`-tag the image the same way as squid/agent so `--skip-pull` finds
-    // it locally.
-    if include_api_proxy {
-        let api_proxy = image_ref(
-            "ghcr.io/github/gh-aw-firewall/api-proxy",
-            AWF_VERSION,
-            registry_base,
-        );
-        let api_proxy_latest = image_ref("ghcr.io/github/gh-aw-firewall/api-proxy", "latest", None);
-        script.push_str(&format!(
-            "docker pull {api_proxy}\n\
-             docker tag {api_proxy} {api_proxy_latest}\n"
-        ));
-    }
     let display = if include_mcpg {
         let mcpg = image_ref(MCPG_IMAGE, &format!("v{MCPG_VERSION}"), registry_base);
         script.push_str(&format!("docker pull {mcpg}\n"));
@@ -2601,49 +2533,6 @@ fn prepull_images_step(
     }
     steps.push(Step::Bash(bash(display, script)));
     steps
-}
-
-fn start_safeoutputs_server_step(enabled_tools_args: &str, working_directory: &str) -> BashStep {
-    let script = format!(
-        "SAFE_OUTPUTS_PORT=8100\n\
-         SAFE_OUTPUTS_API_KEY=$(openssl rand -base64 45 | tr -d '/+=')\n\
-         echo \"##vso[task.setvariable variable=SAFE_OUTPUTS_PORT]$SAFE_OUTPUTS_PORT\"\n\
-         echo \"##vso[task.setvariable variable=SAFE_OUTPUTS_API_KEY;issecret=true]$SAFE_OUTPUTS_API_KEY\"\n\
-         \n\
-         mkdir -p \"$(Agent.TempDirectory)/staging/logs\"\n\
-         \n\
-         # Start SafeOutputs as HTTP server in the background\n\
-         # NOTE: {enabled_tools_args} expands to either \"\" or \"--enabled-tools X ... \"\n\
-         # (with trailing space). The value MUST be newline-free; is_safe_tool_name enforces this.\n\
-         # Positional args (output_directory, bounding_directory) MUST come after all named\n\
-         # options — clap parses them positionally and reordering would break the command.\n\
-         nohup /tmp/awf-tools/ado-aw mcp-http \\\n  \
-           --port \"$SAFE_OUTPUTS_PORT\" \\\n  \
-           --api-key \"$SAFE_OUTPUTS_API_KEY\" \\\n  \
-           {enabled_tools_args}\"/tmp/awf-tools/staging\" \\\n  \
-           \"{working_directory}\" \\\n  \
-           > \"$(Agent.TempDirectory)/staging/logs/safeoutputs.log\" 2>&1 &\n\
-         SAFE_OUTPUTS_PID=$!\n\
-         echo \"##vso[task.setvariable variable=SAFE_OUTPUTS_PID]$SAFE_OUTPUTS_PID\"\n\
-         echo \"SafeOutputs HTTP server started on port $SAFE_OUTPUTS_PORT (PID: $SAFE_OUTPUTS_PID)\"\n\
-         \n\
-         # Wait for server to be ready\n\
-         READY=false\n\
-         # shellcheck disable=SC2034 # i is intentionally unused; wait-N-times loop\n\
-         for i in $(seq 1 30); do\n  \
-           if curl -sf \"http://localhost:$SAFE_OUTPUTS_PORT/health\" > /dev/null 2>&1; then\n    \
-             echo \"SafeOutputs HTTP server is ready\"\n    \
-             READY=true\n    \
-             break\n  \
-           fi\n  \
-           sleep 1\n\
-         done\n\
-         if [ \"$READY\" != \"true\" ]; then\n  \
-           echo \"##vso[task.complete result=Failed]SafeOutputs HTTP server did not become ready within 30s\"\n  \
-           exit 1\n\
-         fi\n"
-    );
-    bash("Start SafeOutputs HTTP server", script)
 }
 
 fn start_mcpg_step(
@@ -2699,9 +2588,11 @@ fn start_mcpg_step(
     };
     let script = format!(
         "# Substitute runtime values into MCPG config\n\
+         MCP_RUNNER_UID=$(id -u)\n\
+         MCP_RUNNER_GID=$(id -g)\n\
          MCPG_CONFIG=$(sed \\\n  \
-           -e \"s|\\${{SAFE_OUTPUTS_PORT}}|$(SAFE_OUTPUTS_PORT)|g\" \\\n  \
-           -e \"s|\\${{SAFE_OUTPUTS_API_KEY}}|$(SAFE_OUTPUTS_API_KEY)|g\" \\\n  \
+           -e \"s|\\${{MCP_RUNNER_UID}}|$MCP_RUNNER_UID|g\" \\\n  \
+           -e \"s|\\${{MCP_RUNNER_GID}}|$MCP_RUNNER_GID|g\" \\\n  \
            -e \"s|\\${{MCP_GATEWAY_API_KEY}}|$(MCP_GATEWAY_API_KEY)|g\" \\\n  \
            /tmp/awf-tools/staging/mcpg-config.json)\n\
          \n\
@@ -2711,26 +2602,22 @@ fn start_mcpg_step(
          \n\
          # Remove any leftover container or stale output from a previous interrupted run\n\
          # (--rm only cleans up on clean exit; OOM/SIGKILL may leave it behind)\n\
-         docker rm -f mcpg 2>/dev/null || true\n\
+         docker rm -f {MCPG_CONTAINER_NAME} 2>/dev/null || true\n\
          GATEWAY_OUTPUT=\"/tmp/gh-aw/mcp-config/gateway-output.json\"\n\
          mkdir -p \"$(dirname \"$GATEWAY_OUTPUT\")\" /tmp/gh-aw/mcp-logs\n\
          rm -f \"$GATEWAY_OUTPUT\"\n\
          \n\
-         # Start MCPG Docker container on host network.\n\
+         # Start MCPG on Docker's bridge network. AWF attaches this named,\n\
+         # trusted container to its internal network after creating awf-net.\n\
          # The Docker socket mount is required because MCPG spawns stdio-based MCP\n\
          # servers as sibling containers. This grants significant host access — acceptable\n\
          # here because the pipeline agent is already trusted and network-isolated by AWF.\n\
          #\n\
-         # WORKAROUND: Override entrypoint to bypass run_containerized.sh which has a\n\
-         # validate_port_mapping() bug — it calls `docker inspect .NetworkSettings.Ports`\n\
-         # which is empty with --network host (by design), causing a spurious error:\n\
-         #   [ERROR] Port 80 is not exposed from the container\n\
-         # Upstream fix: https://github.com/github/gh-aw-mcpg/issues/TBD\n\
-         #\n\
          # stdout → gateway-output.json (machine-readable config, read after health check)\n\
          echo \"$MCPG_CONFIG\" | docker run -i --rm \\\n  \
-           --name mcpg \\\n  \
-           --network host \\\n  \
+           --name {MCPG_CONTAINER_NAME} \\\n  \
+           --network bridge \\\n  \
+           -p 127.0.0.1:{MCPG_PORT}:{MCPG_PORT} \\\n  \
            --entrypoint /app/awmg \\\n  \
            -v /var/run/docker.sock:/var/run/docker.sock \\\n  \
            -e MCP_GATEWAY_PORT=\"$(MCP_GATEWAY_PORT)\" \\\n  \
@@ -2784,8 +2671,8 @@ fn start_mcpg_step(
          \n\
          # Convert gateway output to Copilot CLI mcp-config.json.\n\
          # Mirrors gh-aw's convert_gateway_config_copilot.cjs:\n\
-         #   - Rewrite URLs from 127.0.0.1 to host.docker.internal (AWF container needs\n\
-         #     host.docker.internal to reach MCPG on the host; 127.0.0.1 is container loopback)\n\
+         #   - Rewrite gateway URLs to the stable MCPG container name that AWF\n\
+         #     attaches to its internal network\n\
          #   - Ensure tools: [\"*\"] on each server entry (Copilot CLI requirement)\n\
          #   - Mark generated MCPG entries as default/trusted servers for Copilot CLI\n\
          #   - Preserve all other fields (headers, type, etc.)\n\
@@ -2805,17 +2692,27 @@ fn start_mcpg_step(
     Ok(step)
 }
 
-/// Build the AWF api-proxy sidecar flag lines for a Copilot BYOM/BYOK run.
+/// Build AWF image-selection flags for the pre-pulled container set.
+fn awf_image_flags(supply_chain: Option<&SupplyChainConfig>) -> String {
+    let mut block = format!("  --image-tag \"{AWF_VERSION}\" \\\n");
+    if let Some(registry) = supply_chain.and_then(|sc| sc.registry.as_ref()) {
+        block.push_str(&format!(
+            "  --image-registry \"{}\" \\\n",
+            registry.name.as_str()
+        ));
+    }
+    block.push_str("  ");
+    block
+}
+
+/// Build AWF environment-exclusion flag lines for a Copilot BYOM/BYOK run.
 ///
 /// `exclude_keys` are the provider credential env keys present in `engine.env`
-/// (canonical uppercase `COPILOT_PROVIDER_*` names). When non-empty, returns
-/// `--enable-api-proxy` plus one `--exclude-env <key>` line per key, each as a
-/// 2-space-indented `--flag \` continuation ending in `\\\n` so it slots
-/// directly into the AWF command body. Returns an empty string when
-/// `exclude_keys` is empty (non-BYOM).
+/// (canonical uppercase `COPILOT_PROVIDER_*` names). AWF 0.27.32+ always enables
+/// its API proxy, so only one `--exclude-env <key>` line is needed per key.
 ///
-/// How the credential reaches the provider without reaching the agent: with
-/// `--enable-api-proxy`, AWF starts the api-proxy sidecar which reads the *real*
+/// How the credential reaches the provider without reaching the agent: AWF's
+/// api-proxy sidecar reads the *real*
 /// `COPILOT_PROVIDER_*` values from the host process env, and injects
 /// **placeholders** into the agent container regardless of `--env-all` —
 /// `COPILOT_PROVIDER_BASE_URL` becomes the sidecar URL (e.g.
@@ -2829,13 +2726,9 @@ fn start_mcpg_step(
 /// keys are the canonical uppercase names, the emitted `--exclude-env <key>`
 /// matches exactly what AWF overrides and the CLI reads.
 ///
-/// Shared by [`run_agent_step`] and [`run_threat_analysis_step`] so both AWF
-/// invocations enable isolation identically.
-fn awf_api_proxy_flags(exclude_keys: &[String]) -> String {
-    if exclude_keys.is_empty() {
-        return String::new();
-    }
-    let mut block = String::from("  --enable-api-proxy \\\n");
+/// Shared by [`run_agent_step`] and [`run_threat_analysis_step`].
+fn awf_exclude_env_flags(exclude_keys: &[String]) -> String {
+    let mut block = String::new();
     for key in exclude_keys {
         block.push_str(&format!("  --exclude-env {key} \\\n"));
     }
@@ -2849,6 +2742,7 @@ fn run_agent_step(
     engine_run: &str,
     engine_env: &str,
     byom_exclude_keys: &[String],
+    supply_chain: Option<&SupplyChainConfig>,
 ) -> Result<BashStep> {
     // The awf_mounts string is a `\`-joined chain of `--mount "..."` lines.
     // Render each at 2-space indent inside the bash body (the surrounding
@@ -2863,7 +2757,12 @@ fn run_agent_step(
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let api_proxy_block = awf_api_proxy_flags(byom_exclude_keys);
+    let image_flags_block = awf_image_flags(supply_chain);
+    let exclude_env_block = awf_exclude_env_flags(byom_exclude_keys);
+    let routed_engine_run = format!(
+        "export NO_PROXY=\"${{NO_PROXY:+$NO_PROXY,}}{MCPG_CONTAINER_NAME}\"; \
+         export no_proxy=\"$NO_PROXY\"; {engine_run}"
+    );
     let script = format!(
         "set -o pipefail\n\
          \n\
@@ -2873,27 +2772,29 @@ fn run_agent_step(
          echo \"=== Running AI agent with AWF network isolation ===\"\n\
          echo \"Allowed domains: {allowed_domains}\"\n\
          \n\
-         # AWF provides L7 domain whitelisting via Squid proxy + Docker containers.\n\
-         # --enable-host-access allows the AWF container to reach host services\n\
-         # (MCPG and SafeOutputs) via host.docker.internal.\n\
+         # AWF provides L7 domain whitelisting via a rootless Docker topology.\n\
+         # The named MCPG container is attached to AWF's internal network as a\n\
+         # trusted endpoint; the agent has no route to the host.\n\
          # AWF auto-mounts /tmp:/tmp:rw into the container, so copilot binary,\n\
          # agent prompt, and MCP config are placed under /tmp/awf-tools/.\n\
          # Stream agent output in real-time while filtering VSO commands.\n\
          # sed -u = unbuffered (line-by-line) so output appears immediately.\n\
          # tee writes to both stdout (ADO pipeline log) and the artifact file.\n\
          # pipefail (set above) ensures AWF's exit code propagates through the pipe.\n\
-         # shellcheck disable=SC2046 # $(AW_AZ_MOUNTS) is an ADO macro substituted before bash sees it, not bash command substitution; word-splitting the expanded value into separate --mount tokens is intentional\n\
-         sudo -E \"$(Pipeline.Workspace)/awf/awf\" \\\n  \
+         # shellcheck disable=SC2046,SC2016 # ADO macros are substituted before bash; the single-quoted engine command is intentionally expanded by AWF inside the sandbox\n\
+         \"$(Pipeline.Workspace)/awf/awf\" \\\n  \
            --allow-domains \"{allowed_domains}\" \\\n  \
+           --network-isolation \\\n  \
+           --topology-attach \"{MCPG_CONTAINER_NAME}\" \\\n\
+{image_flags_block}\
            --skip-pull \\\n  \
            --env-all \\\n  \
-           --enable-host-access \\\n\
-{api_proxy_block}\
+{exclude_env_block}\
 {awf_mounts_block}\n  \
            --container-workdir \"{working_directory}\" \\\n  \
            --log-level info \\\n  \
            --proxy-logs-dir \"$(Agent.TempDirectory)/staging/logs/firewall\" \\\n  \
-           -- '{engine_run}' \\\n  \
+           -- '{routed_engine_run}' \\\n  \
            2>&1 \\\n  \
            | sed -u 's/##vso\\[/[VSO-FILTERED] vso[/g; s/##\\[/[VSO-FILTERED] [/g' \\\n  \
            | tee \"$AGENT_OUTPUT_FILE\" \\\n  \
@@ -3005,18 +2906,13 @@ fn safe_outputs_summary_step(reviewed: &[String]) -> BashStep {
 }
 
 fn stop_mcpg_step() -> BashStep {
-    let script = "# Stop MCPG container\n\
-                  echo \"Stopping MCPG...\"\n\
-                  docker stop mcpg 2>/dev/null || true\n\
-                  echo \"MCPG stopped\"\n\
-                  \n\
-                  # Stop SafeOutputs HTTP server\n\
-                  if [ -n \"$(SAFE_OUTPUTS_PID)\" ]; then\n  \
-                    echo \"Stopping SafeOutputs (PID: $(SAFE_OUTPUTS_PID))...\"\n  \
-                    kill \"$(SAFE_OUTPUTS_PID)\" 2>/dev/null || true\n  \
-                    echo \"SafeOutputs stopped\"\n\
-                  fi\n";
-    bash("Stop MCPG and SafeOutputs", script).with_condition(Condition::Always)
+    let script = format!(
+        "# Stop MCPG container\n\
+         echo \"Stopping MCPG...\"\n\
+         docker stop {MCPG_CONTAINER_NAME} 2>/dev/null || true\n\
+         echo \"MCPG and stdio child containers stopped\"\n"
+    );
+    bash("Stop MCPG", script).with_condition(Condition::Always)
 }
 
 fn copy_logs_step(engine_log_dir: &str, is_detection: bool) -> BashStep {
@@ -3127,8 +3023,10 @@ fn run_threat_analysis_step(
     byom_exclude_keys: &[String],
     detection_provider_env: &[(String, String)],
     github_token_var: &str,
+    supply_chain: Option<&SupplyChainConfig>,
 ) -> Result<BashStep> {
-    let api_proxy_block = awf_api_proxy_flags(byom_exclude_keys);
+    let image_flags_block = awf_image_flags(supply_chain);
+    let exclude_env_block = awf_exclude_env_flags(byom_exclude_keys);
     let script = format!(
         "set -o pipefail\n\
          \n\
@@ -3136,11 +3034,14 @@ fn run_threat_analysis_step(
          THREAT_OUTPUT_FILE=\"$(Agent.TempDirectory)/threat-analysis-output.txt\"\n\
          \n\
          # Stream threat analysis output in real-time with VSO command filtering\n\
-         sudo -E \"$(Pipeline.Workspace)/awf/awf\" \\\n  \
+         # shellcheck disable=SC2016 # The single-quoted engine command is intentionally expanded by AWF inside the sandbox\n\
+         \"$(Pipeline.Workspace)/awf/awf\" \\\n  \
            --allow-domains \"{allowed_domains}\" \\\n  \
+           --network-isolation \\\n\
+{image_flags_block}\
            --skip-pull \\\n  \
            --env-all \\\n\
-{api_proxy_block}  \
+{exclude_env_block}  \
            --container-workdir \"{working_directory}\" \\\n  \
            --log-level info \\\n  \
            --proxy-logs-dir \"$(Agent.TempDirectory)/threat-analysis-logs/firewall\" \\\n  \
@@ -3923,7 +3824,6 @@ mod tests {
             allowed_domains: String::new(),
             awf_mounts: "\\".to_string(),
             awf_path_step_yaml: String::new(),
-            enabled_tools_args: String::new(),
             mcpg_config_json: "{}".to_string(),
             mcpg_docker_env: String::new(),
             mcpg_step_env: String::new(),
@@ -3935,7 +3835,6 @@ mod tests {
             integrity_check_yaml: String::new(),
             agent_content_value: String::new(),
             debug_pipeline: false,
-            byom_active: false,
             byom_exclude_keys: vec![],
             detection_provider_env: vec![],
         };

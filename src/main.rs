@@ -277,6 +277,9 @@ enum Commands {
     },
     /// Run SafeOutputs MCP server over HTTP (for MCPG integration)
     McpHttp {
+        /// IP address to bind the HTTP listener to
+        #[arg(long, default_value = "127.0.0.1")]
+        bind_address: std::net::IpAddr,
         /// Port to listen on
         #[arg(long, default_value = "8100")]
         port: u16,
@@ -1110,6 +1113,7 @@ async fn main() -> Result<()> {
             .await?;
         }
         Commands::McpHttp {
+            bind_address,
             port,
             api_key,
             output_directory,
@@ -1124,6 +1128,7 @@ async fn main() -> Result<()> {
             mcp::run_http(
                 &output_directory,
                 &bounding_directory,
+                bind_address,
                 port,
                 api_key.as_deref(),
                 filter.as_deref(),

@@ -8,62 +8,123 @@ The MCP Gateway ([gh-aw-mcpg](https://github.com/github/gh-aw-mcpg)) is the upst
 
 ## Architecture
 
+MCPG runs as a trusted named container (`awmg-mcpg`) under AWF's strict
+network topology. It starts on Docker's default bridge network — bound to
+`127.0.0.1:8080` on the host — and AWF then attaches that same container to
+its internal `awf-net`, making it reachable from inside the sandbox as
+`awmg-mcpg:8080`. The agent has no route to the host itself. MCPG already
+holds the Docker socket (`-v /var/run/docker.sock:/var/run/docker.sock`) for
+every stdio MCP backend it spawns, so SafeOutputs being one more sibling
+container adds no new gateway privilege. MCPG owns the full lifecycle (spawn,
+stdio transport, teardown) of every child it starts.
+
+SafeOutputs itself is a **hardened stdio child container**, not an HTTP
+backend: MCPG spawns a sibling container from the same pinned
+`ghcr.io/github/gh-aw-firewall/agent:<AWF_VERSION>` image already pre-pulled
+for the AWF sandbox (or the internal supply-chain registry's `agent:<AWF_VERSION>`
+mirror — see [`docs/supply-chain.md`](supply-chain.md)), with its entrypoint
+overridden to the downloaded `ado-aw` binary. There is no host-side process,
+no bridge-gateway resolution, and no `host.docker.internal` mapping.
+
 ```
-                          Host
-┌─────────────────────────────────────────────────┐
-│                                                 │
-│  ┌──────────────┐     ┌──────────────────────┐  │
-│  │ SafeOutputs  │     │  MCPG Gateway        │  │
-│  │ HTTP Server  │◀────│  (Docker, --network   │  │
-│  │ (ado-aw      │     │   host, port 80)     │  │
-│  │  mcp-http)   │     │                      │  │
-│  │ port 8100    │     │  Routes tool calls   │  │
-│  └──────────────┘     │  to upstreams        │  │
-│                       └──────────┬───────────┘  │
-│                                  │              │
-│          ┌─────────────────┐     │              │
-│          │  Custom MCP     │◀────┘              │
-│          │  (stdio server) │                    │
-│          └─────────────────┘                    │
-└─────────────────────────────────────────────────┘
+                                Host
+┌───────────────────────────────────────────────────────────┐
+│                                                             │
+│  ┌──────────────────────┐        ┌───────────────────────┐ │
+│  │  MCPG (awmg-mcpg)     │──────▶│  SafeOutputs (stdio)  │ │
+│  │  Docker bridge,       │ spawn  │  ghcr.io/.../agent:AWF │ │
+│  │  127.0.0.1:8080       │ via     │  entrypoint: ado-aw   │ │
+│  │  Routes tool calls    │ docker  │  mcp --enabled-tools… │ │
+│  │  to upstreams         │ socket  │  /safeoutputs <wd>    │ │
+│  └──────────┬────────────┘        │  --network none        │ │
+│             │                     │  --cap-drop ALL         │ │
+│             │                     │  --read-only rootfs     │ │
+│             │                     │  non-root UID:GID       │ │
+│  ┌──────────┴──────────┐          └───────────────────────┘ │
+│  │  Custom MCP          │                                    │
+│  │  (stdio server)      │                                    │
+│  └──────────────────────┘                                    │
+└───────────────────────────────────────────────────────────┘
                        │
-          host.docker.internal:80
+        AWF attaches awmg-mcpg to awf-net
                        │
 ┌─────────────────────────────────────────────────┐
-│                  AWF Container                   │
+│              AWF Container (awf-net)             │
 │                                                 │
 │  ┌──────────┐                                   │
-│  │  Copilot │──── HTTP ──── MCPG (via host)     │
-│  │  Agent   │                                   │
+│  │  Copilot │── HTTP ── awmg-mcpg:8080          │
+│  │  Agent   │   (no route to the host)          │
 │  └──────────┘                                   │
 └─────────────────────────────────────────────────┘
 ```
 
 ## How It Works
 
-1. **SafeOutputs HTTP server** starts on the host (port 8100) via `ado-aw mcp-http`
-2. **MCPG container** starts on the host network (`docker run --network host`)
-3. **MCPG config** (generated by the compiler) defines:
-   - SafeOutputs as an HTTP backend (`type: "http"`, URL points to localhost:8100)
-   - Custom MCPs as stdio servers (`type: "stdio"`, spawned by MCPG)
-   - Gateway settings (port 80, API key, payload directory)
-4. **Agent inside AWF** connects to MCPG via `http://host.docker.internal:80/mcp`
-5. MCPG routes tool calls to the appropriate upstream (SafeOutputs or custom MCPs)
-6. After the agent completes, MCPG and SafeOutputs are stopped
+1. **MCPG container** starts on Docker's bridge network as the named,
+   trusted container `awmg-mcpg`, published to the host at
+   `127.0.0.1:8080`, with the Docker socket mounted so it can spawn stdio
+   children — see [`docs/mcp.md`](mcp.md) and
+   [`docs/local-development.md`](local-development.md).
+2. **MCPG config** (generated by the compiler) defines:
+   - SafeOutputs as a hardened stdio backend (`type: "stdio"`, `container:`
+     the pinned AWF `agent` image, `entrypoint: /usr/local/bin/ado-aw`)
+   - Custom MCPs as stdio servers (`type: "stdio"`, spawned by MCPG) or HTTP
+     backends (`type: "http"`), per the agent's `mcp-servers:` front matter
+   - Gateway settings (port 8080, API key, payload directory)
+3. **MCPG spawns the SafeOutputs child** on first use via the same Docker
+   socket it uses for any other stdio backend, with:
+   - the `ado-aw` binary downloaded to `/tmp/awf-tools/ado-aw` mounted
+     read-only at `/usr/local/bin/ado-aw` (entrypoint override)
+   - the agent's working directory mounted read-write at the *same* absolute
+     path — required because `create-pull-request` stages/commits/resets a
+     worktree in place to generate patches
+   - `/tmp/awf-tools/staging` mounted read-write at `/safeoutputs` (NDJSON
+     output directory)
+   - entrypoint args `mcp --enabled-tools <filtered list> /safeoutputs
+     <working directory>`
+   - hardening flags: `--network none`, `--user <host ADO runner UID:GID>`,
+     `--cap-drop ALL`, `--security-opt no-new-privileges`, `--read-only`
+     rootfs, `--tmpfs /tmp:rw,nosuid,nodev,noexec`, `--pids-limit 256`,
+     `HOME=/tmp`
+4. **AWF attaches `awmg-mcpg` to `awf-net`** (`--topology-attach awmg-mcpg`
+   on the Agent's AWF invocation) so the agent, running inside the
+   network-isolated container, can reach it directly at `awmg-mcpg:8080`.
+   The Agent command appends `awmg-mcpg` to both `NO_PROXY` and `no_proxy`
+   so Copilot connects directly over `awf-net` instead of sending this
+   internal request through Squid.
+5. MCPG routes tool calls to the appropriate upstream (SafeOutputs or custom
+   MCPs). Detection is unaffected — it never attaches to MCPG.
+6. After the agent completes, MCPG (and any stdio children it spawned,
+   including SafeOutputs) are stopped.
 
 ## MCPG Configuration Format
 
-The compiler generates MCPG configuration JSON from the `mcp-servers:` front matter:
+The compiler generates MCPG configuration JSON from the `mcp-servers:` front matter. The `safeoutputs` entry is always present and always compiler-owned — it cannot be overridden from front matter:
 
 ```json
 {
   "mcpServers": {
     "safeoutputs": {
-      "type": "http",
-      "url": "http://localhost:8100/mcp",
-      "headers": {
-        "Authorization": "Bearer <api-key>"
-      }
+      "type": "stdio",
+      "container": "ghcr.io/github/gh-aw-firewall/agent:0.27.32",
+      "entrypoint": "/usr/local/bin/ado-aw",
+      "entrypointArgs": ["mcp", "--enabled-tools", "noop", "/safeoutputs", "/path/to/workdir"],
+      "mounts": [
+        "/tmp/awf-tools/ado-aw:/usr/local/bin/ado-aw:ro",
+        "/path/to/workdir:/path/to/workdir:rw",
+        "/tmp/awf-tools/staging:/safeoutputs:rw"
+      ],
+      "args": [
+        "--network", "none",
+        "--user", "${MCP_RUNNER_UID}:${MCP_RUNNER_GID}",
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges",
+        "--read-only",
+        "--tmpfs", "/tmp:rw,nosuid,nodev,noexec",
+        "--pids-limit", "256",
+        "-w", "/path/to/workdir"
+      ],
+      "env": { "HOME": "/tmp" }
     },
     "custom-tool": {
       "type": "stdio",
@@ -74,24 +135,35 @@ The compiler generates MCPG configuration JSON from the `mcp-servers:` front mat
     }
   },
   "gateway": {
-    "port": 80,
-    "domain": "host.docker.internal",
+    "port": 8080,
+    "domain": "awmg-mcpg",
     "apiKey": "<gateway-api-key>",
     "payloadDir": "/tmp/gh-aw/mcp-payloads"
   }
 }
 ```
 
-Runtime placeholders (`${SAFE_OUTPUTS_PORT}`, `${SAFE_OUTPUTS_API_KEY}`, `${MCP_GATEWAY_API_KEY}`) are substituted by the pipeline before passing the config to MCPG.
+The `agent` image is the same pinned AWF sandbox image already pre-pulled for
+the Agent job (or its internal-registry mirror when `supply-chain.registry`
+is configured — see [`docs/supply-chain.md`](supply-chain.md)); the compiler
+only overrides its entrypoint to `ado-aw`. `gateway.domain` (`awmg-mcpg`) is
+the stable container name AWF attaches to `awf-net`, which the agent uses to
+reach MCPG.
+
+Runtime placeholders (`${MCP_RUNNER_UID}`, `${MCP_RUNNER_GID}`,
+`${MCP_GATEWAY_API_KEY}`) are substituted by the pipeline (via `sed`, using
+`id -u`/`id -g` on the Agent job's runner) before passing the config to
+MCPG on stdin. There is no `SAFE_OUTPUTS_PORT`/`SAFE_OUTPUTS_API_KEY`/
+`SAFE_OUTPUTS_BIND_ADDRESS` to substitute — SafeOutputs has no network
+listener at all (`--network none`).
 
 ## Pipeline Integration
 
 The MCPG is automatically configured in generated standalone pipelines:
 
-1. **Config Generation**: The compiler generates `mcpg-config.json` from the agent's `mcp-servers:` front matter
-2. **SafeOutputs Start**: `ado-aw mcp-http` starts as a background process on the host
-3. **MCPG Start**: The MCPG Docker container starts on the host network with config via stdin
-4. **Agent Execution**: AWF runs the agent with `--enable-host-access`, copilot connects to MCPG via HTTP
-5. **Cleanup**: Both MCPG and SafeOutputs are stopped after the agent completes (condition: always)
+1. **Config Generation**: The compiler generates `mcpg-config.json` from the agent's `mcp-servers:` front matter, including the compiler-owned `safeoutputs` stdio entry above.
+2. **MCPG Start**: The MCPG Docker container (`awmg-mcpg`) starts on Docker's bridge network, published to the host at `127.0.0.1:8080`, with config via stdin and the Docker socket mounted so it can spawn stdio children (including SafeOutputs) on demand.
+3. **Agent Execution**: AWF runs the Agent rootlessly with `--network-isolation --topology-attach awmg-mcpg`, attaching the MCPG container to `awf-net`; copilot connects to MCPG at `awmg-mcpg:8080` over HTTP, and reaches SafeOutputs tools transparently through MCPG's stdio routing.
+4. **Cleanup**: MCPG and any stdio children it spawned (including SafeOutputs) are stopped after the agent completes (condition: always).
 
-The MCPG config is written to `$(Agent.TempDirectory)/staging/mcpg-config.json` in its own pipeline step, making it easy to inspect and debug.
+The MCPG config is written to `$(Agent.TempDirectory)/staging/mcpg-config.json` in its own pipeline step, making it easy to inspect and debug. The optional `ado-aw mcp-http` CLI command remains available for direct/local use (see [`docs/cli.md`](cli.md) and [`docs/local-development.md`](local-development.md)), but compiled pipelines never invoke it — they always use the `ado-aw mcp` stdio subcommand through MCPG.

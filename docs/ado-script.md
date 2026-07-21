@@ -70,7 +70,7 @@ pipeline** as runtime helpers. Today it produces thirteen bundles:
   [`engine.md`](engine.md#github-app-backed-copilot-engine-auth).
 - `prepare-pr-base.js` — create-pull-request base-ref preparer that runs when
   `create-pull-request` is configured, in **both** the Agent job (before the
-  Copilot invocation, so the host-side SafeOutputs MCP server can compute a diff
+  Copilot invocation, so the containerized SafeOutputs MCP server can compute a diff
   base — issue #1413) **and** the SafeOutputs job (before `ado-aw execute`, so
   the Stage 3 executor's `git worktree add` resolves `origin/<target>`; each ADO
   job has an isolated checkout, so the ref must be re-fetched in the job that

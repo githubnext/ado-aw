@@ -3,8 +3,8 @@
 #
 # This script validates the ado-aw components that interface with MCPG:
 #   1. Compiles a sample agent and verifies MCPG markers in output YAML
-#   2. Starts the SafeOutputs HTTP server
-#   3. Sends MCP requests via curl (simulating MCPG forwarding)
+#   2. Starts the optional SafeOutputs HTTP server directly
+#   3. Sends MCP requests via curl
 #   4. Verifies NDJSON safe output files are created
 #
 # Usage:
@@ -50,7 +50,7 @@ if [ "${1:-}" != "--skip-compile" ]; then
     FIXTURE="$SCRIPT_DIR/fixtures/minimal-agent.md"
     OUTPUT_YAML="$TEMP_DIR/minimal-agent.yml"
 
-    "$BINARY" compile "$FIXTURE" -o "$OUTPUT_YAML"
+    "$BINARY" compile --force "$FIXTURE" -o "$OUTPUT_YAML"
 
     if [ ! -f "$OUTPUT_YAML" ]; then
         fail "Compiled YAML not created"
@@ -69,22 +69,37 @@ if [ "${1:-}" != "--skip-compile" ]; then
         fail "MCPG config file reference missing"
     fi
 
-    if grep -q 'host.docker.internal' "$OUTPUT_YAML"; then
-        pass "host.docker.internal reference present"
+    if grep -q '"entrypoint": "/usr/local/bin/ado-aw"' "$OUTPUT_YAML" &&
+        grep -q '"/tmp/awf-tools/staging:/safeoutputs:rw"' "$OUTPUT_YAML"; then
+        pass "SafeOutputs stdio container configuration present"
     else
-        fail "host.docker.internal reference missing"
+        fail "SafeOutputs stdio container configuration missing"
     fi
 
-    if grep -q 'enable-host-access' "$OUTPUT_YAML"; then
-        pass "AWF --enable-host-access flag present"
+    if grep -q -- '--network-isolation' "$OUTPUT_YAML" &&
+        grep -q -- '--topology-attach "awmg-mcpg"' "$OUTPUT_YAML"; then
+        pass "AWF strict topology flags present"
     else
-        fail "AWF --enable-host-access flag missing"
+        fail "AWF strict topology flags missing"
     fi
 
-    if grep -q 'SafeOutputs HTTP server' "$OUTPUT_YAML"; then
-        pass "SafeOutputs HTTP server step present"
+    if grep -q -- '--enable-host-access\|--legacy-security\|sudo -E .*awf' "$OUTPUT_YAML"; then
+        fail "Legacy AWF security flags found"
     else
-        fail "SafeOutputs HTTP server step missing"
+        pass "No legacy AWF security flags"
+    fi
+
+    if grep -q '"none"' "$OUTPUT_YAML" &&
+        grep -q '"no-new-privileges"' "$OUTPUT_YAML"; then
+        pass "SafeOutputs container hardening present"
+    else
+        fail "SafeOutputs container hardening missing"
+    fi
+
+    if grep -q 'SAFE_OUTPUTS_BIND_ADDRESS\|host.docker.internal' "$OUTPUT_YAML"; then
+        fail "Legacy SafeOutputs host HTTP plumbing found"
+    else
+        pass "No SafeOutputs host HTTP plumbing"
     fi
 
     # Verify no unreplaced markers

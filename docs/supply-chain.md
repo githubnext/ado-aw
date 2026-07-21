@@ -130,14 +130,29 @@ is kept, placed directly under the configured base path at the **same tag**:
 |-------------|---------------------------------------------|
 | `ghcr.io/github/gh-aw-firewall/squid:<awf-version>` | `<registry>/squid:<awf-version>` |
 | `ghcr.io/github/gh-aw-firewall/agent:<awf-version>` | `<registry>/agent:<awf-version>` |
+| `ghcr.io/github/gh-aw-firewall/api-proxy:<awf-version>` | `<registry>/api-proxy:<awf-version>` |
 | `ghcr.io/github/gh-aw-mcpg:v<mcpg-version>` | `<registry>/gh-aw-mcpg:v<mcpg-version>` |
 
 `<registry>` may be a bare host (`myacr.azurecr.io`) or a host with an
 arbitrary namespace path (`myacr.azurecr.io/oss-mirror`,
 `contoso.azurecr.io/team/oss/mirror`). The contract is only that the artifact
-names (`squid`, `agent`, `gh-aw-mcpg`) and tags remain unchanged under that
-path. `az acr login` derives the ACR registry name from the host portion of
-the base path.
+names (`squid`, `agent`, `api-proxy`, `gh-aw-mcpg`) and tags remain unchanged
+under that path. `az acr login` derives the ACR registry name from the host
+portion of the base path.
+
+> **The `agent` image is dual-purpose.** It backs both the AWF sandbox that
+> runs the Copilot CLI *and* the containerized SafeOutputs MCP server that
+> MCPG spawns as a hardened stdio sibling (`--network none`, non-root,
+> read-only rootfs — see [`docs/mcpg.md`](mcpg.md)). The compiler resolves
+> the same rewritten `<registry>/agent:<awf-version>` reference for both, so
+> no separate mirror entry is needed for SafeOutputs.
+
+AWF 0.27.32+ always runs with its api-proxy sidecar enabled, so `api-proxy`
+must be pre-pulled and mirrored alongside `squid`, `agent`, and MCPG — it is
+not an optional/BYOK-only image. When `registry` is configured, the compiler
+passes both `--image-tag <awf-version>` and `--image-registry <registry>`
+directly to the AWF invocation so `--skip-pull` resolves every pre-pulled image
+(including `api-proxy`) under the mirror name instead of GHCR.
 
 ## Examples
 
