@@ -207,7 +207,12 @@ mod tests {
         .unwrap();
         let node = fm.runtimes.as_ref().unwrap().node.as_ref().unwrap();
         let ext = NodeExtension::new(node.clone());
-        assert!(ext.declarations(&ctx_from(&fm)).is_err());
+        let err = ext.declarations(&ctx_from(&fm)).unwrap_err();
+        assert!(
+            err.to_string().contains("https://") || err.to_string().contains("http://"),
+            "expected scheme error, got: {err}"
+        );
+        assert!(err.to_string().contains("runtimes.node.feed-url"), "got: {err}");
     }
 
     #[test]
@@ -218,7 +223,12 @@ mod tests {
         .unwrap();
         let node = fm.runtimes.as_ref().unwrap().node.as_ref().unwrap();
         let ext = NodeExtension::new(node.clone());
-        assert!(ext.declarations(&ctx_from(&fm)).is_err());
+        let err = ext.declarations(&ctx_from(&fm)).unwrap_err();
+        assert!(
+            err.to_string().contains("ADO expression"),
+            "expected injection error, got: {err}"
+        );
+        assert!(err.to_string().contains("runtimes.node.version"), "got: {err}");
     }
 
     /// Default Node install: only a single `Step::Task(UseNode@1)`

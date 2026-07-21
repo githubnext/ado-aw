@@ -119,12 +119,13 @@ Codemods live in `src/compile/codemods/`:
 
 ```text
 src/compile/codemods/
-├── mod.rs                         # Framework + CODEMODS registry
-├── helpers.rs                     # take_key, insert_no_overwrite, rename_key, ConflictPolicy
-├── 0001_repos_unified.rs          # repositories: + checkout: -> unified repos:
-├── 0002_pool_object_form.rs       # pool: <string> -> pool object form (name/vmImage)
-├── 0003_flatten_work_item_config.rs # safe-outputs.*.work-item: -> flat fields
-└── 0004_legacy_path_markers.rs    # {{ workspace }}/{{ working_directory }}/{{ trigger_repo_directory }} -> ADO path
+├── mod.rs                                        # Framework + CODEMODS registry
+├── helpers.rs                                    # take_key, insert_no_overwrite, rename_key, ConflictPolicy
+├── 0001_repos_unified.rs                         # repositories: + checkout: -> unified repos:
+├── 0002_pool_object_form.rs                      # pool: <string> -> pool object form (name/vmImage)
+├── 0003_flatten_work_item_config.rs              # safe-outputs.*.work-item: -> flat fields
+├── 0004_legacy_path_markers.rs                   # {{ workspace }}/{{ working_directory }}/{{ trigger_repo_directory }} -> ADO path
+└── 0005_drop_build_attachment_allowed_build_ids.rs # safe-outputs.upload-build-attachment.allowed-build-ids: -> removed
 ```
 
 The filename prefix is a zero-padded sequence number (`<NNNN>`). It

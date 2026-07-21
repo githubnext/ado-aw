@@ -494,9 +494,10 @@ mod tests {
             repository: None,
         };
         let result: Result<CreateBranchResult, _> = params.try_into();
+        let err = result.unwrap_err().to_string();
         assert!(
-            result.is_err(),
-            "branch starting with '-' should be rejected"
+            err.contains("must not start with '-'"),
+            "unexpected error: {err}"
         );
     }
 
@@ -509,7 +510,11 @@ mod tests {
             repository: None,
         };
         let result: Result<CreateBranchResult, _> = params.try_into();
-        assert!(result.is_err(), "branch with spaces should be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("must not contain spaces"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -521,7 +526,11 @@ mod tests {
             repository: None,
         };
         let result: Result<CreateBranchResult, _> = params.try_into();
-        assert!(result.is_err(), "branch >200 chars should be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("must be at most 200 characters"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -533,9 +542,10 @@ mod tests {
             repository: None,
         };
         let result: Result<CreateBranchResult, _> = params.try_into();
+        let err = result.unwrap_err().to_string();
         assert!(
-            result.is_err(),
-            "source_branch with '..' should be rejected"
+            err.contains("source_branch must not contain '..'"),
+            "unexpected error: {err}"
         );
     }
 

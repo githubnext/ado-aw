@@ -463,7 +463,11 @@ mod tests {
             repository: None,
         };
         let result: Result<CreateGitTagResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("message must be at least 5 characters"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -475,7 +479,11 @@ mod tests {
             repository: Some("##vso[task.setvariable variable=x]y".to_string()),
         };
         let result: Result<CreateGitTagResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("pipeline command"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

@@ -737,12 +737,26 @@ mod tests {
 
     #[test]
     fn test_validation_rejects_empty_artifact_name() {
-        assert!(try_params(None, "", "out/report.pdf").is_err());
+        let err = try_params(None, "", "out/report.pdf")
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("must be non-empty and contain only alphanumeric"),
+            "expected non-empty artifact_name error, got: {err}"
+        );
     }
 
     #[test]
     fn test_validation_rejects_artifact_name_with_spaces() {
-        assert!(try_params(None, "my report", "out/report.pdf").is_err());
+        let err = try_params(None, "my report", "out/report.pdf")
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("must be non-empty and contain only alphanumeric"),
+            "expected alphanumeric-only artifact_name error, got: {err}"
+        );
     }
 
     #[test]
@@ -759,7 +773,13 @@ mod tests {
     #[test]
     fn test_validation_rejects_long_artifact_name() {
         let long_name = "a".repeat(101);
-        assert!(try_params(None, &long_name, "out/report.pdf").is_err());
+        let err = try_params(None, &long_name, "out/report.pdf")
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("must be at most 100 characters"),
+            "expected 100-char limit error, got: {err}"
+        );
     }
 
     #[test]
@@ -780,17 +800,35 @@ mod tests {
 
     #[test]
     fn test_validation_rejects_null_bytes_in_file_path() {
-        assert!(try_params(None, "report", "out/report\0.pdf").is_err());
+        let err = try_params(None, "report", "out/report\0.pdf")
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("null bytes"),
+            "expected null-bytes error, got: {err}"
+        );
     }
 
     #[test]
     fn test_validation_rejects_newline_in_file_path() {
-        assert!(try_params(None, "report", "out\n/report.pdf").is_err());
+        let err = try_params(None, "report", "out\n/report.pdf")
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("newlines"),
+            "expected newlines error, got: {err}"
+        );
     }
 
     #[test]
     fn test_validation_rejects_carriage_return_in_file_path() {
-        assert!(try_params(None, "report", "out\r/report.pdf").is_err());
+        let err = try_params(None, "report", "out\r/report.pdf")
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("newlines"),
+            "expected newlines/carriage-return error, got: {err}"
+        );
     }
 
     #[test]

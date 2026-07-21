@@ -189,7 +189,12 @@ mod tests {
         .unwrap();
         let python = fm.runtimes.as_ref().unwrap().python.as_ref().unwrap();
         let ext = PythonExtension::new(python.clone());
-        assert!(ext.declarations(&ctx_from(&fm)).is_err());
+        let err = ext.declarations(&ctx_from(&fm)).unwrap_err();
+        assert!(
+            err.to_string().contains("https://") || err.to_string().contains("http://"),
+            "expected scheme error, got: {err}"
+        );
+        assert!(err.to_string().contains("runtimes.python.feed-url"), "got: {err}");
     }
 
     #[test]
@@ -200,7 +205,12 @@ mod tests {
         .unwrap();
         let python = fm.runtimes.as_ref().unwrap().python.as_ref().unwrap();
         let ext = PythonExtension::new(python.clone());
-        assert!(ext.declarations(&ctx_from(&fm)).is_err());
+        let err = ext.declarations(&ctx_from(&fm)).unwrap_err();
+        assert!(
+            err.to_string().contains("ADO expression"),
+            "expected injection error, got: {err}"
+        );
+        assert!(err.to_string().contains("runtimes.python.version"), "got: {err}");
     }
 
     /// Locks the `declarations()` override: must return a single

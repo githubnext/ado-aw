@@ -398,8 +398,11 @@ mod tests {
             parameters: None,
             reason: None,
         };
-        let result: Result<QueueBuildResult, _> = params.try_into();
-        assert!(result.is_ok());
+        let result: QueueBuildResult = params.try_into().expect("minimal params should succeed");
+        assert_eq!(result.name, "queue-build");
+        assert_eq!(result.pipeline_id, 1);
+        assert!(result.branch.is_none());
+        assert!(result.reason.is_none());
     }
 
     #[test]

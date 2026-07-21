@@ -138,6 +138,126 @@ fn graph_rejects_unknown_format() {
     );
 }
 
+fn fixture_path(relative: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join(relative)
+}
+
+/// `graph dump --format text` emits all expected text-mode sections including
+/// step locations, job edges, step counts, and the outputs-needing-isOutput
+/// block. This covers `render_text` in `src/inspect/graph_query.rs`.
+#[test]
+fn graph_text_emits_expected_sections_for_standalone_pipeline() {
+    let (_workspace, src) = fixture_copy("canary.md");
+    let out = Command::new(binary_path())
+        .arg("graph")
+        .arg("dump")
+        .arg(&src)
+        .arg("--format")
+        .arg("text")
+        .output()
+        .expect("run ado-aw graph dump --format text");
+    assert!(
+        out.status.success(),
+        "graph dump --format text exited non-zero. stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Pipeline header
+    assert!(
+        stdout.contains("Pipeline:"),
+        "expected 'Pipeline:' header in text output, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("(standalone)"),
+        "expected '(standalone)' shape in text output, got:\n{stdout}"
+    );
+    // Step locations section
+    assert!(
+        stdout.contains("Step locations"),
+        "expected 'Step locations' section, got:\n{stdout}"
+    );
+    // The canonical canary pipeline has the threat-analysis step with SafeToProcess output.
+    assert!(
+        stdout.contains("outputs=[SafeToProcess]"),
+        "expected 'outputs=[SafeToProcess]' in step locations, got:\n{stdout}"
+    );
+    // Job edges section
+    assert!(
+        stdout.contains("Job edges (consumer -> producer)"),
+        "expected 'Job edges' section, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Detection -> Agent"),
+        "expected Detection→Agent edge in text output, got:\n{stdout}"
+    );
+    // Job step counts footer
+    assert!(
+        stdout.contains("Job step counts"),
+        "expected 'Job step counts' section, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Agent:"),
+        "expected 'Agent:' entry in step counts, got:\n{stdout}"
+    );
+    // Outputs needing isOutput
+    assert!(
+        stdout.contains("Outputs needing isOutput=true"),
+        "expected 'Outputs needing isOutput=true' section, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("threatAnalysis: SafeToProcess"),
+        "expected threatAnalysis isOutput entry, got:\n{stdout}"
+    );
+}
+
+/// `graph dump --format dot` for a stage-template fixture emits subgraph
+/// clusters (one per stage) and fully-qualified `stage.job` node IDs so that
+/// jobs with the same ID in different stages do not collide.
+/// This covers the `PipelineBodySummary::Stages` branch of `render_dot`.
+#[test]
+fn graph_dot_emits_subgraph_clusters_for_stage_template() {
+    let src = fixture_path("stage-agent.md");
+    let workspace = tempfile::tempdir().expect("create temp dir");
+    let dst = workspace.path().join("stage-agent.md");
+    std::fs::copy(&src, &dst).expect("copy stage-agent.md into temp dir");
+
+    let out = Command::new(binary_path())
+        .arg("graph")
+        .arg("dump")
+        .arg(&dst)
+        .arg("--format")
+        .arg("dot")
+        .output()
+        .expect("run ado-aw graph dump --format dot on stage-agent.md");
+    assert!(
+        out.status.success(),
+        "graph dump --format dot (stage-template) exited non-zero. stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.starts_with("digraph ado_aw_pipeline {"));
+    // Stage-grouped jobs are placed inside a `subgraph cluster_<stageId>` block.
+    assert!(
+        stdout.contains("subgraph \"cluster_"),
+        "expected subgraph cluster for stage-template, got:\n{stdout}"
+    );
+    // Node IDs must be `stage.job` to avoid collisions across stages.
+    assert!(
+        stdout.contains("StageTestAgent.StageTestAgent_Detection"),
+        "expected qualified stage.job node id, got:\n{stdout}"
+    );
+    // Edges must also use the qualified IDs.
+    assert!(
+        stdout.contains(
+            "\"StageTestAgent.StageTestAgent_SafeOutputs\" -> \"StageTestAgent.StageTestAgent_Agent\""
+        ),
+        "expected qualified edge in dot output, got:\n{stdout}"
+    );
+}
+
 /// `ado-aw lint` surfaces invalid authored task inputs as a `task-input-invalid`
 /// **warning** finding (not an error), so the agent self-optimization loop can
 /// read structured feedback on the steps it synthesised. Warnings do not fail
