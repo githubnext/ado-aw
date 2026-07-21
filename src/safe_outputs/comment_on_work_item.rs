@@ -387,7 +387,11 @@ mod tests {
             body: "This is a valid comment body text.".to_string(),
         };
         let result: Result<CommentOnWorkItemResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("work_item_id must be positive"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -397,7 +401,11 @@ mod tests {
             body: "This is a valid comment body text.".to_string(),
         };
         let result: Result<CommentOnWorkItemResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("work_item_id must be positive"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -407,7 +415,11 @@ mod tests {
             body: "Too short".to_string(),
         };
         let result: Result<CommentOnWorkItemResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("body must be at least 10 characters"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
