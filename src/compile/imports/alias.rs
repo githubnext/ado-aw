@@ -1,38 +1,20 @@
-//! Synthesis of compiler-internal repository-resource aliases from resolved
-//! remote imports (for the runtime executor-job checkout).
+//! Compiler-internal repository-resource identifiers for imported custom
+//! safe-output components (for the runtime executor-job checkout), plus the
+//! typed-endpoint → ADO repo-type/service-connection mapping and the P7
+//! parent-resource diagnostic for template targets.
 //!
 //! The compiler owns these aliases: authors write only `imports:` entries, and
-//! this pass derives the ADO `resources.repositories` entries needed by later
-//! executor jobs. Aliases are stable, valid ADO identifiers, and readable:
-//! `import_<sanitized-owner>_<sanitized-repo>_<hash>`. The readable parts replace
-//! non-ASCII-identifier characters with `_`; the fixed hash suffix is derived
-//! from the original `owner/repo`, so repos that collide under simple
-//! sanitization (for example `a-b/c` and `a_b/c`) still get distinct aliases
-//! without requiring global import-set context.
-//!
-//! Repository resources are deduplicated by `(owner, repo, endpoint)`, not by
-//! manifest path or SHA: ADO repository-resource refs are branch/tag-level
-//! authorization handles, while the executor job will pin the exact commit with
-//! `git checkout <sha>` after checkout.
-#![allow(dead_code)]
+//! the per-component provenance stamped during the merge pass carries the
+//! `owner/repo` that [`alias_identifier`] turns into a stable, valid ADO
+//! identifier: `import_<sanitized-owner>_<sanitized-repo>_<hash>`. The readable
+//! parts replace non-ASCII-identifier characters with `_`; the fixed hash suffix
+//! is derived from the original `owner/repo`, so repos that collide under simple
+//! sanitization (for example `a-b/c` and `a_b/c`) still get distinct aliases.
 
-use std::collections::{HashMap, HashSet};
-
-use anyhow::Result;
-
-use super::ResolvedImport;
-use crate::compile::types::{CompileTarget, ImportEndpoint, ImportSource, Repository};
+use crate::compile::types::{CompileTarget, ImportEndpoint};
 use crate::hash::sha256_hex;
 
-const REPOSITORY_RESOURCE_REF: &str = "refs/heads/main";
 const HASH_SUFFIX_LEN: usize = 12;
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct RepoKey {
-    owner: String,
-    repo: String,
-    endpoint: Option<ImportEndpoint>,
-}
 
 /// Return the stable compiler-generated repository-resource alias for a remote
 /// import source.
@@ -50,8 +32,7 @@ pub fn alias_identifier(owner: &str, repo: &str) -> String {
 /// Map a typed import [`ImportEndpoint`] to the ADO repository-resource `type`
 /// and the backing service-connection name (`None` for same-org Azure Repos).
 ///
-/// Single source of truth shared by [`synthesize_repo_aliases`] and the
-/// compile-time component-provenance stamping in
+/// Single source of truth for the compile-time component-provenance stamping in
 /// [`crate::compile::imports::merge`], so the runtime component checkout uses
 /// the correct repo type + service connection for GitHub / GitHub Enterprise /
 /// cross-org Azure Repos components (not a hardcoded `git` / no-endpoint).
@@ -64,95 +45,6 @@ pub(crate) fn endpoint_repo_type_and_connection(
         Some(ImportEndpoint::GitHub { name }) => ("github", Some(name.clone())),
         Some(ImportEndpoint::GitHubEnterprise { name, .. }) => {
             ("githubenterprise", Some(name.clone()))
-        }
-    }
-}
-
-/// Synthesize ADO repository resources for remote imports.
-///
-/// Local imports are compile-time only and do not need a runtime checkout, so
-/// they are skipped. Remote imports from the same `(owner, repo, endpoint)` are
-/// collapsed to one resource even when they point at different manifest paths or
-/// SHAs; the resource `ref` is only an ADO authorization ref, not the execution
-/// pin.
-pub fn synthesize_repo_aliases(imports: &[ResolvedImport]) -> Result<Vec<Repository>> {
-    let mut ordered_keys = Vec::new();
-    let mut seen = HashSet::new();
-
-    for import in imports {
-        let ImportSource::Remote(spec) = &import.source else {
-            continue;
-        };
-
-        let key = RepoKey {
-            owner: spec.owner.clone(),
-            repo: spec.repo.clone(),
-            endpoint: import.entry.endpoint.clone(),
-        };
-
-        if seen.insert(key.clone()) {
-            ordered_keys.push(key);
-        }
-    }
-
-    let mut alias_counts: HashMap<String, usize> = HashMap::new();
-    for key in &ordered_keys {
-        *alias_counts
-            .entry(alias_identifier(&key.owner, &key.repo))
-            .or_default() += 1;
-    }
-
-    Ok(ordered_keys
-        .into_iter()
-        .map(|key| {
-            let base_alias = alias_identifier(&key.owner, &key.repo);
-            let alias = if alias_counts.get(&base_alias).copied().unwrap_or(0) > 1 {
-                format!(
-                    "{}_{}",
-                    base_alias,
-                    short_hash(&format!(
-                        "{}/{}/{}",
-                        key.owner,
-                        key.repo,
-                        endpoint_hash_discriminator(key.endpoint.as_ref())
-                    ))
-                )
-            } else {
-                base_alias
-            };
-
-            // Map the typed endpoint to the ADO repository-resource `type` and
-            // the backing service-connection `name` via the shared mapping.
-            let (repo_type, endpoint_name) =
-                endpoint_repo_type_and_connection(key.endpoint.as_ref());
-
-            Repository {
-                repository: alias,
-                repo_type: repo_type.to_string(),
-                name: format!("{}/{}", key.owner, key.repo),
-                // NOTE: ADO repository-resource `ref` does not accept commit
-                // SHAs. This branch ref is for resource authorization only;
-                // the executor checkout must pin the exact import SHA at
-                // runtime with `git checkout <sha>`.
-                repo_ref: REPOSITORY_RESOURCE_REF.to_string(),
-                endpoint: endpoint_name,
-            }
-        })
-        .collect())
-}
-
-/// Stable string discriminator for the alias hash suffix so that two imports of
-/// the same `owner/repo` through different endpoints still receive distinct
-/// aliases.
-fn endpoint_hash_discriminator(endpoint: Option<&ImportEndpoint>) -> String {
-    match endpoint {
-        None => String::new(),
-        Some(ImportEndpoint::GitHub { name }) => format!("github:{name}"),
-        Some(ImportEndpoint::GitHubEnterprise { name, host }) => {
-            format!("ghe:{name}:{}", host.as_str())
-        }
-        Some(ImportEndpoint::AzureReposCrossOrg { name, org }) => {
-            format!("azure-repos:{name}:{org}")
         }
     }
 }
@@ -217,66 +109,6 @@ pub fn import_resource_parent_diagnostic(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compile::imports::ImportProvenance;
-    use crate::compile::types::{ImportEntry, ParsedImportSpec};
-    use crate::secure::CommitSha;
-
-    fn remote_import(
-        owner: &str,
-        repo: &str,
-        path: &str,
-        sha: &str,
-        endpoint: Option<&str>,
-    ) -> ResolvedImport {
-        let endpoint = endpoint.map(|name| ImportEndpoint::GitHub {
-            name: name.to_string(),
-        });
-        ResolvedImport {
-            entry: ImportEntry {
-                uses: format!("{owner}/{repo}/{path}@{sha}"),
-                with: serde_json::Map::new(),
-                endpoint: endpoint.clone(),
-            },
-            source: ImportSource::Remote(ParsedImportSpec {
-                owner: owner.to_string(),
-                repo: repo.to_string(),
-                path: path.to_string(),
-                sha: CommitSha::parse(sha).expect("test sha should be valid"),
-                section: None,
-                optional: false,
-                endpoint,
-            }),
-            front_matter: serde_yaml::Value::Null,
-            body: String::new(),
-            provenance: ImportProvenance {
-                source: format!("{owner}/{repo}/{path}"),
-                sha: Some(sha.to_string()),
-                manifest_digest: "digest".to_string(),
-            },
-        }
-    }
-
-    fn local_import(path: &str) -> ResolvedImport {
-        ResolvedImport {
-            entry: ImportEntry {
-                uses: path.to_string(),
-                with: serde_json::Map::new(),
-                endpoint: None,
-            },
-            source: ImportSource::Local {
-                path: path.to_string(),
-                section: None,
-                optional: false,
-            },
-            front_matter: serde_yaml::Value::Null,
-            body: String::new(),
-            provenance: ImportProvenance {
-                source: path.to_string(),
-                sha: None,
-                manifest_digest: "digest".to_string(),
-            },
-        }
-    }
 
     fn assert_valid_alias(alias: &str) {
         assert!(!alias.is_empty());
@@ -287,203 +119,6 @@ mod tests {
                 .all(|ch| ch.is_ascii_alphanumeric() || ch == '_'),
             "invalid alias: {alias}"
         );
-    }
-
-    #[test]
-    fn single_remote_import_with_endpoint_synthesizes_github_resource() {
-        let imports = vec![remote_import(
-            "owner",
-            "repo",
-            "component.md",
-            "0123456789abcdef0123456789abcdef01234567",
-            Some("github-service-connection"),
-        )];
-
-        let repos = synthesize_repo_aliases(&imports).expect("synthesis should succeed");
-
-        assert_eq!(repos.len(), 1);
-        let repo = &repos[0];
-        assert_eq!(repo.repo_type, "github");
-        assert_eq!(repo.endpoint.as_deref(), Some("github-service-connection"));
-        assert_eq!(repo.name, "owner/repo");
-        assert_eq!(repo.repo_ref, "refs/heads/main");
-        assert_valid_alias(&repo.repository);
-    }
-
-    #[test]
-    fn remote_import_without_endpoint_synthesizes_git_resource() {
-        let imports = vec![remote_import(
-            "ado",
-            "repo",
-            "component.md",
-            "1123456789abcdef0123456789abcdef01234567",
-            None,
-        )];
-
-        let repos = synthesize_repo_aliases(&imports).expect("synthesis should succeed");
-
-        assert_eq!(repos.len(), 1);
-        assert_eq!(repos[0].repo_type, "git");
-        assert_eq!(repos[0].endpoint, None);
-        assert_eq!(repos[0].name, "ado/repo");
-    }
-
-    fn remote_import_with_endpoint(
-        owner: &str,
-        repo: &str,
-        sha: &str,
-        endpoint: ImportEndpoint,
-    ) -> ResolvedImport {
-        let endpoint = Some(endpoint);
-        ResolvedImport {
-            entry: ImportEntry {
-                uses: format!("{owner}/{repo}/component.md@{sha}"),
-                with: serde_json::Map::new(),
-                endpoint: endpoint.clone(),
-            },
-            source: ImportSource::Remote(ParsedImportSpec {
-                owner: owner.to_string(),
-                repo: repo.to_string(),
-                path: "component.md".to_string(),
-                sha: CommitSha::parse(sha).expect("valid sha"),
-                section: None,
-                optional: false,
-                endpoint,
-            }),
-            front_matter: serde_yaml::Value::Null,
-            body: String::new(),
-            provenance: ImportProvenance {
-                source: format!("{owner}/{repo}/component.md"),
-                sha: Some(sha.to_string()),
-                manifest_digest: "digest".to_string(),
-            },
-        }
-    }
-
-    #[test]
-    fn cross_org_azure_repos_endpoint_synthesizes_git_resource_with_connection() {
-        let imports = vec![remote_import_with_endpoint(
-            "proj",
-            "repo",
-            "5123456789abcdef0123456789abcdef01234567",
-            ImportEndpoint::AzureReposCrossOrg {
-                name: "other-org-conn".to_string(),
-                org: "https://dev.azure.com/other".to_string(),
-            },
-        )];
-
-        let repos = synthesize_repo_aliases(&imports).expect("synthesis should succeed");
-        assert_eq!(repos.len(), 1);
-        assert_eq!(repos[0].repo_type, "git");
-        assert_eq!(repos[0].endpoint.as_deref(), Some("other-org-conn"));
-        assert_eq!(repos[0].name, "proj/repo");
-    }
-
-    #[test]
-    fn ghe_endpoint_synthesizes_githubenterprise_resource() {
-        let imports = vec![remote_import_with_endpoint(
-            "octo",
-            "repo",
-            "6123456789abcdef0123456789abcdef01234567",
-            ImportEndpoint::GitHubEnterprise {
-                name: "ghe-conn".to_string(),
-                host: crate::secure::HostName::parse("api.acme.ghe.com").unwrap(),
-            },
-        )];
-
-        let repos = synthesize_repo_aliases(&imports).expect("synthesis should succeed");
-        assert_eq!(repos.len(), 1);
-        assert_eq!(repos[0].repo_type, "githubenterprise");
-        assert_eq!(repos[0].endpoint.as_deref(), Some("ghe-conn"));
-    }
-
-    #[test]
-    fn same_repo_different_endpoint_types_get_distinct_resources() {
-        let imports = vec![
-            remote_import_with_endpoint(
-                "o",
-                "r",
-                "7123456789abcdef0123456789abcdef01234567",
-                ImportEndpoint::GitHub {
-                    name: "gh".to_string(),
-                },
-            ),
-            remote_import_with_endpoint(
-                "o",
-                "r",
-                "8123456789abcdef0123456789abcdef01234567",
-                ImportEndpoint::AzureReposCrossOrg {
-                    name: "az".to_string(),
-                    org: "https://dev.azure.com/other".to_string(),
-                },
-            ),
-        ];
-
-        let repos = synthesize_repo_aliases(&imports).expect("synthesis should succeed");
-        assert_eq!(repos.len(), 2);
-        assert_ne!(repos[0].repository, repos[1].repository);
-    }
-
-    #[test]
-    fn same_repo_at_different_paths_and_shas_is_deduplicated() {
-        let imports = vec![
-            remote_import(
-                "owner",
-                "repo",
-                "one.md",
-                "2123456789abcdef0123456789abcdef01234567",
-                Some("endpoint"),
-            ),
-            remote_import(
-                "owner",
-                "repo",
-                "two.md",
-                "3123456789abcdef0123456789abcdef01234567",
-                Some("endpoint"),
-            ),
-        ];
-
-        let repos = synthesize_repo_aliases(&imports).expect("synthesis should succeed");
-
-        assert_eq!(repos.len(), 1);
-        assert_eq!(repos[0].name, "owner/repo");
-        assert_eq!(repos[0].endpoint.as_deref(), Some("endpoint"));
-    }
-
-    #[test]
-    fn different_repos_with_naive_alias_collision_get_distinct_aliases() {
-        let imports = vec![
-            remote_import(
-                "a-b",
-                "component",
-                "tool.md",
-                "4123456789abcdef0123456789abcdef01234567",
-                None,
-            ),
-            remote_import(
-                "a_b",
-                "component",
-                "tool.md",
-                "5123456789abcdef0123456789abcdef01234567",
-                None,
-            ),
-        ];
-
-        let repos = synthesize_repo_aliases(&imports).expect("synthesis should succeed");
-
-        assert_eq!(repos.len(), 2);
-        assert_ne!(repos[0].repository, repos[1].repository);
-        assert_valid_alias(&repos[0].repository);
-        assert_valid_alias(&repos[1].repository);
-    }
-
-    #[test]
-    fn local_imports_are_skipped() {
-        let imports = vec![local_import("components/local.md")];
-
-        let repos = synthesize_repo_aliases(&imports).expect("synthesis should succeed");
-
-        assert!(repos.is_empty());
     }
 
     #[test]

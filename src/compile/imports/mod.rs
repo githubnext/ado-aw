@@ -3,7 +3,6 @@
 //! This module deliberately stops at resolution: it fetches/loads the imported
 //! markdown manifest, parses its front matter and body, and records provenance.
 //! Merging imported content into the consumer workflow is a later compile pass.
-#![allow(dead_code)]
 
 pub mod alias;
 #[cfg(test)]
@@ -321,11 +320,11 @@ pub struct ImportProvenance {
     pub manifest_digest: String,
 }
 
-/// Resolve top-level imports using `base_dir` for local paths and cache root.
-///
-/// Prefer [`resolve_imports_with_repo_root`] when the workflow directory is not
-/// the repository root. This function is kept as the simple public entry point
-/// for callers that compile from the repo root.
+/// Resolve top-level imports using `base_dir` for both local paths and the
+/// cache root — a convenience over [`resolve_imports_with_repo_root`] for the
+/// repo-root case. Currently only exercised by tests; the production path
+/// always threads an explicit repo root.
+#[cfg(test)]
 pub async fn resolve_imports(
     entries: &[ImportEntry],
     base_dir: &Path,

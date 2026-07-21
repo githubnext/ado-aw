@@ -4,15 +4,9 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde_yaml::{Mapping, Value};
 
-use super::alias::{import_resource_parent_diagnostic, synthesize_repo_aliases};
 use super::merge::merge_resolved;
-use super::{ImportProvenance, ManifestFetcher, ResolvedImport, resolve_imports};
-use crate::compile::types::{
-    CompileTarget, ImportEndpoint, ImportEntry, ImportSource, ParsedImportSpec,
-};
-use crate::secure::CommitSha;
-
-const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+use super::{ManifestFetcher, ResolvedImport, resolve_imports};
+use crate::compile::types::{ImportEntry, ParsedImportSpec};
 
 struct PanicFetcher;
 
@@ -313,53 +307,4 @@ async fn imports_integration_resolve_enforces_import_count_limit() {
             .contains("imports per workflow must be <= 20"),
         "{err}"
     );
-}
-
-#[test]
-fn imports_integration_remote_alias_synthesis_and_template_diagnostic() {
-    let import = ResolvedImport {
-        entry: ImportEntry {
-            uses: format!("octo/components/deploy.md@{SHA}"),
-            with: serde_json::Map::new(),
-            endpoint: Some(ImportEndpoint::GitHub {
-                name: "github-service-connection".to_string(),
-            }),
-        },
-        source: ImportSource::Remote(ParsedImportSpec {
-            owner: "octo".to_string(),
-            repo: "components".to_string(),
-            path: "deploy.md".to_string(),
-            sha: CommitSha::parse(SHA).expect("valid sha"),
-            section: None,
-            optional: false,
-            endpoint: Some(ImportEndpoint::GitHub {
-                name: "github-service-connection".to_string(),
-            }),
-        }),
-        front_matter: Value::Null,
-        body: String::new(),
-        provenance: ImportProvenance {
-            source: "octo/components/deploy.md".to_string(),
-            sha: Some(SHA.to_string()),
-            manifest_digest: "digest".to_string(),
-        },
-    };
-
-    let repos = synthesize_repo_aliases(&[import]).expect("synthesize aliases");
-
-    assert_eq!(repos.len(), 1);
-    assert_eq!(repos[0].repo_type, "github");
-    assert_eq!(
-        repos[0].endpoint.as_deref(),
-        Some("github-service-connection")
-    );
-    assert_eq!(repos[0].name, "octo/components");
-    let aliases = repos
-        .iter()
-        .map(|repo| repo.repository.clone())
-        .collect::<Vec<_>>();
-    let diagnostic = import_resource_parent_diagnostic(CompileTarget::Job, &aliases)
-        .expect("job template target should report parent resource diagnostic");
-    assert!(diagnostic.contains(&aliases[0]), "{diagnostic}");
-    assert!(diagnostic.contains("parent pipeline"), "{diagnostic}");
 }

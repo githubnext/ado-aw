@@ -711,11 +711,25 @@ fn parse_script_result_stdout(tool: &str, stdout: &[u8]) -> CustomToolOutcome {
         .filter(|line| !line.is_empty())
         .collect();
     if lines.len() != 1 {
+        // Distinguish "no output" from "extra output" and, when there is stray
+        // output, surface the first line so an author can locate a debug
+        // `console.log`/`print` that broke the one-JSON-line contract.
+        let detail = if lines.is_empty() {
+            " (no output — the tool must print exactly one JSON result line to stdout)"
+                .to_string()
+        } else {
+            let first: String = lines[0].chars().take(200).collect();
+            format!(
+                " — is debug output going to stdout? first line: {}",
+                sanitize(&first)
+            )
+        };
         return CustomToolOutcome {
             result: ExecutionResult::failure(format!(
-                "Custom tool '{}' must print exactly one JSON line, got {}",
+                "Custom tool '{}' must print exactly one JSON line, got {}{}",
                 sanitize_config(tool),
-                lines.len()
+                lines.len(),
+                detail
             )),
             record_status: "failed",
         };

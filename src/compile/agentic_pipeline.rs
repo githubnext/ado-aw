@@ -316,6 +316,12 @@ pub(crate) fn build_pipeline_context(
         &front_matter.repositories,
         &front_matter.on_config,
     )?;
+    // P7: template targets (job/stage) can't own top-level repository resources,
+    // so a remote custom-component import must be declared + authorized by the
+    // parent pipeline. Surface that requirement (no-op for standalone/1es).
+    if let Some(diagnostic) = custom_import_parent_diagnostic(front_matter)? {
+        eprintln!("Warning: {diagnostic}");
+    }
     let triggers = build_triggers(&front_matter.on_config, front_matter)?;
 
     // ─── Extension declaration fanout ─────────────────────────────
@@ -1689,6 +1695,27 @@ fn custom_repository_resources(front_matter: &FrontMatter) -> Result<Vec<Reposit
         }
     }
     Ok(resources)
+}
+
+/// P7: `target: job` / `target: stage` compile to Azure DevOps *templates*, which
+/// cannot declare top-level `resources.repositories`. When such a workflow
+/// imports a remote custom safe-output component (which needs a runtime
+/// checkout), the **parent** pipeline must declare + authorize that repository —
+/// the compiler must not broaden access silently. Returns the human-readable
+/// requirement, or `None` for resource-owning targets (standalone / 1es) or when
+/// no imported component repositories are present.
+fn custom_import_parent_diagnostic(front_matter: &FrontMatter) -> Result<Option<String>> {
+    let aliases: Vec<String> = custom_repository_resources(front_matter)?
+        .into_iter()
+        .filter_map(|resource| match resource {
+            RepositoryResource::Named { identifier, .. } => Some(identifier),
+            _ => None,
+        })
+        .collect();
+    Ok(super::imports::alias::import_resource_parent_diagnostic(
+        front_matter.target.clone(),
+        &aliases,
+    ))
 }
 
 fn build_custom_safe_output_job(
@@ -4635,6 +4662,78 @@ safe-outputs:
             }
             other => panic!("expected a Named repository resource, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn custom_import_parent_diagnostic_fires_for_template_targets_with_imports() {
+        // A `target: job` / `target: stage` workflow that imports a remote
+        // custom component cannot own the repository resource, so the parent
+        // pipeline must declare + authorize it — the compiler surfaces that.
+        for target in ["job", "stage"] {
+            let fm = test_front_matter(&format!(
+                r#"
+name: Test
+description: Test
+target: {target}
+safe-outputs:
+  scripts:
+    notify-team:
+      run: node notify.js
+      component-source: octo/tools/components/notify.md
+      component-sha: 0123456789012345678901234567890123456789
+      manifest-digest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+"#
+            ));
+            let diagnostic = custom_import_parent_diagnostic(&fm)
+                .unwrap()
+                .unwrap_or_else(|| panic!("target `{target}` should require a parent diagnostic"));
+            assert!(
+                diagnostic.contains("parent pipeline"),
+                "target `{target}`: {diagnostic}"
+            );
+            assert!(
+                diagnostic.contains("import_octo_tools_"),
+                "target `{target}` should name the alias: {diagnostic}"
+            );
+        }
+    }
+
+    #[test]
+    fn custom_import_parent_diagnostic_absent_for_owning_target_or_no_imports() {
+        // Standalone owns its resources → no diagnostic even with an import.
+        let with_import = r#"
+name: Test
+description: Test
+target: standalone
+safe-outputs:
+  scripts:
+    notify-team:
+      run: node notify.js
+      component-source: octo/tools/components/notify.md
+      component-sha: 0123456789012345678901234567890123456789
+      manifest-digest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+"#;
+        assert!(
+            custom_import_parent_diagnostic(&test_front_matter(with_import))
+                .unwrap()
+                .is_none()
+        );
+
+        // Template target but no imported component (no `component-source`) →
+        // nothing for the parent to authorize.
+        let job_no_import = r#"
+name: Test
+description: Test
+target: job
+safe-outputs:
+  create-issue:
+    max: 1
+"#;
+        assert!(
+            custom_import_parent_diagnostic(&test_front_matter(job_no_import))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

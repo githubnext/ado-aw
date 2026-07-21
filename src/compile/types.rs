@@ -1093,7 +1093,6 @@ pub struct FrontMatter {
     pub mcp_servers: HashMap<String, McpConfig>,
     /// Reusable workflow imports. Entries may be local paths or SHA-pinned
     /// cross-repository specs, with optional import-schema inputs.
-    #[allow(dead_code)]
     #[serde(default)]
     pub imports: Vec<ImportEntry>,
     /// Per-tool configuration for safe outputs

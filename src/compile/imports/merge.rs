@@ -19,7 +19,6 @@
 //!
 //! The merge runs only when the consumer declares `imports:`; with no imports
 //! it is never invoked, so existing workflows are unaffected.
-#![allow(dead_code)]
 
 use std::path::Path;
 
@@ -84,6 +83,7 @@ fn join_bodies(imported_body: &str, consumer_body: &str) -> String {
 ///
 /// Returns the combined body (imported bodies in declaration order, then the
 /// consumer body). Front matter is merged into `consumer_fm`.
+#[cfg(test)]
 pub fn merge_resolved(
     consumer_fm: &mut Mapping,
     consumer_body: &str,
@@ -409,11 +409,17 @@ fn configure_safe_output(
             }
             Ok(())
         }
-        // If the consumer provides a non-mapping config (e.g. `true`), overlay
-        // it as the tool value.
-        (Some(slot), _) => {
-            *slot = incoming.clone();
-            Ok(())
+        // The consumer provided a non-mapping value (e.g. `true`/`null`/a
+        // string) for an imported safe-output tool. Configuration must be a
+        // mapping overlay; a scalar would silently replace the tool wholesale,
+        // wiping the imported executor (`run`/`steps`/`entrypoint`/…) that the
+        // executor-redefinition guard above is meant to protect. Reject it.
+        (Some(_), _) => {
+            anyhow::bail!(
+                "import conflict: the consumer must provide a mapping to configure the \
+                 imported safe-output '{sub_name}' (got a non-mapping value); a scalar \
+                 would redefine its executor."
+            );
         }
         (None, _) => {
             existing.insert(sub_key.clone(), incoming.clone());
@@ -743,6 +749,23 @@ mod tests {
         let imports = vec![resolved("safe-outputs:\n  notify:\n    run: notify.js", "")];
         let err = merge_resolved(&mut consumer, "", &imports).unwrap_err();
         assert!(err.to_string().contains("executor"), "{err}");
+    }
+
+    #[test]
+    fn consumer_scalar_config_of_imported_safe_output_errors() {
+        // A non-mapping consumer value (e.g. `notify: null` / `true` / a string)
+        // for an imported safe-output tool must be rejected: overlaying it would
+        // wipe the imported executor (`run`/`steps`/…) wholesale, which the
+        // executor-redefinition guard is meant to forbid.
+        for scalar in ["null", "true", "\"replace\""] {
+            let mut consumer = ymap(&format!("safe-outputs:\n  notify: {scalar}"));
+            let imports = vec![resolved("safe-outputs:\n  notify:\n    run: notify.js", "")];
+            let err = merge_resolved(&mut consumer, "", &imports).unwrap_err();
+            assert!(
+                err.to_string().contains("non-mapping value"),
+                "scalar `{scalar}` should be rejected: {err}"
+            );
+        }
     }
 
     #[test]

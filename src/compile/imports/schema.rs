@@ -1,6 +1,5 @@
 //! `import-schema` modeling, consumer-`with` validation, and
 //! `{{ inputs.<key> }}` substitution.
-#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 
@@ -521,17 +520,39 @@ fn lookup_input_path<'a>(
 /// [`crate::sanitize::sanitize_config`], which neutralizes Azure DevOps
 /// pipeline logging commands (`##vso[` / `##[`) and strips control characters,
 /// so an interpolated value can never smuggle a pipeline command into a
-/// generated step. Non-string scalars/containers are rendered structurally and
-/// need no neutralization.
+/// generated step. Non-string scalars need no neutralization; arrays and
+/// objects are neutralized recursively at their string leaves before structural
+/// serialization (an `import-schema` `array`/`object` input can carry a `##vso[`
+/// sequence inside a nested string).
 fn render_json_value(value: &JsonValue) -> String {
     match value {
         JsonValue::String(value) => crate::sanitize::sanitize_config(value),
         JsonValue::Number(value) => value.to_string(),
         JsonValue::Bool(value) => value.to_string(),
         JsonValue::Array(_) | JsonValue::Object(_) => {
-            serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
+            let sanitized = sanitize_json_strings(value);
+            serde_json::to_string(&sanitized).unwrap_or_else(|_| sanitized.to_string())
         }
         JsonValue::Null => "null".to_string(),
+    }
+}
+
+/// Deep-clone a JSON value, running every string leaf through
+/// [`crate::sanitize::sanitize_config`]. Used before structurally serializing an
+/// array/object import input so a nested string leaf cannot reach a generated
+/// step with an un-neutralized `##vso[` / `##[` pipeline command.
+fn sanitize_json_strings(value: &JsonValue) -> JsonValue {
+    match value {
+        JsonValue::String(s) => JsonValue::String(crate::sanitize::sanitize_config(s)),
+        JsonValue::Array(items) => {
+            JsonValue::Array(items.iter().map(sanitize_json_strings).collect())
+        }
+        JsonValue::Object(map) => JsonValue::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), sanitize_json_strings(v)))
+                .collect(),
+        ),
+        other => other.clone(),
     }
 }
 
@@ -771,6 +792,40 @@ import-schema:
         assert!(
             !substituted.contains("##vso[task.setvariable"),
             "the executable command tail must be broken up: {substituted}"
+        );
+    }
+
+    #[test]
+    fn substitute_inputs_neutralizes_pipeline_commands_in_nested_array_object_values() {
+        // Array/object import inputs (import-schema `array`/`object` types) are
+        // serialized structurally when interpolated into a string-scalar
+        // position. A `##vso[` pipeline command hidden in a nested string leaf
+        // must be neutralized just like a top-level string value — otherwise it
+        // could reach a generated step unsanitized.
+        let inputs = json!({
+            "tags": ["##vso[task.setvariable variable=x]y"],
+            "obj": { "k": "##vso[task.setvariable variable=z]w" }
+        });
+        let inputs = inputs.as_object().unwrap();
+
+        let arr = substitute_inputs("val={{ inputs.tags }}", inputs);
+        assert!(
+            arr.contains("`##vso[`"),
+            "expected neutralized form in array: {arr}"
+        );
+        assert!(
+            !arr.contains("##vso[task.setvariable"),
+            "array leaf command tail must be broken up: {arr}"
+        );
+
+        let obj = substitute_inputs("val={{ inputs.obj }}", inputs);
+        assert!(
+            obj.contains("`##vso[`"),
+            "expected neutralized form in object: {obj}"
+        );
+        assert!(
+            !obj.contains("##vso[task.setvariable"),
+            "object leaf command tail must be broken up: {obj}"
         );
     }
 
