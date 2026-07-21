@@ -269,6 +269,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │           ├── github-app-token/ # GitHub App token minter (bundled to github-app-token.js; mints installation token in Agent + Detection when engine.github-app-token is set)
 │           ├── executor-e2e/ # Stage 3 safe-output E2E test harness (not a bundle; runs deterministic scenarios against a real ADO project and files a GitHub issue on failure)
 │           ├── prepare-pr-base/ # create-pull-request preparer (bundled to prepare-pr-base.js): Agent mode uses ADO diff metadata + bounded dual-ref fallback to make the merge-base reachable; SafeOutputs mode fetches only the target worktree tip
+│           ├── trigger-e2e/ # Test-only FACT_META gate-spec table + trigger-evaluation E2E scenarios (not a bundle); drift-guarded by `export-fact-catalog` + `fact-catalog.gen.json`
 │           └── shared/   # Shared modules across bundles (auth, ado-client, env-facts, types.gen.ts)
 ├── tests/                # Integration tests and fixtures
 ├── docs/                 # Per-concept reference documentation (see index below)
