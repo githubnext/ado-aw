@@ -152,6 +152,10 @@ fails.
 
 In `https://dev.azure.com/msazuresphere/AgentPlayground`:
 
+> Current registration: orchestrator definition `2551`, victim definition
+> `2552`, and Azure Repo `ado-aw-mirror`. The orchestrator uses concurrency
+> `4` and a 30-minute queue-inclusive victim wait budget.
+
 1. **Create and seed `ado-aw-mirror`.** Import or push the merged
    `githubnext/ado-aw` `main` commit into a dedicated Azure Repo. Do not reuse
    `agent-definitions`.
@@ -166,7 +170,7 @@ In `https://dev.azure.com/msazuresphere/AgentPlayground`:
      project uses a different agent pool, edit both files to point at a
      Linux pool with Node.js 20 available before registering.
 3. **Register the ORCHESTRATOR pipeline.** New pipeline → GitHub through
-   `github.com_githubnext` → existing YAML →
+   `githubnext` → existing YAML →
    `tests/trigger-e2e/azure-pipelines.yml`. Place both definitions in a
    `\trigger-e2e` folder and skip the first run until variables are configured.
 4. **Wire the victim id + repo** as non-secret definition variables on the

@@ -116,8 +116,11 @@ no current build. The harness exits non-zero if any scenario fails.
 
 In `https://dev.azure.com/msazuresphere/AgentPlayground`:
 
+> Current registration: definition `2550` in `\executor-e2e`, with
+> `E2E_QUEUE_PIPELINE_ID=2547`.
+
 1. **Register the pipeline.** New pipeline → GitHub through the
-   `github.com_githubnext` service connection → existing YAML →
+   `githubnext` service connection → existing YAML →
    `tests/executor-e2e/azure-pipelines.yml`. Place it in a `\executor-e2e`
    folder and skip the first run until variables are configured.
 2. **Grant the principal behind `agent-playground-write` write access** on the
