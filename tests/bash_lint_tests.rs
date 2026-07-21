@@ -135,6 +135,8 @@ const REQUIRED_STEP_DISPLAY_NAMES: &[&str] = &[
     "Render safe-outputs summary", // src/compile/agentic_pipeline.rs safe_outputs_summary_step (activated by any safe-output tool)
     "Mint GitHub App token (Copilot engine auth)", // src/compile/extensions/ado_script.rs github_app_token_step_typed() (activated by engine.github-app-token)
     "Revoke GitHub App token", // src/compile/extensions/ado_script.rs github_app_token_revoke_step_typed() (activated by engine.github-app-token)
+    "Prepare create-pull-request patch base", // src/compile/extensions/ado_script.rs prepare_pr_base_step_typed(PatchBase) (activated by safe-outputs.create-pull-request)
+    "Prepare create-pull-request target worktree ref", // src/compile/extensions/ado_script.rs prepare_pr_base_step_typed(TargetWorktree) (activated by safe-outputs.create-pull-request)
 ];
 
 fn ado_aw_binary() -> PathBuf {
