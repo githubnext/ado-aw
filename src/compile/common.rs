@@ -2555,6 +2555,12 @@ pub fn generate_mcpg_config(
             .split_whitespace()
             .map(str::to_string),
     );
+    if !front_matter.custom_safe_output_tool_names().is_empty() {
+        safeoutputs_entrypoint_args.extend([
+            "--custom-tools".to_string(),
+            "/safeoutputs/custom-tools.json".to_string(),
+        ]);
+    }
     safeoutputs_entrypoint_args.extend([
         "/safeoutputs".to_string(),
         working_directory.clone(),
@@ -6133,6 +6139,44 @@ safe-outputs:
         assert!(
             entrypoint_args.starts_with(&["mcp".to_string()]),
             "SafeOutputs should use the stdio MCP subcommand: {entrypoint_args:?}"
+        );
+    }
+
+    #[test]
+    fn test_generate_mcpg_config_safeoutputs_receives_custom_tool_definitions() {
+        let mut fm = minimal_front_matter();
+        fm.safe_outputs.insert(
+            "scripts".to_string(),
+            serde_json::json!({
+                "notify": {
+                    "description": "Send a notification",
+                    "run": "node notify.js",
+                    "inputs": {
+                        "message": {
+                            "type": "string",
+                            "required": true
+                        }
+                    }
+                }
+            }),
+        );
+
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
+        let args = config
+            .mcp_servers
+            .get("safeoutputs")
+            .unwrap()
+            .entrypoint_args
+            .as_ref()
+            .unwrap();
+        assert!(
+            args.windows(2).any(|pair| {
+                pair == [
+                    "--custom-tools".to_string(),
+                    "/safeoutputs/custom-tools.json".to_string(),
+                ]
+            }),
+            "SafeOutputs must load the staged custom tool definitions: {args:?}"
         );
     }
 

@@ -251,7 +251,15 @@ pub(crate) fn build_pipeline_context(
     let awf_mounts = common::generate_awf_mounts(extensions, &extension_declarations);
     let awf_path_step_yaml = common::generate_awf_path_step(&awf_paths);
 
-    // MCPG config
+    // MCPG config + compiler-generated dynamic SafeOutputs tool definitions.
+    let custom_tool_schemas = super::custom_tools::generate_custom_tool_schemas(front_matter)?;
+    let custom_tools_json = if custom_tool_schemas.is_empty() {
+        None
+    } else {
+        Some(super::custom_tools::custom_tools_json(
+            &custom_tool_schemas,
+        )?)
+    };
     let mcpg_config_obj = common::generate_mcpg_config(front_matter, &extension_declarations)?;
     let mcpg_config_json = serde_json::to_string_pretty(&mcpg_config_obj)
         .map_err(|e| anyhow::anyhow!("Failed to serialize MCPG config: {e}"))?;
@@ -365,6 +373,7 @@ pub(crate) fn build_pipeline_context(
         awf_mounts,
         awf_path_step_yaml,
         mcpg_config_json,
+        custom_tools_json,
         mcpg_docker_env,
         mcpg_step_env,
         source_path,
@@ -577,6 +586,10 @@ pub(crate) struct StandaloneCtx {
     /// `awf_path_step` YAML body (or empty when no path prepends).
     pub(crate) awf_path_step_yaml: String,
     pub(crate) mcpg_config_json: String,
+    /// Compiler-generated dynamic SafeOutputs tool definitions. When present,
+    /// the Agent job stages this beside the MCPG config and the hardened
+    /// SafeOutputs stdio container reads it through its `/safeoutputs` mount.
+    pub(crate) custom_tools_json: Option<String>,
     /// `-e KEY=...` docker flags for MCPG.
     pub(crate) mcpg_docker_env: String,
     /// `env:` block for the MCPG step (`env:\n  KEY: ...`).
@@ -947,7 +960,10 @@ fn build_agent_job(
     )?;
 
     // 7. Prepare tooling (generates MCPG API key, writes MCPG config to staging)
-    steps.push(Step::Bash(prepare_mcpg_config_step(&cfg.mcpg_config_json)));
+    steps.push(Step::Bash(prepare_mcpg_config_step(
+        &cfg.mcpg_config_json,
+        cfg.custom_tools_json.as_deref(),
+    )?));
 
     // 8. Prepare tooling - copy binary + config to /tmp
     steps.push(Step::Bash(prepare_tooling_step()));
@@ -3193,10 +3209,27 @@ fn substitute_integrity_check(yaml: &str, pipeline_path: &str, trigger_repo_dir:
         .replace("{{ trigger_repo_directory }}", trigger_repo_dir)
 }
 
-fn prepare_mcpg_config_step(mcpg_config_json: &str) -> BashStep {
+fn prepare_mcpg_config_step(
+    mcpg_config_json: &str,
+    custom_tools_json: Option<&str>,
+) -> Result<BashStep> {
     // mcpg_config_json is pretty-printed JSON. We want `{` to align with
     // the surrounding `cat`/`echo` lines (no extra leading indent) so the
     // emitted block-scalar bash body matches base.yml.
+    let custom_tools_script = if let Some(custom_tools_json) = custom_tools_json {
+        let sentinel =
+            super::common::heredoc_sentinel("CUSTOM_TOOLS_JSON_EOF", custom_tools_json)?;
+        format!(
+            "# Write compiler-generated dynamic SafeOutputs tool definitions\n\
+             cat > \"$(Agent.TempDirectory)/staging/custom-tools.json\" << '{sentinel}'\n\
+{custom_tools_json}\n\
+             {sentinel}\n\
+             python3 -m json.tool \"$(Agent.TempDirectory)/staging/custom-tools.json\" > /dev/null\n\
+             \n"
+        )
+    } else {
+        String::new()
+    };
     let script = format!(
         "mkdir -p \"$(Agent.TempDirectory)/staging\"\n\
          \n\
@@ -3217,13 +3250,14 @@ fn prepare_mcpg_config_step(mcpg_config_json: &str) -> BashStep {
 {mcpg_config_json}\n\
          MCPG_CONFIG_EOF\n\
          \n\
+{custom_tools_script}\
          echo \"MCPG config:\"\n\
          cat \"$(Agent.TempDirectory)/staging/mcpg-config.json\"\n\
          \n\
          # Validate JSON\n\
          python3 -m json.tool \"$(Agent.TempDirectory)/staging/mcpg-config.json\" > /dev/null && echo \"JSON is valid\"\n"
     );
-    bash("Prepare MCPG config", script)
+    Ok(bash("Prepare MCPG config", script))
 }
 
 fn prepare_tooling_step() -> BashStep {
@@ -3245,7 +3279,10 @@ fn prepare_tooling_step() -> BashStep {
                   chmod +x /tmp/awf-tools/ado-aw\n\
                   \n\
                   # Copy MCPG config to /tmp\n\
-                  cp \"$(Agent.TempDirectory)/staging/mcpg-config.json\" /tmp/awf-tools/staging/mcpg-config.json\n";
+                  cp \"$(Agent.TempDirectory)/staging/mcpg-config.json\" /tmp/awf-tools/staging/mcpg-config.json\n\
+                  if [ -f \"$(Agent.TempDirectory)/staging/custom-tools.json\" ]; then\n\
+                    cp \"$(Agent.TempDirectory)/staging/custom-tools.json\" /tmp/awf-tools/staging/custom-tools.json\n\
+                  fi\n";
     bash("Prepare tooling", script)
 }
 
@@ -4517,8 +4554,8 @@ mod tests {
             allowed_domains: "example.com".to_string(),
             awf_mounts: "\\".to_string(),
             awf_path_step_yaml: String::new(),
-            enabled_tools_args: String::new(),
             mcpg_config_json: "{}".to_string(),
+            custom_tools_json: None,
             mcpg_docker_env: String::new(),
             mcpg_step_env: String::new(),
             source_path: "$(Build.SourcesDirectory)/agents/test.md".to_string(),
@@ -4529,7 +4566,6 @@ mod tests {
             integrity_check_yaml: String::new(),
             agent_content_value: "Test prompt".to_string(),
             debug_pipeline: false,
-            byom_active: false,
             byom_exclude_keys: Vec::new(),
             detection_provider_env: Vec::new(),
         }
@@ -5154,6 +5190,7 @@ description: Test
             awf_mounts: "\\".to_string(),
             awf_path_step_yaml: String::new(),
             mcpg_config_json: "{}".to_string(),
+            custom_tools_json: None,
             mcpg_docker_env: String::new(),
             mcpg_step_env: String::new(),
             source_path: "source.md".to_string(),
