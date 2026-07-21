@@ -1995,7 +1995,12 @@ Test body.
         )
         .await;
 
-        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("missing or unsupported schema_version: 99"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

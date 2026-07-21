@@ -100,6 +100,30 @@ describe("ado-script bundle coverage", () => {
     ).toEqual([]);
   });
 
+  it("clean removes every generated bundle", () => {
+    const { scripts } = readPackageJson();
+    const clean = scripts.clean ?? "";
+    const missing = listBundleDirs().filter(
+      (name) => !clean.includes(`'${name}'`) && !clean.includes(`"${name}"`),
+    );
+    expect(
+      missing,
+      `src/ bundle dirs missing from the clean script: ${missing.join(", ")}`,
+    ).toEqual([]);
+  });
+
+  it("the smoke build chain rebuilds every bundle", () => {
+    const { scripts } = readPackageJson();
+    const smoke = scripts["test:smoke"] ?? "";
+    const missing = listBundleDirs().filter(
+      (name) => !smoke.includes(`build:${name}`),
+    );
+    expect(
+      missing,
+      `src/ bundle dirs not referenced in the test:smoke build chain: ${missing.join(", ")}`,
+    ).toEqual([]);
+  });
+
   it("every bundle dir has an index.ts entry point", () => {
     const missing = listBundleDirs().filter((name) => {
       try {

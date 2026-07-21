@@ -1914,9 +1914,11 @@ fn write_custom_scripts_config_step(
         .context("failed to serialize custom scripts config")?;
     let script = format!(
         "mkdir -p \"$(Agent.TempDirectory)/ado-aw-custom\"\n\
+         # shellcheck disable=SC2016 # ADO expands $(Agent.TempDirectory) before bash evaluates the quoted path.\n\
          cat > {config_path} << 'ADO_AW_CUSTOM_CONFIG_JSON'\n\
 {json}\n\
          ADO_AW_CUSTOM_CONFIG_JSON\n\
+         # shellcheck disable=SC2016 # ADO expands $(Agent.TempDirectory) before bash evaluates the quoted path.\n\
          python3 -m json.tool {config_path} > /dev/null\n",
         config_path = shell_quote(config_path)
     );
@@ -1929,7 +1931,8 @@ fn custom_scripts_execute_step(
     env: &[(String, String)],
 ) -> BashStep {
     let script = format!(
-        "/tmp/awf-tools/ado-aw execute --source {source} --safe-output-dir \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)\" --custom-config {config}\n",
+        "# shellcheck disable=SC2016 # ADO expands path macros before bash evaluates the single-quoted arguments.\n\
+         /tmp/awf-tools/ado-aw execute --source {source} --safe-output-dir \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)\" --custom-config {config}\n",
         source = shell_quote(source_path),
         config = shell_quote(config_path)
     );
@@ -1943,7 +1946,8 @@ fn custom_jobs_pre_step(
     env: &[(String, String)],
 ) -> BashStep {
     let script = format!(
-        "/tmp/awf-tools/ado-aw execute --source {source} --safe-output-dir \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)\" --custom-phase pre --tool {tool} --proposals-out {proposals}\n",
+        "# shellcheck disable=SC2016 # ADO expands path macros before bash evaluates the single-quoted arguments.\n\
+         /tmp/awf-tools/ado-aw execute --source {source} --safe-output-dir \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)\" --custom-phase pre --tool {tool} --proposals-out {proposals}\n",
         source = shell_quote(source_path),
         tool = shell_quote(tool),
         proposals = shell_quote(proposals_path)
@@ -1973,7 +1977,8 @@ fn custom_jobs_post_step(
         shell_quote(&def.schema_digest)
     ));
     let script = format!(
-        "/tmp/awf-tools/ado-aw execute --source {source} --safe-output-dir \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)\" --custom-phase post --tool {tool} --results-in {results}{provenance_args}\n",
+        "# shellcheck disable=SC2016 # ADO expands path macros before bash evaluates the single-quoted arguments.\n\
+         /tmp/awf-tools/ado-aw execute --source {source} --safe-output-dir \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)\" --custom-phase post --tool {tool} --results-in {results}{provenance_args}\n",
         source = shell_quote(source_path),
         tool = shell_quote(&def.name),
         results = shell_quote(results_path)
