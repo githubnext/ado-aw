@@ -234,37 +234,9 @@ pub fn parse_header_line(line: &str) -> Option<HeaderMetadata> {
     while !remaining.is_empty() {
         remaining = remaining.trim_start();
         if let Some(after) = remaining.strip_prefix("source=") {
-            // Handle quoted value: source="path with spaces"
-            if let Some(after_quote) = after.strip_prefix('"') {
-                // Find closing quote, skipping escaped quotes (\")
-                let mut value = String::new();
-                let mut chars = after_quote.char_indices();
-                let mut end_pos = after_quote.len();
-                while let Some((i, c)) = chars.next() {
-                    if c == '\\' {
-                        // Consume the escaped character
-                        if let Some((_, escaped)) = chars.next() {
-                            value.push(escaped);
-                        }
-                    } else if c == '"' {
-                        end_pos = i;
-                        break;
-                    } else {
-                        value.push(c);
-                    }
-                }
-                source = value;
-                remaining = if end_pos < after_quote.len() {
-                    &after_quote[end_pos + 1..]
-                } else {
-                    ""
-                };
-            } else {
-                // Unquoted: take until next whitespace
-                let end = after.find(' ').unwrap_or(after.len());
-                source = after[..end].to_string();
-                remaining = &after[end..];
-            }
+            let (value, tail) = parse_header_value(after);
+            source = value;
+            remaining = tail;
         } else if let Some(after) = remaining.strip_prefix("version=") {
             let end = after.find(' ').unwrap_or(after.len());
             version = after[..end].to_string();
@@ -281,6 +253,41 @@ pub fn parse_header_line(line: &str) -> Option<HeaderMetadata> {
     }
 
     Some(HeaderMetadata { source, version })
+}
+
+/// Parse a header field value that is either quoted (`"…"`) or unquoted (up to whitespace).
+///
+/// Quoted values support backslash-escaped characters (e.g. `\"`).
+/// Returns `(value, remaining_input)`.
+fn parse_header_value(input: &str) -> (String, &str) {
+    if let Some(after_quote) = input.strip_prefix('"') {
+        // Quoted value: scan until closing `"`, honouring `\"` escapes.
+        let mut value = String::new();
+        let mut chars = after_quote.char_indices();
+        let mut end_pos = after_quote.len();
+        while let Some((i, c)) = chars.next() {
+            if c == '\\' {
+                if let Some((_, escaped)) = chars.next() {
+                    value.push(escaped);
+                }
+            } else if c == '"' {
+                end_pos = i;
+                break;
+            } else {
+                value.push(c);
+            }
+        }
+        let tail = if end_pos < after_quote.len() {
+            &after_quote[end_pos + 1..]
+        } else {
+            ""
+        };
+        (value, tail)
+    } else {
+        // Unquoted: take until next whitespace.
+        let end = input.find(' ').unwrap_or(input.len());
+        (input[..end].to_string(), &input[end..])
+    }
 }
 
 #[cfg(test)]
