@@ -30,8 +30,11 @@ pub struct CreateWorkItemParams {
 
 impl Validate for CreateWorkItemParams {
     fn validate(&self) -> anyhow::Result<()> {
-        ensure!(self.title.len() > 5);
-        ensure!(self.description.len() > 30);
+        ensure!(self.title.len() > 5, "title must be more than 5 characters");
+        ensure!(
+            self.description.len() > 30,
+            "description must be more than 30 characters"
+        );
         for tag in &self.tags {
             ensure!(
                 !tag.contains(';'),
@@ -561,7 +564,11 @@ mod tests {
             tags: vec![],
         };
         let result: Result<CreateWorkItemResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("title must be more than 5 characters"),
+            "Expected title length error, got: {err}"
+        );
     }
 
     #[test]
@@ -572,7 +579,11 @@ mod tests {
             tags: vec![],
         };
         let result: Result<CreateWorkItemResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("description must be more than 30 characters"),
+            "Expected description length error, got: {err}"
+        );
     }
 
     #[test]
@@ -583,7 +594,11 @@ mod tests {
             tags: vec!["tag-one; tag-two".to_string()],
         };
         let result: Result<CreateWorkItemResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("semicolon"),
+            "Expected semicolon error, got: {err}"
+        );
     }
 
     #[test]
