@@ -730,12 +730,26 @@ mod tests {
 
     #[test]
     fn test_validation_rejects_artifact_name_with_space() {
-        assert!(try_params(Some(1), "my artifact", "out/report.pdf").is_err());
+        let err = try_params(Some(1), "my artifact", "out/report.pdf")
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("alphanumeric"),
+            "expected 'alphanumeric' in error, got: {}",
+            err
+        );
     }
 
     #[test]
     fn test_validation_rejects_artifact_name_with_slash() {
-        assert!(try_params(Some(1), "my/artifact", "out/report.pdf").is_err());
+        let err = try_params(Some(1), "my/artifact", "out/report.pdf")
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("alphanumeric"),
+            "expected 'alphanumeric' in error, got: {}",
+            err
+        );
     }
 
     #[test]
@@ -749,17 +763,38 @@ mod tests {
 
     #[test]
     fn test_validation_rejects_empty_file_path() {
-        assert!(try_params(Some(1), "agent-report", "").is_err());
+        let err = try_params(Some(1), "agent-report", "")
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("must not be empty"),
+            "expected 'must not be empty' in error, got: {}",
+            err
+        );
     }
 
     #[test]
     fn test_validation_rejects_path_traversal() {
-        assert!(try_params(Some(1), "agent-report", "../etc/passwd").is_err());
+        let err = try_params(Some(1), "agent-report", "../etc/passwd")
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("traversal"),
+            "expected 'traversal' in error, got: {}",
+            err
+        );
     }
 
     #[test]
     fn test_validation_rejects_absolute_path() {
-        assert!(try_params(Some(1), "agent-report", "/etc/passwd").is_err());
+        let err = try_params(Some(1), "agent-report", "/etc/passwd")
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("relative"),
+            "expected 'relative' in error, got: {}",
+            err
+        );
     }
 
     #[test]
