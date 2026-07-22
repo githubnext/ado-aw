@@ -498,7 +498,7 @@ pub(crate) fn install_and_download_steps_typed(
     vec![Step::Task(install), Step::Bash(download)]
 }
 
-/// Path-anchor ADO variables exposed to the agent prompt via the runtime
+/// Non-secret ADO variables exposed to the agent prompt via the runtime
 /// import resolver. The compiler owns this allowlist; `import.js`
 /// substitutes only the `$(name)` tokens it is handed — it never reads
 /// these from the environment (see
@@ -513,9 +513,14 @@ pub(crate) fn install_and_download_steps_typed(
 /// variable added to this list), it would break bash argument parsing in
 /// the resolver step — the same pre-existing exposure as the adjacent
 /// `--base "$(Build.SourcesDirectory)"`. The current entries are
-/// ADO-controlled path anchors that cannot contain `"`, so this is safe;
-/// re-quote (or shell-escape) before adding any user-influenced variable.
-const PROMPT_ADO_VARS: &[&str] = &["Build.SourcesDirectory", "Build.Repository.Name"];
+/// ADO-controlled values that cannot contain `"`, so this is safe; re-quote
+/// (or shell-escape) before adding any user-influenced variable.
+const PROMPT_ADO_VARS: &[&str] = &[
+    "Build.SourcesDirectory",
+    "Build.Repository.Name",
+    "Build.BuildId",
+    "System.CollectionUri",
+];
 
 /// The resolver step that expands runtime import markers in the agent prompt.
 fn resolver_step_typed() -> Step {
@@ -1744,7 +1749,7 @@ mod tests {
             !resolver.script.contains("ADO_AW_IMPORT_BASE"),
             "resolver step must not export ADO_AW_IMPORT_BASE — base is passed via --base, not env"
         );
-        // Each path-anchor var is passed as `--var "<name>=$(<name>)"` so
+        // Each prompt var is passed as `--var "<name>=$(<name>)"` so
         // ADO expands the macro at runtime and import.js substitutes the
         // concrete value into the prompt (consistent with inlined mode).
         assert!(
@@ -1759,6 +1764,20 @@ mod tests {
                 .script
                 .contains("--var \"Build.Repository.Name=$(Build.Repository.Name)\""),
             "resolver step must pass Build.Repository.Name as a --var, got: {}",
+            resolver.script
+        );
+        assert!(
+            resolver
+                .script
+                .contains("--var \"Build.BuildId=$(Build.BuildId)\""),
+            "resolver step must pass Build.BuildId as a --var, got: {}",
+            resolver.script
+        );
+        assert!(
+            resolver
+                .script
+                .contains("--var \"System.CollectionUri=$(System.CollectionUri)\""),
+            "resolver step must pass System.CollectionUri as a --var, got: {}",
             resolver.script
         );
     }

@@ -17,6 +17,7 @@ safe-outputs:
   noop: {}
   create-work-item:
     work-item-type: Task
+    assignee: devinejames@microsoft.com
     max: 1
     include-stats: false
   add-build-tag:
