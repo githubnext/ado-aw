@@ -7151,9 +7151,14 @@ fn test_supply_chain_pipeline_artifact_reroutes_all_binary_consumers() {
         "ado-aw/candidate-artifact/1",
         "producer_definition_id",
         "producer_build_id",
-        "\"repository\", \"source_ref\", \"source_version\", \"reason\", \"compiler_version\", \"awf_version\"",
-        "type(definition) is int",
-        "type(build) is int",
+        "\"repository\",",
+        "\"source_ref\",",
+        "\"source_version\",",
+        "\"reason\",",
+        "\"compiler_version\",",
+        "\"awf_version\",",
+        "type(definition) is not int",
+        "type(build) is not int",
         "Validated candidate provenance:",
     ] {
         assert!(

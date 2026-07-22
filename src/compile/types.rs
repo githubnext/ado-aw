@@ -1776,8 +1776,10 @@ impl SupplyChainConfig {
     /// Effective service connection for the feed (binary) mirror.
     ///
     /// Resolution: the feed's own `service-connection` → the top-level
-    /// `service-connection`. `None` means "authenticate with
-    /// `$(System.AccessToken)`" (valid for same-org feeds).
+    /// `service-connection`. The top-level fallback is considered only when
+    /// `feed` is configured; without a feed this returns `None`. When a feed
+    /// is present, `None` means "authenticate with `$(System.AccessToken)`"
+    /// (valid for same-org feeds).
     pub fn feed_connection(&self) -> Option<&str> {
         let feed = self.feed.as_ref()?;
         feed.service_connection
@@ -1788,8 +1790,10 @@ impl SupplyChainConfig {
     /// Effective service connection for the registry (image) mirror.
     ///
     /// Resolution: the registry's own `service-connection` → the top-level
-    /// `service-connection`. `None` is invalid when `registry` is set (ACR has
-    /// no `System.AccessToken` path) — see [`SupplyChainConfig::validate`].
+    /// `service-connection`. The top-level fallback is considered only when
+    /// `registry` is configured; without a registry this returns `None`.
+    /// `None` is invalid when `registry` is set (ACR has no
+    /// `System.AccessToken` path) — see [`SupplyChainConfig::validate`].
     pub fn registry_connection(&self) -> Option<&str> {
         let registry = self.registry.as_ref()?;
         registry

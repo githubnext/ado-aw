@@ -2257,6 +2257,53 @@ pub(crate) fn download_candidate_artifact_step(
         .into_step()
 }
 
+// Keep this free of single quotes: the generated Bash passes it as one
+// single-quoted `python3 -c` argument so the multiline validator stays
+// readable without requiring shell escaping.
+const CANDIDATE_PROVENANCE_VALIDATOR_PY: &str = r#"import json
+import sys
+
+provenance_path, definition_arg, build_arg = sys.argv[1:]
+with open(provenance_path, encoding="utf-8") as handle:
+    provenance = json.load(handle)
+
+expected_definition = int(definition_arg)
+expected_build = int(build_arg)
+if provenance.get("schema") != "ado-aw/candidate-artifact/1":
+    sys.exit("candidate provenance schema must be ado-aw/candidate-artifact/1")
+
+definition = provenance.get("producer_definition_id")
+build = provenance.get("producer_build_id")
+if type(definition) is not int or definition != expected_definition:
+    sys.exit(
+        f"candidate producer_definition_id mismatch: "
+        f"expected {expected_definition}, got {definition!r}"
+    )
+if type(build) is not int or build != expected_build:
+    sys.exit(
+        f"candidate producer_build_id mismatch: expected {expected_build}, got {build!r}"
+    )
+
+diagnostic = {
+    "schema": provenance["schema"],
+    "producer_definition_id": definition,
+    "producer_build_id": build,
+}
+for key in (
+    "repository",
+    "source_ref",
+    "source_version",
+    "reason",
+    "compiler_version",
+    "awf_version",
+):
+    if key in provenance:
+        diagnostic[key] = provenance[key]
+
+print("Validated candidate provenance:")
+print(json.dumps(diagnostic, indent=2, sort_keys=True))
+"#;
+
 /// Build the staging script for one payload from a pinned candidate artifact.
 ///
 /// The producer contract is `schema: ado-aw/candidate-artifact/1` with numeric
@@ -2305,8 +2352,9 @@ pub(crate) fn stage_candidate_artifact_payload_bash(
            END {{ if (count != 1) exit 1; print line }}\n\
          ' checksums.txt | sha256sum -c -\n\
          \n\
-         python3 -c 'import json,sys; p=json.load(open(sys.argv[1], encoding=\"utf-8\")); expected_definition=int(sys.argv[2]); expected_build=int(sys.argv[3]); p.get(\"schema\") == \"ado-aw/candidate-artifact/1\" or sys.exit(\"candidate provenance schema must be ado-aw/candidate-artifact/1\"); definition=p.get(\"producer_definition_id\"); build=p.get(\"producer_build_id\"); (type(definition) is int and definition == expected_definition) or sys.exit(f\"candidate producer_definition_id mismatch: expected {{expected_definition}}, got {{definition!r}}\"); (type(build) is int and build == expected_build) or sys.exit(f\"candidate producer_build_id mismatch: expected {{expected_build}}, got {{build!r}}\"); diagnostic={{\"schema\": p[\"schema\"], \"producer_definition_id\": definition, \"producer_build_id\": build}}; diagnostic.update({{key: p[key] for key in (\"repository\", \"source_ref\", \"source_version\", \"reason\", \"compiler_version\", \"awf_version\") if key in p}}); print(\"Validated candidate provenance:\"); print(json.dumps(diagnostic, indent=2, sort_keys=True))' provenance.json {definition_id} {run_id}\n\
+         python3 -c '{provenance_validator}' provenance.json {definition_id} {run_id}\n\
          {tail}",
+        provenance_validator = CANDIDATE_PROVENANCE_VALIDATOR_PY,
         definition_id = config.definition_id,
         run_id = config.run_id,
     )
