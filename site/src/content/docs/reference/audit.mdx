@@ -56,7 +56,7 @@ URL-encoded project segments are decoded automatically. Both `t=` and `s=` are a
 │   │   ├── aw_info.json              # Runtime engine / agent / source metadata
 │   │   └── otel.jsonl                # Copilot OTel (when emitted)
 │   └── logs/
-│       ├── firewall/                 # AWF Squid proxy logs
+│       ├── firewall/                 # AWF firewall logs
 │       ├── mcpg/                     # MCP Gateway logs
 │       ├── safeoutputs.log           # SafeOutputs HTTP server log
 │       └── agent-output.txt          # Filtered agent stdout
@@ -92,7 +92,7 @@ Optional sections are omitted from `--json` output when empty.
 | `mcp_tool_usage` | MCPG logs aggregated per `(server, tool)`. |
 | `mcp_failures` | MCPG `tool_error` / `server_error` events. |
 | `jobs` | ADO `/timeline` records filtered to `type: Job`. |
-| `firewall_analysis` | AWF Squid proxy logs aggregated by domain. |
+| `firewall_analysis` | AWF firewall logs aggregated by domain. |
 | `policy_analysis` | AWF policy artifacts aggregated into allow/deny summaries. |
 | `missing_tools` / `missing_data` / `noops` | NDJSON entries from the corresponding SafeOutputs MCP tools. |
 | `downloaded_files` | One entry per file under `<output>/build-<id>/`. |
