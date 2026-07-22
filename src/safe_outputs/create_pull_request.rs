@@ -1035,58 +1035,7 @@ impl Executor for CreatePrResult {
         }
 
         if changes.is_empty() {
-            // If every collected entry was a symlink, the agent's payload is
-            // effectively gone — surface that to the agent so it can debug
-            // (the per-symlink warn! only goes to Stage 3 infrastructure logs).
-            // Paths are passed through sanitize_path_for_markdown so adversarial
-            // filenames (bidi overrides, control chars, etc.) cannot garble the
-            // ExecutionResult message or the corresponding log line.
-            let symlink_suffix = if skipped_symlinks.is_empty() {
-                String::new()
-            } else {
-                let sanitized: Vec<String> = skipped_symlinks
-                    .iter()
-                    .map(|p| sanitize_path_for_markdown(p))
-                    .collect();
-                format!(
-                    " ({} symlink(s) were skipped for safety: {})",
-                    sanitized.len(),
-                    sanitized.join(", ")
-                )
-            };
-            // Handle no-changes based on config
-            match config.if_no_changes {
-                IfNoChanges::Error => {
-                    warn!(
-                        "No changes detected after applying patch (if-no-changes: error){}",
-                        symlink_suffix
-                    );
-                    return Ok(ExecutionResult::failure(format!(
-                        "No changes detected after applying patch{}",
-                        symlink_suffix
-                    )));
-                }
-                IfNoChanges::Ignore => {
-                    info!(
-                        "No changes detected after applying patch (if-no-changes: ignore){}",
-                        symlink_suffix
-                    );
-                    return Ok(ExecutionResult::success(format!(
-                        "No changes detected — nothing to do{}",
-                        symlink_suffix
-                    )));
-                }
-                IfNoChanges::Warn => {
-                    warn!(
-                        "No changes detected after applying patch (if-no-changes: warn){}",
-                        symlink_suffix
-                    );
-                    return Ok(ExecutionResult::warning(format!(
-                        "No changes detected after applying patch{}",
-                        symlink_suffix
-                    )));
-                }
-            }
+            return Ok(handle_no_changes(&config, &skipped_symlinks));
         }
 
         // Use ADO REST API to create branch and push changes
@@ -1176,14 +1125,7 @@ impl Executor for CreatePrResult {
                         source_branch,
                         attempt + 1
                     );
-                    use rand::RngExt;
-                    let new_suffix: u32 = rand::rng().random();
-                    let new_hex = format!("{:08x}", new_suffix);
-                    source_branch = if let Some(pos) = source_branch.rfind('-') {
-                        format!("{}-{}", &source_branch[..pos], new_hex)
-                    } else {
-                        format!("{}-{}", source_branch, new_hex)
-                    };
+                    source_branch = rename_branch_suffix(&source_branch, &random_branch_suffix());
                     source_ref = format!("refs/heads/{}", source_branch);
                     info!("Renamed source branch to '{}'", source_branch);
                     continue;
@@ -1200,98 +1142,21 @@ impl Executor for CreatePrResult {
         );
         debug!("Push URL: {}", push_url);
 
-        // For creating a new branch with a commit:
-        // - refUpdates.oldObjectId = zeros (new ref)
-        // - commits[0].parents = [base_commit] (parent of new commit)
-        // ADO will compute the newObjectId from the commit
-        let push_body = serde_json::json!({
-            "refUpdates": [{
-                "name": source_ref,
-                "oldObjectId": "0000000000000000000000000000000000000000"
-            }],
-            "commits": [{
-                "comment": effective_title,
-                "changes": changes,
-                "parents": [base_commit]
-            }]
-        });
-
-        debug!(
-            "Push request body: {}",
-            serde_json::to_string_pretty(&push_body).unwrap_or_default()
-        );
-
-        let push_response = client
-            .post(&push_url)
-            .basic_auth("", Some(token))
-            .json(&push_body)
-            .send()
-            .await
-            .context("Failed to push changes")?;
-
-        if !push_response.status().is_success() {
-            let status = push_response.status();
-            let body = push_response.text().await.unwrap_or_default();
-
-            // Handle TOCTOU branch collision: if the push fails because the branch
-            // was created between our check and the push, retry with a new suffix
-            if status.as_u16() == 409 || (status.as_u16() == 400 && body.contains("already exists"))
-            {
-                warn!(
-                    "Push failed due to branch collision, retrying with new suffix: {}",
-                    body
-                );
-                use rand::RngExt;
-                let new_suffix: u32 = rand::rng().random();
-                let new_hex = format!("{:08x}", new_suffix);
-                source_branch = if let Some(pos) = source_branch.rfind('-') {
-                    format!("{}-{}", &source_branch[..pos], new_hex)
-                } else {
-                    format!("{}-{}", source_branch, new_hex)
-                };
-                source_ref = format!("refs/heads/{}", source_branch);
-                info!("Retrying push with branch '{}'", source_branch);
-
-                let retry_body = serde_json::json!({
-                    "refUpdates": [{
-                        "name": source_ref,
-                        "oldObjectId": "0000000000000000000000000000000000000000"
-                    }],
-                    "commits": [{
-                        "comment": effective_title,
-                        "changes": changes,
-                        "parents": [base_commit]
-                    }]
-                });
-
-                let retry_response = client
-                    .post(&push_url)
-                    .basic_auth("", Some(token))
-                    .json(&retry_body)
-                    .send()
-                    .await
-                    .context("Failed to push changes (retry)")?;
-
-                if !retry_response.status().is_success() {
-                    let retry_status = retry_response.status();
-                    let retry_body_text = retry_response.text().await.unwrap_or_default();
-                    warn!(
-                        "Retry push also failed: {} - {}",
-                        retry_status, retry_body_text
-                    );
-                    return Ok(ExecutionResult::failure(format!(
-                        "Failed to push changes after retry: {} - {}",
-                        retry_status, retry_body_text
-                    )));
-                }
-            } else {
-                warn!("Failed to push changes: {} - {}", status, body);
-                return Ok(ExecutionResult::failure(format!(
-                    "Failed to push changes: {} - {}",
-                    status, body
-                )));
-            }
-        }
+        (source_branch, source_ref) = match push_new_branch(PushBranchParams {
+            client: &client,
+            push_url: &push_url,
+            token,
+            source_branch,
+            source_ref,
+            changes: &changes,
+            base_commit: &base_commit,
+            effective_title: &effective_title,
+        })
+        .await?
+        {
+            Ok(pair) => pair,
+            Err(result) => return Ok(result),
+        };
         debug!("Changes pushed successfully");
 
         // Append agent stats then provenance footer to description.
@@ -1339,40 +1204,10 @@ impl Executor for CreatePrResult {
         }
 
         // Validate and add labels (merge operator labels + validated agent labels)
-        let mut all_labels = config.labels.clone();
-
-        // Validate agent-provided labels against allowed-labels
-        if !self.agent_labels.is_empty() {
-            if !config.allowed_labels.is_empty() {
-                let disallowed: Vec<_> = self
-                    .agent_labels
-                    .iter()
-                    .filter(|l| {
-                        !config
-                            .allowed_labels
-                            .iter()
-                            .any(|al| al.eq_ignore_ascii_case(l))
-                    })
-                    .collect();
-                if !disallowed.is_empty() {
-                    warn!("Agent labels not in allowed-labels: {:?}", disallowed);
-                    return Ok(ExecutionResult::failure(format!(
-                        "Agent-provided labels not in allowed-labels: {}",
-                        disallowed
-                            .iter()
-                            .map(|l| l.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )));
-                }
-            }
-            // Merge agent labels (case-insensitive dedup to match allowlist comparison)
-            for label in &self.agent_labels {
-                if !all_labels.iter().any(|l| l.eq_ignore_ascii_case(label)) {
-                    all_labels.push(label.clone());
-                }
-            }
-        }
+        let all_labels = match validate_and_build_labels(&config, &self.agent_labels) {
+            Ok(labels) => labels,
+            Err(result) => return Ok(result),
+        };
 
         if !all_labels.is_empty() {
             debug!("Adding {} labels", all_labels.len());
@@ -1627,6 +1462,233 @@ async fn apply_patch_to_worktree(
     } else {
         apply_patch_without_exclusions(worktree_path, patch_path).await
     }
+}
+
+/// Build a branch-rename suffix (8-char lowercase hex).
+fn random_branch_suffix() -> String {
+    use rand::RngExt;
+    let v: u32 = rand::rng().random();
+    format!("{:08x}", v)
+}
+
+/// Replace the last hyphen-separated suffix in `branch` with `new_suffix`,
+/// or append `-new_suffix` if there is no hyphen.
+fn rename_branch_suffix(branch: &str, new_suffix: &str) -> String {
+    if let Some(pos) = branch.rfind('-') {
+        format!("{}-{}", &branch[..pos], new_suffix)
+    } else {
+        format!("{}-{}", branch, new_suffix)
+    }
+}
+
+/// Build the ADO push payload for creating a new branch with a single commit.
+fn build_push_payload(
+    source_ref: &str,
+    effective_title: &str,
+    changes: &[serde_json::Value],
+    base_commit: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "refUpdates": [{
+            "name": source_ref,
+            "oldObjectId": "0000000000000000000000000000000000000000"
+        }],
+        "commits": [{
+            "comment": effective_title,
+            "changes": changes,
+            "parents": [base_commit]
+        }]
+    })
+}
+
+/// Parameters for [`push_new_branch`]. Groups arguments to stay under Clippy's
+/// `too_many_arguments` limit.
+struct PushBranchParams<'a> {
+    client: &'a reqwest::Client,
+    push_url: &'a str,
+    token: &'a str,
+    source_branch: String,
+    source_ref: String,
+    changes: &'a [serde_json::Value],
+    base_commit: &'a str,
+    effective_title: &'a str,
+}
+
+/// Push `changes` to a new ADO branch, handling TOCTOU branch-collision with one retry.
+///
+/// Returns `Ok((source_branch, source_ref))` with the (possibly-renamed) branch on
+/// success. Returns `Err(ExecutionResult)` on push failure.
+async fn push_new_branch(
+    p: PushBranchParams<'_>,
+) -> anyhow::Result<Result<(String, String), ExecutionResult>> {
+    let PushBranchParams {
+        client,
+        push_url,
+        token,
+        mut source_branch,
+        mut source_ref,
+        changes,
+        base_commit,
+        effective_title,
+    } = p;
+    let push_body = build_push_payload(&source_ref, effective_title, changes, base_commit);
+    debug!(
+        "Push request body: {}",
+        serde_json::to_string_pretty(&push_body).unwrap_or_default()
+    );
+
+    let push_response = client
+        .post(push_url)
+        .basic_auth("", Some(token))
+        .json(&push_body)
+        .send()
+        .await
+        .context("Failed to push changes")?;
+
+    if push_response.status().is_success() {
+        return Ok(Ok((source_branch, source_ref)));
+    }
+
+    let status = push_response.status();
+    let body = push_response.text().await.unwrap_or_default();
+
+    // Handle TOCTOU branch collision: retry once with a new random suffix
+    if status.as_u16() == 409 || (status.as_u16() == 400 && body.contains("already exists")) {
+        warn!(
+            "Push failed due to branch collision, retrying with new suffix: {}",
+            body
+        );
+        source_branch = rename_branch_suffix(&source_branch, &random_branch_suffix());
+        source_ref = format!("refs/heads/{}", source_branch);
+        info!("Retrying push with branch '{}'", source_branch);
+
+        let retry_body = build_push_payload(&source_ref, effective_title, changes, base_commit);
+        let retry_response = client
+            .post(push_url)
+            .basic_auth("", Some(token))
+            .json(&retry_body)
+            .send()
+            .await
+            .context("Failed to push changes (retry)")?;
+
+        if !retry_response.status().is_success() {
+            let retry_status = retry_response.status();
+            let retry_body_text = retry_response.text().await.unwrap_or_default();
+            warn!("Retry push also failed: {} - {}", retry_status, retry_body_text);
+            return Ok(Err(ExecutionResult::failure(format!(
+                "Failed to push changes after retry: {} - {}",
+                retry_status, retry_body_text
+            ))));
+        }
+        return Ok(Ok((source_branch, source_ref)));
+    }
+
+    warn!("Failed to push changes: {} - {}", status, body);
+    Ok(Err(ExecutionResult::failure(format!(
+        "Failed to push changes: {} - {}",
+        status, body
+    ))))
+}
+
+/// Decide what to do when the applied patch produces no file changes.
+///
+/// If every collected entry was a symlink, the agent's payload is effectively
+/// gone — surface that in the result so the agent can debug (the per-symlink
+/// `warn!` only goes to Stage 3 infrastructure logs). Paths are passed through
+/// `sanitize_path_for_markdown` so adversarial filenames cannot garble the
+/// `ExecutionResult` message.
+fn handle_no_changes(config: &CreatePrConfig, skipped_symlinks: &[String]) -> ExecutionResult {
+    let symlink_suffix = if skipped_symlinks.is_empty() {
+        String::new()
+    } else {
+        let sanitized: Vec<String> = skipped_symlinks
+            .iter()
+            .map(|p| sanitize_path_for_markdown(p))
+            .collect();
+        format!(
+            " ({} symlink(s) were skipped for safety: {})",
+            sanitized.len(),
+            sanitized.join(", ")
+        )
+    };
+
+    match config.if_no_changes {
+        IfNoChanges::Error => {
+            warn!(
+                "No changes detected after applying patch (if-no-changes: error){}",
+                symlink_suffix
+            );
+            ExecutionResult::failure(format!(
+                "No changes detected after applying patch{}",
+                symlink_suffix
+            ))
+        }
+        IfNoChanges::Ignore => {
+            info!(
+                "No changes detected after applying patch (if-no-changes: ignore){}",
+                symlink_suffix
+            );
+            ExecutionResult::success(format!("No changes detected — nothing to do{}", symlink_suffix))
+        }
+        IfNoChanges::Warn => {
+            warn!(
+                "No changes detected after applying patch (if-no-changes: warn){}",
+                symlink_suffix
+            );
+            ExecutionResult::warning(format!(
+                "No changes detected after applying patch{}",
+                symlink_suffix
+            ))
+        }
+    }
+}
+
+/// Validate agent-provided labels against the allowlist and merge them with
+/// the operator's configured labels.
+///
+/// Returns the merged label list on success, or an `ExecutionResult` failure if
+/// the agent supplied labels that are not in `allowed-labels`.
+fn validate_and_build_labels(
+    config: &CreatePrConfig,
+    agent_labels: &[String],
+) -> Result<Vec<String>, ExecutionResult> {
+    let mut all_labels = config.labels.clone();
+
+    if agent_labels.is_empty() {
+        return Ok(all_labels);
+    }
+
+    if !config.allowed_labels.is_empty() {
+        let disallowed: Vec<_> = agent_labels
+            .iter()
+            .filter(|l| {
+                !config
+                    .allowed_labels
+                    .iter()
+                    .any(|al| al.eq_ignore_ascii_case(l))
+            })
+            .collect();
+        if !disallowed.is_empty() {
+            warn!("Agent labels not in allowed-labels: {:?}", disallowed);
+            return Err(ExecutionResult::failure(format!(
+                "Agent-provided labels not in allowed-labels: {}",
+                disallowed
+                    .iter()
+                    .map(|l| l.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+    }
+
+    // Merge agent labels (case-insensitive dedup to match allowlist comparison)
+    for label in agent_labels {
+        if !all_labels.iter().any(|l| l.eq_ignore_ascii_case(label)) {
+            all_labels.push(label.clone());
+        }
+    }
+
+    Ok(all_labels)
 }
 
 /// Context for PR post-creation operations (reviewers, completion options).
