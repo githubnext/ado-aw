@@ -239,6 +239,343 @@ impl Default for UploadPipelineArtifactConfig {
     }
 }
 
+/// Resolved ADO context fields required by the upload executor.
+struct ArtifactAdoContext<'a> {
+    org_url: &'a str,
+    project: &'a str,
+    project_id: &'a str,
+    token: &'a str,
+    container_id: u64,
+}
+
+/// Validated staged-file metadata after all policy checks.
+struct StagedFileInfo {
+    canonical: std::path::PathBuf,
+    file_size: u64,
+}
+
+/// Resolve the effective build ID from the request or the current pipeline run.
+fn resolve_effective_build_id(
+    build_id: Option<i64>,
+    ctx: &ExecutionContext,
+) -> anyhow::Result<i64> {
+    match build_id {
+        Some(id) => Ok(id),
+        None => {
+            let current = ctx.build_id.context(
+                "build_id was not specified and BUILD_BUILDID is not set — \
+                 cannot determine which build to publish the artifact to",
+            )?;
+            i64::try_from(current).context("BUILD_BUILDID value overflows i64")
+        }
+    }
+}
+
+/// Apply config allow-list / name-prefix checks and return the final artifact
+/// name, or an `ExecutionResult::failure` if a policy is violated.
+fn resolve_final_artifact_name(
+    artifact_name: &str,
+    file_path: &str,
+    build_id: Option<i64>,
+    effective_build_id: i64,
+    config: &UploadPipelineArtifactConfig,
+) -> Result<String, ExecutionResult> {
+    // Build-ID allow-list
+    if build_id.is_some()
+        && !config.allowed_build_ids.is_empty()
+        && !config.allowed_build_ids.contains(&effective_build_id)
+    {
+        return Err(ExecutionResult::failure(format!(
+            "Build ID {} is not in the allowed-build-ids list",
+            effective_build_id
+        )));
+    }
+
+    // Name-prefix length guard
+    if let Some(prefix) = &config.name_prefix
+        && prefix.len() > 50
+    {
+        return Err(ExecutionResult::failure(format!(
+            "name-prefix '{}...' is too long ({} chars, max 50)",
+            prefix.chars().take(20).collect::<String>(),
+            prefix.len()
+        )));
+    }
+    let final_name = match &config.name_prefix {
+        Some(prefix) => format!("{}{}", prefix, artifact_name),
+        None => artifact_name.to_string(),
+    };
+    if final_name.starts_with('.')
+        || final_name.len() > 100
+        || !crate::validate::is_valid_artifact_name(&final_name)
+    {
+        return Err(ExecutionResult::failure(format!(
+            "Resolved artifact name '{}' is not a valid Azure DevOps artifact name",
+            final_name
+        )));
+    }
+
+    // Artifact-name allow-list
+    if !config.allowed_artifact_names.is_empty() {
+        let allowed = config
+            .allowed_artifact_names
+            .iter()
+            .any(|pattern| super::name_matches_pattern(&final_name, pattern));
+        if !allowed {
+            return Err(ExecutionResult::failure(format!(
+                "Artifact name '{}' is not in the allowed list",
+                final_name
+            )));
+        }
+    }
+
+    // Extension allow-list
+    if !config.allowed_extensions.is_empty() {
+        let file_ext = std::path::Path::new(file_path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        let has_valid_ext = config
+            .allowed_extensions
+            .iter()
+            .any(|ext| ext.trim_start_matches('.').eq_ignore_ascii_case(file_ext));
+        if !has_valid_ext {
+            return Err(ExecutionResult::failure(format!(
+                "File '{}' has an extension not in the allowed list: {:?}",
+                file_path, config.allowed_extensions
+            )));
+        }
+    }
+
+    Ok(final_name)
+}
+
+/// Resolve and integrity-check the staged file, returning its canonical path
+/// and size, or an `ExecutionResult::failure` on any violation.
+fn resolve_staged_file(
+    staged_file: &str,
+    expected_size: u64,
+    max_file_size: u64,
+    ctx: &ExecutionContext,
+) -> anyhow::Result<Result<StagedFileInfo, ExecutionResult>> {
+    let staged_path = ctx.working_directory.join(staged_file);
+    let canonical = staged_path.canonicalize().context(
+        "Failed to canonicalize staged file path — file may be missing or contains broken symlinks",
+    )?;
+    let canonical_base = ctx
+        .working_directory
+        .canonicalize()
+        .context("Failed to canonicalize working directory")?;
+    if !canonical.starts_with(&canonical_base) {
+        return Ok(Err(ExecutionResult::failure(format!(
+            "Staged file '{}' resolves outside the safe-outputs directory",
+            staged_file
+        ))));
+    }
+    let metadata = std::fs::metadata(&canonical).context("Failed to read file metadata")?;
+    if metadata.is_dir() {
+        return Ok(Err(ExecutionResult::failure(format!(
+            "Staged path '{}' is a directory; upload-pipeline-artifact only supports single files",
+            staged_file
+        ))));
+    }
+    let file_size = metadata.len();
+    if file_size != expected_size {
+        return Ok(Err(ExecutionResult::failure(format!(
+            "Staged file size ({} bytes) differs from size recorded at Stage 1 ({} bytes) — \
+             the file may have been modified between stages",
+            file_size, expected_size
+        ))));
+    }
+    if file_size > max_file_size {
+        return Ok(Err(ExecutionResult::failure(format!(
+            "File size ({} bytes) exceeds maximum allowed size ({} bytes)",
+            file_size, max_file_size
+        ))));
+    }
+    Ok(Ok(StagedFileInfo { canonical, file_size }))
+}
+
+/// Extract the required ADO context fields from `ctx`, failing with a clear
+/// error message for each missing environment variable.
+fn resolve_ado_context(ctx: &ExecutionContext) -> anyhow::Result<ArtifactAdoContext<'_>> {
+    let org_url = ctx
+        .ado_org_url
+        .as_deref()
+        .context("AZURE_DEVOPS_ORG_URL not set")?;
+    let project = ctx
+        .ado_project
+        .as_deref()
+        .context("SYSTEM_TEAMPROJECT not set")?;
+    let project_id = ctx
+        .ado_project_id
+        .as_deref()
+        .context("SYSTEM_TEAMPROJECTID not set — required for pipeline artifact upload")?;
+    let token = ctx
+        .access_token
+        .as_deref()
+        .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
+    // Resolve the agent's own build container ID (Azure DevOps pre-creates
+    // one container per build at job initialization and exposes it via
+    // BUILD_CONTAINERID). All artifacts in the build share this container,
+    // including those whose record we associate with a different build.
+    let container_id = ctx.build_container_id.context(
+        "BUILD_CONTAINERID not set or invalid — required to publish a \
+         pipeline artifact; this tool must run inside an Azure DevOps \
+         pipeline job",
+    )?;
+    Ok(ArtifactAdoContext { org_url, project, project_id, token, container_id })
+}
+
+/// Upload the file bytes to the agent's own build container (Step 1).
+/// Returns `Err(ExecutionResult::failure(...))` on HTTP failure.
+async fn upload_file_to_container(
+    client: &reqwest::Client,
+    ado: &ArtifactAdoContext<'_>,
+    container_folder: &str,
+    filename: &str,
+    file_bytes: Vec<u8>,
+    file_size: u64,
+) -> anyhow::Result<Result<(), ExecutionResult>> {
+    // The canonical query parameter is `scope` (not `scopeIdentifier`,
+    // which is the response model field name); all official ADO SDKs
+    // (Node, Python, Extension API) use `scope=`.
+    let upload_url = format!(
+        "{}/_apis/resources/Containers/{}?itemPath={}/{}&scope={}&api-version=7.1-preview.4",
+        ado.org_url.trim_end_matches('/'),
+        ado.container_id,
+        utf8_percent_encode(container_folder, PATH_SEGMENT),
+        utf8_percent_encode(filename, PATH_SEGMENT),
+        utf8_percent_encode(ado.project_id, PATH_SEGMENT),
+    );
+    debug!("Uploading {} bytes to container: {}", file_size, upload_url);
+
+    // The Azure DevOps File Container API requires a `Content-Range` header on
+    // every PUT (it's how ADO supports chunked uploads, even for clients that
+    // send the whole file in a single request). Without it the server responds
+    // `HTTP 400: Content-Range header not understood.`.
+    let content_range = format_content_range(file_size);
+    let upload_resp = client
+        .put(&upload_url)
+        .header("Content-Type", "application/octet-stream")
+        .header("Content-Range", &content_range)
+        .basic_auth("", Some(ado.token))
+        .body(file_bytes)
+        .send()
+        .await
+        .context("Failed to upload file to artifact container")?;
+
+    if !upload_resp.status().is_success() {
+        let status = upload_resp.status();
+        let error_body = upload_resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        return Ok(Err(ExecutionResult::failure(format!(
+            "Failed to upload file to container #{} (HTTP {}): {}",
+            ado.container_id, status, error_body
+        ))));
+    }
+    debug!("File uploaded to container {}", ado.container_id);
+    Ok(Ok(()))
+}
+
+/// Associate the artifact record with the target build (Step 2).
+/// For cross-build publishing the artifact bytes physically live in the
+/// agent's own container; the record on the target build holds a pointer.
+async fn associate_artifact_with_build(
+    client: &reqwest::Client,
+    ado: &ArtifactAdoContext<'_>,
+    final_name: &str,
+    container_folder: &str,
+    effective_build_id: i64,
+    file_path: &str,
+    file_size: u64,
+) -> anyhow::Result<ExecutionResult> {
+    let artifact_url = format!(
+        "{}/{}/_apis/build/builds/{}/artifacts?api-version=7.1",
+        ado.org_url.trim_end_matches('/'),
+        utf8_percent_encode(ado.project, PATH_SEGMENT),
+        effective_build_id,
+    );
+    debug!(
+        "Associating artifact '{}' (folder '{}') with build #{}: {}",
+        final_name, container_folder, effective_build_id, artifact_url
+    );
+
+    let artifact_body = serde_json::json!({
+        "name": final_name,
+        "resource": {
+            "data": format!("#/{}/{}", ado.container_id, container_folder),
+            "type": "Container",
+        },
+    });
+    let artifact_resp = client
+        .post(&artifact_url)
+        .header("Content-Type", "application/json")
+        .basic_auth("", Some(ado.token))
+        .json(&artifact_body)
+        .send()
+        .await
+        .context("Failed to associate artifact with build")?;
+
+    if artifact_resp.status().is_success() {
+        let resp_body: serde_json::Value = artifact_resp.json().await.unwrap_or_else(|e| {
+            warn!(
+                "Pipeline artifact created for build #{} but the response JSON could not be parsed: {} — proceeding without download URL",
+                effective_build_id, e
+            );
+            serde_json::Value::Null
+        });
+        let download_url = resp_body
+            .get("resource")
+            .and_then(|r| r.get("downloadUrl"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        info!(
+            "Published '{}' as pipeline artifact '{}' on build #{}",
+            file_path, final_name, effective_build_id
+        );
+        Ok(ExecutionResult::success_with_data(
+            format!(
+                "Published '{}' as pipeline artifact '{}' on build #{}",
+                file_path, final_name, effective_build_id
+            ),
+            serde_json::json!({
+                "build_id": effective_build_id,
+                "artifact_name": final_name,
+                "file_path": file_path,
+                "size_bytes": file_size,
+                "download_url": download_url,
+                "project": ado.project,
+                "container_id": ado.container_id,
+                "container_folder": container_folder,
+            }),
+        ))
+    } else {
+        let status = artifact_resp.status();
+        let error_body = artifact_resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        // Best-effort hint when the most common failure modes show up.
+        let hint = match status.as_u16() {
+            401 | 403 => {
+                " — token may lack 'Build (Read & Execute)' scope on the target build's project"
+            }
+            404 => {
+                " — target build does not exist or is in a different project (cross-project publishing is not supported)"
+            }
+            409 => " — an artifact with this name already exists on the target build",
+            _ => "",
+        };
+        Ok(ExecutionResult::failure(format!(
+            "Failed to associate artifact with build #{} (HTTP {}){}: {}",
+            effective_build_id, status, hint, error_body
+        )))
+    }
+}
+
 #[async_trait::async_trait]
 impl Executor for UploadPipelineArtifactResult {
     fn dry_run_summary(&self) -> String {
@@ -255,153 +592,51 @@ impl Executor for UploadPipelineArtifactResult {
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
-        let effective_build_id: i64 = match self.build_id {
-            Some(id) => id,
-            None => {
-                let current = ctx.build_id.context(
-                    "build_id was not specified and BUILD_BUILDID is not set — \
-                     cannot determine which build to publish the artifact to",
-                )?;
-                i64::try_from(current).context("BUILD_BUILDID value overflows i64")?
-            }
-        };
+        let effective_build_id = resolve_effective_build_id(self.build_id, ctx)?;
 
         info!(
             "Publishing '{}' as pipeline artifact '{}' on build #{}{}",
             self.file_path,
             self.artifact_name,
             effective_build_id,
-            if self.build_id.is_none() {
-                " (current build)"
-            } else {
-                ""
-            }
+            if self.build_id.is_none() { " (current build)" } else { "" }
         );
 
         let config: UploadPipelineArtifactConfig = ctx.get_tool_config("upload-pipeline-artifact");
 
-        // ── Build-ID allow-list ──────────────────────────────────────────
-        if self.build_id.is_some()
-            && !config.allowed_build_ids.is_empty()
-            && !config.allowed_build_ids.contains(&effective_build_id)
-        {
-            return Ok(ExecutionResult::failure(format!(
-                "Build ID {} is not in the allowed-build-ids list",
-                effective_build_id
-            )));
-        }
-
-        // ── Name-prefix ─────────────────────────────────────────────────
-        if let Some(prefix) = &config.name_prefix
-            && prefix.len() > 50
-        {
-            return Ok(ExecutionResult::failure(format!(
-                "name-prefix '{}...' is too long ({} chars, max 50)",
-                prefix.chars().take(20).collect::<String>(),
-                prefix.len()
-            )));
-        }
-        let final_name = match &config.name_prefix {
-            Some(prefix) => format!("{}{}", prefix, self.artifact_name),
-            None => self.artifact_name.clone(),
+        let final_name = match resolve_final_artifact_name(
+            &self.artifact_name,
+            &self.file_path,
+            self.build_id,
+            effective_build_id,
+            &config,
+        ) {
+            Ok(name) => name,
+            Err(failure) => return Ok(failure),
         };
-        if final_name.starts_with('.')
-            || final_name.len() > 100
-            || !crate::validate::is_valid_artifact_name(&final_name)
-        {
-            return Ok(ExecutionResult::failure(format!(
-                "Resolved artifact name '{}' is not a valid Azure DevOps artifact name",
-                final_name
-            )));
-        }
 
-        // ── Artifact-name allow-list ─────────────────────────────────────
-        if !config.allowed_artifact_names.is_empty() {
-            let allowed = config
-                .allowed_artifact_names
-                .iter()
-                .any(|pattern| super::name_matches_pattern(&final_name, pattern));
-            if !allowed {
-                return Ok(ExecutionResult::failure(format!(
-                    "Artifact name '{}' is not in the allowed list",
-                    final_name
-                )));
-            }
-        }
-
-        // ── Extension allow-list ─────────────────────────────────────────
-        if !config.allowed_extensions.is_empty() {
-            let file_ext = std::path::Path::new(&self.file_path)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
-            let has_valid_ext = config
-                .allowed_extensions
-                .iter()
-                .any(|ext| ext.trim_start_matches('.').eq_ignore_ascii_case(file_ext));
-            if !has_valid_ext {
-                return Ok(ExecutionResult::failure(format!(
-                    "File '{}' has an extension not in the allowed list: {:?}",
-                    self.file_path, config.allowed_extensions
-                )));
-            }
-        }
-
-        // ── Staged file resolution ───────────────────────────────────────
-        let staged_path = ctx.working_directory.join(&self.staged_file);
-        let canonical = staged_path.canonicalize().context(
-            "Failed to canonicalize staged file path — file may be missing or contains broken symlinks",
-        )?;
-        let canonical_base = ctx
-            .working_directory
-            .canonicalize()
-            .context("Failed to canonicalize working directory")?;
-        if !canonical.starts_with(&canonical_base) {
-            return Ok(ExecutionResult::failure(format!(
-                "Staged file '{}' resolves outside the safe-outputs directory",
-                self.staged_file
-            )));
-        }
-        let metadata = std::fs::metadata(&canonical).context("Failed to read file metadata")?;
-        if metadata.is_dir() {
-            return Ok(ExecutionResult::failure(format!(
-                "Staged path '{}' is a directory; upload-pipeline-artifact only supports single files",
-                self.staged_file
-            )));
-        }
-        let file_size = metadata.len();
-
-        // ── Integrity checks ─────────────────────────────────────────────
-        if file_size != self.file_size {
-            return Ok(ExecutionResult::failure(format!(
-                "Staged file size ({} bytes) differs from size recorded at Stage 1 ({} bytes) — \
-                 the file may have been modified between stages",
-                file_size, self.file_size
-            )));
-        }
-        if file_size > config.max_file_size {
-            return Ok(ExecutionResult::failure(format!(
-                "File size ({} bytes) exceeds maximum allowed size ({} bytes)",
-                file_size, config.max_file_size
-            )));
-        }
+        let staged = match resolve_staged_file(
+            &self.staged_file,
+            self.file_size,
+            config.max_file_size,
+            ctx,
+        )? {
+            Ok(info) => info,
+            Err(failure) => return Ok(failure),
+        };
 
         if ctx.dry_run {
             return Ok(ExecutionResult::success(format!(
                 "[dry-run] would publish '{}' ({} bytes) as pipeline artifact '{}' on build #{}{}",
                 self.file_path,
-                file_size,
+                staged.file_size,
                 final_name,
                 effective_build_id,
-                if self.build_id.is_none() {
-                    " (current build)"
-                } else {
-                    ""
-                }
+                if self.build_id.is_none() { " (current build)" } else { "" }
             )));
         }
 
-        let file_bytes = tokio::fs::read(&canonical)
+        let file_bytes = tokio::fs::read(&staged.canonical)
             .await
             .context("Failed to read file contents")?;
 
@@ -414,33 +649,7 @@ impl Executor for UploadPipelineArtifactResult {
             )));
         }
 
-        // ── Resolve ADO context ──────────────────────────────────────────
-        let org_url = ctx
-            .ado_org_url
-            .as_ref()
-            .context("AZURE_DEVOPS_ORG_URL not set")?;
-        let project = ctx
-            .ado_project
-            .as_ref()
-            .context("SYSTEM_TEAMPROJECT not set")?;
-        let project_id = ctx
-            .ado_project_id
-            .as_ref()
-            .context("SYSTEM_TEAMPROJECTID not set — required for pipeline artifact upload")?;
-        let token = ctx
-            .access_token
-            .as_ref()
-            .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
-
-        // Resolve the agent's own build container ID (Azure DevOps pre-creates
-        // one container per build at job initialization and exposes it via
-        // BUILD_CONTAINERID). All artifacts in the build share this container,
-        // including those whose record we associate with a different build.
-        let container_id = ctx.build_container_id.context(
-            "BUILD_CONTAINERID not set or invalid — required to publish a \
-             pipeline artifact; this tool must run inside an Azure DevOps \
-             pipeline job",
-        )?;
+        let ado = resolve_ado_context(ctx)?;
 
         // ── Per-run dedupe (when require-unique-names is set) ────────────
         // Reject reuse of (effective_build_id, final_name) before any HTTP
@@ -464,22 +673,17 @@ impl Executor for UploadPipelineArtifactResult {
         }
 
         // Internal container folder. The user-visible artifact name is
-        // `final_name`; the folder name carries an optional discriminator so
+        // `final_name`; the folder carries an optional discriminator so
         // multiple calls in one run sharing the same name but uploading
         // different content don't overwrite each other's bytes in the shared
         // container. The discriminator is derived from the file content hash
-        // (already computed above) so distinct content always maps to a
-        // distinct folder — identical content maps to the same folder, which
-        // is safe (idempotent PUT). The discriminator is invisible in standard
-        // download paths (web UI zip wrapper, DownloadBuildArtifacts@1,
-        // DownloadPipelineArtifact@2 — all strip the prefix) and is only seen
-        // by callers that hit `GET /_apis/resources/Containers/{id}?itemPath=…`
-        // directly.
+        // so distinct content always maps to a distinct folder — identical
+        // content maps to the same folder (idempotent PUT). The discriminator
+        // is invisible in standard download paths.
         let container_folder = if config.require_unique_names {
             final_name.clone()
         } else {
-            let disc = &live_hash[..6];
-            format!("{}__{}", final_name, disc)
+            format!("{}__{}", final_name, &live_hash[..6])
         };
 
         let client = reqwest::Client::new();
@@ -491,152 +695,43 @@ impl Executor for UploadPipelineArtifactResult {
             .and_then(|n| n.to_str())
             .unwrap_or(&self.staged_file);
 
-        // ── Step 1: Upload file to the agent's own build container ──────
-        // The canonical query parameter is `scope` (not `scopeIdentifier`,
-        // which is the response model field name); all official ADO SDKs
-        // (Node, Python, Extension API) use `scope=`.
-        let upload_url = format!(
-            "{}/_apis/resources/Containers/{}?itemPath={}/{}&scope={}&api-version=7.1-preview.4",
-            org_url.trim_end_matches('/'),
-            container_id,
-            utf8_percent_encode(&container_folder, PATH_SEGMENT),
-            utf8_percent_encode(filename, PATH_SEGMENT),
-            utf8_percent_encode(project_id, PATH_SEGMENT),
-        );
-        debug!("Uploading {} bytes to container: {}", file_size, upload_url);
-
-        // The Azure DevOps File Container API requires a `Content-Range`
-        // header on every PUT (it's how ADO supports chunked uploads, even
-        // for clients that send the whole file in a single request). Without
-        // it the server responds `HTTP 400: Content-Range header not
-        // understood.`. See `format_content_range` for the exact format.
-        let content_range = format_content_range(file_size);
-
-        let upload_resp = client
-            .put(&upload_url)
-            .header("Content-Type", "application/octet-stream")
-            .header("Content-Range", &content_range)
-            .basic_auth("", Some(token))
-            .body(file_bytes)
-            .send()
-            .await
-            .context("Failed to upload file to artifact container")?;
-
-        if !upload_resp.status().is_success() {
-            let status = upload_resp.status();
-            let error_body = upload_resp
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            return Ok(ExecutionResult::failure(format!(
-                "Failed to upload file to container #{} (HTTP {}): {}",
-                container_id, status, error_body
-            )));
+        if let Err(failure) = upload_file_to_container(
+            &client,
+            &ado,
+            &container_folder,
+            filename,
+            file_bytes,
+            staged.file_size,
+        )
+        .await?
+        {
+            return Ok(failure);
         }
-        debug!("File uploaded to container {}", container_id);
 
-        // ── Step 2: Associate artifact record with the target build ─────
-        // For cross-build publishing the artifact bytes physically live in
-        // the agent's own container; the record on the target build holds a
-        // pointer (`resource.data = "#/{containerId}/{folder}"`). ADO does
-        // not require the container to belong to the target build — that is
-        // exactly how `DownloadBuildArtifacts@1 buildType=specific` already
-        // works (it follows cross-build container pointers).
-        let artifact_url = format!(
-            "{}/{}/_apis/build/builds/{}/artifacts?api-version=7.1",
-            org_url.trim_end_matches('/'),
-            utf8_percent_encode(project, PATH_SEGMENT),
+        let result = associate_artifact_with_build(
+            &client,
+            &ado,
+            &final_name,
+            &container_folder,
             effective_build_id,
-        );
-        debug!(
-            "Associating artifact '{}' (folder '{}') with build #{}: {}",
-            final_name, container_folder, effective_build_id, artifact_url
-        );
+            &self.file_path,
+            staged.file_size,
+        )
+        .await?;
 
-        let artifact_body = serde_json::json!({
-            "name": final_name,
-            "resource": {
-                "data": format!("#/{}/{}", container_id, container_folder),
-                "type": "Container",
-            },
-        });
-        let artifact_resp = client
-            .post(&artifact_url)
-            .header("Content-Type", "application/json")
-            .basic_auth("", Some(token))
-            .json(&artifact_body)
-            .send()
-            .await
-            .context("Failed to associate artifact with build")?;
-
-        if artifact_resp.status().is_success() {
-            let resp_body: serde_json::Value = artifact_resp.json().await.unwrap_or_else(|e| {
-                warn!(
-                    "Pipeline artifact created for build #{} but the response JSON could not be parsed: {} — proceeding without download URL",
-                    effective_build_id, e
-                );
-                serde_json::Value::Null
-            });
-            let download_url = resp_body
-                .get("resource")
-                .and_then(|r| r.get("downloadUrl"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            info!(
-                "Published '{}' as pipeline artifact '{}' on build #{}",
-                self.file_path, final_name, effective_build_id
-            );
-
-            // Record the successful publish in the dedupe set now that both
-            // HTTP steps have completed — done here (not before the calls) so
-            // a transient failure doesn't permanently block retries.
-            if config.require_unique_names {
-                ctx.uploaded_pipeline_artifact_keys
-                    .lock()
-                    .map_err(|e| {
-                        anyhow::anyhow!("uploaded_pipeline_artifact_keys mutex poisoned: {}", e)
-                    })?
-                    .insert(dedupe_key);
-            }
-
-            Ok(ExecutionResult::success_with_data(
-                format!(
-                    "Published '{}' as pipeline artifact '{}' on build #{}",
-                    self.file_path, final_name, effective_build_id
-                ),
-                serde_json::json!({
-                    "build_id": effective_build_id,
-                    "artifact_name": final_name,
-                    "file_path": self.file_path,
-                    "size_bytes": file_size,
-                    "download_url": download_url,
-                    "project": project,
-                    "container_id": container_id,
-                    "container_folder": container_folder,
-                }),
-            ))
-        } else {
-            let status = artifact_resp.status();
-            let error_body = artifact_resp
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            // Best-effort hint when the most common failure modes show up.
-            let hint = match status.as_u16() {
-                401 | 403 => {
-                    " — token may lack 'Build (Read & Execute)' scope on the target build's project"
-                }
-                404 => {
-                    " — target build does not exist or is in a different project (cross-project publishing is not supported)"
-                }
-                409 => " — an artifact with this name already exists on the target build",
-                _ => "",
-            };
-            Ok(ExecutionResult::failure(format!(
-                "Failed to associate artifact with build #{} (HTTP {}){}: {}",
-                effective_build_id, status, hint, error_body
-            )))
+        // Record the successful publish in the dedupe set now that both
+        // HTTP steps have completed — done here (not before the calls) so
+        // a transient failure doesn't permanently block retries.
+        if result.success && config.require_unique_names {
+            ctx.uploaded_pipeline_artifact_keys
+                .lock()
+                .map_err(|e| {
+                    anyhow::anyhow!("uploaded_pipeline_artifact_keys mutex poisoned: {}", e)
+                })?
+                .insert(dedupe_key);
         }
+
+        Ok(result)
     }
 }
 
