@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::extensions::{
     CompilerExtension, Declarations, McpgConfig, McpgGatewayConfig, McpgServerConfig,
@@ -45,21 +45,26 @@ pub async fn atomic_write(path: &Path, contents: &str) -> Result<()> {
         .context("atomic_write task panicked")?
 }
 
+/// Returns the directory in which the atomic tempfile should be created for a
+/// write to `path`.  The tempfile must live on the same filesystem as `path`
+/// so that the final `persist()` rename is atomic (EXDEV guard).
+///
+/// - `path.parent() == Some(non-empty)` → use that parent directory.
+/// - `path.parent() == Some("")` (bare filename like `"agent.md"`) or `None`
+///   → use `"."` (current directory), which is on the same filesystem as a
+///   bare-filename destination.
+pub(crate) fn atomic_write_parent_dir(path: &Path) -> PathBuf {
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+    parent
+        .map(|p| p.to_owned())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 fn atomic_write_blocking(path: &Path, contents: &str) -> Result<()> {
     use std::io::Write;
 
-    // Determine the directory to create the tempfile in. We MUST use
-    // a path on the same filesystem as the destination so that the
-    // final `persist` rename is atomic (otherwise it fails with
-    // EXDEV on Linux when /tmp is a separate tmpfs mount).
-    //
-    // - `path.parent() == Some(non-empty)` -> use that parent.
-    // - `path.parent() == Some("")` (bare filename like "agent.md")
-    //   or `None` -> use the current directory ("."), which is the
-    //   same filesystem as where the file will land.
-    let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
-    let parent_dir: &Path = parent.unwrap_or_else(|| Path::new("."));
-    let mut tmp = tempfile::NamedTempFile::new_in(parent_dir).with_context(|| {
+    let parent_dir = atomic_write_parent_dir(path);
+    let mut tmp = tempfile::NamedTempFile::new_in(&parent_dir).with_context(|| {
         format!(
             "failed to create temporary file in {}",
             parent_dir.display()
@@ -3284,28 +3289,17 @@ mod tests {
     }
 
     #[test]
-    fn atomic_write_parent_derivation_handles_bare_filename() {
+    fn atomic_write_parent_dir_handles_bare_filename() {
         // Regression test for the EXDEV bug: a bare filename (no
         // directory component) used to fall through to
         // `NamedTempFile::new()` which creates the tempfile in the
         // system temp dir, breaking persist() across filesystem
-        // boundaries (e.g. tmpfs `/tmp` on Linux). Verify the
-        // derivation logic now picks ".". Pure-logic test — no
-        // filesystem I/O so it's parallel-safe.
-        let bare = Path::new("agent.md");
-        let parent = bare.parent().filter(|p| !p.as_os_str().is_empty());
-        let parent_dir: &Path = parent.unwrap_or_else(|| Path::new("."));
-        assert_eq!(parent_dir, Path::new("."));
-
-        let with_dir = Path::new("subdir/agent.md");
-        let parent = with_dir.parent().filter(|p| !p.as_os_str().is_empty());
-        let parent_dir: &Path = parent.unwrap_or_else(|| Path::new("."));
-        assert_eq!(parent_dir, Path::new("subdir"));
-
-        let absolute = Path::new("/tmp/agent.md");
-        let parent = absolute.parent().filter(|p| !p.as_os_str().is_empty());
-        let parent_dir: &Path = parent.unwrap_or_else(|| Path::new("."));
-        assert_eq!(parent_dir, Path::new("/tmp"));
+        // boundaries (e.g. tmpfs `/tmp` on Linux). Verify that the
+        // extracted helper returns "." for a bare filename so the
+        // tempfile lands on the same filesystem as the destination.
+        assert_eq!(atomic_write_parent_dir(Path::new("agent.md")), PathBuf::from("."));
+        assert_eq!(atomic_write_parent_dir(Path::new("subdir/agent.md")), PathBuf::from("subdir"));
+        assert_eq!(atomic_write_parent_dir(Path::new("/tmp/agent.md")), PathBuf::from("/tmp"));
     }
 
     // ─── parse_markdown_detailed ──────────────────────────────────────────────
