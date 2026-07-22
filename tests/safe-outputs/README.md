@@ -129,9 +129,9 @@ In `https://dev.azure.com/msazuresphere/AgentPlayground`:
      tests/safe-outputs/
    ```
 
-   Keep fork builds, fork secrets, and fork full-access tokens disabled on
-   every resulting GitHub-backed definition. The active definition IDs are
-   included in the trusted candidate-smoke fork-policy audit.
+   Keep CI and PR triggers disabled on every resulting release-smoke
+   definition. These definitions are scheduled/manual only; compiler PRs are
+   validated by `tests/compiler-smoke-e2e/`.
 
 3. Capture each Pipeline ID and update `REGISTERED.md`.
 4. Provision the `ADO_AW_DEBUG_GITHUB_TOKEN` secret (fine-grained PAT,

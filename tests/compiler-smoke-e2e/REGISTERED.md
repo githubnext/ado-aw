@@ -30,13 +30,17 @@ forks.allowFullAccessToken=false
 pipelineTriggerSettings.buildsEnabledForForks=false
 ```
 
-Existing GitHub-backed AgentPlayground definitions were explicitly hardened on
-2026-07-22:
+GitHub-backed AgentPlayground definitions that intentionally validate PRs were
+explicitly hardened on 2026-07-22:
 
 | Definition IDs | `forks.enabled` | `allowSecrets` | `allowFullAccessToken` | Effective fork builds |
 | --- | --- | --- | --- | --- |
-| `2544`–`2551` | `false` | `false` | `false` | `false` |
+| `2544`, `2550` | `false` | `false` | `false` | `false` |
 | `2559` | `false` | `false` | `false` | `false` |
+
+Release-smoke definitions `2545`-`2549` and scheduled trigger E2E definition
+`2551` have no CI or PR trigger metadata. Their schedules/manual queues remain
+independent of the candidate compiler PR lane.
 
 Definition `2559` uses the `github.com_githubnext` GitHub service connection
 and stores the five child definition IDs as non-secret definition variables.

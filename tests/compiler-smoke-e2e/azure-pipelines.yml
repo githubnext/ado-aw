@@ -230,31 +230,57 @@ jobs:
       - script: |
           set -euo pipefail
           BASE="$(System.CollectionUri)$(System.TeamProject)/_apis/build/definitions"
-          IDS="$(
+          POLICY="tests/compiler-smoke-e2e/trigger-policy.json"
+          PR_IDS="$(
             jq -er '
-              select(.schema == "ado-aw/credentialed-pr-definitions/1")
-              | .definition_ids[]
-            ' tests/compiler-smoke-e2e/credentialed-pr-definitions.json
+              select(.schema == "ado-aw/agentplayground-trigger-policy/1")
+              | .pr_definition_ids[]
+            ' "$POLICY"
           ) $(System.DefinitionId)"
-          for id in $IDS; do
+          SCHEDULED_ONLY_IDS="$(
+            jq -er '
+              select(.schema == "ado-aw/agentplayground-trigger-policy/1")
+              | .scheduled_only_definition_ids[]
+            ' "$POLICY"
+          )"
+
+          for id in $PR_IDS; do
             JSON="$(curl -fsS \
               -H "Authorization: Bearer $SYSTEM_ACCESSTOKEN" \
               "$BASE/$id?api-version=7.1")"
             if ! printf '%s' "$JSON" | jq -e '
-              any(
-                .triggers[]?;
-                .triggerType == "pullRequest"
-                and .forks.enabled == false
-                and .forks.allowSecrets == false
-                and .forks.allowFullAccessToken == false
-                and .pipelineTriggerSettings.buildsEnabledForForks == false
-              )' >/dev/null; then
+              ([.triggers[]? | select(.triggerType == "continuousIntegration")] | length == 0)
+              and any(
+                  .triggers[]?;
+                  .triggerType == "pullRequest"
+                  and .forks.enabled == false
+                  and .forks.allowSecrets == false
+                  and .forks.allowFullAccessToken == false
+                  and .pipelineTriggerSettings.buildsEnabledForForks == false
+                )' >/dev/null; then
               NAME="$(printf '%s' "$JSON" | jq -r '.name // "unknown"')"
-              echo "Fork policy drift detected for definition $id ($NAME)." >&2
+              echo "PR trigger policy drift detected for definition $id ($NAME)." >&2
               exit 1
             fi
           done
-        displayName: Audit credentialed PR definitions deny forks
+
+          for id in $SCHEDULED_ONLY_IDS; do
+            JSON="$(curl -fsS \
+              -H "Authorization: Bearer $SYSTEM_ACCESSTOKEN" \
+              "$BASE/$id?api-version=7.1")"
+            if ! printf '%s' "$JSON" | jq -e '
+              [.triggers[]?
+                | select(
+                    .triggerType == "continuousIntegration"
+                    or .triggerType == "pullRequest"
+                  )]
+              | length == 0' >/dev/null; then
+              NAME="$(printf '%s' "$JSON" | jq -r '.name // "unknown"')"
+              echo "Scheduled-only trigger policy drift detected for definition $id ($NAME)." >&2
+              exit 1
+            fi
+          done
+        displayName: Audit AgentPlayground trigger policy
         env:
           SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)
 

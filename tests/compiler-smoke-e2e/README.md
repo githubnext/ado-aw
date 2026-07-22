@@ -70,10 +70,10 @@ pipelineTriggerSettings.buildsEnabledForForks = false
 The YAML also rejects `System.PullRequest.IsFork` as defense in depth, but that
 check is not the security boundary because a PR can modify its YAML. The live
 definition settings must be audited after registration and periodically from a
-trusted `main` run. Existing definition IDs are held in
-[`credentialed-pr-definitions.json`](credentialed-pr-definitions.json); the
-orchestrator always audits its own `System.DefinitionId` in addition to that
-manifest.
+trusted `main` run. Intentional PR definitions and scheduled/manual-only
+definitions are held in [`trigger-policy.json`](trigger-policy.json); the
+orchestrator always audits its own `System.DefinitionId` as PR-only in addition
+to that manifest.
 
 ## Fixed child definitions
 
