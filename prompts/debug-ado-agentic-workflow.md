@@ -279,7 +279,7 @@ network:
       allowed:
         - missing_tool_name   # ← add the tool here
   ```
-- **SafeOutputs HTTP server not responding**: The `ado-aw mcp-http` process crashed or didn't start. Check for port conflicts on 8100.
+- **SafeOutputs MCP not reachable**: In compiled pipelines SafeOutputs runs as a stdio MCP server managed by MCPG (not an HTTP server). Check the MCPG container logs for connection errors and confirm the `ado-aw mcp` entrypoint is resolving correctly in the MCPG sidecar.
 - **Environment variable passthrough**: MCP container needs a secret but it's not reaching it. Verify `env:` mapping:
   ```yaml
   env:
@@ -380,7 +380,7 @@ If genuinely a false positive, adjust the agent's instructions to produce output
 - **Agent didn't call any safe-output tools**: Check agent instructions — does the prompt clearly tell the agent which safe-output tool to use and when?
 - **Agent used `noop`**: This is expected when no action is needed. Check if the agent's `noop` context explains why.
 - **Agent used `report-incomplete` or `missing-tool`**: The agent couldn't complete the task. Check the diagnostic output for what was missing.
-- **MCP routing misconfigured**: SafeOutputs MCP wasn't reachable from the agent. Check MCPG configuration and the `mcp-http` process logs.
+- **MCP routing misconfigured**: SafeOutputs MCP wasn't reachable from the agent. Check MCPG configuration and the MCPG container logs — SafeOutputs runs as a stdio server in the MCPG sidecar, not an HTTP server.
 
 ---
 
