@@ -342,10 +342,11 @@ index to jump to the right page.
   issues from dogfood pipelines). NOT a regular safe-output.
 - [`docs/supply-chain.md`](docs/supply-chain.md) — optional `supply-chain:`
   front-matter section that mirrors the compiler, AWF binary, ado-script
-  bundle, and AWF/MCPG images from an internal Azure DevOps Artifacts feed
-  and/or container registry (NuGet `DownloadPackage@1` + ACR `az acr login`),
-  with asymmetric auth (feed defaults to `$(System.AccessToken)`; registry
-  requires a service connection).
+  bundle, and AWF/MCPG images from an internal Azure DevOps Artifacts feed,
+  an exact provenance-checked pipeline artifact, and/or a container registry.
+  Feed and pipeline artifact are mutually exclusive; registry is independent.
+  Feed defaults to `$(System.AccessToken)`, while registry requires a service
+  connection and the pipeline artifact uses the build identity.
 
 ### Compiler internals & operations
 
@@ -442,8 +443,8 @@ Following the gh-aw security model:
    `src/compile/agentic_pipeline.rs::run_agent_step`). AWF runs rootlessly in
    strict topology mode; the Agent reaches trusted MCPG through
    `--topology-attach awmg-mcpg`, not through host access. All other ADO steps —
-   binary/bundle downloads, `docker pull`, ACR/NuGet auth (including the
-   `supply-chain:` mirror fetches) — run *outside* the sandbox with the build
+   binary/bundle downloads, `docker pull`, ACR/NuGet auth (including feed and
+   pipeline-artifact `supply-chain:` fetches) — run *outside* the sandbox with the build
    agent pool's normal network, so they do **not** need entries in the AWF
    allowlist. Air-gapping the build agent itself from GitHub/GHCR is the agent
    pool's network policy, not AWF.
@@ -495,6 +496,17 @@ When adding a new bash step, run `cargo test --test bash_lint_tests` and fix
 anything it flags. If a finding is genuinely intentional, add a
 `# shellcheck disable=SCxxxx` comment immediately above the offending line in
 the bash body — shellcheck honours the directive and it's inert at runtime.
+
+### Release-owned smoke lock files
+
+`tests/safe-outputs/*.lock.yml` are the latest-release customer contract. Do
+not regenerate them with `cargo run -- compile` from an unreleased checkout:
+their runtime integrity step downloads the released compiler, so development
+output can drift even while Cargo still reports the same semver. Compiler PRs
+and nightly `main` are exercised by `tests/compiler-smoke-e2e/`, which
+recompiles all five workflows in a temporary worktree and stages them on an
+ephemeral `ado-aw-mirror` ref. The release workflow updates the checked-in
+locks only after matching release assets exist.
 
 ## Common Tasks
 

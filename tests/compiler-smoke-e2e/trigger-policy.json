@@ -1,0 +1,15 @@
+{
+  "schema": "ado-aw/agentplayground-trigger-policy/1",
+  "pr_definition_ids": [
+    2544,
+    2550
+  ],
+  "scheduled_only_definition_ids": [
+    2545,
+    2546,
+    2547,
+    2548,
+    2549,
+    2551
+  ]
+}

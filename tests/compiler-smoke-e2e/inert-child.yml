@@ -1,0 +1,15 @@
+# Seed content copied to each candidate child definition's YAML path on
+# refs/heads/ado-aw-smoke-candidate-base. The orchestrator always queues an
+# explicit per-run ref; a run that reaches this file is a setup error.
+
+trigger: none
+pr: none
+
+pool:
+  name: AZS-1ES-L-Playground-ubuntu-22.04
+
+steps:
+  - bash: |
+      echo "Candidate compiler smoke must be queued with an explicit generated ref." >&2
+      exit 1
+    displayName: Reject inert candidate-smoke base

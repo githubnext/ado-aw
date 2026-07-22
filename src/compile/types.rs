@@ -129,7 +129,10 @@ impl PoolConfig {
 impl SanitizeConfigTrait for PoolConfig {
     fn sanitize_config_fields(&mut self) {
         self.name = self.name.as_deref().map(crate::sanitize::sanitize_config);
-        self.vm_image = self.vm_image.as_deref().map(crate::sanitize::sanitize_config);
+        self.vm_image = self
+            .vm_image
+            .as_deref()
+            .map(crate::sanitize::sanitize_config);
         self.os = self.os.as_deref().map(crate::sanitize::sanitize_config);
         self.demands = self
             .demands
@@ -1427,7 +1430,11 @@ impl FrontMatter {
             check("safe-outputs.require-approval", v)?;
         }
         for tool in self.safe_output_tool_names() {
-            if let Some(v) = self.safe_outputs.get(tool).and_then(|c| c.get("require-approval")) {
+            if let Some(v) = self
+                .safe_outputs
+                .get(tool)
+                .and_then(|c| c.get("require-approval"))
+            {
                 check(&format!("safe-outputs.{tool}.require-approval"), v)?;
             }
         }
@@ -1634,9 +1641,10 @@ impl SanitizeConfigTrait for AdoAwDebugConfig {
 ///
 /// Lives under the optional `supply-chain:` top-level front-matter key. When
 /// present, the compiler mirrors the artifacts it normally fetches from
-/// GitHub Releases / GHCR from an internal Azure DevOps Artifacts feed and/or
-/// an internal container registry instead. `feed` and `registry` are
-/// independent — a user may set either, both, or neither.
+/// GitHub Releases / GHCR from an internal Azure DevOps Artifacts feed, a
+/// pinned pipeline artifact, and/or an internal container registry instead.
+/// `feed` and `pipeline-artifact` are mutually exclusive binary sources;
+/// `registry` is independent.
 ///
 /// See `docs/supply-chain.md`.
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -1647,12 +1655,16 @@ pub struct SupplyChainConfig {
     /// fetched from GitHub Releases as today.
     #[serde(default)]
     pub feed: Option<FeedConfig>,
+    /// A pinned Azure DevOps pipeline artifact containing all three binary
+    /// payloads plus checksums and provenance.
+    #[serde(default, rename = "pipeline-artifact")]
+    pub pipeline_artifact: Option<PipelineArtifactConfig>,
     /// Internal container registry (ACR login server) for the AWF and MCPG
     /// images. When omitted images are pulled from GHCR as today.
     #[serde(default)]
     pub registry: Option<RegistryConfig>,
-    /// Shared fallback service connection used by whichever target does not
-    /// declare its own `service-connection`.
+    /// Shared fallback service connection for feed and registry targets. It
+    /// never applies to `pipeline-artifact`.
     #[serde(default, rename = "service-connection")]
     pub service_connection: Option<crate::secure::ServiceConnection>,
 }
@@ -1679,6 +1691,23 @@ pub struct RegistryConfig {
     pub name: crate::secure::RegistryRef,
     /// Optional per-target service connection (overrides the top-level one).
     pub service_connection: Option<crate::secure::ServiceConnection>,
+}
+
+/// A pinned Azure DevOps pipeline artifact containing the compiler, AWF, and
+/// ado-script payloads.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct PipelineArtifactConfig {
+    /// Azure DevOps project name or GUID containing the producer pipeline.
+    pub project: crate::secure::AdoProject,
+    /// Producer pipeline definition ID.
+    #[serde(rename = "definition-id")]
+    pub definition_id: u64,
+    /// Exact producer build/run ID.
+    #[serde(rename = "run-id")]
+    pub run_id: u64,
+    /// Pipeline artifact name.
+    pub artifact: crate::secure::ArtifactName,
 }
 
 impl<'de> Deserialize<'de> for FeedConfig {
@@ -1747,30 +1776,47 @@ impl SupplyChainConfig {
     /// Effective service connection for the feed (binary) mirror.
     ///
     /// Resolution: the feed's own `service-connection` → the top-level
-    /// `service-connection`. `None` means "authenticate with
-    /// `$(System.AccessToken)`" (valid for same-org feeds).
+    /// `service-connection`. The top-level fallback is considered only when
+    /// `feed` is configured; without a feed this returns `None`. When a feed
+    /// is present, `None` means "authenticate with `$(System.AccessToken)`"
+    /// (valid for same-org feeds).
     pub fn feed_connection(&self) -> Option<&str> {
-        self.feed
-            .as_ref()
-            .and_then(|f| f.service_connection.as_deref())
+        let feed = self.feed.as_ref()?;
+        feed.service_connection
+            .as_deref()
             .or(self.service_connection.as_deref())
     }
 
     /// Effective service connection for the registry (image) mirror.
     ///
     /// Resolution: the registry's own `service-connection` → the top-level
-    /// `service-connection`. `None` is invalid when `registry` is set (ACR has
-    /// no `System.AccessToken` path) — see [`SupplyChainConfig::validate`].
+    /// `service-connection`. The top-level fallback is considered only when
+    /// `registry` is configured; without a registry this returns `None`.
+    /// `None` is invalid when `registry` is set (ACR has no
+    /// `System.AccessToken` path) — see [`SupplyChainConfig::validate`].
     pub fn registry_connection(&self) -> Option<&str> {
-        self.registry
-            .as_ref()
-            .and_then(|r| r.service_connection.as_deref())
+        let registry = self.registry.as_ref()?;
+        registry
+            .service_connection
+            .as_deref()
             .or(self.service_connection.as_deref())
     }
 
-    /// Validate cross-field rules. Errors when `registry` is configured but no
-    /// service connection resolves for it.
+    /// Validate cross-field rules and positive producer IDs.
     pub fn validate(&self) -> anyhow::Result<()> {
+        if self.feed.is_some() && self.pipeline_artifact.is_some() {
+            anyhow::bail!(
+                "supply-chain.feed and supply-chain.pipeline-artifact are mutually exclusive"
+            );
+        }
+        if let Some(artifact) = &self.pipeline_artifact {
+            if artifact.definition_id == 0 {
+                anyhow::bail!("supply-chain.pipeline-artifact.definition-id must be positive");
+            }
+            if artifact.run_id == 0 {
+                anyhow::bail!("supply-chain.pipeline-artifact.run-id must be positive");
+            }
+        }
         if self.registry.is_some() && self.registry_connection().is_none() {
             anyhow::bail!(
                 "supply-chain.registry requires a service connection: set \
@@ -1785,9 +1831,8 @@ impl SupplyChainConfig {
 
 impl SanitizeConfigTrait for SupplyChainConfig {
     fn sanitize_config_fields(&mut self) {
-        // All fields are validated newtypes (FeedRef / HostName /
-        // ServiceConnection) constrained at deserialization time; there is
-        // nothing further to sanitize.
+        // String fields are validated newtypes constrained at deserialization
+        // time; numeric fields are checked by validate().
     }
 }
 
@@ -2815,6 +2860,65 @@ mod tests {
     }
 
     #[test]
+    fn test_supply_chain_pipeline_artifact_parses_and_validates() {
+        let sc = parse_supply_chain(
+            "supply-chain:\n  pipeline-artifact:\n    project: AgentPlayground\n    definition-id: 2560\n    run-id: 630001\n    artifact: ado-aw-candidate\n  service-connection: must-not-apply",
+        );
+        let artifact = sc.pipeline_artifact.as_ref().unwrap();
+        assert_eq!(artifact.project.as_str(), "AgentPlayground");
+        assert_eq!(artifact.definition_id, 2560);
+        assert_eq!(artifact.run_id, 630001);
+        assert_eq!(artifact.artifact.as_str(), "ado-aw-candidate");
+        assert!(sc.validate().is_ok());
+        assert_eq!(
+            sc.feed_connection(),
+            None,
+            "top-level service connections do not apply to pipeline artifacts"
+        );
+        assert_eq!(
+            sc.registry_connection(),
+            None,
+            "top-level service connections do not create a registry target"
+        );
+    }
+
+    #[test]
+    fn test_supply_chain_rejects_feed_pipeline_artifact_conflict() {
+        let sc = parse_supply_chain(
+            "supply-chain:\n  feed: my-feed\n  pipeline-artifact:\n    project: AgentPlayground\n    definition-id: 2560\n    run-id: 630001\n    artifact: ado-aw-candidate",
+        );
+        assert!(sc.validate().is_err());
+    }
+
+    #[test]
+    fn test_supply_chain_rejects_zero_pipeline_artifact_ids() {
+        for field in ["definition-id", "run-id"] {
+            let yaml = format!(
+                "supply-chain:\n  pipeline-artifact:\n    project: AgentPlayground\n    definition-id: {}\n    run-id: {}\n    artifact: ado-aw-candidate",
+                if field == "definition-id" { 0 } else { 2560 },
+                if field == "run-id" { 0 } else { 630001 }
+            );
+            let sc = parse_supply_chain(&yaml);
+            assert!(sc.validate().is_err(), "{field}=0 must be rejected");
+        }
+    }
+
+    #[test]
+    fn test_supply_chain_rejects_invalid_pipeline_artifact_values() {
+        for yaml in [
+            "supply-chain:\n  pipeline-artifact:\n    project: bad/project\n    definition-id: 2560\n    run-id: 630001\n    artifact: ado-aw-candidate",
+            "supply-chain:\n  pipeline-artifact:\n    project: AgentPlayground\n    definition-id: -1\n    run-id: 630001\n    artifact: ado-aw-candidate",
+            "supply-chain:\n  pipeline-artifact:\n    project: AgentPlayground\n    definition-id: 2560\n    run-id: 630001\n    artifact: bad/artifact",
+            "supply-chain:\n  pipeline-artifact:\n    project: AgentPlayground\n    definition-id: 2560\n    run-id: 630001\n    artifact: ado-aw-candidate\n    latest: true",
+        ] {
+            let v: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+            let result: Result<SupplyChainConfig, _> =
+                serde_yaml::from_value(v["supply-chain"].clone());
+            assert!(result.is_err(), "invalid config must be rejected:\n{yaml}");
+        }
+    }
+
+    #[test]
     fn test_supply_chain_rejects_unknown_fields() {
         let v: serde_yaml::Value =
             serde_yaml::from_str("supply-chain:\n  feed: my-feed\n  bogus: x").unwrap();
@@ -3062,9 +3166,13 @@ github-app-token:
             .unwrap()
             .clone();
         assert_eq!(gat.app_id, "1234567");
-        assert_eq!(gat.api_url.as_deref(), Some("https://ghe.example.com/api/v3"));
+        assert_eq!(
+            gat.api_url.as_deref(),
+            Some("https://ghe.example.com/api/v3")
+        );
         assert!(gat.skip_token_revocation);
-        gat.validate().expect("numeric app-id + https api-url is valid");
+        gat.validate()
+            .expect("numeric app-id + https api-url is valid");
     }
 
     #[test]
@@ -3109,7 +3217,11 @@ github-app-token:
         let ec = EngineConfig::default();
         assert!(ec.github_app_token().is_none());
         let opts: EngineOptions = serde_yaml::from_str("id: copilot").unwrap();
-        assert!(EngineConfig::Full(Box::new(opts)).github_app_token().is_none());
+        assert!(
+            EngineConfig::Full(Box::new(opts))
+                .github_app_token()
+                .is_none()
+        );
     }
 
     #[test]
@@ -3121,7 +3233,10 @@ github-app-token:
   owner: octo-org
 "#;
         let opts: EngineOptions = serde_yaml::from_str(yaml).unwrap();
-        let gat = EngineConfig::Full(Box::new(opts)).github_app_token().unwrap().clone();
+        let gat = EngineConfig::Full(Box::new(opts))
+            .github_app_token()
+            .unwrap()
+            .clone();
         assert!(gat.repositories.is_empty());
         gat.validate().unwrap();
     }
@@ -3280,8 +3395,7 @@ github-app-token:
         // accidentally introducing a required field or a non-None serde default.
         let yaml = "permissions: {}";
         let fm: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
-        let pc: PermissionsConfig =
-            serde_yaml::from_value(fm["permissions"].clone()).unwrap();
+        let pc: PermissionsConfig = serde_yaml::from_value(fm["permissions"].clone()).unwrap();
         assert!(pc.read.is_none());
         assert!(pc.write.is_none());
     }
@@ -4244,8 +4358,14 @@ Body
         assert_eq!(report_flag, Some(false));
         // noop config with flat fields
         let noop = fm.safe_outputs.get("noop").unwrap();
-        assert_eq!(noop.get("title-prefix").and_then(|v| v.as_str()), Some("[ado-aw] Agent noop"));
-        assert_eq!(noop.get("area-path").and_then(|v| v.as_str()), Some("MyProject\\MyTeam"));
+        assert_eq!(
+            noop.get("title-prefix").and_then(|v| v.as_str()),
+            Some("[ado-aw] Agent noop")
+        );
+        assert_eq!(
+            noop.get("area-path").and_then(|v| v.as_str()),
+            Some("MyProject\\MyTeam")
+        );
     }
 
     #[test]
@@ -4298,7 +4418,9 @@ Body
         let (fm, _) = super::super::common::parse_markdown(implicit).unwrap();
         let default_branch = crate::safe_outputs::CreatePrConfig::default().target_branch;
         assert_eq!(
-            fm.create_pr_config().unwrap().resolve_target_branch("self", &no_refs),
+            fm.create_pr_config()
+                .unwrap()
+                .resolve_target_branch("self", &no_refs),
             default_branch
         );
         // Guard the shared default so a future rename can't silently make the
@@ -4374,7 +4496,10 @@ safe-outputs:
 Body
 "#;
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
-        let noop = fm.safe_outputs.get("noop").expect("noop key must be present");
+        let noop = fm
+            .safe_outputs
+            .get("noop")
+            .expect("noop key must be present");
         assert!(
             noop.is_object(),
             "noop: {{}} must parse as an object, not bool or null; got: {:?}",

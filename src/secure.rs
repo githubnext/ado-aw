@@ -32,6 +32,7 @@
 //! - [`Identifier`] — an engine agent/model identifier.
 //! - [`HostName`] — a DNS-style hostname.
 //! - [`RegistryRef`] — a container-registry host or base path.
+//! - [`AdoProject`] — an Azure DevOps project name or GUID.
 //! - [`Version`] — a version string (`1.2.3`, `latest`).
 //!
 //! New safe-output tools that accept paths or identifiers should type those
@@ -325,6 +326,47 @@ validated_string! {
 }
 
 validated_string! {
+    /// An Azure DevOps project name or GUID.
+    AdoProject, "project", |value: &str, label: &str| {
+        let bytes = value.as_bytes();
+        let is_guid = bytes.len() == 36
+            && bytes.iter().enumerate().all(|(index, byte)| {
+                if matches!(index, 8 | 13 | 18 | 23) {
+                    *byte == b'-'
+                } else {
+                    byte.is_ascii_hexdigit()
+                }
+            });
+        let invalid_name_char = |c: char| {
+            c.is_control()
+                || matches!(
+                    c,
+                    ',' | '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+                        | ';' | '#' | '$' | '{' | '}' | '+' | '=' | '[' | ']'
+                )
+        };
+        let char_count = value.chars().count();
+        let is_name = char_count > 0
+            && char_count <= 64
+            && value.trim() == value
+            && !value.starts_with('_')
+            && !value.starts_with('.')
+            && !value.ends_with('.')
+            && !value.chars().any(invalid_name_char);
+
+        if is_guid || is_name {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "{label} '{value}' must be an Azure DevOps project name \
+                 (1-64 characters, no reserved punctuation, leading '_' or \
+                 leading/trailing '.') or a canonical GUID"
+            )
+        }
+    }
+}
+
+validated_string! {
     /// An Azure resource (audience) URL passed to
     /// `az account get-access-token --resource`. Validated to be a shell-safe,
     /// URI-shaped value so it can be interpolated into the generated provider
@@ -414,6 +456,16 @@ mod tests {
         assert!(ArtifactName::parse(".hidden").is_err());
         assert!(ArtifactName::parse("has space").is_err());
         assert!(ArtifactName::parse("a".repeat(101).as_str()).is_err());
+    }
+
+    #[test]
+    fn ado_project_name_or_guid_rules() {
+        assert!(AdoProject::parse("Agent Playground").is_ok());
+        assert!(AdoProject::parse("12345678-1234-1234-1234-1234567890ab").is_ok());
+        assert!(AdoProject::parse("_reserved").is_err());
+        assert!(AdoProject::parse("bad/project").is_err());
+        assert!(AdoProject::parse("bad$(macro)").is_err());
+        assert!(AdoProject::parse("x".repeat(65)).is_err());
     }
 
     #[test]

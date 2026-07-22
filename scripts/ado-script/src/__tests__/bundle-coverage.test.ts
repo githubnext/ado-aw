@@ -34,8 +34,21 @@ const packageJsonPath = join(here, "..", "..", "package.json");
  * `trigger-e2e` is the analogous deterministic trigger-condition (gate /
  * synth-PR) E2E harness. Same treatment: its own `build:trigger-e2e` emits to
  * `test-bin/`, so it is never packaged in `ado-script.zip`.
+ *
+ * `compiler-smoke-e2e` is the deterministic compiler-candidate smoke E2E
+ * harness: it stages the `supply-chain.pipeline-artifact` candidate compiler
+ * across the real `tests/safe-outputs/*.md` fixtures and drives the fixed
+ * "candidate lane" pipeline definitions. Same treatment: its own
+ * `build:compiler-smoke-e2e` emits to `test-bin/`, so it is never packaged in
+ * `ado-script.zip`.
  */
-const NON_BUNDLE_DIRS = new Set(["shared", "__tests__", "executor-e2e", "trigger-e2e"]);
+const NON_BUNDLE_DIRS = new Set([
+  "shared",
+  "__tests__",
+  "executor-e2e",
+  "trigger-e2e",
+  "compiler-smoke-e2e",
+]);
 
 function listBundleDirs(): string[] {
   return readdirSync(srcDir)

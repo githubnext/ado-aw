@@ -20,7 +20,10 @@
 use anyhow::Result;
 
 use super::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
-use crate::compile::agentic_pipeline::{download_package_step, nuget_authenticate_step};
+use crate::compile::agentic_pipeline::{
+    download_candidate_artifact_step, download_package_step, nuget_authenticate_step,
+    stage_candidate_artifact_payload_bash,
+};
 use crate::compile::filter_ir::{
     GateContext, Severity, build_gate_step_typed, lower_pipeline_filters, lower_pr_filters,
     validate_pipeline_filters, validate_pr_filters,
@@ -86,8 +89,7 @@ pub(crate) const EXEC_CONTEXT_PR_SYNTH_PATH: &str =
 /// Path to the safe-outputs approval-summary bundle inside the unpacked
 /// `ado-script.zip`. Runs at the end of the Agent job to render the proposed
 /// safe outputs to a sanitized markdown summary tab.
-pub(crate) const APPROVAL_SUMMARY_PATH: &str =
-    "/tmp/ado-aw-scripts/ado-script/approval-summary.js";
+pub(crate) const APPROVAL_SUMMARY_PATH: &str = "/tmp/ado-aw-scripts/ado-script/approval-summary.js";
 /// Path to the conclusion bundle inside the unpacked `ado-script.zip`. Runs in
 /// the always-on Conclusion job (see [`crate::compile::agentic_pipeline`]) to
 /// file pipeline-failure work items and diagnostic signals. Referenced both by
@@ -98,15 +100,13 @@ pub(crate) const CONCLUSION_PATH: &str = "/tmp/ado-aw-scripts/ado-script/conclus
 /// Runs immediately before the Copilot invocation in the Agent and Detection
 /// jobs (issue #1316) to mint a GitHub App installation token and expose it as
 /// a masked same-job `GITHUB_APP_TOKEN` variable.
-pub(crate) const GITHUB_APP_TOKEN_PATH: &str =
-    "/tmp/ado-aw-scripts/ado-script/github-app-token.js";
+pub(crate) const GITHUB_APP_TOKEN_PATH: &str = "/tmp/ado-aw-scripts/ado-script/github-app-token.js";
 /// Path to the prepare-pr-base bundle inside the unpacked `ado-script.zip`.
 /// Runs in the Agent job before the Copilot invocation (issue #1413) when
 /// `create-pull-request` is configured, to fetch/deepen the target branch so
 /// the containerized SafeOutputs MCP server can compute a diff base on
 /// shallow-default agent pools.
-pub(crate) const PREPARE_PR_BASE_PATH: &str =
-    "/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js";
+pub(crate) const PREPARE_PR_BASE_PATH: &str = "/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js";
 const RELEASE_BASE_URL: &str = "https://github.com/githubnext/ado-aw/releases/download";
 
 /// Single always-on extension that owns all `ado-script` bundle wiring.
@@ -377,12 +377,9 @@ impl AdoScriptExtension {
     }
 }
 
-/// Returns the two-step bundle as typed `Step`s: a
-/// `Step::Task(UseNode@1)` plus a `Step::Bash` for the curl, sha256,
-/// and unzip pipeline. When an internal feed is configured the bundle is
-/// pulled from the Azure DevOps Artifacts feed (NuGet) instead of GitHub
-/// Releases; the `.nupkg` is unzipped and `ado-script.zip` relocated, then
-/// verified and unpacked exactly as in the GitHub path.
+/// Returns typed install, acquisition, verification, and unpacking steps.
+/// Internal feed and pinned pipeline artifact sources replace GitHub Releases
+/// while preserving the final layout.
 ///
 /// Bundles are unpacked into `/tmp/ado-aw-scripts/` so the consumer
 /// references `/tmp/ado-aw-scripts/ado-script/<bundle>.js`. Shared by the
@@ -399,6 +396,32 @@ pub(crate) fn install_and_download_steps_typed(
         t.condition = Some(Condition::Succeeded);
         t
     };
+
+    if let Some(artifact) = supply_chain.and_then(|sc| sc.pipeline_artifact.as_ref()) {
+        let staging = "/tmp/ado-aw-scripts/_artifact";
+        let tail = "unzip -o /tmp/ado-aw-scripts/ado-script.zip -d /tmp/ado-aw-scripts/\n";
+        let script = stage_candidate_artifact_payload_bash(
+            artifact,
+            staging,
+            "/tmp/ado-aw-scripts",
+            "ado-script.zip",
+            tail,
+        );
+        let download = {
+            let mut t = download_candidate_artifact_step(
+                artifact,
+                "Download candidate artifact for ado-aw scripts",
+                staging,
+            );
+            t.timeout = Some(std::time::Duration::from_secs(300));
+            t.condition = Some(Condition::Succeeded);
+            t
+        };
+        let mut stage = BashStep::new("Stage candidate ado-aw scripts", script)
+            .with_condition(Condition::Succeeded);
+        stage.timeout = Some(std::time::Duration::from_secs(300));
+        return vec![Step::Task(install), Step::Task(download), Step::Bash(stage)];
+    }
 
     if let Some(feed) = supply_chain.and_then(|sc| sc.feed.as_ref()) {
         let connection = supply_chain.and_then(|sc| sc.feed_connection());
@@ -616,10 +639,7 @@ pub struct PreparePrBaseRepo {
 /// Emit one of the two create-pull-request preparation modes. The Agent job
 /// uses `PatchBase` to recover and verify the merge-base; SafeOutputs uses
 /// `TargetWorktree` to fetch only the target tip required by `git worktree add`.
-pub fn prepare_pr_base_step_typed(
-    mode: PreparePrBaseMode,
-    repos: &[PreparePrBaseRepo],
-) -> Step {
+pub fn prepare_pr_base_step_typed(mode: PreparePrBaseMode, repos: &[PreparePrBaseRepo]) -> Step {
     let repo_flags: String = repos
         .iter()
         .map(|repo| {
@@ -874,7 +894,8 @@ impl CompilerExtension for AdoScriptExtension {
             || self.github_app_token_active
             || self.prepare_pr_base_active
         {
-            agent_prepare_steps.extend(install_and_download_steps_typed(self.supply_chain.as_ref()));
+            agent_prepare_steps
+                .extend(install_and_download_steps_typed(self.supply_chain.as_ref()));
             if import_active {
                 agent_prepare_steps.push(resolver_step_typed());
             }
@@ -1283,7 +1304,10 @@ mod tests {
         let Step::Bash(step) = github_app_token_step_typed(&cfg).unwrap() else {
             panic!("expected a bash step");
         };
-        assert_eq!(step.display_name, "Mint GitHub App token (Copilot engine auth)");
+        assert_eq!(
+            step.display_name,
+            "Mint GitHub App token (Copilot engine auth)"
+        );
         assert!(
             step.script
                 .contains("node '/tmp/ado-aw-scripts/ado-script/github-app-token.js'"),
@@ -1303,7 +1327,8 @@ mod tests {
             step.script
         );
         assert!(
-            step.script.contains("--repositories 'octo-repo other-repo'"),
+            step.script
+                .contains("--repositories 'octo-repo other-repo'"),
             "repositories must be a single-quoted argv flag:\n{}",
             step.script
         );
@@ -1466,7 +1491,8 @@ mod tests {
         ));
         // api-url is an argv flag (non-secret), not an env var.
         assert!(
-            step.script.contains("revoke --api-url 'https://ghe.example.com/api/v3'"),
+            step.script
+                .contains("revoke --api-url 'https://ghe.example.com/api/v3'"),
             "revoke must pass api-url as an argv flag:\n{}",
             step.script
         );
@@ -1511,8 +1537,7 @@ mod tests {
             source_ref: None,
             target_branch: "main".to_string(),
         }];
-        let Step::Bash(step) =
-            prepare_pr_base_step_typed(PreparePrBaseMode::PatchBase, &repos)
+        let Step::Bash(step) = prepare_pr_base_step_typed(PreparePrBaseMode::PatchBase, &repos)
         else {
             panic!("expected a bash step");
         };
@@ -1548,8 +1573,7 @@ mod tests {
             source_ref: Some("refs/heads/feature".to_string()),
             target_branch: "release/2.x".to_string(),
         }];
-        let Step::Bash(step) =
-            prepare_pr_base_step_typed(PreparePrBaseMode::PatchBase, &repos)
+        let Step::Bash(step) = prepare_pr_base_step_typed(PreparePrBaseMode::PatchBase, &repos)
         else {
             panic!("expected a bash step");
         };
@@ -1582,8 +1606,7 @@ mod tests {
                 target_branch: "gh-pages".to_string(),
             },
         ];
-        let Step::Bash(step) =
-            prepare_pr_base_step_typed(PreparePrBaseMode::PatchBase, &repos)
+        let Step::Bash(step) = prepare_pr_base_step_typed(PreparePrBaseMode::PatchBase, &repos)
         else {
             panic!("expected a bash step");
         };
@@ -1594,9 +1617,8 @@ mod tests {
             step.script
         );
         assert!(
-            step.script.contains(
-                "--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"
-            )
+            step.script
+                .contains("--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'")
         );
         assert!(
             step.script.contains(

@@ -729,7 +729,8 @@ index to jump to the right page.
 - [`docs/safe-output-permissions.md`](docs/safe-output-permissions.md) —
   diagnosis and fix reference for Stage 3 permission failures (401/403).
 - [`docs/supply-chain.md`](docs/supply-chain.md) — optional `supply-chain:`
-  front-matter section for internal feed/registry mirrors.
+  front-matter section for internal feed/registry mirrors and exact
+  provenance-checked pipeline artifacts.
 - [`docs/ado-aw-debug.md`](docs/ado-aw-debug.md) — debug-only `ado-aw-debug:`
   front-matter section (`skip-integrity`, `create-issue`).
 

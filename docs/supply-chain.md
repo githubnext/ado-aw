@@ -11,10 +11,10 @@ GitHub / GHCR at run time:
 | 4 | AWF + MCPG container images | `ghcr.io/github/...` |
 
 The optional `supply-chain:` front-matter section reroutes these fetches to an
-**internal Azure DevOps Artifacts feed** (for the binaries #1–#3) and/or an
-**internal container registry** (for the images #4). This is intended for
-supply-chain-hardened environments where the build agent pool cannot reach
-GitHub / GHCR.
+**internal Azure DevOps Artifacts feed** or one exact **Azure DevOps pipeline
+artifact** (for the binaries #1–#3), and/or an **internal container registry**
+(for the images #4). This is intended for supply-chain-hardened environments
+where the build agent pool cannot reach GitHub / GHCR.
 
 When `supply-chain:` is omitted, the generated pipeline is byte-for-byte
 identical to before — there is no behavioural change for existing agents.
@@ -26,6 +26,12 @@ supply-chain:
   feed:                          # mirrors binaries #1, #2, #3
     name: my-project/my-feed     # feed name or "project/feed"
     service-connection: feed-conn  # optional (see Authentication)
+  # Alternative to feed (the two are mutually exclusive):
+  # pipeline-artifact:
+  #   project: AgentPlayground
+  #   definition-id: 2560
+  #   run-id: 630001
+  #   artifact: ado-aw-candidate
   registry:                      # mirrors images #4
     name: myacr.azurecr.io/mirror  # registry host or base path
     service-connection: acr-conn   # required when registry is set
@@ -35,10 +41,12 @@ supply-chain:
 | Field | Type | Required | Purpose |
 |-------|------|----------|---------|
 | `feed` | scalar **or** `{ name, service-connection }` | optional | Enables the binary mirror (#1–#3). A bare string is shorthand for `{ name: <string> }`. |
-| `registry` | scalar **or** `{ name, service-connection }` | optional | Enables the image mirror (#4). |
-| `service-connection` | string | optional | Shared fallback connection used by whichever target does not declare its own. |
+| `pipeline-artifact` | `{ project, definition-id, run-id, artifact }` | optional | Uses one exact producer run as the complete binary source (#1–#3). Mutually exclusive with `feed`. |
+| `registry` | scalar **or** `{ name, service-connection }` | optional | Enables the image mirror (#4), independently of either binary source. |
+| `service-connection` | string | optional | Shared fallback connection for `feed` and `registry`; it does not apply to `pipeline-artifact`. |
 
-`feed` and `registry` are **independent** — set either, both, or neither.
+`feed` and `pipeline-artifact` are mutually exclusive. `registry` is
+independent and may accompany either binary source.
 
 ### Scalar shorthand
 
@@ -71,6 +79,28 @@ role and `NuGetAuthenticate@1` authenticates automatically via
 `$(System.AccessToken)`. Set a `service-connection` only for cross-org or
 external feeds.
 
+### Pipeline artifact (binaries)
+
+The pipeline-artifact source is immutable configuration: the generated
+`DownloadPipelineArtifact@2` tasks always use `source: specific`,
+`runVersion: specific`, the configured project, definition ID (`pipeline`),
+run ID (`runId`), and artifact name. The compiler never selects latest runs,
+tags, or triggering pipelines.
+
+`project` must be an Azure DevOps project name or canonical GUID;
+`definition-id` and `run-id` must be positive integers; and `artifact` follows
+Azure DevOps artifact-name rules. The current build identity must have
+permission to read the configured project, pipeline run, and artifact.
+The producer must be in the same Azure DevOps organization; cross-organization
+pipeline-artifact downloads are not supported by this source.
+`supply-chain.service-connection` is not used for this source, and no
+`NuGetAuthenticate@1` step is emitted.
+
+With an exact run ID, the artifact is consumable as soon as its publish task
+has completed even if later jobs keep the producer run active. Consumers
+queued before the named artifact exists fail; producers should confirm artifact
+visibility before queueing them.
+
 ### Registry (images)
 
 The image mirror authenticates with `az acr login` (`AzureCLI@2`) using the
@@ -96,7 +126,7 @@ used by `permissions:`), passed to `AzureCLI@2` as `azureSubscription`.
 > `registry.name` to the canonical `*.azurecr.io` login server so the derived
 > registry name is correct.
 
-## What the feed and registry must contain
+## What the binary source and registry must contain
 
 Versions stay **pinned by the generating compiler** — the internal mirror must
 host the exact pinned versions. A mirror that is a few days behind is fine: use
@@ -118,6 +148,47 @@ payload, so the package simply needs to carry the same files (and matching
 `checksums.txt`) that the GitHub release ships. **Checksum verification with
 `sha256sum -c checksums.txt` is preserved**, so the mirror must ship the
 matching `checksums.txt`.
+
+### Pipeline artifact
+
+The single configured artifact is a complete source and must contain exactly
+one file with each of these names (directory nesting is allowed):
+
+- `ado-aw-linux-x64`
+- `awf-linux-x64`
+- `ado-script.zip`
+- `checksums.txt`
+- `provenance.json`
+
+`checksums.txt` must have exactly one standard sha256sum entry for each payload,
+with the exact filename. Each consumer locates its payload plus the shared
+manifest and provenance document, verifies the exact checksum entry, then
+preserves the normal chmod/move/unzip/PATH behavior.
+
+`provenance.json` must be a JSON object using this Phase 1 contract:
+
+```json
+{
+  "schema": "ado-aw/candidate-artifact/1",
+  "producer_definition_id": 2560,
+  "producer_build_id": 630001,
+  "repository": "githubnext/ado-aw",
+  "source_ref": "refs/heads/main",
+  "source_version": "0123456789abcdef0123456789abcdef01234567",
+  "reason": "IndividualCI",
+  "compiler_version": "0.45.1",
+  "awf_version": "0.27.32"
+}
+```
+
+The required identity fields are exactly `schema`, `producer_definition_id`,
+and `producer_build_id`; both producer IDs are JSON numbers. Compilation embeds
+the configured IDs, and every consumer fails closed if the schema or either
+producer ID is missing, non-numeric, or mismatched. `repository`, `source_ref`,
+`source_version`, `reason`, `compiler_version`, and `awf_version` are optional
+diagnostic fields: when present, the generated step includes them in the
+validated, non-secret provenance output. Their absence does not invalidate an
+otherwise valid artifact.
 
 ### Registry images
 
@@ -175,6 +246,31 @@ supply-chain:
   feed: my-internal-feed
 ```
 
+All binaries from one exact candidate pipeline run:
+
+```yaml
+supply-chain:
+  pipeline-artifact:
+    project: AgentPlayground
+    definition-id: 2560
+    run-id: 630001
+    artifact: ado-aw-candidate
+```
+
+Candidate binaries plus mirrored images:
+
+```yaml
+supply-chain:
+  pipeline-artifact:
+    project: AgentPlayground
+    definition-id: 2560
+    run-id: 630001
+    artifact: ado-aw-candidate
+  registry:
+    name: myacr.azurecr.io
+    service-connection: acr-conn
+```
+
 Images only:
 
 ```yaml
@@ -186,9 +282,10 @@ supply-chain:
 
 ## Network isolation note
 
-The mirror fetches (`NuGetAuthenticate@1`, `DownloadPackage@1`, `docker pull`,
-`az acr login`) run as ordinary ADO steps on the build agent — **outside** the
-AWF network-isolation sandbox, which wraps only the copilot agent command.
+The mirror fetches (`NuGetAuthenticate@1`, `DownloadPackage@1`,
+`DownloadPipelineArtifact@2`, `docker pull`, `az acr login`) run as ordinary
+ADO steps on the build agent — **outside** the AWF network-isolation sandbox,
+which wraps only the copilot agent command.
 Consequently:
 
 - The feed/registry hosts are **not** added to the agent's AWF

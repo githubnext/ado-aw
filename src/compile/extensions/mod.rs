@@ -14,7 +14,7 @@
 //! 2. Implement [`CompilerExtension`] for it
 //! 3. Add a variant to the [`Extension`] enum and update [`collect_extensions`]
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -88,6 +88,8 @@ use crate::ado::AdoContext;
 use crate::engine::{self, Engine};
 use std::path::Path;
 
+const COMPILE_REMOTE_URL_ENV: &str = "ADO_AW_COMPILE_REMOTE_URL";
+
 /// Metadata resolved at compile time from the local environment.
 ///
 /// Built once via [`CompileContext::new`] and passed to all extension
@@ -99,8 +101,9 @@ pub struct CompileContext<'a> {
     pub agent_name: &'a str,
     /// The full front matter (for cross-cutting checks like bash access level).
     pub front_matter: &'a FrontMatter,
-    /// ADO context inferred from the git remote (org URL, project, repo name).
-    /// `None` if the compile directory has no ADO remote.
+    /// ADO context inferred from the git remote (org URL, project, repo name),
+    /// or from the compiler-owned `ADO_AW_COMPILE_REMOTE_URL` override.
+    /// `None` if neither source supplies an ADO remote.
     pub ado_context: Option<AdoContext>,
     /// Resolved engine based on the front matter `engine:` field.
     pub engine: Engine,
@@ -121,6 +124,9 @@ impl<'a> CompileContext<'a> {
     ///
     /// Resolves the engine implementation from front matter and infers ADO
     /// context from the git remote in the directory containing `input_path`.
+    /// Internal orchestration may set `ADO_AW_COMPILE_REMOTE_URL` when output
+    /// will execute from a different checkout remote; an invalid override is a
+    /// hard error rather than a silent fallback.
     /// Returns an error if the engine identifier is unsupported.
     pub async fn new(front_matter: &'a FrontMatter, input_path: &'a Path) -> Result<Self> {
         // `Path::parent()` is subtle: for a bare filename like `foo.md`
@@ -135,7 +141,16 @@ impl<'a> CompileContext<'a> {
             _ => Path::new("."),
         };
         let engine = engine::get_engine(front_matter.engine.engine_id())?;
-        let ado_context = Self::infer_ado_context(compile_dir).await;
+        let ado_context = match Self::ado_context_override()? {
+            Some(ctx) => {
+                log::info!(
+                    "Using ADO compile context override for repository '{}'",
+                    ctx.repo_name
+                );
+                Some(ctx)
+            }
+            None => Self::infer_ado_context(compile_dir).await,
+        };
         Ok(Self {
             agent_name: &front_matter.name,
             front_matter,
@@ -152,6 +167,32 @@ impl<'a> CompileContext<'a> {
             let org = ctx.org_url.trim_end_matches('/').rsplit('/').next()?;
             if org.is_empty() { None } else { Some(org) }
         })
+    }
+
+    fn ado_context_override() -> Result<Option<AdoContext>> {
+        let Some(value) = std::env::var_os(COMPILE_REMOTE_URL_ENV) else {
+            return Ok(None);
+        };
+        let value = value
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("{COMPILE_REMOTE_URL_ENV} must contain valid Unicode"))?;
+        Self::parse_ado_context_override(Some(&value))
+    }
+
+    fn parse_ado_context_override(value: Option<&str>) -> Result<Option<AdoContext>> {
+        let Some(value) = value else {
+            return Ok(None);
+        };
+        let value = value.trim();
+        anyhow::ensure!(
+            !value.is_empty(),
+            "{COMPILE_REMOTE_URL_ENV} must not be empty"
+        );
+        crate::ado::parse_ado_remote(value)
+            .with_context(|| {
+                format!("{COMPILE_REMOTE_URL_ENV} must be an Azure DevOps Git remote URL")
+            })
+            .map(Some)
     }
 
     async fn infer_ado_context(dir: &Path) -> Option<AdoContext> {
@@ -223,6 +264,42 @@ impl<'a> CompileContext<'a> {
             engine: crate::engine::Engine::Copilot,
             compile_dir: Some(compile_dir),
             input_path: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod compile_context_override_tests {
+    use super::CompileContext;
+
+    #[test]
+    fn absent_override_has_no_context() {
+        assert!(
+            CompileContext::parse_ado_context_override(None)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn ado_remote_override_resolves_exact_context() {
+        let ctx = CompileContext::parse_ado_context_override(Some(
+            "https://dev.azure.com/msazuresphere/AgentPlayground/_git/ado-aw-mirror",
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(ctx.org_url, "https://dev.azure.com/msazuresphere");
+        assert_eq!(ctx.project, "AgentPlayground");
+        assert_eq!(ctx.repo_name, "ado-aw-mirror");
+    }
+
+    #[test]
+    fn invalid_override_fails_closed() {
+        for value in ["", "https://github.com/githubnext/ado-aw"] {
+            assert!(
+                CompileContext::parse_ado_context_override(Some(value)).is_err(),
+                "override should be rejected: {value:?}"
+            );
         }
     }
 }

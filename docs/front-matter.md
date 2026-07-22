@@ -217,10 +217,15 @@ supply-chain:                  # optional internal supply-chain mirror (see docs
   feed:                          # mirror binaries (compiler, AWF, ado-script) from an ADO Artifacts feed
     name: my-project/my-feed     # feed name or project/feed; scalar `feed: my-feed` shorthand also works
     service-connection: feed-conn  # optional; omit for same-org feeds (uses $(System.AccessToken))
+  # pipeline-artifact:           # alternative binary source; mutually exclusive with feed
+  #   project: AgentPlayground   # validated ADO project name or GUID
+  #   definition-id: 2560        # positive producer pipeline definition ID
+  #   run-id: 630001             # positive, exact producer build ID
+  #   artifact: ado-aw-candidate # complete payload/checksum/provenance artifact
   registry:                      # mirror AWF/MCPG images from an internal ACR
     name: myacr.azurecr.io/mirror  # registry host or base path (artifact names kept under it)
     service-connection: acr-conn   # REQUIRED when registry is set (ACR has no System.AccessToken path)
-  service-connection: shared-conn  # optional shared fallback for whichever target omits its own
+  service-connection: shared-conn  # optional feed/registry fallback; never applies to pipeline-artifact
 # ado-aw-debug:                 # debug-only knobs; see docs/ado-aw-debug.md
 #   skip-integrity: false       # omit generated pipeline integrity verification
 #   create-issue: false         # dogfood-only GitHub issue filing for debug reports

@@ -4,8 +4,7 @@ use std::path::PathBuf;
 fn compiled_has_enabled_tool(compiled: &str, tool: &str) -> bool {
     let lines: Vec<&str> = compiled.lines().map(str::trim).collect();
     lines.windows(2).any(|pair| {
-        pair[0] == "\"--enabled-tools\","
-            && pair[1].trim_end_matches(',').trim_matches('"') == tool
+        pair[0] == "\"--enabled-tools\"," && pair[1].trim_end_matches(',').trim_matches('"') == tool
     })
 }
 
@@ -255,7 +254,10 @@ fn test_compiled_output_no_unreplaced_markers() {
             && compiled.contains("-p 127.0.0.1:8080:8080"),
         "MCPG must use the stable bridge-network topology"
     );
-    for line in compiled.lines().filter(|line| line.contains("--allow-domains")) {
+    for line in compiled
+        .lines()
+        .filter(|line| line.contains("--allow-domains"))
+    {
         assert!(
             !line.contains("host.docker.internal"),
             "the agent egress allowlist must not expose the host: {line}"
@@ -280,8 +282,9 @@ fn legacy_default_collection_remote_matches_modern_remote_lock_output() {
     let legacy = compile_lock_with_origin(
         "https://exampleorg.visualstudio.com/DefaultCollection/Example%20Project/_git/example-repo",
     );
-    let modern =
-        compile_lock_with_origin("https://dev.azure.com/exampleorg/Example%20Project/_git/example-repo");
+    let modern = compile_lock_with_origin(
+        "https://dev.azure.com/exampleorg/Example%20Project/_git/example-repo",
+    );
 
     assert_eq!(
         legacy, modern,
@@ -1761,8 +1764,7 @@ Call the noop tool exactly once.
     );
 
     let agent = extract_job_block(&compiled, "Agent").expect("Agent job should exist");
-    let detection =
-        extract_job_block(&compiled, "Detection").expect("Detection job should exist");
+    let detection = extract_job_block(&compiled, "Detection").expect("Detection job should exist");
 
     assert!(
         agent.contains(
@@ -4494,7 +4496,10 @@ fn test_standalone_pipeline_trigger_compiled_output_is_valid_yaml() {
         compiled.contains("trigger: none"),
         "pipeline-trigger output should disable CI trigger"
     );
-    assert!(compiled.contains("pr: none"), "pipeline-trigger output should disable PR trigger");
+    assert!(
+        compiled.contains("pr: none"),
+        "pipeline-trigger output should disable PR trigger"
+    );
 }
 
 // ─── --skip-integrity flag tests ─────────────────────────────────────────
@@ -5359,12 +5364,16 @@ fn test_byom_provider_env_compiles_and_merges() {
     // The compiler-owned in-job mint step runs before the Copilot invocation in
     // BOTH the Agent and Detection jobs, authenticated by the service connection.
     assert_eq!(
-        compiled.matches("displayName: Acquire provider bearer token").count(),
+        compiled
+            .matches("displayName: Acquire provider bearer token")
+            .count(),
         2,
         "provider.token must emit the AzureCLI@2 mint step in both the Agent and Detection jobs: {compiled}"
     );
     assert_eq!(
-        compiled.matches("azureSubscription: my-arm-connection").count(),
+        compiled
+            .matches("azureSubscription: my-arm-connection")
+            .count(),
         2,
         "mint step must authenticate via the configured service connection in both jobs: {compiled}"
     );
@@ -5412,14 +5421,18 @@ fn test_byom_provider_env_compiles_and_merges() {
     // from --env-all in both jobs, so it can never ride the passthrough into the
     // agent container even if ADO ever exposed it as a process env var.
     assert_eq!(
-        compiled.matches("--exclude-env AW_PROVIDER_BEARER_TOKEN").count(),
+        compiled
+            .matches("--exclude-env AW_PROVIDER_BEARER_TOKEN")
+            .count(),
         2,
         "the intermediate mint secret AW_PROVIDER_BEARER_TOKEN must be excluded in both jobs: {compiled}"
     );
     // A credential key NOT configured must NOT be excluded (BEARER_TOKEN is never
     // used by ado-aw — the sidecar only reads API_KEY).
     assert_eq!(
-        compiled.matches("--exclude-env COPILOT_PROVIDER_BEARER_TOKEN").count(),
+        compiled
+            .matches("--exclude-env COPILOT_PROVIDER_BEARER_TOKEN")
+            .count(),
         0,
         "COPILOT_PROVIDER_BEARER_TOKEN must never be referenced: {compiled}"
     );
@@ -5443,31 +5456,30 @@ fn test_byom_provider_env_compiles_and_merges() {
 #[test]
 fn test_byok_provider_api_key_compiles_without_mint_step() {
     // Reuse the token fixture but swap the `token:` block for a static `api-key`.
-    let compiled = compile_fixture_tree_with_flags(
-        "byom-foundry-agent.md",
-        &[],
-        &[],
-        |contents| {
-            // Line-based rewrite (robust to CRLF/LF): drop the `token:` block and
-            // insert a static `api-key:` in its place.
-            let newline = if contents.contains("\r\n") { "\r\n" } else { "\n" };
-            contents
-                .lines()
-                .filter(|l| {
-                    let t = l.trim();
-                    t != "token:" && t != "service-connection: my-arm-connection"
-                })
-                .map(|l| {
-                    if l.trim() == "type: azure" {
-                        format!("{l}{newline}    api-key: $(FOUNDRY_API_KEY)")
-                    } else {
-                        l.to_string()
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(newline)
-        },
-    );
+    let compiled = compile_fixture_tree_with_flags("byom-foundry-agent.md", &[], &[], |contents| {
+        // Line-based rewrite (robust to CRLF/LF): drop the `token:` block and
+        // insert a static `api-key:` in its place.
+        let newline = if contents.contains("\r\n") {
+            "\r\n"
+        } else {
+            "\n"
+        };
+        contents
+            .lines()
+            .filter(|l| {
+                let t = l.trim();
+                t != "token:" && t != "service-connection: my-arm-connection"
+            })
+            .map(|l| {
+                if l.trim() == "type: azure" {
+                    format!("{l}{newline}    api-key: $(FOUNDRY_API_KEY)")
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(newline)
+    });
     assert_valid_yaml(&compiled, "byom-foundry-agent.md (api-key)");
 
     // api-key maps to COPILOT_PROVIDER_API_KEY in both jobs (unquoted macro).
@@ -5492,7 +5504,9 @@ fn test_byok_provider_api_key_compiles_without_mint_step() {
         "the api-key path must rely on AWF's always-on api-proxy: {compiled}"
     );
     assert_eq!(
-        compiled.matches("--exclude-env COPILOT_PROVIDER_API_KEY").count(),
+        compiled
+            .matches("--exclude-env COPILOT_PROVIDER_API_KEY")
+            .count(),
         2,
         "the api-key credential must be excluded from --env-all in both jobs: {compiled}"
     );
@@ -7025,6 +7039,210 @@ fn job_block<'a>(compiled: &'a str, job: &str) -> &'a str {
     }
 }
 
+fn collect_pipeline_artifact_task_inputs(
+    value: &serde_yaml::Value,
+    inputs: &mut Vec<serde_yaml::Mapping>,
+) {
+    match value {
+        serde_yaml::Value::Mapping(map) => {
+            if map.get(yaml_key("task")).and_then(|v| v.as_str())
+                == Some("DownloadPipelineArtifact@2")
+                && map
+                    .get(yaml_key("inputs"))
+                    .and_then(|v| v.as_mapping())
+                    .and_then(|task_inputs| task_inputs.get(yaml_key("artifact")))
+                    .and_then(|v| v.as_str())
+                    == Some("ado-aw-candidate")
+            {
+                inputs.push(
+                    map.get(yaml_key("inputs"))
+                        .and_then(|v| v.as_mapping())
+                        .unwrap()
+                        .clone(),
+                );
+            }
+            for child in map.values() {
+                collect_pipeline_artifact_task_inputs(child, inputs);
+            }
+        }
+        serde_yaml::Value::Sequence(sequence) => {
+            for child in sequence {
+                collect_pipeline_artifact_task_inputs(child, inputs);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// One pinned pipeline artifact replaces all three GitHub binary sources and
+/// is acquired only through exact, typed DownloadPipelineArtifact@2 inputs.
+#[test]
+fn test_supply_chain_pipeline_artifact_reroutes_all_binary_consumers() {
+    let compiled = compile_fixture("pipeline-artifact-agent.md");
+    assert_valid_yaml(&compiled, "pipeline-artifact-agent.md");
+
+    assert!(
+        !compiled.contains("github.com/githubnext/ado-aw/releases"),
+        "compiler and ado-script release URLs must be absent"
+    );
+    assert!(
+        !compiled.contains("github.com/github/gh-aw-firewall/releases"),
+        "AWF release URLs must be absent"
+    );
+    assert!(
+        !compiled.contains("DownloadPackage@1")
+            && !compiled.contains("NuGetAuthenticate@1")
+            && !compiled.contains("nuGetServiceConnections"),
+        "pipeline artifacts must not emit feed acquisition or authentication"
+    );
+
+    let document = parse_compiled_yaml(&compiled);
+    let mut task_inputs = Vec::new();
+    collect_pipeline_artifact_task_inputs(&document, &mut task_inputs);
+    assert!(
+        task_inputs.len() >= 7,
+        "compiler, AWF, and ado-script consumers across isolated jobs must each acquire the pinned artifact"
+    );
+    let allowed_targets = [
+        "$(Pipeline.Workspace)/ado-aw-candidate/compiler",
+        "$(Pipeline.Workspace)/ado-aw-candidate/awf",
+        "/tmp/ado-aw-scripts/_artifact",
+    ];
+    for inputs in task_inputs {
+        for (key, expected) in [
+            ("source", "specific"),
+            ("project", "AgentPlayground"),
+            ("pipeline", "2560"),
+            ("runVersion", "specific"),
+            ("runId", "630001"),
+            ("artifact", "ado-aw-candidate"),
+        ] {
+            assert_eq!(
+                inputs.get(yaml_key(key)).and_then(|v| v.as_str()),
+                Some(expected),
+                "candidate task input {key} must be exact"
+            );
+        }
+        assert!(
+            allowed_targets.contains(
+                &inputs
+                    .get(yaml_key("targetPath"))
+                    .and_then(|v| v.as_str())
+                    .expect("candidate task needs compiler-owned targetPath")
+            ),
+            "candidate task targetPath must be compiler-owned"
+        );
+        assert_eq!(
+            inputs.len(),
+            7,
+            "candidate acquisition must not add latest/tags/preferTriggering inputs"
+        );
+    }
+
+    for marker in [
+        "PAYLOAD_NAME='ado-aw-linux-x64'",
+        "PAYLOAD_NAME='awf-linux-x64'",
+        "PAYLOAD_NAME='ado-script.zip'",
+        "locate_one checksums.txt",
+        "locate_one provenance.json",
+        "awk -v name=\"$PAYLOAD_NAME\"",
+        "candidate == name",
+        "sha256sum -c -",
+        "ado-aw/candidate-artifact/1",
+        "producer_definition_id",
+        "producer_build_id",
+        "\"repository\",",
+        "\"source_ref\",",
+        "\"source_version\",",
+        "\"reason\",",
+        "\"compiler_version\",",
+        "\"awf_version\",",
+        "type(definition) is not int",
+        "type(build) is not int",
+        "Validated candidate provenance:",
+    ] {
+        assert!(
+            compiled.contains(marker),
+            "candidate checksum/provenance staging marker missing: {marker}"
+        );
+    }
+
+    for (job, expected_payloads) in [
+        (
+            "Agent",
+            &["ado-aw-linux-x64", "awf-linux-x64", "ado-script.zip"][..],
+        ),
+        ("Detection", &["ado-aw-linux-x64", "awf-linux-x64"][..]),
+        ("SafeOutputs", &["ado-aw-linux-x64", "ado-script.zip"][..]),
+        ("Conclusion", &["ado-script.zip"][..]),
+    ] {
+        let block = job_block(&compiled, job);
+        for payload in expected_payloads {
+            assert!(
+                block.contains(payload),
+                "{job} must route its {payload} consumer through the candidate artifact"
+            );
+        }
+    }
+}
+
+/// Registry routing is independent and can accompany the pinned binary source.
+#[test]
+fn test_supply_chain_pipeline_artifact_with_registry() {
+    let source = r#"---
+name: "Candidate and Registry"
+description: "pinned binaries and mirrored images"
+supply-chain:
+  pipeline-artifact:
+    project: AgentPlayground
+    definition-id: 2560
+    run-id: 630001
+    artifact: ado-aw-candidate
+  registry:
+    name: myacr.azurecr.io/candidate
+    service-connection: acr-conn
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("candidate-registry", source);
+    assert!(ok, "pipeline-artifact + registry should compile: {stderr}");
+    assert!(compiled.contains("source: specific"));
+    assert!(compiled.contains("runId: '630001'"));
+    assert!(compiled.contains("docker pull myacr.azurecr.io/candidate/squid:"));
+    assert!(compiled.contains("azureSubscription: acr-conn"));
+    assert!(!compiled.contains("docker pull ghcr.io"));
+    assert!(!compiled.contains("DownloadPackage@1"));
+    assert!(!compiled.contains("NuGetAuthenticate@1"));
+    assert!(!compiled.contains("github.com/githubnext/ado-aw/releases"));
+    assert!(!compiled.contains("github.com/github/gh-aw-firewall/releases"));
+}
+
+/// The canonical acquisition path is shared by standalone and every wrapper
+/// target.
+#[test]
+fn test_supply_chain_pipeline_artifact_all_compile_targets() {
+    for target in [None, Some("1es"), Some("job"), Some("stage")] {
+        let target_field = target
+            .map(|value| format!("target: {value}\n"))
+            .unwrap_or_default();
+        let source = format!(
+            "---\nname: Candidate Target\ndescription: target coverage\n{target_field}supply-chain:\n  pipeline-artifact:\n    project: AgentPlayground\n    definition-id: 2560\n    run-id: 630001\n    artifact: ado-aw-candidate\n---\n\n## Body\n"
+        );
+        let name = target.unwrap_or("standalone");
+        let (ok, compiled, stderr) = compile_inline_source(&format!("candidate-{name}"), &source);
+        assert!(ok, "{name} target should compile: {stderr}");
+        assert!(
+            compiled.contains("- task: DownloadPipelineArtifact@2")
+                && compiled.contains("artifact: ado-aw-candidate")
+                && compiled.contains("runVersion: specific"),
+            "{name} target must use the canonical pinned artifact acquisition"
+        );
+        assert!(!compiled.contains("github.com/githubnext/ado-aw/releases"));
+        assert!(!compiled.contains("github.com/github/gh-aw-firewall/releases"));
+    }
+}
+
 /// With `supply-chain.feed` + `supply-chain.registry` configured, every
 /// GitHub/GHCR fetch is rerouted to the internal feed + registry while
 /// checksum verification is preserved.
@@ -7871,7 +8089,10 @@ repos:
     assert!(ok, "self full-history tuning should compile: {stderr}");
 
     let self_checkouts = compiled.matches("- checkout: self").count();
-    assert!(self_checkouts >= 2, "expected multiple self checkouts:\n{compiled}");
+    assert!(
+        self_checkouts >= 2,
+        "expected multiple self checkouts:\n{compiled}"
+    );
     assert_eq!(
         compiled.matches("fetchDepth: 0").count(),
         self_checkouts,
@@ -8260,13 +8481,28 @@ fn variable_groups_standalone_emits_group_imports_in_order() {
         "vg-standalone",
         "---\nname: vg-standalone\ndescription: variable group import test\nvariable-groups:\n  - Agentic Workflows\n  - Shared Secrets\n---\n\n## Agent\n\nDo work.\n",
     );
-    assert!(ok, "standalone compile with variable-groups should succeed.\nstderr: {stderr}");
-    assert!(compiled.contains("variables:"), "top-level variables: block must be present:\n{compiled}");
-    assert!(compiled.contains("- group: Agentic Workflows"), "first group import missing:\n{compiled}");
-    assert!(compiled.contains("- group: Shared Secrets"), "second group import missing:\n{compiled}");
+    assert!(
+        ok,
+        "standalone compile with variable-groups should succeed.\nstderr: {stderr}"
+    );
+    assert!(
+        compiled.contains("variables:"),
+        "top-level variables: block must be present:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("- group: Agentic Workflows"),
+        "first group import missing:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("- group: Shared Secrets"),
+        "second group import missing:\n{compiled}"
+    );
     let first = compiled.find("Agentic Workflows").unwrap();
     let second = compiled.find("Shared Secrets").unwrap();
-    assert!(first < second, "group imports must preserve declaration order");
+    assert!(
+        first < second,
+        "group imports must preserve declaration order"
+    );
 }
 
 /// A 1ES pipeline (`target: 1es`) also emits the `variables:` group import at
@@ -8277,10 +8513,22 @@ fn variable_groups_onees_emits_group_imports() {
         "vg-onees",
         "---\nname: vg-onees\ndescription: variable group import test\ntarget: 1es\nvariable-groups:\n  - Agentic Workflows\n---\n\n## Agent\n\nDo work.\n",
     );
-    assert!(ok, "1es compile with variable-groups should succeed.\nstderr: {stderr}");
-    assert!(compiled.contains("extends:"), "1ES pipeline must still emit extends:\n{compiled}");
-    assert!(compiled.contains("variables:"), "top-level variables: block must be present:\n{compiled}");
-    assert!(compiled.contains("- group: Agentic Workflows"), "group import missing:\n{compiled}");
+    assert!(
+        ok,
+        "1es compile with variable-groups should succeed.\nstderr: {stderr}"
+    );
+    assert!(
+        compiled.contains("extends:"),
+        "1ES pipeline must still emit extends:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("variables:"),
+        "top-level variables: block must be present:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("- group: Agentic Workflows"),
+        "group import missing:\n{compiled}"
+    );
 }
 
 /// `target: job` cannot carry pipeline-level `variables:`, so a non-empty
@@ -8292,8 +8540,14 @@ fn variable_groups_rejected_for_job_target() {
         "---\nname: vg-job\ndescription: variable group import test\ntarget: job\nvariable-groups:\n  - Agentic Workflows\n---\n\n## Agent\n\nDo work.\n",
     );
     assert!(!ok, "job target with variable-groups must fail to compile");
-    assert!(stderr.contains("variable-groups"), "error must mention variable-groups:\n{stderr}");
-    assert!(stderr.contains("target: job"), "error must name the job target:\n{stderr}");
+    assert!(
+        stderr.contains("variable-groups"),
+        "error must mention variable-groups:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("target: job"),
+        "error must name the job target:\n{stderr}"
+    );
 }
 
 /// `target: stage` is rejected for the same reason as `target: job`.
@@ -8303,9 +8557,18 @@ fn variable_groups_rejected_for_stage_target() {
         "vg-stage",
         "---\nname: vg-stage\ndescription: variable group import test\ntarget: stage\nvariable-groups:\n  - Agentic Workflows\n---\n\n## Agent\n\nDo work.\n",
     );
-    assert!(!ok, "stage target with variable-groups must fail to compile");
-    assert!(stderr.contains("variable-groups"), "error must mention variable-groups:\n{stderr}");
-    assert!(stderr.contains("target: stage"), "error must name the stage target:\n{stderr}");
+    assert!(
+        !ok,
+        "stage target with variable-groups must fail to compile"
+    );
+    assert!(
+        stderr.contains("variable-groups"),
+        "error must mention variable-groups:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("target: stage"),
+        "error must name the stage target:\n{stderr}"
+    );
 }
 
 /// A group name that carries an ADO macro expression is rejected as an unsafe
@@ -8317,8 +8580,10 @@ fn variable_groups_rejects_injection_name() {
         "---\nname: vg-inject\ndescription: variable group import test\nvariable-groups:\n  - \"$(evil)\"\n---\n\n## Agent\n\nDo work.\n",
     );
     assert!(!ok, "an injection-bearing group name must fail to compile");
-    assert!(stderr.contains("variable group name") || stderr.contains("variable-groups entry"),
-        "error must explain the invalid group name:\n{stderr}");
+    assert!(
+        stderr.contains("variable group name") || stderr.contains("variable-groups entry"),
+        "error must explain the invalid group name:\n{stderr}"
+    );
 }
 
 /// A workflow that references a GitHub App private key held in a project-level
@@ -8331,10 +8596,18 @@ fn variable_groups_with_github_app_token_compiles_without_patch() {
         "vg-ghapp",
         "---\nname: vg-ghapp\ndescription: variable group + github app token\nvariable-groups:\n  - Agentic Workflows\nengine:\n  id: copilot\n  github-app-token:\n    app-id: 1234567\n    owner: octo-org\n    repositories: [octo-repo]\n    private-key: AGENTIC_WORKFLOWS_GITHUB_APP_PRIVATE_KEY\n---\n\n## Agent\n\nDo work.\n",
     );
-    assert!(ok, "compile with variable-groups + github-app-token should succeed.\nstderr: {stderr}");
-    assert!(compiled.contains("- group: Agentic Workflows"), "group import missing:\n{compiled}");
-    assert!(compiled.contains("$(AGENTIC_WORKFLOWS_GITHUB_APP_PRIVATE_KEY)"),
-        "private-key macro reference missing:\n{compiled}");
+    assert!(
+        ok,
+        "compile with variable-groups + github-app-token should succeed.\nstderr: {stderr}"
+    );
+    assert!(
+        compiled.contains("- group: Agentic Workflows"),
+        "group import missing:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("$(AGENTIC_WORKFLOWS_GITHUB_APP_PRIVATE_KEY)"),
+        "private-key macro reference missing:\n{compiled}"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -8519,8 +8792,7 @@ fn test_create_pull_request_safeoutputs_prepare_step_covers_all_checkout_repos()
     );
     let safeoutputs = job_block(&compiled, "SafeOutputs");
     assert!(
-        safeoutputs
-            .contains("--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
+        safeoutputs.contains("--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
         "self must target the literal default 'main' in the SafeOutputs job:\n{safeoutputs}"
     );
     assert!(
