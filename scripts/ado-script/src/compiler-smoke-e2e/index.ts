@@ -63,11 +63,16 @@ async function stageFixtures(config: CompilerSmokeConfig, worktreeDir: string): 
   }
 }
 
-async function compileFixtures(config: CompilerSmokeConfig, worktreeDir: string): Promise<void> {
+async function compileFixtures(
+  config: CompilerSmokeConfig,
+  worktreeDir: string,
+  mirrorUrl: string,
+): Promise<void> {
   for (const fixture of ALL_FIXTURES) {
     const result = await compileAndCheck({
       adoAwBin: config.adoAwBin,
       worktreeDir,
+      metadataRemoteUrl: mirrorUrl,
       relMd: fixture.relMd,
       relLock: fixture.relLock,
       timeoutMs: config.childTimeoutMs,
@@ -180,7 +185,7 @@ export async function main(): Promise<number> {
     });
 
     await stageFixtures(config, worktreeDir);
-    await compileFixtures(config, worktreeDir);
+    await compileFixtures(config, worktreeDir, mirrorUrl);
 
     const changed = await worktreeChangedFiles({ worktreeDir, timeoutMs: config.childTimeoutMs });
     const violations = disallowedChanges(changed, allowedChangedPaths());

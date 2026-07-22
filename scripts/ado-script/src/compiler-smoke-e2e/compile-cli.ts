@@ -20,6 +20,15 @@ export interface CompileCheckOptions {
   adoAwBin: string;
   /** Detached worktree root (subprocess cwd). */
   worktreeDir: string;
+  /**
+   * Remote URL whose ADO identity must be embedded in generated metadata.
+   *
+   * The candidate is compiled in a GitHub worktree but executed from an Azure
+   * Repos mirror. Pass the compiler-owned context override only to these child
+   * processes so staging and runtime integrity compilation infer the same
+   * org/repo without mutating the worktree's shared Git configuration.
+   */
+  metadataRemoteUrl: string;
   /** Repo-relative path to the fixture markdown source. */
   relMd: string;
   /** Repo-relative path to the compiled lock file. */
@@ -32,11 +41,15 @@ export interface CompileCheckOptions {
 /** Run `compile --force <md>` then `check <lock>` for one fixture. Never throws. */
 export async function compileAndCheck(opts: CompileCheckOptions): Promise<CompileCheckResult> {
   const secrets = opts.secrets ?? [];
+  const metadataEnv = {
+    ADO_AW_COMPILE_REMOTE_URL: opts.metadataRemoteUrl,
+  };
 
   const compileOutcome = await safeSpawn({
     cmd: opts.adoAwBin,
     args: ["compile", "--force", opts.relMd],
     cwd: opts.worktreeDir,
+    env: metadataEnv,
     timeoutMs: opts.timeoutMs,
   });
   if (compileOutcome.timedOut || compileOutcome.status !== 0) {
@@ -55,6 +68,7 @@ export async function compileAndCheck(opts: CompileCheckOptions): Promise<Compil
     cmd: opts.adoAwBin,
     args: ["check", opts.relLock],
     cwd: opts.worktreeDir,
+    env: metadataEnv,
     timeoutMs: opts.timeoutMs,
   });
   if (checkOutcome.timedOut || checkOutcome.status !== 0) {

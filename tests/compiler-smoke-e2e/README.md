@@ -29,7 +29,10 @@ binary cannot drift.
 4. The test-only `compiler-smoke-e2e` TypeScript harness creates a detached
    worktree, adds an exact `supply-chain.pipeline-artifact` source to all five
    smoke files, removes their schedules, recompiles them with the candidate
-   compiler, and runs `ado-aw check`.
+   compiler, and runs `ado-aw check`. Both compiler subprocesses receive
+   `ADO_AW_COMPILE_REMOTE_URL` set to the target `ado-aw-mirror` URL, so
+   integrity-sensitive org/repository metadata matches the child checkout
+   without changing the worktree's Git configuration.
 5. The harness pushes the worktree commit to
    `refs/heads/ado-aw-smoke-candidate/<producer-build-id>` in the Azure Repo
    `ado-aw-mirror`.
