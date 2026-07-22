@@ -8970,7 +8970,10 @@ fn custom_safe_output_compiles_for_all_targets() {
     for target in [None, Some("1es"), Some("job"), Some("stage")] {
         let compiled = compile_custom_for_target(target);
         let label = target.unwrap_or("standalone");
-        assert_valid_yaml(&compiled, &format!("custom-safe-output-scripts.md ({label})"));
+        assert_valid_yaml(
+            &compiled,
+            &format!("custom-safe-output-scripts.md ({label})"),
+        );
         assert!(
             compiled.contains("Custom_send_notification"),
             "target {label}: expected a Custom_send_notification job:\n{compiled}"
@@ -9000,5 +9003,98 @@ fn custom_safe_output_secret_scope_excludes_agent_and_detection() {
                 "executor marker {marker} must only appear in the custom job region"
             );
         }
+    }
+}
+
+#[test]
+fn candidate_custom_safe_output_fixture_compiles_from_vendored_cache() {
+    let repo = tempfile::tempdir().expect("create candidate fixture repo");
+    let source_rel = PathBuf::from("tests")
+        .join("compiler-smoke-e2e")
+        .join("custom-safe-output.md");
+    let source = repo.path().join(&source_rel);
+    fs::create_dir_all(source.parent().unwrap()).expect("create source directory");
+    fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(&source_rel),
+        &source,
+    )
+    .expect("copy candidate source");
+
+    let component_rel = PathBuf::from(".ado-aw")
+        .join("imports")
+        .join("AgentPlayground")
+        .join("ado-aw-e2e-fixture")
+        .join("aa711dd17c4dfcde492b2bfad62e5fb1baad71f6")
+        .join("components")
+        .join("custom-build-tags")
+        .join("component.md");
+    let component = repo.path().join(component_rel);
+    fs::create_dir_all(component.parent().unwrap()).expect("create import cache directory");
+    fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("compiler-smoke-e2e")
+            .join("component-fixture")
+            .join("components")
+            .join("custom-build-tags")
+            .join("component.md"),
+        &component,
+    )
+    .expect("copy cached component manifest");
+
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.name", "candidate-test"]);
+    git(&["config", "user.email", "candidate-test@example.com"]);
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "candidate fixture"]);
+
+    let output_path = repo.path().join("custom-safe-output.yml");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ado-aw"))
+        .args([
+            "compile",
+            source.to_str().unwrap(),
+            "--output",
+            output_path.to_str().unwrap(),
+            "--skip-integrity",
+        ])
+        .output()
+        .expect("compile candidate custom fixture");
+    assert!(
+        output.status.success(),
+        "candidate fixture compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let compiled = fs::read_to_string(output_path).expect("read candidate output");
+    assert_valid_yaml(&compiled, "custom-safe-output.md");
+    for expected in [
+        "Custom_candidate_script_build_tag",
+        "Custom_candidate_job_build_tag",
+        "name: AgentPlayground/ado-aw-e2e-fixture",
+        "type: git",
+        "aa711dd17c4dfcde492b2bfad62e5fb1baad71f6",
+        "node components/custom-build-tags/tag-build-script.js",
+        "--custom-config",
+        "--custom-phase pre",
+        "--custom-phase post",
+        "SYSTEM_ACCESSTOKEN: $(System.AccessToken)",
+    ] {
+        assert!(
+            compiled.contains(expected),
+            "candidate output missing {expected}:\n{compiled}"
+        );
     }
 }

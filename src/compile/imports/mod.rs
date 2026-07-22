@@ -133,6 +133,15 @@ pub struct AdoRepoFetcher {
     auth: tokio::sync::OnceCell<std::result::Result<crate::ado::AdoAuth, String>>,
 }
 
+fn ado_org_url_from_env(mut get: impl FnMut(&str) -> Option<String>) -> Option<String> {
+    ["AZURE_DEVOPS_ORG_URL", "SYSTEM_COLLECTIONURI"]
+        .into_iter()
+        .find_map(|name| {
+            let value = get(name)?;
+            (!value.trim().is_empty()).then(|| crate::ado::normalize_org_url(&value))
+        })
+}
+
 impl AdoRepoFetcher {
     /// Construct a fetcher that resolves org/auth lazily on first fetch, using
     /// `repo_root` to infer the consumer organization for same-org imports.
@@ -163,6 +172,9 @@ impl AdoRepoFetcher {
     async fn context_org_url(&self) -> &std::result::Result<String, String> {
         self.context_org_url
             .get_or_init(|| async {
+                if let Some(org_url) = ado_org_url_from_env(|name| std::env::var(name).ok()) {
+                    return Ok(org_url);
+                }
                 crate::ado::resolve_ado_context(&self.repo_root, None, None)
                     .await
                     .map(|ctx| ctx.org_url)
@@ -711,6 +723,31 @@ mod tests {
     use super::*;
 
     const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    #[test]
+    fn ado_org_url_env_prefers_explicit_override() {
+        let value = ado_org_url_from_env(|name| match name {
+            "AZURE_DEVOPS_ORG_URL" => Some(" https://dev.azure.com/explicit/ ".to_string()),
+            "SYSTEM_COLLECTIONURI" => Some("https://dev.azure.com/pipeline/".to_string()),
+            _ => None,
+        });
+        assert_eq!(value.as_deref(), Some("https://dev.azure.com/explicit"));
+    }
+
+    #[test]
+    fn ado_org_url_env_falls_back_to_pipeline_collection_uri() {
+        let value = ado_org_url_from_env(|name| match name {
+            "SYSTEM_COLLECTIONURI" => Some("https://dev.azure.com/pipeline/".to_string()),
+            _ => None,
+        });
+        assert_eq!(value.as_deref(), Some("https://dev.azure.com/pipeline"));
+    }
+
+    #[test]
+    fn ado_org_url_env_ignores_empty_values() {
+        let value = ado_org_url_from_env(|_| Some("   ".to_string()));
+        assert!(value.is_none());
+    }
 
     struct StaticFetcher {
         bytes: Vec<u8>,

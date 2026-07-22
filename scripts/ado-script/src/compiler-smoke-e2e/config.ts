@@ -2,10 +2,9 @@
  * Environment configuration for the deterministic compiler-smoke E2E harness.
  *
  * This harness stages the compiler candidate produced by the current build as
- * a pinned `supply-chain.pipeline-artifact` source across five real,
- * registered ADO pipeline fixtures (canary, azure-cli, noop-target, janitor,
- * smoke-failure-reporter), pushes the staged candidate to a per-run branch on
- * a mirror repo, queues all five, and asserts they all go green.
+ * a pinned `supply-chain.pipeline-artifact` source across six registered ADO
+ * pipeline fixtures, pushes the staged candidate to a per-run branch on a
+ * mirror repo, queues all six, and asserts they all go green.
  *
  * Strict, fail-closed parsing lives here so every other module can trust a
  * fully validated {@link CompilerSmokeConfig} rather than re-checking env
@@ -17,9 +16,9 @@
 /** Per-run candidate branch prefix (never the base ref). */
 export const CANDIDATE_BRANCH_PREFIX = "ado-aw-smoke-candidate";
 
-export const DEFAULT_CONCURRENCY = 5;
+export const DEFAULT_CONCURRENCY = 6;
 export const MIN_CONCURRENCY = 1;
-export const MAX_CONCURRENCY = 5;
+export const MAX_CONCURRENCY = 6;
 
 export const DEFAULT_CHILD_TIMEOUT_MS = 7_200_000;
 export const DEFAULT_POLL_MS = 10_000;
@@ -34,6 +33,7 @@ export const FIXTURE_NAMES = [
   "noop-target",
   "janitor",
   "smoke-failure-reporter",
+  "custom-safe-output",
 ] as const;
 
 export type FixtureName = (typeof FIXTURE_NAMES)[number];
@@ -59,11 +59,11 @@ export interface CompilerSmokeConfig {
   readonly adoAwBin: string;
   /** Pipeline artifact name pinned into each fixture's supply-chain config. */
   readonly artifactName: string;
-  /** ADO Git repo hosting the five registered fixture pipeline definitions. */
+  /** ADO Git repo hosting the six registered fixture pipeline definitions. */
   readonly mirrorRepo: string;
   /** Registered ADO pipeline definition id, keyed by fixture name. */
   readonly definitionIds: Readonly<Record<FixtureName, number>>;
-  /** Bounded fixture polling concurrency (1..5, default 5). */
+  /** Bounded fixture polling concurrency (1..6, default 6). */
   readonly concurrency: number;
   /** Bounded per-fixture build wait, in ms (default 2h). */
   readonly childTimeoutMs: number;
@@ -91,6 +91,7 @@ const DEFINITION_ID_ENV_BY_FIXTURE: Readonly<Record<FixtureName, string>> = {
   "noop-target": "COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID",
   janitor: "COMPILER_SMOKE_JANITOR_DEFINITION_ID",
   "smoke-failure-reporter": "COMPILER_SMOKE_REPORTER_DEFINITION_ID",
+  "custom-safe-output": "COMPILER_SMOKE_CUSTOM_SAFE_OUTPUT_DEFINITION_ID",
 };
 
 /** ADO macros that failed to expand look like `$(NAME)`; treat them as unset. */

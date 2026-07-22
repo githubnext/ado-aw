@@ -7,7 +7,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$copilotDefinitionIds = @(2545, 2546, 2547, 2548, 2549, 2554, 2555, 2556, 2557, 2558)
+$copilotDefinitionIds = @(2545, 2546, 2547, 2548, 2549, 2554, 2555, 2556, 2557, 2558, 2564)
 $reporterDefinitionIds = @(2549, 2558)
 $executorDefinitionIds = @(2550)
 $triggerDefinitionIds = @(2551)

@@ -16,6 +16,13 @@ Its normal test refs are immutable:
 Both pairs diverge from commit
 `52cfa195595a85eedc7ad405575bd92be93fb0e3`.
 
+The same repository also hosts the immutable custom-safe-output component used
+by candidate compiler smoke:
+
+| Ref | Commit | Purpose |
+| --- | --- | --- |
+| `e2e/custom-safe-output-v1` | `aa711dd17c4dfcde492b2bfad62e5fb1baad71f6` | Imported scripts/jobs component whose two routes tag the current child build. |
+
 The registered definition is `\ado-script-e2e\ado-script e2e` (ID `2544`) in
 the `AgentPlayground` project. It uses Microsoft-hosted Ubuntu because the test
 needs only Node and Git; it does not depend on the internal executor E2E pool.

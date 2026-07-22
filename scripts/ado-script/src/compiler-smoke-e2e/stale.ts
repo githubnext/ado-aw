@@ -10,8 +10,8 @@
  * (`COMPILER_SMOKE_STALE_REF_HOURS`), and (c) that parent build is
  * terminal. Note that (c) is NOT by itself proof the orchestration it
  * started is done — an abruptly canceled/killed parent process can reach a
- * terminal ADO build status while the five fixture builds it queued are
- * still running. The scanner therefore also queries each of the five FIXED
+ * terminal ADO build status while its fixture builds are still running. The
+ * scanner therefore also queries each fixed
  * child definitions on the ref's exact branch (see
  * `listBuildsForDefinitionBranch`) and inspects their statuses directly;
  * only when every child build found there is ALSO terminal (or none exist)
@@ -157,7 +157,7 @@ export async function scanStaleRefs(opts: ScanStaleRefsOptions): Promise<StaleRe
     }
 
     // The orchestrator's own run is old enough and terminal, but that alone
-    // does not prove the five fixture ("child") builds it queued on this
+    // does not prove the fixture ("child") builds it queued on this
     // exact branch have also finished — an abruptly cancelled orchestrator
     // run can "complete" while its queued children keep running. Check
     // every fixed child definition on this exact branch before declaring

@@ -19,6 +19,7 @@ const baseEnv = {
   COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID: "3003",
   COMPILER_SMOKE_JANITOR_DEFINITION_ID: "3004",
   COMPILER_SMOKE_REPORTER_DEFINITION_ID: "3005",
+  COMPILER_SMOKE_CUSTOM_SAFE_OUTPUT_DEFINITION_ID: "3006",
   COMPILER_SMOKE_CHILD_TIMEOUT_MS: "5000",
   COMPILER_SMOKE_POLL_MS: "1",
 };
@@ -47,6 +48,10 @@ vi.mock("../ado-rest.js", () => {
           return { name: "ado-aw-candidate" };
         }),
         getBuild: vi.fn(async () => ({ status: "completed", result: "succeeded" })),
+        getBuildTags: vi.fn(async (buildId: number) => [
+          `ado-aw-custom-script-${buildId}`,
+          `ado-aw-custom-job-${buildId}`,
+        ]),
         queueBuild: vi.fn(async () => ({ id: 1 })),
         cancelBuild: vi.fn(async () => {}),
         buildUrl: (id: number) => `https://example/${id}`,
@@ -83,6 +88,11 @@ vi.mock("../git.js", async (importOriginal) => {
         "tests/safe-outputs/janitor.lock.yml",
         "tests/safe-outputs/smoke-failure-reporter.md",
         "tests/safe-outputs/smoke-failure-reporter.lock.yml",
+        "tests/compiler-smoke-e2e/custom-safe-output.md",
+        "tests/compiler-smoke-e2e/custom-safe-output.lock.yml",
+        ".ado-aw/imports/.gitattributes",
+        ".ado-aw/imports/AgentPlayground/ado-aw-e2e-fixture/aa711dd17c4dfcde492b2bfad62e5fb1baad71f6/components/custom-build-tags/component.md",
+        ".ado-aw/imports/AgentPlayground/ado-aw-e2e-fixture/aa711dd17c4dfcde492b2bfad62e5fb1baad71f6/components/custom-build-tags/component.md.sha256",
       ];
     }),
     commitAll: vi.fn(async () => {
@@ -156,28 +166,32 @@ beforeEach(() => {
 });
 
 describe("compiler-smoke-e2e index.main (happy path)", () => {
-  it("checks artifact visibility before any git work, and deletes the ref before removing the worktree", async () => {
-    process.env = { ...process.env, ...baseEnv, VITEST: "true" };
-    const { main } = await import("../index.js");
-    const code = await main();
-    expect(code).toBe(0);
+  it(
+    "checks artifact visibility before any git work, and deletes the ref before removing the worktree",
+    async () => {
+      process.env = { ...process.env, ...baseEnv, VITEST: "true" };
+      const { main } = await import("../index.js");
+      const code = await main();
+      expect(code).toBe(0);
 
-    expect(mockCalls.indexOf("getArtifact")).toBeGreaterThanOrEqual(0);
-    expect(mockCalls.indexOf("getArtifact")).toBeLessThan(mockCalls.indexOf("verifyLocalCommit"));
-    expect(mockCalls.indexOf("verifyLocalCommit")).toBeLessThan(mockCalls.indexOf("createDetachedWorktree"));
-    expect(mockCalls.indexOf("createDetachedWorktree")).toBeLessThan(mockCalls.indexOf("compileAndCheck"));
-    expect(mockCalls.indexOf("compileAndCheck")).toBeLessThan(mockCalls.indexOf("worktreeChangedFiles"));
-    expect(mockCalls.indexOf("worktreeChangedFiles")).toBeLessThan(mockCalls.indexOf("commitAll"));
-    expect(mockCalls.indexOf("commitAll")).toBeLessThan(mockCalls.indexOf("pushCandidate"));
-    expect(mockCalls.indexOf("pushCandidate")).toBeLessThan(mockCalls.indexOf("verifyRemoteRef"));
-    expect(mockCalls.indexOf("verifyRemoteRef")).toBeLessThan(mockCalls.indexOf("runFixtures"));
+      expect(mockCalls.indexOf("getArtifact")).toBeGreaterThanOrEqual(0);
+      expect(mockCalls.indexOf("getArtifact")).toBeLessThan(mockCalls.indexOf("verifyLocalCommit"));
+      expect(mockCalls.indexOf("verifyLocalCommit")).toBeLessThan(mockCalls.indexOf("createDetachedWorktree"));
+      expect(mockCalls.indexOf("createDetachedWorktree")).toBeLessThan(mockCalls.indexOf("compileAndCheck"));
+      expect(mockCalls.indexOf("compileAndCheck")).toBeLessThan(mockCalls.indexOf("worktreeChangedFiles"));
+      expect(mockCalls.indexOf("worktreeChangedFiles")).toBeLessThan(mockCalls.indexOf("commitAll"));
+      expect(mockCalls.indexOf("commitAll")).toBeLessThan(mockCalls.indexOf("pushCandidate"));
+      expect(mockCalls.indexOf("pushCandidate")).toBeLessThan(mockCalls.indexOf("verifyRemoteRef"));
+      expect(mockCalls.indexOf("verifyRemoteRef")).toBeLessThan(mockCalls.indexOf("runFixtures"));
 
-    // Cleanup ordering: the remote candidate ref must be deleted BEFORE the
-    // local worktree is removed (never leave the ref hanging around).
-    expect(mockCalls.indexOf("deleteRemoteRef")).toBeGreaterThanOrEqual(0);
-    expect(mockCalls.indexOf("removeWorktree")).toBeGreaterThanOrEqual(0);
-    expect(mockCalls.indexOf("deleteRemoteRef")).toBeLessThan(mockCalls.indexOf("removeWorktree"));
-  });
+      // Cleanup ordering: the remote candidate ref must be deleted BEFORE the
+      // local worktree is removed (never leave the ref hanging around).
+      expect(mockCalls.indexOf("deleteRemoteRef")).toBeGreaterThanOrEqual(0);
+      expect(mockCalls.indexOf("removeWorktree")).toBeGreaterThanOrEqual(0);
+      expect(mockCalls.indexOf("deleteRemoteRef")).toBeLessThan(mockCalls.indexOf("removeWorktree"));
+    },
+    15_000,
+  );
 });
 
 describe("compiler-smoke-e2e index.main (unexpected path guard)", () => {

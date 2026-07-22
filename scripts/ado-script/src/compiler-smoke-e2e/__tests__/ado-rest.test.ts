@@ -104,6 +104,64 @@ describe("AdoRest.getBuild / cancelBuild", () => {
     expect(build.result).toBe("succeeded");
   });
 
+  describe("AdoRest.getBuildTags", () => {
+    it("accepts the documented string-array response", async () => {
+      const fetchImpl = vi.fn(async () =>
+        jsonResponse(200, ["ado-aw-custom-script-10", "ado-aw-custom-job-10"]),
+      );
+      const rest = makeRest(fetchImpl as unknown as typeof fetch);
+      await expect(rest.getBuildTags(10)).resolves.toEqual([
+        "ado-aw-custom-script-10",
+        "ado-aw-custom-job-10",
+      ]);
+    });
+
+    it("accepts an ADO collection wrapper defensively", async () => {
+      const fetchImpl = vi.fn(async () =>
+        jsonResponse(200, { count: 1, value: ["tag-one"] }),
+      );
+      const rest = makeRest(fetchImpl as unknown as typeof fetch);
+      await expect(rest.getBuildTags(10)).resolves.toEqual(["tag-one"]);
+    });
+
+    it("retries malformed responses and reports the final error", async () => {
+      const fetchImpl = vi.fn(async () => jsonResponse(200, { value: [42] }));
+      const rest = makeRest(fetchImpl as unknown as typeof fetch);
+      await expect(
+        rest.getBuildTags(10, { retries: 2, retryDelayMs: 1 }),
+      ).rejects.toThrow(/not a string array/);
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+    });
+
+    it("retries a successful response until every required tag is visible", async () => {
+      let calls = 0;
+      const fetchImpl = vi.fn(async () => {
+        calls++;
+        return jsonResponse(
+          200,
+          calls === 1
+            ? ["ado-aw-custom-script-10"]
+            : ["ado-aw-custom-script-10", "ado-aw-custom-job-10"],
+        );
+      });
+      const rest = makeRest(fetchImpl as unknown as typeof fetch);
+      await expect(
+        rest.getBuildTags(10, {
+          retries: 2,
+          retryDelayMs: 1,
+          required: [
+            "ado-aw-custom-script-10",
+            "ado-aw-custom-job-10",
+          ],
+        }),
+      ).resolves.toEqual([
+        "ado-aw-custom-script-10",
+        "ado-aw-custom-job-10",
+      ]);
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+    });
+  });
+
   it("cancelBuild PATCHes the build to status=cancelling", async () => {
     let method: string | undefined;
     let body: unknown;
