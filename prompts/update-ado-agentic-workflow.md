@@ -309,7 +309,7 @@ Before finalizing any update, verify:
 
 2. **MCP allow-lists**: Custom MCP servers (with `container:` or `url:`) have explicit `allowed:` lists.
 
-3. **Schedule syntax**: The schedule expression uses valid fuzzy schedule syntax. Valid frequencies: `daily`, `weekly on <day>`, `hourly`, `every Nh`, `every N minutes`, `every N days`, `every N weeks`, `bi-weekly`, `tri-weekly`. Valid time specs: `around HH:MM`, `between HH:MM and HH:MM`.
+3. **Schedule syntax**: The schedule expression uses valid fuzzy schedule syntax. Valid frequencies: `daily`, `weekly`, `weekly on <day>`, `hourly`, `every Nh` / `every N hours`, `every N minutes`, `every N days`, `every N weeks`, `bi-weekly`, `tri-weekly`. Valid time specs: `around HH:MM`, `between HH:MM and HH:MM`.
 
 4. **Repository aliases**: Every repo alias used in agent instructions or safe-output `repository:` fields exists as an entry in `repos:` with `checkout: true` (the default).
 
