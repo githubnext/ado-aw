@@ -123,6 +123,9 @@ In `https://dev.azure.com/msazuresphere/AgentPlayground`:
    `githubnext` service connection → existing YAML →
    `tests/executor-e2e/azure-pipelines.yml`. Place it in a `\executor-e2e`
    folder and skip the first run until variables are configured.
+   In the live pull-request trigger settings, disable builds from forks and
+   disable fork access to secrets/full tokens. Definition `2550` is audited by
+   `tests/compiler-smoke-e2e/credentialed-pr-definitions.json`.
 2. **Grant the principal behind `agent-playground-write` write access** on the
    `agent-definitions` repo (Contribute, Create branch, Contribute to PRs) and
    on Build (add tags). The YAML maps its AAD token to

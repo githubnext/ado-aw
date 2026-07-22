@@ -41,3 +41,10 @@ failing with an unresolved merge-base.
 The pipeline is path-filtered for relevant GitHub PR changes, manually
 queueable, and scheduled daily on `main`. Because excluded PRs receive no
 status, it is intentionally not configured as a global required GitHub check.
+
+Although this pipeline does not consume the candidate-smoke write connection,
+it is a GitHub-backed AgentPlayground PR definition with protected repository
+access. Its live ADO trigger must keep fork builds and fork secrets disabled;
+definition `2544` is included in
+[`tests/compiler-smoke-e2e/credentialed-pr-definitions.json`](../compiler-smoke-e2e/credentialed-pr-definitions.json)
+and the trusted candidate-smoke audit.

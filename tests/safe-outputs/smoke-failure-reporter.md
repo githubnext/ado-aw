@@ -31,18 +31,30 @@ suite running in the AgentPlayground ADO project.
 
 ### Monitored pipelines
 
-Query only these two pipelines (matched by exact `definition.name`):
+Query only these three pipelines (matched by exact `definition.name`):
 
 - `Daily safe-output smoke canary`
 - `Daily smoke az CLI access`
+- `ado-aw candidate compiler smoke`
+
+The first two are the registered ADO **definition names** from
+`tests/safe-outputs/REGISTERED.md`; do not substitute the colon-bearing
+front-matter `name:` values from their source Markdown.
 
 ### Tasks
 
-1. Query the ADO REST `builds?api-version=7.1` endpoint of the
-   AgentPlayground project to fetch the most recent **completed** run
-   of each monitored pipeline. Use the read service connection's
-   `SYSTEM_ACCESSTOKEN`-equivalent bearer token already available to
-   you in the agent environment.
+1. Resolve each monitored pipeline by exact name, then query the ADO REST
+   `builds?api-version=7.1` endpoint of the AgentPlayground project to fetch
+   its most recent **completed** run. Use the read service connection's
+   `SYSTEM_ACCESSTOKEN`-equivalent bearer token already available to you in
+   the agent environment.
+   - For `Daily safe-output smoke canary` and `Daily smoke az CLI access`,
+     use the latest completed run with no reason/branch restriction.
+   - For `ado-aw candidate compiler smoke`, include both
+     `branchName=refs/heads/main` and `reasonFilter=schedule`, plus
+     `statusFilter=completed`, `queryOrder=finishTimeDescending`, and
+     `$top=1`. Never report its PR or manual runs; those failures are surfaced
+     directly on their ADO validation.
 2. For every run with `result != "succeeded"`:
    1. Search open issues on `jamesadevine/ado-aw-issues` for one whose title
       starts with `[smoke-failure] <pipeline-name>`. If one already

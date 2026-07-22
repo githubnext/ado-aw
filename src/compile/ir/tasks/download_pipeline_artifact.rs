@@ -268,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn specific_run_inputs() {
+    fn latest_from_branch_inputs() {
         let t = DownloadPipelineArtifact::new("$(Pipeline.Workspace)/in")
             .source(ArtifactSource::Specific)
             .project("$(System.TeamProject)")
@@ -293,5 +293,34 @@ mod tests {
                 .map(String::as_str),
             Some("true")
         );
+    }
+
+    #[test]
+    fn exact_specific_run_inputs() {
+        let t = DownloadPipelineArtifact::new("$(Pipeline.Workspace)/in")
+            .source(ArtifactSource::Specific)
+            .project("AgentPlayground")
+            .pipeline("2560")
+            .run_version(RunVersion::Specific)
+            .run_id("630001")
+            .artifact("ado-aw-candidate")
+            .into_step();
+        assert_eq!(t.inputs.get("source").map(String::as_str), Some("specific"));
+        assert_eq!(
+            t.inputs.get("runVersion").map(String::as_str),
+            Some("specific")
+        );
+        assert_eq!(
+            t.inputs.get("project").map(String::as_str),
+            Some("AgentPlayground")
+        );
+        assert_eq!(t.inputs.get("pipeline").map(String::as_str), Some("2560"));
+        assert_eq!(t.inputs.get("runId").map(String::as_str), Some("630001"));
+        assert_eq!(
+            t.inputs.get("artifact").map(String::as_str),
+            Some("ado-aw-candidate")
+        );
+        assert!(!t.inputs.contains_key("tags"));
+        assert!(!t.inputs.contains_key("preferTriggeringPipeline"));
     }
 }

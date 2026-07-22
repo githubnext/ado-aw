@@ -109,60 +109,24 @@ jobs:
       # These duplicate the compile-time values baked into the YAML, but MCPG's
       # Docker container requires MCP_GATEWAY_PORT and MCP_GATEWAY_DOMAIN env vars
       # to start — the ADO variable indirection satisfies that contract.
-      echo "##vso[task.setvariable variable=MCP_GATEWAY_PORT]8080"
-      echo "##vso[task.setvariable variable=MCP_GATEWAY_DOMAIN]awmg-mcpg"
+      echo "##vso[task.setvariable variable=MCP_GATEWAY_PORT]80"
+      echo "##vso[task.setvariable variable=MCP_GATEWAY_DOMAIN]host.docker.internal"
 
       # Write MCPG (MCP Gateway) configuration to a file
       cat > "$(Agent.TempDirectory)/staging/mcpg-config.json" << 'MCPG_CONFIG_EOF'
       {
         "mcpServers": {
           "safeoutputs": {
-            "type": "stdio",
-            "container": "ghcr.io/github/gh-aw-firewall/agent:0.27.32",
-            "entrypoint": "/usr/local/bin/ado-aw",
-            "entrypointArgs": [
-              "mcp",
-              "--enabled-tools",
-              "missing-data",
-              "--enabled-tools",
-              "missing-tool",
-              "--enabled-tools",
-              "noop",
-              "--enabled-tools",
-              "report-incomplete",
-              "/safeoutputs",
-              "$(Build.SourcesDirectory)"
-            ],
-            "mounts": [
-              "/tmp/awf-tools/ado-aw:/usr/local/bin/ado-aw:ro",
-              "$(Build.SourcesDirectory):$(Build.SourcesDirectory):rw",
-              "/tmp/awf-tools/staging:/safeoutputs:rw"
-            ],
-            "args": [
-              "--network",
-              "none",
-              "--user",
-              "${MCP_RUNNER_UID}:${MCP_RUNNER_GID}",
-              "--cap-drop",
-              "ALL",
-              "--security-opt",
-              "no-new-privileges",
-              "--read-only",
-              "--tmpfs",
-              "/tmp:rw,nosuid,nodev,noexec",
-              "--pids-limit",
-              "256",
-              "-w",
-              "$(Build.SourcesDirectory)"
-            ],
-            "env": {
-              "HOME": "/tmp"
+            "type": "http",
+            "url": "http://localhost:${SAFE_OUTPUTS_PORT}/mcp",
+            "headers": {
+              "Authorization": "Bearer ${SAFE_OUTPUTS_API_KEY}"
             }
           }
         },
         "gateway": {
-          "port": 8080,
-          "domain": "awmg-mcpg",
+          "port": 80,
+          "domain": "host.docker.internal",
           "apiKey": "${MCP_GATEWAY_API_KEY}",
           "payloadDir": "/tmp/gh-aw/mcp-payloads"
         }
@@ -212,7 +176,7 @@ jobs:
   - bash: |
       set -eo pipefail
 
-      AWF_VERSION="0.27.32"
+      AWF_VERSION="0.27.9"
       DOWNLOAD_DIR="$(Pipeline.Workspace)/awf"
       DOWNLOAD_URL="https://github.com/github/gh-aw-firewall/releases/download/v${AWF_VERSION}/awf-linux-x64"
       CHECKSUM_URL="https://github.com/github/gh-aw-firewall/releases/download/v${AWF_VERSION}/checksums.txt"
@@ -229,15 +193,16 @@ jobs:
       chmod +x awf
       echo "##vso[task.prependpath]$(Pipeline.Workspace)/awf"
       ./awf --version
-    displayName: Download AWF (Agentic Workflow Firewall) v0.27.32
+    displayName: Download AWF (Agentic Workflow Firewall) v0.27.9
   - bash: |
       set -eo pipefail
 
-      docker pull ghcr.io/github/gh-aw-firewall/squid:0.27.32
-      docker pull ghcr.io/github/gh-aw-firewall/agent:0.27.32
-      docker pull ghcr.io/github/gh-aw-firewall/api-proxy:0.27.32
+      docker pull ghcr.io/github/gh-aw-firewall/squid:0.27.9
+      docker pull ghcr.io/github/gh-aw-firewall/agent:0.27.9
+      docker tag ghcr.io/github/gh-aw-firewall/squid:0.27.9 ghcr.io/github/gh-aw-firewall/squid:latest
+      docker tag ghcr.io/github/gh-aw-firewall/agent:0.27.9 ghcr.io/github/gh-aw-firewall/agent:latest
       docker pull ghcr.io/github/gh-aw-mcpg:v0.4.1
-    displayName: Pre-pull AWF and MCPG container images (v0.27.32)
+    displayName: Pre-pull AWF and MCPG container images (v0.27.9)
   - task: UseNode@1
     inputs:
       version: 22.x
@@ -315,12 +280,49 @@ jobs:
     displayName: Append Azure CLI prompt
     condition: ne(variables['AW_AZ_MOUNTS'], '')
   - bash: |
+      SAFE_OUTPUTS_PORT=8100
+      SAFE_OUTPUTS_API_KEY=$(openssl rand -base64 45 | tr -d '/+=')
+      echo "##vso[task.setvariable variable=SAFE_OUTPUTS_PORT]$SAFE_OUTPUTS_PORT"
+      echo "##vso[task.setvariable variable=SAFE_OUTPUTS_API_KEY;issecret=true]$SAFE_OUTPUTS_API_KEY"
+
+      mkdir -p "$(Agent.TempDirectory)/staging/logs"
+
+      # Start SafeOutputs as HTTP server in the background
+      # NOTE: --enabled-tools missing-data --enabled-tools missing-tool --enabled-tools noop --enabled-tools report-incomplete  expands to either "" or "--enabled-tools X ... "
+      # (with trailing space). The value MUST be newline-free; is_safe_tool_name enforces this.
+      # Positional args (output_directory, bounding_directory) MUST come after all named
+      # options — clap parses them positionally and reordering would break the command.
+      nohup /tmp/awf-tools/ado-aw mcp-http \
+        --port "$SAFE_OUTPUTS_PORT" \
+        --api-key "$SAFE_OUTPUTS_API_KEY" \
+        --enabled-tools missing-data --enabled-tools missing-tool --enabled-tools noop --enabled-tools report-incomplete "/tmp/awf-tools/staging" \
+        "$(Build.SourcesDirectory)" \
+        > "$(Agent.TempDirectory)/staging/logs/safeoutputs.log" 2>&1 &
+      SAFE_OUTPUTS_PID=$!
+      echo "##vso[task.setvariable variable=SAFE_OUTPUTS_PID]$SAFE_OUTPUTS_PID"
+      echo "SafeOutputs HTTP server started on port $SAFE_OUTPUTS_PORT (PID: $SAFE_OUTPUTS_PID)"
+
+      # Wait for server to be ready
+      READY=false
+      # shellcheck disable=SC2034 # i is intentionally unused; wait-N-times loop
+      for i in $(seq 1 30); do
+        if curl -sf "http://localhost:$SAFE_OUTPUTS_PORT/health" > /dev/null 2>&1; then
+          echo "SafeOutputs HTTP server is ready"
+          READY=true
+          break
+        fi
+        sleep 1
+      done
+      if [ "$READY" != "true" ]; then
+        echo "##vso[task.complete result=Failed]SafeOutputs HTTP server did not become ready within 30s"
+        exit 1
+      fi
+    displayName: Start SafeOutputs HTTP server
+  - bash: |
       # Substitute runtime values into MCPG config
-      MCP_RUNNER_UID=$(id -u)
-      MCP_RUNNER_GID=$(id -g)
       MCPG_CONFIG=$(sed \
-        -e "s|\${MCP_RUNNER_UID}|$MCP_RUNNER_UID|g" \
-        -e "s|\${MCP_RUNNER_GID}|$MCP_RUNNER_GID|g" \
+        -e "s|\${SAFE_OUTPUTS_PORT}|$(SAFE_OUTPUTS_PORT)|g" \
+        -e "s|\${SAFE_OUTPUTS_API_KEY}|$(SAFE_OUTPUTS_API_KEY)|g" \
         -e "s|\${MCP_GATEWAY_API_KEY}|$(MCP_GATEWAY_API_KEY)|g" \
         /tmp/awf-tools/staging/mcpg-config.json)
 
@@ -330,22 +332,26 @@ jobs:
 
       # Remove any leftover container or stale output from a previous interrupted run
       # (--rm only cleans up on clean exit; OOM/SIGKILL may leave it behind)
-      docker rm -f awmg-mcpg 2>/dev/null || true
+      docker rm -f mcpg 2>/dev/null || true
       GATEWAY_OUTPUT="/tmp/gh-aw/mcp-config/gateway-output.json"
       mkdir -p "$(dirname "$GATEWAY_OUTPUT")" /tmp/gh-aw/mcp-logs
       rm -f "$GATEWAY_OUTPUT"
 
-      # Start MCPG on Docker's bridge network. AWF attaches this named,
-      # trusted container to its internal network after creating awf-net.
+      # Start MCPG Docker container on host network.
       # The Docker socket mount is required because MCPG spawns stdio-based MCP
       # servers as sibling containers. This grants significant host access — acceptable
       # here because the pipeline agent is already trusted and network-isolated by AWF.
       #
+      # WORKAROUND: Override entrypoint to bypass run_containerized.sh which has a
+      # validate_port_mapping() bug — it calls `docker inspect .NetworkSettings.Ports`
+      # which is empty with --network host (by design), causing a spurious error:
+      #   [ERROR] Port 80 is not exposed from the container
+      # Upstream fix: https://github.com/github/gh-aw-mcpg/issues/TBD
+      #
       # stdout → gateway-output.json (machine-readable config, read after health check)
       echo "$MCPG_CONFIG" | docker run -i --rm \
-        --name awmg-mcpg \
-        --network bridge \
-        -p 127.0.0.1:8080:8080 \
+        --name mcpg \
+        --network host \
         --entrypoint /app/awmg \
         -v /var/run/docker.sock:/var/run/docker.sock \
         -e MCP_GATEWAY_PORT="$(MCP_GATEWAY_PORT)" \
@@ -354,7 +360,7 @@ jobs:
         \
         \
         ghcr.io/github/gh-aw-mcpg:v0.4.1 \
-        --routed --listen 0.0.0.0:8080 --config-stdin --log-dir /tmp/gh-aw/mcp-logs \
+        --routed --listen 0.0.0.0:80 --config-stdin --log-dir /tmp/gh-aw/mcp-logs \
         > "$GATEWAY_OUTPUT" 2> >(tee /tmp/gh-aw/mcp-logs/stderr.log >&2) &
       MCPG_PID=$!
       echo "MCPG started (PID: $MCPG_PID)"
@@ -363,7 +369,7 @@ jobs:
       READY=false
       # shellcheck disable=SC2034 # i is intentionally unused; wait-N-times loop
       for i in $(seq 1 30); do
-        if curl -sf "http://localhost:8080/health" > /dev/null 2>&1; then
+        if curl -sf "http://localhost:80/health" > /dev/null 2>&1; then
           echo "MCPG is ready"
           READY=true
           break
@@ -400,8 +406,8 @@ jobs:
 
       # Convert gateway output to Copilot CLI mcp-config.json.
       # Mirrors gh-aw's convert_gateway_config_copilot.cjs:
-      #   - Rewrite gateway URLs to the stable MCPG container name that AWF
-      #     attaches to its internal network
+      #   - Rewrite URLs from 127.0.0.1 to host.docker.internal (AWF container needs
+      #     host.docker.internal to reach MCPG on the host; 127.0.0.1 is container loopback)
       #   - Ensure tools: ["*"] on each server entry (Copilot CLI requirement)
       #   - Mark generated MCPG entries as default/trusted servers for Copilot CLI
       #   - Preserve all other fields (headers, type, etc.)
@@ -421,30 +427,28 @@ jobs:
       mkdir -p "$(Agent.TempDirectory)/staging/logs"
 
       echo "=== Running AI agent with AWF network isolation ==="
-      echo "Allowed domains: *.applicationinsights.azure.com,*.blob.core.windows.net,*.copilot.github.com,*.dev.azure.com,*.github.com,*.githubcopilot.com,*.githubusercontent.com,*.in.applicationinsights.azure.com,*.msauth.net,*.msauthimages.net,*.msftauth.net,*.pkgs.dev.azure.com,*.queue.core.windows.net,*.table.core.windows.net,*.visualstudio.com,*.vsassets.io,*.vsblob.visualstudio.com,*.vsrm.dev.azure.com,*.vssps.visualstudio.com,aex.dev.azure.com,aexus.dev.azure.com,aka.ms,api.github.com,config.edge.skype.com,copilot-proxy.githubusercontent.com,dc.services.visualstudio.com,dev.azure.com,github.com,graph.microsoft.com,login.live.com,login.microsoftonline.com,login.windows.net,management.azure.com,pkgs.dev.azure.com,rt.services.visualstudio.com,vsrm.dev.azure.com,vssps.dev.azure.com,vstoken.dev.azure.com"
+      echo "Allowed domains: *.applicationinsights.azure.com,*.blob.core.windows.net,*.copilot.github.com,*.dev.azure.com,*.github.com,*.githubcopilot.com,*.githubusercontent.com,*.in.applicationinsights.azure.com,*.msauth.net,*.msauthimages.net,*.msftauth.net,*.pkgs.dev.azure.com,*.queue.core.windows.net,*.table.core.windows.net,*.visualstudio.com,*.vsassets.io,*.vsblob.visualstudio.com,*.vsrm.dev.azure.com,*.vssps.visualstudio.com,aex.dev.azure.com,aexus.dev.azure.com,aka.ms,api.github.com,config.edge.skype.com,copilot-proxy.githubusercontent.com,dc.services.visualstudio.com,dev.azure.com,github.com,graph.microsoft.com,host.docker.internal,login.live.com,login.microsoftonline.com,login.windows.net,management.azure.com,pkgs.dev.azure.com,rt.services.visualstudio.com,vsrm.dev.azure.com,vssps.dev.azure.com,vstoken.dev.azure.com"
 
-      # AWF provides L7 domain whitelisting via a rootless Docker topology.
-      # The named MCPG container is attached to AWF's internal network as a
-      # trusted endpoint; the agent has no route to the host.
+      # AWF provides L7 domain whitelisting via Squid proxy + Docker containers.
+      # --enable-host-access allows the AWF container to reach host services
+      # (MCPG and SafeOutputs) via host.docker.internal.
       # AWF auto-mounts /tmp:/tmp:rw into the container, so copilot binary,
       # agent prompt, and MCP config are placed under /tmp/awf-tools/.
       # Stream agent output in real-time while filtering VSO commands.
       # sed -u = unbuffered (line-by-line) so output appears immediately.
       # tee writes to both stdout (ADO pipeline log) and the artifact file.
       # pipefail (set above) ensures AWF's exit code propagates through the pipe.
-      # shellcheck disable=SC2046,SC2016 # ADO macros are substituted before bash; the single-quoted engine command is intentionally expanded by AWF inside the sandbox
-      "$(Pipeline.Workspace)/awf/awf" \
-        --allow-domains "*.applicationinsights.azure.com,*.blob.core.windows.net,*.copilot.github.com,*.dev.azure.com,*.github.com,*.githubcopilot.com,*.githubusercontent.com,*.in.applicationinsights.azure.com,*.msauth.net,*.msauthimages.net,*.msftauth.net,*.pkgs.dev.azure.com,*.queue.core.windows.net,*.table.core.windows.net,*.visualstudio.com,*.vsassets.io,*.vsblob.visualstudio.com,*.vsrm.dev.azure.com,*.vssps.visualstudio.com,aex.dev.azure.com,aexus.dev.azure.com,aka.ms,api.github.com,config.edge.skype.com,copilot-proxy.githubusercontent.com,dc.services.visualstudio.com,dev.azure.com,github.com,graph.microsoft.com,login.live.com,login.microsoftonline.com,login.windows.net,management.azure.com,pkgs.dev.azure.com,rt.services.visualstudio.com,vsrm.dev.azure.com,vssps.dev.azure.com,vstoken.dev.azure.com" \
-        --network-isolation \
-        --topology-attach "awmg-mcpg" \
-        --image-tag "0.27.32" \
+      # shellcheck disable=SC2046 # $(AW_AZ_MOUNTS) is an ADO macro substituted before bash sees it, not bash command substitution; word-splitting the expanded value into separate --mount tokens is intentional
+      sudo -E "$(Pipeline.Workspace)/awf/awf" \
+        --allow-domains "*.applicationinsights.azure.com,*.blob.core.windows.net,*.copilot.github.com,*.dev.azure.com,*.github.com,*.githubcopilot.com,*.githubusercontent.com,*.in.applicationinsights.azure.com,*.msauth.net,*.msauthimages.net,*.msftauth.net,*.pkgs.dev.azure.com,*.queue.core.windows.net,*.table.core.windows.net,*.visualstudio.com,*.vsassets.io,*.vsblob.visualstudio.com,*.vsrm.dev.azure.com,*.vssps.visualstudio.com,aex.dev.azure.com,aexus.dev.azure.com,aka.ms,api.github.com,config.edge.skype.com,copilot-proxy.githubusercontent.com,dc.services.visualstudio.com,dev.azure.com,github.com,graph.microsoft.com,host.docker.internal,login.live.com,login.microsoftonline.com,login.windows.net,management.azure.com,pkgs.dev.azure.com,rt.services.visualstudio.com,vsrm.dev.azure.com,vssps.dev.azure.com,vstoken.dev.azure.com" \
         --skip-pull \
         --env-all \
-          $(AW_AZ_MOUNTS) \
+        --enable-host-access \
+        $(AW_AZ_MOUNTS) \
         --container-workdir "$(Build.SourcesDirectory)" \
         --log-level info \
         --proxy-logs-dir "$(Agent.TempDirectory)/staging/logs/firewall" \
-        -- 'export NO_PROXY="${NO_PROXY:+$NO_PROXY,}awmg-mcpg"; export no_proxy="$NO_PROXY"; /tmp/awf-tools/copilot --prompt "$(cat /tmp/awf-tools/agent-prompt.md)" --additional-mcp-config @/tmp/awf-tools/mcp-config.json --model gpt-5-mini --disable-builtin-mcps --no-ask-user --allow-all-tools --allow-tool github --allow-tool safeoutputs --allow-all-paths' \
+        -- '/tmp/awf-tools/copilot --prompt "$(cat /tmp/awf-tools/agent-prompt.md)" --additional-mcp-config @/tmp/awf-tools/mcp-config.json --model gpt-5-mini --disable-builtin-mcps --no-ask-user --allow-all-tools --allow-tool github --allow-tool safeoutputs --allow-all-paths' \
         2>&1 \
         | sed -u 's/##vso\[/[VSO-FILTERED] vso[/g; s/##\[/[VSO-FILTERED] [/g' \
         | tee "$AGENT_OUTPUT_FILE" \
@@ -484,9 +488,16 @@ jobs:
   - bash: |
       # Stop MCPG container
       echo "Stopping MCPG..."
-      docker stop awmg-mcpg 2>/dev/null || true
-      echo "MCPG and stdio child containers stopped"
-    displayName: Stop MCPG
+      docker stop mcpg 2>/dev/null || true
+      echo "MCPG stopped"
+
+      # Stop SafeOutputs HTTP server
+      if [ -n "$(SAFE_OUTPUTS_PID)" ]; then
+        echo "Stopping SafeOutputs (PID: $(SAFE_OUTPUTS_PID))..."
+        kill "$(SAFE_OUTPUTS_PID)" 2>/dev/null || true
+        echo "SafeOutputs stopped"
+      fi
+    displayName: Stop MCPG and SafeOutputs
     condition: always()
   - bash: |
       # Copy all logs to output directory for artifact upload
@@ -589,7 +600,7 @@ jobs:
   - bash: |
       set -eo pipefail
 
-      AWF_VERSION="0.27.32"
+      AWF_VERSION="0.27.9"
       DOWNLOAD_DIR="$(Pipeline.Workspace)/awf"
       DOWNLOAD_URL="https://github.com/github/gh-aw-firewall/releases/download/v${AWF_VERSION}/awf-linux-x64"
       CHECKSUM_URL="https://github.com/github/gh-aw-firewall/releases/download/v${AWF_VERSION}/checksums.txt"
@@ -606,14 +617,15 @@ jobs:
       chmod +x awf
       echo "##vso[task.prependpath]$(Pipeline.Workspace)/awf"
       ./awf --version
-    displayName: Download AWF (Agentic Workflow Firewall) v0.27.32
+    displayName: Download AWF (Agentic Workflow Firewall) v0.27.9
   - bash: |
       set -eo pipefail
 
-      docker pull ghcr.io/github/gh-aw-firewall/squid:0.27.32
-      docker pull ghcr.io/github/gh-aw-firewall/agent:0.27.32
-      docker pull ghcr.io/github/gh-aw-firewall/api-proxy:0.27.32
-    displayName: Pre-pull AWF container images (v0.27.32)
+      docker pull ghcr.io/github/gh-aw-firewall/squid:0.27.9
+      docker pull ghcr.io/github/gh-aw-firewall/agent:0.27.9
+      docker tag ghcr.io/github/gh-aw-firewall/squid:0.27.9 ghcr.io/github/gh-aw-firewall/squid:latest
+      docker tag ghcr.io/github/gh-aw-firewall/agent:0.27.9 ghcr.io/github/gh-aw-firewall/agent:latest
+    displayName: Pre-pull AWF container images (v0.27.9)
   - bash: |
       mkdir -p "$(Build.SourcesDirectory)/safe_outputs"
       cp -a "$(Pipeline.Workspace)/agent_outputs_$(Build.BuildId)/."  "$(Build.SourcesDirectory)/safe_outputs"
@@ -674,11 +686,8 @@ jobs:
       THREAT_OUTPUT_FILE="$(Agent.TempDirectory)/threat-analysis-output.txt"
 
       # Stream threat analysis output in real-time with VSO command filtering
-      # shellcheck disable=SC2016 # The single-quoted engine command is intentionally expanded by AWF inside the sandbox
-      "$(Pipeline.Workspace)/awf/awf" \
-        --allow-domains "*.applicationinsights.azure.com,*.blob.core.windows.net,*.copilot.github.com,*.dev.azure.com,*.github.com,*.githubcopilot.com,*.githubusercontent.com,*.in.applicationinsights.azure.com,*.msauth.net,*.msauthimages.net,*.msftauth.net,*.pkgs.dev.azure.com,*.queue.core.windows.net,*.table.core.windows.net,*.visualstudio.com,*.vsassets.io,*.vsblob.visualstudio.com,*.vsrm.dev.azure.com,*.vssps.visualstudio.com,aex.dev.azure.com,aexus.dev.azure.com,aka.ms,api.github.com,config.edge.skype.com,copilot-proxy.githubusercontent.com,dc.services.visualstudio.com,dev.azure.com,github.com,graph.microsoft.com,login.live.com,login.microsoftonline.com,login.windows.net,management.azure.com,pkgs.dev.azure.com,rt.services.visualstudio.com,vsrm.dev.azure.com,vssps.dev.azure.com,vstoken.dev.azure.com" \
-        --network-isolation \
-        --image-tag "0.27.32" \
+      sudo -E "$(Pipeline.Workspace)/awf/awf" \
+        --allow-domains "*.applicationinsights.azure.com,*.blob.core.windows.net,*.copilot.github.com,*.dev.azure.com,*.github.com,*.githubcopilot.com,*.githubusercontent.com,*.in.applicationinsights.azure.com,*.msauth.net,*.msauthimages.net,*.msftauth.net,*.pkgs.dev.azure.com,*.queue.core.windows.net,*.table.core.windows.net,*.visualstudio.com,*.vsassets.io,*.vsblob.visualstudio.com,*.vsrm.dev.azure.com,*.vssps.visualstudio.com,aex.dev.azure.com,aexus.dev.azure.com,aka.ms,api.github.com,config.edge.skype.com,copilot-proxy.githubusercontent.com,dc.services.visualstudio.com,dev.azure.com,github.com,graph.microsoft.com,host.docker.internal,login.live.com,login.microsoftonline.com,login.windows.net,management.azure.com,pkgs.dev.azure.com,rt.services.visualstudio.com,vsrm.dev.azure.com,vssps.dev.azure.com,vstoken.dev.azure.com" \
         --skip-pull \
         --env-all \
         --container-workdir "$(Build.SourcesDirectory)" \

@@ -63,11 +63,11 @@
 use anyhow::Result;
 use std::path::Path;
 
+use super::common::PerJobPools;
 use super::common::{
     self, ADO_BUILD_ID_SUFFIX, AWF_VERSION, HEADER_MARKER, MCPG_CONTAINER_NAME, MCPG_DOMAIN,
     MCPG_IMAGE, MCPG_PORT, MCPG_VERSION, image_ref,
 };
-use super::common::PerJobPools;
 use super::extensions::{CompileContext, CompilerExtension, Declarations, Extension, McpgConfig};
 use super::ir::condition::{Condition, Expr};
 use super::ir::env::EnvValue;
@@ -80,6 +80,9 @@ use super::ir::step::{
 use super::ir::tasks::azure_cli::{AzureCli, ScriptLocation, ScriptType};
 use super::ir::tasks::docker_installer::DockerInstaller;
 use super::ir::tasks::download_package::DownloadPackage;
+use super::ir::tasks::download_pipeline_artifact::{
+    ArtifactSource, DownloadPipelineArtifact, RunVersion,
+};
 use super::ir::tasks::manual_validation::{ManualValidation, OnTimeout};
 use super::ir::tasks::nuget_authenticate::NuGetAuthenticate;
 use super::ir::{
@@ -87,8 +90,9 @@ use super::ir::{
     PrTrigger, RepositoryResource, Resources, Schedule, Triggers,
 };
 use super::types::{
-    ApprovalConfig, ApprovalOnTimeout, CheckoutFetchOpts, FrontMatter, OnConfig, PrMode,
-    ProviderToken, Repository as RepoCfg, SELF_CHECKOUT_ALIAS, SupplyChainConfig,
+    ApprovalConfig, ApprovalOnTimeout, CheckoutFetchOpts, FrontMatter, OnConfig,
+    PipelineArtifactConfig, PrMode, ProviderToken, Repository as RepoCfg, SELF_CHECKOUT_ALIAS,
+    SupplyChainConfig,
 };
 
 /// The `safe-outputs:` key for the create-pull-request tool. Matches the kebab
@@ -449,19 +453,13 @@ pub(crate) fn build_canonical_jobs(
             front_matter,
             cfg,
             &p,
-            &SafeOutputsVariant::automatic(
-                &reviewed,
-                create_pr_configured && !create_pr_reviewed,
-            ),
+            &SafeOutputsVariant::automatic(&reviewed, create_pr_configured && !create_pr_reviewed),
         )?);
         jobs.push(build_safeoutputs_job(
             front_matter,
             cfg,
             &p,
-            &SafeOutputsVariant::reviewed(
-                &reviewed,
-                create_pr_configured && create_pr_reviewed,
-            ),
+            &SafeOutputsVariant::reviewed(&reviewed, create_pr_configured && create_pr_reviewed),
         )?);
     }
     if let Some(teardown) = build_teardown_job(front_matter, cfg, &p)? {
@@ -1263,7 +1261,11 @@ fn build_detection_job(
         condition: Some(Condition::Always),
     }));
 
-    let mut job = Job::new(prefix.id("Detection")?, "Detection", cfg.pools.detection.clone());
+    let mut job = Job::new(
+        prefix.id("Detection")?,
+        "Detection",
+        cfg.pools.detection.clone(),
+    );
     job.steps = steps;
     Ok(job)
 }
@@ -1385,9 +1387,7 @@ fn create_pr_prepare_repos(
     for alias in &front_matter.checkout {
         repos.push(PreparePrBaseRepo {
             dir: format!("{working_directory}/{alias}"),
-            source_ref: repo_refs
-                .get(alias)
-                .cloned(),
+            source_ref: repo_refs.get(alias).cloned(),
             target_branch: pr_cfg.resolve_target_branch(alias, &repo_refs),
         });
     }
@@ -1762,7 +1762,11 @@ fn build_teardown_job(
     for user_step_val in &front_matter.teardown {
         steps.push(Step::RawYaml(step_to_raw_yaml_string(user_step_val)?));
     }
-    let mut job = Job::new(prefix.id("Teardown")?, "Teardown", cfg.pools.teardown.clone());
+    let mut job = Job::new(
+        prefix.id("Teardown")?,
+        "Teardown",
+        cfg.pools.teardown.clone(),
+    );
     job.steps = steps;
     Ok(Some(job))
 }
@@ -2001,7 +2005,11 @@ fi\n"
 
     steps.push(Step::Bash(conclusion_step));
 
-    let mut job = Job::new(prefix.id("Conclusion")?, "Conclusion", cfg.pools.conclusion.clone());
+    let mut job = Job::new(
+        prefix.id("Conclusion")?,
+        "Conclusion",
+        cfg.pools.conclusion.clone(),
+    );
     job.variables = conclusion_variables;
     job.steps = steps;
     // Keep Conclusion's "run regardless of upstream result" behavior, but do
@@ -2229,6 +2237,81 @@ pub(crate) fn download_package_step(
         .into_step()
 }
 
+/// Download one pinned candidate pipeline artifact to a compiler-owned path.
+///
+/// User-controlled project and artifact values remain typed task inputs; only
+/// validated positive numeric IDs are converted to task-input strings.
+pub(crate) fn download_candidate_artifact_step(
+    config: &PipelineArtifactConfig,
+    display: impl Into<String>,
+    target_path: &str,
+) -> TaskStep {
+    DownloadPipelineArtifact::new(target_path)
+        .source(ArtifactSource::Specific)
+        .project(config.project.as_str())
+        .pipeline(config.definition_id.to_string())
+        .run_version(RunVersion::Specific)
+        .run_id(config.run_id.to_string())
+        .artifact(config.artifact.as_str())
+        .with_display_name(display)
+        .into_step()
+}
+
+/// Build the staging script for one payload from a pinned candidate artifact.
+///
+/// The producer contract is `schema: ado-aw/candidate-artifact/1` with numeric
+/// `producer_definition_id` and `producer_build_id` fields. The script requires
+/// exactly one payload, checksum manifest, and provenance document; verifies an
+/// exact filename checksum entry; and validates producer identity before
+/// running `tail`.
+///
+/// SAFETY: shell-interpolated path, payload, and tail arguments must be
+/// compiler-owned constants. Producer IDs are validated positive `u64`s.
+pub(crate) fn stage_candidate_artifact_payload_bash(
+    config: &PipelineArtifactConfig,
+    staging: &str,
+    dest_dir: &str,
+    payload: &str,
+    tail: &str,
+) -> String {
+    format!(
+        "set -eo pipefail\n\
+         STAGING=\"{staging}\"\n\
+         DEST=\"{dest_dir}\"\n\
+         PAYLOAD_NAME='{payload}'\n\
+         mkdir -p \"$DEST\"\n\
+         \n\
+         locate_one() {{\n  \
+           local name=\"$1\"\n  \
+           mapfile -d '' -t matches < <(find \"$STAGING\" -type f -name \"$name\" -print0)\n  \
+           if [ \"${{#matches[@]}}\" -ne 1 ]; then\n    \
+             echo \"##vso[task.complete result=Failed]Expected exactly one $name in candidate artifact, found ${{#matches[@]}}\" >&2\n    \
+             exit 1\n  \
+           fi\n  \
+           printf '%s' \"${{matches[0]}}\"\n\
+         }}\n\
+         \n\
+         PAYLOAD=\"$(locate_one \"$PAYLOAD_NAME\")\"\n\
+         CHK=\"$(locate_one checksums.txt)\"\n\
+         PROVENANCE=\"$(locate_one provenance.json)\"\n\
+         cp \"$PAYLOAD\" \"$DEST/$PAYLOAD_NAME\"\n\
+         cp \"$CHK\" \"$DEST/checksums.txt\"\n\
+         cp \"$PROVENANCE\" \"$DEST/provenance.json\"\n\
+         \n\
+         echo \"Verifying exact checksum entry for $PAYLOAD_NAME...\"\n\
+         cd \"$DEST\" || exit 1\n\
+         awk -v name=\"$PAYLOAD_NAME\" '\n  \
+           {{ candidate=$2; sub(/^\\*/, \"\", candidate); if (candidate == name) {{ count++; line=$0 }} }}\n  \
+           END {{ if (count != 1) exit 1; print line }}\n\
+         ' checksums.txt | sha256sum -c -\n\
+         \n\
+         python3 -c 'import json,sys; p=json.load(open(sys.argv[1], encoding=\"utf-8\")); expected_definition=int(sys.argv[2]); expected_build=int(sys.argv[3]); p.get(\"schema\") == \"ado-aw/candidate-artifact/1\" or sys.exit(\"candidate provenance schema must be ado-aw/candidate-artifact/1\"); definition=p.get(\"producer_definition_id\"); build=p.get(\"producer_build_id\"); (type(definition) is int and definition == expected_definition) or sys.exit(f\"candidate producer_definition_id mismatch: expected {{expected_definition}}, got {{definition!r}}\"); (type(build) is int and build == expected_build) or sys.exit(f\"candidate producer_build_id mismatch: expected {{expected_build}}, got {{build!r}}\"); diagnostic={{\"schema\": p[\"schema\"], \"producer_definition_id\": definition, \"producer_build_id\": build}}; diagnostic.update({{key: p[key] for key in (\"repository\", \"source_ref\", \"source_version\", \"reason\", \"compiler_version\", \"awf_version\") if key in p}}); print(\"Validated candidate provenance:\"); print(json.dumps(diagnostic, indent=2, sort_keys=True))' provenance.json {definition_id} {run_id}\n\
+         {tail}",
+        definition_id = config.definition_id,
+        run_id = config.run_id,
+    )
+}
+
 /// Bash body that locates a payload file inside a `DownloadPackage@1` staging
 /// directory — handling both the extracted-tree and raw-`.nupkg` delivery
 /// shapes — copies it (plus `checksums.txt`) into `dest_dir`, then runs the
@@ -2294,6 +2377,28 @@ fn download_compiler_step(
     compiler_version: &str,
     supply_chain: Option<&SupplyChainConfig>,
 ) -> Vec<Step> {
+    if let Some(artifact) = supply_chain.and_then(|sc| sc.pipeline_artifact.as_ref()) {
+        let dest = "$(Pipeline.Workspace)/agentic-pipeline-compiler";
+        let staging = "$(Pipeline.Workspace)/ado-aw-candidate/compiler";
+        let tail = "mv ado-aw-linux-x64 ado-aw\n\
+                    chmod +x ado-aw\n";
+        let body = stage_candidate_artifact_payload_bash(
+            artifact,
+            staging,
+            dest,
+            "ado-aw-linux-x64",
+            tail,
+        );
+        return vec![
+            Step::Task(download_candidate_artifact_step(
+                artifact,
+                "Download candidate artifact for agentic pipeline compiler",
+                staging,
+            )),
+            Step::Bash(bash("Stage candidate agentic pipeline compiler", body)),
+        ];
+    }
+
     if let Some(feed) = supply_chain.and_then(|sc| sc.feed.as_ref()) {
         let dest = "$(Pipeline.Workspace)/agentic-pipeline-compiler";
         let staging = "$(Pipeline.Workspace)/agentic-pipeline-compiler/_pkg";
@@ -2432,6 +2537,28 @@ fn prepare_agent_prompt_step(agent_content: &str) -> Result<BashStep> {
 }
 
 fn download_awf_step(supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
+    if let Some(artifact) = supply_chain.and_then(|sc| sc.pipeline_artifact.as_ref()) {
+        let dest = "$(Pipeline.Workspace)/awf";
+        let staging = "$(Pipeline.Workspace)/ado-aw-candidate/awf";
+        let tail = "mv awf-linux-x64 awf\n\
+                    chmod +x awf\n\
+                    echo \"##vso[task.prependpath]$(Pipeline.Workspace)/awf\"\n\
+                    ./awf --version\n";
+        let body =
+            stage_candidate_artifact_payload_bash(artifact, staging, dest, "awf-linux-x64", tail);
+        return vec![
+            Step::Task(download_candidate_artifact_step(
+                artifact,
+                "Download candidate artifact for AWF",
+                staging,
+            )),
+            Step::Bash(bash(
+                "Stage candidate AWF (Agentic Workflow Firewall)",
+                body,
+            )),
+        ];
+    }
+
     if let Some(feed) = supply_chain.and_then(|sc| sc.feed.as_ref()) {
         let dest = "$(Pipeline.Workspace)/awf";
         let staging = "$(Pipeline.Workspace)/awf/_pkg";
@@ -2483,10 +2610,7 @@ fn download_awf_step(supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
     ))]
 }
 
-fn prepull_images_step(
-    include_mcpg: bool,
-    supply_chain: Option<&SupplyChainConfig>,
-) -> Vec<Step> {
+fn prepull_images_step(include_mcpg: bool, supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
     let registry = supply_chain.and_then(|sc| sc.registry.as_ref());
     let registry_base = registry.map(|r| r.name.as_str());
 
@@ -3838,7 +3962,16 @@ mod tests {
             byom_exclude_keys: vec![],
             detection_provider_env: vec![],
         };
-        build_canonical_jobs(&fm, &extensions, &cfg, &ext_setup_steps, &ext_agent_prepare, &ext_agent_conditions, None).unwrap()
+        build_canonical_jobs(
+            &fm,
+            &extensions,
+            &cfg,
+            &ext_setup_steps,
+            &ext_agent_prepare,
+            &ext_agent_conditions,
+            None,
+        )
+        .unwrap()
     }
 
     fn job_pool_by_id<'a>(jobs: &'a [super::super::ir::job::Job], id: &str) -> Option<&'a Pool> {

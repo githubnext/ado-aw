@@ -26,6 +26,7 @@
     "build:prepare-pr-base": "ncc build src/prepare-pr-base/index.ts -o .ado-build/prepare-pr-base -m -t && node -e \"const fs=require('node:fs'); fs.copyFileSync('.ado-build/prepare-pr-base/index.js','prepare-pr-base.js'); fs.rmSync('.ado-build/prepare-pr-base',{recursive:true,force:true});\"",
     "build:executor-e2e": "ncc build src/executor-e2e/index.ts -o .ado-build/executor-e2e -m -t && node -e \"const fs=require('node:fs'); fs.mkdirSync('test-bin',{recursive:true}); fs.copyFileSync('.ado-build/executor-e2e/index.js','test-bin/executor-e2e.js'); fs.rmSync('.ado-build/executor-e2e',{recursive:true,force:true});\"",
     "build:trigger-e2e": "ncc build src/trigger-e2e/index.ts -o .ado-build/trigger-e2e -m -t && node -e \"const fs=require('node:fs'); fs.mkdirSync('test-bin',{recursive:true}); fs.copyFileSync('.ado-build/trigger-e2e/index.js','test-bin/trigger-e2e.js'); fs.rmSync('.ado-build/trigger-e2e',{recursive:true,force:true});\"",
+    "build:compiler-smoke-e2e": "ncc build src/compiler-smoke-e2e/index.ts -o .ado-build/compiler-smoke-e2e -m -t && node -e \"const fs=require('node:fs'); fs.mkdirSync('test-bin',{recursive:true}); fs.copyFileSync('.ado-build/compiler-smoke-e2e/index.js','test-bin/compiler-smoke-e2e.js'); fs.rmSync('.ado-build/compiler-smoke-e2e',{recursive:true,force:true});\"",
     "build:check": "ls -lh gate.js && wc -c gate.js",
     "codegen": "node -e \"require('node:fs').mkdirSync('schema', { recursive: true })\" && cargo run --quiet --manifest-path ../../Cargo.toml -- export-gate-schema --output schema/gate-spec.schema.json && npx json2ts schema/gate-spec.schema.json -o src/shared/types.gen.ts --bannerComment \"// AUTO-GENERATED from Rust IR via cargo run -- export-gate-schema. Do not edit; run npm run codegen.\" && cargo run --quiet --manifest-path ../../Cargo.toml -- export-fact-catalog --output src/trigger-e2e/fact-catalog.gen.json",
     "test": "vitest run",
@@ -35,7 +36,8 @@
   },
   "dependencies": {
     "azure-devops-node-api": "^14.1.0",
-    "picomatch": "^4.0.4"
+    "picomatch": "^4.0.4",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@types/node": "^20.19.39",

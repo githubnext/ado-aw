@@ -28,6 +28,10 @@ mirror and every AgentPlayground test repository carry root
 `es-metadata.yml` inventory metadata so repository inventory automation keeps
 them enabled.
 
+The PR/nightly compiler-candidate definitions are tracked separately in
+[`tests/compiler-smoke-e2e/REGISTERED.md`](../compiler-smoke-e2e/REGISTERED.md);
+they do not replace or repoint the release-backed definitions above.
+
 ## Retired definitions
 
 The cutover deleted legacy definitions `2506`, `2513` through `2538`, and
