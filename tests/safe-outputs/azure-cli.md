@@ -40,10 +40,15 @@ Steps (run each in turn using your bash tool):
      -o tsv
    ```
 
-   Capture the combined stdout/stderr (truncated to 400 characters if
-   longer) for the safe-output context below.
+   Do not suppress or overwrite the command's exit status. Capture the
+   combined stdout/stderr (truncated to 400 characters if longer) for the
+   safe-output context below. Treat a non-zero exit or empty project list as
+   a failure.
 
-3. Call exactly one safe-output tool, `noop`, with:
+3. If either command fails, call `report-incomplete` exactly once with the
+   failing command and its captured output, then stop. Do not call `noop`.
+
+4. Otherwise, call exactly one safe-output tool, `noop`, with:
 
    - context: a brief one-line proof-of-life containing the az version
      string and the captured project-list output, prefixed with

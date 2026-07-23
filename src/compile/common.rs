@@ -1882,6 +1882,23 @@ pub fn generate_acquire_ado_token(service_connection: Option<&str>, variable_nam
     }
 }
 
+/// Generate the Agent-step ADO environment entry for `permissions.read`.
+///
+/// The read-scoped token is exposed as `AZURE_DEVOPS_EXT_PAT`, the standard
+/// variable consumed by `az devops` and other read-only ADO clients inside the
+/// AWF sandbox. The write-scoped token and `System.AccessToken` are deliberately
+/// absent: Stage 1 never receives either write-capable credential.
+///
+/// Returns entries without an `env:` header because they are composed into the
+/// engine environment before the typed Agent step is built.
+pub fn generate_agent_ado_env(read_service_connection: Option<&str>) -> String {
+    if read_service_connection.is_some() {
+        "AZURE_DEVOPS_EXT_PAT: $(SC_READ_TOKEN)".to_string()
+    } else {
+        String::new()
+    }
+}
+
 /// Generate the env block entries for the executor step (Stage 3 Execution).
 ///
 /// Always emits a non-empty `env:` block containing at minimum
@@ -5373,7 +5390,7 @@ safe-outputs:
         assert!(!result.contains("SC_READ_TOKEN"));
     }
 
-    // ─── engine env / generate_executor_ado_env ────────────────────────────
+    // ─── engine env / agent + executor ADO env ─────────────────────────────
 
     #[test]
     fn test_engine_env() {
@@ -5386,8 +5403,21 @@ safe-outputs:
         );
         assert!(
             !result.contains("AZURE_DEVOPS_EXT_PAT"),
-            "ADO token is handled by MCPG, not engine env"
+            "base engine env must not own the ADO token; the pipeline adds it after resolving permissions.read"
         );
+    }
+
+    #[test]
+    fn test_generate_agent_ado_env_with_read_connection() {
+        let result = generate_agent_ado_env(Some("read-sc"));
+        assert_eq!(result, "AZURE_DEVOPS_EXT_PAT: $(SC_READ_TOKEN)");
+        assert!(!result.contains("SC_WRITE_TOKEN"));
+        assert!(!result.contains("SYSTEM_ACCESSTOKEN"));
+    }
+
+    #[test]
+    fn test_generate_agent_ado_env_without_read_connection() {
+        assert!(generate_agent_ado_env(None).is_empty());
     }
 
     #[test]

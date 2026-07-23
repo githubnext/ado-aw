@@ -28,6 +28,8 @@ export interface FixturePaths {
   readonly relMd: string;
   /** Repo-relative path to the compiled lock file, e.g. tests/safe-outputs/canary.lock.yml. */
   readonly relLock: string;
+  /** Whether the Agent step must receive the read-scoped ADO token. */
+  readonly requiresAgentReadToken: boolean;
   /** Observable ADO build tags that must exist after this child succeeds. */
   readonly requiredBuildTags?: (buildId: number) => readonly string[];
 }
@@ -47,6 +49,7 @@ export function fixturePaths(name: FixtureName): FixturePaths {
     name,
     relMd: `${directory}/${name}.md`,
     relLock: `${directory}/${name}.lock.yml`,
+    requiresAgentReadToken: name !== "custom-safe-output",
     requiredBuildTags,
   };
 }

@@ -244,6 +244,15 @@ pub(crate) fn build_pipeline_context(
     if !agent_env.is_empty() {
         engine_env = format!("{engine_env}\n{agent_env}");
     }
+    let agent_ado_env = common::generate_agent_ado_env(
+        front_matter
+            .permissions
+            .as_ref()
+            .and_then(|permissions| permissions.read.as_deref()),
+    );
+    if !agent_ado_env.is_empty() {
+        engine_env = format!("{engine_env}\n{agent_ado_env}");
+    }
 
     // AWF mounts + allowlist
     let allowed_domains =

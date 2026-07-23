@@ -17,7 +17,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { AdoRest } from "./ado-rest.js";
-import { assertNoForbiddenReleaseUrls, assertPipelineArtifactValues } from "./assertions.js";
+import {
+  assertAdoTokenIsolation,
+  assertNoForbiddenReleaseUrls,
+  assertPipelineArtifactValues,
+} from "./assertions.js";
 import { candidateRef, FIXTURE_NAMES, loadConfig, type CompilerSmokeConfig } from "./config.js";
 import { compileAndCheck } from "./compile-cli.js";
 import { ALL_FIXTURES, allowedChangedPaths } from "./fixtures.js";
@@ -86,6 +90,7 @@ async function compileFixtures(
 
     const yamlText = await readFile(join(worktreeDir, fixture.relLock), "utf8");
     assertNoForbiddenReleaseUrls(yamlText, fixture.name);
+    assertAdoTokenIsolation(yamlText, fixture.name, fixture.requiresAgentReadToken);
     assertPipelineArtifactValues(yamlText, fixture.name, {
       project: config.project,
       pipeline: String(config.definitionId),

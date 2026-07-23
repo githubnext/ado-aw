@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { assertNoForbiddenReleaseUrls, assertPipelineArtifactValues } from "../assertions.js";
+import {
+  assertAdoTokenIsolation,
+  assertNoForbiddenReleaseUrls,
+  assertPipelineArtifactValues,
+} from "../assertions.js";
 
 const EXPECTED = {
   project: "AgentPlayground",
@@ -25,6 +29,76 @@ steps:
       artifact: ${values.artifact}
 `;
 }
+
+function agentTokenYaml(opts: {
+  agentReadToken?: string;
+  agentExtraEnv?: string;
+  detectionExtraEnv?: string;
+} = {}): string {
+  const agentReadToken =
+    opts.agentReadToken === undefined
+      ? ""
+      : `\n          AZURE_DEVOPS_EXT_PAT: ${opts.agentReadToken}`;
+  return `
+jobs:
+  - job: Agent
+    steps:
+      - bash: echo agent
+        displayName: Run copilot (AWF network isolated)
+        env:
+          GITHUB_TOKEN: $(GITHUB_TOKEN)${agentReadToken}${opts.agentExtraEnv ?? ""}
+  - job: Detection
+    steps:
+      - bash: echo detection
+        displayName: Run threat analysis (AWF network isolated)
+        env:
+          GITHUB_TOKEN: $(GITHUB_TOKEN)${opts.detectionExtraEnv ?? ""}
+`;
+}
+
+describe("assertAdoTokenIsolation", () => {
+  it("accepts the read-scoped Agent mapping while keeping Detection isolated", () => {
+    expect(() =>
+      assertAdoTokenIsolation(agentTokenYaml({ agentReadToken: "$(SC_READ_TOKEN)" }), "canary", true),
+    ).not.toThrow();
+  });
+
+  it("rejects a missing Agent read-token mapping", () => {
+    expect(() => assertAdoTokenIsolation(agentTokenYaml(), "canary", true)).toThrow(
+      /read-token contract mismatch/,
+    );
+  });
+
+  it("accepts a workflow that does not request read permissions", () => {
+    expect(() => assertAdoTokenIsolation(agentTokenYaml(), "custom-safe-output", false)).not.toThrow();
+  });
+
+  it("rejects a write-scoped token on the Agent", () => {
+    expect(() =>
+      assertAdoTokenIsolation(
+        agentTokenYaml({
+          agentReadToken: "$(SC_READ_TOKEN)",
+          agentExtraEnv: "\n          SC_WRITE_TOKEN: $(SC_WRITE_TOKEN)",
+        }),
+        "canary",
+        true,
+      ),
+    ).toThrow(/Agent must not receive SC_WRITE_TOKEN/);
+  });
+
+  it("rejects any ADO token on Detection", () => {
+    expect(() =>
+      assertAdoTokenIsolation(
+        agentTokenYaml({
+          agentReadToken: "$(SC_READ_TOKEN)",
+          detectionExtraEnv: "\n          AZURE_DEVOPS_EXT_PAT: $(SC_READ_TOKEN)",
+        }),
+        "canary",
+        true,
+      ),
+    ).toThrow(/Detection must not receive AZURE_DEVOPS_EXT_PAT/);
+  });
+});
 
 describe("assertNoForbiddenReleaseUrls", () => {
   it("passes for YAML with no forbidden release URL", () => {

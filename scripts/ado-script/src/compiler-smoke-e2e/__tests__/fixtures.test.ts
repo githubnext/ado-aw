@@ -17,6 +17,7 @@ describe("fixturePaths", () => {
       name: "canary",
       relMd: "tests/safe-outputs/canary.md",
       relLock: "tests/safe-outputs/canary.lock.yml",
+      requiresAgentReadToken: true,
     });
   });
 
@@ -28,6 +29,7 @@ describe("fixturePaths", () => {
     expect(fixture.relLock).toBe(
       "tests/compiler-smoke-e2e/custom-safe-output.lock.yml",
     );
+    expect(fixture.requiresAgentReadToken).toBe(false);
     expect(fixture.requiredBuildTags?.(42)).toEqual([
       "ado-aw-custom-script-42",
       "ado-aw-custom-job-42",

@@ -497,6 +497,10 @@ Do something.
         compiled.contains("my-read-sc"),
         "Compiled output should contain the read service connection name"
     );
+    assert!(
+        compiled.contains("AZURE_DEVOPS_EXT_PAT: $(SC_READ_TOKEN)"),
+        "Compiled output should project the read-scoped token into the Agent sandbox"
+    );
 
     // Should contain write token acquisition (SC_WRITE_TOKEN)
     assert!(
@@ -772,11 +776,92 @@ Do something.
         "Compiled output should contain SC_READ_TOKEN"
     );
     assert!(
+        compiled.contains("AZURE_DEVOPS_EXT_PAT: $(SC_READ_TOKEN)"),
+        "Read-only permissions should project the token into the Agent sandbox"
+    );
+    assert!(
         !compiled.contains("SC_WRITE_TOKEN"),
         "Compiled output should not contain SC_WRITE_TOKEN when only read is configured"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_permissions_read_token_contract_for_all_targets() {
+    for target in [None, Some("1es"), Some("job"), Some("stage")] {
+        let label = target.unwrap_or("standalone");
+        let target_line = target
+            .map(|value| format!("target: {value}\n"))
+            .unwrap_or_default();
+        let source = format!(
+            r#"---
+name: "Read Token Contract {label}"
+description: "Ensures Stage 1 receives only the read-scoped ADO token"
+{target_line}permissions:
+  read: agent-read
+  write: executor-write
+safe-outputs:
+  noop: {{}}
+---
+
+## Test
+
+Call noop.
+"#
+        );
+        let (ok, compiled, stderr) =
+            compile_inline_source(&format!("read-token-contract-{label}"), &source);
+        assert!(ok, "{label}: compilation failed:\n{stderr}");
+
+        let document = parse_compiled_yaml(&compiled);
+        let agent = find_job_mapping_by_display_name(&document, "Agent")
+            .unwrap_or_else(|| panic!("{label}: missing Agent job"));
+        let run_agent = find_bash_step_containing(agent, "=== Running AI agent with AWF")
+            .unwrap_or_else(|| panic!("{label}: missing Agent execution step"));
+        let agent_env = run_agent
+            .get(yaml_key("env"))
+            .and_then(|value| value.as_mapping())
+            .unwrap_or_else(|| panic!("{label}: Agent execution step must have an env mapping"));
+
+        assert_eq!(
+            agent_env
+                .get(yaml_key("AZURE_DEVOPS_EXT_PAT"))
+                .and_then(|value| value.as_str()),
+            Some("$(SC_READ_TOKEN)"),
+            "{label}: permissions.read must project SC_READ_TOKEN into the Agent sandbox"
+        );
+        for forbidden in ["SC_READ_TOKEN", "SC_WRITE_TOKEN", "SYSTEM_ACCESSTOKEN"] {
+            assert!(
+                !agent_env.contains_key(yaml_key(forbidden)),
+                "{label}: Agent execution env must not expose {forbidden}"
+            );
+        }
+
+        let detection = find_job_mapping_by_display_name(&document, "Detection")
+            .unwrap_or_else(|| panic!("{label}: missing Detection job"));
+        let run_detection = find_bash_step_containing(
+            detection,
+            "# Run threat analysis with AWF network isolation",
+        )
+        .unwrap_or_else(|| panic!("{label}: missing Detection execution step"));
+        if let Some(detection_env) = run_detection
+            .get(yaml_key("env"))
+            .and_then(|value| value.as_mapping())
+        {
+            for forbidden in [
+                "AZURE_DEVOPS_EXT_PAT",
+                "SC_READ_TOKEN",
+                "SC_WRITE_TOKEN",
+                "SYSTEM_ACCESSTOKEN",
+            ] {
+                assert!(
+                    !detection_env.contains_key(yaml_key(forbidden)),
+                    "{label}: Detection execution env must not expose {forbidden}"
+                );
+            }
+        }
+    }
 }
 
 /// Test that the 1ES fixture compiles correctly with no unreplaced markers
@@ -3433,7 +3518,9 @@ fn find_job_mapping_by_display_name<'a>(
 ) -> Option<&'a serde_yaml::Mapping> {
     match value {
         serde_yaml::Value::Mapping(map) => {
-            if map.get(yaml_key("displayName")).and_then(|v| v.as_str()) == Some(display_name) {
+            if map.contains_key(yaml_key("job"))
+                && map.get(yaml_key("displayName")).and_then(|v| v.as_str()) == Some(display_name)
+            {
                 return Some(map);
             }
             map.values()
@@ -3450,19 +3537,31 @@ fn find_bash_step_containing<'a>(
     job: &'a serde_yaml::Mapping,
     needle: &str,
 ) -> Option<&'a serde_yaml::Mapping> {
-    job.get(yaml_key("steps"))
-        .and_then(|v| v.as_sequence())
-        .and_then(|steps| {
-            steps.iter().find_map(|step| {
-                let map = step.as_mapping()?;
-                let bash = map.get(yaml_key("bash")).and_then(|v| v.as_str())?;
-                if bash.contains(needle) {
-                    Some(map)
-                } else {
-                    None
-                }
-            })
-        })
+    job.values()
+        .find_map(|value| find_bash_step_containing_value(value, needle))
+}
+
+fn find_bash_step_containing_value<'a>(
+    value: &'a serde_yaml::Value,
+    needle: &str,
+) -> Option<&'a serde_yaml::Mapping> {
+    match value {
+        serde_yaml::Value::Mapping(map) => {
+            if map
+                .get(yaml_key("bash"))
+                .and_then(|value| value.as_str())
+                .is_some_and(|bash| bash.contains(needle))
+            {
+                return Some(map);
+            }
+            map.values()
+                .find_map(|child| find_bash_step_containing_value(child, needle))
+        }
+        serde_yaml::Value::Sequence(items) => items
+            .iter()
+            .find_map(|child| find_bash_step_containing_value(child, needle)),
+        _ => None,
+    }
 }
 
 fn assert_named_pool_demands(pool: &serde_yaml::Mapping, expected_os: Option<&str>) {
@@ -8908,6 +9007,26 @@ fn test_smoke_failure_reporter_uses_registered_ado_names_and_staging_repo() {
             && reporter.contains("Search open issues on `jamesadevine/ado-aw-issues`"),
         "front matter and prompt must agree on the staging issue repository"
     );
+}
+
+#[test]
+fn test_azure_cli_smoke_fails_closed_when_authentication_fails() {
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("safe-outputs")
+        .join("azure-cli.md");
+    let fixture = fs::read_to_string(fixture_path).expect("read azure-cli smoke fixture");
+
+    for contract in [
+        "If either command fails",
+        "call `report-incomplete` exactly once",
+        "Do not call `noop`",
+    ] {
+        assert!(
+            fixture.contains(contract),
+            "Azure CLI smoke must fail closed on an auth regression; missing contract: {contract}"
+        );
+    }
 }
 
 // ─── Custom safe-output (imports/scripts/jobs) acceptance matrix (#1473) ─────

@@ -294,8 +294,9 @@ agents. Set `permissions.write` only when you need:
 
 ### Security Model
 
-- **`permissions.read`**: Mints a read-only ADO-scoped token given to the
-  agent inside the AWF sandbox (Stage 1). The agent can query ADO APIs but
+- **`permissions.read`**: Mints a read-only ADO-scoped token and maps it as
+  `AZURE_DEVOPS_EXT_PAT: $(SC_READ_TOKEN)` on the Agent step. AWF carries that
+  secret into the Stage 1 sandbox, where the agent can query ADO APIs but
   cannot write.
 - **`permissions.write` (optional)**: Mints a write-capable ADO-scoped token
   used **only** by the executor in Stage 3 (`SafeOutputs` job). Overrides

@@ -24,18 +24,33 @@ const baseEnv = {
   COMPILER_SMOKE_POLL_MS: "1",
 };
 
-function specificRunYaml(): string {
+function specificRunYaml(agentReadToken: boolean): string {
+  const readTokenEnv = agentReadToken
+    ? "\n          AZURE_DEVOPS_EXT_PAT: $(SC_READ_TOKEN)"
+    : "";
   return `
-steps:
-  - task: DownloadPipelineArtifact@2
-    inputs:
-      targetPath: in
-      source: specific
-      project: AgentPlayground
-      pipeline: '2560'
-      runVersion: specific
-      runId: '630001'
-      artifact: ado-aw-candidate
+jobs:
+  - job: Agent
+    steps:
+      - bash: echo agent
+        displayName: Run copilot (AWF network isolated)
+        env:
+          GITHUB_TOKEN: $(GITHUB_TOKEN)${readTokenEnv}
+      - task: DownloadPipelineArtifact@2
+        inputs:
+          targetPath: in
+          source: specific
+          project: AgentPlayground
+          pipeline: '2560'
+          runVersion: specific
+          runId: '630001'
+          artifact: ado-aw-candidate
+  - job: Detection
+    steps:
+      - bash: echo detection
+        displayName: Run threat analysis (AWF network isolated)
+        env:
+          GITHUB_TOKEN: $(GITHUB_TOKEN)
 `;
 }
 
@@ -152,7 +167,9 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     ...actual,
     mkdtemp: vi.fn(async () => "C:\\tmp\\compiler-smoke-xyz"),
     readFile: vi.fn(async (path: string) => {
-      if (String(path).endsWith(".lock.yml")) return specificRunYaml();
+      if (String(path).endsWith(".lock.yml")) {
+        return specificRunYaml(!String(path).includes("custom-safe-output.lock.yml"));
+      }
       return "---\nname: fixture\n---\nBody.\n";
     }),
     writeFile: vi.fn(async () => {}),
