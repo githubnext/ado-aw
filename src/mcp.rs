@@ -200,9 +200,8 @@ async fn try_root_commit_fallback(git_dir: &std::path::Path) -> Option<String> {
 pub struct SafeOutputs {
     bounding_directory: PathBuf,
     output_directory: PathBuf,
-    /// ToolRouter is used by the rmcp framework's #[tool_handler] macro for
-    /// dispatching MCP tool calls. Clippy doesn't see this usage.
-    #[allow(dead_code)]
+    /// Runtime router used by the rmcp handler. This contains both the filtered
+    /// built-in routes and any dynamically registered custom routes.
     tool_router: ToolRouter<Self>,
 }
 
@@ -1510,7 +1509,7 @@ agent attempted work but couldn't finish (e.g., API timeouts, build failures, re
 }
 
 // Implement the server handler
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for SafeOutputs {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
@@ -2022,6 +2021,30 @@ safe-outputs:
         assert!(tool_names.contains(&"send-notification".to_string()));
         assert!(tool_names.contains(&"noop".to_string()));
         assert!(tool_names.contains(&"create-work-item".to_string()));
+        assert!(
+            <SafeOutputs as ServerHandler>::get_tool(&so, "send-notification").is_some(),
+            "the MCP protocol handler must use the runtime router, not rebuild the static router"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_server_handler_respects_runtime_tool_filter() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let enabled = vec!["noop".to_string()];
+        let so = SafeOutputs::new(
+            temp_dir.path(),
+            temp_dir.path(),
+            Some(&enabled),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(<SafeOutputs as ServerHandler>::get_tool(&so, "noop").is_some());
+        assert!(
+            <SafeOutputs as ServerHandler>::get_tool(&so, "add-build-tag").is_none(),
+            "the MCP protocol handler must honor the runtime enabled-tools filter"
+        );
     }
 
     #[tokio::test]
