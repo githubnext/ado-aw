@@ -10,6 +10,8 @@ engine:
   timeout-minutes: 15
 imports:
   - AgentPlayground/ado-aw-e2e-fixture/components/custom-build-tags/component.md@aa711dd17c4dfcde492b2bfad62e5fb1baad71f6
+safe-outputs:
+  noop: {}
 ---
 
 ## Candidate custom safe-output smoke
@@ -23,4 +25,6 @@ in this order:
 2. `candidate-job-build-tag`
    - `proof`: `candidate-smoke`
 
-Do not call any other tool. After both safe outputs are emitted, stop.
+These are actual custom MCP tools, not labels or aliases for another tool.
+Do **not** call `noop`, and do **not** substitute the built-in
+`add-build-tag` tool. After both custom safe outputs are emitted, stop.

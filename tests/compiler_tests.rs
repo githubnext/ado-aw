@@ -9091,10 +9091,16 @@ fn candidate_custom_safe_output_fixture_compiles_from_vendored_cache() {
         "--custom-phase pre",
         "--custom-phase post",
         "SYSTEM_ACCESSTOKEN: $(System.AccessToken)",
+        "\"--enabled-tools\"",
+        "\"noop\"",
     ] {
         assert!(
             compiled.contains(expected),
             "candidate output missing {expected}:\n{compiled}"
         );
     }
+    assert!(
+        !compiled.contains("\"--enabled-tools\",\n              \"add-build-tag\""),
+        "candidate fixture must not expose built-in add-build-tag:\n{compiled}"
+    );
 }
