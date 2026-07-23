@@ -1771,6 +1771,83 @@ fn build_teardown_job(
     Ok(Some(job))
 }
 
+/// Apply env vars from a tool's object-form config to `step`.
+///
+/// Each recognized key maps to an `AW_{PREFIX}_{FIELD}` env var consumed by
+/// `conclusion.js`. String fields are sanitized before being written; the
+/// `report-as-work-item` field accepts both YAML bool and string forms so the
+/// TypeScript `readBooleanEnv` helper receives a plain `"true"`/`"false"`.
+fn apply_tool_config_envs(
+    mut step: BashStep,
+    env_prefix: &str,
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> BashStep {
+    if let Some(v) = obj.get("report-as-work-item") {
+        // Accept both YAML bool and string forms.
+        // serde_json::Value::to_string() on String("false") would emit
+        // "\"false\"" (JSON-encoded with quotes), which the TypeScript
+        // readBooleanEnv would reject and default to true — silently
+        // inverting the opt-out. Use as_bool()/as_str() instead.
+        let bool_str = v
+            .as_bool()
+            .map(|b| b.to_string())
+            .or_else(|| v.as_str().map(|s| s.to_string()));
+        if let Some(s) = bool_str {
+            step = step.with_env(
+                format!("{env_prefix}_REPORT_AS_WORK_ITEM"),
+                EnvValue::Literal(s),
+            );
+        }
+    }
+    for (key, env_suffix) in &[
+        ("title-prefix", "TITLE_PREFIX"),
+        ("work-item-type", "WORK_ITEM_TYPE"),
+        ("area-path", "AREA_PATH"),
+        ("iteration-path", "ITERATION_PATH"),
+    ] {
+        if let Some(v) = obj.get(*key).and_then(|v| v.as_str()) {
+            step = step.with_env(
+                format!("{env_prefix}_{env_suffix}"),
+                EnvValue::Literal(crate::sanitize::sanitize(v)),
+            );
+        }
+    }
+    if let Some(tags) = obj.get("tags").and_then(|v| v.as_array()) {
+        let tags_json = serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string());
+        step = step.with_env(format!("{env_prefix}_TAGS"), EnvValue::Literal(tags_json));
+    }
+    step
+}
+
+/// Apply a single conclusion tool's config (from `safe-outputs.<tool_key>`)
+/// to the conclusion step's env vars. Returns the updated step.
+///
+/// `tool_key` is a kebab-case key such as `"noop"` or `"missing-tool"`.
+/// The matching env prefix is derived as `AW_{UPPER_SNAKE}` (e.g. `AW_MISSING_TOOL`).
+fn apply_conclusion_tool_config(
+    mut step: BashStep,
+    tool_key: &str,
+    tool_config: &serde_json::Value,
+) -> BashStep {
+    let env_prefix = format!("AW_{}", tool_key.to_uppercase().replace('-', "_"));
+
+    // Tool disabled entirely (e.g. `noop: false`).
+    if tool_config.is_boolean() {
+        if tool_config.as_bool() == Some(false) {
+            step = step.with_env(
+                format!("{env_prefix}_REPORT_AS_WORK_ITEM"),
+                EnvValue::Literal("false".to_string()),
+            );
+        }
+        return step;
+    }
+
+    if let Some(obj) = tool_config.as_object() {
+        step = apply_tool_config_envs(step, &env_prefix, obj);
+    }
+    step
+}
+
 fn build_conclusion_job(
     front_matter: &FrontMatter,
     cfg: &StandaloneCtx,
@@ -1874,68 +1951,8 @@ fi\n"
     // report-failure-as-work-item toggle controls whether it files at all.
     for tool_key in &["noop", "missing-tool", "missing-data"] {
         if let Some(tool_config) = front_matter.safe_outputs.get(*tool_key) {
-            let env_prefix = format!("AW_{}", tool_key.to_uppercase().replace('-', "_"));
-
-            // Tool disabled entirely (e.g. noop: false)
-            if tool_config.is_boolean() {
-                if tool_config.as_bool() == Some(false) {
-                    conclusion_step = conclusion_step.with_env(
-                        format!("{env_prefix}_REPORT_AS_WORK_ITEM"),
-                        EnvValue::Literal("false".to_string()),
-                    );
-                }
-                continue;
-            }
-
-            if let Some(obj) = tool_config.as_object() {
-                // report-as-work-item: accept both YAML bool and string forms.
-                // serde_json::Value::to_string() on String("false") would emit
-                // "\"false\"" (JSON-encoded with quotes), which the TypeScript
-                // readBooleanEnv would reject and default to true — silently
-                // inverting the opt-out. Use as_bool()/as_str() instead.
-                if let Some(v) = obj.get("report-as-work-item") {
-                    let bool_str = v
-                        .as_bool()
-                        .map(|b| b.to_string())
-                        .or_else(|| v.as_str().map(|s| s.to_string()));
-                    if let Some(s) = bool_str {
-                        conclusion_step = conclusion_step.with_env(
-                            format!("{env_prefix}_REPORT_AS_WORK_ITEM"),
-                            EnvValue::Literal(s),
-                        );
-                    }
-                }
-                if let Some(v) = obj.get("title-prefix").and_then(|v| v.as_str()) {
-                    conclusion_step = conclusion_step.with_env(
-                        format!("{env_prefix}_TITLE_PREFIX"),
-                        EnvValue::Literal(crate::sanitize::sanitize(v)),
-                    );
-                }
-                if let Some(v) = obj.get("work-item-type").and_then(|v| v.as_str()) {
-                    conclusion_step = conclusion_step.with_env(
-                        format!("{env_prefix}_WORK_ITEM_TYPE"),
-                        EnvValue::Literal(crate::sanitize::sanitize(v)),
-                    );
-                }
-                if let Some(v) = obj.get("area-path").and_then(|v| v.as_str()) {
-                    conclusion_step = conclusion_step.with_env(
-                        format!("{env_prefix}_AREA_PATH"),
-                        EnvValue::Literal(crate::sanitize::sanitize(v)),
-                    );
-                }
-                if let Some(v) = obj.get("iteration-path").and_then(|v| v.as_str()) {
-                    conclusion_step = conclusion_step.with_env(
-                        format!("{env_prefix}_ITERATION_PATH"),
-                        EnvValue::Literal(crate::sanitize::sanitize(v)),
-                    );
-                }
-                if let Some(tags) = obj.get("tags").and_then(|v| v.as_array()) {
-                    let tags_json =
-                        serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string());
-                    conclusion_step = conclusion_step
-                        .with_env(format!("{env_prefix}_TAGS"), EnvValue::Literal(tags_json));
-                }
-            }
+            conclusion_step =
+                apply_conclusion_tool_config(conclusion_step, tool_key, tool_config);
         }
     }
 
