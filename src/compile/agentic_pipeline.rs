@@ -1741,7 +1741,13 @@ fn build_custom_safe_output_job(
     cfg: &StandaloneCtx,
 ) -> Result<Job> {
     let mut steps = Vec::new();
-    steps.push(checkout_self_step(&cfg.self_checkout_fetch));
+    // ADO moves `self` to `s/<repo-name>` when a second repository is
+    // checked out unless `path` is explicit. Keep the trigger repo at the
+    // canonical `$(Build.SourcesDirectory)` root because `cfg.source_path`
+    // and every custom wrapper invocation are anchored there.
+    steps.push(checkout_self_step_at_sources_root(
+        &cfg.self_checkout_fetch,
+    ));
     if let Some(component) = &def.component {
         steps.push(Step::Checkout(CheckoutStep {
             repository: CheckoutRepo::Named(component.alias.clone()),
@@ -2834,6 +2840,14 @@ fn wire_explicit_dependencies(
 // ─────────────────────────────────────────────────────────────────────
 
 fn checkout_self_step(fetch: &CheckoutFetchOpts) -> Step {
+    checkout_self_step_with_path(fetch, None)
+}
+
+fn checkout_self_step_at_sources_root(fetch: &CheckoutFetchOpts) -> Step {
+    checkout_self_step_with_path(fetch, Some("s"))
+}
+
+fn checkout_self_step_with_path(fetch: &CheckoutFetchOpts, path: Option<&str>) -> Step {
     Step::Checkout(CheckoutStep {
         repository: CheckoutRepo::Self_,
         clean: None,
@@ -2841,7 +2855,7 @@ fn checkout_self_step(fetch: &CheckoutFetchOpts) -> Step {
         fetch_depth: fetch.depth_for_emit(),
         fetch_tags: fetch.fetch_tags,
         persist_credentials: None,
-        path: None,
+        path: path.map(str::to_string),
     })
 }
 
@@ -4820,6 +4834,14 @@ safe-outputs:
                     && path == &format!("s/{alias}")
             )
         }));
+        assert!(matches!(
+            custom.steps.first(),
+            Some(Step::Checkout(CheckoutStep {
+                repository: CheckoutRepo::Self_,
+                path: Some(path),
+                ..
+            })) if path == "s"
+        ));
         // The pinned SHA is fetched + verified via the checkout-component
         // ado-script bundle (not a raw `git checkout` that would fail on a
         // shallow pool), with the ADO bearer projected for the fetch.

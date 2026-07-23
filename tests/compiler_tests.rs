@@ -9083,6 +9083,7 @@ fn candidate_custom_safe_output_fixture_compiles_from_vendored_cache() {
     for expected in [
         "Custom_candidate_script_build_tag",
         "Custom_candidate_job_build_tag",
+        "checkout: self\n    path: s",
         "name: AgentPlayground/ado-aw-e2e-fixture",
         "type: git",
         "path: s/import_AgentPlayground_ado_aw_e2e_fixture_955c8702d066",
