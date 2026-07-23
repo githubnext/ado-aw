@@ -6,7 +6,7 @@ pool:
   name: AZS-1ES-L-Playground-ubuntu-22.04
 engine:
   id: copilot
-  model: gpt-5-mini
+  model: claude-sonnet-4.6
   timeout-minutes: 15
 imports:
   - AgentPlayground/ado-aw-e2e-fixture/components/custom-build-tags/component.md@aa711dd17c4dfcde492b2bfad62e5fb1baad71f6
