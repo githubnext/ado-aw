@@ -8986,7 +8986,9 @@ fn test_smoke_failure_reporter_uses_registered_ado_names_and_staging_repo() {
         .join("tests")
         .join("safe-outputs")
         .join("smoke-failure-reporter.md");
-    let reporter = fs::read_to_string(reporter_path).expect("read smoke-failure-reporter fixture");
+    let reporter = fs::read_to_string(reporter_path)
+        .expect("read smoke-failure-reporter fixture")
+        .replace("\r\n", "\n");
 
     for definition_name in [
         "Daily safe-output smoke canary",
@@ -9006,6 +9008,16 @@ fn test_smoke_failure_reporter_uses_registered_ado_names_and_staging_repo() {
         reporter.contains("target-repo: jamesadevine/ado-aw-issues")
             && reporter.contains("Search open issues on `jamesadevine/ado-aw-issues`"),
         "front matter and prompt must agree on the staging issue repository"
+    );
+    assert!(
+        reporter.contains(
+            "allowed-labels:\n      - pipeline-failure\n      - ado-aw-smoke"
+        ),
+        "reporter must allow only redundant copies of its two static labels"
+    );
+    assert!(
+        reporter.contains("rejects every other agent-supplied label"),
+        "reporter prompt must explain the exact-label boundary"
     );
 }
 

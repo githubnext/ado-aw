@@ -20,7 +20,9 @@ ado-aw-debug:
     labels:
       - pipeline-failure
       - ado-aw-smoke
-    allowed-labels: []
+    allowed-labels:
+      - pipeline-failure
+      - ado-aw-smoke
     max: 5
 ---
 
@@ -69,9 +71,9 @@ front-matter `name:` values from their source Markdown.
         - finish time,
         - `result` and `status`,
         - the last 50 lines of the agent stage log if accessible.
-      - `labels`: `["pipeline-failure", "ado-aw-smoke"]` are added by
-        config; do **not** pass any agent-supplied labels — the fixture
-        sets `allowed-labels: []` (default-deny).
+      - `labels`: omit this field. `["pipeline-failure", "ado-aw-smoke"]`
+        are added by config. The executor permits only redundant copies of
+        those exact labels and rejects every other agent-supplied label.
 
 ### Hard limits
 
