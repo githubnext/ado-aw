@@ -927,6 +927,7 @@ fn build_agent_job(
             fetch_depth: fetch.depth_for_emit(),
             fetch_tags: fetch.fetch_tags,
             persist_credentials: None,
+            path: None,
         }));
     }
 
@@ -1749,6 +1750,7 @@ fn build_custom_safe_output_job(
             fetch_depth: Some(1),
             fetch_tags: Some(false),
             persist_credentials: None,
+            path: Some(format!("s/{}", component.alias)),
         }));
         // Install Node + download the ado-script bundle, then fetch/verify the
         // pinned component commit via the checkout-component bundle. An ADO
@@ -2839,6 +2841,7 @@ fn checkout_self_step(fetch: &CheckoutFetchOpts) -> Step {
         fetch_depth: fetch.depth_for_emit(),
         fetch_tags: fetch.fetch_tags,
         persist_credentials: None,
+        path: None,
     })
 }
 
@@ -2850,6 +2853,7 @@ fn checkout_none_step() -> Step {
         fetch_depth: None,
         fetch_tags: None,
         persist_credentials: None,
+        path: None,
     })
 }
 
@@ -4810,8 +4814,10 @@ safe-outputs:
                 Step::Checkout(CheckoutStep {
                     repository: CheckoutRepo::Named(alias),
                     fetch_depth: Some(1),
+                    path: Some(path),
                     ..
                 }) if alias.starts_with("import_octo_tools_")
+                    && path == &format!("s/{alias}")
             )
         }));
         // The pinned SHA is fetched + verified via the checkout-component

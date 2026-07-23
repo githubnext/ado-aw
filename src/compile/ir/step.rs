@@ -194,6 +194,8 @@ pub struct CheckoutStep {
     pub fetch_depth: Option<u32>,
     pub fetch_tags: Option<bool>,
     pub persist_credentials: Option<bool>,
+    /// Checkout location relative to `$(Agent.BuildDirectory)`.
+    pub path: Option<String>,
 }
 
 /// Target of a [`CheckoutStep`].
@@ -266,6 +268,7 @@ mod tests {
             fetch_depth: None,
             fetch_tags: None,
             persist_credentials: None,
+            path: None,
         });
         assert!(chk.id().is_none());
 

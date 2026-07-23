@@ -278,6 +278,7 @@ mod tests {
             fetch_depth: None,
             fetch_tags: None,
             persist_credentials: None,
+            path: None,
         }));
         assert_eq!(j.steps.len(), 1);
     }

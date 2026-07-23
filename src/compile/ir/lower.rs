@@ -1049,6 +1049,9 @@ fn lower_checkout(c: &CheckoutStep) -> Value {
     if let Some(pc) = c.persist_credentials {
         m.insert(s("persistCredentials"), Value::Bool(pc));
     }
+    if let Some(path) = &c.path {
+        m.insert(s("path"), s(path));
+    }
     Value::Mapping(m)
 }
 
@@ -2919,12 +2922,14 @@ mod tests {
             fetch_depth: Some(1),
             fetch_tags: Some(false),
             persist_credentials: None,
+            path: Some("s/custom-checkout".to_string()),
         };
         let v = lower_checkout(&c);
         let m = v.as_mapping().unwrap();
         assert_eq!(m.get(s("checkout")).unwrap(), &s("self"));
         assert_eq!(m.get(s("fetchDepth")).unwrap(), &Value::from(1u32));
         assert_eq!(m.get(s("fetchTags")).unwrap(), &Value::Bool(false));
+        assert_eq!(m.get(s("path")).unwrap(), &s("s/custom-checkout"));
     }
 
     #[test]
@@ -2936,6 +2941,7 @@ mod tests {
             fetch_depth: Some(0),
             fetch_tags: None,
             persist_credentials: None,
+            path: None,
         };
         let v = lower_checkout(&c);
         let m = v.as_mapping().unwrap();
@@ -2951,6 +2957,7 @@ mod tests {
             fetch_depth: None,
             fetch_tags: None,
             persist_credentials: None,
+            path: None,
         };
         let v = lower_checkout(&c);
         let m = v.as_mapping().unwrap();
@@ -2967,6 +2974,7 @@ mod tests {
             fetch_depth: None,
             fetch_tags: None,
             persist_credentials: None,
+            path: None,
         };
         let v = lower_checkout(&c);
         let m = v.as_mapping().unwrap();
