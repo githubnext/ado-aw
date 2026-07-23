@@ -340,8 +340,11 @@ mod tests {
             link_type: "related".to_string(),
             comment: None,
         };
-        let result: Result<LinkWorkItemsResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = LinkWorkItemsResult::try_from(params).unwrap_err();
+        assert!(
+            err.to_string().contains("source_id must be positive"),
+            "expected error about source_id, got: {err}"
+        );
     }
 
     #[test]
@@ -352,8 +355,11 @@ mod tests {
             link_type: "related".to_string(),
             comment: None,
         };
-        let result: Result<LinkWorkItemsResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = LinkWorkItemsResult::try_from(params).unwrap_err();
+        assert!(
+            err.to_string().contains("target_id must be positive"),
+            "expected error about target_id, got: {err}"
+        );
     }
 
     #[test]
@@ -364,8 +370,11 @@ mod tests {
             link_type: "related".to_string(),
             comment: None,
         };
-        let result: Result<LinkWorkItemsResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = LinkWorkItemsResult::try_from(params).unwrap_err();
+        assert!(
+            err.to_string().contains("source_id and target_id must be different"),
+            "expected error about same ids, got: {err}"
+        );
     }
 
     #[test]
@@ -376,8 +385,11 @@ mod tests {
             link_type: "unknown".to_string(),
             comment: None,
         };
-        let result: Result<LinkWorkItemsResult, _> = params.try_into();
-        assert!(result.is_err());
+        let err = LinkWorkItemsResult::try_from(params).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid link_type"),
+            "expected error about invalid link_type, got: {err}"
+        );
     }
 
     #[test]

@@ -93,8 +93,12 @@ mod tests {
     #[test]
     fn test_params_requires_tool_name() {
         let json = r#"{"context": "why"}"#;
-        let result: Result<MissingToolParams, _> = serde_json::from_str(json);
-        assert!(result.is_err());
+        let result = serde_json::from_str::<MissingToolParams>(json);
+        let err = result.map(|_| ()).unwrap_err().to_string();
+        assert!(
+            err.contains("tool_name"),
+            "expected error about missing tool_name field, got: {err}"
+        );
     }
 
     #[tokio::test]
