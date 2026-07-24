@@ -55,9 +55,18 @@ Candidate branches are never pushed to GitHub.
 
 ## Triggers
 
-- Same-repository pull requests to `main`, path-filtered to compiler/runtime
-  code and these fixtures.
-- Nightly at 01:00 UTC on `main`.
+- Same-repository pull requests to `main` remain path-filtered to
+  compiler/runtime code and these fixtures, but definition `2559` requires a
+  collaborator comment before it queues. From the GitHub PR, use:
+
+  ```text
+  /azp run ado-aw candidate compiler smoke
+  ```
+
+  Azure Pipelines posts the resulting optional check back to the PR. It is not
+  a required check in the `main` ruleset.
+- Nightly at 01:00 UTC on `main`, with `always: true`, so the latest `main`
+  candidate is exercised daily even when no relevant files changed.
 - Manual runs for setup and diagnosis.
 
 The existing release smoke remains on its own schedule.
@@ -73,6 +82,9 @@ forks.enabled = false
 forks.allowSecrets = false
 forks.allowFullAccessToken = false
 pipelineTriggerSettings.buildsEnabledForForks = false
+isCommentRequiredForPullRequest = true
+isCommentRequiredForInternalRepoPRs = true
+commentOptionInternalRepos = all
 ```
 
 The YAML also rejects `System.PullRequest.IsFork` as defense in depth, but that
@@ -80,8 +92,8 @@ check is not the security boundary because a PR can modify its YAML. The live
 definition settings must be audited after registration and periodically from a
 trusted `main` run. Intentional PR definitions and scheduled/manual-only
 definitions are held in [`trigger-policy.json`](trigger-policy.json); the
-orchestrator always audits its own `System.DefinitionId` as PR-only in addition
-to that manifest.
+orchestrator always audits its own `System.DefinitionId` as PR-only and
+comment-gated in addition to that manifest.
 
 ## Fixed child definitions
 

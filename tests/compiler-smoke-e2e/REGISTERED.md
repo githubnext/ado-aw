@@ -36,6 +36,9 @@ forks.enabled=false
 forks.allowSecrets=false
 forks.allowFullAccessToken=false
 pipelineTriggerSettings.buildsEnabledForForks=false
+isCommentRequiredForPullRequest=true
+isCommentRequiredForInternalRepoPRs=true
+commentOptionInternalRepos=all
 ```
 
 GitHub-backed AgentPlayground definitions that intentionally validate PRs were
@@ -45,6 +48,16 @@ explicitly hardened on 2026-07-22:
 | --- | --- | --- | --- | --- |
 | `2544`, `2550` | `false` | `false` | `false` | `false` |
 | `2559` | `false` | `false` | `false` | `false` |
+
+Definition `2559` is optional on pull requests. A collaborator with repository
+write access queues it from the PR with:
+
+```text
+/azp run ado-aw candidate compiler smoke
+```
+
+Its nightly `main` schedule remains independent and runs at 01:00 UTC with
+`always: true`.
 
 Release-smoke definitions `2545`-`2549` and scheduled trigger E2E definition
 `2551` have no CI or PR trigger metadata. Their schedules/manual queues remain

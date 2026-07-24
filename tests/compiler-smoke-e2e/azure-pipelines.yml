@@ -4,6 +4,10 @@
 # publishes an immutable candidate artifact, recompiles five agentic smoke
 # workflows, stages them on a short-lived ado-aw-mirror ref, and waits for the
 # five fixed child definitions to complete.
+#
+# PR eligibility remains path-filtered below, but definition 2559 requires a
+# collaborator comment before queueing. Trigger it from GitHub with:
+# /azp run ado-aw candidate compiler smoke
 
 trigger: none
 
@@ -263,6 +267,23 @@ jobs:
               exit 1
             fi
           done
+
+          SELF_JSON="$(curl -fsS \
+            -H "Authorization: ******" \
+            "$BASE/$(System.DefinitionId)?api-version=7.1")"
+          if ! printf '%s' "$SELF_JSON" | jq -e '
+            any(
+              .triggers[]?;
+              .triggerType == "pullRequest"
+              and .isCommentRequiredForPullRequest == true
+              and .requireCommentsForNonTeamMembersOnly == false
+              and .requireCommentsForNonTeamMemberAndNonContributors == false
+              and .isCommentRequiredForInternalRepoPRs == true
+              and .commentOptionInternalRepos == "all"
+            )' >/dev/null; then
+            echo "Candidate compiler PR comment-gate policy drift detected for definition $(System.DefinitionId)." >&2
+            exit 1
+          fi
 
           for id in $SCHEDULED_ONLY_IDS; do
             JSON="$(curl -fsS \
