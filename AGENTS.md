@@ -121,7 +121,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   ├── execute.rs        # Stage 3 safe output execution
 │   ├── fuzzy_schedule.rs # Fuzzy schedule parsing
 │   ├── logging.rs        # File-based logging infrastructure
-│   ├── mcp.rs            # SafeOutputs MCP server (stdio + HTTP)
+│   ├── mcp.rs            # SafeOutputs stdio MCP server
 │   ├── mcp_author/       # Author-facing read-only MCP server for local IDE/Copilot Chat integrations
 │   │   ├── mod.rs        # Tool router + handlers for inspect/graph/deps/outputs/whatif/lint/catalog/trace/audit
 │   │   └── tests.rs      # MCP-author integration / contract tests
