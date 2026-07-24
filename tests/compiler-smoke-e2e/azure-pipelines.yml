@@ -59,6 +59,27 @@ jobs:
 
       - script: |
           set -euo pipefail
+          DIAGNOSTICS="$(Build.ArtifactStagingDirectory)/compiler-smoke-diagnostics"
+          mkdir -p "$DIAGNOSTICS"
+          jq -n \
+            --arg schema "ado-aw/candidate-smoke-diagnostics/1" \
+            --arg build_id "$(Build.BuildId)" \
+            --arg definition_id "$(System.DefinitionId)" \
+            --arg reason "$(Build.Reason)" \
+            --arg source_branch "$(Build.SourceBranch)" \
+            --arg source_version "$(Build.SourceVersion)" \
+            '{
+              schema: $schema,
+              build_id: $build_id,
+              definition_id: $definition_id,
+              reason: $reason,
+              source_branch: $source_branch,
+              source_version: $source_version
+            }' > "$DIAGNOSTICS/context.json"
+        displayName: Initialize candidate smoke diagnostics
+
+      - script: |
+          set -euo pipefail
           if [ "${SYSTEM_PULLREQUEST_ISFORK:-false}" = "True" ] || \
              [ "${SYSTEM_PULLREQUEST_ISFORK:-false}" = "true" ]; then
             echo "Fork PRs may not run this credentialed pipeline." >&2
@@ -235,12 +256,121 @@ jobs:
           set -euo pipefail
           BASE="$(System.CollectionUri)$(System.TeamProject)/_apis/build/definitions"
           POLICY="tests/compiler-smoke-e2e/trigger-policy.json"
+          DIAGNOSTICS="$(Build.ArtifactStagingDirectory)/compiler-smoke-diagnostics"
+          RAW_DIAGNOSTICS="$(Agent.TempDirectory)/compiler-smoke-policy"
+          SELF_ID="$(System.DefinitionId)"
+          mkdir -p "$RAW_DIAGNOSTICS"
+
+          fetch_definition() {
+            local id="$1"
+            local attempt
+            local body
+            local curl_exit
+            local curl_metadata
+            local headers
+            local jq_error
+            local metadata
+            local raw_headers
+            local response_bytes
+            local sample
+
+            for attempt in 1 2 3; do
+              body="$RAW_DIAGNOSTICS/definition-${id}-attempt-${attempt}.body"
+              raw_headers="$RAW_DIAGNOSTICS/definition-${id}-attempt-${attempt}.headers.raw"
+              headers="$DIAGNOSTICS/definition-${id}-attempt-${attempt}.headers"
+              metadata="$DIAGNOSTICS/definition-${id}-attempt-${attempt}.metadata"
+              jq_error="$DIAGNOSTICS/definition-${id}-attempt-${attempt}.jq-error"
+              sample="$DIAGNOSTICS/definition-${id}-attempt-${attempt}.body-sample"
+              : > "$body"
+              : > "$raw_headers"
+              : > "$jq_error"
+              curl_exit=0
+              curl_metadata=""
+
+              if curl_metadata="$(curl -sS --fail-with-body \
+                --connect-timeout 15 \
+                --max-time 60 \
+                --dump-header "$raw_headers" \
+                --output "$body" \
+                --write-out 'http_code=%{http_code}\ncontent_type=%{content_type}\nnum_redirects=%{num_redirects}\nurl_effective=%{url_effective}\ntime_total=%{time_total}\n' \
+                -H "Authorization: Bearer $SYSTEM_ACCESSTOKEN" \
+                "$BASE/$id?api-version=7.1")"; then
+                :
+              else
+                curl_exit=$?
+              fi
+
+              awk '{
+                lower = tolower($0)
+                if ($0 ~ /^HTTP\// ||
+                    lower ~ /^(content-type|content-length|x-vss-e2eid|x-tfs-session|activityid|request-context):/) {
+                  print
+                }
+              }' "$raw_headers" > "$headers"
+              rm -f "$raw_headers"
+
+              response_bytes="$(wc -c < "$body" | tr -d ' ')"
+              {
+                printf 'definition_id=%s\n' "$id"
+                printf 'attempt=%s\n' "$attempt"
+                printf 'curl_exit=%s\n' "$curl_exit"
+                printf 'response_bytes=%s\n' "$response_bytes"
+                printf '%s\n' "$curl_metadata"
+              } > "$metadata"
+
+              if [ "$curl_exit" -eq 0 ] &&
+                 jq -e 'type == "object"' "$body" >/dev/null 2>"$jq_error"; then
+                jq '{
+                  id,
+                  name,
+                  revision,
+                  triggers,
+                  repository: (.repository | {id, name, type, defaultBranch}),
+                  variable_names: ((.variables // {}) | keys)
+                }' "$body" > "$DIAGNOSTICS/definition-${id}-snapshot.json"
+                rm -f "$jq_error"
+                cat "$body"
+                rm -f "$body"
+                return 0
+              fi
+
+              head -c 16384 "$body" > "$sample"
+              rm -f "$body"
+              {
+                echo "ADO definition response validation failed for definition $id (attempt $attempt/3)."
+                cat "$metadata"
+                if [ -s "$headers" ]; then
+                  echo "response_headers_begin"
+                  cat "$headers"
+                  echo "response_headers_end"
+                fi
+                if [ -s "$jq_error" ]; then
+                  echo "jq_error_begin"
+                  cat "$jq_error"
+                  echo "jq_error_end"
+                fi
+                if [ -s "$sample" ]; then
+                  echo "response_sample_begin"
+                  head -c 2048 "$sample" | LC_ALL=C tr -c '\11\12\15\40-\176' '?'
+                  echo
+                  echo "response_sample_end"
+                fi
+              } >&2
+
+              if [ "$attempt" -lt 3 ]; then
+                sleep "$((attempt * 2))"
+              fi
+            done
+
+            return 1
+          }
+
           PR_IDS="$(
             jq -er '
               select(.schema == "ado-aw/agentplayground-trigger-policy/1")
               | .pr_definition_ids[]
             ' "$POLICY"
-          ) $(System.DefinitionId)"
+          ) $SELF_ID"
           SCHEDULED_ONLY_IDS="$(
             jq -er '
               select(.schema == "ado-aw/agentplayground-trigger-policy/1")
@@ -248,10 +378,15 @@ jobs:
             ' "$POLICY"
           )"
 
+          SELF_JSON=""
           for id in $PR_IDS; do
-            JSON="$(curl -fsS \
-              -H "Authorization: Bearer $SYSTEM_ACCESSTOKEN" \
-              "$BASE/$id?api-version=7.1")"
+            if ! JSON="$(fetch_definition "$id")"; then
+              echo "Unable to audit PR definition $id after 3 attempts; see compiler-smoke-diagnostics." >&2
+              exit 1
+            fi
+            if [ "$id" = "$SELF_ID" ]; then
+              SELF_JSON="$JSON"
+            fi
             if ! printf '%s' "$JSON" | jq -e '
               ([.triggers[]? | select(.triggerType == "continuousIntegration")] | length == 0)
               and any(
@@ -264,13 +399,15 @@ jobs:
                 )' >/dev/null; then
               NAME="$(printf '%s' "$JSON" | jq -r '.name // "unknown"')"
               echo "PR trigger policy drift detected for definition $id ($NAME)." >&2
+              printf '%s' "$JSON" | jq '{id, name, revision, triggers}' >&2
               exit 1
             fi
           done
 
-          SELF_JSON="$(curl -fsS \
-            -H "Authorization: ******" \
-            "$BASE/$(System.DefinitionId)?api-version=7.1")"
+          if [ -z "$SELF_JSON" ]; then
+            echo "Candidate definition $SELF_ID was not included in the PR policy audit." >&2
+            exit 1
+          fi
           if ! printf '%s' "$SELF_JSON" | jq -e '
             any(
               .triggers[]?;
@@ -281,14 +418,16 @@ jobs:
               and .isCommentRequiredForInternalRepoPRs == true
               and .commentOptionInternalRepos == "all"
             )' >/dev/null; then
-            echo "Candidate compiler PR comment-gate policy drift detected for definition $(System.DefinitionId)." >&2
+            echo "Candidate compiler PR comment-gate policy drift detected for definition $SELF_ID." >&2
+            printf '%s' "$SELF_JSON" | jq '{id, name, revision, triggers}' >&2
             exit 1
           fi
 
           for id in $SCHEDULED_ONLY_IDS; do
-            JSON="$(curl -fsS \
-              -H "Authorization: Bearer $SYSTEM_ACCESSTOKEN" \
-              "$BASE/$id?api-version=7.1")"
+            if ! JSON="$(fetch_definition "$id")"; then
+              echo "Unable to audit scheduled-only definition $id after 3 attempts; see compiler-smoke-diagnostics." >&2
+              exit 1
+            fi
             if ! printf '%s' "$JSON" | jq -e '
               [.triggers[]?
                 | select(
@@ -298,6 +437,7 @@ jobs:
               | length == 0' >/dev/null; then
               NAME="$(printf '%s' "$JSON" | jq -r '.name // "unknown"')"
               echo "Scheduled-only trigger policy drift detected for definition $id ($NAME)." >&2
+              printf '%s' "$JSON" | jq '{id, name, revision, triggers}' >&2
               exit 1
             fi
           done
