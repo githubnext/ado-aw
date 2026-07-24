@@ -1,6 +1,8 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
 const mockCalls: string[] = [];
+const compiledFixturePaths: string[] = [];
+let queuedFixtureNames: string[] = [];
 
 const baseEnv = {
   SYSTEM_COLLECTIONURI: "https://dev.azure.com/org/",
@@ -17,24 +19,39 @@ const baseEnv = {
   COMPILER_SMOKE_CANARY_DEFINITION_ID: "3001",
   COMPILER_SMOKE_AZURE_CLI_DEFINITION_ID: "3002",
   COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID: "3003",
-  COMPILER_SMOKE_JANITOR_DEFINITION_ID: "3004",
-  COMPILER_SMOKE_REPORTER_DEFINITION_ID: "3005",
+  COMPILER_SMOKE_REPORTER_DEFINITION_ID: "3004",
+  COMPILER_SMOKE_CUSTOM_SAFE_OUTPUT_DEFINITION_ID: "3005",
   COMPILER_SMOKE_CHILD_TIMEOUT_MS: "5000",
   COMPILER_SMOKE_POLL_MS: "1",
 };
 
-function specificRunYaml(): string {
+function specificRunYaml(agentReadToken: boolean): string {
+  const readTokenEnv = agentReadToken
+    ? "\n          AZURE_DEVOPS_EXT_PAT: $(SC_READ_TOKEN)"
+    : "";
   return `
-steps:
-  - task: DownloadPipelineArtifact@2
-    inputs:
-      targetPath: in
-      source: specific
-      project: AgentPlayground
-      pipeline: '2560'
-      runVersion: specific
-      runId: '630001'
-      artifact: ado-aw-candidate
+jobs:
+  - job: Agent
+    steps:
+      - bash: copilot --allow-tool "shell(az)" --allow-tool "shell(head)"
+        displayName: Run copilot (AWF network isolated)
+        env:
+          GITHUB_TOKEN: $(GITHUB_TOKEN)${readTokenEnv}
+      - task: DownloadPipelineArtifact@2
+        inputs:
+          targetPath: in
+          source: specific
+          project: AgentPlayground
+          pipeline: '2560'
+          runVersion: specific
+          runId: '630001'
+          artifact: ado-aw-candidate
+  - job: Detection
+    steps:
+      - bash: echo detection
+        displayName: Run threat analysis (AWF network isolated)
+        env:
+          GITHUB_TOKEN: $(GITHUB_TOKEN)
 `;
 }
 
@@ -47,6 +64,10 @@ vi.mock("../ado-rest.js", () => {
           return { name: "ado-aw-candidate" };
         }),
         getBuild: vi.fn(async () => ({ status: "completed", result: "succeeded" })),
+        getBuildTags: vi.fn(async (buildId: number) => [
+          `ado-aw-custom-script-${buildId}`,
+          `ado-aw-custom-job-${buildId}`,
+        ]),
         queueBuild: vi.fn(async () => ({ id: 1 })),
         cancelBuild: vi.fn(async () => {}),
         buildUrl: (id: number) => `https://example/${id}`,
@@ -79,10 +100,13 @@ vi.mock("../git.js", async (importOriginal) => {
         "tests/safe-outputs/azure-cli.lock.yml",
         "tests/safe-outputs/noop-target.md",
         "tests/safe-outputs/noop-target.lock.yml",
-        "tests/safe-outputs/janitor.md",
-        "tests/safe-outputs/janitor.lock.yml",
         "tests/safe-outputs/smoke-failure-reporter.md",
         "tests/safe-outputs/smoke-failure-reporter.lock.yml",
+        "tests/compiler-smoke-e2e/custom-safe-output.md",
+        "tests/compiler-smoke-e2e/custom-safe-output.lock.yml",
+        ".ado-aw/imports/.gitattributes",
+        ".ado-aw/imports/AgentPlayground/ado-aw-e2e-fixture/aa711dd17c4dfcde492b2bfad62e5fb1baad71f6/components/custom-build-tags/component.md",
+        ".ado-aw/imports/AgentPlayground/ado-aw-e2e-fixture/aa711dd17c4dfcde492b2bfad62e5fb1baad71f6/components/custom-build-tags/component.md.sha256",
       ];
     }),
     commitAll: vi.fn(async () => {
@@ -106,8 +130,9 @@ vi.mock("../git.js", async (importOriginal) => {
 });
 
 vi.mock("../compile-cli.js", () => ({
-  compileAndCheck: vi.fn(async () => {
+  compileAndCheck: vi.fn(async (opts: { relMd: string }) => {
     mockCalls.push("compileAndCheck");
+    compiledFixturePaths.push(opts.relMd);
     return { ok: true, stdout: "", stderr: "" };
   }),
 }));
@@ -118,6 +143,7 @@ vi.mock("../runner.js", async (importOriginal) => {
     ...actual,
     runFixtures: vi.fn(async (_client: unknown, requests: { name: string }[]) => {
       mockCalls.push("runFixtures");
+      queuedFixtureNames = requests.map((request) => request.name);
       return {
         ok: true,
         allTerminal: true,
@@ -142,7 +168,9 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     ...actual,
     mkdtemp: vi.fn(async () => "C:\\tmp\\compiler-smoke-xyz"),
     readFile: vi.fn(async (path: string) => {
-      if (String(path).endsWith(".lock.yml")) return specificRunYaml();
+      if (String(path).endsWith(".lock.yml")) {
+        return specificRunYaml(!String(path).includes("custom-safe-output.lock.yml"));
+      }
       return "---\nname: fixture\n---\nBody.\n";
     }),
     writeFile: vi.fn(async () => {}),
@@ -152,32 +180,54 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 
 beforeEach(() => {
   mockCalls.length = 0;
+  compiledFixturePaths.length = 0;
+  queuedFixtureNames = [];
   vi.clearAllMocks();
 });
 
 describe("compiler-smoke-e2e index.main (happy path)", () => {
-  it("checks artifact visibility before any git work, and deletes the ref before removing the worktree", async () => {
-    process.env = { ...process.env, ...baseEnv, VITEST: "true" };
-    const { main } = await import("../index.js");
-    const code = await main();
-    expect(code).toBe(0);
+  it(
+    "checks artifact visibility before any git work, and deletes the ref before removing the worktree",
+    async () => {
+      process.env = { ...process.env, ...baseEnv, VITEST: "true" };
+      const { main } = await import("../index.js");
+      const code = await main();
+      expect(code).toBe(0);
 
-    expect(mockCalls.indexOf("getArtifact")).toBeGreaterThanOrEqual(0);
-    expect(mockCalls.indexOf("getArtifact")).toBeLessThan(mockCalls.indexOf("verifyLocalCommit"));
-    expect(mockCalls.indexOf("verifyLocalCommit")).toBeLessThan(mockCalls.indexOf("createDetachedWorktree"));
-    expect(mockCalls.indexOf("createDetachedWorktree")).toBeLessThan(mockCalls.indexOf("compileAndCheck"));
-    expect(mockCalls.indexOf("compileAndCheck")).toBeLessThan(mockCalls.indexOf("worktreeChangedFiles"));
-    expect(mockCalls.indexOf("worktreeChangedFiles")).toBeLessThan(mockCalls.indexOf("commitAll"));
-    expect(mockCalls.indexOf("commitAll")).toBeLessThan(mockCalls.indexOf("pushCandidate"));
-    expect(mockCalls.indexOf("pushCandidate")).toBeLessThan(mockCalls.indexOf("verifyRemoteRef"));
-    expect(mockCalls.indexOf("verifyRemoteRef")).toBeLessThan(mockCalls.indexOf("runFixtures"));
+      expect(mockCalls.indexOf("getArtifact")).toBeGreaterThanOrEqual(0);
+      expect(mockCalls.indexOf("getArtifact")).toBeLessThan(mockCalls.indexOf("verifyLocalCommit"));
+      expect(mockCalls.indexOf("verifyLocalCommit")).toBeLessThan(mockCalls.indexOf("createDetachedWorktree"));
+      expect(mockCalls.indexOf("createDetachedWorktree")).toBeLessThan(mockCalls.indexOf("compileAndCheck"));
+      expect(mockCalls.indexOf("compileAndCheck")).toBeLessThan(mockCalls.indexOf("worktreeChangedFiles"));
+      expect(mockCalls.indexOf("worktreeChangedFiles")).toBeLessThan(mockCalls.indexOf("commitAll"));
+      expect(mockCalls.indexOf("commitAll")).toBeLessThan(mockCalls.indexOf("pushCandidate"));
+      expect(mockCalls.indexOf("pushCandidate")).toBeLessThan(mockCalls.indexOf("verifyRemoteRef"));
+      expect(mockCalls.indexOf("verifyRemoteRef")).toBeLessThan(mockCalls.indexOf("runFixtures"));
+      expect(compiledFixturePaths).toEqual([
+        "tests/safe-outputs/canary.md",
+        "tests/safe-outputs/azure-cli.md",
+        "tests/safe-outputs/noop-target.md",
+        "tests/safe-outputs/smoke-failure-reporter.md",
+        "tests/compiler-smoke-e2e/custom-safe-output.md",
+      ]);
+      expect(compiledFixturePaths).not.toContain("tests/safe-outputs/janitor.md");
+      expect(queuedFixtureNames).toEqual([
+        "canary",
+        "azure-cli",
+        "noop-target",
+        "smoke-failure-reporter",
+        "custom-safe-output",
+      ]);
+      expect(queuedFixtureNames).not.toContain("janitor");
 
-    // Cleanup ordering: the remote candidate ref must be deleted BEFORE the
-    // local worktree is removed (never leave the ref hanging around).
-    expect(mockCalls.indexOf("deleteRemoteRef")).toBeGreaterThanOrEqual(0);
-    expect(mockCalls.indexOf("removeWorktree")).toBeGreaterThanOrEqual(0);
-    expect(mockCalls.indexOf("deleteRemoteRef")).toBeLessThan(mockCalls.indexOf("removeWorktree"));
-  });
+      // Cleanup ordering: the remote candidate ref must be deleted BEFORE the
+      // local worktree is removed (never leave the ref hanging around).
+      expect(mockCalls.indexOf("deleteRemoteRef")).toBeGreaterThanOrEqual(0);
+      expect(mockCalls.indexOf("removeWorktree")).toBeGreaterThanOrEqual(0);
+      expect(mockCalls.indexOf("deleteRemoteRef")).toBeLessThan(mockCalls.indexOf("removeWorktree"));
+    },
+    15_000,
+  );
 });
 
 describe("compiler-smoke-e2e index.main (unexpected path guard)", () => {

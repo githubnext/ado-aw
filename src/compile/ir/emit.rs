@@ -61,6 +61,7 @@ mod tests {
             fetch_depth: None,
             fetch_tags: None,
             persist_credentials: None,
+            path: None,
         }));
         setup.push_step(Step::Bash(BashStep::new("Prep", "echo prep")));
 

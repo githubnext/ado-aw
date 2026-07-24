@@ -31,13 +31,15 @@ impl Compiler for JobCompiler {
         output_path: &Path,
         front_matter: &FrontMatter,
         markdown_body: &str,
+        imported_prompt_body: &str,
         skip_integrity: bool,
         debug_pipeline: bool,
     ) -> Result<String> {
         info!("Compiling for job target (typed IR)");
 
         let extensions = super::extensions::collect_extensions(front_matter);
-        let ctx = super::extensions::CompileContext::new(front_matter, input_path).await?;
+        let mut ctx = super::extensions::CompileContext::new(front_matter, input_path).await?;
+        ctx.imported_prompt_body = imported_prompt_body.to_string();
 
         let pipeline = super::job_ir::build_job_pipeline(
             front_matter,

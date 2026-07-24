@@ -65,6 +65,7 @@ mod tests {
                     source: Some(String::from("agents/security-scan.md")),
                     target: Some(String::from("standalone")),
                     compiler_version: Some(String::from("0.30.2")),
+                    custom_components: Vec::new(),
                 }),
             },
             task_domain: Some(TaskDomainInfo {
@@ -128,6 +129,7 @@ mod tests {
                     proposal: json!({"title": "Fix pipeline", "repository": "repo"}),
                     error: Some(String::from("Batch blocked by detection gate")),
                     result: Some(json!({"status": "blocked"})),
+                    component_provenance: None,
                     rejection_reason: Some(String::from("prompt_injection")),
                     applies_to_whole_batch: true,
                 }],

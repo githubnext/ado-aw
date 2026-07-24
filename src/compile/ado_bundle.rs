@@ -63,6 +63,13 @@ pub enum Bundle {
     /// containerized SafeOutputs MCP server can compute a diff base on
     /// shallow-default pools.
     PreparePrBase,
+    /// SHA-pinned component checkout for custom safe-output jobs (#1473). Runs
+    /// in the isolated custom safe-output job after the component repository
+    /// resource is checked out. Fetches the pinned commit over the ADO bearer,
+    /// checks it out detached, and verifies HEAD equals the pin — failing
+    /// closed. Needed because an ADO repository-resource `ref` cannot be a
+    /// commit SHA, so a shallow-default checkout lacks the pinned object.
+    CheckoutComponent,
 }
 
 /// The auth contract a bundle requires from the step that invokes it.
@@ -142,6 +149,7 @@ impl Bundle {
         Bundle::Conclusion,
         Bundle::GithubAppToken,
         Bundle::PreparePrBase,
+        Bundle::CheckoutComponent,
     ];
 
     /// The bundle's unpacked on-disk path inside the runtime VM. The Conclusion
@@ -168,6 +176,7 @@ impl Bundle {
             Bundle::Conclusion => paths::CONCLUSION_PATH,
             Bundle::GithubAppToken => paths::GITHUB_APP_TOKEN_PATH,
             Bundle::PreparePrBase => paths::PREPARE_PR_BASE_PATH,
+            Bundle::CheckoutComponent => paths::CHECKOUT_COMPONENT_PATH,
         }
     }
 
@@ -186,7 +195,9 @@ impl Bundle {
             | Bundle::ExecContextSchedule
             | Bundle::Conclusion
             // Fetches/deepens the target branch over the ADO bearer (bearerEnv).
-            | Bundle::PreparePrBase => BundleAuth::Bearer,
+            | Bundle::PreparePrBase
+            // Fetches the pinned component commit over the ADO bearer (bearerEnv).
+            | Bundle::CheckoutComponent => BundleAuth::Bearer,
             // Pure filesystem / git-without-auth / argv — no bearer.
             Bundle::Import
             | Bundle::ExecContextManual

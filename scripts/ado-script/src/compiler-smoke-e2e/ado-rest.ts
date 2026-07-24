@@ -41,6 +41,8 @@ export interface ArtifactInfo {
 
 const DEFAULT_ARTIFACT_RETRIES = 5;
 const DEFAULT_ARTIFACT_RETRY_DELAY_MS = 5_000;
+const DEFAULT_TAG_RETRIES = 5;
+const DEFAULT_TAG_RETRY_DELAY_MS = 2_000;
 
 export class AdoRest {
   private readonly base: string;
@@ -151,6 +153,65 @@ export class AdoRest {
     const res = await this.request<BuildSummary>(path);
     if (!res) throw new Error(`getBuild(${buildId}) returned no body`);
     return res;
+  }
+
+  /** Read the observable tags on a completed child build. */
+  async getBuildTags(
+    buildId: number,
+    opts: {
+      retries?: number;
+      retryDelayMs?: number;
+      required?: readonly string[];
+    } = {},
+  ): Promise<string[]> {
+    const retries = opts.retries ?? DEFAULT_TAG_RETRIES;
+    const retryDelayMs = opts.retryDelayMs ?? DEFAULT_TAG_RETRY_DELAY_MS;
+    const path = this.projPath(`_apis/build/builds/${buildId}/tags?api-version=7.1`);
+    let lastErr: unknown;
+
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        const response = await this.request<unknown>(path);
+        const tags = Array.isArray(response)
+          ? response
+          : response &&
+              typeof response === "object" &&
+              Array.isArray((response as { value?: unknown }).value)
+            ? (response as { value: unknown[] }).value
+            : undefined;
+        if (!tags || !tags.every((tag) => typeof tag === "string")) {
+          throw new Error("ADO build-tags response was not a string array");
+        }
+        const stringTags = tags as string[];
+        const missing = (opts.required ?? []).filter(
+          (tag) => !stringTags.includes(tag),
+        );
+        if (missing.length > 0) {
+          throw new Error(
+            `required build tag(s) not visible yet: ${missing.join(", ")}; ` +
+              `observed: ${stringTags.length > 0 ? stringTags.join(", ") : "<none>"}`,
+          );
+        }
+        return stringTags;
+      } catch (err) {
+        lastErr = err;
+      }
+
+      if (attempt < retries) {
+        this.log(
+          `[build-tags] build #${buildId} attempt ${attempt}/${retries} failed, retrying in ${retryDelayMs}ms: ${
+            (lastErr as Error).message
+          }`,
+        );
+        await this.sleepImpl(retryDelayMs);
+      }
+    }
+
+    throw new Error(
+      `could not read tags for build #${buildId} after ${retries} attempts: ${
+        (lastErr as Error)?.message ?? "unknown error"
+      }`,
+    );
   }
 
   async cancelBuild(buildId: number): Promise<void> {

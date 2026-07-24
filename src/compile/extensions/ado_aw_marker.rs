@@ -25,6 +25,7 @@
 use super::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
 use crate::compile::ir::condition::Condition;
 use crate::compile::ir::step::{BashStep, Step};
+use serde::Serialize;
 
 // ─── ado-aw marker (always-on, internal) ─────────────────────────────
 
@@ -36,7 +37,31 @@ use crate::compile::ir::step::{BashStep, Step};
 /// project-scope discovery in [`crate::ado`]. Discovery enumerates ADO
 /// definitions, expands each via the Pipeline Preview API, and greps
 /// the result for this marker.
-pub struct AdoAwMarkerExtension;
+#[derive(Debug, Clone, Default)]
+pub struct AdoAwMarkerExtension {
+    custom_components: Vec<CustomComponentProvenance>,
+}
+
+/// Provenance for a safe-output custom component imported at compile time.
+///
+/// The later import-resolution plumbing is responsible for computing the
+/// digest strings with [`crate::hash::sha256_hex`]. The marker extension only
+/// carries and emits the resolved values.
+#[derive(Debug, Clone, Serialize)]
+pub struct CustomComponentProvenance {
+    /// Import source, for example `org/repo/path`.
+    pub source: String,
+    /// Full 40-character commit SHA that the component resolved to.
+    pub sha: String,
+    pub manifest_digest: String,
+    pub schema_digest: String,
+}
+
+impl AdoAwMarkerExtension {
+    pub fn new(custom_components: Vec<CustomComponentProvenance>) -> Self {
+        Self { custom_components }
+    }
+}
 
 impl CompilerExtension for AdoAwMarkerExtension {
     fn name(&self) -> &str {
@@ -54,7 +79,7 @@ impl CompilerExtension for AdoAwMarkerExtension {
     /// Returns the two Agent-job prepare steps as typed
     /// `Step::Bash(BashStep)` values.
     fn declarations(&self, ctx: &CompileContext) -> anyhow::Result<Declarations> {
-        let Some(metadata) = CompileMetadata::from_ctx(ctx) else {
+        let Some(metadata) = CompileMetadata::from_ctx(ctx, self.custom_components.clone()) else {
             return Ok(Declarations::default());
         };
         let agent_prepare_steps = vec![
@@ -116,10 +141,14 @@ struct CompileMetadata {
     engine: String,
     model: String,
     agent_name: String,
+    custom_components: Vec<CustomComponentProvenance>,
 }
 
 impl CompileMetadata {
-    fn from_ctx(ctx: &CompileContext) -> Option<Self> {
+    fn from_ctx(
+        ctx: &CompileContext,
+        custom_components: Vec<CustomComponentProvenance>,
+    ) -> Option<Self> {
         let input_path = ctx.input_path?;
         Some(Self {
             source: super::super::common::normalize_source_path(input_path),
@@ -144,23 +173,24 @@ impl CompileMetadata {
                     .to_string(),
             },
             agent_name: ctx.agent_name.to_string(),
+            custom_components,
         })
     }
 
     fn marker_json(&self) -> String {
-        serde_json::to_string(&serde_json::json!({
+        let value = self.with_custom_components(serde_json::json!({
             "schema": 1,
             "source": &self.source,
             "org": &self.org,
             "repo": &self.repo,
             "version": &self.compiler_version,
             "target": &self.target,
-        }))
-        .unwrap()
+        }));
+        serde_json::to_string(&value).unwrap()
     }
 
     fn aw_info_json(&self) -> String {
-        serde_json::to_string(&serde_json::json!({
+        let value = self.with_custom_components(serde_json::json!({
             "schema": "ado-aw/aw_info/1",
             "source": &self.source,
             "org": &self.org,
@@ -174,8 +204,18 @@ impl CompileMetadata {
             "source_version": "$(Build.SourceVersion)",
             "source_branch": "$(Build.SourceBranch)",
             "build_definition_id": "$(System.DefinitionId)",
-        }))
-        .unwrap()
+        }));
+        serde_json::to_string(&value).unwrap()
+    }
+
+    fn with_custom_components(&self, mut value: serde_json::Value) -> serde_json::Value {
+        if !self.custom_components.is_empty() {
+            value.as_object_mut().unwrap().insert(
+                "custom_components".to_string(),
+                serde_json::to_value(&self.custom_components).unwrap(),
+            );
+        }
+        value
     }
 }
 
@@ -198,7 +238,7 @@ mod tests {
     }
 
     fn agent_prepare_steps(ctx: &CompileContext<'_>) -> Vec<Step> {
-        AdoAwMarkerExtension
+        AdoAwMarkerExtension::default()
             .declarations(ctx)
             .unwrap()
             .agent_prepare_steps
@@ -235,6 +275,7 @@ mod tests {
             engine: crate::engine::Engine::Copilot,
             compile_dir: None,
             input_path: Some(input_path),
+            imported_prompt_body: String::new(),
         };
         let steps = agent_prepare_steps(&ctx);
         assert_eq!(steps.len(), 2);
@@ -284,6 +325,7 @@ mod tests {
             engine: crate::engine::Engine::Copilot,
             compile_dir: None,
             input_path: Some(input_path),
+            imported_prompt_body: String::new(),
         };
         let steps = agent_prepare_steps(&ctx);
         assert_eq!(steps.len(), 2);
@@ -355,6 +397,92 @@ mod tests {
     }
 
     #[test]
+    fn default_marker_and_aw_info_omit_custom_components() {
+        let fm = parse_fm("name: t\ndescription: x\n");
+        let input_path = Path::new("agents/foo.md");
+        let ctx = CompileContext {
+            agent_name: &fm.name,
+            front_matter: &fm,
+            ado_context: None,
+            engine: crate::engine::Engine::Copilot,
+            compile_dir: None,
+            input_path: Some(input_path),
+            imported_prompt_body: String::new(),
+        };
+        let steps = agent_prepare_steps(&ctx);
+        assert_eq!(steps.len(), 2);
+        for step in steps.iter().map(bash_step) {
+            assert!(
+                !step.script.contains("\"custom_components\""),
+                "default marker extension must omit custom_components:\n{}",
+                step.script
+            );
+        }
+    }
+
+    #[test]
+    fn emits_custom_component_provenance_when_configured() {
+        let fm = parse_fm("name: t\ndescription: x\n");
+        let input_path = Path::new("agents/foo.md");
+        let ctx = CompileContext {
+            agent_name: &fm.name,
+            front_matter: &fm,
+            ado_context: None,
+            engine: crate::engine::Engine::Copilot,
+            compile_dir: None,
+            input_path: Some(input_path),
+            imported_prompt_body: String::new(),
+        };
+        let component = CustomComponentProvenance {
+            source: "org/repo/components/create-pr".to_string(),
+            sha: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            manifest_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+            schema_digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_string(),
+        };
+        let steps = AdoAwMarkerExtension::new(vec![component])
+            .declarations(&ctx)
+            .unwrap()
+            .agent_prepare_steps;
+        assert_eq!(steps.len(), 2);
+
+        for step in steps.iter().map(bash_step) {
+            assert!(
+                step.script.contains("\"custom_components\":["),
+                "step missing custom_components array:\n{}",
+                step.script
+            );
+            assert!(
+                step.script
+                    .contains("\"source\":\"org/repo/components/create-pr\""),
+                "step missing component source:\n{}",
+                step.script
+            );
+            assert!(
+                step.script
+                    .contains("\"sha\":\"0123456789abcdef0123456789abcdef01234567\""),
+                "step missing component sha:\n{}",
+                step.script
+            );
+            assert!(
+                step.script.contains(
+                    "\"manifest_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""
+                ),
+                "step missing component manifest digest:\n{}",
+                step.script
+            );
+            assert!(
+                step.script.contains(
+                    "\"schema_digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\""
+                ),
+                "step missing component schema digest:\n{}",
+                step.script
+            );
+        }
+    }
+
+    #[test]
     fn org_and_repo_embed_from_ado_context_lowercased() {
         // When the compiler runs inside an ADO checkout (the production
         // path — the non-GitHub-remote guard enforces this), the JSON
@@ -373,6 +501,7 @@ mod tests {
             engine: crate::engine::Engine::Copilot,
             compile_dir: None,
             input_path: Some(input_path),
+            imported_prompt_body: String::new(),
         };
         let steps = agent_prepare_steps(&ctx);
         assert_eq!(steps.len(), 2);
@@ -415,6 +544,7 @@ mod tests {
                 engine: crate::engine::Engine::Copilot,
                 compile_dir: None,
                 input_path: Some(input_path),
+                imported_prompt_body: String::new(),
             };
             let steps = agent_prepare_steps(&ctx);
             assert_eq!(steps.len(), 2, "target={raw_target}");
@@ -453,8 +583,9 @@ mod tests {
             engine: crate::engine::Engine::Copilot,
             compile_dir: None,
             input_path: Some(input_path),
+            imported_prompt_body: String::new(),
         };
-        let decl = AdoAwMarkerExtension.declarations(&ctx).unwrap();
+        let decl = AdoAwMarkerExtension::default().declarations(&ctx).unwrap();
         assert_eq!(decl.agent_prepare_steps.len(), 2);
         match (&decl.agent_prepare_steps[0], &decl.agent_prepare_steps[1]) {
             (Step::Bash(marker), Step::Bash(aw_info)) => {
@@ -489,6 +620,7 @@ mod tests {
             engine: crate::engine::Engine::Copilot,
             compile_dir: None,
             input_path: Some(input_path),
+            imported_prompt_body: String::new(),
         };
         let steps = agent_prepare_steps(&ctx);
         assert_eq!(steps.len(), 2);
@@ -529,6 +661,7 @@ mod tests {
             engine: crate::engine::Engine::Copilot,
             compile_dir: None,
             input_path: Some(input_path),
+            imported_prompt_body: String::new(),
         };
         let steps = agent_prepare_steps(&ctx);
         assert_eq!(steps.len(), 2);
@@ -579,6 +712,7 @@ mod tests {
             engine: crate::engine::Engine::Copilot,
             compile_dir: None,
             input_path: Some(input_path),
+            imported_prompt_body: String::new(),
         };
         let steps = agent_prepare_steps(&ctx);
         assert_eq!(steps.len(), 2);

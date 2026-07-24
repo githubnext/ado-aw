@@ -1171,6 +1171,7 @@ By threat:
                     source: Some("agents/my-agent.md".to_string()),
                     target: Some("standalone".to_string()),
                     compiler_version: Some("0.30.2".to_string()),
+                    custom_components: Vec::new(),
                 }),
             },
             task_domain: Some(TaskDomainInfo {
@@ -1235,6 +1236,7 @@ By threat:
                     proposal: json!({"title": "Fix bug"}),
                     error: Some("Blocked by detection gate".to_string()),
                     result: Some(json!({"status": "blocked"})),
+                    component_provenance: None,
                     rejection_reason: Some("prompt_injection".to_string()),
                     applies_to_whole_batch: true,
                 }],

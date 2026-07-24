@@ -20,18 +20,22 @@ describe("runtime-import ADO variable substitution", () => {
       const target = writeFixture(
         dir,
         "prompt.md",
-        "root=$(Build.SourcesDirectory) repo=$(Build.Repository.Name)\n",
+        "root=$(Build.SourcesDirectory) repo=$(Build.Repository.Name) build=$(Build.BuildId) org=$(System.CollectionUri)\n",
       );
 
       const result = runImportSource(target, {
         vars: [
           "Build.SourcesDirectory=/agent/_work/1/s",
           "Build.Repository.Name=my-repo",
+          "Build.BuildId=626006",
+          "System.CollectionUri=https://dev.azure.com/example/",
         ],
       });
 
       expect(result.status).toBe(0);
-      expect(readText(target)).toBe("root=/agent/_work/1/s repo=my-repo\n");
+      expect(readText(target)).toBe(
+        "root=/agent/_work/1/s repo=my-repo build=626006 org=https://dev.azure.com/example/\n",
+      );
     });
   });
 

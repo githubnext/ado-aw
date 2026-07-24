@@ -1,5 +1,5 @@
 /**
- * Bounded-concurrency queue/poll/cancel state machine for the five staged
+ * Bounded-concurrency queue/poll/cancel state machine for the staged
  * fixture builds.
  *
  * Contract:

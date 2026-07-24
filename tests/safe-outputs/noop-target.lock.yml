@@ -10,7 +10,7 @@ resources:
 jobs:
 - job: Agent
   displayName: Agent
-  timeoutInMinutes: 5
+  timeoutInMinutes: 10
   pool:
     name: AZS-1ES-L-Playground-ubuntu-22.04
   steps:

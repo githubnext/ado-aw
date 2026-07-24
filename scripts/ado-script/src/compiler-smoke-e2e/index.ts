@@ -3,10 +3,9 @@
  *
  * Stages the compiler candidate produced by the current build (PR or
  * nightly `main`) as a pinned `supply-chain.pipeline-artifact` source across
- * the five real fixtures documented in `tests/safe-outputs/README.md`
- * (canary, azure-cli, noop-target, janitor, smoke-failure-reporter), pushes
- * the staged candidate to a short-lived branch on the mirror repo, queues
- * the five FIXED "candidate lane" pipeline definitions (tracked in
+ * five fixed fixtures, pushes the staged candidate to a short-lived branch on
+ * the mirror repo, queues the FIXED "candidate lane" pipeline definitions
+ * (tracked in
  * `tests/compiler-smoke-e2e/REGISTERED.md`), and asserts they all go green.
  *
  * See `config.ts` for the full required/optional env var contract.
@@ -18,8 +17,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { AdoRest } from "./ado-rest.js";
-import { assertNoForbiddenReleaseUrls, assertPipelineArtifactValues } from "./assertions.js";
-import { candidateRef, FIXTURE_NAMES, loadConfig, type CompilerSmokeConfig } from "./config.js";
+import {
+  assertAgentCommandPolicy,
+  assertAdoTokenIsolation,
+  assertNoForbiddenReleaseUrls,
+  assertPipelineArtifactValues,
+} from "./assertions.js";
+import {
+  candidateRef,
+  CANDIDATE_FIXTURE_NAMES,
+  loadConfig,
+  type CompilerSmokeConfig,
+} from "./config.js";
 import { compileAndCheck } from "./compile-cli.js";
 import { ALL_FIXTURES, allowedChangedPaths } from "./fixtures.js";
 import {
@@ -38,6 +47,7 @@ import {
 import { injectPipelineArtifact } from "./source.js";
 import { renderResultsTable } from "./report.js";
 import { runFixtures, type FixtureBuildRequest, type FixtureBuildResult } from "./runner.js";
+import { verifyFixtureSignals } from "./signals.js";
 import { scanStaleRefs } from "./stale.js";
 
 function log(msg: string): void {
@@ -86,6 +96,15 @@ async function compileFixtures(
 
     const yamlText = await readFile(join(worktreeDir, fixture.relLock), "utf8");
     assertNoForbiddenReleaseUrls(yamlText, fixture.name);
+    assertAdoTokenIsolation(yamlText, fixture.name, fixture.requiresAgentReadToken);
+    if (fixture.name === "azure-cli") {
+      assertAgentCommandPolicy(
+        yamlText,
+        fixture.name,
+        ["shell(az", "shell(head"],
+        ["--allow-all-tools", "--allow-all-paths"],
+      );
+    }
     assertPipelineArtifactValues(yamlText, fixture.name, {
       project: config.project,
       pipeline: String(config.definitionId),
@@ -108,7 +127,9 @@ async function cleanupStaleRefs(config: CompilerSmokeConfig, rest: AdoRest, mirr
       baseRef: config.sourceBranch,
       ownRef,
       definitionId: config.definitionId,
-      childDefinitionIds: FIXTURE_NAMES.map((name) => config.definitionIds[name]),
+      childDefinitionIds: CANDIDATE_FIXTURE_NAMES.map(
+        (name) => config.definitionIds[name],
+      ),
       staleRefHours: config.staleRefHours,
       client: rest,
     });
@@ -216,7 +237,7 @@ export async function main(): Promise<number> {
     });
     log(`[git] candidate ${candidateSha} pushed to ${ownRef}`);
 
-    const requests: FixtureBuildRequest[] = FIXTURE_NAMES.map((name) => ({
+    const requests: FixtureBuildRequest[] = CANDIDATE_FIXTURE_NAMES.map((name) => ({
       name,
       definitionId: config.definitionIds[name],
       sourceBranch: ownRef,
@@ -235,8 +256,9 @@ export async function main(): Promise<number> {
       pollMs: config.pollMs,
       log,
     });
-    results = outcome.results;
-    overallOk = outcome.ok;
+    const signalOutcome = await verifyFixtureSignals(rest, outcome.results);
+    results = signalOutcome.results;
+    overallOk = outcome.ok && signalOutcome.ok;
     allChildrenTerminal = outcome.allTerminal;
     if (!overallOk) failureMessage = "one or more fixture builds did not succeed";
     if (!allChildrenTerminal) {

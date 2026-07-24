@@ -190,6 +190,54 @@ network:
     - "*.github.com"         # Remove wildcard variant too
 ```
 
+## Repository resource endpoints
+
+Azure DevOps repository resources backed by an external service connection must
+declare `endpoint:`. ado-aw validates this at compile time so the generated YAML
+does not fail later in Azure Pipelines.
+
+| Repository `type` | `endpoint:` required? | Notes |
+|-------------------|-----------------------|-------|
+| `git` | No | Same-organization Azure Repos checkout using the build's OAuth token. |
+| `github` | Yes | Azure DevOps GitHub service connection. |
+| `githubenterprise` | Yes | Azure DevOps GitHub Enterprise service connection. |
+| `bitbucket` | Yes | Azure DevOps Bitbucket service connection. |
+
+```yaml
+repos:
+  - name: octo/shared-components
+    alias: shared-components
+    type: github
+    endpoint: github-shared-components
+    ref: refs/heads/main
+    checkout: false
+```
+
+The same rule applies to repository resources generated for reusable
+[`imports:`](imports.md): object-form imports can specify the ADO service
+connection with `endpoint:`:
+
+```yaml
+imports:
+  - uses: octo/shared-components/components/notify.md@0123456789abcdef0123456789abcdef01234567
+    endpoint: github-shared-components
+```
+
+`endpoint:` is an Azure DevOps runtime authorization setting. It is not passed
+to the agent, Detection, or the compile-time manifest fetcher.
+
+### Template targets (`target: job` / `target: stage`)
+
+`target: job` and `target: stage` emit Azure DevOps templates, and templates
+cannot declare top-level `resources.repositories`. For imports that require a
+generated repository resource, ado-aw emits a diagnostic naming the generated
+alias (for example `import_octo_shared_components_<hash>`). The parent pipeline
+that includes the template must declare and authorize that repository resource
+with the same alias and endpoint.
+
+Standalone and 1ES targets own their top-level resources, so ado-aw emits the
+repository resource directly.
+
 ## Permissions (ADO Access Tokens)
 
 ADO does not support fine-grained permissions — there are two access levels:
@@ -246,8 +294,9 @@ agents. Set `permissions.write` only when you need:
 
 ### Security Model
 
-- **`permissions.read`**: Mints a read-only ADO-scoped token given to the
-  agent inside the AWF sandbox (Stage 1). The agent can query ADO APIs but
+- **`permissions.read`**: Mints a read-only ADO-scoped token and maps it as
+  `AZURE_DEVOPS_EXT_PAT: $(SC_READ_TOKEN)` on the Agent step. AWF carries that
+  secret into the Stage 1 sandbox, where the agent can query ADO APIs but
   cannot write.
 - **`permissions.write` (optional)**: Mints a write-capable ADO-scoped token
   used **only** by the executor in Stage 3 (`SafeOutputs` job). Overrides

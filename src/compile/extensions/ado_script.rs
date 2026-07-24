@@ -106,7 +106,14 @@ pub(crate) const GITHUB_APP_TOKEN_PATH: &str = "/tmp/ado-aw-scripts/ado-script/g
 /// `create-pull-request` is configured, to fetch/deepen the target branch so
 /// the containerized SafeOutputs MCP server can compute a diff base on
 /// shallow-default agent pools.
-pub(crate) const PREPARE_PR_BASE_PATH: &str = "/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js";
+pub(crate) const PREPARE_PR_BASE_PATH: &str =
+    "/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js";
+/// Path to the checkout-component bundle inside the unpacked `ado-script.zip`.
+/// Runs in the isolated custom safe-output job (#1473) after the component
+/// repository resource is checked out, to fetch the pinned commit and verify a
+/// detached checkout of it (fail-closed) on shallow-default agent pools.
+pub(crate) const CHECKOUT_COMPONENT_PATH: &str =
+    "/tmp/ado-aw-scripts/ado-script/checkout-component.js";
 const RELEASE_BASE_URL: &str = "https://github.com/githubnext/ado-aw/releases/download";
 
 /// Single always-on extension that owns all `ado-script` bundle wiring.
@@ -491,7 +498,7 @@ pub(crate) fn install_and_download_steps_typed(
     vec![Step::Task(install), Step::Bash(download)]
 }
 
-/// Path-anchor ADO variables exposed to the agent prompt via the runtime
+/// Non-secret ADO variables exposed to the agent prompt via the runtime
 /// import resolver. The compiler owns this allowlist; `import.js`
 /// substitutes only the `$(name)` tokens it is handed — it never reads
 /// these from the environment (see
@@ -506,9 +513,14 @@ pub(crate) fn install_and_download_steps_typed(
 /// variable added to this list), it would break bash argument parsing in
 /// the resolver step — the same pre-existing exposure as the adjacent
 /// `--base "$(Build.SourcesDirectory)"`. The current entries are
-/// ADO-controlled path anchors that cannot contain `"`, so this is safe;
-/// re-quote (or shell-escape) before adding any user-influenced variable.
-const PROMPT_ADO_VARS: &[&str] = &["Build.SourcesDirectory", "Build.Repository.Name"];
+/// ADO-controlled values that cannot contain `"`, so this is safe; re-quote
+/// (or shell-escape) before adding any user-influenced variable.
+const PROMPT_ADO_VARS: &[&str] = &[
+    "Build.SourcesDirectory",
+    "Build.Repository.Name",
+    "Build.BuildId",
+    "System.CollectionUri",
+];
 
 /// The resolver step that expands runtime import markers in the agent prompt.
 fn resolver_step_typed() -> Step {
@@ -670,9 +682,34 @@ pub fn prepare_pr_base_step_typed(mode: PreparePrBaseMode, repos: &[PreparePrBas
     Step::Bash(step)
 }
 
-/// The GitHub App token **revocation** step (issue #1316). Runs after the
-/// Copilot invocation in the Agent and Detection jobs (unless
-/// `skip-token-revocation` is set) to delete the minted installation token
+/// The SHA-pinned component checkout step (#1473). Runs in the isolated custom
+/// safe-output job after the component repository resource is checked out,
+/// invoking the `checkout-component` ado-script bundle to obtain the pinned
+/// commit (direct by-SHA fetch, then progressive deepening) and verify a
+/// detached checkout of it — failing closed if the exact pin cannot be
+/// obtained and confirmed.
+///
+/// `dir` is the compiler-generated ADO path macro for the component checkout
+/// (`$(Build.SourcesDirectory)/<validated-alias>`) — DOUBLE-quoted so ADO
+/// substitutes the macro before bash runs (single quotes would trip shellcheck
+/// SC2016). `sha` is a validated full 40-char commit SHA literal, single-quoted
+/// (shadow-proof). The ADO bearer is projected via `apply_bundle_auth` for the
+/// authenticated fetch. The step runs OUTSIDE the AWF sandbox on the build
+/// agent's normal network, so it needs no AWF allowlist entry.
+pub fn checkout_component_step_typed(dir: &str, sha: &str) -> Step {
+    let script = format!(
+        "set -eo pipefail\nnode '{CHECKOUT_COMPONENT_PATH}' --dir \"{dir}\" --sha {sha}\n",
+        dir = dir,
+        sha = sh_single_quote(sha),
+    );
+    let step = crate::compile::ado_bundle::apply_bundle_auth(
+        BashStep::new("Checkout pinned custom component", script)
+            .with_condition(Condition::Succeeded),
+        crate::compile::ado_bundle::Bundle::CheckoutComponent,
+        crate::compile::ado_bundle::TokenSource::SystemAccessToken,
+    );
+    Step::Bash(step)
+}
 /// (`DELETE /installation/token`) so it does not remain valid for its full
 /// ~1h lifetime — matching `actions/create-github-app-token`'s default.
 ///
@@ -1712,7 +1749,7 @@ mod tests {
             !resolver.script.contains("ADO_AW_IMPORT_BASE"),
             "resolver step must not export ADO_AW_IMPORT_BASE — base is passed via --base, not env"
         );
-        // Each path-anchor var is passed as `--var "<name>=$(<name>)"` so
+        // Each prompt var is passed as `--var "<name>=$(<name>)"` so
         // ADO expands the macro at runtime and import.js substitutes the
         // concrete value into the prompt (consistent with inlined mode).
         assert!(
@@ -1727,6 +1764,20 @@ mod tests {
                 .script
                 .contains("--var \"Build.Repository.Name=$(Build.Repository.Name)\""),
             "resolver step must pass Build.Repository.Name as a --var, got: {}",
+            resolver.script
+        );
+        assert!(
+            resolver
+                .script
+                .contains("--var \"Build.BuildId=$(Build.BuildId)\""),
+            "resolver step must pass Build.BuildId as a --var, got: {}",
+            resolver.script
+        );
+        assert!(
+            resolver
+                .script
+                .contains("--var \"System.CollectionUri=$(System.CollectionUri)\""),
+            "resolver step must pass System.CollectionUri as a --var, got: {}",
             resolver.script
         );
     }

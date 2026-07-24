@@ -84,6 +84,42 @@ fn inspect_json_emits_schema_version_one() {
 }
 
 #[test]
+fn inspect_resolves_imports_and_shows_imported_custom_job() {
+    // Regression for Fix A: `build_pipeline_ir` (which powers `inspect`/`graph`)
+    // must resolve `imports:` so it reasons about the merged pipeline. A local
+    // import of a `safe-outputs.scripts` component contributes a `Custom_<tool>`
+    // job that only appears if imports are resolved.
+    let workspace = tempfile::tempdir().expect("create temp dir");
+    std::fs::write(
+        workspace.path().join("component.md"),
+        "---\nsafe-outputs:\n  scripts:\n    notify-team:\n      run: node notify.js\n---\nComponent body.\n",
+    )
+    .expect("write component");
+    let consumer = workspace.path().join("agent.md");
+    std::fs::write(
+        &consumer,
+        "---\nname: importer\ndescription: imports a component\nimports:\n  - component.md\n---\nConsumer body.\n",
+    )
+    .expect("write consumer");
+
+    let out = Command::new(binary_path())
+        .arg("inspect")
+        .arg(&consumer)
+        .output()
+        .expect("run ado-aw inspect");
+    assert!(
+        out.status.success(),
+        "inspect exited non-zero. stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Custom_notify_team"),
+        "inspect must resolve imports and show the imported custom job, got:\n{stdout}"
+    );
+}
+
+#[test]
 fn graph_dot_emits_digraph_with_known_edges() {
     let (_workspace, src) = fixture_copy("canary.md");
     let out = Command::new(binary_path())

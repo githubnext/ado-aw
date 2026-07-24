@@ -1,9 +1,13 @@
 # Candidate compiler agentic-smoke orchestrator.
 #
 # Builds ado-aw and ado-script from the exact checked-out PR/main commit,
-# publishes an immutable candidate artifact, recompiles all five agentic smoke
+# publishes an immutable candidate artifact, recompiles five agentic smoke
 # workflows, stages them on a short-lived ado-aw-mirror ref, and waits for the
 # five fixed child definitions to complete.
+#
+# PR eligibility remains path-filtered below, but definition 2559 requires a
+# collaborator comment before queueing. Trigger it from GitHub with:
+# /azp run ado-aw candidate compiler smoke
 
 trigger: none
 
@@ -38,8 +42,8 @@ variables:
   EFFECTIVE_COMPILER_SMOKE_CANARY_DEFINITION_ID: $[ coalesce(variables['COMPILER_SMOKE_CANARY_DEFINITION_ID'], '') ]
   EFFECTIVE_COMPILER_SMOKE_AZURE_CLI_DEFINITION_ID: $[ coalesce(variables['COMPILER_SMOKE_AZURE_CLI_DEFINITION_ID'], '') ]
   EFFECTIVE_COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID: $[ coalesce(variables['COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID'], '') ]
-  EFFECTIVE_COMPILER_SMOKE_JANITOR_DEFINITION_ID: $[ coalesce(variables['COMPILER_SMOKE_JANITOR_DEFINITION_ID'], '') ]
   EFFECTIVE_COMPILER_SMOKE_REPORTER_DEFINITION_ID: $[ coalesce(variables['COMPILER_SMOKE_REPORTER_DEFINITION_ID'], '') ]
+  EFFECTIVE_COMPILER_SMOKE_CUSTOM_SAFE_OUTPUT_DEFINITION_ID: $[ coalesce(variables['COMPILER_SMOKE_CUSTOM_SAFE_OUTPUT_DEFINITION_ID'], '') ]
   EFFECTIVE_CRATES_IO_FEED: $[ coalesce(variables['CRATES_IO_FEED'], 'sparse+https://pkgs.dev.azure.com/msazuresphere/AgentPlayground/_packaging/cargo/Cargo/index/') ]
 
 jobs:
@@ -264,6 +268,23 @@ jobs:
             fi
           done
 
+          SELF_JSON="$(curl -fsS \
+            -H "Authorization: ******" \
+            "$BASE/$(System.DefinitionId)?api-version=7.1")"
+          if ! printf '%s' "$SELF_JSON" | jq -e '
+            any(
+              .triggers[]?;
+              .triggerType == "pullRequest"
+              and .isCommentRequiredForPullRequest == true
+              and .requireCommentsForNonTeamMembersOnly == false
+              and .requireCommentsForNonTeamMemberAndNonContributors == false
+              and .isCommentRequiredForInternalRepoPRs == true
+              and .commentOptionInternalRepos == "all"
+            )' >/dev/null; then
+            echo "Candidate compiler PR comment-gate policy drift detected for definition $(System.DefinitionId)." >&2
+            exit 1
+          fi
+
           for id in $SCHEDULED_ONLY_IDS; do
             JSON="$(curl -fsS \
               -H "Authorization: Bearer $SYSTEM_ACCESSTOKEN" \
@@ -305,8 +326,8 @@ jobs:
           COMPILER_SMOKE_CANARY_DEFINITION_ID: $(EFFECTIVE_COMPILER_SMOKE_CANARY_DEFINITION_ID)
           COMPILER_SMOKE_AZURE_CLI_DEFINITION_ID: $(EFFECTIVE_COMPILER_SMOKE_AZURE_CLI_DEFINITION_ID)
           COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID: $(EFFECTIVE_COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID)
-          COMPILER_SMOKE_JANITOR_DEFINITION_ID: $(EFFECTIVE_COMPILER_SMOKE_JANITOR_DEFINITION_ID)
           COMPILER_SMOKE_REPORTER_DEFINITION_ID: $(EFFECTIVE_COMPILER_SMOKE_REPORTER_DEFINITION_ID)
+          COMPILER_SMOKE_CUSTOM_SAFE_OUTPUT_DEFINITION_ID: $(EFFECTIVE_COMPILER_SMOKE_CUSTOM_SAFE_OUTPUT_DEFINITION_ID)
 
       - task: PublishPipelineArtifact@1
         condition: always()

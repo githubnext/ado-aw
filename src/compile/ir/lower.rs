@@ -355,12 +355,16 @@ fn lower_repository_resource(r: &RepositoryResource) -> Value {
             kind,
             name,
             r#ref,
+            endpoint,
         } => {
             m.insert(s("repository"), s(identifier));
             m.insert(s("type"), s(kind));
             m.insert(s("name"), s(name));
             if let Some(r) = r#ref {
                 m.insert(s("ref"), s(r));
+            }
+            if let Some(ep) = endpoint {
+                m.insert(s("endpoint"), s(ep));
             }
         }
     }
@@ -1045,6 +1049,9 @@ fn lower_checkout(c: &CheckoutStep) -> Value {
     if let Some(pc) = c.persist_credentials {
         m.insert(s("persistCredentials"), Value::Bool(pc));
     }
+    if let Some(path) = &c.path {
+        m.insert(s("path"), s(path));
+    }
     Value::Mapping(m)
 }
 
@@ -1423,6 +1430,33 @@ mod tests {
     }
 
     #[test]
+    fn lower_named_repository_emits_endpoint_when_present() {
+        let r = RepositoryResource::Named {
+            identifier: "shared".to_string(),
+            kind: "github".to_string(),
+            name: "acme/shared".to_string(),
+            r#ref: Some("refs/heads/main".to_string()),
+            endpoint: Some("shared-conn".to_string()),
+        };
+        let v = lower_repository_resource(&r);
+        assert_eq!(v["endpoint"], Value::String("shared-conn".to_string()));
+        assert_eq!(v["type"], Value::String("github".to_string()));
+    }
+
+    #[test]
+    fn lower_named_repository_omits_endpoint_when_absent() {
+        let r = RepositoryResource::Named {
+            identifier: "shared".to_string(),
+            kind: "git".to_string(),
+            name: "proj/shared".to_string(),
+            r#ref: Some("refs/heads/main".to_string()),
+            endpoint: None,
+        };
+        let v = lower_repository_resource(&r);
+        assert!(v.get("endpoint").is_none());
+    }
+
+    #[test]
     fn lower_env_value_runtime_expression_emits_hoisted_macro() {
         let g = Graph::default();
         let job = JobId::new("J").unwrap();
@@ -1612,7 +1646,10 @@ mod tests {
             .and_then(|v| v.as_mapping())
             .expect("lowered job should contain pool mapping");
 
-        assert_eq!(pool.get(s("name")).and_then(|v| v.as_str()), Some("CustomPool"));
+        assert_eq!(
+            pool.get(s("name")).and_then(|v| v.as_str()),
+            Some("CustomPool")
+        );
         let demands: Vec<&str> = pool
             .get(s("demands"))
             .and_then(|v| v.as_sequence())
@@ -2885,12 +2922,14 @@ mod tests {
             fetch_depth: Some(1),
             fetch_tags: Some(false),
             persist_credentials: None,
+            path: Some("s/custom-checkout".to_string()),
         };
         let v = lower_checkout(&c);
         let m = v.as_mapping().unwrap();
         assert_eq!(m.get(s("checkout")).unwrap(), &s("self"));
         assert_eq!(m.get(s("fetchDepth")).unwrap(), &Value::from(1u32));
         assert_eq!(m.get(s("fetchTags")).unwrap(), &Value::Bool(false));
+        assert_eq!(m.get(s("path")).unwrap(), &s("s/custom-checkout"));
     }
 
     #[test]
@@ -2902,6 +2941,7 @@ mod tests {
             fetch_depth: Some(0),
             fetch_tags: None,
             persist_credentials: None,
+            path: None,
         };
         let v = lower_checkout(&c);
         let m = v.as_mapping().unwrap();
@@ -2917,6 +2957,7 @@ mod tests {
             fetch_depth: None,
             fetch_tags: None,
             persist_credentials: None,
+            path: None,
         };
         let v = lower_checkout(&c);
         let m = v.as_mapping().unwrap();
@@ -2933,6 +2974,7 @@ mod tests {
             fetch_depth: None,
             fetch_tags: None,
             persist_credentials: None,
+            path: None,
         };
         let v = lower_checkout(&c);
         let m = v.as_mapping().unwrap();

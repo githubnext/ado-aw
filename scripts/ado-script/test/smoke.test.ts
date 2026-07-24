@@ -3,7 +3,9 @@
  *
  * The gate smoke test validates the existing gate.js bundle.
  * The import smoke test builds import.js and verifies it expands
- * a prompt fixture in place.
+ * a prompt fixture in place. Git-oriented bundles run against disposable
+ * local repositories so their bundled ncc output is exercised without network
+ * or Azure DevOps dependencies.
  */
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -18,6 +20,7 @@ const gateBundlePath = resolve(__dirname, "../gate.js");
 const importBundlePath = resolve(__dirname, "../import.js");
 const execContextPrBundlePath = resolve(__dirname, "../exec-context-pr.js");
 const preparePrBaseBundlePath = resolve(__dirname, "../prepare-pr-base.js");
+const checkoutComponentBundlePath = resolve(__dirname, "../checkout-component.js");
 const gateFixturePath = resolve(
   __dirname,
   "fixtures/gate-spec-pr-title-match.json",
@@ -429,4 +432,68 @@ describe("prepare-pr-base.js smoke", () => {
       expect(existsSync(resolve(wtAfter, "develop.txt"))).toBe(true);
     });
   }, 60000);
+});
+
+describe("checkout-component.js smoke", () => {
+  it("fetches and verifies a pinned commit missing from a shallow checkout", () => {
+    expect(existsSync(checkoutComponentBundlePath)).toBe(true);
+
+    withSmokeScratchDir("checkout-component", (dir) => {
+      const originDir = resolve(dir, "origin");
+      mkdirSync(originDir, { recursive: true });
+      runGitInRepo(originDir, ["init", "-q", "-b", "main"]);
+
+      writeFileSync(resolve(originDir, "component.txt"), "pinned\n", "utf8");
+      runGitInRepo(originDir, ["add", "-A"]);
+      runGitInRepo(originDir, ["commit", "-q", "-m", "pinned component"]);
+      const pinnedSha = spawnSync("git", ["rev-parse", "HEAD"], {
+        cwd: originDir,
+        encoding: "utf8",
+      }).stdout.trim();
+
+      writeFileSync(resolve(originDir, "component.txt"), "tip\n", "utf8");
+      runGitInRepo(originDir, ["add", "-A"]);
+      runGitInRepo(originDir, ["commit", "-q", "-m", "advance default branch"]);
+
+      const checkout = resolve(dir, "checkout");
+      runGitInRepo(dir, [
+        "clone",
+        "--depth",
+        "1",
+        "--single-branch",
+        "--branch",
+        "main",
+        pathToFileURL(originDir).href,
+        checkout,
+      ]);
+      expect(
+        gitStatusInRepo(checkout, ["cat-file", "-e", `${pinnedSha}^{commit}`]),
+      ).not.toBe(0);
+
+      const result = spawnSync(
+        process.execPath,
+        [
+          checkoutComponentBundlePath,
+          "--dir",
+          checkout,
+          "--sha",
+          pinnedSha,
+        ],
+        {
+          env: { ...process.env, SYSTEM_ACCESSTOKEN: "" },
+          encoding: "utf8",
+        },
+      );
+
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain("verified component checkout");
+      expect(result.stderr).toBe("");
+      const actual = spawnSync("git", ["rev-parse", "HEAD"], {
+        cwd: checkout,
+        encoding: "utf8",
+      }).stdout.trim();
+      expect(actual).toBe(pinnedSha);
+      expect(gitStatusInRepo(checkout, ["symbolic-ref", "-q", "HEAD"])).not.toBe(0);
+    });
+  }, 30000);
 });

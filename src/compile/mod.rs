@@ -13,16 +13,18 @@ pub(crate) mod agentic_pipeline;
 #[cfg(test)]
 mod codemod_integration_test;
 pub(crate) mod codemods;
+pub mod custom_tools;
 pub mod extensions;
 pub(crate) mod filter_ir;
 mod gitattributes;
+pub mod imports;
 pub(crate) mod ir;
 mod job;
 mod job_ir;
 mod onees;
 mod onees_ir;
-pub(crate) mod pr_filters;
 mod path_layout_check;
+pub(crate) mod pr_filters;
 pub mod source_path_guard;
 mod stage;
 mod stage_ir;
@@ -55,12 +57,20 @@ pub use types::{CompileTarget, FrontMatter};
 #[async_trait]
 pub trait Compiler: Send + Sync {
     /// Compile the front matter and markdown body into pipeline YAML.
+    ///
+    /// `imported_prompt_body` carries the substituted, joined bodies of any
+    /// imported components (empty when there are no imports). It is inlined
+    /// into the agent prompt at compile time — imported bodies cannot be
+    /// delivered by the default runtime-import path (which reads only the
+    /// consumer's own source file).
+    #[allow(clippy::too_many_arguments)]
     async fn compile(
         &self,
         input_path: &Path,
         output_path: &Path,
         front_matter: &FrontMatter,
         markdown_body: &str,
+        imported_prompt_body: &str,
         skip_integrity: bool,
         debug_pipeline: bool,
     ) -> Result<String>;
@@ -142,12 +152,28 @@ async fn compile_pipeline_inner(
 
     let parsed = common::parse_markdown_detailed_with_registry(&content, registry)?;
     let mut front_matter = parsed.front_matter;
-    let markdown_body = parsed.markdown_body;
+    let mut markdown_body = parsed.markdown_body;
     let codemod_report = parsed.codemods;
     let front_matter_mapping = parsed.front_matter_mapping;
     let leading_whitespace = parsed.leading_whitespace;
     let body_raw = parsed.body_raw;
     let source_sha256 = parsed.source_sha256;
+
+    // Resolve and merge cross-repository / local `imports:` (D8/D9). Runs only
+    // when the workflow declares imports, so import-free workflows are
+    // unaffected. The merge is applied to a CLONE of the front-matter mapping —
+    // the original `front_matter_mapping` is preserved untouched so that any
+    // codemod source-rewrite keeps the author's `imports:` in their file rather
+    // than writing the expanded/merged form back to disk.
+    //
+    // `imported_prompt_body` is the substituted, joined bodies of any imported
+    // components, inlined into the agent prompt at compile time (they cannot be
+    // delivered by the default runtime-import path, which reads the consumer's
+    // own source). Empty when the workflow declares no imports.
+    let (imported_prompt_body, merged_body) =
+        resolve_and_merge_imports(&mut front_matter, &front_matter_mapping, &markdown_body, input_path)
+            .await?;
+    markdown_body = merged_body;
 
     // Sanitize all front matter text fields before any further processing.
     // This neutralizes pipeline command injection (##vso[), strips control
@@ -173,9 +199,7 @@ async fn compile_pipeline_inner(
     // Checkout-aware path-layout advisories (warning-only): surface
     // hand-written paths that won't exist under the resolved checkout
     // layout, plus deprecated directory markers left in the agent body.
-    for warning in
-        path_layout_check::collect_path_layout_warnings(&front_matter, &markdown_body)
-    {
+    for warning in path_layout_check::collect_path_layout_warnings(&front_matter, &markdown_body) {
         eprintln!("Warning: {warning}");
     }
 
@@ -219,6 +243,7 @@ async fn compile_pipeline_inner(
             &yaml_output_path,
             &front_matter,
             &markdown_body,
+            &imported_prompt_body,
             skip_integrity,
             debug_pipeline,
         )
@@ -607,7 +632,18 @@ pub async fn check_pipeline(pipeline_path: &str) -> Result<()> {
     }
 
     let mut front_matter = parsed.front_matter;
-    let markdown_body = parsed.markdown_body;
+
+    // Resolve + merge `imports:` so `check` validates the same fully-merged
+    // pipeline that `compile` produces. Reads the committed `.ado-aw/imports`
+    // cache (SHA-keyed), so this is offline when the cache is vendored. Uses the
+    // absolute `source_path` so the repo root (holding the cache) resolves.
+    let (imported_prompt_body, markdown_body) = resolve_and_merge_imports(
+        &mut front_matter,
+        &parsed.front_matter_mapping,
+        &parsed.markdown_body,
+        &source_path,
+    )
+    .await?;
 
     use crate::sanitize::SanitizeConfig;
     front_matter.sanitize_config_fields();
@@ -631,6 +667,7 @@ pub async fn check_pipeline(pipeline_path: &str) -> Result<()> {
             pipeline_path,
             &front_matter,
             &markdown_body,
+            &imported_prompt_body,
             false,
             false,
         )
@@ -896,6 +933,60 @@ pub fn find_repo_root(start: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Resolve and merge the workflow's `imports:` into `front_matter` and the body.
+///
+/// Shared by [`compile_pipeline_inner`] and [`check_pipeline`] so that `check`
+/// validates the *same* fully-merged pipeline that `compile` produces. Mutates
+/// `front_matter` in place (imported front matter merged, `imports:` consumed)
+/// and returns `(imported_prompt_body, merged_markdown_body)`:
+/// - `imported_prompt_body` — the substituted, joined bodies of imported
+///   components, inlined into the agent prompt at compile time.
+/// - `merged_markdown_body` — imported bodies + the consumer body.
+///
+/// A no-op returning `(String::new(), markdown_body)` when there are no imports.
+///
+/// `source_path` is the absolute path of the agent source `.md`; its parent is
+/// the base directory for local imports and the anchor for locating the repo
+/// root (which holds the committed `.ado-aw/imports` cache).
+async fn resolve_and_merge_imports(
+    front_matter: &mut FrontMatter,
+    front_matter_mapping: &serde_yaml::Mapping,
+    markdown_body: &str,
+    source_path: &Path,
+) -> Result<(String, String)> {
+    if front_matter.imports.is_empty() {
+        return Ok((String::new(), markdown_body.to_string()));
+    }
+
+    let base_dir = source_path.parent().unwrap_or_else(|| Path::new("."));
+    let repo_root = find_repo_root(base_dir).unwrap_or_else(|| base_dir.to_path_buf());
+
+    // Build the routing fetcher: endpoint-less / cross-org Azure Repos imports
+    // resolve via the ADO Git Items API (primary); GitHub/GHE imports resolve
+    // via `gh`. The Azure fetcher resolves its org URL + auth LAZILY on the
+    // first actual fetch (see `AdoRepoFetcher`), so a GitHub-only import set, a
+    // workflow with no ADO remote, or — crucially for `check`/`inspect` — a
+    // fully-vendored committed cache performs no `git`/`az` work at all (the
+    // cache is consulted before any fetch), and any resolution failure surfaces
+    // fail-closed only when an uncached Azure import is actually fetched.
+    let ado_fetcher = crate::compile::imports::AdoRepoFetcher::new(repo_root.clone());
+    let fetcher = crate::compile::imports::RoutingFetcher::new(ado_fetcher);
+
+    let mut merged_mapping = front_matter_mapping.clone();
+    let (imported, combined) = crate::compile::imports::merge::merge_imports(
+        &mut merged_mapping,
+        markdown_body,
+        &front_matter.imports,
+        base_dir,
+        &repo_root,
+        &fetcher,
+    )
+    .await?;
+    *front_matter = serde_yaml::from_value(serde_yaml::Value::Mapping(merged_mapping))
+        .context("Failed to parse front matter after merging imports")?;
+    Ok((imported, combined))
+}
+
 /// Public, read-only entry point that returns the typed [`ir::Pipeline`]
 /// for an agent source file **without** writing any YAML.
 ///
@@ -918,7 +1009,18 @@ pub async fn build_pipeline_ir(input_path: &Path) -> Result<(FrontMatter, ir::Pi
 
     let parsed = common::parse_markdown_detailed(&content)?;
     let mut front_matter = parsed.front_matter;
-    let markdown_body = parsed.markdown_body;
+
+    // Resolve + merge `imports:` so `inspect`/`graph`/`whatif`/`lint`/`trace`
+    // reason about the same fully-merged pipeline `compile` and `check` produce
+    // (imported tools, safe-outputs, custom jobs, and inlined bodies). Reads the
+    // vendored SHA-keyed cache, so it stays offline when the cache is present.
+    let (imported_prompt_body, markdown_body) = resolve_and_merge_imports(
+        &mut front_matter,
+        &parsed.front_matter_mapping,
+        &parsed.markdown_body,
+        input_path,
+    )
+    .await?;
 
     use crate::sanitize::SanitizeConfig;
     front_matter.sanitize_config_fields();
@@ -936,7 +1038,8 @@ pub async fn build_pipeline_ir(input_path: &Path) -> Result<(FrontMatter, ir::Pi
     let output_path = input_path.with_extension("lock.yml");
 
     let extensions = extensions::collect_extensions(&front_matter);
-    let ctx = extensions::CompileContext::new(&front_matter, input_path).await?;
+    let mut ctx = extensions::CompileContext::new(&front_matter, input_path).await?;
+    ctx.imported_prompt_body = imported_prompt_body;
 
     let pipeline = match front_matter.target {
         CompileTarget::Standalone => standalone_ir::build_standalone_pipeline(

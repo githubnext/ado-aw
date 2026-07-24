@@ -1,6 +1,46 @@
 use std::collections::BTreeMap;
 
-use crate::audit::model::{AuditData, Finding, JobData, Recommendation, Severity};
+use crate::audit::model::{
+    AuditData, ComponentProvenance, Finding, JobData, Recommendation, Severity,
+};
+
+/// Build a finding for a custom safe-output component whose runtime
+/// provenance disagrees with the compile-time ado-aw metadata marker.
+pub fn custom_component_provenance_mismatch_finding(
+    tool: &str,
+    source: &str,
+    expected: Option<&ComponentProvenance>,
+    actual: &ComponentProvenance,
+    mismatched_fields: &[&str],
+) -> Finding {
+    let expected_text = expected.map_or_else(
+        || String::from("no compile-time marker entry"),
+        |expected| {
+            format!(
+                "sha={}, manifest_digest={}, schema_digest={}",
+                expected.sha, expected.manifest_digest, expected.schema_digest
+            )
+        },
+    );
+    let fields = if mismatched_fields.is_empty() {
+        String::from("source")
+    } else {
+        mismatched_fields.join(", ")
+    };
+
+    Finding {
+        category: String::from("safe_outputs"),
+        severity: Severity::High,
+        title: format!("Custom component provenance mismatch for {tool}"),
+        description: format!(
+            "Runtime provenance for custom safe-output tool '{tool}' from '{source}' does not match the compile-time ado-aw metadata marker ({fields}). Expected: {expected_text}. Actual: sha={}, manifest_digest={}, schema_digest={}.",
+            actual.sha, actual.manifest_digest, actual.schema_digest
+        ),
+        impact: Some(String::from(
+            "A custom safe-output executor may have run different component code or schema than the compiled workflow declared.",
+        )),
+    }
+}
 
 /// Aggregate findings + recommendations from every populated section
 /// of `AuditData`. Pure function; does not mutate the input.

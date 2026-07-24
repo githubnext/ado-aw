@@ -32,13 +32,13 @@ describe("renderResultsTable", () => {
 
   it("preserves the caller's declaration order", () => {
     const table = renderResultsTable([
-      result({ name: "janitor", definitionId: 2604 }),
+      result({ name: "smoke-failure-reporter", definitionId: 2604 }),
       result({ name: "canary", definitionId: 2601 }),
     ]);
-    const janitorIdx = table.indexOf("janitor");
+    const reporterIdx = table.indexOf("smoke-failure-reporter");
     const canaryIdx = table.indexOf("canary");
-    expect(janitorIdx).toBeGreaterThan(-1);
-    expect(canaryIdx).toBeGreaterThan(janitorIdx);
+    expect(reporterIdx).toBeGreaterThan(-1);
+    expect(canaryIdx).toBeGreaterThan(reporterIdx);
   });
 
   it("renders a '-' placeholder for missing buildId/url", () => {

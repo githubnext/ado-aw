@@ -84,6 +84,7 @@ const FIXTURES: &[&str] = &[
     "supply-chain-agent.md",
     "manual-review-agent.md",
     "github-app-token-agent.md",
+    "custom-safe-output-bash-coverage.md",
 ];
 
 /// Step display names that the lint expects to find at least once across all
@@ -137,6 +138,13 @@ const REQUIRED_STEP_DISPLAY_NAMES: &[&str] = &[
     "Revoke GitHub App token", // src/compile/extensions/ado_script.rs github_app_token_revoke_step_typed() (activated by engine.github-app-token)
     "Prepare create-pull-request patch base", // src/compile/extensions/ado_script.rs prepare_pr_base_step_typed(PatchBase) (activated by safe-outputs.create-pull-request)
     "Prepare create-pull-request target worktree ref", // src/compile/extensions/ado_script.rs prepare_pr_base_step_typed(TargetWorktree) (activated by safe-outputs.create-pull-request)
+    "Detect custom proposals", // src/compile/agentic_pipeline.rs detect_custom_proposals_step
+    "Checkout pinned custom component", // src/compile/extensions/ado_script.rs checkout_component_step_typed
+    "Prepare custom safe-output executor", // src/compile/agentic_pipeline.rs prepare_custom_executor_binary_step
+    "Write custom safe-output config", // src/compile/agentic_pipeline.rs write_custom_scripts_config_step
+    "Execute custom safe output", // src/compile/agentic_pipeline.rs custom_scripts_execute_step
+    "Prepare custom safe-output proposals", // src/compile/agentic_pipeline.rs custom_jobs_pre_step
+    "Finalize custom safe-output results", // src/compile/agentic_pipeline.rs custom_jobs_post_step
 ];
 
 fn ado_aw_binary() -> PathBuf {

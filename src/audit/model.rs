@@ -176,6 +176,27 @@ pub struct AwInfo {
     /// Compiler version that produced the workflow.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compiler_version: Option<String>,
+    /// Compile-time custom component provenance emitted by ado-aw metadata.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_components: Vec<ComponentProvenance>,
+}
+
+/// Custom safe-output component provenance captured at compile and execution time.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ComponentProvenance {
+    /// Import source, for example `org/repo/path`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source: String,
+    /// Resolved component commit SHA.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sha: String,
+    /// SHA-256 digest of the component manifest.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub manifest_digest: String,
+    /// SHA-256 digest of the component schema.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub schema_digest: String,
 }
 
 /// Aggregate numeric metrics for the audited run.
@@ -755,6 +776,9 @@ pub struct SafeOutputExecutionItem {
     /// Optional execution result payload.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
+    /// Custom component provenance for custom safe-output tools.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub component_provenance: Option<ComponentProvenance>,
     /// Optional rejection reason emitted by detection or execution.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rejection_reason: Option<String>,
@@ -919,6 +943,7 @@ mod tests {
                     source: Some(String::from("agents/security-scan.md")),
                     target: Some(String::from("standalone")),
                     compiler_version: Some(String::from("0.30.2")),
+                    custom_components: Vec::new(),
                 }),
             },
             task_domain: Some(TaskDomainInfo {
@@ -982,6 +1007,7 @@ mod tests {
                     proposal: json!({"title": "Fix pipeline", "repository": "repo"}),
                     error: Some(String::from("Batch blocked by detection gate")),
                     result: Some(json!({"status": "blocked"})),
+                    component_provenance: None,
                     rejection_reason: Some(String::from("prompt_injection")),
                     applies_to_whole_batch: true,
                 }],
@@ -1137,6 +1163,39 @@ mod tests {
         let mut keys_sorted = keys.clone();
         keys_sorted.sort();
         assert_eq!(keys_sorted, vec!["downloaded_files", "metrics", "overview"]);
+    }
+
+    #[test]
+    fn safe_output_execution_item_serializes_component_provenance_only_when_present() {
+        let without_component = SafeOutputExecutionItem {
+            tool: String::from("noop"),
+            status: SafeOutputStatus::Executed,
+            proposal: json!({"name": "noop"}),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&without_component).expect("serialize without component");
+        assert!(
+            value.get("component_provenance").is_none(),
+            "None provenance must not change built-in audit JSON"
+        );
+
+        let with_component = SafeOutputExecutionItem {
+            tool: String::from("custom_notify"),
+            status: SafeOutputStatus::Executed,
+            proposal: json!({"message": "done"}),
+            component_provenance: Some(ComponentProvenance {
+                source: String::from("org/repo/components/notify"),
+                sha: String::from("0123456789abcdef0123456789abcdef01234567"),
+                manifest_digest: String::from("sha256:manifest"),
+                schema_digest: String::from("sha256:schema"),
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&with_component).expect("serialize with component");
+        assert!(json.contains("component_provenance"));
+        let round_tripped: SafeOutputExecutionItem =
+            serde_json::from_str(&json).expect("deserialize with component");
+        assert_eq!(round_tripped, with_component);
     }
 
     #[test]
