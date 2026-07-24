@@ -17,7 +17,7 @@ You are modifying an **existing** ado-aw agentic workflow.
 3. Load the **entire** content of the authoritative, version-pinned playbook and
    follow its instructions precisely:
 
-   https://raw.githubusercontent.com/githubnext/ado-aw/v0.45.1/prompts/update-ado-agentic-workflow.md <!-- x-release-please-version -->
+   https://raw.githubusercontent.com/githubnext/ado-aw/v0.46.0/prompts/update-ado-agentic-workflow.md <!-- x-release-please-version -->
 
 4. Use `catalog` to confirm any newly referenced safe-output / runtime / tool /
    model identifiers are valid.
