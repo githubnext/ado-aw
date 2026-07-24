@@ -15,8 +15,7 @@ These definitions live in
 
 All five child definitions use
 `refs/heads/ado-aw-smoke-candidate-base` as their default branch. The ref is
-permanent and inert; the harness never deletes it. Its seed commit is
-`f0fab7a905dfefb8507498c4f3517d17904bc3c1`.
+permanent and inert; the harness never deletes it.
 
 Candidate janitor definition `2557` was retired. The release-backed janitor
 definition `2548` remains scheduled weekly and is not part of this lane.
