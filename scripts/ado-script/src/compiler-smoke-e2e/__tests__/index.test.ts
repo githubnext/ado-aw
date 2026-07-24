@@ -33,7 +33,7 @@ function specificRunYaml(agentReadToken: boolean): string {
 jobs:
   - job: Agent
     steps:
-      - bash: echo agent
+      - bash: copilot --allow-tool "shell(az)" --allow-tool "shell(head)"
         displayName: Run copilot (AWF network isolated)
         env:
           GITHUB_TOKEN: $(GITHUB_TOKEN)${readTokenEnv}

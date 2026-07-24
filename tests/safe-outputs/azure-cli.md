@@ -10,6 +10,11 @@ engine:
   id: copilot
   model: claude-sonnet-4.6
   timeout-minutes: 15
+tools:
+  bash:
+    - az
+    - head
+  edit: false
 permissions:
   read: agent-playground-read
 safe-outputs:
@@ -45,13 +50,18 @@ Steps (run each in turn using your bash tool):
    safe-output context below. Treat a non-zero exit or empty project list as
    a failure.
 
-3. If either command fails, call `report-incomplete` exactly once with the
-   failing command and its captured output, then stop. Do not call `noop`.
+3. If either command fails, invoke exactly one MCP tool:
+   `report-incomplete` from the `safeoutputs` server with the failing command
+   and its captured output, then stop. Do not call `noop`.
 
-4. Otherwise, call exactly one safe-output tool, `noop`, with:
+4. Otherwise, invoke exactly one MCP tool: `noop` from the `safeoutputs`
+   server, with:
 
    - context: a brief one-line proof-of-life containing the az version
      string and the captured project-list output, prefixed with
      `ado-aw-smoke-$(Build.BuildId)-azure-cli:`.
 
-Do not call any other tool. After the safe output is emitted, stop.
+Use the native Copilot MCP tool interface. Do not inspect MCP configuration,
+API keys, processes, files, or HTTP endpoints. Do not invoke SafeOutputs through
+bash, `curl`, or raw HTTP. Do not print or describe a JSON tool request.
+Actually invoke the MCP tool, then stop.

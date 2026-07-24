@@ -18,6 +18,7 @@ import { join } from "node:path";
 
 import { AdoRest } from "./ado-rest.js";
 import {
+  assertAgentCommandPolicy,
   assertAdoTokenIsolation,
   assertNoForbiddenReleaseUrls,
   assertPipelineArtifactValues,
@@ -96,6 +97,14 @@ async function compileFixtures(
     const yamlText = await readFile(join(worktreeDir, fixture.relLock), "utf8");
     assertNoForbiddenReleaseUrls(yamlText, fixture.name);
     assertAdoTokenIsolation(yamlText, fixture.name, fixture.requiresAgentReadToken);
+    if (fixture.name === "azure-cli") {
+      assertAgentCommandPolicy(
+        yamlText,
+        fixture.name,
+        ["shell(az", "shell(head"],
+        ["--allow-all-tools", "--allow-all-paths"],
+      );
+    }
     assertPipelineArtifactValues(yamlText, fixture.name, {
       project: config.project,
       pipeline: String(config.definitionId),

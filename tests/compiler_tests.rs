@@ -9027,16 +9027,48 @@ fn test_azure_cli_smoke_fails_closed_when_authentication_fails() {
         .join("tests")
         .join("safe-outputs")
         .join("azure-cli.md");
-    let fixture = fs::read_to_string(fixture_path).expect("read azure-cli smoke fixture");
+    let fixture = fs::read_to_string(fixture_path)
+        .expect("read azure-cli smoke fixture")
+        .replace("\r\n", "\n");
 
     for contract in [
         "If either command fails",
-        "call `report-incomplete` exactly once",
+        "`report-incomplete` from the `safeoutputs` server",
         "Do not call `noop`",
+        "bash:\n    - az\n    - head",
+        "edit: false",
+        "Do not inspect MCP configuration",
+        "Do not invoke SafeOutputs through",
+        "Actually invoke the MCP tool",
     ] {
         assert!(
             fixture.contains(contract),
             "Azure CLI smoke must fail closed on an auth regression; missing contract: {contract}"
+        );
+    }
+
+    let (ok, compiled, stderr) =
+        compile_inline_source("azure-cli-smoke-tool-policy", &fixture);
+    assert!(ok, "Azure CLI smoke should compile:\n{stderr}");
+    let document = parse_compiled_yaml(&compiled);
+    let agent = find_job_mapping_by_display_name(&document, "Agent")
+        .expect("Azure CLI smoke should contain the Agent job");
+    let run_agent = find_bash_step_containing(agent, "=== Running AI agent with AWF")
+        .expect("Azure CLI smoke should contain the Agent execution step");
+    let command = run_agent
+        .get(yaml_key("bash"))
+        .and_then(|value| value.as_str())
+        .expect("Agent execution step should have a bash body");
+    for required in ["shell(az)", "shell(head)"] {
+        assert!(
+            command.contains(required),
+            "Azure CLI Agent command should allow only its required shell command {required}:\n{command}"
+        );
+    }
+    for forbidden in ["--allow-all-tools", "--allow-all-paths"] {
+        assert!(
+            !command.contains(forbidden),
+            "Azure CLI Agent command must not contain {forbidden}:\n{command}"
         );
     }
 }

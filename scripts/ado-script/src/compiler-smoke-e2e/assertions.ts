@@ -135,6 +135,31 @@ export function assertAdoTokenIsolation(
   }
 }
 
+/** Assert the command/tool policy on the Agent execution step only. */
+export function assertAgentCommandPolicy(
+  yamlText: string,
+  label: string,
+  requiredSnippets: readonly string[],
+  forbiddenSnippets: readonly string[],
+): void {
+  const docs = parseAllDocuments(yamlText, { merge: false }).map((d) => d.toJS());
+  const agent = singleStep(docs, label, "Run copilot (AWF network isolated)");
+  const script = agent.bash;
+  if (typeof script !== "string") {
+    throw new Error(`${label}: Agent execution step has no bash body`);
+  }
+  for (const snippet of requiredSnippets) {
+    if (!script.includes(snippet)) {
+      throw new Error(`${label}: Agent command is missing required snippet '${snippet}'`);
+    }
+  }
+  for (const snippet of forbiddenSnippets) {
+    if (script.includes(snippet)) {
+      throw new Error(`${label}: Agent command contains forbidden snippet '${snippet}'`);
+    }
+  }
+}
+
 /**
  * Throws unless every `DownloadPipelineArtifact` "specific run" step in the
  * compiled YAML carries exactly the expected project/pipeline/runId/artifact

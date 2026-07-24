@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  assertAgentCommandPolicy,
   assertAdoTokenIsolation,
   assertNoForbiddenReleaseUrls,
   assertPipelineArtifactValues,
@@ -97,6 +98,38 @@ describe("assertAdoTokenIsolation", () => {
         true,
       ),
     ).toThrow(/Detection must not receive AZURE_DEVOPS_EXT_PAT/);
+  });
+});
+
+describe("assertAgentCommandPolicy", () => {
+  it("accepts a restricted Agent command", () => {
+    const yaml = agentTokenYaml().replace(
+      "echo agent",
+      'copilot --allow-tool "shell(az:*)" --allow-tool "shell(head)"',
+    );
+    expect(() =>
+      assertAgentCommandPolicy(
+        yaml,
+        "azure-cli",
+        ["shell(az", "shell(head"],
+        ["--allow-all-tools", "--allow-all-paths"],
+      ),
+    ).not.toThrow();
+  });
+
+  it("rejects unrestricted Agent tools", () => {
+    const yaml = agentTokenYaml().replace(
+      "echo agent",
+      "copilot --allow-all-tools --allow-all-paths",
+    );
+    expect(() =>
+      assertAgentCommandPolicy(
+        yaml,
+        "azure-cli",
+        ["shell(az"],
+        ["--allow-all-tools", "--allow-all-paths"],
+      ),
+    ).toThrow(/missing required snippet|forbidden snippet/);
   });
 });
 
