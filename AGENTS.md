@@ -352,7 +352,7 @@ index to jump to the right page.
 
 - [`docs/ir.md`](docs/ir.md) — typed Azure DevOps pipeline IR (`Pipeline`, jobs/stages/steps, output refs, graph pass, lowering, target builders, and the public JSON summary consumed by agent-facing tooling).
 - [`docs/cli.md`](docs/cli.md) — `ado-aw` CLI commands (`init`, `compile`,
-  `check`, `mcp`, `mcp-http`, `execute`, `secrets`, `enable`, `disable`,
+  `check`, `mcp`, `execute`, `secrets`, `enable`, `disable`,
   `remove`, `list`, `status`, `run`, `audit`, `mcp-author`, `trace`,
   `inspect`, `graph`, `whatif`, `lint`, `catalog`; `configure` is a
   deprecated hidden alias; `export-gate-schema` and `export-fact-catalog` are hidden build-time tools).
@@ -391,8 +391,6 @@ index to jump to the right page.
   type codegen, the A2 design decision, the bundle env contract
   modelled in `src/compile/ado_bundle.rs`, and the `trigger-e2e/`
   gate-spec drift guard (kept in sync via `export-fact-catalog`).
-- [`docs/local-development.md`](docs/local-development.md) — local development
-  setup notes.
 
 ## Development Guidelines
 

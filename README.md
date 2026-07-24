@@ -634,7 +634,6 @@ Commands:
   check         Verify a compiled pipeline matches its source
   mcp           Run as an MCP server (safe outputs)
   mcp-author    Run the author-facing MCP server over stdio (IDE/Copilot Chat integration)
-  mcp-http      Run as an HTTP MCP server (for MCPG integration)
   execute       Execute safe outputs (Stage 3)
   secrets       Manage pipeline-variable secrets on matched ADO definitions (set/list/delete)
   enable        Register ADO build definitions for compiled pipelines and ensure they are enabled
@@ -765,8 +764,6 @@ index to jump to the right page.
 - [`docs/extending.md`](docs/extending.md) — adding new CLI commands, compile
   targets, front-matter fields, typed IR extensions, safe-output tools,
   first-class tools, and runtimes.
-- [`docs/local-development.md`](docs/local-development.md) — local development
-  setup notes.
 
 ---
 

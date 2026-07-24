@@ -178,7 +178,7 @@ ado-aw mcp-author
 No flags; add the server to your IDE's MCP config pointing to the `ado-aw mcp-author` command. See the [Author MCP Server reference](/ado-aw/reference/mcp-author/) for tool parameters, IDE configuration snippets (VS Code, Claude Desktop, Cursor), and trust model.
 
 :::note[Not the SafeOutputs server]
-`mcp-author` is a local developer tool. The `ado-aw mcp` and `ado-aw mcp-http` commands are the SafeOutputs servers used by compiled pipelines at Stage 1. They are documented in the [Internal / pipeline runtime commands](#internal--pipeline-runtime-commands) section below.
+`mcp-author` is a local developer tool. The `ado-aw mcp` command is the SafeOutputs server used by compiled pipelines at Stage 1. It is documented in the [Internal / pipeline runtime commands](#internal--pipeline-runtime-commands) section below.
 :::
 
 ## Pipeline lifecycle commands
@@ -373,20 +373,6 @@ ado-aw mcp <output_directory> <bounding_directory> [--enabled-tools <name>]
 
 Options:
 
-- `--enabled-tools <name>` -- only expose these safe output tools; repeat to allow more than one. If omitted, all tools are exposed
-
-### `mcp-http <output_directory> <bounding_directory>`
-
-Run SafeOutputs as an HTTP MCP server (for MCPG integration). The `<bounding_directory>` guards against directory traversal attacks.
-
-```bash
-ado-aw mcp-http <output_directory> <bounding_directory> [options]
-```
-
-Options:
-
-- `--port <port>` -- port to listen on (default: `8100`)
-- `--api-key <key>` -- API key for authentication (if not provided, one is generated)
 - `--enabled-tools <name>` -- only expose these safe output tools; repeat to allow more than one. If omitted, all tools are exposed
 
 ### `execute`

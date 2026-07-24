@@ -8,13 +8,12 @@ import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 `ado-aw mcp-author` runs a **local, read-only MCP server over stdio** for IDE and Copilot Chat integrations. It exposes the full set of IR analysis commands — inspect, graph traversal, lint, what-if, trace, and audit — as MCP tools so your IDE agent can reason about ado-aw workflows without you running CLI commands by hand.
 
 <Aside type="caution" title="Not the SafeOutputs MCP server">
-  `mcp-author` is a **local developer tool**. It is completely separate from the `ado-aw mcp` / `ado-aw mcp-http` servers that compiled pipelines run in Stage 1 to record safe-output proposals.
+  `mcp-author` is a **local developer tool**. It is completely separate from the `ado-aw mcp` server that compiled pipelines run in Stage 1 to record safe-output proposals.
   
   | Server | Purpose | Who runs it |
   |--------|---------|-------------|
   | `ado-aw mcp-author` | Local IR queries for IDE agents | You, on your laptop |
   | `ado-aw mcp` | Stage 1 safe-output recording | Compiled pipeline (Stage 1) |
-  | `ado-aw mcp-http` | Same, over HTTP for MCPG routing | Compiled pipeline (Stage 1) |
 </Aside>
 
 ## When to use it

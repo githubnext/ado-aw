@@ -275,25 +275,6 @@ enum Commands {
         #[arg(long = "exclude")]
         exclude: Vec<String>,
     },
-    /// Run SafeOutputs MCP server over HTTP (for MCPG integration)
-    McpHttp {
-        /// IP address to bind the HTTP listener to
-        #[arg(long, default_value = "127.0.0.1")]
-        bind_address: std::net::IpAddr,
-        /// Port to listen on
-        #[arg(long, default_value = "8100")]
-        port: u16,
-        /// API key for authentication (if not provided, one is generated)
-        #[arg(long)]
-        api_key: Option<String>,
-        /// Directory for safe output files
-        output_directory: String,
-        /// Guard against directory traversal attacks
-        bounding_directory: String,
-        /// Only expose these safe output tools (can be repeated). If omitted, all tools are exposed.
-        #[arg(long = "enabled-tools")]
-        enabled_tools: Vec<String>,
-    },
     /// Initialize a repository for AI-first agentic workflow authoring
     Init {
         /// Target directory (defaults to current directory)
@@ -998,7 +979,6 @@ async fn main() -> Result<()> {
         Some(Commands::Mcp { .. }) => "mcp",
         Some(Commands::McpAuthor { .. }) => "mcp-author",
         Some(Commands::Execute { .. }) => "execute",
-        Some(Commands::McpHttp { .. }) => "mcp-http",
         Some(Commands::Init { .. }) => "init",
         Some(Commands::Configure { .. }) => "configure",
         Some(Commands::Secrets { .. }) => "secrets",
@@ -1034,7 +1014,7 @@ async fn main() -> Result<()> {
     };
 
     // Check for a newer release on GitHub and nudge the user to update.
-    // Skipped for pipeline-internal commands (execute, mcp, mcp-http) that
+    // Skipped for pipeline-internal commands (execute and mcp) that
     // run inside network-isolated sandboxes and are not invoked by humans.
     // Also skipped in CI environments to avoid unnecessary outbound calls.
     let is_pipeline_internal = matches!(
@@ -1042,7 +1022,6 @@ async fn main() -> Result<()> {
         Commands::Execute { .. }
             | Commands::Mcp { .. }
             | Commands::McpAuthor { .. }
-            | Commands::McpHttp { .. }
     );
     let update_handle = if !is_pipeline_internal && std::env::var_os("CI").is_none() {
         Some(tokio::spawn(update_check::check_for_update()))
@@ -1109,29 +1088,6 @@ async fn main() -> Result<()> {
                 ado_project,
                 dry_run,
                 execute::ToolFilter { only, exclude },
-            )
-            .await?;
-        }
-        Commands::McpHttp {
-            bind_address,
-            port,
-            api_key,
-            output_directory,
-            bounding_directory,
-            enabled_tools,
-        } => {
-            let filter = if enabled_tools.is_empty() {
-                None
-            } else {
-                Some(enabled_tools)
-            };
-            mcp::run_http(
-                &output_directory,
-                &bounding_directory,
-                bind_address,
-                port,
-                api_key.as_deref(),
-                filter.as_deref(),
             )
             .await?;
         }
