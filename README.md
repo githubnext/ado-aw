@@ -764,6 +764,8 @@ index to jump to the right page.
 - [`docs/extending.md`](docs/extending.md) — adding new CLI commands, compile
   targets, front-matter fields, typed IR extensions, safe-output tools,
   first-class tools, and runtimes.
+- [`docs/local-development.md`](docs/local-development.md) — local development
+  setup notes.
 
 ---
 

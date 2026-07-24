@@ -391,6 +391,8 @@ index to jump to the right page.
   type codegen, the A2 design decision, the bundle env contract
   modelled in `src/compile/ado_bundle.rs`, and the `trigger-e2e/`
   gate-spec drift guard (kept in sync via `export-fact-catalog`).
+- [`docs/local-development.md`](docs/local-development.md) — local development
+  setup notes.
 
 ## Development Guidelines
 
