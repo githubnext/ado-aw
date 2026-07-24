@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.46.0](https://github.com/githubnext/ado-aw/compare/v0.45.1...v0.46.0) (2026-07-24)
+
+
+### Features
+
+* **compile:** adopt AWF strict network isolation ([#1534](https://github.com/githubnext/ado-aw/issues/1534)) ([8fad0ab](https://github.com/githubnext/ado-aw/commit/8fad0ab5d5c2087c609e83422aa6d96d4c6c529c))
+* **smoke:** run agentic smoke against compiler candidates ([#1628](https://github.com/githubnext/ado-aw/issues/1628)) ([0ad3d22](https://github.com/githubnext/ado-aw/commit/0ad3d225f67d2f4dd7c4a8bbc2dd65fda6933a79))
+
+
+### Bug Fixes
+
+* **ado-script:** recover shallow Azure checkout merge bases ([#1563](https://github.com/githubnext/ado-aw/issues/1563)) ([a59eda0](https://github.com/githubnext/ado-aw/commit/a59eda0acd1c50b5e4ad1ac422e7eb9c0723fa5f))
+* **executor-e2e:** invoke .js test fixture via process.execPath on Windows ([#1616](https://github.com/githubnext/ado-aw/issues/1616)) ([5ad7f63](https://github.com/githubnext/ado-aw/commit/5ad7f6324a6dad7569cce73e0bcd3d5a00be0309))
+* **tests:** prepare AgentPlayground CI cutover ([#1560](https://github.com/githubnext/ado-aw/issues/1560)) ([b73183a](https://github.com/githubnext/ado-aw/commit/b73183ac0cc083a12caab089d720ebac17727eab))
+* **trigger-e2e:** mint victim cancellation token ([#1599](https://github.com/githubnext/ado-aw/issues/1599)) ([f32f86f](https://github.com/githubnext/ado-aw/commit/f32f86fecf54a0f33ac33ada4b9e095856ffbe1f))
+* **trigger-e2e:** preserve mirror push diagnostics ([#1601](https://github.com/githubnext/ado-aw/issues/1601)) ([ab2d2b8](https://github.com/githubnext/ado-aw/commit/ab2d2b8d5a02e6e9a454f927a9b68040e27503aa))
+* **trigger-e2e:** stabilize and parallelize victim scenarios ([#1595](https://github.com/githubnext/ado-aw/issues/1595)) ([05ce3f9](https://github.com/githubnext/ado-aw/commit/05ce3f9e9ad68e78bf049dfbca3e7037d93c7f54))
+* **workflows:** harden recurring agentic incidents ([#1529](https://github.com/githubnext/ado-aw/issues/1529)) ([5001f4a](https://github.com/githubnext/ado-aw/commit/5001f4a6502f1e477ad8f2d835f8201c8f6f061c))
+
 ## [0.45.1](https://github.com/githubnext/ado-aw/compare/v0.45.0...v0.45.1) (2026-07-15)
 
 
