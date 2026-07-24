@@ -38,10 +38,12 @@ five pipelines:
 These five registered definitions remain the **release-backed** contract: their
 checked-in YAML downloads the latest released compiler/runtime assets. A
 separate [`tests/compiler-smoke-e2e/`](../compiler-smoke-e2e/) orchestrator
-builds these five workflows plus a candidate-only imported custom-safe-output
-workflow with a compiler from the current PR or nightly `main`, stages the
-regenerated sources/YAML on a short-lived `ado-aw-mirror` ref, and runs six
-fixed candidate definitions. Keeping both lanes distinguishes release
+builds four selected release workflows (canary, azure-cli, noop-target, and
+failure reporter) plus a candidate-only imported custom-safe-output workflow
+with a compiler from the current PR or nightly `main`, stages the regenerated
+sources/YAML on a short-lived `ado-aw-mirror` ref, and runs five fixed candidate
+definitions. The weekly janitor remains release-only maintenance and is not
+compiled or run by the candidate lane. Keeping both lanes distinguishes release
 packaging/download failures from regressions in unreleased compiler output.
 
 Do **not** regenerate the checked-in `tests/safe-outputs/*.lock.yml` files with

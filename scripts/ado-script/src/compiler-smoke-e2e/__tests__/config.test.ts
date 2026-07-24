@@ -18,9 +18,8 @@ function baseEnv(overrides: Record<string, string | undefined> = {}): NodeJS.Pro
     COMPILER_SMOKE_CANARY_DEFINITION_ID: "2601",
     COMPILER_SMOKE_AZURE_CLI_DEFINITION_ID: "2602",
     COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID: "2603",
-    COMPILER_SMOKE_JANITOR_DEFINITION_ID: "2604",
-    COMPILER_SMOKE_REPORTER_DEFINITION_ID: "2605",
-    COMPILER_SMOKE_CUSTOM_SAFE_OUTPUT_DEFINITION_ID: "2606",
+    COMPILER_SMOKE_REPORTER_DEFINITION_ID: "2604",
+    COMPILER_SMOKE_CUSTOM_SAFE_OUTPUT_DEFINITION_ID: "2605",
     ...overrides,
   };
 }
@@ -36,11 +35,10 @@ describe("loadConfig", () => {
       canary: 2601,
       "azure-cli": 2602,
       "noop-target": 2603,
-      janitor: 2604,
-      "smoke-failure-reporter": 2605,
-      "custom-safe-output": 2606,
+      "smoke-failure-reporter": 2604,
+      "custom-safe-output": 2605,
     });
-    expect(config.concurrency).toBe(6);
+    expect(config.concurrency).toBe(5);
     expect(config.childTimeoutMs).toBe(7_200_000);
     expect(config.pollMs).toBe(10_000);
     expect(config.staleRefHours).toBe(24);
@@ -61,7 +59,6 @@ describe("loadConfig", () => {
     "COMPILER_SMOKE_CANARY_DEFINITION_ID",
     "COMPILER_SMOKE_AZURE_CLI_DEFINITION_ID",
     "COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID",
-    "COMPILER_SMOKE_JANITOR_DEFINITION_ID",
     "COMPILER_SMOKE_REPORTER_DEFINITION_ID",
     "COMPILER_SMOKE_CUSTOM_SAFE_OUTPUT_DEFINITION_ID",
   ]) {
@@ -87,7 +84,7 @@ describe("loadConfig", () => {
   });
 
   it("rejects a non-integer fixture definition id", () => {
-    expect(() => loadConfig(baseEnv({ COMPILER_SMOKE_JANITOR_DEFINITION_ID: "12.5" }))).toThrow(
+    expect(() => loadConfig(baseEnv({ COMPILER_SMOKE_REPORTER_DEFINITION_ID: "12.5" }))).toThrow(
       /positive integer/,
     );
   });
@@ -108,31 +105,31 @@ describe("loadConfig", () => {
         baseEnv({
           COMPILER_SMOKE_AZURE_CLI_DEFINITION_ID: "2601",
           COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID: "2604",
-          COMPILER_SMOKE_JANITOR_DEFINITION_ID: "2604",
+          COMPILER_SMOKE_REPORTER_DEFINITION_ID: "2604",
         }),
       ),
     ).toThrow(/canary/);
   });
 
   describe("COMPILER_SMOKE_CONCURRENCY bounds", () => {
-    it("defaults to 6 when unset", () => {
-      expect(loadConfig(baseEnv()).concurrency).toBe(6);
+    it("defaults to 5 when unset", () => {
+      expect(loadConfig(baseEnv()).concurrency).toBe(5);
     });
 
     it("accepts the lower bound (1)", () => {
       expect(loadConfig(baseEnv({ COMPILER_SMOKE_CONCURRENCY: "1" })).concurrency).toBe(1);
     });
 
-    it("accepts the upper bound (6)", () => {
-      expect(loadConfig(baseEnv({ COMPILER_SMOKE_CONCURRENCY: "6" })).concurrency).toBe(6);
+    it("accepts the upper bound (5)", () => {
+      expect(loadConfig(baseEnv({ COMPILER_SMOKE_CONCURRENCY: "5" })).concurrency).toBe(5);
     });
 
     it("rejects 0", () => {
       expect(() => loadConfig(baseEnv({ COMPILER_SMOKE_CONCURRENCY: "0" }))).toThrow(/range/);
     });
 
-    it("rejects 7", () => {
-      expect(() => loadConfig(baseEnv({ COMPILER_SMOKE_CONCURRENCY: "7" }))).toThrow(/range/);
+    it("rejects 6", () => {
+      expect(() => loadConfig(baseEnv({ COMPILER_SMOKE_CONCURRENCY: "6" }))).toThrow(/range/);
     });
 
     it("rejects a non-integer value", () => {

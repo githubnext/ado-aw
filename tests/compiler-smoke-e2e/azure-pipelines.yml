@@ -1,9 +1,9 @@
 # Candidate compiler agentic-smoke orchestrator.
 #
 # Builds ado-aw and ado-script from the exact checked-out PR/main commit,
-# publishes an immutable candidate artifact, recompiles all six agentic smoke
+# publishes an immutable candidate artifact, recompiles five agentic smoke
 # workflows, stages them on a short-lived ado-aw-mirror ref, and waits for the
-# six fixed child definitions to complete.
+# five fixed child definitions to complete.
 
 trigger: none
 
@@ -38,7 +38,6 @@ variables:
   EFFECTIVE_COMPILER_SMOKE_CANARY_DEFINITION_ID: $[ coalesce(variables['COMPILER_SMOKE_CANARY_DEFINITION_ID'], '') ]
   EFFECTIVE_COMPILER_SMOKE_AZURE_CLI_DEFINITION_ID: $[ coalesce(variables['COMPILER_SMOKE_AZURE_CLI_DEFINITION_ID'], '') ]
   EFFECTIVE_COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID: $[ coalesce(variables['COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID'], '') ]
-  EFFECTIVE_COMPILER_SMOKE_JANITOR_DEFINITION_ID: $[ coalesce(variables['COMPILER_SMOKE_JANITOR_DEFINITION_ID'], '') ]
   EFFECTIVE_COMPILER_SMOKE_REPORTER_DEFINITION_ID: $[ coalesce(variables['COMPILER_SMOKE_REPORTER_DEFINITION_ID'], '') ]
   EFFECTIVE_COMPILER_SMOKE_CUSTOM_SAFE_OUTPUT_DEFINITION_ID: $[ coalesce(variables['COMPILER_SMOKE_CUSTOM_SAFE_OUTPUT_DEFINITION_ID'], '') ]
   EFFECTIVE_CRATES_IO_FEED: $[ coalesce(variables['CRATES_IO_FEED'], 'sparse+https://pkgs.dev.azure.com/msazuresphere/AgentPlayground/_packaging/cargo/Cargo/index/') ]
@@ -306,7 +305,6 @@ jobs:
           COMPILER_SMOKE_CANARY_DEFINITION_ID: $(EFFECTIVE_COMPILER_SMOKE_CANARY_DEFINITION_ID)
           COMPILER_SMOKE_AZURE_CLI_DEFINITION_ID: $(EFFECTIVE_COMPILER_SMOKE_AZURE_CLI_DEFINITION_ID)
           COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID: $(EFFECTIVE_COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID)
-          COMPILER_SMOKE_JANITOR_DEFINITION_ID: $(EFFECTIVE_COMPILER_SMOKE_JANITOR_DEFINITION_ID)
           COMPILER_SMOKE_REPORTER_DEFINITION_ID: $(EFFECTIVE_COMPILER_SMOKE_REPORTER_DEFINITION_ID)
           COMPILER_SMOKE_CUSTOM_SAFE_OUTPUT_DEFINITION_ID: $(EFFECTIVE_COMPILER_SMOKE_CUSTOM_SAFE_OUTPUT_DEFINITION_ID)
 

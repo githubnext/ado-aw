@@ -1,10 +1,12 @@
 # Candidate compiler agentic smoke
 
 This suite validates compiler changes before release. It builds `ado-aw` and
-`ado-script` from the exact pull-request or `main` commit, recompiles every
-release workflow under [`tests/safe-outputs/`](../safe-outputs/) plus the
-candidate-only custom-safe-output workflow in this directory, and queues six
-fixed AgentPlayground definitions against the regenerated YAML.
+`ado-script` from the exact pull-request or `main` commit, recompiles four
+selected release workflows under [`tests/safe-outputs/`](../safe-outputs/)
+(canary, azure-cli, noop-target, and failure reporter) plus the candidate-only
+custom-safe-output workflow in this directory, and queues five fixed
+AgentPlayground definitions against the regenerated YAML. The weekly janitor is
+intentionally outside the candidate lane.
 
 It complements rather than replaces the release-backed daily smoke:
 
@@ -28,7 +30,7 @@ check and downloaded binary cannot drift.
    `ado-aw-linux-x64`, `awf-linux-x64`, `ado-script.zip`, `checksums.txt`, and
    `provenance.json`.
 4. The test-only `compiler-smoke-e2e` TypeScript harness creates a detached
-   worktree, adds an exact `supply-chain.pipeline-artifact` source to all six
+   worktree, adds an exact `supply-chain.pipeline-artifact` source to all five
    smoke files, removes their schedules, resolves the SHA-pinned custom
    component into the ephemeral import cache, recompiles them with the
    candidate compiler, and runs `ado-aw check`. Both compiler subprocesses receive
@@ -38,7 +40,7 @@ check and downloaded binary cannot drift.
 5. The harness pushes the worktree commit to
    `refs/heads/ado-aw-smoke-candidate/<producer-build-id>` in the Azure Repo
    `ado-aw-mirror`.
-6. Six fixed child definitions are queued concurrently with both that ref and
+6. Five fixed child definitions are queued concurrently with both that ref and
    its exact commit SHA. Each generated pipeline downloads and verifies the
    artifact from the still-running producer build.
 7. The custom child imports both scripts-style and jobs-style tools from
@@ -85,10 +87,10 @@ to that manifest.
 
 The definitions are registered against `ado-aw-mirror`, not GitHub. Their
 default branch is the permanent inert ref
-`refs/heads/ado-aw-smoke-candidate-base`, whose six lock-file paths contain
+`refs/heads/ado-aw-smoke-candidate-base`, whose five lock-file paths contain
 hand-authored `trigger: none`, `pr: none`, schedule-free placeholders. A child
 therefore runs only when the orchestrator explicitly supplies a candidate ref.
-The checked-in [`inert-child.yml`](inert-child.yml) is copied to those six
+The checked-in [`inert-child.yml`](inert-child.yml) is copied to those five
 paths when the base ref is created.
 
 The candidate-only custom source is
@@ -105,7 +107,7 @@ The principal behind `agent-playground-write`, used only after artifact
 publication, needs:
 
 - Contribute/Create branch/Delete refs on `ado-aw-mirror`;
-- Queue builds and Stop builds on the six child definitions;
+- Queue builds and Stop builds on the five child definitions;
 - Read builds and artifacts in AgentPlayground.
 
 Child build identities need Code Read on `ado-aw-mirror` and Build Read on the
@@ -130,7 +132,6 @@ Set these non-secret variables on the orchestrator:
 COMPILER_SMOKE_CANARY_DEFINITION_ID
 COMPILER_SMOKE_AZURE_CLI_DEFINITION_ID
 COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID
-COMPILER_SMOKE_JANITOR_DEFINITION_ID
 COMPILER_SMOKE_REPORTER_DEFINITION_ID
 COMPILER_SMOKE_CUSTOM_SAFE_OUTPUT_DEFINITION_ID
 ```
@@ -140,7 +141,7 @@ Optional overrides:
 ```text
 COMPILER_SMOKE_ARTIFACT_NAME=ado-aw-candidate
 COMPILER_SMOKE_MIRROR_REPO=ado-aw-mirror
-COMPILER_SMOKE_CONCURRENCY=6
+COMPILER_SMOKE_CONCURRENCY=5
 COMPILER_SMOKE_CHILD_TIMEOUT_MS=7200000
 COMPILER_SMOKE_POLL_MS=10000
 COMPILER_SMOKE_STALE_REF_HOURS=24
@@ -163,7 +164,7 @@ The full live contract requires AgentPlayground and the fixed definitions:
 
 1. the producer remains in progress after publishing its artifact;
 2. every child downloads the exact producer `run-id`;
-3. all six children succeed;
+3. all five children succeed;
 4. the custom child carries both
    `ado-aw-custom-script-<child-build-id>` and
    `ado-aw-custom-job-<child-build-id>`;

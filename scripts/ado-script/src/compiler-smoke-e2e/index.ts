@@ -3,7 +3,7 @@
  *
  * Stages the compiler candidate produced by the current build (PR or
  * nightly `main`) as a pinned `supply-chain.pipeline-artifact` source across
- * six fixed fixtures, pushes the staged candidate to a short-lived branch on
+ * five fixed fixtures, pushes the staged candidate to a short-lived branch on
  * the mirror repo, queues the FIXED "candidate lane" pipeline definitions
  * (tracked in
  * `tests/compiler-smoke-e2e/REGISTERED.md`), and asserts they all go green.
@@ -22,7 +22,12 @@ import {
   assertNoForbiddenReleaseUrls,
   assertPipelineArtifactValues,
 } from "./assertions.js";
-import { candidateRef, FIXTURE_NAMES, loadConfig, type CompilerSmokeConfig } from "./config.js";
+import {
+  candidateRef,
+  CANDIDATE_FIXTURE_NAMES,
+  loadConfig,
+  type CompilerSmokeConfig,
+} from "./config.js";
 import { compileAndCheck } from "./compile-cli.js";
 import { ALL_FIXTURES, allowedChangedPaths } from "./fixtures.js";
 import {
@@ -113,7 +118,9 @@ async function cleanupStaleRefs(config: CompilerSmokeConfig, rest: AdoRest, mirr
       baseRef: config.sourceBranch,
       ownRef,
       definitionId: config.definitionId,
-      childDefinitionIds: FIXTURE_NAMES.map((name) => config.definitionIds[name]),
+      childDefinitionIds: CANDIDATE_FIXTURE_NAMES.map(
+        (name) => config.definitionIds[name],
+      ),
       staleRefHours: config.staleRefHours,
       client: rest,
     });
@@ -221,7 +228,7 @@ export async function main(): Promise<number> {
     });
     log(`[git] candidate ${candidateSha} pushed to ${ownRef}`);
 
-    const requests: FixtureBuildRequest[] = FIXTURE_NAMES.map((name) => ({
+    const requests: FixtureBuildRequest[] = CANDIDATE_FIXTURE_NAMES.map((name) => ({
       name,
       definitionId: config.definitionIds[name],
       sourceBranch: ownRef,

@@ -1,8 +1,9 @@
 /**
- * Manifest of the six fixed compiler-smoke fixtures.
+ * Manifest of the five fixed compiler-smoke fixtures.
  *
- * Five reuse the release-backed sources under `tests/safe-outputs/`; the sixth
- * is candidate-only and lives beside this harness. Every source is read from
+ * Four reuse release-backed sources under `tests/safe-outputs/`; the fifth is
+ * candidate-only and lives beside this harness. The weekly janitor is
+ * deliberately excluded from candidate checks. Every selected source is read from
  * the detached candidate worktree (an exact checkout of
  * `BUILD_SOURCEVERSION`, never the possibly-divergent
  * `BUILD_SOURCESDIRECTORY`), transformed, compiled, and queued through its
@@ -11,9 +12,9 @@
  * Test-harness module; not shipped in `ado-script.zip`.
  */
 import type { FixtureName } from "./config.js";
-import { FIXTURE_NAMES } from "./config.js";
+import { CANDIDATE_FIXTURE_NAMES } from "./config.js";
 
-/** Repo-relative directory containing the five release-backed fixtures. */
+/** Repo-relative directory containing release-backed fixture sources. */
 export const RELEASE_FIXTURE_DIR = "tests/safe-outputs";
 /** Repo-relative directory containing the candidate-only custom fixture. */
 export const CANDIDATE_FIXTURE_DIR = "tests/compiler-smoke-e2e";
@@ -54,8 +55,9 @@ export function fixturePaths(name: FixtureName): FixturePaths {
   };
 }
 
-/** All six fixtures in the stable declaration order used throughout the harness. */
-export const ALL_FIXTURES: readonly FixturePaths[] = FIXTURE_NAMES.map(fixturePaths);
+/** All five candidate fixtures in the stable order used throughout the harness. */
+export const ALL_FIXTURES: readonly FixturePaths[] =
+  CANDIDATE_FIXTURE_NAMES.map(fixturePaths);
 
 export function fixtureByName(name: FixtureName): FixturePaths {
   const fixture = ALL_FIXTURES.find((candidate) => candidate.name === name);
@@ -67,7 +69,7 @@ export function fixtureByName(name: FixtureName): FixturePaths {
 
 /**
  * The exact set of repo-relative paths the candidate-staging commit may touch:
- * six markdown sources, six compiled locks, and the compiler-managed
+ * five markdown sources, five compiled locks, and the compiler-managed
  * `.gitattributes` block. Any other changed path fails before push.
  */
 export function allowedChangedPaths(): Set<string> {

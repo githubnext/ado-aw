@@ -38,15 +38,15 @@ describe("fixturePaths", () => {
 });
 
 describe("ALL_FIXTURES", () => {
-  it("has exactly the six fixtures in the required stable order", () => {
+  it("has exactly the five candidate fixtures in the required stable order", () => {
     expect(ALL_FIXTURES.map((f) => f.name)).toEqual([
       "canary",
       "azure-cli",
       "noop-target",
-      "janitor",
       "smoke-failure-reporter",
       "custom-safe-output",
     ]);
+    expect(ALL_FIXTURES.map((f) => f.name)).not.toContain("janitor");
   });
 
   it("keeps release and candidate-only fixture paths separate", () => {
@@ -62,9 +62,9 @@ describe("ALL_FIXTURES", () => {
 });
 
 describe("allowedChangedPaths", () => {
-  it("contains the six source/lock pairs and exact compiler-managed attribute/cache paths", () => {
+  it("contains the five source/lock pairs and exact compiler-managed attribute/cache paths", () => {
     const allowed = allowedChangedPaths();
-    expect(allowed.size).toBe(16);
+    expect(allowed.size).toBe(14);
     expect(allowed.has(".gitattributes")).toBe(true);
     expect(allowed.has(IMPORT_CACHE_ATTRIBUTES_PATH)).toBe(true);
     expect(allowed.has(CUSTOM_COMPONENT_CACHE_PATH)).toBe(true);
