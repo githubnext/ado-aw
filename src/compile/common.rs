@@ -2307,7 +2307,7 @@ fn try_add_user_mcp(
     // Prevent user-defined MCPs from overwriting the reserved safeoutputs backend
     if name.eq_ignore_ascii_case("safeoutputs") {
         log::warn!(
-            "MCP name 'safeoutputs' is reserved for the safe outputs HTTP backend — skipping"
+            "MCP name 'safeoutputs' is reserved for the compiler-owned safe outputs backend — skipping"
         );
         return Ok(());
     }

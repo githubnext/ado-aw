@@ -121,7 +121,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   ├── execute.rs        # Stage 3 safe output execution
 │   ├── fuzzy_schedule.rs # Fuzzy schedule parsing
 │   ├── logging.rs        # File-based logging infrastructure
-│   ├── mcp.rs            # SafeOutputs MCP server (stdio + HTTP)
+│   ├── mcp.rs            # SafeOutputs stdio MCP server
 │   ├── mcp_author/       # Author-facing read-only MCP server for local IDE/Copilot Chat integrations
 │   │   ├── mod.rs        # Tool router + handlers for inspect/graph/deps/outputs/whatif/lint/catalog/trace/audit
 │   │   └── tests.rs      # MCP-author integration / contract tests
@@ -352,7 +352,7 @@ index to jump to the right page.
 
 - [`docs/ir.md`](docs/ir.md) — typed Azure DevOps pipeline IR (`Pipeline`, jobs/stages/steps, output refs, graph pass, lowering, target builders, and the public JSON summary consumed by agent-facing tooling).
 - [`docs/cli.md`](docs/cli.md) — `ado-aw` CLI commands (`init`, `compile`,
-  `check`, `mcp`, `mcp-http`, `execute`, `secrets`, `enable`, `disable`,
+  `check`, `mcp`, `execute`, `secrets`, `enable`, `disable`,
   `remove`, `list`, `status`, `run`, `audit`, `mcp-author`, `trace`,
   `inspect`, `graph`, `whatif`, `lint`, `catalog`; `configure` is a
   deprecated hidden alias; `export-gate-schema` and `export-fact-catalog` are hidden build-time tools).
