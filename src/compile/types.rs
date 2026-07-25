@@ -813,6 +813,12 @@ impl GithubAppTokenConfig {
                     api_url
                 );
             }
+            if parsed.query().is_some() || parsed.fragment().is_some() {
+                anyhow::bail!(
+                    "{path}.api-url '{}' must not contain a query string or fragment",
+                    api_url
+                );
+            }
         }
         for permission in self.permissions.keys() {
             if matches!(
@@ -2113,6 +2119,12 @@ impl FrontMatter {
         if parsed.scheme() != "https" || parsed.host_str().is_none() {
             anyhow::bail!(
                 "safe-outputs.github-api-url '{}' must be an https:// URL with a host",
+                raw
+            );
+        }
+        if parsed.query().is_some() || parsed.fragment().is_some() {
+            anyhow::bail!(
+                "safe-outputs.github-api-url '{}' must not contain a query string or fragment",
                 raw
             );
         }
@@ -4987,6 +4999,16 @@ github-app-token:
             error.contains("ADO expression") || error.contains("newlines"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn github_issue_pat_rejects_api_url_fragment() {
+        let (fm, _) = super::super::common::parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-api-url: https://api.github.com/api/v3#fragment\n  create-issue:\n    target-repo: octo/repo\n---\n",
+        )
+        .unwrap();
+        let error = fm.github_safe_outputs_auth().unwrap_err().to_string();
+        assert!(error.contains("query string or fragment"));
     }
 
     #[test]

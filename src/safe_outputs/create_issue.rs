@@ -443,15 +443,31 @@ impl Executor for CreateIssueResult {
                 "Filed GitHub issue {}#{}: {}",
                 target_repo, number, html_url
             );
-            if let Some(temporary_id) = &self.temporary_id {
-                ctx.register_resolved_github_issue(
+            if let Some(temporary_id) = &self.temporary_id
+                && let Err(error) = ctx.register_resolved_github_issue(
                     temporary_id,
                     crate::safe_outputs::ResolvedGithubIssue {
                         repository: target_repo.clone(),
                         number,
                         url: html_url.clone(),
                     },
-                )?;
+                )
+            {
+                return Ok(ExecutionResult::failure_with_data(
+                    format!(
+                        "Filed issue {}#{} but failed to register temporary_id '{}': {}",
+                        target_repo,
+                        number,
+                        temporary_id.canonical(),
+                        crate::sanitize::neutralize_pipeline_commands(&error.to_string())
+                    ),
+                    serde_json::json!({
+                        "number": number,
+                        "url": html_url,
+                        "target_repo": target_repo,
+                        "temporary_id": temporary_id.canonical(),
+                    }),
+                ));
             }
             Ok(ExecutionResult::success_with_data(
                 format!("Filed issue {}#{}: {}", target_repo, number, html_url),

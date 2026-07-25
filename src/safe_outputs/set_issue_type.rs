@@ -217,6 +217,8 @@ impl Executor for SetIssueTypeResult {
         );
         debug!("PATCHing GitHub issue type at {url}");
 
+        // gh-aw's set-issue-type contract uses an empty string to clear the
+        // native type; preserve that wire behavior for front-matter parity.
         let response = reqwest::Client::new()
             .patch(&url)
             .header("Accept", "application/vnd.github+json")

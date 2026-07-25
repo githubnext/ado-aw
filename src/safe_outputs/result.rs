@@ -221,6 +221,9 @@ impl ExecutionContext {
             .get(tool_name)
             .cloned()
             .map(|mut value| {
+                // Approval is compiler orchestration metadata, not executor
+                // configuration. Strip it before typed configs with
+                // deny_unknown_fields are deserialized.
                 if let Some(object) = value.as_object_mut() {
                     object.remove("require-approval");
                 }

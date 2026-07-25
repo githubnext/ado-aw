@@ -1953,10 +1953,9 @@ pub fn generate_executor_ado_env(
             "ADO_AW_GITHUB_TOKEN: $({})",
             github_auth.executor_token_var()
         ));
-        lines.push(format!(
-            "ADO_AW_GITHUB_API_URL: {}",
-            github_auth.api_url()
-        ));
+        let api_url = serde_json::to_string(github_auth.api_url())
+            .expect("serializing a validated GitHub API URL cannot fail");
+        lines.push(format!("ADO_AW_GITHUB_API_URL: {api_url}"));
     }
     // The two-space indent on each value line is the YAML relative indent for
     // a key nested under `env:`. replace_with_indent prepends the base
@@ -5447,6 +5446,10 @@ safe-outputs:
         assert!(
             result.contains("ADO_AW_GITHUB_TOKEN: $(MY_GITHUB_WRITE_TOKEN)"),
             "Executor should map the configured Stage 3 GitHub token"
+        );
+        assert!(
+            result.contains("ADO_AW_GITHUB_API_URL: \"https://api.github.com\""),
+            "GitHub API URL must be emitted as a quoted YAML scalar"
         );
         assert!(
             !result.contains("SC_WRITE_TOKEN"),
