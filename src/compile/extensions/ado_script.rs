@@ -17,7 +17,7 @@
 //! in **both** Setup and Agent. That's correct architecture given ADO's
 //! topology, not waste.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use super::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
 use crate::compile::agentic_pipeline::{
@@ -566,6 +566,23 @@ fn resolver_step_typed() -> Step {
 pub fn github_app_token_step_typed(
     cfg: &crate::compile::types::GithubAppTokenConfig,
 ) -> Result<Step> {
+    github_app_token_step_typed_for(
+        cfg,
+        crate::engine::GITHUB_APP_TOKEN_VAR,
+        "Mint GitHub App token (Copilot engine auth)",
+        &cfg.permissions,
+    )
+}
+
+pub fn github_app_token_step_typed_for(
+    cfg: &crate::compile::types::GithubAppTokenConfig,
+    output_var: &str,
+    display_name: &str,
+    permissions: &std::collections::BTreeMap<
+        String,
+        crate::compile::types::GithubAppPermissionLevel,
+    >,
+) -> Result<Step> {
     cfg.validate()?;
     // The App ID is a non-secret literal (numeric App ID or alphanumeric client
     // ID); single-quote it so any character is passed through as one argv token.
@@ -576,7 +593,7 @@ pub fn github_app_token_step_typed(
         // pipeline variable can redirect the minted token.
         format!(
             "--output-var {}",
-            sh_single_quote(crate::engine::GITHUB_APP_TOKEN_VAR)
+            sh_single_quote(output_var)
         ),
     ];
     if !cfg.repositories.is_empty() {
@@ -588,11 +605,20 @@ pub fn github_app_token_step_typed(
     if let Some(api_url) = &cfg.api_url {
         args.push(format!("--api-url {}", sh_single_quote(api_url)));
     }
+    if !permissions.is_empty() {
+        let normalized: std::collections::BTreeMap<String, String> = permissions
+            .iter()
+            .map(|(name, level)| (name.replace('-', "_"), level.as_str().to_string()))
+            .collect();
+        let json = serde_json::to_string(&normalized)
+            .context("serialize GitHub App token permissions")?;
+        args.push(format!("--permissions-json {}", sh_single_quote(&json)));
+    }
     let script = format!(
         "set -eo pipefail\nnode '{GITHUB_APP_TOKEN_PATH}' {}\n",
         args.join(" ")
     );
-    let step = BashStep::new("Mint GitHub App token (Copilot engine auth)", script)
+    let step = BashStep::new(display_name, script)
         .with_condition(Condition::Succeeded)
         // Only the secret rides in env — masked, never on the command line. Its
         // variable name is the `private-key` override or the default
@@ -691,6 +717,18 @@ pub fn prepare_pr_base_step_typed(mode: PreparePrBaseMode, repos: &[PreparePrBas
 pub fn github_app_token_revoke_step_typed(
     cfg: &crate::compile::types::GithubAppTokenConfig,
 ) -> Result<Step> {
+    github_app_token_revoke_step_typed_for(
+        cfg,
+        crate::engine::GITHUB_APP_TOKEN_VAR,
+        "Revoke GitHub App token",
+    )
+}
+
+pub fn github_app_token_revoke_step_typed_for(
+    cfg: &crate::compile::types::GithubAppTokenConfig,
+    token_var: &str,
+    display_name: &str,
+) -> Result<Step> {
     // Validate for symmetry with the mint step, so neither function silently
     // assumes the other ran first (e.g. if a future caller emits revoke alone).
     cfg.validate()?;
@@ -705,12 +743,12 @@ pub fn github_app_token_revoke_step_typed(
         None => String::new(),
     };
     let script = format!("node '{GITHUB_APP_TOKEN_PATH}' revoke{api_url_arg}\n");
-    let step = BashStep::new("Revoke GitHub App token", script)
+    let step = BashStep::new(display_name, script)
         .with_condition(Condition::Always)
         .with_continue_on_error(true)
         .with_env(
             "GH_APP_TOKEN",
-            EnvValue::secret(crate::engine::GITHUB_APP_TOKEN_VAR),
+            EnvValue::secret(token_var),
         );
     Ok(Step::Bash(step))
 }
@@ -1306,6 +1344,7 @@ mod tests {
             repositories: vec!["octo-repo".to_string(), "other-repo".to_string()],
             api_url: None,
             skip_token_revocation: false,
+            permissions: Default::default(),
         };
         let Step::Bash(step) = github_app_token_step_typed(&cfg).unwrap() else {
             panic!("expected a bash step");
@@ -1372,6 +1411,7 @@ mod tests {
             repositories: vec![],
             api_url: None,
             skip_token_revocation: false,
+            permissions: Default::default(),
         };
         let Step::Bash(step) = github_app_token_step_typed(&cfg).unwrap() else {
             panic!("expected a bash step");
@@ -1380,6 +1420,36 @@ mod tests {
             step.env.get("GH_APP_PRIVATE_KEY"),
             Some(EnvValue::Secret(v)) if v == "GITHUB_APP_PRIVATE_KEY"
         ));
+    }
+
+    #[test]
+    fn github_app_token_step_emits_permission_subset() {
+        use crate::compile::types::{GithubAppPermissionLevel, GithubAppTokenConfig};
+        let cfg = GithubAppTokenConfig {
+            app_id: "1234567".to_string(),
+            private_key: None,
+            owner: "octo-org".to_string(),
+            repositories: vec!["octo-repo".to_string()],
+            api_url: None,
+            skip_token_revocation: false,
+            permissions: std::collections::BTreeMap::from([
+                ("issues".to_string(), GithubAppPermissionLevel::Read),
+                (
+                    "pull-requests".to_string(),
+                    GithubAppPermissionLevel::Read,
+                ),
+            ]),
+        };
+        let Step::Bash(step) = github_app_token_step_typed(&cfg).unwrap() else {
+            panic!("expected bash step");
+        };
+        assert!(
+            step.script.contains(
+                "--permissions-json '{\"issues\":\"read\",\"pull_requests\":\"read\"}'"
+            ),
+            "permissions must be deterministic normalized JSON:\n{}",
+            step.script
+        );
     }
 
     #[test]
@@ -1394,6 +1464,7 @@ mod tests {
             repositories: vec![],
             api_url: None,
             skip_token_revocation: false,
+            permissions: Default::default(),
         };
         let Step::Bash(step) = github_app_token_step_typed(&cfg).unwrap() else {
             panic!("expected a bash step");
@@ -1415,6 +1486,7 @@ mod tests {
             repositories: vec![],
             api_url: Some("https://ghe.example.com/api/v3".to_string()),
             skip_token_revocation: false,
+            permissions: Default::default(),
         };
         let Step::Bash(step) = github_app_token_step_typed(&cfg).unwrap() else {
             panic!("expected a bash step");
@@ -1444,6 +1516,7 @@ mod tests {
             repositories: vec![],
             api_url: None,
             skip_token_revocation: false,
+            permissions: Default::default(),
         };
         let Step::Bash(step) = github_app_token_step_typed(&cfg).unwrap() else {
             panic!("expected a bash step");
@@ -1461,6 +1534,7 @@ mod tests {
             repositories: vec![],
             api_url: None,
             skip_token_revocation: false,
+            permissions: Default::default(),
         };
         let err = github_app_token_step_typed(&cfg).unwrap_err();
         assert!(
@@ -1480,6 +1554,7 @@ mod tests {
             repositories: vec![],
             api_url: Some("https://ghe.example.com/api/v3".to_string()),
             skip_token_revocation: false,
+            permissions: Default::default(),
         };
         let Step::Bash(step) = github_app_token_revoke_step_typed(&cfg).unwrap() else {
             panic!("expected a bash step");
@@ -1519,6 +1594,7 @@ mod tests {
             repositories: vec![],
             api_url: Some("http://insecure.example.com/api/v3".to_string()),
             skip_token_revocation: false,
+            permissions: Default::default(),
         };
         let err = github_app_token_revoke_step_typed(&cfg).unwrap_err();
         assert!(

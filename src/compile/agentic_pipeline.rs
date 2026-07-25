@@ -101,6 +101,7 @@ use super::types::{
 /// name `FrontMatter::create_pr_config`/`partition_safe_outputs_by_approval` use.
 const CREATE_PULL_REQUEST_TOOL: &str = "create-pull-request";
 const CUSTOM_PROPOSALS_STEP_ID: &str = "customProposals";
+const GITHUB_ISSUE_TOOLS: &[&str] = &["create-issue", "set-issue-type"];
 
 /// Built pipeline context — the result of running every validation,
 /// scalar computation, extension declaration fanout, and canonical-
@@ -143,6 +144,7 @@ pub(crate) fn build_pipeline_context(
         .validate_threat_detection_config(&threat_detection, &detection_engine_config)?;
     front_matter.validate_require_approval()?;
     front_matter.validate_staged()?;
+    common::validate_github_issue_outputs_config(front_matter)?;
     common::validate_comment_target(front_matter)?;
     common::validate_update_work_item_target(front_matter)?;
     common::validate_submit_pr_review_events(front_matter)?;
@@ -373,14 +375,6 @@ pub(crate) fn build_pipeline_context(
             .and_then(|p| p.write.as_deref()),
         "SC_WRITE_TOKEN",
     );
-    let executor_ado_env = common::generate_executor_ado_env(
-        front_matter
-            .permissions
-            .as_ref()
-            .and_then(|p| p.write.as_deref()),
-        common::debug_create_issue_enabled(front_matter),
-    );
-
     // Skip integrity check resolution
     let skip_integrity = skip_integrity
         || front_matter
@@ -460,7 +454,6 @@ pub(crate) fn build_pipeline_context(
         pipeline_path: pipeline_path.clone(),
         acquire_read_token,
         acquire_write_token,
-        executor_ado_env,
         integrity_check_yaml,
         agent_content_value,
         debug_pipeline,
@@ -572,27 +565,42 @@ pub(crate) fn build_canonical_jobs(
     let create_pr_configured = front_matter.create_pr_config().is_some();
     let create_pr_reviewed = reviewed.iter().any(|t| t == CREATE_PULL_REQUEST_TOOL);
     let safeoutputs_waits_for_review = !reviewed.is_empty() && auto.is_empty();
+    let github_issue_tools_configured = front_matter.has_github_issue_outputs();
+    let github_issue_tools_reviewed = reviewed
+        .iter()
+        .any(|tool| GITHUB_ISSUE_TOOLS.contains(&tool.as_str()));
     if reviewed.is_empty() || auto.is_empty() {
         jobs.push(build_safeoutputs_job(
             front_matter,
             cfg,
             &p,
-            &SafeOutputsVariant::default_single(create_pr_configured)
-                .with_excluded_tools(&custom_tool_names),
+            &SafeOutputsVariant::default_single(
+                create_pr_configured,
+                github_issue_tools_configured,
+            )
+            .with_excluded_tools(&custom_tool_names),
         )?);
     } else {
         jobs.push(build_safeoutputs_job(
             front_matter,
             cfg,
             &p,
-            &SafeOutputsVariant::automatic(&reviewed, create_pr_configured && !create_pr_reviewed)
-                .with_excluded_tools(&custom_tool_names),
+            &SafeOutputsVariant::automatic(
+                &reviewed,
+                create_pr_configured && !create_pr_reviewed,
+                github_issue_tools_configured && !github_issue_tools_reviewed,
+            )
+            .with_excluded_tools(&custom_tool_names),
         )?);
         jobs.push(build_safeoutputs_job(
             front_matter,
             cfg,
             &p,
-            &SafeOutputsVariant::reviewed(&reviewed, create_pr_configured && create_pr_reviewed),
+            &SafeOutputsVariant::reviewed(
+                &reviewed,
+                create_pr_configured && create_pr_reviewed,
+                github_issue_tools_configured && github_issue_tools_reviewed,
+            ),
         )?);
     }
     if let Some(teardown) = build_teardown_job(front_matter, cfg, &p)? {
@@ -708,9 +716,6 @@ pub(crate) struct StandaloneCtx {
     /// `AzureCLI@2` task YAML body (or empty when no read service connection).
     pub(crate) acquire_read_token: String,
     pub(crate) acquire_write_token: String,
-    /// `env:` block for executor step (always non-empty — has
-    /// SYSTEM_ACCESSTOKEN at minimum).
-    pub(crate) executor_ado_env: String,
     /// `Verify pipeline integrity` step YAML (or empty when skipped).
     pub(crate) integrity_check_yaml: String,
     /// Agent prompt body (either inlined imports or
@@ -1505,6 +1510,7 @@ struct SafeOutputsVariant {
     /// (issue #1453 review). Avoids a wasted Node install + bundle fetch +
     /// prepare step in the variant that will never open a PR.
     runs_create_pull_request: bool,
+    runs_github_issue_tools: bool,
     /// Whether this is the manual-review-gated `SafeOutputs_Reviewed` variant.
     /// Used to select the correct pool override without relying on the job name.
     is_reviewed: bool,
@@ -1561,39 +1567,53 @@ impl SafeOutputsCheckoutLayout {
 impl SafeOutputsVariant {
     /// The default single-job variant: no filter, canonical names. Runs every
     /// configured tool, so it executes `create-pull-request` iff configured.
-    fn default_single(runs_create_pull_request: bool) -> Self {
+    fn default_single(
+        runs_create_pull_request: bool,
+        runs_github_issue_tools: bool,
+    ) -> Self {
         Self {
             base: "SafeOutputs",
             display: "SafeOutputs",
             artifact: "safe_outputs",
             filter_args: String::new(),
             runs_create_pull_request,
+            runs_github_issue_tools,
             is_reviewed: false,
         }
     }
 
     /// The automatic variant in a split: excludes every reviewed tool. Runs
     /// `create-pull-request` only when it is configured and NOT review-gated.
-    fn automatic(reviewed: &[String], runs_create_pull_request: bool) -> Self {
+    fn automatic(
+        reviewed: &[String],
+        runs_create_pull_request: bool,
+        runs_github_issue_tools: bool,
+    ) -> Self {
         Self {
             base: "SafeOutputs",
             display: "SafeOutputs",
             artifact: "safe_outputs",
             filter_args: filter_flags("--exclude", reviewed),
             runs_create_pull_request,
+            runs_github_issue_tools,
             is_reviewed: false,
         }
     }
 
     /// The reviewed variant in a split: runs only the reviewed tools. Runs
     /// `create-pull-request` only when it is configured and review-gated.
-    fn reviewed(reviewed: &[String], runs_create_pull_request: bool) -> Self {
+    fn reviewed(
+        reviewed: &[String],
+        runs_create_pull_request: bool,
+        runs_github_issue_tools: bool,
+    ) -> Self {
         Self {
             base: "SafeOutputs_Reviewed",
             display: "SafeOutputs (reviewed)",
             artifact: "safe_outputs_reviewed",
             filter_args: filter_flags("--only", reviewed),
             runs_create_pull_request,
+            runs_github_issue_tools,
             is_reviewed: true,
         }
     }
@@ -2145,6 +2165,14 @@ fn build_safeoutputs_job(
     variant: &SafeOutputsVariant,
 ) -> Result<Job> {
     let layout = SafeOutputsCheckoutLayout::for_variant(front_matter, cfg, variant);
+    let github_auth = if variant.runs_github_issue_tools {
+        front_matter.github_safe_outputs_auth()?
+    } else {
+        None
+    };
+    let github_app = github_auth
+        .as_ref()
+        .and_then(crate::compile::types::GithubSafeOutputsAuth::app_config);
     let mut steps: Vec<Step> = Vec::new();
     steps.push(checkout_self_step(
         &cfg.self_checkout_fetch,
@@ -2218,18 +2246,41 @@ fn build_safeoutputs_job(
     // then emit the same `prepare-pr-base` step. The bundle auth projects
     // `System.AccessToken` (the build identity the checkout persists credentials
     // for), so the git fetch is authenticated regardless of the write token.
-    if variant.runs_create_pull_request {
+    if variant.runs_create_pull_request || github_app.is_some() {
         steps.extend(
             super::extensions::ado_script::install_and_download_steps_typed(
                 front_matter.supply_chain(),
             ),
         );
+    }
+    if variant.runs_create_pull_request {
         let repos = create_pr_prepare_repos(front_matter, &layout.self_repository_directory);
         steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
             super::extensions::ado_script::PreparePrBaseMode::TargetWorktree,
             &repos,
         ));
     }
+    if let Some(app) = github_app {
+        let permissions = std::collections::BTreeMap::from([(
+            "issues".to_string(),
+            crate::compile::types::GithubAppPermissionLevel::Write,
+        )]);
+        steps.push(
+            super::extensions::ado_script::github_app_token_step_typed_for(
+                app,
+                crate::compile::types::SAFE_OUTPUTS_GITHUB_APP_TOKEN_VAR,
+                "Mint GitHub App token (SafeOutputs)",
+                &permissions,
+            )?,
+        );
+    }
+    let executor_ado_env = common::generate_executor_ado_env(
+        front_matter
+            .permissions
+            .as_ref()
+            .and_then(|permissions| permissions.write.as_deref()),
+        github_auth.as_ref(),
+    );
     let resolved_config_path = "$(Agent.TempDirectory)/ado-aw-resolved-config.json";
     steps.push(Step::Bash(write_custom_runtime_config_step(
         &cfg.resolved_execution_config_json,
@@ -2241,9 +2292,20 @@ fn build_safeoutputs_job(
         resolved_config_path,
         &layout.self_repository_directory,
         &cfg.self_repository_name,
-        &cfg.executor_ado_env,
+        &executor_ado_env,
         &variant.filter_args,
     )?));
+    if let Some(app) = github_app
+        && !app.skip_token_revocation
+    {
+        steps.push(
+            super::extensions::ado_script::github_app_token_revoke_step_typed_for(
+                app,
+                crate::compile::types::SAFE_OUTPUTS_GITHUB_APP_TOKEN_VAR,
+                "Revoke GitHub App token (SafeOutputs)",
+            )?,
+        );
+    }
     // Copy logs
     steps.push(Step::Bash(copy_logs_safeoutputs_step(&cfg.engine_log_dir)));
     // Publish
@@ -4737,7 +4799,6 @@ mod tests {
             pipeline_path: "$(Build.SourcesDirectory)/agents/test.lock.yml".to_string(),
             acquire_read_token: String::new(),
             acquire_write_token: String::new(),
-            executor_ado_env: "env:\n  SYSTEM_ACCESSTOKEN: $(System.AccessToken)\n".to_string(),
             integrity_check_yaml: String::new(),
             agent_content_value: "Test prompt".to_string(),
             debug_pipeline: false,
@@ -5391,7 +5452,6 @@ safe-outputs:
             pipeline_path: "source.lock.yml".to_string(),
             acquire_read_token: String::new(),
             acquire_write_token: String::new(),
-            executor_ado_env: "env:\n  SYSTEM_ACCESSTOKEN: $(System.AccessToken)\n".to_string(),
             integrity_check_yaml: String::new(),
             agent_content_value: String::new(),
             debug_pipeline: false,

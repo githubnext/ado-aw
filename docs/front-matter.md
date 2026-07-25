@@ -273,7 +273,6 @@ supply-chain:                  # optional internal supply-chain mirror (see docs
   service-connection: shared-conn  # optional feed/registry fallback; never applies to pipeline-artifact
 # ado-aw-debug:                 # debug-only knobs; see docs/ado-aw-debug.md
 #   skip-integrity: false       # omit generated pipeline integrity verification
-#   create-issue: false         # dogfood-only GitHub issue filing for debug reports
 parameters:                    # optional ADO runtime parameters (surfaced in UI when queuing a run)
   - name: clearMemory
     displayName: "Clear agent memory"
@@ -390,9 +389,12 @@ quiet. So adding validation coverage can only ever *surface* authoring mistakes
 
 `ado-aw-debug:` is accepted in front matter for repository dogfooding and
 local diagnostics. It is **not** a regular safe-output tool. Use
-`skip-integrity` to omit generated pipeline integrity verification, or
-`create-issue` to file a GitHub issue from debug pipelines; see
+`skip-integrity` to omit generated pipeline integrity verification; see
 [`ado-aw-debug.md`](ado-aw-debug.md) for the full reference.
+
+GitHub issue filing now uses regular `safe-outputs.create-issue` and
+`safe-outputs.set-issue-type`; see
+[`safe-outputs.md`](safe-outputs.md#github-issue-safe-outputs).
 
 ## Per-Job Pool Overrides (`pool.overrides:`)
 

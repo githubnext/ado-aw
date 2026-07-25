@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use crate::sanitize::{SanitizeConfig, SanitizeContent};
+use crate::secure::GithubTemporaryId;
 
 /// Trait for tool results that include a name field
 pub trait ToolResult: Serialize {
@@ -17,13 +18,14 @@ pub trait ToolResult: Serialize {
     /// Each tool can override this; the operator can further override via `max` in front matter.
     const DEFAULT_MAX: u32 = 1;
 
-    /// Whether this tool performs write operations against ADO.
+    /// Whether this tool performs an external write operation.
     ///
-    /// The Stage 3 executor always receives a write-capable token via
+    /// ADO-backed tools receive a write-capable token via
     /// `SYSTEM_ACCESSTOKEN`: by default the pipeline's built-in
     /// `$(System.AccessToken)` (scoped by pipeline settings), or
     /// `$(SC_WRITE_TOKEN)` minted from an ARM service connection when
-    /// `permissions.write` is configured.
+    /// `permissions.write` is configured. GitHub-backed tools use the separate
+    /// Stage 3 GitHub credential.
     ///
     /// This flag is informational — used by audit and (historically) by
     /// the compiler's permission validator. It is NOT a gate. Diagnostic /
@@ -42,6 +44,14 @@ pub trait Validate {
     }
 }
 
+/// A GitHub issue created earlier in the same Stage 3 execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedGithubIssue {
+    pub repository: String,
+    pub number: u64,
+    pub url: String,
+}
+
 /// Context provided to executors during Stage 3 execution
 #[derive(Debug, Clone)]
 pub struct ExecutionContext {
@@ -58,11 +68,10 @@ pub struct ExecutionContext {
     /// `$(System.AccessToken)` by default or `$(SC_WRITE_TOKEN)` (ARM-minted)
     /// when `permissions.write` is configured.
     pub access_token: Option<String>,
-    /// GitHub PAT used by debug-only safe outputs (e.g. `ado-aw-debug.create-issue`).
-    /// Sourced from the `ADO_AW_DEBUG_GITHUB_TOKEN` pipeline variable. Intentionally
-    /// **separate** from `access_token` (ADO) and from the read-only `GITHUB_TOKEN`
-    /// the agent sees in Stage 1 — only Stage 3 ever sees this token.
+    /// GitHub credential used by GitHub safe outputs in Stage 3.
     pub github_token: Option<String>,
+    /// GitHub REST API base URL for Stage 3 issue calls.
+    pub github_api_url: String,
     /// Working directory for file operations (safe outputs directory)
     pub working_directory: std::path::PathBuf,
     /// Source checkout directory (BUILD_SOURCESDIRECTORY) where git repos are checked out
@@ -74,12 +83,6 @@ pub struct ExecutionContext {
     pub self_repository_directory: std::path::PathBuf,
     /// Per-tool configuration, keyed by tool name
     pub tool_configs: HashMap<String, serde_json::Value>,
-    /// Debug-only tools (e.g. `create-issue`) that the operator authorized
-    /// via the `ado-aw-debug:` front-matter section. Stage 3 executors for
-    /// `crate::safe_outputs::DEBUG_ONLY_TOOLS` MUST reject NDJSON entries
-    /// whose tool name is absent from this set — otherwise a forged entry
-    /// could bypass the MCP-layer default-deny gate. Empty by default.
-    pub debug_enabled_tools: HashSet<String>,
     /// Exact `self` repository ID.
     ///
     /// Compiled pipelines no longer project an ID: the compiler resolves the
@@ -94,6 +97,8 @@ pub struct ExecutionContext {
     /// `ADO_AW_SELF_REPOSITORY_NAME`; direct/legacy invocations fall back to
     /// `BUILD_REPOSITORY_NAME`.
     pub repository_name: Option<String>,
+    /// Repository provider (from BUILD_REPOSITORY_PROVIDER).
+    pub repository_provider: Option<String>,
     /// Allowed repositories for PRs: "self" + checkout list aliases
     /// Maps alias to ADO repo name (e.g., "other-repo" -> "org/other-repo")
     pub allowed_repositories: HashMap<String, String>,
@@ -196,6 +201,8 @@ pub struct ExecutionContext {
     /// the `Clone` semantics need to share state. Each `Default` instance
     /// gets its own fresh empty set, which is correct for tests.
     pub uploaded_pipeline_artifact_keys: Arc<Mutex<HashSet<String>>>,
+    /// Temporary GitHub issue IDs resolved by successful `create-issue` calls.
+    pub resolved_github_issues: Arc<Mutex<HashMap<String, ResolvedGithubIssue>>>,
 }
 
 impl ExecutionContext {
@@ -209,13 +216,60 @@ impl ExecutionContext {
         &self,
         tool_name: &str,
     ) -> T {
-        let mut config: T = self
+        let value = self
             .tool_configs
             .get(tool_name)
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .cloned()
+            .map(|mut value| {
+                if let Some(object) = value.as_object_mut() {
+                    object.remove("require-approval");
+                }
+                value
+            });
+        let mut config: T = value
+            .and_then(|v| serde_json::from_value(v).ok())
             .unwrap_or_default();
         config.sanitize_config_fields();
         config
+    }
+
+    pub fn has_resolved_github_issue(
+        &self,
+        temporary_id: &GithubTemporaryId,
+    ) -> anyhow::Result<bool> {
+        let issues = self
+            .resolved_github_issues
+            .lock()
+            .map_err(|_| anyhow::anyhow!("temporary GitHub issue map lock poisoned"))?;
+        Ok(issues.contains_key(&temporary_id.canonical()))
+    }
+
+    pub fn register_resolved_github_issue(
+        &self,
+        temporary_id: &GithubTemporaryId,
+        issue: ResolvedGithubIssue,
+    ) -> anyhow::Result<()> {
+        let id = temporary_id.canonical();
+        let mut issues = self
+            .resolved_github_issues
+            .lock()
+            .map_err(|_| anyhow::anyhow!("temporary GitHub issue map lock poisoned"))?;
+        if issues.contains_key(&id) {
+            anyhow::bail!("temporary_id '{id}' was already used in this run");
+        }
+        issues.insert(id, issue);
+        Ok(())
+    }
+
+    pub fn resolve_github_issue(
+        &self,
+        temporary_id: &GithubTemporaryId,
+    ) -> anyhow::Result<Option<ResolvedGithubIssue>> {
+        let issues = self
+            .resolved_github_issues
+            .lock()
+            .map_err(|_| anyhow::anyhow!("temporary GitHub issue map lock poisoned"))?;
+        Ok(issues.get(&temporary_id.canonical()).cloned())
     }
 }
 
@@ -282,14 +336,16 @@ impl ExecutionContext {
             ado_project: env("SYSTEM_TEAMPROJECT"),
             ado_project_id: env("SYSTEM_TEAMPROJECTID"),
             access_token: env("SYSTEM_ACCESSTOKEN").or_else(|| env("AZURE_DEVOPS_EXT_PAT")),
-            github_token: env("ADO_AW_DEBUG_GITHUB_TOKEN"),
+            github_token: env("ADO_AW_GITHUB_TOKEN"),
+            github_api_url: env("ADO_AW_GITHUB_API_URL")
+                .unwrap_or_else(|| "https://api.github.com".to_string()),
             working_directory: std::env::current_dir().unwrap_or_default(),
             source_directory,
             self_repository_directory,
             tool_configs: HashMap::new(),
-            debug_enabled_tools: HashSet::new(),
             repository_id,
             repository_name,
+            repository_provider: env("BUILD_REPOSITORY_PROVIDER"),
             allowed_repositories: HashMap::new(),
             repo_refs: HashMap::new(),
             agent_stats: None,
@@ -324,6 +380,7 @@ impl ExecutionContext {
 
             // Per-run state for upload-pipeline-artifact dedupe.
             uploaded_pipeline_artifact_keys: Arc::new(Mutex::new(HashSet::new())),
+            resolved_github_issues: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }

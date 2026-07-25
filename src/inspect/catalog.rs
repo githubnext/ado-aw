@@ -251,6 +251,7 @@ fn safe_output_description(name: &str) -> &'static str {
         }
         "report-incomplete" => "Parameters for reporting that a task could not be completed",
         "resolve-pr-thread" => "Parameters for resolving or reactivating a PR review thread",
+        "set-issue-type" => "Sets or clears the native type on a GitHub issue",
         "submit-pr-review" => "Parameters for submitting a pull request review",
         "update-pr" => "Parameters for updating a pull request",
         "update-wiki-page" => "Parameters for editing a wiki page (agent-provided)",

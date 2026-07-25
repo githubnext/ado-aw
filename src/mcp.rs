@@ -19,9 +19,10 @@ use crate::safe_outputs::{
     MissingDataParams, MissingDataResult, MissingToolParams, MissingToolResult, NoopParams,
     NoopResult, PIPELINE_ARTIFACT_DEFAULT_MAX_FILE_SIZE, QueueBuildParams, QueueBuildResult,
     ReplyToPrCommentParams, ReplyToPrCommentResult, ReportIncompleteParams, ReportIncompleteResult,
-    ResolvePrThreadParams, ResolvePrThreadResult, SubmitPrReviewParams, SubmitPrReviewResult,
-    ToolResult, UpdatePrParams, UpdatePrResult, UpdateWikiPageParams, UpdateWikiPageResult,
-    UpdateWorkItemParams, UpdateWorkItemResult, UploadBuildAttachmentParams,
+    ResolvePrThreadParams, ResolvePrThreadResult, SetIssueTypeParams, SetIssueTypeResult,
+    SubmitPrReviewParams, SubmitPrReviewResult, ToolResult, UpdatePrParams, UpdatePrResult,
+    UpdateWikiPageParams, UpdateWikiPageResult, UpdateWorkItemParams, UpdateWorkItemResult,
+    UploadBuildAttachmentParams,
     UploadBuildAttachmentResult, UploadPipelineArtifactParams, UploadPipelineArtifactResult,
     UploadWorkitemAttachmentParams, UploadWorkitemAttachmentResult, anyhow_to_mcp_error,
 };
@@ -56,7 +57,7 @@ fn generate_short_id() -> String {
 }
 
 // Re-export from tools module
-use crate::safe_outputs::{ALWAYS_ON_TOOLS, DEBUG_ONLY_TOOLS};
+use crate::safe_outputs::{ALWAYS_ON_TOOLS, CONFIGURED_ONLY_TOOLS, DEBUG_ONLY_TOOLS};
 
 // ============================================================================
 // Git merge-base helpers (used by find_merge_base)
@@ -377,12 +378,13 @@ async fn undo_synthetic_commit(git_dir: &std::path::Path) -> Result<(), McpError
 /// Decide whether a single tool should remain in the router after filtering.
 ///
 /// Three categories, evaluated in priority order:
-/// - `DEBUG_ONLY_TOOLS` — kept only when the caller explicitly lists the tool.
+/// - `DEBUG_ONLY_TOOLS` / `CONFIGURED_ONLY_TOOLS` — kept only when explicitly
+///   listed.
 /// - `ALWAYS_ON_TOOLS` — always kept regardless of the enabled list.
 /// - Everything else — permissive default when no list is provided; otherwise
 ///   filtered to what the caller requested.
 fn should_keep_tool(tool_name: &str, enabled_tools: Option<&[String]>) -> bool {
-    if DEBUG_ONLY_TOOLS.contains(&tool_name) {
+    if DEBUG_ONLY_TOOLS.contains(&tool_name) || CONFIGURED_ONLY_TOOLS.contains(&tool_name) {
         enabled_tools
             .map(|list| list.iter().any(|e| e.as_str() == tool_name))
             .unwrap_or(false)
@@ -437,7 +439,7 @@ fn apply_tool_filter(tool_router: &mut ToolRouter<SafeOutputs>, enabled_tools: O
         );
     } else {
         info!(
-            "Default tool exposure: {} of {} tools served (debug-only stripped)",
+            "Default tool exposure: {} of {} tools served",
             remaining.len(),
             total
         );
@@ -754,19 +756,12 @@ impl SafeOutputs {
         Ok(CallToolResult::success(vec![]))
     }
 
-    /// Debug-only: file a GitHub issue. Default-deny gated via
-    /// `DEBUG_ONLY_TOOLS` so this route is only reachable when the compiler
-    /// explicitly lists `create-issue` in `--enabled-tools` (which it does
-    /// only when the agent's front matter sets `ado-aw-debug.create-issue`).
-    /// Stage 3 authenticates against GitHub using the
-    /// `ADO_AW_DEBUG_GITHUB_TOKEN` pipeline variable.
+    /// File a GitHub issue through the Stage 3 safe-output executor.
     #[tool(
         name = "create-issue",
-        description = "Debug-only: file a GitHub issue against the operator-configured \
-target repository. Provide a concise title and a markdown body. \
-Optional `labels` and `assignees` are subject to operator-controlled allowlists. \
-This tool is gated by the agent's `ado-aw-debug.create-issue` front-matter section \
-and is not available in regular pipelines."
+        description = "Create a GitHub issue against the operator-configured target repository. \
+Provide the final title and markdown body. Optional labels are subject to the configured \
+allowlist. Set temporary_id when a later safe output must refer to the newly-created issue."
     )]
     async fn create_issue(
         &self,
@@ -780,6 +775,22 @@ and is not available in regular pipelines."
         let result: CreateIssueResult = sanitized.try_into()?;
         let _ = self.write_safe_output_file(&result).await;
         info!("Issue queued for creation");
+        Ok(CallToolResult::success(vec![]))
+    }
+
+    #[tool(
+        name = "set-issue-type",
+        description = "Set the native GitHub issue type. issue_number may be a positive issue \
+number or a temporary_id from an earlier create_issue call in the same run. Pass an empty \
+issue_type to clear the current type."
+    )]
+    async fn set_issue_type(
+        &self,
+        params: Parameters<SetIssueTypeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: SetIssueTypeResult = params.0.try_into()?;
+        let _ = self.write_safe_output_file(&result).await;
+        info!("Issue type update queued");
         Ok(CallToolResult::success(vec![]))
     }
 
@@ -2143,9 +2154,14 @@ safe-outputs:
         use crate::safe_outputs::ALL_KNOWN_SAFE_OUTPUTS;
 
         let temp_dir = tempfile::tempdir().unwrap();
-        // Pass an enable list that includes every debug-only tool so they
-        // remain in the router for this introspection check.
-        let enabled: Vec<String> = DEBUG_ONLY_TOOLS.iter().map(|s| s.to_string()).collect();
+        // Pass an enable list that includes every debug-only and
+        // configured-only tool so they remain in the router for this
+        // introspection check.
+        let enabled: Vec<String> = DEBUG_ONLY_TOOLS
+            .iter()
+            .chain(CONFIGURED_ONLY_TOOLS.iter())
+            .map(|s| s.to_string())
+            .collect();
         let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled), None)
             .await
             .unwrap();
@@ -2170,7 +2186,7 @@ safe-outputs:
     }
 
     #[tokio::test]
-    async fn test_filter_strips_debug_only_when_no_enabled_list() {
+    async fn test_default_filter_hides_configured_only_github_tools() {
         let temp_dir = tempfile::tempdir().unwrap();
         let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), None, None)
             .await
@@ -2190,10 +2206,12 @@ safe-outputs:
         }
         // Spot check a regular tool is present in the permissive default.
         assert!(tool_names.contains(&"create-work-item".to_string()));
+        assert!(!tool_names.contains(&"create-issue".to_string()));
+        assert!(!tool_names.contains(&"set-issue-type".to_string()));
     }
 
     #[tokio::test]
-    async fn test_filter_keeps_debug_only_when_explicitly_enabled() {
+    async fn test_filter_keeps_create_issue_when_explicitly_enabled() {
         let temp_dir = tempfile::tempdir().unwrap();
         let enabled = vec!["create-issue".to_string()];
         let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled), None)
@@ -2207,13 +2225,14 @@ safe-outputs:
             .collect();
         assert!(
             tool_names.contains(&"create-issue".to_string()),
-            "Explicitly enabled debug-only tool should be present, got: {:?}",
+            "Explicitly enabled create-issue tool should be present, got: {:?}",
             tool_names
         );
+        assert!(!tool_names.contains(&"set-issue-type".to_string()));
     }
 
     #[tokio::test]
-    async fn test_filter_strips_debug_only_when_other_tool_enabled() {
+    async fn test_filter_strips_create_issue_when_other_tool_enabled() {
         let temp_dir = tempfile::tempdir().unwrap();
         let enabled = vec!["create-work-item".to_string()];
         let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled), None)
@@ -2227,7 +2246,7 @@ safe-outputs:
             .collect();
         assert!(
             !tool_names.contains(&"create-issue".to_string()),
-            "Debug-only tool must remain stripped when not in the explicit enable list"
+            "create-issue must remain filtered when not explicitly enabled"
         );
         assert!(tool_names.contains(&"create-work-item".to_string()));
     }

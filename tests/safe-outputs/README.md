@@ -136,7 +136,7 @@ In `https://dev.azure.com/msazuresphere/AgentPlayground`:
    validated by `tests/compiler-smoke-e2e/`.
 
 3. Capture each Pipeline ID and update `REGISTERED.md`.
-4. Provision the `ADO_AW_DEBUG_GITHUB_TOKEN` secret (fine-grained PAT,
+4. Provision the `ADO_AW_GITHUB_TOKEN` secret (fine-grained PAT,
    Issues: read/write on `jamesadevine/ado-aw-issues`) on the
    `smoke-failure-reporter` pipeline **only**. Confirm the staging repository
    has the `pipeline-failure` and `ado-aw-smoke` labels.

@@ -304,13 +304,6 @@ pub fn resolved_execution_config_json(
                 "allowedExtensions": config.allowed_extensions(),
             })
         });
-    let debug_create_issue = front_matter
-        .ado_aw_debug
-        .as_ref()
-        .and_then(|debug| debug.create_issue.as_ref())
-        .map(serde_json::to_value)
-        .transpose()
-        .context("failed to serialize ado-aw-debug.create-issue")?;
     serde_json::to_string_pretty(&json!({
         "name": front_matter.name,
         "toolConfigs": tool_configs,
@@ -319,7 +312,6 @@ pub fn resolved_execution_config_json(
         "checkout": front_matter.checkout,
         "repoRefs": front_matter.checkout_repo_refs(),
         "cacheMemory": cache_memory,
-        "debugCreateIssue": debug_create_issue,
     }))
     .context("failed to serialize resolved safe-output configuration")
 }

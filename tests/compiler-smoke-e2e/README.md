@@ -259,7 +259,7 @@ them.
 Every child receives its own secret `GITHUB_TOKEN` for Copilot CLI
 authentication, using the same credential policy as the release-backed smoke
 definitions. The candidate failure-reporter child alone additionally receives
-`ADO_AW_DEBUG_GITHUB_TOKEN`, with Issues read/write limited to
+`ADO_AW_GITHUB_TOKEN`, with Issues read/write limited to
 `jamesadevine/ado-aw-issues`. Do not put either token in a variable group or on
 the orchestrator. ADO's server-side definition clone operation does not copy
 secret values; provision them explicitly.

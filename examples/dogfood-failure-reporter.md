@@ -5,7 +5,7 @@ on:
   schedule: daily
 permissions:
   read: my-read-arm-connection
-ado-aw-debug:
+safe-outputs:
   create-issue:
     target-repo: githubnext/ado-aw
     title-prefix: "[pipeline-failure] "
@@ -44,7 +44,7 @@ in Azure DevOps inside an AWF-isolated sandbox.
 
 - Do not attempt to redirect issues to a different repository — the agent
   has no `target_repo` parameter and the target is fixed by the operator.
-- The `ADO_AW_DEBUG_GITHUB_TOKEN` PAT is **not** visible to you; it is
+- The `ADO_AW_GITHUB_TOKEN` PAT is **not** visible to you; it is
   used only by Stage 3 to authenticate against GitHub.
 - Issues are reviewed for prompt injection by Stage 2 before they are
   filed, so do not include text that looks like ADO pipeline commands

@@ -135,7 +135,9 @@ src/compile/codemods/
 ├── 0002_pool_object_form.rs # Legacy scalar pool → explicit object form codemod
 ├── 0003_flatten_work_item_config.rs # Legacy work-item config flatten codemod
 ├── 0004_legacy_path_markers.rs # {{ workspace }} / {{ working_directory }} / {{ trigger_repo_directory }} → explicit ADO path exprs
-└── 0005_drop_build_attachment_allowed_build_ids.rs # remove no-op upload-build-attachment.allowed-build-ids
+├── 0005_drop_build_attachment_allowed_build_ids.rs # remove no-op upload-build-attachment.allowed-build-ids
+├── 0006_explicit_push_trigger.rs # pin legacy implicit all-branches push trigger for pre-0.49.0 sources
+└── 0007_promote_debug_create_issue.rs # move debug GitHub issue filing to regular safe-outputs
 ```
 
 (New codemods are appended as `<NNNN>_<id>.rs` files.)
@@ -474,6 +476,18 @@ or `pipeline` — those authors already chose. It also migrates only the
 Repos the YAML `pr:` block is inert without a server-side Build Validation
 policy, so synthesising an `on.pr` would switch on the whole synthetic-PR
 machinery — a far larger change than the one being preserved.
+## GitHub `create-issue` promotion (`0007_promote_debug_create_issue`)
+
+The dogfood-only `ado-aw-debug.create-issue` surface was retired when GitHub
+issue filing became a regular safe output. The codemod moves the configuration
+to `safe-outputs.create-issue`, preserves other debug fields such as
+`skip-integrity`, and removes an empty `ado-aw-debug` mapping.
+
+If no public GitHub auth is already present, it adds
+`safe-outputs.github-token: "$(ADO_AW_DEBUG_GITHUB_TOKEN)"` so an existing ADO
+secret continues to work through the normal Stage 3 auth path. When both old
+and new `create-issue` keys exist, the codemod fails with a manual-migration
+error rather than overwriting either value.
 
 ## Tests
 

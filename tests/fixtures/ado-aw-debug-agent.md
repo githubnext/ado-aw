@@ -1,8 +1,9 @@
 ---
 name: "Ado AW Debug Test Agent"
-description: "Fixture exercising the ado-aw-debug.create-issue front matter section"
+description: "Fixture exercising skip-integrity plus public GitHub issue output"
 ado-aw-debug:
   skip-integrity: true
+safe-outputs:
   create-issue:
     target-repo: githubnext/ado-aw
     title-prefix: "[pipeline-failure] "

@@ -1,6 +1,5 @@
 /**
- * github-app-token — mint a GitHub App installation access token for the
- * Copilot engine (issue #1316).
+ * github-app-token — mint a scoped GitHub App installation access token.
  *
  * Mirrors gh-aw's `create-github-app-token` model, adapted to Azure DevOps:
  * the GitHub App **App ID** and **private key** are supplied via env vars
@@ -18,7 +17,7 @@
  *      set of repositories.
  *   4. Emit the token as a **masked, same-job** pipeline variable
  *      (`##vso[task.setvariable …;issecret=true]`) so a downstream step in the
- *      same job (the Copilot invocation) can read it via `$(GITHUB_APP_TOKEN)`
+ *      same job can read it through a compiler-selected `$(...)` variable
  *      without it leaking into the log.
  *
  * Trust boundary: runs OUTSIDE the AWF sandbox (a normal ADO script step, like
@@ -34,7 +33,8 @@
  *
  *   Mint:   node github-app-token.js \
  *             --app-id <id> --owner <login> --output-var <name> \
- *             [--repositories "a b"] [--api-url https://host/api/v3]
+ *             [--repositories "a b"] [--permissions-json '{"issues":"write"}'] \
+ *             [--api-url https://host/api/v3]
  *           env: GH_APP_PRIVATE_KEY (required, secret)
  *
  *   Revoke: node github-app-token.js revoke [--api-url https://host/api/v3]
@@ -138,6 +138,43 @@ export function parseRepositories(raw: string | undefined): string[] {
     .filter((s) => s.length > 0);
 }
 
+export function parsePermissions(
+  raw: string | undefined,
+): Record<string, "read" | "write"> {
+  if (!raw) return {};
+  const parsed: unknown = JSON.parse(raw);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("--permissions-json must be a JSON object");
+  }
+  const permissions = Object.create(null) as Record<
+    string,
+    "read" | "write"
+  >;
+  for (const [name, level] of Object.entries(parsed)) {
+    if (
+      name === "__proto__" ||
+      name === "prototype" ||
+      name === "constructor"
+    ) {
+      throw new Error(
+        `reserved GitHub App permission name ${JSON.stringify(name)}`,
+      );
+    }
+    if (!/^[a-z0-9_]+$/.test(name)) {
+      throw new Error(
+        `invalid GitHub App permission name ${JSON.stringify(name)}`,
+      );
+    }
+    if (level !== "read" && level !== "write") {
+      throw new Error(
+        `GitHub App permission ${JSON.stringify(name)} must be "read" or "write"`,
+      );
+    }
+    permissions[name] = level;
+  }
+  return permissions;
+}
+
 interface FetchLike {
   (
     url: string,
@@ -213,10 +250,14 @@ export async function mintInstallationToken(
   jwt: string,
   installationId: number,
   repositories: string[],
+  permissions: Record<string, "read" | "write"> = {},
 ): Promise<string> {
   const body: Record<string, unknown> = {};
   if (repositories.length > 0) {
     body.repositories = repositories;
+  }
+  if (Object.keys(permissions).length > 0) {
+    body.permissions = permissions;
   }
   const resp = await fetchFn(
     `${apiUrl}/app/installations/${installationId}/access_tokens`,
@@ -269,6 +310,7 @@ export interface CliArgs {
   owner?: string;
   outputVar?: string;
   repositories?: string;
+  permissionsJson?: string;
   apiUrl?: string;
 }
 
@@ -303,6 +345,9 @@ export function parseArgs(argv: string[]): CliArgs {
         break;
       case "--repositories":
         if (value !== undefined) out.repositories = value;
+        break;
+      case "--permissions-json":
+        if (value !== undefined) out.permissionsJson = value;
         break;
       case "--api-url":
         if (value !== undefined) out.apiUrl = value;
@@ -376,6 +421,7 @@ export async function main(
     const owner = requireArg(args.owner, "--owner");
     const privateKey = requireEnv(env, "GH_APP_PRIVATE_KEY");
     const repositories = parseRepositories(args.repositories);
+    const permissions = parsePermissions(args.permissionsJson);
     const apiUrl = normalizeApiUrl(args.apiUrl);
     const outputVar =
       args.outputVar && args.outputVar.length > 0
@@ -395,9 +441,10 @@ export async function main(
       jwt,
       installationId,
       repositories,
+      permissions,
     );
 
-    // Mask + expose to the same-job Copilot step. Emitting the secret BEFORE
+    // Mask + expose to the same-job consumer. Emitting the secret BEFORE
     // any log line that could contain it keeps ADO's scrubber ahead of leaks.
     setSecretVar(outputVar, token);
     logInfo(

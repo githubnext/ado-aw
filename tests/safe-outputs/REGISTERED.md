@@ -12,7 +12,7 @@ cutover.
 | `azure-cli.md` | `daily around 03:00` | `2546` | Verifies AWF az CLI mount + ADO auth via `AZURE_DEVOPS_EXT_PAT`. |
 | `noop-target.md` | _no schedule_ | `2547` | Target of the `queue-build` executor-e2e scenario. `E2E_QUEUE_PIPELINE_ID=2547` on executor definition `2550`. |
 | `janitor.md` | `weekly on monday around 02:00` | `2548` | Prunes `ado-aw-smoke-*` artifacts older than 30 days. |
-| `smoke-failure-reporter.md` | `daily around 04:30` | `2549` | Files `[smoke-failure] …` issues on `jamesadevine/ado-aw-issues`. Requires the `ADO_AW_DEBUG_GITHUB_TOKEN` secret pipeline variable, **only on this pipeline**. |
+| `smoke-failure-reporter.md` | `daily around 04:30` | `2549` | Files `[smoke-failure] …` issues on `jamesadevine/ado-aw-issues`. Requires the `ADO_AW_GITHUB_TOKEN` secret pipeline variable, **only on this pipeline**. |
 
 ## Deterministic E2E definitions
 
@@ -72,14 +72,14 @@ the following one-time setup in
    (`tests/executor-e2e/azure-pipelines.yml`) with the `noop-target`
    Pipeline ID from step 3. This enables the `queue-build` deterministic
    scenario.
-5. Provision pipeline variable `ADO_AW_DEBUG_GITHUB_TOKEN` (secret) on
+5. Provision pipeline variable `ADO_AW_GITHUB_TOKEN` (secret) on
    the `smoke-failure-reporter` pipeline **only**. Use a GitHub
    fine-grained PAT scoped to `Issues: Read and write` on
    `jamesadevine/ado-aw-issues` only. Confirm the target repository has the
    `pipeline-failure` and `ado-aw-smoke` labels.
 
    ```powershell
-   ado-aw secrets set ADO_AW_DEBUG_GITHUB_TOKEN `
+   ado-aw secrets set ADO_AW_GITHUB_TOKEN `
      --org msazuresphere --project AgentPlayground `
      --definition-ids <smoke-failure-reporter-pipeline-id> `
      --value <fine-grained-pat>

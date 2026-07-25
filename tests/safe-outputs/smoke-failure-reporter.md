@@ -21,7 +21,7 @@ tools:
 permissions:
   read: agent-playground-read
   write: agent-playground-write
-ado-aw-debug:
+safe-outputs:
   create-issue:
     target-repo: jamesadevine/ado-aw-issues
     title-prefix: "[smoke-failure] "
@@ -96,7 +96,7 @@ front-matter `name:` values from their source Markdown.
 - Do **not** call `create-issue` with a `target_repo` parameter. The
   agent has no override; the target is fixed by the operator at
   `jamesadevine/ado-aw-issues`.
-- The `ADO_AW_DEBUG_GITHUB_TOKEN` PAT is not visible to you. Stage 3
+- The `ADO_AW_GITHUB_TOKEN` PAT is not visible to you. Stage 3
   uses it to authenticate against GitHub.
 
 After the appropriate `create-issue` calls (or one `report-incomplete`

@@ -20,7 +20,8 @@ use crate::safe_outputs::{
     CreateGitTagResult, CreateIssueResult, CreatePrResult, CreateWikiPageResult,
     CreateWorkItemResult, ExecutionContext, ExecutionResult, Executor, LinkWorkItemsResult,
     MissingDataResult, MissingToolResult, NoopResult, QueueBuildResult, ReplyToPrCommentResult,
-    ReportIncompleteResult, ResolvePrThreadResult, SubmitPrReviewResult, ToolResult,
+    ReportIncompleteResult, ResolvePrThreadResult, SetIssueTypeResult, SubmitPrReviewResult,
+    ToolResult,
     UpdatePrResult, UpdateWikiPageResult, UpdateWorkItemResult, UploadBuildAttachmentResult,
     UploadPipelineArtifactResult, UploadWorkitemAttachmentResult,
 };
@@ -245,6 +246,7 @@ pub async fn execute_safe_outputs(
         ReplyToPrCommentResult,
         ResolvePrThreadResult,
         CreateIssueResult,
+        SetIssueTypeResult,
     );
 
     let mut results = Vec::new();
@@ -673,7 +675,7 @@ async fn find_tool_executor(
     if let Some(r) = dispatch_resource_tools(tool_name, entry, ctx).await? {
         return Ok(Some(r));
     }
-    if let Some(r) = dispatch_debug_tools(tool_name, entry, ctx).await? {
+    if let Some(r) = dispatch_github_tools(tool_name, entry, ctx).await? {
         return Ok(Some(r));
     }
     Ok(None)
@@ -742,15 +744,15 @@ async fn dispatch_resource_tools(
     })
 }
 
-/// Dispatch debug-only tools (gated by `ado-aw-debug:` front-matter section
-/// at compile time and `DEBUG_ONLY_TOOLS` at the MCP layer at runtime).
-async fn dispatch_debug_tools(
+/// Dispatch GitHub issue tools.
+async fn dispatch_github_tools(
     tool_name: &str,
     entry: &Value,
     ctx: &ExecutionContext,
 ) -> Result<Option<ExecutionResult>> {
     dispatch_executor_tools!(tool_name, entry, ctx, {
         "create-issue" => CreateIssueResult,
+        "set-issue-type" => SetIssueTypeResult,
     })
 }
 
