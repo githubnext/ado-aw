@@ -132,4 +132,93 @@ describe("main", () => {
     // Bearer is delivered via GIT_CONFIG_* env, and the token is never in argv.
     expect(seen[0]?.GIT_CONFIG_VALUE_0).toContain("bearer tok");
   });
+
+  it("uses persisted git credentials when no bearer is supplied", () => {
+    const seen: Array<Record<string, string> | undefined> = [];
+    const calls: string[][] = [];
+    const runGit: GitRunners["runGit"] = (args, env) => {
+      calls.push(args);
+      if (args[0] === "fetch") seen.push(env);
+      const status = args[0] === "cat-file" ? (seen.length === 0 ? 1 : 0) : 0;
+      return { stdout: "", stderr: "", status };
+    };
+    const gitOk: GitRunners["gitOk"] = () => SHA;
+
+    expect(main({ dir: "/c", sha: SHA }, {}, { runGit, gitOk }, noopChdir)).toBe(0);
+    expect(seen).toEqual([{}]);
+    expect(calls).toContainEqual([
+      "config",
+      "--local",
+      "--name-only",
+      "--get-regexp",
+      "^(http\\..*\\.extraheader|http(\\..*)?\\.proxy|credential\\..*)$",
+    ]);
+  });
+
+  it("fails closed when persisted credentials cannot be removed", () => {
+    let fetched = false;
+    const runGit: GitRunners["runGit"] = (args) => {
+      if (args[0] === "cat-file") {
+        return { stdout: "", stderr: "", status: fetched ? 0 : 1 };
+      }
+      if (args[0] === "fetch") {
+        fetched = true;
+        return { stdout: "", stderr: "", status: 0 };
+      }
+      if (args[0] === "config" && args.includes("--get-regexp")) {
+        return {
+          stdout:
+            "http.https://example.test.extraheader\nhttp.proxy\ncredential.helper\n",
+          stderr: "",
+          status: 0,
+        };
+      }
+      if (args[0] === "config" && args.includes("--unset-all")) {
+        return { stdout: "", stderr: "denied", status: 1 };
+      }
+      return { stdout: "", stderr: "", status: 0 };
+    };
+    const gitOk: GitRunners["gitOk"] = () => SHA;
+
+    expect(main({ dir: "/c", sha: SHA }, {}, { runGit, gitOk }, noopChdir)).toBe(1);
+  });
+
+  it("removes persisted headers, proxies, and credential helpers", () => {
+    let fetched = false;
+    const removed: string[] = [];
+    const runGit: GitRunners["runGit"] = (args) => {
+      if (args[0] === "cat-file") {
+        return { stdout: "", stderr: "", status: fetched ? 0 : 1 };
+      }
+      if (args[0] === "fetch") {
+        fetched = true;
+        return { stdout: "", stderr: "", status: 0 };
+      }
+      if (args[0] === "config" && args.includes("--get-regexp")) {
+        return {
+          stdout: [
+            "http.https://example.test.extraheader",
+            "http.proxy",
+            "http.https://example.test.proxy",
+            "credential.helper",
+          ].join("\n"),
+          stderr: "",
+          status: 0,
+        };
+      }
+      if (args[0] === "config" && args.includes("--unset-all")) {
+        removed.push(args.at(-1) ?? "");
+      }
+      return { stdout: "", stderr: "", status: 0 };
+    };
+    const gitOk: GitRunners["gitOk"] = () => SHA;
+
+    expect(main({ dir: "/c", sha: SHA }, {}, { runGit, gitOk }, noopChdir)).toBe(0);
+    expect(removed).toEqual([
+      "http.https://example.test.extraheader",
+      "http.proxy",
+      "http.https://example.test.proxy",
+      "credential.helper",
+    ]);
+  });
 });

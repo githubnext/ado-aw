@@ -39,7 +39,7 @@ use serde::Serialize;
 /// the result for this marker.
 #[derive(Debug, Clone, Default)]
 pub struct AdoAwMarkerExtension {
-    custom_components: Vec<CustomComponentProvenance>,
+    custom_components: Option<Vec<CustomComponentProvenance>>,
 }
 
 /// Provenance for a safe-output custom component imported at compile time.
@@ -49,6 +49,8 @@ pub struct AdoAwMarkerExtension {
 /// carries and emits the resolved values.
 #[derive(Debug, Clone, Serialize)]
 pub struct CustomComponentProvenance {
+    /// Custom safe-output tool that consumes this component.
+    pub tool: String,
     /// Import source, for example `org/repo/path`.
     pub source: String,
     /// Full 40-character commit SHA that the component resolved to.
@@ -58,8 +60,11 @@ pub struct CustomComponentProvenance {
 }
 
 impl AdoAwMarkerExtension {
+    #[cfg(test)]
     pub fn new(custom_components: Vec<CustomComponentProvenance>) -> Self {
-        Self { custom_components }
+        Self {
+            custom_components: Some(custom_components),
+        }
     }
 }
 
@@ -79,7 +84,11 @@ impl CompilerExtension for AdoAwMarkerExtension {
     /// Returns the two Agent-job prepare steps as typed
     /// `Step::Bash(BashStep)` values.
     fn declarations(&self, ctx: &CompileContext) -> anyhow::Result<Declarations> {
-        let Some(metadata) = CompileMetadata::from_ctx(ctx, self.custom_components.clone()) else {
+        let custom_components = match &self.custom_components {
+            Some(custom_components) => custom_components.clone(),
+            None => resolved_custom_components(ctx.front_matter)?,
+        };
+        let Some(metadata) = CompileMetadata::from_ctx(ctx, custom_components) else {
             return Ok(Declarations::default());
         };
         let agent_prepare_steps = vec![
@@ -91,6 +100,27 @@ impl CompilerExtension for AdoAwMarkerExtension {
             ..Declarations::default()
         })
     }
+}
+
+fn resolved_custom_components(
+    front_matter: &crate::compile::types::FrontMatter,
+) -> anyhow::Result<Vec<CustomComponentProvenance>> {
+    Ok(
+        crate::compile::custom_tools::collect_custom_tool_definitions(front_matter)?
+            .into_iter()
+            .filter_map(|definition| {
+                definition
+                    .component
+                    .map(|component| CustomComponentProvenance {
+                        tool: definition.name,
+                        source: component.source,
+                        sha: component.sha.as_str().to_string(),
+                        manifest_digest: component.manifest_digest.unwrap_or_default(),
+                        schema_digest: definition.schema_digest,
+                    })
+            })
+            .collect(),
+    )
 }
 
 /// Build the typed [`BashStep`] form of the `# ado-aw-metadata: …`
@@ -421,6 +451,44 @@ mod tests {
     }
 
     #[test]
+    fn default_extension_derives_custom_components_from_front_matter() {
+        let fm = parse_fm(
+            r#"
+name: t
+description: x
+safe-outputs:
+  scripts:
+    notify:
+      run: ./notify
+      component-source: org/repo/components/notify.md
+      component-sha: 0123456789abcdef0123456789abcdef01234567
+      manifest-digest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+"#,
+        );
+        let input_path = Path::new("agents/foo.md");
+        let ctx = CompileContext {
+            agent_name: &fm.name,
+            front_matter: &fm,
+            ado_context: None,
+            engine: crate::engine::Engine::Copilot,
+            compile_dir: None,
+            input_path: Some(input_path),
+            imported_prompt_body: String::new(),
+        };
+        let steps = AdoAwMarkerExtension::default()
+            .declarations(&ctx)
+            .unwrap()
+            .agent_prepare_steps;
+        for step in steps.iter().map(bash_step) {
+            assert!(step.script.contains("\"tool\":\"notify\""));
+            assert!(
+                step.script
+                    .contains("\"source\":\"org/repo/components/notify.md\"")
+            );
+        }
+    }
+
+    #[test]
     fn emits_custom_component_provenance_when_configured() {
         let fm = parse_fm("name: t\ndescription: x\n");
         let input_path = Path::new("agents/foo.md");
@@ -434,6 +502,7 @@ mod tests {
             imported_prompt_body: String::new(),
         };
         let component = CustomComponentProvenance {
+            tool: "create-service-ticket".to_string(),
             source: "org/repo/components/create-pr".to_string(),
             sha: "0123456789abcdef0123456789abcdef01234567".to_string(),
             manifest_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -457,6 +526,11 @@ mod tests {
                 step.script
                     .contains("\"source\":\"org/repo/components/create-pr\""),
                 "step missing component source:\n{}",
+                step.script
+            );
+            assert!(
+                step.script.contains("\"tool\":\"create-service-ticket\""),
+                "step missing component tool:\n{}",
                 step.script
             );
             assert!(

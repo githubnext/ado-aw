@@ -17,7 +17,7 @@
 //! at deserialization time. New safe-output tools dealing with file paths or
 //! identifiers should type their fields with `secure::` newtypes.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -165,8 +165,9 @@ pub fn is_valid_provider_resource_url(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 256
         && s.contains("://")
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '/' | '%' | '~'))
+        && s.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '/' | '%' | '~')
+        })
 }
 
 /// Validate an `engine.provider.base-url` value.
@@ -740,10 +741,69 @@ pub fn validate_commit_sha(s: &str, label: &str) -> Result<()> {
             s.len()
         );
     }
+
     if !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         anyhow::bail!("{label} must be a valid hex string: {s}");
     }
     Ok(())
+}
+
+/// Validate a full Azure DevOps organization collection URL before any
+/// compiler credential is sent to it.
+pub fn validate_ado_org_url(s: &str, label: &str) -> Result<()> {
+    let url = url::Url::parse(s).with_context(|| format!("{label} must be a valid URL"))?;
+    anyhow::ensure!(url.scheme() == "https", "{label} must use https");
+    anyhow::ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "{label} must not contain embedded credentials"
+    );
+    anyhow::ensure!(
+        url.port().is_none(),
+        "{label} must not specify a non-default port"
+    );
+    anyhow::ensure!(
+        url.query().is_none() && url.fragment().is_none(),
+        "{label} must not contain a query or fragment"
+    );
+    let host = url
+        .host_str()
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| anyhow::anyhow!("{label} must include a host"))?;
+    let segments: Vec<String> = url
+        .path_segments()
+        .into_iter()
+        .flatten()
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| {
+            percent_encoding::percent_decode_str(segment)
+                .decode_utf8_lossy()
+                .into_owned()
+        })
+        .collect();
+
+    if host == "dev.azure.com" {
+        anyhow::ensure!(
+            segments.len() == 1 && is_safe_path_segment(&segments[0]),
+            "{label} must be an Azure DevOps organization URL like \
+             https://dev.azure.com/myorg"
+        );
+        return Ok(());
+    }
+
+    if let Some(org) = host.strip_suffix(".visualstudio.com") {
+        anyhow::ensure!(
+            is_safe_path_segment(org),
+            "{label} has an invalid Azure DevOps organization name"
+        );
+        anyhow::ensure!(
+            segments.is_empty()
+                || (segments.len() == 1 && segments[0].eq_ignore_ascii_case("DefaultCollection")),
+            "{label} legacy visualstudio.com URLs may only include /DefaultCollection"
+        );
+        return Ok(());
+    }
+
+    anyhow::bail!("{label} must target dev.azure.com or an <org>.visualstudio.com collection host")
 }
 
 /// Validate a string against `git check-ref-format` rules.
@@ -819,7 +879,9 @@ mod tests {
     fn test_is_valid_service_connection() {
         assert!(is_valid_service_connection("acr-conn"));
         assert!(is_valid_service_connection("My ACR Connection")); // spaces allowed
-        assert!(is_valid_service_connection("11112222-3333-4444-5555-666677778888"));
+        assert!(is_valid_service_connection(
+            "11112222-3333-4444-5555-666677778888"
+        ));
         assert!(!is_valid_service_connection(""));
         assert!(!is_valid_service_connection("with\nnewline"));
         assert!(!is_valid_service_connection("with'quote"));
@@ -1242,6 +1304,28 @@ mod tests {
         assert!(validate_commit_sha("0123456789abcdef0123456789abcdef01234567", "c").is_ok());
         assert!(validate_commit_sha("short", "c").is_err());
         assert!(validate_commit_sha("zzz3456789abcdef0123456789abcdef01234567", "c").is_err());
+    }
+
+    #[test]
+    fn test_validate_ado_org_url() {
+        for valid in [
+            "https://dev.azure.com/my-org",
+            "https://my-org.visualstudio.com",
+            "https://my-org.visualstudio.com/DefaultCollection",
+        ] {
+            assert!(validate_ado_org_url(valid, "org").is_ok(), "{valid}");
+        }
+        for invalid in [
+            "http://dev.azure.com/my-org",
+            "https://evil.example.com/my-org",
+            "https://dev.azure.com.evil.example/my-org",
+            "https://dev.azure.com/my-org/project",
+            "https://user@dev.azure.com/my-org",
+            "https://dev.azure.com:444/my-org",
+            "https://dev.azure.com/my-org?token=x",
+        ] {
+            assert!(validate_ado_org_url(invalid, "org").is_err(), "{invalid}");
+        }
     }
 
     #[test]

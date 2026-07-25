@@ -41,6 +41,7 @@ struct ExecutionRecord {
     name: String,
     status: String,
     context: Option<String>,
+    proposal_index: Option<usize>,
     result: Option<Value>,
     error: Option<String>,
     component: Option<ExecutionComponentProvenance>,
@@ -272,19 +273,24 @@ async fn load_marker_custom_components(
 }
 
 impl ExecutionComponentProvenance {
-    fn to_model(&self) -> Option<ComponentProvenance> {
-        Some(ComponentProvenance {
-            source: normalize_optional_string(self.source.clone())?,
-            sha: normalize_optional_string(self.sha.clone())?,
-            manifest_digest: normalize_optional_string(self.manifest_digest.clone())?,
-            schema_digest: normalize_optional_string(self.schema_digest.clone())?,
-        })
+    fn to_model(&self) -> ComponentProvenance {
+        ComponentProvenance {
+            tool: String::new(),
+            source: normalize_optional_string(self.source.clone()).unwrap_or_default(),
+            sha: normalize_optional_string(self.sha.clone()).unwrap_or_default(),
+            manifest_digest: normalize_optional_string(self.manifest_digest.clone())
+                .unwrap_or_default(),
+            schema_digest: normalize_optional_string(self.schema_digest.clone())
+                .unwrap_or_default(),
+        }
     }
 }
 
 impl ExecutionRecord {
     fn component_provenance(&self) -> Option<ComponentProvenance> {
-        self.component.as_ref()?.to_model()
+        self.component
+            .as_ref()
+            .map(ExecutionComponentProvenance::to_model)
     }
 }
 
@@ -295,15 +301,20 @@ fn build_execution_items(
     let mut proposal_to_execution = vec![None; proposals.len()];
     let mut execution_matched = vec![false; executions.len()];
     let mut context_index = BTreeMap::<(String, String), VecDeque<usize>>::new();
+    let mut context_free_index = BTreeMap::<String, VecDeque<usize>>::new();
 
     for proposal in proposals {
-        let Some(context) = proposal.context.clone() else {
-            continue;
-        };
-        context_index
-            .entry((proposal.name.clone(), context))
-            .or_default()
-            .push_back(proposal.index);
+        if let Some(context) = proposal.context.clone() {
+            context_index
+                .entry((proposal.name.clone(), context))
+                .or_default()
+                .push_back(proposal.index);
+        } else {
+            context_free_index
+                .entry(proposal.name.clone())
+                .or_default()
+                .push_back(proposal.index);
+        }
     }
 
     for execution in executions {
@@ -329,15 +340,29 @@ fn build_execution_items(
             continue;
         }
 
-        let Some(proposal) = proposals.get(execution.index) else {
-            continue;
-        };
-        if proposal_to_execution[proposal.index].is_some() {
+        if let Some(proposal_index) = execution.record.proposal_index {
+            let Some(proposal) = proposals.get(proposal_index) else {
+                continue;
+            };
+            if proposal_to_execution[proposal.index].is_none()
+                && proposal.context.is_none()
+                && proposal.name == execution.record.name
+            {
+                proposal_to_execution[proposal.index] = Some(execution.index);
+                execution_matched[execution.index] = true;
+            }
             continue;
         }
-        if proposal.context.is_none() && proposal.name == execution.record.name {
-            proposal_to_execution[proposal.index] = Some(execution.index);
-            execution_matched[execution.index] = true;
+
+        let Some(proposal_indexes) = context_free_index.get_mut(&execution.record.name) else {
+            continue;
+        };
+        while let Some(proposal_index) = proposal_indexes.pop_front() {
+            if proposal_to_execution[proposal_index].is_none() {
+                proposal_to_execution[proposal_index] = Some(execution.index);
+                execution_matched[execution.index] = true;
+                break;
+            }
         }
     }
 
@@ -540,7 +565,20 @@ fn build_provenance_findings(
     executions
         .iter()
         .filter_map(|execution| {
-            let component = execution.record.component_provenance()?;
+            let component = execution.record.component_provenance();
+            let marker_declares_tool = marker_components
+                .iter()
+                .any(|marker| marker.tool == execution.record.name);
+            let legacy_marker_matches_source = component.as_ref().is_some_and(|runtime| {
+                !runtime.source.is_empty()
+                    && marker_components
+                        .iter()
+                        .any(|marker| marker.tool.is_empty() && marker.source == runtime.source)
+            });
+            if !marker_declares_tool && !legacy_marker_matches_source {
+                return None;
+            }
+            let component = component.unwrap_or_default();
             cross_check_provenance(&execution.record.name, &component, marker_components)
         })
         .collect()
@@ -551,10 +589,10 @@ fn cross_check_provenance(
     record_component: &ComponentProvenance,
     marker_components: &[ComponentProvenance],
 ) -> Option<Finding> {
-    let Some(expected) = marker_components
-        .iter()
-        .find(|component| component.source == record_component.source)
-    else {
+    let Some(expected) = marker_components.iter().find(|component| {
+        (component.tool.is_empty() || component.tool == tool)
+            && (record_component.source.is_empty() || component.source == record_component.source)
+    }) else {
         return Some(
             crate::audit::findings::custom_component_provenance_mismatch_finding(
                 tool,
@@ -567,6 +605,9 @@ fn cross_check_provenance(
     };
 
     let mut mismatched_fields = Vec::new();
+    if expected.source != record_component.source {
+        mismatched_fields.push("source");
+    }
     if expected.sha != record_component.sha {
         mismatched_fields.push("sha");
     }
@@ -779,8 +820,10 @@ fn collect_named_files<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        ComponentProvenance, CreatedItemReport, EXECUTED_NDJSON_FILENAME, SAFE_OUTPUT_FILENAME,
-        SafeOutputStatus, Severity, analyze_safe_outputs, cross_check_provenance,
+        ComponentProvenance, CreatedItemReport, EXECUTED_NDJSON_FILENAME,
+        ExecutionComponentProvenance, ExecutionRecord, IndexedExecutionRecord, ProposalRecord,
+        SAFE_OUTPUT_FILENAME, SafeOutputStatus, Severity, analyze_safe_outputs,
+        build_execution_items, build_provenance_findings, cross_check_provenance,
     };
     use serde_json::{Value, json};
     use std::fs;
@@ -876,6 +919,7 @@ mod tests {
             &json!({
                 "schema": "ado-aw/aw_info/1",
                 "custom_components": [{
+                    "tool": "custom_notify",
                     "source": "org/repo/components/notify",
                     "sha": "0123456789abcdef0123456789abcdef01234567",
                     "manifest_digest": "sha256:manifest",
@@ -922,6 +966,7 @@ mod tests {
         assert_eq!(
             execution.items[0].component_provenance,
             Some(ComponentProvenance {
+                tool: String::new(),
                 source: String::from("org/repo/components/notify"),
                 sha: String::from("0123456789abcdef0123456789abcdef01234567"),
                 manifest_digest: String::from("sha256:manifest"),
@@ -937,6 +982,7 @@ mod tests {
     #[test]
     fn cross_check_provenance_accepts_matching_marker_component() {
         let component = ComponentProvenance {
+            tool: String::from("custom_notify"),
             source: String::from("org/repo/components/notify"),
             sha: String::from("sha-a"),
             manifest_digest: String::from("manifest-a"),
@@ -944,20 +990,26 @@ mod tests {
         };
 
         assert!(
-            cross_check_provenance("custom_notify", &component, std::slice::from_ref(&component))
-                .is_none()
+            cross_check_provenance(
+                "custom_notify",
+                &component,
+                std::slice::from_ref(&component)
+            )
+            .is_none()
         );
     }
 
     #[test]
     fn cross_check_provenance_reports_mismatched_sha() {
         let marker = ComponentProvenance {
+            tool: String::from("custom_notify"),
             source: String::from("org/repo/components/notify"),
             sha: String::from("sha-expected"),
             manifest_digest: String::from("manifest-a"),
             schema_digest: String::from("schema-a"),
         };
         let runtime = ComponentProvenance {
+            tool: String::new(),
             source: String::from("org/repo/components/notify"),
             sha: String::from("sha-actual"),
             manifest_digest: String::from("manifest-a"),
@@ -970,6 +1022,148 @@ mod tests {
         assert!(finding.title.contains("custom_notify"));
         assert!(finding.description.contains("sha-expected"));
         assert!(finding.description.contains("sha-actual"));
+    }
+
+    #[test]
+    fn cross_check_provenance_matches_tool_when_components_share_source() {
+        let runtime = ComponentProvenance {
+            tool: String::new(),
+            source: String::from("org/repo/components/shared"),
+            sha: String::from("sha-notify"),
+            manifest_digest: String::from("manifest"),
+            schema_digest: String::from("schema-notify"),
+        };
+        let markers = vec![
+            ComponentProvenance {
+                tool: String::from("other-tool"),
+                source: runtime.source.clone(),
+                sha: String::from("sha-other"),
+                manifest_digest: runtime.manifest_digest.clone(),
+                schema_digest: String::from("schema-other"),
+            },
+            ComponentProvenance {
+                tool: String::from("custom_notify"),
+                source: runtime.source.clone(),
+                sha: runtime.sha.clone(),
+                manifest_digest: runtime.manifest_digest.clone(),
+                schema_digest: runtime.schema_digest.clone(),
+            },
+        ];
+
+        assert!(cross_check_provenance("custom_notify", &runtime, &markers).is_none());
+    }
+
+    #[test]
+    fn provenance_findings_reject_missing_runtime_component_for_marker_tool() {
+        let executions = vec![IndexedExecutionRecord {
+            index: 0,
+            record: ExecutionRecord {
+                name: String::from("custom_notify"),
+                status: String::from("succeeded"),
+                component: None,
+                ..ExecutionRecord::default()
+            },
+        }];
+        let markers = vec![ComponentProvenance {
+            tool: String::from("custom_notify"),
+            source: String::from("org/repo/components/notify"),
+            sha: String::from("sha"),
+            manifest_digest: String::from("manifest"),
+            schema_digest: String::from("schema"),
+        }];
+
+        let findings = build_provenance_findings(&executions, &markers);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::High);
+        assert!(findings[0].description.contains("source"));
+    }
+
+    #[test]
+    fn provenance_findings_reject_partial_runtime_component() {
+        let executions = vec![IndexedExecutionRecord {
+            index: 0,
+            record: ExecutionRecord {
+                name: String::from("custom_notify"),
+                status: String::from("succeeded"),
+                component: Some(ExecutionComponentProvenance {
+                    source: Some(String::from("org/repo/components/notify")),
+                    sha: None,
+                    manifest_digest: Some(String::from("manifest")),
+                    schema_digest: Some(String::from("schema")),
+                }),
+                ..ExecutionRecord::default()
+            },
+        }];
+        let markers = vec![ComponentProvenance {
+            tool: String::from("custom_notify"),
+            source: String::from("org/repo/components/notify"),
+            sha: String::from("sha"),
+            manifest_digest: String::from("manifest"),
+            schema_digest: String::from("schema"),
+        }];
+
+        let findings = build_provenance_findings(&executions, &markers);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].description.contains("sha"));
+    }
+
+    #[test]
+    fn provenance_findings_ignore_local_custom_tools_without_marker_component() {
+        let executions = vec![IndexedExecutionRecord {
+            index: 0,
+            record: ExecutionRecord {
+                name: String::from("local_custom"),
+                status: String::from("succeeded"),
+                component: Some(ExecutionComponentProvenance::default()),
+                ..ExecutionRecord::default()
+            },
+        }];
+
+        assert!(build_provenance_findings(&executions, &[]).is_empty());
+    }
+
+    #[test]
+    fn split_artifacts_match_custom_index_and_legacy_tool_fifo() {
+        let proposals = vec![
+            ProposalRecord {
+                index: 0,
+                name: String::from("noop"),
+                context: None,
+                proposal: json!({"name": "noop"}),
+            },
+            ProposalRecord {
+                index: 1,
+                name: String::from("custom-tool"),
+                context: None,
+                proposal: json!({"name": "custom-tool"}),
+            },
+        ];
+        let executions = vec![
+            IndexedExecutionRecord {
+                index: 0,
+                record: ExecutionRecord {
+                    name: String::from("custom-tool"),
+                    status: String::from("succeeded"),
+                    proposal_index: Some(1),
+                    result: Some(json!({"matched": "custom"})),
+                    ..ExecutionRecord::default()
+                },
+            },
+            IndexedExecutionRecord {
+                index: 1,
+                record: ExecutionRecord {
+                    name: String::from("noop"),
+                    status: String::from("succeeded"),
+                    proposal_index: None,
+                    result: Some(json!({"matched": "builtin"})),
+                    ..ExecutionRecord::default()
+                },
+            },
+        ];
+
+        let items = build_execution_items(&proposals, &executions);
+        assert_eq!(items[0].result, Some(json!({"matched": "builtin"})));
+        assert_eq!(items[1].result, Some(json!({"matched": "custom"})));
     }
 
     #[tokio::test]

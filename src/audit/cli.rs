@@ -758,6 +758,8 @@ fn artifact_name_to_prefix(name: &str) -> Option<&'static str> {
         Some("analyzed_outputs")
     } else if name == "safe_outputs" || name.starts_with("safe_outputs_") {
         Some("safe_outputs")
+    } else if name.starts_with("custom_safe_output_") {
+        Some("safe_outputs")
     } else {
         None
     }
@@ -1041,6 +1043,10 @@ mod tests {
         assert!(artifact_matches_selected("agent_outputs_42", normalized));
         assert!(artifact_matches_selected("analyzed_outputs_42", normalized));
         assert!(artifact_matches_selected("safe_outputs", normalized));
+        assert!(artifact_matches_selected(
+            "custom_safe_output_notify_42",
+            normalized
+        ));
 
         let agent_only = vec![String::from("agent")];
         let agent_only =
@@ -1052,6 +1058,18 @@ mod tests {
             agent_only
         ));
         assert!(!artifact_matches_selected("safe_outputs", agent_only));
+        assert!(!artifact_matches_selected(
+            "custom_safe_output_notify_42",
+            agent_only
+        ));
+
+        let safe_outputs_only = vec![String::from("safe-outputs")];
+        let safe_outputs_only = normalize_artifact_filters(Some(&safe_outputs_only))
+            .expect("normalize safe-output filter");
+        assert!(artifact_matches_selected(
+            "custom_safe_output_notify_42",
+            safe_outputs_only.as_deref()
+        ));
     }
 
     // ── validate_audit_url_host: PAT exfiltration guard ───────────────────

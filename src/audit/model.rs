@@ -185,6 +185,9 @@ pub struct AwInfo {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ComponentProvenance {
+    /// Custom safe-output tool associated with this component.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tool: String,
     /// Import source, for example `org/repo/path`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source: String,
@@ -1184,6 +1187,7 @@ mod tests {
             status: SafeOutputStatus::Executed,
             proposal: json!({"message": "done"}),
             component_provenance: Some(ComponentProvenance {
+                tool: String::new(),
                 source: String::from("org/repo/components/notify"),
                 sha: String::from("0123456789abcdef0123456789abcdef01234567"),
                 manifest_digest: String::from("sha256:manifest"),

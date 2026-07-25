@@ -12,8 +12,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::fs::OpenOptions;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
+use tokio::task::JoinHandle;
 
 use crate::ndjson::{self, EXECUTED_NDJSON_FILENAME, SAFE_OUTPUT_FILENAME};
 use crate::safe_outputs::{
@@ -25,7 +26,7 @@ use crate::safe_outputs::{
     UpdatePrResult, UpdateWikiPageResult, UpdateWorkItemResult, UploadBuildAttachmentResult,
     UploadPipelineArtifactResult, UploadWorkitemAttachmentResult,
 };
-use crate::sanitize::{SanitizeConfig, neutralize_pipeline_commands, sanitize, sanitize_config};
+use crate::sanitize::{neutralize_pipeline_commands, sanitize, sanitize_config};
 
 // Re-export memory types for use by main.rs
 pub use crate::tools::cache_memory::{MemoryConfig, process_agent_memory};
@@ -66,6 +67,8 @@ pub struct CustomExecuteOptions {
     pub custom_phase: Option<String>,
     /// Jobs-style custom tool name.
     pub tool: Option<String>,
+    /// Compiler-resolved jobs-style proposal budget.
+    pub max: Option<usize>,
     /// Jobs-style pre output path for selected proposals.
     pub proposals_out: Option<PathBuf>,
     /// Jobs-style post input path for component result records.
@@ -83,6 +86,7 @@ impl CustomExecuteOptions {
         self.custom_config.is_some()
             || self.custom_phase.is_some()
             || self.tool.is_some()
+            || self.max.is_some()
             || self.proposals_out.is_some()
             || self.results_in.is_some()
             || self.component_sha.is_some()
@@ -93,14 +97,17 @@ impl CustomExecuteOptions {
 }
 
 const CUSTOM_SCHEMA_VERSION: u32 = 1;
-const DEFAULT_CUSTOM_MAX: usize = 3;
-
+const MAX_CUSTOM_PROCESS_OUTPUT_BYTES: usize = 1024 * 1024;
 fn default_custom_max() -> usize {
-    DEFAULT_CUSTOM_MAX
+    crate::compile::custom_tools::DEFAULT_CUSTOM_MAX
 }
 
 fn default_custom_cwd() -> PathBuf {
     PathBuf::from(".")
+}
+
+fn default_custom_timeout_minutes() -> u32 {
+    crate::compile::custom_tools::DEFAULT_CUSTOM_SCRIPT_TIMEOUT_MINUTES
 }
 
 /// Scripts-style custom safe-output config emitted by the compiler.
@@ -117,6 +124,8 @@ pub struct CustomScriptToolConfig {
     pub cwd: PathBuf,
     #[serde(default = "default_custom_max")]
     pub max: usize,
+    #[serde(default = "default_custom_timeout_minutes")]
+    pub timeout_minutes: u32,
 }
 
 /// Compiler-owned custom component provenance attached to each final record.
@@ -240,9 +249,13 @@ async fn execute_custom_scripts(
     dry_run: bool,
     options: &CustomExecuteOptions,
 ) -> Result<Vec<ExecutionResult>> {
-    if options.tool.is_some() || options.proposals_out.is_some() || options.results_in.is_some() {
+    if options.tool.is_some()
+        || options.max.is_some()
+        || options.proposals_out.is_some()
+        || options.results_in.is_some()
+    {
         anyhow::bail!(
-            "--custom-config cannot be combined with --tool, --proposals-out, or --results-in"
+            "--custom-config cannot be combined with --tool, --max, --proposals-out, or --results-in"
         );
     }
 
@@ -310,6 +323,7 @@ async fn execute_custom_scripts(
                 &tool_config.entrypoint,
                 &cwd,
                 entry,
+                std::time::Duration::from_secs(u64::from(tool_config.timeout_minutes) * 60),
             )
             .await
         };
@@ -339,7 +353,7 @@ async fn execute_custom_scripts(
 }
 
 async fn execute_custom_pre(
-    source: &Path,
+    _source: &Path,
     safe_output_dir: &Path,
     dry_run: bool,
     options: &CustomExecuteOptions,
@@ -353,7 +367,7 @@ async fn execute_custom_pre(
         anyhow::bail!("--custom-phase pre cannot be combined with --custom-config or --results-in");
     }
 
-    let max = load_custom_max(source, tool).await?;
+    let max = required_custom_max(options)?;
     let entries = load_entries_or_empty(safe_output_dir).await?;
     let selected = select_custom_proposals(&entries, tool, max);
     let attempted: Vec<Value> = selected
@@ -378,7 +392,7 @@ async fn execute_custom_pre(
 }
 
 async fn execute_custom_post(
-    source: &Path,
+    _source: &Path,
     safe_output_dir: &Path,
     dry_run: bool,
     options: &CustomExecuteOptions,
@@ -394,7 +408,7 @@ async fn execute_custom_post(
         );
     }
 
-    let max = load_custom_max(source, tool).await?;
+    let max = required_custom_max(options)?;
     let entries = load_entries_or_empty(safe_output_dir).await?;
     let selected = select_custom_proposals(&entries, tool, max);
     let attempted_ids: HashSet<String> = selected
@@ -471,12 +485,33 @@ fn required_custom_tool(options: &CustomExecuteOptions) -> Result<&str> {
         .context("--custom-phase requires --tool")
 }
 
+fn required_custom_max(options: &CustomExecuteOptions) -> Result<usize> {
+    let max = options.max.context("--custom-phase requires --max")?;
+    anyhow::ensure!(max > 0, "--custom-phase --max must be a positive integer");
+    Ok(max)
+}
+
 async fn load_custom_scripts_config(path: &Path) -> Result<CustomScriptsConfig> {
     let contents = tokio::fs::read_to_string(path)
         .await
         .with_context(|| format!("Failed to read custom config: {}", path.display()))?;
-    serde_json::from_str(&contents)
-        .with_context(|| format!("Failed to parse custom config: {}", path.display()))
+    let config: CustomScriptsConfig = serde_json::from_str(&contents)
+        .with_context(|| format!("Failed to parse custom config: {}", path.display()))?;
+    for (name, tool) in &config.tools {
+        anyhow::ensure!(
+            tool.max > 0,
+            "Custom tool '{}' has an invalid zero proposal budget",
+            sanitize_config(name)
+        );
+        anyhow::ensure!(
+            (1..=crate::compile::custom_tools::MAX_CUSTOM_SCRIPT_TIMEOUT_MINUTES)
+                .contains(&tool.timeout_minutes),
+            "Custom tool '{}' timeout must be from 1 to {} minutes",
+            sanitize_config(name),
+            crate::compile::custom_tools::MAX_CUSTOM_SCRIPT_TIMEOUT_MINUTES
+        );
+    }
+    Ok(config)
 }
 
 async fn load_entries_or_empty(safe_output_dir: &Path) -> Result<Vec<Value>> {
@@ -484,45 +519,6 @@ async fn load_entries_or_empty(safe_output_dir: &Path) -> Result<Vec<Value>> {
     Ok(load_safe_output_entries(&safe_output_path)
         .await?
         .unwrap_or_default())
-}
-
-async fn load_custom_max(source: &Path, tool: &str) -> Result<usize> {
-    let content = tokio::fs::read_to_string(source)
-        .await
-        .with_context(|| format!("Failed to read source file: {}", source.display()))?;
-    let parsed = crate::compile::parse_markdown_detailed(&content)
-        .with_context(|| format!("Failed to parse source file: {}", source.display()))?;
-    let mut front_matter = parsed.front_matter;
-    front_matter.sanitize_config_fields();
-    Ok(custom_max_from_safe_outputs(
-        &front_matter.safe_outputs,
-        tool,
-    ))
-}
-
-fn custom_max_from_safe_outputs(safe_outputs: &HashMap<String, Value>, tool: &str) -> usize {
-    max_from_value(safe_outputs.get(tool))
-        .or_else(|| nested_custom_max(safe_outputs, "scripts", tool))
-        .or_else(|| nested_custom_max(safe_outputs, "jobs", tool))
-        .unwrap_or(DEFAULT_CUSTOM_MAX)
-}
-
-fn nested_custom_max(
-    safe_outputs: &HashMap<String, Value>,
-    section: &str,
-    tool: &str,
-) -> Option<usize> {
-    safe_outputs
-        .get(section)
-        .and_then(|section| section.get(tool))
-        .and_then(|tool_cfg| max_from_value(Some(tool_cfg)))
-}
-
-fn max_from_value(value: Option<&Value>) -> Option<usize> {
-    value
-        .and_then(|v| v.get("max"))
-        .and_then(|v| v.as_u64())
-        .map(|v| v as usize)
 }
 
 fn select_custom_proposals(
@@ -602,6 +598,7 @@ async fn run_custom_entrypoint(
     entrypoint: &str,
     cwd: &Path,
     proposal: &Value,
+    timeout: std::time::Duration,
 ) -> CustomToolOutcome {
     let proposal_json = match serde_json::to_string(proposal) {
         Ok(json) => json,
@@ -626,9 +623,14 @@ async fn run_custom_entrypoint(
         command.arg("-c").arg(entrypoint);
         command
     };
+    #[cfg(unix)]
+    command.process_group(0);
+    #[cfg(windows)]
+    command.creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
     command
         .current_dir(cwd)
         .env("AW_PROPOSAL", &proposal_json)
+        .kill_on_drop(true)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -641,6 +643,21 @@ async fn run_custom_entrypoint(
                     "Failed to start custom tool '{}': {}",
                     sanitize_config(tool),
                     sanitize(&err.to_string())
+                )),
+                record_status: "failed",
+            };
+        }
+    };
+    let process_tree = match CustomProcessTree::attach(&child) {
+        Ok(process_tree) => process_tree,
+        Err(error) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return CustomToolOutcome {
+                result: ExecutionResult::failure(format!(
+                    "Failed to isolate custom tool '{}' process tree: {}",
+                    sanitize_config(tool),
+                    sanitize(&error.to_string())
                 )),
                 record_status: "failed",
             };
@@ -663,18 +680,108 @@ async fn run_custom_entrypoint(
         });
     }
 
-    let output = match child.wait_with_output().await {
-        Ok(output) => output,
-        Err(err) => {
+    let (overflow_tx, mut overflow_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stdout_task = child
+        .stdout
+        .take()
+        .map(|stdout| spawn_pipe_reader(stdout, "stdout", overflow_tx.clone()));
+    let stderr_task = child
+        .stderr
+        .take()
+        .map(|stderr| spawn_pipe_reader(stderr, "stderr", overflow_tx));
+    let started = tokio::time::Instant::now();
+    let deadline = tokio::time::sleep(timeout);
+    tokio::pin!(deadline);
+    let status = tokio::select! {
+        result = child.wait() => match result {
+            Ok(status) => status,
+            Err(err) => {
+                let _ = process_tree.terminate(&mut child).await;
+                abort_pipe_reader(&stdout_task);
+                abort_pipe_reader(&stderr_task);
+                return CustomToolOutcome {
+                    result: ExecutionResult::failure(format!(
+                        "Failed to wait for custom tool '{}': {}",
+                        sanitize_config(tool),
+                        sanitize(&err.to_string())
+                    )),
+                    record_status: "failed",
+                };
+            }
+        },
+        Some(stream) = overflow_rx.recv() => {
+            let _ = process_tree.terminate(&mut child).await;
+            abort_pipe_reader(&stdout_task);
+            abort_pipe_reader(&stderr_task);
             return CustomToolOutcome {
                 result: ExecutionResult::failure(format!(
-                    "Failed to wait for custom tool '{}': {}",
+                    "Custom tool '{}' exceeded the {} byte {} capture limit",
                     sanitize_config(tool),
-                    sanitize(&err.to_string())
+                    MAX_CUSTOM_PROCESS_OUTPUT_BYTES,
+                    stream
+                )),
+                record_status: "failed",
+            };
+        },
+        () = &mut deadline => {
+            let termination = process_tree.terminate(&mut child).await;
+            abort_pipe_reader(&stdout_task);
+            abort_pipe_reader(&stderr_task);
+            return CustomToolOutcome {
+                result: ExecutionResult::failure(format!(
+                    "Custom tool '{}' timed out after {} second(s){}",
+                    sanitize_config(tool),
+                    timeout.as_secs(),
+                    termination
+                        .err()
+                        .map(|error| format!(
+                            "; failed to terminate its process tree: {}",
+                            sanitize(&error.to_string())
+                        ))
+                        .unwrap_or_default()
                 )),
                 record_status: "failed",
             };
         }
+    };
+    let remaining = timeout.saturating_sub(started.elapsed());
+    let (stdout, stderr) =
+        match tokio::time::timeout(remaining, collect_child_output(stdout_task, stderr_task)).await
+        {
+            Ok(Ok(output)) => output,
+            Ok(Err(error)) => {
+                return CustomToolOutcome {
+                    result: ExecutionResult::failure(format!(
+                        "Failed to read custom tool '{}' output: {}",
+                        sanitize_config(tool),
+                        sanitize(&error.to_string())
+                    )),
+                    record_status: "failed",
+                };
+            }
+            Err(_) => {
+                let termination = process_tree.terminate(&mut child).await;
+                return CustomToolOutcome {
+                    result: ExecutionResult::failure(format!(
+                        "Custom tool '{}' timed out after {} second(s) while draining output{}",
+                        sanitize_config(tool),
+                        timeout.as_secs(),
+                        termination
+                            .err()
+                            .map(|error| format!(
+                                "; failed to terminate its process tree: {}",
+                                sanitize(&error.to_string())
+                            ))
+                            .unwrap_or_default()
+                    )),
+                    record_status: "failed",
+                };
+            }
+        };
+    let output = std::process::Output {
+        status,
+        stdout,
+        stderr,
     };
 
     if !output.status.success() {
@@ -703,6 +810,230 @@ async fn run_custom_entrypoint(
     parse_script_result_stdout(tool, &output.stdout)
 }
 
+fn spawn_pipe_reader<R>(
+    mut reader: R,
+    stream: &'static str,
+    overflow: tokio::sync::mpsc::UnboundedSender<&'static str>,
+) -> JoinHandle<std::io::Result<Vec<u8>>>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut output = Vec::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            let read = reader.read(&mut chunk).await?;
+            if read == 0 {
+                return Ok(output);
+            }
+            if output.len().saturating_add(read) > MAX_CUSTOM_PROCESS_OUTPUT_BYTES {
+                let _ = overflow.send(stream);
+                return Err(std::io::Error::other(format!(
+                    "{stream} exceeded {MAX_CUSTOM_PROCESS_OUTPUT_BYTES} bytes"
+                )));
+            }
+            output.extend_from_slice(&chunk[..read]);
+        }
+    })
+}
+
+fn abort_pipe_reader(reader: &Option<JoinHandle<std::io::Result<Vec<u8>>>>) {
+    if let Some(reader) = reader {
+        reader.abort();
+    }
+}
+
+async fn collect_child_output(
+    stdout: Option<JoinHandle<std::io::Result<Vec<u8>>>>,
+    stderr: Option<JoinHandle<std::io::Result<Vec<u8>>>>,
+) -> std::io::Result<(Vec<u8>, Vec<u8>)> {
+    async fn collect(
+        reader: Option<JoinHandle<std::io::Result<Vec<u8>>>>,
+    ) -> std::io::Result<Vec<u8>> {
+        match reader {
+            Some(reader) => reader
+                .await
+                .map_err(|error| std::io::Error::other(error.to_string()))?,
+            None => Ok(Vec::new()),
+        }
+    }
+
+    tokio::try_join!(collect(stdout), collect(stderr))
+}
+
+#[cfg(unix)]
+struct CustomProcessTree {
+    process_group: i32,
+}
+
+#[cfg(unix)]
+impl CustomProcessTree {
+    fn attach(child: &tokio::process::Child) -> std::io::Result<Self> {
+        let pid = child
+            .id()
+            .ok_or_else(|| std::io::Error::other("custom tool exited before isolation"))?;
+        Ok(Self {
+            process_group: pid as i32,
+        })
+    }
+
+    async fn terminate(&self, child: &mut tokio::process::Child) -> std::io::Result<()> {
+        self.kill_group()?;
+        let _ = child.wait().await?;
+        Ok(())
+    }
+
+    fn kill_group(&self) -> std::io::Result<()> {
+        let result = unsafe { libc::kill(-self.process_group, libc::SIGKILL) };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            Ok(())
+        } else {
+            Err(error)
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for CustomProcessTree {
+    fn drop(&mut self) {
+        let _ = self.kill_group();
+    }
+}
+
+#[cfg(windows)]
+struct CustomProcessTree {
+    job: usize,
+}
+
+#[cfg(windows)]
+impl CustomProcessTree {
+    fn attach(child: &tokio::process::Child) -> std::io::Result<Self> {
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            SetInformationJobObject,
+        };
+
+        let pid = child
+            .id()
+            .ok_or_else(|| std::io::Error::other("custom tool exited before isolation"))?;
+        let process = child
+            .raw_handle()
+            .ok_or_else(|| std::io::Error::other("custom tool exited before isolation"))?
+            as HANDLE;
+        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if job.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&raw const limits).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if configured == 0 {
+            let error = std::io::Error::last_os_error();
+            unsafe {
+                CloseHandle(job);
+            }
+            return Err(error);
+        }
+        if unsafe { AssignProcessToJobObject(job, process) } == 0 {
+            let error = std::io::Error::last_os_error();
+            unsafe {
+                CloseHandle(job);
+            }
+            return Err(error);
+        }
+        if let Err(error) = Self::resume_windows_process(pid) {
+            unsafe {
+                CloseHandle(job);
+            }
+            return Err(error);
+        }
+        Ok(Self { job: job as usize })
+    }
+
+    fn resume_windows_process(pid: u32) -> std::io::Result<()> {
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+        };
+        use windows_sys::Win32::System::Threading::{
+            OpenThread, ResumeThread, THREAD_SUSPEND_RESUME,
+        };
+
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut entry = THREADENTRY32 {
+            dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+            ..THREADENTRY32::default()
+        };
+        let mut found = unsafe { Thread32First(snapshot, &mut entry) } != 0;
+        while found {
+            if entry.th32OwnerProcessID == pid {
+                let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+                if thread.is_null() {
+                    let error = std::io::Error::last_os_error();
+                    unsafe {
+                        CloseHandle(snapshot);
+                    }
+                    return Err(error);
+                }
+                let resumed = unsafe { ResumeThread(thread) };
+                unsafe {
+                    CloseHandle(thread);
+                    CloseHandle(snapshot);
+                }
+                if resumed == u32::MAX {
+                    return Err(std::io::Error::last_os_error());
+                }
+                return Ok(());
+            }
+            found = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
+        }
+        unsafe {
+            CloseHandle(snapshot);
+        }
+        Err(std::io::Error::other(
+            "unable to find suspended custom tool thread",
+        ))
+    }
+
+    async fn terminate(&self, child: &mut tokio::process::Child) -> std::io::Result<()> {
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+
+        if unsafe { TerminateJobObject(self.job as _, 1) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let _ = child.wait().await?;
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for CustomProcessTree {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+
+        unsafe {
+            CloseHandle(self.job as _);
+        }
+    }
+}
+
 fn parse_script_result_stdout(tool: &str, stdout: &[u8]) -> CustomToolOutcome {
     let stdout = String::from_utf8_lossy(stdout);
     let lines: Vec<&str> = stdout
@@ -715,8 +1046,7 @@ fn parse_script_result_stdout(tool: &str, stdout: &[u8]) -> CustomToolOutcome {
         // output, surface the first line so an author can locate a debug
         // `console.log`/`print` that broke the one-JSON-line contract.
         let detail = if lines.is_empty() {
-            " (no output — the tool must print exactly one JSON result line to stdout)"
-                .to_string()
+            " (no output — the tool must print exactly one JSON result line to stdout)".to_string()
         } else {
             let first: String = lines[0].chars().take(200).collect();
             format!(
@@ -1793,6 +2123,89 @@ Test body.
     }
 
     #[tokio::test]
+    async fn test_custom_script_timeout_returns_failed_outcome() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let entrypoint = if cfg!(windows) {
+            "for /L %i in (0,0,1) do @rem"
+        } else {
+            "while true; do :; done"
+        };
+        let outcome = run_custom_entrypoint(
+            "send-notification",
+            "send-notification-0",
+            entrypoint,
+            temp_dir.path(),
+            &serde_json::json!({"name": "send-notification"}),
+            std::time::Duration::from_millis(50),
+        )
+        .await;
+
+        assert!(!outcome.result.success);
+        assert_eq!(outcome.record_status, "failed");
+        assert!(outcome.result.message.contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn test_custom_script_output_is_bounded() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            temp_dir.path().join("flood.py"),
+            format!("print('x' * {})\n", MAX_CUSTOM_PROCESS_OUTPUT_BYTES + 1),
+        )
+        .await
+        .unwrap();
+        let outcome = run_custom_entrypoint(
+            "send-notification",
+            "send-notification-0",
+            if cfg!(windows) {
+                "python flood.py"
+            } else {
+                "python3 flood.py"
+            },
+            temp_dir.path(),
+            &serde_json::json!({"name": "send-notification"}),
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+
+        assert!(!outcome.result.success);
+        assert_eq!(outcome.record_status, "failed");
+        assert!(outcome.result.message.contains("capture limit"));
+    }
+
+    #[tokio::test]
+    async fn test_custom_script_timeout_terminates_descendants_after_parent_exit() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            temp_dir.path().join("spawn_child.py"),
+            "import subprocess, sys\nsubprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], stdout=sys.stdout, stderr=sys.stderr)\n",
+        )
+        .await
+        .unwrap();
+        let started = std::time::Instant::now();
+        let outcome = run_custom_entrypoint(
+            "send-notification",
+            "send-notification-0",
+            if cfg!(windows) {
+                "python spawn_child.py"
+            } else {
+                "python3 spawn_child.py"
+            },
+            temp_dir.path(),
+            &serde_json::json!({"name": "send-notification"}),
+            std::time::Duration::from_millis(200),
+        )
+        .await;
+
+        assert!(!outcome.result.success);
+        assert!(outcome.result.message.contains("timed out"));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "descendant process tree was not terminated promptly"
+        );
+    }
+
+    #[tokio::test]
     async fn test_custom_execute_scripts_budget_exhausted_record() {
         let temp_dir = tempfile::tempdir().unwrap();
         write_safe_outputs(
@@ -1851,7 +2264,7 @@ Test body.
     #[tokio::test]
     async fn test_custom_execute_jobs_pre_writes_filtered_proposals_with_ids() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let source = write_custom_source(temp_dir.path(), 2).await;
+        let source = temp_dir.path().join("source-is-not-read.md");
         let proposals_out = temp_dir.path().join("proposals.ndjson");
         write_safe_outputs(
             temp_dir.path(),
@@ -1869,6 +2282,7 @@ Test body.
             CustomExecuteOptions {
                 custom_phase: Some("pre".to_string()),
                 tool: Some("send-notification".to_string()),
+                max: Some(2),
                 proposals_out: Some(proposals_out.clone()),
                 ..Default::default()
             },
@@ -1910,6 +2324,7 @@ Test body.
             CustomExecuteOptions {
                 custom_phase: Some("post".to_string()),
                 tool: Some("send-notification".to_string()),
+                max: Some(2),
                 results_in: Some(results_in),
                 component_source: Some("repo/path".to_string()),
                 component_sha: Some("abc123".to_string()),
@@ -1955,6 +2370,7 @@ Test body.
             CustomExecuteOptions {
                 custom_phase: Some("post".to_string()),
                 tool: Some("send-notification".to_string()),
+                max: Some(2),
                 results_in: Some(results_in),
                 ..Default::default()
             },
@@ -1989,6 +2405,7 @@ Test body.
             CustomExecuteOptions {
                 custom_phase: Some("post".to_string()),
                 tool: Some("send-notification".to_string()),
+                max: Some(1),
                 results_in: Some(results_in),
                 ..Default::default()
             },

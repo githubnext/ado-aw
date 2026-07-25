@@ -106,8 +106,7 @@ pub(crate) const GITHUB_APP_TOKEN_PATH: &str = "/tmp/ado-aw-scripts/ado-script/g
 /// `create-pull-request` is configured, to fetch/deepen the target branch so
 /// the containerized SafeOutputs MCP server can compute a diff base on
 /// shallow-default agent pools.
-pub(crate) const PREPARE_PR_BASE_PATH: &str =
-    "/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js";
+pub(crate) const PREPARE_PR_BASE_PATH: &str = "/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js";
 /// Path to the checkout-component bundle inside the unpacked `ado-script.zip`.
 /// Runs in the isolated custom safe-output job (#1473) after the component
 /// repository resource is checked out, to fetch the pinned commit and verify a
@@ -693,20 +692,22 @@ pub fn prepare_pr_base_step_typed(mode: PreparePrBaseMode, repos: &[PreparePrBas
 /// (`$(Build.SourcesDirectory)/<validated-alias>`) — DOUBLE-quoted so ADO
 /// substitutes the macro before bash runs (single quotes would trip shellcheck
 /// SC2016). `sha` is a validated full 40-char commit SHA literal, single-quoted
-/// (shadow-proof). The ADO bearer is projected via `apply_bundle_auth` for the
-/// authenticated fetch. The step runs OUTSIDE the AWF sandbox on the build
-/// agent's normal network, so it needs no AWF allowlist entry.
-pub fn checkout_component_step_typed(dir: &str, sha: &str) -> Step {
+/// (shadow-proof). Same-org Azure Repos projects the ADO bearer; GitHub/GHE and
+/// cross-org Azure Repos reuse credentials persisted by the repository checkout.
+/// The step runs OUTSIDE the AWF sandbox on the build agent's normal network,
+/// so it needs no AWF allowlist entry.
+pub fn checkout_component_step_typed(dir: &str, sha: &str, use_system_access_token: bool) -> Step {
     let script = format!(
         "set -eo pipefail\nnode '{CHECKOUT_COMPONENT_PATH}' --dir \"{dir}\" --sha {sha}\n",
         dir = dir,
         sha = sh_single_quote(sha),
     );
-    let step = crate::compile::ado_bundle::apply_bundle_auth(
+    let step = crate::compile::ado_bundle::apply_bundle_auth_optional(
         BashStep::new("Checkout pinned custom component", script)
             .with_condition(Condition::Succeeded),
         crate::compile::ado_bundle::Bundle::CheckoutComponent,
-        crate::compile::ado_bundle::TokenSource::SystemAccessToken,
+        use_system_access_token
+            .then_some(crate::compile::ado_bundle::TokenSource::SystemAccessToken),
     );
     Step::Bash(step)
 }

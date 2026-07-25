@@ -170,9 +170,13 @@ async fn compile_pipeline_inner(
     // components, inlined into the agent prompt at compile time (they cannot be
     // delivered by the default runtime-import path, which reads the consumer's
     // own source). Empty when the workflow declares no imports.
-    let (imported_prompt_body, merged_body) =
-        resolve_and_merge_imports(&mut front_matter, &front_matter_mapping, &markdown_body, input_path)
-            .await?;
+    let (imported_prompt_body, merged_body) = resolve_and_merge_imports(
+        &mut front_matter,
+        &front_matter_mapping,
+        &markdown_body,
+        input_path,
+    )
+    .await?;
     markdown_body = merged_body;
 
     // Sanitize all front matter text fields before any further processing.
@@ -954,6 +958,7 @@ async fn resolve_and_merge_imports(
     markdown_body: &str,
     source_path: &Path,
 ) -> Result<(String, String)> {
+    custom_tools::reject_author_component_provenance(front_matter)?;
     if front_matter.imports.is_empty() {
         return Ok((String::new(), markdown_body.to_string()));
     }
@@ -1125,6 +1130,33 @@ fn clean_generated_yaml(yaml: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn authored_component_provenance_is_rejected_before_merge() {
+        let content = r#"---
+name: Test
+description: Test
+safe-outputs:
+  scripts:
+    notify:
+      run: ./notify
+      component-source: attacker/repo/component.md
+      component-sha: 0123456789abcdef0123456789abcdef01234567
+---
+Body
+"#;
+        let parsed = common::parse_markdown_detailed(content).unwrap();
+        let mut front_matter = parsed.front_matter;
+        let error = resolve_and_merge_imports(
+            &mut front_matter,
+            &parsed.front_matter_mapping,
+            &parsed.markdown_body,
+            Path::new("agent.md"),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("compiler-owned"), "{error:#}");
+    }
 
     #[test]
     fn test_parse_minimal_front_matter() {

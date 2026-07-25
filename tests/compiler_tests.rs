@@ -9010,9 +9010,7 @@ fn test_smoke_failure_reporter_uses_registered_ado_names_and_staging_repo() {
         "front matter and prompt must agree on the staging issue repository"
     );
     assert!(
-        reporter.contains(
-            "allowed-labels:\n      - pipeline-failure\n      - ado-aw-smoke"
-        ),
+        reporter.contains("allowed-labels:\n      - pipeline-failure\n      - ado-aw-smoke"),
         "reporter must allow only redundant copies of its two static labels"
     );
     assert!(
@@ -9047,8 +9045,7 @@ fn test_azure_cli_smoke_fails_closed_when_authentication_fails() {
         );
     }
 
-    let (ok, compiled, stderr) =
-        compile_inline_source("azure-cli-smoke-tool-policy", &fixture);
+    let (ok, compiled, stderr) = compile_inline_source("azure-cli-smoke-tool-policy", &fixture);
     assert!(ok, "Azure CLI smoke should compile:\n{stderr}");
     let document = parse_compiled_yaml(&compiled);
     let agent = find_job_mapping_by_display_name(&document, "Agent")
@@ -9255,6 +9252,8 @@ fn candidate_custom_safe_output_fixture_compiles_from_vendored_cache() {
         "--custom-config",
         "--custom-phase pre",
         "--custom-phase post",
+        "--max 1",
+        "\"timeout_minutes\": 10",
         "SYSTEM_ACCESSTOKEN: $(System.AccessToken)",
         "\"--enabled-tools\"",
         "\"noop\"",

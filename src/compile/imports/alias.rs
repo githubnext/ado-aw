@@ -24,6 +24,30 @@ const HASH_SUFFIX_LEN: usize = 12;
 /// original `owner/repo` to avoid collisions from sanitization alone.
 pub fn alias_identifier(owner: &str, repo: &str) -> String {
     let digest = short_hash(&format!("{owner}/{repo}"));
+    render_alias(owner, repo, &digest)
+}
+
+/// Return a repository-resource alias that also distinguishes provider and
+/// service-connection identity. Same-org Azure Repos keeps the historical alias
+/// for compatibility; every other provider/endpoint is included in the hash so
+/// identical `owner/repo` text cannot collapse distinct repositories.
+pub fn component_alias_identifier(
+    owner: &str,
+    repo: &str,
+    repo_type: &str,
+    endpoint: Option<&str>,
+) -> String {
+    if repo_type == "git" && endpoint.is_none() {
+        return alias_identifier(owner, repo);
+    }
+    let digest = short_hash(&format!(
+        "{repo_type}\0{}\0{owner}/{repo}",
+        endpoint.unwrap_or_default()
+    ));
+    render_alias(owner, repo, &digest)
+}
+
+fn render_alias(owner: &str, repo: &str, digest: &str) -> String {
     let owner = sanitize_identifier_part(owner);
     let repo = sanitize_identifier_part(repo);
     format!("import_{owner}_{repo}_{digest}")
@@ -128,6 +152,26 @@ mod tests {
         assert_eq!(alias, alias_identifier("123-owner.with-dots", "repo/name"));
         assert_valid_alias(&alias);
         assert!(alias.starts_with("import_"));
+    }
+
+    #[test]
+    fn component_alias_distinguishes_provider_and_endpoint() {
+        let same_org = component_alias_identifier("octo", "repo", "git", None);
+        assert_eq!(same_org, alias_identifier("octo", "repo"));
+
+        let github =
+            component_alias_identifier("octo", "repo", "github", Some("github-connection"));
+        let ghe =
+            component_alias_identifier("octo", "repo", "githubenterprise", Some("ghe-connection"));
+        let cross_org =
+            component_alias_identifier("octo", "repo", "git", Some("other-org-connection"));
+
+        assert_ne!(same_org, github);
+        assert_ne!(github, ghe);
+        assert_ne!(same_org, cross_org);
+        for alias in [github, ghe, cross_org] {
+            assert_valid_alias(&alias);
+        }
     }
 
     #[test]

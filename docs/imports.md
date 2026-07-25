@@ -37,7 +37,7 @@ imports:
 
 | Form | Meaning |
 |------|---------|
-| `path/to/component.md` | Local import, resolved relative to the importing `.md` file. |
+| `path/to/component.md` or `./path/to/component.md` | Local import, resolved relative to the importing `.md` file. Exactly one leading `./` is accepted. |
 | `owner/repo/path/to/component.md@<sha>` | Cross-repository import. `<sha>` must be a full 40-character commit SHA; branches and tags are rejected. |
 | `...#Section` | Import only a `# Section` or `## Section` from the markdown body. |
 | `...?` | Optional import. If the target is missing, it is skipped. |
@@ -66,7 +66,7 @@ the runtime checkout, so the two can never disagree.
   | `type` | Extra fields | Source | Runtime `type` |
   |--------|--------------|--------|----------------|
   | `github` (default) | — | GitHub.com | `github` |
-  | `ghe` | `host:` (API host, e.g. `api.acme.ghe.com`) | GitHub Enterprise | `githubenterprise` |
+  | `ghe` | `host:` (GHES server host, e.g. `ghe.acme.com`) | GitHub Enterprise | `githubenterprise` |
   | `azure-repos` | `org:` (target collection URL, e.g. `https://dev.azure.com/otherorg`) | **Cross-organization** Azure Repos | `git` |
 
 ```yaml
@@ -82,10 +82,17 @@ imports:
     endpoint:
       name: ghe-connection
       type: ghe
-      host: api.acme.ghe.com
+      host: ghe.acme.com
 ```
 
 See [Repository resource endpoints](network.md#repository-resource-endpoints).
+
+Cross-organization `org:` values are credential-bearing compile-time
+destinations and are therefore restricted to HTTPS Azure DevOps collection
+URLs: `https://dev.azure.com/<org>` or the legacy
+`https://<org>.visualstudio.com[/DefaultCollection]` form. Arbitrary hosts,
+non-default ports, embedded credentials, query strings, and project-level paths are
+rejected before authentication is resolved.
 
 ## Cross-repository resolution and cache
 
@@ -122,8 +129,8 @@ compile-time fetch always matches the runtime checkout source:
   the repo's Azure Repos git remote; cross-org imports use the endpoint's
   `org:`.
 - **GitHub / GitHub Enterprise** (`type: github` / `type: ghe`) — fetched via
-  `gh api` using the compiler host's GitHub auth (`GH_HOST` targets the GHE
-  instance).
+  `gh api` using the compiler host's GitHub auth. For GHES, `host:` is the
+  server hostname consumed by `GH_HOST` (not the `api.<host>` API hostname).
 
 Routing is **fail-closed**: an endpoint-less (Azure-Repos-intended) import never
 silently falls back to GitHub, and a GitHub-typed import is never served by the
@@ -152,7 +159,9 @@ matter and body before merge.
 > preceded by `$` is treated as an ADO `${{ ... }}` expression and left
 > untouched. Any `{{ inputs.<key> }}` still present after
 > substitution (an input the consumer did not supply and the schema did not
-> default) is a **compile-time error**.
+> default) is a **compile-time error**. An unclosed `{{ inputs.<key>` marker is
+> also rejected with an error identifying the missing `}}`, and an empty
+> `{{ inputs. }}` marker is rejected as malformed.
 
 Supported schema types are `string`, `number`, `boolean`, `choice`, `array`, and
 `object`. `choice` uses an `options:` list. `array` uses an `items:` schema.
@@ -241,6 +250,11 @@ consumer workflow > later import > earlier import
 - The consumer may configure an imported safe-output tool, for example by adding
   `require-approval`, but may not replace executor-defining fields such as
   `steps`, `env`, `inputs`, `run`, or `entrypoint`.
+- Runtime component provenance (`component-source`, `component-sha`,
+  `manifest-digest`, `component-repo-type`, and `component-endpoint`) is
+  compiler-owned. Component-authored values are stripped and consumers cannot
+  override the compiler-resolved source, commit, repository type, or service
+  connection.
 - Imported markdown bodies are concatenated in declaration order, followed by
   the consumer body. Imported bodies are **inlined into the agent prompt at
   compile time** (their `{{ inputs.* }}` placeholders are already

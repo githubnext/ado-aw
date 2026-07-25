@@ -117,9 +117,15 @@ pub fn substitute_inputs(text: &str, inputs: &JsonMap<String, JsonValue>) -> Str
     output
 }
 
-/// Scans `text` for an **unresolved** `{{ inputs.<path> }}`
-/// placeholder and returns its expression (e.g. `inputs.missing`)
-/// if one remains after substitution.
+#[derive(Debug, PartialEq, Eq)]
+enum InputPlaceholderIssue {
+    Unresolved(String),
+    Unclosed,
+    Malformed,
+}
+
+/// Scans `text` for an unresolved or unclosed `{{ inputs.<path> }}`
+/// placeholder remaining after substitution.
 ///
 /// Unlike [`substitute_inputs`], this does NOT skip a `$`-preceded `{{`: an
 /// author who mistakenly wrote a `$`-delimited `${{ inputs.x }}` form must also
@@ -127,34 +133,53 @@ pub fn substitute_inputs(text: &str, inputs: &JsonMap<String, JsonValue>) -> Str
 /// YAML. Any surviving marker of the `inputs.` namespace is a compile-time
 /// error (a body reference to an input not supplied by the consumer `with:` /
 /// absent from the component `import-schema:`).
-fn find_input_placeholder_leak(text: &str) -> Option<String> {
+fn find_input_placeholder_issue(text: &str) -> Option<InputPlaceholderIssue> {
     let mut cursor = 0;
     while let Some(relative_start) = text[cursor..].find("{{") {
         let start = cursor + relative_start;
         let expression_start = start + 2;
-        let relative_end = text[expression_start..].find("}}")?;
-        let expression_end = expression_start + relative_end;
-        let expression = text[expression_start..expression_end].trim();
-        if let Some(path) = expression.strip_prefix(PLACEHOLDER_PREFIX)
-            && !path.is_empty()
-        {
-            return Some(expression.to_string());
+        let remainder = &text[expression_start..];
+        let next_close = remainder.find("}}");
+        let next_open = remainder.find("{{");
+        let is_input_marker = remainder.trim_start().starts_with(PLACEHOLDER_PREFIX);
+
+        match (next_close, next_open) {
+            (Some(relative_end), Some(relative_open)) if relative_open < relative_end => {
+                if is_input_marker {
+                    return Some(InputPlaceholderIssue::Unclosed);
+                }
+                cursor = expression_start + relative_open;
+            }
+            (Some(relative_end), _) => {
+                let expression = remainder[..relative_end].trim();
+                if let Some(path) = expression.strip_prefix(PLACEHOLDER_PREFIX) {
+                    if path.is_empty() {
+                        return Some(InputPlaceholderIssue::Malformed);
+                    }
+                    return Some(InputPlaceholderIssue::Unresolved(expression.to_string()));
+                }
+                cursor = expression_start + relative_end + 2;
+            }
+            (None, _) if is_input_marker => {
+                return Some(InputPlaceholderIssue::Unclosed);
+            }
+            (None, Some(relative_open)) => {
+                cursor = expression_start + relative_open;
+            }
+            (None, None) => break,
         }
-        cursor = expression_end + 2;
     }
     None
 }
 
-/// Walks front-matter string scalars for an unresolved import-input placeholder.
-fn find_front_matter_placeholder_leak(fm: &YamlValue) -> Option<String> {
+/// Walks front-matter string scalars for an import-input placeholder issue.
+fn find_front_matter_placeholder_issue(fm: &YamlValue) -> Option<InputPlaceholderIssue> {
     match fm {
-        YamlValue::String(s) => find_input_placeholder_leak(s),
-        YamlValue::Sequence(items) => {
-            items.iter().find_map(find_front_matter_placeholder_leak)
-        }
+        YamlValue::String(s) => find_input_placeholder_issue(s),
+        YamlValue::Sequence(items) => items.iter().find_map(find_front_matter_placeholder_issue),
         YamlValue::Mapping(mapping) => mapping.iter().find_map(|(key, value)| {
-            find_front_matter_placeholder_leak(key)
-                .or_else(|| find_front_matter_placeholder_leak(value))
+            find_front_matter_placeholder_issue(key)
+                .or_else(|| find_front_matter_placeholder_issue(value))
         }),
         _ => None,
     }
@@ -208,16 +233,32 @@ pub fn apply_import_inputs(
     // default. Fail closed — an unresolved marker embedded into the pipeline
     // YAML or agent prompt is a footgun (ADO would template-process a stray
     // `${{ ... }}`, and a leaked prompt marker is meaningless to the agent).
-    if let Some(expr) = find_front_matter_placeholder_leak(&substituted_front_matter)
-        .or_else(|| find_input_placeholder_leak(&substituted_body))
+    if let Some(issue) = find_front_matter_placeholder_issue(&substituted_front_matter)
+        .or_else(|| find_input_placeholder_issue(&substituted_body))
     {
-        let key = expr.strip_prefix(PLACEHOLDER_PREFIX).unwrap_or(&expr);
-        anyhow::bail!(
-            "unresolved import input placeholder `{{{{ {expr} }}}}`: no input named `{key}` \
-             was provided in the consumer `with:` or defaulted by the component \
-             `import-schema:` (note: use the compile-time `{{{{ ... }}}}` delimiter, not \
-             the ADO `${{{{ ... }}}}` template-expression delimiter)"
-        );
+        match issue {
+            InputPlaceholderIssue::Unresolved(expr) => {
+                let key = expr.strip_prefix(PLACEHOLDER_PREFIX).unwrap_or(&expr);
+                anyhow::bail!(
+                    "unresolved import input placeholder `{{{{ {expr} }}}}`: no input named `{key}` \
+                     was provided in the consumer `with:` or defaulted by the component \
+                     `import-schema:` (note: use the compile-time `{{{{ ... }}}}` delimiter, not \
+                     the ADO `${{{{ ... }}}}` template-expression delimiter)"
+                );
+            }
+            InputPlaceholderIssue::Unclosed => {
+                anyhow::bail!(
+                    "malformed import input placeholder: missing closing `}}}}` after \
+                     `{{{{ inputs.<key>`"
+                );
+            }
+            InputPlaceholderIssue::Malformed => {
+                anyhow::bail!(
+                    "malformed import input placeholder: `{{{{ inputs. }}}}` must name an \
+                     input after `inputs.`"
+                );
+            }
+        }
     }
 
     Ok((substituted_front_matter, substituted_body))
@@ -904,12 +945,8 @@ variables:
         // catch a body-only reference, so the leftover guard must.
         let fm = yaml("import-schema:\n  name:\n    type: string\n");
         let with = json!({ "name": "demo" });
-        let err = apply_import_inputs(
-            &fm,
-            "Hello {{ inputs.typo }}",
-            with.as_object().unwrap(),
-        )
-        .unwrap_err();
+        let err = apply_import_inputs(&fm, "Hello {{ inputs.typo }}", with.as_object().unwrap())
+            .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("unresolved import input placeholder"), "{msg}");
         assert!(msg.contains("inputs.typo"), "{msg}");
@@ -921,16 +958,49 @@ variables:
         // it would otherwise be template-processed by ADO in the emitted YAML.
         let fm = yaml("import-schema:\n  name:\n    type: string\n");
         let with = json!({ "name": "demo" });
-        let err = apply_import_inputs(
-            &fm,
-            "Hello ${{ inputs.name }}",
-            with.as_object().unwrap(),
-        )
-        .unwrap_err();
+        let err = apply_import_inputs(&fm, "Hello ${{ inputs.name }}", with.as_object().unwrap())
+            .unwrap_err();
         assert!(
             format!("{err:#}").contains("unresolved import input placeholder"),
             "{err:#}"
         );
+    }
+
+    #[test]
+    fn apply_import_inputs_rejects_unclosed_body_placeholder_after_valid_marker() {
+        let fm = yaml("import-schema:\n  name:\n    type: string\n");
+        let with = json!({ "name": "demo" });
+        let err = apply_import_inputs(
+            &fm,
+            "Hello {{ inputs.name }} then {{ inputs.name",
+            with.as_object().unwrap(),
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("malformed import input placeholder"), "{msg}");
+        assert!(msg.contains("missing closing `}}`"), "{msg}");
+    }
+
+    #[test]
+    fn apply_import_inputs_rejects_unclosed_front_matter_placeholder() {
+        let fm =
+            yaml("import-schema:\n  name:\n    type: string\nname: \"component-{{ inputs.name\"\n");
+        let with = json!({ "name": "demo" });
+        let err = apply_import_inputs(&fm, "body", with.as_object().unwrap()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("malformed import input placeholder"), "{msg}");
+        assert!(msg.contains("missing closing `}}`"), "{msg}");
+    }
+
+    #[test]
+    fn apply_import_inputs_rejects_empty_input_path() {
+        let fm = yaml("import-schema: {}\n");
+        let with = json!({});
+        let err =
+            apply_import_inputs(&fm, "Hello {{ inputs. }}", with.as_object().unwrap()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("malformed import input placeholder"), "{msg}");
+        assert!(msg.contains("must name an input"), "{msg}");
     }
 
     #[test]

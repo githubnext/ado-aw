@@ -65,10 +65,9 @@ pub enum Bundle {
     PreparePrBase,
     /// SHA-pinned component checkout for custom safe-output jobs (#1473). Runs
     /// in the isolated custom safe-output job after the component repository
-    /// resource is checked out. Fetches the pinned commit over the ADO bearer,
-    /// checks it out detached, and verifies HEAD equals the pin — failing
-    /// closed. Needed because an ADO repository-resource `ref` cannot be a
-    /// commit SHA, so a shallow-default checkout lacks the pinned object.
+    /// resource is checked out. Fetches the pinned commit using either the ADO
+    /// bearer (same-org Azure Repos) or credentials persisted by the repository
+    /// checkout (GitHub/GHE/cross-org), then verifies HEAD equals the pin.
     CheckoutComponent,
 }
 
@@ -84,6 +83,9 @@ pub enum BundleAuth {
     /// URI, by contrast, comes from the auto-injected `SYSTEM_COLLECTIONURI`
     /// and is therefore *not* part of this contract (see #1307).
     Bearer,
+    /// The bundle can use a projected ADO bearer, but may instead rely on
+    /// credentials persisted by a repository-resource checkout.
+    OptionalBearer,
     /// The bundle needs no bearer (pure filesystem / git-without-auth / argv).
     None,
 }
@@ -196,8 +198,10 @@ impl Bundle {
             | Bundle::Conclusion
             // Fetches/deepens the target branch over the ADO bearer (bearerEnv).
             | Bundle::PreparePrBase
-            // Fetches the pinned component commit over the ADO bearer (bearerEnv).
-            | Bundle::CheckoutComponent => BundleAuth::Bearer,
+            => BundleAuth::Bearer,
+            // Same-org Azure Repos uses the ADO bearer; external repository
+            // resources reuse credentials persisted by their checkout.
+            Bundle::CheckoutComponent => BundleAuth::OptionalBearer,
             // Pure filesystem / git-without-auth / argv — no bearer.
             Bundle::Import
             | Bundle::ExecContextManual
@@ -219,10 +223,23 @@ impl Bundle {
 /// guarantee that every bearer-requiring bundle step carries a token — the
 /// structural fix for the class of bug behind #1307.
 pub fn apply_bundle_auth(step: BashStep, bundle: Bundle, token: TokenSource) -> BashStep {
+    apply_bundle_auth_optional(step, bundle, Some(token))
+}
+
+pub fn apply_bundle_auth_optional(
+    step: BashStep,
+    bundle: Bundle,
+    token: Option<TokenSource>,
+) -> BashStep {
     match bundle.auth() {
-        BundleAuth::Bearer => {
-            step.with_env("SYSTEM_ACCESSTOKEN", EnvValue::secret(token.variable()))
-        }
+        BundleAuth::Bearer => step.with_env(
+            "SYSTEM_ACCESSTOKEN",
+            EnvValue::secret(token.expect("required bundle bearer").variable()),
+        ),
+        BundleAuth::OptionalBearer => match token {
+            Some(token) => step.with_env("SYSTEM_ACCESSTOKEN", EnvValue::secret(token.variable())),
+            None => step,
+        },
         BundleAuth::None => step,
     }
 }
@@ -265,8 +282,7 @@ mod tests {
     fn every_bundle_path_is_under_the_unpack_dir() {
         for b in Bundle::ALL {
             assert!(
-                b.path()
-                    .starts_with("/tmp/ado-aw-scripts/ado-script/"),
+                b.path().starts_with("/tmp/ado-aw-scripts/ado-script/"),
                 "{b:?} path must live under the unzip destination"
             );
             assert!(b.path().ends_with(".js"), "{b:?} path must be a .js bundle");
@@ -280,9 +296,9 @@ mod tests {
             let out = apply_bundle_auth(step, *b, TokenSource::SystemAccessToken);
             let has_token = out.env.contains_key("SYSTEM_ACCESSTOKEN");
             match b.auth() {
-                BundleAuth::Bearer => assert!(
+                BundleAuth::Bearer | BundleAuth::OptionalBearer => assert!(
                     has_token,
-                    "{b:?} is Bearer and must carry SYSTEM_ACCESSTOKEN"
+                    "{b:?} accepts a bearer and apply_bundle_auth must project it"
                 ),
                 BundleAuth::None => assert!(
                     !has_token,
@@ -293,6 +309,16 @@ mod tests {
     }
 
     #[test]
+    fn optional_bundle_auth_can_rely_on_persisted_credentials() {
+        let step = apply_bundle_auth_optional(
+            BashStep::new("t", "node x\n"),
+            Bundle::CheckoutComponent,
+            None,
+        );
+        assert!(!step.env.contains_key("SYSTEM_ACCESSTOKEN"));
+    }
+
+    #[test]
     fn token_source_selection_matches_write_service_connection() {
         assert_eq!(token_source_for(None), TokenSource::SystemAccessToken);
         assert_eq!(token_source_for(None).variable(), "System.AccessToken");
@@ -300,10 +326,7 @@ mod tests {
             token_source_for(Some("my-sc")),
             TokenSource::WriteServiceConnection
         );
-        assert_eq!(
-            token_source_for(Some("my-sc")).variable(),
-            "SC_WRITE_TOKEN"
-        );
+        assert_eq!(token_source_for(Some("my-sc")).variable(), "SC_WRITE_TOKEN");
     }
 
     #[test]

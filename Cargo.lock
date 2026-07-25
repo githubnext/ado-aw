@@ -23,6 +23,7 @@ dependencies = [
  "glob-match",
  "indexmap",
  "inquire",
+ "libc",
  "log",
  "percent-encoding",
  "rand",
@@ -38,6 +39,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "url",
+ "windows-sys 0.61.2",
  "wiremock",
  "zip",
 ]

@@ -7,10 +7,22 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use crate::compile::types::FrontMatter;
+use crate::secure::CommitSha;
 
 const CUSTOM_TOOL_LIMIT: usize = 10;
 const DEFAULT_STRING_MAX_LENGTH: u64 = 4_000;
 const HARD_STRING_MAX_LENGTH: u64 = 8_000;
+pub const DEFAULT_CUSTOM_MAX: usize = 3;
+pub const DEFAULT_CUSTOM_SCRIPT_TIMEOUT_MINUTES: u32 = 10;
+pub const MAX_CUSTOM_SCRIPT_TIMEOUT_MINUTES: u32 = 60;
+
+pub const COMPONENT_PROVENANCE_KEYS: [&str; 5] = [
+    "component-source",
+    "component-sha",
+    "manifest-digest",
+    "component-repo-type",
+    "component-endpoint",
+];
 
 /// A compiler-generated custom MCP tool definition.
 #[derive(Debug, Clone, PartialEq)]
@@ -20,10 +32,44 @@ pub struct CustomToolSchema {
     pub input_schema: Map<String, Value>,
 }
 
-/// Generate closed JSON Schemas for custom tools under
-/// `safe-outputs.scripts` and `safe-outputs.jobs`.
-pub fn generate_custom_tool_schemas(front_matter: &FrontMatter) -> Result<Vec<CustomToolSchema>> {
-    let mut schemas = Vec::new();
+#[derive(Debug, Clone, PartialEq)]
+pub enum CustomToolKind {
+    Scripts {
+        entrypoint: String,
+        timeout_minutes: u32,
+    },
+    Jobs {
+        steps: Vec<Value>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomComponentDefinition {
+    pub alias: String,
+    pub checkout_dir: String,
+    pub source: String,
+    pub sha: CommitSha,
+    pub manifest_digest: Option<String>,
+    pub repo_type: String,
+    pub endpoint: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CustomToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Map<String, Value>,
+    pub schema_digest: String,
+    pub max: usize,
+    pub env: Vec<(String, String)>,
+    pub kind: CustomToolKind,
+    pub component: Option<CustomComponentDefinition>,
+}
+
+pub fn collect_custom_tool_definitions(
+    front_matter: &FrontMatter,
+) -> Result<Vec<CustomToolDefinition>> {
+    let mut definitions = Vec::new();
     let mut seen = HashSet::new();
 
     for section in ["scripts", "jobs"] {
@@ -33,8 +79,13 @@ pub fn generate_custom_tool_schemas(front_matter: &FrontMatter) -> Result<Vec<Cu
         let section_obj = section_value.as_object().ok_or_else(|| {
             anyhow!("safe-outputs.{section} must be a mapping of tool name to tool definition")
         })?;
+        let mut names: Vec<&String> = section_obj.keys().collect();
+        names.sort();
 
-        for (tool_name, tool_def) in section_obj {
+        for tool_name in names {
+            let tool_def = section_obj
+                .get(tool_name)
+                .expect("tool name collected from map keys");
             validate_tool_name(section, tool_name)?;
             ensure!(
                 seen.insert(tool_name.clone()),
@@ -51,20 +102,105 @@ pub fn generate_custom_tool_schemas(front_matter: &FrontMatter) -> Result<Vec<Cu
                 .with_context(|| format!("safe-outputs.{section}.{tool_name}.description"))?
                 .unwrap_or_default();
             let input_schema = build_input_schema(section, tool_name, tool_obj.get("inputs"))?;
+            let schema_digest = crate::hash::sha256_hex(
+                &serde_json::to_vec(&input_schema)
+                    .context("failed to serialize custom tool schema for digest")?,
+            );
+            let max = parse_max(section, tool_name, tool_obj.get("max"))?;
+            let env = parse_env(section, tool_name, tool_obj.get("env"))?;
+            let component = parse_component(tool_obj, section, tool_name)?;
+            let kind = if section == "scripts" {
+                let entrypoint = tool_obj
+                    .get("entrypoint")
+                    .or_else(|| tool_obj.get("run"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        anyhow!("safe-outputs.scripts.{tool_name} requires `run` or `entrypoint`")
+                    })?
+                    .to_string();
+                CustomToolKind::Scripts {
+                    entrypoint,
+                    timeout_minutes: parse_script_timeout(
+                        section,
+                        tool_name,
+                        tool_obj.get("timeout-minutes"),
+                    )?,
+                }
+            } else {
+                ensure!(
+                    !tool_obj.contains_key("timeout-minutes"),
+                    "safe-outputs.jobs.{tool_name}.timeout-minutes is not supported; \
+                     set timeouts on the authored ADO steps or job instead"
+                );
+                let steps = tool_obj
+                    .get("steps")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| anyhow!("safe-outputs.jobs.{tool_name}.steps must be a list"))?
+                    .clone();
+                CustomToolKind::Jobs { steps }
+            };
 
-            schemas.push(CustomToolSchema {
+            definitions.push(CustomToolDefinition {
                 name: tool_name.clone(),
                 description,
                 input_schema,
+                schema_digest,
+                max,
+                env,
+                kind,
+                component,
             });
             ensure!(
-                schemas.len() <= CUSTOM_TOOL_LIMIT,
+                definitions.len() <= CUSTOM_TOOL_LIMIT,
                 "custom safe-output tools per workflow must be <= {CUSTOM_TOOL_LIMIT}"
             );
         }
     }
 
-    Ok(schemas)
+    Ok(definitions)
+}
+
+/// Reject compiler-owned component provenance in the consumer's authored front
+/// matter before imports are resolved. Remote-import provenance is stamped
+/// later by the merge pass; accepting these fields here would let an ordinary
+/// workflow forge a repository checkout and audit identity.
+pub fn reject_author_component_provenance(front_matter: &FrontMatter) -> Result<()> {
+    for section in ["scripts", "jobs"] {
+        let Some(section_value) = front_matter.safe_outputs.get(section) else {
+            continue;
+        };
+        let Some(tools) = section_value.as_object() else {
+            continue;
+        };
+        for (tool_name, tool_value) in tools {
+            let Some(tool) = tool_value.as_object() else {
+                continue;
+            };
+            for key in COMPONENT_PROVENANCE_KEYS {
+                ensure!(
+                    !tool.contains_key(key),
+                    "safe-outputs.{section}.{tool_name}.{key} is compiler-owned and may only \
+                     be supplied by a resolved remote import"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Generate closed JSON Schemas for custom tools under
+/// `safe-outputs.scripts` and `safe-outputs.jobs`.
+pub fn generate_custom_tool_schemas(front_matter: &FrontMatter) -> Result<Vec<CustomToolSchema>> {
+    collect_custom_tool_definitions(front_matter).map(|definitions| {
+        definitions
+            .into_iter()
+            .map(|definition| CustomToolSchema {
+                name: definition.name,
+                description: definition.description,
+                input_schema: definition.input_schema,
+            })
+            .collect()
+    })
 }
 
 /// Serialize schemas to the JSON array shape consumed by the SafeOutputs MCP
@@ -101,6 +237,11 @@ fn validate_tool_name(section: &str, tool_name: &str) -> Result<()> {
         !crate::safe_outputs::ALL_KNOWN_SAFE_OUTPUTS.contains(&tool_name),
         "safe-outputs.{section}.{tool_name}: custom tool name collides with a built-in \
          safe-output tool"
+    );
+    ensure!(
+        !matches!(tool_name, "scripts" | "jobs"),
+        "safe-outputs.{section}.{tool_name}: custom tool name is reserved for a \
+         safe-outputs structural section"
     );
     Ok(())
 }
@@ -268,6 +409,138 @@ fn optional_string(obj: &Map<String, Value>, key: &str) -> Result<Option<String>
     }
 }
 
+fn parse_max(section: &str, tool_name: &str, value: Option<&Value>) -> Result<usize> {
+    let Some(value) = value else {
+        return Ok(DEFAULT_CUSTOM_MAX);
+    };
+    let max = value.as_u64().ok_or_else(|| {
+        anyhow!("safe-outputs.{section}.{tool_name}.max must be a positive integer")
+    })?;
+    ensure!(
+        max > 0,
+        "safe-outputs.{section}.{tool_name}.max must be a positive integer"
+    );
+    usize::try_from(max)
+        .with_context(|| format!("safe-outputs.{section}.{tool_name}.max is too large"))
+}
+
+fn parse_script_timeout(section: &str, tool_name: &str, value: Option<&Value>) -> Result<u32> {
+    let Some(value) = value else {
+        return Ok(DEFAULT_CUSTOM_SCRIPT_TIMEOUT_MINUTES);
+    };
+    let timeout = value.as_u64().ok_or_else(|| {
+        anyhow!(
+            "safe-outputs.{section}.{tool_name}.timeout-minutes must be an integer from 1 to \
+             {MAX_CUSTOM_SCRIPT_TIMEOUT_MINUTES}"
+        )
+    })?;
+    ensure!(
+        (1..=u64::from(MAX_CUSTOM_SCRIPT_TIMEOUT_MINUTES)).contains(&timeout),
+        "safe-outputs.{section}.{tool_name}.timeout-minutes must be from 1 to \
+         {MAX_CUSTOM_SCRIPT_TIMEOUT_MINUTES}"
+    );
+    Ok(timeout as u32)
+}
+
+fn parse_env(
+    section: &str,
+    tool_name: &str,
+    value: Option<&Value>,
+) -> Result<Vec<(String, String)>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let env = value
+        .as_object()
+        .ok_or_else(|| anyhow!("safe-outputs.{section}.{tool_name}.env must be a mapping"))?;
+    let mut pairs = Vec::new();
+    for (name, value) in env {
+        ensure!(
+            crate::validate::is_valid_env_var_name(name),
+            "safe-outputs.{section}.{tool_name}.env key `{name}` is not a valid environment variable name"
+        );
+        let variable = value.as_str().ok_or_else(|| {
+            anyhow!("safe-outputs.{section}.{tool_name}.env.{name} must name an ADO variable")
+        })?;
+        ensure!(
+            crate::validate::is_valid_ado_variable_name(variable),
+            "safe-outputs.{section}.{tool_name}.env.{name} must be a valid ADO variable name"
+        );
+        pairs.push((name.clone(), variable.to_string()));
+    }
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(pairs)
+}
+
+fn parse_component(
+    tool_obj: &Map<String, Value>,
+    section: &str,
+    tool_name: &str,
+) -> Result<Option<CustomComponentDefinition>> {
+    let source = tool_obj.get("component-source").and_then(Value::as_str);
+    let sha = tool_obj.get("component-sha").and_then(Value::as_str);
+    let has_provenance = source.is_some()
+        || sha.is_some()
+        || COMPONENT_PROVENANCE_KEYS
+            .iter()
+            .any(|key| tool_obj.contains_key(*key));
+    if !has_provenance {
+        return Ok(None);
+    }
+    let source = source.ok_or_else(|| {
+        anyhow!(
+            "safe-outputs.{section}.{tool_name} has incomplete component provenance: \
+             component-source and component-sha must be present together"
+        )
+    })?;
+    let sha = sha.ok_or_else(|| {
+        anyhow!(
+            "safe-outputs.{section}.{tool_name} has incomplete component provenance: \
+             component-source and component-sha must be present together"
+        )
+    })?;
+    let sha = CommitSha::parse(sha)
+        .with_context(|| format!("safe-outputs.{section}.{tool_name}.component-sha"))?;
+    let mut parts = source.splitn(3, '/');
+    let owner = parts.next().unwrap_or_default();
+    let repo = parts.next().unwrap_or_default();
+    let path = parts.next().unwrap_or_default();
+    ensure!(
+        !owner.is_empty() && !repo.is_empty() && !path.is_empty(),
+        "safe-outputs.{section}.{tool_name}.component-source must be owner/repo/path"
+    );
+    let repo_type = tool_obj
+        .get("component-repo-type")
+        .and_then(Value::as_str)
+        .unwrap_or("git");
+    ensure!(
+        matches!(repo_type, "git" | "github" | "githubenterprise"),
+        "safe-outputs.{section}.{tool_name}.component-repo-type must be git, github, or githubenterprise"
+    );
+    let endpoint = tool_obj
+        .get("component-endpoint")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let alias = super::imports::alias::component_alias_identifier(
+        owner,
+        repo,
+        repo_type,
+        endpoint.as_deref(),
+    );
+    Ok(Some(CustomComponentDefinition {
+        checkout_dir: format!("$(Build.SourcesDirectory)/{alias}"),
+        alias,
+        source: source.to_string(),
+        sha,
+        manifest_digest: tool_obj
+            .get("manifest-digest")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        repo_type: repo_type.to_string(),
+        endpoint,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,6 +602,133 @@ safe-outputs:
             deploy.input_schema["properties"]["target"],
             json!({ "type": "string", "maxLength": DEFAULT_STRING_MAX_LENGTH })
         );
+
+        let definitions = collect_custom_tool_definitions(&fm).unwrap();
+        let send = definitions
+            .iter()
+            .find(|definition| definition.name == "send-notification")
+            .unwrap();
+        assert_eq!(send.max, 3);
+        assert!(matches!(
+            send.kind,
+            CustomToolKind::Scripts {
+                timeout_minutes: DEFAULT_CUSTOM_SCRIPT_TIMEOUT_MINUTES,
+                ..
+            }
+        ));
+        let deploy = definitions
+            .iter()
+            .find(|definition| definition.name == "deploy-thing")
+            .unwrap();
+        assert_eq!(deploy.max, DEFAULT_CUSTOM_MAX);
+    }
+
+    #[test]
+    fn script_timeout_is_bounded_and_jobs_reject_it() {
+        for timeout in [0, 61] {
+            let fm = parse_front_matter(&format!(
+                r#"
+name: Test
+description: Test
+safe-outputs:
+  scripts:
+    notify:
+      run: ./notify
+      timeout-minutes: {timeout}
+"#
+            ));
+            let err = collect_custom_tool_definitions(&fm).unwrap_err();
+            assert!(err.to_string().contains("timeout-minutes"), "{err:#}");
+        }
+
+        let fm = parse_front_matter(
+            r#"
+name: Test
+description: Test
+safe-outputs:
+  scripts:
+    notify:
+      run: ./notify
+      timeout-minutes: 60
+  jobs:
+    deploy:
+      timeout-minutes: 10
+      steps: []
+"#,
+        );
+        let err = collect_custom_tool_definitions(&fm).unwrap_err();
+        assert!(err.to_string().contains("not supported"), "{err:#}");
+    }
+
+    #[test]
+    fn component_sha_is_typed_and_partial_provenance_fails_closed() {
+        let fm = parse_front_matter(
+            r#"
+name: Test
+description: Test
+safe-outputs:
+  scripts:
+    notify:
+      run: ./notify
+      component-source: octo/tools/components/notify.md
+      component-sha: not-a-full-sha
+"#,
+        );
+        let err = collect_custom_tool_definitions(&fm).unwrap_err();
+        assert!(err.to_string().contains("component-sha"), "{err:#}");
+
+        let fm = parse_front_matter(
+            r#"
+name: Test
+description: Test
+safe-outputs:
+  scripts:
+    notify:
+      run: ./notify
+      component-source: octo/tools/components/notify.md
+"#,
+        );
+        let err = collect_custom_tool_definitions(&fm).unwrap_err();
+        assert!(err.to_string().contains("incomplete"), "{err:#}");
+
+        let fm = parse_front_matter(
+            r#"
+name: Test
+description: Test
+safe-outputs:
+  scripts:
+    notify:
+      run: ./notify
+      source: attacker/repo/component.md
+      sha: 0123456789abcdef0123456789abcdef01234567
+"#,
+        );
+        let definitions = collect_custom_tool_definitions(&fm).unwrap();
+        assert!(
+            definitions[0].component.is_none(),
+            "legacy source/sha fields must not synthesize component provenance"
+        );
+    }
+
+    #[test]
+    fn authored_component_provenance_is_rejected_before_import_merge() {
+        for key in COMPONENT_PROVENANCE_KEYS {
+            let fm = parse_front_matter(&format!(
+                r#"
+name: Test
+description: Test
+safe-outputs:
+  scripts:
+    notify:
+      run: ./notify
+      {key}: forged
+"#
+            ));
+            let err = reject_author_component_provenance(&fm).unwrap_err();
+            let message = err.to_string();
+            assert!(message.contains("compiler-owned"), "{message}");
+            assert!(message.contains(key), "{message}");
+        }
     }
 
     #[test]
@@ -368,6 +768,24 @@ safe-outputs:
 
         let err = generate_custom_tool_schemas(&fm).unwrap_err();
         assert!(err.to_string().contains("collides with a built-in"));
+    }
+
+    #[test]
+    fn structural_section_names_are_rejected_as_custom_tools() {
+        for name in ["scripts", "jobs"] {
+            let fm = parse_front_matter(&format!(
+                r#"
+name: Test
+description: Test
+safe-outputs:
+  scripts:
+    {name}:
+      run: ./tool
+"#
+            ));
+            let err = collect_custom_tool_definitions(&fm).unwrap_err();
+            assert!(err.to_string().contains("reserved"), "{err:#}");
+        }
     }
 
     #[test]

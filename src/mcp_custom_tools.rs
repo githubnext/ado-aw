@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use log::{info, warn};
+use rmcp::ErrorData as McpError;
 use rmcp::handler::server::router::tool::{ToolRoute, ToolRouter};
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::model::{CallToolResult, Tool};
@@ -81,13 +82,28 @@ fn build_custom_route(def: CustomToolDef) -> ToolRoute<SafeOutputs> {
         let tool_name = tool_name.clone();
         let output_path = ctx.service.custom_output_path();
         let arguments = ctx.arguments.clone();
-        Box::pin(async move {
-            if let Err(e) = append_custom_proposal(&output_path, &tool_name, arguments).await {
-                warn!("Failed to record custom safe-output proposal '{tool_name}': {e:#}");
-            }
-            Ok(CallToolResult::success(vec![]))
-        })
+        Box::pin(async move { record_custom_proposal(&output_path, &tool_name, arguments).await })
     })
+}
+
+async fn record_custom_proposal(
+    output_path: &Path,
+    tool_name: &str,
+    arguments: Option<Map<String, Value>>,
+) -> std::result::Result<CallToolResult, McpError> {
+    append_custom_proposal(output_path, tool_name, arguments)
+        .await
+        .map_err(|error| {
+            warn!("Failed to record custom safe-output proposal '{tool_name}': {error:#}");
+            McpError::internal_error(
+                format!(
+                    "Failed to record custom safe-output proposal '{}'",
+                    crate::sanitize::sanitize_config(tool_name)
+                ),
+                None,
+            )
+        })?;
+    Ok(CallToolResult::success(vec![]))
 }
 
 /// Append a `{ "name": <tool>, <...args> }` proposal line to the NDJSON file.
@@ -247,5 +263,27 @@ description: Test
         let v: Value = serde_json::from_str(contents.trim()).unwrap();
         assert_eq!(v["name"], "send-notification");
         assert_eq!(v["title"], "Outage");
+    }
+
+    #[tokio::test]
+    async fn test_record_custom_proposal_returns_mcp_error_on_persistence_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("output-is-a-directory");
+        std::fs::create_dir(&output_path).unwrap();
+
+        let error = record_custom_proposal(&output_path, "send-notification", Some(Map::new()))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+        assert!(
+            error
+                .message
+                .contains("Failed to record custom safe-output proposal")
+        );
+        assert!(
+            !error.message.contains(&output_path.display().to_string()),
+            "agent-visible MCP error must not expose the output path"
+        );
     }
 }

@@ -1213,11 +1213,11 @@ pub enum ImportEndpoint {
         /// ADO service connection name.
         name: String,
     },
-    /// GitHub Enterprise Server at API host `host`, via service connection `name`.
+    /// GitHub Enterprise Server at server host `host`, via service connection `name`.
     GitHubEnterprise {
         /// ADO service connection name.
         name: String,
-        /// GHE API host (e.g. `api.acme.ghe.com`).
+        /// GHES server host used by `GH_HOST` (e.g. `ghe.acme.com`).
         host: crate::secure::HostName,
     },
     /// Azure Repos in a *different* organization `org` (a full collection URL,
@@ -1226,7 +1226,7 @@ pub enum ImportEndpoint {
         /// ADO service connection name.
         name: String,
         /// Target organization collection URL.
-        org: String,
+        org: crate::secure::AzureDevOpsOrgUrl,
     },
 }
 
@@ -1279,7 +1279,9 @@ impl<'de> Deserialize<'de> for ImportEndpoint {
 
                 let obj = EndpointObject::deserialize(de::value::MapAccessDeserializer::new(map))?;
                 if obj.name.trim().is_empty() {
-                    return Err(de::Error::custom("import endpoint `name` must not be empty"));
+                    return Err(de::Error::custom(
+                        "import endpoint `name` must not be empty",
+                    ));
                 }
                 let kind = obj.kind.as_deref().unwrap_or("github");
                 match kind {
@@ -1319,11 +1321,8 @@ impl<'de> Deserialize<'de> for ImportEndpoint {
                                  (the target organization collection URL)",
                             )
                         })?;
-                        if org.trim().is_empty() {
-                            return Err(de::Error::custom(
-                                "import endpoint `org` must not be empty",
-                            ));
-                        }
+                        let org = crate::secure::AzureDevOpsOrgUrl::parse(org)
+                            .map_err(|e| de::Error::custom(e.to_string()))?;
                         Ok(ImportEndpoint::AzureReposCrossOrg {
                             name: obj.name,
                             org,
@@ -3233,13 +3232,13 @@ endpoint: shared-components-connection
     fn test_import_endpoint_object_ghe_requires_host() {
         let entry: ImportEntry = serde_yaml::from_str(&format!(
             "uses: acme/shared/deploy.md@{IMPORT_SHA}\n\
-             endpoint:\n  name: ghe-conn\n  type: ghe\n  host: api.acme.ghe.com\n"
+             endpoint:\n  name: ghe-conn\n  type: ghe\n  host: ghe.acme.com\n"
         ))
         .unwrap();
         match entry.endpoint {
             Some(ImportEndpoint::GitHubEnterprise { name, host }) => {
                 assert_eq!(name, "ghe-conn");
-                assert_eq!(host.as_str(), "api.acme.ghe.com");
+                assert_eq!(host.as_str(), "ghe.acme.com");
             }
             other => panic!("expected GHE endpoint, got {other:?}"),
         }
@@ -3263,9 +3262,17 @@ endpoint: shared-components-connection
             entry.endpoint,
             Some(ImportEndpoint::AzureReposCrossOrg {
                 name: "xorg-conn".to_string(),
-                org: "https://dev.azure.com/other".to_string(),
+                org: crate::secure::AzureDevOpsOrgUrl::parse("https://dev.azure.com/other",)
+                    .unwrap(),
             })
         );
+
+        let err = serde_yaml::from_str::<ImportEntry>(&format!(
+            "uses: acme/shared/deploy.md@{IMPORT_SHA}\n\
+             endpoint:\n  name: xorg-conn\n  type: azure-repos\n  org: https://attacker.example/steal\n"
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("dev.azure.com"), "{err}");
 
         // `azure-repos` without `org` must be rejected.
         let err = serde_yaml::from_str::<ImportEntry>(&format!(
@@ -3283,14 +3290,21 @@ endpoint: shared-components-connection
             "uses: o/r/p.md@{IMPORT_SHA}\nendpoint:\n  name: c\n  type: bitbucket\n"
         ))
         .unwrap_err();
-        assert!(err.to_string().contains("unknown import endpoint type"), "{err}");
+        assert!(
+            err.to_string().contains("unknown import endpoint type"),
+            "{err}"
+        );
 
         // `org` on a github endpoint.
         let err = serde_yaml::from_str::<ImportEntry>(&format!(
             "uses: o/r/p.md@{IMPORT_SHA}\nendpoint:\n  name: c\n  type: github\n  org: x\n"
         ))
         .unwrap_err();
-        assert!(err.to_string().contains("not valid for import endpoint type `github`"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("not valid for import endpoint type `github`"),
+            "{err}"
+        );
     }
 
     #[test]

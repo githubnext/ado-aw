@@ -27,6 +27,7 @@ use serde_yaml::{Mapping, Value};
 
 use super::schema::apply_import_inputs;
 use super::{ManifestFetcher, ResolvedImport, resolve_imports_with_repo_root};
+use crate::compile::custom_tools::COMPONENT_PROVENANCE_KEYS;
 use crate::compile::types::ImportEntry;
 
 /// Front-matter keys whose values are mappings merged additively by sub-key.
@@ -170,15 +171,6 @@ pub fn merge_resolved_imported_body(
 fn stamp_component_provenance(component_fm: &mut Value, import: &ResolvedImport) {
     use crate::compile::types::ImportSource;
 
-    /// Compiler-owned provenance keys — never author-settable.
-    const PROVENANCE_KEYS: [&str; 5] = [
-        "component-source",
-        "component-sha",
-        "manifest-digest",
-        "component-repo-type",
-        "component-endpoint",
-    ];
-
     let Value::Mapping(fm_map) = component_fm else {
         return;
     };
@@ -208,7 +200,7 @@ fn stamp_component_provenance(component_fm: &mut Value, import: &ResolvedImport)
 
             // Strip any author-provided provenance first (compiler fully owns
             // these keys).
-            for key in PROVENANCE_KEYS {
+            for key in COMPONENT_PROVENANCE_KEYS {
                 cfg.remove(Value::String(key.to_string()));
             }
 
@@ -350,6 +342,12 @@ fn merge_map_key(
 
         match &side {
             MergeSide::Import { idx, source } => {
+                if key == "safe-outputs" && matches!(sub_name.as_str(), "scripts" | "jobs") {
+                    merge_imported_custom_safe_output_section(
+                        existing, sub_key, sub_val, &sub_name, *idx, source, provenance,
+                    )?;
+                    continue;
+                }
                 if already {
                     // Collision between two imports is a hard error.
                     let prev = provenance.get(&prov_key).copied();
@@ -384,6 +382,46 @@ fn merge_map_key(
     Ok(())
 }
 
+fn merge_imported_custom_safe_output_section(
+    safe_outputs: &mut Mapping,
+    section_key: &Value,
+    incoming: &Value,
+    section: &str,
+    import_idx: usize,
+    source: &str,
+    provenance: &mut std::collections::HashMap<String, usize>,
+) -> Result<()> {
+    let Value::Mapping(incoming_tools) = incoming else {
+        anyhow::bail!("safe-outputs.{section} must be a mapping of tool definitions");
+    };
+    let entry = safe_outputs
+        .entry(section_key.clone())
+        .or_insert_with(|| Value::Mapping(Mapping::new()));
+    let Value::Mapping(existing_tools) = entry else {
+        anyhow::bail!("safe-outputs.{section} must be a mapping of tool definitions");
+    };
+
+    for (tool_key, tool_value) in incoming_tools {
+        let Some(tool_name) = tool_key.as_str() else {
+            continue;
+        };
+        let provenance_key = format!("safe-outputs.{section}.{tool_name}");
+        if existing_tools.contains_key(tool_key) {
+            let previous = provenance.get(&provenance_key).copied();
+            if previous.is_some() && previous != Some(import_idx) {
+                anyhow::bail!(
+                    "import conflict: 'safe-outputs.{section}.{tool_name}' is defined by more \
+                     than one imported component (latest from '{source}'). Imported custom \
+                     safe-output tools must have unique names."
+                );
+            }
+        }
+        existing_tools.insert(tool_key.clone(), tool_value.clone());
+        provenance.insert(provenance_key, import_idx);
+    }
+    Ok(())
+}
+
 /// Overlay consumer configuration onto an imported `safe-outputs` tool without
 /// allowing executor redefinition.
 fn configure_safe_output(
@@ -395,6 +433,9 @@ fn configure_safe_output(
     let existing_val = existing.get_mut(sub_key);
     match (existing_val, incoming) {
         (Some(Value::Mapping(existing_cfg)), Value::Mapping(incoming_cfg)) => {
+            if matches!(sub_name, "scripts" | "jobs") {
+                return configure_custom_safe_output_section(existing_cfg, incoming_cfg);
+            }
             for (cfg_key, cfg_val) in incoming_cfg {
                 if let Some(name) = cfg_key.as_str()
                     && EXECUTOR_KEYS.contains(&name)
@@ -403,6 +444,15 @@ fn configure_safe_output(
                         "import conflict: the consumer may configure the imported \
                          safe-output '{sub_name}' but not redefine its executor \
                          ('{name}' is executor-defining)."
+                    );
+                }
+                if let Some(name) = cfg_key.as_str()
+                    && COMPONENT_PROVENANCE_KEYS.contains(&name)
+                {
+                    anyhow::bail!(
+                        "import conflict: the consumer may not override compiler-owned \
+                          component provenance for imported safe-output '{sub_name}' \
+                          ('{name}' is compiler-owned)."
                     );
                 }
                 existing_cfg.insert(cfg_key.clone(), cfg_val.clone());
@@ -426,6 +476,20 @@ fn configure_safe_output(
             Ok(())
         }
     }
+}
+
+fn configure_custom_safe_output_section(existing: &mut Mapping, incoming: &Mapping) -> Result<()> {
+    for (tool_key, tool_value) in incoming {
+        let Some(tool_name) = tool_key.as_str() else {
+            continue;
+        };
+        if existing.contains_key(tool_key) {
+            configure_safe_output(existing, tool_key, tool_value, tool_name)?;
+        } else {
+            existing.insert(tool_key.clone(), tool_value.clone());
+        }
+    }
+    Ok(())
 }
 
 /// Concatenate a sequence-valued key (imports first, then consumer).
@@ -548,7 +612,10 @@ mod tests {
         merge_resolved_imported_body(&mut consumer, &[import]).unwrap();
 
         let notify = scripts_notify_tool(&consumer);
-        assert_eq!(tool_str(notify, "component-source"), Some("octo/repo/notify.md"));
+        assert_eq!(
+            tool_str(notify, "component-source"),
+            Some("octo/repo/notify.md")
+        );
         assert_eq!(tool_str(notify, "component-sha"), Some(REMOTE_SHA));
         assert_eq!(tool_str(notify, "manifest-digest"), Some("digest123"));
         assert_eq!(tool_str(notify, "component-repo-type"), Some("github"));
@@ -612,7 +679,10 @@ mod tests {
         // Spoofed endpoint stripped (same-org => no connection).
         assert_eq!(tool_str(notify, "component-endpoint"), None);
         // Spoofed source overwritten with the compiler-resolved provenance.
-        assert_eq!(tool_str(notify, "component-source"), Some("octo/repo/notify.md"));
+        assert_eq!(
+            tool_str(notify, "component-source"),
+            Some("octo/repo/notify.md")
+        );
         assert_eq!(tool_str(notify, "component-repo-type"), Some("git"));
     }
 
@@ -633,6 +703,54 @@ mod tests {
 
         let notify = scripts_notify_tool(&consumer);
         assert_eq!(tool_str(notify, "component-endpoint"), Some("real-conn"));
+    }
+
+    #[test]
+    fn consumer_cannot_override_imported_custom_tool_provenance() {
+        for section in ["scripts", "jobs"] {
+            for key in COMPONENT_PROVENANCE_KEYS {
+                let mut consumer = ymap(&format!(
+                    "safe-outputs:\n  {section}:\n    notify:\n      {key}: attacker\n"
+                ));
+                let imported_tool = if section == "scripts" {
+                    "safe-outputs:\n  scripts:\n    notify:\n      run: node notify.js\n"
+                } else {
+                    "safe-outputs:\n  jobs:\n    notify:\n      steps:\n        - bash: echo hi\n"
+                };
+                let err = merge_resolved_imported_body(
+                    &mut consumer,
+                    &[remote_resolved(imported_tool, None)],
+                )
+                .unwrap_err();
+                let message = err.to_string();
+                assert!(message.contains("compiler-owned"), "{message}");
+                assert!(message.contains(key), "{message}");
+            }
+        }
+    }
+
+    #[test]
+    fn consumer_custom_tool_configuration_preserves_executor_and_provenance() {
+        let mut consumer = ymap("safe-outputs:\n  scripts:\n    notify:\n      max: 1\n");
+        let import = remote_resolved(
+            "safe-outputs:\n  scripts:\n    notify:\n      run: node notify.js\n",
+            None,
+        );
+        merge_resolved_imported_body(&mut consumer, &[import]).unwrap();
+
+        let notify = scripts_notify_tool(&consumer);
+        assert_eq!(tool_str(notify, "run"), Some("node notify.js"));
+        assert_eq!(
+            tool_str(notify, "component-source"),
+            Some("octo/repo/notify.md")
+        );
+        assert_eq!(tool_str(notify, "component-sha"), Some(REMOTE_SHA));
+        assert_eq!(
+            notify
+                .get(Value::String("max".into()))
+                .and_then(Value::as_u64),
+            Some(1)
+        );
     }
 
     #[test]
@@ -710,6 +828,57 @@ mod tests {
         ];
         let err = merge_resolved(&mut consumer, "", &imports).unwrap_err();
         assert!(err.to_string().contains("more than one"), "{err}");
+    }
+
+    #[test]
+    fn imports_deep_merge_distinct_custom_safe_output_tools() {
+        let mut consumer = ymap("name: consumer");
+        let imports = vec![
+            resolved(
+                "safe-outputs:\n  scripts:\n    notify:\n      run: notify.sh",
+                "",
+            ),
+            resolved(
+                "safe-outputs:\n  scripts:\n    archive:\n      run: archive.sh\n  jobs:\n    deploy:\n      steps: []",
+                "",
+            ),
+        ];
+        merge_resolved(&mut consumer, "", &imports).unwrap();
+
+        let safe_outputs = consumer
+            .get(Value::String("safe-outputs".into()))
+            .and_then(Value::as_mapping)
+            .unwrap();
+        let scripts = safe_outputs
+            .get(Value::String("scripts".into()))
+            .and_then(Value::as_mapping)
+            .unwrap();
+        assert!(scripts.contains_key(Value::String("notify".into())));
+        assert!(scripts.contains_key(Value::String("archive".into())));
+        let jobs = safe_outputs
+            .get(Value::String("jobs".into()))
+            .and_then(Value::as_mapping)
+            .unwrap();
+        assert!(jobs.contains_key(Value::String("deploy".into())));
+    }
+
+    #[test]
+    fn imports_reject_duplicate_custom_safe_output_tool_names() {
+        let mut consumer = ymap("name: consumer");
+        let imports = vec![
+            resolved(
+                "safe-outputs:\n  scripts:\n    notify:\n      run: one.sh",
+                "",
+            ),
+            resolved(
+                "safe-outputs:\n  scripts:\n    notify:\n      run: two.sh",
+                "",
+            ),
+        ];
+        let err = merge_resolved(&mut consumer, "", &imports).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("safe-outputs.scripts.notify"), "{message}");
+        assert!(message.contains("more than one"), "{message}");
     }
 
     #[test]

@@ -289,6 +289,9 @@ enum Commands {
         /// Custom safe-output tool name for jobs-style pre/post phases.
         #[arg(long = "tool")]
         tool: Option<String>,
+        /// Compiler-resolved proposal budget for jobs-style pre/post phases.
+        #[arg(long = "max")]
+        custom_max: Option<usize>,
         /// Jobs-style pre phase output path for filtered proposals.
         #[arg(long = "proposals-out")]
         proposals_out: Option<PathBuf>,
@@ -1118,6 +1121,7 @@ async fn main() -> Result<()> {
             custom_config,
             custom_phase,
             tool,
+            custom_max,
             proposals_out,
             results_in,
             component_source,
@@ -1129,6 +1133,7 @@ async fn main() -> Result<()> {
                 custom_config,
                 custom_phase,
                 tool,
+                max: custom_max,
                 proposals_out,
                 results_in,
                 component_source,

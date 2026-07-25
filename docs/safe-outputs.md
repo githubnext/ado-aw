@@ -206,9 +206,10 @@ agent-supplied keys are rejected. String inputs default to `maxLength: 4000`;
 set `max-length` per field to choose a smaller bound (up to the compiler's hard
 limit of 8000). `choice` inputs require an `options:` list.
 
-Custom tool names must be safe tool identifiers and cannot collide with built-in
-safe-output names. `require-approval` works for custom tools exactly like it
-does for built-ins: configure it under the tool's top-level name in the consumer
+Custom tool names must be safe tool identifiers, cannot collide with built-in
+safe-output names, and cannot use the reserved structural names `scripts` or
+`jobs`. `require-approval` works for custom tools exactly like it does for
+built-ins: configure it under the tool's top-level name in the consumer
 workflow, or set a section-level default.
 
 ```yaml
@@ -226,6 +227,14 @@ proposal loop: for each selected proposal it invokes the entrypoint, passes the
 proposal JSON on stdin and in `AW_PROPOSAL`, enforces the budget/staged mode,
 sanitizes the result, and appends the final execution record.
 
+`timeout-minutes` bounds each entrypoint invocation. It defaults to 10 minutes
+and must be between 1 and 60. On expiry the executor terminates the child
+process tree, waits for the direct child to exit, and records that proposal as
+failed rather than waiting for the outer Azure Pipelines job timeout. This field
+is scripts-only; jobs-style tools should set timeouts on their authored ADO
+steps. Stdout and stderr capture are each capped at 1 MiB; exceeding either
+limit terminates the process tree and fails the proposal.
+
 The script must print exactly one JSON line to stdout:
 
 ```json
@@ -240,6 +249,7 @@ safe-outputs:
     notify-team:
       description: Send a structured team notification.
       max: 3
+      timeout-minutes: 10
       run: node tools/notify.js
       inputs:
         title:
@@ -258,17 +268,27 @@ safe-outputs:
 Jobs-style tools declare arbitrary Azure DevOps `steps:`. The compiler wraps
 those steps:
 
-1. `ado-aw execute --custom-phase pre --tool <name>` filters proposals for this
-   tool, applies `max`, assigns stable `proposal_id` values, writes
+1. `ado-aw execute --custom-phase pre --tool <name> --max <resolved>` filters
+   proposals for this tool, applies the compiler-resolved `max`, assigns stable
+   `proposal_id` values, writes
    `ADO_AW_SAFE_OUTPUT_PROPOSALS`, and sets `ADO_AW_SAFE_OUTPUTS_STAGED=true`
    during dry runs.
 2. The component's authored ADO steps run. They read
    `$ADO_AW_SAFE_OUTPUT_PROPOSALS` and append one result record per attempted
    proposal to `$ADO_AW_SAFE_OUTPUT_RESULTS`.
-3. `ado-aw execute --custom-phase post --tool <name>` validates and enriches
-   the component results with compiler-owned provenance, sanitizes output, and
-   emits the standard executed-safe-output artifact. Missing, malformed, or
-   duplicate result records fail closed.
+3. `ado-aw execute --custom-phase post --tool <name> --max <resolved>` validates
+   and enriches the component results with compiler-owned provenance, sanitizes
+   output, and emits the standard executed-safe-output artifact. Missing,
+   malformed, or duplicate result records fail closed.
+
+The resolved budget is embedded in both wrapper commands at compile time,
+including values contributed by imported components; Stage 3 does not reparse
+the unmerged consumer source to infer it.
+
+Every `Custom_<tool>` job runs its finalization wrapper with `always()` and
+publishes a unique `custom_safe_output_<tool>_<build-id>` artifact with the
+execution records. This preserves failure/provenance evidence even when an
+authored component step or scripts entrypoint fails.
 
 Each jobs-style result line must be JSON with `schema_version: 1`,
 `proposal_id`, `status`, `message`, and optional `data`:
@@ -312,7 +332,11 @@ For cross-repository components that ship executor files, the custom executor
 job checks out the component repository resource, detaches to the pinned commit
 SHA, verifies `HEAD`, then runs the script or wrapped steps. Prompt-only or
 configuration-only imports are fully inlined at compile time and do not need a
-runtime checkout.
+runtime checkout. Same-organization Azure Repos fetches the pin with
+`$(System.AccessToken)`; GitHub, GitHub Enterprise, and cross-organization
+Azure Repos reuse their repository-resource service-connection credentials.
+Persisted Git auth headers are removed immediately after the pin is fetched and
+verified, before component code runs.
 
 ## Available Safe Output Tools
 

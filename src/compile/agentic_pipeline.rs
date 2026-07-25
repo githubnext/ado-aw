@@ -68,6 +68,10 @@ use super::common::{
     self, ADO_BUILD_ID_SUFFIX, AWF_VERSION, HEADER_MARKER, MCPG_CONTAINER_NAME, MCPG_DOMAIN,
     MCPG_IMAGE, MCPG_PORT, MCPG_VERSION, image_ref,
 };
+use super::custom_tools::{
+    CustomComponentDefinition, CustomToolDefinition, CustomToolKind,
+    collect_custom_tool_definitions,
+};
 use super::extensions::{CompileContext, CompilerExtension, Declarations, Extension, McpgConfig};
 use super::ir::condition::{Condition, Expr};
 use super::ir::env::EnvValue;
@@ -1452,36 +1456,15 @@ fn filter_flags(flag: &str, tools: &[String]) -> String {
 }
 
 #[derive(Debug, Clone)]
-enum CustomSafeOutputKind {
-    Scripts { entrypoint: String },
-    Jobs { steps: Vec<serde_yaml::Value> },
-}
-
-#[derive(Debug, Clone)]
 struct CustomSafeOutputJobDef {
     name: String,
     job_id: JobId,
     reviewed: bool,
-    max: Option<u64>,
+    max: usize,
     env: Vec<(String, String)>,
-    kind: CustomSafeOutputKind,
-    component: Option<CustomComponentRuntime>,
+    kind: CustomToolKind,
+    component: Option<CustomComponentDefinition>,
     schema_digest: String,
-}
-
-#[derive(Debug, Clone)]
-struct CustomComponentRuntime {
-    alias: String,
-    checkout_dir: String,
-    source: String,
-    sha: String,
-    manifest_digest: Option<String>,
-    /// ADO repository-resource `type` (`git` | `github` | `githubenterprise`),
-    /// resolved from the import's typed endpoint at merge time. Defaults to
-    /// `git` (same-org Azure Repos) when unstamped.
-    repo_type: String,
-    /// Backing service-connection name, when the endpoint names one.
-    endpoint: Option<String>,
 }
 
 fn ado_identifier_suffix(raw: &str) -> String {
@@ -1514,211 +1497,61 @@ fn collect_custom_safe_output_job_defs(
 ) -> Result<Vec<CustomSafeOutputJobDef>> {
     let (_, reviewed) = front_matter.partition_safe_outputs_by_approval();
     let reviewed: std::collections::HashSet<&str> = reviewed.iter().map(String::as_str).collect();
-    let schema_digests = custom_schema_digests(front_matter)?;
-    let mut defs = Vec::new();
+    collect_custom_tool_definitions(front_matter)?
+        .into_iter()
+        .map(|definition| custom_job_def(definition, &reviewed, prefix))
+        .collect()
+}
 
-    for section in ["scripts", "jobs"] {
-        let Some(section_value) = front_matter.safe_outputs.get(section) else {
-            continue;
-        };
-        let section_obj = section_value.as_object().ok_or_else(|| {
-            anyhow::anyhow!("safe-outputs.{section} must be a mapping of tool definitions")
-        })?;
-        let mut names: Vec<&String> = section_obj.keys().collect();
-        names.sort();
-        for tool_name in names {
-            let tool_value = section_obj
-                .get(tool_name)
-                .expect("tool name collected from map keys");
-            let tool_obj = tool_value.as_object().ok_or_else(|| {
-                anyhow::anyhow!("safe-outputs.{section}.{tool_name} must be a mapping")
-            })?;
-            let env = parse_custom_env(section, tool_name, tool_obj.get("env"))?;
-            let max = match tool_obj.get("max") {
-                Some(v) => Some(v.as_u64().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "safe-outputs.{section}.{tool_name}.max must be a positive integer"
-                    )
-                })?),
-                None => None,
-            };
-            let kind = if section == "scripts" {
-                let entrypoint = tool_obj
-                    .get("entrypoint")
-                    .or_else(|| tool_obj.get("run"))
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "safe-outputs.scripts.{tool_name} requires `run` or `entrypoint`"
-                        )
-                    })?
-                    .to_string();
-                CustomSafeOutputKind::Scripts { entrypoint }
-            } else {
-                let steps = tool_obj
-                    .get("steps")
-                    .and_then(serde_json::Value::as_array)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("safe-outputs.jobs.{tool_name}.steps must be a list")
-                    })?
-                    .iter()
-                    .map(|v| serde_yaml::to_value(v).context("failed to convert custom job step"))
-                    .collect::<Result<Vec<_>>>()?;
-                for step in &steps {
-                    if let Some(Err(message)) = super::ir::tasks::parse::validate_task_step(step) {
-                        eprintln!(
-                            "Warning: safe-outputs.jobs.{tool_name}.steps contains an invalid task input: {message}"
-                        );
-                    }
-                }
-                CustomSafeOutputKind::Jobs { steps }
-            };
-            let schema_digest = schema_digests
-                .get(tool_name)
-                .cloned()
-                .unwrap_or_else(|| crate::hash::sha256_hex(b"{}"));
-            defs.push(CustomSafeOutputJobDef {
-                name: tool_name.clone(),
-                job_id: prefix.custom_id(tool_name)?,
-                reviewed: reviewed.contains(tool_name.as_str()),
-                max,
-                env,
-                kind,
-                component: parse_custom_component_runtime(tool_obj),
-                schema_digest,
-            });
+fn custom_job_def(
+    definition: CustomToolDefinition,
+    reviewed: &std::collections::HashSet<&str>,
+    prefix: &JobPrefix<'_>,
+) -> Result<CustomSafeOutputJobDef> {
+    if let CustomToolKind::Jobs { steps } = &definition.kind {
+        for step in steps {
+            let step = serde_yaml::to_value(step)
+                .context("failed to convert custom job step for validation")?;
+            if let Some(Err(message)) = super::ir::tasks::parse::validate_task_step(&step) {
+                eprintln!(
+                    "Warning: safe-outputs.jobs.{}.steps contains an invalid task input: {message}",
+                    definition.name
+                );
+            }
         }
     }
-    Ok(defs)
-}
-
-fn custom_schema_digests(
-    front_matter: &FrontMatter,
-) -> Result<std::collections::HashMap<String, String>> {
-    let mut out = std::collections::HashMap::new();
-    for schema in super::custom_tools::generate_custom_tool_schemas(front_matter)? {
-        let bytes = serde_json::to_vec(&schema.input_schema)
-            .context("failed to serialize custom tool schema for digest")?;
-        out.insert(schema.name, crate::hash::sha256_hex(&bytes));
-    }
-    Ok(out)
-}
-
-fn parse_custom_env(
-    section: &str,
-    tool_name: &str,
-    env: Option<&serde_json::Value>,
-) -> Result<Vec<(String, String)>> {
-    let Some(env) = env else {
-        return Ok(Vec::new());
-    };
-    let env_obj = env.as_object().ok_or_else(|| {
-        anyhow::anyhow!("safe-outputs.{section}.{tool_name}.env must be a mapping")
-    })?;
-    let mut pairs = Vec::new();
-    for (name, value) in env_obj {
-        anyhow::ensure!(
-            crate::validate::is_valid_env_var_name(name),
-            "safe-outputs.{section}.{tool_name}.env key `{name}` is not a valid environment variable name"
-        );
-        let var = value.as_str().ok_or_else(|| {
-            anyhow::anyhow!(
-                "safe-outputs.{section}.{tool_name}.env.{name} must name an ADO variable"
-            )
-        })?;
-        anyhow::ensure!(
-            crate::validate::is_valid_ado_variable_name(var),
-            "safe-outputs.{section}.{tool_name}.env.{name} must be a valid ADO variable name"
-        );
-        pairs.push((name.clone(), var.to_string()));
-    }
-    pairs.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(pairs)
-}
-
-fn parse_custom_component_runtime(
-    tool_obj: &serde_json::Map<String, serde_json::Value>,
-) -> Option<CustomComponentRuntime> {
-    let source = tool_obj
-        .get("component-source")
-        .or_else(|| tool_obj.get("source"))
-        .and_then(serde_json::Value::as_str)?;
-    let sha = tool_obj
-        .get("component-sha")
-        .or_else(|| tool_obj.get("sha"))
-        .and_then(serde_json::Value::as_str)?;
-    let mut parts = source.splitn(3, '/');
-    let owner = parts.next()?;
-    let repo = parts.next()?;
-    let _path = parts.next()?;
-    if owner.is_empty() || repo.is_empty() {
-        return None;
-    }
-    let alias = super::imports::alias::alias_identifier(owner, repo);
-    Some(CustomComponentRuntime {
-        checkout_dir: format!("$(Build.SourcesDirectory)/{alias}"),
-        alias,
-        source: source.to_string(),
-        sha: sha.to_string(),
-        manifest_digest: tool_obj
-            .get("manifest-digest")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string),
-        repo_type: tool_obj
-            .get("component-repo-type")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("git")
-            .to_string(),
-        endpoint: tool_obj
-            .get("component-endpoint")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string),
+    Ok(CustomSafeOutputJobDef {
+        job_id: prefix.custom_id(&definition.name)?,
+        reviewed: reviewed.contains(definition.name.as_str()),
+        name: definition.name,
+        max: definition.max,
+        env: definition.env,
+        kind: definition.kind,
+        component: definition.component,
+        schema_digest: definition.schema_digest,
     })
 }
 
 fn custom_repository_resources(front_matter: &FrontMatter) -> Result<Vec<RepositoryResource>> {
     let mut resources = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for section in ["scripts", "jobs"] {
-        let Some(section_value) = front_matter.safe_outputs.get(section) else {
+    for definition in collect_custom_tool_definitions(front_matter)? {
+        let Some(component) = definition.component else {
             continue;
         };
-        let Some(section_obj) = section_value.as_object() else {
+        if !seen.insert(component.alias.clone()) {
             continue;
-        };
-        for tool_value in section_obj.values() {
-            let Some(tool_obj) = tool_value.as_object() else {
-                continue;
-            };
-            let Some(component) = parse_custom_component_runtime(tool_obj) else {
-                continue;
-            };
-            if !seen.insert(component.alias.clone()) {
-                continue;
-            }
-            let mut parts = component.source.splitn(3, '/');
-            let owner = parts.next().unwrap_or_default();
-            let repo = parts.next().unwrap_or_default();
-            resources.push(RepositoryResource::Named {
-                identifier: component.alias,
-                // Resolved from the import's typed endpoint at merge time:
-                // `git` for (same- or cross-org) Azure Repos, `github` /
-                // `githubenterprise` for GitHub sources. The service connection
-                // (when any) rides on `endpoint`.
-                kind: component.repo_type.clone(),
-                name: format!("{owner}/{repo}"),
-                // Omit `ref` so ADO checks out the component repo's actual
-                // default branch (which always exists) for the initial shallow
-                // checkout. A hardcoded `refs/heads/main` hard-fails the
-                // checkout step for any repo whose default branch is not `main`
-                // (ADO: "Couldn't find remote ref …", no fallback). The exact
-                // import commit is pinned separately at runtime by the
-                // checkout-component bundle (`git fetch <sha>` + detached
-                // checkout), so the initial branch content is irrelevant.
-                r#ref: None,
-                endpoint: component.endpoint.clone(),
-            });
         }
+        let mut parts = component.source.splitn(3, '/');
+        let owner = parts.next().unwrap_or_default();
+        let repo = parts.next().unwrap_or_default();
+        resources.push(RepositoryResource::Named {
+            identifier: component.alias,
+            kind: component.repo_type,
+            name: format!("{owner}/{repo}"),
+            r#ref: None,
+            endpoint: component.endpoint,
+        });
     }
     Ok(resources)
 }
@@ -1754,17 +1587,16 @@ fn build_custom_safe_output_job(
     // checked out unless `path` is explicit. Keep the trigger repo at the
     // canonical `$(Build.SourcesDirectory)` root because `cfg.source_path`
     // and every custom wrapper invocation are anchored there.
-    steps.push(checkout_self_step_at_sources_root(
-        &cfg.self_checkout_fetch,
-    ));
+    steps.push(checkout_self_step_at_sources_root(&cfg.self_checkout_fetch));
     if let Some(component) = &def.component {
+        let use_system_access_token = component.repo_type == "git" && component.endpoint.is_none();
         steps.push(Step::Checkout(CheckoutStep {
             repository: CheckoutRepo::Named(component.alias.clone()),
             clean: None,
             submodules: None,
             fetch_depth: Some(1),
             fetch_tags: Some(false),
-            persist_credentials: None,
+            persist_credentials: Some(!use_system_access_token),
             path: Some(format!("s/{}", component.alias)),
         }));
         // Install Node + download the ado-script bundle, then fetch/verify the
@@ -1778,10 +1610,13 @@ fn build_custom_safe_output_job(
                 front_matter.supply_chain.as_ref(),
             ),
         );
-        steps.push(super::extensions::ado_script::checkout_component_step_typed(
-            &component.checkout_dir,
-            &component.sha,
-        ));
+        steps.push(
+            super::extensions::ado_script::checkout_component_step_typed(
+                &component.checkout_dir,
+                component.sha.as_str(),
+                use_system_access_token,
+            ),
+        );
     }
     steps.push(Step::Download(DownloadStep {
         source: "current".to_string(),
@@ -1798,7 +1633,10 @@ fn build_custom_safe_output_job(
     steps.push(Step::Bash(prepare_custom_executor_binary_step()));
 
     match &def.kind {
-        CustomSafeOutputKind::Scripts { entrypoint } => {
+        CustomToolKind::Scripts {
+            entrypoint,
+            timeout_minutes,
+        } => {
             let config_path = format!("$(Agent.TempDirectory)/ado-aw-custom/{}.json", def.name);
             let cwd = def
                 .component
@@ -1808,16 +1646,17 @@ fn build_custom_safe_output_job(
             steps.push(Step::Bash(write_custom_scripts_config_step(
                 def,
                 entrypoint,
+                *timeout_minutes,
                 &cwd,
                 &config_path,
             )?));
             steps.push(Step::Bash(custom_scripts_execute_step(
                 &cfg.source_path,
                 &config_path,
-                &def.env,
+                def,
             )));
         }
-        CustomSafeOutputKind::Jobs {
+        CustomToolKind::Jobs {
             steps: component_steps,
         } => {
             let proposals_path = format!("$(Agent.TempDirectory)/proposals-{}.json", def.name);
@@ -1825,12 +1664,15 @@ fn build_custom_safe_output_job(
             steps.push(Step::Bash(custom_jobs_pre_step(
                 &cfg.source_path,
                 &def.name,
+                def.max,
                 &proposals_path,
                 &def.env,
             )));
             for step in component_steps {
+                let step =
+                    serde_yaml::to_value(step).context("failed to convert custom job step")?;
                 steps.push(Step::RawYaml(component_step_with_custom_env(
-                    step,
+                    &step,
                     &def.env,
                     &proposals_path,
                     &results_path,
@@ -1844,6 +1686,14 @@ fn build_custom_safe_output_job(
             )));
         }
     }
+    steps.push(Step::Publish(PublishStep {
+        path: "$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)".to_string(),
+        artifact: format!(
+            "custom_safe_output_{}_$(Build.BuildId)",
+            ado_identifier_suffix(&def.name)
+        ),
+        condition: Some(Condition::Always),
+    }));
 
     let custom_pool = if def.reviewed {
         cfg.pools.safe_outputs_reviewed.clone()
@@ -1904,6 +1754,7 @@ fn prepare_custom_executor_binary_step() -> BashStep {
 fn write_custom_scripts_config_step(
     def: &CustomSafeOutputJobDef,
     entrypoint: &str,
+    timeout_minutes: u32,
     cwd: &str,
     config_path: &str,
 ) -> Result<BashStep> {
@@ -1916,12 +1767,14 @@ fn write_custom_scripts_config_step(
         "cwd".to_string(),
         serde_json::Value::String(cwd.to_string()),
     );
-    if let Some(max) = def.max {
-        tool.insert(
-            "max".to_string(),
-            serde_json::Value::Number(serde_json::Number::from(max)),
-        );
-    }
+    tool.insert(
+        "max".to_string(),
+        serde_json::Value::Number(serde_json::Number::from(def.max)),
+    );
+    tool.insert(
+        "timeout_minutes".to_string(),
+        serde_json::Value::Number(serde_json::Number::from(timeout_minutes)),
+    );
     let mut tools = serde_json::Map::new();
     tools.insert(def.name.clone(), serde_json::Value::Object(tool));
     let mut root = serde_json::Map::new();
@@ -1945,28 +1798,31 @@ fn write_custom_scripts_config_step(
 fn custom_scripts_execute_step(
     source_path: &str,
     config_path: &str,
-    env: &[(String, String)],
+    def: &CustomSafeOutputJobDef,
 ) -> BashStep {
+    let provenance_args = custom_provenance_args(def);
     let script = format!(
         "# shellcheck disable=SC2016 # ADO expands path macros before bash evaluates the single-quoted arguments.\n\
-         /tmp/awf-tools/ado-aw execute --source {source} --safe-output-dir \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)\" --custom-config {config}\n",
+         /tmp/awf-tools/ado-aw execute --source {source} --safe-output-dir \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)\" --custom-config {config}{provenance_args}\n",
         source = shell_quote(source_path),
-        config = shell_quote(config_path)
+        config = shell_quote(config_path),
     );
-    with_custom_secret_env(bash("Execute custom safe output", script), env)
+    with_custom_secret_env(bash("Execute custom safe output", script), &def.env)
 }
 
 fn custom_jobs_pre_step(
     source_path: &str,
     tool: &str,
+    max: usize,
     proposals_path: &str,
     env: &[(String, String)],
 ) -> BashStep {
     let script = format!(
         "# shellcheck disable=SC2016 # ADO expands path macros before bash evaluates the single-quoted arguments.\n\
-         /tmp/awf-tools/ado-aw execute --source {source} --safe-output-dir \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)\" --custom-phase pre --tool {tool} --proposals-out {proposals}\n",
+         /tmp/awf-tools/ado-aw execute --source {source} --safe-output-dir \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)\" --custom-phase pre --tool {tool} --max {max} --proposals-out {proposals}\n",
         source = shell_quote(source_path),
         tool = shell_quote(tool),
+        max = max,
         proposals = shell_quote(proposals_path)
     );
     with_custom_secret_env(bash("Prepare custom safe-output proposals", script), env)
@@ -1978,29 +1834,16 @@ fn custom_jobs_post_step(
     proposals_path: &str,
     results_path: &str,
 ) -> BashStep {
-    let mut provenance_args = String::new();
-    if let Some(component) = &def.component {
-        provenance_args.push_str(&format!(
-            " --component-sha {} --component-source {}",
-            shell_quote(&component.sha),
-            shell_quote(&component.source)
-        ));
-        if let Some(digest) = &component.manifest_digest {
-            provenance_args.push_str(&format!(" --manifest-digest {}", shell_quote(digest)));
-        }
-    }
-    provenance_args.push_str(&format!(
-        " --schema-digest {}",
-        shell_quote(&def.schema_digest)
-    ));
+    let provenance_args = custom_provenance_args(def);
     let script = format!(
         "# shellcheck disable=SC2016 # ADO expands path macros before bash evaluates the single-quoted arguments.\n\
-         /tmp/awf-tools/ado-aw execute --source {source} --safe-output-dir \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)\" --custom-phase post --tool {tool} --results-in {results}{provenance_args}\n",
+         /tmp/awf-tools/ado-aw execute --source {source} --safe-output-dir \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)\" --custom-phase post --tool {tool} --max {max} --results-in {results}{provenance_args}\n",
         source = shell_quote(source_path),
         tool = shell_quote(&def.name),
+        max = def.max,
         results = shell_quote(results_path)
     );
-    with_custom_secret_env(
+    let step = with_custom_secret_env(
         bash("Finalize custom safe-output results", script)
             .with_env(
                 "ADO_AW_SAFE_OUTPUT_PROPOSALS",
@@ -2011,7 +1854,30 @@ fn custom_jobs_post_step(
                 EnvValue::literal(results_path.to_string()),
             ),
         &def.env,
-    )
+    );
+    BashStep {
+        condition: Some(Condition::Always),
+        ..step
+    }
+}
+
+fn custom_provenance_args(def: &CustomSafeOutputJobDef) -> String {
+    let mut provenance_args = String::new();
+    if let Some(component) = &def.component {
+        provenance_args.push_str(&format!(
+            " --component-sha {} --component-source {}",
+            shell_quote(component.sha.as_str()),
+            shell_quote(&component.source)
+        ));
+        if let Some(digest) = &component.manifest_digest {
+            provenance_args.push_str(&format!(" --manifest-digest {}", shell_quote(digest)));
+        }
+    }
+    provenance_args.push_str(&format!(
+        " --schema-digest {}",
+        shell_quote(&def.schema_digest)
+    ));
+    provenance_args
 }
 
 fn with_custom_secret_env(mut step: BashStep, env: &[(String, String)]) -> BashStep {
@@ -3249,8 +3115,7 @@ fn prepare_mcpg_config_step(
     // the surrounding `cat`/`echo` lines (no extra leading indent) so the
     // emitted block-scalar bash body matches base.yml.
     let custom_tools_script = if let Some(custom_tools_json) = custom_tools_json {
-        let sentinel =
-            super::common::heredoc_sentinel("CUSTOM_TOOLS_JSON_EOF", custom_tools_json)?;
+        let sentinel = super::common::heredoc_sentinel("CUSTOM_TOOLS_JSON_EOF", custom_tools_json)?;
         format!(
             "# Write compiler-generated dynamic SafeOutputs tool definitions\n\
              cat > \"$(Agent.TempDirectory)/staging/custom-tools.json\" << '{sentinel}'\n\
@@ -4815,6 +4680,7 @@ safe-outputs:
     notify-team:
       run: node notify.js
       max: 2
+      timeout-minutes: 7
       component-source: octo/tools/components/notify.md
       component-sha: 0123456789012345678901234567890123456789
       manifest-digest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -4866,10 +4732,18 @@ safe-outputs:
                 && !s.script.contains("checkout-component.js"))
         }));
         assert!(custom.steps.iter().any(|step| {
-            matches!(step, Step::Bash(s) if s.script.contains("\"notify-team\"") && s.script.contains("\"entrypoint\": \"node notify.js\"") && s.script.contains("\"max\": 2"))
+            matches!(step, Step::Bash(s) if s.script.contains("\"notify-team\"")
+                && s.script.contains("\"entrypoint\": \"node notify.js\"")
+                && s.script.contains("\"max\": 2")
+                && s.script.contains("\"timeout_minutes\": 7"))
         }));
         assert!(custom.steps.iter().any(|step| {
-            matches!(step, Step::Bash(s) if s.script.contains("--custom-config"))
+            matches!(step, Step::Bash(s)
+                if s.script.contains("--custom-config")
+                    && s.script.contains("--component-sha '0123456789012345678901234567890123456789'")
+                    && s.script.contains("--component-source 'octo/tools/components/notify.md'")
+                    && s.script.contains("--manifest-digest 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'")
+                    && s.script.contains("--schema-digest"))
                 && step_env_has_secret(step, "API_TOKEN", "NOTIFY_TOKEN")
         }));
         let safeoutputs = job_by_id(&jobs, "SafeOutputs");
@@ -4888,6 +4762,53 @@ safe-outputs:
             "API_TOKEN",
             "NOTIFY_TOKEN"
         )));
+        assert!(custom.steps.iter().any(|step| {
+            matches!(
+                step,
+                Step::Publish(PublishStep {
+                    artifact,
+                    condition: Some(Condition::Always),
+                    ..
+                }) if artifact == "custom_safe_output_notify_team_$(Build.BuildId)"
+            )
+        }));
+    }
+
+    #[test]
+    fn external_component_checkout_reuses_persisted_endpoint_credentials() {
+        let jobs = canonical_jobs_for(
+            r#"
+name: Test
+description: Test
+safe-outputs:
+  scripts:
+    notify-team:
+      run: node notify.js
+      component-source: octo/tools/components/notify.md
+      component-sha: 0123456789012345678901234567890123456789
+      component-repo-type: github
+      component-endpoint: gh-shared-conn
+"#,
+        );
+        let custom = job_by_id(&jobs, "Custom_notify_team");
+        assert!(custom.steps.iter().any(|step| {
+            matches!(
+                step,
+                Step::Checkout(CheckoutStep {
+                    repository: CheckoutRepo::Named(_),
+                    persist_credentials: Some(true),
+                    ..
+                })
+            )
+        }));
+        assert!(custom.steps.iter().any(|step| {
+            matches!(
+                step,
+                Step::Bash(step)
+                    if step.display_name == "Checkout pinned custom component"
+                        && !step.env.contains_key("SYSTEM_ACCESSTOKEN")
+            )
+        }));
     }
 
     #[test]
@@ -4899,6 +4820,7 @@ description: Test
 safe-outputs:
   jobs:
     deploy-thing:
+      max: 1
       steps:
         - bash: echo deploy
           displayName: Component deploy
@@ -4925,6 +4847,16 @@ safe-outputs:
             )
             .unwrap();
         assert!(pre < component && component < post);
+        assert!(matches!(
+            &custom.steps[pre],
+            Step::Bash(step) if step.script.contains("--max 1")
+        ));
+        assert!(matches!(
+            &custom.steps[post],
+            Step::Bash(step)
+                if step.script.contains("--max 1")
+                    && step.condition == Some(Condition::Always)
+        ));
     }
 
     #[test]

@@ -41,24 +41,37 @@ pub trait ManifestFetcher: Send + Sync {
 /// GitHub Contents API-backed manifest fetcher using the author's `gh` auth.
 ///
 /// Handles both GitHub.com ([`ImportEndpoint::GitHub`]) and GitHub Enterprise
-/// ([`ImportEndpoint::GitHubEnterprise`]) sources; for GHE the target API host
-/// is passed to `gh` via the `GH_HOST` environment variable.
+/// ([`ImportEndpoint::GitHubEnterprise`]) sources; for GHE the target server
+/// host is passed to `gh` via the `GH_HOST` environment variable.
 pub struct GhCliFetcher;
+
+fn github_contents_api_route(owner: &str, repo: &str, path: &str, reference: &str) -> String {
+    let encoded_path = path
+        .split('/')
+        .map(|segment| {
+            percent_encoding::utf8_percent_encode(segment, crate::ado::PATH_SEGMENT).to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+
+    format!(
+        "repos/{}/{}/contents/{}?ref={}",
+        percent_encoding::utf8_percent_encode(owner, crate::ado::PATH_SEGMENT),
+        percent_encoding::utf8_percent_encode(repo, crate::ado::PATH_SEGMENT),
+        encoded_path,
+        percent_encoding::utf8_percent_encode(reference, crate::ado::QUERY_VALUE)
+    )
+}
 
 #[async_trait]
 impl ManifestFetcher for GhCliFetcher {
     async fn fetch(&self, spec: &ParsedImportSpec) -> Result<Vec<u8>> {
-        let route = format!(
-            "repos/{}/{}/contents/{}?ref={}",
-            spec.owner,
-            spec.repo,
-            spec.path,
-            spec.sha.as_str()
-        );
+        let route =
+            github_contents_api_route(&spec.owner, &spec.repo, &spec.path, spec.sha.as_str());
 
         let mut command = tokio::process::Command::new("gh");
         command.args(["api", &route]);
-        // GitHub Enterprise: target the configured API host. `GH_HOST` makes
+        // GitHub Enterprise: target the configured server host. `GH_HOST` makes
         // `gh api` resolve the relative route against that instance.
         if let Some(ImportEndpoint::GitHubEnterprise { host, .. }) = &spec.endpoint {
             command.env("GH_HOST", host.as_str());
@@ -200,8 +213,9 @@ impl ManifestFetcher for AdoRepoFetcher {
     async fn fetch(&self, spec: &ParsedImportSpec) -> Result<Vec<u8>> {
         // Fail-closed BEFORE any lazy org/auth resolution: a GitHub/GHE-typed
         // import must never reach the Azure Repos fetcher.
-        if let Some(other @ (ImportEndpoint::GitHub { .. } | ImportEndpoint::GitHubEnterprise { .. })) =
-            &spec.endpoint
+        if let Some(
+            other @ (ImportEndpoint::GitHub { .. } | ImportEndpoint::GitHubEnterprise { .. }),
+        ) = &spec.endpoint
         {
             anyhow::bail!(
                 "internal routing error: Azure Repos fetcher received a {:?} import",
@@ -436,16 +450,15 @@ async fn resolve_one(
 }
 
 fn resolve_local_path(base_dir: &Path, import_path: &str) -> Result<PathBuf> {
-    let path = Path::new(import_path);
-    if path.is_absolute() {
+    let normalized = import_path.strip_prefix("./").unwrap_or(import_path);
+    let path = Path::new(normalized);
+    if Path::new(import_path).is_absolute() || path.is_absolute() {
         anyhow::bail!("local import path must be relative, got `{}`", import_path);
     }
-    // Reject path-traversal: a `..`/`.` segment (or a backslash) would let a
-    // local import escape the workflow directory and read arbitrary files at
-    // compile time. Mirrors the guard `validate_import_path_segments` applies to
-    // remote import paths.
-    if import_path.contains('\\')
-        || import_path
+    // Accept one documented leading `./`, then reject any remaining
+    // path-traversal or ambiguous segments before joining.
+    if normalized.contains('\\')
+        || normalized
             .split('/')
             .any(|segment| segment.is_empty() || segment == "." || segment == "..")
     {
@@ -474,16 +487,27 @@ async fn read_remote_manifest(
         // in diffs (`linguist-generated`) — before the manifest is trusted at
         // compile time. A missing sidecar (older cache) is tolerated.
         let sidecar = digest_sidecar_path(&cache_path);
-        if let Ok(expected) = fs::read_to_string(&sidecar) {
-            let actual = sha256_hex(&bytes);
-            if actual != expected.trim() {
-                anyhow::bail!(
-                    "cached import {} does not match its recorded digest (expected {}, got {}); \
-                     the committed cache may have been tampered with — delete it to re-fetch",
-                    cache_path.display(),
-                    expected.trim(),
-                    actual
-                );
+        match fs::read_to_string(&sidecar) {
+            Ok(expected) => {
+                let actual = sha256_hex(&bytes);
+                if actual != expected.trim() {
+                    anyhow::bail!(
+                        "cached import {} does not match its recorded digest (expected {}, got {}); \
+                         the committed cache may have been tampered with — delete it to re-fetch",
+                        cache_path.display(),
+                        expected.trim(),
+                        actual
+                    );
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "failed to read import cache digest sidecar {}",
+                        sidecar.display()
+                    )
+                });
             }
         }
         return Ok(bytes);
@@ -680,7 +704,10 @@ fn extract_markdown_section(body: &str, section: &str) -> Result<String> {
     let start_level = markdown_heading(lines[start])
         .map(|(level, _)| level)
         .ok_or_else(|| {
-            anyhow::anyhow!("import section `{}` heading could not be re-parsed", section)
+            anyhow::anyhow!(
+                "import section `{}` heading could not be re-parsed",
+                section
+            )
         })?;
 
     let end = lines
@@ -781,6 +808,26 @@ mod tests {
         b"---\nimport-schema:\n  region:\n    type: string\n---\n# Imported\nBody\n"
     }
 
+    #[test]
+    fn github_contents_route_encodes_segments_and_ref_without_encoding_path_separators() {
+        let route = github_contents_api_route(
+            "octo space%+?:@!\u{e9}",
+            "repo name%+/#",
+            "dir one/100%+?:@!\u{e9}&=.md",
+            "feature/name % +&=?#\u{e9}",
+        );
+
+        assert_eq!(
+            route,
+            concat!(
+                "repos/octo%20space%25+%3F%3A%40%21%C3%A9/",
+                "repo%20name%25+%2F%23/contents/",
+                "dir%20one/100%25+%3F%3A%40%21%C3%A9&=.md",
+                "?ref=feature%2Fname%20%25%20%2B%26%3D%3F%23%C3%A9"
+            )
+        );
+    }
+
     #[tokio::test]
     async fn local_import_resolves_front_matter_body_and_provenance() {
         let repo = tempfile::tempdir().unwrap();
@@ -810,6 +857,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_import_accepts_one_leading_dot_slash() {
+        let repo = tempfile::tempdir().unwrap();
+        fs::write(repo.path().join("component.md"), manifest()).unwrap();
+
+        let resolved = resolve_imports_with_repo_root(
+            &[import_entry("./component.md")],
+            repo.path(),
+            repo.path(),
+            &PanicFetcher,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resolved[0].body, "# Imported\nBody");
+    }
+
+    #[tokio::test]
     async fn remote_import_fetches_writes_cache_attributes_and_records_digest() {
         let repo = tempfile::tempdir().unwrap();
         let entry = import_entry(&format!("acme/shared/components/deploy.md@{SHA}"));
@@ -817,10 +881,9 @@ mod tests {
             bytes: manifest().to_vec(),
         };
 
-        let resolved =
-            resolve_imports_with_repo_root(&[entry], repo.path(), repo.path(), &fetcher)
-                .await
-                .unwrap();
+        let resolved = resolve_imports_with_repo_root(&[entry], repo.path(), repo.path(), &fetcher)
+            .await
+            .unwrap();
 
         let cache_file = repo
             .path()
@@ -853,7 +916,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_import_uses_cache_before_fetching() {
+    async fn remote_import_uses_cache_without_digest_sidecar_for_backward_compatibility() {
         let repo = tempfile::tempdir().unwrap();
         let entry = import_entry(&format!("acme/shared/components/deploy.md@{SHA}"));
         let cache_dir = repo
@@ -873,6 +936,35 @@ mod tests {
 
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].body, "# Imported\nBody");
+    }
+
+    #[tokio::test]
+    async fn cached_import_rejects_unreadable_digest_sidecar() {
+        let repo = tempfile::tempdir().unwrap();
+        let entry = import_entry(&format!("acme/shared/components/deploy.md@{SHA}"));
+        let cache_file = repo
+            .path()
+            .join(".ado-aw")
+            .join("imports")
+            .join("acme")
+            .join("shared")
+            .join(SHA)
+            .join("components")
+            .join("deploy.md");
+        fs::create_dir_all(cache_file.parent().unwrap()).unwrap();
+        fs::write(&cache_file, manifest()).unwrap();
+        let sidecar = digest_sidecar_path(&cache_file);
+        fs::create_dir(&sidecar).unwrap();
+
+        let err = resolve_imports_with_repo_root(&[entry], repo.path(), repo.path(), &PanicFetcher)
+            .await
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("failed to read import cache digest sidecar"),
+            "got: {msg}"
+        );
+        assert!(msg.contains(&sidecar.display().to_string()), "got: {msg}");
     }
 
     #[tokio::test]
@@ -962,9 +1054,14 @@ mod tests {
             bytes: manifest().to_vec(),
         };
         // First resolve populates the cache + digest sidecar.
-        resolve_imports_with_repo_root(std::slice::from_ref(&entry), repo.path(), repo.path(), &fetcher)
-            .await
-            .unwrap();
+        resolve_imports_with_repo_root(
+            std::slice::from_ref(&entry),
+            repo.path(),
+            repo.path(),
+            &fetcher,
+        )
+        .await
+        .unwrap();
 
         // Tamper with the committed cache file (sidecar still records the
         // original digest).
@@ -979,10 +1076,9 @@ mod tests {
             .join("deploy.md");
         fs::write(&cache_file, b"---\n{}\n---\n# Tampered\nevil\n").unwrap();
 
-        let err =
-            resolve_imports_with_repo_root(&[entry], repo.path(), repo.path(), &PanicFetcher)
-                .await
-                .unwrap_err();
+        let err = resolve_imports_with_repo_root(&[entry], repo.path(), repo.path(), &PanicFetcher)
+            .await
+            .unwrap_err();
         assert!(
             format!("{err:#}").contains("does not match its recorded digest"),
             "got: {err:#}"
@@ -1042,7 +1138,16 @@ mod tests {
     #[tokio::test]
     async fn local_import_rejects_path_traversal() {
         let repo = tempfile::tempdir().unwrap();
-        for spec in ["../secret.md", "../../etc/passwd.md", "a/../../b.md", "./x.md"] {
+        for spec in [
+            "././x",
+            "a/./b",
+            "../x",
+            "./../x",
+            "../../etc/passwd.md",
+            "a/../../b.md",
+            "a//b",
+            r"a\b",
+        ] {
             let err = resolve_imports_with_repo_root(
                 &[import_entry(spec)],
                 repo.path(),
@@ -1056,6 +1161,18 @@ mod tests {
                 "spec `{spec}` should be rejected as traversal, got: {err:#}"
             );
         }
+    }
+
+    #[test]
+    fn local_import_rejects_absolute_path() {
+        let repo = tempfile::tempdir().unwrap();
+        let absolute = repo.path().join("component.md");
+        let err = resolve_local_path(repo.path(), &absolute.to_string_lossy()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("local import path must be relative"),
+            "got: {err:#}"
+        );
     }
 
     #[tokio::test]
@@ -1098,7 +1215,8 @@ mod tests {
         assert_eq!(
             route_endpoint(&Some(ImportEndpoint::AzureReposCrossOrg {
                 name: "conn".to_string(),
-                org: "https://dev.azure.com/other".to_string(),
+                org: crate::secure::AzureDevOpsOrgUrl::parse("https://dev.azure.com/other",)
+                    .unwrap(),
             })),
             FetcherKind::AzureRepos
         );
@@ -1115,7 +1233,7 @@ mod tests {
         assert_eq!(
             route_endpoint(&Some(ImportEndpoint::GitHubEnterprise {
                 name: "ghe-conn".to_string(),
-                host: HostName::parse("api.acme.ghe.com").unwrap(),
+                host: HostName::parse("ghe.acme.com").unwrap(),
             })),
             FetcherKind::GitHub
         );

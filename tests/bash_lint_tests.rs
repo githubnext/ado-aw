@@ -193,6 +193,30 @@ fn compile_fixture_with_flags(
     let src = fixtures_dir().join(fixture);
     let dest = workspace.join(fixture);
     std::fs::copy(&src, &dest).unwrap_or_else(|e| panic!("copy fixture {fixture}: {e}"));
+    if fixture == "custom-safe-output-bash-coverage.md" {
+        let cached_component = workspace
+            .join(".ado-aw")
+            .join("imports")
+            .join("AgentPlayground")
+            .join("ado-aw-e2e-fixture")
+            .join("aa711dd17c4dfcde492b2bfad62e5fb1baad71f6")
+            .join("components")
+            .join("custom-build-tags")
+            .join("component.md");
+        std::fs::create_dir_all(cached_component.parent().unwrap())
+            .expect("create custom component cache directory");
+        std::fs::copy(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join("compiler-smoke-e2e")
+                .join("component-fixture")
+                .join("components")
+                .join("custom-build-tags")
+                .join("component.md"),
+            &cached_component,
+        )
+        .expect("copy custom component cache manifest");
+    }
 
     let mut args = vec!["compile", dest.to_str().unwrap()];
     args.extend_from_slice(extra_flags);

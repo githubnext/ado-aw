@@ -13,21 +13,24 @@
  * SHA-pinning: the pinned revision must actually run, reproducibly, regardless
  * of where `main` has since moved.
  *
- * This bundle runs as a **credentialed step in the isolated custom
- * safe-output job** (using `$(System.AccessToken)`). It obtains the pinned
- * commit object — first via a direct `git fetch origin <sha>` (supported by
- * GitHub, GitHub Enterprise, and Azure Repos), then, if the server refuses a
- * by-SHA fetch, by progressively deepening the checked-out branch until the
- * object is present — then checks it out detached and **verifies HEAD equals
- * the pin, failing closed** on any mismatch or unrecoverable fetch.
+ * This bundle runs in the isolated custom safe-output job. Same-org Azure
+ * Repos receives `$(System.AccessToken)`; GitHub/GHE and cross-org Azure Repos
+ * reuse credentials persisted by the repository-resource checkout. It obtains
+ * the pinned commit object — first via a direct `git fetch origin <sha>`, then,
+ * if the server refuses a by-SHA fetch, by progressively deepening the checked
+ * out branch until the object is present — then checks it out detached and
+ * **verifies HEAD equals the pin, failing closed** on any mismatch or
+ * unrecoverable fetch.
  *
  * ## Trust boundary
  *
- * Mirrors the other credentialed bundles: the bearer (`SYSTEM_ACCESSTOKEN`) is
- * passed to the spawned `git` child via `GIT_CONFIG_*` env vars (see
- * `shared/git.ts::bearerEnv`) — never in argv, never written to `.git/config`.
- * The compiler-owned, non-secret `--dir` / `--sha` are argv flags (immune to
- * ADO pipeline-variable shadowing).
+ * When present, the bearer (`SYSTEM_ACCESSTOKEN`) is passed to the spawned
+ * `git` child via `GIT_CONFIG_*` env vars (see `shared/git.ts::bearerEnv`) —
+ * never in argv and never written to `.git/config`. When absent, Git uses the
+ * checkout's persisted provider credentials, then removes every persisted
+ * `http.*.extraheader` before component code runs. The compiler-owned,
+ * non-secret `--dir` / `--sha` are argv flags (immune to ADO variable
+ * shadowing).
  *
  * ## Posture — FAIL CLOSED
  *
@@ -37,7 +40,7 @@
  * the pipeline — fails rather than running an unverified revision.
  *
  *   Invocation: node checkout-component.js --dir <checkout-dir> --sha <40-hex>
- *               env: SYSTEM_ACCESSTOKEN (bearer for the git fetch)
+ *               env: SYSTEM_ACCESSTOKEN (same-org Azure Repos only)
  */
 import {
   bearerEnv,
@@ -120,6 +123,33 @@ function ensureShaFetched(
   return false;
 }
 
+function clearPersistedAuth(runners: GitRunners): boolean {
+  const listed = runners.runGit([
+    "config",
+    "--local",
+    "--name-only",
+    "--get-regexp",
+    "^(http\\..*\\.extraheader|http(\\..*)?\\.proxy|credential\\..*)$",
+  ]);
+  // `git config --get-regexp` exits 1 when there are no matching keys (for
+  // example a public repository), which is already a clean state.
+  if (listed.status !== 0 && listed.status !== 1) {
+    return false;
+  }
+  const keys = [
+    ...new Set(
+      listed.stdout
+        .split(/\r?\n/)
+        .map((key) => key.trim())
+        .filter((key) => key.length > 0),
+    ),
+  ];
+  return keys.every(
+    (key) =>
+      runners.runGit(["config", "--local", "--unset-all", key]).status === 0,
+  );
+}
+
 export function main(
   args: CheckoutArgs,
   env: NodeJS.ProcessEnv = process.env,
@@ -151,6 +181,7 @@ export function main(
   }
 
   const fetchEnv = bearerEnv(env.SYSTEM_ACCESSTOKEN);
+  const usingPersistedAuth = fetchEnv.GIT_CONFIG_COUNT === undefined;
 
   if (!ensureShaFetched(sha, fetchEnv, runners)) {
     process.stderr.write(
@@ -172,6 +203,12 @@ export function main(
   if (actual.toLowerCase() !== sha.toLowerCase()) {
     process.stderr.write(
       `[checkout-component] error: checkout resolved '${actual}', expected pinned '${sha}' in '${dir}'.\n`,
+    );
+    return 1;
+  }
+  if (usingPersistedAuth && !clearPersistedAuth(runners)) {
+    process.stderr.write(
+      `[checkout-component] error: could not remove persisted repository credentials in '${dir}'.\n`,
     );
     return 1;
   }
