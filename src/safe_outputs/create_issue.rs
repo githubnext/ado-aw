@@ -311,6 +311,11 @@ impl Executor for CreateIssueResult {
                  safe-outputs.create-issue.require-temporary-id is true",
             ));
         }
+        let target_repo = match resolve_target_repo(config.target_repo.as_deref(), ctx) {
+            Ok(target) => target,
+            Err(result) => return Ok(result),
+        };
+        debug!("create-issue: target-repo={target_repo}");
         if let Some(temporary_id) = &self.temporary_id
             && ctx.has_resolved_github_issue(temporary_id)?
         {
@@ -319,11 +324,6 @@ impl Executor for CreateIssueResult {
                 temporary_id.canonical()
             )));
         }
-        let target_repo = match resolve_target_repo(config.target_repo.as_deref(), ctx) {
-            Ok(target) => target,
-            Err(result) => return Ok(result),
-        };
-        debug!("create-issue: target-repo={target_repo}");
 
         // Validate agent-supplied labels against allowed-labels.
         // Default-deny semantics: an empty list means NO agent labels are
@@ -704,6 +704,32 @@ mod tests {
         let exec = result.execute_sanitized(&ctx).await.unwrap();
         assert!(!exec.success);
         assert!(exec.message.contains("requires temporary_id"));
+    }
+
+    #[tokio::test]
+    async fn target_configuration_error_precedes_duplicate_temporary_id() {
+        let temporary_id = GithubTemporaryId::parse("#aw_dup1").unwrap();
+        let mut params = valid_params();
+        params.temporary_id = Some(temporary_id.clone());
+        let mut result: CreateIssueResult = params.try_into().unwrap();
+        let ctx = ctx_with_config(
+            serde_json::json!({"require-temporary-id": true}),
+            Some("token".to_string()),
+        );
+        ctx.register_resolved_github_issue(
+            &temporary_id,
+            crate::safe_outputs::ResolvedGithubIssue {
+                repository: "octo/repo".to_string(),
+                number: 1,
+                url: "https://github.com/octo/repo/issues/1".to_string(),
+            },
+        )
+        .unwrap();
+
+        let exec = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!exec.success);
+        assert!(exec.message.contains("target-repo is required"));
+        assert!(!exec.message.contains("already used"));
     }
 
     #[tokio::test]

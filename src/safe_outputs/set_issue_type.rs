@@ -15,11 +15,58 @@ use crate::tool_result;
 use crate::validate::reject_pipeline_injection;
 use ado_aw_derive::SanitizeConfig;
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
 pub enum GithubIssueNumber {
     Number(u64),
     Temporary(GithubTemporaryId),
+}
+
+impl<'de> Deserialize<'de> for GithubIssueNumber {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct IssueNumberVisitor;
+
+        impl serde::de::Visitor<'_> for IssueNumberVisitor {
+            type Value = GithubIssueNumber;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a positive issue number or #aw_ temporary issue ID")
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(GithubIssueNumber::Number(value))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                u64::try_from(value)
+                    .map(GithubIssueNumber::Number)
+                    .map_err(|_| E::custom("issue_number must be positive"))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if value.chars().all(|c| c.is_ascii_digit()) {
+                    return value
+                        .parse::<u64>()
+                        .map(GithubIssueNumber::Number)
+                        .map_err(|_| E::custom("quoted issue_number is outside the u64 range"));
+                }
+                GithubTemporaryId::parse(value)
+                    .map(GithubIssueNumber::Temporary)
+                    .map_err(E::custom)
+            }
+        }
+
+        deserializer.deserialize_any(IssueNumberVisitor)
+    }
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -259,6 +306,19 @@ mod tests {
         }
         .validate();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn quoted_numeric_issue_number_deserializes_as_number() {
+        let params: SetIssueTypeParams = serde_json::from_value(serde_json::json!({
+            "issue_number": "42",
+            "issue_type": "Bug"
+        }))
+        .unwrap();
+        assert!(matches!(
+            params.issue_number,
+            GithubIssueNumber::Number(42)
+        ));
     }
 
     #[tokio::test]
