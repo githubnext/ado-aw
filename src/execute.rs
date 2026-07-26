@@ -1012,7 +1012,12 @@ mod tests {
         let ctx = ExecutionContext::default();
 
         let result = execute_safe_output(&entry, &ctx).await;
-        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Failed to parse create-work-item"),
+            "got: {msg}"
+        );
+        assert!(msg.contains("missing field"), "got: {msg}");
     }
 
     #[tokio::test]
@@ -1031,8 +1036,12 @@ mod tests {
         let entry = serde_json::json!({"name": "update-wiki-page"});
         let ctx = ExecutionContext::default();
 
-        let result = execute_safe_output(&entry, &ctx).await;
-        assert!(result.is_err());
+        let msg = execute_safe_output(&entry, &ctx).await.unwrap_err().to_string();
+        assert!(
+            msg.contains("Failed to parse update-wiki-page"),
+            "got: {msg}"
+        );
+        assert!(msg.contains("missing field"), "got: {msg}");
     }
 
     #[tokio::test]
@@ -1077,8 +1086,12 @@ mod tests {
         let entry = serde_json::json!({"name": "create-wiki-page"});
         let ctx = ExecutionContext::default();
 
-        let result = execute_safe_output(&entry, &ctx).await;
-        assert!(result.is_err());
+        let msg = execute_safe_output(&entry, &ctx).await.unwrap_err().to_string();
+        assert!(
+            msg.contains("Failed to parse create-wiki-page"),
+            "got: {msg}"
+        );
+        assert!(msg.contains("missing field"), "got: {msg}");
     }
 
     #[tokio::test]
@@ -1087,8 +1100,12 @@ mod tests {
         let entry = serde_json::json!({"name": "upload-pipeline-artifact"});
         let ctx = ExecutionContext::default();
 
-        let result = execute_safe_output(&entry, &ctx).await;
-        assert!(result.is_err());
+        let msg = execute_safe_output(&entry, &ctx).await.unwrap_err().to_string();
+        assert!(
+            msg.contains("Failed to parse upload-pipeline-artifact"),
+            "got: {msg}"
+        );
+        assert!(msg.contains("missing field"), "got: {msg}");
     }
 
     #[tokio::test]
@@ -1133,8 +1150,12 @@ mod tests {
         let entry = serde_json::json!({"name": "comment-on-work-item"});
         let ctx = ExecutionContext::default();
 
-        let result = execute_safe_output(&entry, &ctx).await;
-        assert!(result.is_err());
+        let msg = execute_safe_output(&entry, &ctx).await.unwrap_err().to_string();
+        assert!(
+            msg.contains("Failed to parse comment-on-work-item"),
+            "got: {msg}"
+        );
+        assert!(msg.contains("missing field"), "got: {msg}");
     }
 
     #[tokio::test]
