@@ -674,6 +674,7 @@ ado-aw provides specialized prompt files that guide AI agents through common tas
 
 | Task | Prompt URL | Description |
 |------|-----------|-------------|
+| Shared policy | [prompt-contract.md](prompts/prompt-contract.md) | Canonical consent, side-effect, evidence, and stop-condition contract used by all prompts |
 | Create a workflow | [create-ado-agentic-workflow.md](prompts/create-ado-agentic-workflow.md) | Step-by-step guide for creating a new agentic workflow from scratch |
 | Update a workflow | [update-ado-agentic-workflow.md](prompts/update-ado-agentic-workflow.md) | Guide for modifying existing agent workflows |
 | Debug a workflow | [debug-ado-agentic-workflow.md](prompts/debug-ado-agentic-workflow.md) | Troubleshoot failing agentic workflows |
