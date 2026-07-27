@@ -91,7 +91,7 @@ safe-outputs:
 The job downloads the `safe_outputs` artifact, reads
 `safe-outputs-executed.ndjson`, checks upstream Agent / Detection /
 SafeOutputs job results, and then files or comments on Azure DevOps
-work items using `SYSTEM_ACCESSTOKEN`.
+work items using `SYSTEM_ACCESSTOKEN` (or `SC_WRITE_TOKEN` when a write service connection is configured).
 
 Per-tool config is passed from the compiler to `conclusion.js` as
 individual flat env vars per field (e.g. `AW_NOOP_TITLE_PREFIX`,
