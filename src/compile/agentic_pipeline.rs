@@ -1796,6 +1796,12 @@ fn build_conclusion_job(
         ),
     );
 
+    // Acquire write token (when configured): same-job minting is required because
+    // Azure Pipelines task.setvariable variables are job-scoped and NOT propagated
+    // to downstream jobs without isOutput=true + dependsOn mapping. The SafeOutputs
+    // job mints its own SC_WRITE_TOKEN copy; Conclusion must do the same.
+    push_raw_yaml_if_nonempty(&mut steps, &cfg.acquire_write_token)?;
+
     let mut download_artifact = TaskStep::new(
         "DownloadPipelineArtifact@2",
         "Download SafeOutputs artifact",
