@@ -8909,3 +8909,64 @@ fn test_smoke_failure_reporter_uses_registered_ado_names_and_staging_repo() {
         "front matter and prompt must agree on the staging issue repository"
     );
 }
+
+/// `runtimes: python: false` must emit no Python install or authenticate steps.
+///
+/// Guards against accidental `is_enabled()` logic inversion — if `Enabled(false)`
+/// were treated as enabled, `UsePythonVersion@0` and `PipAuthenticate@1` would
+/// appear in the compiled output.
+#[test]
+fn test_python_runtime_disabled_emits_no_python_steps() {
+    let compiled = compile_inline_agent(
+        "python-disabled",
+        r#"---
+name: "Python Disabled Agent"
+description: "Agent with python explicitly disabled"
+runtimes:
+  python: false
+safe-outputs:
+  noop: {}
+---
+
+## Python Disabled Agent
+"#,
+    );
+    assert!(
+        !compiled.contains("UsePythonVersion@0"),
+        "UsePythonVersion@0 must not appear when python: false\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("PipAuthenticate@1"),
+        "PipAuthenticate@1 must not appear when python: false\n{compiled}"
+    );
+}
+
+/// `runtimes: dotnet: false` must emit no .NET install or authenticate steps.
+///
+/// Guards against accidental `is_enabled()` logic inversion — if `Enabled(false)`
+/// were treated as enabled, `UseDotNet@2` and `NuGetAuthenticate@1` would appear.
+#[test]
+fn test_dotnet_runtime_disabled_emits_no_dotnet_steps() {
+    let compiled = compile_inline_agent(
+        "dotnet-disabled",
+        r#"---
+name: "Dotnet Disabled Agent"
+description: "Agent with dotnet explicitly disabled"
+runtimes:
+  dotnet: false
+safe-outputs:
+  noop: {}
+---
+
+## Dotnet Disabled Agent
+"#,
+    );
+    assert!(
+        !compiled.contains("UseDotNet@2"),
+        "UseDotNet@2 must not appear when dotnet: false\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("NuGetAuthenticate@1"),
+        "NuGetAuthenticate@1 must not appear when dotnet: false\n{compiled}"
+    );
+}
