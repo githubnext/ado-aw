@@ -1,6 +1,6 @@
-# Create an Azure DevOps Agentic Workflow (v2)
+# Create an Azure DevOps Agentic Workflow
 
-Apply `/home/runner/work/ado-aw/ado-aw/prompts/prompt-contract-v2.md` before executing this prompt.
+Apply `/home/runner/work/ado-aw/ado-aw/prompts/prompt-contract.md` before executing this prompt.
 
 ## Core
 

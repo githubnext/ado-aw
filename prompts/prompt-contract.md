@@ -1,4 +1,4 @@
-# Prompt Contract v2 (Shared)
+# Prompt Contract (Shared)
 
 This contract is the canonical behavior policy for all authoring prompts in `prompts/`.
 

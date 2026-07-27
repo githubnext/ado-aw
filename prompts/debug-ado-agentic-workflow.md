@@ -1,6 +1,6 @@
-# Debug an Azure DevOps Agentic Pipeline (v2)
+# Debug an Azure DevOps Agentic Pipeline
 
-Apply `/home/runner/work/ado-aw/ado-aw/prompts/prompt-contract-v2.md` before executing this prompt.
+Apply `/home/runner/work/ado-aw/ado-aw/prompts/prompt-contract.md` before executing this prompt.
 
 ## Core
 

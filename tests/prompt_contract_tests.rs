@@ -10,8 +10,8 @@ fn read(rel: &str) -> String {
 }
 
 #[test]
-fn prompts_reference_shared_contract_v2() {
-    let shared = repo_path("prompts/prompt-contract-v2.md");
+fn prompts_reference_shared_contract() {
+    let shared = repo_path("prompts/prompt-contract.md");
     assert!(shared.exists(), "shared prompt contract must exist");
 
     for rel in [
@@ -21,7 +21,7 @@ fn prompts_reference_shared_contract_v2() {
     ] {
         let content = read(rel);
         assert!(
-            content.contains("prompts/prompt-contract-v2.md"),
+            content.contains("prompts/prompt-contract.md"),
             "{rel} must reference shared contract"
         );
     }

@@ -247,7 +247,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │       └── scripts/      # doctor.{sh,ps1} prerequisite checks
 ├── examples/             # Example agent definitions
 ├── prompts/              # AI agent prompt files for workflow authoring tasks
-│   ├── prompt-contract-v2.md # Shared confirmation/side-effect/evidence contract reused by prompts
+│   ├── prompt-contract.md # Shared confirmation/side-effect/evidence contract reused by prompts
 │   ├── create-ado-agentic-workflow.md # Step-by-step guide for creating a new agentic workflow
 │   ├── update-ado-agentic-workflow.md # Guide for modifying an existing agentic workflow
 │   └── debug-ado-agentic-workflow.md  # Guide for troubleshooting a failing agentic workflow (report-first; consent-gated filing)
@@ -296,7 +296,7 @@ index to jump to the right page.
 
 ### Prompt files for workflow authoring
 
-- [`prompts/prompt-contract-v2.md`](prompts/prompt-contract-v2.md) — shared
+- [`prompts/prompt-contract.md`](prompts/prompt-contract.md) — shared
   behavior contract (confirmation policy, side-effect gates, evidence standards, stop conditions).
 - [`prompts/create-ado-agentic-workflow.md`](prompts/create-ado-agentic-workflow.md) — step-by-step
   guide for creating a new agentic workflow from scratch (interactive and non-interactive modes).
