@@ -1,6 +1,6 @@
 # Debug an Azure DevOps Agentic Pipeline
 
-Apply `/home/runner/work/ado-aw/ado-aw/prompts/prompt-contract.md` before executing this prompt.
+Apply the shared prompt contract before executing this prompt: https://raw.githubusercontent.com/githubnext/ado-aw/main/prompts/prompt-contract.md
 
 ## Core
 
@@ -80,7 +80,7 @@ If consent is absent, end with report + ready-to-file issue draft.
 - Filing is complete only when explicitly approved and URL is returned.
 
 ## References
-- `/home/runner/work/ado-aw/ado-aw/docs/audit.md`
-- `/home/runner/work/ado-aw/ado-aw/docs/ir.md`
-- `/home/runner/work/ado-aw/ado-aw/docs/mcp-author.md`
-- `/home/runner/work/ado-aw/ado-aw/docs/safe-outputs.md`
+- https://raw.githubusercontent.com/githubnext/ado-aw/main/docs/audit.md
+- https://raw.githubusercontent.com/githubnext/ado-aw/main/docs/ir.md
+- https://raw.githubusercontent.com/githubnext/ado-aw/main/docs/mcp-author.md
+- https://raw.githubusercontent.com/githubnext/ado-aw/main/docs/safe-outputs.md
