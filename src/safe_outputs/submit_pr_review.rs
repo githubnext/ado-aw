@@ -123,6 +123,211 @@ pub struct SubmitPrReviewConfig {
     pub allowed_repositories: Vec<String>,
 }
 
+/// Fetches the authenticated user's ID from the ADO connection data endpoint.
+/// Returns `Ok(Err(ExecutionResult::failure(...)))` on HTTP errors, `Ok(Ok(user_id))` on success.
+async fn fetch_authenticated_user_id(
+    client: &reqwest::Client,
+    org_url: &str,
+    token: &str,
+) -> anyhow::Result<Result<String, ExecutionResult>> {
+    let connection_url = format!("{}/_apis/connectiondata", org_url.trim_end_matches('/'));
+    debug!("Connection data URL: {}", connection_url);
+
+    let response = client
+        .get(&connection_url)
+        .basic_auth("", Some(token))
+        .send()
+        .await
+        .context("Failed to fetch connection data")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        return Ok(Err(ExecutionResult::failure(format!(
+            "Failed to fetch connection data (HTTP {}): {}",
+            status, error_body
+        ))));
+    }
+
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .context("Failed to parse connection data response")?;
+
+    let user_id = body
+        .get("authenticatedUser")
+        .and_then(|au| au.get("id"))
+        .and_then(|id| id.as_str())
+        .context("Connection data response missing authenticatedUser.id")?
+        .to_string();
+
+    debug!("Authenticated user ID: {}", user_id);
+    Ok(Ok(user_id))
+}
+
+/// Self-approval guard: returns `Some(failure)` when a positive vote targets a PR the
+/// authenticated user created; returns `None` when the vote is allowed to proceed.
+async fn check_self_approval(
+    client: &reqwest::Client,
+    base_url: &str,
+    encoded_repo: &str,
+    pull_request_id: i32,
+    user_id: &str,
+    event: &str,
+    vote_value: i32,
+    token: &str,
+) -> anyhow::Result<Option<ExecutionResult>> {
+    if vote_value <= 0 {
+        return Ok(None);
+    }
+
+    let pr_url = format!(
+        "{}/{}/pullRequests/{}?api-version=7.1",
+        base_url, encoded_repo, pull_request_id
+    );
+    let pr_response = client
+        .get(&pr_url)
+        .basic_auth("", Some(token))
+        .send()
+        .await
+        .context("Failed to fetch PR for self-approval check")?;
+
+    if !pr_response.status().is_success() {
+        let status = pr_response.status();
+        let error_body = pr_response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        return Ok(Some(ExecutionResult::failure(format!(
+            "Failed to fetch PR #{} for self-approval check (HTTP {}): {}",
+            pull_request_id, status, error_body
+        ))));
+    }
+
+    let pr_body: serde_json::Value = pr_response
+        .json()
+        .await
+        .context("Failed to parse PR response")?;
+
+    let creator_id = pr_body
+        .get("createdBy")
+        .and_then(|cb| cb.get("id"))
+        .and_then(|id| id.as_str());
+
+    if creator_id == Some(user_id) {
+        return Ok(Some(ExecutionResult::failure(format!(
+            "Self-approval blocked: the authenticated identity created PR #{} \
+             and cannot cast a positive vote ('{}') on it",
+            pull_request_id, event
+        ))));
+    }
+
+    Ok(None)
+}
+
+/// PUTs the review vote to the ADO reviewers endpoint.
+/// Returns `Err` on network errors, `Ok(Some(failure))` on HTTP errors, `Ok(None)` on success.
+async fn submit_vote(
+    client: &reqwest::Client,
+    base_url: &str,
+    encoded_repo: &str,
+    encoded_user_id: &str,
+    pull_request_id: i32,
+    event: &str,
+    vote_value: i32,
+    token: &str,
+) -> anyhow::Result<Option<ExecutionResult>> {
+    let vote_url = format!(
+        "{}/{}/pullRequests/{}/reviewers/{}?api-version=7.1",
+        base_url, encoded_repo, pull_request_id, encoded_user_id
+    );
+    info!(
+        "Voting '{}' ({}) on PR #{}",
+        event, vote_value, pull_request_id
+    );
+    let response = client
+        .put(&vote_url)
+        .header("Content-Type", "application/json")
+        .basic_auth("", Some(token))
+        .json(&serde_json::json!({ "vote": vote_value }))
+        .send()
+        .await
+        .context("Failed to submit vote")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        return Ok(Some(ExecutionResult::failure(format!(
+            "Failed to submit vote on PR #{} (HTTP {}): {}",
+            pull_request_id, status, error_body
+        ))));
+    }
+
+    info!("Vote '{}' submitted on PR #{}", event, pull_request_id);
+    Ok(None)
+}
+
+/// POSTs an optional review comment thread. Returns the ADO thread ID on success, or a failure.
+async fn post_review_comment_thread(
+    client: &reqwest::Client,
+    base_url: &str,
+    encoded_repo: &str,
+    pull_request_id: i32,
+    body: &str,
+    token: &str,
+) -> anyhow::Result<Result<i64, ExecutionResult>> {
+    let thread_url = format!(
+        "{}/{}/pullRequests/{}/threads?api-version=7.1",
+        base_url, encoded_repo, pull_request_id
+    );
+    info!(
+        "Posting review comment on PR #{} ({} chars)",
+        pull_request_id,
+        body.len()
+    );
+    let response = client
+        .post(&thread_url)
+        .header("Content-Type", "application/json")
+        .basic_auth("", Some(token))
+        .json(&serde_json::json!({
+            "comments": [{"parentCommentId": 0, "content": body, "commentType": 1}],
+            "status": 1
+        }))
+        .send()
+        .await
+        .context("Failed to post review comment thread")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        return Ok(Err(ExecutionResult::failure(format!(
+            "Vote submitted but failed to post review comment on PR #{} (HTTP {}): {}",
+            pull_request_id, status, error_body
+        ))));
+    }
+
+    let thread_resp: serde_json::Value = response
+        .json()
+        .await
+        .context("Failed to parse comment thread response")?;
+
+    let thread_id = thread_resp.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+    info!(
+        "Review comment thread #{} posted on PR #{}",
+        thread_id, pull_request_id
+    );
+    Ok(Ok(thread_id))
+}
+
 #[async_trait::async_trait]
 impl Executor for SubmitPrReviewResult {
     fn dry_run_summary(&self) -> String {
@@ -217,178 +422,59 @@ impl Executor for SubmitPrReviewResult {
 
         // Resolve the current user identity via connection data.
         // Use the org URL — supports vanity domains and national clouds.
-        let connection_url = format!("{}/_apis/connectiondata", org_url.trim_end_matches('/'));
-        debug!("Connection data URL: {}", connection_url);
-
-        let conn_response = client
-            .get(&connection_url)
-            .basic_auth("", Some(token))
-            .send()
-            .await
-            .context("Failed to fetch connection data")?;
-
-        if !conn_response.status().is_success() {
-            let status = conn_response.status();
-            let error_body = conn_response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            return Ok(ExecutionResult::failure(format!(
-                "Failed to fetch connection data (HTTP {}): {}",
-                status, error_body
-            )));
-        }
-
-        let conn_body: serde_json::Value = conn_response
-            .json()
-            .await
-            .context("Failed to parse connection data response")?;
-
-        let user_id = conn_body
-            .get("authenticatedUser")
-            .and_then(|au| au.get("id"))
-            .and_then(|id| id.as_str())
-            .context("Connection data response missing authenticatedUser.id")?;
-        debug!("Authenticated user ID: {}", user_id);
+        let user_id = match fetch_authenticated_user_id(&client, org_url, token).await? {
+            Ok(id) => id,
+            Err(failure) => return Ok(failure),
+        };
 
         // Self-approval guard: prevent the agent from approving PRs it created.
-        // Positive votes (approve=10, approve-with-suggestions=5) are blocked when
-        // the authenticated user is also the PR author.
-        if vote_value > 0 {
-            let pr_url = format!(
-                "{}/{}/pullRequests/{}?api-version=7.1",
-                base_url, encoded_repo, self.pull_request_id
-            );
-            let pr_response = client
-                .get(&pr_url)
-                .basic_auth("", Some(token))
-                .send()
-                .await
-                .context("Failed to fetch PR for self-approval check")?;
-
-            if pr_response.status().is_success() {
-                let pr_body: serde_json::Value = pr_response
-                    .json()
-                    .await
-                    .context("Failed to parse PR response")?;
-
-                let creator_id = pr_body
-                    .get("createdBy")
-                    .and_then(|cb| cb.get("id"))
-                    .and_then(|id| id.as_str());
-
-                if creator_id == Some(user_id) {
-                    return Ok(ExecutionResult::failure(format!(
-                        "Self-approval blocked: the authenticated identity created PR #{} \
-                         and cannot cast a positive vote ('{}') on it",
-                        self.pull_request_id, self.event
-                    )));
-                }
-            } else {
-                let status = pr_response.status();
-                let error_body = pr_response
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "Unknown error".to_string());
-                return Ok(ExecutionResult::failure(format!(
-                    "Failed to fetch PR #{} for self-approval check (HTTP {}): {}",
-                    self.pull_request_id, status, error_body
-                )));
-            }
+        if let Some(failure) = check_self_approval(
+            &client,
+            &base_url,
+            &encoded_repo,
+            self.pull_request_id,
+            &user_id,
+            &self.event,
+            vote_value,
+            token,
+        )
+        .await?
+        {
+            return Ok(failure);
         }
 
         // PUT vote to reviewers endpoint
-        let encoded_user_id = utf8_percent_encode(user_id, PATH_SEGMENT).to_string();
-        let vote_url = format!(
-            "{}/{}/pullRequests/{}/reviewers/{}?api-version=7.1",
-            base_url, encoded_repo, self.pull_request_id, encoded_user_id
-        );
-        let vote_body = serde_json::json!({
-            "vote": vote_value
-        });
-
-        info!(
-            "Voting '{}' ({}) on PR #{}",
-            self.event, vote_value, self.pull_request_id
-        );
-        let response = client
-            .put(&vote_url)
-            .header("Content-Type", "application/json")
-            .basic_auth("", Some(token))
-            .json(&vote_body)
-            .send()
-            .await
-            .context("Failed to submit vote")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            return Ok(ExecutionResult::failure(format!(
-                "Failed to submit vote on PR #{} (HTTP {}): {}",
-                self.pull_request_id, status, error_body
-            )));
+        let encoded_user_id = utf8_percent_encode(&user_id, PATH_SEGMENT).to_string();
+        if let Some(failure) = submit_vote(
+            &client,
+            &base_url,
+            &encoded_repo,
+            &encoded_user_id,
+            self.pull_request_id,
+            &self.event,
+            vote_value,
+            token,
+        )
+        .await?
+        {
+            return Ok(failure);
         }
-
-        info!(
-            "Vote '{}' submitted on PR #{}",
-            self.event, self.pull_request_id
-        );
 
         // If body is provided, also POST a comment thread with the review rationale
         if let Some(ref body) = self.body {
-            let thread_url = format!(
-                "{}/{}/pullRequests/{}/threads?api-version=7.1",
-                base_url, encoded_repo, self.pull_request_id
-            );
-            let thread_body = serde_json::json!({
-                "comments": [{
-                    "parentCommentId": 0,
-                    "content": body,
-                    "commentType": 1
-                }],
-                "status": 1
-            });
-
-            info!(
-                "Posting review comment on PR #{} ({} chars)",
+            let thread_id = match post_review_comment_thread(
+                &client,
+                &base_url,
+                &encoded_repo,
                 self.pull_request_id,
-                body.len()
-            );
-            let thread_response = client
-                .post(&thread_url)
-                .header("Content-Type", "application/json")
-                .basic_auth("", Some(token))
-                .json(&thread_body)
-                .send()
-                .await
-                .context("Failed to post review comment thread")?;
-
-            if !thread_response.status().is_success() {
-                let status = thread_response.status();
-                let error_body = thread_response
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "Unknown error".to_string());
-                return Ok(ExecutionResult::failure(format!(
-                    "Vote submitted but failed to post review comment on PR #{} (HTTP {}): {}",
-                    self.pull_request_id, status, error_body
-                )));
-            }
-
-            let thread_resp: serde_json::Value = thread_response
-                .json()
-                .await
-                .context("Failed to parse comment thread response")?;
-
-            let thread_id = thread_resp.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
-
-            info!(
-                "Review comment thread #{} posted on PR #{}",
-                thread_id, self.pull_request_id
-            );
+                body,
+                token,
+            )
+            .await?
+            {
+                Ok(id) => id,
+                Err(failure) => return Ok(failure),
+            };
 
             return Ok(ExecutionResult::success_with_data(
                 format!(
