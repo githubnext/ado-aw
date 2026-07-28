@@ -1,6 +1,6 @@
 # Create an Azure DevOps Agentic Workflow
 
-Apply `/home/runner/work/ado-aw/ado-aw/prompts/prompt-contract.md` before executing this prompt.
+Apply `./prompt-contract.md` before executing this prompt.
 
 ## Core
 
@@ -68,8 +68,8 @@ Return:
   3. commit both `.md` and generated `.lock.yml`.
 
 ## References
-- `/home/runner/work/ado-aw/ado-aw/docs/front-matter.md`
-- `/home/runner/work/ado-aw/ado-aw/docs/safe-outputs.md`
-- `/home/runner/work/ado-aw/ado-aw/docs/engine.md`
-- `/home/runner/work/ado-aw/ado-aw/docs/targets.md`
-- `/home/runner/work/ado-aw/ado-aw/docs/network.md`
+- `../docs/front-matter.md`
+- `../docs/safe-outputs.md`
+- `../docs/engine.md`
+- `../docs/targets.md`
+- `../docs/network.md`
