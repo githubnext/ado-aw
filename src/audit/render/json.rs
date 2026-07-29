@@ -65,6 +65,7 @@ mod tests {
                     source: Some(String::from("agents/security-scan.md")),
                     target: Some(String::from("standalone")),
                     compiler_version: Some(String::from("0.30.2")),
+                    ..AwInfo::default()
                 }),
             },
             task_domain: Some(TaskDomainInfo {

@@ -37,6 +37,75 @@ safe-outputs:
 
 Safe output configurations are passed to Stage 3 execution and used when processing safe outputs.
 
+### Threat detection (`threat-detection`)
+
+Threat Detection runs between the Agent and SafeOutputs jobs. Configuration
+lives under `safe-outputs:` because it controls the gate protecting safe-output
+execution, matching gh-aw.
+
+```yaml
+safe-outputs:
+  create-pull-request: {}
+  threat-detection:
+    enabled: true
+    prompt: |
+      Also check for:
+      - authentication bypasses
+      - unsafe deserialization
+      - hardcoded credentials
+    engine:
+      id: copilot
+      model: gpt-5-mini
+      args: [--reasoning-effort=high]
+      env:
+        DETECTION_MODE: strict
+    steps:
+      - bash: ./scripts/prepare-security-scanner.sh
+        displayName: Prepare security scanner
+    post-steps:
+      - bash: ./scripts/run-security-scanner.sh
+        displayName: Run security scanner
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | boolean | `true` | Run AI threat analysis. Runtime expressions are not supported. |
+| `prompt` | string | *(none)* | Literal additional instructions appended under `## Additional Instructions`. ADO expressions (`$(...)`, `${{ ... }}`, `$[...]`) are rejected. The fixed detector prompt and `THREAT_DETECTION_RESULT:` contract are never replaced. |
+| `engine` | string/object | top-level `engine` | Detection-specific Copilot configuration overlay. Non-Copilot IDs remain unsupported. |
+| `steps` | ADO step list | `[]` | Trusted host-side steps after artifact/prompt preparation and before credential minting + AI execution. |
+| `post-steps` | ADO step list | `[]` | Trusted host-side steps after AI execution and token revocation, before verdict parsing. |
+
+Boolean shorthand is also supported:
+
+```yaml
+safe-outputs:
+  create-pull-request: {}
+  threat-detection: false
+```
+
+When disabled, the Detection job remains in the pipeline as a pass-through: it
+copies the Agent artifact to `analyzed_outputs`, publishes
+`threatAnalysis.SafeToProcess=true`, and still detects approval-gated proposals.
+Safe outputs therefore proceed without AI analysis, but manual-review gates and
+the existing job/artifact graph remain intact. Custom Detection `steps` and
+`post-steps` do not run while disabled.
+
+The engine overlay inherits top-level settings unless a nested value is
+supplied. Detection `env` merges by key (Detection wins); `args` inherits when
+omitted and replaces the inherited list when supplied, so `args: []` clears
+top-level arguments for Detection. Install version, command, auth/provider,
+BYOK credential isolation, and firewall hosts are all resolved from the
+effective Detection engine.
+
+`steps` and `post-steps` run outside AWF and are trusted with the checked-out
+repository and Detection artifacts. A failing custom step fails Detection and
+blocks SafeOutputs. Use `pool.overrides.detection` to select a different
+Detection pool; there is no duplicate `runs-on` key.
+
+Not currently supported: runtime/expression-controlled enablement,
+`continue-on-error`, `engine: false` custom-scanner-only mode, and a
+Detection-specific AI-credit budget.
+
 ### Manual review (`require-approval`)
 
 High-impact safe outputs can be gated behind a human approval step
@@ -120,8 +189,8 @@ apply one note to every tool.
   low-impact tool (e.g. `add-pr-comment`) non-gated so the automatic split job
   is created.
 
-The Detection threat gate always runs first, so a flagged run applies nothing —
-automatic or reviewed.
+The Detection job always runs first. When AI threat analysis is enabled, a
+flagged run applies nothing — automatic or reviewed.
 
 > **Trust boundary note for `pool.overrides:`:** When `pool.overrides:` is used
 > to move Detection, SafeOutputs, or Conclusion onto a different **self-hosted**

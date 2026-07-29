@@ -44,6 +44,50 @@ The `timeout-minutes` field sets a wall-clock limit (in minutes) for the entire 
 
 When omitted, Azure DevOps uses its default job timeout (60 minutes). When set, the compiler emits `timeoutInMinutes: <value>` on the agentic job.
 
+### Detection-specific engine overlay
+
+`safe-outputs.threat-detection.engine` can override the Copilot configuration
+used by the separate Detection job:
+
+```yaml
+engine:
+  id: copilot
+  model: claude-opus-4.7
+  version: "1.0.70"
+  args: [--reasoning-effort=high]
+  env:
+    SHARED_SETTING: agent
+
+safe-outputs:
+  create-pull-request: {}
+  threat-detection:
+    engine:
+      model: gpt-5-mini
+      args: []                 # explicitly clear inherited args
+      env:
+        SHARED_SETTING: detection
+        DETECTION_ONLY: "true"
+```
+
+The nested block accepts the same Copilot engine fields as top-level `engine:`.
+Omitted values inherit from the top-level configuration. Scalar, command,
+provider, and auth values supplied in the nested block replace inherited
+values. Detection `env` merges by key with nested values winning; `args`
+inherits when absent and replaces the complete inherited list when present.
+For Detection, `--model` and `--api-target` are rejected inside the effective
+args list; use the structured fields so metadata and firewall hosts cannot
+drift. Set nested `args: []` to clear an inherited override.
+
+The effective Detection config drives its own binary installation, invocation,
+timeout, GitHub App/provider token minting, BYOK environment and credential
+isolation, API target, and AWF network hosts. It never mutates the Agent config.
+An explicit Detection `timeout-minutes` (or inherited timeout in an explicit
+overlay) sets the Detection job timeout.
+
+ado-aw currently supports only engine ID `copilot`; a different nested ID fails
+at compile time. See [Threat detection](safe-outputs.md#threat-detection-threat-detection)
+for prompt, enable/disable, and custom-step behavior.
+
 ### GitHub App-backed Copilot engine auth
 
 By default the Copilot engine authenticates with the `GITHUB_TOKEN` pipeline
@@ -240,10 +284,11 @@ sidecar active:
   placeholder override.
 
 This isolation applies to **both** the Agent stage and the Detection
-(threat-analysis) stage: the detection Copilot run inherits the same
-`COPILOT_PROVIDER_*` routing and api-proxy credential isolation, so it reaches
-the same external provider without exposing the credential (matching gh-aw,
-whose detection engine config inherits the main engine's `env`).
+(threat-analysis) stage. By default Detection uses the top-level provider
+routing. An explicit
+`safe-outputs.threat-detection.engine.provider` can select a different provider;
+its credential exclusion and required firewall host are resolved independently
+from the Agent.
 
 #### Network allowlist
 

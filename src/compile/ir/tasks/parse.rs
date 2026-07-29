@@ -156,8 +156,7 @@ pub fn validate_task_step(step: &Value) -> Option<Result<(), String>> {
 /// synthesised the step attribute and fix the finding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskStepFinding {
-    /// Which front-matter step list the step came from: `"setup"`, `"steps"`,
-    /// `"post-steps"`, or `"teardown"`.
+    /// Which front-matter step list the step came from.
     pub list: &'static str,
     /// Zero-based index of the step within that list.
     pub index: usize,
@@ -180,13 +179,20 @@ pub fn validate_front_matter_task_steps(
     post_steps: &[Value],
     teardown: &[Value],
 ) -> Vec<TaskStepFinding> {
-    let mut findings = Vec::new();
-    for (list, values) in [
+    validate_named_task_step_lists(&[
         ("setup", setup),
         ("steps", steps),
         ("post-steps", post_steps),
         ("teardown", teardown),
-    ] {
+    ])
+}
+
+/// Validate arbitrary named front-matter step lists.
+pub fn validate_named_task_step_lists(
+    lists: &[(&'static str, &[Value])],
+) -> Vec<TaskStepFinding> {
+    let mut findings = Vec::new();
+    for &(list, values) in lists {
         for (index, step) in values.iter().enumerate() {
             if let Some(Err(message)) = validate_task_step(step) {
                 // A `Some(_)` result guarantees `validate_task_step` already
