@@ -1,6 +1,6 @@
 # Update an Azure DevOps Agentic Workflow
 
-Apply `/home/runner/work/ado-aw/ado-aw/prompts/prompt-contract.md` before executing this prompt.
+Apply `./prompt-contract.md` before executing this prompt.
 
 ## Core
 
@@ -62,8 +62,8 @@ Return:
 - Recompilation guidance matches the actual changed surface and `inlined-imports` setting.
 
 ## References
-- `/home/runner/work/ado-aw/ado-aw/docs/front-matter.md`
-- `/home/runner/work/ado-aw/ado-aw/docs/runtime-imports.md`
-- `/home/runner/work/ado-aw/ado-aw/docs/safe-outputs.md`
-- `/home/runner/work/ado-aw/ado-aw/docs/engine.md`
-- `/home/runner/work/ado-aw/ado-aw/docs/ir.md`
+- `docs/front-matter.md`
+- `docs/runtime-imports.md`
+- `docs/safe-outputs.md`
+- `docs/engine.md`
+- `docs/ir.md`
