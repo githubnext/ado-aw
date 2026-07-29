@@ -298,12 +298,11 @@ pub(crate) fn build_pipeline_context(
     // `source_path` embeds `{{ trigger_repo_directory }}` which the
     // legacy template fold substitutes — do the same eagerly so step
     // bodies receive a fully-resolved scalar.
-    let normalized_source_path = common::normalize_source_path(input_path);
-    crate::validate::reject_pipeline_injection(
-        &normalized_source_path,
-        "workflow source path",
-    )?;
     let source_path_raw = common::generate_source_path(input_path);
+    let source_path_suffix = source_path_raw
+        .strip_prefix("{{ trigger_repo_directory }}/")
+        .expect("generate_source_path always emits the compiler-owned trigger-repo prefix");
+    crate::validate::reject_pipeline_injection(source_path_suffix, "workflow source path")?;
     let source_path =
         source_path_raw.replace("{{ trigger_repo_directory }}", &trigger_repo_directory);
     let pipeline_path = common::generate_pipeline_path(output_path);

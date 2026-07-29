@@ -447,6 +447,7 @@ pub enum DetectionEngineConfig {
 impl DetectionEngineConfig {
     /// Apply this override to the top-level engine configuration.
     pub fn resolve(&self, base: &EngineConfig) -> EngineConfig {
+        let base_id = base.engine_id().to_string();
         let mut options = match base {
             EngineConfig::Simple(id) => EngineOptions {
                 id: Some(id.clone()),
@@ -505,6 +506,15 @@ impl DetectionEngineConfig {
                     options.provider = Some(value.clone());
                 }
             }
+        }
+
+        let effective_id = options.id.as_deref().unwrap_or("copilot");
+        if base_id == "copilot" && effective_id != base_id {
+            if let Some(env) = &mut options.env {
+                env.retain(|key, _| !key.starts_with("COPILOT_PROVIDER_"));
+            }
+            options.provider = None;
+            options.github_app_token = None;
         }
 
         EngineConfig::Full(Box::new(options))
@@ -3472,7 +3482,7 @@ safe-outputs:
   threat-detection:
     engine:
       env:
-        COPILOT_PROVIDER_TYPE: azure
+        COPILOT_PROVIDER_BASE_URL: https://conflict.example.com/v1
       provider:
         base-url: https://detector.example.com/v1
         api-key: $(DETECTOR_KEY)
@@ -3480,6 +3490,32 @@ safe-outputs:
 "#;
         let (fm, _) = super::super::common::parse_markdown(conflict).unwrap();
         assert!(validate_threat_detection(&fm).is_err());
+    }
+
+    #[test]
+    fn threat_detection_engine_switch_drops_inherited_copilot_credentials() {
+        let source = r#"---
+name: test
+description: test
+engine:
+  id: copilot
+  env:
+    KEEP: value
+    COPILOT_PROVIDER_BASE_URL: https://legacy.example.com/v1
+    COPILOT_PROVIDER_API_KEY: $(LEGACY_KEY)
+safe-outputs:
+  threat-detection:
+    engine: claude
+---
+"#;
+        let (fm, _) = super::super::common::parse_markdown(source).unwrap();
+        let config = fm.threat_detection_config().unwrap();
+        let effective = fm.effective_detection_engine(&config);
+        let env = effective.env().unwrap();
+        assert_eq!(env.get("KEEP").map(String::as_str), Some("value"));
+        assert!(!env.keys().any(|key| key.starts_with("COPILOT_PROVIDER_")));
+        assert!(effective.provider().is_none());
+        assert!(effective.github_app_token().is_none());
     }
 
     #[test]
