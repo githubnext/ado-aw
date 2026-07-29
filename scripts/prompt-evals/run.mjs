@@ -1,20 +1,16 @@
 #!/usr/bin/env node
 
-import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
-  ALL_SUITES,
   PROMPT_FILES,
   composeSubjectPrompt,
-  digestFiles,
-  listFilesRecursive,
   loadCorpus,
   selectSuites
 } from "./lib/corpus.mjs";
-import { changedFiles, currentFile, currentSha, fileAtRef } from "./lib/git.mjs";
+import { changedFiles, fileAtRef } from "./lib/git.mjs";
 import { runJudgeSuite } from "./lib/judge.mjs";
 import { runProcess } from "./lib/process.mjs";
 import {
@@ -25,6 +21,7 @@ import {
 import { runSubjectVariant, runToolFreeProbe } from "./lib/subject.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const VARIANTS = ["base", "head"];
 
 function parseArgs(argv) {
   const result = {};
@@ -56,10 +53,6 @@ function requireArg(args, name) {
     throw new Error(`--${name} is required`);
   }
   return value;
-}
-
-function sha256(text) {
-  return createHash("sha256").update(text).digest("hex");
 }
 
 async function writeJson(filePath, value) {
@@ -131,27 +124,11 @@ async function validateCatalog({
   }
 }
 
-async function promptAt({
-  repoRoot,
-  mode,
-  ref,
-  relativePath
-}) {
-  if (mode === "pr") {
-    return fileAtRef(repoRoot, ref, relativePath);
-  }
-  return currentFile(repoRoot, relativePath);
-}
-
 function stripResponses(subjects) {
   return subjects.map((subject) => ({
     ...subject,
     response: undefined
   }));
-}
-
-function variantsForMode(mode) {
-  return mode === "pr" ? ["base", "head"] : ["current"];
 }
 
 export async function mapLimit(items, limit, worker) {
@@ -186,33 +163,22 @@ export async function runEvaluation(options) {
   await mkdir(outputRoot, { recursive: true });
 
   const corpus = await loadCorpus(repoRoot);
-  const evaluatorScriptRoot = path.join(repoRoot, "scripts", "prompt-evals");
-  const evaluatorFiles = (await listFilesRecursive(evaluatorScriptRoot)).filter(
-    (filePath) =>
-      !filePath.includes(`${path.sep}test${path.sep}`) &&
-      (filePath.endsWith(".mjs") || filePath.endsWith("config.json"))
-  );
-  evaluatorFiles.push(
-    path.join(repoRoot, ".github", "workflows", "prompt-evaluator.md")
-  );
-  const evaluatorDigest = await digestFiles(evaluatorFiles);
   const engine = await resolveEngineConstants(repoRoot);
-  const headSha =
-    options.headSha ?? (await currentSha(repoRoot));
-  const baseSha = options.mode === "pr" ? options.baseSha : null;
-  if (options.mode === "pr" && !baseSha) {
-    throw new Error("PR mode requires --base-sha");
+  const headSha = options.headSha;
+  if (!headSha) {
+    throw new Error("paired prompt evaluation requires --head-sha");
+  }
+  const baseSha = options.baseSha;
+  if (!baseSha) {
+    throw new Error("paired prompt evaluation requires --base-sha");
   }
 
   const changed =
-    options.mode === "pr"
-      ? options.changedFiles ??
-        (await changedFiles(repoRoot, baseSha, headSha))
-      : [];
-  const suites = selectSuites(options.mode, changed);
+    options.changedFiles ?? (await changedFiles(repoRoot, baseSha, headSha));
+  const suites = selectSuites(changed);
   const metadata = {
     schema_version: 1,
-    mode: options.mode,
+    mode: "pr",
     event_name: options.eventName,
     repository: options.repository,
     run_id: options.runId,
@@ -225,27 +191,26 @@ export async function runEvaluation(options) {
     fixture_set_version: corpus.manifest.fixture_set_version,
     fixture_set_digest: corpus.fixture_set_digest,
     rubric_digest: corpus.rubric_digest,
-    evaluator_digest: evaluatorDigest,
     subject_model: engine.subject_model,
     judge_model: config.judge_model,
-    copilot_cli_version: engine.copilot_cli_version,
-    config_digest: sha256(JSON.stringify(config))
+    copilot_cli_version: engine.copilot_cli_version
   };
   await writeJson(path.join(outputRoot, "run-metadata.json"), metadata);
 
   if (suites.length === 0) {
+    const completedAt = new Date().toISOString();
     const emptyScorecard = {
       schema_version: 1,
       ...metadata,
-      completed_at: new Date().toISOString(),
+      completed_at: completedAt,
       cases: [],
-      summary: summarizeScorecard(options.mode, []),
+      summary: summarizeScorecard([]),
       suites: {}
     };
     await writeJson(path.join(outputRoot, "scorecard.json"), emptyScorecard);
     await writeJson(path.join(outputRoot, "manifest.json"), {
       ...metadata,
-      completed_at: emptyScorecard.completed_at,
+      completed_at: completedAt,
       status: "no-suites-selected",
       scorecard_path: path.join(outputRoot, "scorecard.json")
     });
@@ -277,44 +242,36 @@ export async function runEvaluation(options) {
 
   const sharedByVariant = new Map();
   const promptBySuiteVariant = new Map();
-  for (const variant of variantsForMode(options.mode)) {
-    const ref =
-      variant === "base" ? baseSha : variant === "head" ? headSha : null;
-    const shared = await promptAt({
+  for (const variant of VARIANTS) {
+    const ref = variant === "base" ? baseSha : headSha;
+    const shared = await fileAtRef(
       repoRoot,
-      mode: options.mode,
       ref,
-      relativePath: "prompts/prompt-contract.md"
-    });
+      "prompts/prompt-contract.md"
+    );
     if (shared === null) {
       throw new Error(`shared prompt contract is absent for variant ${variant}`);
     }
     sharedByVariant.set(variant, shared);
     for (const suite of suites) {
-      const taskPrompt = await promptAt({
-        repoRoot,
-        mode: options.mode,
-        ref,
-        relativePath: PROMPT_FILES[suite]
-      });
-      promptBySuiteVariant.set(`${suite}:${variant}`, taskPrompt);
+      promptBySuiteVariant.set(
+        `${suite}:${variant}`,
+        await fileAtRef(repoRoot, ref, PROMPT_FILES[suite])
+      );
     }
   }
 
   const subjectsByCase = new Map();
-  const judgeCasesById = new Map();
-  const judgeMetadata = {};
-
   const subjectTasks = [];
   for (const suite of suites) {
     for (const caseData of corpus.cases.filter(
       (entry) => entry.prompt === suite
     )) {
       subjectsByCase.set(caseData.id, []);
-      for (const variant of variantsForMode(options.mode)) {
+      for (const variant of VARIANTS) {
         const taskPrompt = promptBySuiteVariant.get(`${suite}:${variant}`);
         if (taskPrompt !== null) {
-          subjectTasks.push({ suite, caseData, variant, taskPrompt });
+          subjectTasks.push({ caseData, variant, taskPrompt });
         }
       }
     }
@@ -351,11 +308,12 @@ export async function runEvaluation(options) {
   for (const subjects of subjectsByCase.values()) {
     subjects.sort(
       (left, right) =>
-        variantsForMode(options.mode).indexOf(left.variant) -
-        variantsForMode(options.mode).indexOf(right.variant)
+        VARIANTS.indexOf(left.variant) - VARIANTS.indexOf(right.variant)
     );
   }
 
+  const judgeCasesById = new Map();
+  const judgeMetadata = {};
   const judgeResults = await mapLimit(
     suites,
     config.judge_concurrency,
@@ -392,8 +350,7 @@ export async function runEvaluation(options) {
       buildCaseScore({
         caseData,
         subjects: subjectsByCase.get(caseData.id),
-        judgeCase: judgeCasesById.get(caseData.id),
-        mode: options.mode
+        judgeCase: judgeCasesById.get(caseData.id)
       })
     );
   const completedAt = new Date().toISOString();
@@ -402,8 +359,8 @@ export async function runEvaluation(options) {
     ...metadata,
     completed_at: completedAt,
     cases: caseResults,
-    summary: summarizeScorecard(options.mode, caseResults),
-    suites: summarizeSuites(options.mode, caseResults),
+    summary: summarizeScorecard(caseResults),
+    suites: summarizeSuites(caseResults),
     judges: judgeMetadata
   };
   await writeJson(path.join(outputRoot, "scorecard.json"), scorecard);
@@ -422,10 +379,6 @@ export async function runEvaluation(options) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const mode = requireArg(args, "mode");
-  if (!["pr", "nightly", "manual"].includes(mode)) {
-    throw new Error("--mode must be pr, nightly, or manual");
-  }
   const repoRoot = path.resolve(args["repo-root"] ?? process.cwd());
   const outputRoot = path.resolve(
     args.output ?? path.join(repoRoot, ".prompt-eval-output")
@@ -436,16 +389,15 @@ async function main() {
 
   try {
     await runEvaluation({
-      mode,
       repoRoot,
       outputRoot,
       configPath,
-      baseSha: args["base-sha"],
-      headSha: args["head-sha"],
+      baseSha: requireArg(args, "base-sha"),
+      headSha: requireArg(args, "head-sha"),
       copilotPath: args.copilot ?? "copilot",
       adoAwPath: args["ado-aw"] ?? "ado-aw",
       fakeDir: args["fake-dir"] ? path.resolve(args["fake-dir"]) : null,
-      eventName: args["event-name"] ?? process.env.GITHUB_EVENT_NAME ?? mode,
+      eventName: args["event-name"] ?? process.env.GITHUB_EVENT_NAME ?? "pull_request",
       repository: args.repository ?? process.env.GITHUB_REPOSITORY ?? null,
       runId: args["run-id"] ?? process.env.GITHUB_RUN_ID ?? null,
       runUrl: args["run-url"] ?? null,
@@ -455,7 +407,7 @@ async function main() {
     await mkdir(outputRoot, { recursive: true });
     await writeJson(path.join(outputRoot, "manifest.json"), {
       schema_version: 1,
-      mode,
+      mode: "pr",
       status: "infrastructure-failure",
       completed_at: new Date().toISOString(),
       error: error.stack ?? error.message

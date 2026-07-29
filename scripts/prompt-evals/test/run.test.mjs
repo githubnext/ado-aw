@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import {
   mkdir,
   mkdtemp,
-  readFile,
   rm,
   writeFile
 } from "node:fs/promises";
@@ -69,52 +68,6 @@ async function prepareFakeDir(tempRoot, corpus, variants, suiteScores) {
   return fakeDir;
 }
 
-test("runs all nightly cases with fake subject and judge responses", async (t) => {
-  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "prompt-eval-run-"));
-  const outputDir = path.join(tempRoot, "output");
-  t.after(() => rm(tempRoot, { recursive: true, force: true }));
-
-  const corpus = await loadCorpus(REPO_ROOT);
-  const fakeDir = await prepareFakeDir(
-    tempRoot,
-    corpus,
-    ["current"],
-    {
-      create: { current: 1 },
-      update: { current: 1 },
-      debug: { current: 1 }
-    }
-  );
-
-  const scorecard = await runEvaluation({
-    mode: "nightly",
-    repoRoot: REPO_ROOT,
-    outputRoot: outputDir,
-    configPath: CONFIG_PATH,
-    copilotPath: "unused-copilot",
-    adoAwPath: "unused-ado-aw",
-    fakeDir,
-    eventName: "schedule",
-    repository: "githubnext/ado-aw",
-    runId: "synthetic-run",
-    runUrl: "https://example.invalid/runs/synthetic-run",
-    env: {}
-  });
-
-  assert.equal(scorecard.cases.length, 9);
-  assert.equal(scorecard.summary.scored_cases, 9);
-  assert.equal(scorecard.summary.normalized_score, 0.5);
-  assert.equal(scorecard.judges.create.success, true);
-  assert.equal(scorecard.judges.update.success, true);
-  assert.equal(scorecard.judges.debug.success, true);
-
-  const manifest = JSON.parse(
-    await readFile(path.join(outputDir, "manifest.json"), "utf8")
-  );
-  assert.equal(manifest.status, "completed");
-  assert.equal(manifest.suites.length, 3);
-});
-
 test("runs a paired PR suite end to end with fake responses", async (t) => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "prompt-eval-pr-"));
   const outputDir = path.join(tempRoot, "output");
@@ -135,7 +88,6 @@ test("runs a paired PR suite end to end with fake responses", async (t) => {
   }).trim();
 
   const scorecard = await runEvaluation({
-    mode: "pr",
     repoRoot: REPO_ROOT,
     outputRoot: outputDir,
     configPath: CONFIG_PATH,

@@ -6,15 +6,5 @@
   "session_timeout_seconds": 600,
   "max_output_bytes": 1048576,
   "subject_concurrency": 3,
-  "judge_concurrency": 3,
-  "history": {
-    "max_runs": 30,
-    "artifact_retention_days": 90,
-    "minimum_baseline_runs": 7,
-    "baseline_window_runs": 14,
-    "recent_window_runs": 3,
-    "semantic_decline_points": 10,
-    "minimum_affected_cases": 2,
-    "hard_observable_baseline_rate": 0.8
-  }
+  "judge_concurrency": 3
 }

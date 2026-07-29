@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -57,9 +57,7 @@ export async function readInfrastructureStatus(statusDir) {
   const checks = {
     build: "build-exit-code.txt",
     copilot_install: "copilot-install-exit-code.txt",
-    history: "history-exit-code.txt",
-    runner: "runner-exit-code.txt",
-    trend: "trend-exit-code.txt"
+    runner: "runner-exit-code.txt"
   };
   const results = {};
   for (const [name, fileName] of Object.entries(checks)) {
@@ -90,54 +88,18 @@ export async function readInfrastructureStatus(statusDir) {
   };
 }
 
-export function decideReportAction({
-  eventName,
-  trend = null,
-  manualPublish = false
-}) {
-  if (eventName === "pull_request") {
-    return {
-      action: "pr-comment",
-      reason: "pull-request comparison completed"
-    };
+function infrastructureLines(infrastructure) {
+  if (!infrastructure?.degraded) {
+    return [];
   }
-  if (eventName === "schedule") {
-    if (trend?.alert?.started) {
-      return {
-        action: "discussion",
-        reason: "new sustained regression"
-      };
-    }
-    if (trend?.weekly_due) {
-      return {
-        action: "discussion",
-        reason: trend.alert?.active
-          ? "weekly digest with active sustained regression"
-          : "weekly digest"
-      };
-    }
-    return {
-      action: "noop",
-      reason: trend?.alert?.active
-        ? "sustained regression already reported"
-        : "nightly scorecard stored; no sustained regression"
-    };
-  }
-  if (eventName === "workflow_dispatch") {
-    return manualPublish
-      ? {
-          action: "discussion",
-          reason: "manual calibration report requested"
-        }
-      : {
-          action: "noop",
-          reason: "manual calibration run stored without publication"
-        };
-  }
-  return {
-    action: "noop",
-    reason: `unsupported reporting event ${eventName}`
-  };
+  const failed = Object.entries(infrastructure.checks)
+    .filter(([, result]) => result.present && result.success === false)
+    .map(([name]) => name.replaceAll("_", " "));
+  return [
+    "",
+    "> [!WARNING]",
+    `> Evaluator infrastructure was degraded: ${failed.join(", ")}. Treat missing or inconclusive scores cautiously.`
+  ];
 }
 
 function criterionRegressions(caseResult) {
@@ -162,20 +124,6 @@ function criterionRegressions(caseResult) {
       evidence: criterion.evidence,
       reason: criterion.reason
     }));
-}
-
-function infrastructureLines(infrastructure) {
-  if (!infrastructure?.degraded) {
-    return [];
-  }
-  const failed = Object.entries(infrastructure.checks)
-    .filter(([, result]) => result.present && result.success === false)
-    .map(([name]) => name.replaceAll("_", " "));
-  return [
-    "",
-    "> [!WARNING]",
-    `> Evaluator infrastructure was degraded: ${failed.join(", ")}. Treat missing or inconclusive scores cautiously.`
-  ];
 }
 
 export function renderPrReport(scorecard, infrastructure = null) {
@@ -253,250 +201,58 @@ export function renderPrReport(scorecard, infrastructure = null) {
   return `${lines.join("\n")}\n`;
 }
 
-export function renderDiscussionReport(
-  scorecard,
-  trend,
-  reason,
-  infrastructure = null
-) {
-  const alert = trend?.alert;
-  const lines = [
-    "### Summary",
-    "",
-    "> [!NOTE]",
-    "> Continuous prompt evaluation is advisory and uses synthetic fixtures only.",
-    "",
-    `**Report reason:** ${reason}`,
-    ...infrastructureLines(infrastructure),
-    "",
-    `**Window:** ${trend?.windows?.latest_seven?.start_at ?? "insufficient history"} to ${trend?.windows?.latest_seven?.end_at ?? scorecard.completed_at} (UTC)`,
-    "",
-    "| Metric | Latest 7 | Previous 7 |",
-    "|---|---:|---:|",
-    `| Normalized rubric score | ${percent(trend?.windows?.latest_seven?.normalized_score)} | ${percent(trend?.windows?.previous_seven?.normalized_score)} |`,
-    `| Artifact extraction | ${percent(trend?.windows?.latest_seven?.artifact_extraction_rate)} | ${percent(trend?.windows?.previous_seven?.artifact_extraction_rate)} |`,
-    `| Compile success | ${percent(trend?.windows?.latest_seven?.compile_success_rate)} | ${percent(trend?.windows?.previous_seven?.compile_success_rate)} |`,
-    `| Lint success | ${percent(trend?.windows?.latest_seven?.lint_success_rate)} | ${percent(trend?.windows?.previous_seven?.lint_success_rate)} |`,
-    `| Safety/consent pass | ${percent(trend?.windows?.latest_seven?.safety_consent_pass_rate)} | ${percent(trend?.windows?.previous_seven?.safety_consent_pass_rate)} |`,
-    `| Infrastructure failures | ${percent(trend?.windows?.latest_seven?.infrastructure_failure_rate)} | ${percent(trend?.windows?.previous_seven?.infrastructure_failure_rate)} |`
-  ];
-
-  if (alert?.active) {
-    lines.push(
-      "",
-      "> [!WARNING]",
-      "> A sustained regression is active across three comparable nightly runs.",
-      "",
-      "### Sustained regression"
-    );
-    for (const affected of alert.semantic?.affected_cases ?? []) {
-      lines.push(
-        `- \`${affected.case_id}\`: baseline ${percent(affected.baseline_median)}, recent ${affected.recent_scores.map(percent).join(", ")}`
-      );
-    }
-    for (const hard of alert.hard_observables ?? []) {
-      lines.push(
-        `- \`${hard.case_id}\` ${hard.observable}: baseline ${percent(hard.baseline_rate)}, failed in all three recent runs`
-      );
-    }
-  } else if (!alert?.eligible) {
-    lines.push(
-      "",
-      "> [!NOTE]",
-      `> Regression alerting is not yet eligible: ${alert?.reason ?? "insufficient comparable history"}.`
-    );
-  }
-
-  lines.push(
-    "",
-    "### Per-prompt current state",
-    "",
-    "| Prompt | Score | Compile | Lint | Safety/consent | Inconclusive |",
-    "|---|---:|---:|---:|---:|---:|"
-  );
-  for (const suite of ["create", "update", "debug"]) {
-    const summary = scorecard.suites?.[suite];
-    if (!summary) {
-      continue;
-    }
-    lines.push(
-      `| ${suite} | ${percent(summary.normalized_score)} | ${percent(summary.compile_success_rate)} | ${percent(summary.lint_success_rate)} | ${percent(summary.safety_consent_pass_rate)} | ${summary.inconclusive_cases}/${summary.case_count} |`
-    );
-  }
-
-  lines.push(
-    "",
-    "<details>",
-    "<summary>Cohort and case details</summary>",
-    "",
-    `- Cohort: \`${trend?.cohort?.key ?? "unavailable"}\``,
-    `- Subject model: \`${scorecard.subject_model}\``,
-    `- Judge model: \`${scorecard.judge_model}\``,
-    `- Copilot CLI: \`${scorecard.copilot_cli_version}\``,
-    `- Comparable previous runs: ${trend?.cohort?.comparable_previous_runs ?? 0}`,
-    `- Excluded incomplete runs: ${trend?.history?.excluded_incomplete_runs ?? 0}`,
-    "",
-    "| Case | Prompt | Latest | 7-run average | Previous 7 |",
-    "|---|---|---:|---:|---:|"
-  );
-  for (const entry of trend?.case_trends ?? []) {
-    lines.push(
-      `| \`${entry.case_id}\` | ${entry.suite} | ${percent(entry.latest_score)} | ${percent(entry.seven_run_average)} | ${percent(entry.previous_seven_run_average)} |`
-    );
-  }
-  lines.push("", "</details>");
-  const reference = runReference(scorecard);
-  if (reference) {
-    lines.push("", `**References:** ${reference}`);
-  }
-  return `${lines.join("\n")}\n`;
-}
-
-export async function buildReport({
-  eventName,
-  scorecard,
-  trend,
-  outputDir,
-  manualPublish = false,
-  infrastructure = null
-}) {
-  await mkdir(outputDir, { recursive: true });
-  const decision = decideReportAction({ eventName, trend, manualPublish });
-  let body = "";
-  let title = "";
-  if (decision.action === "pr-comment") {
-    body = renderPrReport(scorecard, infrastructure);
-  } else if (decision.action === "discussion") {
-    body = renderDiscussionReport(
-      scorecard,
-      trend,
-      decision.reason,
-      infrastructure
-    );
-    title = trend?.alert?.started
-      ? `Sustained regression - ${scorecard.completed_at.slice(0, 10)}`
-      : `Weekly trends - ${scorecard.completed_at.slice(0, 10)}`;
-  }
-  const context = {
-    schema_version: 1,
-    event_name: eventName,
-    action: decision.action,
-    reason: decision.reason,
-    report_path: body ? path.join(outputDir, "report.md") : null,
-    title_path: title ? path.join(outputDir, "report-title.txt") : null
-  };
-  await writeFile(
-    path.join(outputDir, "report-context.json"),
-    `${JSON.stringify(context, null, 2)}\n`,
-    "utf8"
-  );
-  await writeFile(
-    path.join(outputDir, "report.md"),
-    body,
-    "utf8"
-  );
-  await writeFile(
-    path.join(outputDir, "report-title.txt"),
-    title,
-    "utf8"
-  );
-  await writeFile(
-    path.join(outputDir, "noop.txt"),
-    `${decision.reason}\n`,
-    "utf8"
-  );
-  return context;
-}
-
-export async function buildInfrastructureReport({
-  eventName,
-  manifest,
-  outputDir
-}) {
-  await mkdir(outputDir, { recursive: true });
-  const action = eventName === "pull_request" ? "pr-comment" : "noop";
+export function renderInfrastructureReport(manifest) {
   const reason =
     manifest?.error?.split(/\r?\n/, 1)[0] ??
     "prompt evaluation did not produce a scorecard";
-  const body =
-    action === "pr-comment"
-      ? [
-          "### Prompt evaluation",
-          "",
-          "> [!WARNING]",
-          "> The advisory prompt evaluation could not produce a scorecard.",
-          "",
-          `**Infrastructure error:** ${tableCell(reason)}`,
-          "",
-          "The separate Prompt Contracts check remains the merge-blocking signal."
-        ].join("\n") + "\n"
-      : "";
-  const context = {
-    schema_version: 1,
-    event_name: eventName,
-    action,
-    reason,
-    report_path: body ? path.join(outputDir, "report.md") : null,
-    title_path: null
-  };
-  await writeFile(
-    path.join(outputDir, "report-context.json"),
-    `${JSON.stringify(context, null, 2)}\n`,
-    "utf8"
-  );
+  return [
+    "### Prompt evaluation",
+    "",
+    "> [!WARNING]",
+    "> The advisory prompt evaluation could not produce a scorecard.",
+    "",
+    `**Infrastructure error:** ${tableCell(reason)}`,
+    "",
+    "The separate Prompt Contracts check remains the merge-blocking signal.",
+    ""
+  ].join("\n");
+}
+
+export async function buildPrReport({
+  scorecard,
+  manifest,
+  outputDir,
+  infrastructure
+}) {
+  await mkdir(outputDir, { recursive: true });
+  const body = scorecard
+    ? renderPrReport(scorecard, infrastructure)
+    : renderInfrastructureReport(manifest);
   await writeFile(path.join(outputDir, "report.md"), body, "utf8");
-  await writeFile(path.join(outputDir, "report-title.txt"), "", "utf8");
-  await writeFile(path.join(outputDir, "noop.txt"), `${reason}\n`, "utf8");
-  return context;
+}
+
+async function readJsonIfPresent(filePath) {
+  try {
+    return JSON.parse(await readFile(filePath, "utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  let scorecard = null;
-  try {
-    if (args.scorecard) {
-      scorecard = JSON.parse(
-        await readFile(path.resolve(args.scorecard), "utf8")
-      );
-    }
-  } catch (error) {
-    if (error.code !== "ENOENT") {
-      throw error;
-    }
-  }
-  if (!scorecard) {
-    let manifest = null;
-    try {
-      if (args.manifest) {
-        manifest = JSON.parse(
-          await readFile(path.resolve(args.manifest), "utf8")
-        );
-      }
-    } catch (error) {
-      if (error.code !== "ENOENT") {
-        throw error;
-      }
-    }
-    await buildInfrastructureReport({
-      eventName: args.event,
-      manifest,
-      outputDir: path.resolve(args.output)
-    });
-    return;
-  }
-  let trend = null;
-  if (args.trend) {
-    trend = JSON.parse(await readFile(path.resolve(args.trend), "utf8"));
-  }
+  const scorecard = await readJsonIfPresent(path.resolve(args.scorecard));
+  const manifest = await readJsonIfPresent(path.resolve(args.manifest));
   const infrastructure = args["status-dir"]
     ? await readInfrastructureStatus(path.resolve(args["status-dir"]))
     : null;
-  await buildReport({
-    eventName: args.event,
+  await buildPrReport({
     scorecard,
-    trend,
+    manifest,
     outputDir: path.resolve(args.output),
-    manualPublish: args["manual-publish"] === "true",
     infrastructure
   });
 }

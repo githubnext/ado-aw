@@ -1,6 +1,3 @@
-import { readFile } from "node:fs/promises";
-import path from "node:path";
-
 import { runProcess } from "./process.mjs";
 
 export async function gitOutput(repoRoot, args, options = {}) {
@@ -55,12 +52,3 @@ export async function fileAtRef(repoRoot, ref, relativePath) {
     `git show ${ref}:${relativePath} failed: ${result.stderr || result.stdout}`
   );
 }
-
-export async function currentFile(repoRoot, relativePath) {
-  return readFile(path.join(repoRoot, relativePath), "utf8");
-}
-
-export async function currentSha(repoRoot) {
-  return (await gitOutput(repoRoot, ["rev-parse", "HEAD"])).trim();
-}
-

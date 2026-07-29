@@ -73,7 +73,7 @@ test("rejects missing or invented criteria", async () => {
   const caseData = corpus.cases.find(
     (entry) => entry.id === "debug-missing-evidence"
   );
-  const subjectsByCase = new Map([[caseData.id, [{ variant: "current" }]]]);
+  const subjectsByCase = new Map([[caseData.id, [{ variant: "head" }]]]);
   const incomplete = rawVariant(caseData, 2);
   incomplete.criteria.pop();
   assert.throws(
@@ -85,7 +85,7 @@ test("rejects missing or invented criteria", async () => {
           cases: [
             {
               case_id: caseData.id,
-              variants: { current: incomplete }
+              variants: { head: incomplete }
             }
           ]
         },
@@ -107,4 +107,3 @@ test("extracts raw and fenced judge JSON", () => {
     { schema_version: 1 }
   );
 });
-

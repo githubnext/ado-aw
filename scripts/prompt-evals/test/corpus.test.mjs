@@ -60,18 +60,14 @@ test("fixture digests do not depend on checkout location", async (t) => {
 
 test("selects affected prompt suites", () => {
   assert.deepEqual(
-    selectSuites("pr", ["prompts/create-ado-agentic-workflow.md"]),
+    selectSuites(["prompts/create-ado-agentic-workflow.md"]),
     ["create"]
   );
   assert.deepEqual(
-    selectSuites("pr", ["prompts/prompt-contract.md"]),
+    selectSuites(["prompts/prompt-contract.md"]),
     ["create", "update", "debug"]
   );
-  assert.deepEqual(
-    selectSuites("pr", ["docs/front-matter.md"]),
-    []
-  );
-  assert.deepEqual(selectSuites("nightly"), ["create", "update", "debug"]);
+  assert.deepEqual(selectSuites(["docs/front-matter.md"]), []);
 });
 
 test("composes isolated prompts and extracts workflow artifacts", async () => {
@@ -132,4 +128,3 @@ test("Copilot arguments expose no tools and child env strips write tokens", () =
   assert.equal(env.GH_TOKEN, undefined);
   assert.equal(env.SYSTEM_ACCESSTOKEN, undefined);
 });
-

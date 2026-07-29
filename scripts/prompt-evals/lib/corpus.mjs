@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile, readdir, stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
 export const PROMPT_FILES = {
@@ -119,11 +119,6 @@ function validateCase(caseData, casePath) {
     `case ${casePath}.expected.required_sections`
   );
   assertObject(caseData.ground_truth, `case ${casePath}.ground_truth`);
-}
-
-async function hashFile(filePath) {
-  const content = await readFile(filePath);
-  return createHash("sha256").update(content).digest("hex");
 }
 
 export async function digestFiles(filePaths) {
@@ -269,14 +264,7 @@ export async function loadCorpus(repoRoot) {
   };
 }
 
-export function selectSuites(mode, changedFiles = []) {
-  if (mode === "nightly" || mode === "manual") {
-    return [...ALL_SUITES];
-  }
-  if (mode !== "pr") {
-    throw new Error(`unsupported prompt evaluation mode: ${mode}`);
-  }
-
+export function selectSuites(changedFiles = []) {
   const normalized = changedFiles.map((file) => file.replaceAll("\\", "/"));
   const selected = new Set();
   const selectAll = normalized.some(
@@ -367,20 +355,6 @@ export function requiredSectionResults(response, requiredSections) {
   }));
 }
 
-export async function listFilesRecursive(root) {
-  const entries = await readdir(root, { withFileTypes: true });
-  const files = [];
-  for (const entry of entries) {
-    const entryPath = path.join(root, entry.name);
-    if (entry.isDirectory()) {
-      files.push(...(await listFilesRecursive(entryPath)));
-    } else if (entry.isFile()) {
-      files.push(entryPath);
-    }
-  }
-  return files;
-}
-
 export async function pathExists(filePath) {
   try {
     await stat(filePath);
@@ -391,8 +365,4 @@ export async function pathExists(filePath) {
     }
     throw error;
   }
-}
-
-export async function sha256File(filePath) {
-  return hashFile(filePath);
 }
