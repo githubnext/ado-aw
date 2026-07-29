@@ -85,7 +85,7 @@ safe-outputs:
   report-incomplete:
     create-issue: false
   threat-detection:
-    max-ai-credits: 100
+    max-ai-credits: 50
   add-comment:
     max: 1
     hide-older-comments: true
@@ -93,8 +93,8 @@ safe-outputs:
     pull-requests: true
   noop:
     report-as-issue: false
-max-ai-credits: 500
-max-daily-ai-credits: 1000
+max-ai-credits: 100
+max-daily-ai-credits: 500
 timeout-minutes: 30
 ---
 

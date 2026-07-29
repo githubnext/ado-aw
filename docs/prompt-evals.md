@@ -54,9 +54,10 @@ The workflow does **not** invoke Copilot CLI directly, start a separate subject
 model, run a judge model, or use subagents. gh-aw owns the single Copilot engine
 invocation.
 
-The single evaluator agent has a 500-credit soft cap because one run may review
-all nine cases and both prompt revisions. Threat detection has a separate
-100-credit cap. There are no per-case or judge-session budgets.
+The first complete nine-case run used 44.2 AI credits for evaluation and 6.54
+for threat detection. The workflow therefore uses soft caps of 100 and 50
+respectively, with a 500-credit daily cap to allow several PR revisions. There
+are no per-case or judge-session budgets.
 
 The agent:
 
