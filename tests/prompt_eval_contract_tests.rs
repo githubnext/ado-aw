@@ -49,23 +49,24 @@ fn safe_relative(root: &Path, relative: &str, label: &str) -> PathBuf {
     joined
 }
 
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}
+
 #[test]
 fn prompt_eval_manifest_has_three_cases_per_prompt() {
     let root = repo_path("tests/prompt-evals");
     let manifest = read_json(&root.join("manifest.json"));
     assert_eq!(manifest["schema_version"], 1);
-    assert!(
-        manifest["fixture_set_version"]
-            .as_u64()
-            .is_some_and(|version| version > 0)
-    );
 
     let case_paths = string_array(&manifest, "cases", &root.join("manifest.json"));
-    assert_eq!(case_paths.len(), 9, "MVP corpus must contain nine cases");
 
     let mut ids = HashSet::new();
     let mut counts: HashMap<String, usize> = HashMap::new();
-    for relative_case in case_paths {
+    for relative_case in &case_paths {
         let case_path = safe_relative(&root, relative_case, "case path");
         let case = read_json(&case_path);
         assert_eq!(case["schema_version"], 1, "{}", case_path.display());
@@ -84,9 +85,20 @@ fn prompt_eval_manifest_has_three_cases_per_prompt() {
         *counts.entry(prompt.to_string()).or_default() += 1;
     }
 
-    assert_eq!(counts.get("create"), Some(&3));
-    assert_eq!(counts.get("update"), Some(&3));
-    assert_eq!(counts.get("debug"), Some(&3));
+    assert_eq!(
+        case_paths.len(),
+        counts.values().sum::<usize>(),
+        "every manifest case must belong to a supported prompt suite"
+    );
+    assert_eq!(
+        counts,
+        HashMap::from([
+            ("create".to_string(), 3),
+            ("update".to_string(), 3),
+            ("debug".to_string(), 3),
+        ]),
+        "the MVP corpus must contain three cases per prompt suite"
+    );
 }
 
 #[test]
@@ -218,6 +230,10 @@ fn prompt_eval_fixtures_are_synthetic_and_secret_free() {
     let banned = [
         "github_pat_",
         "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
         "Authorization: Bearer",
         "dev.azure.com/",
         "visualstudio.com/",
@@ -231,17 +247,24 @@ fn prompt_eval_fixtures_are_synthetic_and_secret_free() {
                 stack.push(path);
                 continue;
             }
-            let content = fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("read fixture {}: {e}", path.display()));
+            let content =
+                fs::read(&path).unwrap_or_else(|e| panic!("read fixture {}: {e}", path.display()));
             for marker in banned {
                 assert!(
-                    !content.contains(marker),
+                    !contains_bytes(&content, marker.as_bytes()),
                     "{} contains banned live-data marker {marker}",
                     path.display()
                 );
             }
         }
     }
+}
+
+#[test]
+fn fixture_secret_scan_supports_non_utf8_content() {
+    let binary = [0xff, 0xfe, b'g', b'h', b'p', b'_', b'x'];
+    assert!(contains_bytes(&binary, b"ghp_"));
+    assert!(!contains_bytes(&binary, b"github_pat_"));
 }
 
 #[test]

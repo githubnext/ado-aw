@@ -1,6 +1,5 @@
 {
   "schema_version": 1,
-  "fixture_set_version": 1,
   "cases": [
     "cases/create/minimal-manual/case.json",
     "cases/create/scheduled-workitem-report/case.json",
@@ -13,4 +12,3 @@
     "cases/debug/missing-evidence/case.json"
   ]
 }
-

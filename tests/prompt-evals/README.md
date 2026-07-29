@@ -24,8 +24,7 @@ When adding or changing a case:
 1. Update `manifest.json`.
 2. Keep request and context data concise.
 3. Add explicit ground truth for diagnostic cases.
-4. Update `fixture_set_version` when case meaning changes.
-5. Run:
+4. Run:
 
    ```text
    cargo test --test prompt_contract_tests --test prompt_eval_contract_tests
