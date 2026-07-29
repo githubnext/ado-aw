@@ -129,6 +129,9 @@ pub(crate) fn build_pipeline_context(
     debug_pipeline: bool,
     prefix: Option<&str>,
 ) -> Result<BuiltPipelineContext> {
+    let threat_detection = front_matter.threat_detection_config()?;
+    let detection_engine_config = front_matter.effective_detection_engine(&threat_detection);
+
     // ─── Validations (reuse all shared validators) ────────────────
     common::validate_front_matter_identity(front_matter)?;
     common::validate_variable_groups(front_matter)?;
@@ -138,7 +141,8 @@ pub(crate) fn build_pipeline_context(
         ctx.ado_context.as_ref().map(|c| c.repo_name.as_str()),
     )?;
     common::validate_safe_outputs_keys(front_matter)?;
-    front_matter.validate_threat_detection()?;
+    front_matter
+        .validate_threat_detection_config(&threat_detection, &detection_engine_config)?;
     front_matter.validate_require_approval()?;
     common::validate_comment_target(front_matter)?;
     common::validate_update_work_item_target(front_matter)?;
@@ -180,8 +184,6 @@ pub(crate) fn build_pipeline_context(
     )?;
 
     let compiler_version = env!("CARGO_PKG_VERSION").to_string();
-    let threat_detection = front_matter.threat_detection_config()?;
-    let detection_engine_config = front_matter.effective_detection_engine(&threat_detection);
     let detection_engine = crate::engine::get_engine(detection_engine_config.engine_id())?;
 
     let engine_run = ctx.engine.invocation(
@@ -1313,6 +1315,9 @@ fn build_detection_job(
         "Detection",
         cfg.pools.detection.clone(),
     );
+    // Preserve the existing default: top-level Agent timeout does not
+    // implicitly constrain Detection. Only an explicit Detection engine
+    // overlay opts that job into the effective timeout.
     if cfg.threat_detection.is_enabled()
         && cfg.threat_detection.engine.is_some()
         && let Some(minutes) = cfg.detection_engine_config.timeout_minutes()

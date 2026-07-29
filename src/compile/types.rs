@@ -1496,13 +1496,15 @@ impl FrontMatter {
         effective
     }
 
-    /// Eagerly validate threat-detection config and its effective engine.
-    pub fn validate_threat_detection(&self) -> anyhow::Result<()> {
-        let config = self.threat_detection_config()?;
-        let effective = self.effective_detection_engine(&config);
-        crate::engine::validate_engine_feature_support(&effective)?;
+    /// Validate an already-parsed threat-detection config and resolved engine.
+    pub fn validate_threat_detection_config(
+        &self,
+        config: &ThreatDetectionConfig,
+        effective: &EngineConfig,
+    ) -> anyhow::Result<()> {
+        crate::engine::validate_engine_feature_support(effective)?;
         crate::engine::get_engine(effective.engine_id())?;
-        if self.safe_outputs.contains_key(THREAT_DETECTION_KEY) {
+        if config.engine.is_some() {
             for arg in effective.args() {
                 if arg == "--model"
                     || arg.starts_with("--model=")
@@ -3014,6 +3016,12 @@ impl SanitizeConfigTrait for LabelFilter {
 mod tests {
     use super::*;
 
+    fn validate_threat_detection(fm: &FrontMatter) -> anyhow::Result<()> {
+        let config = fm.threat_detection_config()?;
+        let effective = fm.effective_detection_engine(&config);
+        fm.validate_threat_detection_config(&config, &effective)
+    }
+
     // ─── SupplyChainConfig deserialization + resolution ──────────────────────
 
     fn parse_supply_chain(yaml: &str) -> SupplyChainConfig {
@@ -3455,7 +3463,7 @@ safe-outputs:
         let env = effective.env().unwrap();
         assert_eq!(env.get("KEEP").map(String::as_str), Some("value"));
         assert!(!env.keys().any(|key| key.starts_with("COPILOT_PROVIDER_")));
-        fm.validate_threat_detection().unwrap();
+        validate_threat_detection(&fm).unwrap();
 
         let conflict = r#"---
 name: test
@@ -3471,26 +3479,33 @@ safe-outputs:
 ---
 "#;
         let (fm, _) = super::super::common::parse_markdown(conflict).unwrap();
-        assert!(fm.validate_threat_detection().is_err());
+        assert!(validate_threat_detection(&fm).is_err());
     }
 
     #[test]
-    fn explicit_threat_detection_rejects_model_and_api_target_args() {
+    fn threat_detection_engine_overlay_rejects_model_and_api_target_args() {
         for arg in ["--model=other", "--api-target=other.example.com"] {
             let source = format!(
                 "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  \
-                 args:\n    - {arg}\nsafe-outputs:\n  threat-detection: true\n---\n"
+                 args:\n    - {arg}\nsafe-outputs:\n  threat-detection:\n    \
+                 engine:\n      model: detector\n---\n"
             );
             let (fm, _) = super::super::common::parse_markdown(&source).unwrap();
-            let error = fm.validate_threat_detection().unwrap_err().to_string();
+            let error = validate_threat_detection(&fm).unwrap_err().to_string();
             assert!(error.contains("desynchronize"), "{error}");
         }
+
+        let source = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  \
+                      args:\n    - --model=other\nsafe-outputs:\n  \
+                      threat-detection: true\n---\n";
+        let (fm, _) = super::super::common::parse_markdown(source).unwrap();
+        validate_threat_detection(&fm).unwrap();
 
         let source = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  \
                       args:\n    - --model=other\nsafe-outputs:\n  threat-detection:\n    \
                       engine:\n      model: detector\n      args: []\n---\n";
         let (fm, _) = super::super::common::parse_markdown(source).unwrap();
-        fm.validate_threat_detection().unwrap();
+        validate_threat_detection(&fm).unwrap();
     }
 
     #[test]
@@ -3504,7 +3519,7 @@ safe-outputs:
         let unsupported = "---\nname: test\ndescription: test\nsafe-outputs:\n  \
                            threat-detection:\n    engine: claude\n---\n";
         let (fm, _) = super::super::common::parse_markdown(unsupported).unwrap();
-        let err = fm.validate_threat_detection().unwrap_err().to_string();
+        let err = validate_threat_detection(&fm).unwrap_err().to_string();
         assert!(err.contains("Unsupported engine 'claude'"), "{err}");
     }
 

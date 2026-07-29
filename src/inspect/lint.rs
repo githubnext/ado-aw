@@ -343,11 +343,9 @@ fn location_for(job: &JobSummary, step: Option<&str>) -> LintLocation {
 /// (e.g. `"CopyFiles@2"`). Consumers correlating findings with the pipeline
 /// graph should branch on `code == "task-input-invalid"` and treat `job` as a
 /// list name rather than a job id for this class.
-pub fn lint_front_matter_tasks(front_matter: &FrontMatter) -> Vec<LintFinding> {
-    let threat_detection = front_matter
-        .threat_detection_config()
-        .expect("front matter was validated before lint task checks");
-    crate::compile::ir::tasks::parse::validate_named_task_step_lists(&[
+pub fn lint_front_matter_tasks(front_matter: &FrontMatter) -> anyhow::Result<Vec<LintFinding>> {
+    let threat_detection = front_matter.threat_detection_config()?;
+    Ok(crate::compile::ir::tasks::parse::validate_named_task_step_lists(&[
         ("setup", &front_matter.setup),
         ("steps", &front_matter.steps),
         ("post-steps", &front_matter.post_steps),
@@ -366,7 +364,7 @@ pub fn lint_front_matter_tasks(front_matter: &FrontMatter) -> Vec<LintFinding> {
             step: Some(f.task),
         }),
     })
-    .collect()
+    .collect())
 }
 
 #[cfg(test)]
@@ -467,7 +465,7 @@ mod tests {
             "---\nname: t\ndescription: d\nsteps:\n- task: CopyFiles@2\n  inputs:\n    Contents: \"**\"\n    Bogus: nope\n---\n",
         )
         .unwrap();
-        let findings = lint_front_matter_tasks(&front_matter);
+        let findings = lint_front_matter_tasks(&front_matter).unwrap();
         assert_eq!(findings.len(), 1, "got: {findings:?}");
         let f = &findings[0];
         assert_eq!(f.code, "task-input-invalid");
@@ -485,7 +483,7 @@ mod tests {
              Contents: \"**\"\n          Bogus: nope\n---\n",
         )
         .unwrap();
-        let findings = lint_front_matter_tasks(&front_matter);
+        let findings = lint_front_matter_tasks(&front_matter).unwrap();
         assert_eq!(findings.len(), 1, "got: {findings:?}");
         let loc = findings[0].location.as_ref().expect("location present");
         assert_eq!(loc.job.as_deref(), Some("threat-detection.post-steps"));
@@ -498,7 +496,20 @@ mod tests {
             "---\nname: t\ndescription: d\nsteps:\n- task: CopyFiles@2\n  inputs:\n    Contents: \"**\"\n    TargetFolder: out\n- bash: echo hi\n---\n",
         )
         .unwrap();
-        assert!(lint_front_matter_tasks(&front_matter).is_empty());
+        assert!(lint_front_matter_tasks(&front_matter).unwrap().is_empty());
+    }
+
+    #[test]
+    fn malformed_threat_detection_returns_error_instead_of_panicking() {
+        let (front_matter, _) = crate::compile::parse_markdown(
+            "---\nname: t\ndescription: d\nsafe-outputs:\n  threat-detection:\n    \
+             promtp: typo\n---\n",
+        )
+        .unwrap();
+        let error = lint_front_matter_tasks(&front_matter)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("invalid configuration"), "{error}");
     }
 
     #[test]

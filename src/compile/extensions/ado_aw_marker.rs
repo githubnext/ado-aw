@@ -133,19 +133,20 @@ impl CompileMetadata {
         let (threat_detection_enabled, detection_engine, detection_model) =
             if explicit_threat_detection {
                 let config = ctx.front_matter.threat_detection_config()?;
-                let effective = ctx.front_matter.effective_detection_engine(&config);
-                let engine = crate::engine::get_engine(effective.engine_id())?;
-                let model = match engine {
-                    crate::engine::Engine::Copilot => effective
-                        .model()
-                        .unwrap_or(crate::engine::DEFAULT_COPILOT_MODEL)
-                        .to_string(),
+                let (engine, model) = if config.engine.is_some() {
+                    let effective = ctx.front_matter.effective_detection_engine(&config);
+                    let engine = crate::engine::get_engine(effective.engine_id())?;
+                    let model = match engine {
+                        crate::engine::Engine::Copilot => effective
+                            .model()
+                            .unwrap_or(crate::engine::DEFAULT_COPILOT_MODEL)
+                            .to_string(),
+                    };
+                    (Some(effective.engine_id().to_string()), Some(model))
+                } else {
+                    (None, None)
                 };
-                (
-                    Some(config.is_enabled()),
-                    Some(effective.engine_id().to_string()),
-                    Some(model),
-                )
+                (Some(config.is_enabled()), engine, model)
             } else {
                 (None, None, None)
             };
@@ -443,6 +444,31 @@ mod tests {
             "{}",
             step.script
         );
+    }
+
+    #[test]
+    fn explicit_default_threat_detection_emits_enabled_state_only() {
+        let fm = parse_fm(
+            "name: t\ndescription: x\nsafe-outputs:\n  threat-detection: true\n",
+        );
+        let input_path = Path::new("agents/foo.md");
+        let ctx = CompileContext {
+            agent_name: &fm.name,
+            front_matter: &fm,
+            ado_context: None,
+            engine: crate::engine::Engine::Copilot,
+            compile_dir: None,
+            input_path: Some(input_path),
+        };
+        let steps = agent_prepare_steps(&ctx);
+        let step = bash_step(&steps[1]);
+        assert!(
+            step.script.contains("\"threat_detection_enabled\":true"),
+            "{}",
+            step.script
+        );
+        assert!(!step.script.contains("\"detection_engine\""));
+        assert!(!step.script.contains("\"detection_model\""));
     }
 
     #[test]

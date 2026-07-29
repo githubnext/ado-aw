@@ -296,7 +296,6 @@ impl Engine {
     }
 
     /// Generate CLI arguments for the engine invocation.
-    #[allow(dead_code)]
     pub fn args(
         &self,
         front_matter: &FrontMatter,
@@ -427,12 +426,12 @@ impl Engine {
         prompt_path: &str,
         mcp_config_path: Option<&str>,
     ) -> Result<String> {
-        self.invocation_with_config(
+        let args = self.args(front_matter, extension_declarations)?;
+        self.invocation_with_args(
             &front_matter.engine,
-            front_matter,
-            extension_declarations,
             prompt_path,
             mcp_config_path,
+            &args,
         )
     }
 
@@ -446,6 +445,16 @@ impl Engine {
         mcp_config_path: Option<&str>,
     ) -> Result<String> {
         let args = self.args_with_config(engine_config, front_matter, extension_declarations)?;
+        self.invocation_with_args(engine_config, prompt_path, mcp_config_path, &args)
+    }
+
+    fn invocation_with_args(
+        &self,
+        engine_config: &EngineConfig,
+        prompt_path: &str,
+        mcp_config_path: Option<&str>,
+        args: &str,
+    ) -> Result<String> {
         match self {
             Engine::Copilot => {
                 let command_path = match engine_config.command() {
@@ -465,7 +474,7 @@ impl Engine {
                     &command_path,
                     prompt_path,
                     mcp_config_path,
-                    &args,
+                    args,
                 ))
             }
         }
@@ -915,13 +924,10 @@ pub fn copilot_detection_env(
 ) -> Result<Vec<(String, String)>> {
     let mut pairs = Vec::new();
     if include_non_provider && let Some(env_map) = engine_config.env() {
-        let mut keys: Vec<&String> = env_map
-            .keys()
-            .filter(|key| !key.starts_with(COPILOT_PROVIDER_PREFIX))
-            .collect();
-        keys.sort();
-        for key in keys {
-            let value = &env_map[key];
+        for (key, value) in env_map
+            .iter()
+            .filter(|(key, _)| !key.starts_with(COPILOT_PROVIDER_PREFIX))
+        {
             validate_engine_env_entry(key, value)?;
             pairs.push((key.clone(), value.clone()));
         }

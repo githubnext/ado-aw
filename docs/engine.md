@@ -74,9 +74,10 @@ Omitted values inherit from the top-level configuration. Scalar, command,
 provider, and auth values supplied in the nested block replace inherited
 values. Detection `env` merges by key with nested values winning; `args`
 inherits when absent and replaces the complete inherited list when present.
-For Detection, `--model` and `--api-target` are rejected inside the effective
-args list; use the structured fields so metadata and firewall hosts cannot
-drift. Set nested `args: []` to clear an inherited override.
+When a Detection engine overlay is present, `--model` and `--api-target` are
+rejected inside the effective args list; use the structured fields so metadata
+and firewall hosts cannot drift. Set nested `args: []` to clear an inherited
+override.
 
 The effective Detection config drives its own binary installation, invocation,
 timeout, GitHub App/provider token minting, BYOK environment and credential

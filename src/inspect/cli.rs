@@ -293,7 +293,7 @@ pub async fn build_lint(source: &Path) -> Result<lint::LintReport> {
     let summary = PipelineSummary::from_pipeline(&pipeline)?;
 
     let mut findings = lint::lint(&summary);
-    findings.extend(lint::lint_front_matter_tasks(&front_matter));
+    findings.extend(lint::lint_front_matter_tasks(&front_matter)?);
     Ok(lint::report_from_findings(findings))
 }
 
