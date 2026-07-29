@@ -230,7 +230,12 @@ describe("runFixtures", () => {
   it("respects the configured concurrency (never more than N builds polled in parallel)", async () => {
     let inFlight = 0;
     let maxInFlight = 0;
-    const fixtureNames = ["canary", "azure-cli", "noop-target", "janitor"] as const;
+    const fixtureNames = [
+      "canary",
+      "azure-cli",
+      "noop-target",
+      "smoke-failure-reporter",
+    ] as const;
     const buildIds = [701, 702, 703, 704];
 
     const client: FixtureBuildClient = {

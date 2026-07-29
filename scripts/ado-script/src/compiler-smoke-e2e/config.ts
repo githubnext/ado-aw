@@ -2,10 +2,10 @@
  * Environment configuration for the deterministic compiler-smoke E2E harness.
  *
  * This harness stages the compiler candidate produced by the current build as
- * a pinned `supply-chain.pipeline-artifact` source across five real,
- * registered ADO pipeline fixtures (canary, azure-cli, noop-target, janitor,
+ * a pinned `supply-chain.pipeline-artifact` source across four registered ADO
+ * pipeline fixtures (canary, azure-cli, noop-target, and
  * smoke-failure-reporter), pushes the staged candidate to a per-run branch on
- * a mirror repo, queues all five, and asserts they all go green.
+ * a mirror repo, queues all four, and asserts they all go green.
  *
  * Strict, fail-closed parsing lives here so every other module can trust a
  * fully validated {@link CompilerSmokeConfig} rather than re-checking env
@@ -32,7 +32,6 @@ export const FIXTURE_NAMES = [
   "canary",
   "azure-cli",
   "noop-target",
-  "janitor",
   "smoke-failure-reporter",
 ] as const;
 
@@ -59,7 +58,7 @@ export interface CompilerSmokeConfig {
   readonly adoAwBin: string;
   /** Pipeline artifact name pinned into each fixture's supply-chain config. */
   readonly artifactName: string;
-  /** ADO Git repo hosting the five registered fixture pipeline definitions. */
+  /** ADO Git repo hosting the four registered fixture pipeline definitions. */
   readonly mirrorRepo: string;
   /** Registered ADO pipeline definition id, keyed by fixture name. */
   readonly definitionIds: Readonly<Record<FixtureName, number>>;
@@ -89,7 +88,6 @@ const DEFINITION_ID_ENV_BY_FIXTURE: Readonly<Record<FixtureName, string>> = {
   canary: "COMPILER_SMOKE_CANARY_DEFINITION_ID",
   "azure-cli": "COMPILER_SMOKE_AZURE_CLI_DEFINITION_ID",
   "noop-target": "COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID",
-  janitor: "COMPILER_SMOKE_JANITOR_DEFINITION_ID",
   "smoke-failure-reporter": "COMPILER_SMOKE_REPORTER_DEFINITION_ID",
 };
 

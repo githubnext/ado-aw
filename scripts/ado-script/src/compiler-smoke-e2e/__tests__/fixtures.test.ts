@@ -13,12 +13,11 @@ describe("fixturePaths", () => {
 });
 
 describe("ALL_FIXTURES", () => {
-  it("has exactly the five fixtures in the required stable order", () => {
+  it("has exactly the four fixtures in the required stable order", () => {
     expect(ALL_FIXTURES.map((f) => f.name)).toEqual([
       "canary",
       "azure-cli",
       "noop-target",
-      "janitor",
       "smoke-failure-reporter",
     ]);
   });
@@ -32,9 +31,9 @@ describe("ALL_FIXTURES", () => {
 });
 
 describe("allowedChangedPaths", () => {
-  it("contains exactly the five md files, five lock files, and .gitattributes", () => {
+  it("contains exactly the four md files, four lock files, and .gitattributes", () => {
     const allowed = allowedChangedPaths();
-    expect(allowed.size).toBe(11);
+    expect(allowed.size).toBe(9);
     expect(allowed.has(".gitattributes")).toBe(true);
     for (const f of ALL_FIXTURES) {
       expect(allowed.has(f.relMd)).toBe(true);
