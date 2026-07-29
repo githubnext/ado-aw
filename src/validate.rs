@@ -948,12 +948,14 @@ mod tests {
     #[test]
     fn test_is_valid_parameter_name() {
         assert!(is_valid_parameter_name("clearMemory"));
+        assert!(is_valid_parameter_name("myParam"));
         assert!(is_valid_parameter_name("_private"));
         assert!(is_valid_parameter_name("param123"));
         assert!(!is_valid_parameter_name(""));
         assert!(!is_valid_parameter_name("123abc"));
         assert!(!is_valid_parameter_name("my-param"));
         assert!(!is_valid_parameter_name("my param"));
+        assert!(!is_valid_parameter_name("${{inject}}"));
     }
 
     #[test]
