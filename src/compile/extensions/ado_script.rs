@@ -508,7 +508,11 @@ pub(crate) fn install_and_download_steps_typed(
 /// `--base "$(Build.SourcesDirectory)"`. The current entries are
 /// ADO-controlled path anchors that cannot contain `"`, so this is safe;
 /// re-quote (or shell-escape) before adding any user-influenced variable.
-const PROMPT_ADO_VARS: &[&str] = &["Build.SourcesDirectory", "Build.Repository.Name"];
+const PROMPT_ADO_VARS: &[&str] = &[
+    "Build.BuildId",
+    "Build.Repository.Name",
+    "Build.SourcesDirectory",
+];
 
 /// The resolver step that expands runtime import markers in the agent prompt.
 fn resolver_step_typed() -> Step {
@@ -1715,6 +1719,13 @@ mod tests {
         // Each path-anchor var is passed as `--var "<name>=$(<name>)"` so
         // ADO expands the macro at runtime and import.js substitutes the
         // concrete value into the prompt (consistent with inlined mode).
+        assert!(
+            resolver
+                .script
+                .contains("--var \"Build.BuildId=$(Build.BuildId)\""),
+            "resolver step must pass Build.BuildId as a --var, got: {}",
+            resolver.script
+        );
         assert!(
             resolver
                 .script
