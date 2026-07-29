@@ -252,7 +252,6 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   ├── update-ado-agentic-workflow.md # Guide for modifying an existing agentic workflow
 │   └── debug-ado-agentic-workflow.md  # Guide for troubleshooting a failing agentic workflow (report-first; consent-gated filing)
 ├── scripts/              # Supporting scripts shipped as release artifacts
-│   ├── prompt-evals/     # Dependency-free Node harness for paired PR prompt evaluations, strict rubric judging, compiler evidence, and report rendering
 │   └── ado-script/       # TypeScript workspace for bundled gate/import helpers plus execution-context, conclusion, and approval-summary bundles
 │       └── src/
 │           ├── gate/     # Gate evaluator source (bundled to gate.js)
@@ -307,8 +306,8 @@ index to jump to the right page.
 - [`prompts/debug-ado-agentic-workflow.md`](prompts/debug-ado-agentic-workflow.md) — guide for
   troubleshooting a failing agentic workflow with report-first diagnostics and consent-gated issue filing.
 - [`docs/prompt-evals.md`](docs/prompt-evals.md) — deterministic prompt
-  contracts plus paired PR evaluation, tool-free judging, compiler evidence,
-  artifacts, and rolling PR comments.
+  contracts plus a gh-aw-managed static base-versus-head review against
+  synthetic scenarios and scoring rubrics.
 
 ### Authoring agent files
 

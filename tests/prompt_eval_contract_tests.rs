@@ -282,3 +282,28 @@ fn embedded_workflow_contexts_pass_ado_aw_lint() {
         );
     }
 }
+
+#[test]
+fn prompt_evaluator_uses_only_the_gh_aw_managed_agent() {
+    let workflow_path = repo_path(".github/workflows/prompt-evaluator.md");
+    let workflow = fs::read_to_string(&workflow_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", workflow_path.display()));
+
+    for forbidden in [
+        "scripts/prompt-evals",
+        "--prompt-file",
+        "subject_max_ai_credits",
+        "judge_max_ai_credits",
+        "judge_model",
+    ] {
+        assert!(
+            !workflow.contains(forbidden),
+            "prompt evaluator must not contain nested model harness marker {forbidden}"
+        );
+    }
+    assert!(
+        workflow.contains("gh-aw is already running you through the configured Copilot engine")
+            && workflow.contains("Do not invoke `copilot`, another model, a judge, or a subagent"),
+        "prompt evaluator must explicitly preserve the single gh-aw-managed agent architecture"
+    );
+}

@@ -15,10 +15,9 @@ This directory contains synthetic cases for evaluating the authoring prompts in
 All content must be synthetic. Do not copy real build logs, organization names,
 credentials, work-item content, or user conversations into these fixtures.
 
-The behavioral evaluator runs each selected case in a fresh, tool-free Copilot
-CLI session. Workflow-shaped responses are extracted and checked with
-`ado-aw compile` and `ado-aw lint`. A separate tool-free judge applies the
-rubrics. Model-derived results are advisory.
+The advisory Prompt Evaluator workflow uses one gh-aw-managed agent run to
+review base and candidate prompt text against these cases and rubrics. It does
+not invoke Copilot CLI directly or execute the authoring prompts.
 
 When adding or changing a case:
 
@@ -30,6 +29,5 @@ When adding or changing a case:
 
    ```text
    cargo test --test prompt_contract_tests --test prompt_eval_contract_tests
-   node --test scripts/prompt-evals/test/*.test.mjs
+   gh aw compile prompt-evaluator --strict
    ```
-

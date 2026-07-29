@@ -737,8 +737,8 @@ index to jump to the right page.
 **Compiler internals & operations**
 
 - [`docs/prompt-evals.md`](docs/prompt-evals.md) — deterministic prompt
-  contracts, paired PR evaluations, tool-free rubric judging, compiler
-  evidence, and rolling PR comments.
+  contracts and a gh-aw-managed static base-versus-head review against
+  synthetic scenarios and scoring rubrics.
 - [`docs/ir.md`](docs/ir.md) — typed Azure DevOps pipeline IR (`Pipeline`,
   jobs/stages/steps, output refs, graph pass, lowering, and target builders).
 - [`docs/cli.md`](docs/cli.md) — `ado-aw` CLI command and flag reference.
