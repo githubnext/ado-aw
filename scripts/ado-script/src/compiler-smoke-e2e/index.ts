@@ -3,10 +3,10 @@
  *
  * Stages the compiler candidate produced by the current build (PR or
  * nightly `main`) as a pinned `supply-chain.pipeline-artifact` source across
- * the five real fixtures documented in `tests/safe-outputs/README.md`
- * (canary, azure-cli, noop-target, janitor, smoke-failure-reporter), pushes
+ * four release-backed fixtures documented in `tests/safe-outputs/README.md`
+ * (canary, azure-cli, noop-target, and smoke-failure-reporter), pushes
  * the staged candidate to a short-lived branch on the mirror repo, queues
- * the five FIXED "candidate lane" pipeline definitions (tracked in
+ * the four FIXED "candidate lane" pipeline definitions (tracked in
  * `tests/compiler-smoke-e2e/REGISTERED.md`), and asserts they all go green.
  *
  * See `config.ts` for the full required/optional env var contract.
