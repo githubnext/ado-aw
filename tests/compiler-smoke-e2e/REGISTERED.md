@@ -10,13 +10,15 @@ These definitions live in
 | `Candidate compiler smoke - canary` | `ado-aw-mirror` | `tests/safe-outputs/canary.lock.yml` | `2554` |
 | `Candidate compiler smoke - azure-cli` | `ado-aw-mirror` | `tests/safe-outputs/azure-cli.lock.yml` | `2555` |
 | `Candidate compiler smoke - noop-target` | `ado-aw-mirror` | `tests/safe-outputs/noop-target.lock.yml` | `2556` |
-| `Candidate compiler smoke - janitor` | `ado-aw-mirror` | `tests/safe-outputs/janitor.lock.yml` | `2557` |
 | `Candidate compiler smoke - failure reporter` | `ado-aw-mirror` | `tests/safe-outputs/smoke-failure-reporter.lock.yml` | `2558` |
 
-All five child definitions use
+All four child definitions use
 `refs/heads/ado-aw-smoke-candidate-base` as their default branch. The ref is
 permanent and inert; the harness never deletes it. Its seed commit is
 `2b5fa7c336bd1f55a867cfc281e665472730b84c`.
+
+Candidate janitor definition `2557` was retired. The release-backed janitor
+definition `2548` remains scheduled weekly and is not part of this lane.
 
 ## Security record
 
@@ -43,7 +45,7 @@ Release-smoke definitions `2545`-`2549` and scheduled trigger E2E definition
 independent of the candidate compiler PR lane.
 
 Definition `2559` uses the `github.com_githubnext` GitHub service connection
-and stores the five child definition IDs as non-secret definition variables.
+and stores the four child definition IDs as non-secret definition variables.
 
 Every child definition needs its own secret `GITHUB_TOKEN` for Copilot CLI
 authentication. Definition `2558` additionally needs

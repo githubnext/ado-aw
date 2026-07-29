@@ -1,9 +1,11 @@
 # Candidate compiler agentic smoke
 
 This suite validates compiler changes before release. It builds `ado-aw` and
-`ado-script` from the exact pull-request or `main` commit, recompiles every
-workflow under [`tests/safe-outputs/`](../safe-outputs/), and queues five fixed
-AgentPlayground definitions against the regenerated YAML.
+`ado-script` from the exact pull-request or `main` commit, recompiles four
+selected workflows under [`tests/safe-outputs/`](../safe-outputs/) (canary,
+azure-cli, noop-target, and failure reporter), and queues four fixed
+AgentPlayground definitions against the regenerated YAML. The weekly janitor
+remains covered by the release-backed lane and is intentionally excluded here.
 
 It complements rather than replaces the release-backed daily smoke:
 
@@ -27,7 +29,7 @@ binary cannot drift.
    `ado-aw-linux-x64`, `awf-linux-x64`, `ado-script.zip`, `checksums.txt`, and
    `provenance.json`.
 4. The test-only `compiler-smoke-e2e` TypeScript harness creates a detached
-   worktree, adds an exact `supply-chain.pipeline-artifact` source to all five
+   worktree, adds an exact `supply-chain.pipeline-artifact` source to all four
    smoke files, removes their schedules, recompiles them with the candidate
    compiler, and runs `ado-aw check`. Both compiler subprocesses receive
    `ADO_AW_COMPILE_REMOTE_URL` set to the target `ado-aw-mirror` URL, so
@@ -36,7 +38,7 @@ binary cannot drift.
 5. The harness pushes the worktree commit to
    `refs/heads/ado-aw-smoke-candidate/<producer-build-id>` in the Azure Repo
    `ado-aw-mirror`.
-6. Five fixed child definitions are queued concurrently with both that ref and
+6. Four fixed child definitions are queued concurrently with both that ref and
    its exact commit SHA. Each generated pipeline downloads and verifies the
    artifact from the still-running producer build.
 7. The harness waits for all children, cancels non-terminal runs after a
@@ -79,10 +81,10 @@ to that manifest.
 
 The definitions are registered against `ado-aw-mirror`, not GitHub. Their
 default branch is the permanent inert ref
-`refs/heads/ado-aw-smoke-candidate-base`, whose five lock-file paths contain
+`refs/heads/ado-aw-smoke-candidate-base`, whose four lock-file paths contain
 hand-authored `trigger: none`, `pr: none`, schedule-free placeholders. A child
 therefore runs only when the orchestrator explicitly supplies a candidate ref.
-The checked-in [`inert-child.yml`](inert-child.yml) is copied to those five
+The checked-in [`inert-child.yml`](inert-child.yml) is copied to those four
 paths when the base ref is created.
 
 See [`REGISTERED.md`](REGISTERED.md) for definition IDs and variables.
@@ -93,7 +95,7 @@ The principal behind `agent-playground-write`, used only after artifact
 publication, needs:
 
 - Contribute/Create branch/Delete refs on `ado-aw-mirror`;
-- Queue builds and Stop builds on the five child definitions;
+- Queue builds and Stop builds on the four child definitions;
 - Read builds and artifacts in AgentPlayground.
 
 Child build identities need Code Read on `ado-aw-mirror` and Build Read on the
@@ -117,7 +119,6 @@ Set these non-secret variables on the orchestrator:
 COMPILER_SMOKE_CANARY_DEFINITION_ID
 COMPILER_SMOKE_AZURE_CLI_DEFINITION_ID
 COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID
-COMPILER_SMOKE_JANITOR_DEFINITION_ID
 COMPILER_SMOKE_REPORTER_DEFINITION_ID
 ```
 
@@ -149,7 +150,7 @@ The full live contract requires AgentPlayground and the fixed definitions:
 
 1. the producer remains in progress after publishing its artifact;
 2. every child downloads the exact producer `run-id`;
-3. all five children succeed;
+3. all four children succeed;
 4. child provenance identifies the producer definition, build, and source SHA;
 5. the per-run mirror ref is removed.
 

@@ -17,7 +17,6 @@ const baseEnv = {
   COMPILER_SMOKE_CANARY_DEFINITION_ID: "3001",
   COMPILER_SMOKE_AZURE_CLI_DEFINITION_ID: "3002",
   COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID: "3003",
-  COMPILER_SMOKE_JANITOR_DEFINITION_ID: "3004",
   COMPILER_SMOKE_REPORTER_DEFINITION_ID: "3005",
   COMPILER_SMOKE_CHILD_TIMEOUT_MS: "5000",
   COMPILER_SMOKE_POLL_MS: "1",
@@ -79,8 +78,6 @@ vi.mock("../git.js", async (importOriginal) => {
         "tests/safe-outputs/azure-cli.lock.yml",
         "tests/safe-outputs/noop-target.md",
         "tests/safe-outputs/noop-target.lock.yml",
-        "tests/safe-outputs/janitor.md",
-        "tests/safe-outputs/janitor.lock.yml",
         "tests/safe-outputs/smoke-failure-reporter.md",
         "tests/safe-outputs/smoke-failure-reporter.lock.yml",
       ];

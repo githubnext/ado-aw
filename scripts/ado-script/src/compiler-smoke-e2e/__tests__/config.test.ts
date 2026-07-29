@@ -18,7 +18,6 @@ function baseEnv(overrides: Record<string, string | undefined> = {}): NodeJS.Pro
     COMPILER_SMOKE_CANARY_DEFINITION_ID: "2601",
     COMPILER_SMOKE_AZURE_CLI_DEFINITION_ID: "2602",
     COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID: "2603",
-    COMPILER_SMOKE_JANITOR_DEFINITION_ID: "2604",
     COMPILER_SMOKE_REPORTER_DEFINITION_ID: "2605",
     ...overrides,
   };
@@ -35,7 +34,6 @@ describe("loadConfig", () => {
       canary: 2601,
       "azure-cli": 2602,
       "noop-target": 2603,
-      janitor: 2604,
       "smoke-failure-reporter": 2605,
     });
     expect(config.concurrency).toBe(5);
@@ -59,7 +57,6 @@ describe("loadConfig", () => {
     "COMPILER_SMOKE_CANARY_DEFINITION_ID",
     "COMPILER_SMOKE_AZURE_CLI_DEFINITION_ID",
     "COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID",
-    "COMPILER_SMOKE_JANITOR_DEFINITION_ID",
     "COMPILER_SMOKE_REPORTER_DEFINITION_ID",
   ]) {
     it(`rejects a missing ${name}`, () => {
@@ -84,7 +81,7 @@ describe("loadConfig", () => {
   });
 
   it("rejects a non-integer fixture definition id", () => {
-    expect(() => loadConfig(baseEnv({ COMPILER_SMOKE_JANITOR_DEFINITION_ID: "12.5" }))).toThrow(
+    expect(() => loadConfig(baseEnv({ COMPILER_SMOKE_REPORTER_DEFINITION_ID: "12.5" }))).toThrow(
       /positive integer/,
     );
   });
@@ -104,11 +101,10 @@ describe("loadConfig", () => {
       loadConfig(
         baseEnv({
           COMPILER_SMOKE_AZURE_CLI_DEFINITION_ID: "2601",
-          COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID: "2604",
-          COMPILER_SMOKE_JANITOR_DEFINITION_ID: "2604",
+          COMPILER_SMOKE_REPORTER_DEFINITION_ID: "2603",
         }),
       ),
-    ).toThrow(/canary/);
+    ).toThrow(/2601 used by \[canary, azure-cli\].*2603 used by \[noop-target, smoke-failure-reporter\]/);
   });
 
   describe("COMPILER_SMOKE_CONCURRENCY bounds", () => {
