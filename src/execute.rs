@@ -1012,7 +1012,8 @@ mod tests {
         let ctx = ExecutionContext::default();
 
         let result = execute_safe_output(&entry, &ctx).await;
-        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Failed to parse create-work-item"), "err: {err}");
     }
 
     #[tokio::test]
@@ -1032,7 +1033,8 @@ mod tests {
         let ctx = ExecutionContext::default();
 
         let result = execute_safe_output(&entry, &ctx).await;
-        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Failed to parse update-wiki-page"), "err: {err}");
     }
 
     #[tokio::test]
@@ -1078,7 +1080,8 @@ mod tests {
         let ctx = ExecutionContext::default();
 
         let result = execute_safe_output(&entry, &ctx).await;
-        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Failed to parse create-wiki-page"), "err: {err}");
     }
 
     #[tokio::test]
@@ -1088,7 +1091,8 @@ mod tests {
         let ctx = ExecutionContext::default();
 
         let result = execute_safe_output(&entry, &ctx).await;
-        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Failed to parse upload-pipeline-artifact"), "err: {err}");
     }
 
     #[tokio::test]
@@ -1134,7 +1138,8 @@ mod tests {
         let ctx = ExecutionContext::default();
 
         let result = execute_safe_output(&entry, &ctx).await;
-        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Failed to parse comment-on-work-item"), "err: {err}");
     }
 
     #[tokio::test]
@@ -1144,7 +1149,8 @@ mod tests {
         let ctx = ExecutionContext::default();
 
         let result = execute_safe_output(&entry, &ctx).await;
-        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Failed to parse upload-workitem-attachment"), "err: {err}");
     }
 
     #[tokio::test]
