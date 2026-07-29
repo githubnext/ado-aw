@@ -202,11 +202,15 @@ pub(crate) fn build_pipeline_context(
     let engine_install_steps_yaml =
         ctx.engine
             .install_steps(&front_matter.engine, &front_matter.target, ctx.ado_org())?;
-    let detection_engine_install_steps_yaml = detection_engine.install_steps(
-        &detection_engine_config,
-        &front_matter.target,
-        ctx.ado_org(),
-    )?;
+    let detection_engine_install_steps_yaml = if threat_detection.is_enabled() {
+        detection_engine.install_steps(
+            &detection_engine_config,
+            &front_matter.target,
+            ctx.ado_org(),
+        )?
+    } else {
+        String::new()
+    };
     let engine_log_dir = ctx.engine.log_dir().to_string();
 
     let mut engine_env = ctx.engine.env(&front_matter.engine)?;
@@ -250,12 +254,9 @@ pub(crate) fn build_pipeline_context(
     {
         detection_byom_exclude_keys
             .push(crate::compile::types::PROVIDER_BEARER_TOKEN_VAR.to_string());
-    }
+    };
     let detection_engine_env = if detection_is_copilot {
-        crate::engine::copilot_detection_env(
-            &detection_engine_config,
-            threat_detection.engine.is_some(),
-        )?
+        crate::engine::copilot_detection_env(&detection_engine_config)?
     } else {
         Vec::new()
     };
@@ -599,9 +600,7 @@ pub(crate) struct StandaloneCtx {
     /// empty for non-BYOM. AWF's API proxy itself is always enabled.
     pub(crate) byom_exclude_keys: Vec<String>,
     pub(crate) detection_byom_exclude_keys: Vec<String>,
-    /// Validated custom env for Detection. Existing workflows retain the
-    /// historical provider-only subset; an explicit overlay opts into the full
-    /// inherited/overridden engine environment.
+    /// Validated inherited/overridden custom env for Detection.
     pub(crate) detection_engine_env: Vec<(String, String)>,
 }
 
@@ -1316,11 +1315,7 @@ fn build_detection_job(
         "Detection",
         cfg.pools.detection.clone(),
     );
-    // Preserve the existing default: top-level Agent timeout does not
-    // implicitly constrain Detection. Only an explicit Detection engine
-    // overlay opts that job into the effective timeout.
     if cfg.threat_detection.is_enabled()
-        && cfg.threat_detection.engine.is_some()
         && let Some(minutes) = cfg.detection_engine_config.timeout_minutes()
     {
         job.timeout = Some(std::time::Duration::from_secs(60 * minutes as u64));

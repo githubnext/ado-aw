@@ -97,6 +97,10 @@ top-level arguments for Detection. Install version, command, auth/provider,
 BYOK credential isolation, and firewall hosts are all resolved from the
 effective Detection engine.
 
+Detection inherits the top-level `engine.timeout-minutes`. Set
+`safe-outputs.threat-detection.engine.timeout-minutes` to override that limit
+for Detection only.
+
 `steps` and `post-steps` run outside AWF and are trusted with the checked-out
 repository and Detection artifacts. A failing custom step fails Detection and
 blocks SafeOutputs. Use `pool.overrides.detection` to select a different

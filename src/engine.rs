@@ -914,16 +914,14 @@ pub fn copilot_provider_env(engine_config: &EngineConfig) -> Result<Vec<(String,
 
 /// Return custom environment entries for a Detection Copilot run.
 ///
-/// Existing workflows historically forward only provider-routing variables to
-/// Detection. An explicit Detection engine override opts into inheriting the
-/// full effective engine environment, with overlay values already merged by
-/// the front-matter resolver.
-pub fn copilot_detection_env(
-    engine_config: &EngineConfig,
-    include_non_provider: bool,
-) -> Result<Vec<(String, String)>> {
+/// Return the full effective custom environment for a Detection Copilot run.
+///
+/// The front-matter resolver has already overlaid Detection values on the
+/// top-level engine config. Non-provider values are validated here; provider
+/// routing includes raw and typed-provider-derived entries.
+pub fn copilot_detection_env(engine_config: &EngineConfig) -> Result<Vec<(String, String)>> {
     let mut pairs = Vec::new();
-    if include_non_provider && let Some(env_map) = engine_config.env() {
+    if let Some(env_map) = engine_config.env() {
         for (key, value) in env_map
             .iter()
             .filter(|(key, _)| !key.starts_with(COPILOT_PROVIDER_PREFIX))

@@ -7270,6 +7270,83 @@ safe-outputs:
 }
 
 #[test]
+fn threat_detection_disabled_skips_unused_engine_install_resolution() {
+    let source = r#"---
+name: "Threat Detection Disabled Invalid Version"
+description: "Disabled Detection does not install its engine"
+safe-outputs:
+  noop: {}
+  threat-detection:
+    enabled: false
+    engine:
+      version: "bad version"
+---
+
+## Agent
+"#;
+    let (ok, compiled, stderr) =
+        compile_inline_source("threat-detection-disabled-invalid-version", source);
+    assert!(ok, "disabled Detection should not resolve install steps: {stderr}");
+    let detection = job_block(&compiled, "Detection");
+    assert!(detection.contains("Bypass AI threat analysis"), "{detection}");
+    assert!(!detection.contains("bad version"), "{detection}");
+}
+
+#[test]
+fn threat_detection_timeout_inherits_and_can_override_agent_timeout() {
+    let inherited = r#"---
+name: "Threat Detection Timeout"
+description: "Detection inherits top-level timeout"
+engine:
+  id: copilot
+  timeout-minutes: 17
+  env:
+    INHERITED_DETECTION_ENV: "true"
+safe-outputs:
+  noop: {}
+---
+
+## Agent
+"#;
+    let (ok, compiled, stderr) =
+        compile_inline_source("threat-detection-timeout-inherited", inherited);
+    assert!(ok, "pipeline should compile: {stderr}");
+    assert!(
+        job_block(&compiled, "Agent").contains("timeoutInMinutes: 17"),
+        "{}",
+        job_block(&compiled, "Agent")
+    );
+    assert!(
+        job_block(&compiled, "Detection").contains("timeoutInMinutes: 17"),
+        "{}",
+        job_block(&compiled, "Detection")
+    );
+    assert!(
+        job_block(&compiled, "Detection").contains("INHERITED_DETECTION_ENV: 'true'"),
+        "{}",
+        job_block(&compiled, "Detection")
+    );
+
+    let overridden = inherited.replace(
+        "  noop: {}",
+        "  noop: {}\n  threat-detection:\n    engine:\n      timeout-minutes: 9",
+    );
+    let (ok, compiled, stderr) =
+        compile_inline_source("threat-detection-timeout-overridden", &overridden);
+    assert!(ok, "pipeline should compile: {stderr}");
+    assert!(
+        job_block(&compiled, "Agent").contains("timeoutInMinutes: 17"),
+        "{}",
+        job_block(&compiled, "Agent")
+    );
+    assert!(
+        job_block(&compiled, "Detection").contains("timeoutInMinutes: 9"),
+        "{}",
+        job_block(&compiled, "Detection")
+    );
+}
+
+#[test]
 fn threat_detection_provider_override_updates_detection_firewall_only() {
     let source = r#"---
 name: "Threat Detection Provider"

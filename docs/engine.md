@@ -82,8 +82,8 @@ override.
 The effective Detection config drives its own binary installation, invocation,
 timeout, GitHub App/provider token minting, BYOK environment and credential
 isolation, API target, and AWF network hosts. It never mutates the Agent config.
-An explicit Detection `timeout-minutes` (or inherited timeout in an explicit
-overlay) sets the Detection job timeout.
+Detection inherits top-level `engine.timeout-minutes`; a nested
+`timeout-minutes` overrides it for Detection only.
 
 ado-aw currently supports only engine ID `copilot`; a different nested ID fails
 at compile time. See [Threat detection](safe-outputs.md#threat-detection-threat-detection)
