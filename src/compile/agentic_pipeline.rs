@@ -4027,6 +4027,8 @@ mod tests {
 
     fn build_jobs(source: &str) -> Vec<super::super::ir::job::Job> {
         let fm = parse_and_resolve(source);
+        let threat_detection = fm.threat_detection_config().unwrap();
+        let detection_engine_config = fm.effective_detection_engine(&threat_detection);
         let ctx = super::super::extensions::CompileContext::for_test(&fm);
         let extensions = super::super::extensions::collect_extensions(&fm);
         let decls: Vec<_> = extensions
@@ -4071,8 +4073,8 @@ mod tests {
             detection_engine_install_steps_yaml: String::new(),
             engine_run: String::new(),
             engine_run_detection: String::new(),
-            detection_engine_config: EngineConfig::default(),
-            threat_detection: ThreatDetectionConfig::default(),
+            detection_engine_config,
+            threat_detection,
             engine_env: "env:\n  GITHUB_TOKEN: $(GITHUB_TOKEN)\n".to_string(),
             engine_log_dir: "/tmp/logs".to_string(),
             allowed_domains: String::new(),
@@ -4108,6 +4110,100 @@ mod tests {
 
     fn job_pool_by_id<'a>(jobs: &'a [super::super::ir::job::Job], id: &str) -> Option<&'a Pool> {
         jobs.iter().find(|j| j.id.as_ref() == id).map(|j| &j.pool)
+    }
+
+    #[test]
+    fn threat_detection_enabled_and_disabled_match_expected_ir_graph() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        use super::super::ir::{
+            Pipeline, PipelineBody, PipelineShape, Resources, Triggers,
+            graph::build_graph,
+        };
+
+        let common = concat!(
+            "name: test\n",
+            "description: test\n",
+            "safe-outputs:\n",
+            "  require-approval: true\n",
+            "  create-pull-request: {}\n",
+            "  add-pr-comment:\n",
+            "    require-approval: false\n",
+        );
+        let enabled = format!("---\n{common}  threat-detection: true\n---\nbody\n");
+        let disabled = format!(
+            "---\n{common}  threat-detection:\n    enabled: false\n    steps:\n      \
+             - bash: echo should-not-run\n        displayName: SHOULD_NOT_RUN_PRE\n    \
+             post-steps:\n      - bash: echo should-not-run\n        displayName: \
+             SHOULD_NOT_RUN_POST\n---\nbody\n"
+        );
+
+        let enabled_jobs = build_jobs(&enabled);
+        let disabled_jobs = build_jobs(&disabled);
+
+        let graph_for = |jobs| {
+            let pipeline = Pipeline {
+                name: "test".to_string(),
+                parameters: vec![],
+                resources: Resources::default(),
+                triggers: Triggers::default(),
+                variables: vec![],
+                body: PipelineBody::Jobs(jobs),
+                shape: PipelineShape::Standalone,
+            };
+            build_graph(&pipeline).unwrap()
+        };
+        let enabled_graph = graph_for(enabled_jobs.clone());
+        let disabled_graph = graph_for(disabled_jobs.clone());
+
+        let job = |id: &str| JobId::new(id).unwrap();
+        let expected_edges = BTreeSet::from([
+            (job("Conclusion"), job("Agent")),
+            (job("Conclusion"), job("Detection")),
+            (job("Conclusion"), job("SafeOutputs")),
+            (job("Conclusion"), job("SafeOutputs_Reviewed")),
+            (job("Detection"), job("Agent")),
+            (job("ManualReview"), job("Agent")),
+            (job("ManualReview"), job("Detection")),
+            (job("SafeOutputs"), job("Agent")),
+            (job("SafeOutputs"), job("Detection")),
+            (job("SafeOutputs_Reviewed"), job("Agent")),
+            (job("SafeOutputs_Reviewed"), job("Detection")),
+            (job("SafeOutputs_Reviewed"), job("ManualReview")),
+        ]);
+        let expected_outputs = BTreeMap::from([
+            (
+                StepId::new("reviewedProposals").unwrap(),
+                BTreeSet::from(["HasReviewedProposals".to_string()]),
+            ),
+            (
+                StepId::new("threatAnalysis").unwrap(),
+                BTreeSet::from(["SafeToProcess".to_string()]),
+            ),
+        ]);
+
+        for graph in [&enabled_graph, &disabled_graph] {
+            assert_eq!(graph.job_edges, expected_edges);
+            assert!(graph.stage_edges.is_empty());
+            assert_eq!(graph.outputs_needing_is_output, expected_outputs);
+            assert_eq!(graph.step_locations.len(), 2);
+            for (step, outputs) in &expected_outputs {
+                let location = graph.step_locations.get(step).unwrap();
+                assert_eq!(location.job, job("Detection"));
+                assert_eq!(&location.outputs, outputs);
+            }
+        }
+
+        let disabled_detection = disabled_jobs
+            .iter()
+            .find(|job| job.id.as_ref() == "Detection")
+            .unwrap();
+        assert!(disabled_detection.steps.iter().any(|step| {
+            matches!(step, Step::Bash(step) if step.display_name == "Bypass AI threat analysis")
+        }));
+        assert!(!disabled_detection.steps.iter().any(|step| {
+            matches!(step, Step::RawYaml(raw) if raw.contains("SHOULD_NOT_RUN"))
+        }));
     }
 
     #[test]
