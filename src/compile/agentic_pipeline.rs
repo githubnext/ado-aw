@@ -1287,7 +1287,6 @@ fn build_detection_job(
         }
         steps.push(Step::Bash(prepare_analyzed_outputs_step()));
         steps.push(Step::Bash(evaluate_threat_analysis_step()));
-        steps.push(Step::Bash(copy_logs_step(&cfg.engine_log_dir, true)));
     } else {
         steps.push(Step::Bash(prepare_analyzed_outputs_passthrough_step()));
         steps.push(Step::Bash(threat_analysis_disabled_step()));
@@ -1302,6 +1301,9 @@ fn build_detection_job(
             &cfg.working_directory,
             &reviewed_tools,
         )));
+    }
+    if cfg.threat_detection.is_enabled() {
+        steps.push(Step::Bash(copy_logs_step(&cfg.engine_log_dir, true)));
     }
     // Publish
     steps.push(Step::Publish(PublishStep {
@@ -4209,6 +4211,24 @@ mod tests {
         assert!(!disabled_detection.steps.iter().any(|step| {
             matches!(step, Step::RawYaml(raw) if raw.contains("SHOULD_NOT_RUN"))
         }));
+
+        let enabled_detection = enabled_jobs
+            .iter()
+            .find(|job| job.id.as_ref() == "Detection")
+            .unwrap();
+        let reviewed_index = enabled_detection
+            .steps
+            .iter()
+            .position(|step| step.id().is_some_and(|id| id.as_ref() == "reviewedProposals"))
+            .unwrap();
+        let copy_logs_index = enabled_detection
+            .steps
+            .iter()
+            .position(|step| {
+                matches!(step, Step::Bash(step) if step.display_name == "Copy logs to output directory")
+            })
+            .unwrap();
+        assert!(reviewed_index < copy_logs_index);
     }
 
     #[test]
