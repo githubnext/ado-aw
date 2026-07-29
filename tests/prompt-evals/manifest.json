@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "fixture_set_version": 1,
+  "cases": [
+    "cases/create/minimal-manual/case.json",
+    "cases/create/scheduled-workitem-report/case.json",
+    "cases/create/needs-clarification/case.json",
+    "cases/update/body-only/case.json",
+    "cases/update/pr-filter-mode/case.json",
+    "cases/update/safe-output/case.json",
+    "cases/debug/permission-failure/case.json",
+    "cases/debug/product-defect/case.json",
+    "cases/debug/missing-evidence/case.json"
+  ]
+}
+

@@ -93,3 +93,51 @@ fn prompts_align_model_default_to_code_truth() {
         );
     }
 }
+
+#[test]
+fn prompts_define_explicit_done_criteria() {
+    for rel in [
+        "prompts/create-ado-agentic-workflow.md",
+        "prompts/update-ado-agentic-workflow.md",
+        "prompts/debug-ado-agentic-workflow.md",
+    ] {
+        let content = read(rel);
+        assert!(
+            content.contains("## Done Criteria"),
+            "{rel} must define explicit done criteria"
+        );
+    }
+}
+
+#[test]
+fn authoring_prompts_keep_expected_output_contracts() {
+    let create = read("prompts/create-ado-agentic-workflow.md");
+    assert!(
+        create.contains("complete `.md` content")
+            && create.contains("assumptions and unresolved questions")
+            && create.contains("ado-aw compile"),
+        "create prompt must preserve its workflow artifact and compile guidance"
+    );
+
+    let update = read("prompts/update-ado-agentic-workflow.md");
+    assert!(
+        update.contains("concise diff summary")
+            && update.contains("whether compile is required")
+            && update.contains("front matter changed -> `ado-aw compile` required"),
+        "update prompt must preserve targeted-diff and recompilation guidance"
+    );
+
+    let debug = read("prompts/debug-ado-agentic-workflow.md");
+    for section in [
+        "## Diagnostic Summary",
+        "## Evidence",
+        "## Analysis",
+        "## Root Cause",
+        "## Recommended Next Action",
+    ] {
+        assert!(
+            debug.contains(section),
+            "debug prompt must require section {section}"
+        );
+    }
+}

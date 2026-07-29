@@ -1,0 +1,7 @@
+Build ID: 424242
+Agent job: succeeded
+Detection job: succeeded
+SafeOutputs job: failed
+Safe-output artifact: 1 accepted comment-on-work-item proposal
+Last successful run: none
+

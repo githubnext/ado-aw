@@ -1,0 +1,16 @@
+Environment A: clean Ubuntu runner, ado-aw 9.9.9-synthetic
+Environment B: clean Windows runner, ado-aw 9.9.9-synthetic
+
+Command:
+  ado-aw compile workflow.md
+
+Both environments:
+  YAML front matter parses successfully.
+  The documented comment-on-work-item keys are accepted by the schema.
+  Compilation then exits 101 with:
+    thread 'main' panicked at src/compile/extensions/safe_outputs.rs:999:
+    called `Option::unwrap()` on a `None` value
+
+Removing the entire safe-outputs block avoids the panic. Re-adding the same
+documented block reproduces it.
+

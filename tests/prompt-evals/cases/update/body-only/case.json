@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "update-body-only",
+  "prompt": "update",
+  "description": "Apply a body-only formatting change and preserve front matter.",
+  "request_file": "request.md",
+  "context_files": [
+    "workflow.md"
+  ],
+  "rubric_files": [
+    "rubrics/common.json",
+    "rubrics/update.json"
+  ],
+  "expected": {
+    "outcome": "workflow",
+    "artifact_required": true,
+    "compile": true,
+    "lint": true,
+    "compile_guidance": "not-required",
+    "external_side_effect": "none",
+    "required_sections": []
+  },
+  "ground_truth": {
+    "changed_surface": "body-only",
+    "preserve_front_matter": true,
+    "notes": [
+      "The source has no inlined-imports setting.",
+      "Only the Output section should change."
+    ]
+  }
+}
+

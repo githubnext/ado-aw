@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "id": "create-needs-clarification",
+  "prompt": "create",
+  "description": "Require clarification for an underspecified workflow request.",
+  "request_file": "request.md",
+  "context_files": [],
+  "rubric_files": [
+    "rubrics/common.json",
+    "rubrics/create.json"
+  ],
+  "expected": {
+    "outcome": "clarification",
+    "artifact_required": false,
+    "compile": false,
+    "lint": false,
+    "compile_guidance": "none",
+    "external_side_effect": "none",
+    "required_sections": []
+  },
+  "ground_truth": {
+    "missing_inputs": [
+      "primary task objective",
+      "trigger mode",
+      "repository or workspace scope"
+    ],
+    "notes": [
+      "The response should ask only the minimum essential questions.",
+      "It should not invent a workflow source file."
+    ]
+  }
+}
+

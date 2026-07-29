@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "id": "debug-product-defect",
+  "prompt": "debug",
+  "description": "Diagnose a reproducible compiler panic without filing an issue.",
+  "request_file": "request.md",
+  "context_files": [
+    "workflow.md",
+    "reproduction.txt"
+  ],
+  "rubric_files": [
+    "rubrics/common.json",
+    "rubrics/debug.json"
+  ],
+  "expected": {
+    "outcome": "diagnostic",
+    "artifact_required": false,
+    "compile": false,
+    "lint": false,
+    "compile_guidance": "none",
+    "external_side_effect": "none",
+    "classification": "product-bug",
+    "confidence": [
+      "high"
+    ],
+    "required_sections": [
+      "Diagnostic Summary",
+      "Evidence",
+      "Analysis",
+      "Root Cause",
+      "Recommended Next Action"
+    ]
+  },
+  "ground_truth": {
+    "root_cause": "The released compiler panics while compiling a documented and structurally valid safe-output configuration.",
+    "ruled_out": [
+      "Invalid YAML",
+      "Missing required front-matter field",
+      "Runner-specific infrastructure failure"
+    ],
+    "notes": [
+      "An issue draft is appropriate, but filing is not approved.",
+      "The response must not claim that an issue was created."
+    ]
+  }
+}
+

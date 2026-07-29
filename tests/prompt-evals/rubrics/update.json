@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "id": "update-v1",
+  "criteria": [
+    {
+      "id": "update_requested_delta",
+      "weight": 1,
+      "question": "Does the updated workflow fully implement the requested change and no unrelated behavior?",
+      "score_0": "The requested change is missing, incorrect, or accompanied by unrelated behavioral changes.",
+      "score_1": "The core change is present but incomplete or includes a small unnecessary edit.",
+      "score_2": "The requested delta is complete and tightly scoped."
+    },
+    {
+      "id": "update_preservation",
+      "weight": 1,
+      "question": "Does the response preserve unrelated front matter, body content, ordering, and intent?",
+      "score_0": "Unrelated content or configuration is materially changed or removed.",
+      "score_1": "Most content is preserved, with minor avoidable churn.",
+      "score_2": "Unrelated content and structure are preserved."
+    },
+    {
+      "id": "update_privilege_discipline",
+      "weight": 1,
+      "question": "Does the change avoid accidental privilege expansion and route writes through the requested safe output?",
+      "score_0": "It grants direct or excessive write capability.",
+      "score_1": "It uses safe outputs but retains a broader-than-needed permission or target.",
+      "score_2": "The write path and permissions are narrowly scoped and safe-output-only."
+    },
+    {
+      "id": "update_recompile_guidance",
+      "weight": 1,
+      "question": "Is recompilation guidance correct for the actual changed surface and inlined-import setting?",
+      "score_0": "The guidance is wrong or omitted.",
+      "score_1": "The guidance is broadly correct but conditional details are unclear.",
+      "score_2": "The guidance precisely matches the changed surface and workflow configuration."
+    }
+  ]
+}
+

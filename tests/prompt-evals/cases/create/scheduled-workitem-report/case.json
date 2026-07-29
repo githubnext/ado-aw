@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "id": "create-scheduled-workitem-report",
+  "prompt": "create",
+  "description": "Create a scheduled work-item review with a narrowly scoped comment safe output.",
+  "request_file": "request.md",
+  "context_files": [
+    "reference.md"
+  ],
+  "rubric_files": [
+    "rubrics/common.json",
+    "rubrics/create.json"
+  ],
+  "expected": {
+    "outcome": "workflow",
+    "artifact_required": true,
+    "compile": true,
+    "lint": true,
+    "compile_guidance": "required",
+    "external_side_effect": "safe-output-only",
+    "required_sections": [
+      "No Action"
+    ]
+  },
+  "ground_truth": {
+    "trigger": "daily around 09:00",
+    "safe_output": "comment-on-work-item",
+    "safe_output_max": 3,
+    "safe_output_target": "SyntheticProject\\Platform",
+    "notes": [
+      "Only stale Severity 1 or Severity 2 items should receive comments.",
+      "No qualifying items must map to noop."
+    ]
+  }
+}
+
