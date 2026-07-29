@@ -1,6 +1,7 @@
 # Create an Azure DevOps Agentic Workflow
 
-Apply `/home/runner/work/ado-aw/ado-aw/prompts/prompt-contract.md` before executing this prompt.
+Apply the shared behavior contract before executing this prompt:
+https://raw.githubusercontent.com/githubnext/ado-aw/v0.45.1/prompts/prompt-contract.md <!-- x-release-please-version -->
 
 ## Core
 
@@ -68,8 +69,8 @@ Return:
   3. commit both `.md` and generated `.lock.yml`.
 
 ## References
-- `/home/runner/work/ado-aw/ado-aw/docs/front-matter.md`
-- `/home/runner/work/ado-aw/ado-aw/docs/safe-outputs.md`
-- `/home/runner/work/ado-aw/ado-aw/docs/engine.md`
-- `/home/runner/work/ado-aw/ado-aw/docs/targets.md`
-- `/home/runner/work/ado-aw/ado-aw/docs/network.md`
+- https://raw.githubusercontent.com/githubnext/ado-aw/v0.45.1/docs/front-matter.md <!-- x-release-please-version -->
+- https://raw.githubusercontent.com/githubnext/ado-aw/v0.45.1/docs/safe-outputs.md <!-- x-release-please-version -->
+- https://raw.githubusercontent.com/githubnext/ado-aw/v0.45.1/docs/engine.md <!-- x-release-please-version -->
+- https://raw.githubusercontent.com/githubnext/ado-aw/v0.45.1/docs/targets.md <!-- x-release-please-version -->
+- https://raw.githubusercontent.com/githubnext/ado-aw/v0.45.1/docs/network.md <!-- x-release-please-version -->

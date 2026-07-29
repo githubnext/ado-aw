@@ -1,6 +1,7 @@
 # Debug an Azure DevOps Agentic Pipeline
 
-Apply `/home/runner/work/ado-aw/ado-aw/prompts/prompt-contract.md` before executing this prompt.
+Apply the shared behavior contract before executing this prompt:
+https://raw.githubusercontent.com/githubnext/ado-aw/v0.45.1/prompts/prompt-contract.md <!-- x-release-please-version -->
 
 ## Core
 
@@ -80,7 +81,7 @@ If consent is absent, end with report + ready-to-file issue draft.
 - Filing is complete only when explicitly approved and URL is returned.
 
 ## References
-- `/home/runner/work/ado-aw/ado-aw/docs/audit.md`
-- `/home/runner/work/ado-aw/ado-aw/docs/ir.md`
-- `/home/runner/work/ado-aw/ado-aw/docs/mcp-author.md`
-- `/home/runner/work/ado-aw/ado-aw/docs/safe-outputs.md`
+- https://raw.githubusercontent.com/githubnext/ado-aw/v0.45.1/docs/audit.md <!-- x-release-please-version -->
+- https://raw.githubusercontent.com/githubnext/ado-aw/v0.45.1/docs/ir.md <!-- x-release-please-version -->
+- https://raw.githubusercontent.com/githubnext/ado-aw/v0.45.1/docs/mcp-author.md <!-- x-release-please-version -->
+- https://raw.githubusercontent.com/githubnext/ado-aw/v0.45.1/docs/safe-outputs.md <!-- x-release-please-version -->
