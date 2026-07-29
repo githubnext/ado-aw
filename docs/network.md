@@ -12,7 +12,7 @@ The `ado-aw` compiler binary is distributed via [GitHub Releases](https://github
 
 ## Default Allowed Domains
 
-The following domains are always allowed. They are defined in `CORE_ALLOWED_HOSTS` in `allowed_hosts.rs`. `host.docker.internal` is deliberately **not** on this list — the agent has no route to the host under AWF's strict network topology, and SafeOutputs no longer runs as a host-side process at all: MCPG spawns it as a hardened, network-isolated (`--network none`) sibling stdio container; see [`docs/mcpg.md`](mcpg.md):
+The following domains are always allowed via `CORE_ALLOWED_HOSTS` in `allowed_hosts.rs`. `host.docker.internal` is deliberately **not** on this list — the agent has no route to the host under AWF's strict network topology, and SafeOutputs no longer runs as a host-side process at all: MCPG spawns it as a hardened, network-isolated (`--network none`) sibling stdio container; see [`docs/mcpg.md`](mcpg.md):
 
 | Host Pattern | Purpose |
 |-------------|---------|
@@ -48,17 +48,12 @@ The following domains are always allowed. They are defined in `CORE_ALLOWED_HOST
 | `dc.services.visualstudio.com` | Visual Studio telemetry |
 | `rt.services.visualstudio.com` | Visual Studio runtime telemetry |
 | `config.edge.skype.com` | Configuration |
-| `aka.ms` | Microsoft link shortener (used by `az` subcommand metadata) — contributed by the always-on Azure CLI extension |
+
+The always-on Azure CLI extension additionally contributes `aka.ms` (Microsoft's link shortener, used by `az` subcommand metadata) to the AWF allowlist. See [Always-on Azure CLI (`az`)](#always-on-azure-cli-az) below.
 
 ## Always-on Azure CLI (`az`)
 
-Every compiled pipeline adds the Azure auth and management hosts listed
-above (`login.microsoftonline.com`, `login.windows.net`,
-`management.azure.com`, `graph.microsoft.com`, `aka.ms`) to the AWF
-allowlist and emits a small *Detect Azure CLI on host* prepare step
-that runs early in the Agent job. This mirrors gh-aw's "assume `gh` is
-on the runner" model: agents can call `az` from their bash tool
-without opting in — *when the runner has it*.
+Every compiled pipeline emits a small *Detect Azure CLI on host* prepare step that runs early in the Agent job. The always-on Azure CLI extension also adds `aka.ms` to the AWF allowlist (the auth and management hosts it declares are already present in `CORE_ALLOWED_HOSTS` above). This mirrors gh-aw's "assume `gh` is on the runner" model: agents can call `az` from their bash tool without opting in — *when the runner has it*.
 
 ### Runtime detection and graceful degradation
 
