@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cp, mkdtemp, rm } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -127,4 +127,15 @@ test("Copilot arguments expose no tools and child env strips write tokens", () =
   assert.equal(env.GITHUB_TOKEN, undefined);
   assert.equal(env.GH_TOKEN, undefined);
   assert.equal(env.SYSTEM_ACCESSTOKEN, undefined);
+});
+
+test("configured Copilot credit caps satisfy the CLI minimum", async () => {
+  const config = JSON.parse(
+    await readFile(
+      path.join(REPO_ROOT, "scripts", "prompt-evals", "config.json"),
+      "utf8"
+    )
+  );
+  assert.ok(config.subject_max_ai_credits >= 30);
+  assert.ok(config.judge_max_ai_credits >= 30);
 });

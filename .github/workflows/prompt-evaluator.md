@@ -50,6 +50,7 @@ steps:
 
   - name: Build ado-aw for evaluation
     run: |
+      set +e
       set -uo pipefail
       cargo build --quiet \
         --manifest-path "$PROMPT_EVAL_REPO_ROOT/Cargo.toml" \
@@ -67,6 +68,7 @@ steps:
     env:
       GH_HOST: github.com
     run: |
+      set +e
       set -uo pipefail
       version="$(
         awk -F'"' \
@@ -93,6 +95,7 @@ steps:
     env:
       COPILOT_GITHUB_TOKEN: ${{ github.token }}
     run: |
+      set +e
       set -uo pipefail
       node "$PROMPT_EVAL_REPO_ROOT/scripts/prompt-evals/run.mjs" \
         --repo-root "$PROMPT_EVAL_REPO_ROOT" \

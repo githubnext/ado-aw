@@ -64,6 +64,14 @@ async function readConfig(configPath) {
   if (parsed.schema_version !== 1) {
     throw new Error("prompt evaluator config has unsupported schema_version");
   }
+  for (const field of [
+    "subject_max_ai_credits",
+    "judge_max_ai_credits"
+  ]) {
+    if (!Number.isInteger(parsed[field]) || parsed[field] < 30) {
+      throw new Error(`${field} must be an integer of at least 30`);
+    }
+  }
   return parsed;
 }
 
