@@ -55,6 +55,12 @@ Return:
   2. if required run `ado-aw compile <path/to/file.md>`,
   3. commit changed files.
 
+## Done Criteria
+- The requested behavior is fully applied with no unrelated changes.
+- Existing structure, permissions, and intent are preserved unless the request requires changing them.
+- The updated source is internally consistent and uses only valid safe outputs.
+- Recompilation guidance matches the actual changed surface and `inlined-imports` setting.
+
 ## References
 - `/home/runner/work/ado-aw/ado-aw/docs/front-matter.md`
 - `/home/runner/work/ado-aw/ado-aw/docs/runtime-imports.md`

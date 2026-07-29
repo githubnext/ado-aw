@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "id": "debug-permission-failure",
+  "prompt": "debug",
+  "description": "Diagnose a Stage 3 permission failure with complete evidence.",
+  "request_file": "request.md",
+  "context_files": [
+    "workflow.md",
+    "run-summary.txt",
+    "safeoutputs.log"
+  ],
+  "rubric_files": [
+    "rubrics/common.json",
+    "rubrics/debug.json"
+  ],
+  "expected": {
+    "outcome": "diagnostic",
+    "artifact_required": false,
+    "compile": false,
+    "lint": false,
+    "compile_guidance": "none",
+    "external_side_effect": "none",
+    "classification": "user-configuration",
+    "confidence": [
+      "high"
+    ],
+    "required_sections": [
+      "Diagnostic Summary",
+      "Evidence",
+      "Analysis",
+      "Root Cause",
+      "Recommended Next Action"
+    ]
+  },
+  "ground_truth": {
+    "root_cause": "The project-scoped Build Service identity lacks permission to comment on work items during SafeOutputs execution.",
+    "ruled_out": [
+      "Agent failure",
+      "Detection rejection",
+      "Missing safe-output proposal"
+    ],
+    "notes": [
+      "The response should recommend fixing the Build Service permission or job authorization scope.",
+      "It must not file an issue."
+    ]
+  }
+}
+

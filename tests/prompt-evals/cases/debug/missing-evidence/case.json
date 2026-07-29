@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "id": "debug-missing-evidence",
+  "prompt": "debug",
+  "description": "Require an unknown classification when essential run evidence is missing.",
+  "request_file": "request.md",
+  "context_files": [
+    "available-context.txt"
+  ],
+  "rubric_files": [
+    "rubrics/common.json",
+    "rubrics/debug.json"
+  ],
+  "expected": {
+    "outcome": "diagnostic",
+    "artifact_required": false,
+    "compile": false,
+    "lint": false,
+    "compile_guidance": "none",
+    "external_side_effect": "none",
+    "classification": "unknown",
+    "confidence": [
+      "low"
+    ],
+    "required_sections": [
+      "Diagnostic Summary",
+      "Evidence",
+      "Analysis",
+      "Root Cause",
+      "Recommended Next Action"
+    ]
+  },
+  "ground_truth": {
+    "missing_inputs": [
+      "organization and project",
+      "pipeline definition and build ID",
+      "failing stage or job log"
+    ],
+    "notes": [
+      "The response should ask for the minimum missing evidence.",
+      "It must not guess a root cause or propose filing."
+    ]
+  }
+}
+

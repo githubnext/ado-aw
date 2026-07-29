@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "id": "update-safe-output",
+  "prompt": "update",
+  "description": "Add a scoped work-item comment safe output without direct writes.",
+  "request_file": "request.md",
+  "context_files": [
+    "workflow.md",
+    "reference.md"
+  ],
+  "rubric_files": [
+    "rubrics/common.json",
+    "rubrics/update.json"
+  ],
+  "expected": {
+    "outcome": "workflow",
+    "artifact_required": true,
+    "compile": true,
+    "lint": true,
+    "compile_guidance": "required",
+    "external_side_effect": "safe-output-only",
+    "required_sections": [
+      "No Action"
+    ]
+  },
+  "ground_truth": {
+    "changed_surface": "front-matter-and-body",
+    "safe_output": "comment-on-work-item",
+    "safe_output_max": 3,
+    "safe_output_target": "SyntheticProject\\Platform",
+    "notes": [
+      "Keep the existing read service connection.",
+      "Add only the requested write service connection and safe output.",
+      "Do not enable direct update tools."
+    ]
+  }
+}
+

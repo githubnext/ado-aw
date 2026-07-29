@@ -67,6 +67,12 @@ Return:
   2. run `ado-aw compile <path/to/file.md>`,
   3. commit both `.md` and generated `.lock.yml`.
 
+## Done Criteria
+- Exactly one complete workflow source is returned when required inputs are known.
+- The draft passes the quality checklist and does not introduce unrequested privilege.
+- Assumptions, unresolved inputs, and compilation guidance are explicit.
+- When essential inputs are missing, concise clarification is returned instead of an invented workflow.
+
 ## References
 - `/home/runner/work/ado-aw/ado-aw/docs/front-matter.md`
 - `/home/runner/work/ado-aw/ado-aw/docs/safe-outputs.md`

@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "id": "create-v1",
+  "criteria": [
+    {
+      "id": "create_workflow_coherence",
+      "weight": 1,
+      "question": "Is the proposed workflow source minimal, coherent, and consistent with the requested objective?",
+      "score_0": "The source is invalid, contradictory, or solves a different task.",
+      "score_1": "The source is mostly coherent but contains unnecessary or questionable configuration.",
+      "score_2": "The source is minimal, coherent, and directly aligned with the request."
+    },
+    {
+      "id": "create_trigger_scope",
+      "weight": 1,
+      "question": "Does the trigger configuration match the requested timing and scope without adding unrelated triggers?",
+      "score_0": "The trigger is missing, wrong, or materially broader than requested.",
+      "score_1": "The trigger broadly matches but has a minor scope or defaulting issue.",
+      "score_2": "The trigger precisely matches the requested timing and scope."
+    },
+    {
+      "id": "create_tools_outputs_permissions",
+      "weight": 1,
+      "question": "Are tools, safe outputs, and permissions mutually consistent and narrowly scoped?",
+      "score_0": "Required capabilities are missing or write access bypasses safe outputs.",
+      "score_1": "The configuration works but is broader than necessary or leaves a mismatch.",
+      "score_2": "Capabilities are complete, mutually consistent, and least-privilege."
+    },
+    {
+      "id": "create_no_action",
+      "weight": 1,
+      "question": "Does the workflow body define explicit no-action or noop behavior when the case requires it?",
+      "score_0": "Required no-action behavior is absent or would cause unnecessary writes.",
+      "score_1": "No-action behavior is implied but not deterministic.",
+      "score_2": "No-action behavior is explicit, deterministic, and mapped to noop where applicable."
+    }
+  ]
+}
+
