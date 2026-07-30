@@ -168,14 +168,12 @@ async fn fetch_authenticated_user_id(
     Ok(Ok(user_id))
 }
 
-/// Shared context for the vote-related helpers, reducing per-call argument count.
+/// Shared transport/auth context for the vote-related helpers, reducing per-call argument count.
 struct PrVoteCtx<'a> {
     client: &'a reqwest::Client,
     base_url: &'a str,
     encoded_repo: &'a str,
     pull_request_id: i32,
-    event: &'a str,
-    vote_value: i32,
     token: &'a str,
 }
 
@@ -184,28 +182,21 @@ struct PrVoteCtx<'a> {
 async fn check_self_approval(
     ctx: &PrVoteCtx<'_>,
     user_id: &str,
+    event: &str,
+    vote_value: i32,
 ) -> anyhow::Result<Option<ExecutionResult>> {
-    let PrVoteCtx {
-        client,
-        base_url,
-        encoded_repo,
-        pull_request_id,
-        event,
-        vote_value,
-        token,
-    } = ctx;
-    let (pull_request_id, vote_value) = (*pull_request_id, *vote_value);
     if vote_value <= 0 {
         return Ok(None);
     }
 
     let pr_url = format!(
         "{}/{}/pullRequests/{}?api-version=7.1",
-        base_url, encoded_repo, pull_request_id
+        ctx.base_url, ctx.encoded_repo, ctx.pull_request_id
     );
-    let pr_response = client
+    let pr_response = ctx
+        .client
         .get(&pr_url)
-        .basic_auth("", Some(token))
+        .basic_auth("", Some(ctx.token))
         .send()
         .await
         .context("Failed to fetch PR for self-approval check")?;
@@ -218,7 +209,7 @@ async fn check_self_approval(
             .unwrap_or_else(|_| "Unknown error".to_string());
         return Ok(Some(ExecutionResult::failure(format!(
             "Failed to fetch PR #{} for self-approval check (HTTP {}): {}",
-            pull_request_id, status, error_body
+            ctx.pull_request_id, status, error_body
         ))));
     }
 
@@ -236,7 +227,7 @@ async fn check_self_approval(
         return Ok(Some(ExecutionResult::failure(format!(
             "Self-approval blocked: the authenticated identity created PR #{} \
              and cannot cast a positive vote ('{}') on it",
-            pull_request_id, event
+            ctx.pull_request_id, event
         ))));
     }
 
@@ -248,29 +239,22 @@ async fn check_self_approval(
 async fn submit_vote(
     ctx: &PrVoteCtx<'_>,
     encoded_user_id: &str,
+    event: &str,
+    vote_value: i32,
 ) -> anyhow::Result<Option<ExecutionResult>> {
-    let PrVoteCtx {
-        client,
-        base_url,
-        encoded_repo,
-        pull_request_id,
-        event,
-        vote_value,
-        token,
-    } = ctx;
-    let (pull_request_id, vote_value) = (*pull_request_id, *vote_value);
     let vote_url = format!(
         "{}/{}/pullRequests/{}/reviewers/{}?api-version=7.1",
-        base_url, encoded_repo, pull_request_id, encoded_user_id
+        ctx.base_url, ctx.encoded_repo, ctx.pull_request_id, encoded_user_id
     );
     info!(
         "Voting '{}' ({}) on PR #{}",
-        event, vote_value, pull_request_id
+        event, vote_value, ctx.pull_request_id
     );
-    let response = client
+    let response = ctx
+        .client
         .put(&vote_url)
         .header("Content-Type", "application/json")
-        .basic_auth("", Some(token))
+        .basic_auth("", Some(ctx.token))
         .json(&serde_json::json!({ "vote": vote_value }))
         .send()
         .await
@@ -284,11 +268,11 @@ async fn submit_vote(
             .unwrap_or_else(|_| "Unknown error".to_string());
         return Ok(Some(ExecutionResult::failure(format!(
             "Failed to submit vote on PR #{} (HTTP {}): {}",
-            pull_request_id, status, error_body
+            ctx.pull_request_id, status, error_body
         ))));
     }
 
-    info!("Vote '{}' submitted on PR #{}", event, pull_request_id);
+    info!("Vote '{}' submitted on PR #{}", event, ctx.pull_request_id);
     Ok(None)
 }
 
@@ -452,17 +436,15 @@ impl Executor for SubmitPrReviewResult {
             base_url: &base_url,
             encoded_repo: &encoded_repo,
             pull_request_id: self.pull_request_id,
-            event: &self.event,
-            vote_value,
             token,
         };
-        if let Some(failure) = check_self_approval(&vote_ctx, &user_id).await? {
+        if let Some(failure) = check_self_approval(&vote_ctx, &user_id, &self.event, vote_value).await? {
             return Ok(failure);
         }
 
         // PUT vote to reviewers endpoint
         let encoded_user_id = utf8_percent_encode(&user_id, PATH_SEGMENT).to_string();
-        if let Some(failure) = submit_vote(&vote_ctx, &encoded_user_id).await? {
+        if let Some(failure) = submit_vote(&vote_ctx, &encoded_user_id, &self.event, vote_value).await? {
             return Ok(failure);
         }
 
