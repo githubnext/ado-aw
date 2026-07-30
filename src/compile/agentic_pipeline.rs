@@ -172,6 +172,35 @@ pub(crate) fn build_pipeline_context(
     )?;
     let working_directory = common::generate_working_directory(&effective_workspace);
     let trigger_repo_directory = common::generate_trigger_repo_directory(&front_matter.checkout);
+    // Identity of the `self` repository, resolved at compile time.
+    //
+    // `self` is the repository this workflow is compiled in, and (because the
+    // executor's `--source` resolves beneath the `self` checkout) also the
+    // repository whose pipeline runs it — for template targets that is the
+    // parent pipeline's repository. The compiler therefore already knows the
+    // name, and the `ado-aw-marker` extension already bakes it into the lock,
+    // so `ado-aw check` fails loudly if the baked value ever drifts from the
+    // repository the pipeline actually runs in.
+    //
+    // The `$(Build.Repository.Name)` fallback is deliberately last: it names
+    // the *triggering* repository, which differs from `self` on
+    // repository-resource-triggered runs (issue #1731). Warn rather than fail,
+    // because compiling outside an ADO clone is a supported developer path.
+    let self_repository_name = match ctx.ado_context.as_ref() {
+        Some(ado) => EnvValue::literal(ado.repo_name.clone()),
+        None => {
+            eprintln!(
+                "Warning: could not resolve the Azure DevOps repository for agent '{}' \
+                (no ADO git remote and no ADO_AW_COMPILE_REMOTE_URL). Falling back to \
+                $(Build.Repository.Name) for the 'self' repository identity, which names \
+                the TRIGGERING repository — safe-outputs targeting `repository: self` may \
+                resolve to the wrong repository on repository-resource-triggered runs. \
+                Compile from an Azure DevOps clone, or set ADO_AW_COMPILE_REMOTE_URL.",
+                front_matter.name
+            );
+            EnvValue::ado_macro("Build.Repository.Name")?
+        }
+    };
     let pools = common::resolve_pool_overrides_typed(
         front_matter.target.clone(),
         front_matter.pool.as_ref(),
@@ -392,6 +421,7 @@ pub(crate) fn build_pipeline_context(
             .unwrap_or_default(),
         working_directory: working_directory.clone(),
         trigger_repo_directory: trigger_repo_directory.clone(),
+        self_repository_name,
         compiler_version: compiler_version.clone(),
         engine_install_steps_yaml,
         detection_engine_install_steps_yaml,
@@ -563,6 +593,10 @@ pub(crate) struct StandaloneCtx {
     pub(crate) self_checkout_fetch: CheckoutFetchOpts,
     pub(crate) working_directory: String,
     pub(crate) trigger_repo_directory: String,
+    /// Identity of the `self` repository, resolved at compile time from the ADO
+    /// git remote. Falls back to the `$(Build.Repository.Name)` macro (with a
+    /// compile warning) when no ADO context is available.
+    pub(crate) self_repository_name: EnvValue,
     pub(crate) compiler_version: String,
     /// Engine install steps as a YAML string (`Engine::install_steps`
     /// returns YAML today). Lowered through `Step::RawYaml` because
@@ -1639,6 +1673,7 @@ fn build_safeoutputs_job(
     steps.push(Step::Bash(execute_safe_outputs_step(
         &layout.source_path,
         &layout.self_repository_directory,
+        &cfg.self_repository_name,
         &cfg.executor_ado_env,
         &variant.filter_args,
     )?));
@@ -3158,6 +3193,7 @@ fn run_agent_step(
 fn execute_safe_outputs_step(
     source_path: &str,
     self_repository_directory: &str,
+    self_repository_name: &EnvValue,
     executor_ado_env: &str,
     filter_args: &str,
 ) -> Result<BashStep> {
@@ -3188,12 +3224,8 @@ fn execute_safe_outputs_step(
         EnvValue::literal(self_repository_directory),
     );
     step = step.with_env(
-        "ADO_AW_SELF_REPOSITORY_ID",
-        EnvValue::runtime_expression("resources.repositories['self'].id"),
-    );
-    step = step.with_env(
         "ADO_AW_SELF_REPOSITORY_NAME",
-        EnvValue::runtime_expression("resources.repositories['self'].name"),
+        self_repository_name.clone(),
     );
     Ok(step)
 }
@@ -4184,6 +4216,7 @@ mod tests {
             trigger_repo_directory: super::super::common::generate_trigger_repo_directory(
                 &fm.checkout,
             ),
+            self_repository_name: EnvValue::literal("test-repo"),
             compiler_version: "0.0.0-test".to_string(),
             engine_install_steps_yaml: String::new(),
             detection_engine_install_steps_yaml: String::new(),

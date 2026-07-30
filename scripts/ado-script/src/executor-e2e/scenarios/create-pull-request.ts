@@ -42,8 +42,6 @@ interface CreatePrState {
   sourcesDir: string;
   /** Actual git checkout beneath sourcesDir. */
   checkoutDir: string;
-  /** ADO repository id, required when the executor selector is `self`. */
-  repositoryId?: string;
   /** PR id, populated in assert() so cleanup can abandon it. */
   prId?: number;
 }
@@ -131,10 +129,6 @@ async function setupCreatePullRequest(
   const sourcesDir = join(ctx.workDir, options.id, "src-checkout");
   await mkdir(sourcesDir, { recursive: true });
   const checkoutDir = join(sourcesDir, repo);
-  const repositoryId =
-    options.repositorySelector === "self"
-      ? (await ctx.rest.getRepository(repo)).id
-      : undefined;
 
   const cloneUrl = `${ctx.orgUrl.replace(/\/+$/, "")}/${encodeURIComponent(ctx.project)}/_git/${encodeURIComponent(repo)}`;
   ctx.log(`[${options.id}] cloning ${repo}`);
@@ -194,7 +188,6 @@ async function setupCreatePullRequest(
     patchContent,
     sourcesDir,
     checkoutDir,
-    repositoryId,
   };
 }
 
@@ -221,16 +214,16 @@ function createPullRequestScenario(
         BUILD_SOURCESDIRECTORY: state.sourcesDir,
       };
       if (options.repositorySelector === "self") {
-        if (!state.repositoryId) {
-          throw new Error("self create-pull-request scenario has no ADO repository id");
-        }
         Object.assign(env, {
           ADO_AW_SELF_REPOSITORY_DIRECTORY: state.checkoutDir,
-          ADO_AW_SELF_REPOSITORY_ID: state.repositoryId,
+          // Compiled pipelines identify `self` by name only; the executor
+          // resolves an ID from it where one is needed. Supplying just the
+          // name here mirrors what the compiler actually emits.
           ADO_AW_SELF_REPOSITORY_NAME: state.repo,
           // Model a repository-resource-triggered run: Build.Repository.*
           // identifies the trigger, while the compiler-owned values above
-          // must continue to identify checkout: self.
+          // must continue to identify checkout: self. The bogus ID must be
+          // ignored entirely rather than paired with the self name.
           BUILD_REPOSITORY_ID: "00000000-0000-0000-0000-000000000000",
           BUILD_REPOSITORY_NAME: "external-trigger-repository",
         });

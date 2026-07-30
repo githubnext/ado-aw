@@ -389,6 +389,15 @@ Reference the explicit ADO path instead:
   when one or more additional repositories are checked out.
 - `$(Build.SourcesDirectory)/<alias>` — a specific checked-out repository.
 
+> **`self` identity.** The compiler resolves the `self` repository's name at
+> compile time from the Azure DevOps git remote (or
+> `ADO_AW_COMPILE_REMOTE_URL`) and bakes it into the compiled pipeline, so
+> safe outputs targeting `repository: self` never depend on
+> `Build.Repository.*` — which names the *triggering* repository and differs
+> from `self` on repository-resource-triggered runs. If no ADO remote can be
+> resolved at compile time the compiler warns and falls back to
+> `$(Build.Repository.Name)`; compile from an Azure DevOps clone to avoid it.
+
 The `legacy_path_markers` codemod automatically rewrites any remaining markers
 in front matter to the path they resolved to on the next `compile` (see
 [`docs/codemods.md`](codemods.md)). Markers left in the **agent body** cannot be

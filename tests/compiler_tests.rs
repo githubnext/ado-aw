@@ -8595,6 +8595,14 @@ description: "no fetch tuning"
 /// Compile inline agent `content` in an isolated temp dir and return the
 /// compiled YAML. Panics on compile failure.
 fn compile_inline_agent(tag: &str, content: &str) -> String {
+    compile_inline_agent_with_env(tag, content, &[])
+}
+
+/// Compile inline agent `content` with additional environment variables set on
+/// the compiler subprocess. Used to exercise compile-time ADO context
+/// resolution (`ADO_AW_COMPILE_REMOTE_URL`) without mutating the test
+/// process's own environment, which parallel tests share.
+fn compile_inline_agent_with_env(tag: &str, content: &str, env: &[(&str, &str)]) -> String {
     let temp_dir =
         std::env::temp_dir().join(format!("agentic-pipeline-{tag}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&temp_dir);
@@ -8603,15 +8611,17 @@ fn compile_inline_agent(tag: &str, content: &str) -> String {
     fs::write(&input, content).expect("Failed to write test input");
     let output_path = temp_dir.join(format!("{tag}-agent.yml"));
     let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
-    let output = std::process::Command::new(&binary_path)
-        .args([
-            "compile",
-            input.to_str().unwrap(),
-            "-o",
-            output_path.to_str().unwrap(),
-        ])
-        .output()
-        .expect("Failed to run compiler");
+    let mut command = std::process::Command::new(&binary_path);
+    command.args([
+        "compile",
+        input.to_str().unwrap(),
+        "-o",
+        output_path.to_str().unwrap(),
+    ]);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command.output().expect("Failed to run compiler");
     assert!(
         output.status.success(),
         "compile should succeed for {tag}.\nstderr: {}",
@@ -9405,11 +9415,59 @@ fn test_issue_1731_safeoutputs_executor_source_path_uses_multi_checkout_layout()
         "SafeOutputs must pass the exact self checkout to the executor:\n{safeoutputs}"
     );
     assert!(
-        safeoutputs.contains("resources.repositories['self'].id")
-            && safeoutputs.contains("resources.repositories['self'].name")
-            && safeoutputs.contains("ADO_AW_SELF_REPOSITORY_ID:")
-            && safeoutputs.contains("ADO_AW_SELF_REPOSITORY_NAME:"),
-        "SafeOutputs must use self resource metadata rather than trigger-scoped Build.Repository.*:\n{safeoutputs}"
+        safeoutputs.contains("ADO_AW_SELF_REPOSITORY_NAME:")
+            && !safeoutputs.contains("ADO_AW_SELF_REPOSITORY_ID:"),
+        "SafeOutputs must identify self by name only (the ID is resolved from it):\n{safeoutputs}"
+    );
+    assert!(
+        !safeoutputs.contains("resources.repositories['self'].id")
+            && !safeoutputs.contains("resources.repositories['self'].name"),
+        "self identity must be resolved at compile time, not via runtime expressions:\n{safeoutputs}"
+    );
+}
+
+/// Issue #1731: `self`'s repository identity is resolved at compile time from
+/// the ADO git remote, so Stage 3 never has to infer it from the
+/// trigger-scoped `Build.Repository.*` variables.
+#[test]
+fn test_issue_1731_self_repository_name_is_resolved_at_compile_time() {
+    let compiled = compile_inline_agent_with_env(
+        "issue-1731-baked-identity",
+        "---\nname: \"Multi-repo PR\"\ndescription: \"Opens a PR in an additional repo\"\nworkspace: root\nrepos:\n  - my-org/tools\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n\n## Agent\n\nDo work.\n",
+        &[(
+            "ADO_AW_COMPILE_REMOTE_URL",
+            "https://dev.azure.com/msazuresphere/AgentPlayground/_git/ado-aw-mirror",
+        )],
+    );
+    let safeoutputs = job_block(&compiled, "SafeOutputs");
+    assert!(
+        safeoutputs.contains("ADO_AW_SELF_REPOSITORY_NAME: ado-aw-mirror"),
+        "the compile-time repository name must be baked into the executor env:\n{safeoutputs}"
+    );
+    assert!(
+        !safeoutputs.contains("$(Build.Repository.Name)"),
+        "the trigger-scoped macro must not appear when ADO context resolves:\n{safeoutputs}"
+    );
+}
+
+/// Without a resolvable ADO remote the compiler falls back to the
+/// trigger-scoped macro. That is a degraded mode, so it must be accompanied by
+/// a warning rather than silently emitting a value that can name the wrong
+/// repository on repository-resource-triggered runs.
+#[test]
+fn test_issue_1731_unresolvable_ado_context_falls_back_with_warning() {
+    let (ok, compiled, stderr) = compile_inline_source(
+        "issue-1731-identity-fallback",
+        "---\nname: \"Fallback PR\"\ndescription: \"No ADO remote available\"\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n\n## Agent\n\nDo work.\n",
+    );
+    assert!(ok, "fallback must not fail the compile: {stderr}");
+    assert!(
+        compiled.contains("ADO_AW_SELF_REPOSITORY_NAME: $(Build.Repository.Name)"),
+        "fallback must emit the trigger-scoped macro:\n{compiled}"
+    );
+    assert!(
+        stderr.contains("TRIGGERING repository"),
+        "fallback must warn that the identity may be wrong:\n{stderr}"
     );
 }
 
@@ -9528,9 +9586,10 @@ fn test_issue_1731_split_checkout_layout_compiles_for_every_target() {
             "{target}: PR-capable Stage 3 source must use multi-checkout layout:\n{compiled}"
         );
         assert!(
-            compiled.contains("resources.repositories['self'].id")
-                && compiled.contains("resources.repositories['self'].name"),
-            "{target}: Stage 3 must use self resource metadata:\n{compiled}"
+            compiled.contains("ADO_AW_SELF_REPOSITORY_NAME:")
+                && !compiled.contains("resources.repositories['self'].id")
+                && !compiled.contains("resources.repositories['self'].name"),
+            "{target}: Stage 3 self identity must be compile-time resolved:\n{compiled}"
         );
         assert!(
             compiled.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/")
