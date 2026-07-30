@@ -267,6 +267,19 @@ pub(crate) fn input_refers_to_self(input: &str, ctx: &ExecutionContext) -> bool 
 }
 
 /// Normalize a repository selector to the compiler/runtime alias key.
+///
+/// Accepts a raw agent-supplied selector (`"self"`, `""`, an alias key, a full
+/// `project/repo` value, or a bare repo name) and returns the canonical alias
+/// key — `"self"` or a key of `ctx.allowed_repositories`.
+///
+/// **Idempotent**: passing an already-canonical alias returns it unchanged
+/// (`"self"` short-circuits on [`input_refers_to_self`]; an alias key hits the
+/// exact-key arm of [`lookup_allowed_repository_alias`]), so callers may
+/// canonicalize defensively without changing the result.
+///
+/// **Precedence**: self-identity wins over the alias map. A selector matching
+/// the pipeline repository's name resolves to `"self"` even if an alias of the
+/// same name is configured for a different repository.
 pub(crate) fn canonical_repository_alias(
     repository: &str,
     ctx: &ExecutionContext,
@@ -282,6 +295,14 @@ pub(crate) fn canonical_repository_alias(
 /// The checkout root and `self` directory differ in multi-checkout jobs.
 /// Named repositories are resolved through the configured alias map rather
 /// than appended from untrusted selector text.
+///
+/// `repository` may be **either** a raw agent-supplied selector or an alias
+/// already canonicalized by [`canonical_repository_alias`]; both are supported
+/// because that helper is idempotent. `add-pr-comment` passes the raw value
+/// straight from the agent, while `create-pull-request` canonicalizes first so
+/// it can reuse the alias for target-branch resolution. Callers must not build
+/// the path themselves — routing every selector through here is what keeps
+/// untrusted text out of the path join.
 pub(crate) fn resolve_repository_checkout_dir(
     repository: &str,
     ctx: &ExecutionContext,

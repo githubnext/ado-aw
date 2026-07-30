@@ -1383,8 +1383,20 @@ impl SafeOutputsCheckoutLayout {
         let has_additional_checkouts =
             variant.runs_create_pull_request && !front_matter.checkout.is_empty();
         let self_repository_directory = if has_additional_checkouts {
+            // This job emits the same multi-checkout layout as the Agent job, so
+            // `self` sits at the compiler-owned `MULTI_CHECKOUT_SELF_PATH`. That
+            // is exactly what `generate_trigger_repo_directory` produces for a
+            // non-empty checkout list, which is how `cfg.trigger_repo_directory`
+            // was built — assert the two stay in agreement.
+            debug_assert_eq!(
+                cfg.trigger_repo_directory,
+                common::MULTI_CHECKOUT_SELF_DIRECTORY,
+                "multi-checkout self directory must match the fixed `s/self` path"
+            );
             cfg.trigger_repo_directory.clone()
         } else {
+            // Only `checkout: self` runs here, so ADO places it at the root
+            // regardless of what the workflow-wide layout looks like.
             common::generate_trigger_repo_directory(&[])
         };
         let source_path = format!(
@@ -3167,6 +3179,12 @@ fn execute_safe_outputs_step(
     }
     step = step.with_env(
         "ADO_AW_SELF_REPOSITORY_DIRECTORY",
+        // The value embeds `$(Build.SourcesDirectory)`, but it is still a
+        // `Literal`: ADO expands `$(...)` macros in step `env:` values at agent
+        // runtime, so the macro reaches the executor already resolved.
+        // `EnvValue::AdoMacro` is for values that are *only* a macro; this one
+        // is a macro-plus-suffix path, and `Concat` would add no value because
+        // no part of it needs separate lowering.
         EnvValue::literal(self_repository_directory),
     );
     step = step.with_env(

@@ -681,6 +681,14 @@ impl Executor for CreatePrResult {
             );
             ado_repo_name.clone()
         } else {
+            // Unreachable: `repository_alias` is either "self" (handled above)
+            // or a key produced by iterating `ctx.allowed_repositories`, so the
+            // lookup cannot miss. Kept as a fail-closed guard in case the
+            // canonicalization and the map ever drift apart.
+            debug_assert!(
+                false,
+                "canonical alias '{repository_alias}' is absent from allowed_repositories"
+            );
             return Ok(ExecutionResult::failure(format!(
                 "Repository alias '{}' has no configured repository",
                 repository_alias
