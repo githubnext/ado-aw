@@ -275,6 +275,10 @@ pub(crate) fn build_pipeline_context(
     // AWF mounts + allowlist
     let allowed_domains =
         common::generate_allowed_domains(front_matter, extensions, &extension_declarations)?;
+    // With no engine overlay, Detection uses the same effective engine and
+    // network inputs as Agent, so the already-computed allowlist is identical.
+    // Any future detection-only network contributor must extend this branch
+    // rather than relying on the clone.
     let detection_allowed_domains = if threat_detection.engine.is_some() {
         common::generate_allowed_domains_for_engine(
             front_matter,
@@ -299,6 +303,9 @@ pub(crate) fn build_pipeline_context(
     // `source_path` embeds `{{ trigger_repo_directory }}` which the
     // legacy template fold substitutes — do the same eagerly so step
     // bodies receive a fully-resolved scalar.
+    // Validate the exact user-controlled suffix produced by the canonical path
+    // generator before the final path is embedded into compiler-authored bash.
+    // The trigger-repository prefix itself is compiler-owned.
     let source_path_raw = common::generate_source_path(input_path);
     let source_path_suffix = source_path_raw
         .strip_prefix("{{ trigger_repo_directory }}/")

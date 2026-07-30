@@ -406,8 +406,9 @@ pub struct EngineOptions {
 ///
 /// Collection fields are optional so the compiler can distinguish omission
 /// (inherit the top-level value) from an explicitly empty list/map. `args: []`
-/// therefore clears inherited CLI arguments, while `env` merges by key with
-/// Detection values taking precedence.
+/// therefore clears inherited CLI arguments; any non-empty `args` list also
+/// replaces rather than appends to the inherited list. `env` instead merges by
+/// key with Detection values taking precedence.
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct DetectionEngineOptions {
