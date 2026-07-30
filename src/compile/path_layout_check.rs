@@ -7,17 +7,14 @@
 //!   *is* the trigger repo root.
 //! - **Multi-checkout** (≥1 additional repo): every repo, including the
 //!   trigger repo, lives in a subfolder of `$(Build.SourcesDirectory)`
-//!   named after its alias — the trigger repo under
-//!   `$(Build.Repository.Name)`, each additional repo under its `repos:`
-//!   alias.
+//!   named after its alias — the trigger repo under the compiler-owned
+//!   `self` path, each additional repo under its `repos:` alias.
 //!
 //! When authors hand-write paths anchored at `$(Build.SourcesDirectory)`
 //! (or reference repos via `{{#runtime-import …}}`), it is easy to point
 //! at a path that will not exist under the resolved layout. This pass
 //! surfaces those mistakes as **warnings** — it never fails the compile,
-//! because the compiler cannot always resolve a path (e.g. the trigger
-//! repo's literal name behind `$(Build.Repository.Name)`), and false
-//! positives must not block builds.
+//! because false positives must not block builds.
 //!
 //! It also warns when deprecated directory markers
 //! (`{{ workspace }}` / `{{ working_directory }}` /
@@ -35,9 +32,14 @@ use crate::compile::types::FrontMatter;
 /// reference is not treated as having a sub-segment).
 const SOURCES_DIR_PREFIX: &str = "$(Build.SourcesDirectory)/";
 
-/// The runtime macro under which the trigger ("self") repo is checked
-/// out in multi-checkout mode.
-const SELF_REPO_SEGMENT: &str = "$(Build.Repository.Name)";
+/// Compiler-owned segment under which the trigger ("self") repo is checked out
+/// in multi-checkout mode.
+const SELF_REPO_SEGMENT: &str = "self";
+
+/// Legacy self path segment. `Build.Repository.Name` identifies the triggering
+/// repository on repository-resource-triggered runs, so it is never a stable
+/// checkout path.
+const LEGACY_SELF_REPO_SEGMENT: &str = "$(Build.Repository.Name)";
 
 /// Deprecated directory markers that the `legacy_path_markers` codemod
 /// migrates in front matter but cannot touch in the agent body.
@@ -92,7 +94,18 @@ pub(crate) fn collect_path_layout_warnings(front_matter: &FrontMatter, markdown_
     }
     for scalar in &step_scalars {
         for seg in sources_dir_segments(scalar) {
-            if declared_not_checked_out.contains(&seg.as_str()) {
+            if seg == LEGACY_SELF_REPO_SEGMENT {
+                let replacement = if multi {
+                    "`$(Build.SourcesDirectory)/self`"
+                } else {
+                    "`$(Build.SourcesDirectory)`"
+                };
+                warnings.push(format!(
+                    "step references `$(Build.SourcesDirectory)/$(Build.Repository.Name)`, but \
+                     `Build.Repository.Name` identifies the triggering repository and is not a \
+                     stable `self` checkout path. Use {replacement}."
+                ));
+            } else if declared_not_checked_out.contains(&seg.as_str()) {
                 warnings.push(format!(
                     "step references `$(Build.SourcesDirectory)/{seg}`, but repository `{seg}` is \
                      declared in `repos:` with `checkout: false`; its sources will not be present \
@@ -100,7 +113,7 @@ pub(crate) fn collect_path_layout_warnings(front_matter: &FrontMatter, markdown_
                 ));
             } else if !multi && seg == SELF_REPO_SEGMENT {
                 warnings.push(
-                    "step references `$(Build.SourcesDirectory)/$(Build.Repository.Name)`, but with \
+                    "step references `$(Build.SourcesDirectory)/self`, but with \
                      only the trigger repository checked out `$(Build.SourcesDirectory)` already IS \
                      the repository root; that subfolder will not exist. Use \
                      `$(Build.SourcesDirectory)` directly."
@@ -239,7 +252,7 @@ mod tests {
     #[test]
     fn warns_on_self_subfolder_in_single_checkout() {
         let fm = fm(
-            "name: a\ndescription: d\nsteps:\n  - script: cd $(Build.SourcesDirectory)/$(Build.Repository.Name)\n",
+            "name: a\ndescription: d\nsteps:\n  - script: cd $(Build.SourcesDirectory)/self\n",
         );
         let w = collect_path_layout_warnings(&fm, "body");
         assert_eq!(w.len(), 1, "{w:?}");
@@ -249,9 +262,23 @@ mod tests {
     #[test]
     fn no_self_subfolder_warning_in_multi_checkout() {
         let fm = fm(
-            "name: a\ndescription: d\nrepos:\n  - org/other\nsteps:\n  - script: cd $(Build.SourcesDirectory)/$(Build.Repository.Name)\n",
+            "name: a\ndescription: d\nrepos:\n  - org/other\nsteps:\n  - script: cd $(Build.SourcesDirectory)/self\n",
         );
         assert!(collect_path_layout_warnings(&fm, "body").is_empty());
+    }
+
+    #[test]
+    fn warns_on_trigger_scoped_repository_name_in_multi_checkout() {
+        let fm = fm(
+            "name: a\ndescription: d\nrepos:\n  - org/other\nsteps:\n  - script: cd $(Build.SourcesDirectory)/$(Build.Repository.Name)\n",
+        );
+        let warnings = collect_path_layout_warnings(&fm, "body");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("triggering repository")
+                && warnings[0].contains("$(Build.SourcesDirectory)/self"),
+            "{warnings:?}"
+        );
     }
 
     #[test]
@@ -309,7 +336,7 @@ mod tests {
     #[test]
     fn deduplicates_repeated_warnings() {
         let fm = fm(
-            "name: a\ndescription: d\nsteps:\n  - script: cd $(Build.SourcesDirectory)/$(Build.Repository.Name)\n  - script: ls $(Build.SourcesDirectory)/$(Build.Repository.Name)\n",
+            "name: a\ndescription: d\nsteps:\n  - script: cd $(Build.SourcesDirectory)/self\n  - script: ls $(Build.SourcesDirectory)/self\n",
         );
         let w = collect_path_layout_warnings(&fm, "body");
         assert_eq!(w.len(), 1, "{w:?}");
@@ -323,8 +350,12 @@ mod tests {
         );
         assert!(sources_dir_segments("cd $(Build.SourcesDirectory)").is_empty());
         assert_eq!(
-            sources_dir_segments("$(Build.SourcesDirectory)/$(Build.Repository.Name)/x"),
+            sources_dir_segments("$(Build.SourcesDirectory)/self/x"),
             vec![SELF_REPO_SEGMENT.to_string()]
+        );
+        assert_eq!(
+            sources_dir_segments("$(Build.SourcesDirectory)/$(Build.Repository.Name)/x"),
+            vec![LEGACY_SELF_REPO_SEGMENT.to_string()]
         );
         // Back-to-back double prefix: the inner `$(Build.SourcesDirectory)`
         // is extracted as the segment and the loop advances past it (rather

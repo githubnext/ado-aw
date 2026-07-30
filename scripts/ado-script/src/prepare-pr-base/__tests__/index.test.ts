@@ -188,6 +188,32 @@ describe("prepare-pr-base main", () => {
     );
   });
 
+  it("prefers the self resource ref over the triggering repository branch", async () => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const { deps, calls } = dependencies({
+      remote: "https://github.com/example/repo.git",
+    });
+    await main(
+      {
+        mode: "patch-base",
+        repos: [{ dir: "/src", target: "main" }],
+        fallbackTarget: "main",
+      },
+      {
+        ADO_AW_SELF_REPOSITORY_REF: "refs/heads/self-default",
+        BUILD_SOURCEBRANCH: "refs/heads/external-trigger",
+      },
+      deps,
+    );
+    const fetch = calls.find((call) => call.args[0] === "fetch");
+    expect(fetch?.args).toContain(
+      "+refs/heads/self-default:refs/remotes/origin/ado-aw-prepare-source",
+    );
+    expect(fetch?.args).not.toContain(
+      "+refs/heads/external-trigger:refs/remotes/origin/ado-aw-prepare-source",
+    );
+  });
+
   it("target-worktree fetches only the target tip at depth one", async () => {
     vi.spyOn(process.stdout, "write").mockImplementation(() => true);
     const { deps, calls } = dependencies();

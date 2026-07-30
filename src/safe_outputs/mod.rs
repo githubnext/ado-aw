@@ -181,34 +181,50 @@ pub(crate) async fn resolve_wiki_branch(
 /// 3. a case-insensitive match against the trailing repo-name part of the value
 ///    (e.g. `sdk-FtdiDeviceControl` for `4x4/sdk-FtdiDeviceControl`).
 ///
-/// Azure DevOps repository names are case-insensitive, so the trailing-name fallback
-/// matches case-insensitively. Returns the resolved alias key on success, or `None`
-/// if no entry matches.
+/// Azure DevOps repository names are case-insensitive, so the name-based
+/// fallbacks match case-insensitively. Returns the resolved alias key only when
+/// the match is unique; ambiguous names are rejected.
 pub(crate) fn lookup_allowed_repository_alias<'a>(
     input: &str,
     allowed_repositories: &'a std::collections::HashMap<String, String>,
 ) -> Option<&'a String> {
+    fn unique_alias<'a>(
+        mut matches: impl Iterator<Item = &'a String>,
+    ) -> Option<&'a String> {
+        let first = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(first)
+    }
+
     // 1. Exact alias key match
     if let Some((alias, _)) = allowed_repositories.get_key_value(input) {
         return Some(alias);
     }
-    // 2. Case-insensitive value match (full "project/repo" or just "repo").
+    // 2. Unique case-insensitive full-value match ("project/repo").
     // ADO repo names are case-insensitive, so accept any case for the full path.
-    if let Some((alias, _)) = allowed_repositories
-        .iter()
-        .find(|(_, v)| v.eq_ignore_ascii_case(input))
-    {
+    if let Some(alias) = unique_alias(
+        allowed_repositories
+            .iter()
+            .filter(|(_, value)| value.eq_ignore_ascii_case(input))
+            .map(|(alias, _)| alias),
+    ) {
         return Some(alias);
     }
-    // 3. Trailing repo-name part match (case-insensitive)
-    allowed_repositories.iter().find_map(|(alias, v)| {
-        let trailing = v.rsplit('/').next().unwrap_or(v.as_str());
-        if trailing.eq_ignore_ascii_case(input) {
-            Some(alias)
-        } else {
-            None
-        }
-    })
+    // 3. Unique trailing repo-name match (case-insensitive).
+    unique_alias(
+        allowed_repositories
+            .iter()
+            .filter(|(_, value)| {
+                value
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(value.as_str())
+                    .eq_ignore_ascii_case(input)
+            })
+            .map(|(alias, _)| alias),
+    )
 }
 
 /// Look up an ADO repo name in `allowed_repositories`, accepting either:
@@ -250,6 +266,39 @@ pub(crate) fn input_refers_to_self(input: &str, ctx: &ExecutionContext) -> bool 
     false
 }
 
+/// Normalize a repository selector to the compiler/runtime alias key.
+pub(crate) fn canonical_repository_alias(
+    repository: &str,
+    ctx: &ExecutionContext,
+) -> Option<String> {
+    if input_refers_to_self(repository, ctx) {
+        return Some("self".to_string());
+    }
+    lookup_allowed_repository_alias(repository, &ctx.allowed_repositories).cloned()
+}
+
+/// Resolve a repository selector to its checkout directory.
+///
+/// The checkout root and `self` directory differ in multi-checkout jobs.
+/// Named repositories are resolved through the configured alias map rather
+/// than appended from untrusted selector text.
+pub(crate) fn resolve_repository_checkout_dir(
+    repository: &str,
+    ctx: &ExecutionContext,
+) -> anyhow::Result<std::path::PathBuf> {
+    let Some(alias) = canonical_repository_alias(repository, ctx) else {
+        anyhow::bail!(
+            "Repository '{}' is not in the allowed repository list",
+            repository
+        );
+    };
+    if alias == "self" {
+        return Ok(ctx.self_repository_directory.clone());
+    }
+
+    Ok(ctx.source_directory.join(alias))
+}
+
 /// Resolve a repository alias to its ADO repo name.
 ///
 /// Accepts `"self"` (or `None`) → `ctx.repository_name`, an alias key from
@@ -262,13 +311,20 @@ pub(crate) fn resolve_repo_name(
     ctx: &ExecutionContext,
 ) -> Result<String, ExecutionResult> {
     let alias = repo_alias.unwrap_or("self");
-    if input_refers_to_self(alias, ctx) {
+    let Some(alias) = canonical_repository_alias(alias, ctx) else {
+        return Err(ExecutionResult::failure(format!(
+            "Repository '{}' is not in the allowed repository list",
+            alias
+        )));
+    };
+    if alias == "self" {
         return ctx
             .repository_name
             .clone()
             .ok_or_else(|| ExecutionResult::failure("BUILD_REPOSITORY_NAME not set"));
     }
-    lookup_allowed_repository(alias, &ctx.allowed_repositories)
+    ctx.allowed_repositories
+        .get(&alias)
         .cloned()
         .ok_or_else(|| {
             ExecutionResult::failure(format!(
@@ -819,6 +875,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_lookup_allowed_repository_rejects_ambiguous_bare_name() {
+        let allowed = std::collections::HashMap::from([
+            ("tools-a".to_string(), "ProjectA/tools".to_string()),
+            ("tools-b".to_string(), "ProjectB/tools".to_string()),
+        ]);
+
+        assert_eq!(lookup_allowed_repository_alias("tools", &allowed), None);
+        assert_eq!(lookup_allowed_repository("tools", &allowed), None);
+        assert_eq!(
+            lookup_allowed_repository_alias("ProjectA/tools", &allowed),
+            Some(&"tools-a".to_string())
+        );
+    }
+
     // ─── resolve_repo_name ──────────────────────────────────────────────
 
     fn ctx_with(
@@ -831,6 +902,42 @@ mod tests {
             repo_refs: std::collections::HashMap::new(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_resolve_repository_checkout_dir_distinguishes_root_and_self() {
+        let mut ctx = ctx_with(Some("4x4/current-repo"), sample_allowed());
+        ctx.source_directory = std::path::PathBuf::from("checkout-root");
+        ctx.self_repository_directory =
+            std::path::PathBuf::from("checkout-root").join("current-repo");
+
+        assert_eq!(
+            resolve_repository_checkout_dir("self", &ctx).unwrap(),
+            ctx.self_repository_directory
+        );
+        assert_eq!(
+            resolve_repository_checkout_dir("4X4/CURRENT-REPO", &ctx).unwrap(),
+            ctx.self_repository_directory
+        );
+        assert_eq!(
+            resolve_repository_checkout_dir("sdk-ftdidevicecontrol", &ctx).unwrap(),
+            ctx.source_directory.join("repo-sdk-ftdidevicecontrol")
+        );
+        assert_eq!(
+            resolve_repository_checkout_dir("4x4/sdk-DeviceCommunication", &ctx).unwrap(),
+            ctx.source_directory.join("repo-sdk-devicecommunication")
+        );
+    }
+
+    #[test]
+    fn test_resolve_repository_checkout_dir_rejects_unknown_selector() {
+        let ctx = ctx_with(Some("4x4/current-repo"), sample_allowed());
+        let err = resolve_repository_checkout_dir("../outside", &ctx).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("not in the allowed repository list"),
+            "got: {err}"
+        );
     }
 
     #[test]

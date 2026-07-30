@@ -4,7 +4,7 @@ use log::{debug, info};
 use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::PATH_SEGMENT;
 use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
@@ -208,23 +208,6 @@ fn validate_file_path(path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn repository_checkout_dir(repository: &str, ctx: &ExecutionContext) -> anyhow::Result<PathBuf> {
-    if crate::safe_outputs::input_refers_to_self(repository, ctx) {
-        return Ok(ctx.source_directory.clone());
-    }
-
-    if let Some(alias) =
-        crate::safe_outputs::lookup_allowed_repository_alias(repository, &ctx.allowed_repositories)
-    {
-        return Ok(ctx.source_directory.join(alias));
-    }
-
-    anyhow::bail!(
-        "Repository alias '{}' not found in allowed repositories",
-        repository
-    )
-}
-
 fn build_inline_thread_context(
     workspace_root: &Path,
     repo_root: &Path,
@@ -415,7 +398,11 @@ impl Executor for AddPrCommentResult {
         if let Some(ref fp) = self.file_path {
             let end_line = self.line.unwrap_or(1);
             let start_line = self.start_line.unwrap_or(end_line);
-            let repo_root = match repository_checkout_dir(&self.repository, ctx).and_then(|path| {
+            let repo_root = match crate::safe_outputs::resolve_repository_checkout_dir(
+                &self.repository,
+                ctx,
+            )
+            .and_then(|path| {
                 crate::validate::ensure_path_within_base(
                     &path,
                     &ctx.source_directory,
@@ -875,7 +862,11 @@ allowed-statuses:
             ..Default::default()
         };
 
-        let resolved = repository_checkout_dir("4x4/sdk-ftdidevicecontrol", &ctx).unwrap();
+        let resolved = crate::safe_outputs::resolve_repository_checkout_dir(
+            "4x4/sdk-ftdidevicecontrol",
+            &ctx,
+        )
+        .unwrap();
 
         assert_eq!(resolved, alias_dir);
     }
@@ -899,7 +890,11 @@ allowed-statuses:
             ..Default::default()
         };
 
-        let resolved = repository_checkout_dir("repo-sdk-ftdidevicecontrol", &ctx).unwrap();
+        let resolved = crate::safe_outputs::resolve_repository_checkout_dir(
+            "repo-sdk-ftdidevicecontrol",
+            &ctx,
+        )
+        .unwrap();
 
         assert_eq!(resolved, alias_dir);
     }
@@ -907,14 +902,17 @@ allowed-statuses:
     #[test]
     fn test_repository_checkout_dir_treats_empty_repository_as_self() {
         let workspace = tempdir().unwrap();
+        let self_dir = workspace.path().join("current-repo");
         let ctx = ExecutionContext {
             source_directory: workspace.path().to_path_buf(),
+            self_repository_directory: self_dir.clone(),
             repository_name: Some("4x4/current-repo".to_string()),
             ..Default::default()
         };
 
-        let resolved = repository_checkout_dir("", &ctx).unwrap();
+        let resolved =
+            crate::safe_outputs::resolve_repository_checkout_dir("", &ctx).unwrap();
 
-        assert_eq!(resolved, workspace.path());
+        assert_eq!(resolved, self_dir);
     }
 }

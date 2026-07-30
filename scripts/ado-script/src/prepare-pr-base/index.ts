@@ -158,7 +158,11 @@ async function preparePatchBase(
 ): Promise<boolean> {
   const { runners } = deps;
   const headSha = runners.gitOk(["rev-parse", "HEAD"]) ?? "";
-  const sourceRef = repo.sourceRef ?? env.BUILD_SOURCEBRANCH ?? headSha;
+  const sourceRef =
+    repo.sourceRef ??
+    env.ADO_AW_SELF_REPOSITORY_REF ??
+    env.BUILD_SOURCEBRANCH ??
+    headSha;
   let restReason = "origin is not an eligible same-organization Azure Repos remote";
 
   const remote = runners.gitOk(["remote", "get-url", "origin"]) ?? "";

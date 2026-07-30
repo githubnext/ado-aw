@@ -670,6 +670,10 @@ pub fn prepare_pr_base_step_typed(mode: PreparePrBaseMode, repos: &[PreparePrBas
         BashStep::new(mode.display_name(), script).with_condition(Condition::Succeeded),
         crate::compile::ado_bundle::Bundle::PreparePrBase,
         crate::compile::ado_bundle::TokenSource::SystemAccessToken,
+    )
+    .with_env(
+        "ADO_AW_SELF_REPOSITORY_REF",
+        EnvValue::runtime_expression("resources.repositories['self'].ref"),
     );
     Step::Bash(step)
 }
@@ -1567,6 +1571,11 @@ mod tests {
         assert!(matches!(
             step.env.get("SYSTEM_ACCESSTOKEN"),
             Some(EnvValue::Secret(v)) if v == "System.AccessToken"
+        ));
+        assert!(matches!(
+            step.env.get("ADO_AW_SELF_REPOSITORY_REF"),
+            Some(EnvValue::RuntimeExpression(v))
+                if v == "resources.repositories['self'].ref"
         ));
     }
 

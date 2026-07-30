@@ -199,6 +199,7 @@ async fn try_root_commit_fallback(git_dir: &std::path::Path) -> Option<String> {
 #[derive(Clone, Debug)]
 pub struct SafeOutputs {
     bounding_directory: PathBuf,
+    self_repository_directory: PathBuf,
     output_directory: PathBuf,
     /// ToolRouter is used by the rmcp framework's #[tool_handler] macro for
     /// dispatching MCP tool calls. Clippy doesn't see this usage.
@@ -208,15 +209,16 @@ pub struct SafeOutputs {
 
 /// Resolve which git directory to use for patch generation.
 ///
-/// `repository` of `None` or `"self"` maps to `bounding_directory` directly;
-/// any other value is validated as a safe path segment and resolved as a
-/// subdirectory of `bounding_directory`.
+/// `repository` of `None` or `"self"` maps to the compiler-provided self
+/// checkout; any other value is validated as a safe path segment and resolved
+/// as a subdirectory of `bounding_directory`.
 fn resolve_git_dir_for_patch(
     bounding_directory: &std::path::Path,
+    self_repository_directory: &std::path::Path,
     repository: Option<&str>,
 ) -> Result<std::path::PathBuf, McpError> {
     match repository {
-        Some("self") | None => Ok(bounding_directory.to_owned()),
+        Some("self") | None => Ok(self_repository_directory.to_owned()),
         Some(repo_alias) => {
             if !crate::validate::is_safe_path_segment(repo_alias) {
                 return Err(anyhow_to_mcp_error(anyhow::anyhow!(
@@ -484,22 +486,46 @@ impl SafeOutputs {
         Ok(true)
     }
 
+    #[cfg(test)]
     async fn new(
         bounding_directory: impl Into<PathBuf>,
         output_directory: impl Into<PathBuf>,
         enabled_tools: Option<&[String]>,
     ) -> Result<Self> {
+        Self::new_with_self_repository_directory(
+            bounding_directory,
+            output_directory,
+            None,
+            enabled_tools,
+        )
+        .await
+    }
+
+    async fn new_with_self_repository_directory(
+        bounding_directory: impl Into<PathBuf>,
+        output_directory: impl Into<PathBuf>,
+        self_repository_directory: Option<PathBuf>,
+        enabled_tools: Option<&[String]>,
+    ) -> Result<Self> {
         let bounding_dir = bounding_directory.into();
         let output_dir = output_directory.into();
+        let self_repository_dir =
+            self_repository_directory.unwrap_or_else(|| bounding_dir.clone());
         info!(
-            "Initializing SafeOutputs MCP server: bounding={}, output={}",
+            "Initializing SafeOutputs MCP server: bounding={}, self={}, output={}",
             bounding_dir.display(),
+            self_repository_dir.display(),
             output_dir.display()
         );
         anyhow::ensure!(
             bounding_dir.exists() && bounding_dir.is_dir(),
             "bounding_directory: {:?} is not a valid path or directory",
             bounding_dir
+        );
+        anyhow::ensure!(
+            self_repository_dir.exists() && self_repository_dir.is_dir(),
+            "self_repository_directory: {:?} is not a valid path or directory",
+            self_repository_dir
         );
         anyhow::ensure!(
             output_dir.exists() && output_dir.is_dir(),
@@ -524,18 +550,23 @@ impl SafeOutputs {
 
         Ok(Self {
             bounding_directory: bounding_dir,
+            self_repository_directory: self_repository_dir,
             output_directory: output_dir,
             tool_router,
         })
     }
 
     /// Generate a git diff patch from a specific directory
-    /// If `repository` is Some, it's treated as a subdirectory of bounding_directory
-    /// If `repository` is None or "self", use bounding_directory directly
+    /// If `repository` is Some, it's treated as a subdirectory of bounding_directory.
+    /// If `repository` is None or "self", use the explicit self checkout.
     async fn generate_patch(&self, repository: Option<&str>) -> Result<(String, String), McpError> {
         use tokio::process::Command;
 
-        let git_dir = resolve_git_dir_for_patch(&self.bounding_directory, repository)?;
+        let git_dir = resolve_git_dir_for_patch(
+            &self.bounding_directory,
+            &self.self_repository_directory,
+            repository,
+        )?;
 
         // Generate patch using git format-patch for proper commit metadata,
         // rename detection, and binary file handling.
@@ -1512,16 +1543,22 @@ impl ServerHandler for SafeOutputs {
 pub async fn run(
     output_directory: &str,
     bounding_directory: &str,
+    self_repository_directory: Option<&str>,
     enabled_tools: Option<&[String]>,
 ) -> Result<()> {
     // Create and run the server with STDIO transport
-    let service = SafeOutputs::new(bounding_directory, output_directory, enabled_tools)
-        .await?
-        .serve(stdio())
-        .await
-        .inspect_err(|e| {
-            error!("Error starting MCP server: {}", e);
-        })?;
+    let service = SafeOutputs::new_with_self_repository_directory(
+        bounding_directory,
+        output_directory,
+        self_repository_directory.map(PathBuf::from),
+        enabled_tools,
+    )
+    .await?
+    .serve(stdio())
+    .await
+    .inspect_err(|e| {
+        error!("Error starting MCP server: {}", e);
+    })?;
     service
         .waiting()
         .await
@@ -1540,6 +1577,28 @@ mod tests {
             .await
             .unwrap();
         (safe_outputs, temp_dir)
+    }
+
+    #[test]
+    fn test_resolve_git_dir_for_patch_uses_explicit_self_checkout() {
+        let root = tempdir().unwrap();
+        let self_dir = root.path().join("self-repo");
+        let alias_dir = root.path().join("tools");
+        std::fs::create_dir(&self_dir).unwrap();
+        std::fs::create_dir(&alias_dir).unwrap();
+
+        assert_eq!(
+            resolve_git_dir_for_patch(root.path(), &self_dir, Some("self")).unwrap(),
+            self_dir
+        );
+        assert_eq!(
+            resolve_git_dir_for_patch(root.path(), &self_dir, None).unwrap(),
+            self_dir
+        );
+        assert_eq!(
+            resolve_git_dir_for_patch(root.path(), &self_dir, Some("tools")).unwrap(),
+            alias_dir.canonicalize().unwrap()
+        );
     }
 
     #[test]

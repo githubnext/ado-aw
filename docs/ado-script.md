@@ -171,7 +171,7 @@ node import.js <prompt-file> --base "$(Build.SourcesDirectory)" \
   compiler always passes `$(Build.SourcesDirectory)` (ADO expands the macro
   before node runs), and the compiler-emitted marker for the agent body is a
   **trigger-repo-relative** path (e.g. `agents/foo.md`, or
-  `$(Build.Repository.Name)/agents/foo.md` under multi-checkout) — not
+  `self/agents/foo.md` under multi-checkout) — not
   absolute. `import.js` rejects absolute and `..` paths.
 - `--var name=value` (repeatable) — a small, **compiler-owned allowlist** of
   ADO path-anchor variables (currently `Build.SourcesDirectory` and

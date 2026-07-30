@@ -385,8 +385,8 @@ Reference the explicit ADO path instead:
 
 - `$(Build.SourcesDirectory)` — the checkout root (the trigger repo root when
   only `self` is checked out).
-- `$(Build.SourcesDirectory)/$(Build.Repository.Name)` — the trigger repo when
-  one or more additional repositories are checked out.
+- `$(Build.SourcesDirectory)/self` — the compiler-owned `self` checkout path
+  when one or more additional repositories are checked out.
 - `$(Build.SourcesDirectory)/<alias>` — a specific checked-out repository.
 
 The `legacy_path_markers` codemod automatically rewrites any remaining markers
@@ -422,6 +422,10 @@ Object fields:
 | `checkout`    | `true`                 | Whether the agent job clones this repo |
 | `fetch-depth` | *(ADO default)*        | Shallow-clone depth for this repo's checkout (ADO `fetchDepth`). `0` = full history |
 | `fetch-tags`  | *(ADO default)*        | Whether to fetch git tags during checkout (ADO `fetchTags`) |
+
+Aliases must be unique case-insensitively because they become checkout
+directory names on Windows agents. `root`, `repo`, and `self` are reserved in
+every casing; `self` is the compiler-owned path for the pipeline repository.
 
 ### Tuning checkout fetch behavior (`fetch-depth` / `fetch-tags`)
 
@@ -614,9 +618,11 @@ The trade-off is that the generated YAML is larger, and prompt-body
 edits require `ado-aw compile` plus committing the updated pipeline
 file.
 
-A small, fixed set of ADO path-anchor variables —
-`$(Build.SourcesDirectory)` and `$(Build.Repository.Name)` — is
-substituted into the prompt consistently in **both** modes. Arbitrary
+A small, fixed set of ADO path-anchor variables — including
+`$(Build.SourcesDirectory)` and `$(Build.Repository.Name)` — is substituted
+into the prompt consistently in **both** modes. `Build.Repository.Name`
+identifies the triggering repository and is not the compiler-owned `self`
+checkout path. Arbitrary
 `$(...)` macros and pipeline/secret variables are not expanded; see
 [ADO variables in the prompt](runtime-imports.md#ado-variables-in-the-prompt).
 

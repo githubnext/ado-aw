@@ -67,6 +67,11 @@ pub struct ExecutionContext {
     pub working_directory: std::path::PathBuf,
     /// Source checkout directory (BUILD_SOURCESDIRECTORY) where git repos are checked out
     pub source_directory: std::path::PathBuf,
+    /// Exact checkout directory for the pipeline's `self` repository.
+    ///
+    /// In a multi-checkout job `BUILD_SOURCESDIRECTORY` is the common checkout
+    /// root, so the compiler passes this path explicitly.
+    pub self_repository_directory: std::path::PathBuf,
     /// Per-tool configuration, keyed by tool name
     pub tool_configs: HashMap<String, serde_json::Value>,
     /// Debug-only tools (e.g. `create-issue`) that the operator authorized
@@ -75,9 +80,13 @@ pub struct ExecutionContext {
     /// whose tool name is absent from this set — otherwise a forged entry
     /// could bypass the MCP-layer default-deny gate. Empty by default.
     pub debug_enabled_tools: HashSet<String>,
-    /// Repository ID (from BUILD_REPOSITORY_ID)
+    /// Exact `self` repository ID. Compiled pipelines provide
+    /// `ADO_AW_SELF_REPOSITORY_ID`; direct/legacy invocations fall back to
+    /// `BUILD_REPOSITORY_ID`.
     pub repository_id: Option<String>,
-    /// Repository name (from BUILD_REPOSITORY_NAME)
+    /// Exact `self` repository name. Compiled pipelines provide
+    /// `ADO_AW_SELF_REPOSITORY_NAME`; direct/legacy invocations fall back to
+    /// `BUILD_REPOSITORY_NAME`.
     pub repository_name: Option<String>,
     /// Allowed repositories for PRs: "self" + checkout list aliases
     /// Maps alias to ADO repo name (e.g., "other-repo" -> "org/other-repo")
@@ -239,6 +248,9 @@ impl ExecutionContext {
         let source_directory = env("BUILD_SOURCESDIRECTORY")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let self_repository_directory = env("ADO_AW_SELF_REPOSITORY_DIRECTORY")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| source_directory.clone());
 
         Self {
             ado_org_url,
@@ -249,10 +261,13 @@ impl ExecutionContext {
             github_token: env("ADO_AW_DEBUG_GITHUB_TOKEN"),
             working_directory: std::env::current_dir().unwrap_or_default(),
             source_directory,
+            self_repository_directory,
             tool_configs: HashMap::new(),
             debug_enabled_tools: HashSet::new(),
-            repository_id: env("BUILD_REPOSITORY_ID"),
-            repository_name: env("BUILD_REPOSITORY_NAME"),
+            repository_id: env("ADO_AW_SELF_REPOSITORY_ID")
+                .or_else(|| env("BUILD_REPOSITORY_ID")),
+            repository_name: env("ADO_AW_SELF_REPOSITORY_NAME")
+                .or_else(|| env("BUILD_REPOSITORY_NAME")),
             allowed_repositories: HashMap::new(),
             repo_refs: HashMap::new(),
             agent_stats: None,
@@ -898,6 +913,66 @@ mod tests {
         assert_eq!(ctx.source_branch.as_deref(), Some("refs/heads/main"));
         assert_eq!(ctx.source_branch_name.as_deref(), Some("main"));
         assert_eq!(ctx.source_version.as_deref(), Some("abc1234"));
+    }
+
+    #[test]
+    fn test_from_env_lookup_populates_checkout_directories() {
+        let ctx = ExecutionContext::from_env_lookup(env_from(&[
+            ("BUILD_SOURCESDIRECTORY", "C:\\agent\\s"),
+            (
+                "ADO_AW_SELF_REPOSITORY_DIRECTORY",
+                "C:\\agent\\s\\ado-aw",
+            ),
+        ]));
+
+        assert_eq!(
+            ctx.source_directory,
+            std::path::PathBuf::from("C:\\agent\\s")
+        );
+        assert_eq!(
+            ctx.self_repository_directory,
+            std::path::PathBuf::from("C:\\agent\\s\\ado-aw")
+        );
+    }
+
+    #[test]
+    fn test_from_env_lookup_self_directory_falls_back_to_source_directory() {
+        let ctx = ExecutionContext::from_env_lookup(env_from(&[(
+            "BUILD_SOURCESDIRECTORY",
+            "C:\\agent\\s",
+        )]));
+
+        assert_eq!(ctx.self_repository_directory, ctx.source_directory);
+    }
+
+    #[test]
+    fn test_from_env_lookup_prefers_compiler_owned_self_identity() {
+        let ctx = ExecutionContext::from_env_lookup(env_from(&[
+            ("ADO_AW_SELF_REPOSITORY_ID", "self-id"),
+            ("ADO_AW_SELF_REPOSITORY_NAME", "project/self-repo"),
+            ("BUILD_REPOSITORY_ID", "trigger-id"),
+            ("BUILD_REPOSITORY_NAME", "project/trigger-repo"),
+        ]));
+
+        assert_eq!(ctx.repository_id.as_deref(), Some("self-id"));
+        assert_eq!(
+            ctx.repository_name.as_deref(),
+            Some("project/self-repo")
+        );
+    }
+
+    #[test]
+    fn test_from_env_lookup_self_identity_falls_back_to_build_variables() {
+        let ctx = ExecutionContext::from_env_lookup(env_from(&[
+            ("BUILD_REPOSITORY_ID", "build-id"),
+            ("BUILD_REPOSITORY_NAME", "project/build-repo"),
+        ]));
+
+        assert_eq!(ctx.repository_id.as_deref(), Some("build-id"));
+        assert_eq!(
+            ctx.repository_name.as_deref(),
+            Some("project/build-repo")
+        );
     }
 
     #[test]

@@ -273,6 +273,7 @@ mod tests {
         );
         j.push_step(Step::Checkout(super::super::step::CheckoutStep {
             repository: super::super::step::CheckoutRepo::Self_,
+            path: None,
             clean: None,
             submodules: None,
             fetch_depth: None,

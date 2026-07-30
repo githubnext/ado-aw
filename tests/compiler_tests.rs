@@ -6244,40 +6244,35 @@ fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
     // The Stage step's own env block must NOT contain a direct
     // `dependencies.Setup.outputs[...]` reference. (The same expression
     // IS expected at Agent-job-level `variables:` scope, the documented
-    // safe location — that hoist is asserted separately.) Scope this
-    // check by isolating the Stage step's bash + env body.
-    let stage_step = compiled
-        .split("Stage PR execution context")
-        .nth(1)
-        .map(|tail| {
-            // Stop at the next step (`- bash:` / `- task:` / `- script:`)
-            // or end of the job (a less-indented key).
-            let stop_at = ["\n      - bash:", "\n      - task:", "\n      - script:"];
-            let end = stop_at
-                .iter()
-                .filter_map(|needle| tail.find(needle))
-                .min()
-                .unwrap_or(tail.len());
-            &tail[..end]
-        })
-        .unwrap_or("");
+    // safe location — that hoist is asserted separately.)
+    let parsed = parse_compiled_yaml(&compiled);
+    let stage_step = find_job_mapping_by_display_name(
+        &parsed,
+        "Stage PR execution context (aw-context/pr/*)",
+    )
+    .expect("compiled YAML must contain the PR execution-context step");
+    let stage_env = stage_step
+        .get(yaml_key("env"))
+        .and_then(|value| value.as_mapping())
+        .expect("PR execution-context step must have an env block");
+    let stage_env = serde_yaml::to_string(stage_env).expect("stage env must serialize");
     assert!(
-        !stage_step.contains("dependencies.Setup.outputs['synthPr."),
+        !stage_env.contains("dependencies.Setup.outputs['synthPr."),
         "Stage step's own env block must NOT reference \
          `dependencies.Setup.outputs[...]` — that is cross-job syntax. The cross-job \
          output is hoisted into Agent-job-level `variables:` (see \
          `generate_agent_job_variables`) and the Stage step reads it via the \
-         `$(AW_PR_*)` macros. Stage step body: {stage_step}"
+         `$(AW_PR_*)` macros. Stage step env: {stage_env}"
     );
     // ADO does NOT evaluate `$[ ... ]` runtime expressions inside step
     // `env:` values — only inside `variables:` mappings and
     // `condition:` fields. Any `$[ ` in this step's env block would be
     // passed through to bash as a literal string (the bug fixed here).
     assert!(
-        !stage_step.contains("$["),
+        !stage_env.contains("$["),
         "Stage step's env block must not contain `$[ ` runtime expressions \
          (ADO doesn't evaluate them at step-env scope). Use the Agent-job-level \
-         `variables:` hoist + `$(name)` macros instead. Stage step body: {stage_step}"
+         `variables:` hoist + `$(name)` macros instead. Stage step env: {stage_env}"
     );
     assert!(
         compiled.contains("SYSTEM_ACCESSTOKEN: $(System.AccessToken)"),
@@ -9096,9 +9091,8 @@ fn test_create_pull_request_prepare_step_defaults_target_branch() {
 }
 
 /// Multi-repo: with additional `checkout:` repos, the prepare step deepens the
-/// target branch in the self working dir AND each alias dir — mirroring
-/// `mcp.rs::resolve_git_dir_for_patch` so a PR to any allowed repo works on a
-/// shallow pool.
+/// target branch in the exact self checkout AND each alias checkout so a PR to
+/// any allowed repo works on a shallow pool.
 #[test]
 fn test_create_pull_request_prepare_step_covers_all_checkout_repos() {
     let compiled = compile_inline_agent(
@@ -9106,15 +9100,15 @@ fn test_create_pull_request_prepare_step_covers_all_checkout_repos() {
         "---\nname: \"Multi PR Agent\"\ndescription: \"opens PRs across repos\"\nworkspace: root\nrepos:\n  - my-org/tools\n  - my-org/lib\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n\n## Agent\n\nDo work.\n",
     );
     let agent = job_block(&compiled, "Agent");
-    // self (working_directory == $(Build.SourcesDirectory) under workspace: root)
-    // + one dir per derived alias (my-org/tools -> tools, my-org/lib -> lib).
+    // self uses the compiler-owned multi-checkout path; aliases are siblings
+    // under the checkout root (my-org/tools -> tools, my-org/lib -> lib).
     assert_eq!(
         agent.matches("--repo-dir ").count(),
         3,
         "multi-repo agent must emit one --repo-dir per allowed repo (self + 2 aliases):\n{agent}"
     );
     assert!(
-        agent.contains("--repo-dir \"$(Build.SourcesDirectory)\""),
+        agent.contains("--repo-dir \"$(Build.SourcesDirectory)/self\""),
         "self dir must be covered:\n{agent}"
     );
     assert!(
@@ -9139,7 +9133,7 @@ fn test_create_pull_request_prepare_step_per_repo_targets() {
     let agent = job_block(&compiled, "Agent");
     // self ⇒ literal default 'main' (self never infers).
     assert!(
-        agent.contains("--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
+        agent.contains("--repo-dir \"$(Build.SourcesDirectory)/self\" --target-branch 'main'"),
         "self must target the literal default 'main':\n{agent}"
     );
     // tools ⇒ inferred from its checkout ref (refs/heads/release → release).
@@ -9204,7 +9198,7 @@ fn test_create_pull_request_safeoutputs_prepare_step_covers_all_checkout_repos()
     );
     let safeoutputs = job_block(&compiled, "SafeOutputs");
     assert!(
-        safeoutputs.contains("--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
+        safeoutputs.contains("--repo-dir \"$(Build.SourcesDirectory)/self\" --target-branch 'main'"),
         "self must target the literal default 'main' in the SafeOutputs job:\n{safeoutputs}"
     );
     assert!(
@@ -9299,28 +9293,28 @@ fn test_no_create_pull_request_omits_prepare_pr_base_step() {
 /// checked-out repos, the SafeOutputs job must emit a `checkout` step for each
 /// `checkout: true` repo so that:
 ///   • The additional repo directories exist before `prepare-pr-base.js` runs.
-///   • ADO uses the multi-checkout workspace layout, placing `self` at
-///     `$(Build.SourcesDirectory)/$(Build.Repository.Name)` rather than
-///     directly at `$(Build.SourcesDirectory)`.
+///   • `self` stays at the compiler-owned `$(Build.SourcesDirectory)/self`
+///     path regardless of trigger metadata or repository aliases.
 ///
 /// A `checkout: false` repo must remain resource-only (no checkout step).
 #[test]
 fn test_issue_1731_safeoutputs_checks_out_additional_repos_for_create_pr() {
     let compiled = compile_inline_agent(
         "issue-1731-multi-checkout",
-        "---\nname: \"Multi-repo PR\"\ndescription: \"Opens a PR in an additional repo\"\nworkspace: root\nrepos:\n  - my-org/tools\n  - my-org/docs\n  - name: my-org/scripts\n    checkout: false\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n\n## Agent\n\nDo work.\n",
+        "---\nname: \"Multi-repo PR\"\ndescription: \"Opens a PR in an additional repo\"\nworkspace: root\nrepos:\n  - name: my-org/tools\n    alias: build-tools\n  - my-org/docs\n  - name: my-org/scripts\n    checkout: false\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n\n## Agent\n\nDo work.\n",
     );
     let agent = job_block(&compiled, "Agent");
     let safeoutputs = job_block(&compiled, "SafeOutputs");
 
     // Agent job: self + both checked-out repos.
     assert!(
-        agent.contains("- checkout: self"),
-        "Agent must check out self:\n{agent}"
+        agent.contains("- checkout: self") && agent.contains("path: s/self"),
+        "Agent must check out self at its fixed multi-checkout path:\n{agent}"
     );
     assert!(
-        agent.contains("- checkout: tools"),
-        "Agent must check out tools:\n{agent}"
+        agent.contains("- checkout: build-tools")
+            && agent.contains("path: s/build-tools"),
+        "Agent must check out tools at its explicit alias path:\n{agent}"
     );
     assert!(
         agent.contains("- checkout: docs"),
@@ -9334,12 +9328,13 @@ fn test_issue_1731_safeoutputs_checks_out_additional_repos_for_create_pr() {
 
     // SafeOutputs job: same three checkouts must precede prepare-pr-base.js.
     assert!(
-        safeoutputs.contains("- checkout: self"),
-        "SafeOutputs must check out self:\n{safeoutputs}"
+        safeoutputs.contains("- checkout: self") && safeoutputs.contains("path: s/self"),
+        "SafeOutputs must check out self at its fixed multi-checkout path:\n{safeoutputs}"
     );
     assert!(
-        safeoutputs.contains("- checkout: tools"),
-        "SafeOutputs must check out tools (issue #1731):\n{safeoutputs}"
+        safeoutputs.contains("- checkout: build-tools")
+            && safeoutputs.contains("path: s/build-tools"),
+        "SafeOutputs must check out tools at its explicit alias path (issue #1731):\n{safeoutputs}"
     );
     assert!(
         safeoutputs.contains("- checkout: docs"),
@@ -9350,10 +9345,14 @@ fn test_issue_1731_safeoutputs_checks_out_additional_repos_for_create_pr() {
         !safeoutputs.contains("- checkout: scripts"),
         "SafeOutputs must NOT check out scripts (checkout: false):\n{safeoutputs}"
     );
+    assert!(
+        safeoutputs.contains("--repo-dir \"$(Build.SourcesDirectory)/build-tools\""),
+        "prepare-pr-base must use the explicit alias checkout path:\n{safeoutputs}"
+    );
 
     // Checkouts must appear before the prepare-pr-base.js invocation.
     let tools_checkout_at = safeoutputs
-        .find("- checkout: tools")
+        .find("- checkout: build-tools")
         .expect("tools checkout present");
     let prepare_at = safeoutputs
         .find("prepare-pr-base.js")
@@ -9364,12 +9363,29 @@ fn test_issue_1731_safeoutputs_checks_out_additional_repos_for_create_pr() {
     );
 }
 
+#[test]
+fn test_issue_1731_fixed_self_path_cannot_collide_with_repository_alias() {
+    let compiled = compile_inline_agent(
+        "issue-1731-self-alias-collision",
+        "---\nname: \"Collision proof\"\ndescription: \"Keeps self separate from a same-named alias\"\nrepos:\n  - name: another-project/orchestrator\n    alias: orchestrator\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let agent = job_block(&compiled, "Agent");
+    let safeoutputs = job_block(&compiled, "SafeOutputs");
+
+    for job in [agent, safeoutputs] {
+        assert!(
+            job.contains("- checkout: self")
+                && job.contains("path: s/self")
+                && job.contains("- checkout: orchestrator")
+                && job.contains("path: s/orchestrator"),
+            "self and the named checkout must use distinct explicit paths:\n{job}"
+        );
+    }
+}
+
 /// Issue #1731: with additional checked-out repos the executor `--source` path
-/// uses the multi-checkout layout `$(Build.SourcesDirectory)/$(Build.Repository.Name)/...`
-/// (because `trigger_repo_directory` expands to the subdirectory form when
-/// `checkout` is non-empty). The SafeOutputs job's additional checkout steps
-/// are what forces ADO to apply that layout rather than placing `self` directly
-/// at `$(Build.SourcesDirectory)`.
+/// uses the compiler-owned multi-checkout layout
+/// `$(Build.SourcesDirectory)/self/...`.
 #[test]
 fn test_issue_1731_safeoutputs_executor_source_path_uses_multi_checkout_layout() {
     let compiled = compile_inline_agent(
@@ -9377,10 +9393,23 @@ fn test_issue_1731_safeoutputs_executor_source_path_uses_multi_checkout_layout()
         "---\nname: \"Multi-repo PR\"\ndescription: \"Opens a PR in an additional repo\"\nworkspace: root\nrepos:\n  - my-org/tools\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n\n## Agent\n\nDo work.\n",
     );
     let safeoutputs = job_block(&compiled, "SafeOutputs");
-    // With additional repos, self is placed at $(Build.SourcesDirectory)/$(Build.Repository.Name).
+    // With additional repos, self is pinned to $(Build.SourcesDirectory)/self.
     assert!(
-        safeoutputs.contains("$(Build.Repository.Name)"),
+        safeoutputs
+            .contains("ado-aw execute --source \"$(Build.SourcesDirectory)/self/"),
         "SafeOutputs executor --source must use the multi-checkout layout path:\n{safeoutputs}"
+    );
+    assert!(
+        safeoutputs
+            .contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"),
+        "SafeOutputs must pass the exact self checkout to the executor:\n{safeoutputs}"
+    );
+    assert!(
+        safeoutputs.contains("resources.repositories['self'].id")
+            && safeoutputs.contains("resources.repositories['self'].name")
+            && safeoutputs.contains("ADO_AW_SELF_REPOSITORY_ID:")
+            && safeoutputs.contains("ADO_AW_SELF_REPOSITORY_NAME:"),
+        "SafeOutputs must use self resource metadata rather than trigger-scoped Build.Repository.*:\n{safeoutputs}"
     );
 }
 
@@ -9409,6 +9438,27 @@ fn test_issue_1731_split_approval_additional_checkouts_only_in_pr_variant() {
         !auto.contains("- checkout: tools"),
         "auto SafeOutputs must NOT check out additional repos (it never runs create-pull-request):\n{auto}"
     );
+    assert!(
+        auto.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/")
+            && !auto.contains(
+                "ado-aw execute --source \"$(Build.SourcesDirectory)/self/"
+            ),
+        "self-only SafeOutputs must use its single-checkout source path:\n{auto}"
+    );
+    assert!(
+        auto.contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)")
+            && !auto.contains(
+                "ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"
+            ),
+        "self-only SafeOutputs must pass its checkout root as the self repo:\n{auto}"
+    );
+    assert!(
+        reviewed.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/self/")
+            && reviewed.contains(
+                "ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"
+            ),
+        "PR-capable reviewed job must use its multi-checkout self path:\n{reviewed}"
+    );
 }
 
 /// Mirror of the split-approval case: when `create-pull-request` is NOT gated
@@ -9435,6 +9485,61 @@ fn test_issue_1731_split_approval_additional_checkouts_in_auto_when_sibling_gate
         !reviewed.contains("- checkout: tools"),
         "SafeOutputs_Reviewed must NOT check out additional repos when it doesn't run create-pull-request:\n{reviewed}"
     );
+    assert!(
+        auto.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/self/")
+            && auto.contains(
+                "ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"
+            ),
+        "PR-capable automatic job must use its multi-checkout self path:\n{auto}"
+    );
+    assert!(
+        reviewed.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/")
+            && !reviewed.contains(
+                "ado-aw execute --source \"$(Build.SourcesDirectory)/self/"
+            ),
+        "self-only reviewed job must use its single-checkout source path:\n{reviewed}"
+    );
+    assert!(
+        reviewed.contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)")
+            && !reviewed.contains(
+                "ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"
+            ),
+        "self-only reviewed job must pass its checkout root as the self repo:\n{reviewed}"
+    );
+}
+
+#[test]
+fn test_issue_1731_split_checkout_layout_compiles_for_every_target() {
+    for target in ["standalone", "1es", "job", "stage"] {
+        let compiled = compile_inline_agent(
+            &format!("issue-1731-{target}"),
+            &format!(
+                "---\nname: \"Split PR {target}\"\ndescription: \"Cross-target split checkout layout\"\ntarget: {target}\nworkspace: root\nrepos:\n  - my-org/tools\nsafe-outputs:\n  add-build-tag:\n    tag: ci\n  create-pull-request:\n    target-branch: main\n    require-approval: true\n---\n\n## Agent\n\nDo work.\n"
+            ),
+        );
+
+        assert_eq!(
+            compiled.matches("- checkout: tools").count(),
+            2,
+            "{target}: tools must be checked out in Agent and the PR-capable Stage 3 job only:\n{compiled}"
+        );
+        assert!(
+            compiled.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/self/"),
+            "{target}: PR-capable Stage 3 source must use multi-checkout layout:\n{compiled}"
+        );
+        assert!(
+            compiled.contains("resources.repositories['self'].id")
+                && compiled.contains("resources.repositories['self'].name"),
+            "{target}: Stage 3 must use self resource metadata:\n{compiled}"
+        );
+        assert!(
+            compiled.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/")
+                && compiled.contains(
+                    "ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)"
+                ),
+            "{target}: self-only Stage 3 sibling must use single-checkout layout:\n{compiled}"
+        );
+    }
 }
 
 #[test]

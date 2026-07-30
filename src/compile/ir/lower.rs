@@ -1025,6 +1025,9 @@ fn lower_checkout(c: &CheckoutStep) -> Value {
             m.insert(s("checkout"), s(name));
         }
     }
+    if let Some(path) = &c.path {
+        m.insert(s("path"), s(path));
+    }
     if let Some(clean) = c.clean {
         m.insert(s("clean"), Value::Bool(clean));
     }
@@ -2880,6 +2883,7 @@ mod tests {
     fn lower_checkout_emits_fetch_depth_and_tags_when_set() {
         let c = CheckoutStep {
             repository: CheckoutRepo::Self_,
+            path: None,
             clean: None,
             submodules: None,
             fetch_depth: Some(1),
@@ -2894,9 +2898,27 @@ mod tests {
     }
 
     #[test]
+    fn lower_checkout_emits_explicit_path() {
+        let c = CheckoutStep {
+            repository: CheckoutRepo::Named("build-tools".to_string()),
+            path: Some("s/build-tools".to_string()),
+            clean: None,
+            submodules: None,
+            fetch_depth: None,
+            fetch_tags: None,
+            persist_credentials: None,
+        };
+        let v = lower_checkout(&c);
+        let m = v.as_mapping().unwrap();
+        assert_eq!(m.get(s("checkout")).unwrap(), &s("build-tools"));
+        assert_eq!(m.get(s("path")).unwrap(), &s("s/build-tools"));
+    }
+
+    #[test]
     fn lower_checkout_emits_zero_fetch_depth_explicitly() {
         let c = CheckoutStep {
             repository: CheckoutRepo::Self_,
+            path: None,
             clean: None,
             submodules: None,
             fetch_depth: Some(0),
@@ -2912,6 +2934,7 @@ mod tests {
     fn lower_checkout_omits_fetch_keys_when_none() {
         let c = CheckoutStep {
             repository: CheckoutRepo::Self_,
+            path: None,
             clean: None,
             submodules: None,
             fetch_depth: None,
@@ -2928,6 +2951,7 @@ mod tests {
     fn lower_checkout_none_emits_checkout_none() {
         let c = CheckoutStep {
             repository: CheckoutRepo::None,
+            path: None,
             clean: None,
             submodules: None,
             fetch_depth: None,
