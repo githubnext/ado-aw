@@ -1,21 +1,30 @@
 ---
 name: Custom Safe Output Acceptance
-description: A workflow with a custom scripts-style safe-output tool for the acceptance matrix.
+description: A workflow with a custom jobs-style safe-output tool for the acceptance matrix.
 safe-outputs:
-  scripts:
+  jobs:
     send-notification:
       description: Send a structured notification to the configured destination.
-      run: node send-notification.js
-      max: 3
+      output: Notification proposal accepted.
+      max: 1
       inputs:
         title:
+          description: Notification title.
           type: string
           required: true
-          max-length: 120
         severity:
+          description: Operational severity.
           type: choice
           options: [info, warning, critical]
           required: true
+      env:
+        NOTIFICATION_TOKEN: $(SHARED_NOTIFICATION_TOKEN)
+      steps:
+        - bash: |
+            set -euo pipefail
+            jq -e '.items[] | select(.type == "send-notification")' \
+              "$ADO_AW_AGENT_OUTPUT" > /dev/null
+          displayName: Validate notification proposals
   send-notification:
     require-approval: true
 ---

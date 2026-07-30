@@ -7,6 +7,7 @@ use rmcp::{
 };
 use serde_json::Value;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
 use crate::safe_outputs::{
@@ -203,6 +204,8 @@ pub struct SafeOutputs {
     /// Runtime router used by the rmcp handler. This contains both the filtered
     /// built-in routes and any dynamically registered custom routes.
     tool_router: ToolRouter<Self>,
+    /// Serializes custom-tool budget inspection and proposal append.
+    custom_proposal_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Resolve which git directory to use for patch generation.
@@ -452,6 +455,10 @@ impl SafeOutputs {
         self.safe_output_path()
     }
 
+    pub(crate) fn custom_proposal_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
+        self.custom_proposal_lock.clone()
+    }
+
     /// Read the current contents of the safe output file as NDJSON
     async fn read_safe_output_file(&self) -> Result<Vec<Value>> {
         ndjson::read_ndjson_file(&self.safe_output_path()).await
@@ -534,6 +541,7 @@ impl SafeOutputs {
             bounding_directory: bounding_dir,
             output_directory: output_dir,
             tool_router,
+            custom_proposal_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -1862,12 +1870,16 @@ mod tests {
 name: Test
 description: Test
 safe-outputs:
-  scripts:
+  jobs:
     send-notification:
       description: Send a structured notification.
-      run: node notify.js
       inputs:
-        title: { type: string, required: true, max-length: 120 }
+        title:
+          type: string
+          description: Notification title.
+          required: true
+      steps:
+        - bash: echo notify
 "#,
         )
         .unwrap();

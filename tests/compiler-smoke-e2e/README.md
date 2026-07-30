@@ -31,9 +31,8 @@ check and downloaded binary cannot drift.
    `provenance.json`.
 4. The test-only `compiler-smoke-e2e` TypeScript harness creates a detached
    worktree, adds an exact `supply-chain.pipeline-artifact` source to all five
-   smoke files, removes their schedules, resolves the SHA-pinned custom
-   component into the ephemeral import cache, recompiles them with the
-   candidate compiler, and runs `ado-aw check`. Both compiler subprocesses receive
+   smoke files, removes their schedules, recompiles them with the candidate
+   compiler, and runs `ado-aw check`. Both compiler subprocesses receive
    `ADO_AW_COMPILE_REMOTE_URL` set to the target `ado-aw-mirror` URL, so
    integrity-sensitive org/repository metadata matches the child checkout
    without changing the worktree's Git configuration.
@@ -43,10 +42,10 @@ check and downloaded binary cannot drift.
 6. Five fixed child definitions are queued concurrently with both that ref and
    its exact commit SHA. Each generated pipeline downloads and verifies the
    artifact from the still-running producer build.
-7. The custom child imports both scripts-style and jobs-style tools from
-   `AgentPlayground/ado-aw-e2e-fixture` at an immutable commit. Each route adds
-   a distinct tag to its own child build, and the orchestrator verifies both
-   tags through the ADO Build Tags API.
+7. The custom child imports a self-contained jobs-style tool from
+   `AgentPlayground/ado-aw-e2e-fixture`. The authored ref resolves to an
+   immutable commit at compile time. The custom job adds a tag to its own child
+   build, and the orchestrator verifies the tag through the ADO Build Tags API.
 8. The harness waits for all children, cancels non-terminal runs after a
    timeout, and deletes the per-run mirror ref only after every child is
    terminal.
@@ -106,10 +105,10 @@ The checked-in [`inert-child.yml`](inert-child.yml) is copied to those five
 paths when the base ref is created.
 
 The candidate-only custom source is
-[`custom-safe-output.md`](custom-safe-output.md). Its canonical component seed
-is committed under [`component-fixture/`](component-fixture/) and published to
-`ado-aw-e2e-fixture` on `refs/heads/e2e/custom-safe-output-v1`, pinned at
-`aa711dd17c4dfcde492b2bfad62e5fb1baad71f6`.
+[`custom-safe-output.md`](custom-safe-output.md). Its self-contained component
+is committed under [`component-fixture/`](component-fixture/) and imported
+locally so candidate smoke always exercises the component from the candidate
+commit.
 
 See [`REGISTERED.md`](REGISTERED.md) for definition IDs and variables.
 
@@ -123,10 +122,9 @@ publication, needs:
 - Read builds and artifacts in AgentPlayground.
 
 Child build identities need Code Read on `ado-aw-mirror` and Build Read on the
-producer definition. The custom child additionally needs Code Read on, and
-pipeline-resource authorization for, `ado-aw-e2e-fixture`. Authorize
-`agent-playground-read` and `agent-playground-write` only on children whose
-generated fixture references them.
+producer definition. Authorize `agent-playground-read` and
+`agent-playground-write` only on children whose generated fixture references
+them.
 
 Every child receives its own secret `GITHUB_TOKEN` for Copilot CLI
 authentication, using the same credential policy as the release-backed smoke
@@ -177,8 +175,7 @@ The full live contract requires AgentPlayground and the fixed definitions:
 1. the producer remains in progress after publishing its artifact;
 2. every child downloads the exact producer `run-id`;
 3. all five children succeed;
-4. the custom child carries both
-   `ado-aw-custom-script-<child-build-id>` and
+4. the custom child carries
    `ado-aw-custom-job-<child-build-id>`;
 5. child provenance identifies the producer definition, build, and source SHA;
 6. the per-run mirror ref is removed.

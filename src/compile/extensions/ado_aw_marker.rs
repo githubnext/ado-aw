@@ -53,10 +53,21 @@ pub struct CustomComponentProvenance {
     pub tool: String,
     /// Import source, for example `org/repo/path`.
     pub source: String,
+    /// Branch, tag, or SHA requested by the author.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_ref: Option<String>,
     /// Full 40-character commit SHA that the component resolved to.
     pub sha: String,
     pub manifest_digest: String,
     pub schema_digest: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CustomJobMetadata {
+    tool: String,
+    job_id: String,
+    approval_path: String,
+    staged_requested: bool,
 }
 
 impl AdoAwMarkerExtension {
@@ -114,6 +125,7 @@ fn resolved_custom_components(
                     .map(|component| CustomComponentProvenance {
                         tool: definition.name,
                         source: component.source,
+                        requested_ref: component.requested_ref,
                         sha: component.sha.as_str().to_string(),
                         manifest_digest: component.manifest_digest.unwrap_or_default(),
                         schema_digest: definition.schema_digest,
@@ -172,6 +184,7 @@ struct CompileMetadata {
     model: String,
     agent_name: String,
     custom_components: Vec<CustomComponentProvenance>,
+    custom_jobs: Vec<CustomJobMetadata>,
 }
 
 impl CompileMetadata {
@@ -204,11 +217,12 @@ impl CompileMetadata {
             },
             agent_name: ctx.agent_name.to_string(),
             custom_components,
+            custom_jobs: resolved_custom_jobs(ctx.front_matter).unwrap_or_default(),
         })
     }
 
     fn marker_json(&self) -> String {
-        let value = self.with_custom_components(serde_json::json!({
+        let value = self.with_custom_metadata(serde_json::json!({
             "schema": 1,
             "source": &self.source,
             "org": &self.org,
@@ -220,7 +234,7 @@ impl CompileMetadata {
     }
 
     fn aw_info_json(&self) -> String {
-        let value = self.with_custom_components(serde_json::json!({
+        let value = self.with_custom_metadata(serde_json::json!({
             "schema": "ado-aw/aw_info/1",
             "source": &self.source,
             "org": &self.org,
@@ -238,15 +252,109 @@ impl CompileMetadata {
         serde_json::to_string(&value).unwrap()
     }
 
-    fn with_custom_components(&self, mut value: serde_json::Value) -> serde_json::Value {
+    fn with_custom_metadata(&self, mut value: serde_json::Value) -> serde_json::Value {
         if !self.custom_components.is_empty() {
             value.as_object_mut().unwrap().insert(
                 "custom_components".to_string(),
                 serde_json::to_value(&self.custom_components).unwrap(),
             );
         }
+        if !self.custom_jobs.is_empty() {
+            value.as_object_mut().unwrap().insert(
+                "custom_jobs".to_string(),
+                serde_json::to_value(&self.custom_jobs).unwrap(),
+            );
+        }
         value
     }
+}
+
+fn resolved_custom_jobs(
+    front_matter: &crate::compile::types::FrontMatter,
+) -> anyhow::Result<Vec<CustomJobMetadata>> {
+    let definitions = crate::compile::custom_tools::collect_custom_tool_definitions(front_matter)?;
+    let indexes: std::collections::HashMap<&str, usize> = definitions
+        .iter()
+        .enumerate()
+        .map(|(index, definition)| (definition.name.as_str(), index))
+        .collect();
+    let mut post_review = vec![false; definitions.len()];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (index, definition) in definitions.iter().enumerate() {
+            if front_matter
+                .tool_requires_approval(&definition.name)
+                .is_some()
+                || post_review[index]
+            {
+                continue;
+            }
+            if definition.needs.iter().any(|dependency| {
+                indexes.get(dependency.as_str()).is_some_and(|dependency| {
+                    front_matter
+                        .tool_requires_approval(&definitions[*dependency].name)
+                        .is_some()
+                        || post_review[*dependency]
+                }) || dependency == "safe-outputs-reviewed"
+            }) {
+                post_review[index] = true;
+                changed = true;
+            }
+        }
+    }
+
+    let prefix = matches!(
+        front_matter.target,
+        crate::compile::types::CompileTarget::Job | crate::compile::types::CompileTarget::Stage
+    )
+    .then(|| crate::compile::common::generate_stage_prefix(&front_matter.name));
+
+    Ok(definitions
+        .into_iter()
+        .enumerate()
+        .map(|(index, definition)| {
+            let mut suffix: String = definition
+                .name
+                .chars()
+                .map(|character| {
+                    if character.is_ascii_alphanumeric() {
+                        character
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            if !suffix
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
+            {
+                suffix.insert(0, '_');
+            }
+            let base = format!("Custom_{suffix}");
+            let job_id = prefix
+                .as_ref()
+                .map(|prefix| format!("{prefix}_{base}"))
+                .unwrap_or(base);
+            let approval_path = if front_matter
+                .tool_requires_approval(&definition.name)
+                .is_some()
+            {
+                "manual_review"
+            } else if post_review[index] {
+                "post_review_dependency"
+            } else {
+                "automatic"
+            };
+            CustomJobMetadata {
+                tool: definition.name.clone(),
+                job_id,
+                approval_path: approval_path.to_string(),
+                staged_requested: front_matter.tool_is_staged(&definition.name),
+            }
+        })
+        .collect())
 }
 
 /// Escape any `'` in `s` so it can be safely embedded inside a single-quoted
@@ -457,9 +565,11 @@ mod tests {
 name: t
 description: x
 safe-outputs:
-  scripts:
+  jobs:
     notify:
-      run: ./notify
+      description: Notify.
+      steps:
+        - bash: echo notify
       component-source: org/repo/components/notify.md
       component-sha: 0123456789abcdef0123456789abcdef01234567
       manifest-digest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -504,6 +614,7 @@ safe-outputs:
         let component = CustomComponentProvenance {
             tool: "create-service-ticket".to_string(),
             source: "org/repo/components/create-pr".to_string(),
+            requested_ref: Some("v2".to_string()),
             sha: "0123456789abcdef0123456789abcdef01234567".to_string(),
             manifest_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 .to_string(),

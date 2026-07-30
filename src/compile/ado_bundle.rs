@@ -63,12 +63,6 @@ pub enum Bundle {
     /// containerized SafeOutputs MCP server can compute a diff base on
     /// shallow-default pools.
     PreparePrBase,
-    /// SHA-pinned component checkout for custom safe-output jobs (#1473). Runs
-    /// in the isolated custom safe-output job after the component repository
-    /// resource is checked out. Fetches the pinned commit using either the ADO
-    /// bearer (same-org Azure Repos) or credentials persisted by the repository
-    /// checkout (GitHub/GHE/cross-org), then verifies HEAD equals the pin.
-    CheckoutComponent,
 }
 
 /// The auth contract a bundle requires from the step that invokes it.
@@ -83,9 +77,6 @@ pub enum BundleAuth {
     /// URI, by contrast, comes from the auto-injected `SYSTEM_COLLECTIONURI`
     /// and is therefore *not* part of this contract (see #1307).
     Bearer,
-    /// The bundle can use a projected ADO bearer, but may instead rely on
-    /// credentials persisted by a repository-resource checkout.
-    OptionalBearer,
     /// The bundle needs no bearer (pure filesystem / git-without-auth / argv).
     None,
 }
@@ -151,7 +142,6 @@ impl Bundle {
         Bundle::Conclusion,
         Bundle::GithubAppToken,
         Bundle::PreparePrBase,
-        Bundle::CheckoutComponent,
     ];
 
     /// The bundle's unpacked on-disk path inside the runtime VM. The Conclusion
@@ -178,7 +168,6 @@ impl Bundle {
             Bundle::Conclusion => paths::CONCLUSION_PATH,
             Bundle::GithubAppToken => paths::GITHUB_APP_TOKEN_PATH,
             Bundle::PreparePrBase => paths::PREPARE_PR_BASE_PATH,
-            Bundle::CheckoutComponent => paths::CHECKOUT_COMPONENT_PATH,
         }
     }
 
@@ -199,9 +188,6 @@ impl Bundle {
             // Fetches/deepens the target branch over the ADO bearer (bearerEnv).
             | Bundle::PreparePrBase
             => BundleAuth::Bearer,
-            // Same-org Azure Repos uses the ADO bearer; external repository
-            // resources reuse credentials persisted by their checkout.
-            Bundle::CheckoutComponent => BundleAuth::OptionalBearer,
             // Pure filesystem / git-without-auth / argv — no bearer.
             Bundle::Import
             | Bundle::ExecContextManual
@@ -223,23 +209,10 @@ impl Bundle {
 /// guarantee that every bearer-requiring bundle step carries a token — the
 /// structural fix for the class of bug behind #1307.
 pub fn apply_bundle_auth(step: BashStep, bundle: Bundle, token: TokenSource) -> BashStep {
-    apply_bundle_auth_optional(step, bundle, Some(token))
-}
-
-pub fn apply_bundle_auth_optional(
-    step: BashStep,
-    bundle: Bundle,
-    token: Option<TokenSource>,
-) -> BashStep {
     match bundle.auth() {
-        BundleAuth::Bearer => step.with_env(
-            "SYSTEM_ACCESSTOKEN",
-            EnvValue::secret(token.expect("required bundle bearer").variable()),
-        ),
-        BundleAuth::OptionalBearer => match token {
-            Some(token) => step.with_env("SYSTEM_ACCESSTOKEN", EnvValue::secret(token.variable())),
-            None => step,
-        },
+        BundleAuth::Bearer => {
+            step.with_env("SYSTEM_ACCESSTOKEN", EnvValue::secret(token.variable()))
+        }
         BundleAuth::None => step,
     }
 }
@@ -296,9 +269,9 @@ mod tests {
             let out = apply_bundle_auth(step, *b, TokenSource::SystemAccessToken);
             let has_token = out.env.contains_key("SYSTEM_ACCESSTOKEN");
             match b.auth() {
-                BundleAuth::Bearer | BundleAuth::OptionalBearer => assert!(
+                BundleAuth::Bearer => assert!(
                     has_token,
-                    "{b:?} accepts a bearer and apply_bundle_auth must project it"
+                    "{b:?} requires a bearer and apply_bundle_auth must project it"
                 ),
                 BundleAuth::None => assert!(
                     !has_token,
@@ -306,16 +279,6 @@ mod tests {
                 ),
             }
         }
-    }
-
-    #[test]
-    fn optional_bundle_auth_can_rely_on_persisted_credentials() {
-        let step = apply_bundle_auth_optional(
-            BashStep::new("t", "node x\n"),
-            Bundle::CheckoutComponent,
-            None,
-        );
-        assert!(!step.env.contains_key("SYSTEM_ACCESSTOKEN"));
     }
 
     #[test]

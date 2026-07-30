@@ -1,25 +1,6 @@
-//! Consumer-wins front-matter merge for `imports:` (decision D9).
-//!
-//! Merges the front matter and body of resolved imported components into the
-//! consumer workflow. Precedence is **consumer > later import > earlier
-//! import**:
-//!
-//! * **Scalar / singleton keys** (`name`, `engine`, `target`, …): the
-//!   highest-precedence explicit setter wins. No error.
-//! * **Collection keys** (`tools`, `mcp-servers`, `safe-outputs`, `runtimes`,
-//!   `env`): additive union by sub-key. A sub-key defined by **two different
-//!   imports** is a hard error. The consumer may **configure** an imported
-//!   `safe-outputs` tool (overlay non-executor config) but may **not** redefine
-//!   its executor (`steps`/`env`/`inputs`/`run`/`entrypoint`) — that is a hard
-//!   error.
-//! * **Sequence keys** (`parameters`, `repos`, `variable-groups`): additive
-//!   concatenation (imports first, then consumer).
-//! * **Body**: imported bodies are concatenated in declaration order, then the
-//!   consumer body.
-//!
-//! The merge runs only when the consumer declares `imports:`; with no imports
-//! it is never invoked, so existing workflows are unaffected.
+//! Field-specific merge policy for compile-time reusable imports.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -28,32 +9,28 @@ use serde_yaml::{Mapping, Value};
 use super::schema::apply_import_inputs;
 use super::{ManifestFetcher, ResolvedImport, resolve_imports_with_repo_root};
 use crate::compile::custom_tools::COMPONENT_PROVENANCE_KEYS;
-use crate::compile::types::ImportEntry;
+use crate::compile::types::{ImportEntry, ParsedImportSpec, PermissionsRequired};
 
-/// Front-matter keys whose values are mappings merged additively by sub-key.
-const COLLECTION_MAP_KEYS: &[&str] = &["tools", "mcp-servers", "safe-outputs", "runtimes", "env"];
+const CONSUMER_OWNED_FIELDS: &[&str] = &[
+    "name",
+    "description",
+    "target",
+    "engine",
+    "workspace",
+    "pool",
+    "on",
+    "permissions",
+    "variable-groups",
+    "parameters",
+    "setup",
+    "teardown",
+    "execution-context",
+    "supply-chain",
+    "ado-aw-debug",
+    "inlined-imports",
+];
 
-/// Front-matter keys whose values are sequences merged by concatenation.
-const SEQUENCE_KEYS: &[&str] = &["parameters", "repos", "variable-groups"];
-
-/// `safe-outputs` sub-keys that define a tool's executor. A consumer may
-/// configure an imported tool but may not redefine these.
-const EXECUTOR_KEYS: &[&str] = &["steps", "env", "inputs", "run", "entrypoint"];
-
-/// Resolve the consumer's imports, apply their `import-schema` inputs, and
-/// merge their front matter + body into `consumer_fm` / the returned bodies.
-///
-/// Returns `(imported_body, combined_body)`:
-/// - `imported_body` is the substituted, joined bodies of the imported
-///   components (declaration order), with the consumer body NOT appended.
-///   This is inlined into the agent prompt at compile time because imported
-///   component bodies are only substituted here — they cannot be delivered by
-///   the default runtime-import path (which reads the consumer's own source).
-/// - `combined_body` additionally appends the consumer body, and is what
-///   `inlined-imports: true` folds into the compiled YAML.
-///
-/// `consumer_fm` is mutated in place and its `imports:` key is removed (imports
-/// are consumed by this pass).
+/// Resolve, substitute, and merge imports into a consumer mapping.
 pub async fn merge_imports(
     consumer_fm: &mut Mapping,
     consumer_body: &str,
@@ -68,22 +45,15 @@ pub async fn merge_imports(
     Ok((imported_body, combined_body))
 }
 
-/// Join the imported-body prefix with the consumer body using the same
-/// `\n\n` separator as the merge accumulator, tolerating either side being
-/// empty.
 fn join_bodies(imported_body: &str, consumer_body: &str) -> String {
-    let consumer_trimmed = consumer_body.trim();
-    match (imported_body.is_empty(), consumer_trimmed.is_empty()) {
-        (true, _) => consumer_trimmed.to_string(),
+    let consumer_body = consumer_body.trim();
+    match (imported_body.is_empty(), consumer_body.is_empty()) {
+        (true, _) => consumer_body.to_string(),
         (false, true) => imported_body.to_string(),
-        (false, false) => format!("{imported_body}\n\n{consumer_trimmed}"),
+        (false, false) => format!("{imported_body}\n\n{consumer_body}"),
     }
 }
 
-/// Merge already-resolved imports (test-friendly seam that takes no fetcher).
-///
-/// Returns the combined body (imported bodies in declaration order, then the
-/// consumer body). Front matter is merged into `consumer_fm`.
 #[cfg(test)]
 pub fn merge_resolved(
     consumer_fm: &mut Mapping,
@@ -94,872 +64,977 @@ pub fn merge_resolved(
     Ok(join_bodies(&imported_body, consumer_body))
 }
 
-/// Merge resolved imports' front matter into `consumer_fm` and return the
-/// substituted, joined **imported** bodies (declaration order) — the consumer
-/// body is NOT appended here (see [`merge_imports`] for why the imported body
-/// is tracked separately from the consumer body).
+/// Merge already-resolved imports and return their substituted prompt prefix.
 pub fn merge_resolved_imported_body(
     consumer_fm: &mut Mapping,
     resolved: &[ResolvedImport],
 ) -> Result<String> {
-    // Accumulate imported front matter in declaration order (import-vs-import
-    // rules), then overlay the consumer on top.
-    let mut acc = Mapping::new();
-    let mut acc_provenance: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
-    let mut body_parts: Vec<String> = Vec::new();
+    let mut state = MergeState::default();
+    let mut body_parts = Vec::new();
 
-    for (idx, import) in resolved.iter().enumerate() {
-        let (mut sub_fm, sub_body) =
+    for import in resolved {
+        let (mut front_matter, body) =
             apply_import_inputs(&import.front_matter, &import.body, &import.entry.with)
                 .with_context(|| {
                     format!(
-                        "failed to apply import inputs for '{}'",
+                        "failed to apply import inputs for `{}`",
                         import.provenance.source
                     )
                 })?;
-
-        // Stamp compile-time component provenance (source / sha / manifest
-        // digest + resolved repo-type/service-connection from the typed
-        // endpoint) onto this import's custom safe-output tools, so the runtime
-        // executor job can check the component repo out at the pinned SHA. Only
-        // remote imports have a repo to check out.
-        stamp_component_provenance(&mut sub_fm, import);
-
-        if let Value::Mapping(component_map) = &sub_fm {
-            merge_import_into_acc(
-                &mut acc,
-                &mut acc_provenance,
-                component_map,
-                idx,
-                &import.provenance.source,
-            )?;
+        stamp_component_provenance(&mut front_matter, import);
+        if let Value::Mapping(mapping) = front_matter {
+            state.merge_import(&mapping, &import.provenance.source)?;
         }
-
-        let trimmed = sub_body.trim();
-        if !trimmed.is_empty() {
-            body_parts.push(trimmed.to_string());
+        let body = body.trim();
+        if !body.is_empty() {
+            body_parts.push(body.to_string());
         }
     }
 
-    // Overlay the consumer front matter on top of the accumulated imports.
-    overlay_consumer(&mut acc, consumer_fm)?;
-
-    // The merged mapping replaces the consumer mapping; drop the now-consumed
-    // `imports` key.
-    acc.remove(Value::String("imports".to_string()));
-    *consumer_fm = acc;
-
+    state.overlay_consumer(consumer_fm)?;
+    dedupe_repos(&mut state.merged)?;
+    state.merged.remove(Value::String("imports".to_string()));
+    *consumer_fm = state.merged;
     Ok(body_parts.join("\n\n"))
 }
 
-/// Stamp compiler-owned component provenance onto the custom safe-output tools
-/// (`safe-outputs.scripts.*` / `safe-outputs.jobs.*`) declared by an import, so
-/// the runtime executor job can check the component repository out at the pinned
-/// commit — while ensuring the compiler **fully owns** these keys.
-///
-/// The `component-*` keys are compiler-owned provenance. For **every** imported
-/// component (local or remote) any author-provided `component-*` value is first
-/// **stripped**, so a component cannot spoof its own checkout (e.g. inject a
-/// `component-endpoint` service connection or redirect `component-source`).
-/// Then, for **remote** imports only, the compiler-resolved values are stamped:
-/// `component-source` (owner/repo/path), `component-sha`, `manifest-digest`,
-/// `component-repo-type` (`git` | `github` | `githubenterprise`), and — when the
-/// endpoint names a service connection — `component-endpoint`. Local imports
-/// (whose components live in the consumer repo's own checkout) end up with no
-/// provenance keys and thus synthesize no separate checkout resource.
-fn stamp_component_provenance(component_fm: &mut Value, import: &ResolvedImport) {
-    use crate::compile::types::ImportSource;
+#[derive(Default)]
+struct MergeState {
+    merged: Mapping,
+    env_origins: HashMap<String, String>,
+    mcp_origins: HashMap<String, String>,
+    safe_output_origins: HashMap<String, String>,
+}
 
-    let Value::Mapping(fm_map) = component_fm else {
-        return;
-    };
-    let Some(Value::Mapping(safe_outputs)) = fm_map.get_mut("safe-outputs") else {
-        return;
-    };
-
-    // Remote imports carry a repo + pinned SHA to check out; local imports do
-    // not (their components live in the consumer's own checkout).
-    let remote_sha = match &import.source {
-        ImportSource::Remote(_) => import.provenance.sha.as_deref(),
-        _ => None,
-    };
-    let (repo_type, endpoint_name) =
-        crate::compile::imports::alias::endpoint_repo_type_and_connection(
-            import.entry.endpoint.as_ref(),
-        );
-
-    for section in ["scripts", "jobs"] {
-        let Some(Value::Mapping(tools)) = safe_outputs.get_mut(section) else {
-            continue;
-        };
-        for (_tool_name, tool_cfg) in tools.iter_mut() {
-            let Value::Mapping(cfg) = tool_cfg else {
+impl MergeState {
+    fn merge_import(&mut self, component: &Mapping, source: &str) -> Result<()> {
+        for (key, value) in component {
+            let Some(key) = key.as_str() else {
                 continue;
             };
-
-            // Strip any author-provided provenance first (compiler fully owns
-            // these keys).
-            for key in COMPONENT_PROVENANCE_KEYS {
-                cfg.remove(Value::String(key.to_string()));
-            }
-
-            // Stamp compiler-resolved provenance for remote imports only.
-            if let Some(sha) = remote_sha {
-                cfg.insert(
-                    Value::String("component-source".into()),
-                    Value::String(import.provenance.source.clone()),
-                );
-                cfg.insert(
-                    Value::String("component-sha".into()),
-                    Value::String(sha.to_string()),
-                );
-                cfg.insert(
-                    Value::String("manifest-digest".into()),
-                    Value::String(import.provenance.manifest_digest.clone()),
-                );
-                cfg.insert(
-                    Value::String("component-repo-type".into()),
-                    Value::String(repo_type.to_string()),
-                );
-                if let Some(name) = &endpoint_name {
-                    cfg.insert(
-                        Value::String("component-endpoint".into()),
-                        Value::String(name.clone()),
-                    );
+            match key {
+                "imports" | "import-schema" => {}
+                "tools" => merge_tools_import(&mut self.merged, value),
+                "runtimes" => deep_fill_field(&mut self.merged, key, value),
+                "mcp-servers" => {
+                    merge_first_mapping(&mut self.merged, key, value, &mut self.mcp_origins)?
                 }
-            }
-        }
-    }
-}
-
-/// Merge one import's mapping into the accumulator, enforcing import-vs-import
-/// collision rules.
-fn merge_import_into_acc(
-    acc: &mut Mapping,
-    provenance: &mut std::collections::HashMap<String, usize>,
-    component: &Mapping,
-    import_idx: usize,
-    source: &str,
-) -> Result<()> {
-    for (key, value) in component {
-        let key_str = match key.as_str() {
-            Some(k) => k.to_string(),
-            None => continue,
-        };
-        // `import-schema` is consumed by substitution and must never leak into
-        // the merged workflow.
-        if key_str == "import-schema" || key_str == "imports" {
-            continue;
-        }
-
-        if is_collection_map_key(&key_str) {
-            merge_map_key(
-                acc,
-                &key_str,
-                value,
-                MergeSide::Import {
-                    idx: import_idx,
+                "env" => merge_unique_mapping(
+                    &mut self.merged,
+                    key,
+                    value,
                     source,
-                },
-                provenance,
-            )?;
-        } else if is_sequence_key(&key_str) {
-            concat_sequence(acc, &key_str, value);
-        } else {
-            // Scalar/singleton: later import wins over earlier.
-            acc.insert(Value::String(key_str), value.clone());
-        }
-    }
-    Ok(())
-}
-
-/// Overlay the consumer front matter on top of the accumulated imports.
-fn overlay_consumer(acc: &mut Mapping, consumer: &Mapping) -> Result<()> {
-    for (key, value) in consumer {
-        let key_str = match key.as_str() {
-            Some(k) => k.to_string(),
-            None => continue,
-        };
-        if key_str == "imports" {
-            continue;
-        }
-
-        if is_collection_map_key(&key_str) {
-            merge_map_key(
-                acc,
-                &key_str,
-                value,
-                MergeSide::Consumer,
-                &mut Default::default(),
-            )?;
-        } else if is_sequence_key(&key_str) {
-            concat_sequence(acc, &key_str, value);
-        } else {
-            // Scalar/singleton: consumer wins.
-            acc.insert(Value::String(key_str), value.clone());
-        }
-    }
-    Ok(())
-}
-
-enum MergeSide<'a> {
-    Import { idx: usize, source: &'a str },
-    Consumer,
-}
-
-/// Merge a collection-map key (e.g. `tools`) into the accumulator, applying the
-/// per-sub-key collision rules.
-fn merge_map_key(
-    acc: &mut Mapping,
-    key: &str,
-    incoming: &Value,
-    side: MergeSide<'_>,
-    provenance: &mut std::collections::HashMap<String, usize>,
-) -> Result<()> {
-    let Value::Mapping(incoming_map) = incoming else {
-        // Non-mapping value under a collection key: treat as scalar overwrite.
-        acc.insert(Value::String(key.to_string()), incoming.clone());
-        return Ok(());
-    };
-
-    let entry = acc
-        .entry(Value::String(key.to_string()))
-        .or_insert_with(|| Value::Mapping(Mapping::new()));
-    let Value::Mapping(existing) = entry else {
-        // Existing non-mapping (unusual) — replace wholesale.
-        *entry = incoming.clone();
-        return Ok(());
-    };
-
-    for (sub_key, sub_val) in incoming_map {
-        let sub_name = match sub_key.as_str() {
-            Some(s) => s.to_string(),
-            None => continue,
-        };
-        let prov_key = format!("{key}.{sub_name}");
-        let already = existing.contains_key(sub_key);
-
-        match &side {
-            MergeSide::Import { idx, source } => {
-                if key == "safe-outputs" && matches!(sub_name.as_str(), "scripts" | "jobs") {
-                    merge_imported_custom_safe_output_section(
-                        existing, sub_key, sub_val, &sub_name, *idx, source, provenance,
-                    )?;
-                    continue;
+                    &mut self.env_origins,
+                )?,
+                "network" => merge_import_network(&mut self.merged, value, source)?,
+                "permissions-required" => merge_permissions_required(&mut self.merged, value)?,
+                "safe-outputs" => merge_import_safe_outputs(
+                    &mut self.merged,
+                    value,
+                    source,
+                    &mut self.safe_output_origins,
+                )?,
+                "repos" | "steps" | "post-steps" => {
+                    append_sequence(&mut self.merged, key, value)?;
                 }
-                if already {
-                    // Collision between two imports is a hard error.
-                    let prev = provenance.get(&prov_key).copied();
-                    if prev.is_some() && prev != Some(*idx) {
-                        anyhow::bail!(
-                            "import conflict: '{key}.{sub_name}' is defined by more than one \
-                             imported component (latest from '{source}'). Imported \
-                             {key} entries must have unique names."
-                        );
+                unsupported => warn_ignored_field(source, unsupported),
+            }
+        }
+        Ok(())
+    }
+
+    fn overlay_consumer(&mut self, consumer: &Mapping) -> Result<()> {
+        for (key, value) in consumer {
+            let Some(key) = key.as_str() else {
+                continue;
+            };
+            match key {
+                "imports" => {}
+                "tools" => merge_tools_consumer(&mut self.merged, value),
+                "runtimes" => deep_merge_field(&mut self.merged, key, value),
+                "mcp-servers" => overlay_mapping_missing(&mut self.merged, key, value)?,
+                "env" => overlay_mapping(&mut self.merged, key, value)?,
+                "network" => merge_consumer_network(&mut self.merged, value)?,
+                "permissions-required" => {
+                    // Requirements can only be strengthened. The consumer may
+                    // request additional capabilities but cannot clear an
+                    // imported requirement.
+                    merge_permissions_required(&mut self.merged, value)?;
+                }
+                "safe-outputs" => overlay_consumer_safe_outputs(&mut self.merged, value)?,
+                "repos" => overlay_consumer_repos(&mut self.merged, value)?,
+                "steps" => append_sequence(&mut self.merged, key, value)?,
+                "post-steps" => prepend_sequence(&mut self.merged, key, value)?,
+                _ => {
+                    self.merged
+                        .insert(Value::String(key.to_string()), value.clone());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn warn_ignored_field(source: &str, field: &str) {
+    if CONSUMER_OWNED_FIELDS.contains(&field) {
+        eprintln!(
+            "Warning: imported component `{source}` sets consumer-owned field `{field}`; ignoring it"
+        );
+    } else {
+        eprintln!(
+            "Warning: imported component `{source}` sets unsupported field `{field}`; ignoring it"
+        );
+    }
+}
+
+fn deep_merge_field(target: &mut Mapping, key: &str, incoming: &Value) {
+    let key = Value::String(key.to_string());
+    match target.get_mut(&key) {
+        Some(existing) => deep_merge_value(existing, incoming),
+        None => {
+            target.insert(key, incoming.clone());
+        }
+    }
+}
+
+fn deep_merge_value(existing: &mut Value, incoming: &Value) {
+    match (existing, incoming) {
+        (Value::Mapping(existing), Value::Mapping(incoming)) => {
+            for (key, value) in incoming {
+                match existing.get_mut(key) {
+                    Some(current) => deep_merge_value(current, value),
+                    None => {
+                        existing.insert(key.clone(), value.clone());
                     }
                 }
-                existing.insert(sub_key.clone(), sub_val.clone());
-                provenance.insert(prov_key, *idx);
             }
-            MergeSide::Consumer => {
-                if already && key == "safe-outputs" {
-                    // Consumer may configure an imported tool but not redefine
-                    // its executor.
-                    configure_safe_output(existing, sub_key, sub_val, &sub_name)?;
-                } else if already {
-                    anyhow::bail!(
-                        "import conflict: the consumer redefines '{key}.{sub_name}', which is \
-                         already provided by an imported component. Collections merge \
-                         additively; rename or remove the duplicate."
-                    );
-                } else {
-                    existing.insert(sub_key.clone(), sub_val.clone());
+        }
+        (existing, incoming) => *existing = incoming.clone(),
+    }
+}
+
+fn deep_fill_field(target: &mut Mapping, key: &str, incoming: &Value) {
+    let key = Value::String(key.to_string());
+    match target.get_mut(&key) {
+        Some(existing) => deep_fill_value(existing, incoming),
+        None => {
+            target.insert(key, incoming.clone());
+        }
+    }
+}
+
+fn deep_fill_value(existing: &mut Value, incoming: &Value) {
+    if let (Value::Mapping(existing), Value::Mapping(incoming)) = (existing, incoming) {
+        for (key, value) in incoming {
+            match existing.get_mut(key) {
+                Some(current) => deep_fill_value(current, value),
+                None => {
+                    existing.insert(key.clone(), value.clone());
                 }
             }
         }
     }
-    Ok(())
+    // Earlier imports own any existing non-mapping field, including
+    // sequences. Later imports only fill fields that remain absent.
 }
 
-fn merge_imported_custom_safe_output_section(
-    safe_outputs: &mut Mapping,
-    section_key: &Value,
-    incoming: &Value,
-    section: &str,
-    import_idx: usize,
-    source: &str,
-    provenance: &mut std::collections::HashMap<String, usize>,
-) -> Result<()> {
-    let Value::Mapping(incoming_tools) = incoming else {
-        anyhow::bail!("safe-outputs.{section} must be a mapping of tool definitions");
-    };
-    let entry = safe_outputs
-        .entry(section_key.clone())
-        .or_insert_with(|| Value::Mapping(Mapping::new()));
-    let Value::Mapping(existing_tools) = entry else {
-        anyhow::bail!("safe-outputs.{section} must be a mapping of tool definitions");
-    };
+fn merge_tools_import(target: &mut Mapping, incoming: &Value) {
+    merge_tools_field(target, incoming, false);
+}
 
-    for (tool_key, tool_value) in incoming_tools {
-        let Some(tool_name) = tool_key.as_str() else {
-            continue;
+fn merge_tools_consumer(target: &mut Mapping, incoming: &Value) {
+    merge_tools_field(target, incoming, true);
+}
+
+fn merge_tools_field(target: &mut Mapping, incoming: &Value, consumer: bool) {
+    let key = Value::String("tools".to_string());
+    match target.get_mut(&key) {
+        Some(existing) => merge_tools_value(existing, incoming, consumer),
+        None => {
+            target.insert(key, incoming.clone());
+        }
+    }
+}
+
+fn merge_tools_value(existing: &mut Value, incoming: &Value, consumer: bool) {
+    match (existing, incoming) {
+        (Value::Mapping(existing), Value::Mapping(incoming)) => {
+            for (key, value) in incoming {
+                match existing.get_mut(key) {
+                    Some(current) => merge_tools_value(current, value, consumer),
+                    None => {
+                        existing.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+        }
+        (Value::Sequence(existing), Value::Sequence(incoming)) => {
+            for value in incoming {
+                if !existing.contains(value) {
+                    existing.push(value.clone());
+                }
+            }
+        }
+        (existing, incoming) if consumer => *existing = incoming.clone(),
+        // Earlier imports win for scalar/type-conflicting leaves.
+        _ => {}
+    }
+}
+
+fn merge_first_mapping(
+    target: &mut Mapping,
+    field: &str,
+    incoming: &Value,
+    origins: &mut HashMap<String, String>,
+) -> Result<()> {
+    let incoming = incoming
+        .as_mapping()
+        .with_context(|| format!("imported `{field}` must be a mapping"))?;
+    let target_mapping = ensure_mapping_field(target, field)?;
+    for (key, value) in incoming {
+        let Some(name) = key.as_str() else {
+            anyhow::bail!("imported `{field}` keys must be strings");
         };
-        let provenance_key = format!("safe-outputs.{section}.{tool_name}");
-        if existing_tools.contains_key(tool_key) {
-            let previous = provenance.get(&provenance_key).copied();
-            if previous.is_some() && previous != Some(import_idx) {
-                anyhow::bail!(
-                    "import conflict: 'safe-outputs.{section}.{tool_name}' is defined by more \
-                     than one imported component (latest from '{source}'). Imported custom \
-                     safe-output tools must have unique names."
-                );
-            }
+        if origins.contains_key(name) {
+            continue;
         }
-        existing_tools.insert(tool_key.clone(), tool_value.clone());
-        provenance.insert(provenance_key, import_idx);
+        origins.insert(name.to_string(), String::new());
+        target_mapping.insert(key.clone(), value.clone());
     }
     Ok(())
 }
 
-/// Overlay consumer configuration onto an imported `safe-outputs` tool without
-/// allowing executor redefinition.
-fn configure_safe_output(
-    existing: &mut Mapping,
-    sub_key: &Value,
+fn merge_unique_mapping(
+    target: &mut Mapping,
+    field: &str,
     incoming: &Value,
-    sub_name: &str,
+    source: &str,
+    origins: &mut HashMap<String, String>,
 ) -> Result<()> {
-    let existing_val = existing.get_mut(sub_key);
-    match (existing_val, incoming) {
-        (Some(Value::Mapping(existing_cfg)), Value::Mapping(incoming_cfg)) => {
-            if matches!(sub_name, "scripts" | "jobs") {
-                return configure_custom_safe_output_section(existing_cfg, incoming_cfg);
-            }
-            for (cfg_key, cfg_val) in incoming_cfg {
-                if let Some(name) = cfg_key.as_str()
-                    && EXECUTOR_KEYS.contains(&name)
-                {
-                    anyhow::bail!(
-                        "import conflict: the consumer may configure the imported \
-                         safe-output '{sub_name}' but not redefine its executor \
-                         ('{name}' is executor-defining)."
-                    );
-                }
-                if let Some(name) = cfg_key.as_str()
-                    && COMPONENT_PROVENANCE_KEYS.contains(&name)
-                {
-                    anyhow::bail!(
-                        "import conflict: the consumer may not override compiler-owned \
-                          component provenance for imported safe-output '{sub_name}' \
-                          ('{name}' is compiler-owned)."
-                    );
-                }
-                existing_cfg.insert(cfg_key.clone(), cfg_val.clone());
-            }
-            Ok(())
-        }
-        // The consumer provided a non-mapping value (e.g. `true`/`null`/a
-        // string) for an imported safe-output tool. Configuration must be a
-        // mapping overlay; a scalar would silently replace the tool wholesale,
-        // wiping the imported executor (`run`/`steps`/`entrypoint`/…) that the
-        // executor-redefinition guard above is meant to protect. Reject it.
-        (Some(_), _) => {
+    let incoming = incoming
+        .as_mapping()
+        .with_context(|| format!("imported `{field}` must be a mapping"))?;
+    let target_value = target
+        .entry(Value::String(field.to_string()))
+        .or_insert_with(|| Value::Mapping(Mapping::new()));
+    let target_mapping = target_value
+        .as_mapping_mut()
+        .with_context(|| format!("merged `{field}` must remain a mapping"))?;
+
+    for (key, value) in incoming {
+        let Some(name) = key.as_str() else {
+            anyhow::bail!("imported `{field}` keys must be strings");
+        };
+        if let Some(previous) = origins.get(name) {
             anyhow::bail!(
-                "import conflict: the consumer must provide a mapping to configure the \
-                 imported safe-output '{sub_name}' (got a non-mapping value); a scalar \
-                 would redefine its executor."
+                "import conflict: `{field}.{name}` is defined by both `{previous}` and `{source}`"
             );
         }
-        (None, _) => {
-            existing.insert(sub_key.clone(), incoming.clone());
-            Ok(())
-        }
+        origins.insert(name.to_string(), source.to_string());
+        target_mapping.insert(key.clone(), value.clone());
     }
+    Ok(())
 }
 
-fn configure_custom_safe_output_section(existing: &mut Mapping, incoming: &Mapping) -> Result<()> {
-    for (tool_key, tool_value) in incoming {
-        let Some(tool_name) = tool_key.as_str() else {
-            continue;
-        };
-        if existing.contains_key(tool_key) {
-            configure_safe_output(existing, tool_key, tool_value, tool_name)?;
-        } else {
-            existing.insert(tool_key.clone(), tool_value.clone());
+fn overlay_mapping(target: &mut Mapping, field: &str, incoming: &Value) -> Result<()> {
+    let incoming = incoming
+        .as_mapping()
+        .with_context(|| format!("consumer `{field}` must be a mapping"))?;
+    let target_value = target
+        .entry(Value::String(field.to_string()))
+        .or_insert_with(|| Value::Mapping(Mapping::new()));
+    let target_mapping = target_value
+        .as_mapping_mut()
+        .with_context(|| format!("merged `{field}` must remain a mapping"))?;
+    for (key, value) in incoming {
+        target_mapping.insert(key.clone(), value.clone());
+    }
+    Ok(())
+}
+
+fn overlay_mapping_missing(target: &mut Mapping, field: &str, incoming: &Value) -> Result<()> {
+    let incoming = incoming
+        .as_mapping()
+        .with_context(|| format!("consumer `{field}` must be a mapping"))?;
+    let target_mapping = ensure_mapping_field(target, field)?;
+    for (key, value) in incoming {
+        if !target_mapping.contains_key(key) {
+            target_mapping.insert(key.clone(), value.clone());
         }
     }
     Ok(())
 }
 
-/// Concatenate a sequence-valued key (imports first, then consumer).
-fn concat_sequence(acc: &mut Mapping, key: &str, incoming: &Value) {
-    let Value::Sequence(incoming_seq) = incoming else {
-        acc.insert(Value::String(key.to_string()), incoming.clone());
-        return;
-    };
-    let entry = acc
-        .entry(Value::String(key.to_string()))
+fn merge_import_network(target: &mut Mapping, incoming: &Value, source: &str) -> Result<()> {
+    let incoming = incoming
+        .as_mapping()
+        .context("imported `network` must be a mapping")?;
+    let network = ensure_mapping_field(target, "network")?;
+    for (key, value) in incoming {
+        match key.as_str() {
+            Some("allowed") => union_string_sequence(network, "allowed", value)?,
+            Some("blocked") if !value.as_sequence().is_none_or(Vec::is_empty) => eprintln!(
+                "Warning: imported component `{source}` sets `network.blocked`; ignoring it \
+                 because network deny policy is consumer-owned"
+            ),
+            Some("blocked") => {}
+            Some(other) => eprintln!(
+                "Warning: imported component `{source}` sets unsupported `network.{other}`; ignoring it"
+            ),
+            None => {}
+        }
+    }
+    Ok(())
+}
+
+fn merge_consumer_network(target: &mut Mapping, incoming: &Value) -> Result<()> {
+    let incoming = incoming
+        .as_mapping()
+        .context("consumer `network` must be a mapping")?;
+    let network = ensure_mapping_field(target, "network")?;
+    for (key, value) in incoming {
+        if key.as_str() == Some("allowed") {
+            union_string_sequence(network, "allowed", value)?;
+        } else {
+            network.insert(key.clone(), value.clone());
+        }
+    }
+    Ok(())
+}
+
+fn union_string_sequence(target: &mut Mapping, field: &str, incoming: &Value) -> Result<()> {
+    let incoming = incoming
+        .as_sequence()
+        .with_context(|| format!("`network.{field}` must be a sequence"))?;
+    let target_value = target
+        .entry(Value::String(field.to_string()))
         .or_insert_with(|| Value::Sequence(Vec::new()));
-    if let Value::Sequence(existing) = entry {
-        existing.extend(incoming_seq.iter().cloned());
-    } else {
-        *entry = incoming.clone();
+    let target_sequence = target_value
+        .as_sequence_mut()
+        .with_context(|| format!("merged `network.{field}` must remain a sequence"))?;
+    for value in incoming {
+        if !target_sequence.contains(value) {
+            target_sequence.push(value.clone());
+        }
+    }
+    Ok(())
+}
+
+fn merge_permissions_required(target: &mut Mapping, incoming: &Value) -> Result<()> {
+    let mut requirements = target
+        .get(Value::String("permissions-required".to_string()))
+        .map(|value| serde_yaml::from_value::<PermissionsRequired>(value.clone()))
+        .transpose()
+        .context("merged `permissions-required` is invalid")?
+        .unwrap_or_default();
+    let incoming: PermissionsRequired = serde_yaml::from_value(incoming.clone())
+        .context("`permissions-required` must contain boolean `read` / `write` fields")?;
+    requirements.union(incoming);
+    target.insert(
+        Value::String("permissions-required".to_string()),
+        serde_yaml::to_value(requirements).context("failed to serialize permissions-required")?,
+    );
+    Ok(())
+}
+
+fn merge_import_safe_outputs(
+    target: &mut Mapping,
+    incoming: &Value,
+    source: &str,
+    origins: &mut HashMap<String, String>,
+) -> Result<()> {
+    let incoming = incoming
+        .as_mapping()
+        .context("imported `safe-outputs` must be a mapping")?;
+    let safe_outputs = ensure_mapping_field(target, "safe-outputs")?;
+    for (key, value) in incoming {
+        let Some(name) = key.as_str() else {
+            anyhow::bail!("imported `safe-outputs` keys must be strings");
+        };
+        match name {
+            "scripts" => {
+                eprintln!(
+                    "Warning: imported component `{source}` uses removed \
+                     `safe-outputs.scripts`; ignoring it"
+                );
+            }
+            "jobs" => {
+                merge_import_custom_jobs(safe_outputs, value, source, origins)?;
+            }
+            _ => {
+                let origin_key = format!("safe-outputs.{name}");
+                if let Some(previous) = origins.get(&origin_key) {
+                    anyhow::bail!(
+                        "import conflict: `{origin_key}` is defined by both `{previous}` and `{source}`"
+                    );
+                }
+                origins.insert(origin_key, source.to_string());
+                safe_outputs.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn merge_import_custom_jobs(
+    safe_outputs: &mut Mapping,
+    incoming: &Value,
+    source: &str,
+    origins: &mut HashMap<String, String>,
+) -> Result<()> {
+    let incoming = incoming
+        .as_mapping()
+        .context("imported `safe-outputs.jobs` must be a mapping")?;
+    let jobs_value = safe_outputs
+        .entry(Value::String("jobs".to_string()))
+        .or_insert_with(|| Value::Mapping(Mapping::new()));
+    let jobs = jobs_value
+        .as_mapping_mut()
+        .context("merged `safe-outputs.jobs` must remain a mapping")?;
+    for (key, value) in incoming {
+        let Some(name) = key.as_str() else {
+            anyhow::bail!("imported custom safe-output job names must be strings");
+        };
+        let origin_key = format!("safe-outputs.jobs.{name}");
+        if let Some(previous) = origins.get(&origin_key) {
+            anyhow::bail!(
+                "import conflict: `{origin_key}` is defined by both `{previous}` and `{source}`"
+            );
+        }
+        origins.insert(origin_key, source.to_string());
+        jobs.insert(key.clone(), value.clone());
+    }
+    Ok(())
+}
+
+fn overlay_consumer_safe_outputs(target: &mut Mapping, incoming: &Value) -> Result<()> {
+    let incoming = incoming
+        .as_mapping()
+        .context("consumer `safe-outputs` must be a mapping")?;
+    let safe_outputs = ensure_mapping_field(target, "safe-outputs")?;
+    for (key, value) in incoming {
+        if key.as_str() == Some("jobs") {
+            overlay_consumer_custom_jobs(safe_outputs, value)?;
+        } else {
+            // Built-in safe-output configuration is consumer-owned.
+            safe_outputs.insert(key.clone(), value.clone());
+        }
+    }
+    Ok(())
+}
+
+fn overlay_consumer_custom_jobs(safe_outputs: &mut Mapping, incoming: &Value) -> Result<()> {
+    let incoming = incoming
+        .as_mapping()
+        .context("consumer `safe-outputs.jobs` must be a mapping")?;
+    let jobs_value = safe_outputs
+        .entry(Value::String("jobs".to_string()))
+        .or_insert_with(|| Value::Mapping(Mapping::new()));
+    let jobs = jobs_value
+        .as_mapping_mut()
+        .context("merged `safe-outputs.jobs` must remain a mapping")?;
+    for (key, incoming_job) in incoming {
+        let Some(name) = key.as_str() else {
+            anyhow::bail!("custom safe-output job names must be strings");
+        };
+        if jobs.contains_key(key) {
+            anyhow::bail!(
+                "import conflict: custom safe-output job `{name}` is already defined by an \
+                 imported component; configure approval/staged policy at \
+                 `safe-outputs.{name}` instead of redeclaring the job"
+            );
+        }
+        jobs.insert(key.clone(), incoming_job.clone());
+    }
+    Ok(())
+}
+
+fn append_sequence(target: &mut Mapping, field: &str, incoming: &Value) -> Result<()> {
+    let incoming = incoming
+        .as_sequence()
+        .with_context(|| format!("`{field}` must be a sequence"))?;
+    let target_value = target
+        .entry(Value::String(field.to_string()))
+        .or_insert_with(|| Value::Sequence(Vec::new()));
+    let target_sequence = target_value
+        .as_sequence_mut()
+        .with_context(|| format!("merged `{field}` must remain a sequence"))?;
+    target_sequence.extend(incoming.iter().cloned());
+    Ok(())
+}
+
+fn prepend_sequence(target: &mut Mapping, field: &str, incoming: &Value) -> Result<()> {
+    let incoming = incoming
+        .as_sequence()
+        .with_context(|| format!("`{field}` must be a sequence"))?;
+    let imported = target
+        .remove(Value::String(field.to_string()))
+        .and_then(|value| value.as_sequence().cloned())
+        .unwrap_or_default();
+    let mut combined = incoming.clone();
+    combined.extend(imported);
+    target.insert(Value::String(field.to_string()), Value::Sequence(combined));
+    Ok(())
+}
+
+fn overlay_consumer_repos(target: &mut Mapping, incoming: &Value) -> Result<()> {
+    let consumer = incoming
+        .as_sequence()
+        .context("consumer `repos` must be a sequence")?;
+    let imported = target
+        .remove(Value::String("repos".to_string()))
+        .and_then(|value| value.as_sequence().cloned())
+        .unwrap_or_default();
+    let mut merged = Vec::new();
+    let mut seen = HashMap::<String, ()>::new();
+    for repo in consumer.iter().chain(imported.iter()) {
+        let key = repo_identity(repo);
+        if seen.insert(key, ()).is_none() {
+            merged.push(repo.clone());
+        }
+    }
+    target.insert(Value::String("repos".to_string()), Value::Sequence(merged));
+    Ok(())
+}
+
+fn dedupe_repos(target: &mut Mapping) -> Result<()> {
+    let Some(repos) = target.remove(Value::String("repos".to_string())) else {
+        return Ok(());
+    };
+    let repos = repos
+        .as_sequence()
+        .context("merged `repos` must be a sequence")?;
+    let mut merged = Vec::new();
+    let mut seen = HashMap::<String, ()>::new();
+    for repo in repos {
+        let key = repo_identity(repo);
+        if seen.insert(key, ()).is_none() {
+            merged.push(repo.clone());
+        }
+    }
+    target.insert(Value::String("repos".to_string()), Value::Sequence(merged));
+    Ok(())
+}
+
+fn repo_identity(value: &Value) -> String {
+    match value {
+        Value::String(value) => value
+            .split_once('=')
+            .map(|(alias, _)| format!("alias:{alias}"))
+            .unwrap_or_else(|| format!("name:{value}")),
+        Value::Mapping(mapping) => mapping
+            .get(Value::String("alias".to_string()))
+            .and_then(Value::as_str)
+            .map(|value| format!("alias:{value}"))
+            .or_else(|| {
+                mapping
+                    .get(Value::String("name".to_string()))
+                    .and_then(Value::as_str)
+                    .map(|value| format!("name:{value}"))
+            })
+            .unwrap_or_else(|| yaml_identity(value)),
+        _ => yaml_identity(value),
     }
 }
 
-fn is_collection_map_key(key: &str) -> bool {
-    COLLECTION_MAP_KEYS.contains(&key)
+fn yaml_identity(value: &Value) -> String {
+    serde_yaml::to_string(value).unwrap_or_else(|_| format!("{value:?}"))
 }
 
-fn is_sequence_key(key: &str) -> bool {
-    SEQUENCE_KEYS.contains(&key)
+fn ensure_mapping_field<'a>(target: &'a mut Mapping, field: &str) -> Result<&'a mut Mapping> {
+    target
+        .entry(Value::String(field.to_string()))
+        .or_insert_with(|| Value::Mapping(Mapping::new()))
+        .as_mapping_mut()
+        .with_context(|| format!("merged `{field}` must remain a mapping"))
+}
+
+fn stamp_component_provenance(component_fm: &mut Value, import: &ResolvedImport) {
+    let Value::Mapping(front_matter) = component_fm else {
+        return;
+    };
+    let Some(Value::Mapping(safe_outputs)) = front_matter.get_mut("safe-outputs") else {
+        return;
+    };
+    let Some(Value::Mapping(jobs)) = safe_outputs.get_mut("jobs") else {
+        return;
+    };
+
+    let is_remote = matches!(import.spec, ParsedImportSpec::Remote { .. });
+    for job in jobs.values_mut() {
+        let Value::Mapping(job) = job else {
+            continue;
+        };
+        for key in COMPONENT_PROVENANCE_KEYS {
+            job.remove(Value::String(key.to_string()));
+        }
+        if is_remote && let Some(sha) = &import.provenance.sha {
+            job.insert(
+                Value::String("component-source".to_string()),
+                Value::String(import.provenance.source.clone()),
+            );
+            if let Some(requested_ref) = &import.provenance.requested_ref {
+                job.insert(
+                    Value::String("component-ref".to_string()),
+                    Value::String(requested_ref.clone()),
+                );
+            }
+            job.insert(
+                Value::String("component-sha".to_string()),
+                Value::String(sha.clone()),
+            );
+            job.insert(
+                Value::String("manifest-digest".to_string()),
+                Value::String(import.provenance.manifest_digest.clone()),
+            );
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::ImportProvenance;
     use super::*;
-    use crate::compile::types::ImportSource;
+    use crate::compile::types::{ImportSource, ParsedImportSpec};
+
+    const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 
     fn ymap(yaml: &str) -> Mapping {
-        match serde_yaml::from_str::<Value>(yaml).unwrap() {
-            Value::Mapping(m) => m,
-            _ => panic!("expected mapping"),
-        }
+        serde_yaml::from_str::<Value>(yaml)
+            .unwrap()
+            .as_mapping()
+            .unwrap()
+            .clone()
     }
 
-    fn resolved(fm_yaml: &str, body: &str) -> ResolvedImport {
+    fn local(front_matter: &str, body: &str) -> ResolvedImport {
         ResolvedImport {
             entry: ImportEntry {
-                uses: "local.md".to_string(),
-                with: serde_json::Map::new(),
-                endpoint: None,
+                uses: "./component.md".to_string(),
+                with: Default::default(),
+                repository: None,
+                source: None,
             },
-            source: ImportSource::Local {
-                path: "local.md".to_string(),
+            spec: ParsedImportSpec::Local {
+                path: "./component.md".to_string(),
                 section: None,
                 optional: false,
             },
-            front_matter: serde_yaml::from_str(fm_yaml).unwrap(),
+            front_matter: serde_yaml::from_str(front_matter).unwrap(),
             body: body.to_string(),
-            provenance: ImportProvenance {
-                source: "local.md".to_string(),
+            provenance: super::super::ImportProvenance {
+                source: "component.md".to_string(),
+                requested_ref: None,
                 sha: None,
-                manifest_digest: "d".to_string(),
+                manifest_digest: "digest".to_string(),
             },
         }
     }
 
-    const REMOTE_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
-
-    fn remote_resolved(
-        fm_yaml: &str,
-        endpoint: Option<crate::compile::types::ImportEndpoint>,
-    ) -> ResolvedImport {
-        use crate::compile::types::ParsedImportSpec;
-        use crate::secure::CommitSha;
+    fn remote(front_matter: &str) -> ResolvedImport {
         ResolvedImport {
             entry: ImportEntry {
-                uses: format!("octo/repo/notify.md@{REMOTE_SHA}"),
-                with: serde_json::Map::new(),
-                endpoint: endpoint.clone(),
+                uses: "component.md@main".to_string(),
+                with: Default::default(),
+                repository: Some("owner/repo".to_string()),
+                source: Some(ImportSource::GitHub {
+                    host: crate::secure::HostName::parse("github.com").unwrap(),
+                }),
             },
-            source: ImportSource::Remote(ParsedImportSpec {
-                owner: "octo".to_string(),
-                repo: "repo".to_string(),
-                path: "notify.md".to_string(),
-                sha: CommitSha::parse(REMOTE_SHA).unwrap(),
+            spec: ParsedImportSpec::Remote {
+                source: ImportSource::GitHub {
+                    host: crate::secure::HostName::parse("github.com").unwrap(),
+                },
+                project: Some("owner".to_string()),
+                repository: "repo".to_string(),
+                path: "component.md".to_string(),
+                requested_ref: "main".to_string(),
                 section: None,
                 optional: false,
-                endpoint,
-            }),
-            front_matter: serde_yaml::from_str(fm_yaml).unwrap(),
+            },
+            front_matter: serde_yaml::from_str(front_matter).unwrap(),
             body: String::new(),
-            provenance: ImportProvenance {
-                source: "octo/repo/notify.md".to_string(),
-                sha: Some(REMOTE_SHA.to_string()),
-                manifest_digest: "digest123".to_string(),
+            provenance: super::super::ImportProvenance {
+                source: "github:github.com/owner/repo/component.md".to_string(),
+                requested_ref: Some("main".to_string()),
+                sha: Some(SHA.to_string()),
+                manifest_digest: "digest".to_string(),
             },
         }
     }
 
-    fn scripts_notify_tool(consumer: &Mapping) -> &Mapping {
-        consumer
-            .get(Value::String("safe-outputs".into()))
-            .and_then(Value::as_mapping)
-            .and_then(|so| so.get(Value::String("scripts".into())))
-            .and_then(Value::as_mapping)
-            .and_then(|s| s.get(Value::String("notify".into())))
-            .and_then(Value::as_mapping)
-            .expect("safe-outputs.scripts.notify present")
-    }
-
-    fn tool_str<'a>(tool: &'a Mapping, key: &str) -> Option<&'a str> {
-        tool.get(Value::String(key.into())).and_then(Value::as_str)
-    }
-
     #[test]
-    fn remote_component_gets_provenance_and_endpoint_stamped() {
-        use crate::compile::types::ImportEndpoint;
-        let mut consumer = ymap("name: consumer");
-        let import = remote_resolved(
-            "safe-outputs:\n  scripts:\n    notify:\n      run: node n.js\n",
-            Some(ImportEndpoint::GitHub {
-                name: "gh-conn".to_string(),
-            }),
-        );
-        merge_resolved_imported_body(&mut consumer, &[import]).unwrap();
-
-        let notify = scripts_notify_tool(&consumer);
-        assert_eq!(
-            tool_str(notify, "component-source"),
-            Some("octo/repo/notify.md")
-        );
-        assert_eq!(tool_str(notify, "component-sha"), Some(REMOTE_SHA));
-        assert_eq!(tool_str(notify, "manifest-digest"), Some("digest123"));
-        assert_eq!(tool_str(notify, "component-repo-type"), Some("github"));
-        assert_eq!(tool_str(notify, "component-endpoint"), Some("gh-conn"));
-    }
-
-    #[test]
-    fn remote_same_org_azure_component_stamps_git_without_endpoint() {
-        let mut consumer = ymap("name: consumer");
-        // Endpoint-less remote import => same-org Azure Repos (`git`, no conn).
-        let import = remote_resolved(
-            "safe-outputs:\n  jobs:\n    notify:\n      steps:\n        - bash: echo hi\n",
-            None,
-        );
-        merge_resolved_imported_body(&mut consumer, &[import]).unwrap();
-
-        let notify = consumer
-            .get(Value::String("safe-outputs".into()))
-            .and_then(Value::as_mapping)
-            .and_then(|so| so.get(Value::String("jobs".into())))
-            .and_then(Value::as_mapping)
-            .and_then(|j| j.get(Value::String("notify".into())))
-            .and_then(Value::as_mapping)
-            .expect("safe-outputs.jobs.notify present");
-        assert_eq!(tool_str(notify, "component-repo-type"), Some("git"));
-        assert_eq!(tool_str(notify, "component-endpoint"), None);
-        assert_eq!(tool_str(notify, "component-sha"), Some(REMOTE_SHA));
-    }
-
-    #[test]
-    fn local_component_is_not_stamped() {
-        let mut consumer = ymap("name: consumer");
-        let import = resolved(
-            "safe-outputs:\n  scripts:\n    notify:\n      run: node n.js\n",
+    fn consumer_owned_import_fields_are_ignored() {
+        let mut consumer = ymap("name: consumer\ndescription: root\ntarget: standalone");
+        merge_resolved(
+            &mut consumer,
             "",
-        );
-        merge_resolved_imported_body(&mut consumer, &[import]).unwrap();
-
-        let notify = scripts_notify_tool(&consumer);
-        assert_eq!(tool_str(notify, "component-source"), None);
-        assert_eq!(tool_str(notify, "component-repo-type"), None);
-    }
-
-    #[test]
-    fn component_cannot_spoof_provenance_keys() {
-        // A component authoring compiler-owned provenance keys into its own
-        // front matter must NOT influence the checkout. For a same-org
-        // (endpoint-less) remote import the compiler resolves no service
-        // connection, so a pre-set `component-endpoint` must be stripped
-        // (compiler fully owns the key). A spoofed `component-source` must be
-        // overwritten with the real source.
-        let mut consumer = ymap("name: consumer");
-        let import = remote_resolved(
-            "safe-outputs:\n  scripts:\n    notify:\n      run: node n.js\n      \
-             component-endpoint: attacker-conn\n      component-source: evil/repo/x.md\n",
-            None,
-        );
-        merge_resolved_imported_body(&mut consumer, &[import]).unwrap();
-
-        let notify = scripts_notify_tool(&consumer);
-        // Spoofed endpoint stripped (same-org => no connection).
-        assert_eq!(tool_str(notify, "component-endpoint"), None);
-        // Spoofed source overwritten with the compiler-resolved provenance.
-        assert_eq!(
-            tool_str(notify, "component-source"),
-            Some("octo/repo/notify.md")
-        );
-        assert_eq!(tool_str(notify, "component-repo-type"), Some("git"));
-    }
-
-    #[test]
-    fn remote_endpoint_overwrites_author_provided_component_endpoint() {
-        use crate::compile::types::ImportEndpoint;
-        // When the import DOES resolve a connection, the compiler value wins
-        // over any author-provided one.
-        let mut consumer = ymap("name: consumer");
-        let import = remote_resolved(
-            "safe-outputs:\n  scripts:\n    notify:\n      run: node n.js\n      \
-             component-endpoint: attacker-conn\n",
-            Some(ImportEndpoint::GitHub {
-                name: "real-conn".to_string(),
-            }),
-        );
-        merge_resolved_imported_body(&mut consumer, &[import]).unwrap();
-
-        let notify = scripts_notify_tool(&consumer);
-        assert_eq!(tool_str(notify, "component-endpoint"), Some("real-conn"));
-    }
-
-    #[test]
-    fn consumer_cannot_override_imported_custom_tool_provenance() {
-        for section in ["scripts", "jobs"] {
-            for key in COMPONENT_PROVENANCE_KEYS {
-                let mut consumer = ymap(&format!(
-                    "safe-outputs:\n  {section}:\n    notify:\n      {key}: attacker\n"
-                ));
-                let imported_tool = if section == "scripts" {
-                    "safe-outputs:\n  scripts:\n    notify:\n      run: node notify.js\n"
-                } else {
-                    "safe-outputs:\n  jobs:\n    notify:\n      steps:\n        - bash: echo hi\n"
-                };
-                let err = merge_resolved_imported_body(
-                    &mut consumer,
-                    &[remote_resolved(imported_tool, None)],
-                )
-                .unwrap_err();
-                let message = err.to_string();
-                assert!(message.contains("compiler-owned"), "{message}");
-                assert!(message.contains(key), "{message}");
-            }
-        }
-    }
-
-    #[test]
-    fn consumer_custom_tool_configuration_preserves_executor_and_provenance() {
-        let mut consumer = ymap("safe-outputs:\n  scripts:\n    notify:\n      max: 1\n");
-        let import = remote_resolved(
-            "safe-outputs:\n  scripts:\n    notify:\n      run: node notify.js\n",
-            None,
-        );
-        merge_resolved_imported_body(&mut consumer, &[import]).unwrap();
-
-        let notify = scripts_notify_tool(&consumer);
-        assert_eq!(tool_str(notify, "run"), Some("node notify.js"));
-        assert_eq!(
-            tool_str(notify, "component-source"),
-            Some("octo/repo/notify.md")
-        );
-        assert_eq!(tool_str(notify, "component-sha"), Some(REMOTE_SHA));
-        assert_eq!(
-            notify
-                .get(Value::String("max".into()))
-                .and_then(Value::as_u64),
-            Some(1)
-        );
-    }
-
-    #[test]
-    fn consumer_wins_for_scalars() {
-        let mut consumer = ymap("engine: copilot\nname: consumer");
-        let imports = vec![resolved("engine: claude\ntarget: 1es", "")];
-        merge_resolved(&mut consumer, "", &imports).unwrap();
-        assert_eq!(
-            consumer[Value::String("engine".into())],
-            Value::String("copilot".into())
-        );
-        // Import-only scalar is adopted.
-        assert_eq!(
-            consumer[Value::String("target".into())],
-            Value::String("1es".into())
-        );
-    }
-
-    #[test]
-    fn imported_body_and_combined_body_split_correctly() {
-        // merge_resolved_imported_body returns ONLY the imported bodies; the
-        // combined form (via merge_resolved) additionally appends the consumer
-        // body. Imports-first ordering.
-        let mut fm = ymap("name: consumer");
-        let imports = vec![resolved("{}", "Import A."), resolved("{}", "Import B.")];
-        let imported = merge_resolved_imported_body(&mut fm, &imports).unwrap();
-        assert_eq!(imported, "Import A.\n\nImport B.");
-
-        let mut fm2 = ymap("name: consumer");
-        let combined = merge_resolved(&mut fm2, "Consumer body.", &imports).unwrap();
-        assert_eq!(combined, "Import A.\n\nImport B.\n\nConsumer body.");
-    }
-
-    #[test]
-    fn imported_body_empty_when_no_import_bodies() {
-        let mut fm = ymap("name: consumer");
-        let imports = vec![resolved("tools:\n  edit: {}", "")];
-        let imported = merge_resolved_imported_body(&mut fm, &imports).unwrap();
-        assert_eq!(imported, "");
-        // Combined with a consumer body yields just the consumer body.
-        let mut fm2 = ymap("name: consumer");
-        let combined = merge_resolved(&mut fm2, "Only consumer.", &imports).unwrap();
-        assert_eq!(combined, "Only consumer.");
-    }
-
-    #[test]
-    fn later_import_wins_over_earlier_for_scalars() {
-        let mut consumer = ymap("name: c");
-        let imports = vec![resolved("engine: a", ""), resolved("engine: b", "")];
-        merge_resolved(&mut consumer, "", &imports).unwrap();
-        assert_eq!(
-            consumer[Value::String("engine".into())],
-            Value::String("b".into())
-        );
-    }
-
-    #[test]
-    fn collections_union_additively() {
-        let mut consumer = ymap("tools:\n  bash: {}");
-        let imports = vec![resolved("tools:\n  edit: {}", "")];
-        merge_resolved(&mut consumer, "", &imports).unwrap();
-        let tools = consumer[Value::String("tools".into())]
-            .as_mapping()
-            .unwrap();
-        assert!(tools.contains_key(Value::String("bash".into())));
-        assert!(tools.contains_key(Value::String("edit".into())));
-    }
-
-    #[test]
-    fn import_vs_import_collection_collision_errors() {
-        let mut consumer = ymap("name: c");
-        let imports = vec![
-            resolved("mcp-servers:\n  x:\n    url: a", ""),
-            resolved("mcp-servers:\n  x:\n    url: b", ""),
-        ];
-        let err = merge_resolved(&mut consumer, "", &imports).unwrap_err();
-        assert!(err.to_string().contains("more than one"), "{err}");
-    }
-
-    #[test]
-    fn imports_deep_merge_distinct_custom_safe_output_tools() {
-        let mut consumer = ymap("name: consumer");
-        let imports = vec![
-            resolved(
-                "safe-outputs:\n  scripts:\n    notify:\n      run: notify.sh",
+            &[local(
+                "name: component\ndescription: ignored\ntarget: 1es\nengine: claude",
                 "",
-            ),
-            resolved(
-                "safe-outputs:\n  scripts:\n    archive:\n      run: archive.sh\n  jobs:\n    deploy:\n      steps: []",
-                "",
-            ),
-        ];
-        merge_resolved(&mut consumer, "", &imports).unwrap();
-
-        let safe_outputs = consumer
-            .get(Value::String("safe-outputs".into()))
-            .and_then(Value::as_mapping)
-            .unwrap();
-        let scripts = safe_outputs
-            .get(Value::String("scripts".into()))
-            .and_then(Value::as_mapping)
-            .unwrap();
-        assert!(scripts.contains_key(Value::String("notify".into())));
-        assert!(scripts.contains_key(Value::String("archive".into())));
-        let jobs = safe_outputs
-            .get(Value::String("jobs".into()))
-            .and_then(Value::as_mapping)
-            .unwrap();
-        assert!(jobs.contains_key(Value::String("deploy".into())));
+            )],
+        )
+        .unwrap();
+        assert_eq!(consumer["name"], "consumer");
+        assert_eq!(consumer["target"], "standalone");
+        assert!(!consumer.contains_key("engine"));
     }
 
     #[test]
-    fn imports_reject_duplicate_custom_safe_output_tool_names() {
-        let mut consumer = ymap("name: consumer");
-        let imports = vec![
-            resolved(
-                "safe-outputs:\n  scripts:\n    notify:\n      run: one.sh",
-                "",
-            ),
-            resolved(
-                "safe-outputs:\n  scripts:\n    notify:\n      run: two.sh",
-                "",
-            ),
-        ];
-        let err = merge_resolved(&mut consumer, "", &imports).unwrap_err();
-        let message = err.to_string();
-        assert!(message.contains("safe-outputs.scripts.notify"), "{message}");
-        assert!(message.contains("more than one"), "{message}");
-    }
-
-    #[test]
-    fn consumer_redefining_imported_tool_errors() {
-        let mut consumer = ymap("tools:\n  edit: {}");
-        let imports = vec![resolved("tools:\n  edit: {}", "")];
-        let err = merge_resolved(&mut consumer, "", &imports).unwrap_err();
-        assert!(err.to_string().contains("redefines"), "{err}");
-    }
-
-    #[test]
-    fn consumer_may_configure_imported_safe_output() {
-        let mut consumer = ymap("safe-outputs:\n  notify:\n    require-approval: true");
-        let imports = vec![resolved(
-            "safe-outputs:\n  notify:\n    run: node notify.js\n    max: 3",
+    fn tools_union_allow_arrays_and_consumer_scalars_win() {
+        let mut consumer = ymap(
+            "tools:\n  edit: false\n  azure-devops:\n    allowed: [b, consumer]\n    org: consumer",
+        );
+        merge_resolved(
+            &mut consumer,
             "",
-        )];
-        merge_resolved(&mut consumer, "", &imports).unwrap();
-        let so = consumer[Value::String("safe-outputs".into())]
-            .as_mapping()
-            .unwrap();
-        let notify = so[Value::String("notify".into())].as_mapping().unwrap();
+            &[
+                local(
+                    r#"tools:
+  edit: true
+  azure-devops:
+    allowed: [a, b]
+    toolsets: [repos]
+    org: first"#,
+                    "",
+                ),
+                local(
+                    r#"tools:
+  edit: true
+  azure-devops:
+    allowed: [b, c]
+    toolsets: [wit]
+    org: second"#,
+                    "",
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(consumer["tools"]["edit"], false);
+        assert_eq!(consumer["tools"]["azure-devops"]["org"], "consumer");
         assert_eq!(
-            notify[Value::String("require-approval".into())],
-            Value::Bool(true)
+            consumer["tools"]["azure-devops"]["allowed"],
+            serde_yaml::from_str::<Value>("[a, b, c, consumer]").unwrap()
         );
-        // Imported executor config is preserved.
         assert_eq!(
-            notify[Value::String("run".into())],
-            Value::String("node notify.js".into())
+            consumer["tools"]["azure-devops"]["toolsets"],
+            serde_yaml::from_str::<Value>("[repos, wit]").unwrap()
         );
     }
 
     #[test]
-    fn consumer_redefining_safe_output_executor_errors() {
-        let mut consumer = ymap("safe-outputs:\n  notify:\n    run: evil.js");
-        let imports = vec![resolved("safe-outputs:\n  notify:\n    run: notify.js", "")];
-        let err = merge_resolved(&mut consumer, "", &imports).unwrap_err();
-        assert!(err.to_string().contains("executor"), "{err}");
+    fn runtimes_consumer_overrides_and_earlier_imports_fill_remaining_fields() {
+        let mut consumer = ymap("runtimes:\n  python:\n    version: '3.12'");
+        merge_resolved(
+            &mut consumer,
+            "",
+            &[
+                local(
+                    "runtimes:\n  python:\n    version: '3.10'\n    packages: [first]",
+                    "",
+                ),
+                local(
+                    r#"runtimes:
+  python:
+    version: '3.11'
+    packages: [second]
+    architecture: x64
+  node:
+    version: '22'"#,
+                    "",
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(consumer["runtimes"]["python"]["version"], "3.12");
+        assert_eq!(
+            consumer["runtimes"]["python"]["packages"],
+            serde_yaml::from_str::<Value>("[first]").unwrap()
+        );
+        assert_eq!(consumer["runtimes"]["python"]["architecture"], "x64");
+        assert_eq!(consumer["runtimes"]["node"]["version"], "22");
     }
 
     #[test]
-    fn consumer_scalar_config_of_imported_safe_output_errors() {
-        // A non-mapping consumer value (e.g. `notify: null` / `true` / a string)
-        // for an imported safe-output tool must be rejected: overlaying it would
-        // wipe the imported executor (`run`/`steps`/…) wholesale, which the
-        // executor-redefinition guard is meant to forbid.
-        for scalar in ["null", "true", "\"replace\""] {
-            let mut consumer = ymap(&format!("safe-outputs:\n  notify: {scalar}"));
-            let imports = vec![resolved("safe-outputs:\n  notify:\n    run: notify.js", "")];
-            let err = merge_resolved(&mut consumer, "", &imports).unwrap_err();
-            assert!(
-                err.to_string().contains("non-mapping value"),
-                "scalar `{scalar}` should be rejected: {err}"
-            );
-        }
+    fn mcp_servers_first_import_wins_and_import_overrides_consumer() {
+        let mut consumer = ymap(
+            r#"mcp-servers:
+  shared:
+    url: https://consumer.example
+  consumer-only:
+    url: https://consumer-only.example"#,
+        );
+        merge_resolved(
+            &mut consumer,
+            "",
+            &[
+                local(
+                    r#"mcp-servers:
+  shared:
+    url: https://first.example
+  first-only:
+    url: https://first-only.example"#,
+                    "",
+                ),
+                local(
+                    r#"mcp-servers:
+  shared:
+    url: https://second.example
+  second-only:
+    url: https://second-only.example"#,
+                    "",
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            consumer["mcp-servers"]["shared"]["url"],
+            "https://first.example"
+        );
+        assert_eq!(
+            consumer["mcp-servers"]["consumer-only"]["url"],
+            "https://consumer-only.example"
+        );
+        assert_eq!(
+            consumer["mcp-servers"]["first-only"]["url"],
+            "https://first-only.example"
+        );
+        assert_eq!(
+            consumer["mcp-servers"]["second-only"]["url"],
+            "https://second-only.example"
+        );
     }
 
     #[test]
-    fn body_concatenated_imports_then_consumer() {
-        let mut consumer = ymap("name: c");
-        let imports = vec![resolved("name: i", "IMPORT BODY")];
-        let body = merge_resolved(&mut consumer, "CONSUMER BODY", &imports).unwrap();
-        assert_eq!(body, "IMPORT BODY\n\nCONSUMER BODY");
+    fn env_duplicates_between_imports_fail_but_consumer_overrides() {
+        let imports = [local("env:\n  A: one", ""), local("env:\n  A: two", "")];
+        let error = merge_resolved(&mut ymap("name: c"), "", &imports).unwrap_err();
+        assert!(error.to_string().contains("env.A"));
+
+        let mut consumer = ymap("env:\n  A: consumer");
+        merge_resolved(&mut consumer, "", &[local("env:\n  A: imported", "")]).unwrap();
+        assert_eq!(consumer["env"]["A"], "consumer");
     }
 
     #[test]
-    fn imports_key_removed_after_merge() {
-        let mut consumer = ymap("imports:\n  - local.md\nname: c");
-        merge_resolved(&mut consumer, "", &[]).unwrap();
-        assert!(!consumer.contains_key(Value::String("imports".into())));
+    fn network_permissions_and_sequence_orders_follow_contract() {
+        let mut consumer = ymap(
+            "network:\n  allowed: [consumer.example]\n  blocked: [deny.example]\n\
+             permissions-required:\n  read: false\n\
+             repos: [shared/repo, consumer/repo]\n\
+             steps:\n  - bash: consumer-step\n\
+             post-steps:\n  - bash: consumer-post",
+        );
+        merge_resolved(
+            &mut consumer,
+            "",
+            &[local(
+                "network:\n  allowed: [import.example]\n  blocked: [ignored.example]\n\
+                 permissions-required:\n  read: true\n  write: true\n\
+                 repos: [shared/repo, imported/repo]\n\
+                 steps:\n  - bash: import-step\n\
+                 post-steps:\n  - bash: import-post",
+                "",
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            consumer["network"]["allowed"].as_sequence().unwrap().len(),
+            2
+        );
+        assert_eq!(consumer["permissions-required"]["read"], true);
+        assert_eq!(consumer["permissions-required"]["write"], true);
+        assert_eq!(consumer["repos"][0], "shared/repo");
+        assert_eq!(consumer["repos"][1], "consumer/repo");
+        assert_eq!(consumer["repos"][2], "imported/repo");
+        assert_eq!(consumer["steps"][0]["bash"], "import-step");
+        assert_eq!(consumer["steps"][1]["bash"], "consumer-step");
+        assert_eq!(consumer["post-steps"][0]["bash"], "consumer-post");
+        assert_eq!(consumer["post-steps"][1]["bash"], "import-post");
     }
 
     #[test]
-    fn sequences_concatenated() {
-        let mut consumer = ymap("parameters:\n  - name: p2");
-        let imports = vec![resolved("parameters:\n  - name: p1", "")];
-        merge_resolved(&mut consumer, "", &imports).unwrap();
-        let params = consumer[Value::String("parameters".into())]
-            .as_sequence()
-            .unwrap();
-        assert_eq!(params.len(), 2);
+    fn imported_repos_are_deduplicated_without_consumer_repos() {
+        let mut consumer = ymap("name: consumer");
+        merge_resolved(
+            &mut consumer,
+            "",
+            &[
+                local("repos: [shared/repo, other/repo]", ""),
+                local("repos: [shared/repo]", ""),
+            ],
+        )
+        .unwrap();
+        assert_eq!(consumer["repos"].as_sequence().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn safe_output_duplicates_fail_and_consumer_builtins_override() {
+        let duplicate = [
+            local("safe-outputs:\n  create-issue:\n    max: 1", ""),
+            local("safe-outputs:\n  create-issue:\n    max: 2", ""),
+        ];
+        assert!(
+            merge_resolved(&mut ymap("name: c"), "", &duplicate)
+                .unwrap_err()
+                .to_string()
+                .contains("safe-outputs.create-issue")
+        );
+
+        let mut consumer = ymap("safe-outputs:\n  create-issue:\n    max: 9");
+        merge_resolved(
+            &mut consumer,
+            "",
+            &[local("safe-outputs:\n  create-issue:\n    max: 1", "")],
+        )
+        .unwrap();
+        assert_eq!(consumer["safe-outputs"]["create-issue"]["max"], 9);
+    }
+
+    #[test]
+    fn custom_job_names_are_unique_and_policy_stays_top_level() {
+        let import = remote(
+            r#"safe-outputs:
+  jobs:
+    notify:
+      steps:
+        - bash: echo hi
+      component-ref: attacker-controlled
+      max: 2"#,
+        );
+        let mut consumer = ymap("safe-outputs:\n  notify:\n    require-approval: true\n    max: 4");
+        merge_resolved(&mut consumer, "", std::slice::from_ref(&import)).unwrap();
+        let job = &consumer["safe-outputs"]["jobs"]["notify"];
+        assert_eq!(job["max"], 2);
+        assert_eq!(job["component-ref"], "main");
+        assert_eq!(job["component-sha"], SHA);
+        assert_eq!(job["manifest-digest"], "digest");
+        assert!(job.get("component-repo-type").is_none());
+        assert!(job.get("component-endpoint").is_none());
+        assert_eq!(consumer["safe-outputs"]["notify"]["require-approval"], true);
+        assert_eq!(consumer["safe-outputs"]["notify"]["max"], 4);
+
+        let mut consumer = ymap("safe-outputs:\n  jobs:\n    notify:\n      steps: []");
+        let error = merge_resolved(&mut consumer, "", std::slice::from_ref(&import)).unwrap_err();
+        assert!(error.to_string().contains("already defined"), "{error}");
+
+        let duplicate_import =
+            remote("safe-outputs:\n  jobs:\n    notify:\n      steps:\n        - bash: duplicate");
+        let error = merge_resolved(&mut ymap("name: consumer"), "", &[import, duplicate_import])
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("safe-outputs.jobs.notify"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn imported_bodies_precede_consumer_body() {
+        let body = merge_resolved(
+            &mut ymap("name: c"),
+            "Consumer.",
+            &[local("{}", "First."), local("{}", "Second.")],
+        )
+        .unwrap();
+        assert_eq!(body, "First.\n\nSecond.\n\nConsumer.");
     }
 }

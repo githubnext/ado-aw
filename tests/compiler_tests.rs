@@ -9070,9 +9070,9 @@ fn test_azure_cli_smoke_fails_closed_when_authentication_fails() {
     }
 }
 
-// ─── Custom safe-output (imports/scripts/jobs) acceptance matrix (#1473) ─────
+// ─── Custom safe-output jobs acceptance matrix ───────────────────────────────
 
-/// Compile the custom scripts-style fixture with the front-matter `target:`
+/// Compile the custom jobs-style fixture with the front-matter `target:`
 /// swapped to `target`, returning the compiled YAML.
 fn compile_custom_for_target(target: Option<&str>) -> String {
     let target_owned = target.map(str::to_string);
@@ -9100,10 +9100,10 @@ fn custom_safe_output_emits_gated_executor_job_standalone() {
         compiled.contains("Custom_send_notification"),
         "expected a Custom_send_notification job:\n{compiled}"
     );
-    // It invokes the executor via the scripts-style --custom-config contract.
+    // It prepares one aggregate, validated Agent-output file.
     assert!(
-        compiled.contains("--custom-config"),
-        "expected the custom job to call `ado-aw execute --custom-config`:\n{compiled}"
+        compiled.contains("--prepare-custom-agent-output"),
+        "expected the custom job to prepare aggregate Agent output:\n{compiled}"
     );
     // The generated closed MCP tool schema is wired into the server launch.
     assert!(
@@ -9111,7 +9111,8 @@ fn custom_safe_output_emits_gated_executor_job_standalone() {
         "expected the SafeOutputs MCP server to receive --custom-tools:\n{compiled}"
     );
     assert!(
-        compiled.contains("\"additionalProperties\":false"),
+        compiled.contains("\"additionalProperties\":false")
+            || compiled.contains("\"additionalProperties\": false"),
         "expected a closed (additionalProperties:false) generated schema:\n{compiled}"
     );
     // require-approval on the custom tool routes it through ManualReview.
@@ -9143,31 +9144,21 @@ fn custom_safe_output_compiles_for_all_targets() {
 
 #[test]
 fn custom_safe_output_secret_scope_excludes_agent_and_detection() {
-    // The generated custom-tools schema (agent-facing) must NOT leak the
-    // executor contract into the Agent job beyond the closed input schema:
-    // the executor `--custom-config` / `--custom-phase` invocations belong only
-    // to the dedicated custom job, never the Agent or Detection jobs.
     let compiled = compile_custom_for_target(None);
-    // Locate the Agent and Detection job bodies and assert they don't invoke
-    // the custom executor modes.
-    for marker in ["--custom-config", "--custom-phase"] {
-        // The only occurrences must be inside the Custom_ job. A crude but
-        // effective check: every line containing the marker must be part of a
-        // custom job region (which begins at `Custom_send_notification`).
-        let custom_start = compiled
-            .find("Custom_send_notification")
-            .expect("custom job present");
-        for (idx, _) in compiled.match_indices(marker) {
-            assert!(
-                idx > custom_start,
-                "executor marker {marker} must only appear in the custom job region"
-            );
-        }
-    }
+    let custom_start = compiled
+        .find("- job: Custom_send_notification")
+        .expect("custom job present");
+    let custom = &compiled[custom_start..];
+    let before_custom = &compiled[..custom_start];
+    assert!(custom.contains("NOTIFICATION_TOKEN: $(SHARED_NOTIFICATION_TOKEN)"));
+    assert!(!before_custom.contains("NOTIFICATION_TOKEN: $(SHARED_NOTIFICATION_TOKEN)"));
+    assert!(custom.contains("ADO_AW_AGENT_OUTPUT"));
+    assert!(custom.contains("checkout: none"));
+    assert!(!compiled.contains("custom_safe_output_send_notification"));
 }
 
 #[test]
-fn candidate_custom_safe_output_fixture_compiles_from_vendored_cache() {
+fn candidate_custom_safe_output_fixture_compiles_with_local_component() {
     let repo = tempfile::tempdir().expect("create candidate fixture repo");
     let source_rel = PathBuf::from("tests")
         .join("compiler-smoke-e2e")
@@ -9180,16 +9171,14 @@ fn candidate_custom_safe_output_fixture_compiles_from_vendored_cache() {
     )
     .expect("copy candidate source");
 
-    let component_rel = PathBuf::from(".ado-aw")
-        .join("imports")
-        .join("AgentPlayground")
-        .join("ado-aw-e2e-fixture")
-        .join("aa711dd17c4dfcde492b2bfad62e5fb1baad71f6")
+    let component_rel = PathBuf::from("tests")
+        .join("compiler-smoke-e2e")
+        .join("component-fixture")
         .join("components")
         .join("custom-build-tags")
         .join("component.md");
     let component = repo.path().join(component_rel);
-    fs::create_dir_all(component.parent().unwrap()).expect("create import cache directory");
+    fs::create_dir_all(component.parent().unwrap()).expect("create component directory");
     fs::copy(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests")
@@ -9200,7 +9189,7 @@ fn candidate_custom_safe_output_fixture_compiles_from_vendored_cache() {
             .join("component.md"),
         &component,
     )
-    .expect("copy cached component manifest");
+    .expect("copy local component manifest");
 
     let git = |args: &[&str]| {
         let output = std::process::Command::new("git")
@@ -9241,20 +9230,12 @@ fn candidate_custom_safe_output_fixture_compiles_from_vendored_cache() {
     let compiled = fs::read_to_string(output_path).expect("read candidate output");
     assert_valid_yaml(&compiled, "custom-safe-output.md");
     for expected in [
-        "Custom_candidate_script_build_tag",
         "Custom_candidate_job_build_tag",
-        "checkout: self\n    path: s",
-        "name: AgentPlayground/ado-aw-e2e-fixture",
-        "type: git",
-        "path: s/import_AgentPlayground_ado_aw_e2e_fixture_955c8702d066",
-        "aa711dd17c4dfcde492b2bfad62e5fb1baad71f6",
-        "node components/custom-build-tags/tag-build-script.js",
-        "--custom-config",
-        "--custom-phase pre",
-        "--custom-phase post",
-        "--max 1",
-        "\"timeout_minutes\": 10",
-        "SYSTEM_ACCESSTOKEN: $(System.AccessToken)",
+        "checkout: none",
+        "--prepare-custom-agent-output",
+        "ADO_AW_AGENT_OUTPUT",
+        "\"max\":1",
+        "Candidate build-tag proposal accepted.",
         "\"--enabled-tools\"",
         "\"noop\"",
     ] {
@@ -9267,4 +9248,7 @@ fn candidate_custom_safe_output_fixture_compiles_from_vendored_cache() {
         !compiled.contains("\"--enabled-tools\",\n              \"add-build-tag\""),
         "candidate fixture must not expose built-in add-build-tag:\n{compiled}"
     );
+    assert!(!compiled.contains("candidate-script-build-tag"));
+    assert!(!compiled.contains("checkout-component"));
+    assert!(!compiled.contains("custom_safe_output_"));
 }

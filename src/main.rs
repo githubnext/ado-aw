@@ -253,9 +253,9 @@ enum Commands {
     McpAuthor {},
     /// Execute safe outputs from Stage 1 (Stage 3 of the pipeline)
     Execute {
-        /// Path to the source markdown file (used to read tool configs from front matter)
+        /// Path to the source markdown file (used by built-in safe-output execution)
         #[arg(short, long)]
-        source: PathBuf,
+        source: Option<PathBuf>,
         /// Directory containing safe output NDJSON file
         #[arg(long, default_value = ".")]
         safe_output_dir: PathBuf,
@@ -280,36 +280,12 @@ enum Commands {
         /// tools wait for approval.
         #[arg(long = "exclude")]
         exclude: Vec<String>,
-        /// Compiler-generated scripts-style custom safe-output dispatcher config.
-        #[arg(long = "custom-config")]
-        custom_config: Option<PathBuf>,
-        /// Jobs-style custom safe-output wrapper phase: pre or post.
-        #[arg(long = "custom-phase")]
-        custom_phase: Option<String>,
-        /// Custom safe-output tool name for jobs-style pre/post phases.
-        #[arg(long = "tool")]
-        tool: Option<String>,
-        /// Compiler-resolved proposal budget for jobs-style pre/post phases.
-        #[arg(long = "max")]
-        custom_max: Option<usize>,
-        /// Jobs-style pre phase output path for filtered proposals.
-        #[arg(long = "proposals-out")]
-        proposals_out: Option<PathBuf>,
-        /// Jobs-style post phase input path for component result records.
-        #[arg(long = "results-in")]
-        results_in: Option<PathBuf>,
-        /// Compiler-owned custom component source provenance.
-        #[arg(long = "component-source")]
-        component_source: Option<String>,
-        /// Compiler-owned custom component SHA provenance.
-        #[arg(long = "component-sha")]
-        component_sha: Option<String>,
-        /// Compiler-owned custom component manifest digest provenance.
-        #[arg(long = "manifest-digest")]
-        manifest_digest: Option<String>,
-        /// Compiler-owned custom component schema digest provenance.
-        #[arg(long = "schema-digest")]
-        schema_digest: Option<String>,
+        /// Compiler-generated resolved safe-output configuration.
+        #[arg(long = "resolved-config")]
+        resolved_config: Option<PathBuf>,
+        /// Materialize the validated aggregate Agent-output JSON for custom jobs.
+        #[arg(long = "prepare-custom-agent-output")]
+        prepare_custom_agent_output: Option<PathBuf>,
     },
     /// Initialize a repository for AI-first agentic workflow authoring
     Init {
@@ -732,15 +708,173 @@ async fn ensure_non_github_remote_for_ado_aw(command_name: &str, repo_path: &Pat
     Ok(())
 }
 
-async fn run_execute(
-    source: PathBuf,
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolvedExecutionConfig {
+    name: String,
+    #[serde(default)]
+    tool_configs: std::collections::HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    repositories: Vec<ResolvedExecutionRepository>,
+    #[serde(default)]
+    checkout: Vec<String>,
+    #[serde(default)]
+    repo_refs: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    cache_memory: Option<ResolvedCacheMemory>,
+    #[serde(default)]
+    debug_create_issue: Option<crate::safe_outputs::CreateIssueConfig>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ResolvedExecutionRepository {
+    repository: String,
+    name: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolvedCacheMemory {
+    enabled: bool,
+    #[serde(default)]
+    allowed_extensions: Vec<String>,
+}
+
+impl ResolvedExecutionConfig {
+    fn cache_memory_tools(&self) -> Option<crate::compile::types::ToolsConfig> {
+        let memory = self.cache_memory.as_ref()?;
+        let cache_memory = if !memory.enabled {
+            crate::compile::types::CacheMemoryToolConfig::Enabled(false)
+        } else if memory.allowed_extensions.is_empty() {
+            crate::compile::types::CacheMemoryToolConfig::Enabled(true)
+        } else {
+            crate::compile::types::CacheMemoryToolConfig::WithOptions(
+                crate::compile::types::CacheMemoryOptions {
+                    allowed_extensions: memory.allowed_extensions.clone(),
+                },
+            )
+        };
+        Some(crate::compile::types::ToolsConfig {
+            cache_memory: Some(cache_memory),
+            ..Default::default()
+        })
+    }
+}
+
+async fn build_execution_context_from_resolved(
+    config: &ResolvedExecutionConfig,
+    safe_output_dir: &Path,
+    ado_org_url: Option<String>,
+    ado_project: Option<String>,
+    dry_run: bool,
+) -> crate::safe_outputs::ExecutionContext {
+    let allowed_repositories = config
+        .checkout
+        .iter()
+        .filter_map(|alias| {
+            config
+                .repositories
+                .iter()
+                .find(|repository| &repository.repository == alias)
+                .map(|repository| (alias.clone(), repository.name.clone()))
+        })
+        .collect();
+
+    let mut ctx = crate::safe_outputs::ExecutionContext::default();
+    if let Some(url) = ado_org_url {
+        ctx.ado_organization = crate::safe_outputs::org_from_url(&url);
+        ctx.ado_org_url = Some(url);
+    }
+    if let Some(project) = ado_project {
+        ctx.ado_project = Some(project);
+    }
+    ctx.working_directory = safe_output_dir.to_path_buf();
+    ctx.tool_configs = config.tool_configs.clone();
+    if let Some(create_issue) = config.debug_create_issue.as_ref() {
+        match serde_json::to_value(create_issue) {
+            Ok(value) => {
+                ctx.tool_configs.insert("create-issue".to_string(), value);
+                ctx.debug_enabled_tools.insert("create-issue".to_string());
+            }
+            Err(error) => {
+                log::warn!("Failed to serialize resolved debug create-issue config: {error}")
+            }
+        }
+    }
+    ctx.allowed_repositories = allowed_repositories;
+    ctx.repo_refs = config.repo_refs.clone();
+    ctx.dry_run = dry_run;
+
+    let otel_path = safe_output_dir.join(agent_stats::OTEL_FILENAME);
+    if otel_path.exists() {
+        match agent_stats::AgentStats::from_otel_file(&otel_path, &config.name).await {
+            Ok(stats) => ctx.agent_stats = Some(stats),
+            Err(error) => log::warn!("Failed to parse OTel stats file: {error}"),
+        }
+    }
+    ctx
+}
+
+struct RunExecuteOptions {
+    source: Option<PathBuf>,
+    resolved_config: Option<PathBuf>,
     safe_output_dir: PathBuf,
     output_dir: Option<PathBuf>,
     ado_org_url: Option<String>,
     ado_project: Option<String>,
     dry_run: bool,
     filter: execute::ToolFilter,
-) -> Result<()> {
+}
+
+async fn run_execute(options: RunExecuteOptions) -> Result<()> {
+    let RunExecuteOptions {
+        source,
+        resolved_config,
+        safe_output_dir,
+        output_dir,
+        ado_org_url,
+        ado_project,
+        dry_run,
+        filter,
+    } = options;
+    if let Some(resolved_config) = resolved_config {
+        let content = tokio::fs::read_to_string(&resolved_config)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to read resolved execution config: {}",
+                    resolved_config.display()
+                )
+            })?;
+        let config: ResolvedExecutionConfig =
+            serde_json::from_str(&content).with_context(|| {
+                format!(
+                    "Failed to parse resolved execution config: {}",
+                    resolved_config.display()
+                )
+            })?;
+        println!(
+            "Loaded resolved tool configs from: {}",
+            resolved_config.display()
+        );
+        let tools = config.cache_memory_tools();
+        let mut ctx = build_execution_context_from_resolved(
+            &config,
+            &safe_output_dir,
+            ado_org_url,
+            ado_project,
+            dry_run,
+        )
+        .await;
+        if let Some(source) = source.as_deref() {
+            ctx.agent_last_author = discover_last_author(source).await;
+        }
+        let results = execute::execute_safe_outputs(&safe_output_dir, &ctx, &filter).await?;
+        process_cache_memory(tools.as_ref(), &safe_output_dir, output_dir).await?;
+        return finish_execution(results);
+    }
+
+    let source = source.context("--source or --resolved-config is required for execution")?;
     // Read and parse source markdown to get tool configs.
     // Use parse_markdown_detailed so Stage 3 benefits from in-memory
     // codemod fixes when a source has deprecated shapes. Stage 3 must
@@ -804,10 +938,13 @@ async fn run_execute(
     // Process agent memory if cache-memory tool is enabled
     process_cache_memory(tools.as_ref(), &safe_output_dir, output_dir).await?;
 
-    print_execution_summary(&results);
+    finish_execution(results)
+}
 
-    let failure_count = results.iter().filter(|r| !r.success).count();
-    let warning_count = results.iter().filter(|r| r.is_warning()).count();
+fn finish_execution(results: Vec<crate::safe_outputs::ExecutionResult>) -> Result<()> {
+    print_execution_summary(&results);
+    let failure_count = results.iter().filter(|result| !result.success).count();
+    let warning_count = results.iter().filter(|result| result.is_warning()).count();
     if failure_count > 0 {
         std::process::exit(1);
     } else if warning_count > 0 {
@@ -859,6 +996,20 @@ async fn build_execution_context(
         .filter(|(k, _)| !crate::compile::types::SAFE_OUTPUT_RESERVED_KEYS.contains(&k.as_str()))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
+    for tool in front_matter.all_safe_output_tool_names() {
+        let staged = front_matter.tool_is_staged(&tool);
+        let config = ctx
+            .tool_configs
+            .entry(tool)
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if !config.is_object() {
+            *config = serde_json::Value::Object(serde_json::Map::new());
+        }
+        config
+            .as_object_mut()
+            .expect("tool config normalized to object")
+            .insert("staged".to_string(), serde_json::Value::Bool(staged));
+    }
     // Merge ado-aw-debug.create-issue config under the same tool_configs map
     // so Stage 3's `ctx.get_tool_config::<CreateIssueConfig>("create-issue")`
     // works exactly like every other safe-output. Without this merge the
@@ -1118,65 +1269,46 @@ async fn main() -> Result<()> {
             dry_run,
             only,
             exclude,
-            custom_config,
-            custom_phase,
-            tool,
-            custom_max,
-            proposals_out,
-            results_in,
-            component_source,
-            component_sha,
-            manifest_digest,
-            schema_digest,
+            resolved_config,
+            prepare_custom_agent_output,
         } => {
-            let custom_options = execute::CustomExecuteOptions {
-                custom_config,
-                custom_phase,
-                tool,
-                max: custom_max,
-                proposals_out,
-                results_in,
-                component_source,
-                component_sha,
-                manifest_digest,
-                schema_digest,
-            };
-            if custom_options.has_any_custom_flag() {
+            if let Some(output_path) = prepare_custom_agent_output {
                 if output_dir.is_some()
                     || ado_org_url.is_some()
                     || ado_project.is_some()
                     || !only.is_empty()
                     || !exclude.is_empty()
+                    || dry_run
                 {
                     anyhow::bail!(
-                        "Custom execute modes cannot be combined with --output-dir, --ado-org-url, --ado-project, --only, or --exclude"
+                        "--prepare-custom-agent-output cannot be combined with --output-dir, \
+                         --ado-org-url, --ado-project, --dry-run, --only, or --exclude"
                     );
                 }
-                let results = execute::execute_custom_safe_outputs(
-                    &source,
+                let resolved_config = resolved_config
+                    .as_deref()
+                    .context("--prepare-custom-agent-output requires --resolved-config")?;
+                let count = execute::prepare_custom_agent_output(
                     &safe_output_dir,
-                    dry_run,
-                    custom_options,
+                    resolved_config,
+                    &output_path,
                 )
                 .await?;
-                print_execution_summary(&results);
-                let failure_count = results.iter().filter(|r| !r.success).count();
-                let warning_count = results.iter().filter(|r| r.is_warning()).count();
-                if failure_count > 0 {
-                    std::process::exit(1);
-                } else if warning_count > 0 {
-                    std::process::exit(2);
-                }
+                println!(
+                    "Prepared {count} Agent-output item(s) at {}",
+                    output_path.display()
+                );
             } else {
-                run_execute(
+                run_execute(RunExecuteOptions {
                     source,
+                    resolved_config,
                     safe_output_dir,
                     output_dir,
                     ado_org_url,
                     ado_project,
                     dry_run,
-                    execute::ToolFilter { only, exclude },
-                )
+                    filter: execute::ToolFilter { only, exclude },
+                })
                 .await?;
             }
         }

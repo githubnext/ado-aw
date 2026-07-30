@@ -3,9 +3,6 @@ import { describe, expect, it } from "vitest";
 import {
   ALL_FIXTURES,
   CANDIDATE_FIXTURE_DIR,
-  CUSTOM_COMPONENT_CACHE_PATH,
-  CUSTOM_COMPONENT_DIGEST_PATH,
-  IMPORT_CACHE_ATTRIBUTES_PATH,
   RELEASE_FIXTURE_DIR,
   allowedChangedPaths,
   fixturePaths,
@@ -30,10 +27,7 @@ describe("fixturePaths", () => {
       "tests/compiler-smoke-e2e/custom-safe-output.lock.yml",
     );
     expect(fixture.requiresAgentReadToken).toBe(false);
-    expect(fixture.requiredBuildTags?.(42)).toEqual([
-      "ado-aw-custom-script-42",
-      "ado-aw-custom-job-42",
-    ]);
+    expect(fixture.requiredBuildTags?.(42)).toEqual(["ado-aw-custom-job-42"]);
   });
 });
 
@@ -62,13 +56,10 @@ describe("ALL_FIXTURES", () => {
 });
 
 describe("allowedChangedPaths", () => {
-  it("contains the five source/lock pairs and exact compiler-managed attribute/cache paths", () => {
+  it("contains the five source/lock pairs and root compiler-managed attributes", () => {
     const allowed = allowedChangedPaths();
-    expect(allowed.size).toBe(14);
+    expect(allowed.size).toBe(11);
     expect(allowed.has(".gitattributes")).toBe(true);
-    expect(allowed.has(IMPORT_CACHE_ATTRIBUTES_PATH)).toBe(true);
-    expect(allowed.has(CUSTOM_COMPONENT_CACHE_PATH)).toBe(true);
-    expect(allowed.has(CUSTOM_COMPONENT_DIGEST_PATH)).toBe(true);
     for (const f of ALL_FIXTURES) {
       expect(allowed.has(f.relMd)).toBe(true);
       expect(allowed.has(f.relLock)).toBe(true);

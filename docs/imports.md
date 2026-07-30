@@ -1,173 +1,162 @@
-# Reusable Imports
+# Reusable imports
 
-_Part of the [ado-aw documentation](../AGENTS.md)._
+`imports:` composes reusable markdown workflow components at compile time. An
+import may contribute prompt text and a controlled subset of front matter. The
+compiler resolves every remote branch or tag to a full commit SHA, caches the
+manifest, expands nested imports, and emits no runtime repository checkout.
 
-`imports:` lets one agent file reuse another markdown component, including
-cross-repository components pinned to an immutable commit SHA. The imported file
-is the same markdown + YAML-front-matter format as a normal workflow: its front
-matter is merged into the consumer, and its markdown body is prepended to the
-consumer's prompt.
-
-This is separate from [`{{#runtime-import}}`](runtime-imports.md). Runtime
-imports expand prompt snippets on the pipeline runner; `imports:` is resolved by
-`ado-aw compile`, validates optional `import-schema:` inputs, and can contribute
-front-matter configuration such as tools, runtimes, MCP servers, and custom safe
-outputs.
+This is separate from [`{{#runtime-import}}`](runtime-imports.md), which reads
+prompt files on a pipeline runner.
 
 ## Syntax
 
-`imports:` is a flat list. Each entry is either a bare spec string or an object
-with `uses`, optional `with`, and optional `endpoint`:
+### Local
+
+Local paths are relative to the file declaring the import:
 
 ```yaml
 imports:
-  # Same-org Azure Repos (the primary, default source — no endpoint):
-  - myproject/shared-agents/components/notify.md@0123456789abcdef0123456789abcdef01234567
-  # Local import:
-  - ./components/local-guidance.md
-  # GitHub.com, via an ADO service connection (bare-string endpoint shorthand):
-  - uses: octo/shared-agents/components/deploy.md@89abcdef0123456789abcdef0123456789abcdef
-    endpoint: github-shared-components
-    with:
-      environment: prod
-      region: westus3
+  - ./components/review-guidance.md
 ```
 
-### Import specs
+Nested local imports are likewise relative to the importing component. They
+must remain inside the consumer repository.
 
-| Form | Meaning |
-|------|---------|
-| `path/to/component.md` or `./path/to/component.md` | Local import, resolved relative to the importing `.md` file. Exactly one leading `./` is accepted. |
-| `owner/repo/path/to/component.md@<sha>` | Cross-repository import. `<sha>` must be a full 40-character commit SHA; branches and tags are rejected. |
-| `...#Section` | Import only a `# Section` or `## Section` from the markdown body. |
-| `...?` | Optional import. If the target is missing, it is skipped. |
+### Canonical remote object
 
-The optional marker is trailing, so a sectioned optional import looks like
-`owner/repo/component.md@0123...cdef#Usage?`.
-
-For a cross-repository spec `owner/repo/path@<sha>`, `owner` maps to the Azure
-DevOps **project** (or GitHub owner) and `repo` to the repository name.
-
-### `endpoint:` — source type and service connection
-
-`endpoint:` selects the **source type** of a cross-repository import and names
-the Azure DevOps service connection the generated runtime repository resource
-authenticates with. It drives **both** the compile-time manifest fetch **and**
-the runtime checkout, so the two can never disagree.
-
-- **Absent** → **same-organization Azure Repos** (the primary, default case for
-  this ADO-native compiler). Fetched at compile time via the ADO Git Items API
-  and checked out at runtime with `System.AccessToken` (`type: git`, no
-  endpoint).
-- **Bare string** (`endpoint: my-connection`) → shorthand for a **GitHub.com**
-  service connection.
-- **Object form** with an explicit `type`:
-
-  | `type` | Extra fields | Source | Runtime `type` |
-  |--------|--------------|--------|----------------|
-  | `github` (default) | — | GitHub.com | `github` |
-  | `ghe` | `host:` (GHES server host, e.g. `ghe.acme.com`) | GitHub Enterprise | `githubenterprise` |
-  | `azure-repos` | `org:` (target collection URL, e.g. `https://dev.azure.com/otherorg`) | **Cross-organization** Azure Repos | `git` |
+The canonical form separates the manifest path/ref from the repository:
 
 ```yaml
 imports:
-  # Cross-org Azure Repos:
-  - uses: otherproject/otherrepo/component.md@0123456789abcdef0123456789abcdef01234567
-    endpoint:
-      name: other-org-repos-connection
-      type: azure-repos
-      org: https://dev.azure.com/otherorg
-  # GitHub Enterprise:
-  - uses: octo/components/deploy.md@89abcdef0123456789abcdef0123456789abcdef
-    endpoint:
-      name: ghe-connection
-      type: ghe
-      host: ghe.acme.com
+  # Azure Repos, current organization and current project
+  - uses: components/review.md@main
+    repository: shared-agents
+
+  # Azure Repos, current organization and explicit project
+  - uses: components/review.md@v2
+    repository: Platform/shared-agents
+
+  # Azure Repos in another organization
+  - uses: components/review.md@refs/tags/v2
+    repository: Platform/shared-agents
+    source: https://dev.azure.com/contoso
+
+  # GitHub.com
+  - uses: components/review.md@release/v2
+    repository: githubnext/shared-agents
+    source: github.com
+
+  # GitHub Enterprise Server
+  - uses: components/review.md@0123456789abcdef0123456789abcdef01234567
+    repository: engineering/shared-agents
+    source: ghe.contoso.com
 ```
 
-See [Repository resource endpoints](network.md#repository-resource-endpoints).
+`uses:` is `path@ref`. `ref` may be a branch, tag, fully qualified
+`refs/heads/...` / `refs/tags/...` name, or full 40-character commit SHA.
 
-Cross-organization `org:` values are credential-bearing compile-time
-destinations and are therefore restricted to HTTPS Azure DevOps collection
-URLs: `https://dev.azure.com/<org>` or the legacy
-`https://<org>.visualstudio.com[/DefaultCollection]` form. Arbitrary hosts,
-non-default ports, embedded credentials, query strings, and project-level paths are
-rejected before authentication is resolved.
+`repository:` accepts:
 
-## Cross-repository resolution and cache
+- `repository` — the current Azure DevOps project (Azure Repos only)
+- `project/repository` — the current Azure DevOps organization
+- `owner/repository` — GitHub.com or GHES
 
-Cross-repository imports are immutable: the spec must include a full commit SHA.
-At compile time, ado-aw fetches the imported **markdown manifest** and stores a
-SHA-keyed copy under:
+`source:` is an optional scalar:
+
+- omitted — Azure Repos in the consumer's current organization
+- an HTTPS Azure DevOps collection URL — cross-organization Azure Repos
+- `github.com` — GitHub.com
+- another validated host — GitHub Enterprise Server
+
+`source:` is compile-time routing only. It is not a service connection and does
+not create an Azure DevOps `resources.repositories` entry.
+
+### Combined shorthand
+
+For compatibility with gh-aw-style component references, the combined form is
+also accepted:
+
+```yaml
+imports:
+  - owner-or-project/repository/components/review.md@main
+```
+
+With omitted `source`, this means same-organization Azure Repos. To select
+GitHub or cross-organization Azure Repos, use the canonical object and set
+`source:`.
+
+### Sections and optional imports
+
+Append `#Heading` to import a matching `#` or `##` markdown section. Append `?`
+to make a missing import optional:
+
+```yaml
+imports:
+  - uses: components/review.md@main#Instructions?
+    repository: Platform/shared-agents
+```
+
+Optional imports skip only a typed not-found result. Authentication failures,
+invalid refs, malformed manifests, cache-integrity failures, and other errors
+remain fatal.
+
+## Ref resolution and committed cache
+
+Remote refs are resolved to a full commit SHA before the manifest is fetched:
+
+- Azure Repos uses the Git Refs and Git Items APIs.
+- GitHub.com and GHES use `gh api` with the compiler host's existing auth.
+
+The immutable manifest cache is stored below:
 
 ```text
-.ado-aw/imports/<owner>/<repo>/<sha>/<path>/<file>.md
+.ado-aw/imports/cache/<source>/<project-or-owner>/<repo>/<sha>/<path>
 ```
 
-The component's directory structure under `<sha>/` mirrors its path in the
-source repository (e.g. `components/deploy.md`).
+The exact directory segments include stable hashes so source identities cannot
+collide after filesystem sanitization. Each manifest has a `.sha256` sidecar.
+`.ado-aw/imports/.gitattributes` marks the cache generated and `merge=ours`.
 
-The cache is intended to be committed. ado-aw also creates
-`.ado-aw/imports/.gitattributes` marking cached imports as generated and using
-`merge=ours`, mirroring gh-aw's committed import-cache model.
+Requested-ref metadata is persisted in:
 
-Only the markdown manifest is cached. Script files and other executor source are
-not vendored into `.ado-aw/imports/`; script-bearing custom safe-output
-components are checked out in their dedicated executor job and verified at the
-pinned SHA before their code runs.
+```text
+.ado-aw/imports/refs.json
+```
 
-### Compile-time manifest fetch
+It records source, repository, requested ref, and resolved SHA. Commit the
+cache and metadata together. When a branch/tag cannot be refreshed (for
+example, during an offline `ado-aw check`), the compiler may reuse the recorded
+SHA only when its immutable manifest is present in the committed cache. A
+typed not-found response is not replaced by stale metadata.
 
-The manifest fetcher is selected from the import's `endpoint` type so that the
-compile-time fetch always matches the runtime checkout source:
+## Nested imports and limits
 
-- **Azure Repos** (endpoint-less same-org, or `type: azure-repos` cross-org) —
-  fetched via the ADO Git Items API. Credentials are resolved
-  **non-interactively** in this precedence: `SYSTEM_ACCESSTOKEN` →
-  `AZURE_DEVOPS_EXT_PAT` → `az account get-access-token`. The consumer
-  organization is taken from `AZURE_DEVOPS_ORG_URL` / `SYSTEM_COLLECTIONURI` or
-  the repo's Azure Repos git remote; cross-org imports use the endpoint's
-  `org:`.
-- **GitHub / GitHub Enterprise** (`type: github` / `type: ghe`) — fetched via
-  `gh api` using the compiler host's GitHub auth. For GHES, `host:` is the
-  server hostname consumed by `GH_HOST` (not the `api.<host>` API hostname).
+Imports are expanded breadth-first in declaration order:
 
-Routing is **fail-closed**: an endpoint-less (Azure-Repos-intended) import never
-silently falls back to GitHub, and a GitHub-typed import is never served by the
-Azure Repos fetcher.
+1. all imports declared by the consumer,
+2. their nested imports,
+3. the next depth, and so on.
 
-Current MVP notes:
+Nested relative imports inherit their origin:
 
-- Nested/transitive import resolution is not expanded yet; the current resolver
-  processes the workflow's top-level `imports:` list.
-- A workflow may declare at most 20 imports, and each resolved manifest is
-  capped at 256 KiB.
+- local component → relative to that component's directory
+- remote component → relative to that path in the same source/repository and
+  the parent's resolved SHA
+
+Limits are fail-closed:
+
+- at most 20 unique resolved files
+- maximum nesting depth 5
+- maximum 256 KiB per manifest
+- cycles report the import path
+
+The same resolved file (including section) with the same `with:` values is
+deduplicated. Resolving the same file with different `with:` values is an
+error.
 
 ## `import-schema:` and `with:`
 
-A reusable component can declare non-secret inputs with `import-schema:`.
-Consumers pass values through `with:`. Values are validated at compile time,
-defaults are applied, and placeholders of the form
-`{{ inputs.<key> }}` are substituted throughout the imported front
-matter and body before merge.
-
-> **Delimiter.** Import inputs use the compile-time `{{ ... }}` delimiter (the
-> same family as `{{ workspace }}`), **not** the Azure DevOps template-expression
-> delimiter `${{ ... }}`. The substituted output is embedded directly into the
-> pipeline YAML and agent prompt, where ADO template-processes any `${{ ... }}`
-> it finds — so reusing that delimiter would be a footgun. A `{{` immediately
-> preceded by `$` is treated as an ADO `${{ ... }}` expression and left
-> untouched. Any `{{ inputs.<key> }}` still present after
-> substitution (an input the consumer did not supply and the schema did not
-> default) is a **compile-time error**. An unclosed `{{ inputs.<key>` marker is
-> also rejected with an error identifying the missing `}}`, and an empty
-> `{{ inputs. }}` marker is rejected as malformed.
-
-Supported schema types are `string`, `number`, `boolean`, `choice`, `array`, and
-`object`. `choice` uses an `options:` list. `array` uses an `items:` schema.
-`object` uses `properties:`; object properties are currently one level deep.
-Unknown `with:` keys, missing required inputs, and values of the wrong type are
-compile-time errors.
+Components can declare typed, non-secret inputs:
 
 ```markdown
 ---
@@ -175,159 +164,105 @@ import-schema:
   channel:
     type: string
     required: true
-    description: Notification channel name.
   severity:
     type: choice
     options: [info, warning, critical]
     default: info
-  labels:
-    type: array
-    items:
-      type: string
-  delivery:
-    type: object
-    properties:
-      retries:
-        type: number
-        default: 2
-safe-outputs:
-  scripts:
-    notify-team:
-      description: Send a team notification.
-      max: 3
-      run: node tools/notify.js
-      inputs:
-        title:
-          type: string
-          required: true
-          max-length: 120
-        body:
-          type: string
-          required: true
-      env:
-        NOTIFY_TOKEN: TEAM_NOTIFY_TOKEN
 ---
-When notifying the team, use channel `{{ inputs.channel }}` and
-severity `{{ inputs.severity }}`.
+Notify `{{ inputs.channel }}` at `{{ inputs.severity }}` severity.
 ```
 
 Consumer:
 
 ```yaml
 imports:
-  - uses: octo/shared-agents/components/notify.md@0123456789abcdef0123456789abcdef01234567
-    endpoint: github-shared-components
+  - uses: components/notify.md@v2
+    repository: Platform/shared-agents
     with:
       channel: service-alerts
       severity: warning
-      labels: [agentic, automated]
-      delivery:
-        retries: 3
+```
+
+`{{ inputs.x }}` is retained as the compile-time syntax. Do not use the Azure
+DevOps `${{ ... }}` delimiter. Existing rich schema types remain supported:
+`string`, `number`, `boolean`, `choice`, `array`, and one-level `object`
+properties, including defaults and required values. Unknown inputs, missing
+required inputs, wrong types, unresolved placeholders, and malformed
+placeholders are compile-time errors.
+
+Input values are not secrets. Bind secrets through the normal consumer-owned
+pipeline configuration.
+
+## Merge contract
+
+Only these imported fields are applied:
+
+| Field | Merge behavior |
+|---|---|
+| `imports`, `import-schema` | Consumed by import expansion/substitution |
+| Markdown body | Imports in breadth-first order, then consumer body |
+| `tools` | Recursive merge; command/allow arrays union and deduplicate; earlier imports provide defaults and consumer scalar settings win |
+| `mcp-servers` | First import wins across imports; an imported server overrides a same-named consumer server |
+| `network.allowed` | Ordered union across imports and consumer; all other network controls remain consumer-owned |
+| `permissions-required` | Boolean OR of abstract `read` / `write` requirements |
+| `safe-outputs.jobs` | Custom job names are unique across consumer and imports; duplicates fail |
+| Built-in `safe-outputs` keys | Duplicates across imports fail; consumer configuration replaces imported built-in configuration |
+| `runtimes` | Consumer fields override imported fields; earlier imports fill remaining fields |
+| `env` | Duplicate keys across imports fail; consumer overrides |
+| `repos` | Consumer entries first, then imported entries, deduplicated by alias/name |
+| `steps` | Imported steps prepend in import order; consumer steps follow |
+| `post-steps` | Consumer post-steps first; imported post-steps follow in import order |
+
+An imported custom job's executor is immutable, and consumers do not redeclare
+it. Configure ado-aw policy such as approval or staged mode at the top-level
+tool key:
+
+```yaml
 safe-outputs:
-  notify-team:
+  send-notification:
     require-approval: true
 ```
 
-`with:` values are not secrets. Pass secrets through custom safe-output `env:`
-bindings, which name Azure DevOps variables and are scoped to the privileged
-custom executor job.
+Imported remote custom jobs receive compiler-owned compile-time provenance:
 
-## Merge semantics
+- `component-source`
+- `component-ref` (the requested branch, tag, or SHA)
+- `component-sha`
+- `manifest-digest`
 
-Imports are merged in declaration order, then the consumer workflow is overlaid
-on top. Precedence is:
+The removed runtime-checkout fields `component-repo-type` and
+`component-endpoint` are not generated.
 
-```text
-consumer workflow > later import > earlier import
-```
+The following fields are consumer-owned and ignored with a warning when an
+import declares them:
 
-- Scalar/singleton fields use the highest-precedence explicit value.
-- Mapping collections (`tools`, `mcp-servers`, `safe-outputs`, `runtimes`,
-  `env`) merge additively by key. Duplicate keys from two different imports are
-  hard errors.
-- Sequence fields (`parameters`, `repos`, `variable-groups`) concatenate in
-  import order, then consumer entries.
-- The consumer may configure an imported safe-output tool, for example by adding
-  `require-approval`, but may not replace executor-defining fields such as
-  `steps`, `env`, `inputs`, `run`, or `entrypoint`.
-- Runtime component provenance (`component-source`, `component-sha`,
-  `manifest-digest`, `component-repo-type`, and `component-endpoint`) is
-  compiler-owned. Component-authored values are stripped and consumers cannot
-  override the compiler-resolved source, commit, repository type, or service
-  connection.
-- Imported markdown bodies are concatenated in declaration order, followed by
-  the consumer body. Imported bodies are **inlined into the agent prompt at
-  compile time** (their `{{ inputs.* }}` placeholders are already
-  substituted); in the default `inlined-imports: false` mode the consumer's own
-  body is delivered ahead-of-time as a `{{#runtime-import}}` marker so it can
-  still be edited without recompiling, while imported bodies — which can only be
-  substituted at compile time — precede it inline.
-- `import-schema:` and `imports:` are consumed by the merge and do not appear in
-  the merged workflow.
+`name`, `description`, `target`, `engine`, `workspace`, `pool`, `on`,
+concrete `permissions`, `variable-groups`, `parameters`, `setup`, `teardown`,
+`execution-context`, `supply-chain`, `ado-aw-debug`, and `inlined-imports`.
+Other unsupported imported fields are also warned and ignored.
 
-## Example: shared custom safe-output job
+## `permissions-required`
 
-Shared component manifest:
-
-```markdown
----
-import-schema:
-  service:
-    type: string
-    required: true
-safe-outputs:
-  jobs:
-    create-service-ticket:
-      description: Create an incident ticket in the service desk.
-      max: 2
-      inputs:
-        title:
-          type: string
-          required: true
-          max-length: 160
-        priority:
-          type: choice
-          options: [low, normal, high]
-          required: true
-      env:
-        SERVICE_DESK_TOKEN: SERVICE_DESK_TOKEN
-        SERVICE_NAME: SERVICE_NAME
-      steps:
-        - bash: |
-            set -euo pipefail
-            : > "$ADO_AW_SAFE_OUTPUT_RESULTS"
-            while IFS= read -r proposal; do
-              proposal_id=$(echo "$proposal" | jq -r '.proposal_id')
-              title=$(echo "$proposal" | jq -r '.title')
-              # Call your service-desk client here, honoring staged mode.
-              jq -cn \
-                --arg proposal_id "$proposal_id" \
-                --arg title "$title" \
-                '{schema_version:1, proposal_id:$proposal_id, status:"success", message:("created ticket for " + $title)}' \
-                >> "$ADO_AW_SAFE_OUTPUT_RESULTS"
-            done < "$ADO_AW_SAFE_OUTPUT_PROPOSALS"
-          displayName: Create service ticket
----
-Use `create-service-ticket` only when a durable service-desk record is needed
-for `{{ inputs.service }}`.
-```
-
-Consumer workflow:
+A component can declare abstract ADO capability requirements without naming a
+consumer's service connections:
 
 ```yaml
-imports:
-  - uses: contoso/ado-aw-components/service-ticket.md@89abcdef0123456789abcdef0123456789abcdef
-    endpoint: github-components
-    with:
-      service: payments-api
-safe-outputs:
-  create-service-ticket:
-    require-approval:
-      approvers: ["[Contoso]\\SRE Leads"]
-      instructions: Confirm the ticket title and priority before approving.
+permissions-required:
+  read: true
+  write: true
 ```
 
-The imported tool appears to the agent as a typed SafeOutputs MCP tool. Agent
-proposals still flow through Detection and optional manual review before the
-isolated `Custom_create_service_ticket` executor job receives the secret env
-bindings and performs the side effect.
+Requirements are unioned across all imports and the consumer. The consumer must satisfy `read: true` with a concrete Agent read connection:
+
+```yaml
+permissions:
+  read: ado-read-connection
+```
+
+Imported components cannot set concrete `permissions:` values. Compilation
+fails when required Agent read capability is missing. `write: true` is
+satisfied by Stage 3's ordinary default `$(System.AccessToken)` capability;
+`permissions.write` remains an optional consumer choice for cross-org scope or
+named-identity attribution. The reusable validation helper is also exposed on
+the typed requirements value for parent integration paths that
+validate front matter outside import orchestration.

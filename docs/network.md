@@ -213,30 +213,19 @@ repos:
     checkout: false
 ```
 
-The same rule applies to repository resources generated for reusable
-[`imports:`](imports.md): object-form imports can specify the ADO service
-connection with `endpoint:`:
-
-```yaml
-imports:
-  - uses: octo/shared-components/components/notify.md@0123456789abcdef0123456789abcdef01234567
-    endpoint: github-shared-components
-```
-
-`endpoint:` is an Azure DevOps runtime authorization setting. It is not passed
-to the agent, Detection, or the compile-time manifest fetcher.
-
 ### Template targets (`target: job` / `target: stage`)
 
 `target: job` and `target: stage` emit Azure DevOps templates, and templates
-cannot declare top-level `resources.repositories`. For imports that require a
-generated repository resource, ado-aw emits a diagnostic naming the generated
-alias (for example `import_octo_shared_components_<hash>`). The parent pipeline
-that includes the template must declare and authorize that repository resource
-with the same alias and endpoint.
+cannot declare top-level `resources.repositories`. Ordinary `repos:` entries
+therefore remain the parent pipeline's responsibility.
 
 Standalone and 1ES targets own their top-level resources, so ado-aw emits the
 repository resource directly.
+
+Reusable markdown imports are resolved entirely at compile time and do not
+create runtime repository resources or use ADO service-connection endpoints.
+See [`imports:`](imports.md) for the ADO-first compile-time `repository` and
+`source` syntax.
 
 ## Permissions (ADO Access Tokens)
 

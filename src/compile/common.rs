@@ -2014,7 +2014,7 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
         effective_mcp_tool_count += 1;
     }
 
-    if effective_mcp_tool_count == 0 {
+    if effective_mcp_tool_count == 0 && front_matter.custom_safe_output_tool_names().is_empty() {
         // Every user-specified key was either a non-MCP key or a guard path
         // from the defensive check above. Return empty to keep all tools
         // available (backward compat).
@@ -2232,8 +2232,7 @@ pub fn validate_safe_outputs_keys(front_matter: &FrontMatter) -> Result<()> {
     let mut unknown: Vec<(String, Vec<&'static str>)> = Vec::new();
     let mut invalid_names: Vec<String> = Vec::new();
 
-    // Custom tools declared under `safe-outputs.scripts` / `safe-outputs.jobs`
-    // (decision D16). A top-level key that matches a custom tool name is that
+    // Custom tools declared under `safe-outputs.jobs`. A top-level key that matches a custom tool name is that
     // tool's *configuration* (e.g. `require-approval`) and must be accepted
     // rather than treated as an unknown built-in.
     let custom_names: std::collections::HashSet<String> = front_matter
@@ -2316,14 +2315,18 @@ pub fn validate_safe_outputs_keys(front_matter: &FrontMatter) -> Result<()> {
     Ok(())
 }
 
-/// Validate custom safe-output tool definitions under `safe-outputs.scripts`
-/// and `safe-outputs.jobs` (decision D16): each tool name must be a valid tool
-/// name and must not collide with a built-in safe-output tool. The `scripts`
-/// and `jobs` sections themselves must be mappings.
+/// Validate custom safe-output job names and structural shape.
 pub fn validate_custom_safe_output_tools(front_matter: &FrontMatter) -> Result<()> {
     use crate::safe_outputs::ALL_KNOWN_SAFE_OUTPUTS;
 
-    for section in ["scripts", "jobs"] {
+    if front_matter.safe_outputs.contains_key("scripts") {
+        anyhow::bail!(
+            "safe-outputs.scripts is not supported; use a self-contained \
+             safe-outputs.jobs executor"
+        );
+    }
+
+    for section in ["jobs"] {
         let Some(value) = front_matter.safe_outputs.get(section) else {
             continue;
         };
@@ -2578,10 +2581,7 @@ pub fn generate_mcpg_config(
             "/safeoutputs/custom-tools.json".to_string(),
         ]);
     }
-    safeoutputs_entrypoint_args.extend([
-        "/safeoutputs".to_string(),
-        working_directory.clone(),
-    ]);
+    safeoutputs_entrypoint_args.extend(["/safeoutputs".to_string(), working_directory.clone()]);
     mcp_servers.insert(
         "safeoutputs".to_string(),
         McpgServerConfig {
@@ -3454,9 +3454,18 @@ mod tests {
         // boundaries (e.g. tmpfs `/tmp` on Linux). Verify that the
         // extracted helper returns "." for a bare filename so the
         // tempfile lands on the same filesystem as the destination.
-        assert_eq!(atomic_write_parent_dir(Path::new("agent.md")), PathBuf::from("."));
-        assert_eq!(atomic_write_parent_dir(Path::new("subdir/agent.md")), PathBuf::from("subdir"));
-        assert_eq!(atomic_write_parent_dir(Path::new("/tmp/agent.md")), PathBuf::from("/tmp"));
+        assert_eq!(
+            atomic_write_parent_dir(Path::new("agent.md")),
+            PathBuf::from(".")
+        );
+        assert_eq!(
+            atomic_write_parent_dir(Path::new("subdir/agent.md")),
+            PathBuf::from("subdir")
+        );
+        assert_eq!(
+            atomic_write_parent_dir(Path::new("/tmp/agent.md")),
+            PathBuf::from("/tmp")
+        );
     }
 
     // ─── parse_markdown_detailed ──────────────────────────────────────────────
@@ -4728,6 +4737,30 @@ ado-aw-debug:
     }
 
     #[test]
+    fn custom_only_safe_outputs_emit_explicit_builtin_allowlist() {
+        let (fm, _) = parse_markdown(
+            r#"---
+name: test
+description: test
+safe-outputs:
+  jobs:
+    notify:
+      description: Notify.
+      steps:
+        - bash: echo notify
+---
+"#,
+        )
+        .unwrap();
+        let args = generate_enabled_tools_args(&fm);
+        assert!(!args.is_empty());
+        assert!(args.contains("--enabled-tools noop"));
+        assert!(args.contains("--enabled-tools missing-data"));
+        assert!(!args.contains("--enabled-tools create-work-item"));
+        assert!(!args.contains("--enabled-tools create-pull-request"));
+    }
+
+    #[test]
     fn test_generate_enabled_tools_args_skips_require_approval_reserved_key() {
         // The reserved section-level `require-approval` key must never be
         // treated as a tool name in `--enabled-tools`.
@@ -5041,9 +5074,11 @@ safe-outputs:
 name: test
 description: test
 safe-outputs:
-  scripts:
+  jobs:
     send-notification:
-      run: node notify.js
+      description: Send a notification.
+      steps:
+        - bash: echo notify
   send-notification:
     require-approval: true
 ---
@@ -5058,9 +5093,11 @@ safe-outputs:
 name: test
 description: test
 safe-outputs:
-  scripts:
+  jobs:
     create-pull-request:
-      run: evil.js
+      description: Collision.
+      steps:
+        - bash: echo evil
 ---
 "#;
         let (fm, _) = parse_markdown(yaml).unwrap();
@@ -5074,7 +5111,7 @@ safe-outputs:
 name: test
 description: test
 safe-outputs:
-  scripts: "not-a-map"
+  jobs: "not-a-map"
 ---
 "#;
         let (fm, _) = parse_markdown(yaml).unwrap();
@@ -6176,17 +6213,18 @@ safe-outputs:
     fn test_generate_mcpg_config_safeoutputs_receives_custom_tool_definitions() {
         let mut fm = minimal_front_matter();
         fm.safe_outputs.insert(
-            "scripts".to_string(),
+            "jobs".to_string(),
             serde_json::json!({
                 "notify": {
                     "description": "Send a notification",
-                    "run": "node notify.js",
                     "inputs": {
                         "message": {
                             "type": "string",
+                            "description": "Message to send",
                             "required": true
                         }
-                    }
+                    },
+                    "steps": [{"bash": "echo notify"}]
                 }
             }),
         );
@@ -7665,10 +7703,7 @@ repos:
             err.contains("manual-review"),
             "error should mention key: {err}"
         );
-        assert!(
-            err.contains("agentless"),
-            "error should explain why: {err}"
-        );
+        assert!(err.contains("agentless"), "error should explain why: {err}");
     }
 
     #[test]
@@ -7710,15 +7745,18 @@ repos:
             resolve_pool_overrides_typed(CompileTarget::Standalone, Some(&default), &overrides)
                 .unwrap_err()
                 .to_string();
-        assert!(err.contains("name") && err.contains("vmImage"), "err: {err}");
+        assert!(
+            err.contains("name") && err.contains("vmImage"),
+            "err: {err}"
+        );
     }
 
     #[test]
     fn pool_overrides_no_default_pool_uses_ubuntu_fallback() {
         // When the top-level pool: is omitted, defaults to ubuntu-22.04.
         let overrides: HashMap<String, PoolConfig> = HashMap::new();
-        let per_job = resolve_pool_overrides_typed(CompileTarget::Standalone, None, &overrides)
-            .unwrap();
+        let per_job =
+            resolve_pool_overrides_typed(CompileTarget::Standalone, None, &overrides).unwrap();
         let expected = crate::compile::ir::job::Pool::VmImage("ubuntu-22.04".to_string());
         assert_eq!(per_job.agent, expected);
         assert_eq!(per_job.detection, expected);
@@ -7751,7 +7789,10 @@ repos:
         assert_eq!(pool_name(&per_job.agent), "AgentPool");
         assert_eq!(pool_name(&per_job.detection), "DetectionPool");
         assert_eq!(pool_name(&per_job.safe_outputs), "SafeOutputsPool");
-        assert_eq!(pool_name(&per_job.safe_outputs_reviewed), "SafeOutputsReviewedPool");
+        assert_eq!(
+            pool_name(&per_job.safe_outputs_reviewed),
+            "SafeOutputsReviewedPool"
+        );
         assert_eq!(pool_name(&per_job.teardown), "TeardownPool");
         assert_eq!(pool_name(&per_job.conclusion), "ConclusionPool");
     }

@@ -1,9 +1,8 @@
 //! Dynamic (config-driven) custom safe-output MCP tools.
 //!
 //! Built-in safe-output tools are registered statically via the rmcp
-//! `#[tool_router]` macro. Custom safe-output tools — declared by an imported
-//! component's `safe-outputs.scripts.<name>` / `safe-outputs.jobs.<name>`
-//! block (see the reusable-custom-safe-output-jobs feature) — are not known at
+//! `#[tool_router]` macro. Custom safe-output jobs declared under
+//! `safe-outputs.jobs.<name>` are not known at
 //! compile time, so they are surfaced from a **generated schema file** loaded
 //! at server startup.
 //!
@@ -12,8 +11,7 @@
 //! via `--custom-tools`. Each entry is registered as a real MCP tool whose
 //! generic handler appends a proposal NDJSON line tagged with the tool name —
 //! the same `{ "name": <tool>, <...args> }` shape the built-in tools produce.
-//! Budget, sanitization, and execution are enforced later by the Stage-3
-//! executor; the MCP server only records the proposal.
+//! The generated schema and per-run call budget are enforced before persistence.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -23,7 +21,7 @@ use log::{info, warn};
 use rmcp::ErrorData as McpError;
 use rmcp::handler::server::router::tool::{ToolRoute, ToolRouter};
 use rmcp::handler::server::tool::ToolCallContext;
-use rmcp::model::{CallToolResult, Tool};
+use rmcp::model::{CallToolResult, Content, Tool};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -40,6 +38,14 @@ pub struct CustomToolDef {
     /// Closed JSON Schema for the tool inputs (`additionalProperties: false`).
     #[serde(rename = "inputSchema", default)]
     pub input_schema: Map<String, Value>,
+    #[serde(default = "default_custom_max")]
+    pub max: usize,
+    #[serde(default)]
+    pub output: Option<String>,
+}
+
+fn default_custom_max() -> usize {
+    crate::compile::custom_tools::DEFAULT_CUSTOM_MAX
 }
 
 /// Load custom-tool definitions from a compiler-generated JSON file.
@@ -49,8 +55,15 @@ pub struct CustomToolDef {
 pub fn load_custom_tool_defs(path: &Path) -> Result<Vec<CustomToolDef>> {
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read custom-tools file: {}", path.display()))?;
-    let defs: Vec<CustomToolDef> = serde_json::from_str(&contents)
+    let value: Value = serde_json::from_str(&contents)
         .with_context(|| format!("Failed to parse custom-tools JSON: {}", path.display()))?;
+    let definitions = value.get("customTools").cloned().unwrap_or(value);
+    let defs: Vec<CustomToolDef> = serde_json::from_value(definitions).with_context(|| {
+        format!(
+            "Failed to parse custom tool definitions: {}",
+            path.display()
+        )
+    })?;
     Ok(defs)
 }
 
@@ -76,21 +89,63 @@ pub fn register_custom_tools(tool_router: &mut ToolRouter<SafeOutputs>, defs: Ve
 fn build_custom_route(def: CustomToolDef) -> ToolRoute<SafeOutputs> {
     let tool_name = def.name.clone();
     let schema: Arc<Map<String, Value>> = Arc::new(def.input_schema);
-    let tool = Tool::new(def.name.clone(), def.description.clone(), schema);
+    let tool = Tool::new(def.name.clone(), def.description.clone(), schema.clone());
+    let max = def.max;
+    let output = def.output;
 
     ToolRoute::new_dyn(tool, move |ctx: ToolCallContext<'_, SafeOutputs>| {
         let tool_name = tool_name.clone();
+        let schema = schema.clone();
+        let output = output.clone();
         let output_path = ctx.service.custom_output_path();
+        let proposal_lock = ctx.service.custom_proposal_lock();
         let arguments = ctx.arguments.clone();
-        Box::pin(async move { record_custom_proposal(&output_path, &tool_name, arguments).await })
+        Box::pin(async move {
+            let _guard = proposal_lock.lock().await;
+            record_custom_proposal(
+                &output_path,
+                &tool_name,
+                schema.as_ref(),
+                max,
+                output.as_deref(),
+                arguments,
+            )
+            .await
+        })
     })
 }
 
 async fn record_custom_proposal(
     output_path: &Path,
     tool_name: &str,
+    schema: &Map<String, Value>,
+    max: usize,
+    acknowledgement: Option<&str>,
     arguments: Option<Map<String, Value>>,
 ) -> std::result::Result<CallToolResult, McpError> {
+    let arguments =
+        crate::compile::custom_tools::validate_custom_arguments(tool_name, schema, arguments)
+            .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
+    let current = count_custom_proposals(output_path, tool_name)
+        .await
+        .map_err(|error| {
+            warn!("Failed to inspect custom safe-output proposal budget '{tool_name}': {error:#}");
+            McpError::internal_error(
+                format!(
+                    "Failed to inspect custom safe-output proposal '{}'",
+                    crate::sanitize::sanitize_config(tool_name)
+                ),
+                None,
+            )
+        })?;
+    if current >= max {
+        return Err(McpError::invalid_params(
+            format!(
+                "Custom safe-output tool '{tool_name}' limit reached ({current} of {max} used)"
+            ),
+            None,
+        ));
+    }
     append_custom_proposal(output_path, tool_name, arguments)
         .await
         .map_err(|error| {
@@ -103,16 +158,24 @@ async fn record_custom_proposal(
                 None,
             )
         })?;
-    Ok(CallToolResult::success(vec![]))
+    Ok(CallToolResult::success(
+        acknowledgement
+            .map(|message| {
+                vec![Content::text(
+                    serde_json::json!({ "result": message }).to_string(),
+                )]
+            })
+            .unwrap_or_default(),
+    ))
 }
 
 /// Append a `{ "name": <tool>, <...args> }` proposal line to the NDJSON file.
 async fn append_custom_proposal(
     output_path: &Path,
     tool_name: &str,
-    arguments: Option<Map<String, Value>>,
+    arguments: Map<String, Value>,
 ) -> Result<()> {
-    let mut entry = arguments.unwrap_or_default();
+    let mut entry = arguments;
     // The `name` tag is compiler-owned and always wins over any agent input.
     entry.insert("name".to_string(), Value::String(tool_name.to_string()));
     let line = serde_json::to_string(&Value::Object(entry))? + "\n";
@@ -132,6 +195,21 @@ async fn append_custom_proposal(
     file.write_all(line.as_bytes()).await?;
     file.flush().await?;
     Ok(())
+}
+
+async fn count_custom_proposals(output_path: &Path, tool_name: &str) -> Result<usize> {
+    if !tokio::fs::metadata(output_path)
+        .await
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false)
+    {
+        return Ok(0);
+    }
+    Ok(crate::ndjson::read_ndjson_file(output_path)
+        .await?
+        .iter()
+        .filter(|entry| entry.get("name").and_then(Value::as_str) == Some(tool_name))
+        .count())
 }
 
 /// Load and register custom tools from `path`, logging a summary.
@@ -164,7 +242,9 @@ mod tests {
             "title": { "type": "string" },
             "severity": { "type": "string", "enum": ["info", "warning", "critical"] }
           }
-        }
+        },
+        "max": 2,
+        "output": "Accepted."
       }
     ]"#;
 
@@ -182,6 +262,8 @@ mod tests {
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, "send-notification");
         assert_eq!(defs[0].description, "Send a structured notification.");
+        assert_eq!(defs[0].max, 2);
+        assert_eq!(defs[0].output.as_deref(), Some("Accepted."));
         assert_eq!(
             defs[0].input_schema["additionalProperties"],
             Value::Bool(false)
@@ -204,12 +286,16 @@ mod tests {
 name: Test
 description: Test
 safe-outputs:
-  scripts:
+  jobs:
     send-notification:
       description: Send a structured notification.
-      run: node notify.js
       inputs:
-        title: { type: string, required: true, max-length: 120 }
+        title:
+          type: string
+          description: Notification title.
+          required: true
+      steps:
+        - bash: echo ok
 "#,
         );
         let schemas = generate_custom_tool_schemas(&fm).unwrap();
@@ -252,10 +338,7 @@ description: Test
         let path = dir.path().join("safe_outputs.ndjson");
         let mut args = Map::new();
         args.insert("title".to_string(), Value::String("Outage".to_string()));
-        // An agent-supplied "name" must be overridden by the compiler-owned tag.
-        args.insert("name".to_string(), Value::String("spoofed".to_string()));
-
-        append_custom_proposal(&path, "send-notification", Some(args))
+        append_custom_proposal(&path, "send-notification", args)
             .await
             .unwrap();
 
@@ -271,9 +354,20 @@ description: Test
         let output_path = dir.path().join("output-is-a-directory");
         std::fs::create_dir(&output_path).unwrap();
 
-        let error = record_custom_proposal(&output_path, "send-notification", Some(Map::new()))
-            .await
-            .unwrap_err();
+        let defs = serde_json::from_str::<Vec<CustomToolDef>>(SAMPLE).unwrap();
+        let error = record_custom_proposal(
+            &output_path,
+            "send-notification",
+            &defs[0].input_schema,
+            defs[0].max,
+            defs[0].output.as_deref(),
+            Some(Map::from_iter([(
+                "title".to_string(),
+                Value::String("Outage".to_string()),
+            )])),
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(error.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
         assert!(
@@ -285,5 +379,58 @@ description: Test
             !error.message.contains(&output_path.display().to_string()),
             "agent-visible MCP error must not expose the output path"
         );
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_arguments_and_enforces_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("safe_outputs.ndjson");
+        let defs = serde_json::from_str::<Vec<CustomToolDef>>(SAMPLE).unwrap();
+        let def = &defs[0];
+
+        let error = record_custom_proposal(
+            &path,
+            &def.name,
+            &def.input_schema,
+            def.max,
+            def.output.as_deref(),
+            Some(Map::from_iter([(
+                "extra".to_string(),
+                Value::String("no".to_string()),
+            )])),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+
+        for title in ["one", "two"] {
+            record_custom_proposal(
+                &path,
+                &def.name,
+                &def.input_schema,
+                def.max,
+                def.output.as_deref(),
+                Some(Map::from_iter([(
+                    "title".to_string(),
+                    Value::String(title.to_string()),
+                )])),
+            )
+            .await
+            .unwrap();
+        }
+        let error = record_custom_proposal(
+            &path,
+            &def.name,
+            &def.input_schema,
+            def.max,
+            def.output.as_deref(),
+            Some(Map::from_iter([(
+                "title".to_string(),
+                Value::String("three".to_string()),
+            )])),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
     }
 }

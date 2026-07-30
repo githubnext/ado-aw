@@ -20,14 +20,10 @@ function result(
 }
 
 describe("verifyFixtureSignals", () => {
-  it("passes when both custom executor tags exist", async () => {
+  it("passes when the custom job tag exists", async () => {
     const outcome = await verifyFixtureSignals(
       {
-        getBuildTags: async () => [
-          "unrelated",
-          "ado-aw-custom-script-42",
-          "ado-aw-custom-job-42",
-        ],
+        getBuildTags: async () => ["unrelated", "ado-aw-custom-job-42"],
       },
       [result()],
     );
@@ -35,9 +31,9 @@ describe("verifyFixtureSignals", () => {
     expect(outcome.results[0]?.status).toBe("succeeded");
   });
 
-  it("fails a successful child when either route tag is missing", async () => {
+  it("fails a successful child when the custom job tag is missing", async () => {
     const outcome = await verifyFixtureSignals(
-      { getBuildTags: async () => ["ado-aw-custom-script-42"] },
+      { getBuildTags: async () => ["unrelated"] },
       [result()],
     );
     expect(outcome.ok).toBe(false);
@@ -46,9 +42,7 @@ describe("verifyFixtureSignals", () => {
       terminalProven: true,
       result: "succeeded",
     });
-    expect(outcome.results[0]?.message).toMatch(
-      /ado-aw-custom-job-42/,
-    );
+    expect(outcome.results[0]?.message).toMatch(/ado-aw-custom-job-42/);
   });
 
   it("reports tag API failures without losing terminal proof", async () => {

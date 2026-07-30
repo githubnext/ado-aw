@@ -66,6 +66,7 @@ mod tests {
                     target: Some(String::from("standalone")),
                     compiler_version: Some(String::from("0.30.2")),
                     custom_components: Vec::new(),
+                    ..Default::default()
                 }),
             },
             task_domain: Some(TaskDomainInfo {
@@ -129,11 +130,26 @@ mod tests {
                     proposal: json!({"title": "Fix pipeline", "repository": "repo"}),
                     error: Some(String::from("Batch blocked by detection gate")),
                     result: Some(json!({"status": "blocked"})),
-                    component_provenance: None,
                     rejection_reason: Some(String::from("prompt_injection")),
                     applies_to_whole_batch: true,
                 }],
             }),
+            custom_safe_output_jobs: vec![CustomSafeOutputJobAudit {
+                tool: String::from("notify_team"),
+                proposed_count: 1,
+                expected_job_id: Some(String::from("Custom_notify_team")),
+                proposal_time_acknowledgement: Some(String::from("Notification proposed.")),
+                ado_job: Some(CustomSafeOutputAdoJob {
+                    ref_name: Some(String::from("Custom_notify_team")),
+                    name: String::from("Notify team"),
+                    status: String::from("completed"),
+                    result: Some(String::from("succeeded")),
+                    started_at: Some(String::from("2026-05-21T12:05:00Z")),
+                    finished_at: Some(String::from("2026-05-21T12:05:01Z")),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
             rejected_safe_outputs: Some(RejectedSafeOutputsRollup {
                 total_rejected: 1,
                 by_reason,
@@ -158,7 +174,6 @@ mod tests {
                     unreliable: true,
                 }],
             }),
-            pipeline_graph: None,
             jobs: vec![JobData {
                 name: String::from("Agent"),
                 status: String::from("completed"),
@@ -254,6 +269,7 @@ mod tests {
                 id: Some(String::from("123")),
                 title: Some(String::from("Fix pipeline")),
             }],
+            ..Default::default()
         }
     }
 

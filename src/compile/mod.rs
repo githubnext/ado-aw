@@ -960,20 +960,18 @@ async fn resolve_and_merge_imports(
 ) -> Result<(String, String)> {
     custom_tools::reject_author_component_provenance(front_matter)?;
     if front_matter.imports.is_empty() {
+        front_matter
+            .permissions_required
+            .validate_against(front_matter.permissions.as_ref())?;
         return Ok((String::new(), markdown_body.to_string()));
     }
 
     let base_dir = source_path.parent().unwrap_or_else(|| Path::new("."));
     let repo_root = find_repo_root(base_dir).unwrap_or_else(|| base_dir.to_path_buf());
 
-    // Build the routing fetcher: endpoint-less / cross-org Azure Repos imports
-    // resolve via the ADO Git Items API (primary); GitHub/GHE imports resolve
-    // via `gh`. The Azure fetcher resolves its org URL + auth LAZILY on the
-    // first actual fetch (see `AdoRepoFetcher`), so a GitHub-only import set, a
-    // workflow with no ADO remote, or — crucially for `check`/`inspect` — a
-    // fully-vendored committed cache performs no `git`/`az` work at all (the
-    // cache is consulted before any fetch), and any resolution failure surfaces
-    // fail-closed only when an uncached Azure import is actually fetched.
+    // Build the compile-time routing fetcher. Omitted `source` means the
+    // consumer's Azure Repos organization; collection URLs select cross-org
+    // Azure Repos, while github.com / GHES hosts resolve through `gh`.
     let ado_fetcher = crate::compile::imports::AdoRepoFetcher::new(repo_root.clone());
     let fetcher = crate::compile::imports::RoutingFetcher::new(ado_fetcher);
 
@@ -989,6 +987,9 @@ async fn resolve_and_merge_imports(
     .await?;
     *front_matter = serde_yaml::from_value(serde_yaml::Value::Mapping(merged_mapping))
         .context("Failed to parse front matter after merging imports")?;
+    front_matter
+        .permissions_required
+        .validate_against(front_matter.permissions.as_ref())?;
     Ok((imported, combined))
 }
 
@@ -1137,9 +1138,10 @@ mod tests {
 name: Test
 description: Test
 safe-outputs:
-  scripts:
+  jobs:
     notify:
-      run: ./notify
+      steps:
+        - bash: ./notify
       component-source: attacker/repo/component.md
       component-sha: 0123456789abcdef0123456789abcdef01234567
 ---
@@ -1156,6 +1158,32 @@ Body
         .await
         .unwrap_err();
         assert!(error.to_string().contains("compiler-owned"), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn import_free_permissions_required_are_validated() {
+        let content = r#"---
+name: Test
+description: Test
+permissions-required:
+  read: true
+---
+Body
+"#;
+        let parsed = common::parse_markdown_detailed(content).unwrap();
+        let mut front_matter = parsed.front_matter;
+        let error = resolve_and_merge_imports(
+            &mut front_matter,
+            &parsed.front_matter_mapping,
+            &parsed.markdown_body,
+            Path::new("agent.md"),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("require ADO read permission"),
+            "{error:#}"
+        );
     }
 
     #[test]

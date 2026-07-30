@@ -101,6 +101,7 @@ mcp-servers:
       Authorization: "Bearer $(MCP_TOKEN)"
     allowed: [search, fetch]
 safe-outputs:                  # optional per-tool configuration for safe outputs
+  staged: false               # cooperative preview default; per-tool override supported
   create-work-item:
     work-item-type: Task
     assignee: "user@example.com"
@@ -110,6 +111,20 @@ safe-outputs:                  # optional per-tool configuration for safe output
     artifact-link:             # optional: link work item to repository branch
       enabled: true
       branch: main
+  jobs:                       # custom Agent-callable jobs (see docs/safe-outputs.md)
+    send-notification:
+      description: Notify release operators.
+      max: 1
+      output: Notification proposal accepted.
+      inputs:
+        title:
+          description: Notification title.
+          type: string
+          required: true
+      env:
+        NOTIFICATION_TOKEN: $(SHARED_NOTIFICATION_TOKEN)
+      steps:
+        - bash: jq -e '.items[] | select(.type == "send-notification")' "$ADO_AW_AGENT_OUTPUT"
 on:                            # trigger configuration (unified under on: key)
   schedule: daily around 14:00 # fuzzy schedule - see docs/schedule-syntax.md
   pipeline:
@@ -257,9 +272,10 @@ runtime — write it as clear, structured natural-language instructions.
 
 ## Reusable Imports (`imports:` / `import-schema:`)
 
-`imports:` lets a workflow reuse local or SHA-pinned cross-repository markdown
-components. Each imported file is parsed as regular ado-aw markdown with YAML
-front matter; the compiler validates optional `import-schema:` inputs, applies
+`imports:` lets a workflow reuse local or cross-repository markdown components.
+Remote branches, tags, and SHAs resolve to an immutable commit SHA at compile
+time. Each imported file is parsed as regular ado-aw markdown with YAML front
+matter; the compiler validates optional `import-schema:` inputs, applies
 `{{ inputs.<key> }}` substitutions (a compile-time `{{ ... }}`
 replacement — not the ADO `${{ ... }}` template delimiter), then merges the
 imported front matter and body into the consumer workflow. Imported **body**
@@ -269,24 +285,30 @@ consumer's own body); see [`imports.md`](imports.md) for the full reference.
 ```yaml
 imports:
   - ./components/local-policy.md
-  - octo/shared-agents/components/notify.md@0123456789abcdef0123456789abcdef01234567
-  - uses: octo/shared-agents/components/deploy.md@89abcdef0123456789abcdef0123456789abcdef
-    endpoint: github-shared-components
+  - PlatformProject/shared-agents/components/notify.md@v2
+  - uses: components/deploy.md@release/v2
+    repository: shared-agents
     with:
       environment: prod
       region: westus3
+  - uses: components/github-notify.md@main
+    repository: octo/shared-agents
+    source: github.com
 ```
 
 Object-form fields:
 
 | Field | Description |
 |-------|-------------|
-| `uses` | Import spec. Local paths are relative to the importing `.md` file. Cross-repo specs use `owner/repo/path@<40-character-sha>`; branches/tags are rejected. |
+| `uses` | Local path, combined `project/repo/path@ref` shorthand, or canonical remote `path@ref`. |
+| `repository` | Remote repository. A bare name means the current ADO project; `project/repo` means the current ADO organization. |
+| `source` | Optional compile-time source: cross-org ADO collection URL, `github.com`, or a GHES host. Omitted means the current ADO organization. |
 | `with` | Non-secret values validated against the imported file's `import-schema:`. |
-| `endpoint` | Azure DevOps service connection for GitHub/GitHub Enterprise runtime repository resources created for imported component sources. |
 
 Import specs may also include `#Section` to import only a markdown heading
-section, and a trailing `?` to make the import optional.
+section, and a trailing `?` to make the import optional. Imports may themselves
+declare imports; expansion is breadth-first with cycle detection and bounded
+depth/count/manifest size.
 
 Reusable components declare compile-time inputs with `import-schema:`:
 

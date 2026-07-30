@@ -87,12 +87,12 @@ fn inspect_json_emits_schema_version_one() {
 fn inspect_resolves_imports_and_shows_imported_custom_job() {
     // Regression for Fix A: `build_pipeline_ir` (which powers `inspect`/`graph`)
     // must resolve `imports:` so it reasons about the merged pipeline. A local
-    // import of a `safe-outputs.scripts` component contributes a `Custom_<tool>`
+    // import of a `safe-outputs.jobs` component contributes a `Custom_<tool>`
     // job that only appears if imports are resolved.
     let workspace = tempfile::tempdir().expect("create temp dir");
     std::fs::write(
         workspace.path().join("component.md"),
-        "---\nsafe-outputs:\n  scripts:\n    notify-team:\n      run: node notify.js\n---\nComponent body.\n",
+        "---\nsafe-outputs:\n  jobs:\n    notify-team:\n      description: Notify the team.\n      steps:\n        - bash: echo notify\n---\nComponent body.\n",
     )
     .expect("write component");
     let consumer = workspace.path().join("agent.md");

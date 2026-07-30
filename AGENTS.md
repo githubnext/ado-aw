@@ -74,8 +74,8 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── filter_ir.rs  # Filter expression IR: Fact/Predicate types, lowering, validation, codegen
 │   │   ├── pr_filters.rs # PR trigger filter generation (native ADO + gate steps)
 │   │   ├── path_layout_check.rs # Warning-only checkout-aware path validation: $(Build.SourcesDirectory)/<seg> refs in steps, runtime-import targets, deprecated directory markers in the body
-│   │   ├── custom_tools.rs # Compile-time custom safe-output MCP schema generation for safe-outputs.scripts/jobs (closed scalar input schemas, custom-tools JSON)
-│   │   ├── imports/      # Reusable component imports: mod.rs resolver + SHA-keyed .ado-aw/imports cache, schema.rs import-schema/with validation + substitution, alias.rs generated repo aliases + template diagnostics, merge.rs consumer-wins front-matter/body merge
+│   │   ├── custom_tools.rs # Typed custom safe-output job model, closed MCP schemas, resolved execution config, and shared argument validation
+│   │   ├── imports/      # Reusable component imports: ADO-first source/ref resolution, bounded nested graph + SHA-keyed cache, import-schema substitution, and field-specific merge semantics
 │   │   ├── extensions/   # CompilerExtension trait and infrastructure extensions
 │   │   │   ├── mod.rs    # Trait, Extension enum, collect_extensions(), re-exports
 │   │   │   ├── ado_aw_marker.rs # Always-on metadata marker extension (emits # ado-aw-metadata JSON)
@@ -120,7 +120,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │       ├── emit.rs   # Thin `lower() + serde_yaml::to_string()` wrapper
 │   │       └── summary.rs # Public, serializable PipelineSummary / GraphSummary for agent-facing tooling (see docs/ir.md Public JSON summary)
 │   ├── init.rs           # Repository initialization for AI-first authoring: scaffolds a dispatcher agent (.github/agents/ado-aw.agent.md) AND skill (.github/skills/ado-aw/SKILL.md); `--agency` plugin scaffold embeds agency/plugins/ado-aw/ via include_str!
-│   ├── execute.rs        # Stage 3 safe output execution, including custom safe-output modes: scripts-style `--custom-config` native dispatch and jobs-style `--custom-phase pre|post` wrapper/result validation
+│   ├── execute.rs        # Stage 3 built-in safe-output execution plus validation/materialization of aggregate ADO_AW_AGENT_OUTPUT for custom jobs
 │   ├── fuzzy_schedule.rs # Fuzzy schedule parsing
 │   ├── logging.rs        # File-based logging infrastructure
 │   ├── mcp.rs            # SafeOutputs stdio MCP server
@@ -337,7 +337,7 @@ index to jump to the right page.
   configured via the `execution-context:` front-matter block.
 - [`docs/safe-outputs.md`](docs/safe-outputs.md) — full reference for every
   safe-output tool agents can use to propose actions (PRs, work items, wiki
-  pages, comments, etc.), custom `safe-outputs.scripts` / `safe-outputs.jobs`
+  pages, comments, etc.) and custom `safe-outputs.jobs`
   components, and per-agent configuration.
 - [`docs/safe-output-permissions.md`](docs/safe-output-permissions.md) —
   diagnosis and fix reference for Stage 3 401/403 failures: the

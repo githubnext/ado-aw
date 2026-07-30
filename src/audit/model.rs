@@ -46,12 +46,15 @@ pub struct AuditData {
     /// Engine configuration captured from compiled metadata and runtime emission.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub engine_config: Option<AuditEngineConfig>,
-    /// Rollup of proposed, executed, and dropped safe outputs for the build.
+    /// Rollup of proposed, executed, and dropped built-in safe outputs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub safe_output_summary: Option<SafeOutputSummary>,
-    /// Per-item safe-output execution outcomes emitted by the ADO SafeOutputs stage.
+    /// Per-item built-in safe-output outcomes emitted by the ADO SafeOutputs stage.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub safe_output_execution: Option<SafeOutputExecution>,
+    /// Job-level audit records for configured custom safe-output jobs.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub custom_safe_output_jobs: Vec<CustomSafeOutputJobAudit>,
     /// Aggregate rollup of safe outputs rejected before or during execution.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rejected_safe_outputs: Option<RejectedSafeOutputsRollup>,
@@ -179,9 +182,12 @@ pub struct AwInfo {
     /// Compile-time custom component provenance emitted by ado-aw metadata.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_components: Vec<ComponentProvenance>,
+    /// Compile-time custom-job metadata. Older compiler versions omit this.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_jobs: Vec<CustomSafeOutputJobMetadata>,
 }
 
-/// Custom safe-output component provenance captured at compile and execution time.
+/// Compile-time provenance for a custom safe-output component.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ComponentProvenance {
@@ -191,6 +197,9 @@ pub struct ComponentProvenance {
     /// Import source, for example `org/repo/path`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source: String,
+    /// Branch, tag, or SHA requested by the workflow import, when emitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_ref: Option<String>,
     /// Resolved component commit SHA.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sha: String,
@@ -200,6 +209,28 @@ pub struct ComponentProvenance {
     /// SHA-256 digest of the component schema.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub schema_digest: String,
+}
+
+/// Optional compile-time metadata for one custom safe-output job.
+///
+/// This shape is intentionally additive so audits remain compatible with
+/// `aw_info.json` emitted before custom-job metadata was available.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CustomSafeOutputJobMetadata {
+    /// Custom safe-output tool name.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tool: String,
+    /// Compiler-generated ADO job identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    /// Compile-time path such as `automatic`, `manual_review`, or
+    /// `post_review_dependency`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_path: Option<String>,
+    /// Whether the custom component was asked to operate in staged/preview mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub staged_requested: Option<bool>,
 }
 
 /// Aggregate numeric metrics for the audited run.
@@ -369,9 +400,28 @@ pub struct JobData {
     /// Downstream job IDs from typed-IR graph correlation.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub downstream_jobs: Vec<String>,
+    /// Per-run ADO timeline record ID, persisted for cache correlation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) timeline_record_id: Option<String>,
+    /// Stable ADO timeline identifier, persisted for cache correlation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) timeline_identifier: Option<String>,
+    /// ADO timeline reference name, persisted for cache correlation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) timeline_ref_name: Option<String>,
 }
 
 impl JobData {
+    pub(crate) fn stable_matches_ir_id(&self, ir_job_id: &str) -> bool {
+        [
+            self.timeline_ref_name.as_deref(),
+            self.timeline_identifier.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|candidate| candidate_matches_ir_id(candidate, ir_job_id))
+    }
+
     /// Returns true when this job ended in a failure-like state.
     pub fn failed(&self) -> bool {
         let result = self.result.as_deref().unwrap_or_default();
@@ -394,8 +444,9 @@ impl JobData {
     }
 
     /// Returns `true` when this runtime job corresponds to the typed-IR
-    /// job id `ir_job_id`. Accepts either the bare id or a
-    /// `Stage.Job`-style qualified timeline name.
+    /// job id `ir_job_id`. Checks the display name plus ADO `refName` /
+    /// `identifier`, accepting either the bare id or a `Stage.Job`-style
+    /// qualified value.
     ///
     /// Centralised so that `audit::findings` and `inspect::trace`
     /// share one definition — a future typo or extension (e.g. handling
@@ -407,15 +458,81 @@ impl JobData {
     /// because the old `rsplit('.').next()` form could attach IR edges
     /// to the wrong runtime job in unusual pipeline shapes.
     pub fn matches_ir_id(&self, ir_job_id: &str) -> bool {
-        if self.name == ir_job_id {
-            return true;
-        }
-        matches!(
-            self.name.rsplit_once('.'),
+        self.stable_matches_ir_id(ir_job_id) || candidate_matches_ir_id(&self.name, ir_job_id)
+    }
+}
+
+fn candidate_matches_ir_id(candidate: &str, ir_job_id: &str) -> bool {
+    candidate == ir_job_id
+        || matches!(
+            candidate.rsplit_once('.'),
             Some((prefix, suffix))
                 if suffix == ir_job_id && !prefix.contains('.')
         )
-    }
+}
+
+/// Job-level audit record for one custom safe-output tool.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CustomSafeOutputJobAudit {
+    /// Custom safe-output tool name.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tool: String,
+    /// Number of proposals recorded for this tool by the Agent.
+    pub proposed_count: u64,
+    /// Compiler-generated ADO job identifier, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_job_id: Option<String>,
+    /// Compile-time component provenance from `aw_info.json`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub component_provenance: Option<ComponentProvenance>,
+    /// Approval/review path, when metadata or graph correlation can determine it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_path: Option<String>,
+    /// Whether staged/preview behavior was requested at compile time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub staged_requested: Option<bool>,
+    /// Static text returned when the proposal was accepted by the MCP tool.
+    ///
+    /// This is proposal-time acknowledgement, not a custom-job execution result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_time_acknowledgement: Option<String>,
+    /// Correlated ADO timeline job, when the job appears in the build timeline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ado_job: Option<CustomSafeOutputAdoJob>,
+}
+
+/// ADO timeline identity and outcome for a custom safe-output job.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CustomSafeOutputAdoJob {
+    /// Per-run timeline record ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_id: Option<String>,
+    /// Stable ADO timeline identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identifier: Option<String>,
+    /// ADO timeline reference name, normally the YAML job ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ref_name: Option<String>,
+    /// Timeline display name.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    /// Timeline lifecycle state.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub status: String,
+    /// Final ADO job result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    /// Human-readable duration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration: Option<String>,
+    /// Job start timestamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    /// Job finish timestamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
 }
 
 /// Metadata about a file downloaded while assembling the audit.
@@ -728,7 +845,8 @@ pub struct CreatedItemReport {
 
 /// Aggregate safe-output counts for the audited build.
 ///
-/// This summary is derived by correlating proposed, analyzed, and executed safe-output artifacts.
+/// This summary is derived by correlating built-in proposals, detection, and
+/// `safe-outputs-executed.ndjson`. Custom tools are reported at job level.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SafeOutputSummary {
@@ -757,7 +875,7 @@ pub struct SafeOutputExecution {
     pub items: Vec<SafeOutputExecutionItem>,
 }
 
-/// Execution outcome for one safe-output proposal.
+/// Execution outcome for one built-in safe-output proposal.
 ///
 /// This row is derived by joining proposal, detection, and execution artifacts for a single proposal context.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -779,9 +897,6 @@ pub struct SafeOutputExecutionItem {
     /// Optional execution result payload.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
-    /// Custom component provenance for custom safe-output tools.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub component_provenance: Option<ComponentProvenance>,
     /// Optional rejection reason emitted by detection or execution.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rejection_reason: Option<String>,
@@ -947,6 +1062,7 @@ mod tests {
                     target: Some(String::from("standalone")),
                     compiler_version: Some(String::from("0.30.2")),
                     custom_components: Vec::new(),
+                    ..Default::default()
                 }),
             },
             task_domain: Some(TaskDomainInfo {
@@ -1010,11 +1126,11 @@ mod tests {
                     proposal: json!({"title": "Fix pipeline", "repository": "repo"}),
                     error: Some(String::from("Batch blocked by detection gate")),
                     result: Some(json!({"status": "blocked"})),
-                    component_provenance: None,
                     rejection_reason: Some(String::from("prompt_injection")),
                     applies_to_whole_batch: true,
                 }],
             }),
+            custom_safe_output_jobs: Vec::new(),
             rejected_safe_outputs: Some(RejectedSafeOutputsRollup {
                 total_rejected: 1,
                 by_reason,
@@ -1039,7 +1155,6 @@ mod tests {
                     unreliable: true,
                 }],
             }),
-            pipeline_graph: None,
             jobs: vec![JobData {
                 name: String::from("Agent"),
                 status: String::from("completed"),
@@ -1135,6 +1250,7 @@ mod tests {
                 id: Some(String::from("123")),
                 title: Some(String::from("Fix pipeline")),
             }],
+            ..Default::default()
         }
     }
 
@@ -1169,37 +1285,64 @@ mod tests {
     }
 
     #[test]
-    fn safe_output_execution_item_serializes_component_provenance_only_when_present() {
-        let without_component = SafeOutputExecutionItem {
+    fn built_in_execution_item_omits_removed_custom_provenance_field() {
+        let item = SafeOutputExecutionItem {
             tool: String::from("noop"),
             status: SafeOutputStatus::Executed,
             proposal: json!({"name": "noop"}),
             ..Default::default()
         };
-        let value = serde_json::to_value(&without_component).expect("serialize without component");
+        let value = serde_json::to_value(&item).expect("serialize built-in item");
         assert!(
             value.get("component_provenance").is_none(),
-            "None provenance must not change built-in audit JSON"
+            "removed custom-only provenance must not change built-in audit JSON"
         );
 
-        let with_component = SafeOutputExecutionItem {
+        let legacy: SafeOutputExecutionItem = serde_json::from_value(json!({
+            "tool": "noop",
+            "status": "executed",
+            "proposal": {"name": "noop"},
+            "component_provenance": {"sha": "legacy-custom-record"}
+        }))
+        .expect("legacy custom-only field remains deserializable");
+        assert_eq!(legacy.tool, "noop");
+    }
+
+    #[test]
+    fn custom_job_audit_round_trips_compile_and_timeline_metadata() {
+        let custom_job = CustomSafeOutputJobAudit {
             tool: String::from("custom_notify"),
-            status: SafeOutputStatus::Executed,
-            proposal: json!({"message": "done"}),
+            proposed_count: 2,
+            expected_job_id: Some(String::from("Custom_custom_notify")),
             component_provenance: Some(ComponentProvenance {
-                tool: String::new(),
+                tool: String::from("custom_notify"),
                 source: String::from("org/repo/components/notify"),
+                requested_ref: Some(String::from("refs/tags/v1")),
                 sha: String::from("0123456789abcdef0123456789abcdef01234567"),
                 manifest_digest: String::from("sha256:manifest"),
                 schema_digest: String::from("sha256:schema"),
             }),
-            ..Default::default()
+            approval_path: Some(String::from("manual_review")),
+            staged_requested: Some(true),
+            proposal_time_acknowledgement: Some(String::from("Proposal accepted.")),
+            ado_job: Some(CustomSafeOutputAdoJob {
+                record_id: Some(String::from("record-1")),
+                identifier: Some(String::from("job-custom-notify")),
+                ref_name: Some(String::from("Custom_custom_notify")),
+                name: String::from("Notify team"),
+                status: String::from("completed"),
+                result: Some(String::from("succeeded")),
+                duration: Some(String::from("0m 3s")),
+                started_at: Some(String::from("2026-07-29T12:00:00Z")),
+                finished_at: Some(String::from("2026-07-29T12:00:03Z")),
+            }),
         };
-        let json = serde_json::to_string(&with_component).expect("serialize with component");
+        let json = serde_json::to_string(&custom_job).expect("serialize custom job");
         assert!(json.contains("component_provenance"));
-        let round_tripped: SafeOutputExecutionItem =
-            serde_json::from_str(&json).expect("deserialize with component");
-        assert_eq!(round_tripped, with_component);
+        assert!(json.contains("proposal_time_acknowledgement"));
+        let round_tripped: CustomSafeOutputJobAudit =
+            serde_json::from_str(&json).expect("deserialize custom job");
+        assert_eq!(round_tripped, custom_job);
     }
 
     #[test]
@@ -1215,6 +1358,13 @@ mod tests {
             ..Default::default()
         };
         assert!(qualified.matches_ir_id("Agent"));
+
+        let display_named = JobData {
+            name: "Notify team".to_string(),
+            timeline_ref_name: Some("Custom_notify_team".to_string()),
+            ..Default::default()
+        };
+        assert!(display_named.matches_ir_id("Custom_notify_team"));
     }
 
     #[test]
@@ -1244,5 +1394,30 @@ mod tests {
             ..Default::default()
         };
         assert!(!job.matches_ir_id("Agent"));
+    }
+
+    #[test]
+    fn job_timeline_ids_survive_cache_serialization() {
+        let job = JobData {
+            name: String::from("Notify team"),
+            timeline_record_id: Some(String::from("record-1")),
+            timeline_identifier: Some(String::from("Stage.Custom_notify_team")),
+            timeline_ref_name: Some(String::from("Custom_notify_team")),
+            ..Default::default()
+        };
+
+        let encoded = serde_json::to_vec(&job).expect("serialize job");
+        let decoded: JobData = serde_json::from_slice(&encoded).expect("deserialize job");
+
+        assert_eq!(decoded.timeline_record_id.as_deref(), Some("record-1"));
+        assert_eq!(
+            decoded.timeline_identifier.as_deref(),
+            Some("Stage.Custom_notify_team")
+        );
+        assert_eq!(
+            decoded.timeline_ref_name.as_deref(),
+            Some("Custom_notify_team")
+        );
+        assert!(decoded.stable_matches_ir_id("Custom_notify_team"));
     }
 }

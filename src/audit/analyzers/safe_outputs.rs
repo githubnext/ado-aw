@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 
 use crate::audit::model::{
-    AwInfo, ComponentProvenance, CreatedItemReport, Finding, RejectedSafeOutputsRollup,
-    SafeOutputExecution, SafeOutputExecutionItem, SafeOutputStatus, SafeOutputSummary, Severity,
+    CreatedItemReport, ErrorInfo, Finding, RejectedSafeOutputsRollup, SafeOutputExecution,
+    SafeOutputExecutionItem, SafeOutputStatus, SafeOutputSummary, Severity,
 };
 use crate::ndjson::{EXECUTED_NDJSON_FILENAME, SAFE_OUTPUT_FILENAME, read_ndjson_file};
 
@@ -21,6 +21,7 @@ pub struct SafeOutputAnalysis {
     pub execution: Option<crate::audit::model::SafeOutputExecution>,
     pub rollup: Option<crate::audit::model::RejectedSafeOutputsRollup>,
     pub created_items: Vec<crate::audit::model::CreatedItemReport>,
+    pub warnings: Vec<ErrorInfo>,
     /// Severity-`high` findings emitted when proposals were rejected by
     /// the aggregate detection gate. At most one finding per audit run.
     pub findings: Vec<crate::audit::model::Finding>,
@@ -44,16 +45,6 @@ struct ExecutionRecord {
     proposal_index: Option<usize>,
     result: Option<Value>,
     error: Option<String>,
-    component: Option<ExecutionComponentProvenance>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-struct ExecutionComponentProvenance {
-    source: Option<String>,
-    sha: Option<String>,
-    manifest_digest: Option<String>,
-    schema_digest: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -78,10 +69,20 @@ pub async fn analyze_safe_outputs(
     let detection_path = find_detection_file(download_root).await?;
     let executions_paths = find_execution_files(download_root).await?;
 
-    let proposals = load_proposals(proposals_path.as_deref()).await?;
+    let custom_tool_catalog =
+        super::custom_jobs::load_custom_tool_catalog(download_root, None).await?;
+    let warnings = custom_tool_catalog.warnings.clone();
+    let custom_tools = custom_tool_catalog.names();
+    let (proposals, proposal_indexes) = exclude_custom_proposals(
+        load_proposals(proposals_path.as_deref()).await?,
+        &custom_tools,
+    );
     let detection = load_detection_verdict(detection_path.as_deref()).await?;
-    let executions = load_execution_records(&executions_paths).await?;
-    let marker_components = load_marker_custom_components(download_root).await?;
+    let executions = exclude_custom_executions(
+        load_execution_records(&executions_paths).await?,
+        &custom_tools,
+        &proposal_indexes,
+    );
     let detection_gate_fired = detection.as_ref().is_some_and(DetectionVerdict::gate_fired);
 
     let items = if detection_gate_fired {
@@ -144,7 +145,7 @@ pub async fn analyze_safe_outputs(
         })
         .unwrap_or_default();
     let rollup = build_rollup(summary.as_ref(), execution.as_ref(), detection.as_ref());
-    let mut findings = if detection_gate_fired && proposed_count > 0 {
+    let findings = if detection_gate_fired && proposed_count > 0 {
         vec![build_detection_finding(
             detection.as_ref().expect("gate-fired verdict"),
             proposed_count,
@@ -152,17 +153,53 @@ pub async fn analyze_safe_outputs(
     } else {
         Vec::new()
     };
-    if let Some(marker_components) = marker_components.as_deref() {
-        findings.extend(build_provenance_findings(&executions, marker_components));
-    }
 
     Ok(SafeOutputAnalysis {
         summary,
         execution,
         rollup,
         created_items,
+        warnings,
         findings,
     })
+}
+
+fn exclude_custom_proposals(
+    proposals: Vec<ProposalRecord>,
+    custom_tools: &std::collections::BTreeSet<String>,
+) -> (Vec<ProposalRecord>, BTreeMap<usize, usize>) {
+    let mut retained = Vec::new();
+    let mut indexes = BTreeMap::new();
+    for mut proposal in proposals {
+        if custom_tools.contains(&proposal.name) {
+            continue;
+        }
+        let original_index = proposal.index;
+        proposal.index = retained.len();
+        indexes.insert(original_index, proposal.index);
+        retained.push(proposal);
+    }
+    (retained, indexes)
+}
+
+fn exclude_custom_executions(
+    executions: Vec<IndexedExecutionRecord>,
+    custom_tools: &std::collections::BTreeSet<String>,
+    proposal_indexes: &BTreeMap<usize, usize>,
+) -> Vec<IndexedExecutionRecord> {
+    executions
+        .into_iter()
+        .filter(|execution| !custom_tools.contains(&execution.record.name))
+        .enumerate()
+        .map(|(index, mut execution)| {
+            execution.index = index;
+            execution.record.proposal_index = execution
+                .record
+                .proposal_index
+                .and_then(|original| proposal_indexes.get(&original).copied());
+            execution
+        })
+        .collect()
 }
 
 impl DetectionVerdict {
@@ -240,58 +277,6 @@ async fn load_execution_records(paths: &[PathBuf]) -> anyhow::Result<Vec<Indexed
         }
     }
     Ok(records)
-}
-
-async fn load_marker_custom_components(
-    download_root: &Path,
-) -> anyhow::Result<Option<Vec<ComponentProvenance>>> {
-    // Phase F1 mirrors the compile-time `# ado-aw-metadata` marker into
-    // staging/aw_info.json, so audit can cross-check provenance locally without
-    // fetching component sources from the network.
-    for directory in top_level_dirs_with_prefix(download_root, "agent_outputs_").await? {
-        for candidate in [
-            directory.join("staging").join("aw_info.json"),
-            directory.join("aw_info.json"),
-        ] {
-            if !fs::metadata(&candidate)
-                .await
-                .map(|m| m.is_file())
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            let contents = tokio::fs::read_to_string(&candidate)
-                .await
-                .with_context(|| format!("Failed to read aw_info file: {}", candidate.display()))?;
-            let aw_info = serde_json::from_str::<AwInfo>(&contents).with_context(|| {
-                format!("Failed to parse aw_info file: {}", candidate.display())
-            })?;
-            return Ok(Some(aw_info.custom_components));
-        }
-    }
-    Ok(None)
-}
-
-impl ExecutionComponentProvenance {
-    fn to_model(&self) -> ComponentProvenance {
-        ComponentProvenance {
-            tool: String::new(),
-            source: normalize_optional_string(self.source.clone()).unwrap_or_default(),
-            sha: normalize_optional_string(self.sha.clone()).unwrap_or_default(),
-            manifest_digest: normalize_optional_string(self.manifest_digest.clone())
-                .unwrap_or_default(),
-            schema_digest: normalize_optional_string(self.schema_digest.clone())
-                .unwrap_or_default(),
-        }
-    }
-}
-
-impl ExecutionRecord {
-    fn component_provenance(&self) -> Option<ComponentProvenance> {
-        self.component
-            .as_ref()
-            .map(ExecutionComponentProvenance::to_model)
-    }
 }
 
 fn build_execution_items(
@@ -407,7 +392,6 @@ fn build_item_from_execution(
         proposal: proposal.proposal.clone(),
         error: error.clone(),
         result: execution.result.clone(),
-        component_provenance: execution.component_provenance(),
         rejection_reason: rejection_reason_for_status(status, error),
         applies_to_whole_batch: false,
     }
@@ -422,7 +406,6 @@ fn build_missing_execution_item(proposal: &ProposalRecord) -> SafeOutputExecutio
         proposal: proposal.proposal.clone(),
         error: error.clone(),
         result: None,
-        component_provenance: None,
         rejection_reason: error,
         applies_to_whole_batch: false,
     }
@@ -438,7 +421,6 @@ fn build_unmatched_execution_item(execution: &ExecutionRecord) -> SafeOutputExec
         proposal: Value::Null,
         error: error.clone(),
         result: execution.result.clone(),
-        component_provenance: execution.component_provenance(),
         rejection_reason: rejection_reason_for_status(status, error),
         applies_to_whole_batch: false,
     }
@@ -455,7 +437,6 @@ fn build_gate_rejected_item(
         proposal: proposal.proposal.clone(),
         error: None,
         result: None,
-        component_provenance: None,
         rejection_reason: Some(aggregate_reason_key(detection)),
         applies_to_whole_batch: true,
     }
@@ -558,77 +539,6 @@ fn build_detection_finding(detection: &DetectionVerdict, proposed_count: u64) ->
     }
 }
 
-fn build_provenance_findings(
-    executions: &[IndexedExecutionRecord],
-    marker_components: &[ComponentProvenance],
-) -> Vec<Finding> {
-    executions
-        .iter()
-        .filter_map(|execution| {
-            let component = execution.record.component_provenance();
-            let marker_declares_tool = marker_components
-                .iter()
-                .any(|marker| marker.tool == execution.record.name);
-            let legacy_marker_matches_source = component.as_ref().is_some_and(|runtime| {
-                !runtime.source.is_empty()
-                    && marker_components
-                        .iter()
-                        .any(|marker| marker.tool.is_empty() && marker.source == runtime.source)
-            });
-            if !marker_declares_tool && !legacy_marker_matches_source {
-                return None;
-            }
-            let component = component.unwrap_or_default();
-            cross_check_provenance(&execution.record.name, &component, marker_components)
-        })
-        .collect()
-}
-
-fn cross_check_provenance(
-    tool: &str,
-    record_component: &ComponentProvenance,
-    marker_components: &[ComponentProvenance],
-) -> Option<Finding> {
-    let Some(expected) = marker_components.iter().find(|component| {
-        (component.tool.is_empty() || component.tool == tool)
-            && (record_component.source.is_empty() || component.source == record_component.source)
-    }) else {
-        return Some(
-            crate::audit::findings::custom_component_provenance_mismatch_finding(
-                tool,
-                &record_component.source,
-                None,
-                record_component,
-                &["source"],
-            ),
-        );
-    };
-
-    let mut mismatched_fields = Vec::new();
-    if expected.source != record_component.source {
-        mismatched_fields.push("source");
-    }
-    if expected.sha != record_component.sha {
-        mismatched_fields.push("sha");
-    }
-    if expected.manifest_digest != record_component.manifest_digest {
-        mismatched_fields.push("manifest_digest");
-    }
-    if expected.schema_digest != record_component.schema_digest {
-        mismatched_fields.push("schema_digest");
-    }
-
-    (!mismatched_fields.is_empty()).then(|| {
-        crate::audit::findings::custom_component_provenance_mismatch_finding(
-            tool,
-            &record_component.source,
-            Some(expected),
-            record_component,
-            &mismatched_fields,
-        )
-    })
-}
-
 fn created_item_from_execution_item(item: &SafeOutputExecutionItem) -> Option<CreatedItemReport> {
     if item.status != SafeOutputStatus::Executed {
         return None;
@@ -726,9 +636,13 @@ async fn find_execution_files(download_root: &Path) -> anyhow::Result<Vec<PathBu
     // With manual review, execution splits across multiple artifacts
     // (`safe_outputs/` for the automatic path and `safe_outputs_reviewed/`
     // for the approval-gated path), each with its own `executed.ndjson`.
-    // Collect them all so the audit reflects the complete set of actions.
+    // Search only those built-in artifacts. Legacy
+    // `custom_safe_output_*` artifacts are intentionally excluded because
+    // custom jobs are audited from proposals plus the ADO timeline.
     let mut matches = Vec::new();
-    collect_named_files(download_root, EXECUTED_NDJSON_FILENAME, &mut matches).await?;
+    for directory in top_level_dirs_with_prefix(download_root, "safe_outputs").await? {
+        collect_named_files(&directory, EXECUTED_NDJSON_FILENAME, &mut matches).await?;
+    }
     matches.sort();
     matches.dedup();
     Ok(matches)
@@ -820,10 +734,9 @@ fn collect_named_files<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        ComponentProvenance, CreatedItemReport, EXECUTED_NDJSON_FILENAME,
-        ExecutionComponentProvenance, ExecutionRecord, IndexedExecutionRecord, ProposalRecord,
-        SAFE_OUTPUT_FILENAME, SafeOutputStatus, Severity, analyze_safe_outputs,
-        build_execution_items, build_provenance_findings, cross_check_provenance,
+        CreatedItemReport, EXECUTED_NDJSON_FILENAME, ExecutionRecord, IndexedExecutionRecord,
+        ProposalRecord, SAFE_OUTPUT_FILENAME, SafeOutputStatus, Severity, analyze_safe_outputs,
+        build_execution_items,
     };
     use serde_json::{Value, json};
     use std::fs;
@@ -888,19 +801,12 @@ mod tests {
                 .iter()
                 .all(|item| item.status == SafeOutputStatus::Executed)
         );
-        assert!(
-            execution
-                .items
-                .iter()
-                .all(|item| item.component_provenance.is_none()),
-            "built-in records must not gain custom component provenance"
-        );
         assert!(analysis.rollup.is_none());
         assert!(analysis.findings.is_empty());
     }
 
     #[tokio::test]
-    async fn custom_execution_record_populates_component_provenance() {
+    async fn custom_proposals_and_legacy_artifacts_are_excluded_from_builtin_execution() {
         let temp_dir = TempDir::new().expect("create temp dir");
         write_ndjson(
             &temp_dir
@@ -908,24 +814,24 @@ mod tests {
                 .join("agent_outputs_42")
                 .join("staging")
                 .join(SAFE_OUTPUT_FILENAME),
-            &[json!({"name": "custom_notify", "context": "custom-1"})],
+            &[
+                json!({"name": "custom_notify", "context": "custom-1"}),
+                json!({"name": "noop"}),
+            ],
         );
         write_json(
             &temp_dir
                 .path()
                 .join("agent_outputs_42")
                 .join("staging")
-                .join("aw_info.json"),
-            &json!({
-                "schema": "ado-aw/aw_info/1",
-                "custom_components": [{
-                    "tool": "custom_notify",
-                    "source": "org/repo/components/notify",
-                    "sha": "0123456789abcdef0123456789abcdef01234567",
-                    "manifest_digest": "sha256:manifest",
-                    "schema_digest": "sha256:schema"
-                }]
-            }),
+                .join("custom-tools.json"),
+            &json!([{
+                "name": "custom_notify",
+                "description": "Notify",
+                "inputSchema": {"type": "object"},
+                "max": 1,
+                "output": "Proposal accepted."
+            }]),
         );
         write_ndjson(
             &temp_dir
@@ -933,197 +839,92 @@ mod tests {
                 .join("safe_outputs")
                 .join(EXECUTED_NDJSON_FILENAME),
             &[json!({
-                "schema_version": 1,
-                "tool": "custom_notify",
-                "proposal_id": "custom-1",
-                "proposal_index": 0,
+                "name": "noop",
+                "status": "succeeded",
+                "proposal_index": 1,
+                "result": {"status": "ok"}
+            })],
+        );
+        write_ndjson(
+            &temp_dir
+                .path()
+                .join("custom_safe_output_notify_42")
+                .join(EXECUTED_NDJSON_FILENAME),
+            &[json!({
                 "name": "custom_notify",
                 "status": "succeeded",
                 "context": "custom-1",
-                "message": "ok",
-                "component": {
-                    "source": "org/repo/components/notify",
-                    "sha": "0123456789abcdef0123456789abcdef01234567",
-                    "manifest_digest": "sha256:manifest",
-                    "schema_digest": "sha256:schema"
-                },
-                "attempt": {
-                    "number": 1,
-                    "staged": false,
-                    "started_at": "2026-07-13T00:00:00Z",
-                    "ended_at": "2026-07-13T00:00:01Z"
-                },
+                "component": {"sha": "legacy-runtime-record"},
+                "result": {"status": "must not be audited per item"}
+            })],
+        );
+
+        let analysis = analyze_safe_outputs(temp_dir.path())
+            .await
+            .expect("analyze built-in and custom safe outputs");
+
+        let summary = analysis.summary.expect("summary");
+        assert_eq!(summary.proposed_count, 1);
+        assert_eq!(summary.executed_count, 1);
+        let execution = analysis.execution.expect("execution");
+        assert_eq!(execution.items.len(), 1);
+        assert_eq!(execution.items[0].tool, "noop");
+        assert_eq!(execution.items[0].status, SafeOutputStatus::Executed);
+        assert!(analysis.findings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn malformed_optional_aw_info_does_not_hide_valid_safe_output_analysis() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let staging = temp_dir.path().join("agent_outputs_42").join("staging");
+        write_ndjson(
+            &staging.join(SAFE_OUTPUT_FILENAME),
+            &[
+                json!({"name": "custom_notify", "context": "custom-1"}),
+                json!({"name": "noop"}),
+            ],
+        );
+        write_json(
+            &staging.join("custom-tools.json"),
+            &json!([{
+                "name": "custom_notify",
+                "description": "Notify",
+                "inputSchema": {"type": "object"},
+                "max": 1
+            }]),
+        );
+        fs::write(staging.join("aw_info.json"), "{not valid json")
+            .expect("write malformed aw_info");
+        write_ndjson(
+            &temp_dir
+                .path()
+                .join("safe_outputs")
+                .join(EXECUTED_NDJSON_FILENAME),
+            &[json!({
+                "name": "noop",
+                "status": "succeeded",
+                "proposal_index": 1,
                 "result": {"status": "ok"}
             })],
         );
 
         let analysis = analyze_safe_outputs(temp_dir.path())
             .await
-            .expect("analyze custom safe output");
+            .expect("analyze with malformed optional metadata");
 
-        let execution = analysis.execution.expect("execution");
-        assert_eq!(execution.items.len(), 1);
-        assert_eq!(
-            execution.items[0].component_provenance,
-            Some(ComponentProvenance {
-                tool: String::new(),
-                source: String::from("org/repo/components/notify"),
-                sha: String::from("0123456789abcdef0123456789abcdef01234567"),
-                manifest_digest: String::from("sha256:manifest"),
-                schema_digest: String::from("sha256:schema"),
-            })
-        );
+        let summary = analysis.summary.expect("summary");
+        assert_eq!(summary.proposed_count, 1);
+        assert_eq!(summary.executed_count, 1);
+        assert_eq!(analysis.warnings.len(), 1);
         assert!(
-            analysis.findings.is_empty(),
-            "matching marker/runtime provenance should not emit findings"
+            analysis.warnings[0]
+                .message
+                .contains("aw_info.json could not be read or parsed")
         );
     }
 
     #[test]
-    fn cross_check_provenance_accepts_matching_marker_component() {
-        let component = ComponentProvenance {
-            tool: String::from("custom_notify"),
-            source: String::from("org/repo/components/notify"),
-            sha: String::from("sha-a"),
-            manifest_digest: String::from("manifest-a"),
-            schema_digest: String::from("schema-a"),
-        };
-
-        assert!(
-            cross_check_provenance(
-                "custom_notify",
-                &component,
-                std::slice::from_ref(&component)
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn cross_check_provenance_reports_mismatched_sha() {
-        let marker = ComponentProvenance {
-            tool: String::from("custom_notify"),
-            source: String::from("org/repo/components/notify"),
-            sha: String::from("sha-expected"),
-            manifest_digest: String::from("manifest-a"),
-            schema_digest: String::from("schema-a"),
-        };
-        let runtime = ComponentProvenance {
-            tool: String::new(),
-            source: String::from("org/repo/components/notify"),
-            sha: String::from("sha-actual"),
-            manifest_digest: String::from("manifest-a"),
-            schema_digest: String::from("schema-a"),
-        };
-
-        let finding = cross_check_provenance("custom_notify", &runtime, &[marker])
-            .expect("mismatched sha should emit finding");
-        assert_eq!(finding.severity, Severity::High);
-        assert!(finding.title.contains("custom_notify"));
-        assert!(finding.description.contains("sha-expected"));
-        assert!(finding.description.contains("sha-actual"));
-    }
-
-    #[test]
-    fn cross_check_provenance_matches_tool_when_components_share_source() {
-        let runtime = ComponentProvenance {
-            tool: String::new(),
-            source: String::from("org/repo/components/shared"),
-            sha: String::from("sha-notify"),
-            manifest_digest: String::from("manifest"),
-            schema_digest: String::from("schema-notify"),
-        };
-        let markers = vec![
-            ComponentProvenance {
-                tool: String::from("other-tool"),
-                source: runtime.source.clone(),
-                sha: String::from("sha-other"),
-                manifest_digest: runtime.manifest_digest.clone(),
-                schema_digest: String::from("schema-other"),
-            },
-            ComponentProvenance {
-                tool: String::from("custom_notify"),
-                source: runtime.source.clone(),
-                sha: runtime.sha.clone(),
-                manifest_digest: runtime.manifest_digest.clone(),
-                schema_digest: runtime.schema_digest.clone(),
-            },
-        ];
-
-        assert!(cross_check_provenance("custom_notify", &runtime, &markers).is_none());
-    }
-
-    #[test]
-    fn provenance_findings_reject_missing_runtime_component_for_marker_tool() {
-        let executions = vec![IndexedExecutionRecord {
-            index: 0,
-            record: ExecutionRecord {
-                name: String::from("custom_notify"),
-                status: String::from("succeeded"),
-                component: None,
-                ..ExecutionRecord::default()
-            },
-        }];
-        let markers = vec![ComponentProvenance {
-            tool: String::from("custom_notify"),
-            source: String::from("org/repo/components/notify"),
-            sha: String::from("sha"),
-            manifest_digest: String::from("manifest"),
-            schema_digest: String::from("schema"),
-        }];
-
-        let findings = build_provenance_findings(&executions, &markers);
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].severity, Severity::High);
-        assert!(findings[0].description.contains("source"));
-    }
-
-    #[test]
-    fn provenance_findings_reject_partial_runtime_component() {
-        let executions = vec![IndexedExecutionRecord {
-            index: 0,
-            record: ExecutionRecord {
-                name: String::from("custom_notify"),
-                status: String::from("succeeded"),
-                component: Some(ExecutionComponentProvenance {
-                    source: Some(String::from("org/repo/components/notify")),
-                    sha: None,
-                    manifest_digest: Some(String::from("manifest")),
-                    schema_digest: Some(String::from("schema")),
-                }),
-                ..ExecutionRecord::default()
-            },
-        }];
-        let markers = vec![ComponentProvenance {
-            tool: String::from("custom_notify"),
-            source: String::from("org/repo/components/notify"),
-            sha: String::from("sha"),
-            manifest_digest: String::from("manifest"),
-            schema_digest: String::from("schema"),
-        }];
-
-        let findings = build_provenance_findings(&executions, &markers);
-        assert_eq!(findings.len(), 1);
-        assert!(findings[0].description.contains("sha"));
-    }
-
-    #[test]
-    fn provenance_findings_ignore_local_custom_tools_without_marker_component() {
-        let executions = vec![IndexedExecutionRecord {
-            index: 0,
-            record: ExecutionRecord {
-                name: String::from("local_custom"),
-                status: String::from("succeeded"),
-                component: Some(ExecutionComponentProvenance::default()),
-                ..ExecutionRecord::default()
-            },
-        }];
-
-        assert!(build_provenance_findings(&executions, &[]).is_empty());
-    }
-
-    #[test]
-    fn split_artifacts_match_custom_index_and_legacy_tool_fifo() {
+    fn proposal_index_and_legacy_tool_fifo_are_both_supported() {
         let proposals = vec![
             ProposalRecord {
                 index: 0,
@@ -1133,19 +934,19 @@ mod tests {
             },
             ProposalRecord {
                 index: 1,
-                name: String::from("custom-tool"),
+                name: String::from("create_issue"),
                 context: None,
-                proposal: json!({"name": "custom-tool"}),
+                proposal: json!({"name": "create_issue"}),
             },
         ];
         let executions = vec![
             IndexedExecutionRecord {
                 index: 0,
                 record: ExecutionRecord {
-                    name: String::from("custom-tool"),
+                    name: String::from("create_issue"),
                     status: String::from("succeeded"),
                     proposal_index: Some(1),
-                    result: Some(json!({"matched": "custom"})),
+                    result: Some(json!({"matched": "indexed"})),
                     ..ExecutionRecord::default()
                 },
             },
@@ -1163,7 +964,7 @@ mod tests {
 
         let items = build_execution_items(&proposals, &executions);
         assert_eq!(items[0].result, Some(json!({"matched": "builtin"})));
-        assert_eq!(items[1].result, Some(json!({"matched": "custom"})));
+        assert_eq!(items[1].result, Some(json!({"matched": "indexed"})));
     }
 
     #[tokio::test]

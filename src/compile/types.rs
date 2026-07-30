@@ -1151,6 +1151,12 @@ pub struct FrontMatter {
     /// - `write`: MI for Stage 3 (executor) — write access for safe-outputs, never given to agent
     #[serde(default)]
     pub permissions: Option<PermissionsConfig>,
+    /// Abstract permissions required by this workflow and its imported
+    /// components. Import merging unions these requirements; the compiler then
+    /// validates that the consumer supplied matching concrete `permissions:`
+    /// service connections.
+    #[serde(default, rename = "permissions-required")]
+    pub permissions_required: PermissionsRequired,
     /// When `true`, the compiler inlines all `{{#runtime-import …}}` markers
     /// (including the implicit top-level body marker) at compile time,
     /// embedding referenced content directly into the emitted YAML. When
@@ -1194,149 +1200,89 @@ impl FrontMatter {
     }
 }
 
-/// Typed cross-repository import endpoint.
+/// Compile-time source for a remote reusable import.
 ///
-/// An **absent** endpoint (`None` on [`ImportEntry`]) denotes a
-/// **same-organization Azure Repos** source — the primary, default case for
-/// this ADO-native compiler. An **explicit** endpoint selects a different
-/// source kind and names the ADO service connection the generated runtime
-/// repository resource authenticates with.
+/// The YAML form is intentionally a scalar:
 ///
-/// Deserializes from either a bare string (shorthand for a GitHub.com service
-/// connection) or an object with `name`, an optional `type`
-/// (`github` | `ghe` | `azure-repos`, defaulting to `github`), and the
-/// type-specific `host` (GHE) or `org` (cross-org Azure Repos) field.
+/// - omitted: Azure Repos in the consumer's current organization
+/// - an Azure DevOps collection URL: Azure Repos in that organization
+/// - `github.com`: GitHub.com
+/// - any other validated host name: GitHub Enterprise Server
+///
+/// Imports are resolved and cached entirely at compile time. This type does
+/// not name an Azure DevOps service connection and never creates a runtime
+/// repository resource.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ImportEndpoint {
-    /// GitHub.com, authenticated at runtime via ADO service connection `name`.
+pub enum ImportSource {
+    /// Azure Repos. `None` means the consumer's current organization.
+    AzureRepos {
+        /// Explicit cross-organization collection URL.
+        collection: Option<crate::secure::AzureDevOpsOrgUrl>,
+    },
+    /// GitHub.com or GitHub Enterprise Server.
     GitHub {
-        /// ADO service connection name.
-        name: String,
-    },
-    /// GitHub Enterprise Server at server host `host`, via service connection `name`.
-    GitHubEnterprise {
-        /// ADO service connection name.
-        name: String,
-        /// GHES server host used by `GH_HOST` (e.g. `ghe.acme.com`).
+        /// GitHub CLI host (`github.com` for GitHub.com).
         host: crate::secure::HostName,
-    },
-    /// Azure Repos in a *different* organization `org` (a full collection URL,
-    /// e.g. `https://dev.azure.com/otherorg`), via service connection `name`.
-    AzureReposCrossOrg {
-        /// ADO service connection name.
-        name: String,
-        /// Target organization collection URL.
-        org: crate::secure::AzureDevOpsOrgUrl,
     },
 }
 
-impl<'de> Deserialize<'de> for ImportEndpoint {
+impl Default for ImportSource {
+    fn default() -> Self {
+        Self::AzureRepos { collection: None }
+    }
+}
+
+impl ImportSource {
+    /// Stable human-readable identity used in diagnostics and cache metadata.
+    pub fn identity(&self) -> String {
+        match self {
+            Self::AzureRepos { collection: None } => "azure-repos:current".to_string(),
+            Self::AzureRepos {
+                collection: Some(collection),
+            } => format!("azure-repos:{}", collection.as_str().trim_end_matches('/')),
+            Self::GitHub { host } => format!("github:{}", host.as_str().to_ascii_lowercase()),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ImportSource {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         use serde::de;
 
-        struct EndpointVisitor;
+        struct SourceVisitor;
 
-        impl<'de> de::Visitor<'de> for EndpointVisitor {
-            type Value = ImportEndpoint;
+        impl de::Visitor<'_> for SourceVisitor {
+            type Value = ImportSource;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
                 formatter.write_str(
-                    "a service connection name string, or an object with `name`, optional \
-                     `type` (github|ghe|azure-repos), and a type-specific `host`/`org`",
+                    "an Azure DevOps collection URL, `github.com`, or a GitHub Enterprise host",
                 )
             }
 
-            fn visit_str<E: de::Error>(
-                self,
-                value: &str,
-            ) -> std::result::Result<ImportEndpoint, E> {
-                if value.trim().is_empty() {
-                    return Err(E::custom("import endpoint name must not be empty"));
+            fn visit_str<E: de::Error>(self, value: &str) -> std::result::Result<ImportSource, E> {
+                let value = value.trim();
+                if value.is_empty() {
+                    return Err(E::custom("import source must not be empty"));
                 }
-                Ok(ImportEndpoint::GitHub {
-                    name: value.to_string(),
-                })
-            }
-
-            fn visit_map<M>(self, map: M) -> std::result::Result<ImportEndpoint, M::Error>
-            where
-                M: de::MapAccess<'de>,
-            {
-                #[derive(Deserialize)]
-                #[serde(deny_unknown_fields)]
-                struct EndpointObject {
-                    name: String,
-                    #[serde(default, rename = "type")]
-                    kind: Option<String>,
-                    #[serde(default)]
-                    host: Option<String>,
-                    #[serde(default)]
-                    org: Option<String>,
+                if value.starts_with("https://") {
+                    let collection = crate::secure::AzureDevOpsOrgUrl::parse(value)
+                        .map_err(|error| E::custom(error.to_string()))?;
+                    return Ok(ImportSource::AzureRepos {
+                        collection: Some(collection),
+                    });
                 }
 
-                let obj = EndpointObject::deserialize(de::value::MapAccessDeserializer::new(map))?;
-                if obj.name.trim().is_empty() {
-                    return Err(de::Error::custom(
-                        "import endpoint `name` must not be empty",
-                    ));
-                }
-                let kind = obj.kind.as_deref().unwrap_or("github");
-                match kind {
-                    "github" => {
-                        if obj.host.is_some() || obj.org.is_some() {
-                            return Err(de::Error::custom(
-                                "`host`/`org` are not valid for import endpoint type `github`",
-                            ));
-                        }
-                        Ok(ImportEndpoint::GitHub { name: obj.name })
-                    }
-                    "ghe" => {
-                        if obj.org.is_some() {
-                            return Err(de::Error::custom(
-                                "`org` is not valid for import endpoint type `ghe`",
-                            ));
-                        }
-                        let host = obj.host.ok_or_else(|| {
-                            de::Error::custom("import endpoint type `ghe` requires `host`")
-                        })?;
-                        let host = crate::secure::HostName::parse(host)
-                            .map_err(|e| de::Error::custom(e.to_string()))?;
-                        Ok(ImportEndpoint::GitHubEnterprise {
-                            name: obj.name,
-                            host,
-                        })
-                    }
-                    "azure-repos" => {
-                        if obj.host.is_some() {
-                            return Err(de::Error::custom(
-                                "`host` is not valid for import endpoint type `azure-repos`",
-                            ));
-                        }
-                        let org = obj.org.ok_or_else(|| {
-                            de::Error::custom(
-                                "import endpoint type `azure-repos` requires `org` \
-                                 (the target organization collection URL)",
-                            )
-                        })?;
-                        let org = crate::secure::AzureDevOpsOrgUrl::parse(org)
-                            .map_err(|e| de::Error::custom(e.to_string()))?;
-                        Ok(ImportEndpoint::AzureReposCrossOrg {
-                            name: obj.name,
-                            org,
-                        })
-                    }
-                    other => Err(de::Error::custom(format!(
-                        "unknown import endpoint type `{other}`; expected \
-                         `github`, `ghe`, or `azure-repos`"
-                    ))),
-                }
+                let host = crate::secure::HostName::parse(value)
+                    .map_err(|error| E::custom(error.to_string()))?;
+                Ok(ImportSource::GitHub { host })
             }
         }
 
-        deserializer.deserialize_any(EndpointVisitor)
+        deserializer.deserialize_str(SourceVisitor)
     }
 }
 
@@ -1347,8 +1293,12 @@ pub struct ImportEntry {
     pub uses: String,
     /// Non-secret input values for the imported workflow schema.
     pub with: serde_json::Map<String, serde_json::Value>,
-    /// Typed remote source endpoint. `None` denotes same-org Azure Repos.
-    pub endpoint: Option<ImportEndpoint>,
+    /// Remote repository. A bare name uses the consumer's current ADO project;
+    /// `project/repository` is explicit. Omitted for local imports and the
+    /// accepted combined `project/repository/path@ref` shorthand.
+    pub repository: Option<String>,
+    /// Compile-time remote source. Omission defaults to same-org Azure Repos.
+    pub source: Option<ImportSource>,
 }
 
 impl<'de> Deserialize<'de> for ImportEntry {
@@ -1365,7 +1315,9 @@ impl<'de> Deserialize<'de> for ImportEntry {
             #[serde(default)]
             with: serde_json::Map<String, serde_json::Value>,
             #[serde(default)]
-            endpoint: Option<ImportEndpoint>,
+            repository: Option<String>,
+            #[serde(default)]
+            source: Option<ImportSource>,
         }
 
         struct ImportEntryVisitor;
@@ -1375,7 +1327,8 @@ impl<'de> Deserialize<'de> for ImportEntry {
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
                 formatter.write_str(
-                    "a string import spec or an object with `uses`, optional `with`, and optional `endpoint`",
+                    "a string import spec or an object with `uses`, optional `repository`, \
+                     optional scalar `source`, and optional `with`",
                 )
             }
 
@@ -1383,7 +1336,8 @@ impl<'de> Deserialize<'de> for ImportEntry {
                 Ok(ImportEntry {
                     uses: value.to_string(),
                     with: serde_json::Map::new(),
-                    endpoint: None,
+                    repository: None,
+                    source: None,
                 })
             }
 
@@ -1396,7 +1350,8 @@ impl<'de> Deserialize<'de> for ImportEntry {
                 Ok(ImportEntry {
                     uses: entry.uses,
                     with: entry.with,
-                    endpoint: entry.endpoint,
+                    repository: entry.repository,
+                    source: entry.source,
                 })
             }
         }
@@ -1405,13 +1360,10 @@ impl<'de> Deserialize<'de> for ImportEntry {
     }
 }
 
-/// Parsed import source. The simple local-vs-remote heuristic is:
-/// after removing a trailing optional marker (`?`) and section (`#Section`),
-/// any spec containing `@` is remote and must be `owner/repo/path@<sha>`;
-/// all specs without `@` are treated as local paths for later resolution.
+/// Parsed local or remote import specification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
-pub enum ImportSource {
+pub enum ParsedImportSpec {
     /// Local import path within the current repository.
     Local {
         /// Relative path to the imported markdown file.
@@ -1421,39 +1373,35 @@ pub enum ImportSource {
         /// Whether a missing import should be tolerated by later resolution.
         optional: bool,
     },
-    /// Cross-repository import pinned to a full commit SHA.
-    Remote(ParsedImportSpec),
-}
-
-/// Parsed cross-repository import spec.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub struct ParsedImportSpec {
-    /// Repository owner/organization.
-    pub owner: String,
-    /// Repository name.
-    pub repo: String,
-    /// Path within the repository.
-    pub path: String,
-    /// Full 40-character commit SHA pin.
-    pub sha: crate::secure::CommitSha,
-    /// Optional markdown section selector.
-    pub section: Option<String>,
-    /// Whether a missing import should be tolerated by later resolution.
-    pub optional: bool,
-    /// Typed source endpoint carried from the [`ImportEntry`]. `None` denotes
-    /// same-org Azure Repos (the primary compile-time fetch source).
-    pub endpoint: Option<ImportEndpoint>,
+    /// Compile-time remote import.
+    Remote {
+        /// Azure Repos or GitHub source.
+        source: ImportSource,
+        /// Explicit ADO project / GitHub owner. `None` means the consumer's
+        /// current ADO project and is only valid for Azure Repos.
+        project: Option<String>,
+        /// Repository name.
+        repository: String,
+        /// Path within the repository.
+        path: String,
+        /// Requested branch, tag, or full commit SHA.
+        requested_ref: String,
+        /// Optional markdown section selector.
+        section: Option<String>,
+        /// Whether a typed not-found result should skip this import.
+        optional: bool,
+    },
 }
 
 impl ImportEntry {
     /// Parse and validate the import spec string.
     #[allow(dead_code)]
-    pub fn parse_source(&self) -> anyhow::Result<ImportSource> {
+    pub fn parse_source(&self) -> anyhow::Result<ParsedImportSpec> {
         let raw = self.uses.trim();
         if raw.is_empty() {
             anyhow::bail!("import spec must not be empty");
         }
+        validate_import_literal("spec", raw)?;
 
         let (without_optional, optional) = match raw.strip_suffix('?') {
             Some(value) => (value, true),
@@ -1465,6 +1413,7 @@ impl ImportEntry {
                 if section.is_empty() {
                     anyhow::bail!("import section must not be empty");
                 }
+                validate_import_literal("section", section)?;
                 (base, Some(section.to_string()))
             }
             None => (without_optional, None),
@@ -1475,7 +1424,14 @@ impl ImportEntry {
         }
 
         if !base.contains('@') {
-            return Ok(ImportSource::Local {
+            if self.repository.is_some() || self.source.is_some() {
+                anyhow::bail!(
+                    "local import `{raw}` must not set `repository` or `source`; \
+                     use a remote `path@ref` spec instead"
+                );
+            }
+            validate_import_literal("local path", base)?;
+            return Ok(ParsedImportSpec::Local {
                 path: base.to_string(),
                 section,
                 optional,
@@ -1483,44 +1439,129 @@ impl ImportEntry {
         }
 
         let (repo_and_path, ref_part) = base
-            .split_once('@')
+            .rsplit_once('@')
             .ok_or_else(|| anyhow::anyhow!("remote import spec must contain `@`"))?;
-        let sha =
-            crate::secure::CommitSha::parse(ref_part.to_string()).map_err(|_| {
-                anyhow::anyhow!(
-                    "cross-repository imports must be pinned to a full 40-character commit SHA, got '{}'",
-                    ref_part
-                )
+        if ref_part.is_empty() {
+            anyhow::bail!("remote import `{raw}` must name a branch, tag, or commit after `@`");
+        }
+        validate_import_literal("git ref", ref_part)?;
+        if ref_part.chars().any(char::is_whitespace) {
+            anyhow::bail!("remote import git ref must not contain whitespace: `{ref_part}`");
+        }
+        if crate::secure::CommitSha::parse(ref_part).is_err() {
+            crate::secure::GitRefName::parse(ref_part).map_err(|error| {
+                anyhow::anyhow!("remote import `{raw}` has invalid git ref `{ref_part}`: {error}")
             })?;
+        }
 
-        let mut parts = repo_and_path.splitn(3, '/');
-        let owner = parts.next().unwrap_or_default();
-        let repo = parts.next().unwrap_or_default();
-        let path = parts.next().unwrap_or_default();
-        if owner.is_empty() || repo.is_empty() || path.is_empty() {
+        let (project, repository, path) = match self.repository.as_deref() {
+            Some(repository) => {
+                let (project, repository) = parse_import_repository(repository)?;
+                (project, repository, repo_and_path.to_string())
+            }
+            None => {
+                let mut parts = repo_and_path.splitn(3, '/');
+                let project = parts.next().unwrap_or_default();
+                let repository = parts.next().unwrap_or_default();
+                let path = parts.next().unwrap_or_default();
+                if project.is_empty() || repository.is_empty() || path.is_empty() {
+                    anyhow::bail!(
+                        "remote import `{raw}` must use the canonical object form \
+                         (`uses: path@ref` plus `repository:`) or the combined \
+                         `project/repository/path@ref` shorthand"
+                    );
+                }
+                validate_import_repository_segment("project/owner", project)?;
+                validate_import_repository_segment("repository", repository)?;
+                (
+                    Some(project.to_string()),
+                    repository.to_string(),
+                    path.to_string(),
+                )
+            }
+        };
+        validate_import_manifest_path(&path)?;
+
+        let source = self.source.clone().unwrap_or_default();
+        if matches!(source, ImportSource::GitHub { .. }) && project.is_none() {
             anyhow::bail!(
-                "remote import spec must be `owner/repo/path@<40-character-sha>`, got '{}'",
-                raw
+                "GitHub import `{raw}` requires `repository: owner/repository`; \
+                 a bare repository name is only valid for Azure Repos"
             );
         }
 
-        Ok(ImportSource::Remote(ParsedImportSpec {
-            owner: owner.to_string(),
-            repo: repo.to_string(),
-            path: path.to_string(),
-            sha,
+        Ok(ParsedImportSpec::Remote {
+            source,
+            project,
+            repository,
+            path,
+            requested_ref: ref_part.to_string(),
             section,
             optional,
-            endpoint: self.endpoint.clone(),
-        }))
+        })
     }
+}
+
+fn parse_import_repository(value: &str) -> anyhow::Result<(Option<String>, String)> {
+    let value = value.trim();
+    let parts: Vec<&str> = value.split('/').collect();
+    match parts.as_slice() {
+        [repository] => {
+            validate_import_repository_segment("repository", repository)?;
+            Ok((None, (*repository).to_string()))
+        }
+        [project, repository] => {
+            validate_import_repository_segment("project/owner", project)?;
+            validate_import_repository_segment("repository", repository)?;
+            Ok((Some((*project).to_string()), (*repository).to_string()))
+        }
+        _ => anyhow::bail!(
+            "import repository must be `repository` or `project/repository`, got `{value}`"
+        ),
+    }
+}
+
+fn validate_import_repository_segment(label: &str, value: &str) -> anyhow::Result<()> {
+    validate_import_literal(label, value)?;
+    if value.is_empty() || matches!(value, "." | "..") || value.contains(['\\', '@', '#', '?']) {
+        anyhow::bail!("import {label} contains an invalid value: `{value}`");
+    }
+    Ok(())
+}
+
+fn validate_import_manifest_path(path: &str) -> anyhow::Result<()> {
+    validate_import_literal("manifest path", path)?;
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.contains('\\')
+        || path
+            .split('/')
+            .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+    {
+        anyhow::bail!("remote import path contains an invalid segment: `{path}`");
+    }
+    Ok(())
+}
+
+fn validate_import_literal(label: &str, value: &str) -> anyhow::Result<()> {
+    if value.chars().any(char::is_control)
+        || crate::validate::contains_pipeline_command(value)
+        || crate::validate::contains_ado_expression(value)
+        || crate::validate::contains_template_marker(value)
+    {
+        anyhow::bail!(
+            "import {label} must be a literal value without control characters, \
+             Azure DevOps expressions/commands, or template markers"
+        );
+    }
+    Ok(())
 }
 
 /// Reserved keys inside the `safe-outputs:` map that configure the section
 /// itself rather than naming a safe-output tool. These must never be treated
 /// as tool names (e.g. in `--enabled-tools`, Stage-3 budgets, or unknown-key
 /// validation).
-pub const SAFE_OUTPUT_RESERVED_KEYS: &[&str] = &["require-approval", "scripts", "jobs"];
+pub const SAFE_OUTPUT_RESERVED_KEYS: &[&str] = &["require-approval", "staged", "scripts", "jobs"];
 
 /// Automatic action a manual-validation gate takes when its pending period
 /// elapses with no human response. Mirrors `ManualValidation@1`'s `onTimeout`.
@@ -1598,19 +1639,14 @@ impl FrontMatter {
             .filter(|k| !SAFE_OUTPUT_RESERVED_KEYS.contains(&k.as_str()))
     }
 
-    /// Names of **custom** safe-output tools declared by imported components
-    /// under the `safe-outputs.scripts.<name>` (entrypoint) and
-    /// `safe-outputs.jobs.<name>` (arbitrary-ADO-steps) sections (decision
-    /// D16). These are agent-callable tools generated from imported manifests,
-    /// distinct from the built-in tools keyed at the top level.
+    /// Names of custom safe-output jobs declared under
+    /// `safe-outputs.jobs.<name>`.
     pub fn custom_safe_output_tool_names(&self) -> Vec<String> {
-        let mut names = Vec::new();
-        for section in ["scripts", "jobs"] {
-            if let Some(map) = self.safe_outputs.get(section).and_then(|v| v.as_object()) {
-                names.extend(map.keys().cloned());
-            }
-        }
-        names
+        self.safe_outputs
+            .get("jobs")
+            .and_then(|value| value.as_object())
+            .map(|jobs| jobs.keys().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// The full set of safe-output tool names for approval-partitioning and
@@ -1717,6 +1753,23 @@ impl FrontMatter {
         setting.is_required().then(|| setting.config())
     }
 
+    /// Effective cooperative staged/preview setting for a safe-output tool.
+    ///
+    /// A per-tool `safe-outputs.<tool>.staged` boolean overrides the section
+    /// level `safe-outputs.staged` default.
+    pub fn tool_is_staged(&self, tool: &str) -> bool {
+        self.safe_outputs
+            .get(tool)
+            .and_then(|config| config.get("staged"))
+            .and_then(serde_json::Value::as_bool)
+            .or_else(|| {
+                self.safe_outputs
+                    .get("staged")
+                    .and_then(serde_json::Value::as_bool)
+            })
+            .unwrap_or(false)
+    }
+
     /// Partition enabled safe-output tool names into `(auto, reviewed)` where
     /// `reviewed` tools require manual approval and `auto` tools do not. Both
     /// lists are sorted for deterministic emission. Includes both built-in and
@@ -1802,6 +1855,26 @@ impl FrontMatter {
         Ok(())
     }
 
+    /// Validate global and per-tool staged settings eagerly.
+    pub fn validate_staged(&self) -> anyhow::Result<()> {
+        if let Some(value) = self.safe_outputs.get("staged") {
+            anyhow::ensure!(value.is_boolean(), "safe-outputs.staged must be a boolean");
+        }
+        for tool in self.all_safe_output_tool_names() {
+            if let Some(value) = self
+                .safe_outputs
+                .get(&tool)
+                .and_then(|config| config.get("staged"))
+            {
+                anyhow::ensure!(
+                    value.is_boolean(),
+                    "safe-outputs.{tool}.staged must be a boolean"
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Get the schedule configuration (if any).
     pub fn schedule(&self) -> Option<&ScheduleConfig> {
         self.on_config.as_ref().and_then(|o| o.schedule.as_ref())
@@ -1876,6 +1949,11 @@ impl SanitizeConfigTrait for FrontMatter {
         for mcp in self.mcp_servers.values_mut() {
             mcp.sanitize_config_fields();
         }
+        // Import specs are structural compile-time source identifiers. Their
+        // paths/refs are validated by ImportEntry::parse_source(), repository
+        // components by dedicated guards, and source hosts/URLs by validated
+        // newtypes. Sanitizing them here would mutate valid git refs or paths
+        // after parsing and could make cache identities disagree.
         // safe_outputs: HashMap<String, serde_json::Value> — opaque JSON, sanitized at
         // Stage 3 execution via get_tool_config() when deserialized into typed configs.
         if let Some(ref mut o) = self.on_config {
@@ -1926,6 +2004,61 @@ pub struct NetworkConfig {
     /// Blocked host patterns (takes precedence over allowed)
     #[serde(default)]
     pub blocked: Vec<String>,
+}
+
+/// Abstract ADO capabilities required by a workflow or reusable component.
+///
+/// Imported requirements are unioned (logical OR) and cannot be weakened by a
+/// consumer. The concrete credentials remain consumer-owned under
+/// [`PermissionsConfig`].
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PermissionsRequired {
+    /// The agent requires a read-capable ADO token.
+    #[serde(default)]
+    pub read: bool,
+    /// A safe-output executor requires write capability. Stage 3's ordinary
+    /// default `$(System.AccessToken)` satisfies this requirement; a concrete
+    /// `permissions.write` service connection is not required.
+    #[serde(default)]
+    pub write: bool,
+}
+
+impl PermissionsRequired {
+    /// Union another component's requirements into this set.
+    pub fn union(&mut self, other: Self) {
+        self.read |= other.read;
+        self.write |= other.write;
+    }
+
+    /// Return requirements not satisfied by the consumer's available
+    /// capabilities.
+    pub fn missing_from(self, permissions: Option<&PermissionsConfig>) -> Vec<&'static str> {
+        let read_available = permissions.and_then(|value| value.read.as_ref()).is_some();
+        let mut missing = Vec::new();
+        if self.read && !read_available {
+            missing.push("read");
+        }
+        // `write: true` is always satisfied by Stage 3's ordinary default
+        // $(System.AccessToken). `permissions.write` changes identity/scope,
+        // but is not necessary for baseline write capability.
+        missing
+    }
+
+    /// Validate imported abstract requirements against the consumer-owned
+    /// concrete `permissions:` configuration.
+    pub fn validate_against(self, permissions: Option<&PermissionsConfig>) -> anyhow::Result<()> {
+        let missing = self.missing_from(permissions);
+        if !missing.is_empty() {
+            anyhow::bail!(
+                "imported components require ADO {} permission{}, but the consumer does not \
+                 provide the required Agent read capability",
+                missing.join(" and "),
+                if missing.len() == 1 { "" } else { "s" },
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Permissions configuration for ADO access tokens.
@@ -3148,50 +3281,26 @@ mod tests {
         ImportEntry {
             uses: uses.into(),
             with: serde_json::Map::new(),
-            endpoint: None,
+            repository: None,
+            source: None,
         }
     }
 
     // ─── imports field and spec parsing ─────────────────────────────────────
 
     #[test]
-    fn test_import_bare_remote_spec_parses_to_remote() {
-        let entry = bare_import(format!("owner/repo/path.md@{IMPORT_SHA}"));
-
-        let source = entry.parse_source().unwrap();
-
-        match source {
-            ImportSource::Remote(spec) => {
-                assert_eq!(spec.owner, "owner");
-                assert_eq!(spec.repo, "repo");
-                assert_eq!(spec.path, "path.md");
-                assert_eq!(spec.sha.as_str(), IMPORT_SHA);
-                assert_eq!(spec.section, None);
-                assert!(!spec.optional);
-            }
-            other => panic!("expected remote import, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_import_object_form_captures_with_and_endpoint() {
-        let entry: ImportEntry = serde_yaml::from_str(&format!(
+    fn test_import_canonical_object_accepts_branch_and_defaults_to_ado() {
+        let entry: ImportEntry = serde_yaml::from_str(
             r#"
-uses: acme/shared/deploy.md@{IMPORT_SHA}
+uses: components/deploy.md@release/v1
+repository: shared
 with:
   region: us-east-1
   retries: 3
-endpoint: shared-components-connection
-"#
-        ))
+"#,
+        )
         .unwrap();
 
-        assert_eq!(
-            entry.endpoint,
-            Some(ImportEndpoint::GitHub {
-                name: "shared-components-connection".to_string()
-            })
-        );
         assert_eq!(
             entry.with.get("region").and_then(|v| v.as_str()),
             Some("us-east-1")
@@ -3199,216 +3308,234 @@ endpoint: shared-components-connection
         assert_eq!(entry.with.get("retries").and_then(|v| v.as_i64()), Some(3));
 
         match entry.parse_source().unwrap() {
-            ImportSource::Remote(spec) => {
-                assert_eq!(spec.owner, "acme");
-                assert_eq!(spec.repo, "shared");
-                assert_eq!(spec.path, "deploy.md");
-                assert_eq!(spec.sha.as_str(), IMPORT_SHA);
+            ParsedImportSpec::Remote {
+                source,
+                project,
+                repository,
+                path,
+                requested_ref,
+                ..
+            } => {
+                assert_eq!(source, ImportSource::default());
+                assert_eq!(project, None);
+                assert_eq!(repository, "shared");
+                assert_eq!(path, "components/deploy.md");
+                assert_eq!(requested_ref, "release/v1");
             }
             other => panic!("expected remote import, got {other:?}"),
         }
     }
 
     #[test]
-    fn test_import_endpoint_object_github_explicit() {
+    fn test_import_object_supports_cross_org_ado_collection() {
         let entry: ImportEntry = serde_yaml::from_str(&format!(
-            "uses: acme/shared/deploy.md@{IMPORT_SHA}\nendpoint:\n  name: gh-conn\n  type: github\n"
+            "uses: deploy.md@{IMPORT_SHA}\nrepository: project/repo\n\
+             source: https://dev.azure.com/other\n"
         ))
         .unwrap();
-        assert_eq!(
-            entry.endpoint,
-            Some(ImportEndpoint::GitHub {
-                name: "gh-conn".to_string()
-            })
-        );
-        // parse_source threads the endpoint into the spec.
         match entry.parse_source().unwrap() {
-            ImportSource::Remote(spec) => assert_eq!(spec.endpoint, entry.endpoint),
-            other => panic!("expected remote import, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_import_endpoint_object_ghe_requires_host() {
-        let entry: ImportEntry = serde_yaml::from_str(&format!(
-            "uses: acme/shared/deploy.md@{IMPORT_SHA}\n\
-             endpoint:\n  name: ghe-conn\n  type: ghe\n  host: ghe.acme.com\n"
-        ))
-        .unwrap();
-        match entry.endpoint {
-            Some(ImportEndpoint::GitHubEnterprise { name, host }) => {
-                assert_eq!(name, "ghe-conn");
-                assert_eq!(host.as_str(), "ghe.acme.com");
+            ParsedImportSpec::Remote {
+                source:
+                    ImportSource::AzureRepos {
+                        collection: Some(collection),
+                    },
+                project,
+                repository,
+                ..
+            } => {
+                assert_eq!(collection.as_str(), "https://dev.azure.com/other");
+                assert_eq!(project.as_deref(), Some("project"));
+                assert_eq!(repository, "repo");
             }
-            other => panic!("expected GHE endpoint, got {other:?}"),
-        }
-
-        // `ghe` without `host` must be rejected.
-        let err = serde_yaml::from_str::<ImportEntry>(&format!(
-            "uses: acme/shared/deploy.md@{IMPORT_SHA}\nendpoint:\n  name: ghe-conn\n  type: ghe\n"
-        ))
-        .unwrap_err();
-        assert!(err.to_string().contains("requires `host`"), "{err}");
-    }
-
-    #[test]
-    fn test_import_endpoint_object_azure_repos_requires_org() {
-        let entry: ImportEntry = serde_yaml::from_str(&format!(
-            "uses: proj/repo/deploy.md@{IMPORT_SHA}\n\
-             endpoint:\n  name: xorg-conn\n  type: azure-repos\n  org: https://dev.azure.com/other\n"
-        ))
-        .unwrap();
-        assert_eq!(
-            entry.endpoint,
-            Some(ImportEndpoint::AzureReposCrossOrg {
-                name: "xorg-conn".to_string(),
-                org: crate::secure::AzureDevOpsOrgUrl::parse("https://dev.azure.com/other",)
-                    .unwrap(),
-            })
-        );
-
-        let err = serde_yaml::from_str::<ImportEntry>(&format!(
-            "uses: acme/shared/deploy.md@{IMPORT_SHA}\n\
-             endpoint:\n  name: xorg-conn\n  type: azure-repos\n  org: https://attacker.example/steal\n"
-        ))
-        .unwrap_err();
-        assert!(err.to_string().contains("dev.azure.com"), "{err}");
-
-        // `azure-repos` without `org` must be rejected.
-        let err = serde_yaml::from_str::<ImportEntry>(&format!(
-            "uses: proj/repo/deploy.md@{IMPORT_SHA}\n\
-             endpoint:\n  name: xorg-conn\n  type: azure-repos\n"
-        ))
-        .unwrap_err();
-        assert!(err.to_string().contains("requires `org`"), "{err}");
-    }
-
-    #[test]
-    fn test_import_endpoint_rejects_unknown_type_and_mismatched_fields() {
-        // Unknown type.
-        let err = serde_yaml::from_str::<ImportEntry>(&format!(
-            "uses: o/r/p.md@{IMPORT_SHA}\nendpoint:\n  name: c\n  type: bitbucket\n"
-        ))
-        .unwrap_err();
-        assert!(
-            err.to_string().contains("unknown import endpoint type"),
-            "{err}"
-        );
-
-        // `org` on a github endpoint.
-        let err = serde_yaml::from_str::<ImportEntry>(&format!(
-            "uses: o/r/p.md@{IMPORT_SHA}\nendpoint:\n  name: c\n  type: github\n  org: x\n"
-        ))
-        .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("not valid for import endpoint type `github`"),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn test_import_endpoint_absent_is_same_org_azure_repos() {
-        let entry: ImportEntry =
-            serde_yaml::from_str(&format!("uses: proj/repo/deploy.md@{IMPORT_SHA}\n")).unwrap();
-        assert_eq!(entry.endpoint, None);
-        match entry.parse_source().unwrap() {
-            ImportSource::Remote(spec) => assert_eq!(spec.endpoint, None),
             other => panic!("expected remote import, got {other:?}"),
         }
     }
 
     #[test]
-    fn test_import_section_and_optional_marker_parse() {
+    fn test_import_object_supports_github_and_ghes_hosts() {
+        let entry: ImportEntry = serde_yaml::from_str(
+            "uses: deploy.md@main\nrepository: octo/components\nsource: github.com\n",
+        )
+        .unwrap();
+        match entry.parse_source().unwrap() {
+            ParsedImportSpec::Remote {
+                source: ImportSource::GitHub { host },
+                ..
+            } => {
+                assert_eq!(host.as_str(), "github.com");
+            }
+            other => panic!("expected GitHub import, got {other:?}"),
+        }
+
+        let entry: ImportEntry = serde_yaml::from_str(
+            "uses: deploy.md@v1\nrepository: octo/components\nsource: ghe.acme.com\n",
+        )
+        .unwrap();
+        match entry.parse_source().unwrap() {
+            ParsedImportSpec::Remote {
+                source: ImportSource::GitHub { host },
+                ..
+            } => assert_eq!(host.as_str(), "ghe.acme.com"),
+            other => panic!("expected GHES import, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_import_combined_gh_aw_shorthand_and_markers_parse() {
         let entry = bare_import(format!("owner/repo/path.md@{IMPORT_SHA}#Deploy?"));
-
-        let source = entry.parse_source().unwrap();
-
-        match source {
-            ImportSource::Remote(spec) => {
-                assert_eq!(spec.section.as_deref(), Some("Deploy"));
-                assert!(spec.optional);
+        match entry.parse_source().unwrap() {
+            ParsedImportSpec::Remote {
+                project,
+                repository,
+                path,
+                requested_ref,
+                section,
+                optional,
+                ..
+            } => {
+                assert_eq!(project.as_deref(), Some("owner"));
+                assert_eq!(repository, "repo");
+                assert_eq!(path, "path.md");
+                assert_eq!(requested_ref, IMPORT_SHA);
+                assert_eq!(section.as_deref(), Some("Deploy"));
+                assert!(optional);
             }
             other => panic!("expected remote import, got {other:?}"),
         }
     }
 
     #[test]
-    fn test_import_non_sha_remote_refs_are_rejected() {
+    fn test_import_branch_tag_and_sha_refs_are_accepted() {
         for ref_part in ["main", "v1.0.0", "abc123"] {
             let entry = bare_import(format!("owner/repo/path.md@{ref_part}"));
-
-            let err = entry.parse_source().unwrap_err().to_string();
-
-            assert!(
-                err.contains(
-                    "cross-repository imports must be pinned to a full 40-character commit SHA"
-                ),
-                "unexpected error for {ref_part}: {err}"
-            );
-            assert!(
-                err.contains(ref_part),
-                "error should include rejected ref {ref_part}: {err}"
-            );
+            assert!(matches!(
+                entry.parse_source().unwrap(),
+                ParsedImportSpec::Remote { .. }
+            ));
         }
     }
 
     #[test]
-    fn test_import_local_bare_path_parses_to_local() {
-        let entry = bare_import("shared/notify.md");
-
-        let source = entry.parse_source().unwrap();
-
-        match source {
-            ImportSource::Local {
+    fn test_import_local_path_parses_and_rejects_remote_fields() {
+        match bare_import("./shared/notify.md").parse_source().unwrap() {
+            ParsedImportSpec::Local {
                 path,
                 section,
                 optional,
             } => {
-                assert_eq!(path, "shared/notify.md");
+                assert_eq!(path, "./shared/notify.md");
                 assert_eq!(section, None);
                 assert!(!optional);
             }
             other => panic!("expected local import, got {other:?}"),
         }
+
+        let error =
+            serde_yaml::from_str::<ImportEntry>("uses: ./local.md\nrepository: project/repo\n")
+                .unwrap()
+                .parse_source()
+                .unwrap_err();
+        assert!(error.to_string().contains("must not set `repository`"));
+    }
+
+    #[test]
+    fn test_import_rejects_github_bare_repository_and_invalid_source_url() {
+        let entry: ImportEntry =
+            serde_yaml::from_str("uses: component.md@main\nrepository: repo\nsource: github.com\n")
+                .unwrap();
+        assert!(
+            entry
+                .parse_source()
+                .unwrap_err()
+                .to_string()
+                .contains("owner/repository")
+        );
+
+        let error = serde_yaml::from_str::<ImportEntry>(
+            "uses: component.md@main\nrepository: project/repo\n\
+             source: https://attacker.example/org\n",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("dev.azure.com"), "{error}");
+    }
+
+    #[test]
+    fn test_import_identifiers_reject_expressions_and_pipeline_commands() {
+        for uses in [
+            "./##vso[task.setvariable]component.md",
+            "owner/repo/component.md@$(REF)",
+            "owner/repo/component.md@main#${{ variables.section }}",
+        ] {
+            let error = bare_import(uses).parse_source().unwrap_err();
+            assert!(error.to_string().contains("literal value"), "{error}");
+        }
     }
 
     #[test]
     fn test_imports_field_deserializes_in_front_matter() {
-        let yaml = format!(
-            r#"
+        let yaml = r#"
 name: Test Agent
 description: Test imports
 imports:
-  - shared/notify.md
-  - uses: acme/shared/deploy.md@{IMPORT_SHA}
+  - ./shared/notify.md
+  - uses: deploy.md@main
+    repository: acme/shared
+    source: github.com
     with:
       region: us-east-1
-    endpoint: shared-components-connection
 "#
-        );
+        .to_string();
 
         let fm: FrontMatter = serde_yaml::from_str(&yaml).unwrap();
 
         assert_eq!(fm.imports.len(), 2);
         assert!(matches!(
             fm.imports[0].parse_source().unwrap(),
-            ImportSource::Local { .. }
+            ParsedImportSpec::Local { .. }
         ));
-        assert_eq!(
-            fm.imports[1].endpoint,
-            Some(ImportEndpoint::GitHub {
-                name: "shared-components-connection".to_string()
-            })
-        );
         assert_eq!(
             fm.imports[1].with.get("region").and_then(|v| v.as_str()),
             Some("us-east-1")
         );
         assert!(matches!(
             fm.imports[1].parse_source().unwrap(),
-            ImportSource::Remote(_)
+            ParsedImportSpec::Remote {
+                source: ImportSource::GitHub { .. },
+                ..
+            }
         ));
+    }
+
+    #[test]
+    fn test_permissions_required_validation_seam() {
+        let required = PermissionsRequired {
+            read: true,
+            write: true,
+        };
+        let concrete = PermissionsConfig {
+            read: Some("read-connection".to_string()),
+            write: None,
+        };
+        assert!(required.missing_from(Some(&concrete)).is_empty());
+        assert!(required.validate_against(Some(&concrete)).is_ok());
+        assert_eq!(required.missing_from(None), vec!["read"]);
+        assert!(required.validate_against(None).is_err());
+        assert!(
+            PermissionsRequired {
+                read: false,
+                write: true,
+            }
+            .validate_against(None)
+            .is_ok()
+        );
+        assert!(
+            required
+                .validate_against(Some(&PermissionsConfig {
+                    read: Some("read".to_string()),
+                    write: Some("write".to_string()),
+                }))
+                .is_ok()
+        );
     }
 
     // ─── SupplyChainConfig deserialization + resolution ──────────────────────
@@ -4497,12 +4624,15 @@ Body
 name: "Test"
 description: "Test"
 safe-outputs:
-  scripts:
-    send-notification:
-      run: node notify.js
   jobs:
+    send-notification:
+      description: Send notification.
+      steps:
+        - bash: echo notify
     deploy-thing:
-      steps: []
+      description: Deploy.
+      steps:
+        - bash: echo deploy
   send-notification:
     require-approval: true
 ---

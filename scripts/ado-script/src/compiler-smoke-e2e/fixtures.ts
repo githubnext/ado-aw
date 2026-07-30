@@ -18,10 +18,6 @@ import { CANDIDATE_FIXTURE_NAMES } from "./config.js";
 export const RELEASE_FIXTURE_DIR = "tests/safe-outputs";
 /** Repo-relative directory containing the candidate-only custom fixture. */
 export const CANDIDATE_FIXTURE_DIR = "tests/compiler-smoke-e2e";
-export const CUSTOM_COMPONENT_CACHE_PATH =
-  ".ado-aw/imports/AgentPlayground/ado-aw-e2e-fixture/aa711dd17c4dfcde492b2bfad62e5fb1baad71f6/components/custom-build-tags/component.md";
-export const CUSTOM_COMPONENT_DIGEST_PATH = `${CUSTOM_COMPONENT_CACHE_PATH}.sha256`;
-export const IMPORT_CACHE_ATTRIBUTES_PATH = ".ado-aw/imports/.gitattributes";
 
 export interface FixturePaths {
   readonly name: FixtureName;
@@ -41,10 +37,7 @@ export function fixturePaths(name: FixtureName): FixturePaths {
     name === "custom-safe-output" ? CANDIDATE_FIXTURE_DIR : RELEASE_FIXTURE_DIR;
   const requiredBuildTags =
     name === "custom-safe-output"
-      ? (buildId: number): readonly string[] => [
-          `ado-aw-custom-script-${buildId}`,
-          `ado-aw-custom-job-${buildId}`,
-        ]
+      ? (buildId: number): readonly string[] => [`ado-aw-custom-job-${buildId}`]
       : undefined;
   return {
     name,
@@ -69,16 +62,11 @@ export function fixtureByName(name: FixtureName): FixturePaths {
 
 /**
  * The exact set of repo-relative paths the candidate-staging commit may touch:
- * five markdown sources, five compiled locks, and the compiler-managed
+ * five markdown sources, five compiled locks, and the compiler-managed root
  * `.gitattributes` block. Any other changed path fails before push.
  */
 export function allowedChangedPaths(): Set<string> {
-  const paths = new Set<string>([
-    ".gitattributes",
-    IMPORT_CACHE_ATTRIBUTES_PATH,
-    CUSTOM_COMPONENT_CACHE_PATH,
-    CUSTOM_COMPONENT_DIGEST_PATH,
-  ]);
+  const paths = new Set<string>([".gitattributes"]);
   for (const fixture of ALL_FIXTURES) {
     paths.add(fixture.relMd);
     paths.add(fixture.relLock);

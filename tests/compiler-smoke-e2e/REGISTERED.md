@@ -20,11 +20,9 @@ permanent and inert; the harness never deletes it.
 Candidate janitor definition `2557` was retired. The release-backed janitor
 definition `2548` remains scheduled weekly and is not part of this lane.
 
-The custom child imports
-`AgentPlayground/ado-aw-e2e-fixture/components/custom-build-tags/component.md`
-from immutable ref `refs/heads/e2e/custom-safe-output-v1`, pinned to
-`aa711dd17c4dfcde492b2bfad62e5fb1baad71f6`. Definition `2564` is explicitly
-authorized for that repository resource.
+The custom child imports its self-contained component from the candidate
+commit under `tests/compiler-smoke-e2e/component-fixture/`; it requires no
+external repository resource authorization.
 
 ## Security record
 

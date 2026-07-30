@@ -1,45 +1,34 @@
 ---
 safe-outputs:
-  scripts:
-    candidate-script-build-tag:
-      description: Add the candidate scripts-style proof tag to the current build.
-      max: 1
-      run: node components/custom-build-tags/tag-build-script.js
-      inputs:
-        proof:
-          type: choice
-          options: [candidate-smoke]
-          required: true
-      env:
-        SYSTEM_ACCESSTOKEN: System.AccessToken
   jobs:
     candidate-job-build-tag:
       description: Add the candidate jobs-style proof tag to the current build.
+      output: Candidate build-tag proposal accepted.
       max: 1
       inputs:
         proof:
+          description: Deterministic candidate-smoke proof value.
           type: choice
           options: [candidate-smoke]
           required: true
       steps:
         - bash: |
             set -euo pipefail
-            : > "$ADO_AW_SAFE_OUTPUT_RESULTS"
-            while IFS= read -r proposal; do
-              proposal_id="$(printf '%s' "$proposal" | jq -er '.proposal_id')"
-              proof="$(printf '%s' "$proposal" | jq -er '.proof')"
+            jq -c '.items[] | select(.type == "candidate-job-build-tag")' \
+              "$ADO_AW_AGENT_OUTPUT" |
+            while IFS= read -r item; do
+              proof="$(printf '%s' "$item" | jq -er '.proof')"
               test "$proof" = "candidate-smoke"
 
               tag="ado-aw-custom-job-$(Build.BuildId)"
-              printf '##vso[build.addbuildtag]%s\n' "$tag"
-              jq -cn \
-                --arg proposal_id "$proposal_id" \
-                --arg tag "$tag" \
-                '{schema_version:1, proposal_id:$proposal_id, status:"success", message:("added jobs-style build tag " + $tag), data:{tag:$tag}}' \
-                >> "$ADO_AW_SAFE_OUTPUT_RESULTS"
-            done < "$ADO_AW_SAFE_OUTPUT_PROPOSALS"
+              if [ "$ADO_AW_SAFE_OUTPUTS_STAGED" = "true" ]; then
+                printf 'STAGED: would add build tag %s\n' "$tag"
+              else
+                printf '##vso[build.addbuildtag]%s\n' "$tag"
+              fi
+            done
           displayName: Add jobs-style candidate build tag
 ---
 
-These tools are deterministic candidate-smoke probes. Call each only when the
+This tool is a deterministic candidate-smoke probe. Call it only when the
 consumer workflow explicitly requests `proof: candidate-smoke`.

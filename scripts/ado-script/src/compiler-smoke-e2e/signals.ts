@@ -1,8 +1,8 @@
 /**
  * Post-build verification for fixture-specific observable signals.
  *
- * A successful child build is not sufficient for custom safe outputs: both
- * executor modes must leave their distinct build tags on the actual child run.
+ * A successful child build is not sufficient for custom safe outputs: the
+ * custom job must leave its deterministic build tag on the actual child run.
  */
 import { fixtureByName } from "./fixtures.js";
 import type { FixtureBuildResult } from "./runner.js";

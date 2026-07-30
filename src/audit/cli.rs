@@ -10,7 +10,7 @@ use crate::ado::{
     resolve_ado_context, resolve_auth,
 };
 use crate::audit::analyzers::{
-    detection, firewall, jobs, mcp, missing, otel, policy, safe_outputs,
+    custom_jobs, detection, firewall, jobs, mcp, missing, otel, policy, safe_outputs,
 };
 use crate::audit::cache::{RunSummary, load_run_summary, save_run_summary};
 use crate::audit::findings;
@@ -198,6 +198,7 @@ async fn try_serve_from_cache(
     }
     let mut audit = summary.audit_data;
     let before_postprocess = audit.clone();
+    prepare_cached_reprocessing(&mut audit, run_dir).await;
     derive_post_processing(&mut audit, run_dir).await;
     if audit != before_postprocess {
         refresh_stale_cached_summary(&mut audit, summary.build_id, run_dir).await;
@@ -208,6 +209,38 @@ async fn try_serve_from_cache(
         json,
         from_cache: true,
     }))
+}
+
+async fn prepare_cached_reprocessing(audit: &mut AuditData, run_dir: &Path) {
+    audit.key_findings.clear();
+    audit.recommendations.clear();
+    audit.custom_safe_output_jobs.clear();
+    audit.pipeline_graph = None;
+    for job in &mut audit.jobs {
+        job.upstream_jobs.clear();
+        job.downstream_jobs.clear();
+    }
+    audit.warnings.retain(|warning| {
+        !matches!(
+            warning.source.as_str(),
+            "audit::safe_outputs"
+                | "audit::aw_info"
+                | "audit::pipeline_graph"
+                | "audit::custom_safe_outputs"
+        )
+    });
+    audit.safe_output_summary = None;
+    audit.safe_output_execution = None;
+    audit.rejected_safe_outputs = None;
+    audit.created_items.clear();
+
+    run_analyzer(
+        audit,
+        "audit::safe_outputs",
+        "safe-output analysis failed",
+        safe_outputs::analyze_safe_outputs(run_dir).await,
+        apply_safe_output_analysis,
+    );
 }
 
 /// Persist recomputed pipeline_graph + findings back to the cached snapshot
@@ -266,6 +299,13 @@ async fn derive_post_processing(audit: &mut AuditData, run_dir: &Path) {
             audit,
             "audit::pipeline_graph",
             format!("pipeline graph correlation failed: {error:#}"),
+        );
+    }
+    if let Err(error) = custom_jobs::populate_custom_safe_output_jobs(audit, run_dir).await {
+        warn_and_record(
+            audit,
+            "audit::custom_safe_outputs",
+            format!("custom safe-output job correlation failed: {error:#}"),
         );
     }
     audit.metrics.warning_count = audit.warnings.len() as u64;
@@ -375,13 +415,7 @@ async fn run_analyzers(
         "audit::safe_outputs",
         "safe-output analysis failed",
         safe_outputs::analyze_safe_outputs(run_dir).await,
-        |a, result| {
-            a.safe_output_summary = result.summary;
-            a.safe_output_execution = result.execution;
-            a.rejected_safe_outputs = result.rollup;
-            a.created_items = result.created_items;
-            a.key_findings.extend(result.findings);
-        },
+        apply_safe_output_analysis,
     );
     run_analyzer(
         audit,
@@ -418,6 +452,17 @@ async fn run_analyzers(
         jobs::fetch_timeline(client, ctx, auth, build_id).await,
         |a, timeline| a.jobs = jobs::timeline_to_jobs(&timeline),
     );
+}
+
+fn apply_safe_output_analysis(audit: &mut AuditData, result: safe_outputs::SafeOutputAnalysis) {
+    audit.safe_output_summary = result.summary;
+    audit.safe_output_execution = result.execution;
+    audit.rejected_safe_outputs = result.rollup;
+    audit.created_items = result.created_items;
+    for warning in result.warnings {
+        crate::audit::push_warning_once(audit, warning);
+    }
+    audit.key_findings.extend(result.findings);
 }
 
 /// Run analyzers that operate on the `agent_outputs` artifact directory.
@@ -471,6 +516,9 @@ async fn run_agent_output_analyzers(agent_outputs_dir: &Path, audit: &mut AuditD
             a.engine_config = result.engine_config;
             a.performance_metrics = result.performance;
             a.overview.aw_info = result.aw_info;
+            for warning in result.warnings {
+                crate::audit::push_warning_once(a, warning);
+            }
         },
     );
 }
@@ -758,8 +806,6 @@ fn artifact_name_to_prefix(name: &str) -> Option<&'static str> {
         Some("analyzed_outputs")
     } else if name == "safe_outputs" || name.starts_with("safe_outputs_") {
         Some("safe_outputs")
-    } else if name.starts_with("custom_safe_output_") {
-        Some("safe_outputs")
     } else {
         None
     }
@@ -929,11 +975,14 @@ fn is_authz_error(error: &anyhow::Error) -> bool {
 
 fn warn_and_record(audit: &mut AuditData, source: &str, message: String) {
     eprintln!("warning: {message}");
-    audit.warnings.push(ErrorInfo {
-        source: source.to_string(),
-        message,
-        timestamp: None,
-    });
+    crate::audit::push_warning_once(
+        audit,
+        ErrorInfo {
+            source: source.to_string(),
+            message,
+            timestamp: None,
+        },
+    );
 }
 
 /// Apply a fallible analyzer result to `audit`, recording any error as a
@@ -967,6 +1016,64 @@ fn render_audit(audit: &AuditData, json: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::model::{CustomSafeOutputJobAudit, Finding, JobData, Recommendation};
+
+    #[tokio::test]
+    async fn cached_reprocessing_resets_derived_state_and_pass_warnings() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let unrelated_warning = ErrorInfo {
+            source: String::from("audit::artifacts"),
+            message: String::from("persistent warning"),
+            timestamp: None,
+        };
+        let mut audit = AuditData {
+            key_findings: vec![Finding::default()],
+            recommendations: vec![Recommendation::default()],
+            custom_safe_output_jobs: vec![CustomSafeOutputJobAudit::default()],
+            warnings: vec![
+                ErrorInfo {
+                    source: String::from("audit::pipeline_graph"),
+                    message: String::from("stale graph warning"),
+                    timestamp: None,
+                },
+                unrelated_warning.clone(),
+            ],
+            jobs: vec![JobData {
+                upstream_jobs: vec![String::from("OldUpstream")],
+                downstream_jobs: vec![String::from("OldDownstream")],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        prepare_cached_reprocessing(&mut audit, temp_dir.path()).await;
+
+        assert!(audit.key_findings.is_empty());
+        assert!(audit.recommendations.is_empty());
+        assert!(audit.custom_safe_output_jobs.is_empty());
+        assert!(audit.jobs[0].upstream_jobs.is_empty());
+        assert!(audit.jobs[0].downstream_jobs.is_empty());
+        assert_eq!(audit.warnings, vec![unrelated_warning]);
+
+        warn_and_record(
+            &mut audit,
+            "audit::pipeline_graph",
+            String::from("same warning"),
+        );
+        warn_and_record(
+            &mut audit,
+            "audit::pipeline_graph",
+            String::from("same warning"),
+        );
+        assert_eq!(
+            audit
+                .warnings
+                .iter()
+                .filter(|warning| warning.message == "same warning")
+                .count(),
+            1
+        );
+    }
 
     #[test]
     fn url_context_overrides_flag_org() {
@@ -1043,7 +1150,7 @@ mod tests {
         assert!(artifact_matches_selected("agent_outputs_42", normalized));
         assert!(artifact_matches_selected("analyzed_outputs_42", normalized));
         assert!(artifact_matches_selected("safe_outputs", normalized));
-        assert!(artifact_matches_selected(
+        assert!(!artifact_matches_selected(
             "custom_safe_output_notify_42",
             normalized
         ));
@@ -1066,7 +1173,7 @@ mod tests {
         let safe_outputs_only = vec![String::from("safe-outputs")];
         let safe_outputs_only = normalize_artifact_filters(Some(&safe_outputs_only))
             .expect("normalize safe-output filter");
-        assert!(artifact_matches_selected(
+        assert!(!artifact_matches_selected(
             "custom_safe_output_notify_42",
             safe_outputs_only.as_deref()
         ));

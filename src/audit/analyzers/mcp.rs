@@ -59,8 +59,8 @@ struct EventAccumulators {
 impl EventAccumulators {
     fn on_tool_call(&mut self, value: &Value) {
         self.saw_recognizable_event = true;
-        let server = extract_string_field(value, &["server", "mcp_server", "provider"])
-            .unwrap_or_default();
+        let server =
+            extract_string_field(value, &["server", "mcp_server", "provider"]).unwrap_or_default();
         let tool = extract_string_field(value, &["tool", "name"]);
         if !server.is_empty() {
             self.observed_servers.insert(server.clone());
@@ -74,8 +74,8 @@ impl EventAccumulators {
 
     fn on_tool_error(&mut self, value: Value) {
         self.saw_recognizable_event = true;
-        let server = extract_string_field(&value, &["server", "mcp_server", "provider"])
-            .unwrap_or_default();
+        let server =
+            extract_string_field(&value, &["server", "mcp_server", "provider"]).unwrap_or_default();
         let tool = extract_string_field(&value, &["tool", "name"]);
         if !server.is_empty() {
             self.observed_servers.insert(server.clone());
@@ -96,8 +96,8 @@ impl EventAccumulators {
 
     fn on_server_error(&mut self, value: Value) {
         self.saw_recognizable_event = true;
-        let server = extract_string_field(&value, &["server", "mcp_server", "provider"])
-            .unwrap_or_default();
+        let server =
+            extract_string_field(&value, &["server", "mcp_server", "provider"]).unwrap_or_default();
         if !server.is_empty() {
             self.observed_servers.insert(server.clone());
             *self.server_error_counts.entry(server).or_default() += 1;
@@ -113,9 +113,7 @@ impl EventAccumulators {
 
     fn on_server_lifecycle(&mut self, value: &Value) {
         self.saw_recognizable_event = true;
-        if let Some(server) =
-            extract_string_field(value, &["server", "mcp_server", "provider"])
-        {
+        if let Some(server) = extract_string_field(value, &["server", "mcp_server", "provider"]) {
             self.observed_servers.insert(server);
         }
     }

@@ -175,168 +175,160 @@ ARM-minted token, e.g. for cross-org writes or named-identity attribution.
 See [`docs/network.md`](network.md) and
 [`docs/ir.md`](ir.md) for the typed SafeOutputs job wiring.
 
-## Custom safe outputs (scripts & jobs)
+## Custom safe-output jobs
 
 Reusable components imported with [`imports:`](imports.md) can add custom
-agent-callable safe-output tools under `safe-outputs.scripts.<name>` or
-`safe-outputs.jobs.<name>`. Both mechanisms preserve the standard trust
-boundary:
+agent-callable tools under `safe-outputs.jobs.<name>`. Each definition compiles
+to a dedicated Azure Pipelines job:
 
 ```text
-Agent MCP proposal → Detection → optional ManualReview → Custom_<tool> executor job
+Agent proposal -> Detection -> optional ManualReview -> Custom_<tool>
 ```
 
-The Agent and Detection jobs see only the generated closed MCP schema and the
-proposal artifact. Secret variables and service credentials named by the custom
-tool are bound only in the dedicated `Custom_<tool>` executor job.
+The Agent sees only the generated MCP description and closed input schema. The
+custom job receives its authored environment variables and steps only after the
+proposal artifact has passed Detection (and approval when configured).
 
-### Shared fields
-
-Both custom forms accept:
+### Job fields
 
 | Field | Description |
 |-------|-------------|
-| `description` | Human-readable MCP tool description shown to the agent. |
-| `inputs` | Agent-facing typed input schema. MVP types are scalar only: `string`, `number`, `boolean`, and `choice`. |
-| `max` | Maximum proposals of this custom tool to attempt in one run. Omitted tools default to 3. |
-| `env` | Mapping of environment variable names to Azure DevOps variable names. Values are treated as secret bindings and scoped to the custom executor job. |
+| `display-name` | Optional ADO job display name. |
+| `description` | Required MCP tool description. |
+| `condition` | Optional ADO condition ANDed with compiler-owned gates. |
+| `needs` | Optional additional custom/canonical job dependencies. |
+| `timeout-minutes` | Optional ADO job timeout. Omission uses the platform/pool default. |
+| `max` | Per-run MCP call budget. Defaults to 1. |
+| `inputs` | Closed Agent-facing schema. Types: `string`, `boolean`, `choice`. |
+| `env` | Literal strings or explicit ADO macros such as `$(SHARED_TOKEN)`. |
+| `output` | Static acknowledgement returned when the Agent records a proposal; it is not the later job result. |
+| `steps` | Self-contained inline Bash/PowerShell steps or explicitly versioned ADO tasks. |
 
-The generated MCP schema is closed (`additionalProperties: false`), so extra
-agent-supplied keys are rejected. String inputs default to `maxLength: 4000`;
-set `max-length` per field to choose a smaller bound (up to the compiler's hard
-limit of 8000). `choice` inputs require an `options:` list.
+Input definitions use the gh-aw-compatible fields `description`, `required`,
+`default`, `type`, and `options`. String arguments are limited to 10 KiB. Extra,
+missing, mistyped, invalid-choice, and oversized arguments are rejected by the
+MCP server and revalidated before the job runs.
 
-Custom tool names must be safe tool identifiers, cannot collide with built-in
-safe-output names, and cannot use the reserved structural names `scripts` or
-`jobs`. `require-approval` works for custom tools exactly like it does for
-built-ins: configure it under the tool's top-level name in the consumer
-workflow, or set a section-level default.
+Custom job names stay hyphenated in MCP and in `item.type`; generated ADO job
+identifiers replace non-identifier characters with underscores.
 
-```yaml
-safe-outputs:
-  notify-team:
-    require-approval: true
-```
+### Agent-output file
 
-### `safe-outputs.scripts.<name>`
-
-Scripts-style tools declare an entrypoint command with `run:` (or
-`entrypoint:`). The compiled job writes a compiler-generated custom config and
-runs one `ado-aw execute --custom-config <path>` step. The executor owns the
-proposal loop: for each selected proposal it invokes the entrypoint, passes the
-proposal JSON on stdin and in `AW_PROPOSAL`, enforces the budget/staged mode,
-sanitizes the result, and appends the final execution record.
-
-`timeout-minutes` bounds each entrypoint invocation. It defaults to 10 minutes
-and must be between 1 and 60. On expiry the executor terminates the child
-process tree, waits for the direct child to exit, and records that proposal as
-failed rather than waiting for the outer Azure Pipelines job timeout. This field
-is scripts-only; jobs-style tools should set timeouts on their authored ADO
-steps. Stdout and stderr capture are each capped at 1 MiB; exceeding either
-limit terminates the process tree and fails the proposal.
-
-The script must print exactly one JSON line to stdout:
+Every custom job receives the same validated aggregate file through
+`ADO_AW_AGENT_OUTPUT`:
 
 ```json
-{"status":"success","message":"sent notification","data":{"id":"123"}}
+{
+  "items": [
+    {"type":"add-build-tag","tag":"release"},
+    {"type":"send-notification","title":"Release blocked","severity":"critical"}
+  ]
+}
 ```
 
-`status` may be `success`/`succeeded`, `failure`/`failed`, or `staged`.
+A component filters the items it owns:
 
-```yaml
-safe-outputs:
-  scripts:
-    notify-team:
-      description: Send a structured team notification.
-      max: 3
-      timeout-minutes: 10
-      run: node tools/notify.js
-      inputs:
-        title:
-          type: string
-          required: true
-          max-length: 120
-        severity:
-          type: choice
-          options: [info, warning, critical]
-      env:
-        NOTIFY_TOKEN: TEAM_NOTIFY_TOKEN
+```bash
+jq -c '.items[] | select(.type == "send-notification")' \
+  "$ADO_AW_AGENT_OUTPUT"
 ```
 
-### `safe-outputs.jobs.<name>`
+The custom job's ADO timeline result is the execution outcome. There is no
+custom results file or per-proposal execution-record protocol.
 
-Jobs-style tools declare arbitrary Azure DevOps `steps:`. The compiler wraps
-those steps:
-
-1. `ado-aw execute --custom-phase pre --tool <name> --max <resolved>` filters
-   proposals for this tool, applies the compiler-resolved `max`, assigns stable
-   `proposal_id` values, writes
-   `ADO_AW_SAFE_OUTPUT_PROPOSALS`, and sets `ADO_AW_SAFE_OUTPUTS_STAGED=true`
-   during dry runs.
-2. The component's authored ADO steps run. They read
-   `$ADO_AW_SAFE_OUTPUT_PROPOSALS` and append one result record per attempted
-   proposal to `$ADO_AW_SAFE_OUTPUT_RESULTS`.
-3. `ado-aw execute --custom-phase post --tool <name> --max <resolved>` validates
-   and enriches the component results with compiler-owned provenance, sanitizes
-   output, and emits the standard executed-safe-output artifact. Missing,
-   malformed, or duplicate result records fail closed.
-
-The resolved budget is embedded in both wrapper commands at compile time,
-including values contributed by imported components; Stage 3 does not reparse
-the unmerged consumer source to infer it.
-
-Every `Custom_<tool>` job runs its finalization wrapper with `always()` and
-publishes a unique `custom_safe_output_<tool>_<build-id>` artifact with the
-execution records. This preserves failure/provenance evidence even when an
-authored component step or scripts entrypoint fails.
-
-Each jobs-style result line must be JSON with `schema_version: 1`,
-`proposal_id`, `status`, `message`, and optional `data`:
-
-```json
-{"schema_version":1,"proposal_id":"deploy-thing-0","status":"success","message":"deployment queued"}
-```
+### Example
 
 ```yaml
 safe-outputs:
   jobs:
-    create-service-ticket:
-      description: Create an incident ticket in the service desk.
+    send-notification:
+      display-name: Send release notification
+      description: Notify release operators when human action is required.
       max: 2
+      output: Notification proposal accepted.
       inputs:
         title:
+          description: Short operator-facing title.
           type: string
           required: true
-          max-length: 160
-        priority:
+        severity:
+          description: Operational severity.
           type: choice
-          options: [low, normal, high]
+          options: [info, warning, critical]
           required: true
       env:
-        SERVICE_DESK_TOKEN: SERVICE_DESK_TOKEN
+        NOTIFICATION_DESTINATION: release-operations
+        NOTIFICATION_TOKEN: $(SHARED_NOTIFICATION_TOKEN)
       steps:
         - bash: |
             set -euo pipefail
-            : > "$ADO_AW_SAFE_OUTPUT_RESULTS"
-            while IFS= read -r proposal; do
-              proposal_id=$(echo "$proposal" | jq -r '.proposal_id')
-              title=$(echo "$proposal" | jq -r '.title')
-              jq -cn --arg proposal_id "$proposal_id" --arg title "$title" \
-                '{schema_version:1, proposal_id:$proposal_id, status:"success", message:("created ticket for " + $title)}' \
-                >> "$ADO_AW_SAFE_OUTPUT_RESULTS"
-            done < "$ADO_AW_SAFE_OUTPUT_PROPOSALS"
-          displayName: Create service ticket
+            jq -c '.items[] | select(.type == "send-notification")' \
+              "$ADO_AW_AGENT_OUTPUT" |
+            while IFS= read -r item; do
+              if [ "$ADO_AW_SAFE_OUTPUTS_STAGED" = "true" ]; then
+                printf 'STAGED: %s\n' "$item"
+                continue
+              fi
+              curl -fsS https://notify.example/api/messages \
+                -H "Authorization: Bearer $NOTIFICATION_TOKEN" \
+                -H 'Content-Type: application/json' \
+                --data "$item"
+            done
+          displayName: Send notifications
 ```
 
-For cross-repository components that ship executor files, the custom executor
-job checks out the component repository resource, detaches to the pinned commit
-SHA, verifies `HEAD`, then runs the script or wrapped steps. Prompt-only or
-configuration-only imports are fully inlined at compile time and do not need a
-runtime checkout. Same-organization Azure Repos fetches the pin with
-`$(System.AccessToken)`; GitHub, GitHub Enterprise, and cross-organization
-Azure Repos reuse their repository-resource service-connection credentials.
-Persisted Git auth headers are removed immediately after the pin is fetched and
-verified, before component code runs.
+Supported authored steps are inline `bash`, `powershell`, or `pwsh`, plus ADO
+tasks with an explicit numeric version such as `PowerShell@2`. Custom jobs reject
+`template:`, authored checkout, containers, and unversioned tasks. They do not
+automatically checkout the consumer or component repository; executor logic must
+be self-contained in the compiled steps.
+
+### Approval and dependencies
+
+Configure approval through the same top-level per-tool policy as built-ins:
+
+```yaml
+safe-outputs:
+  send-notification:
+    require-approval: true
+```
+
+Only directly reviewed tools appear in ManualReview. A non-reviewed custom job
+that depends on a reviewed job runs after the reviewed chain, uses the reviewed
+safe-output pool, and is not separately presented for approval.
+
+### Staged mode
+
+Custom staged mode follows gh-aw's cooperative model. Global or per-tool policy
+sets `ADO_AW_SAFE_OUTPUTS_STAGED=true`; trusted component steps must avoid the
+write and render their own preview. ado-aw does not claim to prove that arbitrary
+privileged component code made no external write.
+
+```yaml
+safe-outputs:
+  staged: false
+  send-notification:
+    staged: true
+```
+
+### Pools and secrets
+
+Components cannot choose pools. Consumers select the execution trust boundary:
+
+```yaml
+pool:
+  vmImage: ubuntu-22.04
+  overrides:
+    safe-outputs:
+      name: PrivilegedWriters
+    safe-outputs-reviewed:
+      name: ReviewedWriters
+```
+
+`env` values are emitted verbatim. Use ADO secret variables or authorized
+variable groups for macros such as `$(SHARED_NOTIFICATION_TOKEN)`. Secret values
+are not resolved into generated config or artifacts; runtime log masking is
+provided by Azure Pipelines. Custom component code is trusted privileged code.
 
 ## Available Safe Output Tools
 
