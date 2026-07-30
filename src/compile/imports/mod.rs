@@ -906,7 +906,11 @@ async fn resolve_spec(
         } => {
             let remote_identity = fetcher.remote_identity(&spec).await?;
             if *optional {
-                fetcher.ensure_repository_accessible(&spec).await?;
+                match fetcher.ensure_repository_accessible(&spec).await {
+                    Ok(()) => {}
+                    Err(error) if is_import_not_found(&error) => return Ok(None),
+                    Err(error) => return Err(error),
+                }
             }
             let ref_key = ref_metadata_key(&remote_identity, repository, requested_ref);
             let resolved_sha = match resolve_remote_sha(

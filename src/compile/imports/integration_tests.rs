@@ -153,6 +153,25 @@ impl ManifestFetcher for InaccessibleRepositoryFetcher {
     }
 }
 
+struct MissingRepositoryFetcher;
+
+#[async_trait::async_trait]
+impl ManifestFetcher for MissingRepositoryFetcher {
+    async fn ensure_repository_accessible(&self, _spec: &ParsedImportSpec) -> Result<()> {
+        Err(anyhow::Error::new(ImportNotFound::new(
+            "missing repository",
+        )))
+    }
+
+    async fn resolve_ref(&self, _spec: &ParsedImportSpec) -> Result<CommitSha> {
+        panic!("missing optional repositories must skip before ref resolution")
+    }
+
+    async fn fetch(&self, _spec: &ParsedImportSpec, _sha: &CommitSha) -> Result<Vec<u8>> {
+        panic!("missing optional repositories must not fetch manifests")
+    }
+}
+
 struct ContextualFetcher {
     source: &'static str,
     project: &'static str,
@@ -420,6 +439,17 @@ async fn optional_remote_skips_only_typed_not_found() {
         repo.path(),
         repo.path(),
         &FakeFetcher::default(),
+    )
+    .await
+    .unwrap();
+    assert!(resolved.is_empty());
+
+    let optional_missing_repository = remote_entry("component.md@main?", "project/missing");
+    let resolved = resolve_imports_with_repo_root(
+        &[optional_missing_repository],
+        repo.path(),
+        repo.path(),
+        &MissingRepositoryFetcher,
     )
     .await
     .unwrap();

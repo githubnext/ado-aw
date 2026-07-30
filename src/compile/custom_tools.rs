@@ -269,7 +269,7 @@ pub fn resolved_execution_config_json(
         }
         config
             .as_object_mut()
-            .expect("tool config normalized to object")
+            .ok_or_else(|| anyhow!("failed to normalize resolved config for tool '{tool}'"))?
             .insert(
                 "staged".to_string(),
                 Value::Bool(front_matter.tool_is_staged(&tool)),
@@ -510,7 +510,7 @@ fn input_schema(
     };
     let property_obj = property
         .as_object_mut()
-        .expect("custom input schema is always an object");
+        .ok_or_else(|| anyhow!("failed to construct object schema for {path}"))?;
     property_obj.insert("description".to_string(), Value::String(description));
 
     if let Some(default) = input_obj.get("default") {

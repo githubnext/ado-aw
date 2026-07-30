@@ -1696,6 +1696,8 @@ fn validate_custom_job_step(tool: &str, step: &serde_json::Value) -> Result<()> 
         "safe-outputs.jobs.{tool}.steps entries must define exactly one of: {}",
         execution_keys.join(", ")
     );
+    // Only the step-level map becomes process environment; `inputs.env` is
+    // ordinary task input and cannot shadow compiler-owned job variables.
     if let Some(env) = object.get("env").and_then(serde_json::Value::as_object) {
         for key in ["ADO_AW_AGENT_OUTPUT", "ADO_AW_SAFE_OUTPUTS_STAGED"] {
             anyhow::ensure!(
