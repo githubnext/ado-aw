@@ -1,11 +1,47 @@
 # Candidate compiler agentic smoke
 
 This suite validates compiler changes before release. It builds `ado-aw` and
-`ado-script` from the exact pull-request or `main` commit, recompiles four
-selected workflows under [`tests/safe-outputs/`](../safe-outputs/) (canary,
-azure-cli, noop-target, and failure reporter), and queues four fixed
-AgentPlayground definitions against the regenerated YAML. The weekly janitor
-remains covered by the release-backed lane and is intentionally excluded here.
+`ado-script` from the exact pull-request or `main` commit, recompiles the
+selected workflows below, and queues the matching fixed AgentPlayground
+definitions against the regenerated YAML. The weekly janitor remains covered by
+the release-backed lane and is intentionally excluded here.
+
+| Fixture | Source | Covers |
+| --- | --- | --- |
+| `canary` | [`tests/safe-outputs/`](../safe-outputs/) | Full agentic loop with two ADO write paths |
+| `azure-cli` | [`tests/safe-outputs/`](../safe-outputs/) | AWF `az` extension and ADO control-plane reach |
+| `noop-target` | [`tests/safe-outputs/`](../safe-outputs/) | Minimal Stage 1 → 3 shape |
+| `smoke-failure-reporter` | [`tests/safe-outputs/`](../safe-outputs/) | Debug-only `create-issue` path |
+| `multi-repo` | [`fixtures/`](fixtures/) | **Candidate-only.** Multi-checkout layout and compile-time `self` identity |
+
+The first four are release-backed sources that also feed the release lane.
+`multi-repo` has no released lock file and no release definition, so it lives
+under [`fixtures/`](fixtures/) instead — a lock committed there would have no
+released compiler that owns it.
+
+### What `multi-repo` proves
+
+Compiler tests assert the *emitted YAML*; the executor-e2e suite asserts Stage 3
+against directories it creates itself. Neither proves that **Azure DevOps puts
+repositories where the compiler said**. `multi-repo` closes that gap on live
+ADO by checking, before the agent starts, that:
+
+1. `self` is at `$(Build.SourcesDirectory)/self` (the compiler-owned
+   `path: s/self`) and holds the exact candidate commit;
+2. the additional repository is at `$(Build.SourcesDirectory)/pinned-base` and
+   resolves to a *different* commit, so a collapsed or missing checkout is
+   detectable;
+3. the compiled pipeline is reachable beneath the `self` checkout — the same
+   path Stage 3 passes to `ado-aw execute --source`;
+4. the `self` repository name baked in at compile time matches the repository
+   the build is actually running against.
+
+It declares `create-pull-request` so the compiler emits the multi-checkout
+SafeOutputs job shape (issue #1731), but instructs the agent to emit only
+`noop` and grants no `edit` tool — so Stage 3 exercises the layout while
+proposing nothing and writing nothing. The SafeOutputs job's own layout is
+verified implicitly: if its `self` checkout were misplaced, `--source` would
+not resolve and Stage 3 would fail.
 
 It complements rather than replaces the release-backed daily smoke:
 
@@ -29,7 +65,7 @@ binary cannot drift.
    `ado-aw-linux-x64`, `awf-linux-x64`, `ado-script.zip`, `checksums.txt`, and
    `provenance.json`.
 4. The test-only `compiler-smoke-e2e` TypeScript harness creates a detached
-   worktree, adds an exact `supply-chain.pipeline-artifact` source to all four
+   worktree, adds an exact `supply-chain.pipeline-artifact` source to every
    smoke files, removes their schedules, recompiles them with the candidate
    compiler, and runs `ado-aw check`. Both compiler subprocesses receive
    `ADO_AW_COMPILE_REMOTE_URL` set to the target `ado-aw-mirror` URL, so
@@ -38,7 +74,7 @@ binary cannot drift.
 5. The harness pushes the worktree commit to
    `refs/heads/ado-aw-smoke-candidate/<producer-build-id>` in the Azure Repo
    `ado-aw-mirror`.
-6. Four fixed child definitions are queued concurrently with both that ref and
+6. Each fixed child definition is queued concurrently with both that ref and
    its exact commit SHA. Each generated pipeline downloads and verifies the
    artifact from the still-running producer build.
 7. The harness waits for all children, cancels non-terminal runs after a
@@ -81,10 +117,10 @@ to that manifest.
 
 The definitions are registered against `ado-aw-mirror`, not GitHub. Their
 default branch is the permanent inert ref
-`refs/heads/ado-aw-smoke-candidate-base`, whose four lock-file paths contain
+`refs/heads/ado-aw-smoke-candidate-base`, whose lock-file paths contain
 hand-authored `trigger: none`, `pr: none`, schedule-free placeholders. A child
 therefore runs only when the orchestrator explicitly supplies a candidate ref.
-The checked-in [`inert-child.yml`](inert-child.yml) is copied to those four
+The checked-in [`inert-child.yml`](inert-child.yml) is copied to each of those
 paths when the base ref is created.
 
 See [`REGISTERED.md`](REGISTERED.md) for definition IDs and variables.
@@ -95,7 +131,7 @@ The principal behind `agent-playground-write`, used only after artifact
 publication, needs:
 
 - Contribute/Create branch/Delete refs on `ado-aw-mirror`;
-- Queue builds and Stop builds on the four child definitions;
+- Queue builds and Stop builds on the child definitions;
 - Read builds and artifacts in AgentPlayground.
 
 Child build identities need Code Read on `ado-aw-mirror` and Build Read on the
@@ -120,6 +156,7 @@ COMPILER_SMOKE_CANARY_DEFINITION_ID
 COMPILER_SMOKE_AZURE_CLI_DEFINITION_ID
 COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID
 COMPILER_SMOKE_REPORTER_DEFINITION_ID
+COMPILER_SMOKE_MULTI_REPO_DEFINITION_ID
 ```
 
 Optional overrides:
@@ -150,7 +187,7 @@ The full live contract requires AgentPlayground and the fixed definitions:
 
 1. the producer remains in progress after publishing its artifact;
 2. every child downloads the exact producer `run-id`;
-3. all four children succeed;
+3. every child succeeds;
 4. child provenance identifies the producer definition, build, and source SHA;
 5. the per-run mirror ref is removed.
 

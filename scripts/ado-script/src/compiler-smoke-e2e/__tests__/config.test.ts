@@ -19,6 +19,7 @@ function baseEnv(overrides: Record<string, string | undefined> = {}): NodeJS.Pro
     COMPILER_SMOKE_AZURE_CLI_DEFINITION_ID: "2602",
     COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID: "2603",
     COMPILER_SMOKE_REPORTER_DEFINITION_ID: "2605",
+    COMPILER_SMOKE_MULTI_REPO_DEFINITION_ID: "2606",
     ...overrides,
   };
 }
@@ -35,6 +36,7 @@ describe("loadConfig", () => {
       "azure-cli": 2602,
       "noop-target": 2603,
       "smoke-failure-reporter": 2605,
+      "multi-repo": 2606,
     });
     expect(config.concurrency).toBe(5);
     expect(config.childTimeoutMs).toBe(7_200_000);
