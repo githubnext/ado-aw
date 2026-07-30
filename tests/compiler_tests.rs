@@ -9441,6 +9441,39 @@ fn test_smoke_failure_reporter_uses_registered_ado_names_and_staging_repo() {
         reporter.contains("rejects every other agent-supplied label"),
         "reporter prompt must explain the exact-label boundary"
     );
+    for contract in [
+        "org: msazuresphere",
+        "toolsets: [pipelines]",
+        "- pipelines_definition",
+        "- pipelines_build",
+        "- pipelines_build_log",
+        "Use only the native Azure DevOps MCP tools",
+        "Do not call ADO through bash, `curl`, `az`, or raw HTTP",
+    ] {
+        assert!(
+            reporter.contains(contract),
+            "reporter must use the MCPG-authenticated pipelines tools; missing: {contract}"
+        );
+    }
+    assert!(
+        !reporter.contains("SYSTEM_ACCESSTOKEN-equivalent bearer token"),
+        "reporter must not claim that an ADO credential is available in the Agent environment"
+    );
+
+    let (ok, compiled, stderr) =
+        compile_inline_source("smoke-failure-reporter-mcp-contract", &reporter);
+    assert!(ok, "smoke failure reporter should compile:\n{stderr}");
+    assert!(
+        compiled.contains("-e ADO_MCP_AUTH_TOKEN=\"$SC_READ_TOKEN\""),
+        "reporter must map the read token only into the Azure DevOps MCP container"
+    );
+    let document = parse_compiled_yaml(&compiled);
+    assert_job_execution_env_excludes_ado_credentials(
+        &document,
+        "Agent",
+        "=== Running AI agent with AWF",
+        "smoke failure reporter Agent",
+    );
 }
 
 #[test]
