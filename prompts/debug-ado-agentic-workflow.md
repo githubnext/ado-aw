@@ -32,7 +32,12 @@ Collect build context:
 - last known successful run (if available).
 
 ### Step 2 — Investigate
-Use available tools/logs to gather:
+Use `ado-aw` CLI tools as the primary investigation path:
+- Run `ado-aw audit <build-id-or-url>` to download the three artifact families (agent outputs, detection verdict, safe outputs) and run the built-in analyzers in one step. This is faster than manually trawling ADO logs.
+- Run `ado-aw trace <build-id-or-url>` to correlate the build's telemetry with the local typed-IR graph and explain failed-job chains and downstream skip classifications.
+- Run `ado-aw graph dump <source.md>` to visualise the pipeline's job/step dependency graph and understand structural relationships.
+
+Supplement with:
 - timeline state by stage/job,
 - failing job logs,
 - safe-output and detection artifacts when present,
