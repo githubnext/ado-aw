@@ -1499,6 +1499,34 @@ fn build_safeoutputs_job(
 ) -> Result<Job> {
     let mut steps: Vec<Step> = Vec::new();
     steps.push(checkout_self_step(&cfg.self_checkout_fetch));
+    // When `create-pull-request` is configured and there are additional
+    // checked-out repos, the SafeOutputs job must replicate the Agent job's
+    // multi-checkout layout (issue #1731). Without these checkouts:
+    //   • The additional repo directories don't exist in the SafeOutputs
+    //     workspace, so `prepare-pr-base.js` and `ado-aw execute` fail.
+    //   • A single `checkout: self` places `self` at
+    //     `$(Build.SourcesDirectory)` instead of the multi-checkout path
+    //     `$(Build.SourcesDirectory)/$(Build.Repository.Name)`, causing
+    //     the executor --source path to not resolve.
+    // Only emit these for the variant that actually runs `create-pull-request`;
+    // other variants (and split-approval auto-SafeOutputs) don't need them.
+    if variant.runs_create_pull_request {
+        for repo in &front_matter.checkout {
+            let fetch = front_matter
+                .checkout_fetch
+                .get(repo)
+                .cloned()
+                .unwrap_or_default();
+            steps.push(Step::Checkout(CheckoutStep {
+                repository: CheckoutRepo::Named(repo.clone()),
+                clean: None,
+                submodules: None,
+                fetch_depth: fetch.depth_for_emit(),
+                fetch_tags: fetch.fetch_tags,
+                persist_credentials: None,
+            }));
+        }
+    }
     // Acquire write token (when configured)
     push_raw_yaml_if_nonempty(&mut steps, &cfg.acquire_write_token)?;
     // Download analyzed outputs

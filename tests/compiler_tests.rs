@@ -9293,6 +9293,150 @@ fn test_no_create_pull_request_omits_prepare_pr_base_step() {
     );
 }
 
+// ── Issue #1731: SafeOutputs must check out additional repos for create-pr ──
+
+/// Issue #1731: when `create-pull-request` is configured with additional
+/// checked-out repos, the SafeOutputs job must emit a `checkout` step for each
+/// `checkout: true` repo so that:
+///   • The additional repo directories exist before `prepare-pr-base.js` runs.
+///   • ADO uses the multi-checkout workspace layout, placing `self` at
+///     `$(Build.SourcesDirectory)/$(Build.Repository.Name)` rather than
+///     directly at `$(Build.SourcesDirectory)`.
+///
+/// A `checkout: false` repo must remain resource-only (no checkout step).
+#[test]
+fn test_issue_1731_safeoutputs_checks_out_additional_repos_for_create_pr() {
+    let compiled = compile_inline_agent(
+        "issue-1731-multi-checkout",
+        "---\nname: \"Multi-repo PR\"\ndescription: \"Opens a PR in an additional repo\"\nworkspace: root\nrepos:\n  - my-org/tools\n  - my-org/docs\n  - name: my-org/scripts\n    checkout: false\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let agent = job_block(&compiled, "Agent");
+    let safeoutputs = job_block(&compiled, "SafeOutputs");
+
+    // Agent job: self + both checked-out repos.
+    assert!(
+        agent.contains("- checkout: self"),
+        "Agent must check out self:\n{agent}"
+    );
+    assert!(
+        agent.contains("- checkout: tools"),
+        "Agent must check out tools:\n{agent}"
+    );
+    assert!(
+        agent.contains("- checkout: docs"),
+        "Agent must check out docs:\n{agent}"
+    );
+    // scripts has checkout: false — resource-only, no checkout step in Agent.
+    assert!(
+        !agent.contains("- checkout: scripts"),
+        "Agent must NOT check out scripts (checkout: false):\n{agent}"
+    );
+
+    // SafeOutputs job: same three checkouts must precede prepare-pr-base.js.
+    assert!(
+        safeoutputs.contains("- checkout: self"),
+        "SafeOutputs must check out self:\n{safeoutputs}"
+    );
+    assert!(
+        safeoutputs.contains("- checkout: tools"),
+        "SafeOutputs must check out tools (issue #1731):\n{safeoutputs}"
+    );
+    assert!(
+        safeoutputs.contains("- checkout: docs"),
+        "SafeOutputs must check out docs (issue #1731):\n{safeoutputs}"
+    );
+    // scripts has checkout: false — must not appear in SafeOutputs either.
+    assert!(
+        !safeoutputs.contains("- checkout: scripts"),
+        "SafeOutputs must NOT check out scripts (checkout: false):\n{safeoutputs}"
+    );
+
+    // Checkouts must appear before the prepare-pr-base.js invocation.
+    let tools_checkout_at = safeoutputs
+        .find("- checkout: tools")
+        .expect("tools checkout present");
+    let prepare_at = safeoutputs
+        .find("prepare-pr-base.js")
+        .expect("prepare-pr-base.js present");
+    assert!(
+        tools_checkout_at < prepare_at,
+        "additional checkouts must precede prepare-pr-base.js in SafeOutputs:\n{safeoutputs}"
+    );
+}
+
+/// Issue #1731: with additional checked-out repos the executor `--source` path
+/// uses the multi-checkout layout `$(Build.SourcesDirectory)/$(Build.Repository.Name)/...`
+/// (because `trigger_repo_directory` expands to the subdirectory form when
+/// `checkout` is non-empty). The SafeOutputs job's additional checkout steps
+/// are what forces ADO to apply that layout rather than placing `self` directly
+/// at `$(Build.SourcesDirectory)`.
+#[test]
+fn test_issue_1731_safeoutputs_executor_source_path_uses_multi_checkout_layout() {
+    let compiled = compile_inline_agent(
+        "issue-1731-source-path",
+        "---\nname: \"Multi-repo PR\"\ndescription: \"Opens a PR in an additional repo\"\nworkspace: root\nrepos:\n  - my-org/tools\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let safeoutputs = job_block(&compiled, "SafeOutputs");
+    // With additional repos, self is placed at $(Build.SourcesDirectory)/$(Build.Repository.Name).
+    assert!(
+        safeoutputs.contains("$(Build.Repository.Name)"),
+        "SafeOutputs executor --source must use the multi-checkout layout path:\n{safeoutputs}"
+    );
+}
+
+/// Issue #1731, split-approval variant: when `create-pull-request` is
+/// review-gated and additional repos are checked out, the additional checkout
+/// steps must appear ONLY in `SafeOutputs_Reviewed` (the variant that actually
+/// runs the PR tool). The auto `SafeOutputs` job must not have them — it never
+/// executes `create-pull-request` and should not pay for the extra checkouts.
+#[test]
+fn test_issue_1731_split_approval_additional_checkouts_only_in_pr_variant() {
+    let compiled = compile_inline_agent(
+        "issue-1731-split-checkout",
+        "---\nname: \"Split PR\"\ndescription: \"Gated PR with extra repos\"\nworkspace: root\nrepos:\n  - my-org/tools\nsafe-outputs:\n  add-build-tag:\n    tag: ci\n  create-pull-request:\n    target-branch: main\n    require-approval: true\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let auto = job_block(&compiled, "SafeOutputs");
+    let reviewed = job_block(&compiled, "SafeOutputs_Reviewed");
+
+    // Reviewed job runs create-pull-request → must check out additional repos.
+    assert!(
+        reviewed.contains("- checkout: tools"),
+        "SafeOutputs_Reviewed must check out additional repos (issue #1731):\n{reviewed}"
+    );
+
+    // Auto job excludes create-pull-request → must NOT check out additional repos.
+    assert!(
+        !auto.contains("- checkout: tools"),
+        "auto SafeOutputs must NOT check out additional repos (it never runs create-pull-request):\n{auto}"
+    );
+}
+
+/// Mirror of the split-approval case: when `create-pull-request` is NOT gated
+/// but a sibling tool is, the PR tool runs in the auto `SafeOutputs` job.
+/// Additional checkouts must therefore appear in the auto job and NOT in
+/// `SafeOutputs_Reviewed`.
+#[test]
+fn test_issue_1731_split_approval_additional_checkouts_in_auto_when_sibling_gated() {
+    let compiled = compile_inline_agent(
+        "issue-1731-split-checkout-auto",
+        "---\nname: \"Split PR auto\"\ndescription: \"Non-gated PR with gated sibling and extra repos\"\nworkspace: root\nrepos:\n  - my-org/tools\nsafe-outputs:\n  add-build-tag:\n    tag: ci\n    require-approval: true\n  create-pull-request:\n    target-branch: main\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let auto = job_block(&compiled, "SafeOutputs");
+    let reviewed = job_block(&compiled, "SafeOutputs_Reviewed");
+
+    // Auto job runs create-pull-request → must check out additional repos.
+    assert!(
+        auto.contains("- checkout: tools"),
+        "auto SafeOutputs must check out additional repos when it runs create-pull-request:\n{auto}"
+    );
+
+    // Reviewed job excludes create-pull-request → must NOT check out additional repos.
+    assert!(
+        !reviewed.contains("- checkout: tools"),
+        "SafeOutputs_Reviewed must NOT check out additional repos when it doesn't run create-pull-request:\n{reviewed}"
+    );
+}
+
 #[test]
 fn test_smoke_failure_reporter_uses_registered_ado_names_and_staging_repo() {
     let reporter_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
