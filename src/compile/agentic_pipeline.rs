@@ -302,7 +302,11 @@ pub(crate) fn build_pipeline_context(
     let source_path_raw = common::generate_source_path(input_path);
     let source_path_suffix = source_path_raw
         .strip_prefix("{{ trigger_repo_directory }}/")
-        .expect("generate_source_path always emits the compiler-owned trigger-repo prefix");
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "compiler-generated workflow source path is missing the trigger-repository prefix"
+            )
+        })?;
     crate::validate::reject_pipeline_injection(source_path_suffix, "workflow source path")?;
     let source_path =
         source_path_raw.replace("{{ trigger_repo_directory }}", &trigger_repo_directory);

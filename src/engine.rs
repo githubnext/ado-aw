@@ -912,8 +912,6 @@ pub fn copilot_provider_env(engine_config: &EngineConfig) -> Result<Vec<(String,
     Ok(pairs)
 }
 
-/// Return custom environment entries for a Detection Copilot run.
-///
 /// Return the full effective custom environment for a Detection Copilot run.
 ///
 /// The front-matter resolver has already overlaid Detection values on the

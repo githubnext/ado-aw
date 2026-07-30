@@ -534,10 +534,13 @@ pub struct ThreatDetectionConfig {
     /// Detection-specific engine settings layered over top-level `engine:`.
     #[serde(default)]
     pub engine: Option<DetectionEngineConfig>,
-    /// Trusted raw ADO steps run before AI analysis.
+    /// Trusted raw ADO steps run before AI analysis. Like top-level
+    /// setup/steps/post-steps/teardown, these are operator-authored host steps
+    /// emitted verbatim; they are not sanitized as untrusted runtime content.
     #[serde(default)]
     pub steps: Vec<serde_yaml::Value>,
-    /// Trusted raw ADO steps run after AI analysis.
+    /// Trusted raw ADO steps run after AI analysis. They share the same
+    /// operator-trusted raw-step boundary as the other front-matter step lists.
     #[serde(default)]
     pub post_steps: Vec<serde_yaml::Value>,
 }
