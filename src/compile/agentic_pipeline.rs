@@ -2875,8 +2875,7 @@ fn start_mcpg_step(
          \n\
          # Wait for MCPG to be ready\n\
          READY=false\n\
-         # shellcheck disable=SC2034 # i is intentionally unused; wait-N-times loop\n\
-         for i in $(seq 1 30); do\n  \
+         for _i in $(seq 1 30); do\n  \
            if curl -sf \"http://localhost:{MCPG_PORT}/health\" > /dev/null 2>&1; then\n    \
              echo \"MCPG is ready\"\n    \
              READY=true\n    \
@@ -2893,8 +2892,7 @@ fn start_mcpg_step(
          # Health check passing doesn't guarantee stdout is flushed, so poll.\n\
          echo \"Waiting for gateway output file...\"\n\
          GATEWAY_READY=false\n\
-         # shellcheck disable=SC2034 # i is intentionally unused; wait-N-times loop\n\
-         for i in $(seq 1 15); do\n  \
+         for _i in $(seq 1 15); do\n  \
            if [ -s \"$GATEWAY_OUTPUT\" ] && jq -e '.mcpServers' \"$GATEWAY_OUTPUT\" > /dev/null 2>&1; then\n    \
              echo \"Gateway output is ready\"\n    \
              GATEWAY_READY=true\n    \
