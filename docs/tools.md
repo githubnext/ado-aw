@@ -146,9 +146,7 @@ general use. Two paths are supported:
 1. **`az devops *` subcommands** (work items, repos, pipelines, etc.)
    are automatically authenticated via `AZURE_DEVOPS_EXT_PAT`, which
    the compiler populates inside AWF whenever `permissions.read` is
-   configured. The Agent step maps only
-   `AZURE_DEVOPS_EXT_PAT: $(SC_READ_TOKEN)`; neither `SC_WRITE_TOKEN` nor
-   `$(System.AccessToken)` is exposed to Stage 1. No extra steps needed.
+   configured. No extra steps needed.
 2. **General `az` / ARM / Graph commands** (`az account get-access-token`,
    `az resource ...`, `az ad ...`, etc.) require their own
    authentication. The agent has no inherited cloud identity; you

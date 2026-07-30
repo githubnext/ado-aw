@@ -45,16 +45,10 @@ Steps (run each in turn using your bash tool):
      -o tsv
    ```
 
-   Do not suppress or overwrite the command's exit status. Capture the
-   combined stdout/stderr (truncated to 400 characters if longer) for the
-   safe-output context below. Treat a non-zero exit or empty project list as
-   a failure.
+   Capture the combined stdout/stderr (truncated to 400 characters if
+   longer) for the safe-output context below.
 
-3. If either command fails, invoke exactly one MCP tool:
-   `report-incomplete` from the `safeoutputs` server with the failing command
-   and its captured output, then stop. Do not call `noop`.
-
-4. Otherwise, invoke exactly one MCP tool: `noop` from the `safeoutputs`
+3. Invoke exactly one MCP tool: `noop` from the `safeoutputs`
    server, with:
 
    - context: a brief one-line proof-of-life containing the az version

@@ -32,14 +32,9 @@ steps:
 }
 
 function agentTokenYaml(opts: {
-  agentReadToken?: string;
   agentExtraEnv?: string;
   detectionExtraEnv?: string;
 } = {}): string {
-  const agentReadToken =
-    opts.agentReadToken === undefined
-      ? ""
-      : `\n          AZURE_DEVOPS_EXT_PAT: ${opts.agentReadToken}`;
   return `
 jobs:
   - job: Agent
@@ -47,7 +42,7 @@ jobs:
       - bash: echo agent
         displayName: Run copilot (AWF network isolated)
         env:
-          GITHUB_TOKEN: $(GITHUB_TOKEN)${agentReadToken}${opts.agentExtraEnv ?? ""}
+          GITHUB_TOKEN: $(GITHUB_TOKEN)${opts.agentExtraEnv ?? ""}
   - job: Detection
     steps:
       - bash: echo detection
@@ -58,46 +53,40 @@ jobs:
 }
 
 describe("assertAdoTokenIsolation", () => {
-  it("accepts the read-scoped Agent mapping while keeping Detection isolated", () => {
-    expect(() =>
-      assertAdoTokenIsolation(agentTokenYaml({ agentReadToken: "$(SC_READ_TOKEN)" }), "canary", true),
-    ).not.toThrow();
+  it("accepts credential-free Agent and Detection environments", () => {
+    expect(() => assertAdoTokenIsolation(agentTokenYaml(), "canary")).not.toThrow();
   });
 
-  it("rejects a missing Agent read-token mapping", () => {
-    expect(() => assertAdoTokenIsolation(agentTokenYaml(), "canary", true)).toThrow(
-      /read-token contract mismatch/,
-    );
-  });
-
-  it("accepts a workflow that does not request read permissions", () => {
-    expect(() => assertAdoTokenIsolation(agentTokenYaml(), "custom-safe-output", false)).not.toThrow();
-  });
-
-  it("rejects a write-scoped token on the Agent", () => {
+  it.each([
+    "AZURE_DEVOPS_EXT_PAT",
+    "SC_READ_TOKEN",
+    "SC_WRITE_TOKEN",
+    "SYSTEM_ACCESSTOKEN",
+  ])("rejects %s on the Agent", (credential) => {
     expect(() =>
       assertAdoTokenIsolation(
         agentTokenYaml({
-          agentReadToken: "$(SC_READ_TOKEN)",
-          agentExtraEnv: "\n          SC_WRITE_TOKEN: $(SC_WRITE_TOKEN)",
+          agentExtraEnv: `\n          ${credential}: $(${credential})`,
         }),
         "canary",
-        true,
       ),
-    ).toThrow(/Agent must not receive SC_WRITE_TOKEN/);
+    ).toThrow(new RegExp(`Agent must not receive ${credential}`));
   });
 
-  it("rejects any ADO token on Detection", () => {
+  it.each([
+    "AZURE_DEVOPS_EXT_PAT",
+    "SC_READ_TOKEN",
+    "SC_WRITE_TOKEN",
+    "SYSTEM_ACCESSTOKEN",
+  ])("rejects %s on Detection", (credential) => {
     expect(() =>
       assertAdoTokenIsolation(
         agentTokenYaml({
-          agentReadToken: "$(SC_READ_TOKEN)",
-          detectionExtraEnv: "\n          AZURE_DEVOPS_EXT_PAT: $(SC_READ_TOKEN)",
+          detectionExtraEnv: `\n          ${credential}: $(${credential})`,
         }),
         "canary",
-        true,
       ),
-    ).toThrow(/Detection must not receive AZURE_DEVOPS_EXT_PAT/);
+    ).toThrow(new RegExp(`Detection must not receive ${credential}`));
   });
 });
 

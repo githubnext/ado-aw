@@ -25,10 +25,7 @@ const baseEnv = {
   COMPILER_SMOKE_POLL_MS: "1",
 };
 
-function specificRunYaml(agentReadToken: boolean): string {
-  const readTokenEnv = agentReadToken
-    ? "\n          AZURE_DEVOPS_EXT_PAT: $(SC_READ_TOKEN)"
-    : "";
+function specificRunYaml(): string {
   return `
 jobs:
   - job: Agent
@@ -36,7 +33,7 @@ jobs:
       - bash: copilot --allow-tool "shell(az)" --allow-tool "shell(head)"
         displayName: Run copilot (AWF network isolated)
         env:
-          GITHUB_TOKEN: $(GITHUB_TOKEN)${readTokenEnv}
+          GITHUB_TOKEN: $(GITHUB_TOKEN)
       - task: DownloadPipelineArtifact@2
         inputs:
           targetPath: in
@@ -170,9 +167,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     mkdtemp: vi.fn(async () => "C:\\tmp\\compiler-smoke-xyz"),
     readFile: vi.fn(async (path: string) => {
       if (String(path).endsWith(".lock.yml")) {
-        return specificRunYaml(
-          !String(path).includes("custom-safe-output.lock.yml"),
-        );
+        return specificRunYaml();
       }
       return "---\nname: fixture\n---\nBody.\n";
     }),

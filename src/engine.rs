@@ -29,7 +29,6 @@ pub const BLOCKED_ENV_KEYS: &[&str] = &[
     "COPILOT_OTEL_ENABLED",
     "COPILOT_OTEL_EXPORTER_TYPE",
     "COPILOT_OTEL_FILE_EXPORTER_PATH",
-    "AZURE_DEVOPS_EXT_PAT",
     // Shell/system vars that could affect AWF or pipeline behavior
     "PATH",
     "HOME",
@@ -1571,19 +1570,13 @@ mod tests {
     }
 
     #[test]
-    fn engine_env_blocks_azure_devops_pat() {
+    fn engine_env_allows_azure_devops_pat() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    AZURE_DEVOPS_EXT_PAT: evil\n---\n",
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    AZURE_DEVOPS_EXT_PAT: custom\n---\n",
         )
         .unwrap();
-        let result = Engine::Copilot.env(&fm.engine);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("compiler-controlled")
-        );
+        let env = Engine::Copilot.env(&fm.engine).unwrap();
+        assert!(env.contains("AZURE_DEVOPS_EXT_PAT: \"custom\""));
     }
 
     #[test]

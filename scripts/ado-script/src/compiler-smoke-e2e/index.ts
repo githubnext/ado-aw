@@ -96,7 +96,7 @@ async function compileFixtures(
 
     const yamlText = await readFile(join(worktreeDir, fixture.relLock), "utf8");
     assertNoForbiddenReleaseUrls(yamlText, fixture.name);
-    assertAdoTokenIsolation(yamlText, fixture.name, fixture.requiresAgentReadToken);
+    assertAdoTokenIsolation(yamlText, fixture.name);
     if (fixture.name === "azure-cli") {
       assertAgentCommandPolicy(
         yamlText,

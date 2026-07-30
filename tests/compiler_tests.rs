@@ -497,9 +497,12 @@ Do something.
         compiled.contains("my-read-sc"),
         "Compiled output should contain the read service connection name"
     );
-    assert!(
-        compiled.contains("AZURE_DEVOPS_EXT_PAT: $(SC_READ_TOKEN)"),
-        "Compiled output should project the read-scoped token into the Agent sandbox"
+    let document = parse_compiled_yaml(&compiled);
+    assert_job_execution_env_excludes_ado_credentials(
+        &document,
+        "Agent",
+        "=== Running AI agent with AWF",
+        "read/write Agent",
     );
 
     // Should contain write token acquisition (SC_WRITE_TOKEN)
@@ -776,8 +779,15 @@ Do something.
         "Compiled output should contain SC_READ_TOKEN"
     );
     assert!(
-        compiled.contains("AZURE_DEVOPS_EXT_PAT: $(SC_READ_TOKEN)"),
-        "Read-only permissions should project the token into the Agent sandbox"
+        compiled.contains("my-read-sc"),
+        "Compiled output should contain the read service connection name"
+    );
+    let document = parse_compiled_yaml(&compiled);
+    assert_job_execution_env_excludes_ado_credentials(
+        &document,
+        "Agent",
+        "=== Running AI agent with AWF",
+        "read-only Agent",
     );
     assert!(
         !compiled.contains("SC_WRITE_TOKEN"),
@@ -788,7 +798,7 @@ Do something.
 }
 
 #[test]
-fn test_permissions_read_token_contract_for_all_targets() {
+fn test_permissions_ado_token_isolation_for_all_targets() {
     for target in [None, Some("1es"), Some("job"), Some("stage")] {
         let label = target.unwrap_or("standalone");
         let target_line = target
@@ -796,8 +806,8 @@ fn test_permissions_read_token_contract_for_all_targets() {
             .unwrap_or_default();
         let source = format!(
             r#"---
-name: "Read Token Contract {label}"
-description: "Ensures Stage 1 receives only the read-scoped ADO token"
+name: "ADO Token Isolation {label}"
+description: "Ensures Agent and Detection receive no ADO credentials"
 {target_line}permissions:
   read: agent-read
   write: executor-write
@@ -811,56 +821,30 @@ Call noop.
 "#
         );
         let (ok, compiled, stderr) =
-            compile_inline_source(&format!("read-token-contract-{label}"), &source);
+            compile_inline_source(&format!("ado-token-isolation-{label}"), &source);
         assert!(ok, "{label}: compilation failed:\n{stderr}");
+        assert!(
+            compiled.contains("SC_READ_TOKEN"),
+            "{label}: permissions.read must still acquire SC_READ_TOKEN"
+        );
+        assert!(
+            compiled.contains("agent-read"),
+            "{label}: compiled output must retain the read service connection"
+        );
 
         let document = parse_compiled_yaml(&compiled);
-        let agent = find_job_mapping_by_display_name(&document, "Agent")
-            .unwrap_or_else(|| panic!("{label}: missing Agent job"));
-        let run_agent = find_bash_step_containing(agent, "=== Running AI agent with AWF")
-            .unwrap_or_else(|| panic!("{label}: missing Agent execution step"));
-        let agent_env = run_agent
-            .get(yaml_key("env"))
-            .and_then(|value| value.as_mapping())
-            .unwrap_or_else(|| panic!("{label}: Agent execution step must have an env mapping"));
-
-        assert_eq!(
-            agent_env
-                .get(yaml_key("AZURE_DEVOPS_EXT_PAT"))
-                .and_then(|value| value.as_str()),
-            Some("$(SC_READ_TOKEN)"),
-            "{label}: permissions.read must project SC_READ_TOKEN into the Agent sandbox"
+        assert_job_execution_env_excludes_ado_credentials(
+            &document,
+            "Agent",
+            "=== Running AI agent with AWF",
+            &format!("{label} Agent"),
         );
-        for forbidden in ["SC_READ_TOKEN", "SC_WRITE_TOKEN", "SYSTEM_ACCESSTOKEN"] {
-            assert!(
-                !agent_env.contains_key(yaml_key(forbidden)),
-                "{label}: Agent execution env must not expose {forbidden}"
-            );
-        }
-
-        let detection = find_job_mapping_by_display_name(&document, "Detection")
-            .unwrap_or_else(|| panic!("{label}: missing Detection job"));
-        let run_detection = find_bash_step_containing(
-            detection,
+        assert_job_execution_env_excludes_ado_credentials(
+            &document,
+            "Detection",
             "# Run threat analysis with AWF network isolation",
-        )
-        .unwrap_or_else(|| panic!("{label}: missing Detection execution step"));
-        if let Some(detection_env) = run_detection
-            .get(yaml_key("env"))
-            .and_then(|value| value.as_mapping())
-        {
-            for forbidden in [
-                "AZURE_DEVOPS_EXT_PAT",
-                "SC_READ_TOKEN",
-                "SC_WRITE_TOKEN",
-                "SYSTEM_ACCESSTOKEN",
-            ] {
-                assert!(
-                    !detection_env.contains_key(yaml_key(forbidden)),
-                    "{label}: Detection execution env must not expose {forbidden}"
-                );
-            }
-        }
+            &format!("{label} Detection"),
+        );
     }
 }
 
@@ -3561,6 +3545,34 @@ fn find_bash_step_containing_value<'a>(
             .iter()
             .find_map(|child| find_bash_step_containing_value(child, needle)),
         _ => None,
+    }
+}
+
+fn assert_job_execution_env_excludes_ado_credentials(
+    document: &serde_yaml::Value,
+    job_display_name: &str,
+    script_needle: &str,
+    label: &str,
+) {
+    let job = find_job_mapping_by_display_name(document, job_display_name)
+        .unwrap_or_else(|| panic!("{label}: missing {job_display_name} job"));
+    let step = find_bash_step_containing(job, script_needle)
+        .unwrap_or_else(|| panic!("{label}: missing execution step"));
+    if let Some(env) = step
+        .get(yaml_key("env"))
+        .and_then(|value| value.as_mapping())
+    {
+        for forbidden in [
+            "AZURE_DEVOPS_EXT_PAT",
+            "SC_READ_TOKEN",
+            "SC_WRITE_TOKEN",
+            "SYSTEM_ACCESSTOKEN",
+        ] {
+            assert!(
+                !env.contains_key(yaml_key(forbidden)),
+                "{label}: execution env must not expose {forbidden}"
+            );
+        }
     }
 }
 
@@ -9132,7 +9144,7 @@ fn test_smoke_failure_reporter_uses_registered_ado_names_and_staging_repo() {
 }
 
 #[test]
-fn test_azure_cli_smoke_fails_closed_when_authentication_fails() {
+fn test_azure_cli_smoke_uses_non_blocking_noop_flow() {
     let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("safe-outputs")
@@ -9142,9 +9154,8 @@ fn test_azure_cli_smoke_fails_closed_when_authentication_fails() {
         .replace("\r\n", "\n");
 
     for contract in [
-        "If either command fails",
-        "`report-incomplete` from the `safeoutputs` server",
-        "Do not call `noop`",
+        "Capture the combined stdout/stderr",
+        "Invoke exactly one MCP tool: `noop` from the `safeoutputs`",
         "bash:\n    - az\n    - head",
         "edit: false",
         "Do not inspect MCP configuration",
@@ -9153,13 +9164,25 @@ fn test_azure_cli_smoke_fails_closed_when_authentication_fails() {
     ] {
         assert!(
             fixture.contains(contract),
-            "Azure CLI smoke must fail closed on an auth regression; missing contract: {contract}"
+            "Azure CLI smoke must preserve its non-blocking restricted flow; missing contract: {contract}"
+        );
+    }
+    for forbidden in ["report-incomplete", "Do not call `noop`"] {
+        assert!(
+            !fixture.contains(forbidden),
+            "Azure CLI smoke must not fail the candidate lane on unavailable direct auth: {forbidden}"
         );
     }
 
     let (ok, compiled, stderr) = compile_inline_source("azure-cli-smoke-tool-policy", &fixture);
     assert!(ok, "Azure CLI smoke should compile:\n{stderr}");
     let document = parse_compiled_yaml(&compiled);
+    assert_job_execution_env_excludes_ado_credentials(
+        &document,
+        "Agent",
+        "=== Running AI agent with AWF",
+        "Azure CLI smoke Agent",
+    );
     let agent = find_job_mapping_by_display_name(&document, "Agent")
         .expect("Azure CLI smoke should contain the Agent job");
     let run_agent = find_bash_step_containing(agent, "=== Running AI agent with AWF")
