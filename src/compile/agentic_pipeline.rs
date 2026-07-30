@@ -1604,10 +1604,8 @@ fn classify_custom_post_review_dependencies(defs: &mut [CustomSafeOutputJobDef])
         for dependency in &definition.needs {
             anyhow::ensure!(
                 indexes.contains_key(dependency)
-                    || matches!(
-                        dependency.as_str(),
-                        "agent" | "detection" | "safe-outputs" | "safe-outputs-reviewed"
-                    ),
+                    || super::custom_tools::CUSTOM_JOB_SYSTEM_NEEDS
+                        .contains(&dependency.as_str()),
                 "safe-outputs.jobs.{}.needs references unknown job '{}'",
                 definition.name,
                 dependency
@@ -1722,15 +1720,60 @@ fn validate_custom_job_step(tool: &str, step: &serde_json::Value) -> Result<()> 
     if let Some(Err(message)) = super::ir::tasks::parse::validate_task_step(&yaml) {
         anyhow::bail!("safe-outputs.jobs.{tool}.steps has invalid task input: {message}");
     }
-    let serialized = serde_json::to_string(step).context("failed to inspect custom job step")?;
     for removed in ["ADO_AW_SAFE_OUTPUT_PROPOSALS", "ADO_AW_SAFE_OUTPUT_RESULTS"] {
         anyhow::ensure!(
-            !serialized.contains(removed),
+            !custom_step_references_removed_variable(object, removed),
             "safe-outputs.jobs.{tool}.steps references removed variable {removed}; use \
              ADO_AW_AGENT_OUTPUT"
         );
     }
     Ok(())
+}
+
+fn custom_step_references_removed_variable(
+    step: &serde_json::Map<String, serde_json::Value>,
+    variable: &str,
+) -> bool {
+    let env_references = step
+        .get("env")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|env| {
+            env.contains_key(variable)
+                || env
+                    .values()
+                    .any(|value| json_value_references_variable(value, variable))
+        });
+    let runtime_field_references = ["bash", "powershell", "pwsh", "inputs", "workingDirectory"]
+        .iter()
+        .filter_map(|field| step.get(*field))
+        .any(|value| json_value_references_variable(value, variable));
+    let condition_references = step
+        .get("condition")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|condition| condition.contains(variable));
+
+    env_references || runtime_field_references || condition_references
+}
+
+fn json_value_references_variable(value: &serde_json::Value, variable: &str) -> bool {
+    match value {
+        serde_json::Value::String(value) => {
+            value.contains(&format!("$({variable})"))
+                || value.contains(&format!("${variable}"))
+                || value.contains(&format!("${{{variable}}}"))
+                || value
+                    .to_ascii_uppercase()
+                    .contains(&format!("$ENV:{variable}"))
+                || value.contains(&format!("%{variable}%"))
+        }
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| json_value_references_variable(value, variable)),
+        serde_json::Value::Object(values) => values
+            .values()
+            .any(|value| json_value_references_variable(value, variable)),
+        _ => false,
+    }
 }
 
 fn build_custom_safe_output_job(
@@ -4820,6 +4863,36 @@ safe-outputs:
                 .contains("no reviewed built-in SafeOutputs path"),
             "{error:#}"
         );
+    }
+
+    #[test]
+    fn removed_custom_variable_check_ignores_descriptive_text() {
+        let step = serde_json::json!({
+            "bash": "echo ok",
+            "displayName": "Migrated from ADO_AW_SAFE_OUTPUT_PROPOSALS",
+        });
+        assert!(validate_custom_job_step("notify", &step).is_ok());
+    }
+
+    #[test]
+    fn removed_custom_variable_check_rejects_runtime_references() {
+        for step in [
+            serde_json::json!({
+                "bash": "cat \"$ADO_AW_SAFE_OUTPUT_PROPOSALS\"",
+            }),
+            serde_json::json!({
+                "pwsh": "Get-Content $env:ADO_AW_SAFE_OUTPUT_RESULTS",
+            }),
+            serde_json::json!({
+                "bash": "echo ok",
+                "env": {
+                    "LEGACY": "$(ADO_AW_SAFE_OUTPUT_PROPOSALS)",
+                },
+            }),
+        ] {
+            let error = validate_custom_job_step("notify", &step).unwrap_err();
+            assert!(error.to_string().contains("removed variable"), "{error:#}");
+        }
     }
 
     // ── fold_agent_conditions (issue #987) ─────────────────────────────────

@@ -40,6 +40,12 @@ const INPUT_KEYS: &[&str] = &["description", "required", "default", "type", "opt
 
 const COMPILER_ENV_KEYS: &[&str] = &["ADO_AW_AGENT_OUTPUT", "ADO_AW_SAFE_OUTPUTS_STAGED"];
 const COMPILER_INPUT_KEYS: &[&str] = &["name", "type"];
+pub(crate) const CUSTOM_JOB_SYSTEM_NEEDS: &[&str] = &[
+    "agent",
+    "detection",
+    "safe-outputs",
+    "safe-outputs-reviewed",
+];
 
 /// A compiler-generated custom MCP tool definition.
 #[derive(Debug, Clone, PartialEq)]
@@ -414,17 +420,8 @@ fn validate_tool_name(tool_name: &str) -> Result<()> {
          safe-output tool"
     );
     ensure!(
-        !matches!(
-            tool_name,
-            "scripts"
-                | "jobs"
-                | "require-approval"
-                | "staged"
-                | "agent"
-                | "detection"
-                | "safe-outputs"
-                | "safe-outputs-reviewed"
-        ),
+        !matches!(tool_name, "scripts" | "jobs" | "require-approval" | "staged")
+            && !CUSTOM_JOB_SYSTEM_NEEDS.contains(&tool_name),
         "safe-outputs.jobs.{tool_name}: custom tool name is reserved"
     );
     Ok(())
@@ -659,6 +656,10 @@ fn parse_env(tool_name: &str, value: Option<&Value>) -> Result<Vec<(String, Stri
         let value = value
             .as_str()
             .ok_or_else(|| anyhow!("safe-outputs.jobs.{tool_name}.env.{name} must be a string"))?;
+        ensure!(
+            !crate::validate::contains_pipeline_command(value),
+            "safe-outputs.jobs.{tool_name}.env.{name} must not contain an ADO pipeline command"
+        );
         pairs.push((name.clone(), value.to_string()));
     }
     pairs.sort_by(|a, b| a.0.cmp(&b.0));
@@ -692,6 +693,20 @@ fn parse_component(
              component-source and component-sha must be present together"
         )
     })?;
+    let manifest_digest = match tool_obj.get("manifest-digest") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(digest)) => {
+            ensure!(
+                digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                "safe-outputs.jobs.{tool_name}.manifest-digest must be a 64-character \
+                 hexadecimal SHA-256 digest"
+            );
+            Some(digest.to_ascii_lowercase())
+        }
+        Some(_) => {
+            bail!("safe-outputs.jobs.{tool_name}.manifest-digest must be a string")
+        }
+    };
 
     Ok(Some(CustomComponentDefinition {
         source: source.to_string(),
@@ -701,10 +716,7 @@ fn parse_component(
             .map(str::to_string),
         sha: CommitSha::parse(sha)
             .with_context(|| format!("safe-outputs.jobs.{tool_name}.component-sha"))?,
-        manifest_digest: tool_obj
-            .get("manifest-digest")
-            .and_then(Value::as_str)
-            .map(str::to_string),
+        manifest_digest,
     }))
 }
 
@@ -948,6 +960,86 @@ safe-outputs:
                 .to_string()
                 .contains("compiler-owned")
         );
+    }
+
+    #[test]
+    fn custom_env_values_reject_pipeline_commands_but_allow_ado_macros() {
+        let rejected = parse_front_matter(
+            r###"
+name: Test
+description: Test
+safe-outputs:
+  jobs:
+    notify:
+      description: Notify.
+      env:
+        MESSAGE: "##vso[task.setvariable variable=forged]value"
+      steps:
+        - bash: echo ok
+"###,
+        );
+        assert!(
+            collect_custom_tool_definitions(&rejected)
+                .unwrap_err()
+                .to_string()
+                .contains("pipeline command")
+        );
+
+        let accepted = parse_front_matter(
+            r#"
+name: Test
+description: Test
+safe-outputs:
+  jobs:
+    notify:
+      description: Notify.
+      env:
+        TOKEN: $(SHARED_TOKEN)
+      steps:
+        - bash: echo ok
+"#,
+        );
+        assert_eq!(
+            collect_custom_tool_definitions(&accepted).unwrap()[0].env,
+            vec![("TOKEN".to_string(), "$(SHARED_TOKEN)".to_string())]
+        );
+    }
+
+    #[test]
+    fn component_manifest_digest_requires_sha256_hex() {
+        let fm = parse_front_matter(
+            r#"
+name: Test
+description: Test
+safe-outputs:
+  jobs:
+    notify:
+      description: Notify.
+      component-source: org/repo/components/notify.md
+      component-sha: 0123456789abcdef0123456789abcdef01234567
+      manifest-digest: not-a-sha256
+      steps:
+        - bash: echo ok
+"#,
+        );
+        let error = collect_custom_tool_definitions(&fm).unwrap_err();
+        assert!(
+            error.to_string().contains("64-character hexadecimal"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn system_job_names_are_reserved_for_custom_tools() {
+        for name in CUSTOM_JOB_SYSTEM_NEEDS {
+            assert!(
+                validate_tool_name(name)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("reserved"),
+                "{name}"
+            );
+        }
     }
 
     #[test]
