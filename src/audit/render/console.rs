@@ -93,6 +93,19 @@ fn render_overview_section(
 
     push_opt_owned_row(&mut rows, "engine", engine);
     push_opt_owned_row(&mut rows, "model", model);
+    if let Some(enabled) = aw_info.and_then(|info| info.threat_detection_enabled) {
+        rows.push(("threat_detection_enabled".to_string(), enabled.to_string()));
+    }
+    push_opt_owned_row(
+        &mut rows,
+        "detection_engine",
+        aw_info.and_then(|info| info.detection_engine.clone()),
+    );
+    push_opt_owned_row(
+        &mut rows,
+        "detection_model",
+        aw_info.and_then(|info| info.detection_model.clone()),
+    );
     push_opt_owned_row(
         &mut rows,
         "agent",
@@ -1171,6 +1184,7 @@ By threat:
                     source: Some("agents/my-agent.md".to_string()),
                     target: Some("standalone".to_string()),
                     compiler_version: Some("0.30.2".to_string()),
+                    ..AwInfo::default()
                 }),
             },
             task_domain: Some(TaskDomainInfo {

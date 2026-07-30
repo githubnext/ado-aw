@@ -34,8 +34,11 @@ Every compiled pipeline runs as three sequential jobs:
    sandbox with a read-only ADO token. The agent produces *safe-output
    proposals* (e.g. "create this PR", "comment on this work item") rather than
    acting directly.
-2. **Detection (Stage 2)** — a separate agent inspects Stage 1's proposals for
-   prompt injection, secret leaks, and other threats.
+2. **Detection (Stage 2)** — by default, a separate agent inspects Stage 1's
+   proposals for prompt injection, secret leaks, and other threats. Authors can
+   configure or explicitly disable AI analysis under
+   `safe-outputs.threat-detection`; the Detection job remains as the pipeline
+   boundary even when analysis is disabled.
 3. **SafeOutputs (Stage 3)** — a non-agent executor applies approved safe outputs
    using a write-capable ADO token that the agent never sees.
 

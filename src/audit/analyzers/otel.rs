@@ -105,7 +105,7 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    const AW_INFO_JSON: &str = r#"{"schema":"ado-aw/aw_info/1","engine":"copilot","model":"claude-sonnet-4.5","agent_name":"test","target":"standalone","source":"agents/test.md","compiler_version":"0.30.0"}"#;
+    const AW_INFO_JSON: &str = r#"{"schema":"ado-aw/aw_info/1","engine":"copilot","model":"claude-sonnet-4.5","threat_detection_enabled":false,"detection_engine":"copilot","detection_model":"gpt-5-mini","agent_name":"test","target":"standalone","source":"agents/test.md","compiler_version":"0.30.0"}"#;
     const COPILOT_OTEL_FIXTURE: &str = include_str!("../../../tests/fixtures/copilot-otel.jsonl");
 
     async fn write_file(path: &Path, contents: &str) {
@@ -141,6 +141,9 @@ mod tests {
         let aw_info = analysis.aw_info.expect("expected aw_info");
         assert_eq!(aw_info.engine.as_deref(), Some("copilot"));
         assert_eq!(aw_info.model.as_deref(), Some("claude-sonnet-4.5"));
+        assert_eq!(aw_info.threat_detection_enabled, Some(false));
+        assert_eq!(aw_info.detection_engine.as_deref(), Some("copilot"));
+        assert_eq!(aw_info.detection_model.as_deref(), Some("gpt-5-mini"));
         assert_eq!(aw_info.compiler_version.as_deref(), Some("0.30.0"));
 
         let engine_config = analysis.engine_config.expect("expected engine config");

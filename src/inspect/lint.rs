@@ -323,8 +323,8 @@ fn location_for(job: &JobSummary, step: Option<&str>) -> LintLocation {
     }
 }
 
-/// Lint rule: authored task steps (`setup` / `steps` / `post-steps` /
-/// `teardown`) whose inputs are invalid for the ADO task they invoke.
+/// Lint rule: authored task steps whose inputs are invalid for the ADO task
+/// they invoke, including nested threat-detection pre/post steps.
 ///
 /// This is the agent-facing surface of the typed-builder task validation (see
 /// `crate::compile::ir::tasks::parse`). It runs over the **front matter** rather
@@ -339,18 +339,20 @@ fn location_for(job: &JobSummary, step: Option<&str>) -> LintLocation {
 /// in front matter, before jobs/stages exist, so `location` does **not** carry
 /// real graph identifiers like the structural rules do. Instead it encodes the
 /// authored source position: `stage` is always `None`, `job` holds the
-/// front-matter step *list* name (`"setup"` / `"steps"` / `"post-steps"` /
-/// `"teardown"`), and `step` holds the offending ADO task id (e.g.
-/// `"CopyFiles@2"`). Consumers correlating findings with the pipeline graph
-/// should branch on `code == "task-input-invalid"` and treat `job` as a list
-/// name rather than a job id for this class.
-pub fn lint_front_matter_tasks(front_matter: &FrontMatter) -> Vec<LintFinding> {
-    crate::compile::ir::tasks::parse::validate_front_matter_task_steps(
-        &front_matter.setup,
-        &front_matter.steps,
-        &front_matter.post_steps,
-        &front_matter.teardown,
-    )
+/// front-matter step *list* name, and `step` holds the offending ADO task id
+/// (e.g. `"CopyFiles@2"`). Consumers correlating findings with the pipeline
+/// graph should branch on `code == "task-input-invalid"` and treat `job` as a
+/// list name rather than a job id for this class.
+pub fn lint_front_matter_tasks(front_matter: &FrontMatter) -> anyhow::Result<Vec<LintFinding>> {
+    let threat_detection = front_matter.threat_detection_config()?;
+    Ok(crate::compile::ir::tasks::parse::validate_named_task_step_lists(&[
+        ("setup", &front_matter.setup),
+        ("steps", &front_matter.steps),
+        ("post-steps", &front_matter.post_steps),
+        ("teardown", &front_matter.teardown),
+        ("threat-detection.steps", &threat_detection.steps),
+        ("threat-detection.post-steps", &threat_detection.post_steps),
+    ])
     .into_iter()
     .map(|f| LintFinding {
         severity: LintSeverity::Warning,
@@ -362,7 +364,7 @@ pub fn lint_front_matter_tasks(front_matter: &FrontMatter) -> Vec<LintFinding> {
             step: Some(f.task),
         }),
     })
-    .collect()
+    .collect())
 }
 
 #[cfg(test)]
@@ -463,7 +465,7 @@ mod tests {
             "---\nname: t\ndescription: d\nsteps:\n- task: CopyFiles@2\n  inputs:\n    Contents: \"**\"\n    Bogus: nope\n---\n",
         )
         .unwrap();
-        let findings = lint_front_matter_tasks(&front_matter);
+        let findings = lint_front_matter_tasks(&front_matter).unwrap();
         assert_eq!(findings.len(), 1, "got: {findings:?}");
         let f = &findings[0];
         assert_eq!(f.code, "task-input-invalid");
@@ -474,12 +476,40 @@ mod tests {
     }
 
     #[test]
+    fn invalid_threat_detection_task_step_uses_nested_location() {
+        let (front_matter, _) = crate::compile::parse_markdown(
+            "---\nname: t\ndescription: d\nsafe-outputs:\n  threat-detection:\n    \
+             post-steps:\n      - task: CopyFiles@2\n        inputs:\n          \
+             Contents: \"**\"\n          Bogus: nope\n---\n",
+        )
+        .unwrap();
+        let findings = lint_front_matter_tasks(&front_matter).unwrap();
+        assert_eq!(findings.len(), 1, "got: {findings:?}");
+        let loc = findings[0].location.as_ref().expect("location present");
+        assert_eq!(loc.job.as_deref(), Some("threat-detection.post-steps"));
+        assert_eq!(loc.step.as_deref(), Some("CopyFiles@2"));
+    }
+
+    #[test]
     fn valid_front_matter_task_steps_emit_no_findings() {
         let (front_matter, _) = crate::compile::parse_markdown(
             "---\nname: t\ndescription: d\nsteps:\n- task: CopyFiles@2\n  inputs:\n    Contents: \"**\"\n    TargetFolder: out\n- bash: echo hi\n---\n",
         )
         .unwrap();
-        assert!(lint_front_matter_tasks(&front_matter).is_empty());
+        assert!(lint_front_matter_tasks(&front_matter).unwrap().is_empty());
+    }
+
+    #[test]
+    fn malformed_threat_detection_returns_error_instead_of_panicking() {
+        let (front_matter, _) = crate::compile::parse_markdown(
+            "---\nname: t\ndescription: d\nsafe-outputs:\n  threat-detection:\n    \
+             promtp: typo\n---\n",
+        )
+        .unwrap();
+        let error = lint_front_matter_tasks(&front_matter)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("invalid configuration"), "{error}");
     }
 
     #[test]

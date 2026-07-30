@@ -347,7 +347,7 @@ impl SanitizeConfigTrait for EngineConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Clone, SanitizeConfig)]
+#[derive(Debug, Deserialize, Clone, Default, SanitizeConfig)]
 pub struct EngineOptions {
     /// Engine identifier (e.g., "copilot"). Defaults to "copilot" when omitted.
     #[serde(default)]
@@ -399,6 +399,178 @@ pub struct EngineOptions {
     #[serde(default)]
     #[sanitize_config(skip)]
     pub provider: Option<ProviderConfig>,
+}
+
+/// Detection-specific engine configuration layered over the top-level
+/// [`EngineConfig`].
+///
+/// Collection fields are optional so the compiler can distinguish omission
+/// (inherit the top-level value) from an explicitly empty list/map. `args: []`
+/// therefore clears inherited CLI arguments; any non-empty `args` list also
+/// replaces rather than appends to the inherited list. `env` instead merges by
+/// key with Detection values taking precedence.
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct DetectionEngineOptions {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default, rename = "api-target")]
+    pub api_target: Option<String>,
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    #[serde(default)]
+    pub env: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default, rename = "timeout-minutes")]
+    pub timeout_minutes: Option<u32>,
+    #[serde(default, rename = "github-app-token")]
+    pub github_app_token: Option<GithubAppTokenConfig>,
+    #[serde(default)]
+    pub provider: Option<ProviderConfig>,
+}
+
+/// String or object form accepted by
+/// `safe-outputs.threat-detection.engine`.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum DetectionEngineConfig {
+    Simple(String),
+    Full(Box<DetectionEngineOptions>),
+}
+
+impl DetectionEngineConfig {
+    /// Apply this override to the top-level engine configuration.
+    pub fn resolve(&self, base: &EngineConfig) -> EngineConfig {
+        let base_id = base.engine_id().to_string();
+        let mut options = match base {
+            EngineConfig::Simple(id) => EngineOptions {
+                id: Some(id.clone()),
+                ..EngineOptions::default()
+            },
+            EngineConfig::Full(options) => (**options).clone(),
+        };
+
+        match self {
+            DetectionEngineConfig::Simple(id) => {
+                options.id = Some(id.clone());
+            }
+            DetectionEngineConfig::Full(overlay) => {
+                if let Some(value) = &overlay.id {
+                    options.id = Some(value.clone());
+                }
+                if let Some(value) = &overlay.model {
+                    options.model = Some(value.clone());
+                }
+                if let Some(value) = &overlay.version {
+                    options.version = Some(value.clone());
+                }
+                if let Some(value) = &overlay.agent {
+                    options.agent = Some(value.clone());
+                }
+                if let Some(value) = &overlay.api_target {
+                    options.api_target = Some(value.clone());
+                }
+                if let Some(value) = &overlay.args {
+                    options.args = value.clone();
+                }
+                if overlay.provider.is_some() {
+                    // A typed Detection provider replaces legacy top-level
+                    // COPILOT_PROVIDER_* env configuration. Remove inherited
+                    // keys before merging the nested env so conflicts authored
+                    // inside the overlay still reach validation and fail.
+                    if let Some(env) = &mut options.env {
+                        env.retain(|key, _| !key.starts_with("COPILOT_PROVIDER_"));
+                    }
+                }
+                if let Some(value) = &overlay.env {
+                    let mut merged = options.env.take().unwrap_or_default();
+                    merged.extend(value.clone());
+                    options.env = Some(merged);
+                }
+                if let Some(value) = &overlay.command {
+                    options.command = Some(value.clone());
+                }
+                if let Some(value) = overlay.timeout_minutes {
+                    options.timeout_minutes = Some(value);
+                }
+                if let Some(value) = &overlay.github_app_token {
+                    options.github_app_token = Some(value.clone());
+                }
+                if let Some(value) = &overlay.provider {
+                    options.provider = Some(value.clone());
+                }
+            }
+        }
+
+        let effective_id = options.id.as_deref().unwrap_or("copilot");
+        if base_id == "copilot" && effective_id != base_id {
+            if let Some(env) = &mut options.env {
+                env.retain(|key, _| !key.starts_with("COPILOT_PROVIDER_"));
+            }
+            options.provider = None;
+            options.github_app_token = None;
+        }
+
+        EngineConfig::Full(Box::new(options))
+    }
+}
+
+/// Object form of `safe-outputs.threat-detection`.
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ThreatDetectionConfig {
+    /// Whether AI threat analysis runs. Defaults to true.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Additional operator instructions appended to the fixed detector prompt.
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// Detection-specific engine settings layered over top-level `engine:`.
+    #[serde(default)]
+    pub engine: Option<DetectionEngineConfig>,
+    /// Trusted raw ADO steps run before AI analysis. Like top-level
+    /// setup/steps/post-steps/teardown, these are operator-authored host steps
+    /// emitted verbatim; they are not sanitized as untrusted runtime content.
+    #[serde(default)]
+    pub steps: Vec<serde_yaml::Value>,
+    /// Trusted raw ADO steps run after AI analysis. They share the same
+    /// operator-trusted raw-step boundary as the other front-matter step lists.
+    #[serde(default)]
+    pub post_steps: Vec<serde_yaml::Value>,
+}
+
+impl ThreatDetectionConfig {
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+}
+
+/// Boolean shorthand or object form accepted by
+/// `safe-outputs.threat-detection`.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum ThreatDetectionSetting {
+    Bool(bool),
+    Config(ThreatDetectionConfig),
+}
+
+impl ThreatDetectionSetting {
+    fn into_config(self) -> ThreatDetectionConfig {
+        match self {
+            ThreatDetectionSetting::Bool(enabled) => ThreatDetectionConfig {
+                enabled: Some(enabled),
+                ..ThreatDetectionConfig::default()
+            },
+            ThreatDetectionSetting::Config(config) => config,
+        }
+    }
 }
 
 /// GitHub App-backed Copilot engine authentication configuration.
@@ -1194,7 +1366,8 @@ impl FrontMatter {
 /// itself rather than naming a safe-output tool. These must never be treated
 /// as tool names (e.g. in `--enabled-tools`, Stage-3 budgets, or unknown-key
 /// validation).
-pub const SAFE_OUTPUT_RESERVED_KEYS: &[&str] = &["require-approval"];
+pub const THREAT_DETECTION_KEY: &str = "threat-detection";
+pub const SAFE_OUTPUT_RESERVED_KEYS: &[&str] = &["require-approval", THREAT_DETECTION_KEY];
 
 /// Automatic action a manual-validation gate takes when its pending period
 /// elapses with no human response. Mirrors `ManualValidation@1`'s `onTimeout`.
@@ -1284,6 +1457,87 @@ impl FrontMatter {
     /// that was never downloaded.
     pub fn has_any_safe_output_tool(&self) -> bool {
         self.safe_output_tool_names().next().is_some()
+    }
+
+    /// Parse the section-level threat-detection configuration.
+    ///
+    /// An absent or null key preserves the current enabled-by-default behavior.
+    /// The returned prompt is sanitized for pipeline-command/control-character
+    /// safety before it is written to and echoed from the Detection job.
+    pub fn threat_detection_config(&self) -> anyhow::Result<ThreatDetectionConfig> {
+        let Some(value) = self.safe_outputs.get(THREAT_DETECTION_KEY) else {
+            return Ok(ThreatDetectionConfig::default());
+        };
+        if value.is_null() {
+            return Ok(ThreatDetectionConfig::default());
+        }
+
+        let setting =
+            serde_json::from_value::<ThreatDetectionSetting>(value.clone()).map_err(|e| {
+                anyhow::anyhow!(
+                    "safe-outputs.threat-detection has invalid configuration: {e}\n\n\
+                     Use a boolean or an object with the keys: enabled, prompt, engine, \
+                     steps, post-steps. See docs/safe-outputs.md."
+                )
+            })?;
+        let mut config = setting.into_config();
+        if let Some(prompt) = &mut config.prompt {
+            let sanitized = crate::sanitize::sanitize_config(prompt);
+            if crate::validate::contains_ado_expression(&sanitized) {
+                anyhow::bail!(
+                    "safe-outputs.threat-detection.prompt contains an ADO expression \
+                     ('${{{{', '$(', or '$['), which is not allowed. Detection prompt \
+                     instructions must be literal text."
+                );
+            }
+            *prompt = sanitized;
+        }
+        Ok(config)
+    }
+
+    /// Resolve the effective Detection engine without mutating the Agent engine
+    /// configuration.
+    pub fn effective_detection_engine(
+        &self,
+        config: &ThreatDetectionConfig,
+    ) -> EngineConfig {
+        let mut effective = config
+            .engine
+            .as_ref()
+            .map(|overlay| overlay.resolve(&self.engine))
+            .unwrap_or_else(|| self.engine.clone());
+        effective.sanitize_config_fields();
+        effective
+    }
+
+    /// Validate an already-parsed threat-detection config and resolved engine.
+    pub fn validate_threat_detection_config(
+        &self,
+        config: &ThreatDetectionConfig,
+        effective: &EngineConfig,
+    ) -> anyhow::Result<()> {
+        crate::engine::validate_engine_feature_support(effective)?;
+        crate::engine::get_engine(effective.engine_id())?;
+        if config.engine.is_some() {
+            for arg in effective.args() {
+                if arg == "--model"
+                    || arg.starts_with("--model=")
+                    || arg == "--api-target"
+                    || arg.starts_with("--api-target=")
+                {
+                    anyhow::bail!(
+                        "safe-outputs.threat-detection effective engine args contain '{arg}', \
+                         which would desynchronize Detection metadata or firewall hosts. Use \
+                         threat-detection.engine.model / api-target instead; set nested \
+                         `args: []` first if the flag is inherited from top-level engine.args."
+                    );
+                }
+            }
+        }
+        if let Some(app) = effective.github_app_token() {
+            app.validate()?;
+        }
+        Ok(())
     }
 
     /// The parsed, sanitized `create-pull-request` config, or `None` when the
@@ -2776,6 +3030,12 @@ impl SanitizeConfigTrait for LabelFilter {
 mod tests {
     use super::*;
 
+    fn validate_threat_detection(fm: &FrontMatter) -> anyhow::Result<()> {
+        let config = fm.threat_detection_config()?;
+        let effective = fm.effective_detection_engine(&config);
+        fm.validate_threat_detection_config(&config, &effective)
+    }
+
     // ─── SupplyChainConfig deserialization + resolution ──────────────────────
 
     fn parse_supply_chain(yaml: &str) -> SupplyChainConfig {
@@ -3102,6 +3362,234 @@ timeout-minutes: 60
         let env = ec.env().unwrap();
         assert_eq!(env.get("DEBUG_MODE").unwrap(), "true");
         assert_eq!(env.get("AWS_REGION").unwrap(), "us-west-2");
+    }
+
+    // ─── ThreatDetectionConfig ──────────────────────────────────────────────
+
+    #[test]
+    fn threat_detection_absent_defaults_enabled() {
+        let (fm, _) =
+            super::super::common::parse_markdown("---\nname: test\ndescription: test\n---\n")
+                .unwrap();
+        let config = fm.threat_detection_config().unwrap();
+        assert!(config.is_enabled());
+        assert!(config.prompt.is_none());
+        assert!(config.engine.is_none());
+        assert!(config.steps.is_empty());
+        assert!(config.post_steps.is_empty());
+    }
+
+    #[test]
+    fn threat_detection_boolean_shorthand_and_reserved_key() {
+        let source = "---\nname: test\ndescription: test\nsafe-outputs:\n  \
+                      threat-detection: false\n  noop: {}\n---\n";
+        let (fm, _) = super::super::common::parse_markdown(source).unwrap();
+        let config = fm.threat_detection_config().unwrap();
+        assert!(!config.is_enabled());
+        assert_eq!(
+            fm.safe_output_tool_names().cloned().collect::<Vec<_>>(),
+            vec!["noop".to_string()]
+        );
+    }
+
+    #[test]
+    fn threat_detection_object_appends_sanitized_prompt_and_steps() {
+        let source = r#"---
+name: test
+description: test
+safe-outputs:
+  threat-detection:
+    prompt: "Inspect this ##vso[task.setvariable variable=x]payload"
+    steps:
+      - bash: echo pre
+    post-steps:
+      - bash: echo post
+---
+"#;
+        let (fm, _) = super::super::common::parse_markdown(source).unwrap();
+        let config = fm.threat_detection_config().unwrap();
+        assert!(config.is_enabled());
+        assert_eq!(config.steps.len(), 1);
+        assert_eq!(config.post_steps.len(), 1);
+        let prompt = config.prompt.unwrap();
+        assert!(!prompt.contains("##vso[task.setvariable"));
+        assert!(prompt.contains("`##vso[`"));
+    }
+
+    #[test]
+    fn threat_detection_engine_overlay_merges_env_and_replaces_args() {
+        let source = r#"---
+name: test
+description: test
+engine:
+  id: copilot
+  model: base-model
+  version: "1.0.0"
+  args: [--base]
+  env:
+    KEEP: base
+    SHARED: base
+safe-outputs:
+  threat-detection:
+    engine:
+      model: detection-model
+      args: []
+      env:
+        SHARED: detection
+        EXTRA: value
+---
+"#;
+        let (fm, _) = super::super::common::parse_markdown(source).unwrap();
+        let config = fm.threat_detection_config().unwrap();
+        let effective = fm.effective_detection_engine(&config);
+        assert_eq!(effective.engine_id(), "copilot");
+        assert_eq!(effective.model(), Some("detection-model"));
+        assert_eq!(effective.version(), Some("1.0.0"));
+        assert!(effective.args().is_empty());
+        let env = effective.env().unwrap();
+        assert_eq!(env.get("KEEP").map(String::as_str), Some("base"));
+        assert_eq!(env.get("SHARED").map(String::as_str), Some("detection"));
+        assert_eq!(env.get("EXTRA").map(String::as_str), Some("value"));
+    }
+
+    #[test]
+    fn threat_detection_typed_provider_replaces_inherited_legacy_provider_env() {
+        let source = r#"---
+name: test
+description: test
+engine:
+  id: copilot
+  env:
+    KEEP: value
+    COPILOT_PROVIDER_BASE_URL: https://legacy.example.com/v1
+    COPILOT_PROVIDER_API_KEY: $(LEGACY_KEY)
+safe-outputs:
+  threat-detection:
+    engine:
+      provider:
+        base-url: https://detector.example.com/v1
+        api-key: $(DETECTOR_KEY)
+---
+"#;
+        let (fm, _) = super::super::common::parse_markdown(source).unwrap();
+        let config = fm.threat_detection_config().unwrap();
+        let effective = fm.effective_detection_engine(&config);
+        let env = effective.env().unwrap();
+        assert_eq!(env.get("KEEP").map(String::as_str), Some("value"));
+        assert!(!env.keys().any(|key| key.starts_with("COPILOT_PROVIDER_")));
+        validate_threat_detection(&fm).unwrap();
+
+        let conflict = r#"---
+name: test
+description: test
+safe-outputs:
+  threat-detection:
+    engine:
+      env:
+        COPILOT_PROVIDER_BASE_URL: https://conflict.example.com/v1
+      provider:
+        base-url: https://detector.example.com/v1
+        api-key: $(DETECTOR_KEY)
+---
+"#;
+        let (fm, _) = super::super::common::parse_markdown(conflict).unwrap();
+        assert!(validate_threat_detection(&fm).is_err());
+    }
+
+    #[test]
+    fn threat_detection_engine_switch_drops_inherited_copilot_credentials() {
+        let source = r#"---
+name: test
+description: test
+engine:
+  id: copilot
+  env:
+    KEEP: value
+    COPILOT_PROVIDER_BASE_URL: https://legacy.example.com/v1
+    COPILOT_PROVIDER_API_KEY: $(LEGACY_KEY)
+safe-outputs:
+  threat-detection:
+    engine: claude
+---
+"#;
+        let (fm, _) = super::super::common::parse_markdown(source).unwrap();
+        let config = fm.threat_detection_config().unwrap();
+        let effective = fm.effective_detection_engine(&config);
+        let env = effective.env().unwrap();
+        assert_eq!(env.get("KEEP").map(String::as_str), Some("value"));
+        assert!(!env.keys().any(|key| key.starts_with("COPILOT_PROVIDER_")));
+        assert!(effective.provider().is_none());
+        assert!(effective.github_app_token().is_none());
+    }
+
+    #[test]
+    fn threat_detection_engine_overlay_rejects_model_and_api_target_args() {
+        for arg in ["--model=other", "--api-target=other.example.com"] {
+            let source = format!(
+                "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  \
+                 args:\n    - {arg}\nsafe-outputs:\n  threat-detection:\n    \
+                 engine:\n      model: detector\n---\n"
+            );
+            let (fm, _) = super::super::common::parse_markdown(&source).unwrap();
+            let error = validate_threat_detection(&fm).unwrap_err().to_string();
+            assert!(error.contains("desynchronize"), "{error}");
+        }
+
+        let source = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  \
+                      args:\n    - --model=other\nsafe-outputs:\n  \
+                      threat-detection: true\n---\n";
+        let (fm, _) = super::super::common::parse_markdown(source).unwrap();
+        validate_threat_detection(&fm).unwrap();
+
+        let source = "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  \
+                      args:\n    - --model=other\nsafe-outputs:\n  threat-detection:\n    \
+                      engine:\n      model: detector\n      args: []\n---\n";
+        let (fm, _) = super::super::common::parse_markdown(source).unwrap();
+        validate_threat_detection(&fm).unwrap();
+    }
+
+    #[test]
+    fn threat_detection_rejects_unknown_fields_and_engines() {
+        let unknown = "---\nname: test\ndescription: test\nsafe-outputs:\n  \
+                       threat-detection:\n    promtp: typo\n---\n";
+        let (fm, _) = super::super::common::parse_markdown(unknown).unwrap();
+        let err = fm.threat_detection_config().unwrap_err().to_string();
+        assert!(err.contains("promtp") || err.contains("invalid configuration"));
+
+        let unsupported = "---\nname: test\ndescription: test\nsafe-outputs:\n  \
+                           threat-detection:\n    engine: claude\n---\n";
+        let (fm, _) = super::super::common::parse_markdown(unsupported).unwrap();
+        let err = validate_threat_detection(&fm).unwrap_err().to_string();
+        assert!(err.contains("Unsupported engine 'claude'"), "{err}");
+    }
+
+    #[test]
+    fn threat_detection_rejects_ado_expressions_in_prompt() {
+        for expression in [
+            "$(MALICIOUS_MULTILINE_VARIABLE)",
+            "${{ variables.secret }}",
+            "$[variables.runtime]",
+        ] {
+            let source = format!(
+                "---\nname: test\ndescription: test\nsafe-outputs:\n  \
+                 threat-detection:\n    prompt: \"{expression}\"\n---\n"
+            );
+            let (fm, _) = super::super::common::parse_markdown(&source).unwrap();
+            let err = fm.threat_detection_config().unwrap_err().to_string();
+            assert!(err.contains("literal text"), "{err}");
+        }
+
+        let reconstructed = r#"---
+name: test
+description: test
+safe-outputs:
+  threat-detection:
+    prompt: "$\0(SECRET)"
+---
+"#;
+        let (fm, _) = super::super::common::parse_markdown(reconstructed).unwrap();
+        let err = fm.threat_detection_config().unwrap_err().to_string();
+        assert!(err.contains("literal text"), "{err}");
     }
 
     // ─── GithubAppTokenConfig ────────────────────────────────────────────
