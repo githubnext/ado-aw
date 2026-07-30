@@ -966,6 +966,9 @@ async fn resolve_and_merge_imports(
         return Ok((String::new(), markdown_body.to_string()));
     }
 
+    let source_path = tokio::fs::canonicalize(source_path)
+        .await
+        .with_context(|| format!("failed to resolve workflow source {}", source_path.display()))?;
     let base_dir = source_path.parent().unwrap_or_else(|| Path::new("."));
     let repo_root = find_repo_root(base_dir).unwrap_or_else(|| base_dir.to_path_buf());
 
@@ -1184,6 +1187,15 @@ Body
             error.to_string().contains("require ADO read permission"),
             "{error:#}"
         );
+    }
+
+    #[tokio::test]
+    async fn relative_local_import_source_resolves_repository_root() {
+        let input = Path::new("tests/compiler-smoke-e2e/custom-safe-output.md");
+        let (front_matter, _) = build_pipeline_ir(input).await.unwrap();
+
+        assert!(front_matter.imports.is_empty());
+        assert!(front_matter.safe_outputs.contains_key("jobs"));
     }
 
     #[test]
