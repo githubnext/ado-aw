@@ -83,15 +83,32 @@ pub fn sanitize(input: &str) -> String {
 /// comment removal, and URL protocol sanitization — these are content-rendering
 /// concerns that would corrupt identifiers like area paths, wiki names, or emails.
 pub fn sanitize_config(input: &str) -> String {
-    let mut s = remove_control_characters(input);
-    s = neutralize_pipeline_commands(&s);
-    s = enforce_content_limits(&s);
+    let s = sanitize_transport_text(input);
     debug!(
         "Sanitized config value: {} -> {} bytes",
         input.len(),
         s.len()
     );
     s
+}
+
+/// Sanitize an untrusted string for transport to an authored custom safe-output
+/// job without applying content-rendering transformations that would corrupt an
+/// external API payload.
+pub(crate) fn sanitize_custom_payload(input: &str) -> String {
+    let s = sanitize_transport_text(input);
+    debug!(
+        "Sanitized custom payload value: {} -> {} bytes",
+        input.len(),
+        s.len()
+    );
+    s
+}
+
+fn sanitize_transport_text(input: &str) -> String {
+    let mut s = remove_control_characters(input);
+    s = neutralize_pipeline_commands(&s);
+    enforce_content_limits(&s)
 }
 
 // ── IS-09: Control character & ANSI escape removal ─────────────────────────
@@ -828,6 +845,25 @@ mod tests {
             result.contains("<MyProject>"),
             "Config sanitize should NOT escape HTML tags"
         );
+    }
+
+    #[test]
+    fn test_sanitize_custom_payload_neutralizes_commands_and_controls() {
+        let input =
+            "first\x00\x1b[31m\n##vso[task.setvariable variable=X]owned\n##[error]failed";
+        let result = sanitize_custom_payload(input);
+        assert!(!result.contains('\0'));
+        assert!(!result.contains('\x1b'));
+        assert!(!result.contains("##vso[task"));
+        assert!(!result.contains("##[error]"));
+        assert!(result.contains("`##vso[`"));
+        assert!(result.contains("`##[`"));
+    }
+
+    #[test]
+    fn test_sanitize_custom_payload_preserves_external_content() {
+        let input = "https://notify.example/@team <b>hello</b>\n## Heading\t$(SHARED_TOKEN)\r\n";
+        assert_eq!(sanitize_custom_payload(input), input);
     }
 
     #[test]

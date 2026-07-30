@@ -345,10 +345,10 @@ pub fn validate_custom_arguments(
         .collect();
 
     for key in arguments.keys() {
-        ensure!(
-            properties.contains_key(key),
-            "custom tool '{tool_name}' argument '{key}' is not allowed"
-        );
+        if !properties.contains_key(key) {
+            let safe_key = crate::sanitize::sanitize_config(key);
+            bail!("custom tool '{tool_name}' argument '{safe_key}' is not allowed");
+        }
     }
 
     for (name, property) in properties {

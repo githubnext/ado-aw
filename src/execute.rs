@@ -9,6 +9,7 @@ use log::{debug, error, info, warn};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::path::Path;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
@@ -55,8 +56,8 @@ impl ToolFilter {
     }
 }
 
-/// Validate and materialize the aggregate Agent-output file consumed by every
-/// custom safe-output job.
+/// Validate, sanitize, and materialize the aggregate Agent-output file consumed
+/// by every custom safe-output job.
 ///
 /// Schema and budget validation are added by the resolved-config workstream.
 /// This initial jobs-only seam deliberately writes one gh-aw-shaped aggregate
@@ -67,6 +68,20 @@ pub async fn prepare_custom_agent_output(
     output_path: &Path,
 ) -> Result<usize> {
     let safe_output_path = safe_output_dir.join(SAFE_OUTPUT_FILENAME);
+    anyhow::ensure!(
+        safe_output_path != output_path,
+        "Custom Agent output path must differ from the analyzed safe-output path"
+    );
+    if let Err(error) = tokio::fs::remove_file(output_path).await
+        && error.kind() != ErrorKind::NotFound
+    {
+        return Err(error).with_context(|| {
+            format!(
+                "Failed to remove stale custom Agent output: {}",
+                output_path.display()
+            )
+        });
+    }
     let entries = load_safe_output_entries(&safe_output_path)
         .await?
         .unwrap_or_default();
@@ -89,12 +104,22 @@ pub async fn prepare_custom_agent_output(
 
         if let Some(definition) = custom_tools.get(&name) {
             let arguments = std::mem::take(object);
-            let arguments = crate::compile::custom_tools::validate_custom_arguments(
+            let mut arguments = crate::compile::custom_tools::validate_custom_arguments(
                 &name,
                 &definition.input_schema,
                 Some(arguments),
             )
             .with_context(|| format!("Invalid custom safe-output item '{name}'"))?;
+            let mut sanitized = Value::Object(arguments);
+            sanitize_custom_agent_output_value(&mut sanitized, true)?;
+            arguments = crate::compile::custom_tools::validate_custom_arguments(
+                &name,
+                &definition.input_schema,
+                sanitized.as_object().cloned(),
+            )
+            .with_context(|| {
+                format!("Sanitized custom safe-output item '{name}' is no longer valid")
+            })?;
             let count = custom_counts.entry(name.clone()).or_default();
             *count += 1;
             anyhow::ensure!(
@@ -103,9 +128,11 @@ pub async fn prepare_custom_agent_output(
                 definition.max
             );
             *object = arguments;
+            object.insert("type".to_string(), Value::String(name));
+        } else {
+            object.insert("type".to_string(), Value::String(name));
+            sanitize_custom_agent_output_value(&mut entry, true)?;
         }
-
-        object.insert("type".to_string(), Value::String(name));
         items.push(entry);
     }
     let item_count = items.len();
@@ -123,6 +150,41 @@ pub async fn prepare_custom_agent_output(
         .await
         .with_context(|| format!("Failed to write Agent output: {}", output_path.display()))?;
     Ok(item_count)
+}
+
+fn sanitize_custom_agent_output_value(value: &mut Value, sanitize_keys: bool) -> Result<()> {
+    match value {
+        Value::String(value) => {
+            *value = crate::sanitize::sanitize_custom_payload(value);
+        }
+        Value::Array(values) => {
+            for value in values {
+                sanitize_custom_agent_output_value(value, sanitize_keys)?;
+            }
+        }
+        Value::Object(values) => {
+            if sanitize_keys {
+                let original = std::mem::take(values);
+                let mut sanitized = serde_json::Map::new();
+                for (key, mut value) in original {
+                    let key = crate::sanitize::sanitize_custom_payload(&key);
+                    anyhow::ensure!(
+                        !sanitized.contains_key(&key),
+                        "Agent-output object keys collide after transport sanitization: '{key}'"
+                    );
+                    sanitize_custom_agent_output_value(&mut value, true)?;
+                    sanitized.insert(key, value);
+                }
+                *values = sanitized;
+            } else {
+                for value in values.values_mut() {
+                    sanitize_custom_agent_output_value(value, false)?;
+                }
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+    Ok(())
 }
 
 /// Execute all safe outputs from the NDJSON file in the specified directory
@@ -838,18 +900,8 @@ mod tests {
         assert!(f.allows("add-pr-comment"));
     }
 
-    #[tokio::test]
-    async fn prepare_custom_agent_output_validates_and_preserves_aggregate_items() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join(SAFE_OUTPUT_FILENAME),
-            r#"{"name":"noop","context":"nothing"}
-{"name":"send-notification","title":"Outage"}
-"#,
-        )
-        .await
-        .unwrap();
-        let config = dir.path().join("resolved.json");
+    async fn write_custom_tool_test_config(dir: &Path) -> PathBuf {
+        let config = dir.join("resolved.json");
         tokio::fs::write(
             &config,
             serde_json::json!({
@@ -879,6 +931,21 @@ mod tests {
         )
         .await
         .unwrap();
+        config
+    }
+
+    #[tokio::test]
+    async fn prepare_custom_agent_output_validates_and_preserves_aggregate_items() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join(SAFE_OUTPUT_FILENAME),
+            r#"{"name":"noop","context":"nothing"}
+{"name":"send-notification","title":"Outage"}
+"#,
+        )
+        .await
+        .unwrap();
+        let config = write_custom_tool_test_config(dir.path()).await;
         let output = dir.path().join("agent-output.json");
 
         assert_eq!(
@@ -891,6 +958,142 @@ mod tests {
         assert_eq!(value["items"][0]["type"], "noop");
         assert_eq!(value["items"][1]["type"], "send-notification");
         assert_eq!(value["items"][1]["urgent"], false);
+    }
+
+    #[tokio::test]
+    async fn prepare_custom_agent_output_sanitizes_only_materialized_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw = format!(
+            "{}\n{}\n",
+            serde_json::json!({
+                "name": "noop",
+                "context": "first\0\x1b[31m\n##[error]failed",
+                "##vso[task.setvariable variable=KEY]owned": "key value",
+                "nested": {
+                    "value": "https://notify.example/@team <b>hello</b>",
+                    "commands": ["normal", "##vso[task.complete result=Failed]owned"],
+                },
+            }),
+            serde_json::json!({
+                "name": "send-notification",
+                "title": "Outage\n##vso[task.setvariable variable=X]owned",
+            }),
+        );
+        let source = dir.path().join(SAFE_OUTPUT_FILENAME);
+        tokio::fs::write(&source, &raw).await.unwrap();
+        let config = write_custom_tool_test_config(dir.path()).await;
+        let output = dir.path().join("agent-output.json");
+
+        prepare_custom_agent_output(dir.path(), &config, &output)
+            .await
+            .unwrap();
+
+        assert_eq!(tokio::fs::read_to_string(&source).await.unwrap(), raw);
+        let value: Value = serde_json::from_slice(&tokio::fs::read(output).await.unwrap()).unwrap();
+        let noop = &value["items"][0];
+        assert_eq!(
+            noop["nested"]["value"],
+            "https://notify.example/@team <b>hello</b>"
+        );
+        assert_eq!(noop["nested"]["commands"][0], "normal");
+        assert!(
+            noop["nested"]["commands"][1]
+                .as_str()
+                .unwrap()
+                .contains("`##vso[`")
+        );
+        let keys: Vec<&str> = noop.as_object().unwrap().keys().map(String::as_str).collect();
+        assert!(keys.iter().all(|key| !key.contains("##vso[task")));
+        assert!(keys.iter().any(|key| key.contains("`##vso[`")));
+        let context = noop["context"].as_str().unwrap();
+        assert!(!context.contains('\0'));
+        assert!(!context.contains('\x1b'));
+        assert!(!context.contains("##[error]"));
+        assert!(context.contains("`##[`"));
+        let title = value["items"][1]["title"].as_str().unwrap();
+        assert!(!title.contains("##vso[task"));
+        assert!(title.contains("`##vso[`"));
+        assert_eq!(value["items"][1]["urgent"], false);
+    }
+
+    #[tokio::test]
+    async fn prepare_custom_agent_output_neutralizes_forged_key_error_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join(SAFE_OUTPUT_FILENAME),
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "name": "send-notification",
+                    "##vso[task.setvariable variable=X]owned": "value",
+                    "title": "Outage",
+                })
+            ),
+        )
+        .await
+        .unwrap();
+        let config = write_custom_tool_test_config(dir.path()).await;
+        let output = dir.path().join("agent-output.json");
+        tokio::fs::write(&output, "stale").await.unwrap();
+
+        let error = prepare_custom_agent_output(dir.path(), &config, &output)
+            .await
+            .unwrap_err();
+
+        let rendered = format!("{error:#}");
+        assert!(!rendered.contains("##vso[task"));
+        assert!(rendered.contains("`##vso[`"));
+        assert!(!output.exists());
+    }
+
+    #[tokio::test]
+    async fn prepare_custom_agent_output_rejects_sanitized_key_collisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut item = serde_json::Map::new();
+        item.insert("name".to_string(), Value::String("noop".to_string()));
+        item.insert("key".to_string(), Value::String("one".to_string()));
+        item.insert("ke\0y".to_string(), Value::String("two".to_string()));
+        tokio::fs::write(
+            dir.path().join(SAFE_OUTPUT_FILENAME),
+            format!("{}\n", Value::Object(item)),
+        )
+        .await
+        .unwrap();
+        let config = write_custom_tool_test_config(dir.path()).await;
+        let output = dir.path().join("agent-output.json");
+
+        let error = prepare_custom_agent_output(dir.path(), &config, &output)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("keys collide"));
+        assert!(!output.exists());
+    }
+
+    #[tokio::test]
+    async fn prepare_custom_agent_output_revalidates_sanitized_required_values() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join(SAFE_OUTPUT_FILENAME),
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "name": "send-notification",
+                    "title": "\u{7}",
+                })
+            ),
+        )
+        .await
+        .unwrap();
+        let config = write_custom_tool_test_config(dir.path()).await;
+        let output = dir.path().join("agent-output.json");
+
+        let error = prepare_custom_agent_output(dir.path(), &config, &output)
+            .await
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("argument 'title' is required"));
+        assert!(!output.exists());
     }
 
     #[test]

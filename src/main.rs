@@ -283,7 +283,7 @@ enum Commands {
         /// Compiler-generated resolved safe-output configuration.
         #[arg(long = "resolved-config")]
         resolved_config: Option<PathBuf>,
-        /// Materialize the validated aggregate Agent-output JSON for custom jobs.
+        /// Validate, sanitize, and materialize Agent-output JSON for custom jobs.
         #[arg(long = "prepare-custom-agent-output")]
         prepare_custom_agent_output: Option<PathBuf>,
     },

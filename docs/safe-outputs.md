@@ -287,7 +287,7 @@ identifiers replace non-identifier characters with underscores.
 
 ### Agent-output file
 
-Every custom job receives the same validated aggregate file through
+Every custom job receives the same transport-sanitized aggregate file through
 `ADO_AW_AGENT_OUTPUT`:
 
 ```json
@@ -349,6 +349,23 @@ safe-outputs:
             done
           displayName: Send notifications
 ```
+
+`ADO_AW_AGENT_OUTPUT` is a Stage-3 materialized copy of the analyzed proposals.
+Before the file is written, ado-aw revalidates custom schemas and budgets, strips
+ANSI/unsafe control characters, and neutralizes Azure Pipelines logging commands
+(`##vso[` and `##[`) in string values and object keys. Custom values are
+revalidated after sanitization so required/type/size guarantees apply to the data
+the job receives; sanitized key collisions fail closed. URLs, mentions, HTML,
+markdown, and other external-system payload text are otherwise preserved. The
+analyzed proposal artifact remains unchanged for Detection and audit.
+String size is revalidated after transport sanitization, so a value whose
+neutralized form exceeds the 10 KiB custom-input limit fails materialization
+before any authored step runs.
+
+Treat the materialized values as untrusted integration data even after this
+transport sanitization. Parse JSON structurally, build outbound request bodies
+with tools such as `jq -n --arg`, and apply API-specific validation and escaping.
+Avoid printing raw scalar fields when they are not needed.
 
 Supported authored steps are inline `bash`, `powershell`, or `pwsh`, plus ADO
 tasks with an explicit numeric version such as `PowerShell@2`. Custom jobs reject

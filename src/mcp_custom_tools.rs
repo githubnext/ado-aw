@@ -349,6 +349,32 @@ description: Test
     }
 
     #[tokio::test]
+    async fn custom_proposal_preserves_raw_value_until_stage3_materialization() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("safe_outputs.ndjson");
+        let defs = serde_json::from_str::<Vec<CustomToolDef>>(SAMPLE).unwrap();
+        let raw = "Outage\n##vso[task.setvariable variable=X]owned";
+
+        record_custom_proposal(
+            &path,
+            &defs[0].name,
+            &defs[0].input_schema,
+            defs[0].max,
+            defs[0].output.as_deref(),
+            Some(Map::from_iter([(
+                "title".to_string(),
+                Value::String(raw.to_string()),
+            )])),
+        )
+        .await
+        .unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let value: Value = serde_json::from_str(contents.trim()).unwrap();
+        assert_eq!(value["title"], raw);
+    }
+
+    #[tokio::test]
     async fn test_record_custom_proposal_returns_mcp_error_on_persistence_failure() {
         let dir = tempfile::tempdir().unwrap();
         let output_path = dir.path().join("output-is-a-directory");
