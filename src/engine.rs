@@ -301,8 +301,23 @@ impl Engine {
         front_matter: &FrontMatter,
         extension_declarations: &[Declarations],
     ) -> Result<String> {
+        self.args_with_config(
+            &front_matter.engine,
+            front_matter,
+            extension_declarations,
+        )
+    }
+
+    /// Generate CLI arguments using an explicit engine configuration while
+    /// retaining the workflow's tool/MCP policy.
+    pub fn args_with_config(
+        &self,
+        engine_config: &EngineConfig,
+        front_matter: &FrontMatter,
+        extension_declarations: &[Declarations],
+    ) -> Result<String> {
         match self {
-            Engine::Copilot => copilot_args(front_matter, extension_declarations),
+            Engine::Copilot => copilot_args(engine_config, front_matter, extension_declarations),
         }
     }
 
@@ -412,9 +427,37 @@ impl Engine {
         mcp_config_path: Option<&str>,
     ) -> Result<String> {
         let args = self.args(front_matter, extension_declarations)?;
+        self.invocation_with_args(
+            &front_matter.engine,
+            prompt_path,
+            mcp_config_path,
+            &args,
+        )
+    }
+
+    /// Generate an invocation using an explicit engine configuration.
+    pub fn invocation_with_config(
+        &self,
+        engine_config: &EngineConfig,
+        front_matter: &FrontMatter,
+        extension_declarations: &[Declarations],
+        prompt_path: &str,
+        mcp_config_path: Option<&str>,
+    ) -> Result<String> {
+        let args = self.args_with_config(engine_config, front_matter, extension_declarations)?;
+        self.invocation_with_args(engine_config, prompt_path, mcp_config_path, &args)
+    }
+
+    fn invocation_with_args(
+        &self,
+        engine_config: &EngineConfig,
+        prompt_path: &str,
+        mcp_config_path: Option<&str>,
+        args: &str,
+    ) -> Result<String> {
         match self {
             Engine::Copilot => {
-                let command_path = match front_matter.engine.command() {
+                let command_path = match engine_config.command() {
                     Some(cmd) => {
                         if !is_valid_command_path(cmd) {
                             anyhow::bail!(
@@ -431,7 +474,7 @@ impl Engine {
                     &command_path,
                     prompt_path,
                     mcp_config_path,
-                    &args,
+                    args,
                 ))
             }
         }
@@ -577,6 +620,7 @@ fn validate_user_arg(arg: &str) -> Result<()> {
 }
 
 fn copilot_args(
+    engine_config: &EngineConfig,
     front_matter: &FrontMatter,
     extension_declarations: &[Declarations],
 ) -> Result<String> {
@@ -616,7 +660,7 @@ fn copilot_args(
 
     // Validate model name to prevent shell injection — copilot_params are embedded
     // inside a single-quoted bash string in the AWF command.
-    let model = front_matter.engine.model().unwrap_or(DEFAULT_COPILOT_MODEL);
+    let model = engine_config.model().unwrap_or(DEFAULT_COPILOT_MODEL);
     if model.is_empty()
         || !model
             .chars()
@@ -629,7 +673,7 @@ fn copilot_args(
         );
     }
     params.push(format!("--model {}", model));
-    if let Some(0) = front_matter.engine.timeout_minutes() {
+    if let Some(0) = engine_config.timeout_minutes() {
         eprintln!(
             "Warning: Agent '{}' has timeout-minutes: 0, which means no time is allowed. \
             The agent job will time out immediately. \
@@ -639,7 +683,7 @@ fn copilot_args(
     }
 
     // Wire engine.agent — selects a custom agent from .github/agents/
-    if let Some(agent) = front_matter.engine.agent() {
+    if let Some(agent) = engine_config.agent() {
         if !is_valid_identifier(agent) {
             anyhow::bail!(
                 "engine.agent '{}' contains invalid characters. \
@@ -651,7 +695,7 @@ fn copilot_args(
     }
 
     // Wire engine.api-target — sets the GHES/GHEC API endpoint hostname
-    if let Some(api_target) = front_matter.engine.api_target() {
+    if let Some(api_target) = engine_config.api_target() {
         if !is_valid_hostname(api_target) {
             anyhow::bail!(
                 "engine.api-target '{}' contains invalid characters. \
@@ -688,7 +732,7 @@ fn copilot_args(
     // Wire engine.args — append user-provided CLI arguments after compiler-generated args.
     // User args are additive; they cannot remove compiler security flags but may override
     // non-security defaults via last-wins semantics (e.g., --model).
-    for arg in front_matter.engine.args() {
+    for arg in engine_config.args() {
         validate_user_arg(arg)?;
         params.push(arg.to_string());
     }
@@ -864,6 +908,27 @@ pub fn copilot_provider_env(engine_config: &EngineConfig) -> Result<Vec<(String,
         pairs.push((k, v));
     }
 
+    pairs.sort();
+    Ok(pairs)
+}
+
+/// Return the full effective custom environment for a Detection Copilot run.
+///
+/// The front-matter resolver has already overlaid Detection values on the
+/// top-level engine config. Non-provider values are validated here; provider
+/// routing includes raw and typed-provider-derived entries.
+pub fn copilot_detection_env(engine_config: &EngineConfig) -> Result<Vec<(String, String)>> {
+    let mut pairs = Vec::new();
+    if let Some(env_map) = engine_config.env() {
+        for (key, value) in env_map
+            .iter()
+            .filter(|(key, _)| !key.starts_with(COPILOT_PROVIDER_PREFIX))
+        {
+            validate_engine_env_entry(key, value)?;
+            pairs.push((key.clone(), value.clone()));
+        }
+    }
+    pairs.extend(copilot_provider_env(engine_config)?);
     pairs.sort();
     Ok(pairs)
 }

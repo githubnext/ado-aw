@@ -69,6 +69,7 @@ pub(crate) fn collect_path_layout_warnings(front_matter: &FrontMatter, markdown_
     // in a non-step field (e.g. `description:`) is harmless and intentionally
     // not flagged here.
     let mut step_scalars: Vec<&str> = Vec::new();
+    let threat_detection = front_matter.threat_detection_config().ok();
     for block in [
         &front_matter.setup,
         &front_matter.steps,
@@ -77,6 +78,16 @@ pub(crate) fn collect_path_layout_warnings(front_matter: &FrontMatter, markdown_
     ] {
         for value in block {
             collect_string_scalars(value, &mut step_scalars);
+        }
+    }
+    // Invalid threat-detection config is reported by the normal compile
+    // validation immediately after this advisory pass; only valid nested step
+    // lists participate in path warnings.
+    if let Some(threat_detection) = &threat_detection {
+        for block in [&threat_detection.steps, &threat_detection.post_steps] {
+            for value in block {
+                collect_string_scalars(value, &mut step_scalars);
+            }
         }
     }
     for scalar in &step_scalars {
@@ -247,6 +258,19 @@ mod tests {
     fn warns_on_reference_to_not_checked_out_repo() {
         let fm = fm(
             "name: a\ndescription: d\nrepos:\n  - name: org/other\n    checkout: false\nsteps:\n  - script: cat $(Build.SourcesDirectory)/other/file\n",
+        );
+        let w = collect_path_layout_warnings(&fm, "body");
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("`checkout: false`"), "{w:?}");
+        assert!(w[0].contains("other"), "{w:?}");
+    }
+
+    #[test]
+    fn warns_on_nested_threat_detection_step_path() {
+        let fm = fm(
+            "name: a\ndescription: d\nrepos:\n  - name: org/other\n    checkout: false\n\
+             safe-outputs:\n  threat-detection:\n    post-steps:\n      - script: cat \
+             $(Build.SourcesDirectory)/other/file\n",
         );
         let w = collect_path_layout_warnings(&fm, "body");
         assert_eq!(w.len(), 1, "{w:?}");

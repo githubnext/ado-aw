@@ -71,7 +71,7 @@ Current top-level keys include the following. Optional sections are omitted from
 
 | Key | Source |
 | --- | --- |
-| `overview` | ADO build metadata + `aw_info.json` (engine, model, agent name, source, target). |
+| `overview` | ADO build metadata + `aw_info.json` (engine, model, optional threat-detection enabled/engine/model, agent name, source, target). |
 | `task_domain` | Audit heuristics over the run's prompts and outputs. |
 | `behavior_fingerprint` | Higher-level audit heuristics over the run's behavior. |
 | `agentic_assessments` | Higher-level audit assessments emitted by the analyzers. |

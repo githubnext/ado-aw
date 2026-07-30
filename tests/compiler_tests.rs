@@ -7262,6 +7262,306 @@ fn job_block<'a>(compiled: &'a str, job: &str) -> &'a str {
     }
 }
 
+#[test]
+fn threat_detection_custom_prompt_engine_and_steps_are_detection_scoped() {
+    let source = r#"---
+name: "Threat Detection Config"
+description: "Exercises detector configuration"
+engine:
+  id: copilot
+  model: agent-model
+  version: "1.0.1"
+  args:
+    - --reasoning-effort=high
+  env:
+    INHERITED_ENV: "agent"
+safe-outputs:
+  noop: {}
+  threat-detection:
+    prompt: |
+      Focus on unsafe deserialization.
+    engine:
+      model: detection-model
+      version: "2.0.2"
+      args:
+        - --reasoning-effort=low
+      env:
+        DETECTION_ENV: "enabled"
+    steps:
+      - bash: echo pre
+        displayName: Detection custom pre
+    post-steps:
+      - bash: echo post
+        displayName: Detection custom post
+---
+
+## Agent
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("threat-detection-config", source);
+    assert!(ok, "pipeline should compile: {stderr}");
+
+    let agent = job_block(&compiled, "Agent");
+    let detection = job_block(&compiled, "Detection");
+    assert!(agent.contains("--model agent-model"), "{agent}");
+    assert!(agent.contains("--reasoning-effort=high"), "{agent}");
+    assert!(!agent.contains("--model detection-model"), "{agent}");
+    assert!(!agent.contains("DETECTION_ENV"), "{agent}");
+
+    assert!(detection.contains("--model detection-model"), "{detection}");
+    assert!(detection.contains("--reasoning-effort=low"), "{detection}");
+    assert!(!detection.contains("--reasoning-effort=high"), "{detection}");
+    assert!(detection.contains("INHERITED_ENV: agent"), "{detection}");
+    assert!(detection.contains("DETECTION_ENV: enabled"), "{detection}");
+    assert!(
+        detection.contains("## Additional Instructions")
+            && detection.contains("Focus on unsafe deserialization.")
+            && detection.contains("THREAT_DETECTION_RESULT:"),
+        "{detection}"
+    );
+
+    let pre = detection.find("Detection custom pre").unwrap();
+    let run = detection
+        .find("Run threat analysis (AWF network isolated)")
+        .unwrap();
+    let post = detection.find("Detection custom post").unwrap();
+    assert!(pre < run && run < post, "{detection}");
+    assert!(detection.contains("2.0.2"), "{detection}");
+}
+
+#[test]
+fn threat_detection_disabled_preserves_outputs_artifacts_and_manual_review() {
+    let source = r#"---
+name: "Threat Detection Disabled"
+description: "Pass-through Detection with approval"
+safe-outputs:
+  require-approval: true
+  create-pull-request: {}
+  threat-detection: false
+---
+
+## Agent
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("threat-detection-disabled", source);
+    assert!(ok, "pipeline should compile: {stderr}");
+
+    let detection = job_block(&compiled, "Detection");
+    assert!(
+        detection.contains("AI threat detection was explicitly disabled"),
+        "{detection}"
+    );
+    assert!(!detection.contains("Run threat analysis (AWF network isolated)"));
+    assert!(!detection.contains("Prepare threat analysis prompt"));
+    assert!(detection.contains("name: threatAnalysis"), "{detection}");
+    assert!(
+        detection.contains(
+            "##vso[task.setvariable variable=SafeToProcess;isOutput=true]true"
+        ),
+        "{detection}"
+    );
+    assert!(detection.contains("name: reviewedProposals"), "{detection}");
+    assert!(
+        detection.contains("artifact: analyzed_outputs_$(Build.BuildId)"),
+        "{detection}"
+    );
+
+    let review = job_block(&compiled, "ManualReview");
+    assert!(
+        review.contains("dependencies.Detection.outputs['threatAnalysis.SafeToProcess']")
+            && review.contains(
+                "dependencies.Detection.outputs['reviewedProposals.HasReviewedProposals']"
+            ),
+        "{review}"
+    );
+    let safe_outputs = job_block(&compiled, "SafeOutputs");
+    assert!(
+        safe_outputs
+            .contains("dependencies.Detection.outputs['threatAnalysis.SafeToProcess']"),
+        "{safe_outputs}"
+    );
+}
+
+#[test]
+fn threat_detection_disabled_skips_unused_engine_install_resolution() {
+    let source = r#"---
+name: "Threat Detection Disabled Invalid Version"
+description: "Disabled Detection does not install its engine"
+safe-outputs:
+  noop: {}
+  threat-detection:
+    enabled: false
+    engine:
+      version: "bad version"
+---
+
+## Agent
+"#;
+    let (ok, compiled, stderr) =
+        compile_inline_source("threat-detection-disabled-invalid-version", source);
+    assert!(ok, "disabled Detection should not resolve install steps: {stderr}");
+    let detection = job_block(&compiled, "Detection");
+    assert!(detection.contains("Bypass AI threat analysis"), "{detection}");
+    assert!(!detection.contains("bad version"), "{detection}");
+}
+
+#[test]
+fn threat_detection_timeout_inherits_and_can_override_agent_timeout() {
+    let inherited = r#"---
+name: "Threat Detection Timeout"
+description: "Detection inherits top-level timeout"
+engine:
+  id: copilot
+  timeout-minutes: 17
+  env:
+    INHERITED_DETECTION_ENV: "true"
+safe-outputs:
+  noop: {}
+---
+
+## Agent
+"#;
+    let (ok, compiled, stderr) =
+        compile_inline_source("threat-detection-timeout-inherited", inherited);
+    assert!(ok, "pipeline should compile: {stderr}");
+    assert!(
+        job_block(&compiled, "Agent").contains("timeoutInMinutes: 17"),
+        "{}",
+        job_block(&compiled, "Agent")
+    );
+    assert!(
+        job_block(&compiled, "Detection").contains("timeoutInMinutes: 17"),
+        "{}",
+        job_block(&compiled, "Detection")
+    );
+    assert!(
+        job_block(&compiled, "Detection").contains("INHERITED_DETECTION_ENV: 'true'"),
+        "{}",
+        job_block(&compiled, "Detection")
+    );
+
+    let overridden = inherited.replace(
+        "  noop: {}",
+        "  noop: {}\n  threat-detection:\n    engine:\n      timeout-minutes: 9",
+    );
+    let (ok, compiled, stderr) =
+        compile_inline_source("threat-detection-timeout-overridden", &overridden);
+    assert!(ok, "pipeline should compile: {stderr}");
+    assert!(
+        job_block(&compiled, "Agent").contains("timeoutInMinutes: 17"),
+        "{}",
+        job_block(&compiled, "Agent")
+    );
+    assert!(
+        job_block(&compiled, "Detection").contains("timeoutInMinutes: 9"),
+        "{}",
+        job_block(&compiled, "Detection")
+    );
+}
+
+#[test]
+fn threat_detection_provider_override_updates_detection_firewall_only() {
+    let source = r#"---
+name: "Threat Detection Provider"
+description: "Detection-only provider"
+engine:
+  id: copilot
+  model: agent-model
+safe-outputs:
+  noop: {}
+  threat-detection:
+    engine:
+      model: detection-model
+      provider:
+        base-url: https://detector.example.com/v1
+        api-key: $(DETECTION_API_KEY)
+---
+
+## Agent
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("threat-detection-provider", source);
+    assert!(ok, "pipeline should compile: {stderr}");
+
+    let agent = job_block(&compiled, "Agent");
+    let detection = job_block(&compiled, "Detection");
+    assert!(!agent.contains("detector.example.com"), "{agent}");
+    assert!(detection.contains("detector.example.com"), "{detection}");
+    assert!(detection.contains("COPILOT_PROVIDER_BASE_URL"), "{detection}");
+    assert!(detection.contains("DETECTION_API_KEY"), "{detection}");
+    assert!(
+        detection.contains("--exclude-env COPILOT_PROVIDER_API_KEY"),
+        "{detection}"
+    );
+}
+
+#[test]
+fn threat_detection_config_compiles_for_every_target() {
+    for target in ["standalone", "1es", "job", "stage"] {
+        let source = format!(
+            r#"---
+name: "Threat Detection {target}"
+description: "Cross-target threat detection"
+target: {target}
+safe-outputs:
+  noop: {{}}
+  threat-detection:
+    prompt: "Cross-target detector instruction"
+    steps:
+      - bash: echo pre
+        displayName: Cross-target detection pre
+    post-steps:
+      - bash: echo post
+        displayName: Cross-target detection post
+---
+
+## Agent
+"#
+        );
+        let (ok, compiled, stderr) =
+            compile_inline_source(&format!("threat-detection-{target}"), &source);
+        assert!(ok, "{target} should compile: {stderr}");
+        assert!(
+            compiled.contains("Cross-target detector instruction")
+                && compiled.contains("Cross-target detection pre")
+                && compiled.contains("Cross-target detection post"),
+            "{target} output missing threat-detection config:\n{compiled}"
+        );
+    }
+}
+
+#[test]
+fn workflow_source_path_rejects_ado_expression_before_prompt_embedding() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "ado-aw-source-path-injection-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let input = temp_dir.join("$(System.AccessToken).md");
+    let output_path = temp_dir.join("out.yml");
+    fs::write(
+        &input,
+        "---\nname: test\ndescription: test\nsafe-outputs:\n  noop: {}\n---\n",
+    )
+    .unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(binary_path)
+        .args([
+            "compile",
+            input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let _ = fs::remove_dir_all(&temp_dir);
+
+    assert!(!output.status.success(), "source path expression must fail");
+    assert!(
+        stderr.contains("workflow source path") && stderr.contains("ADO expression"),
+        "{stderr}"
+    );
+}
+
 fn collect_pipeline_artifact_task_inputs(
     value: &serde_yaml::Value,
     inputs: &mut Vec<serde_yaml::Mapping>,

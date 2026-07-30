@@ -34,8 +34,11 @@ Every compiled pipeline runs as three sequential jobs:
    sandbox with a read-only ADO token. The agent produces *safe-output
    proposals* (e.g. "create this PR", "comment on this work item") rather than
    acting directly.
-2. **Detection (Stage 2)** — a separate agent inspects Stage 1's proposals for
-   prompt injection, secret leaks, and other threats.
+2. **Detection (Stage 2)** — by default, a separate agent inspects Stage 1's
+   proposals for prompt injection, secret leaks, and other threats. Authors can
+   configure or explicitly disable AI analysis under
+   `safe-outputs.threat-detection`; the Detection job remains as the pipeline
+   boundary even when analysis is disabled.
 3. **SafeOutputs (Stage 3)** — a non-agent executor applies approved safe outputs
    using a write-capable ADO token that the agent never sees.
 
@@ -544,6 +547,51 @@ cargo run -- compile
 
 ```bash
 cargo add <crate-name>
+```
+
+### Debug a failing smoke or pipeline run
+
+When a smoke or pipeline run fails, use `ado-aw audit` as the first-response tool rather than manually trawling ADO logs. It downloads the three audit artifact families (agent outputs, detection verdict, safe outputs) and runs the built-in analyzers in one step.
+
+```bash
+# Audit a failing build (pass a full ADO URL or a bare build ID)
+cargo run -- audit <build-id-or-url>
+
+# Narrow to specific artifact families if the full audit is slow
+cargo run -- audit <build-id-or-url> --artifacts agent,detection
+
+# Correlate the build's telemetry with the local IR graph
+cargo run -- trace <build-id-or-url>
+```
+
+See [`docs/audit.md`](docs/audit.md) for the full flag reference, accepted URL formats, and `AuditData` report shape.
+
+### View a pipeline as a dependency graph
+
+Use the `graph` subcommands to visualise the compiled job/step dependency graph without writing YAML.
+
+```bash
+# Render the full job/step dependency graph (human-readable)
+cargo run -- graph dump ./path/to/agent.md
+
+# DOT format for Graphviz or other tools
+cargo run -- graph dump ./path/to/agent.md --format dot
+
+# Traverse dependencies upstream/downstream from a specific step
+cargo run -- graph deps ./path/to/agent.md <step-id>
+
+# List step output producers and consumers
+cargo run -- graph outputs ./path/to/agent.md
+```
+
+### Lint a workflow and run static what-if analysis
+
+```bash
+# Run structural lint checks without writing YAML
+cargo run -- lint ./path/to/agent.md
+
+# Classify what downstream jobs would be skipped if a step fails
+cargo run -- whatif ./path/to/agent.md --fail <step-id-or-job-id>
 ```
 
 ## File Naming Conventions

@@ -99,7 +99,7 @@ impl CompilerExtension for AdoAwMarkerExtension {
             Some(custom_components) => custom_components.clone(),
             None => resolved_custom_components(ctx.front_matter)?,
         };
-        let Some(metadata) = CompileMetadata::from_ctx(ctx, custom_components) else {
+        let Some(metadata) = CompileMetadata::from_ctx(ctx, custom_components)? else {
             return Ok(Declarations::default());
         };
         let agent_prepare_steps = vec![
@@ -185,15 +185,44 @@ struct CompileMetadata {
     agent_name: String,
     custom_components: Vec<CustomComponentProvenance>,
     custom_jobs: Vec<CustomJobMetadata>,
+    threat_detection_enabled: Option<bool>,
+    detection_engine: Option<String>,
+    detection_model: Option<String>,
 }
 
 impl CompileMetadata {
     fn from_ctx(
         ctx: &CompileContext,
         custom_components: Vec<CustomComponentProvenance>,
-    ) -> Option<Self> {
-        let input_path = ctx.input_path?;
-        Some(Self {
+    ) -> anyhow::Result<Option<Self>> {
+        let Some(input_path) = ctx.input_path else {
+            return Ok(None);
+        };
+        let explicit_threat_detection = ctx
+            .front_matter
+            .safe_outputs
+            .contains_key(crate::compile::types::THREAT_DETECTION_KEY);
+        let (threat_detection_enabled, detection_engine, detection_model) =
+            if explicit_threat_detection {
+                let config = ctx.front_matter.threat_detection_config()?;
+                let (engine, model) = if config.engine.is_some() {
+                    let effective = ctx.front_matter.effective_detection_engine(&config);
+                    let engine = crate::engine::get_engine(effective.engine_id())?;
+                    let model = match engine {
+                        crate::engine::Engine::Copilot => effective
+                            .model()
+                            .unwrap_or(crate::engine::DEFAULT_COPILOT_MODEL)
+                            .to_string(),
+                    };
+                    (Some(effective.engine_id().to_string()), Some(model))
+                } else {
+                    (None, None)
+                };
+                (Some(config.is_enabled()), engine, model)
+            } else {
+                (None, None, None)
+            };
+        Ok(Some(Self {
             source: super::super::common::normalize_source_path(input_path),
             org: ctx
                 .ado_org()
@@ -218,7 +247,10 @@ impl CompileMetadata {
             agent_name: ctx.agent_name.to_string(),
             custom_components,
             custom_jobs: resolved_custom_jobs(ctx.front_matter).unwrap_or_default(),
-        })
+            threat_detection_enabled,
+            detection_engine,
+            detection_model,
+        }))
     }
 
     fn marker_json(&self) -> String {
@@ -234,7 +266,7 @@ impl CompileMetadata {
     }
 
     fn aw_info_json(&self) -> String {
-        let value = self.with_custom_metadata(serde_json::json!({
+        let mut value = self.with_custom_metadata(serde_json::json!({
             "schema": "ado-aw/aw_info/1",
             "source": &self.source,
             "org": &self.org,
@@ -249,6 +281,27 @@ impl CompileMetadata {
             "source_branch": "$(Build.SourceBranch)",
             "build_definition_id": "$(System.DefinitionId)",
         }));
+        let object = value
+            .as_object_mut()
+            .expect("aw_info metadata is always a JSON object");
+        if let Some(enabled) = self.threat_detection_enabled {
+            object.insert(
+                "threat_detection_enabled".to_string(),
+                serde_json::Value::Bool(enabled),
+            );
+        }
+        if let Some(engine) = &self.detection_engine {
+            object.insert(
+                "detection_engine".to_string(),
+                serde_json::Value::String(engine.clone()),
+            );
+        }
+        if let Some(model) = &self.detection_model {
+            object.insert(
+                "detection_model".to_string(),
+                serde_json::Value::String(model.clone()),
+            );
+        }
         serde_json::to_string(&value).unwrap()
     }
 
@@ -532,6 +585,72 @@ mod tests {
             "step missing build_definition_id macro:\n{}",
             step.script
         );
+        assert!(!step.script.contains("detection_model"));
+        assert!(!step.script.contains("threat_detection_enabled"));
+    }
+
+    #[test]
+    fn explicit_threat_detection_emits_detector_metadata() {
+        let fm = parse_fm(
+            "name: t\ndescription: x\nengine:\n  id: copilot\n  model: agent-model\n\
+             safe-outputs:\n  threat-detection:\n    enabled: false\n    engine:\n      \
+             model: detector-model\n",
+        );
+        let input_path = Path::new("agents/foo.md");
+        let ctx = CompileContext {
+            agent_name: &fm.name,
+            front_matter: &fm,
+            ado_context: None,
+            engine: crate::engine::Engine::Copilot,
+            compile_dir: None,
+            input_path: Some(input_path),
+            imported_prompt_body: String::new(),
+        };
+        let steps = agent_prepare_steps(&ctx);
+        let step = bash_step(&steps[1]);
+        assert!(
+            step.script
+                .contains("\"threat_detection_enabled\":false"),
+            "{}",
+            step.script
+        );
+        assert!(
+            step.script.contains("\"detection_engine\":\"copilot\""),
+            "{}",
+            step.script
+        );
+        assert!(
+            step.script
+                .contains("\"detection_model\":\"detector-model\""),
+            "{}",
+            step.script
+        );
+    }
+
+    #[test]
+    fn explicit_default_threat_detection_emits_enabled_state_only() {
+        let fm = parse_fm(
+            "name: t\ndescription: x\nsafe-outputs:\n  threat-detection: true\n",
+        );
+        let input_path = Path::new("agents/foo.md");
+        let ctx = CompileContext {
+            agent_name: &fm.name,
+            front_matter: &fm,
+            ado_context: None,
+            engine: crate::engine::Engine::Copilot,
+            compile_dir: None,
+            input_path: Some(input_path),
+            imported_prompt_body: String::new(),
+        };
+        let steps = agent_prepare_steps(&ctx);
+        let step = bash_step(&steps[1]);
+        assert!(
+            step.script.contains("\"threat_detection_enabled\":true"),
+            "{}",
+            step.script
+        );
+        assert!(!step.script.contains("\"detection_engine\""));
+        assert!(!step.script.contains("\"detection_model\""));
     }
 
     #[test]

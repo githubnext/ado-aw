@@ -125,6 +125,16 @@ safe-outputs:                  # optional per-tool configuration for safe output
         NOTIFICATION_TOKEN: $(SHARED_NOTIFICATION_TOKEN)
       steps:
         - bash: jq -e '.items[] | select(.type == "send-notification")' "$ADO_AW_AGENT_OUTPUT"
+  threat-detection:            # section-level Detection configuration
+    enabled: true              # boolean only; false keeps a pass-through Detection job
+    prompt: |                  # appended to the fixed detector prompt
+      Focus on unsafe deserialization and authentication bypasses.
+    engine:                    # optional overlay on top-level engine:
+      model: gpt-5-mini        # currently only the copilot engine ID is supported
+    steps:                     # trusted ADO steps before AI analysis
+      - bash: echo "Prepare detector"
+    post-steps:                # trusted ADO steps after AI analysis
+      - bash: echo "Run additional scanner"
 on:                            # trigger configuration (unified under on: key)
   schedule: daily around 14:00 # fuzzy schedule - see docs/schedule-syntax.md
   pipeline:
@@ -334,9 +344,11 @@ limitations, and custom safe-output component examples.
 
 ## Inline step validation (`setup` / `steps` / `post-steps` / `teardown`)
 
-Inline steps are authored as raw Azure DevOps YAML and are emitted into the
-generated pipeline **verbatim** (a passthrough). For steps that invoke a
-built-in ADO task the compiler also knows (e.g. `CopyFiles@2`, `Docker@2`,
+Inline steps under `setup`, `steps`, `post-steps`, `teardown`,
+`safe-outputs.threat-detection.steps`, and
+`safe-outputs.threat-detection.post-steps` are authored as raw Azure DevOps YAML
+and emitted into the generated pipeline **verbatim** (a passthrough). For steps
+that invoke a built-in ADO task the compiler also knows (e.g. `CopyFiles@2`, `Docker@2`,
 `DotNetCoreCLI@2`, and most other first-party tasks), `ado-aw lint` performs an
 **advisory** validation of the `inputs:` mapping against the task's typed
 schema — checking for missing required inputs, unknown input keys, bad

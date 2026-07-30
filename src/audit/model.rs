@@ -167,6 +167,15 @@ pub struct AwInfo {
     /// Model identifier used by the agent runtime.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Whether AI threat detection was enabled for this workflow.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub threat_detection_enabled: Option<bool>,
+    /// Engine identifier used by the Detection job when explicitly configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detection_engine: Option<String>,
+    /// Model identifier used by the Detection job when explicitly configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detection_model: Option<String>,
     /// Agent name emitted by the compiled workflow metadata.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<String>,
@@ -1061,7 +1070,6 @@ mod tests {
                     source: Some(String::from("agents/security-scan.md")),
                     target: Some(String::from("standalone")),
                     compiler_version: Some(String::from("0.30.2")),
-                    custom_components: Vec::new(),
                     ..Default::default()
                 }),
             },

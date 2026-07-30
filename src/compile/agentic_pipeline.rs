@@ -92,9 +92,9 @@ use super::ir::{
     PrTrigger, RepositoryResource, Resources, Schedule, Triggers,
 };
 use super::types::{
-    ApprovalConfig, ApprovalOnTimeout, CheckoutFetchOpts, FrontMatter, OnConfig,
+    ApprovalConfig, ApprovalOnTimeout, CheckoutFetchOpts, EngineConfig, FrontMatter, OnConfig,
     PipelineArtifactConfig, PrMode, ProviderToken, Repository as RepoCfg, SELF_CHECKOUT_ALIAS,
-    SupplyChainConfig,
+    SupplyChainConfig, ThreatDetectionConfig,
 };
 
 /// The `safe-outputs:` key for the create-pull-request tool. Matches the kebab
@@ -132,6 +132,9 @@ pub(crate) fn build_pipeline_context(
     debug_pipeline: bool,
     prefix: Option<&str>,
 ) -> Result<BuiltPipelineContext> {
+    let threat_detection = front_matter.threat_detection_config()?;
+    let detection_engine_config = front_matter.effective_detection_engine(&threat_detection);
+
     // ─── Validations (reuse all shared validators) ────────────────
     common::validate_front_matter_identity(front_matter)?;
     common::validate_variable_groups(front_matter)?;
@@ -141,6 +144,8 @@ pub(crate) fn build_pipeline_context(
         ctx.ado_context.as_ref().map(|c| c.repo_name.as_str()),
     )?;
     common::validate_safe_outputs_keys(front_matter)?;
+    front_matter
+        .validate_threat_detection_config(&threat_detection, &detection_engine_config)?;
     front_matter.validate_require_approval()?;
     front_matter.validate_staged()?;
     common::validate_comment_target(front_matter)?;
@@ -183,6 +188,7 @@ pub(crate) fn build_pipeline_context(
     )?;
 
     let compiler_version = env!("CARGO_PKG_VERSION").to_string();
+    let detection_engine = crate::engine::get_engine(detection_engine_config.engine_id())?;
 
     let engine_run = ctx.engine.invocation(
         ctx.front_matter,
@@ -190,7 +196,8 @@ pub(crate) fn build_pipeline_context(
         "/tmp/awf-tools/agent-prompt.md",
         Some("/tmp/awf-tools/mcp-config.json"),
     )?;
-    let engine_run_detection = ctx.engine.invocation(
+    let engine_run_detection = detection_engine.invocation_with_config(
+        &detection_engine_config,
         ctx.front_matter,
         &extension_declarations,
         "/tmp/awf-tools/threat-analysis-prompt.md",
@@ -199,6 +206,15 @@ pub(crate) fn build_pipeline_context(
     let engine_install_steps_yaml =
         ctx.engine
             .install_steps(&front_matter.engine, &front_matter.target, ctx.ado_org())?;
+    let detection_engine_install_steps_yaml = if threat_detection.is_enabled() {
+        detection_engine.install_steps(
+            &detection_engine_config,
+            &front_matter.target,
+            ctx.ado_org(),
+        )?
+    } else {
+        String::new()
+    };
     let engine_log_dir = ctx.engine.log_dir().to_string();
 
     let mut engine_env = ctx.engine.env(&front_matter.engine)?;
@@ -228,11 +244,23 @@ pub(crate) fn build_pipeline_context(
     {
         byom_exclude_keys.push(crate::compile::types::PROVIDER_BEARER_TOKEN_VAR.to_string());
     }
-    // Provider-only env subset for the Detection step, so the threat-analysis
-    // Copilot run inherits the same BYOM/BYOK routing + credential isolation as
-    // the main agent (mirrors gh-aw's detection engine-config Env inheritance).
-    let detection_provider_env = if is_copilot {
-        crate::engine::copilot_provider_env(&front_matter.engine)?
+    let detection_is_copilot = matches!(detection_engine, crate::engine::Engine::Copilot);
+    let mut detection_byom_exclude_keys = if detection_is_copilot {
+        crate::engine::copilot_byom_credential_keys(&detection_engine_config)
+    } else {
+        Vec::new()
+    };
+    if detection_is_copilot
+        && detection_engine_config
+            .provider()
+            .and_then(|p| p.token.as_ref())
+            .is_some()
+    {
+        detection_byom_exclude_keys
+            .push(crate::compile::types::PROVIDER_BEARER_TOKEN_VAR.to_string());
+    };
+    let detection_engine_env = if detection_is_copilot {
+        crate::engine::copilot_detection_env(&detection_engine_config)?
     } else {
         Vec::new()
     };
@@ -251,6 +279,20 @@ pub(crate) fn build_pipeline_context(
     // AWF mounts + allowlist
     let allowed_domains =
         common::generate_allowed_domains(front_matter, extensions, &extension_declarations)?;
+    // With no engine overlay, Detection uses the same effective engine and
+    // network inputs as Agent, so the already-computed allowlist is identical.
+    // Any future detection-only network contributor must extend this branch
+    // rather than relying on the clone.
+    let detection_allowed_domains = if threat_detection.engine.is_some() {
+        common::generate_allowed_domains_for_engine(
+            front_matter,
+            extensions,
+            &extension_declarations,
+            &detection_engine_config,
+        )?
+    } else {
+        allowed_domains.clone()
+    };
     let awf_mounts = common::generate_awf_mounts(extensions, &extension_declarations);
     let awf_path_step_yaml = common::generate_awf_path_step(&awf_paths);
 
@@ -275,7 +317,18 @@ pub(crate) fn build_pipeline_context(
     // `source_path` embeds `{{ trigger_repo_directory }}` which the
     // legacy template fold substitutes — do the same eagerly so step
     // bodies receive a fully-resolved scalar.
+    // Validate the exact user-controlled suffix produced by the canonical path
+    // generator before the final path is embedded into compiler-authored bash.
+    // The trigger-repository prefix itself is compiler-owned.
     let source_path_raw = common::generate_source_path(input_path);
+    let source_path_suffix = source_path_raw
+        .strip_prefix("{{ trigger_repo_directory }}/")
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "compiler-generated workflow source path is missing the trigger-repository prefix"
+            )
+        })?;
+    crate::validate::reject_pipeline_injection(source_path_suffix, "workflow source path")?;
     let source_path =
         source_path_raw.replace("{{ trigger_repo_directory }}", &trigger_repo_directory);
     let pipeline_path = common::generate_pipeline_path(output_path);
@@ -360,11 +413,15 @@ pub(crate) fn build_pipeline_context(
         trigger_repo_directory: trigger_repo_directory.clone(),
         compiler_version: compiler_version.clone(),
         engine_install_steps_yaml,
+        detection_engine_install_steps_yaml,
         engine_run,
         engine_run_detection,
+        detection_engine_config,
+        threat_detection,
         engine_env,
         engine_log_dir,
         allowed_domains,
+        detection_allowed_domains,
         awf_mounts,
         awf_path_step_yaml,
         mcpg_config_json,
@@ -381,7 +438,8 @@ pub(crate) fn build_pipeline_context(
         agent_content_value,
         debug_pipeline,
         byom_exclude_keys,
-        detection_provider_env,
+        detection_byom_exclude_keys,
+        detection_engine_env,
     };
 
     // ─── Build jobs ───────────────────────────────────────────────
@@ -585,13 +643,17 @@ pub(crate) struct StandaloneCtx {
     /// impl. A future `Engine::install_steps_typed` would lift this
     /// to typed steps.
     pub(crate) engine_install_steps_yaml: String,
+    pub(crate) detection_engine_install_steps_yaml: String,
     pub(crate) engine_run: String,
     pub(crate) engine_run_detection: String,
+    pub(crate) detection_engine_config: EngineConfig,
+    pub(crate) threat_detection: ThreatDetectionConfig,
     /// Composed engine env block — `KEY: VALUE` lines, one per line.
     /// Carried as a string and re-parsed during step emission.
     pub(crate) engine_env: String,
     pub(crate) engine_log_dir: String,
     pub(crate) allowed_domains: String,
+    pub(crate) detection_allowed_domains: String,
     /// `--mount` flags for AWF (or `\` placeholder when no mounts).
     pub(crate) awf_mounts: String,
     /// `awf_path_step` YAML body (or empty when no path prepends).
@@ -624,10 +686,9 @@ pub(crate) struct StandaloneCtx {
     /// Actual provider credential env keys present to pass to AWF `--exclude-env`;
     /// empty for non-BYOM. AWF's API proxy itself is always enabled.
     pub(crate) byom_exclude_keys: Vec<String>,
-    /// Provider-only (`COPILOT_PROVIDER_*`) subset of `engine.env` as validated
-    /// raw `(key, value)` pairs (empty when none). Applied to the Detection
-    /// (threat-analysis) step so it inherits BYOM provider routing + isolation.
-    pub(crate) detection_provider_env: Vec<(String, String)>,
+    pub(crate) detection_byom_exclude_keys: Vec<String>,
+    /// Validated inherited/overridden custom env for Detection.
+    pub(crate) detection_engine_env: Vec<(String, String)>,
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1215,8 +1276,8 @@ fn agent_job_variables_hoist(
 /// emitted. Today only the GitHub App token step needs it; future
 /// detection-only bundle consumers should `||` their own condition in here
 /// rather than adding a second `install_and_download_steps_typed` call.
-fn detection_job_needs_ado_script_bundle(front_matter: &FrontMatter) -> bool {
-    front_matter.engine.github_app_token().is_some()
+fn detection_job_needs_ado_script_bundle(engine_config: &EngineConfig) -> bool {
+    engine_config.github_app_token().is_some()
 }
 
 fn build_detection_job(
@@ -1233,95 +1294,93 @@ fn build_detection_job(
         condition: None,
     }));
 
-    // Engine install
-    push_raw_yaml_if_nonempty(&mut steps, &cfg.engine_install_steps_yaml)?;
-    // One NuGetAuthenticate@1 for the whole Detection job (feed mirror).
-    if let Some(auth) = feed_auth_step(front_matter.supply_chain()) {
-        steps.push(auth);
-    }
-    // Download compiler
-    steps.extend(download_compiler_step(
-        &cfg.compiler_version,
-        front_matter.supply_chain(),
-    ));
-    // DockerInstaller
-    steps.push(Step::Task(DockerInstaller::new("26.1.4").into_step()));
-    // Download AWF
-    steps.extend(download_awf_step(front_matter.supply_chain()));
-    // Pre-pull AWF (no MCPG image for detection).
-    steps.extend(prepull_images_step(false, front_matter.supply_chain()));
     // Prepare safe outputs for analysis
     steps.push(Step::Bash(prepare_safe_outputs_for_analysis(
         &cfg.working_directory,
     )));
-    // Prepare threat analysis prompt
-    // include_str! may carry CRLF line endings on Windows; normalise to LF
-    // so the resulting block scalar emits cleanly. Then substitute the
-    // template markers the threat prompt embeds (source_path, agent_name,
-    // agent_description, working_directory) — these match the legacy
-    // template fold's behaviour.
-    let threat_prompt_raw = include_str!("../data/threat-analysis.md");
-    let threat_prompt = threat_prompt_raw
-        .replace("\r\n", "\n")
-        .replace("{{ source_path }}", &cfg.source_path)
-        .replace("{{ agent_name }}", &cfg.agent_display_name)
-        .replace("{{ agent_description }}", &front_matter.description)
-        .replace("{{ working_directory }}", &cfg.working_directory);
-    steps.push(Step::Bash(prepare_threat_analysis_prompt_step(
-        &threat_prompt,
-    )?));
-    // Setup compiler
-    steps.push(Step::Bash(setup_compiler_step()));
-    // When GitHub App auth is configured, mint the installation token
-    // immediately before the threat-analysis Copilot run. Unlike the Agent job
-    // (whose bundle download is staged by the ado-script extension's
-    // agent-prepare phase, gated on `github_app_token_active`), the Detection
-    // job has no extension-prepare phase to piggyback on, so it stages the
-    // bundle self-contained — but exactly once, gated on the single
-    // `detection_job_needs_ado_script_bundle` predicate below so future
-    // detection-only bundle consumers OR into one download rather than adding a
-    // second (mirroring the Agent-job predicate in `AdoScriptExtension`).
-    if detection_job_needs_ado_script_bundle(front_matter) {
-        steps.extend(
-            super::extensions::ado_script::install_and_download_steps_typed(
-                front_matter.supply_chain(),
-            ),
-        );
+    if cfg.threat_detection.is_enabled() {
+        // Detection gets its own effective engine install/config path.
+        push_raw_yaml_if_nonempty(&mut steps, &cfg.detection_engine_install_steps_yaml)?;
+        if let Some(auth) = feed_auth_step(front_matter.supply_chain()) {
+            steps.push(auth);
+        }
+        steps.extend(download_compiler_step(
+            &cfg.compiler_version,
+            front_matter.supply_chain(),
+        ));
+        steps.push(Step::Task(DockerInstaller::new("26.1.4").into_step()));
+        steps.extend(download_awf_step(front_matter.supply_chain()));
+        steps.extend(prepull_images_step(false, front_matter.supply_chain()));
+
+        // include_str! may carry CRLF line endings on Windows; normalise to LF
+        // before marker substitution and appending operator instructions.
+        let threat_prompt_raw = include_str!("../data/threat-analysis.md");
+        let mut threat_prompt = threat_prompt_raw
+            .replace("\r\n", "\n")
+            .replace("{{ source_path }}", &cfg.source_path)
+            .replace("{{ agent_name }}", &cfg.agent_display_name)
+            .replace("{{ agent_description }}", &front_matter.description)
+            .replace("{{ working_directory }}", &cfg.working_directory);
+        if let Some(custom_prompt) = cfg
+            .threat_detection
+            .prompt
+            .as_deref()
+            .filter(|prompt| !prompt.is_empty())
+        {
+            threat_prompt.push_str("\n\n## Additional Instructions\n\n");
+            threat_prompt.push_str(&custom_prompt.replace("\r\n", "\n"));
+        }
+        steps.push(Step::Bash(prepare_threat_analysis_prompt_step(&threat_prompt)?));
+        steps.push(Step::Bash(setup_compiler_step()));
+
+        // Stage auth support before custom pre-steps, but mint credentials only
+        // after them so trusted setup code receives the least privilege needed.
+        if detection_job_needs_ado_script_bundle(&cfg.detection_engine_config) {
+            steps.extend(
+                super::extensions::ado_script::install_and_download_steps_typed(
+                    front_matter.supply_chain(),
+                ),
+            );
+        }
+        for user_step in &cfg.threat_detection.steps {
+            steps.push(Step::RawYaml(step_to_raw_yaml_string(user_step)?));
+        }
+
+        if let Some(app_token) = cfg.detection_engine_config.github_app_token() {
+            steps.push(super::extensions::ado_script::github_app_token_step_typed(
+                app_token,
+            )?);
+        }
+        if let Some(token) = cfg
+            .detection_engine_config
+            .provider()
+            .and_then(|provider| provider.token.as_ref())
+        {
+            steps.push(Step::Task(provider_token_mint_step(token)));
+        }
+        steps.push(Step::Bash(run_threat_analysis_step(
+            &cfg.detection_allowed_domains,
+            &cfg.working_directory,
+            &cfg.engine_run_detection,
+            &cfg.detection_byom_exclude_keys,
+            &cfg.detection_engine_env,
+            crate::engine::github_token_source_var(&cfg.detection_engine_config),
+            front_matter.supply_chain(),
+        )?));
+        if let Some(app_token) = cfg.detection_engine_config.github_app_token()
+            && !app_token.skip_token_revocation
+        {
+            steps.push(super::extensions::ado_script::github_app_token_revoke_step_typed(app_token)?);
+        }
+        for user_step in &cfg.threat_detection.post_steps {
+            steps.push(Step::RawYaml(step_to_raw_yaml_string(user_step)?));
+        }
+        steps.push(Step::Bash(prepare_analyzed_outputs_step()));
+        steps.push(Step::Bash(evaluate_threat_analysis_step()));
+    } else {
+        steps.push(Step::Bash(prepare_analyzed_outputs_passthrough_step()));
+        steps.push(Step::Bash(threat_analysis_disabled_step()));
     }
-    if let Some(app_token) = front_matter.engine.github_app_token() {
-        steps.push(super::extensions::ado_script::github_app_token_step_typed(
-            app_token,
-        )?);
-    }
-    // Mint the external provider token in-job (same-job secret) before the
-    // threat-analysis Copilot run, mirroring the Agent job.
-    if let Some(token) = front_matter
-        .engine
-        .provider()
-        .and_then(|p| p.token.as_ref())
-    {
-        steps.push(Step::Task(provider_token_mint_step(token)));
-    }
-    // Run threat analysis
-    steps.push(Step::Bash(run_threat_analysis_step(
-        &cfg.allowed_domains,
-        &cfg.working_directory,
-        &cfg.engine_run_detection,
-        &cfg.byom_exclude_keys,
-        &cfg.detection_provider_env,
-        crate::engine::github_token_source_var(&front_matter.engine),
-        front_matter.supply_chain(),
-    )?));
-    // Revoke the GitHub App token (best-effort, always) after threat analysis.
-    if let Some(app_token) = front_matter.engine.github_app_token()
-        && !app_token.skip_token_revocation
-    {
-        steps.push(super::extensions::ado_script::github_app_token_revoke_step_typed(app_token)?);
-    }
-    // Prepare analyzed outputs
-    steps.push(Step::Bash(prepare_analyzed_outputs_step()));
-    // Evaluate threat analysis — DECLARES TYPED OUTPUT
-    steps.push(Step::Bash(evaluate_threat_analysis_step()));
     // When manual review is configured, detect whether the agent actually
     // proposed any approval-gated outputs — DECLARES TYPED OUTPUT. The
     // ManualReview gate is conditioned on this so the run never pauses for a
@@ -1340,8 +1399,9 @@ fn build_detection_job(
             &custom_tools,
         )?));
     }
-    // Copy logs
-    steps.push(Step::Bash(copy_logs_step(&cfg.engine_log_dir, true)));
+    if cfg.threat_detection.is_enabled() {
+        steps.push(Step::Bash(copy_logs_step(&cfg.engine_log_dir, true)));
+    }
     // Publish
     steps.push(Step::Publish(PublishStep {
         path: "$(Agent.TempDirectory)/analyzed_outputs".to_string(),
@@ -1354,6 +1414,11 @@ fn build_detection_job(
         "Detection",
         cfg.pools.detection.clone(),
     );
+    if cfg.threat_detection.is_enabled()
+        && let Some(minutes) = cfg.detection_engine_config.timeout_minutes()
+    {
+        job.timeout = Some(std::time::Duration::from_secs(60 * minutes as u64));
+    }
     job.steps = steps;
     Ok(job)
 }
@@ -3798,7 +3863,7 @@ fn run_threat_analysis_step(
     working_directory: &str,
     engine_run_detection: &str,
     byom_exclude_keys: &[String],
-    detection_provider_env: &[(String, String)],
+    detection_engine_env: &[(String, String)],
     github_token_var: &str,
     supply_chain: Option<&SupplyChainConfig>,
 ) -> Result<BashStep> {
@@ -3842,10 +3907,9 @@ fn run_threat_analysis_step(
             "GITHUB_READ_ONLY",
             EnvValue::RawYamlScalar(serde_yaml::Value::Number(1.into())),
         );
-    // BYOM/BYOK: apply the COPILOT_PROVIDER_* env so the detection Copilot run
-    // routes to the same external provider as the main agent. Classify each raw
-    // value directly (macro → PipelineVar, else Literal) — no YAML round-trip.
-    for (k, raw) in detection_provider_env {
+    // Apply validated Detection engine env directly (macro → PipelineVar, else
+    // Literal) without a YAML render/reparse round-trip.
+    for (k, raw) in detection_engine_env {
         step = step.with_env(k.clone(), env_value_from_str(raw));
     }
     Ok(step)
@@ -3882,6 +3946,27 @@ fn prepare_analyzed_outputs_step() -> BashStep {
                   echo \"Analyzed outputs directory contents:\"\n\
                   ls -laR \"$(Agent.TempDirectory)/analyzed_outputs\"\n";
     bash("Prepare analyzed outputs", script).with_condition(Condition::Always)
+}
+
+fn prepare_analyzed_outputs_passthrough_step() -> BashStep {
+    let script = "set -eo pipefail\n\
+                  mkdir -p \"$(Agent.TempDirectory)/analyzed_outputs\"\n\
+                  cp -a \"$(Pipeline.Workspace)/agent_outputs_$(Build.BuildId)/.\" \
+                    \"$(Agent.TempDirectory)/analyzed_outputs/\"\n\
+                  echo \"AI threat detection is disabled; copied Agent outputs unchanged.\"\n";
+    bash("Prepare analyzed outputs (detection disabled)", script)
+}
+
+fn threat_analysis_disabled_step() -> BashStep {
+    let script = "echo \"AI threat detection was explicitly disabled by workflow configuration.\"\n\
+                  echo \"##vso[task.setvariable variable=SafeToProcess;isOutput=true]true\"\n\
+                  echo \"SafeToProcess set to: true\"\n";
+    bash("Bypass AI threat analysis", script)
+        .with_id(
+            StepId::new("threatAnalysis")
+                .expect("threatAnalysis is a valid StepId — see StepId::new contract"),
+        )
+        .with_output(OutputDecl::new("SafeToProcess"))
 }
 
 fn evaluate_threat_analysis_step() -> BashStep {
@@ -4424,11 +4509,15 @@ mod tests {
             trigger_repo_directory: "$(Build.SourcesDirectory)".to_string(),
             compiler_version: "0.0.0-test".to_string(),
             engine_install_steps_yaml: String::new(),
+            detection_engine_install_steps_yaml: String::new(),
             engine_run: "echo agent".to_string(),
             engine_run_detection: "echo detection".to_string(),
+            detection_engine_config: EngineConfig::default(),
+            threat_detection: ThreatDetectionConfig::default(),
             engine_env: "GITHUB_READ_ONLY: 1".to_string(),
             engine_log_dir: "/tmp/logs".to_string(),
             allowed_domains: "example.com".to_string(),
+            detection_allowed_domains: "example.com".to_string(),
             awf_mounts: "\\".to_string(),
             awf_path_step_yaml: String::new(),
             mcpg_config_json: "{}".to_string(),
@@ -4445,7 +4534,8 @@ mod tests {
             agent_content_value: "Test prompt".to_string(),
             debug_pipeline: false,
             byom_exclude_keys: Vec::new(),
-            detection_provider_env: Vec::new(),
+            detection_byom_exclude_keys: Vec::new(),
+            detection_engine_env: Vec::new(),
         }
     }
 
@@ -4939,6 +5029,8 @@ safe-outputs:
 
     fn build_jobs(source: &str) -> Vec<super::super::ir::job::Job> {
         let fm = parse_and_resolve(source);
+        let threat_detection = fm.threat_detection_config().unwrap();
+        let detection_engine_config = fm.effective_detection_engine(&threat_detection);
         let ctx = super::super::extensions::CompileContext::for_test(&fm);
         let extensions = super::super::extensions::collect_extensions(&fm);
         let decls: Vec<_> = extensions
@@ -4980,11 +5072,15 @@ safe-outputs:
             ),
             compiler_version: "0.0.0-test".to_string(),
             engine_install_steps_yaml: String::new(),
+            detection_engine_install_steps_yaml: String::new(),
             engine_run: String::new(),
             engine_run_detection: String::new(),
+            detection_engine_config,
+            threat_detection,
             engine_env: "env:\n  GITHUB_TOKEN: $(GITHUB_TOKEN)\n".to_string(),
             engine_log_dir: "/tmp/logs".to_string(),
             allowed_domains: String::new(),
+            detection_allowed_domains: String::new(),
             awf_mounts: "\\".to_string(),
             awf_path_step_yaml: String::new(),
             mcpg_config_json: "{}".to_string(),
@@ -5001,7 +5097,8 @@ safe-outputs:
             agent_content_value: String::new(),
             debug_pipeline: false,
             byom_exclude_keys: vec![],
-            detection_provider_env: vec![],
+            detection_byom_exclude_keys: vec![],
+            detection_engine_env: vec![],
         };
         build_canonical_jobs(
             &fm,
@@ -5017,6 +5114,118 @@ safe-outputs:
 
     fn job_pool_by_id<'a>(jobs: &'a [super::super::ir::job::Job], id: &str) -> Option<&'a Pool> {
         jobs.iter().find(|j| j.id.as_ref() == id).map(|j| &j.pool)
+    }
+
+    #[test]
+    fn threat_detection_enabled_and_disabled_match_expected_ir_graph() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        use super::super::ir::{
+            Pipeline, PipelineBody, PipelineShape, Resources, Triggers,
+            graph::build_graph,
+        };
+
+        let common = concat!(
+            "name: test\n",
+            "description: test\n",
+            "safe-outputs:\n",
+            "  require-approval: true\n",
+            "  create-pull-request: {}\n",
+            "  add-pr-comment:\n",
+            "    require-approval: false\n",
+        );
+        let enabled = format!("---\n{common}  threat-detection: true\n---\nbody\n");
+        let disabled = format!(
+            "---\n{common}  threat-detection:\n    enabled: false\n    steps:\n      \
+             - bash: echo should-not-run\n        displayName: SHOULD_NOT_RUN_PRE\n    \
+             post-steps:\n      - bash: echo should-not-run\n        displayName: \
+             SHOULD_NOT_RUN_POST\n---\nbody\n"
+        );
+
+        let enabled_jobs = build_jobs(&enabled);
+        let disabled_jobs = build_jobs(&disabled);
+
+        let graph_for = |jobs| {
+            let pipeline = Pipeline {
+                name: "test".to_string(),
+                parameters: vec![],
+                resources: Resources::default(),
+                triggers: Triggers::default(),
+                variables: vec![],
+                body: PipelineBody::Jobs(jobs),
+                shape: PipelineShape::Standalone,
+            };
+            build_graph(&pipeline).unwrap()
+        };
+        let enabled_graph = graph_for(enabled_jobs.clone());
+        let disabled_graph = graph_for(disabled_jobs.clone());
+
+        let job = |id: &str| JobId::new(id).unwrap();
+        let expected_edges = BTreeSet::from([
+            (job("Conclusion"), job("Agent")),
+            (job("Conclusion"), job("Detection")),
+            (job("Conclusion"), job("SafeOutputs")),
+            (job("Conclusion"), job("SafeOutputs_Reviewed")),
+            (job("Detection"), job("Agent")),
+            (job("ManualReview"), job("Agent")),
+            (job("ManualReview"), job("Detection")),
+            (job("SafeOutputs"), job("Agent")),
+            (job("SafeOutputs"), job("Detection")),
+            (job("SafeOutputs_Reviewed"), job("Agent")),
+            (job("SafeOutputs_Reviewed"), job("Detection")),
+            (job("SafeOutputs_Reviewed"), job("ManualReview")),
+        ]);
+        let expected_outputs = BTreeMap::from([
+            (
+                StepId::new("reviewedProposals").unwrap(),
+                BTreeSet::from(["HasReviewedProposals".to_string()]),
+            ),
+            (
+                StepId::new("threatAnalysis").unwrap(),
+                BTreeSet::from(["SafeToProcess".to_string()]),
+            ),
+        ]);
+
+        for graph in [&enabled_graph, &disabled_graph] {
+            assert_eq!(graph.job_edges, expected_edges);
+            assert!(graph.stage_edges.is_empty());
+            assert_eq!(graph.outputs_needing_is_output, expected_outputs);
+            assert_eq!(graph.step_locations.len(), 2);
+            for (step, outputs) in &expected_outputs {
+                let location = graph.step_locations.get(step).unwrap();
+                assert_eq!(location.job, job("Detection"));
+                assert_eq!(&location.outputs, outputs);
+            }
+        }
+
+        let disabled_detection = disabled_jobs
+            .iter()
+            .find(|job| job.id.as_ref() == "Detection")
+            .unwrap();
+        assert!(disabled_detection.steps.iter().any(|step| {
+            matches!(step, Step::Bash(step) if step.display_name == "Bypass AI threat analysis")
+        }));
+        assert!(!disabled_detection.steps.iter().any(|step| {
+            matches!(step, Step::RawYaml(raw) if raw.contains("SHOULD_NOT_RUN"))
+        }));
+
+        let enabled_detection = enabled_jobs
+            .iter()
+            .find(|job| job.id.as_ref() == "Detection")
+            .unwrap();
+        let reviewed_index = enabled_detection
+            .steps
+            .iter()
+            .position(|step| step.id().is_some_and(|id| id.as_ref() == "reviewedProposals"))
+            .unwrap();
+        let copy_logs_index = enabled_detection
+            .steps
+            .iter()
+            .position(|step| {
+                matches!(step, Step::Bash(step) if step.display_name == "Copy logs to output directory")
+            })
+            .unwrap();
+        assert!(reviewed_index < copy_logs_index);
     }
 
     #[test]

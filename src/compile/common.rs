@@ -2817,6 +2817,23 @@ pub fn generate_allowed_domains(
     extensions: &[super::extensions::Extension],
     extension_declarations: &[Declarations],
 ) -> Result<String> {
+    generate_allowed_domains_for_engine(
+        front_matter,
+        extensions,
+        extension_declarations,
+        &front_matter.engine,
+    )
+}
+
+/// Generate the AWF allowlist using an explicit engine configuration.
+///
+/// Detection uses this when its engine overlay changes API/provider hosts.
+pub fn generate_allowed_domains_for_engine(
+    front_matter: &FrontMatter,
+    extensions: &[super::extensions::Extension],
+    extension_declarations: &[Declarations],
+    engine_config: &crate::compile::types::EngineConfig,
+) -> Result<String> {
     // Collect enabled MCP names (user-defined MCPs, not first-party tools)
     let enabled_mcps: Vec<String> = front_matter
         .mcp_servers
@@ -2866,13 +2883,13 @@ pub fn generate_allowed_domains(
 
     // Add engine-required hosts (e.g., GHES/GHEC api-target hostname).
     // The engine resolves its config and returns additional hosts that AWF must allow.
-    let engine = crate::engine::get_engine(front_matter.engine.engine_id())?;
-    for host in engine.required_hosts(&front_matter.engine) {
+    let engine = crate::engine::get_engine(engine_config.engine_id())?;
+    for host in engine.required_hosts(engine_config) {
         hosts.insert(host);
     }
     // Surface non-fatal engine network warnings (e.g. a literal but malformed
     // COPILOT_PROVIDER_BASE_URL whose host could not be resolved and added).
-    for warning in engine.network_host_warnings(&front_matter.engine) {
+    for warning in engine.network_host_warnings(engine_config) {
         eprintln!("warning: {warning}");
     }
 
