@@ -18,32 +18,8 @@ All child definitions use
 permanent and inert; the harness never deletes it. Its seed commit is
 `2b5fa7c336bd1f55a867cfc281e665472730b84c`.
 
-## Registering the multi-repo child
-
-The `multi-repo` fixture is **candidate-only** — it has no released lock file
-and no release-backed definition, so it lives under
-`tests/compiler-smoke-e2e/fixtures/` rather than `tests/safe-outputs/`.
-Registering it requires:
-
-1. Copy [`inert-child.yml`](inert-child.yml) to
-   `tests/compiler-smoke-e2e/fixtures/multi-repo.lock.yml` on
-   `refs/heads/ado-aw-smoke-candidate-base`, so the definition has an inert
-   YAML path before the orchestrator ever supplies a candidate ref.
-2. Create the definition against `ado-aw-mirror` at that YAML path, with
-   `refs/heads/ado-aw-smoke-candidate-base` as its default branch and CI/PR
-   triggers disabled.
-3. Provision its own secret `GITHUB_TOKEN` (server-side definition cloning does
-   not copy secret values). It needs no `ADO_AW_DEBUG_GITHUB_TOKEN`.
-4. Authorize `agent-playground-read` on it. It needs no write service
-   connection: the fixture proposes no safe output that writes to ADO.
-5. Record the returned ID above and set
-   `COMPILER_SMOKE_MULTI_REPO_DEFINITION_ID` on the orchestrator.
-
-The fixture checks out `ado-aw-mirror` a second time under the alias
-`pinned-base`, pinned to `refs/heads/ado-aw-smoke-candidate-base`. Because that
-is the same repository the child already reads, it needs no additional
-repository-resource authorization — only Code Read on `ado-aw-mirror`, which
-every child already has.
+To add a new child definition, follow **Adding a new candidate fixture** in
+[`README.md`](README.md), then record the returned ID in the table above.
 
 Candidate janitor definition `2557` was retired. The release-backed janitor
 definition `2548` remains scheduled weekly and is not part of this lane.

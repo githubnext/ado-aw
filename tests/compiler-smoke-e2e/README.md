@@ -121,9 +121,77 @@ default branch is the permanent inert ref
 hand-authored `trigger: none`, `pr: none`, schedule-free placeholders. A child
 therefore runs only when the orchestrator explicitly supplies a candidate ref.
 The checked-in [`inert-child.yml`](inert-child.yml) is copied to each of those
-paths when the base ref is created.
+paths — when the base ref is first created, and again for each fixture added
+later (see **Adding a new candidate fixture** below).
 
 See [`REGISTERED.md`](REGISTERED.md) for definition IDs and variables.
+
+## Adding a new candidate fixture
+
+`<name>` is the fixture name; `multi-repo` is the worked example.
+
+> **Order matters.** Phase B must be complete before Phase A merges — the
+> harness fails closed on an unset `*_DEFINITION_ID`, so an unregistered
+> fixture breaks the whole lane.
+
+### Phase A — repository (one PR)
+
+1. Author `fixtures/<name>.md`. Do **not** commit a lock file: candidate-only
+   fixtures have no released compiler that owns one.
+2. Wire it up in five places:
+
+   | File | Change |
+   | --- | --- |
+   | `config.ts` | add `<name>` to `FIXTURE_NAMES` |
+   | `config.ts` | add `COMPILER_SMOKE_<NAME>_DEFINITION_ID` to `DEFINITION_ID_ENV_BY_FIXTURE` |
+   | `fixtures.ts` | add `<name>` to `FIXTURE_DIR_BY_NAME` |
+   | `azure-pipelines.yml` | add the `EFFECTIVE_*` variable **and** its env passthrough |
+   | `__tests__/{config,index}.test.ts` | add the ID to both env builders |
+
+   (All five live under `scripts/ado-script/src/compiler-smoke-e2e/` except the
+   pipeline YAML.)
+3. `npx vitest run src/compiler-smoke-e2e && npm run typecheck`.
+
+### Phase B — Azure DevOps (once, needs mirror push + definition-create rights)
+
+```bash
+# 1. Seed an inert placeholder so the definition has a valid default branch.
+git clone -b ado-aw-smoke-candidate-base \
+  https://dev.azure.com/msazuresphere/AgentPlayground/_git/ado-aw-mirror
+cd ado-aw-mirror
+mkdir -p tests/compiler-smoke-e2e/fixtures
+cp /path/to/ado-aw/tests/compiler-smoke-e2e/inert-child.yml \
+  tests/compiler-smoke-e2e/fixtures/<name>.lock.yml
+git add -A && git commit -m "chore(smoke): seed inert <name> child" && git push
+
+# 2. Create the definition (no run; triggers stay off).
+az pipelines create \
+  --org https://dev.azure.com/msazuresphere --project AgentPlayground \
+  --name "Candidate compiler smoke - <name>" \
+  --repository ado-aw-mirror --repository-type tfsgit \
+  --branch ado-aw-smoke-candidate-base \
+  --yaml-path tests/compiler-smoke-e2e/fixtures/<name>.lock.yml \
+  --folder-path '\compiler-smoke-e2e' --skip-run true
+```
+
+Then, on the new definition:
+
+- provision its **own** secret `GITHUB_TOKEN` — server-side definition cloning
+  does not copy secret values;
+- authorize the service connections the fixture's `permissions:` block declares
+  (`agent-playground-read`, plus `agent-playground-write` only if it proposes a
+  safe output that writes to ADO);
+- set `COMPILER_SMOKE_<NAME>_DEFINITION_ID` on orchestrator `2559`.
+
+### Phase C — verify
+
+`/azp run` the orchestrator on the Phase A PR, confirm the new child appears in
+the results table, then record its ID in [`REGISTERED.md`](REGISTERED.md).
+
+> Checking out an **additional** repository needs no extra authorization when
+> it is one the child already reads (`multi-repo` checks out `ado-aw-mirror`
+> twice). A genuinely different repository needs Code Read granted to the
+> child's build identity.
 
 ## Required permissions
 
