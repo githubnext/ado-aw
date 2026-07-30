@@ -168,18 +168,33 @@ async fn fetch_authenticated_user_id(
     Ok(Ok(user_id))
 }
 
+/// Shared context for the vote-related helpers, reducing per-call argument count.
+struct PrVoteCtx<'a> {
+    client: &'a reqwest::Client,
+    base_url: &'a str,
+    encoded_repo: &'a str,
+    pull_request_id: i32,
+    event: &'a str,
+    vote_value: i32,
+    token: &'a str,
+}
+
 /// Self-approval guard: returns `Some(failure)` when a positive vote targets a PR the
 /// authenticated user created; returns `None` when the vote is allowed to proceed.
 async fn check_self_approval(
-    client: &reqwest::Client,
-    base_url: &str,
-    encoded_repo: &str,
-    pull_request_id: i32,
+    ctx: &PrVoteCtx<'_>,
     user_id: &str,
-    event: &str,
-    vote_value: i32,
-    token: &str,
 ) -> anyhow::Result<Option<ExecutionResult>> {
+    let PrVoteCtx {
+        client,
+        base_url,
+        encoded_repo,
+        pull_request_id,
+        event,
+        vote_value,
+        token,
+    } = ctx;
+    let (pull_request_id, vote_value) = (*pull_request_id, *vote_value);
     if vote_value <= 0 {
         return Ok(None);
     }
@@ -231,15 +246,19 @@ async fn check_self_approval(
 /// PUTs the review vote to the ADO reviewers endpoint.
 /// Returns `Err` on network errors, `Ok(Some(failure))` on HTTP errors, `Ok(None)` on success.
 async fn submit_vote(
-    client: &reqwest::Client,
-    base_url: &str,
-    encoded_repo: &str,
+    ctx: &PrVoteCtx<'_>,
     encoded_user_id: &str,
-    pull_request_id: i32,
-    event: &str,
-    vote_value: i32,
-    token: &str,
 ) -> anyhow::Result<Option<ExecutionResult>> {
+    let PrVoteCtx {
+        client,
+        base_url,
+        encoded_repo,
+        pull_request_id,
+        event,
+        vote_value,
+        token,
+    } = ctx;
+    let (pull_request_id, vote_value) = (*pull_request_id, *vote_value);
     let vote_url = format!(
         "{}/{}/pullRequests/{}/reviewers/{}?api-version=7.1",
         base_url, encoded_repo, pull_request_id, encoded_user_id
@@ -428,35 +447,22 @@ impl Executor for SubmitPrReviewResult {
         };
 
         // Self-approval guard: prevent the agent from approving PRs it created.
-        if let Some(failure) = check_self_approval(
-            &client,
-            &base_url,
-            &encoded_repo,
-            self.pull_request_id,
-            &user_id,
-            &self.event,
+        let vote_ctx = PrVoteCtx {
+            client: &client,
+            base_url: &base_url,
+            encoded_repo: &encoded_repo,
+            pull_request_id: self.pull_request_id,
+            event: &self.event,
             vote_value,
             token,
-        )
-        .await?
-        {
+        };
+        if let Some(failure) = check_self_approval(&vote_ctx, &user_id).await? {
             return Ok(failure);
         }
 
         // PUT vote to reviewers endpoint
         let encoded_user_id = utf8_percent_encode(&user_id, PATH_SEGMENT).to_string();
-        if let Some(failure) = submit_vote(
-            &client,
-            &base_url,
-            &encoded_repo,
-            &encoded_user_id,
-            self.pull_request_id,
-            &self.event,
-            vote_value,
-            token,
-        )
-        .await?
-        {
+        if let Some(failure) = submit_vote(&vote_ctx, &encoded_user_id).await? {
             return Ok(failure);
         }
 
