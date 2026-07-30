@@ -3768,6 +3768,118 @@ fn test_conclusion_job_is_not_emitted_without_safe_outputs() {
     );
 }
 
+/// When `permissions.write` is configured the Conclusion job must mint its own
+/// `SC_WRITE_TOKEN` via an `AzureCLI@2` step. Azure Pipelines `task.setvariable`
+/// variables are job-scoped; the token minted in SafeOutputs is NOT available to
+/// the separate Conclusion job (issue #1688).
+#[test]
+fn test_conclusion_job_acquires_write_token_locally() {
+    let compiled = compile_fixture("conclusion_with_write_sc.md");
+    let doc = parse_compiled_yaml(&compiled);
+
+    let conclusion_job =
+        find_job_mapping(&doc, "Conclusion").expect("compiled YAML should contain Conclusion job");
+
+    // The Conclusion job must contain an AzureCLI@2 step that mints SC_WRITE_TOKEN.
+    let steps = conclusion_job
+        .get(yaml_key("steps"))
+        .and_then(|v| v.as_sequence())
+        .expect("Conclusion job should have steps");
+
+    let has_acquire_step = steps.iter().any(|step| {
+        let Some(map) = step.as_mapping() else {
+            return false;
+        };
+        let is_azure_cli = map
+            .get(yaml_key("task"))
+            .and_then(|v| v.as_str())
+            .map(|t| t.starts_with("AzureCLI@"))
+            .unwrap_or(false);
+        if !is_azure_cli {
+            return false;
+        }
+        // The inline script must set SC_WRITE_TOKEN
+        map.get(yaml_key("inputs"))
+            .and_then(|v| v.as_mapping())
+            .and_then(|inputs| inputs.get(yaml_key("inlineScript")))
+            .and_then(|v| v.as_str())
+            .map(|script| script.contains("SC_WRITE_TOKEN"))
+            .unwrap_or(false)
+    });
+    assert!(
+        has_acquire_step,
+        "Conclusion job must contain an AzureCLI@2 step that mints SC_WRITE_TOKEN locally \
+         (job-scoped task.setvariable variables from SafeOutputs are not available here)"
+    );
+
+    // The conclusion.js step must reference $(SC_WRITE_TOKEN) for SYSTEM_ACCESSTOKEN.
+    let conclusion_step = find_bash_step_containing(conclusion_job, "conclusion.js")
+        .expect("Conclusion job should include the conclusion.js bash step");
+    let env = conclusion_step
+        .get(yaml_key("env"))
+        .and_then(|v| v.as_mapping())
+        .expect("conclusion.js step should have an env block");
+    assert_eq!(
+        env.get(yaml_key("SYSTEM_ACCESSTOKEN"))
+            .and_then(|v| v.as_str()),
+        Some("$(SC_WRITE_TOKEN)"),
+        "conclusion.js step must use $(SC_WRITE_TOKEN) when permissions.write is configured"
+    );
+}
+
+/// When no `permissions.write` is configured the Conclusion job must use the
+/// built-in `$(System.AccessToken)` and must NOT emit an AzureCLI@2 token-mint
+/// step (no-write-SC path regression guard).
+#[test]
+fn test_conclusion_job_no_write_sc_uses_system_access_token() {
+    let compiled = compile_fixture("conclusion_basic.md");
+    let doc = parse_compiled_yaml(&compiled);
+
+    let conclusion_job =
+        find_job_mapping(&doc, "Conclusion").expect("compiled YAML should contain Conclusion job");
+
+    // No AzureCLI@2 step that mentions SC_WRITE_TOKEN.
+    let steps = conclusion_job
+        .get(yaml_key("steps"))
+        .and_then(|v| v.as_sequence())
+        .expect("Conclusion job should have steps");
+    let has_write_token_step = steps.iter().any(|step| {
+        let Some(map) = step.as_mapping() else {
+            return false;
+        };
+        map.get(yaml_key("task"))
+            .and_then(|v| v.as_str())
+            .map(|t| t.starts_with("AzureCLI@"))
+            .unwrap_or(false)
+            && map
+                .get(yaml_key("inputs"))
+                .and_then(|v| v.as_mapping())
+                .and_then(|inputs| inputs.get(yaml_key("inlineScript")))
+                .and_then(|v| v.as_str())
+                .map(|s| s.contains("SC_WRITE_TOKEN"))
+                .unwrap_or(false)
+    });
+    assert!(
+        !has_write_token_step,
+        "Conclusion job must NOT emit an SC_WRITE_TOKEN acquisition step when no write \
+         service connection is configured"
+    );
+
+    // SYSTEM_ACCESSTOKEN must point to $(System.AccessToken).
+    let conclusion_step = find_bash_step_containing(conclusion_job, "conclusion.js")
+        .expect("Conclusion job should include the conclusion.js bash step");
+    let env = conclusion_step
+        .get(yaml_key("env"))
+        .and_then(|v| v.as_mapping())
+        .expect("conclusion.js step should have an env block");
+    assert_eq!(
+        env.get(yaml_key("SYSTEM_ACCESSTOKEN"))
+            .and_then(|v| v.as_str()),
+        Some("$(System.AccessToken)"),
+        "conclusion.js step must use $(System.AccessToken) when no permissions.write is configured"
+    );
+}
+
 /// Assert that no step's `env:` block contains a `$[ ... ]` ADO runtime
 /// expression. ADO ONLY evaluates `$[ ... ]` inside `variables:` mappings
 /// and `condition:` fields — putting one in step `env:` passes the

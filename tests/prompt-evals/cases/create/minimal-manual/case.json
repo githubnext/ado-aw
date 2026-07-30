@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "create-minimal-manual",
+  "prompt": "create",
+  "description": "Create a minimal manual read-only repository analysis workflow.",
+  "request_file": "request.md",
+  "context_files": [],
+  "rubric_files": [
+    "rubrics/common.json",
+    "rubrics/create.json"
+  ],
+  "expected": {
+    "outcome": "workflow",
+    "artifact_required": true,
+    "compile": true,
+    "lint": true,
+    "compile_guidance": "required",
+    "external_side_effect": "none",
+    "required_sections": []
+  },
+  "ground_truth": {
+    "trigger": "manual",
+    "safe_outputs_required": false,
+    "notes": [
+      "The workflow should not invent a schedule or external write capability.",
+      "The body should summarize TODO and FIXME comments and explain the no-match result."
+    ]
+  }
+}
+

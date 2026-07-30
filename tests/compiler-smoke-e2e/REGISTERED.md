@@ -17,12 +17,12 @@ All five child definitions use
 `refs/heads/ado-aw-smoke-candidate-base` as their default branch. The ref is
 permanent and inert; the harness never deletes it.
 
-Candidate janitor definition `2557` was retired. The release-backed janitor
-definition `2548` remains scheduled weekly and is not part of this lane.
-
 The custom child imports its self-contained component from the candidate
 commit under `tests/compiler-smoke-e2e/component-fixture/`; it requires no
 external repository resource authorization.
+
+Candidate janitor definition `2557` was retired. The release-backed janitor
+definition `2548` remains scheduled weekly and is not part of this lane.
 
 ## Security record
 

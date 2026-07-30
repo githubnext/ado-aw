@@ -509,9 +509,9 @@ pub(crate) fn install_and_download_steps_typed(
 /// ADO-controlled values that cannot contain `"`, so this is safe; re-quote
 /// (or shell-escape) before adding any user-influenced variable.
 const PROMPT_ADO_VARS: &[&str] = &[
-    "Build.SourcesDirectory",
-    "Build.Repository.Name",
     "Build.BuildId",
+    "Build.Repository.Name",
+    "Build.SourcesDirectory",
     "System.CollectionUri",
 ];
 
@@ -1717,6 +1717,13 @@ mod tests {
         // Each prompt var is passed as `--var "<name>=$(<name>)"` so
         // ADO expands the macro at runtime and import.js substitutes the
         // concrete value into the prompt (consistent with inlined mode).
+        assert!(
+            resolver
+                .script
+                .contains("--var \"Build.BuildId=$(Build.BuildId)\""),
+            "resolver step must pass Build.BuildId as a --var, got: {}",
+            resolver.script
+        );
         assert!(
             resolver
                 .script

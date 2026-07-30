@@ -3,11 +3,12 @@
  *
  * Four reuse release-backed sources under `tests/safe-outputs/`; the fifth is
  * candidate-only and lives beside this harness. The weekly janitor is
- * deliberately excluded from candidate checks. Every selected source is read from
- * the detached candidate worktree (an exact checkout of
- * `BUILD_SOURCEVERSION`, never the possibly-divergent
- * `BUILD_SOURCESDIRECTORY`), transformed, compiled, and queued through its
- * fixed definition tracked in `tests/compiler-smoke-e2e/REGISTERED.md`.
+ * deliberately excluded from candidate checks. The harness reads every source
+ * from the detached candidate worktree (an exact checkout of
+ * `BUILD_SOURCEVERSION`, never `BUILD_SOURCESDIRECTORY`, which may sit at a
+ * different commit), stages a pinned `supply-chain.pipeline-artifact`
+ * transform, recompiles, and queues the five fixed candidate-lane definitions
+ * tracked in `tests/compiler-smoke-e2e/REGISTERED.md`.
  *
  * Test-harness module; not shipped in `ado-script.zip`.
  */

@@ -1,0 +1,8 @@
+The only supplied information is a cropped status message:
+
+  Pipeline failed
+  One or more jobs failed
+
+No organization, project, pipeline name, build ID, timestamp, job name, logs,
+artifacts, source workflow, or last successful run was supplied.
+

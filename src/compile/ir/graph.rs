@@ -277,54 +277,56 @@ fn collect_step_outputs(step: &Step) -> BTreeSet<String> {
 
 fn add_edges_from_job(stage: Option<StageId>, job: &super::job::Job, g: &mut Graph) -> Result<()> {
     // Walk job-level condition references.
-    if let Some(cond) = &job.condition {
-        for r in collect_condition_refs(cond) {
-            add_edge_for_ref(stage.as_ref(), &job.id, r, g)?;
-        }
-    }
+    add_edges_for_condition(stage.as_ref(), &job.id, job.condition.as_ref(), g)?;
     // Walk every step's env + condition.
     for step in &job.steps {
         match step {
             Step::Bash(b) => {
-                for r in collect_env_refs(b.env.values()) {
-                    add_edge_for_ref(stage.as_ref(), &job.id, r, g)?;
-                }
-                if let Some(cond) = &b.condition {
-                    for r in collect_condition_refs(cond) {
-                        add_edge_for_ref(stage.as_ref(), &job.id, r, g)?;
-                    }
-                }
+                add_edges_for_env(stage.as_ref(), &job.id, b.env.values(), g)?;
+                add_edges_for_condition(stage.as_ref(), &job.id, b.condition.as_ref(), g)?;
             }
             Step::Task(t) => {
-                for r in collect_env_refs(t.env.values()) {
-                    add_edge_for_ref(stage.as_ref(), &job.id, r, g)?;
-                }
-                if let Some(cond) = &t.condition {
-                    for r in collect_condition_refs(cond) {
-                        add_edge_for_ref(stage.as_ref(), &job.id, r, g)?;
-                    }
-                }
+                add_edges_for_env(stage.as_ref(), &job.id, t.env.values(), g)?;
+                add_edges_for_condition(stage.as_ref(), &job.id, t.condition.as_ref(), g)?;
             }
-            Step::Checkout(_) => {}
             Step::Download(d) => {
-                if let Some(cond) = &d.condition {
-                    for r in collect_condition_refs(cond) {
-                        add_edge_for_ref(stage.as_ref(), &job.id, r, g)?;
-                    }
-                }
+                add_edges_for_condition(stage.as_ref(), &job.id, d.condition.as_ref(), g)?;
             }
             Step::Publish(p) => {
-                if let Some(cond) = &p.condition {
-                    for r in collect_condition_refs(cond) {
-                        add_edge_for_ref(stage.as_ref(), &job.id, r, g)?;
-                    }
-                }
+                add_edges_for_condition(stage.as_ref(), &job.id, p.condition.as_ref(), g)?;
             }
+            Step::Checkout(_) => {}
             // `RawYaml` carries opaque user-authored YAML; the graph
             // pass cannot introspect it. Producers that need
             // cross-step refs must use a typed Bash/Task variant.
             Step::RawYaml(_) => {}
         }
+    }
+    Ok(())
+}
+
+fn add_edges_for_condition(
+    stage: Option<&StageId>,
+    job: &JobId,
+    cond: Option<&Condition>,
+    g: &mut Graph,
+) -> Result<()> {
+    if let Some(cond) = cond {
+        for r in collect_condition_refs(cond) {
+            add_edge_for_ref(stage, job, r, g)?;
+        }
+    }
+    Ok(())
+}
+
+fn add_edges_for_env<'a, I: IntoIterator<Item = &'a EnvValue>>(
+    stage: Option<&StageId>,
+    job: &JobId,
+    values: I,
+    g: &mut Graph,
+) -> Result<()> {
+    for r in collect_env_refs(values) {
+        add_edge_for_ref(stage, job, r, g)?;
     }
     Ok(())
 }

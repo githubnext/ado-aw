@@ -10,8 +10,8 @@
  * (`COMPILER_SMOKE_STALE_REF_HOURS`), and (c) that parent build is
  * terminal. Note that (c) is NOT by itself proof the orchestration it
  * started is done — an abruptly canceled/killed parent process can reach a
- * terminal ADO build status while its fixture builds are still running. The
- * scanner therefore also queries each fixed
+ * terminal ADO build status while the fixture builds it queued are still
+ * running. The scanner therefore also queries each configured FIXED
  * child definitions on the ref's exact branch (see
  * `listBuildsForDefinitionBranch`) and inspects their statuses directly;
  * only when every child build found there is ALSO terminal (or none exist)

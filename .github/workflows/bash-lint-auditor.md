@@ -27,6 +27,7 @@ safe-outputs:
     allowed-files:
       - "src/data/**"
       - "src/runtimes/**/mod.rs"
+      - "src/compile/agentic_pipeline.rs"
       - "src/compile/extensions/**.rs"
       - "src/compile/common.rs"
       - "src/engine.rs"

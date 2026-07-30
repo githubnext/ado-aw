@@ -42,10 +42,10 @@ check and downloaded binary cannot drift.
 6. Five fixed child definitions are queued concurrently with both that ref and
    its exact commit SHA. Each generated pipeline downloads and verifies the
    artifact from the still-running producer build.
-7. The custom child imports a self-contained jobs-style tool from
-   `AgentPlayground/ado-aw-e2e-fixture`. The authored ref resolves to an
-   immutable commit at compile time. The custom job adds a tag to its own child
-   build, and the orchestrator verifies the tag through the ADO Build Tags API.
+7. The custom child imports a self-contained jobs-style tool from the
+   candidate commit under [`component-fixture/`](component-fixture/). The
+   custom job adds a tag to its own child build, and the orchestrator verifies
+   the tag through the ADO Build Tags API.
 8. The harness waits for all children, cancels non-terminal runs after a
    timeout, and deletes the per-run mirror ref only after every child is
    terminal.

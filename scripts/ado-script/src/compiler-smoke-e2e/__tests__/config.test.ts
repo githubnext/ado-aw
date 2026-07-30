@@ -104,11 +104,10 @@ describe("loadConfig", () => {
       loadConfig(
         baseEnv({
           COMPILER_SMOKE_AZURE_CLI_DEFINITION_ID: "2601",
-          COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID: "2604",
-          COMPILER_SMOKE_REPORTER_DEFINITION_ID: "2604",
+          COMPILER_SMOKE_REPORTER_DEFINITION_ID: "2603",
         }),
       ),
-    ).toThrow(/canary/);
+    ).toThrow(/2601 used by \[canary, azure-cli\].*2603 used by \[noop-target, smoke-failure-reporter\]/);
   });
 
   describe("COMPILER_SMOKE_CONCURRENCY bounds", () => {

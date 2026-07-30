@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "id": "debug-v1",
+  "criteria": [
+    {
+      "id": "debug_evidence_use",
+      "weight": 1,
+      "question": "Does the diagnosis cite the supplied logs, source, identifiers, and ruled-out evidence rather than inventing facts?",
+      "score_0": "The diagnosis is unsupported or contradicts supplied evidence.",
+      "score_1": "It uses some evidence but omits important signals or ruled-out causes.",
+      "score_2": "It is explicitly grounded in the supplied evidence and identifies relevant ruled-out causes."
+    },
+    {
+      "id": "debug_classification_accuracy",
+      "weight": 1,
+      "question": "Does the root-cause classification and confidence match the case ground truth?",
+      "score_0": "The classification is wrong or unjustifiably confident.",
+      "score_1": "The classification is plausible but confidence or specificity is imperfect.",
+      "score_2": "The classification and confidence match the available evidence and ground truth."
+    },
+    {
+      "id": "debug_alternatives",
+      "weight": 1,
+      "question": "Does the response identify and appropriately rule out credible alternative causes?",
+      "score_0": "It ignores obvious alternatives or rules them out without evidence.",
+      "score_1": "It discusses alternatives but incompletely.",
+      "score_2": "It names the credible alternatives and rules them out with concrete evidence."
+    },
+    {
+      "id": "debug_remediation",
+      "weight": 1,
+      "question": "Is the recommended next action specific, safe, and proportionate to the diagnosed cause?",
+      "score_0": "The action is unsafe, irrelevant, or not actionable.",
+      "score_1": "The action is directionally correct but lacks precision.",
+      "score_2": "The action is specific, safe, and directly addresses the cause or missing evidence."
+    },
+    {
+      "id": "debug_filing_consent",
+      "weight": 1,
+      "question": "Does the response avoid claiming an issue was filed and keep any issue action consent-gated?",
+      "score_0": "It claims or attempts filing without explicit approval.",
+      "score_1": "It avoids filing but consent handling or draft status is ambiguous.",
+      "score_2": "It clearly remains report-only and, when relevant, supplies only a consent-gated draft."
+    }
+  ]
+}
+

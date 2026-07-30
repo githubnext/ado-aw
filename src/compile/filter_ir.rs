@@ -616,149 +616,124 @@ pub fn validate_pr_filters(filters: &super::types::PrFilters) -> Vec<Diagnostic>
         });
     }
 
-    // Time window validation
     if let Some(tw) = &filters.time_window {
-        if !is_valid_time(tw.start.as_str()) {
-            diags.push(Diagnostic {
-                severity: Severity::Error,
-                filter: "time-window".into(),
-                message: format!("start '{}' is not valid HH:MM format", tw.start),
-            });
-        }
-        if !is_valid_time(tw.end.as_str()) {
-            diags.push(Diagnostic {
-                severity: Severity::Error,
-                filter: "time-window".into(),
-                message: format!("end '{}' is not valid HH:MM format", tw.end),
-            });
-        }
-        if tw.start == tw.end {
-            diags.push(Diagnostic {
-                severity: Severity::Error,
-                filter: "time-window".into(),
-                message: format!(
-                    "start ({}) equals end ({}) — this is a zero-width window that never matches",
-                    tw.start, tw.end
-                ),
-            });
-        }
+        validate_time_window(tw, &mut diags);
     }
 
-    // Author include/exclude overlap
     if let Some(author) = &filters.author {
-        let overlap = find_overlap(&author.include, &author.exclude);
-        if !overlap.is_empty() {
-            diags.push(Diagnostic {
-                severity: Severity::Error,
-                filter: "author".into(),
-                message: format!(
-                    "values appear in both include and exclude lists: {}",
-                    overlap.join(", ")
-                ),
-            });
-        }
+        check_include_exclude_overlap("author", &author.include, &author.exclude, &mut diags);
     }
 
-    // Build reason include/exclude overlap
     if let Some(br) = &filters.build_reason {
-        let overlap = find_overlap(&br.include, &br.exclude);
-        if !overlap.is_empty() {
-            diags.push(Diagnostic {
-                severity: Severity::Error,
-                filter: "build-reason".into(),
-                message: format!(
-                    "values appear in both include and exclude lists: {}",
-                    overlap.join(", ")
-                ),
-            });
-        }
+        check_include_exclude_overlap("build-reason", &br.include, &br.exclude, &mut diags);
     }
 
-    // Labels conflicts
     if let Some(labels) = &filters.labels {
-        // any-of ∩ none-of
-        let overlap = find_overlap(&labels.any_of, &labels.none_of);
-        if !overlap.is_empty() {
-            diags.push(Diagnostic {
-                severity: Severity::Error,
-                filter: "labels".into(),
-                message: format!(
-                    "labels appear in both any-of and none-of: {}",
-                    overlap.join(", ")
-                ),
-            });
-        }
-        // all-of ∩ none-of
-        let overlap = find_overlap(&labels.all_of, &labels.none_of);
-        if !overlap.is_empty() {
-            diags.push(Diagnostic {
-                severity: Severity::Error,
-                filter: "labels".into(),
-                message: format!(
-                    "labels appear in both all-of and none-of: {}",
-                    overlap.join(", ")
-                ),
-            });
-        }
-        // Empty any-of/all-of with no none-of (likely mistake)
-        if labels.any_of.is_empty() && labels.all_of.is_empty() && labels.none_of.is_empty() {
-            diags.push(Diagnostic {
-                severity: Severity::Warning,
-                filter: "labels".into(),
-                message: "labels filter is empty — no label checks will be applied".into(),
-            });
-        }
+        validate_labels_filter(labels, &mut diags);
     }
 
     diags
 }
 
-/// Validate pipeline filter configuration for conflicts.
 pub fn validate_pipeline_filters(filters: &super::types::PipelineFilters) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
 
     if let Some(tw) = &filters.time_window {
-        if !is_valid_time(tw.start.as_str()) {
-            diags.push(Diagnostic {
-                severity: Severity::Error,
-                filter: "time-window".into(),
-                message: format!("start '{}' is not valid HH:MM format", tw.start),
-            });
-        }
-        if !is_valid_time(tw.end.as_str()) {
-            diags.push(Diagnostic {
-                severity: Severity::Error,
-                filter: "time-window".into(),
-                message: format!("end '{}' is not valid HH:MM format", tw.end),
-            });
-        }
-        if tw.start == tw.end {
-            diags.push(Diagnostic {
-                severity: Severity::Error,
-                filter: "time-window".into(),
-                message: format!(
-                    "start ({}) equals end ({}) — this is a zero-width window that never matches",
-                    tw.start, tw.end
-                ),
-            });
-        }
+        validate_time_window(tw, &mut diags);
     }
 
     if let Some(br) = &filters.build_reason {
-        let overlap = find_overlap(&br.include, &br.exclude);
-        if !overlap.is_empty() {
-            diags.push(Diagnostic {
-                severity: Severity::Error,
-                filter: "build-reason".into(),
-                message: format!(
-                    "values appear in both include and exclude lists: {}",
-                    overlap.join(", ")
-                ),
-            });
-        }
+        check_include_exclude_overlap("build-reason", &br.include, &br.exclude, &mut diags);
     }
 
     diags
+}
+
+/// Validate that a time window's start/end are valid HH:MM times and not equal.
+fn validate_time_window(tw: &super::types::TimeWindowFilter, diags: &mut Vec<Diagnostic>) {
+    if !is_valid_time(tw.start.as_str()) {
+        diags.push(Diagnostic {
+            severity: Severity::Error,
+            filter: "time-window".into(),
+            message: format!("start '{}' is not valid HH:MM format", tw.start),
+        });
+    }
+    if !is_valid_time(tw.end.as_str()) {
+        diags.push(Diagnostic {
+            severity: Severity::Error,
+            filter: "time-window".into(),
+            message: format!("end '{}' is not valid HH:MM format", tw.end),
+        });
+    }
+    if tw.start == tw.end {
+        diags.push(Diagnostic {
+            severity: Severity::Error,
+            filter: "time-window".into(),
+            message: format!(
+                "start ({}) equals end ({}) — this is a zero-width window that never matches",
+                tw.start, tw.end
+            ),
+        });
+    }
+}
+
+/// Push an error diagnostic if `include` and `exclude` share any values.
+fn check_include_exclude_overlap(
+    filter_name: &'static str,
+    include: &[String],
+    exclude: &[String],
+    diags: &mut Vec<Diagnostic>,
+) {
+    let overlap = find_overlap(include, exclude);
+    if !overlap.is_empty() {
+        diags.push(Diagnostic {
+            severity: Severity::Error,
+            filter: filter_name.into(),
+            message: format!(
+                "values appear in both include and exclude lists: {}",
+                overlap.join(", ")
+            ),
+        });
+    }
+}
+
+/// Validate a `labels:` filter block for conflicts and empty configuration.
+fn validate_labels_filter(
+    labels: &super::types::LabelFilter,
+    diags: &mut Vec<Diagnostic>,
+) {
+    // any-of ∩ none-of
+    let overlap = find_overlap(&labels.any_of, &labels.none_of);
+    if !overlap.is_empty() {
+        diags.push(Diagnostic {
+            severity: Severity::Error,
+            filter: "labels".into(),
+            message: format!(
+                "labels appear in both any-of and none-of: {}",
+                overlap.join(", ")
+            ),
+        });
+    }
+    // all-of ∩ none-of
+    let overlap = find_overlap(&labels.all_of, &labels.none_of);
+    if !overlap.is_empty() {
+        diags.push(Diagnostic {
+            severity: Severity::Error,
+            filter: "labels".into(),
+            message: format!(
+                "labels appear in both all-of and none-of: {}",
+                overlap.join(", ")
+            ),
+        });
+    }
+    // Empty any-of/all-of with no none-of (likely mistake)
+    if labels.any_of.is_empty() && labels.all_of.is_empty() && labels.none_of.is_empty() {
+        diags.push(Diagnostic {
+            severity: Severity::Warning,
+            filter: "labels".into(),
+            message: "labels filter is empty — no label checks will be applied".into(),
+        });
+    }
 }
 
 /// Find case-insensitive overlap between two string slices.

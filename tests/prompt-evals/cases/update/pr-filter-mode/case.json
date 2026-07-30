@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "id": "update-pr-filter-mode",
+  "prompt": "update",
+  "description": "Change PR filters and explicitly select policy trigger mode.",
+  "request_file": "request.md",
+  "context_files": [
+    "workflow.md"
+  ],
+  "rubric_files": [
+    "rubrics/common.json",
+    "rubrics/update.json"
+  ],
+  "expected": {
+    "outcome": "workflow",
+    "artifact_required": true,
+    "compile": true,
+    "lint": true,
+    "compile_guidance": "required",
+    "external_side_effect": "none",
+    "required_sections": []
+  },
+  "ground_truth": {
+    "changed_surface": "front-matter",
+    "pr_mode": "policy",
+    "branches_include": [
+      "main",
+      "release/*"
+    ],
+    "paths_include": [
+      "src/*",
+      "docs/*"
+    ],
+    "notes": [
+      "The request explicitly states that a Build Validation branch policy is installed.",
+      "Unrelated workflow body text must remain unchanged."
+    ]
+  }
+}
+
