@@ -4884,6 +4884,9 @@ safe-outputs:
                 "pwsh": "Get-Content $env:ADO_AW_SAFE_OUTPUT_RESULTS",
             }),
             serde_json::json!({
+                "powershell": "Write-Output $Env:ADO_AW_SAFE_OUTPUT_PROPOSALS",
+            }),
+            serde_json::json!({
                 "bash": "echo ok",
                 "env": {
                     "LEGACY": "$(ADO_AW_SAFE_OUTPUT_PROPOSALS)",
@@ -4892,6 +4895,23 @@ safe-outputs:
         ] {
             let error = validate_custom_job_step("notify", &step).unwrap_err();
             assert!(error.to_string().contains("removed variable"), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn removed_custom_variable_reference_syntaxes_are_detected() {
+        let variable = "ADO_AW_SAFE_OUTPUT_PROPOSALS";
+        for value in [
+            "$(ADO_AW_SAFE_OUTPUT_PROPOSALS)",
+            "$ADO_AW_SAFE_OUTPUT_PROPOSALS",
+            "${ADO_AW_SAFE_OUTPUT_PROPOSALS}",
+            "$env:ADO_AW_SAFE_OUTPUT_PROPOSALS",
+            "%ADO_AW_SAFE_OUTPUT_PROPOSALS%",
+        ] {
+            assert!(
+                json_value_references_variable(&serde_json::Value::String(value.to_string()), variable),
+                "{value}"
+            );
         }
     }
 
