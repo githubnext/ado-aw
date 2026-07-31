@@ -2,7 +2,7 @@
 //!
 //! The Copilot CLI can write OTel spans and metrics to a JSONL file via
 //! `COPILOT_OTEL_FILE_EXPORTER_PATH`. This module parses that file to
-//! extract agent execution statistics (token usage, duration, model,
+//! extract agent execution statistics (AI credits, duration, model,
 //! tool calls, turns) for inclusion in safe output write actions.
 
 use anyhow::{Context, Result};
@@ -20,6 +20,9 @@ pub struct AgentStats {
     pub input_tokens: u64,
     /// Total output tokens across all LLM calls.
     pub output_tokens: u64,
+    /// Aggregated AI credits consumed by the run (`github.copilot.cost`).
+    /// Present only when the Copilot CLI emits this attribute (modern versions).
+    pub ai_credits: Option<u64>,
     /// Wall-clock duration in seconds.
     pub duration_seconds: f64,
     /// Number of tool invocations.
@@ -59,6 +62,7 @@ impl AgentStats {
             model: None,
             input_tokens: 0,
             output_tokens: 0,
+            ai_credits: None,
             duration_seconds: 0.0,
             tool_calls: 0,
             turns: 0,
@@ -89,6 +93,12 @@ impl AgentStats {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
 
+            // AI credits (present on modern Copilot CLI builds)
+            let credits = attrs
+                .get("github.copilot.cost")
+                .and_then(|v| v.as_u64());
+            stats.ai_credits = credits.filter(|&c| c > 0);
+
             // Turns
             stats.turns = attrs
                 .get("github.copilot.turn_count")
@@ -117,20 +127,33 @@ impl AgentStats {
     ///
     /// Uses middle-dot separators for a lightweight single-line format
     /// that works across all ADO markdown surfaces.
+    ///
+    /// When `ai_credits` is present and non-zero, the consumption segment
+    /// reads "{n} AI credits". Otherwise it falls back to "{input} in / {output} out"
+    /// for older Copilot CLI versions or non-Copilot engines that do not emit
+    /// `github.copilot.cost`.
     pub fn to_markdown(&self) -> String {
         let duration = format_duration(self.duration_seconds);
         let model = sanitize_for_markdown(self.model.as_deref().unwrap_or("unknown"));
         let name = sanitize_for_markdown(&self.agent_name);
 
+        let consumption = match self.ai_credits {
+            Some(credits) => format!("{credits} AI credits"),
+            None => format!(
+                "{} in / {} out",
+                format_number(self.input_tokens),
+                format_number(self.output_tokens)
+            ),
+        };
+
         format!(
             "\n\n---\n\
              \u{1F916} {name} \u{00B7} {model} \u{00B7} \
-             {input} in / {output} out \u{00B7} \
+             {consumption} \u{00B7} \
              {tools} tool calls \u{00B7} {duration}\n",
             name = name,
             model = model,
-            input = format_number(self.input_tokens),
-            output = format_number(self.output_tokens),
+            consumption = consumption,
             tools = self.tool_calls,
             duration = duration,
         )
@@ -270,6 +293,7 @@ mod tests {
         assert_eq!(stats.tool_calls, 0);
         assert_eq!(stats.turns, 0);
         assert!(stats.model.is_none());
+        assert!(stats.ai_credits.is_none());
     }
 
     #[test]
@@ -286,6 +310,8 @@ mod tests {
         assert_eq!(stats.tool_calls, 1);
         // Duration should be ~8 seconds (from the last invoke_agent span)
         assert!(stats.duration_seconds > 7.0 && stats.duration_seconds < 10.0);
+        // AI credits from github.copilot.cost on the last invoke_agent span
+        assert_eq!(stats.ai_credits, Some(2));
     }
 
     #[test]
@@ -295,6 +321,7 @@ mod tests {
             model: Some("claude-opus-4.5".to_string()),
             input_tokens: 45230,
             output_tokens: 12450,
+            ai_credits: Some(5),
             duration_seconds: 272.0,
             tool_calls: 23,
             turns: 8,
@@ -302,8 +329,9 @@ mod tests {
         let md = stats.to_markdown();
         assert!(md.contains("Daily Code Review"));
         assert!(md.contains("claude-opus-4.5"));
-        assert!(md.contains("45,230 in"));
-        assert!(md.contains("12,450 out"));
+        assert!(md.contains("5 AI credits"));
+        assert!(!md.contains("45,230 in"), "tokens should not appear when credits are present");
+        assert!(!md.contains("12,450 out"), "tokens should not appear when credits are present");
         assert!(md.contains("23 tool calls"));
         assert!(md.contains("4m 32s"));
         assert!(md.contains("\u{00B7}"), "should use middle-dot separators");
@@ -313,6 +341,24 @@ mod tests {
         // `text\n---\n` which CommonMark parses as a setext h2 heading, consuming the `---`
         // instead of rendering it as a horizontal rule.
         assert!(md.starts_with("\n\n---\n"), "stats footer must open with a blank line before ---");
+    }
+
+    #[test]
+    fn test_to_markdown_falls_back_to_tokens_when_no_credits() {
+        let stats = AgentStats {
+            agent_name: "Old Agent".to_string(),
+            model: Some("gpt-4o".to_string()),
+            input_tokens: 45230,
+            output_tokens: 12450,
+            ai_credits: None,
+            duration_seconds: 272.0,
+            tool_calls: 5,
+            turns: 3,
+        };
+        let md = stats.to_markdown();
+        assert!(md.contains("45,230 in"));
+        assert!(md.contains("12,450 out"));
+        assert!(!md.contains("AI credits"), "credits label should not appear on fallback path");
     }
 
     #[test]
@@ -372,6 +418,7 @@ mod tests {
                 model: Some("model".to_string()),
                 input_tokens: 100,
                 output_tokens: 50,
+                ai_credits: None,
                 duration_seconds: 10.0,
                 tool_calls: 1,
                 turns: 1,
@@ -395,6 +442,7 @@ mod tests {
                 model: Some("model".to_string()),
                 input_tokens: 100,
                 output_tokens: 50,
+                ai_credits: None,
                 duration_seconds: 10.0,
                 tool_calls: 1,
                 turns: 1,
