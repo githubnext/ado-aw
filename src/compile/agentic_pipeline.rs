@@ -134,6 +134,7 @@ pub(crate) fn build_pipeline_context(
 
     // ─── Validations (reuse all shared validators) ────────────────
     common::validate_front_matter_identity(front_matter)?;
+    common::validate_permissions_read_policy(front_matter)?;
     common::validate_variable_groups(front_matter)?;
     common::validate_checkout_self_collision(
         &front_matter.repositories,
@@ -324,7 +325,8 @@ pub(crate) fn build_pipeline_context(
         front_matter
             .permissions
             .as_ref()
-            .and_then(|p| p.read.as_deref()),
+            .and_then(|p| p.read.as_ref())
+            .map(crate::compile::types::ReadPermissionConfig::service_connection),
         "SC_READ_TOKEN",
     );
     let acquire_write_token = common::generate_acquire_ado_token(

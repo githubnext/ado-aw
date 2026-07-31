@@ -453,6 +453,30 @@ pub fn validate_front_matter_identity(front_matter: &FrontMatter) -> Result<()> 
     Ok(())
 }
 
+/// Reject explicit Stage 1 read-policy options until the credential-isolated
+/// proxy enforces them.
+///
+/// Deserializing the object form now lets the typed schema and validation
+/// evolve independently, but compiling it as the legacy scalar behavior would
+/// silently ignore scope/capability restrictions. Fail closed until the proxy
+/// wiring consumes the policy.
+pub fn validate_permissions_read_policy(front_matter: &FrontMatter) -> Result<()> {
+    let explicit_options = front_matter
+        .permissions
+        .as_ref()
+        .and_then(|permissions| permissions.read.as_ref())
+        .and_then(crate::compile::types::ReadPermissionConfig::options);
+
+    if explicit_options.is_some() {
+        anyhow::bail!(
+            "permissions.read object form requires the credential-isolated Azure DevOps proxy, \
+             which is not enabled in this compiler yet. Use the scalar service-connection \
+             shorthand for the current trusted MCP behavior."
+        );
+    }
+    Ok(())
+}
+
 /// Validate the `variable-groups:` front-matter block (issue #1385).
 ///
 /// Enforces two rules before the pipeline is built:
@@ -5357,6 +5381,24 @@ safe-outputs:
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("ADO expression"));
+    }
+
+    #[test]
+    fn test_validate_permissions_read_policy_allows_scalar_and_rejects_object() {
+        let (scalar, _) = parse_markdown(
+            "---\nname: test\ndescription: test\npermissions:\n  read: my-read-sc\n---\n",
+        )
+        .unwrap();
+        validate_permissions_read_policy(&scalar).unwrap();
+
+        let (object, _) = parse_markdown(
+            "---\nname: test\ndescription: test\npermissions:\n  read:\n    service-connection: my-read-sc\n    capabilities: [repos]\n---\n",
+        )
+        .unwrap();
+        let error = validate_permissions_read_policy(&object)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("credential-isolated Azure DevOps proxy"));
     }
 
     #[test]

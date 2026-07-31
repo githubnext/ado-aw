@@ -1312,11 +1312,11 @@ pub struct FrontMatter {
     pub teardown: Vec<serde_yaml::Value>,
     /// Permissions configuration for ADO access tokens.
     ///
-    /// ADO supports two access levels: blanket read and blanket write.
-    /// Tokens are minted from ARM service connections — System.AccessToken is never used.
+    /// The field names describe the intended pipeline roles. Effective Azure
+    /// DevOps permissions come from the underlying identities' ADO grants.
     ///
-    /// - `read`: MI for Stage 1 (agent) — read-only ADO access
-    /// - `write`: MI for Stage 3 (executor) — write access for safe-outputs, never given to agent
+    /// - `read`: ARM service connection used by the trusted Stage 1 ADO MCP
+    /// - `write`: ARM service connection used by the Stage 3 safe-output executor
     #[serde(default)]
     pub permissions: Option<PermissionsConfig>,
     /// When `true`, the compiler inlines all `{{#runtime-import …}}` markers
@@ -1823,9 +1823,9 @@ pub struct NetworkConfig {
 
 /// Permissions configuration for ADO access tokens.
 ///
-/// ADO does not support fine-grained permissions. There are two access levels:
-/// blanket read and blanket write, each backed by an ARM service connection
-/// that mints an ADO-scoped token.
+/// `read` and `write` identify intended pipeline roles, not token-enforced
+/// access levels. Azure DevOps authorizes each underlying service-connection
+/// identity independently of its Azure RBAC scope.
 ///
 /// Examples:
 /// ```yaml
@@ -1834,25 +1834,109 @@ pub struct NetworkConfig {
 ///   read: my-read-arm-connection
 ///   write: my-write-arm-connection
 ///
-/// # Read-only (agent can query ADO APIs, no write safe-outputs)
+/// # Stage 1 ADO MCP authentication
 /// permissions:
 ///   read: my-read-arm-connection
 ///
-/// # Write-only (safe-outputs can write, agent gets no ADO token)
+/// # Stage 3 override only
 /// permissions:
 ///   write: my-write-arm-connection
 /// ```
 #[derive(Debug, Deserialize, Clone, Default, SanitizeConfig)]
 pub struct PermissionsConfig {
-    /// ARM service connection for read-only ADO access.
-    /// Token is minted and given to the agent in Stage 1 (inside AWF sandbox).
+    /// ARM service connection for the trusted Stage 1 Azure DevOps MCP.
+    /// The raw token is not injected into the Agent process.
     #[serde(default)]
-    pub read: Option<String>,
+    pub read: Option<ReadPermissionConfig>,
     /// ARM service connection for write ADO access.
     /// Token is minted and used only by the executor in Stage 3 (Execution).
     /// This token is never exposed to the agent.
     #[serde(default)]
     pub write: Option<String>,
+}
+
+/// Stage 1 Azure DevOps credential and policy configuration.
+///
+/// The scalar form remains shorthand for a service connection with the
+/// compiler-owned current-organization/project/repository policy. The object
+/// form prepares explicit policy configuration for the credential-isolated
+/// proxy and is rejected by compilation until that runtime is wired.
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[serde(untagged)]
+pub enum ReadPermissionConfig {
+    /// Backward-compatible service-connection shorthand.
+    ServiceConnection(crate::secure::ServiceConnection),
+    /// Explicit proxy policy configuration.
+    WithOptions(ReadPermissionOptions),
+}
+
+impl ReadPermissionConfig {
+    /// The ARM service connection used to mint the Stage 1 ADO credential.
+    pub fn service_connection(&self) -> &str {
+        match self {
+            Self::ServiceConnection(value) => value.as_str(),
+            Self::WithOptions(options) => options.service_connection.as_str(),
+        }
+    }
+
+    /// Explicit policy options, when object form was used.
+    pub fn options(&self) -> Option<&ReadPermissionOptions> {
+        match self {
+            Self::ServiceConnection(_) => None,
+            Self::WithOptions(options) => Some(options),
+        }
+    }
+}
+
+impl SanitizeConfigTrait for ReadPermissionConfig {
+    fn sanitize_config_fields(&mut self) {
+        // Every string field is a validated newtype checked at deserialization.
+    }
+}
+
+/// Explicit Stage 1 Azure DevOps read-policy options.
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ReadPermissionOptions {
+    /// ARM service connection used by the trusted credential path.
+    #[serde(rename = "service-connection")]
+    pub service_connection: crate::secure::ServiceConnection,
+    /// Optional capability groups. Empty selects the compiler-owned safe
+    /// default catalog.
+    #[serde(default)]
+    pub capabilities: Vec<AdoReadCapability>,
+    /// Additional scopes beyond the implicit current org/project/repository.
+    #[serde(default)]
+    pub allow: Vec<AdoReadOrganizationScope>,
+}
+
+/// Coarse catalog groups authors may enable for Stage 1 ADO reads.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AdoReadCapability {
+    Core,
+    #[serde(rename = "repos")]
+    Repositories,
+    Pipelines,
+    Boards,
+}
+
+/// Explicit Azure DevOps organization scope.
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AdoReadOrganizationScope {
+    pub organization: crate::secure::AdoOrganization,
+    #[serde(default)]
+    pub projects: Vec<AdoReadProjectScope>,
+}
+
+/// Explicit project and optional repository scope within an organization.
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AdoReadProjectScope {
+    pub project: crate::secure::AdoProject,
+    #[serde(default)]
+    pub repositories: Vec<crate::secure::AdoRepository>,
 }
 
 /// Debug-only configuration block.
@@ -3857,7 +3941,12 @@ github-app-token:
     fn test_permissions_both_fields() {
         let yaml = "read: my-read-sc\nwrite: my-write-sc";
         let pc: PermissionsConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(pc.read.as_deref(), Some("my-read-sc"));
+        assert_eq!(
+            pc.read
+                .as_ref()
+                .map(ReadPermissionConfig::service_connection),
+            Some("my-read-sc")
+        );
         assert_eq!(pc.write.as_deref(), Some("my-write-sc"));
     }
 
@@ -3865,8 +3954,63 @@ github-app-token:
     fn test_permissions_read_only() {
         let yaml = "read: my-read-sc";
         let pc: PermissionsConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(pc.read.as_deref(), Some("my-read-sc"));
+        assert_eq!(
+            pc.read
+                .as_ref()
+                .map(ReadPermissionConfig::service_connection),
+            Some("my-read-sc")
+        );
         assert!(pc.write.is_none());
+    }
+
+    #[test]
+    fn test_permissions_read_object_form() {
+        let yaml = r#"
+read:
+  service-connection: my-read-sc
+  capabilities: [core, repos, pipelines, boards]
+  allow:
+    - organization: other-org
+      projects:
+        - project: Other Project
+          repositories: [Repo One, 01234567-89ab-cdef-0123-456789abcdef]
+"#;
+        let pc: PermissionsConfig = serde_yaml::from_str(yaml).unwrap();
+        let read = pc.read.as_ref().unwrap();
+        assert_eq!(read.service_connection(), "my-read-sc");
+        let options = read.options().unwrap();
+        assert_eq!(
+            options.capabilities,
+            vec![
+                AdoReadCapability::Core,
+                AdoReadCapability::Repositories,
+                AdoReadCapability::Pipelines,
+                AdoReadCapability::Boards,
+            ]
+        );
+        assert_eq!(options.allow[0].organization.as_str(), "other-org");
+        assert_eq!(
+            options.allow[0].projects[0].project.as_str(),
+            "Other Project"
+        );
+        assert_eq!(
+            options.allow[0].projects[0].repositories[0].as_str(),
+            "Repo One"
+        );
+    }
+
+    #[test]
+    fn test_permissions_read_object_form_rejects_invalid_scope() {
+        for yaml in [
+            "read:\n  service-connection: sc\n  allow:\n    - organization: 'bad/org'",
+            "read:\n  service-connection: sc\n  allow:\n    - organization: org\n      projects:\n        - project: Project\n          repositories: ['../repo']",
+            "read:\n  service-connection: sc\n  unknown: value",
+        ] {
+            assert!(
+                serde_yaml::from_str::<PermissionsConfig>(yaml).is_err(),
+                "invalid read policy must fail deserialization:\n{yaml}"
+            );
+        }
     }
 
     #[test]
@@ -3902,7 +4046,13 @@ Body
 "#;
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
         let perms = fm.permissions.unwrap();
-        assert_eq!(perms.read.as_deref(), Some("my-read-sc"));
+        assert_eq!(
+            perms
+                .read
+                .as_ref()
+                .map(ReadPermissionConfig::service_connection),
+            Some("my-read-sc")
+        );
         assert_eq!(perms.write.as_deref(), Some("my-write-sc"));
     }
 

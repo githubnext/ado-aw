@@ -170,9 +170,10 @@ Both `--all-repos` and `--source` route through `ado-aw`'s `discover_ado_aw_pipe
   - `<source>` - Path to the agent markdown file.
   - `--json` - Emit lint findings as structured JSON instead of the human-readable report.
 
-- `catalog [--kind <safe-outputs|runtimes|tools|engines|models|versions>] [--json]` - List the compiler's in-tree registries for scripting or discovery.
+- `catalog [--kind <safe-outputs|runtimes|tools|engines|models|versions|ado-proxy>] [--json]` - List the compiler's in-tree registries for scripting or discovery.
   - `--kind <...>` - Restrict output to one category. When omitted, emits every category.
   - `--kind versions` - Emit the compiler's pinned **semver** versions (`copilot_cli`, `awf`, `mcpg`) as a single source of truth. CI reads these deterministically instead of scraping the Rust source, e.g. `ado-aw catalog --kind versions --json | jq -r '.versions.copilot_cli'`.
+  - `--kind ado-proxy` - Emit the versioned deny-by-default Stage 1 ADO read-policy catalog and whether its credential-isolated runtime is available.
   - `--json` - Emit the catalog as structured JSON instead of the human-readable report.
 
 ### Hidden Build-Time Tools
@@ -186,6 +187,18 @@ These commands are not shown in `--help` but are available for contributors work
 - `export-fact-catalog` - Export the `Fact::ALL` catalog as JSON (`fact-catalog.gen.json`). Used as a drift guard between the Rust-side `Fact` registry and the TypeScript `FACT_META` mirror in `scripts/ado-script/src/trigger-e2e/gate-spec.ts`. The `gate-spec.test.ts` CI test deep-compares `FACT_META` against this output.
   - `--output, -o <path>` - Write the catalog to a file instead of stdout. Parent directories are created automatically.
   - Typical use: `cargo run -- export-fact-catalog --output scripts/ado-script/src/trigger-e2e/fact-catalog.gen.json`
+
+### Hidden Pipeline-Internal Commands
+
+These commands are started by the pipeline itself (or by AWF on its behalf) and are not part of the authoring surface:
+
+> The credential-isolated Azure DevOps policy proxy is **not** an `ado-aw`
+> subcommand. It ships as the `ado-proxy` TypeScript bundle in
+> `scripts/ado-script/` (packaged in `ado-script.zip`, mirrored by
+> `supply-chain:`), and AWF runs it as the managed sidecar's entrypoint. See
+> [`docs/ado-proxy-design.md`](ado-proxy-design.md) for its configuration
+> contract, and `ado-aw catalog --kind ado-proxy` for the versioned operation
+> catalog it enforces.
 
 ## Pipeline IR Reference
 

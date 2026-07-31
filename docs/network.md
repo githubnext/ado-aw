@@ -92,9 +92,10 @@ When (and only when) `AW_AZ_MOUNTS` is non-empty, a follow-up
 *Append Azure CLI prompt* step appends an Azure CLI advisory section
 to `/tmp/awf-tools/agent-prompt.md`. The agent reads the prompt on
 startup and learns that `az` is on PATH, what it's good for
-(`az devops` autoauthed via `$AZURE_DEVOPS_EXT_PAT`, ARM and Graph
-requiring separate auth), and the fallback path (`missing-tool`
-safe output naming `azure-cli`).
+(`az devops` and Azure commands are not pre-authenticated), the authenticated
+ADO MCP alternative, and the fallback path (`missing-tool` safe output naming
+`azure-cli`). The advisory tells the agent not to sign in or place Azure
+credentials in the sandbox.
 
 The step is gated by `condition: ne(variables['AW_AZ_MOUNTS'], '')`,
 which reuses the same pipeline variable the detection step writes.
@@ -187,9 +188,12 @@ network:
 
 ## Permissions (ADO Access Tokens)
 
-ADO does not support fine-grained permissions — there are two access levels:
-blanket read and blanket write. The executor (Stage 3) always has a
-write-capable token; what changes is its *source* and *attribution*:
+The ARM service-connection scope does not determine what its identity may do in
+Azure DevOps. `permissions.read` and `permissions.write` describe intended
+pipeline roles and token placement; operators must separately grant each
+underlying identity the minimum Azure DevOps permissions. The executor
+(Stage 3) always has a write-capable token; what changes is its *source* and
+*attribution*:
 
 | Source                              | When                                          | Identity                                        |
 | ----------------------------------- | --------------------------------------------- | ----------------------------------------------- |
@@ -221,7 +225,7 @@ Operators can scope further per-pipeline by editing the build definition's
 
 ```yaml
 permissions:
-  read: my-read-arm-connection    # Stage 1 agent — read-only ADO access
+  read: my-read-arm-connection    # Stage 1 trusted ADO MCP credential
   # write: my-write-arm-connection  # Optional — see below
 ```
 
@@ -241,9 +245,12 @@ agents. Set `permissions.write` only when you need:
 
 ### Security Model
 
-- **`permissions.read`**: Mints a read-only ADO-scoped token given to the
-  agent inside the AWF sandbox (Stage 1). The agent can query ADO APIs but
-  cannot write.
+- **`permissions.read`**: Mints an ADO-audience token for the trusted
+  first-party Azure DevOps MCP backend when `tools.azure-devops` is enabled.
+  The raw token is not injected into the Agent process or direct Azure CLI.
+  Azure DevOps permissions on the underlying identity remain the authorization
+  boundary until the policy proxy described in
+  [`ado-proxy-design.md`](ado-proxy-design.md) is implemented.
 - **`permissions.write` (optional)**: Mints a write-capable ADO-scoped token
   used **only** by the executor in Stage 3 (`SafeOutputs` job). Overrides
   the default `$(System.AccessToken)` for write operations. Never exposed
@@ -255,7 +262,7 @@ agents. Set `permissions.write` only when you need:
 ### Examples
 
 ```yaml
-# Default: agent can read ADO, executor writes via $(System.AccessToken).
+# Trusted ADO MCP can authenticate; executor writes via $(System.AccessToken).
 permissions:
   read: my-read-sc
 

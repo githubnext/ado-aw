@@ -2,6 +2,7 @@ pub mod ado;
 mod agent_stats;
 mod allowed_hosts;
 mod audit;
+mod ado_proxy;
 mod compile;
 mod configure;
 mod detect;
@@ -567,6 +568,22 @@ enum Commands {
         #[arg(short, long)]
         output: Option<std::path::PathBuf>,
     },
+    /// Export the `ado-proxy` catalog JSON Schema (build-time tool for the
+    /// scripts/ado-script TypeScript workspace).
+    #[command(hide = true)]
+    ExportAdoProxyCatalogSchema {
+        /// Output path; if omitted, prints to stdout.
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
+    },
+    /// Export the `ado-proxy` catalog data JSON — build-time drift guard for
+    /// the `ado-proxy` bundle's committed catalog snapshot.
+    #[command(hide = true)]
+    ExportAdoProxyCatalog {
+        /// Output path; if omitted, prints to stdout.
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
+    },
     /// Inspect an agent source file's typed IR: jobs, stages, steps, outputs, derived `dependsOn`.
     Inspect {
         /// Path to the agent markdown source.
@@ -968,6 +985,31 @@ fn print_execution_summary(results: &[crate::safe_outputs::ExecutionResult]) {
     );
 }
 
+/// Write a build-time generated artifact (JSON Schema or catalog data) to
+/// `output`, or to stdout when no path is given.
+///
+/// Shared by every `export-*` command so the parent-directory creation and
+/// error context stay identical across generators. `label` names the artifact
+/// in error messages (e.g. `"gate schema"`).
+fn write_generated_artifact(output: Option<&Path>, contents: &str, label: &str) -> Result<()> {
+    match output {
+        Some(path) => {
+            if let Some(parent) = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!("creating parent dir for {label}: {}", parent.display())
+                })?;
+            }
+            std::fs::write(path, contents)
+                .with_context(|| format!("writing {label} to {}", path.display()))?;
+        }
+        None => print!("{}", contents),
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -992,6 +1034,8 @@ async fn main() -> Result<()> {
         Some(Commands::Trace { .. }) => "trace",
         Some(Commands::ExportGateSchema { .. }) => "export-gate-schema",
         Some(Commands::ExportFactCatalog { .. }) => "export-fact-catalog",
+        Some(Commands::ExportAdoProxyCatalogSchema { .. }) => "export-ado-proxy-catalog-schema",
+        Some(Commands::ExportAdoProxyCatalog { .. }) => "export-ado-proxy-catalog",
         Some(Commands::Inspect { .. }) => "inspect",
         Some(Commands::Graph { .. }) => "graph",
         Some(Commands::Whatif { .. }) => "whatif",
@@ -1379,40 +1423,32 @@ async fn main() -> Result<()> {
             .await?;
         }
         Commands::ExportGateSchema { output } => {
-            let schema = compile::filter_ir::generate_gate_spec_schema();
-            match output {
-                Some(path) => {
-                    if let Some(parent) = path
-                        .parent()
-                        .filter(|parent| !parent.as_os_str().is_empty())
-                    {
-                        std::fs::create_dir_all(parent).with_context(|| {
-                            format!("creating parent dir for gate schema: {}", parent.display())
-                        })?;
-                    }
-                    std::fs::write(&path, &schema)
-                        .with_context(|| format!("writing gate schema to {}", path.display()))?;
-                }
-                None => print!("{}", schema),
-            }
+            write_generated_artifact(
+                output.as_deref(),
+                &compile::filter_ir::generate_gate_spec_schema(),
+                "gate schema",
+            )?;
         }
         Commands::ExportFactCatalog { output } => {
-            let catalog = compile::filter_ir::generate_fact_catalog();
-            match output {
-                Some(path) => {
-                    if let Some(parent) = path
-                        .parent()
-                        .filter(|parent| !parent.as_os_str().is_empty())
-                    {
-                        std::fs::create_dir_all(parent).with_context(|| {
-                            format!("creating parent dir for fact catalog: {}", parent.display())
-                        })?;
-                    }
-                    std::fs::write(&path, &catalog)
-                        .with_context(|| format!("writing fact catalog to {}", path.display()))?;
-                }
-                None => print!("{}", catalog),
-            }
+            write_generated_artifact(
+                output.as_deref(),
+                &compile::filter_ir::generate_fact_catalog(),
+                "fact catalog",
+            )?;
+        }
+        Commands::ExportAdoProxyCatalogSchema { output } => {
+            write_generated_artifact(
+                output.as_deref(),
+                &ado_proxy::catalog::generate_catalog_schema(),
+                "ado-proxy catalog schema",
+            )?;
+        }
+        Commands::ExportAdoProxyCatalog { output } => {
+            write_generated_artifact(
+                output.as_deref(),
+                &ado_proxy::catalog::generate_catalog_json(),
+                "ado-proxy catalog",
+            )?;
         }
         Commands::Inspect { source, json } => {
             inspect::dispatch_inspect(inspect::InspectOptions {
