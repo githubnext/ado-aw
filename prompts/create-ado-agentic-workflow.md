@@ -1,6 +1,6 @@
 # Create an Azure DevOps Agentic Workflow
 
-Apply `/home/runner/work/ado-aw/ado-aw/prompts/prompt-contract.md` before executing this prompt.
+Apply the shared prompt contract before executing this prompt: https://raw.githubusercontent.com/githubnext/ado-aw/main/prompts/prompt-contract.md
 
 ## Core
 
@@ -74,8 +74,8 @@ Return:
 - When essential inputs are missing, concise clarification is returned instead of an invented workflow.
 
 ## References
-- `/home/runner/work/ado-aw/ado-aw/docs/front-matter.md`
-- `/home/runner/work/ado-aw/ado-aw/docs/safe-outputs.md`
-- `/home/runner/work/ado-aw/ado-aw/docs/engine.md`
-- `/home/runner/work/ado-aw/ado-aw/docs/targets.md`
-- `/home/runner/work/ado-aw/ado-aw/docs/network.md`
+- https://raw.githubusercontent.com/githubnext/ado-aw/main/docs/front-matter.md
+- https://raw.githubusercontent.com/githubnext/ado-aw/main/docs/safe-outputs.md
+- https://raw.githubusercontent.com/githubnext/ado-aw/main/docs/engine.md
+- https://raw.githubusercontent.com/githubnext/ado-aw/main/docs/targets.md
+- https://raw.githubusercontent.com/githubnext/ado-aw/main/docs/network.md
