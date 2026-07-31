@@ -108,7 +108,10 @@ pub async fn prepare_custom_agent_output(
         // content it does not own (pull-request bodies, work-item fields, issue
         // text). Every documented consumer already selects its own `type`.
         let Some(definition) = custom_tools.get(&name) else {
-            debug!("Excluding non-custom safe output '{name}' from the custom Agent output");
+            debug!(
+                "Excluding non-custom safe output '{}' from the custom Agent output",
+                crate::sanitize::neutralize_pipeline_commands(&name)
+            );
             continue;
         };
 

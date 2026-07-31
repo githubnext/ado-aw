@@ -146,6 +146,8 @@ Nested relative imports inherit their origin:
 Limits are fail-closed:
 
 - at most 20 unique resolved files
+- at most 256 resolution lookups, counting duplicates resolved before
+  deduplication
 - maximum nesting depth 5
 - maximum 256 KiB per manifest
 - cycles report the import path
@@ -209,7 +211,7 @@ Only these imported fields are applied:
 | Built-in `safe-outputs` keys | Duplicates across imports fail; consumer configuration replaces imported built-in configuration |
 | `runtimes` | Consumer fields override imported fields; earlier imports fill remaining fields |
 | `env` | Duplicate keys across imports fail; consumer overrides |
-| `repos` | Consumer entries first, then imported entries, deduplicated by alias/name |
+| `repos` | Consumer entries first, then imported entries, deduplicated by alias/name. An import can therefore add a `resources.repositories` entry, including one that references an `endpoint:` service connection — review the compiled `.lock.yml` diff |
 | `steps` | Imported steps prepend in import order; consumer steps follow |
 | `post-steps` | Consumer post-steps first; imported post-steps follow in import order |
 

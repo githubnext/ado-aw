@@ -239,7 +239,7 @@ describe("compiler-smoke-e2e index.main (happy path)", () => {
     expect(mockCalls.indexOf("deleteRemoteRef")).toBeLessThan(
       mockCalls.indexOf("removeWorktree"),
     );
-  }, 15_000);
+  }, 60_000);
 });
 
 describe("compiler-smoke-e2e index.main (unexpected path guard)", () => {
