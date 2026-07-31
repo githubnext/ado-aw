@@ -846,23 +846,52 @@ rather than "Cancelled".
 
 ## Execution Context
 
-The `execution-context:` block controls the **always-on execution-context plugin**
-that stages PR diff context on disk before the agent runs. For PR-triggered
-pipelines, it fetches the target branch and resolves the merge-base SHA, writes
-`aw-context/pr/base.sha` and `aw-context/pr/head.sha`, and appends a tailored
-prompt fragment — so the agent can run `git diff $BASE..$HEAD` directly without
-re-fetching anything.
+The `execution-context:` block controls the **always-on execution-context plugin**,
+which stages trigger-specific context files under `aw-context/` before the agent
+runs. Each contributor handles a different trigger type:
+
+| Contributor | Default | What it stages |
+|-------------|---------|----------------|
+| `pr` | on when `on.pr` is set | Merge-base SHA, head SHA, diff stats; `git diff $BASE..$HEAD` ready to run |
+| `workitem` | on when `pr` is active | Linked ADO work item titles, descriptions, acceptance criteria |
+| `pr.checks` | off (opt in) | Build Validation results for the current PR head |
+| `manual` | on when `parameters:` declared | Requestor identity, parameter snapshot |
+| `pipeline` | on when `on.pipeline` is set | Upstream build metadata (status, run URL, trigger definition) |
+| `ci-push` | off (opt in) | "Since last green build on this branch" diff context |
+| `schedule` | off (opt in) | "Since last run of this pipeline" diff context |
+| `repo` | off (opt in) | Branch, HEAD SHA, last release tag, commits-since-tag |
 
 ```yaml
 execution-context:
   enabled: true  # master switch; default: true
+
+  # --- auto-on contributors (activate based on your triggers) ---
   pr:
-    enabled: true  # default: true when on.pr is configured; set false to opt out
+    enabled: true  # default: true when on.pr is configured
+    checks:
+      enabled: false  # opt in to stage PR build-validation results
+  workitem:
+    enabled: true  # default: true when pr contributor is active
+    max-items: 5   # cap on linked WIs staged (default: 5)
+  manual:
+    enabled: true  # default: true when any parameters: block is declared
+  pipeline:
+    enabled: true  # default: true when on.pipeline is configured
+
+  # --- opt-in contributors (off by default) ---
+  ci-push:
+    enabled: false  # set true for "since last green build" diff on CI push builds
+  schedule:
+    enabled: false  # set true for "since last run" diff on scheduled builds
+  repo:
+    enabled: false  # set true for branch, SHA, last release tag, commits-since-tag
+    conventions: false  # also probe CODEOWNERS / CONTRIBUTING.md / AGENTS.md
 ```
 
-When the block is omitted entirely, the PR contributor activates automatically
-whenever `on.pr:` is configured.
+When the block is omitted entirely, contributors activate automatically based on
+your trigger configuration: `pr`, `workitem`, `manual`, and `pipeline` contributors
+turn on when their respective `on.*` trigger is configured.
 
 See the [Execution Context reference](/ado-aw/reference/execution-context/) for the
-full agent-visible layout, bash allow-list behavior, trust boundary, and migration
-notes.
+full agent-visible file layout, bash allow-list behavior, trust boundary, and
+migration notes.
