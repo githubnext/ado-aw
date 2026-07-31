@@ -1,6 +1,7 @@
 ---
 on:
   slash_command:
+    strategy: centralized
     name: plan
     events: [issues, issue_comment]
 description: Comprehensive issue investigation and planning triggered by /plan

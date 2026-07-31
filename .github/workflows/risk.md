@@ -1,7 +1,8 @@
 ---
 on:
   slash_command:
-    name: change-risk
+    strategy: centralized
+    name: risk
     events: [pull_request, pull_request_comment]
 description: Assesses PRs for breaking change risk and approves or requests changes
 permissions:
@@ -26,7 +27,7 @@ max-daily-ai-credits: -1
 
 # Change Risk Assessor
 
-You are a senior engineer performing a **breaking-change risk assessment** on this pull request. The user invoked `/change-risk` on this PR. Context: "${{ steps.sanitized.outputs.text }}"
+You are a senior engineer performing a **breaking-change risk assessment** on this pull request. The user invoked `/risk` on this PR. Context: "${{ steps.sanitized.outputs.text }}"
 
 ## Your Mission
 

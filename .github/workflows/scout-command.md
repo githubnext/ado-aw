@@ -1,6 +1,7 @@
 ---
 on:
   slash_command:
+    strategy: centralized
     name: scout
     events: [issues, issue_comment]
 description: On-demand code history investigation triggered by /scout on issues
