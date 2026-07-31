@@ -187,26 +187,52 @@ fn find_front_matter_placeholder_issue(fm: &YamlValue) -> Option<InputPlaceholde
 
 /// Walks front matter and substitutes import-input placeholders in every string
 /// scalar.
-pub fn substitute_front_matter(fm: &YamlValue, inputs: &JsonMap<String, JsonValue>) -> YamlValue {
+///
+/// Mapping keys are substituted too, so two distinct authored keys can collapse
+/// onto the same string once their inputs resolve (for example `{{ inputs.a }}`
+/// and `{{ inputs.b }}` when the consumer passes the same value for both).
+/// Inserting both would silently drop the first, so a collision is a hard error
+/// rather than quiet data loss.
+pub fn substitute_front_matter(
+    fm: &YamlValue,
+    inputs: &JsonMap<String, JsonValue>,
+) -> Result<YamlValue> {
     match fm {
-        YamlValue::String(s) => YamlValue::String(substitute_inputs(s, inputs)),
-        YamlValue::Sequence(items) => YamlValue::Sequence(
+        YamlValue::String(s) => Ok(YamlValue::String(substitute_inputs(s, inputs))),
+        YamlValue::Sequence(items) => Ok(YamlValue::Sequence(
             items
                 .iter()
                 .map(|item| substitute_front_matter(item, inputs))
-                .collect(),
-        ),
+                .collect::<Result<Vec<_>>>()?,
+        )),
         YamlValue::Mapping(mapping) => {
             let mut substituted = YamlMapping::new();
             for (key, value) in mapping {
-                substituted.insert(
-                    substitute_front_matter(key, inputs),
-                    substitute_front_matter(value, inputs),
-                );
+                let substituted_key = substitute_front_matter(key, inputs)?;
+                let substituted_value = substitute_front_matter(value, inputs)?;
+                if substituted.contains_key(&substituted_key) {
+                    anyhow::bail!(
+                        "import input substitution produced a duplicate front matter key '{}'; \
+                         two keys in the component resolve to the same name, so one would be \
+                         silently dropped",
+                        render_yaml_key(&substituted_key)
+                    );
+                }
+                substituted.insert(substituted_key, substituted_value);
             }
-            YamlValue::Mapping(substituted)
+            Ok(YamlValue::Mapping(substituted))
         }
-        other => other.clone(),
+        other => Ok(other.clone()),
+    }
+}
+
+/// Best-effort display form for a mapping key in a duplicate-key error.
+fn render_yaml_key(key: &YamlValue) -> String {
+    match key {
+        YamlValue::String(value) => value.clone(),
+        other => serde_yaml::to_string(other)
+            .map(|rendered| rendered.trim().to_string())
+            .unwrap_or_else(|_| String::from("<unrenderable key>")),
     }
 }
 
@@ -224,7 +250,7 @@ pub fn apply_import_inputs(
     let inputs = validate_with(&schema, with)?;
     let stripped_front_matter = strip_import_schema(front_matter);
 
-    let substituted_front_matter = substitute_front_matter(&stripped_front_matter, &inputs);
+    let substituted_front_matter = substitute_front_matter(&stripped_front_matter, &inputs)?;
     let substituted_body = substitute_inputs(body, &inputs);
 
     // Leftover-placeholder guard: any `{{ inputs.<path> }}` still
@@ -572,6 +598,10 @@ fn render_json_value(value: &JsonValue) -> String {
         JsonValue::Bool(value) => value.to_string(),
         JsonValue::Array(_) | JsonValue::Object(_) => {
             let sanitized = sanitize_json_strings(value);
+            // `serde_json::Value` always serializes cleanly (its `Map` keys are
+            // `String`, and `Number` cannot hold NaN/Infinity), so the error arm
+            // is unreachable. Fall back to `Display` — which also emits JSON —
+            // rather than introducing a panic path for an impossible case.
             serde_json::to_string(&sanitized).unwrap_or_else(|_| sanitized.to_string())
         }
         JsonValue::Null => "null".to_string(),
@@ -886,7 +916,8 @@ nested:
             "config": { "apiKey": "secret" }
         });
 
-        let substituted = substitute_front_matter(&fm, inputs.as_object().unwrap());
+        let substituted = substitute_front_matter(&fm, inputs.as_object().unwrap())
+            .expect("substitution without key collisions succeeds");
 
         assert_eq!(mapping_get(&substituted, "name"), Some(&yaml("demo")));
         let steps = mapping_get(&substituted, "steps")
@@ -899,6 +930,46 @@ nested:
             mapping_get(nested, "value"),
             Some(&yaml("before demo after"))
         );
+    }
+
+    #[test]
+    fn substitute_front_matter_rejects_colliding_substituted_keys() {
+        let fm = yaml(
+            r#"
+env:
+  "{{ inputs.first }}": one
+  "{{ inputs.second }}": two
+"#,
+        );
+        let inputs = json!({ "first": "SHARED", "second": "SHARED" });
+
+        let error = substitute_front_matter(&fm, inputs.as_object().unwrap())
+            .expect_err("colliding keys must fail closed rather than drop a field");
+
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("duplicate front matter key 'SHARED'"),
+            "error must name the colliding key: {rendered}"
+        );
+    }
+
+    #[test]
+    fn substitute_front_matter_allows_distinct_keys_from_the_same_input() {
+        let fm = yaml(
+            r#"
+env:
+  "{{ inputs.prefix }}_A": one
+  "{{ inputs.prefix }}_B": two
+"#,
+        );
+        let inputs = json!({ "prefix": "X" });
+
+        let substituted = substitute_front_matter(&fm, inputs.as_object().unwrap())
+            .expect("distinct resolved keys are not a collision");
+
+        let env = mapping_get(&substituted, "env").unwrap();
+        assert_eq!(mapping_get(env, "X_A"), Some(&yaml("one")));
+        assert_eq!(mapping_get(env, "X_B"), Some(&yaml("two")));
     }
 
     #[test]

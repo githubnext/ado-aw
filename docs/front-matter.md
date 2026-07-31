@@ -413,6 +413,11 @@ pool:
 | `teardown` | Teardown (emitted only when `teardown:` steps are declared) |
 | `conclusion` | Conclusion (emitted only when `safe-outputs:` is configured) |
 
+The Teardown job runs with an `always()` condition, so its steps execute even
+when the Agent, Detection, SafeOutputs, or a custom safe-output job fails or is
+skipped. Write teardown steps as unconditional cleanup — do not assume the
+upstream jobs succeeded.
+
 `safe-outputs-reviewed` inherits the `safe-outputs` override unless it has its
 own entry. `manual-review` is **not** a valid key — the ManualReview job is
 agentless and always runs on `pool: server`.
