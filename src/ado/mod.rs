@@ -2730,11 +2730,6 @@ mod tests {
     // ==================== MatchMethod display ====================
 
     #[test]
-    fn test_match_method_explicit_display() {
-        assert_eq!(format!("{}", MatchMethod::Explicit), "explicit");
-    }
-
-    #[test]
     fn test_match_method_all_variants_display() {
         assert_eq!(format!("{}", MatchMethod::YamlPath), "yaml-path");
         assert_eq!(format!("{}", MatchMethod::PipelineName), "pipeline-name");
