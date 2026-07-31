@@ -123,7 +123,7 @@ impl AgentStats {
         let name = sanitize_for_markdown(&self.agent_name);
 
         format!(
-            "\n---\n\
+            "\n\n---\n\
              \u{1F916} {name} \u{00B7} {model} \u{00B7} \
              {input} in / {output} out \u{00B7} \
              {tools} tool calls \u{00B7} {duration}\n",
@@ -308,6 +308,11 @@ mod tests {
         assert!(md.contains("4m 32s"));
         assert!(md.contains("\u{00B7}"), "should use middle-dot separators");
         assert!(!md.contains("turns"), "turns should not be in output");
+        // Must start with \n\n---\n so the thematic break is always preceded by a blank line.
+        // Without this, appending to body text that lacks a trailing newline produces
+        // `text\n---\n` which CommonMark parses as a setext h2 heading, consuming the `---`
+        // instead of rendering it as a horizontal rule.
+        assert!(md.starts_with("\n\n---\n"), "stats footer must open with a blank line before ---");
     }
 
     #[test]
