@@ -1,7 +1,7 @@
 ---
 on:
   schedule: weekly on monday
-description: Checks whether the list of Copilot-accessible models in src/inspect/catalog.rs and prompts/create-ado-agentic-workflow.md is current; opens a PR when new models are available or old ones have been removed.
+description: Checks whether the list of Copilot-accessible models in src/inspect/catalog.rs is current; opens a PR when new models are available or old ones have been removed.
 permissions:
   contents: read
   issues: read
@@ -10,6 +10,11 @@ permissions:
 tools:
   github:
     toolsets: [default]
+  bash:
+    - "curl:*"
+    - "jq:*"
+    - "mkdir:*"
+    - "cat:*"
 network:
   allowed: [defaults]
 safe-outputs:
@@ -20,7 +25,6 @@ safe-outputs:
     max: 1
     allowed-files:
       - src/inspect/catalog.rs
-      - prompts/create-ado-agentic-workflow.md
   close-pull-request:
     required-title-prefix: "chore(deps): update copilot model list"
     target: "*"
@@ -42,54 +46,81 @@ YAML.
 
 ## Your Task
 
-Check whether the list of Copilot-accessible models kept in two files is still
-current, and open a PR to update it when it is not.
-
-The two files you are responsible for:
-
-| File | What to update |
-|------|----------------|
-| `src/inspect/catalog.rs` | string literals in the `models()` function |
-| `prompts/create-ado-agentic-workflow.md` | model table in "Step 2 — Engine" |
+Check whether the list of Copilot-accessible models kept in
+`src/inspect/catalog.rs` (the string literals in the `models()` function) is
+still current, and open a PR to update it when it is not.
 
 ---
 
 ## Step 1 — Fetch Available Models
 
-Use the GitHub API to list models that are accessible to GitHub Copilot:
+Copilot model metadata is served by the AWF `api-proxy` sidecar, which is
+reachable **from inside this agent execution context**. This is an in-sandbox
+call, so it needs no entry in the network allowlist.
 
+> Do **not** try to use the public GitHub Models API (`models.github.ai`,
+> `models.inference.ai.azure.com`). GitHub Models is being retired, those hosts
+> are not in the AWF allowlist, and requests to them are dropped by the
+> firewall.
+
+Run:
+
+```bash
+set -euo pipefail
+OUT=/tmp/gh-aw/agent/reflect.json
+mkdir -p "$(dirname "$OUT")"
+if ! curl -fsS http://api-proxy:10000/reflect > "$OUT"; then
+  printf '%s' '{"endpoints":[],"error":"reflect endpoint unavailable"}' > "$OUT"
+fi
+cat "$OUT"
 ```
-GET /models
+
+Then extract the Copilot model identifiers:
+
+```bash
+jq -r '[.endpoints[] | select(.provider == "copilot") | .models // []] | flatten | .[]' /tmp/gh-aw/agent/reflect.json
 ```
 
-From the response, collect every model whose `vendor` (or `publisher`) is
-`anthropic` or `openai` **and** whose identifier the Copilot CLI `--model` flag
-accepts. The canonical identifier is the `id` (or `name`) field returned by the
-API. Record the full list as `api_models`.
+If `/reflect` reports `models: null` for the Copilot endpoint, fetch the list
+directly from that endpoint's `models_url` — the api-proxy injects the auth
+headers for you — and read the identifiers from `.data[].id`:
 
-If the API call fails or returns an empty list, emit a `report-incomplete`
-safe output explaining what went wrong and stop — do not open a PR against a
-potentially stale snapshot.
+```bash
+MODELS_URL=$(jq -r '.endpoints[] | select(.provider == "copilot") | .models_url // empty' /tmp/gh-aw/agent/reflect.json)
+if [ -n "$MODELS_URL" ]; then
+  curl -fsS "$MODELS_URL" | jq -r '[.data[].id] | .[]'
+fi
+```
+
+Record the resulting identifiers as `api_models`, keeping only those the
+Copilot CLI `--model` flag accepts — concrete model identifiers such as
+`claude-opus-4.7` or `gpt-5.4`. **Exclude capability aliases** (`agent`,
+`large`, `small`, `mini`, `sonnet`, `opus`, `haiku`, `reasoning`, `coding`,
+`auto`, and similar), any entry containing a wildcard `*`, and any
+provider-prefixed form such as `copilot/…` or `anthropic/…` — reduce those to
+the bare identifier.
+
+If the call fails, the `endpoints` array is empty, the response contains an
+`error` field, or `api_models` ends up empty, emit a `report-incomplete` safe
+output explaining exactly what went wrong and **stop** — do not open a PR
+against a potentially stale snapshot, and do not fall back to guessing model
+names from memory.
 
 ---
 
 ## Step 2 — Read the Current Model List
 
-**From `src/inspect/catalog.rs`:**
+Read `src/inspect/catalog.rs` and locate the `models()` function. Extract every
+string literal inside that function. Call this set `catalog_models`. The first
+entry is `DEFAULT_COPILOT_MODEL`; read its current value from `src/engine.rs`
+(look for the line `pub const DEFAULT_COPILOT_MODEL: &str = "...";`).
 
-Read the file and locate the `models()` function. Extract every string literal
-inside that function. Call this set `catalog_models`. The first entry corresponds
-to `DEFAULT_COPILOT_MODEL`; read its current value from `src/engine.rs` (look for
-the line `pub const DEFAULT_COPILOT_MODEL: &str = "...";`).
+The **current tracked set** is `catalog_models`, and the `DEFAULT_COPILOT_MODEL`
+value is always its first entry.
 
-**From `prompts/create-ado-agentic-workflow.md`:**
-
-Read the file and locate the model table inside "Step 2 — Engine". Extract
-every model identifier from the table rows. Call this set `prompt_models`.
-
-The **current tracked set** is the union of `catalog_models` and
-`prompt_models`. The `DEFAULT_COPILOT_MODEL` string is always present in
-`catalog_models` as the first entry.
+> `prompts/create-ado-agentic-workflow.md` is deliberately **not** tracked. It
+> no longer carries a model table — it defers to compiler truth in
+> `src/engine.rs` instead — so there is nothing there to keep in sync.
 
 ---
 
@@ -97,34 +128,36 @@ The **current tracked set** is the union of `catalog_models` and
 
 Compute:
 
-- **New models** (`new_models`): identifiers in `api_models` that are absent
-  from both `catalog_models` and `prompt_models`.
-- **Gone models** (`gone_models`): identifiers in the current tracked set that
-  are no longer in `api_models`, **excluding** the `DEFAULT_COPILOT_MODEL`
-  entry (never auto-remove the default).
+- **New models** (`new_models`): identifiers in `api_models` absent from
+  `catalog_models`.
+- **Gone models** (`gone_models`): identifiers in `catalog_models` no longer in
+  `api_models`, **excluding** the `DEFAULT_COPILOT_MODEL` entry (never
+  auto-remove the default).
 
-If both `new_models` and `gone_models` are empty, **stop** — everything is up
-to date. Emit a `noop` safe output with the message
+If both are empty, **stop** — emit a `noop` safe output with the message
 `"Copilot model list is current; no changes needed."` and exit.
+
+Sanity-check before proceeding: if `gone_models` would remove more than half of
+the current list, or `new_models` contains more than 20 entries, treat the
+response as suspect and emit `report-incomplete` instead of opening a PR. A
+sudden wholesale change is far more likely to be a malformed response than a
+real platform change.
 
 ### Check for an existing open PR
 
 Search for open PRs whose titles start with
 `chore(deps): update copilot model list`.
 
-- If exactly one such PR is found **and** it would still produce the correct
-  result given the current `api_models` response (i.e. the diff it contains
-  already adds all `new_models` and removes all `gone_models`), **skip** —
-  an accurate PR is already open.
-- If a stale PR exists (the model list has changed since it was opened), emit a
-  `close-pull-request` safe output for it with a short comment explaining it is
-  superseded, then proceed to Step 4 to open a fresh one.
+- If exactly one is found **and** it already produces the correct result for
+  the current `api_models`, **skip** — an accurate PR is already open.
+- If a stale PR exists, emit a `close-pull-request` safe output for it with a
+  short comment explaining it is superseded, then continue to Step 4.
 
 ---
 
 ## Step 4 — Open an Update PR
 
-Edit exactly the two files described below and then open a PR.
+Edit `src/inspect/catalog.rs` and open a PR.
 
 ### 4a — Update `src/inspect/catalog.rs`
 
@@ -143,29 +176,6 @@ accurate (the comment currently says
 `// No KNOWN_MODELS registry exists yet; keep this list aligned with` —
 leave that wording intact).
 
-### 4b — Update `prompts/create-ado-agentic-workflow.md`
-
-Locate the model table inside "Step 2 — Engine" (search for the heading
-`### Step 2 — Engine` or the table row that contains the `DEFAULT_COPILOT_MODEL`
-value you read in Step 2).
-
-Rules:
-1. **Never** remove the row for the default model (whatever `DEFAULT_COPILOT_MODEL`
-   is set to in `src/engine.rs`).
-2. Add one row per model in `new_models`. Use the following guidance for the
-   "Use when" column:
-   - If the model name contains `opus` or `o1` or `o3`: "Highest reasoning
-     capability; use for the most complex tasks."
-   - If the model name contains `sonnet` or `gpt-4`: "Faster and cheaper than
-     Opus; good for moderate-complexity tasks."
-   - If the model name contains `haiku` or `gpt-3`: "Fastest and cheapest;
-     use for simple, well-scoped tasks."
-   - Otherwise: "Available model; review capabilities before choosing."
-3. Remove rows for models in `gone_models`.
-4. Keep the table rows sorted so that the default model is first, and the rest
-   are in alphabetical order by the model identifier column.
-5. Do **not** change any other part of the file.
-
 ### 4c — Open the PR
 
 - **Title** (without the auto-prepended prefix):
@@ -177,14 +187,13 @@ Rules:
 ```markdown
 ## Copilot Model List Update
 
-Keeps the model catalog in `src/inspect/catalog.rs` and the recommended-model
-table in `prompts/create-ado-agentic-workflow.md` current with the models
-available via the GitHub Copilot API.
+Keeps the model catalog in `src/inspect/catalog.rs` current with the models
+available through the Copilot API proxy.
 
 ### Changes
 
 **Added:**
-<bullet per new model — identifier and "Use when" description>
+<bullet per new model identifier>
 
 **Removed:**
 <bullet per gone model, or "None." if empty>
@@ -192,17 +201,16 @@ available via the GitHub Copilot API.
 ### Note on `DEFAULT_COPILOT_MODEL`
 
 This PR does **not** change the `DEFAULT_COPILOT_MODEL` constant in
-`src/engine.rs`. Choosing a new default is an
-opinionated, human decision that weighs stability, pricing, and capability
-trade-offs. If one of the newly added models is a strong candidate for the
-default, please update `src/engine.rs` and `prompts/create-ado-agentic-workflow.md`
+`src/engine.rs`. Choosing a new default is an opinionated, human decision that
+weighs stability, pricing, and capability trade-offs. If one of the newly added
+models is a strong candidate for the default, please update `src/engine.rs`
 manually after review.
 
 ### Source
 
-Models fetched from `GET /models` (GitHub Copilot API).
-See the [GitHub Models documentation](https://docs.github.com/en/github-models)
-for the full list of available models.
+Models read from the AWF `api-proxy` `/reflect` endpoint inside the agent
+sandbox (`copilot` provider), which reports the models actually reachable by
+this workflow's engine.
 
 ---
 *This PR was opened automatically by the Copilot model list updater workflow.*
