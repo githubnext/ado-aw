@@ -104,7 +104,7 @@ steps:
       SELF_DIR: $(Build.SourcesDirectory)/self
       PINNED_DIR: $(Build.SourcesDirectory)/pinned-base
       SOURCE_VERSION: $(Build.SourceVersion)
-      LOCK_FILE: $(Build.SourcesDirectory)/self/tests/compiler-smoke-e2e/fixtures/multi-repo.lock.yml
+      LOCK_FILE: $(Build.SourcesDirectory)/self/tests/compiler-smoke-e2e/multi-repo.lock.yml
 ---
 
 ## Multi-repo checkout smoke

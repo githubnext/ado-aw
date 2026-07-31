@@ -12,12 +12,12 @@ the release-backed lane and is intentionally excluded here.
 | `azure-cli` | [`tests/safe-outputs/`](../safe-outputs/) | AWF `az` extension and ADO control-plane reach |
 | `noop-target` | [`tests/safe-outputs/`](../safe-outputs/) | Minimal Stage 1 → 3 shape |
 | `smoke-failure-reporter` | [`tests/safe-outputs/`](../safe-outputs/) | Debug-only `create-issue` path |
-| `multi-repo` | [`fixtures/`](fixtures/) | **Candidate-only.** Multi-checkout layout and compile-time `self` identity |
+| `multi-repo` | [`multi-repo.md`](multi-repo.md) | **Candidate-only.** Multi-checkout layout and compile-time `self` identity |
 
 The first four are release-backed sources that also feed the release lane.
 `multi-repo` has no released lock file and no release definition, so it lives
-under [`fixtures/`](fixtures/) instead — a lock committed there would have no
-released compiler that owns it.
+beside this lane's own files instead — a lock committed under
+`tests/safe-outputs/` would have no released compiler that owns it.
 
 ### What `multi-repo` proves
 
@@ -136,8 +136,8 @@ See [`REGISTERED.md`](REGISTERED.md) for definition IDs and variables.
 
 ### Phase A — repository (one PR)
 
-1. Author `fixtures/<name>.md`. Do **not** commit a lock file: candidate-only
-   fixtures have no released compiler that owns one.
+1. Author `<name>.md` beside this README. Do **not** commit a lock file:
+   candidate-only fixtures have no released compiler that owns one.
 2. Wire it up in five places:
 
    | File | Change |
@@ -159,9 +159,8 @@ See [`REGISTERED.md`](REGISTERED.md) for definition IDs and variables.
 git clone -b ado-aw-smoke-candidate-base \
   https://dev.azure.com/msazuresphere/AgentPlayground/_git/ado-aw-mirror
 cd ado-aw-mirror
-mkdir -p tests/compiler-smoke-e2e/fixtures
 cp /path/to/ado-aw/tests/compiler-smoke-e2e/inert-child.yml \
-  tests/compiler-smoke-e2e/fixtures/<name>.lock.yml
+  tests/compiler-smoke-e2e/<name>.lock.yml
 git add -A && git commit -m "chore(smoke): seed inert <name> child" && git push
 
 # 2. Create the definition (no run; triggers stay off).
@@ -170,18 +169,38 @@ az pipelines create \
   --name "Candidate compiler smoke - <name>" \
   --repository ado-aw-mirror --repository-type tfsgit \
   --branch ado-aw-smoke-candidate-base \
-  --yaml-path tests/compiler-smoke-e2e/fixtures/<name>.lock.yml \
+  --yaml-path tests/compiler-smoke-e2e/<name>.lock.yml \
   --folder-path '\compiler-smoke-e2e' --skip-run true
 ```
+
+> **`az pipelines create` does not produce a compliant definition.** It adds a
+> `continuousIntegration` trigger and picks a default hosted queue. Candidate
+> children must have **no** triggers — the generated locks emit no `trigger:`
+> key, and a YAML pipeline without one defaults to CI on every branch, so a
+> definition-level trigger would let a candidate-ref push start builds outside
+> the orchestrator. Immediately after creating, GET the definition, set
+> `triggers` to `[]` and `queue` to the pool the other children use, and PUT it
+> back (`az rest --resource 499b84ac-1321-427f-aa17-267ca6975798`). Then
+> confirm it matches a known-good child:
+>
+> ```bash
+> az pipelines show --org … --project AgentPlayground --id <new-id> \
+>   --query '{yaml:process.yamlFilename,branch:repository.defaultBranch,queue:queue.name,triggers:triggers,scope:jobAuthorizationScope}'
+> ```
 
 Then, on the new definition:
 
 - provision its **own** secret `GITHUB_TOKEN` — server-side definition cloning
-  does not copy secret values;
+  does not copy secret values, and it cannot be scripted from a checkout;
 - authorize the service connections the fixture's `permissions:` block declares
   (`agent-playground-read`, plus `agent-playground-write` only if it proposes a
   safe output that writes to ADO);
-- set `COMPILER_SMOKE_<NAME>_DEFINITION_ID` on orchestrator `2559`.
+- set `COMPILER_SMOKE_<NAME>_DEFINITION_ID` on orchestrator `2559`:
+
+  ```bash
+  az pipelines variable create --org … --project AgentPlayground \
+    --pipeline-id 2559 --name COMPILER_SMOKE_<NAME>_DEFINITION_ID --value <new-id>
+  ```
 
 ### Phase C — verify
 

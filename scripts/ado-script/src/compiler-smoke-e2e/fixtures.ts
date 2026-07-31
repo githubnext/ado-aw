@@ -5,7 +5,8 @@
  * `tests/safe-outputs/README.md` (canary, azure-cli, noop-target, and
  * smoke-failure-reporter); the weekly janitor remains in the release lane but
  * is not part of candidate checks. `multi-repo` is candidate-only — it has no
- * released lock file and lives under `tests/compiler-smoke-e2e/fixtures/`.
+ * released lock file and lives beside the lane's own files under
+ * `tests/compiler-smoke-e2e/`.
  *
  * The harness reads the exact files from the detached candidate worktree (an
  * exact checkout of `BUILD_SOURCEVERSION` — never from
@@ -29,7 +30,7 @@ export const FIXTURE_DIR = "tests/safe-outputs";
  * definition, so they must not live beside the release-owned sources in
  * {@link FIXTURE_DIR}.
  */
-export const CANDIDATE_FIXTURE_DIR = "tests/compiler-smoke-e2e/fixtures";
+export const CANDIDATE_FIXTURE_DIR = "tests/compiler-smoke-e2e";
 
 /** Directory each fixture's source lives in. */
 const FIXTURE_DIR_BY_NAME: Readonly<Record<FixtureName, string>> = {

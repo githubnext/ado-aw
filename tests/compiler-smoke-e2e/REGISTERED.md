@@ -11,7 +11,7 @@ These definitions live in
 | `Candidate compiler smoke - azure-cli` | `ado-aw-mirror` | `tests/safe-outputs/azure-cli.lock.yml` | `2555` |
 | `Candidate compiler smoke - noop-target` | `ado-aw-mirror` | `tests/safe-outputs/noop-target.lock.yml` | `2556` |
 | `Candidate compiler smoke - failure reporter` | `ado-aw-mirror` | `tests/safe-outputs/smoke-failure-reporter.lock.yml` | `2558` |
-| `Candidate compiler smoke - multi-repo` | `ado-aw-mirror` | `tests/compiler-smoke-e2e/fixtures/multi-repo.lock.yml` | *(pending registration)* |
+| `Candidate compiler smoke - multi-repo` | `ado-aw-mirror` | `tests/compiler-smoke-e2e/multi-repo.lock.yml` | `2565` |
 
 All child definitions use
 `refs/heads/ado-aw-smoke-candidate-base` as their default branch. The ref is

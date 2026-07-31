@@ -20,8 +20,8 @@ describe("fixturePaths", () => {
   it("keeps candidate-only fixtures out of the release-owned directory", () => {
     expect(fixturePaths("multi-repo")).toEqual({
       name: "multi-repo",
-      relMd: "tests/compiler-smoke-e2e/fixtures/multi-repo.md",
-      relLock: "tests/compiler-smoke-e2e/fixtures/multi-repo.lock.yml",
+      relMd: "tests/compiler-smoke-e2e/multi-repo.md",
+      relLock: "tests/compiler-smoke-e2e/multi-repo.lock.yml",
     });
   });
 });
