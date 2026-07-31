@@ -1889,10 +1889,15 @@ fn write_custom_runtime_config_step(
     let json = serde_json::to_string_pretty(&parsed)
         .context("failed to serialize custom job runtime config")?;
     let encoded = STANDARD.encode(json.as_bytes());
+    // No runtime JSON re-validation: the payload was round-trip parsed and
+    // re-serialized above, so it is valid JSON by construction. `base64
+    // --decode` is the last command in the script, so ADO's fail-on-last-command
+    // default already surfaces a corrupted transfer. Custom jobs run on
+    // consumer-owned pools, and this step is their only interpreter-dependent
+    // command, so keeping it to bash + base64 avoids a hard python3 dependency.
     let script = format!(
         "mkdir -p \"$(Agent.TempDirectory)/ado-aw-custom\"\n\
-        printf '%s' {encoded} | base64 --decode > \"{config_path}\"\n\
-        python3 -m json.tool \"{config_path}\" > /dev/null\n",
+        printf '%s' {encoded} | base64 --decode > \"{config_path}\"\n",
         encoded = shell_quote(&encoded),
     );
     Ok(bash("Write custom job runtime config", script))
@@ -4806,6 +4811,45 @@ teardown:
                 .any(|id| id.as_str() == "Custom_notify")
         );
         assert_eq!(teardown.condition, Some(Condition::Always));
+    }
+
+    #[test]
+    fn custom_job_compiler_steps_do_not_require_an_interpreter() {
+        let jobs = canonical_jobs_for(
+            r#"
+name: Test
+description: Test
+safe-outputs:
+  jobs:
+    notify:
+      description: Notify.
+      steps:
+        - bash: echo notify
+"#,
+        );
+        let job = job_by_id(&jobs, "Custom_notify");
+        // Custom jobs run on consumer-owned pools, which are not guaranteed to
+        // ship python3. Every compiler-generated step must stay within bash plus
+        // the downloaded `ado-aw` binary; only the authored component steps may
+        // pull in extra tooling.
+        let generated_bash: Vec<&str> = job
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Bash(bash) => Some(bash.script.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !generated_bash.is_empty(),
+            "custom job should emit compiler-generated bash steps"
+        );
+        for script in generated_bash {
+            assert!(
+                !script.contains("python3"),
+                "compiler-generated custom job step must not depend on python3: {script}"
+            );
+        }
     }
 
     #[test]
