@@ -211,10 +211,13 @@ Then, on the new definition:
 `/azp run` the orchestrator on the Phase A PR, confirm the new child appears in
 the results table, then record its ID in [`REGISTERED.md`](REGISTERED.md).
 
-> Checking out an **additional** repository needs no extra authorization when
-> it is one the child already reads (`multi-repo` checks out `ado-aw-mirror`
-> twice). A genuinely different repository needs Code Read granted to the
-> child's build identity.
+> Checking out an **additional** repository grants no permissions by itself:
+> the child's build identity needs Code Read on it. `multi-repo` checks out
+> `ado-aw-e2e-fixture` alongside `self`. Prefer a genuinely different
+> repository over checking `self`'s repository out twice — two checkouts of one
+> repository contend for the agent's single per-repository cache directory,
+> which warns (`Unable move and reuse existing repository`) and forces a
+> re-clone on every run.
 
 ## Required permissions
 

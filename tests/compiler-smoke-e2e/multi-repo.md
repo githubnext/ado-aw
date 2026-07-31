@@ -11,14 +11,15 @@ engine:
 permissions:
   read: agent-playground-read
 repos:
-  # Deliberately the mirror repo itself, pinned to the permanent inert base
-  # ref. Reusing `self`'s own repository keeps this fixture free of new ADO
-  # repository-resource infrastructure, and the differing ref is what makes a
-  # missing or collapsed checkout detectable: the two working trees must
-  # resolve to different commits.
-  - name: ado-aw-mirror
-    alias: pinned-base
-    ref: refs/heads/ado-aw-smoke-candidate-base
+  # A genuinely different repository from `self`, so the two checkouts cannot
+  # contend for the agent's per-repository cache directory. (Checking out the
+  # same repo twice makes ADO try to move one cached copy to both paths, which
+  # warns and forces a re-clone every run.) Pinned to its stable default
+  # branch — the `e2e/*` branches in this repo are scratch refs owned by the
+  # executor-e2e suite and may be rewritten.
+  - name: ado-aw-e2e-fixture
+    alias: e2e-fixture
+    ref: refs/heads/main
     fetch-depth: 1
 safe-outputs:
   noop: {}
@@ -37,20 +38,20 @@ steps:
       ls -la "$CHECKOUT_ROOT"
 
       # 1. Both repositories must exist at the exact paths the compiler emitted
-      #    (`path: s/self` and `path: s/pinned-base`).
+      #    (`path: s/self` and `path: s/e2e-fixture`).
       if [ ! -d "$SELF_DIR/.git" ]; then
         echo "expected the self checkout at $SELF_DIR" >&2
         exit 1
       fi
-      if [ ! -d "$PINNED_DIR/.git" ]; then
-        echo "expected the pinned checkout at $PINNED_DIR" >&2
+      if [ ! -d "$FIXTURE_DIR/.git" ]; then
+        echo "expected the additional checkout at $FIXTURE_DIR" >&2
         exit 1
       fi
 
       self_head="$(git -C "$SELF_DIR" rev-parse HEAD)"
-      pinned_head="$(git -C "$PINNED_DIR" rev-parse HEAD)"
+      fixture_head="$(git -C "$FIXTURE_DIR" rev-parse HEAD)"
       echo "self HEAD=$self_head"
-      echo "pinned HEAD=$pinned_head"
+      echo "fixture HEAD=$fixture_head"
 
       # 2. `self` must be the exact candidate commit the orchestrator queued.
       if [ "$self_head" != "$SOURCE_VERSION" ]; then
@@ -58,10 +59,10 @@ steps:
         exit 1
       fi
 
-      # 3. The pinned alias tracks a different ref, so equal commits would mean
-      #    the two checkouts collapsed into one directory.
-      if [ "$self_head" = "$pinned_head" ]; then
-        echo "pinned checkout matches self; the checkouts collided" >&2
+      # 3. The two checkouts are different repositories, so equal commits would
+      #    mean they collapsed into one directory.
+      if [ "$self_head" = "$fixture_head" ]; then
+        echo "additional checkout matches self; the checkouts collided" >&2
         exit 1
       fi
 
@@ -102,7 +103,7 @@ steps:
     env:
       CHECKOUT_ROOT: $(Build.SourcesDirectory)
       SELF_DIR: $(Build.SourcesDirectory)/self
-      PINNED_DIR: $(Build.SourcesDirectory)/pinned-base
+      FIXTURE_DIR: $(Build.SourcesDirectory)/e2e-fixture
       SOURCE_VERSION: $(Build.SourceVersion)
       LOCK_FILE: $(Build.SourcesDirectory)/self/tests/compiler-smoke-e2e/multi-repo.lock.yml
 ---
