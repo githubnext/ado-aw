@@ -1860,6 +1860,51 @@ Call the noop tool exactly once.
     );
 }
 
+// ==================== Copilot CLI OTel wiring smoke ====================
+
+/// Verify that a compiled Copilot pipeline sets all three OTel env vars in
+/// the Agent job with the exact values the Stage 3 executor expects when it
+/// reads back `agent_stats::OTEL_FILENAME` from the staging directory.
+///
+/// The three vars must be present AND the file path must match
+/// `/tmp/awf-tools/staging/otel.jsonl` — that path is the link between the
+/// compile-time env configuration and the `ado-aw execute` read-back path.
+#[test]
+fn test_compiled_copilot_agent_job_sets_otel_env_vars() {
+    let compiled = compile_inline_agent(
+        "copilot-otel-env",
+        r#"---
+name: "Copilot OTel Env"
+description: "Compile-time contract for Copilot OTel env var wiring"
+engine:
+  id: copilot
+  model: gpt-5-mini
+safe-outputs:
+  noop: {}
+---
+
+## Agent
+
+Call the noop tool exactly once.
+"#,
+    );
+
+    let agent = extract_job_block(&compiled, "Agent").expect("Agent job should exist");
+
+    assert!(
+        agent.contains("COPILOT_OTEL_ENABLED: 'true'"),
+        "Agent job must enable Copilot OTel: {agent}"
+    );
+    assert!(
+        agent.contains("COPILOT_OTEL_EXPORTER_TYPE: file"),
+        "Agent job must configure file-based OTel exporter: {agent}"
+    );
+    assert!(
+        agent.contains("COPILOT_OTEL_FILE_EXPORTER_PATH: /tmp/awf-tools/staging/otel.jsonl"),
+        "Agent job must write OTel to the staging path read by the executor: {agent}"
+    );
+}
+
 // ==================== Azure DevOps MCP Integration Tests ====================
 
 /// Test that the Azure DevOps MCP fixture compiles successfully with no unreplaced markers
