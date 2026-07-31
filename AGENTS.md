@@ -159,7 +159,8 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   │   ├── missing.rs      # Missing-tool / missing-data / noop safe-output analysis
 │   │   │   ├── otel.rs         # OTel agent stats (token usage, duration, turns)
 │   │   │   ├── policy.rs       # Policy-level findings (safe-output integrity, prompt injection signals)
-│   │   │   └── safe_outputs.rs # Safe-output NDJSON analysis
+│   │   │   ├── safe_outputs.rs # Safe-output NDJSON analysis
+│   │   │   └── custom_jobs.rs  # Job-level audit correlation for custom safe-output jobs
 │   │   └── render/       # Report renderers
 │   │       ├── mod.rs
 │   │       ├── console.rs # Human-readable console report
