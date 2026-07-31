@@ -33,7 +33,7 @@ If interactive, ask only missing essentials first.
 ### 2. Build Front Matter
 Use only required keys plus task-required options:
 - `name`, `description`
-- optional: `target`, `engine`, `workspace`, `pool`, `repos`, `tools`, `runtimes`, `mcp-servers`, `safe-outputs`, `on`, `steps`, `setup`, `teardown`, `permissions`, `parameters`
+- optional: `target`, `engine`, `workspace`, `pool`, `repos`, `tools`, `runtimes`, `mcp-servers`, `safe-outputs`, `on`, `steps`, `post-steps`, `setup`, `teardown`, `permissions`, `parameters`, `env`, `variable-groups`, `network`, `execution-context`, `inlined-imports`, `supply-chain`
 
 Rules:
 - Omit fields that equal defaults.
