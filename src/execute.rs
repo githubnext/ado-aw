@@ -102,37 +102,40 @@ pub async fn prepare_custom_agent_output(
             .and_then(|value| value.as_str().map(str::to_string))
             .context("Safe-output entry is missing string field 'name'")?;
 
-        if let Some(definition) = custom_tools.get(&name) {
-            let arguments = std::mem::take(object);
-            let mut arguments = crate::compile::custom_tools::validate_custom_arguments(
-                &name,
-                &definition.input_schema,
-                Some(arguments),
-            )
-            .with_context(|| format!("Invalid custom safe-output item '{name}'"))?;
-            let mut sanitized = Value::Object(arguments);
-            sanitize_custom_agent_output_value(&mut sanitized, true)?;
-            arguments = crate::compile::custom_tools::validate_custom_arguments(
-                &name,
-                &definition.input_schema,
-                sanitized.as_object().cloned(),
-            )
-            .with_context(|| {
-                format!("Sanitized custom safe-output item '{name}' is no longer valid")
-            })?;
-            let count = custom_counts.entry(name.clone()).or_default();
-            *count += 1;
-            anyhow::ensure!(
-                *count <= definition.max,
-                "Custom safe-output tool '{name}' exceeded its per-run max of {}",
-                definition.max
-            );
-            *object = arguments;
-            object.insert("type".to_string(), Value::String(name));
-        } else {
-            object.insert("type".to_string(), Value::String(name));
-            sanitize_custom_agent_output_value(&mut entry, true)?;
-        }
+        // Built-in safe outputs are applied by Stage 3 itself and are deliberately
+        // withheld from custom jobs. A custom job runs authored steps that may have
+        // been imported from another repository, so it must never receive proposal
+        // content it does not own (pull-request bodies, work-item fields, issue
+        // text). Every documented consumer already selects its own `type`.
+        let Some(definition) = custom_tools.get(&name) else {
+            debug!("Excluding non-custom safe output '{name}' from the custom Agent output");
+            continue;
+        };
+
+        let arguments = std::mem::take(object);
+        let mut arguments = crate::compile::custom_tools::validate_custom_arguments(
+            &name,
+            &definition.input_schema,
+            Some(arguments),
+        )
+        .with_context(|| format!("Invalid custom safe-output item '{name}'"))?;
+        let mut sanitized = Value::Object(arguments);
+        sanitize_custom_agent_output_value(&mut sanitized)?;
+        arguments = crate::compile::custom_tools::validate_custom_arguments(
+            &name,
+            &definition.input_schema,
+            sanitized.as_object().cloned(),
+        )
+        .with_context(|| format!("Sanitized custom safe-output item '{name}' is no longer valid"))?;
+        let count = custom_counts.entry(name.clone()).or_default();
+        *count += 1;
+        anyhow::ensure!(
+            *count <= definition.max,
+            "Custom safe-output tool '{name}' exceeded its per-run max of {}",
+            definition.max
+        );
+        *object = arguments;
+        object.insert("type".to_string(), Value::String(name));
         items.push(entry);
     }
     let item_count = items.len();
@@ -152,35 +155,33 @@ pub async fn prepare_custom_agent_output(
     Ok(item_count)
 }
 
-fn sanitize_custom_agent_output_value(value: &mut Value, sanitize_keys: bool) -> Result<()> {
+/// Transport-sanitize every string key and value in the materialized custom-job
+/// copy. Keys are rebuilt so a forged key can never carry a live ADO logging
+/// command; a collision after sanitization fails closed rather than silently
+/// dropping one of the two entries.
+fn sanitize_custom_agent_output_value(value: &mut Value) -> Result<()> {
     match value {
         Value::String(value) => {
             *value = crate::sanitize::sanitize_custom_payload(value);
         }
         Value::Array(values) => {
             for value in values {
-                sanitize_custom_agent_output_value(value, sanitize_keys)?;
+                sanitize_custom_agent_output_value(value)?;
             }
         }
         Value::Object(values) => {
-            if sanitize_keys {
-                let original = std::mem::take(values);
-                let mut sanitized = serde_json::Map::new();
-                for (key, mut value) in original {
-                    let key = crate::sanitize::sanitize_custom_payload(&key);
-                    anyhow::ensure!(
-                        !sanitized.contains_key(&key),
-                        "Agent-output object keys collide after transport sanitization: '{key}'"
-                    );
-                    sanitize_custom_agent_output_value(&mut value, true)?;
-                    sanitized.insert(key, value);
-                }
-                *values = sanitized;
-            } else {
-                for value in values.values_mut() {
-                    sanitize_custom_agent_output_value(value, false)?;
-                }
+            let original = std::mem::take(values);
+            let mut sanitized = serde_json::Map::new();
+            for (key, mut value) in original {
+                let key = crate::sanitize::sanitize_custom_payload(&key);
+                anyhow::ensure!(
+                    !sanitized.contains_key(&key),
+                    "Agent-output object keys collide after transport sanitization: '{key}'"
+                );
+                sanitize_custom_agent_output_value(&mut value)?;
+                sanitized.insert(key, value);
             }
+            *values = sanitized;
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
@@ -935,7 +936,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prepare_custom_agent_output_validates_and_preserves_aggregate_items() {
+    async fn prepare_custom_agent_output_validates_and_excludes_builtin_proposals() {
         let dir = tempfile::tempdir().unwrap();
         tokio::fs::write(
             dir.path().join(SAFE_OUTPUT_FILENAME),
@@ -952,31 +953,63 @@ mod tests {
             prepare_custom_agent_output(dir.path(), &config, &output)
                 .await
                 .unwrap(),
-            2
+            1
         );
         let value: Value = serde_json::from_slice(&tokio::fs::read(output).await.unwrap()).unwrap();
-        assert_eq!(value["items"][0]["type"], "noop");
-        assert_eq!(value["items"][1]["type"], "send-notification");
-        assert_eq!(value["items"][1]["urgent"], false);
+        assert_eq!(value["items"].as_array().unwrap().len(), 1);
+        assert_eq!(value["items"][0]["type"], "send-notification");
+        assert_eq!(value["items"][0]["urgent"], false);
+    }
+
+    /// A custom job may run steps imported from another repository, so the
+    /// aggregate it receives must never carry built-in proposal content.
+    #[tokio::test]
+    async fn prepare_custom_agent_output_withholds_builtin_proposal_content() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join(SAFE_OUTPUT_FILENAME),
+            format!(
+                "{}\n{}\n{}\n",
+                serde_json::json!({
+                    "name": "create-pull-request",
+                    "title": "Rotate credentials",
+                    "description": "SENSITIVE-PR-BODY internal rollout details",
+                }),
+                serde_json::json!({
+                    "name": "create-work-item",
+                    "title": "SENSITIVE-WORK-ITEM",
+                    "description": "confidential remediation plan",
+                }),
+                serde_json::json!({"name": "send-notification", "title": "Outage"}),
+            ),
+        )
+        .await
+        .unwrap();
+        let config = write_custom_tool_test_config(dir.path()).await;
+        let output = dir.path().join("agent-output.json");
+
+        prepare_custom_agent_output(dir.path(), &config, &output)
+            .await
+            .unwrap();
+
+        let raw = tokio::fs::read_to_string(&output).await.unwrap();
+        assert!(!raw.contains("SENSITIVE-PR-BODY"), "{raw}");
+        assert!(!raw.contains("SENSITIVE-WORK-ITEM"), "{raw}");
+        assert!(!raw.contains("create-pull-request"), "{raw}");
+        assert!(!raw.contains("create-work-item"), "{raw}");
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["items"].as_array().unwrap().len(), 1);
+        assert_eq!(value["items"][0]["type"], "send-notification");
     }
 
     #[tokio::test]
     async fn prepare_custom_agent_output_sanitizes_only_materialized_copy() {
         let dir = tempfile::tempdir().unwrap();
         let raw = format!(
-            "{}\n{}\n",
-            serde_json::json!({
-                "name": "noop",
-                "context": "first\0\x1b[31m\n##[error]failed",
-                "##vso[task.setvariable variable=KEY]owned": "key value",
-                "nested": {
-                    "value": "https://notify.example/@team <b>hello</b>",
-                    "commands": ["normal", "##vso[task.complete result=Failed]owned"],
-                },
-            }),
+            "{}\n",
             serde_json::json!({
                 "name": "send-notification",
-                "title": "Outage\n##vso[task.setvariable variable=X]owned",
+                "title": "Outage first\0\x1b[31m\n##vso[task.setvariable variable=X]owned\n##[error]failed",
             }),
         );
         let source = dir.path().join(SAFE_OUTPUT_FILENAME);
@@ -988,32 +1021,52 @@ mod tests {
             .await
             .unwrap();
 
+        // The analyzed proposal artifact stays byte-identical for Detection/audit.
         assert_eq!(tokio::fs::read_to_string(&source).await.unwrap(), raw);
         let value: Value = serde_json::from_slice(&tokio::fs::read(output).await.unwrap()).unwrap();
-        let noop = &value["items"][0];
+        let title = value["items"][0]["title"].as_str().unwrap();
+        assert!(!title.contains('\0'));
+        assert!(!title.contains('\x1b'));
+        assert!(!title.contains("##vso[task"));
+        assert!(!title.contains("##[error]"));
+        assert!(title.contains("`##vso[`"));
+        assert!(title.contains("`##[`"));
+        assert_eq!(value["items"][0]["urgent"], false);
+    }
+
+    #[test]
+    fn sanitize_custom_agent_output_value_neutralizes_nested_keys_and_values() {
+        let mut value = serde_json::json!({
+            "##vso[task.setvariable variable=KEY]owned": "key value",
+            "keep": "https://notify.example/@team <b>hello</b>",
+            "nested": {
+                "##[error]key": ["normal", "##vso[task.complete result=Failed]owned"],
+            },
+        });
+
+        sanitize_custom_agent_output_value(&mut value).unwrap();
+
+        let rendered = serde_json::to_string(&value).unwrap();
+        assert!(!rendered.contains("##vso[task"), "{rendered}");
+        assert!(!rendered.contains("##[error]"), "{rendered}");
+        // External-system payload text is preserved verbatim.
         assert_eq!(
-            noop["nested"]["value"],
+            value["keep"],
             "https://notify.example/@team <b>hello</b>"
         );
-        assert_eq!(noop["nested"]["commands"][0], "normal");
-        assert!(
-            noop["nested"]["commands"][1]
-                .as_str()
-                .unwrap()
-                .contains("`##vso[`")
-        );
-        let keys: Vec<&str> = noop.as_object().unwrap().keys().map(String::as_str).collect();
-        assert!(keys.iter().all(|key| !key.contains("##vso[task")));
-        assert!(keys.iter().any(|key| key.contains("`##vso[`")));
-        let context = noop["context"].as_str().unwrap();
-        assert!(!context.contains('\0'));
-        assert!(!context.contains('\x1b'));
-        assert!(!context.contains("##[error]"));
-        assert!(context.contains("`##[`"));
-        let title = value["items"][1]["title"].as_str().unwrap();
-        assert!(!title.contains("##vso[task"));
-        assert!(title.contains("`##vso[`"));
-        assert_eq!(value["items"][1]["urgent"], false);
+        assert_eq!(value["nested"]["`##[`error]key"][0], "normal");
+    }
+
+    #[test]
+    fn sanitize_custom_agent_output_value_rejects_sanitized_key_collisions() {
+        let mut object = serde_json::Map::new();
+        object.insert("key".to_string(), Value::String("one".to_string()));
+        object.insert("ke\0y".to_string(), Value::String("two".to_string()));
+        let mut value = Value::Object(object);
+
+        let error = sanitize_custom_agent_output_value(&mut value).unwrap_err();
+
+        assert!(error.to_string().contains("keys collide"), "{error:#}");
     }
 
     #[tokio::test]
@@ -1043,30 +1096,6 @@ mod tests {
         let rendered = format!("{error:#}");
         assert!(!rendered.contains("##vso[task"));
         assert!(rendered.contains("`##vso[`"));
-        assert!(!output.exists());
-    }
-
-    #[tokio::test]
-    async fn prepare_custom_agent_output_rejects_sanitized_key_collisions() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut item = serde_json::Map::new();
-        item.insert("name".to_string(), Value::String("noop".to_string()));
-        item.insert("key".to_string(), Value::String("one".to_string()));
-        item.insert("ke\0y".to_string(), Value::String("two".to_string()));
-        tokio::fs::write(
-            dir.path().join(SAFE_OUTPUT_FILENAME),
-            format!("{}\n", Value::Object(item)),
-        )
-        .await
-        .unwrap();
-        let config = write_custom_tool_test_config(dir.path()).await;
-        let output = dir.path().join("agent-output.json");
-
-        let error = prepare_custom_agent_output(dir.path(), &config, &output)
-            .await
-            .unwrap_err();
-
-        assert!(error.to_string().contains("keys collide"));
         assert!(!output.exists());
     }
 

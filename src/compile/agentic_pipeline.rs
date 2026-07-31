@@ -1921,19 +1921,13 @@ fn component_step_with_custom_env(
     let mapping = step.as_mapping_mut().ok_or_else(|| {
         anyhow::anyhow!("safe-outputs.jobs.<tool>.steps entries must be YAML mappings")
     })?;
-    let env_key = serde_yaml::Value::String("env".to_string());
-    if !mapping.contains_key(&env_key) {
-        mapping.insert(
-            env_key.clone(),
-            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
-        );
-    }
-    let env_value = mapping
-        .get_mut(&env_key)
-        .expect("env key inserted above when absent");
-    let env_map = env_value.as_mapping_mut().ok_or_else(|| {
-        anyhow::anyhow!("safe-outputs.jobs.<tool>.steps env blocks must be mappings")
-    })?;
+    let env_map = mapping
+        .entry(serde_yaml::Value::String("env".to_string()))
+        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()))
+        .as_mapping_mut()
+        .ok_or_else(|| {
+            anyhow::anyhow!("safe-outputs.jobs.<tool>.steps env blocks must be mappings")
+        })?;
     for (name, value) in custom_env {
         let key = serde_yaml::Value::String(name.clone());
         if !env_map.contains_key(&key) {

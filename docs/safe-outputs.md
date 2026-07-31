@@ -293,11 +293,15 @@ Every custom job receives the same transport-sanitized aggregate file through
 ```json
 {
   "items": [
-    {"type":"add-build-tag","tag":"release"},
     {"type":"send-notification","title":"Release blocked","severity":"critical"}
   ]
 }
 ```
+
+The aggregate contains **only custom safe-output proposals**. Built-in
+proposals (`create-pull-request`, `create-work-item`, `add-build-tag`, …) are
+applied by Stage 3 itself and are never surfaced to a custom job, so an
+imported component cannot read proposal content it does not own.
 
 A component filters the items it owns:
 
@@ -350,14 +354,15 @@ safe-outputs:
           displayName: Send notifications
 ```
 
-`ADO_AW_AGENT_OUTPUT` is a Stage-3 materialized copy of the analyzed proposals.
-Before the file is written, ado-aw revalidates custom schemas and budgets, strips
-ANSI/unsafe control characters, and neutralizes Azure Pipelines logging commands
-(`##vso[` and `##[`) in string values and object keys. Custom values are
-revalidated after sanitization so required/type/size guarantees apply to the data
-the job receives; sanitized key collisions fail closed. URLs, mentions, HTML,
-markdown, and other external-system payload text are otherwise preserved. The
-analyzed proposal artifact remains unchanged for Detection and audit.
+`ADO_AW_AGENT_OUTPUT` is a Stage-3 materialized copy of the analyzed proposals,
+restricted to custom safe-output items. Before the file is written, ado-aw
+revalidates custom schemas and budgets, strips ANSI/unsafe control characters,
+and neutralizes Azure Pipelines logging commands (`##vso[` and `##[`) in string
+values and object keys. Custom values are revalidated after sanitization so
+required/type/size guarantees apply to the data the job receives; sanitized key
+collisions fail closed. URLs, mentions, HTML, markdown, and other
+external-system payload text are otherwise preserved. The analyzed proposal
+artifact remains unchanged for Detection and audit.
 String size is revalidated after transport sanitization, so a value whose
 neutralized form exceeds the 10 KiB custom-input limit fails materialization
 before any authored step runs.

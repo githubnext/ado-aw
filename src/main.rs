@@ -998,17 +998,15 @@ async fn build_execution_context(
         .collect();
     for tool in front_matter.all_safe_output_tool_names() {
         let staged = front_matter.tool_is_staged(&tool);
-        let config = ctx
-            .tool_configs
-            .entry(tool)
-            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-        if !config.is_object() {
-            *config = serde_json::Value::Object(serde_json::Map::new());
-        }
-        config
-            .as_object_mut()
-            .expect("tool config normalized to object")
-            .insert("staged".to_string(), serde_json::Value::Bool(staged));
+        // Take-normalize-reinsert keeps the object invariant structural: there is
+        // no intermediate state where a non-object value must be re-borrowed.
+        let mut config = match ctx.tool_configs.remove(&tool) {
+            Some(serde_json::Value::Object(config)) => config,
+            _ => serde_json::Map::new(),
+        };
+        config.insert("staged".to_string(), serde_json::Value::Bool(staged));
+        ctx.tool_configs
+            .insert(tool, serde_json::Value::Object(config));
     }
     // Merge ado-aw-debug.create-issue config under the same tool_configs map
     // so Stage 3's `ctx.get_tool_config::<CreateIssueConfig>("create-issue")`

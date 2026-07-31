@@ -585,5 +585,36 @@ async fn unique_count_depth_and_manifest_size_limits_are_enforced() {
     assert!(format!("{error:#}").contains("262144 byte limit"));
 }
 
+/// `MAX_UNIQUE_IMPORTS` caps distinct components, but duplicates are resolved
+/// before they are deduplicated, so a manifest that repeats the same import
+/// thousands of times must still be bounded.
+#[tokio::test]
+async fn duplicate_import_fan_out_is_bounded() {
+    let repo = temp_repo();
+    write(&repo.path().join("leaf.md"), "---\n{}\n---\nLeaf");
+    let duplicates = (0..300)
+        .map(|_| "  - ./leaf.md\n")
+        .collect::<Vec<_>>()
+        .concat();
+    write(
+        &repo.path().join("fanout.md"),
+        &format!("---\nimports:\n{duplicates}---\nFanout"),
+    );
+
+    let error = resolve_imports_with_repo_root(
+        &[entry("./fanout.md")],
+        repo.path(),
+        repo.path(),
+        &PanicFetcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("more than 256 lookups"),
+        "{error:#}"
+    );
+}
+
 #[allow(dead_code)]
 fn _assert_resolved_is_send_sync(_: &ResolvedImport) {}

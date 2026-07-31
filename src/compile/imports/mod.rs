@@ -26,6 +26,14 @@ use crate::secure::CommitSha;
 
 const MAX_UNIQUE_IMPORTS: usize = 20;
 const MAX_IMPORT_DEPTH: usize = 5;
+/// Upper bound on resolution attempts, including duplicates.
+///
+/// [`MAX_UNIQUE_IMPORTS`] already caps how many distinct components a workflow
+/// may accept, but duplicates are resolved before they are deduplicated, so a
+/// single crafted manifest declaring thousands of repeated `imports:` entries
+/// would otherwise drive that many resolutions. Diamond dependencies stay well
+/// inside this bound.
+const MAX_IMPORT_RESOLUTIONS: usize = 256;
 const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 const REF_METADATA_VERSION: u32 = 1;
 const IMPORT_GITATTRIBUTES: &str = "# Mark all cached import files as generated\n\
@@ -717,7 +725,14 @@ pub async fn resolve_imports_with_repo_root(
     let mut ref_cache: HashMap<String, CommitSha> = HashMap::new();
     let mut ref_metadata = read_ref_metadata(&repo_root)?;
 
+    let mut resolution_attempts = 0usize;
     while let Some(pending) = queue.pop_front() {
+        resolution_attempts += 1;
+        anyhow::ensure!(
+            resolution_attempts <= MAX_IMPORT_RESOLUTIONS,
+            "resolving this import graph requires more than {MAX_IMPORT_RESOLUTIONS} lookups; \
+             reduce duplicate or fanned-out `imports:` entries"
+        );
         if pending.depth > MAX_IMPORT_DEPTH {
             anyhow::bail!(
                 "import nesting depth exceeds the maximum of {MAX_IMPORT_DEPTH}: {}",
