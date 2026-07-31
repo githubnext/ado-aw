@@ -594,6 +594,106 @@ cargo run -- lint ./path/to/agent.md
 cargo run -- whatif ./path/to/agent.md --fail <step-id-or-job-id>
 ```
 
+## Repository agentic workflows
+
+This repository dogfoods [gh-aw](https://github.com/githubnext/gh-aw) for its own
+maintenance. Workflow sources live in `.github/workflows/*.md` and compile to
+committed `*.lock.yml` files via `gh aw compile`. **Never hand-edit a
+`.lock.yml`** — edit the `.md` and recompile.
+
+### Slash commands
+
+All slash commands use `strategy: centralized`, so they are dispatched by the
+generated router `.github/workflows/agentic_commands.yml` rather than each
+workflow listening to comment events itself. That file is generated — commit it
+alongside the lock files or commands silently stop routing.
+
+| Command | Where | Effect |
+|---|---|---|
+| `/review` | PR comment or review comment | Fans out to **five** reviewers in parallel (see below) |
+| `/souschef` | PR comment | Acknowledges, then triages that PR for anything blocking it |
+| `/risk` | PR / PR comment | Breaking-change risk assessment with an approve-or-request-changes verdict |
+| `/scout` | Issue / issue comment | Code-history investigation of the requested area |
+| `/plan` | Issue / issue comment | Issue investigation and implementation plan |
+
+### The `/review` fan-out
+
+Five specialists, each owning a distinct concern so their comments do not
+overlap. All of them post **inline line comments**
+(`create-pull-request-review-comment`) and batch them into a **single**
+`submit-pull-request-review`.
+
+| Workflow | Owns | Auto-trigger |
+|---|---|---|
+| `review-rust.md` | Rust engineering quality — `anyhow` context, `unwrap` on user paths, lossy casts, cross-platform paths, async correctness | `ready_for_review` **and every push** |
+| `review-typescript.md` | `scripts/ado-script/` quality — unhandled rejections, `any` leakage, unvalidated external input, secret handling | `ready_for_review` **and every push** |
+| `review-tests.md` | Test quality beyond coverage — untested behaviour, weakened assertions, implementation-detail tests | `ready_for_review` |
+| `review-compiler-contract.md` | ado-aw domain contracts — front-matter/safe-output schemas, typed IR, **bundle and codegen drift**, docs sync | `ready_for_review` |
+| `review-security.md` | Diff-scoped security regressions — injection into generated YAML, weakened validation, token scope, allowlist widening | `ready_for_review` |
+
+Only the two code-quality reviewers re-run on every push; the rest run once the
+PR is ready and on demand via `/review`.
+
+Because `review-rust.md` and `review-typescript.md` are language-generic by
+design, **all ado-aw-specific review logic belongs in
+`review-compiler-contract.md`**. Put a new domain invariant there, not in the
+language reviewers.
+
+### Shared review components
+
+- `shared/pr-review-base.md` — tools, network allowlist and the common review
+  safe-outputs. `submit-pull-request-review` pins
+  `allowed-events: [COMMENT, REQUEST_CHANGES]` because the GitHub Actions actor
+  **cannot approve a pull request**; it also sets `supersede-older-reviews`.
+- `shared/pr-diff-data-fetch.md` — `pre-agent-steps` that pre-fetch the diff,
+  metadata and **existing review comments** to `/tmp/gh-aw/agent/`, keyed on the
+  head SHA. Reviewers read these instead of calling the API, and consult
+  `pr-review-comments.json` to avoid re-posting on every push.
+- `pr-data-prefetch.yml` — an engine-less workflow that warms the
+  `pr-prefetch-<sha>` cache in ~30-60s so all five reviewers get a cache hit.
+
+Generated artefacts are excluded from the pre-fetched diff (`*.lock.yml`,
+`scripts/ado-script/*.js`, `*.gen.ts`, `*.gen.json`, `Cargo.lock`). Keep the
+exclusion lists in `shared/pr-diff-data-fetch.md` and `pr-data-prefetch.yml` in
+sync.
+
+### PR Sous Chef
+
+`pr-sous-chef.md` runs every 15 minutes (and on `/souschef`) and keeps open
+non-draft PRs moving. Per PR it posts **one** `@copilot` nudge carrying the
+hidden marker `<!-- ado-aw-pr-sous-chef-nudge -->`, listing unresolved review
+threads and failed checks. It also resolves review threads that already have a
+reply, dismisses stale bot reviews once every thread is resolved, refreshes the
+branch, and pushes `cargo fmt --all` fixes.
+
+Guards against nagging: a 30-minute marker cooldown, a skip when the latest
+comment is already one of ours (overridden when the branch is `CONFLICTING`), a
+skip while checks are running — with checks running over an hour treated as
+stale so long agentic jobs cannot block nudges forever — and a cap of four
+nudges per run. A marker comment that does **not** mention `@copilot` is
+informational and counts toward neither rule.
+
+It deliberately does **not** rebuild the TypeScript bundles: that needs `npm ci`
+plus two `cargo run` invocations, far too costly every 15 minutes. Bundle drift
+is reported by `review-compiler-contract.md` instead.
+
+### Working on these workflows
+
+```bash
+gh aw compile            # recompile every workflow (regenerates agentic_commands.yml)
+gh aw compile <name>     # recompile one
+gh aw validate           # validate without writing lock files
+gh aw lint               # actionlint over the lock files (needs docker)
+```
+
+Two gotchas worth knowing:
+
+- **`permissions:` cannot be inherited from an import.** Every workflow must
+  declare its own, even when it imports `shared/pr-review-base.md`.
+- **A literal `${{ ... }}` in the markdown body is parsed as an expression** and
+  will fail compilation with "unauthorized expressions". Describe the syntax in
+  prose instead of writing the literal token.
+
 ## File Naming Conventions
 
 - Pipeline source files: `*.md` (markdown with YAML front matter)
