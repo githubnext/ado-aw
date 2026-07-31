@@ -28,6 +28,7 @@
 //! - [`GitRefName`] — a git ref obeying `git check-ref-format`.
 //! - [`BranchName`] — a git branch ref with extra length / leading-`-` / space rules.
 //! - [`CommitSha`] — a full 40-character hex commit SHA.
+//! - [`AzureDevOpsOrgUrl`] — an HTTPS Azure DevOps organization collection URL.
 //! - [`ArtifactName`] — an ADO artifact / attachment name.
 //! - [`Identifier`] — an engine agent/model identifier.
 //! - [`HostName`] — a DNS-style hostname.
@@ -225,6 +226,11 @@ validated_string! {
 validated_string! {
     /// A full 40-character hex commit SHA.
     CommitSha, "commit", validate::validate_commit_sha
+}
+
+validated_string! {
+    /// An HTTPS Azure DevOps organization collection URL.
+    AzureDevOpsOrgUrl, "Azure DevOps organization URL", validate::validate_ado_org_url
 }
 
 validated_string! {
@@ -448,6 +454,13 @@ mod tests {
     fn commit_sha_rules() {
         assert!(CommitSha::parse("0123456789abcdef0123456789abcdef01234567").is_ok());
         assert!(CommitSha::parse("short").is_err());
+    }
+
+    #[test]
+    fn azure_devops_org_url_rules() {
+        assert!(AzureDevOpsOrgUrl::parse("https://dev.azure.com/myorg").is_ok());
+        assert!(AzureDevOpsOrgUrl::parse("https://myorg.visualstudio.com").is_ok());
+        assert!(AzureDevOpsOrgUrl::parse("https://attacker.example/myorg").is_err());
     }
 
     #[test]

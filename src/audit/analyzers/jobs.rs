@@ -82,6 +82,9 @@ fn record_to_job(record: &Value) -> Option<JobData> {
         started_at,
         finished_at,
         status,
+        timeline_record_id: string_field(record, "id"),
+        timeline_identifier: string_field(record, "identifier"),
+        timeline_ref_name: string_field(record, "refName"),
         ..Default::default()
     })
 }
@@ -244,6 +247,8 @@ mod tests {
             "records": [
                 {
                     "id": "1",
+                    "identifier": "stable-agent",
+                    "refName": "Agent",
                     "name": "Agent",
                     "type": "Job",
                     "state": "completed",
@@ -290,5 +295,9 @@ mod tests {
         assert_eq!(jobs[0].duration.as_deref(), Some("1m 0s"));
         assert_eq!(jobs[0].started_at.as_deref(), Some("2026-01-01T00:00:00Z"));
         assert_eq!(jobs[0].finished_at.as_deref(), Some("2026-01-01T00:01:00Z"));
+        assert_eq!(jobs[0].timeline_record_id.as_deref(), Some("1"));
+        assert_eq!(jobs[0].timeline_identifier.as_deref(), Some("stable-agent"));
+        assert_eq!(jobs[0].timeline_ref_name.as_deref(), Some("Agent"));
+        assert!(jobs[0].matches_ir_id("Agent"));
     }
 }

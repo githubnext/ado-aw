@@ -1,9 +1,9 @@
 use anyhow::Context;
-use log::debug;
+use log::{debug, warn};
 use std::path::{Path, PathBuf};
 
 use crate::agent_stats::AgentStats;
-use crate::audit::model::{AuditEngineConfig, AwInfo, MetricsData, PerformanceMetrics};
+use crate::audit::model::{AuditEngineConfig, AwInfo, ErrorInfo, MetricsData, PerformanceMetrics};
 
 /// Combined OTel + aw_info analysis result.
 #[derive(Debug, Clone, Default)]
@@ -12,6 +12,7 @@ pub struct OtelAnalysis {
     pub engine_config: Option<AuditEngineConfig>,
     pub performance: Option<PerformanceMetrics>,
     pub aw_info: Option<AwInfo>,
+    pub warnings: Vec<ErrorInfo>,
 }
 
 /// Read `staging/otel.jsonl` + `staging/aw_info.json` from an agent
@@ -68,19 +69,31 @@ pub async fn analyze_otel(agent_outputs_dir: &std::path::Path) -> anyhow::Result
     }
 
     if let Some(aw_info_path) = locate_agent_output_file(agent_outputs_dir, "aw_info.json") {
-        let aw_info_contents = tokio::fs::read_to_string(&aw_info_path)
-            .await
-            .with_context(|| format!("Failed to read aw_info file: {}", aw_info_path.display()))?;
-        let aw_info = serde_json::from_str::<AwInfo>(&aw_info_contents)
-            .with_context(|| format!("Failed to parse aw_info file: {}", aw_info_path.display()))?;
-
-        analysis.engine_config = Some(AuditEngineConfig {
-            engine: aw_info.engine.clone().unwrap_or_default(),
-            model: aw_info.model.clone(),
-            version: aw_info.compiler_version.clone(),
-            timeout_minutes: None,
-        });
-        analysis.aw_info = Some(aw_info);
+        let aw_info = match tokio::fs::read_to_string(&aw_info_path).await {
+            Ok(contents) => serde_json::from_str::<AwInfo>(&contents).with_context(|| {
+                format!("Failed to parse aw_info file: {}", aw_info_path.display())
+            }),
+            Err(error) => Err(error).with_context(|| {
+                format!("Failed to read aw_info file: {}", aw_info_path.display())
+            }),
+        };
+        match aw_info {
+            Ok(aw_info) => {
+                analysis.engine_config = Some(AuditEngineConfig {
+                    engine: aw_info.engine.clone().unwrap_or_default(),
+                    model: aw_info.model.clone(),
+                    version: aw_info.compiler_version.clone(),
+                    timeout_minutes: None,
+                });
+                analysis.aw_info = Some(aw_info);
+            }
+            Err(error) => {
+                warn!("{error:#}");
+                analysis
+                    .warnings
+                    .push(crate::audit::malformed_aw_info_warning());
+            }
+        }
     } else {
         debug!(
             "No aw_info.json found under {} (checked staging/ and top-level)",
@@ -198,6 +211,25 @@ mod tests {
                 .as_ref()
                 .and_then(|performance| performance.tokens_per_minute)
                 .is_some_and(|value| value > 0.0)
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_aw_info_preserves_otel_metrics_and_emits_shared_warning() {
+        let temp_dir = TempDir::new().unwrap();
+        let staging_dir = temp_dir.path().join("staging");
+        write_file(&staging_dir.join("otel.jsonl"), COPILOT_OTEL_FIXTURE).await;
+        write_file(&staging_dir.join("aw_info.json"), "{not valid json").await;
+
+        let analysis = analyze_otel(temp_dir.path()).await.unwrap();
+
+        assert_eq!(analysis.metrics.token_usage, 33185);
+        assert_eq!(analysis.metrics.turns, 2);
+        assert!(analysis.engine_config.is_none());
+        assert!(analysis.aw_info.is_none());
+        assert_eq!(
+            analysis.warnings,
+            vec![crate::audit::malformed_aw_info_warning()]
         );
     }
 

@@ -58,8 +58,10 @@ by the runtime resolver:
 
 | Variable | Expands to |
 |----------|------------|
+| `$(Build.BuildId)` | the current build ID |
 | `$(Build.SourcesDirectory)` | the checkout root |
 | `$(Build.Repository.Name)` | the triggering repository name (not the compiler-owned `self` path) |
+| `$(System.CollectionUri)` | the Azure DevOps collection URL |
 
 The compiler passes these to `import.js` as `--var name=$(name)` flags (ADO expands
 the macro at runtime); the resolver then replaces every `$(name)` occurrence in the

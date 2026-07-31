@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { assertNoForbiddenReleaseUrls, assertPipelineArtifactValues } from "../assertions.js";
+import {
+  assertAgentCommandPolicy,
+  assertAdoTokenIsolation,
+  assertNoForbiddenReleaseUrls,
+  assertPipelineArtifactValues,
+} from "../assertions.js";
 
 const EXPECTED = {
   project: "AgentPlayground",
@@ -25,6 +30,97 @@ steps:
       artifact: ${values.artifact}
 `;
 }
+
+function agentTokenYaml(opts: {
+  agentExtraEnv?: string;
+  detectionExtraEnv?: string;
+} = {}): string {
+  return `
+jobs:
+  - job: Agent
+    steps:
+      - bash: echo agent
+        displayName: Run copilot (AWF network isolated)
+        env:
+          GITHUB_TOKEN: $(GITHUB_TOKEN)${opts.agentExtraEnv ?? ""}
+  - job: Detection
+    steps:
+      - bash: echo detection
+        displayName: Run threat analysis (AWF network isolated)
+        env:
+          GITHUB_TOKEN: $(GITHUB_TOKEN)${opts.detectionExtraEnv ?? ""}
+`;
+}
+
+describe("assertAdoTokenIsolation", () => {
+  it("accepts credential-free Agent and Detection environments", () => {
+    expect(() => assertAdoTokenIsolation(agentTokenYaml(), "canary")).not.toThrow();
+  });
+
+  it.each([
+    "AZURE_DEVOPS_EXT_PAT",
+    "SC_READ_TOKEN",
+    "SC_WRITE_TOKEN",
+    "SYSTEM_ACCESSTOKEN",
+  ])("rejects %s on the Agent", (credential) => {
+    expect(() =>
+      assertAdoTokenIsolation(
+        agentTokenYaml({
+          agentExtraEnv: `\n          ${credential}: $(${credential})`,
+        }),
+        "canary",
+      ),
+    ).toThrow(new RegExp(`Agent must not receive ${credential}`));
+  });
+
+  it.each([
+    "AZURE_DEVOPS_EXT_PAT",
+    "SC_READ_TOKEN",
+    "SC_WRITE_TOKEN",
+    "SYSTEM_ACCESSTOKEN",
+  ])("rejects %s on Detection", (credential) => {
+    expect(() =>
+      assertAdoTokenIsolation(
+        agentTokenYaml({
+          detectionExtraEnv: `\n          ${credential}: $(${credential})`,
+        }),
+        "canary",
+      ),
+    ).toThrow(new RegExp(`Detection must not receive ${credential}`));
+  });
+});
+
+describe("assertAgentCommandPolicy", () => {
+  it("accepts a restricted Agent command", () => {
+    const yaml = agentTokenYaml().replace(
+      "echo agent",
+      'copilot --allow-tool "shell(az:*)" --allow-tool "shell(head)"',
+    );
+    expect(() =>
+      assertAgentCommandPolicy(
+        yaml,
+        "azure-cli",
+        ["shell(az", "shell(head"],
+        ["--allow-all-tools", "--allow-all-paths"],
+      ),
+    ).not.toThrow();
+  });
+
+  it("rejects unrestricted Agent tools", () => {
+    const yaml = agentTokenYaml().replace(
+      "echo agent",
+      "copilot --allow-all-tools --allow-all-paths",
+    );
+    expect(() =>
+      assertAgentCommandPolicy(
+        yaml,
+        "azure-cli",
+        ["shell(az"],
+        ["--allow-all-tools", "--allow-all-paths"],
+      ),
+    ).toThrow(/missing required snippet|forbidden snippet/);
+  });
+});
 
 describe("assertNoForbiddenReleaseUrls", () => {
   it("passes for YAML with no forbidden release URL", () => {

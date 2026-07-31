@@ -1,45 +1,24 @@
 /**
  * Manifest of the fixed compiler-smoke fixtures.
  *
- * Most are selected release-backed agentic-pipeline sources documented in
- * `tests/safe-outputs/README.md` (canary, azure-cli, noop-target, and
- * smoke-failure-reporter); the weekly janitor remains in the release lane but
- * is not part of candidate checks. `multi-repo` is candidate-only — it has no
- * released lock file and lives beside the lane's own files under
- * `tests/compiler-smoke-e2e/`.
- *
- * The harness reads the exact files from the detached candidate worktree (an
- * exact checkout of `BUILD_SOURCEVERSION` — never from
- * `BUILD_SOURCESDIRECTORY`, which may sit at a different commit), stages a
- * pinned `supply-chain.pipeline-artifact` transform of each onto the mirror
- * repo, recompiles, and queues the FIXED "candidate lane" pipeline definitions
- * tracked in `tests/compiler-smoke-e2e/REGISTERED.md` (distinct from the
- * release-backed definitions those same sources also feed).
+ * Four reuse release-backed sources under `tests/safe-outputs/`; the rest are
+ * candidate-only and live beside this harness. The weekly janitor is
+ * deliberately excluded from candidate checks. The harness reads every source
+ * from the detached candidate worktree (an exact checkout of
+ * `BUILD_SOURCEVERSION`, never `BUILD_SOURCESDIRECTORY`, which may sit at a
+ * different commit), stages a pinned `supply-chain.pipeline-artifact`
+ * transform, recompiles, and queues the fixed candidate-lane definitions
+ * tracked in `tests/compiler-smoke-e2e/REGISTERED.md`.
  *
  * Test-harness module; not shipped in `ado-script.zip`.
  */
 import type { FixtureName } from "./config.js";
-import { FIXTURE_NAMES } from "./config.js";
+import { CANDIDATE_FIXTURE_NAMES } from "./config.js";
 
-/** Repo-relative directory containing the release-backed fixture sources. */
-export const FIXTURE_DIR = "tests/safe-outputs";
-
-/**
- * Repo-relative directory holding fixtures that exist **only** for the
- * candidate lane. These have no released lock file and no release-backed
- * definition, so they must not live beside the release-owned sources in
- * {@link FIXTURE_DIR}.
- */
+/** Repo-relative directory containing release-backed fixture sources. */
+export const RELEASE_FIXTURE_DIR = "tests/safe-outputs";
+/** Repo-relative directory containing the candidate-only custom fixture. */
 export const CANDIDATE_FIXTURE_DIR = "tests/compiler-smoke-e2e";
-
-/** Directory each fixture's source lives in. */
-const FIXTURE_DIR_BY_NAME: Readonly<Record<FixtureName, string>> = {
-  canary: FIXTURE_DIR,
-  "azure-cli": FIXTURE_DIR,
-  "noop-target": FIXTURE_DIR,
-  "smoke-failure-reporter": FIXTURE_DIR,
-  "multi-repo": CANDIDATE_FIXTURE_DIR,
-};
 
 export interface FixturePaths {
   readonly name: FixtureName;
@@ -47,26 +26,42 @@ export interface FixturePaths {
   readonly relMd: string;
   /** Repo-relative path to the compiled lock file, e.g. tests/safe-outputs/canary.lock.yml. */
   readonly relLock: string;
+  /** Observable ADO build tags that must exist after this child succeeds. */
+  readonly requiredBuildTags?: (buildId: number) => readonly string[];
 }
 
-/** Repo-relative path for a fixture's markdown source. Always POSIX-separated (a git path, not a filesystem path). */
+/** Repo-relative paths and signal contract for one fixture. */
 export function fixturePaths(name: FixtureName): FixturePaths {
-  const dir = FIXTURE_DIR_BY_NAME[name];
+  const candidateOnly = name === "custom-safe-output" || name === "multi-repo";
+  const directory = candidateOnly ? CANDIDATE_FIXTURE_DIR : RELEASE_FIXTURE_DIR;
+  const requiredBuildTags =
+    name === "custom-safe-output"
+      ? (buildId: number): readonly string[] => [`ado-aw-custom-job-${buildId}`]
+      : undefined;
   return {
     name,
-    relMd: `${dir}/${name}.md`,
-    relLock: `${dir}/${name}.lock.yml`,
+    relMd: `${directory}/${name}.md`,
+    relLock: `${directory}/${name}.lock.yml`,
+    requiredBuildTags,
   };
 }
 
-/** Every fixture in the stable declaration order used throughout the harness. */
-export const ALL_FIXTURES: readonly FixturePaths[] = FIXTURE_NAMES.map(fixturePaths);
+/** Every candidate fixture in the stable order used throughout the harness. */
+export const ALL_FIXTURES: readonly FixturePaths[] =
+  CANDIDATE_FIXTURE_NAMES.map(fixturePaths);
+
+export function fixtureByName(name: FixtureName): FixturePaths {
+  const fixture = ALL_FIXTURES.find((candidate) => candidate.name === name);
+  if (!fixture) {
+    throw new Error(`unknown compiler-smoke fixture '${name}'`);
+  }
+  return fixture;
+}
 
 /**
- * The exact set of repo-relative paths the candidate-staging commit is
- * allowed to touch: every markdown source, its compiled lock, and the
- * compiler-managed `.gitattributes` block. Any other changed path fails the
- * run before it pushes anything.
+ * The exact set of repo-relative paths the candidate-staging commit may touch:
+ * every markdown source, its compiled lock, and the compiler-managed root
+ * `.gitattributes` block. Any other changed path fails before push.
  */
 export function allowedChangedPaths(): Set<string> {
   const paths = new Set<string>([".gitattributes"]);

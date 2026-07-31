@@ -1635,6 +1635,16 @@ mod tests {
     }
 
     #[test]
+    fn engine_env_allows_azure_devops_pat() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    AZURE_DEVOPS_EXT_PAT: custom\n---\n",
+        )
+        .unwrap();
+        let env = Engine::Copilot.env(&fm.engine).unwrap();
+        assert!(env.contains("AZURE_DEVOPS_EXT_PAT: \"custom\""));
+    }
+
+    #[test]
     fn engine_env_blocks_path() {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  env:\n    PATH: /evil\n---\n",

@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   ALL_FIXTURES,
-  allowedChangedPaths,
   CANDIDATE_FIXTURE_DIR,
+  RELEASE_FIXTURE_DIR,
+  allowedChangedPaths,
   fixturePaths,
-  FIXTURE_DIR,
 } from "../fixtures.js";
 
 describe("fixturePaths", () => {
@@ -17,37 +17,53 @@ describe("fixturePaths", () => {
     });
   });
 
-  it("keeps candidate-only fixtures out of the release-owned directory", () => {
-    expect(fixturePaths("multi-repo")).toEqual({
-      name: "multi-repo",
-      relMd: "tests/compiler-smoke-e2e/multi-repo.md",
-      relLock: "tests/compiler-smoke-e2e/multi-repo.lock.yml",
-    });
+  it("uses the candidate-only directory for candidate-only fixtures", () => {
+    const fixture = fixturePaths("custom-safe-output");
+    expect(fixture.relMd).toBe(
+      "tests/compiler-smoke-e2e/custom-safe-output.md",
+    );
+    expect(fixture.relLock).toBe(
+      "tests/compiler-smoke-e2e/custom-safe-output.lock.yml",
+    );
+    expect(fixture.requiredBuildTags?.(42)).toEqual(["ado-aw-custom-job-42"]);
+
+    const multiRepo = fixturePaths("multi-repo");
+    expect(multiRepo.relMd).toBe("tests/compiler-smoke-e2e/multi-repo.md");
+    expect(multiRepo.relLock).toBe(
+      "tests/compiler-smoke-e2e/multi-repo.lock.yml",
+    );
+    // Its assertions run inside the pipeline, so it publishes no build tag.
+    expect(multiRepo.requiredBuildTags).toBeUndefined();
   });
 });
 
 describe("ALL_FIXTURES", () => {
-  it("has exactly the five fixtures in the required stable order", () => {
+  it("has exactly the candidate fixtures in the required stable order", () => {
     expect(ALL_FIXTURES.map((f) => f.name)).toEqual([
       "canary",
       "azure-cli",
       "noop-target",
       "smoke-failure-reporter",
+      "custom-safe-output",
       "multi-repo",
     ]);
+    expect(ALL_FIXTURES.map((f) => f.name)).not.toContain("janitor");
   });
 
-  it("every fixture path lives under a known fixture directory", () => {
-    for (const f of ALL_FIXTURES) {
-      const dir = f.name === "multi-repo" ? CANDIDATE_FIXTURE_DIR : FIXTURE_DIR;
-      expect(f.relMd.startsWith(`${dir}/`)).toBe(true);
-      expect(f.relLock.startsWith(`${dir}/`)).toBe(true);
+  it("keeps release and candidate-only fixture paths separate", () => {
+    for (const fixture of ALL_FIXTURES) {
+      const directory =
+        fixture.name === "custom-safe-output" || fixture.name === "multi-repo"
+          ? CANDIDATE_FIXTURE_DIR
+          : RELEASE_FIXTURE_DIR;
+      expect(fixture.relMd.startsWith(`${directory}/`)).toBe(true);
+      expect(fixture.relLock.startsWith(`${directory}/`)).toBe(true);
     }
   });
 });
 
 describe("allowedChangedPaths", () => {
-  it("contains exactly each md file, each lock file, and .gitattributes", () => {
+  it("contains every source/lock pair and root compiler-managed attributes", () => {
     const allowed = allowedChangedPaths();
     expect(allowed.size).toBe(ALL_FIXTURES.length * 2 + 1);
     expect(allowed.has(".gitattributes")).toBe(true);

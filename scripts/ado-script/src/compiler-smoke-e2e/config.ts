@@ -2,10 +2,9 @@
  * Environment configuration for the deterministic compiler-smoke E2E harness.
  *
  * This harness stages the compiler candidate produced by the current build as
- * a pinned `supply-chain.pipeline-artifact` source across four registered ADO
- * pipeline fixtures (canary, azure-cli, noop-target, and
- * smoke-failure-reporter), pushes the staged candidate to a per-run branch on
- * a mirror repo, queues all four, and asserts they all go green.
+ * a pinned `supply-chain.pipeline-artifact` source across five registered ADO
+ * pipeline fixtures, pushes the staged candidate to a per-run branch on a
+ * mirror repo, queues all five, and asserts they all go green.
  *
  * Strict, fail-closed parsing lives here so every other module can trust a
  * fully validated {@link CompilerSmokeConfig} rather than re-checking env
@@ -27,16 +26,17 @@ export const DEFAULT_POLL_MS = 10_000;
 export const DEFAULT_STALE_REF_HOURS = 24;
 export const MIN_STALE_REF_HOURS = 6;
 
-/** Stable declaration order for every fixture-keyed collection in the harness. */
-export const FIXTURE_NAMES = [
+/** Stable declaration order for the five workflows in the live candidate lane. */
+export const CANDIDATE_FIXTURE_NAMES = [
   "canary",
   "azure-cli",
   "noop-target",
   "smoke-failure-reporter",
+  "custom-safe-output",
   "multi-repo",
 ] as const;
 
-export type FixtureName = (typeof FIXTURE_NAMES)[number];
+export type FixtureName = (typeof CANDIDATE_FIXTURE_NAMES)[number];
 
 export interface CompilerSmokeConfig {
   /** ADO collection URI, e.g. https://dev.azure.com/org/. */
@@ -59,7 +59,7 @@ export interface CompilerSmokeConfig {
   readonly adoAwBin: string;
   /** Pipeline artifact name pinned into each fixture's supply-chain config. */
   readonly artifactName: string;
-  /** ADO Git repo hosting the four registered fixture pipeline definitions. */
+  /** ADO Git repo hosting the five registered candidate definitions. */
   readonly mirrorRepo: string;
   /** Registered ADO pipeline definition id, keyed by fixture name. */
   readonly definitionIds: Readonly<Record<FixtureName, number>>;
@@ -90,6 +90,7 @@ const DEFINITION_ID_ENV_BY_FIXTURE: Readonly<Record<FixtureName, string>> = {
   "azure-cli": "COMPILER_SMOKE_AZURE_CLI_DEFINITION_ID",
   "noop-target": "COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID",
   "smoke-failure-reporter": "COMPILER_SMOKE_REPORTER_DEFINITION_ID",
+  "custom-safe-output": "COMPILER_SMOKE_CUSTOM_SAFE_OUTPUT_DEFINITION_ID",
   "multi-repo": "COMPILER_SMOKE_MULTI_REPO_DEFINITION_ID",
 };
 
@@ -162,12 +163,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CompilerSmokeC
   const definitionId = requirePositiveInt(env, "SYSTEM_DEFINITIONID");
 
   const definitionIds = {} as Record<FixtureName, number>;
-  for (const fixture of FIXTURE_NAMES) {
+  for (const fixture of CANDIDATE_FIXTURE_NAMES) {
     definitionIds[fixture] = requirePositiveInt(env, DEFINITION_ID_ENV_BY_FIXTURE[fixture]);
   }
 
   const seen = new Map<number, FixtureName[]>();
-  for (const fixture of FIXTURE_NAMES) {
+  for (const fixture of CANDIDATE_FIXTURE_NAMES) {
     const id = definitionIds[fixture];
     const existing = seen.get(id);
     if (existing) {

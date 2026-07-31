@@ -3,11 +3,20 @@
  *
  * The gate smoke test validates the existing gate.js bundle.
  * The import smoke test builds import.js and verifies it expands
- * a prompt fixture in place.
+ * a prompt fixture in place. Git-oriented bundles run against disposable
+ * local repositories so their bundled ncc output is exercised without network
+ * or Azure DevOps dependencies.
  */
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -99,7 +108,10 @@ describe("import.js smoke", () => {
     withSmokeScratchDir("import", (dir) => {
       const target = resolve(dir, "prompt.md");
       copyFileSync(resolve(importFixtureDir, "prompt.md"), target);
-      copyFileSync(resolve(importFixtureDir, "snippet.md"), resolve(dir, "snippet.md"));
+      copyFileSync(
+        resolve(importFixtureDir, "snippet.md"),
+        resolve(dir, "snippet.md"),
+      );
 
       const result = spawnSync(process.execPath, [importBundlePath, target], {
         env: { ...process.env },
@@ -160,18 +172,40 @@ function gitStatusInRepo(repoDir: string, args: string[]): number | null {
  * Build a fake checkout that looks like ADO's synthetic-merge PR
  * checkout: a merge commit on top of two parent branches.
  */
-function makeSyntheticMergeRepo(repoDir: string): { baseSha: string; headSha: string } {
+function makeSyntheticMergeRepo(repoDir: string): {
+  baseSha: string;
+  headSha: string;
+} {
   mkdirSync(repoDir, { recursive: true });
   runGitInRepo(repoDir, ["init", "-q", "-b", "main"]);
   runGitInRepo(repoDir, ["commit", "--allow-empty", "-q", "-m", "root"]);
   // Diverge a feature branch from main, then advance main once more.
   runGitInRepo(repoDir, ["branch", "feature"]);
-  runGitInRepo(repoDir, ["commit", "--allow-empty", "-q", "-m", "main advance"]);
+  runGitInRepo(repoDir, [
+    "commit",
+    "--allow-empty",
+    "-q",
+    "-m",
+    "main advance",
+  ]);
   runGitInRepo(repoDir, ["checkout", "-q", "feature"]);
-  runGitInRepo(repoDir, ["commit", "--allow-empty", "-q", "-m", "feature commit"]);
+  runGitInRepo(repoDir, [
+    "commit",
+    "--allow-empty",
+    "-q",
+    "-m",
+    "feature commit",
+  ]);
   // Compose a synthetic merge commit (-s ours simulates ADO's merge-into-target shape).
   runGitInRepo(repoDir, ["checkout", "-q", "main"]);
-  runGitInRepo(repoDir, ["merge", "-q", "--no-ff", "-m", "synthetic merge", "feature"]);
+  runGitInRepo(repoDir, [
+    "merge",
+    "-q",
+    "--no-ff",
+    "-m",
+    "synthetic merge",
+    "feature",
+  ]);
   const baseSha = spawnSync("git", ["rev-parse", "HEAD^1"], {
     cwd: repoDir,
     encoding: "utf8",
@@ -202,10 +236,14 @@ describe("exec-context-pr.js smoke", () => {
         cwd: repoDir,
         encoding: "utf8",
       }).stdout.trim();
-      const expectedBase = spawnSync("git", ["merge-base", "HEAD^1", "HEAD^2"], {
-        cwd: repoDir,
-        encoding: "utf8",
-      }).stdout.trim();
+      const expectedBase = spawnSync(
+        "git",
+        ["merge-base", "HEAD^1", "HEAD^2"],
+        {
+          cwd: repoDir,
+          encoding: "utf8",
+        },
+      ).stdout.trim();
 
       const awContext = resolve(repoDir, "aw-context");
       const agentPromptDir = resolve(dir, "awf-tools");
@@ -265,8 +303,12 @@ describe("exec-context-pr.js smoke", () => {
       const promptContent = readFileSync(agentPromptPath, "utf8");
       expect(promptContent).toContain("agent body");
       expect(promptContent).toContain("## PR context");
-      expect(promptContent).toContain("This is PR #4242 in project 'SmokeProject' / repository 'smoke-repo'.");
-      expect(promptContent).toContain("repo_get_pull_request_by_id(project='SmokeProject'");
+      expect(promptContent).toContain(
+        "This is PR #4242 in project 'SmokeProject' / repository 'smoke-repo'.",
+      );
+      expect(promptContent).toContain(
+        "repo_get_pull_request_by_id(project='SmokeProject'",
+      );
     });
   }, 30000);
 
@@ -300,8 +342,12 @@ describe("exec-context-pr.js smoke", () => {
       const reason = readFileSync(errorPath, "utf8");
       expect(reason).toContain("PR_ID='not-a-number'");
       // No SHAs staged on failure.
-      expect(existsSync(resolve(repoDir, "aw-context/pr/base.sha"))).toBe(false);
-      expect(existsSync(resolve(repoDir, "aw-context/pr/head.sha"))).toBe(false);
+      expect(existsSync(resolve(repoDir, "aw-context/pr/base.sha"))).toBe(
+        false,
+      );
+      expect(existsSync(resolve(repoDir, "aw-context/pr/head.sha"))).toBe(
+        false,
+      );
       // Failure prompt appended.
       const promptContent = readFileSync(agentPromptPath, "utf8");
       expect(promptContent).toContain("context preparation failed");
@@ -344,11 +390,10 @@ describe("prepare-pr-base.js smoke", () => {
       writeFileSync(resolve(originDir, "main.txt"), "main\n", "utf8");
       runGitInRepo(originDir, ["add", "-A"]);
       runGitInRepo(originDir, ["commit", "-q", "-m", "main commit"]);
-      const expectedBase = spawnSync(
-        "git",
-        ["merge-base", "main", target],
-        { cwd: originDir, encoding: "utf8" },
-      ).stdout.trim();
+      const expectedBase = spawnSync("git", ["merge-base", "main", target], {
+        cwd: originDir,
+        encoding: "utf8",
+      }).stdout.trim();
 
       // 2. SHALLOW single-branch clone of `main` only. A `file://` URL (not a
       //    bare path) forces the transport that honours `--depth`, so the clone
@@ -370,7 +415,11 @@ describe("prepare-pr-base.js smoke", () => {
       //    step, the executor's `git worktree add <wt> origin/develop` fails
       //    because `origin/develop` is an invalid reference in this checkout.
       expect(
-        gitStatusInRepo(checkout, ["rev-parse", "--verify", `origin/${target}`]),
+        gitStatusInRepo(checkout, [
+          "rev-parse",
+          "--verify",
+          `origin/${target}`,
+        ]),
       ).not.toBe(0);
       expect(
         gitStatusInRepo(checkout, [
@@ -405,7 +454,11 @@ describe("prepare-pr-base.js smoke", () => {
       //    points at it (so mcp.rs's symbolic-ref default-branch probe also
       //    resolves the right base).
       expect(
-        gitStatusInRepo(checkout, ["rev-parse", "--verify", `origin/${target}`]),
+        gitStatusInRepo(checkout, [
+          "rev-parse",
+          "--verify",
+          `origin/${target}`,
+        ]),
       ).toBe(0);
       const originHead = spawnSync(
         "git",
@@ -424,7 +477,12 @@ describe("prepare-pr-base.js smoke", () => {
       //    the target branch's tip.
       const wtAfter = resolve(dir, "wt-after");
       expect(
-        gitStatusInRepo(checkout, ["worktree", "add", wtAfter, `origin/${target}`]),
+        gitStatusInRepo(checkout, [
+          "worktree",
+          "add",
+          wtAfter,
+          `origin/${target}`,
+        ]),
       ).toBe(0);
       expect(existsSync(resolve(wtAfter, "develop.txt"))).toBe(true);
     });

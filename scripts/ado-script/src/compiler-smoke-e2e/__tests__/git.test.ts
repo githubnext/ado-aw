@@ -105,7 +105,7 @@ describe("parseCandidateBuildId", () => {
 
 describe("worktreeChangedFiles", () => {
   it("parses git status --porcelain=v1 output, one path per line", async () => {
-    const { runner } = fakeRunner(() => ({
+    const { runner, calls } = fakeRunner(() => ({
       status: 0,
       stdout: " M tests/safe-outputs/canary.md\n?? tests/safe-outputs/canary.lock.yml\n",
     }));
@@ -113,6 +113,29 @@ describe("worktreeChangedFiles", () => {
     expect(files).toEqual([
       "tests/safe-outputs/canary.md",
       "tests/safe-outputs/canary.lock.yml",
+    ]);
+    expect(calls[0]?.args).toEqual([
+      "status",
+      "--porcelain=v1",
+      "--untracked-files=all",
+    ]);
+  });
+
+  it("receives untracked import-cache files individually instead of a collapsed directory", async () => {
+    const { runner } = fakeRunner(() => ({
+      status: 0,
+      stdout: [
+        "?? .ado-aw/imports/.gitattributes",
+        "?? .ado-aw/imports/owner/repo/sha/component.md",
+        "?? .ado-aw/imports/owner/repo/sha/component.md.sha256",
+      ].join("\n"),
+    }));
+    await expect(
+      worktreeChangedFiles({ worktreeDir: "/wt", timeoutMs: 1000 }, runner),
+    ).resolves.toEqual([
+      ".ado-aw/imports/.gitattributes",
+      ".ado-aw/imports/owner/repo/sha/component.md",
+      ".ado-aw/imports/owner/repo/sha/component.md.sha256",
     ]);
   });
 

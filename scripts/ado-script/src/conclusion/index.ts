@@ -29,7 +29,7 @@ interface ManifestEntry {
 }
 
 interface JobStatus {
-  name: "Agent" | "Detection" | "SafeOutputs" | "SafeOutputs_Reviewed";
+  name: string;
   result: JobResult;
 }
 
@@ -94,6 +94,27 @@ function readJobResult(env: NodeJS.ProcessEnv, name: string): JobResult {
   }
 }
 
+function readCustomJobResults(env: NodeJS.ProcessEnv): JobStatus[] {
+  const rawCount = readOptionalEnv(env, "AW_CUSTOM_JOB_COUNT");
+  if (rawCount === undefined) return [];
+  if (!/^\d+$/.test(rawCount)) {
+    logWarning(`AW_CUSTOM_JOB_COUNT='${rawCount}' is not a non-negative integer`);
+    return [];
+  }
+
+  const count = Number.parseInt(rawCount, 10);
+  const jobs: JobStatus[] = [];
+  for (let index = 0; index < count; index += 1) {
+    jobs.push({
+      name:
+        readOptionalEnv(env, `AW_CUSTOM_JOB_${index}_NAME`) ??
+        `Custom safe output ${index + 1}`,
+      result: readJobResult(env, `AW_CUSTOM_JOB_${index}_RESULT`),
+    });
+  }
+  return jobs;
+}
+
 function parsePerToolConfigFlat(env: NodeJS.ProcessEnv, prefix: string): PerToolConfig {
   return {
     reportAsWorkItem: readBooleanEnv(env, `${prefix}_REPORT_AS_WORK_ITEM`, true),
@@ -140,6 +161,7 @@ function loadConfig(env: NodeJS.ProcessEnv): RuntimeConfig {
             },
           ]
         : []),
+      ...readCustomJobResults(env),
     ],
     toolConfigs: {
       noop: parsePerToolConfigFlat(env, "AW_NOOP"),

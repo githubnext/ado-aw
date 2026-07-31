@@ -52,6 +52,104 @@ function collectDownloadPipelineArtifactSteps(node: unknown, out: Record<string,
   }
 }
 
+function collectStepsByDisplayName(
+  node: unknown,
+  displayName: string,
+  out: Record<string, unknown>[],
+): void {
+  if (Array.isArray(node)) {
+    for (const item of node) collectStepsByDisplayName(item, displayName, out);
+    return;
+  }
+  if (node && typeof node === "object") {
+    const obj = node as Record<string, unknown>;
+    if (obj.displayName === displayName) {
+      out.push(obj);
+    }
+    for (const value of Object.values(obj)) {
+      collectStepsByDisplayName(value, displayName, out);
+    }
+  }
+}
+
+function singleStep(
+  docs: unknown[],
+  label: string,
+  displayName: string,
+): Record<string, unknown> {
+  const steps: Record<string, unknown>[] = [];
+  for (const doc of docs) collectStepsByDisplayName(doc, displayName, steps);
+  if (steps.length !== 1) {
+    throw new Error(
+      `${label}: expected exactly one '${displayName}' step, found ${steps.length}`,
+    );
+  }
+  return steps[0]!;
+}
+
+/**
+ * Assert the Stage 1 ADO credential boundary in freshly compiled YAML.
+ *
+ * Agent and Detection must not receive any ADO credential, regardless of
+ * whether the workflow configures `permissions.read`.
+ */
+export function assertAdoTokenIsolation(
+  yamlText: string,
+  label: string,
+): void {
+  const docs = parseAllDocuments(yamlText, { merge: false }).map((d) => d.toJS());
+  const agent = singleStep(docs, label, "Run copilot (AWF network isolated)");
+  const detection = singleStep(docs, label, "Run threat analysis (AWF network isolated)");
+  const agentEnv = (agent.env ?? {}) as Record<string, unknown>;
+  const detectionEnv = (detection.env ?? {}) as Record<string, unknown>;
+
+  for (const forbidden of [
+    "AZURE_DEVOPS_EXT_PAT",
+    "SC_READ_TOKEN",
+    "SC_WRITE_TOKEN",
+    "SYSTEM_ACCESSTOKEN",
+  ]) {
+    if (agentEnv[forbidden] !== undefined) {
+      throw new Error(`${label}: Agent must not receive ${forbidden}`);
+    }
+  }
+  for (const forbidden of [
+    "AZURE_DEVOPS_EXT_PAT",
+    "SC_READ_TOKEN",
+    "SC_WRITE_TOKEN",
+    "SYSTEM_ACCESSTOKEN",
+  ]) {
+    if (detectionEnv[forbidden] !== undefined) {
+      throw new Error(`${label}: Detection must not receive ${forbidden}`);
+    }
+  }
+}
+
+/** Assert the command/tool policy on the Agent execution step only. */
+export function assertAgentCommandPolicy(
+  yamlText: string,
+  label: string,
+  requiredSnippets: readonly string[],
+  forbiddenSnippets: readonly string[],
+): void {
+  const docs = parseAllDocuments(yamlText, { merge: false }).map((d) => d.toJS());
+  const agent = singleStep(docs, label, "Run copilot (AWF network isolated)");
+  const script = agent.bash;
+  if (typeof script !== "string") {
+    throw new Error(`${label}: Agent execution step has no bash body`);
+  }
+  for (const snippet of requiredSnippets) {
+    if (!script.includes(snippet)) {
+      throw new Error(`${label}: Agent command is missing required snippet '${snippet}'`);
+    }
+  }
+  for (const snippet of forbiddenSnippets) {
+    if (script.includes(snippet)) {
+      throw new Error(`${label}: Agent command contains forbidden snippet '${snippet}'`);
+    }
+  }
+}
+
 /**
  * Throws unless every `DownloadPipelineArtifact` "specific run" step in the
  * compiled YAML carries exactly the expected project/pipeline/runId/artifact

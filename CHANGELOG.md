@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.47.0](https://github.com/githubnext/ado-aw/compare/v0.46.0...v0.47.0) (2026-07-31)
+
+
+### Features
+
+* **agent_stats:** surface AI credits instead of token counts in safe-output consumption summary ([#1750](https://github.com/githubnext/ado-aw/issues/1750)) ([9b809d5](https://github.com/githubnext/ado-aw/commit/9b809d580a0d06ce8c784c2bb6057c24d70191ce))
+* **compile:** reusable cross-repository custom safe-output components ([#1730](https://github.com/githubnext/ado-aw/issues/1730)) ([15f32c4](https://github.com/githubnext/ado-aw/commit/15f32c4b62b3e3a1ad1a66846e210d4cc29bcea7))
+
+
+### Bug Fixes
+
+* **agent_stats:** ensure blank line before --- in stats footer to prevent setext heading ([#1748](https://github.com/githubnext/ado-aw/issues/1748)) ([1973df0](https://github.com/githubnext/ado-aw/commit/1973df0b5e8703d9ea8807ed60e73cbc57d3ac57))
+
 ## [0.46.0](https://github.com/githubnext/ado-aw/compare/v0.45.1...v0.46.0) (2026-07-30)
 
 

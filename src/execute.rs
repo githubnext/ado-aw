@@ -9,6 +9,7 @@ use log::{debug, error, info, warn};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::path::Path;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
@@ -53,6 +54,141 @@ impl ToolFilter {
         }
         true
     }
+}
+
+/// Validate, sanitize, and materialize the aggregate Agent-output file consumed
+/// by every custom safe-output job.
+///
+/// Schema and budget validation are added by the resolved-config workstream.
+/// This initial jobs-only seam deliberately writes one gh-aw-shaped aggregate
+/// file and has no post-execution result protocol.
+pub async fn prepare_custom_agent_output(
+    safe_output_dir: &Path,
+    resolved_config: &Path,
+    output_path: &Path,
+) -> Result<usize> {
+    let safe_output_path = safe_output_dir.join(SAFE_OUTPUT_FILENAME);
+    anyhow::ensure!(
+        safe_output_path != output_path,
+        "Custom Agent output path must differ from the analyzed safe-output path"
+    );
+    if let Err(error) = tokio::fs::remove_file(output_path).await
+        && error.kind() != ErrorKind::NotFound
+    {
+        return Err(error).with_context(|| {
+            format!(
+                "Failed to remove stale custom Agent output: {}",
+                output_path.display()
+            )
+        });
+    }
+    let entries = load_safe_output_entries(&safe_output_path)
+        .await?
+        .unwrap_or_default();
+    let custom_tools = crate::mcp_custom_tools::load_custom_tool_defs(resolved_config)?;
+    let custom_tools: HashMap<String, crate::mcp_custom_tools::CustomToolDef> = custom_tools
+        .into_iter()
+        .map(|definition| (definition.name.clone(), definition))
+        .collect();
+    let mut custom_counts: HashMap<String, usize> = HashMap::new();
+    let mut items = Vec::with_capacity(entries.len());
+
+    for mut entry in entries {
+        let object = entry
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("Safe-output entries must be JSON objects"))?;
+        let name = object
+            .remove("name")
+            .and_then(|value| value.as_str().map(str::to_string))
+            .context("Safe-output entry is missing string field 'name'")?;
+
+        // Built-in safe outputs are applied by Stage 3 itself and are deliberately
+        // withheld from custom jobs. A custom job runs authored steps that may have
+        // been imported from another repository, so it must never receive proposal
+        // content it does not own (pull-request bodies, work-item fields, issue
+        // text). Every documented consumer already selects its own `type`.
+        let Some(definition) = custom_tools.get(&name) else {
+            debug!(
+                "Excluding non-custom safe output '{}' from the custom Agent output",
+                crate::sanitize::neutralize_pipeline_commands(&name)
+            );
+            continue;
+        };
+
+        let arguments = std::mem::take(object);
+        let mut arguments = crate::compile::custom_tools::validate_custom_arguments(
+            &name,
+            &definition.input_schema,
+            Some(arguments),
+        )
+        .with_context(|| format!("Invalid custom safe-output item '{name}'"))?;
+        let mut sanitized = Value::Object(arguments);
+        sanitize_custom_agent_output_value(&mut sanitized)?;
+        arguments = crate::compile::custom_tools::validate_custom_arguments(
+            &name,
+            &definition.input_schema,
+            sanitized.as_object().cloned(),
+        )
+        .with_context(|| format!("Sanitized custom safe-output item '{name}' is no longer valid"))?;
+        let count = custom_counts.entry(name.clone()).or_default();
+        *count += 1;
+        anyhow::ensure!(
+            *count <= definition.max,
+            "Custom safe-output tool '{name}' exceeded its per-run max of {}",
+            definition.max
+        );
+        *object = arguments;
+        object.insert("type".to_string(), Value::String(name));
+        items.push(entry);
+    }
+    let item_count = items.len();
+
+    if let Some(parent) = output_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+    }
+    let contents = serde_json::to_vec_pretty(&serde_json::json!({ "items": items }))
+        .context("Failed to serialize custom Agent output")?;
+    tokio::fs::write(output_path, contents)
+        .await
+        .with_context(|| format!("Failed to write Agent output: {}", output_path.display()))?;
+    Ok(item_count)
+}
+
+/// Transport-sanitize every string key and value in the materialized custom-job
+/// copy. Keys are rebuilt so a forged key can never carry a live ADO logging
+/// command; a collision after sanitization fails closed rather than silently
+/// dropping one of the two entries.
+fn sanitize_custom_agent_output_value(value: &mut Value) -> Result<()> {
+    match value {
+        Value::String(value) => {
+            *value = crate::sanitize::sanitize_custom_payload(value);
+        }
+        Value::Array(values) => {
+            for value in values {
+                sanitize_custom_agent_output_value(value)?;
+            }
+        }
+        Value::Object(values) => {
+            let original = std::mem::take(values);
+            let mut sanitized = serde_json::Map::new();
+            for (key, mut value) in original {
+                let key = crate::sanitize::sanitize_custom_payload(&key);
+                anyhow::ensure!(
+                    !sanitized.contains_key(&key),
+                    "Agent-output object keys collide after transport sanitization: '{key}'"
+                );
+                sanitize_custom_agent_output_value(&mut value)?;
+                sanitized.insert(key, value);
+            }
+            *values = sanitized;
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+    Ok(())
 }
 
 /// Execute all safe outputs from the NDJSON file in the specified directory
@@ -113,9 +249,16 @@ pub async fn execute_safe_outputs(
 
     let mut results = Vec::new();
     for (i, entry) in entries.iter().enumerate() {
-        if let Some(result) =
-            process_one_entry(i, entries.len(), entry, &mut budgets, filter, ctx, safe_output_dir)
-                .await
+        if let Some(result) = process_one_entry(
+            i,
+            entries.len(),
+            entry,
+            &mut budgets,
+            filter,
+            ctx,
+            safe_output_dir,
+        )
+        .await
         {
             results.push(result);
         }
@@ -198,8 +341,13 @@ async fn process_one_entry(
     // Budget is consumed before execution so that failed attempts (target policy rejection,
     // network errors) still count — this prevents unbounded retries against a failing endpoint.
     if let Some(result) = enforce_budget(entry, budgets, total, i) {
-        append_execution_record(safe_output_dir, proposal_tool_name, &result, proposal_context)
-            .await;
+        append_execution_record(
+            safe_output_dir,
+            proposal_tool_name,
+            &result,
+            proposal_context,
+        )
+        .await;
         return Some(result);
     }
 
@@ -489,7 +637,15 @@ pub async fn execute_safe_output(
     // Dispatch based on tool name. All registered tools go through `dispatch_tool`,
     // which handles deserialization and sanitized execution uniformly.
     // The dispatch is split across category helpers to keep each function's complexity low.
-    let result = find_tool_executor(tool_name, entry, ctx)
+    let mut effective_ctx = ctx.clone();
+    effective_ctx.dry_run = ctx.dry_run
+        || ctx
+            .tool_configs
+            .get(tool_name)
+            .and_then(|config| config.get("staged"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+    let result = find_tool_executor(tool_name, entry, &effective_ctx)
         .await?
         .ok_or_else(|| {
             error!("Unknown tool type: {}", tool_name);
@@ -752,6 +908,230 @@ mod tests {
         assert!(f.allows("add-pr-comment"));
     }
 
+    async fn write_custom_tool_test_config(dir: &Path) -> PathBuf {
+        let config = dir.join("resolved.json");
+        tokio::fs::write(
+            &config,
+            serde_json::json!({
+                "customTools": [{
+                    "name": "send-notification",
+                    "description": "Send notification.",
+                    "max": 1,
+                    "inputSchema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["title"],
+                        "properties": {
+                            "title": {
+                                "type": "string",
+                                "description": "Notification title."
+                            },
+                            "urgent": {
+                                "type": "boolean",
+                                "description": "Urgent flag.",
+                                "default": false
+                            }
+                        }
+                    }
+                }]
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+        config
+    }
+
+    #[tokio::test]
+    async fn prepare_custom_agent_output_validates_and_excludes_builtin_proposals() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join(SAFE_OUTPUT_FILENAME),
+            r#"{"name":"noop","context":"nothing"}
+{"name":"send-notification","title":"Outage"}
+"#,
+        )
+        .await
+        .unwrap();
+        let config = write_custom_tool_test_config(dir.path()).await;
+        let output = dir.path().join("agent-output.json");
+
+        assert_eq!(
+            prepare_custom_agent_output(dir.path(), &config, &output)
+                .await
+                .unwrap(),
+            1
+        );
+        let value: Value = serde_json::from_slice(&tokio::fs::read(output).await.unwrap()).unwrap();
+        assert_eq!(value["items"].as_array().unwrap().len(), 1);
+        assert_eq!(value["items"][0]["type"], "send-notification");
+        assert_eq!(value["items"][0]["urgent"], false);
+    }
+
+    /// A custom job may run steps imported from another repository, so the
+    /// aggregate it receives must never carry built-in proposal content.
+    #[tokio::test]
+    async fn prepare_custom_agent_output_withholds_builtin_proposal_content() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join(SAFE_OUTPUT_FILENAME),
+            format!(
+                "{}\n{}\n{}\n",
+                serde_json::json!({
+                    "name": "create-pull-request",
+                    "title": "Rotate credentials",
+                    "description": "SENSITIVE-PR-BODY internal rollout details",
+                }),
+                serde_json::json!({
+                    "name": "create-work-item",
+                    "title": "SENSITIVE-WORK-ITEM",
+                    "description": "confidential remediation plan",
+                }),
+                serde_json::json!({"name": "send-notification", "title": "Outage"}),
+            ),
+        )
+        .await
+        .unwrap();
+        let config = write_custom_tool_test_config(dir.path()).await;
+        let output = dir.path().join("agent-output.json");
+
+        prepare_custom_agent_output(dir.path(), &config, &output)
+            .await
+            .unwrap();
+
+        let raw = tokio::fs::read_to_string(&output).await.unwrap();
+        assert!(!raw.contains("SENSITIVE-PR-BODY"), "{raw}");
+        assert!(!raw.contains("SENSITIVE-WORK-ITEM"), "{raw}");
+        assert!(!raw.contains("create-pull-request"), "{raw}");
+        assert!(!raw.contains("create-work-item"), "{raw}");
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["items"].as_array().unwrap().len(), 1);
+        assert_eq!(value["items"][0]["type"], "send-notification");
+    }
+
+    #[tokio::test]
+    async fn prepare_custom_agent_output_sanitizes_only_materialized_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw = format!(
+            "{}\n",
+            serde_json::json!({
+                "name": "send-notification",
+                "title": "Outage first\0\x1b[31m\n##vso[task.setvariable variable=X]owned\n##[error]failed",
+            }),
+        );
+        let source = dir.path().join(SAFE_OUTPUT_FILENAME);
+        tokio::fs::write(&source, &raw).await.unwrap();
+        let config = write_custom_tool_test_config(dir.path()).await;
+        let output = dir.path().join("agent-output.json");
+
+        prepare_custom_agent_output(dir.path(), &config, &output)
+            .await
+            .unwrap();
+
+        // The analyzed proposal artifact stays byte-identical for Detection/audit.
+        assert_eq!(tokio::fs::read_to_string(&source).await.unwrap(), raw);
+        let value: Value = serde_json::from_slice(&tokio::fs::read(output).await.unwrap()).unwrap();
+        let title = value["items"][0]["title"].as_str().unwrap();
+        assert!(!title.contains('\0'));
+        assert!(!title.contains('\x1b'));
+        assert!(!title.contains("##vso[task"));
+        assert!(!title.contains("##[error]"));
+        assert!(title.contains("`##vso[`"));
+        assert!(title.contains("`##[`"));
+        assert_eq!(value["items"][0]["urgent"], false);
+    }
+
+    #[test]
+    fn sanitize_custom_agent_output_value_neutralizes_nested_keys_and_values() {
+        let mut value = serde_json::json!({
+            "##vso[task.setvariable variable=KEY]owned": "key value",
+            "keep": "https://notify.example/@team <b>hello</b>",
+            "nested": {
+                "##[error]key": ["normal", "##vso[task.complete result=Failed]owned"],
+            },
+        });
+
+        sanitize_custom_agent_output_value(&mut value).unwrap();
+
+        let rendered = serde_json::to_string(&value).unwrap();
+        assert!(!rendered.contains("##vso[task"), "{rendered}");
+        assert!(!rendered.contains("##[error]"), "{rendered}");
+        // External-system payload text is preserved verbatim.
+        assert_eq!(
+            value["keep"],
+            "https://notify.example/@team <b>hello</b>"
+        );
+        assert_eq!(value["nested"]["`##[`error]key"][0], "normal");
+    }
+
+    #[test]
+    fn sanitize_custom_agent_output_value_rejects_sanitized_key_collisions() {
+        let mut object = serde_json::Map::new();
+        object.insert("key".to_string(), Value::String("one".to_string()));
+        object.insert("ke\0y".to_string(), Value::String("two".to_string()));
+        let mut value = Value::Object(object);
+
+        let error = sanitize_custom_agent_output_value(&mut value).unwrap_err();
+
+        assert!(error.to_string().contains("keys collide"), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn prepare_custom_agent_output_neutralizes_forged_key_error_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join(SAFE_OUTPUT_FILENAME),
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "name": "send-notification",
+                    "##vso[task.setvariable variable=X]owned": "value",
+                    "title": "Outage",
+                })
+            ),
+        )
+        .await
+        .unwrap();
+        let config = write_custom_tool_test_config(dir.path()).await;
+        let output = dir.path().join("agent-output.json");
+        tokio::fs::write(&output, "stale").await.unwrap();
+
+        let error = prepare_custom_agent_output(dir.path(), &config, &output)
+            .await
+            .unwrap_err();
+
+        let rendered = format!("{error:#}");
+        assert!(!rendered.contains("##vso[task"));
+        assert!(rendered.contains("`##vso[`"));
+        assert!(!output.exists());
+    }
+
+    #[tokio::test]
+    async fn prepare_custom_agent_output_revalidates_sanitized_required_values() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join(SAFE_OUTPUT_FILENAME),
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "name": "send-notification",
+                    "title": "\u{7}",
+                })
+            ),
+        )
+        .await
+        .unwrap();
+        let config = write_custom_tool_test_config(dir.path()).await;
+        let output = dir.path().join("agent-output.json");
+
+        let error = prepare_custom_agent_output(dir.path(), &config, &output)
+            .await
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("argument 'title' is required"));
+        assert!(!output.exists());
+    }
+
     #[test]
     fn test_stdout_print_neutralizes_result_message_pipeline_commands() {
         let message = "Uploaded '##vso[task.setvariable variable=X]y.txt'";
@@ -881,7 +1261,9 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let ctx = ExecutionContext::default();
 
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
+            .await
+            .unwrap();
         assert!(results.is_empty());
     }
 
@@ -897,7 +1279,9 @@ mod tests {
         tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
 
         let ctx = ExecutionContext::default();
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
+            .await
+            .unwrap();
 
         assert_eq!(results.len(), 2);
         assert!(results[0].success);
@@ -917,7 +1301,9 @@ mod tests {
         tokio::fs::write(&safe_output_path, "").await.unwrap();
 
         let ctx = ExecutionContext::default();
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
+            .await
+            .unwrap();
         assert!(results.is_empty());
     }
 
@@ -940,7 +1326,9 @@ mod tests {
             dry_run: true,
             ..Default::default()
         };
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
+            .await
+            .unwrap();
         assert_eq!(results.len(), 2);
 
         let executed_path = temp_dir.path().join(EXECUTED_NDJSON_FILENAME);
@@ -971,7 +1359,9 @@ mod tests {
             dry_run: true,
             ..Default::default()
         };
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
+            .await
+            .unwrap();
         assert_eq!(results.len(), 2);
 
         let manifest = read_executed_manifest(&temp_dir).await;
@@ -992,7 +1382,9 @@ mod tests {
         tokio::fs::write(&safe_output_path, "").await.unwrap();
 
         let ctx = ExecutionContext::default();
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
+            .await
+            .unwrap();
         assert!(results.is_empty());
         assert!(!temp_dir.path().join(EXECUTED_NDJSON_FILENAME).exists());
     }
@@ -1502,7 +1894,9 @@ mod tests {
         tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
 
         let ctx = ExecutionContext::default();
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
+            .await
+            .unwrap();
 
         // One entry processed (as a failure — unknown tool)
         assert_eq!(results.len(), 1);
@@ -1669,7 +2063,9 @@ mod tests {
             ..Default::default()
         };
 
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
+            .await
+            .unwrap();
         assert_eq!(results.len(), 5);
 
         // Second create-work-item should be skipped
@@ -1705,7 +2101,9 @@ mod tests {
             ..Default::default()
         };
 
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
+            .await
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].success, "dry-run should succeed");
         assert!(
@@ -1718,6 +2116,26 @@ mod tests {
             "message should contain tool summary, got: {}",
             results[0].message
         );
+    }
+
+    #[tokio::test]
+    async fn per_tool_staged_config_uses_existing_dry_run_executor_path() {
+        let entry = serde_json::json!({
+            "name": "create-work-item",
+            "title": "Test work item title",
+            "description": "This is a test description that is long enough to pass validation checks"
+        });
+        let ctx = ExecutionContext {
+            tool_configs: HashMap::from([(
+                "create-work-item".to_string(),
+                serde_json::json!({ "staged": true }),
+            )]),
+            ..Default::default()
+        };
+
+        let (_, result) = execute_safe_output(&entry, &ctx).await.unwrap();
+        assert!(result.success);
+        assert!(result.message.contains("[DRY-RUN]"), "{}", result.message);
     }
 
     #[tokio::test]
@@ -1737,7 +2155,9 @@ mod tests {
             ..Default::default()
         };
 
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default()).await.unwrap();
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
+            .await
+            .unwrap();
         assert_eq!(results.len(), 2);
         // create-work-item goes through Executor trait → dry-run intercepted
         assert!(results[0].message.contains("[DRY-RUN]"));

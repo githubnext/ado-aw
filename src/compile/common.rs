@@ -127,6 +127,66 @@ pub struct ParsedSource {
     pub source_sha256: [u8; 32],
 }
 
+/// Raw markdown split result used by both the typed workflow parser and
+/// import resolution for component manifests that may omit typed fields.
+pub(crate) struct MarkdownFrontMatterParts {
+    pub leading_whitespace: String,
+    pub yaml_raw: Option<String>,
+    pub body_raw: String,
+    pub markdown_body: String,
+}
+
+/// Split optional YAML front matter from a markdown document.
+///
+/// When `require_front_matter` is true this preserves the historical workflow
+/// parser behavior and errors unless the file starts (modulo leading
+/// whitespace) with `---`.
+pub(crate) fn split_markdown_front_matter(
+    content: &str,
+    require_front_matter: bool,
+) -> Result<MarkdownFrontMatterParts> {
+    // Allow leading whitespace before the opening fence (preserves
+    // historical leniency). We compute a byte offset into `content` so
+    // that `body_raw` extraction is purely byte-faithful, and we keep
+    // the whitespace prefix around so that source rewrites preserve
+    // anything the user (or their editor) put before the opening
+    // fence.
+    let leading_ws = content
+        .bytes()
+        .take_while(|b| b.is_ascii_whitespace())
+        .count();
+    let leading_whitespace = content[..leading_ws].to_string();
+    let after_lead = &content[leading_ws..];
+    if !after_lead.starts_with("---") {
+        if require_front_matter {
+            anyhow::bail!("Markdown file must start with YAML front matter (---)");
+        }
+        return Ok(MarkdownFrontMatterParts {
+            leading_whitespace,
+            yaml_raw: None,
+            body_raw: content.to_string(),
+            markdown_body: content.trim().to_string(),
+        });
+    }
+
+    let after_open = &after_lead[3..];
+    let end_idx = after_open
+        .find("\n---")
+        .context("Could not find closing --- for front matter")?;
+
+    let yaml_raw = after_open[..end_idx].to_string();
+    let body_raw_slice = &after_open[end_idx + 4..];
+    let body_raw = body_raw_slice.to_string();
+    let markdown_body = body_raw_slice.trim().to_string();
+
+    Ok(MarkdownFrontMatterParts {
+        leading_whitespace,
+        yaml_raw: Some(yaml_raw),
+        body_raw,
+        markdown_body,
+    })
+}
+
 /// Parse the markdown file, run the codemod registry on the front
 /// matter in memory, and return both the typed `FrontMatter` and the
 /// raw fragments needed to rewrite the source on disk byte-faithfully.
@@ -154,31 +214,11 @@ pub(crate) fn parse_markdown_detailed_with_registry(
     hasher.update(content.as_bytes());
     let source_sha256: [u8; 32] = hasher.finalize().into();
 
-    // Allow leading whitespace before the opening fence (preserves
-    // historical leniency). We compute a byte offset into `content` so
-    // that `body_raw` extraction is purely byte-faithful, and we keep
-    // the whitespace prefix around so that source rewrites preserve
-    // anything the user (or their editor) put before the opening
-    // fence.
-    let leading_ws = content
-        .bytes()
-        .take_while(|b| b.is_ascii_whitespace())
-        .count();
-    let leading_whitespace = content[..leading_ws].to_string();
-    let after_lead = &content[leading_ws..];
-    if !after_lead.starts_with("---") {
-        anyhow::bail!("Markdown file must start with YAML front matter (---)");
-    }
-
-    let after_open = &after_lead[3..];
-    let end_idx = after_open
-        .find("\n---")
-        .context("Could not find closing --- for front matter")?;
-
-    let yaml_str = &after_open[..end_idx];
-    let body_raw_slice = &after_open[end_idx + 4..];
-    let body_raw = body_raw_slice.to_string();
-    let markdown_body = body_raw_slice.trim().to_string();
+    let parts = split_markdown_front_matter(content, true)?;
+    let yaml_str = parts
+        .yaml_raw
+        .as_deref()
+        .expect("required front matter split must return YAML");
 
     // Stage 1: parse to untyped Value, reject non-mapping at top level.
     let parsed_value: serde_yaml::Value =
@@ -217,11 +257,11 @@ pub(crate) fn parse_markdown_detailed_with_registry(
 
     Ok(ParsedSource {
         front_matter,
-        markdown_body,
+        markdown_body: parts.markdown_body,
         codemods: report,
         front_matter_mapping: mapping,
-        leading_whitespace,
-        body_raw,
+        leading_whitespace: parts.leading_whitespace,
+        body_raw: parts.body_raw,
         source_sha256,
     })
 }
@@ -620,7 +660,44 @@ pub fn build_parameters(
 /// The result of lowering a `repos:` list: the ADO repository resources, the
 /// checkout-alias list, and per-checkout fetch tuning keyed by alias (plus
 /// [`SELF_CHECKOUT_ALIAS`] for the trigger repo).
-pub type LoweredRepos = (Vec<Repository>, Vec<String>, HashMap<String, CheckoutFetchOpts>);
+pub type LoweredRepos = (
+    Vec<Repository>,
+    Vec<String>,
+    HashMap<String, CheckoutFetchOpts>,
+);
+
+/// Repository resource types that are backed by an Azure DevOps **service
+/// connection** and therefore require an `endpoint:` on the repository
+/// resource. Azure Repos (`git`) is same-organization and needs no endpoint.
+pub fn repo_type_requires_endpoint(repo_type: &str) -> bool {
+    matches!(repo_type, "github" | "githubenterprise" | "bitbucket")
+}
+
+/// Validate that a repository resource of a service-connection-backed type
+/// (`github` / `githubenterprise` / `bitbucket`) carries a non-empty
+/// `endpoint:`. Azure Repos (`git`) resources are exempt.
+///
+/// This closes a real gap: `repo_type` was previously an untested passthrough,
+/// so a `type: github` resource without an `endpoint:` compiled to invalid
+/// Azure DevOps YAML. Fail fast at compile time with an actionable message.
+pub fn validate_repo_endpoint(
+    repo_type: &str,
+    endpoint: &Option<String>,
+    name: &str,
+) -> Result<()> {
+    let has_endpoint = endpoint
+        .as_deref()
+        .map(|e| !e.trim().is_empty())
+        .unwrap_or(false);
+    if repo_type_requires_endpoint(repo_type) && !has_endpoint {
+        anyhow::bail!(
+            "Repository '{name}' has type '{repo_type}', which requires an `endpoint:` \
+            (an Azure DevOps service connection) to authenticate. Add \
+            `endpoint: <service-connection-name>` to this repository."
+        );
+    }
+    Ok(())
+}
 
 /// Lower a `repos:` list into the internal [`LoweredRepos`] triple consumed by
 /// the rest of the compiler. A reserved `self` entry (an entry whose *name* is
@@ -652,7 +729,7 @@ pub fn lower_repos(items: &[ReposItem]) -> Result<LoweredRepos> {
             continue;
         }
 
-        let (name, alias, repo_type, repo_ref, do_checkout, fetch_opts) = match item {
+        let (name, alias, repo_type, repo_ref, endpoint, do_checkout, fetch_opts) = match item {
             ReposItem::Shorthand(s) => {
                 let (alias, name) = parse_shorthand(s)?;
                 (
@@ -660,6 +737,7 @@ pub fn lower_repos(items: &[ReposItem]) -> Result<LoweredRepos> {
                     alias,
                     "git".to_string(),
                     "refs/heads/main".to_string(),
+                    None,
                     true,
                     CheckoutFetchOpts::default(),
                 )
@@ -674,6 +752,7 @@ pub fn lower_repos(items: &[ReposItem]) -> Result<LoweredRepos> {
                     alias,
                     entry.repo_type.clone(),
                     entry.repo_ref.clone(),
+                    entry.endpoint.clone(),
                     entry.checkout,
                     CheckoutFetchOpts {
                         fetch_depth: entry.fetch_depth,
@@ -737,11 +816,14 @@ pub fn lower_repos(items: &[ReposItem]) -> Result<LoweredRepos> {
             );
         }
 
+        validate_repo_endpoint(&repo_type, &endpoint, &name)?;
+
         repositories.push(Repository {
             repository: alias.clone(),
             repo_type,
             name,
             repo_ref,
+            endpoint,
         });
 
         if do_checkout {
@@ -1039,8 +1121,7 @@ pub(crate) fn contains_template_marker(input: &str, name: &str) -> bool {
         // legacy marker even if its inner content trims to `name`. Matching it
         // here would both raise a false positive and — in `replace_marker` —
         // splice `repl` after the `$`, corrupting the output.
-        let preceded_by_dollar =
-            marker_start > 0 && input.as_bytes()[marker_start - 1] == b'$';
+        let preceded_by_dollar = marker_start > 0 && input.as_bytes()[marker_start - 1] == b'$';
         if !preceded_by_dollar
             && let Some(close) = input[start..].find("}}")
             && input[start..start + close].trim() == name
@@ -1161,7 +1242,8 @@ pub fn resolve_pool_typed(
                         (Some(name), Some(vm_image)) => {
                             anyhow::bail!(
                                 "pool cannot specify both `name` and `vmImage` (got name='{}', vmImage='{}')",
-                                name, vm_image
+                                name,
+                                vm_image
                             );
                         }
                         (_, Some(vm_image)) => {
@@ -1871,7 +1953,7 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
         effective_mcp_tool_count += 1;
     }
 
-    if effective_mcp_tool_count == 0 {
+    if effective_mcp_tool_count == 0 && front_matter.custom_safe_output_tool_names().is_empty() {
         // Every user-specified key was either a non-MCP key or a guard path
         // from the defensive check above. Return empty to keep all tools
         // available (backward compat).
@@ -2089,9 +2171,21 @@ pub fn validate_safe_outputs_keys(front_matter: &FrontMatter) -> Result<()> {
     let mut unknown: Vec<(String, Vec<&'static str>)> = Vec::new();
     let mut invalid_names: Vec<String> = Vec::new();
 
+    // Custom tools declared under `safe-outputs.jobs`. A top-level key that matches a custom tool name is that
+    // tool's *configuration* (e.g. `require-approval`) and must be accepted
+    // rather than treated as an unknown built-in.
+    let custom_names: std::collections::HashSet<String> = front_matter
+        .custom_safe_output_tool_names()
+        .into_iter()
+        .collect();
+
     for key in front_matter.safe_output_tool_names() {
         if !validate::is_safe_tool_name(key) {
             invalid_names.push(key.clone());
+            continue;
+        }
+        if custom_names.contains(key) {
+            // Consumer configuration for an imported custom tool.
             continue;
         }
         if NON_MCP_SAFE_OUTPUT_KEYS.contains(&key.as_str()) {
@@ -2155,6 +2249,50 @@ pub fn validate_safe_outputs_keys(front_matter: &FrontMatter) -> Result<()> {
         anyhow::bail!("{}", msg);
     }
 
+    validate_custom_safe_output_tools(front_matter)?;
+
+    Ok(())
+}
+
+/// Validate custom safe-output job names and structural shape.
+pub fn validate_custom_safe_output_tools(front_matter: &FrontMatter) -> Result<()> {
+    use crate::safe_outputs::ALL_KNOWN_SAFE_OUTPUTS;
+
+    if front_matter.safe_outputs.contains_key("scripts") {
+        anyhow::bail!(
+            "safe-outputs.scripts is not supported; use a self-contained \
+             safe-outputs.jobs executor"
+        );
+    }
+
+    for section in ["jobs"] {
+        let Some(value) = front_matter.safe_outputs.get(section) else {
+            continue;
+        };
+        if value.is_null() {
+            continue;
+        }
+        let Some(map) = value.as_object() else {
+            anyhow::bail!(
+                "safe-outputs.{section} must be a mapping of tool-name to definition. Example:\n\n  \
+                 safe-outputs:\n    {section}:\n      my-tool:\n        description: ...\n"
+            );
+        };
+        for name in map.keys() {
+            if !validate::is_safe_tool_name(name) {
+                anyhow::bail!(
+                    "safe-outputs.{section}.{name} has an invalid tool name. \
+                     Tool names must contain only ASCII letters, digits, and hyphens."
+                );
+            }
+            if ALL_KNOWN_SAFE_OUTPUTS.contains(&name.as_str()) {
+                anyhow::bail!(
+                    "safe-outputs.{section}.{name} collides with the built-in safe-output \
+                     tool '{name}'. Custom tool names must not shadow built-ins; rename it."
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2377,6 +2515,12 @@ pub fn generate_mcpg_config(
             .split_whitespace()
             .map(str::to_string),
     );
+    if !front_matter.custom_safe_output_tool_names().is_empty() {
+        safeoutputs_entrypoint_args.extend([
+            "--custom-tools".to_string(),
+            "/safeoutputs/custom-tools.json".to_string(),
+        ]);
+    }
     safeoutputs_entrypoint_args.extend([
         "--self-repository-directory".to_string(),
         trigger_repo_directory.clone(),
@@ -2592,10 +2736,7 @@ fn add_extension_network_hosts(
 /// Ecosystem identifiers (e.g., `"python"`) are expanded to their domain
 /// lists. Raw domain names are validated against DNS-safe characters before
 /// insertion; an invalid name causes this function to return an error.
-fn add_user_network_hosts(
-    user_hosts: &[String],
-    hosts: &mut HashSet<String>,
-) -> Result<()> {
+fn add_user_network_hosts(user_hosts: &[String], hosts: &mut HashSet<String>) -> Result<()> {
     for host in user_hosts {
         if is_ecosystem_identifier(host) {
             let domains = get_ecosystem_domains(host);
@@ -2973,7 +3114,10 @@ mod tests {
         let err = resolve_pool_typed(CompileTarget::Standalone, Some(&pool))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("pool.demands requires `pool.name`"), "err: {err}");
+        assert!(
+            err.contains("pool.demands requires `pool.name`"),
+            "err: {err}"
+        );
     }
 
     #[test]
@@ -3088,9 +3232,8 @@ mod tests {
         // name-validation stage (before the duplicate check), because the raw
         // string is emitted verbatim into the YAML and would not match the ADO
         // group.
-        let src =
-            "---\nname: t\ndescription: d\nvariable-groups:\n  - \" Shared Secrets \"\n---\n"
-                .to_string();
+        let src = "---\nname: t\ndescription: d\nvariable-groups:\n  - \" Shared Secrets \"\n---\n"
+            .to_string();
         let (fm, _) = parse_markdown(&src).unwrap();
         let err = validate_variable_groups(&fm).unwrap_err().to_string();
         assert!(err.contains("is not a valid"), "err: {err}");
@@ -3281,9 +3424,18 @@ mod tests {
         // boundaries (e.g. tmpfs `/tmp` on Linux). Verify that the
         // extracted helper returns "." for a bare filename so the
         // tempfile lands on the same filesystem as the destination.
-        assert_eq!(atomic_write_parent_dir(Path::new("agent.md")), PathBuf::from("."));
-        assert_eq!(atomic_write_parent_dir(Path::new("subdir/agent.md")), PathBuf::from("subdir"));
-        assert_eq!(atomic_write_parent_dir(Path::new("/tmp/agent.md")), PathBuf::from("/tmp"));
+        assert_eq!(
+            atomic_write_parent_dir(Path::new("agent.md")),
+            PathBuf::from(".")
+        );
+        assert_eq!(
+            atomic_write_parent_dir(Path::new("subdir/agent.md")),
+            PathBuf::from("subdir")
+        );
+        assert_eq!(
+            atomic_write_parent_dir(Path::new("/tmp/agent.md")),
+            PathBuf::from("/tmp")
+        );
     }
 
     // ─── parse_markdown_detailed ──────────────────────────────────────────────
@@ -3544,6 +3696,7 @@ mod tests {
             repo_type: "git".to_string(),
             name: "org/my-repo".to_string(),
             repo_ref: "refs/heads/main".to_string(),
+            endpoint: None,
         }];
         let checkout = vec!["my-repo".to_string()];
         let result = validate_checkout_list(&repos, &checkout);
@@ -3557,6 +3710,7 @@ mod tests {
             repo_type: "git".to_string(),
             name: "org/my-repo".to_string(),
             repo_ref: "refs/heads/main".to_string(),
+            endpoint: None,
         }];
         let checkout = vec!["unknown-alias".to_string()];
         let result = validate_checkout_list(&repos, &checkout);
@@ -3571,6 +3725,7 @@ mod tests {
             repo_type: "git".to_string(),
             name: "org/my-repo".to_string(),
             repo_ref: "refs/heads/main".to_string(),
+            endpoint: None,
         }];
         let result = validate_checkout_list(&repos, &[]);
         assert!(result.is_ok());
@@ -3585,6 +3740,7 @@ mod tests {
             repo_type: "git".to_string(),
             name: "org/repo".to_string(),
             repo_ref: "refs/heads/main".to_string(),
+            endpoint: None,
         }];
         let checkout = vec!["repo".to_string()];
         let err = validate_checkout_list(&repos, &checkout).unwrap_err();
@@ -4466,6 +4622,30 @@ ado-aw-debug:
     }
 
     #[test]
+    fn custom_only_safe_outputs_emit_explicit_builtin_allowlist() {
+        let (fm, _) = parse_markdown(
+            r#"---
+name: test
+description: test
+safe-outputs:
+  jobs:
+    notify:
+      description: Notify.
+      steps:
+        - bash: echo notify
+---
+"#,
+        )
+        .unwrap();
+        let args = generate_enabled_tools_args(&fm);
+        assert!(!args.is_empty());
+        assert!(args.contains("--enabled-tools noop"));
+        assert!(args.contains("--enabled-tools missing-data"));
+        assert!(!args.contains("--enabled-tools create-work-item"));
+        assert!(!args.contains("--enabled-tools create-pull-request"));
+    }
+
+    #[test]
     fn test_generate_enabled_tools_args_skips_require_approval_reserved_key() {
         // The reserved section-level `require-approval` key must never be
         // treated as a tool name in `--enabled-tools`.
@@ -4757,6 +4937,59 @@ safe-outputs:
             "expected create-pull-request to appear in similar-tools list, got: {}",
             msg
         );
+    }
+
+    #[test]
+    fn test_validate_safe_outputs_keys_accepts_custom_tool_config() {
+        // A custom tool declared under scripts/jobs, with a top-level config key
+        // of the same name, must validate.
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  jobs:
+    send-notification:
+      description: Send a notification.
+      steps:
+        - bash: echo notify
+  send-notification:
+    require-approval: true
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        assert!(validate_safe_outputs_keys(&fm).is_ok());
+    }
+
+    #[test]
+    fn test_validate_custom_tool_rejects_builtin_collision() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  jobs:
+    create-pull-request:
+      description: Collision.
+      steps:
+        - bash: echo evil
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let err = validate_safe_outputs_keys(&fm).unwrap_err().to_string();
+        assert!(err.contains("collides with the built-in"), "{err}");
+    }
+
+    #[test]
+    fn test_validate_custom_tool_section_must_be_mapping() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  jobs: "not-a-map"
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let err = validate_safe_outputs_keys(&fm).unwrap_err().to_string();
+        assert!(err.contains("must be a mapping"), "{err}");
     }
 
     #[test]
@@ -5150,8 +5383,8 @@ safe-outputs:
     #[test]
     fn test_model_name_rejects_single_quote() {
         let mut fm = minimal_front_matter();
-        fm.engine =
-            crate::compile::types::EngineConfig::Full(Box::new(crate::compile::types::EngineOptions {
+        fm.engine = crate::compile::types::EngineConfig::Full(Box::new(
+            crate::compile::types::EngineOptions {
                 id: Some("copilot".to_string()),
                 model: Some("model' && echo pwned".to_string()),
                 version: None,
@@ -5163,7 +5396,8 @@ safe-outputs:
                 timeout_minutes: None,
                 github_app_token: None,
                 provider: None,
-            }));
+            },
+        ));
         let result = engine_args_for(&fm);
         assert!(result.is_err());
         assert!(
@@ -5177,8 +5411,8 @@ safe-outputs:
     #[test]
     fn test_model_name_rejects_space() {
         let mut fm = minimal_front_matter();
-        fm.engine =
-            crate::compile::types::EngineConfig::Full(Box::new(crate::compile::types::EngineOptions {
+        fm.engine = crate::compile::types::EngineConfig::Full(Box::new(
+            crate::compile::types::EngineOptions {
                 id: Some("copilot".to_string()),
                 model: Some("model && curl evil.com".to_string()),
                 version: None,
@@ -5190,7 +5424,8 @@ safe-outputs:
                 timeout_minutes: None,
                 github_app_token: None,
                 provider: None,
-            }));
+            },
+        ));
         let result = engine_args_for(&fm);
         assert!(result.is_err());
     }
@@ -5204,8 +5439,8 @@ safe-outputs:
             "my_model:latest",
         ] {
             let mut fm = minimal_front_matter();
-            fm.engine =
-                crate::compile::types::EngineConfig::Full(Box::new(crate::compile::types::EngineOptions {
+            fm.engine = crate::compile::types::EngineConfig::Full(Box::new(
+                crate::compile::types::EngineOptions {
                     id: Some("copilot".to_string()),
                     model: Some(name.to_string()),
                     version: None,
@@ -5217,7 +5452,8 @@ safe-outputs:
                     timeout_minutes: None,
                     github_app_token: None,
                     provider: None,
-                }));
+                },
+            ));
             let result = engine_args_for(&fm);
             assert!(result.is_ok(), "Model name '{}' should be valid", name);
         }
@@ -5842,6 +6078,45 @@ safe-outputs:
                     == "$(Build.SourcesDirectory)/self:$(Build.SourcesDirectory)/self:rw"
             }),
             "self checkout must be mounted when it is outside the selected workspace"
+        );
+    }
+
+    #[test]
+    fn test_generate_mcpg_config_safeoutputs_receives_custom_tool_definitions() {
+        let mut fm = minimal_front_matter();
+        fm.safe_outputs.insert(
+            "jobs".to_string(),
+            serde_json::json!({
+                "notify": {
+                    "description": "Send a notification",
+                    "inputs": {
+                        "message": {
+                            "type": "string",
+                            "description": "Message to send",
+                            "required": true
+                        }
+                    },
+                    "steps": [{"bash": "echo notify"}]
+                }
+            }),
+        );
+
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
+        let args = config
+            .mcp_servers
+            .get("safeoutputs")
+            .unwrap()
+            .entrypoint_args
+            .as_ref()
+            .unwrap();
+        assert!(
+            args.windows(2).any(|pair| {
+                pair == [
+                    "--custom-tools".to_string(),
+                    "/safeoutputs/custom-tools.json".to_string(),
+                ]
+            }),
+            "SafeOutputs must load the staged custom tool definitions: {args:?}"
         );
     }
 
@@ -6750,6 +7025,7 @@ safe-outputs:
             alias: None,
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/main".to_string(),
+            endpoint: None,
             checkout: true,
             fetch_depth: None,
             fetch_tags: None,
@@ -6767,6 +7043,7 @@ safe-outputs:
             alias: None,
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/main".to_string(),
+            endpoint: None,
             checkout: false,
             fetch_depth: None,
             fetch_tags: None,
@@ -6784,6 +7061,7 @@ safe-outputs:
             alias: Some("docs-v2".to_string()),
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/release/2.x".to_string(),
+            endpoint: None,
             checkout: true,
             fetch_depth: None,
             fetch_tags: None,
@@ -6792,6 +7070,49 @@ safe-outputs:
         assert_eq!(repos[0].repository, "docs-v2");
         assert_eq!(repos[0].repo_ref, "refs/heads/release/2.x");
         assert_eq!(checkout, vec!["docs-v2"]);
+    }
+
+    #[test]
+    fn test_repos_github_type_requires_endpoint() {
+        let items = vec![ReposItem::Full(RepoEntry {
+            name: "acme/shared".to_string(),
+            alias: Some("shared".to_string()),
+            repo_type: "github".to_string(),
+            repo_ref: "refs/heads/main".to_string(),
+            endpoint: None,
+            checkout: true,
+            fetch_depth: None,
+            fetch_tags: None,
+        })];
+        let err = lower_repos(&items).unwrap_err();
+        assert!(err.to_string().contains("requires an `endpoint:`"), "{err}");
+        assert!(err.to_string().contains("acme/shared"), "{err}");
+    }
+
+    #[test]
+    fn test_repos_github_type_with_endpoint_ok() {
+        let items = vec![ReposItem::Full(RepoEntry {
+            name: "acme/shared".to_string(),
+            alias: Some("shared".to_string()),
+            repo_type: "githubenterprise".to_string(),
+            repo_ref: "refs/heads/main".to_string(),
+            endpoint: Some("shared-conn".to_string()),
+            checkout: true,
+            fetch_depth: None,
+            fetch_tags: None,
+        })];
+        let (repos, _checkout, _fetch) = lower_repos(&items).unwrap();
+        assert_eq!(repos[0].repo_type, "githubenterprise");
+        assert_eq!(repos[0].endpoint.as_deref(), Some("shared-conn"));
+    }
+
+    #[test]
+    fn test_repos_git_type_needs_no_endpoint() {
+        // Same-org Azure Repos (`git`) must NOT require an endpoint.
+        assert!(validate_repo_endpoint("git", &None, "proj/repo").is_ok());
+        assert!(repo_type_requires_endpoint("github"));
+        assert!(repo_type_requires_endpoint("githubenterprise"));
+        assert!(!repo_type_requires_endpoint("git"));
     }
 
     #[test]
@@ -6842,6 +7163,7 @@ safe-outputs:
             alias: Some("root".to_string()),
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/main".to_string(),
+            endpoint: None,
             checkout: true,
             fetch_depth: None,
             fetch_tags: None,
@@ -6858,6 +7180,7 @@ safe-outputs:
                 alias: Some(alias.to_string()),
                 repo_type: "git".to_string(),
                 repo_ref: "refs/heads/main".to_string(),
+                endpoint: None,
                 checkout: true,
                 fetch_depth: None,
                 fetch_tags: None,
@@ -6881,6 +7204,7 @@ safe-outputs:
                 alias: Some(bad.to_string()),
                 repo_type: "git".to_string(),
                 repo_ref: "refs/heads/main".to_string(),
+                endpoint: None,
                 checkout: true,
                 fetch_depth: None,
                 fetch_tags: None,
@@ -6898,6 +7222,7 @@ safe-outputs:
             alias: Some("my-tools_2".to_string()),
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/main".to_string(),
+            endpoint: None,
             checkout: true,
             fetch_depth: None,
             fetch_tags: None,
@@ -6915,6 +7240,7 @@ safe-outputs:
                 alias: None,
                 repo_type: "git".to_string(),
                 repo_ref: "refs/heads/main".to_string(),
+                endpoint: None,
                 checkout: false,
                 fetch_depth: None,
                 fetch_tags: None,
@@ -6934,6 +7260,7 @@ safe-outputs:
                 alias: None,
                 repo_type: "git".to_string(),
                 repo_ref: "refs/heads/main".to_string(),
+                endpoint: None,
                 checkout: true,
                 fetch_depth: Some(1),
                 fetch_tags: Some(false),
@@ -6959,6 +7286,7 @@ safe-outputs:
             alias: None,
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/main".to_string(),
+            endpoint: None,
             checkout: true,
             fetch_depth: Some(0),
             fetch_tags: Some(false),
@@ -6982,6 +7310,7 @@ safe-outputs:
                 alias: None,
                 repo_type: "git".to_string(),
                 repo_ref: "refs/heads/main".to_string(),
+                endpoint: None,
                 checkout: true,
                 fetch_depth: Some(1),
                 fetch_tags: None,
@@ -6991,6 +7320,7 @@ safe-outputs:
                 alias: None,
                 repo_type: "git".to_string(),
                 repo_ref: "refs/heads/main".to_string(),
+                endpoint: None,
                 checkout: true,
                 fetch_depth: None,
                 fetch_tags: Some(true),
@@ -7009,6 +7339,7 @@ safe-outputs:
             alias: Some("mine".to_string()),
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/feature".to_string(),
+            endpoint: None,
             checkout: false,
             fetch_depth: Some(1),
             fetch_tags: None,
@@ -7045,6 +7376,7 @@ safe-outputs:
             alias: None,
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/main".to_string(),
+            endpoint: None,
             checkout: false,
             fetch_depth: Some(1),
             fetch_tags: Some(false),
@@ -7263,10 +7595,7 @@ repos:
             err.contains("manual-review"),
             "error should mention key: {err}"
         );
-        assert!(
-            err.contains("agentless"),
-            "error should explain why: {err}"
-        );
+        assert!(err.contains("agentless"), "error should explain why: {err}");
     }
 
     #[test]
@@ -7308,15 +7637,18 @@ repos:
             resolve_pool_overrides_typed(CompileTarget::Standalone, Some(&default), &overrides)
                 .unwrap_err()
                 .to_string();
-        assert!(err.contains("name") && err.contains("vmImage"), "err: {err}");
+        assert!(
+            err.contains("name") && err.contains("vmImage"),
+            "err: {err}"
+        );
     }
 
     #[test]
     fn pool_overrides_no_default_pool_uses_ubuntu_fallback() {
         // When the top-level pool: is omitted, defaults to ubuntu-22.04.
         let overrides: HashMap<String, PoolConfig> = HashMap::new();
-        let per_job = resolve_pool_overrides_typed(CompileTarget::Standalone, None, &overrides)
-            .unwrap();
+        let per_job =
+            resolve_pool_overrides_typed(CompileTarget::Standalone, None, &overrides).unwrap();
         let expected = crate::compile::ir::job::Pool::VmImage("ubuntu-22.04".to_string());
         assert_eq!(per_job.agent, expected);
         assert_eq!(per_job.detection, expected);
@@ -7349,7 +7681,10 @@ repos:
         assert_eq!(pool_name(&per_job.agent), "AgentPool");
         assert_eq!(pool_name(&per_job.detection), "DetectionPool");
         assert_eq!(pool_name(&per_job.safe_outputs), "SafeOutputsPool");
-        assert_eq!(pool_name(&per_job.safe_outputs_reviewed), "SafeOutputsReviewedPool");
+        assert_eq!(
+            pool_name(&per_job.safe_outputs_reviewed),
+            "SafeOutputsReviewedPool"
+        );
         assert_eq!(pool_name(&per_job.teardown), "TeardownPool");
         assert_eq!(pool_name(&per_job.conclusion), "ConclusionPool");
     }

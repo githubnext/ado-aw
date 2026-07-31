@@ -149,7 +149,11 @@ export async function worktreeChangedFiles(
   runner: GitRunner = defaultGitRunner,
 ): Promise<string[]> {
   const stdout = await run(
-    ["status", "--porcelain=v1"],
+    // `--untracked-files=all` is security-significant: the default porcelain
+    // output collapses a wholly untracked directory to e.g. `.ado-aw/`, which
+    // prevents the exact-path allowlist below from validating each generated
+    // import-cache file independently.
+    ["status", "--porcelain=v1", "--untracked-files=all"],
     { cwd: opts.worktreeDir, timeoutMs: opts.timeoutMs },
     runner,
   );

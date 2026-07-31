@@ -63,7 +63,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── mod.rs        # Module entry point and Compiler trait
 │   │   ├── common.rs     # Shared helpers across targets
 │   │   ├── ado_bundle.rs # Registry of ado-script bundles and their compile-time env contracts: Bundle enum (path + auth), apply_bundle_auth() (single chokepoint projecting SYSTEM_ACCESSTOKEN into every REST-calling bundle step), token_source_for() (System.AccessToken vs SC_WRITE_TOKEN selection), is_redundant_ado_mirror() (identifies auto-injected ADO predefined var re-projections)
-│   │   ├── agentic_pipeline.rs # Canonical Setup → Agent → Detection → (ManualReview?) → SafeOutputs(+SafeOutputs_Reviewed?) → Teardown → Conclusion shape (Conclusion emitted when configured; shared by every target); BuiltPipelineContext, build_pipeline_context, build_canonical_jobs, per-job builders incl. build_manual_review_job + SafeOutputsVariant split, fold_agent_conditions, agent_job_variables_hoist
+│   │   ├── agentic_pipeline.rs # Canonical Setup → Agent → Detection → (ManualReview?) → Custom_<tool>* → SafeOutputs(+SafeOutputs_Reviewed?) → Teardown → Conclusion shape (Conclusion emitted when configured; shared by every target); BuiltPipelineContext, build_pipeline_context, build_canonical_jobs, per-job builders incl. build_manual_review_job + custom safe-output jobs + SafeOutputsVariant split, fold_agent_conditions, agent_job_variables_hoist
 │   │   ├── standalone.rs # Standalone pipeline compiler
 │   │   ├── standalone_ir.rs # Standalone target typed-IR builder
 │   │   ├── onees.rs      # 1ES Pipeline Template compiler
@@ -77,6 +77,8 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── filter_ir.rs  # Filter expression IR: Fact/Predicate types, lowering, validation, codegen
 │   │   ├── pr_filters.rs # PR trigger filter generation (native ADO + gate steps)
 │   │   ├── path_layout_check.rs # Warning-only checkout-aware path validation: $(Build.SourcesDirectory)/<seg> refs in steps, runtime-import targets, deprecated directory markers in the body
+│   │   ├── custom_tools.rs # Typed custom safe-output job model, closed MCP schemas, resolved execution config, and shared argument validation
+│   │   ├── imports/      # Reusable component imports: ADO-first source/ref resolution, bounded nested graph + SHA-keyed cache, import-schema substitution, and field-specific merge semantics
 │   │   ├── extensions/   # CompilerExtension trait and infrastructure extensions
 │   │   │   ├── mod.rs    # Trait, Extension enum, collect_extensions(), re-exports
 │   │   │   ├── ado_aw_marker.rs # Always-on metadata marker extension (emits # ado-aw-metadata JSON)
@@ -121,10 +123,11 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │       ├── emit.rs   # Thin `lower() + serde_yaml::to_string()` wrapper
 │   │       └── summary.rs # Public, serializable PipelineSummary / GraphSummary for agent-facing tooling (see docs/ir.md Public JSON summary)
 │   ├── init.rs           # Repository initialization for AI-first authoring: scaffolds a dispatcher agent (.github/agents/ado-aw.agent.md) AND skill (.github/skills/ado-aw/SKILL.md); `--agency` plugin scaffold embeds agency/plugins/ado-aw/ via include_str!
-│   ├── execute.rs        # Stage 3 safe output execution
+│   ├── execute.rs        # Stage 3 built-in safe-output execution plus validation/materialization of aggregate ADO_AW_AGENT_OUTPUT for custom jobs
 │   ├── fuzzy_schedule.rs # Fuzzy schedule parsing
 │   ├── logging.rs        # File-based logging infrastructure
 │   ├── mcp.rs            # SafeOutputs stdio MCP server
+│   ├── mcp_custom_tools.rs # Dynamic SafeOutputs MCP tool registration from compiler-generated custom-tools JSON
 │   ├── mcp_author/       # Author-facing read-only MCP server for local IDE/Copilot Chat integrations
 │   │   ├── mod.rs        # Tool router + handlers for inspect/graph/deps/outputs/whatif/lint/catalog/trace/audit
 │   │   └── tests.rs      # MCP-author integration / contract tests
@@ -317,6 +320,10 @@ index to jump to the right page.
 
 - [`docs/front-matter.md`](docs/front-matter.md) — full agent file format
   (markdown body + YAML front matter grammar) with every supported field.
+- [`docs/imports.md`](docs/imports.md) — reusable local and SHA-pinned
+  cross-repository markdown components: `imports:`, `import-schema:`, committed
+  `.ado-aw/imports/` cache, merge semantics, and custom safe-output component
+  examples.
 - [`docs/runtime-imports.md`](docs/runtime-imports.md) — runtime prompt import
   markers, path resolution, and `inlined-imports:` behavior.
 - [`docs/schedule-syntax.md`](docs/schedule-syntax.md) — fuzzy schedule time
@@ -341,7 +348,8 @@ index to jump to the right page.
   configured via the `execution-context:` front-matter block.
 - [`docs/safe-outputs.md`](docs/safe-outputs.md) — full reference for every
   safe-output tool agents can use to propose actions (PRs, work items, wiki
-  pages, comments, etc.) plus their per-agent configuration.
+  pages, comments, etc.) and custom `safe-outputs.jobs`
+  components, and per-agent configuration.
 - [`docs/safe-output-permissions.md`](docs/safe-output-permissions.md) —
   diagnosis and fix reference for Stage 3 401/403 failures: the
   default build identity (PCBS vs project-scoped Build Service),
@@ -382,8 +390,9 @@ index to jump to the right page.
 - [`docs/mcpg.md`](docs/mcpg.md) — MCP Gateway architecture and pipeline
   integration.
 - [`docs/network.md`](docs/network.md) — AWF network isolation, default
-  allowed domains, ecosystem identifiers, blocking, and ADO `permissions:`
-  service-connection model.
+  allowed domains, ecosystem identifiers, blocking, repository-resource
+  `endpoint:` service connections, and ADO `permissions:` service-connection
+  model.
 - [`docs/extending.md`](docs/extending.md) — adding new CLI commands, compile
   targets, front-matter fields, typed IR extensions, safe-output tools,
   first-class tools, and runtimes; the `CompilerExtension` trait.
