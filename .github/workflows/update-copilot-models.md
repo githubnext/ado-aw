@@ -10,11 +10,14 @@ permissions:
 tools:
   github:
     toolsets: [default]
-  bash:
-    - "curl:*"
-    - "jq:*"
-    - "mkdir:*"
-    - "cat:*"
+  # The /reflect fetch below is a compound shell script (set + mkdir + curl +
+  # jq + printf), and the sandbox denies a compound call unless every
+  # constituent command is allowed, so a per-command allow-list is brittle
+  # here. This matches gh-aw's own daily-model-inventory workflow and the five
+  # other workflows in this repo. The real boundary is elsewhere: the agent
+  # runs network-isolated with a read-only token, and every write goes through
+  # safe-outputs restricted to src/inspect/catalog.rs.
+  bash: ["*"]
 network:
   allowed: [defaults]
 safe-outputs:
