@@ -10,6 +10,14 @@ engine:
   id: copilot
   model: claude-sonnet-4.6
   timeout-minutes: 20
+tools:
+  azure-devops:
+    org: msazuresphere
+    toolsets: [pipelines]
+    allowed:
+      - pipelines_definition
+      - pipelines_build
+      - pipelines_build_log
 permissions:
   read: agent-playground-read
   write: agent-playground-write
@@ -45,19 +53,23 @@ front-matter `name:` values from their source Markdown.
 
 ### Tasks
 
-1. Resolve each monitored pipeline by exact name, then query the ADO REST
-   `builds?api-version=7.1` endpoint of the AgentPlayground project to fetch
-   its most recent **completed** run. Use the read service connection's
-   `SYSTEM_ACCESSTOKEN`-equivalent bearer token already available to you in
-   the agent environment.
+1. Use only the native Azure DevOps MCP tools from the `azure-devops` server.
+   Do not call ADO through bash, `curl`, `az`, or raw HTTP, and do not inspect
+   environment variables or credentials.
+2. Resolve each monitored pipeline by exact name with
+   `pipelines_definition` (`action: list`, `project: AgentPlayground`, and
+   the exact `name`), then use `pipelines_build` (`action: list`) to fetch its
+   most recent **completed** run.
    - For `Daily safe-output smoke canary` and `Daily smoke az CLI access`,
-     use the latest completed run with no reason/branch restriction.
+     pass the resolved definition ID and use the latest completed run with no
+     reason/branch restriction.
    - For `ado-aw candidate compiler smoke`, include both
-     `branchName=refs/heads/main` and `reasonFilter=schedule`, plus
-     `statusFilter=completed`, `queryOrder=finishTimeDescending`, and
-     `$top=1`. Never report its PR or manual runs; those failures are surfaced
-     directly on their ADO validation.
-2. For every run with `result != "succeeded"`:
+     `branchName: refs/heads/main` and the numeric scheduled-build reason
+     filter (`reasonFilter: 8`), plus the completed-build status filter
+     (`statusFilter: 2`),
+     `queryOrder: FinishTimeDescending`, and `top: 1`. Never report its PR or
+     manual runs; those failures are surfaced directly on their ADO validation.
+3. For every run with `result != "succeeded"`:
    1. Search open issues on `jamesadevine/ado-aw-issues` for one whose title
       starts with `[smoke-failure] <pipeline-name>`. If one already
       exists, skip this pipeline.
@@ -70,7 +82,8 @@ front-matter `name:` values from their source Markdown.
         - build URL (`_links.web.href`),
         - finish time,
         - `result` and `status`,
-        - the last 50 lines of the agent stage log if accessible.
+        - the last 50 lines of the agent stage log when accessible through
+          `pipelines_build_log` (`action: list`, then `action: get_content`).
       - `labels`: omit this field. `["pipeline-failure", "ado-aw-smoke"]`
         are added by config. The executor permits only redundant copies of
         those exact labels and rejects every other agent-supplied label.

@@ -58,8 +58,10 @@ by the runtime resolver:
 
 | Variable | Expands to |
 |----------|------------|
+| `$(Build.BuildId)` | the current build ID |
 | `$(Build.SourcesDirectory)` | the checkout root |
 | `$(Build.Repository.Name)` | the trigger repo's subfolder name (multi-checkout) |
+| `$(System.CollectionUri)` | the Azure DevOps collection URL |
 
 The compiler passes these to `import.js` as `--var name=$(name)` flags (ADO expands
 the macro at runtime); the resolver then replaces every `$(name)` occurrence in the
@@ -113,4 +115,3 @@ compile time instead of on the pipeline runner.
 - **Compile time**: `resolve_imports_inline()` in
   `src/compile/extensions/ado_script.rs` performs the inline expansion
   when `inlined-imports: true`.
-

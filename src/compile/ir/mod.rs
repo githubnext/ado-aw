@@ -251,6 +251,7 @@ pub enum RepositoryResource {
         kind: String,
         name: String,
         r#ref: Option<String>,
+        endpoint: Option<String>,
     },
 }
 

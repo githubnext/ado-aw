@@ -13,7 +13,10 @@ function emptyResponse(status: number): Response {
   return new Response(null, { status });
 }
 
-function makeRest(fetchImpl: typeof fetch, extra: Partial<ConstructorParameters<typeof AdoRest>[0]> = {}) {
+function makeRest(
+  fetchImpl: typeof fetch,
+  extra: Partial<ConstructorParameters<typeof AdoRest>[0]> = {},
+) {
   return new AdoRest({
     orgUrl: "https://dev.azure.com/org/",
     project: "AgentPlayground",
@@ -27,7 +30,9 @@ function makeRest(fetchImpl: typeof fetch, extra: Partial<ConstructorParameters<
 
 describe("AdoRest.getArtifact", () => {
   it("returns the artifact on the first successful attempt", async () => {
-    const fetchImpl = vi.fn(async () => jsonResponse(200, { name: "ado-aw-candidate" }));
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse(200, { name: "ado-aw-candidate" }),
+    );
     const rest = makeRest(fetchImpl as unknown as typeof fetch);
     const artifact = await rest.getArtifact(100, "ado-aw-candidate");
     expect(artifact.name).toBe("ado-aw-candidate");
@@ -42,7 +47,10 @@ describe("AdoRest.getArtifact", () => {
       return jsonResponse(200, { name: "ado-aw-candidate" });
     });
     const rest = makeRest(fetchImpl as unknown as typeof fetch);
-    const artifact = await rest.getArtifact(100, "ado-aw-candidate", { retries: 5, retryDelayMs: 1 });
+    const artifact = await rest.getArtifact(100, "ado-aw-candidate", {
+      retries: 5,
+      retryDelayMs: 1,
+    });
     expect(artifact.name).toBe("ado-aw-candidate");
     expect(calls).toBe(3);
   });
@@ -51,7 +59,10 @@ describe("AdoRest.getArtifact", () => {
     const fetchImpl = vi.fn(async () => emptyResponse(404));
     const rest = makeRest(fetchImpl as unknown as typeof fetch);
     await expect(
-      rest.getArtifact(100, "ado-aw-candidate", { retries: 2, retryDelayMs: 1 }),
+      rest.getArtifact(100, "ado-aw-candidate", {
+        retries: 2,
+        retryDelayMs: 1,
+      }),
     ).rejects.toThrow(/not visible/);
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
@@ -69,10 +80,12 @@ describe("AdoRest.getArtifact", () => {
 describe("AdoRest.queueBuild", () => {
   it("always sends both sourceBranch and sourceVersion", async () => {
     let sentBody: unknown;
-    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      sentBody = JSON.parse(String(init?.body));
-      return jsonResponse(200, { id: 555 });
-    });
+    const fetchImpl = vi.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        sentBody = JSON.parse(String(init?.body));
+        return jsonResponse(200, { id: 555 });
+      },
+    );
     const rest = makeRest(fetchImpl as unknown as typeof fetch);
     const result = await rest.queueBuild(2560, {
       sourceBranch: "refs/heads/ado-aw-smoke-candidate/1",
@@ -90,28 +103,81 @@ describe("AdoRest.queueBuild", () => {
     const fetchImpl = vi.fn(async () => new Response("nope", { status: 500 }));
     const rest = makeRest(fetchImpl as unknown as typeof fetch);
     await expect(
-      rest.queueBuild(2560, { sourceBranch: "refs/heads/x", sourceVersion: "sha" }),
+      rest.queueBuild(2560, {
+        sourceBranch: "refs/heads/x",
+        sourceVersion: "sha",
+      }),
     ).rejects.toThrow(/HTTP 500/);
   });
 });
 
 describe("AdoRest.getBuild / cancelBuild", () => {
   it("getBuild returns the parsed build summary", async () => {
-    const fetchImpl = vi.fn(async () => jsonResponse(200, { id: 1, status: "completed", result: "succeeded" }));
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse(200, { id: 1, status: "completed", result: "succeeded" }),
+    );
     const rest = makeRest(fetchImpl as unknown as typeof fetch);
     const build = await rest.getBuild(1);
     expect(build.status).toBe("completed");
     expect(build.result).toBe("succeeded");
   });
 
+  describe("AdoRest.getBuildTags", () => {
+    it("accepts the documented string-array response", async () => {
+      const fetchImpl = vi.fn(async () =>
+        jsonResponse(200, ["ado-aw-custom-job-10"]),
+      );
+      const rest = makeRest(fetchImpl as unknown as typeof fetch);
+      await expect(rest.getBuildTags(10)).resolves.toEqual([
+        "ado-aw-custom-job-10",
+      ]);
+    });
+
+    it("accepts an ADO collection wrapper defensively", async () => {
+      const fetchImpl = vi.fn(async () =>
+        jsonResponse(200, { count: 1, value: ["tag-one"] }),
+      );
+      const rest = makeRest(fetchImpl as unknown as typeof fetch);
+      await expect(rest.getBuildTags(10)).resolves.toEqual(["tag-one"]);
+    });
+
+    it("retries malformed responses and reports the final error", async () => {
+      const fetchImpl = vi.fn(async () => jsonResponse(200, { value: [42] }));
+      const rest = makeRest(fetchImpl as unknown as typeof fetch);
+      await expect(
+        rest.getBuildTags(10, { retries: 2, retryDelayMs: 1 }),
+      ).rejects.toThrow(/not a string array/);
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+    });
+
+    it("retries a successful response until every required tag is visible", async () => {
+      let calls = 0;
+      const fetchImpl = vi.fn(async () => {
+        calls++;
+        return jsonResponse(200, calls === 1 ? [] : ["ado-aw-custom-job-10"]);
+      });
+      const rest = makeRest(fetchImpl as unknown as typeof fetch);
+      await expect(
+        rest.getBuildTags(10, {
+          retries: 2,
+          retryDelayMs: 1,
+          required: ["ado-aw-custom-job-10"],
+        }),
+      ).resolves.toEqual(["ado-aw-custom-job-10"]);
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+    });
+  });
+
   it("cancelBuild PATCHes the build to status=cancelling", async () => {
     let method: string | undefined;
     let body: unknown;
-    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      method = init?.method;
-      body = JSON.parse(String(init?.body));
-      return emptyResponse(204);
-    });
+    const fetchImpl = vi.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        method = init?.method;
+        body = JSON.parse(String(init?.body));
+        return emptyResponse(204);
+      },
+    );
     const rest = makeRest(fetchImpl as unknown as typeof fetch);
     await rest.cancelBuild(1);
     expect(method).toBe("PATCH");
@@ -132,28 +198,37 @@ describe("AdoRest.listBuildsForDefinitionBranch", () => {
       });
     });
     const rest = makeRest(fetchImpl as unknown as typeof fetch);
-    const builds = await rest.listBuildsForDefinitionBranch(3001, "refs/heads/ado-aw-smoke-candidate/1");
+    const builds = await rest.listBuildsForDefinitionBranch(
+      3001,
+      "refs/heads/ado-aw-smoke-candidate/1",
+    );
     expect(builds).toHaveLength(2);
     expect(builds[1]?.status).toBe("inProgress");
     // The query is scoped to exactly one definition id + the exact branch —
     // never a comma-separated statusFilter (status is inspected client-side
     // instead, per the stale-scan safety requirement).
     expect(requestedPath).toContain("definitions=3001");
-    expect(requestedPath).toContain(encodeURIComponent("refs/heads/ado-aw-smoke-candidate/1"));
+    expect(requestedPath).toContain(
+      encodeURIComponent("refs/heads/ado-aw-smoke-candidate/1"),
+    );
     expect(requestedPath).not.toContain("statusFilter");
   });
 
   it("returns an empty array when there are no builds on that branch", async () => {
     const fetchImpl = vi.fn(async () => jsonResponse(200, { value: [] }));
     const rest = makeRest(fetchImpl as unknown as typeof fetch);
-    const builds = await rest.listBuildsForDefinitionBranch(3001, "refs/heads/ado-aw-smoke-candidate/2");
+    const builds = await rest.listBuildsForDefinitionBranch(
+      3001,
+      "refs/heads/ado-aw-smoke-candidate/2",
+    );
     expect(builds).toEqual([]);
   });
 });
 
 describe("AdoRest.buildUrl", () => {
   it("builds a human-facing build results URL", () => {
-    const rest = makeRest((async () => emptyResponse(200)) as unknown as typeof fetch);
+    const rest = makeRest((async () =>
+      emptyResponse(200)) as unknown as typeof fetch);
     expect(rest.buildUrl(123)).toBe(
       "https://dev.azure.com/org/AgentPlayground/_build/results?buildId=123",
     );
@@ -168,6 +243,8 @@ describe("redactToken", () => {
   });
 
   it("is a no-op for an undefined token", () => {
-    expect(redactToken("nothing to redact", undefined)).toBe("nothing to redact");
+    expect(redactToken("nothing to redact", undefined)).toBe(
+      "nothing to redact",
+    );
   });
 });

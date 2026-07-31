@@ -72,8 +72,8 @@ function fail(messages: string[]): never {
 // src/compile/extensions/ado_script.rs.
 //
 // The repeatable `--var name=value` flag carries a small, fixed set of
-// ADO path-anchor variables (e.g. `Build.SourcesDirectory`,
-// `Build.Repository.Name`). ADO expands the `$(...)` macros into
+// non-secret ADO variables (e.g. `Build.SourcesDirectory`,
+// `Build.BuildId`). ADO expands the `$(...)` macros into
 // concrete values in the resolver step's bash args before node runs, so
 // the values arrive here already resolved. The allowlist is owned by the
 // compiler (which emits the flags); import.js is a dumb substitutor and
@@ -188,7 +188,7 @@ function main(): void {
     fail(errors);
   }
 
-  // Substitute the compiler-provided ADO path-anchor variables (e.g.
+  // Substitute the compiler-provided ADO variables (e.g.
   // `$(Build.SourcesDirectory)`). Runs on the fully expanded prompt, so it
   // covers both the author body and any inlined snippets, giving the same
   // result whether imports are inlined at compile time (where ADO expands

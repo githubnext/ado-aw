@@ -300,6 +300,50 @@ fn test_integrity_check_inlined_imports_true_fails_on_body_edit() {
     );
 }
 
+#[test]
+fn test_integrity_check_resolves_imports_and_passes() {
+    // Regression: `ado-aw check` must resolve `imports:` the same way `compile`
+    // does. Before the shared resolve-and-merge helper, `check` skipped import
+    // resolution entirely, so a freshly-compiled import-using workflow reported
+    // false "drift" (missing imported tools + body). A local import needs no
+    // cache/network, so this exercises the merge deterministically.
+    let dir = fresh_git_temp_dir();
+    fs::write(
+        dir.path().join("component.md"),
+        "---\ntools:\n  edit: true\n---\nImported guidance line.\n",
+    )
+    .expect("write component");
+    let source = write_source(
+        dir.path(),
+        "---\nname: check-imports-agent\ndescription: check resolves imports\nimports:\n  - component.md\n---\nConsumer body.\n",
+    );
+
+    let compile_output = run_compile(&source);
+    assert!(
+        compile_output.status.success(),
+        "compile should succeed: {}",
+        String::from_utf8_lossy(&compile_output.stderr)
+    );
+    let lock = source.with_extension("lock.yml");
+    assert!(lock.exists(), "expected lock file at {}", lock.display());
+
+    // The imported tool + inlined imported body must be present in the lock.
+    let lock_content = fs::read_to_string(&lock).expect("read lock");
+    assert!(
+        lock_content.contains("Imported guidance line."),
+        "compiled lock should inline the imported body"
+    );
+
+    // check must PASS on the freshly compiled, unedited import-using workflow.
+    let check_output = run_check(&lock);
+    assert!(
+        check_output.status.success(),
+        "check must resolve imports and pass on a fresh compile: stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&check_output.stdout),
+        String::from_utf8_lossy(&check_output.stderr)
+    );
+}
+
 // ─── Non-mapping front matter ──────────────────────────────────────────────
 
 #[test]

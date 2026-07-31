@@ -18,7 +18,8 @@ function baseEnv(overrides: Record<string, string | undefined> = {}): NodeJS.Pro
     COMPILER_SMOKE_CANARY_DEFINITION_ID: "2601",
     COMPILER_SMOKE_AZURE_CLI_DEFINITION_ID: "2602",
     COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID: "2603",
-    COMPILER_SMOKE_REPORTER_DEFINITION_ID: "2605",
+    COMPILER_SMOKE_REPORTER_DEFINITION_ID: "2604",
+    COMPILER_SMOKE_CUSTOM_SAFE_OUTPUT_DEFINITION_ID: "2605",
     ...overrides,
   };
 }
@@ -34,7 +35,8 @@ describe("loadConfig", () => {
       canary: 2601,
       "azure-cli": 2602,
       "noop-target": 2603,
-      "smoke-failure-reporter": 2605,
+      "smoke-failure-reporter": 2604,
+      "custom-safe-output": 2605,
     });
     expect(config.concurrency).toBe(5);
     expect(config.childTimeoutMs).toBe(7_200_000);
@@ -58,6 +60,7 @@ describe("loadConfig", () => {
     "COMPILER_SMOKE_AZURE_CLI_DEFINITION_ID",
     "COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID",
     "COMPILER_SMOKE_REPORTER_DEFINITION_ID",
+    "COMPILER_SMOKE_CUSTOM_SAFE_OUTPUT_DEFINITION_ID",
   ]) {
     it(`rejects a missing ${name}`, () => {
       expect(() => loadConfig(baseEnv({ [name]: undefined }))).toThrow();

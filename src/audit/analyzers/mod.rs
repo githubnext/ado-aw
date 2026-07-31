@@ -2,8 +2,9 @@
 //! and populate sections of [`crate::audit::model::AuditData`].
 //!
 //! Each submodule owns one signal: firewall, mcp, otel, safe-outputs,
-//! detection, missing-tools/data/noops, build timeline.
+//! detection, custom safe-output jobs, missing-tools/data/noops, build timeline.
 
+pub mod custom_jobs;
 pub mod detection;
 pub mod firewall;
 pub mod jobs;

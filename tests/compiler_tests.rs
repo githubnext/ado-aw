@@ -497,6 +497,13 @@ Do something.
         compiled.contains("my-read-sc"),
         "Compiled output should contain the read service connection name"
     );
+    let document = parse_compiled_yaml(&compiled);
+    assert_job_execution_env_excludes_ado_credentials(
+        &document,
+        "Agent",
+        "=== Running AI agent with AWF",
+        "read/write Agent",
+    );
 
     // Should contain write token acquisition (SC_WRITE_TOKEN)
     assert!(
@@ -772,11 +779,73 @@ Do something.
         "Compiled output should contain SC_READ_TOKEN"
     );
     assert!(
+        compiled.contains("my-read-sc"),
+        "Compiled output should contain the read service connection name"
+    );
+    let document = parse_compiled_yaml(&compiled);
+    assert_job_execution_env_excludes_ado_credentials(
+        &document,
+        "Agent",
+        "=== Running AI agent with AWF",
+        "read-only Agent",
+    );
+    assert!(
         !compiled.contains("SC_WRITE_TOKEN"),
         "Compiled output should not contain SC_WRITE_TOKEN when only read is configured"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_permissions_ado_token_isolation_for_all_targets() {
+    for target in [None, Some("1es"), Some("job"), Some("stage")] {
+        let label = target.unwrap_or("standalone");
+        let target_line = target
+            .map(|value| format!("target: {value}\n"))
+            .unwrap_or_default();
+        let source = format!(
+            r#"---
+name: "ADO Token Isolation {label}"
+description: "Ensures Agent and Detection receive no ADO credentials"
+{target_line}permissions:
+  read: agent-read
+  write: executor-write
+safe-outputs:
+  noop: {{}}
+---
+
+## Test
+
+Call noop.
+"#
+        );
+        let (ok, compiled, stderr) =
+            compile_inline_source(&format!("ado-token-isolation-{label}"), &source);
+        assert!(ok, "{label}: compilation failed:\n{stderr}");
+        assert!(
+            compiled.contains("SC_READ_TOKEN"),
+            "{label}: permissions.read must still acquire SC_READ_TOKEN"
+        );
+        assert!(
+            compiled.contains("agent-read"),
+            "{label}: compiled output must retain the read service connection"
+        );
+
+        let document = parse_compiled_yaml(&compiled);
+        assert_job_execution_env_excludes_ado_credentials(
+            &document,
+            "Agent",
+            "=== Running AI agent with AWF",
+            &format!("{label} Agent"),
+        );
+        assert_job_execution_env_excludes_ado_credentials(
+            &document,
+            "Detection",
+            "# Run threat analysis with AWF network isolation",
+            &format!("{label} Detection"),
+        );
+    }
 }
 
 /// Test that the 1ES fixture compiles correctly with no unreplaced markers
@@ -3478,7 +3547,9 @@ fn find_job_mapping_by_display_name<'a>(
 ) -> Option<&'a serde_yaml::Mapping> {
     match value {
         serde_yaml::Value::Mapping(map) => {
-            if map.get(yaml_key("displayName")).and_then(|v| v.as_str()) == Some(display_name) {
+            if map.contains_key(yaml_key("job"))
+                && map.get(yaml_key("displayName")).and_then(|v| v.as_str()) == Some(display_name)
+            {
                 return Some(map);
             }
             map.values()
@@ -3495,19 +3566,59 @@ fn find_bash_step_containing<'a>(
     job: &'a serde_yaml::Mapping,
     needle: &str,
 ) -> Option<&'a serde_yaml::Mapping> {
-    job.get(yaml_key("steps"))
-        .and_then(|v| v.as_sequence())
-        .and_then(|steps| {
-            steps.iter().find_map(|step| {
-                let map = step.as_mapping()?;
-                let bash = map.get(yaml_key("bash")).and_then(|v| v.as_str())?;
-                if bash.contains(needle) {
-                    Some(map)
-                } else {
-                    None
-                }
-            })
-        })
+    job.values()
+        .find_map(|value| find_bash_step_containing_value(value, needle))
+}
+
+fn find_bash_step_containing_value<'a>(
+    value: &'a serde_yaml::Value,
+    needle: &str,
+) -> Option<&'a serde_yaml::Mapping> {
+    match value {
+        serde_yaml::Value::Mapping(map) => {
+            if map
+                .get(yaml_key("bash"))
+                .and_then(|value| value.as_str())
+                .is_some_and(|bash| bash.contains(needle))
+            {
+                return Some(map);
+            }
+            map.values()
+                .find_map(|child| find_bash_step_containing_value(child, needle))
+        }
+        serde_yaml::Value::Sequence(items) => items
+            .iter()
+            .find_map(|child| find_bash_step_containing_value(child, needle)),
+        _ => None,
+    }
+}
+
+fn assert_job_execution_env_excludes_ado_credentials(
+    document: &serde_yaml::Value,
+    job_display_name: &str,
+    script_needle: &str,
+    label: &str,
+) {
+    let job = find_job_mapping_by_display_name(document, job_display_name)
+        .unwrap_or_else(|| panic!("{label}: missing {job_display_name} job"));
+    let step = find_bash_step_containing(job, script_needle)
+        .unwrap_or_else(|| panic!("{label}: missing execution step"));
+    if let Some(env) = step
+        .get(yaml_key("env"))
+        .and_then(|value| value.as_mapping())
+    {
+        for forbidden in [
+            "AZURE_DEVOPS_EXT_PAT",
+            "SC_READ_TOKEN",
+            "SC_WRITE_TOKEN",
+            "SYSTEM_ACCESSTOKEN",
+        ] {
+            assert!(
+                !env.contains_key(yaml_key(forbidden)),
+                "{label}: execution env must not expose {forbidden}"
+            );
+        }
+    }
 }
 
 fn assert_named_pool_demands(pool: &serde_yaml::Mapping, expected_os: Option<&str>) {
@@ -9344,7 +9455,9 @@ fn test_smoke_failure_reporter_uses_registered_ado_names_and_staging_repo() {
         .join("tests")
         .join("safe-outputs")
         .join("smoke-failure-reporter.md");
-    let reporter = fs::read_to_string(reporter_path).expect("read smoke-failure-reporter fixture");
+    let reporter = fs::read_to_string(reporter_path)
+        .expect("read smoke-failure-reporter fixture")
+        .replace("\r\n", "\n");
 
     for definition_name in [
         "Daily safe-output smoke canary",
@@ -9365,4 +9478,290 @@ fn test_smoke_failure_reporter_uses_registered_ado_names_and_staging_repo() {
             && reporter.contains("Search open issues on `jamesadevine/ado-aw-issues`"),
         "front matter and prompt must agree on the staging issue repository"
     );
+    assert!(
+        reporter.contains("allowed-labels:\n      - pipeline-failure\n      - ado-aw-smoke"),
+        "reporter must allow only redundant copies of its two static labels"
+    );
+    assert!(
+        reporter.contains("rejects every other agent-supplied label"),
+        "reporter prompt must explain the exact-label boundary"
+    );
+    for contract in [
+        "org: msazuresphere",
+        "toolsets: [pipelines]",
+        "- pipelines_definition",
+        "- pipelines_build",
+        "- pipelines_build_log",
+        "Use only the native Azure DevOps MCP tools",
+        "Do not call ADO through bash, `curl`, `az`, or raw HTTP",
+    ] {
+        assert!(
+            reporter.contains(contract),
+            "reporter must use the MCPG-authenticated pipelines tools; missing: {contract}"
+        );
+    }
+    assert!(
+        !reporter.contains("SYSTEM_ACCESSTOKEN-equivalent bearer token"),
+        "reporter must not claim that an ADO credential is available in the Agent environment"
+    );
+
+    let (ok, compiled, stderr) =
+        compile_inline_source("smoke-failure-reporter-mcp-contract", &reporter);
+    assert!(ok, "smoke failure reporter should compile:\n{stderr}");
+    assert!(
+        compiled.contains("-e ADO_MCP_AUTH_TOKEN=\"$SC_READ_TOKEN\""),
+        "reporter must map the read token only into the Azure DevOps MCP container"
+    );
+    let document = parse_compiled_yaml(&compiled);
+    assert_job_execution_env_excludes_ado_credentials(
+        &document,
+        "Agent",
+        "=== Running AI agent with AWF",
+        "smoke failure reporter Agent",
+    );
+}
+
+#[test]
+fn test_azure_cli_smoke_uses_non_blocking_noop_flow() {
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("safe-outputs")
+        .join("azure-cli.md");
+    let fixture = fs::read_to_string(fixture_path)
+        .expect("read azure-cli smoke fixture")
+        .replace("\r\n", "\n");
+
+    for contract in [
+        "Capture the combined stdout/stderr",
+        "Invoke exactly one MCP tool: `noop` from the `safeoutputs`",
+        "bash:\n    - az\n    - head",
+        "edit: false",
+        "Do not inspect MCP configuration",
+        "Do not invoke SafeOutputs through",
+        "Actually invoke the MCP tool",
+    ] {
+        assert!(
+            fixture.contains(contract),
+            "Azure CLI smoke must preserve its non-blocking restricted flow; missing contract: {contract}"
+        );
+    }
+    for forbidden in ["report-incomplete", "Do not call `noop`"] {
+        assert!(
+            !fixture.contains(forbidden),
+            "Azure CLI smoke must not fail the candidate lane on unavailable direct auth: {forbidden}"
+        );
+    }
+
+    let (ok, compiled, stderr) = compile_inline_source("azure-cli-smoke-tool-policy", &fixture);
+    assert!(ok, "Azure CLI smoke should compile:\n{stderr}");
+    let document = parse_compiled_yaml(&compiled);
+    assert_job_execution_env_excludes_ado_credentials(
+        &document,
+        "Agent",
+        "=== Running AI agent with AWF",
+        "Azure CLI smoke Agent",
+    );
+    let agent = find_job_mapping_by_display_name(&document, "Agent")
+        .expect("Azure CLI smoke should contain the Agent job");
+    let run_agent = find_bash_step_containing(agent, "=== Running AI agent with AWF")
+        .expect("Azure CLI smoke should contain the Agent execution step");
+    let command = run_agent
+        .get(yaml_key("bash"))
+        .and_then(|value| value.as_str())
+        .expect("Agent execution step should have a bash body");
+    for required in ["shell(az)", "shell(head)"] {
+        assert!(
+            command.contains(required),
+            "Azure CLI Agent command should allow only its required shell command {required}:\n{command}"
+        );
+    }
+    for forbidden in ["--allow-all-tools", "--allow-all-paths"] {
+        assert!(
+            !command.contains(forbidden),
+            "Azure CLI Agent command must not contain {forbidden}:\n{command}"
+        );
+    }
+}
+
+// ─── Custom safe-output jobs acceptance matrix ───────────────────────────────
+
+/// Compile the custom jobs-style fixture with the front-matter `target:`
+/// swapped to `target`, returning the compiled YAML.
+fn compile_custom_for_target(target: Option<&str>) -> String {
+    let target_owned = target.map(str::to_string);
+    compile_fixture_tree_with_flags(
+        "custom-safe-output-scripts.md",
+        &[],
+        &["--skip-integrity"],
+        move |contents| match &target_owned {
+            Some(t) => contents.replacen(
+                "description: A workflow",
+                &format!("target: {t}\ndescription: A workflow"),
+                1,
+            ),
+            None => contents,
+        },
+    )
+}
+
+#[test]
+fn custom_safe_output_emits_gated_executor_job_standalone() {
+    let compiled = compile_custom_for_target(None);
+    assert_valid_yaml(&compiled, "custom-safe-output-scripts.md");
+    // A dedicated per-definition custom job is emitted.
+    assert!(
+        compiled.contains("Custom_send_notification"),
+        "expected a Custom_send_notification job:\n{compiled}"
+    );
+    // It prepares one aggregate, validated Agent-output file.
+    assert!(
+        compiled.contains("--prepare-custom-agent-output"),
+        "expected the custom job to prepare aggregate Agent output:\n{compiled}"
+    );
+    // The generated closed MCP tool schema is wired into the server launch.
+    assert!(
+        compiled.contains("--custom-tools"),
+        "expected the SafeOutputs MCP server to receive --custom-tools:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("\"additionalProperties\":false")
+            || compiled.contains("\"additionalProperties\": false"),
+        "expected a closed (additionalProperties:false) generated schema:\n{compiled}"
+    );
+    // require-approval on the custom tool routes it through ManualReview.
+    assert!(
+        compiled.contains("- job: ManualReview"),
+        "reviewed custom tool must emit a ManualReview gate:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("HasCustom_send_notification"),
+        "Detection must publish a per-tool proposal signal:\n{compiled}"
+    );
+}
+
+#[test]
+fn custom_safe_output_compiles_for_all_targets() {
+    for target in [None, Some("1es"), Some("job"), Some("stage")] {
+        let compiled = compile_custom_for_target(target);
+        let label = target.unwrap_or("standalone");
+        assert_valid_yaml(
+            &compiled,
+            &format!("custom-safe-output-scripts.md ({label})"),
+        );
+        assert!(
+            compiled.contains("Custom_send_notification"),
+            "target {label}: expected a Custom_send_notification job:\n{compiled}"
+        );
+    }
+}
+
+#[test]
+fn custom_safe_output_secret_scope_excludes_agent_and_detection() {
+    let compiled = compile_custom_for_target(None);
+    let custom_start = compiled
+        .find("- job: Custom_send_notification")
+        .expect("custom job present");
+    let custom = &compiled[custom_start..];
+    let before_custom = &compiled[..custom_start];
+    assert!(custom.contains("NOTIFICATION_TOKEN: $(SHARED_NOTIFICATION_TOKEN)"));
+    assert!(!before_custom.contains("NOTIFICATION_TOKEN: $(SHARED_NOTIFICATION_TOKEN)"));
+    assert!(custom.contains("ADO_AW_AGENT_OUTPUT"));
+    assert!(custom.contains("checkout: none"));
+    assert!(!compiled.contains("custom_safe_output_send_notification"));
+}
+
+#[test]
+fn candidate_custom_safe_output_fixture_compiles_with_local_component() {
+    let repo = tempfile::tempdir().expect("create candidate fixture repo");
+    let source_rel = PathBuf::from("tests")
+        .join("compiler-smoke-e2e")
+        .join("custom-safe-output.md");
+    let source = repo.path().join(&source_rel);
+    fs::create_dir_all(source.parent().unwrap()).expect("create source directory");
+    fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(&source_rel),
+        &source,
+    )
+    .expect("copy candidate source");
+
+    let component_rel = PathBuf::from("tests")
+        .join("compiler-smoke-e2e")
+        .join("component-fixture")
+        .join("components")
+        .join("custom-build-tags")
+        .join("component.md");
+    let component = repo.path().join(component_rel);
+    fs::create_dir_all(component.parent().unwrap()).expect("create component directory");
+    fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("compiler-smoke-e2e")
+            .join("component-fixture")
+            .join("components")
+            .join("custom-build-tags")
+            .join("component.md"),
+        &component,
+    )
+    .expect("copy local component manifest");
+
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.name", "candidate-test"]);
+    git(&["config", "user.email", "candidate-test@example.com"]);
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "candidate fixture"]);
+
+    let output_path = repo.path().join("custom-safe-output.yml");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ado-aw"))
+        .args([
+            "compile",
+            source.to_str().unwrap(),
+            "--output",
+            output_path.to_str().unwrap(),
+            "--skip-integrity",
+        ])
+        .output()
+        .expect("compile candidate custom fixture");
+    assert!(
+        output.status.success(),
+        "candidate fixture compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let compiled = fs::read_to_string(output_path).expect("read candidate output");
+    assert_valid_yaml(&compiled, "custom-safe-output.md");
+    for expected in [
+        "Custom_candidate_job_build_tag",
+        "checkout: none",
+        "--prepare-custom-agent-output",
+        "ADO_AW_AGENT_OUTPUT",
+        "\"max\":1",
+        "Candidate build-tag proposal accepted.",
+        "\"--enabled-tools\"",
+        "\"noop\"",
+    ] {
+        assert!(
+            compiled.contains(expected),
+            "candidate output missing {expected}:\n{compiled}"
+        );
+    }
+    assert!(
+        !compiled.contains("\"--enabled-tools\",\n              \"add-build-tag\""),
+        "candidate fixture must not expose built-in add-build-tag:\n{compiled}"
+    );
+    assert!(!compiled.contains("candidate-script-build-tag"));
+    assert!(!compiled.contains("checkout-component"));
+    assert!(!compiled.contains("custom_safe_output_"));
 }

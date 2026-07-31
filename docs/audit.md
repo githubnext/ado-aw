@@ -88,7 +88,7 @@ Current top-level keys include the following. Optional sections are omitted from
 | `pipeline_graph` | Optional typed-IR `PipelineSummary` rebuilt from local source metadata (`aw_info.json.source`) for graph correlation. |
 | `mcp_tool_usage` | MCPG logs aggregated per `(server, tool)`. |
 | `mcp_failures` | MCPG `tool_error` / `server_error` events. |
-| `jobs` | ADO `/timeline` records filtered to `type: Job`; when `pipeline_graph` is available, each entry may include `upstream_jobs` and `downstream_jobs` from IR job edges. |
+| `jobs` | ADO `/timeline` records filtered to `type: Job`; stable timeline IDs are retained for cache-safe correlation, and `pipeline_graph` may add `upstream_jobs` / `downstream_jobs` IR edges. |
 | `firewall_analysis` | AWF Squid proxy logs aggregated by domain. |
 | `policy_analysis` | AWF policy artifacts aggregated into allow / deny summaries. |
 | `missing_tools` / `missing_data` / `noops` | NDJSON entries from the corresponding SafeOutputs MCP tools. |

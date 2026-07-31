@@ -995,6 +995,41 @@ pub async fn resolve_auth(pat: Option<&str>) -> Result<AdoAuth> {
     }
 }
 
+/// Resolve ADO authentication for **non-interactive** (compile-time / CI)
+/// contexts, without ever prompting.
+///
+/// Precedence:
+/// 1. `SYSTEM_ACCESSTOKEN` — the ADO pipeline job token (bearer).
+/// 2. `AZURE_DEVOPS_EXT_PAT` — a personal access token (HTTP Basic).
+/// 3. `az account get-access-token` — an Azure CLI AAD token (bearer).
+///
+/// Unlike [`resolve_auth`], this never falls back to an interactive prompt, so
+/// it is safe to call from `ado-aw compile` and other unattended entry points.
+pub async fn resolve_auth_non_interactive() -> Result<AdoAuth> {
+    if let Ok(token) = std::env::var("SYSTEM_ACCESSTOKEN")
+        && !token.trim().is_empty()
+    {
+        debug!("Using SYSTEM_ACCESSTOKEN for Azure DevOps auth");
+        return Ok(AdoAuth::Bearer(token));
+    }
+    if let Ok(pat) = std::env::var("AZURE_DEVOPS_EXT_PAT")
+        && !pat.trim().is_empty()
+    {
+        debug!("Using AZURE_DEVOPS_EXT_PAT for Azure DevOps auth");
+        return Ok(AdoAuth::Pat(pat));
+    }
+    match try_azure_cli_token().await {
+        Ok(token) => {
+            debug!("Using Azure CLI token for Azure DevOps auth");
+            Ok(AdoAuth::Bearer(token))
+        }
+        Err(e) => Err(anyhow::anyhow!(
+            "no non-interactive Azure DevOps credentials available: set \
+             SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT, or run `az login` ({e:#})"
+        )),
+    }
+}
+
 /// Normalize a `--org` value to a full ADO organization URL.
 ///
 /// Users commonly pass just the org name (e.g. `myorg`) instead of the full
@@ -1280,6 +1315,89 @@ pub async fn get_repository_id(
         .and_then(|v| v.as_str())
         .map(str::to_string)
         .with_context(|| format!("Repository '{}' response has no 'id' field", repo_name))
+}
+
+/// Fetch the raw bytes of a single SHA-pinned file from an Azure Repos git
+/// repository via the ADO Git Items API.
+///
+/// Calls
+/// `GET {org_url}/{project}/_apis/git/repositories/{repo}/items?path={item_path}
+/// &versionDescriptor.version={commit_sha}&versionDescriptor.versionType=commit
+/// &includeContent=true&api-version=7.1`
+/// and returns the file `content` as UTF-8 bytes.
+///
+/// `org_url` is a full organization collection URL (e.g.
+/// `https://dev.azure.com/myorg`); for cross-organization imports pass the
+/// target org's URL. Detects the ADO AAD sign-in HTML response (see
+/// [`looks_like_ado_signin`]) before attempting to parse JSON so an auth
+/// failure surfaces an actionable error rather than a JSON-parse error.
+pub async fn fetch_git_item(
+    client: &reqwest::Client,
+    org_url: &str,
+    project: &str,
+    repo: &str,
+    item_path: &str,
+    commit_sha: &str,
+    auth: &AdoAuth,
+) -> Result<Vec<u8>> {
+    let url = format!(
+        "{}/{}/_apis/git/repositories/{}/items?path={}\
+         &versionDescriptor.version={}&versionDescriptor.versionType=commit\
+         &includeContent=true&api-version=7.1",
+        org_url.trim_end_matches('/'),
+        percent_encoding::utf8_percent_encode(project, PATH_SEGMENT),
+        percent_encoding::utf8_percent_encode(repo, PATH_SEGMENT),
+        percent_encoding::utf8_percent_encode(item_path, PATH_SEGMENT),
+        percent_encoding::utf8_percent_encode(commit_sha, PATH_SEGMENT),
+    );
+
+    debug!("Fetching Azure Repos item: {}", url);
+
+    let resp = auth
+        .apply(client.get(&url))
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .await
+        .with_context(|| format!("Failed to request Azure Repos item '{}'", item_path))?;
+
+    let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let body = resp
+        .text()
+        .await
+        .with_context(|| format!("Failed to read Azure Repos item response for '{}'", item_path))?;
+
+    if looks_like_ado_signin(status, content_type.as_deref(), &body) {
+        return Err(ado_signin_error(auth));
+    }
+    if !status.is_success() {
+        anyhow::bail!(
+            "ADO Git Items API returned {} for '{}': {}",
+            status,
+            item_path,
+            body.trim()
+        );
+    }
+
+    #[derive(Deserialize)]
+    struct GitItem {
+        content: Option<String>,
+    }
+
+    let item: GitItem = serde_json::from_str(&body).with_context(|| {
+        format!("Failed to parse Azure Repos item response for '{}'", item_path)
+    })?;
+    let content = item.content.with_context(|| {
+        format!(
+            "Azure Repos item '{}' response contained no `content` (is it a directory?)",
+            item_path
+        )
+    })?;
+    Ok(content.into_bytes())
 }
 
 /// Resolve a GitHub service-connection identifier to its GUID.

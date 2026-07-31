@@ -280,3 +280,179 @@ async fn audit_uses_cached_run_summary_when_present() {
     assert_eq!(summary.ado_aw_version, env!("CARGO_PKG_VERSION"));
     assert_eq!(summary.audit_data.overview.pipeline_name, "cached-pipeline");
 }
+
+#[tokio::test]
+async fn cached_audit_correlates_custom_safe_output_at_job_level() {
+    let server = MockServer::start().await;
+    let workspace = TempDir::new().expect("create workspace temp dir");
+    let output_dir = TempDir::new().expect("create output temp dir");
+    let summary_path = run_summary_path(output_dir.path(), 12345);
+    let run_dir = summary_path.parent().expect("run summary parent");
+    let staging = run_dir.join("agent_outputs_12345").join("staging");
+
+    fs::create_dir_all(&staging)
+        .await
+        .expect("create cached agent artifacts");
+    fs::write(
+        staging.join("safe_outputs.ndjson"),
+        b"{\"name\":\"notify-team\",\"message\":\"hello\"}\n{\"name\":\"missing-tool\"}\n",
+    )
+    .await
+    .expect("write custom proposal");
+    fs::write(
+        staging.join("custom-tools.json"),
+        serde_json::to_vec(&json!([
+            {
+                "name": "missing-tool",
+                "description": "Missing",
+                "inputSchema": {"type": "object"},
+                "max": 1
+            },
+            {
+                "name": "no-proposal",
+                "description": "Unexpected",
+                "inputSchema": {"type": "object"},
+                "max": 1
+            },
+            {
+                "name": "notify-team",
+                "description": "Notify",
+                "inputSchema": {"type": "object"},
+                "max": 1,
+                "output": "Notification proposal accepted."
+            }
+        ]))
+        .expect("serialize custom tools"),
+    )
+    .await
+    .expect("write custom tools");
+    fs::write(
+        &summary_path,
+        serde_json::to_vec_pretty(&json!({
+            "ado_aw_version": env!("CARGO_PKG_VERSION"),
+            "build_id": 12345,
+            "processed_at": "2026-05-21T12:00:00Z",
+            "audit_data": {
+                "overview": {
+                    "build_id": 12345,
+                    "pipeline_name": "cached-custom-pipeline",
+                    "aw_info": {
+                        "custom_components": [{
+                            "tool": "notify-team",
+                            "source": "org/repo/components/notify",
+                            "sha": "0123456789abcdef0123456789abcdef01234567",
+                            "manifest_digest": "manifest-digest",
+                            "schema_digest": "mismatched-schema-digest"
+                        }],
+                        "custom_jobs": [
+                            {
+                                "tool": "missing-tool",
+                                "job_id": "Custom_missing_tool",
+                                "approval_path": "automatic",
+                                "staged_requested": false
+                            },
+                            {
+                                "tool": "no-proposal",
+                                "job_id": "Custom_no_proposal",
+                                "approval_path": "automatic",
+                                "staged_requested": false
+                            },
+                            {
+                                "tool": "notify-team",
+                                "job_id": "Custom_notify_team",
+                                "approval_path": "automatic",
+                                "staged_requested": true
+                            }
+                        ]
+                    }
+                },
+                "metrics": {},
+                "detection_analysis": {
+                    "threats": {},
+                    "safe_to_process": true
+                },
+                "jobs": [
+                    {
+                        "name": "Custom_no_proposal",
+                        "status": "completed",
+                        "result": "succeeded",
+                        "started_at": "2026-05-21T12:03:00Z",
+                        "finished_at": "2026-05-21T12:03:01Z"
+                    },
+                    {
+                        "name": "Custom_notify_team",
+                        "status": "completed",
+                        "result": "succeeded",
+                        "started_at": "2026-05-21T12:04:00Z",
+                        "finished_at": "2026-05-21T12:04:01Z"
+                    }
+                ],
+                "downloaded_files": []
+            }
+        }))
+        .expect("serialize cached summary"),
+    )
+    .await
+    .expect("write cached summary");
+
+    let output = run_audit(workspace.path(), output_dir.path(), "12345", Some(&server)).await;
+    assert!(
+        output.status.success(),
+        "audit should correlate cached custom job: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("## Custom Safe-Output Jobs"));
+    assert!(stdout.contains("proposal_time_acknowledgement: Notification proposal accepted."));
+
+    let value: serde_json::Value = serde_json::from_slice(
+        &fs::read(&summary_path)
+            .await
+            .expect("read refreshed run summary"),
+    )
+    .expect("parse refreshed run summary");
+    let custom_jobs = value["audit_data"]["custom_safe_output_jobs"]
+        .as_array()
+        .expect("custom job array");
+    let custom = custom_jobs
+        .iter()
+        .find(|entry| entry["tool"] == "notify-team")
+        .expect("notify-team audit row");
+    assert!(
+        value["audit_data"].get("safe_output_execution").is_none(),
+        "custom proposals must not synthesize per-item execution rows"
+    );
+    assert_eq!(custom["tool"], "notify-team");
+    assert_eq!(custom["proposed_count"], 1);
+    assert_eq!(custom["expected_job_id"], "Custom_notify_team");
+    assert_eq!(custom["staged_requested"], true);
+    assert_eq!(
+        custom["proposal_time_acknowledgement"],
+        "Notification proposal accepted."
+    );
+    assert_eq!(custom["ado_job"]["name"], "Custom_notify_team");
+    assert_eq!(custom["ado_job"]["result"], "succeeded");
+    assert!(
+        custom.get("result").is_none(),
+        "custom audit rows must not expose a per-item execution result"
+    );
+    let finding_titles = value["audit_data"]["key_findings"]
+        .as_array()
+        .expect("key findings")
+        .iter()
+        .filter_map(|finding| finding["title"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        finding_titles.contains(&"Expected custom job missing for missing-tool"),
+        "missing custom jobs should produce a finding: {finding_titles:?}"
+    );
+    assert!(
+        finding_titles.contains(&"Custom job ran without proposals for no-proposal"),
+        "impossible custom job states should produce a finding: {finding_titles:?}"
+    );
+    assert!(
+        finding_titles.contains(&"Custom component provenance mismatch for notify-team"),
+        "provenance mismatches should produce a finding: {finding_titles:?}"
+    );
+}

@@ -9,7 +9,7 @@ use crate::audit::model::{self, Severity};
 ///   Overview → Metrics → Key Findings → Recommendations →
 ///   Safe Output Summary → Rejected Safe Outputs →
 ///   MCP Server Health → Firewall Analysis → Policy Analysis →
-///   Detection Analysis → Jobs → Downloaded Files →
+///   Detection Analysis → Custom Safe-Output Jobs → Jobs → Downloaded Files →
 ///   Missing Tools → Missing Data → Noops → MCP Failures →
 ///   Errors → Warnings → Tool Usage → MCP Tool Usage →
 ///   Created Items.
@@ -31,6 +31,7 @@ pub fn render_console(audit: &crate::audit::model::AuditData) -> String {
             render_firewall_analysis_section(audit.firewall_analysis.as_ref()),
             render_policy_analysis_section(audit.policy_analysis.as_ref()),
             render_detection_analysis_section(audit.detection_analysis.as_ref()),
+            render_custom_safe_output_jobs_section(&audit.custom_safe_output_jobs),
             render_jobs_section(&audit.jobs),
             render_downloaded_files_section(&audit.downloaded_files),
             render_missing_tools_section(&audit.missing_tools),
@@ -394,6 +395,98 @@ fn render_detection_analysis_section(
     push_opt_row(&mut rows, "verdict_path", analysis.verdict_path.as_deref());
 
     Some(render_kv_section("Detection Analysis", rows, false))
+}
+
+fn render_custom_safe_output_jobs_section(
+    jobs: &[model::CustomSafeOutputJobAudit],
+) -> Option<String> {
+    if jobs.is_empty() {
+        return None;
+    }
+
+    let lines = jobs
+        .iter()
+        .map(|job| {
+            let mut line = format!(
+                "- {}  proposals={}",
+                fallback_text(&job.tool, "(unknown custom tool)"),
+                format_number(job.proposed_count)
+            );
+            if let Some(path) = job.approval_path.as_deref() {
+                line.push_str("  approval=");
+                line.push_str(path);
+            }
+            if let Some(staged) = job.staged_requested {
+                line.push_str("  staged_requested=");
+                line.push_str(if staged { "true" } else { "false" });
+            }
+            if let Some(ado_job) = &job.ado_job {
+                let identity = ado_job
+                    .ref_name
+                    .as_deref()
+                    .or(ado_job.identifier.as_deref())
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(&ado_job.name);
+                line.push_str("  job=");
+                line.push_str(identity);
+                let state = ado_job
+                    .result
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(&ado_job.status);
+                if !state.is_empty() {
+                    line.push_str(" [");
+                    line.push_str(state);
+                    line.push(']');
+                }
+                if let Some(started_at) = ado_job.started_at.as_deref() {
+                    line.push_str("  started=");
+                    line.push_str(started_at);
+                }
+                if let Some(finished_at) = ado_job.finished_at.as_deref() {
+                    line.push_str("  finished=");
+                    line.push_str(finished_at);
+                }
+            } else if let Some(expected) = job.expected_job_id.as_deref() {
+                line.push_str("  expected_job=");
+                line.push_str(expected);
+            }
+            if let Some(component) = &job.component_provenance {
+                line.push_str("\n  provenance:");
+                if !component.source.is_empty() {
+                    line.push_str(" source=");
+                    line.push_str(&component.source);
+                }
+                if let Some(requested_ref) = component.requested_ref.as_deref() {
+                    line.push_str(" requested_ref=");
+                    line.push_str(requested_ref);
+                }
+                if !component.sha.is_empty() {
+                    line.push_str(" resolved_sha=");
+                    line.push_str(&component.sha);
+                }
+                if !component.manifest_digest.is_empty() {
+                    line.push_str(" manifest_digest=");
+                    line.push_str(&component.manifest_digest);
+                }
+                if !component.schema_digest.is_empty() {
+                    line.push_str(" schema_digest=");
+                    line.push_str(&component.schema_digest);
+                }
+            }
+            if let Some(acknowledgement) = job.proposal_time_acknowledgement.as_deref() {
+                line.push_str("\n  proposal_time_acknowledgement: ");
+                line.push_str(acknowledgement);
+            }
+            line
+        })
+        .collect();
+
+    Some(render_lines_section(
+        "Custom Safe-Output Jobs",
+        lines,
+        false,
+    ))
 }
 
 fn render_jobs_section(jobs: &[model::JobData]) -> Option<String> {
@@ -951,8 +1044,9 @@ mod tests {
     use super::render_console;
     use crate::audit::model::{
         AgenticAssessment, AuditData, AuditEngineConfig, AwInfo, BehaviorFingerprint,
-        CreatedItemReport, DetectionAnalysis, DetectionThreats, DomainStat, ErrorInfo, FileInfo,
-        Finding, FirewallAnalysis, JobData, MCPFailureReport, MCPServerHealth, MCPServerStats,
+        ComponentProvenance, CreatedItemReport, CustomSafeOutputAdoJob, CustomSafeOutputJobAudit,
+        DetectionAnalysis, DetectionThreats, DomainStat, ErrorInfo, FileInfo, Finding,
+        FirewallAnalysis, JobData, MCPFailureReport, MCPServerHealth, MCPServerStats,
         MCPToolSummary, MCPToolUsageData, MetricsData, MissingDataReport, MissingToolReport,
         NoopReport, PerformanceMetrics, PolicyAnalysis, PolicyRule, Recommendation,
         RejectedSafeOutputsRollup, SafeOutputExecution, SafeOutputExecutionItem, SafeOutputStatus,
@@ -1047,6 +1141,11 @@ By threat:
 - reason:          Suspicious instruction in fetched content
 - verdict_path:    analyzed_outputs_12345\threat-analysis.json
 
+## Custom Safe-Output Jobs
+- notify_team  proposals=1  approval=manual_review  staged_requested=true  job=Custom_notify_team [succeeded]  started=2026-05-21T12:04:00Z  finished=2026-05-21T12:04:01Z
+  provenance: source=org/repo/components/notify requested_ref=refs/tags/v1 resolved_sha=0123456789abcdef0123456789abcdef01234567 manifest_digest=sha256:manifest schema_digest=sha256:schema
+  proposal_time_acknowledgement: Notification proposed.
+
 ## Jobs
 - Agent       [completed/succeeded]  2m 30s
 - Detection   [completed/succeeded]  0m 30s
@@ -1129,6 +1228,7 @@ By threat:
             "## Firewall Analysis (total: 42 requests, allowed: 40, denied: 2)",
             "## Policy Analysis (allow: 1, deny: 1)",
             "## Detection Analysis",
+            "## Custom Safe-Output Jobs",
             "## Jobs",
             "## Downloaded Files",
             "## Missing Tools",
@@ -1184,7 +1284,7 @@ By threat:
                     source: Some("agents/my-agent.md".to_string()),
                     target: Some("standalone".to_string()),
                     compiler_version: Some("0.30.2".to_string()),
-                    ..AwInfo::default()
+                    ..Default::default()
                 }),
             },
             task_domain: Some(TaskDomainInfo {
@@ -1253,6 +1353,31 @@ By threat:
                     applies_to_whole_batch: true,
                 }],
             }),
+            custom_safe_output_jobs: vec![CustomSafeOutputJobAudit {
+                tool: "notify_team".to_string(),
+                proposed_count: 1,
+                expected_job_id: Some("Custom_notify_team".to_string()),
+                component_provenance: Some(ComponentProvenance {
+                    tool: "notify_team".to_string(),
+                    source: "org/repo/components/notify".to_string(),
+                    requested_ref: Some("refs/tags/v1".to_string()),
+                    sha: "0123456789abcdef0123456789abcdef01234567".to_string(),
+                    manifest_digest: "sha256:manifest".to_string(),
+                    schema_digest: "sha256:schema".to_string(),
+                }),
+                approval_path: Some("manual_review".to_string()),
+                staged_requested: Some(true),
+                proposal_time_acknowledgement: Some("Notification proposed.".to_string()),
+                ado_job: Some(CustomSafeOutputAdoJob {
+                    ref_name: Some("Custom_notify_team".to_string()),
+                    name: "Notify team".to_string(),
+                    status: "completed".to_string(),
+                    result: Some("succeeded".to_string()),
+                    started_at: Some("2026-05-21T12:04:00Z".to_string()),
+                    finished_at: Some("2026-05-21T12:04:01Z".to_string()),
+                    ..Default::default()
+                }),
+            }],
             rejected_safe_outputs: Some(RejectedSafeOutputsRollup {
                 total_rejected: 4,
                 by_reason,
@@ -1277,7 +1402,6 @@ By threat:
                     unreliable: true,
                 }],
             }),
-            pipeline_graph: None,
             jobs: vec![
                 JobData {
                     name: "Agent".to_string(),
@@ -1394,6 +1518,7 @@ By threat:
                 id: Some("42".to_string()),
                 title: Some("Fix bug".to_string()),
             }],
+            ..Default::default()
         }
     }
 }

@@ -18,6 +18,7 @@ mod list;
 mod logging;
 mod mcp;
 mod mcp_author;
+mod mcp_custom_tools;
 mod ndjson;
 mod remove;
 mod run;
@@ -200,6 +201,7 @@ enum GraphCmd {
 }
 
 #[derive(Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Compile markdown to pipeline definition (or recompile all detected pipelines)
     Compile {
@@ -242,14 +244,18 @@ enum Commands {
         /// Only expose these safe output tools (can be repeated). If omitted, all tools are exposed.
         #[arg(long = "enabled-tools")]
         enabled_tools: Vec<String>,
+        /// Path to a compiler-generated JSON file of custom safe-output tool
+        /// definitions to register as dynamic MCP tools.
+        #[arg(long = "custom-tools")]
+        custom_tools: Option<PathBuf>,
     },
     /// Run the author-facing MCP server over stdio (IDE/Copilot Chat integration)
     McpAuthor {},
     /// Execute safe outputs from Stage 1 (Stage 3 of the pipeline)
     Execute {
-        /// Path to the source markdown file (used to read tool configs from front matter)
+        /// Path to the source markdown file (used by built-in safe-output execution)
         #[arg(short, long)]
-        source: PathBuf,
+        source: Option<PathBuf>,
         /// Directory containing safe output NDJSON file
         #[arg(long, default_value = ".")]
         safe_output_dir: PathBuf,
@@ -274,6 +280,12 @@ enum Commands {
         /// tools wait for approval.
         #[arg(long = "exclude")]
         exclude: Vec<String>,
+        /// Compiler-generated resolved safe-output configuration.
+        #[arg(long = "resolved-config")]
+        resolved_config: Option<PathBuf>,
+        /// Validate, sanitize, and materialize Agent-output JSON for custom jobs.
+        #[arg(long = "prepare-custom-agent-output")]
+        prepare_custom_agent_output: Option<PathBuf>,
     },
     /// Initialize a repository for AI-first agentic workflow authoring
     Init {
@@ -696,15 +708,173 @@ async fn ensure_non_github_remote_for_ado_aw(command_name: &str, repo_path: &Pat
     Ok(())
 }
 
-async fn run_execute(
-    source: PathBuf,
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolvedExecutionConfig {
+    name: String,
+    #[serde(default)]
+    tool_configs: std::collections::HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    repositories: Vec<ResolvedExecutionRepository>,
+    #[serde(default)]
+    checkout: Vec<String>,
+    #[serde(default)]
+    repo_refs: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    cache_memory: Option<ResolvedCacheMemory>,
+    #[serde(default)]
+    debug_create_issue: Option<crate::safe_outputs::CreateIssueConfig>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ResolvedExecutionRepository {
+    repository: String,
+    name: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolvedCacheMemory {
+    enabled: bool,
+    #[serde(default)]
+    allowed_extensions: Vec<String>,
+}
+
+impl ResolvedExecutionConfig {
+    fn cache_memory_tools(&self) -> Option<crate::compile::types::ToolsConfig> {
+        let memory = self.cache_memory.as_ref()?;
+        let cache_memory = if !memory.enabled {
+            crate::compile::types::CacheMemoryToolConfig::Enabled(false)
+        } else if memory.allowed_extensions.is_empty() {
+            crate::compile::types::CacheMemoryToolConfig::Enabled(true)
+        } else {
+            crate::compile::types::CacheMemoryToolConfig::WithOptions(
+                crate::compile::types::CacheMemoryOptions {
+                    allowed_extensions: memory.allowed_extensions.clone(),
+                },
+            )
+        };
+        Some(crate::compile::types::ToolsConfig {
+            cache_memory: Some(cache_memory),
+            ..Default::default()
+        })
+    }
+}
+
+async fn build_execution_context_from_resolved(
+    config: &ResolvedExecutionConfig,
+    safe_output_dir: &Path,
+    ado_org_url: Option<String>,
+    ado_project: Option<String>,
+    dry_run: bool,
+) -> crate::safe_outputs::ExecutionContext {
+    let allowed_repositories = config
+        .checkout
+        .iter()
+        .filter_map(|alias| {
+            config
+                .repositories
+                .iter()
+                .find(|repository| &repository.repository == alias)
+                .map(|repository| (alias.clone(), repository.name.clone()))
+        })
+        .collect();
+
+    let mut ctx = crate::safe_outputs::ExecutionContext::default();
+    if let Some(url) = ado_org_url {
+        ctx.ado_organization = crate::safe_outputs::org_from_url(&url);
+        ctx.ado_org_url = Some(url);
+    }
+    if let Some(project) = ado_project {
+        ctx.ado_project = Some(project);
+    }
+    ctx.working_directory = safe_output_dir.to_path_buf();
+    ctx.tool_configs = config.tool_configs.clone();
+    if let Some(create_issue) = config.debug_create_issue.as_ref() {
+        match serde_json::to_value(create_issue) {
+            Ok(value) => {
+                ctx.tool_configs.insert("create-issue".to_string(), value);
+                ctx.debug_enabled_tools.insert("create-issue".to_string());
+            }
+            Err(error) => {
+                log::warn!("Failed to serialize resolved debug create-issue config: {error}")
+            }
+        }
+    }
+    ctx.allowed_repositories = allowed_repositories;
+    ctx.repo_refs = config.repo_refs.clone();
+    ctx.dry_run = dry_run;
+
+    let otel_path = safe_output_dir.join(agent_stats::OTEL_FILENAME);
+    if otel_path.exists() {
+        match agent_stats::AgentStats::from_otel_file(&otel_path, &config.name).await {
+            Ok(stats) => ctx.agent_stats = Some(stats),
+            Err(error) => log::warn!("Failed to parse OTel stats file: {error}"),
+        }
+    }
+    ctx
+}
+
+struct RunExecuteOptions {
+    source: Option<PathBuf>,
+    resolved_config: Option<PathBuf>,
     safe_output_dir: PathBuf,
     output_dir: Option<PathBuf>,
     ado_org_url: Option<String>,
     ado_project: Option<String>,
     dry_run: bool,
     filter: execute::ToolFilter,
-) -> Result<()> {
+}
+
+async fn run_execute(options: RunExecuteOptions) -> Result<()> {
+    let RunExecuteOptions {
+        source,
+        resolved_config,
+        safe_output_dir,
+        output_dir,
+        ado_org_url,
+        ado_project,
+        dry_run,
+        filter,
+    } = options;
+    if let Some(resolved_config) = resolved_config {
+        let content = tokio::fs::read_to_string(&resolved_config)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to read resolved execution config: {}",
+                    resolved_config.display()
+                )
+            })?;
+        let config: ResolvedExecutionConfig =
+            serde_json::from_str(&content).with_context(|| {
+                format!(
+                    "Failed to parse resolved execution config: {}",
+                    resolved_config.display()
+                )
+            })?;
+        println!(
+            "Loaded resolved tool configs from: {}",
+            resolved_config.display()
+        );
+        let tools = config.cache_memory_tools();
+        let mut ctx = build_execution_context_from_resolved(
+            &config,
+            &safe_output_dir,
+            ado_org_url,
+            ado_project,
+            dry_run,
+        )
+        .await;
+        if let Some(source) = source.as_deref() {
+            ctx.agent_last_author = discover_last_author(source).await;
+        }
+        let results = execute::execute_safe_outputs(&safe_output_dir, &ctx, &filter).await?;
+        process_cache_memory(tools.as_ref(), &safe_output_dir, output_dir).await?;
+        return finish_execution(results);
+    }
+
+    let source = source.context("--source or --resolved-config is required for execution")?;
     // Read and parse source markdown to get tool configs.
     // Use parse_markdown_detailed so Stage 3 benefits from in-memory
     // codemod fixes when a source has deprecated shapes. Stage 3 must
@@ -768,10 +938,13 @@ async fn run_execute(
     // Process agent memory if cache-memory tool is enabled
     process_cache_memory(tools.as_ref(), &safe_output_dir, output_dir).await?;
 
-    print_execution_summary(&results);
+    finish_execution(results)
+}
 
-    let failure_count = results.iter().filter(|r| !r.success).count();
-    let warning_count = results.iter().filter(|r| r.is_warning()).count();
+fn finish_execution(results: Vec<crate::safe_outputs::ExecutionResult>) -> Result<()> {
+    print_execution_summary(&results);
+    let failure_count = results.iter().filter(|result| !result.success).count();
+    let warning_count = results.iter().filter(|result| result.is_warning()).count();
     if failure_count > 0 {
         std::process::exit(1);
     } else if warning_count > 0 {
@@ -820,11 +993,21 @@ async fn build_execution_context(
     ctx.tool_configs = front_matter
         .safe_outputs
         .iter()
-        .filter(|(k, _)| {
-            !crate::compile::types::SAFE_OUTPUT_RESERVED_KEYS.contains(&k.as_str())
-        })
+        .filter(|(k, _)| !crate::compile::types::SAFE_OUTPUT_RESERVED_KEYS.contains(&k.as_str()))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
+    for tool in front_matter.all_safe_output_tool_names() {
+        let staged = front_matter.tool_is_staged(&tool);
+        // Take-normalize-reinsert keeps the object invariant structural: there is
+        // no intermediate state where a non-object value must be re-borrowed.
+        let mut config = match ctx.tool_configs.remove(&tool) {
+            Some(serde_json::Value::Object(config)) => config,
+            _ => serde_json::Map::new(),
+        };
+        config.insert("staged".to_string(), serde_json::Value::Bool(staged));
+        ctx.tool_configs
+            .insert(tool, serde_json::Value::Object(config));
+    }
     // Merge ado-aw-debug.create-issue config under the same tool_configs map
     // so Stage 3's `ctx.get_tool_config::<CreateIssueConfig>("create-issue")`
     // works exactly like every other safe-output. Without this merge the
@@ -1019,9 +1202,7 @@ async fn main() -> Result<()> {
     // Also skipped in CI environments to avoid unnecessary outbound calls.
     let is_pipeline_internal = matches!(
         command,
-        Commands::Execute { .. }
-            | Commands::Mcp { .. }
-            | Commands::McpAuthor { .. }
+        Commands::Execute { .. } | Commands::Mcp { .. } | Commands::McpAuthor { .. }
     );
     let update_handle = if !is_pipeline_internal && std::env::var_os("CI").is_none() {
         Some(tokio::spawn(update_check::check_for_update()))
@@ -1059,13 +1240,20 @@ async fn main() -> Result<()> {
             output_directory,
             bounding_directory,
             enabled_tools,
+            custom_tools,
         } => {
             let filter = if enabled_tools.is_empty() {
                 None
             } else {
                 Some(enabled_tools)
             };
-            mcp::run(&output_directory, &bounding_directory, filter.as_deref()).await?;
+            mcp::run(
+                &output_directory,
+                &bounding_directory,
+                filter.as_deref(),
+                custom_tools.as_deref(),
+            )
+            .await?;
         }
         Commands::McpAuthor {} => {
             mcp_author::run_stdio().await?;
@@ -1079,17 +1267,48 @@ async fn main() -> Result<()> {
             dry_run,
             only,
             exclude,
+            resolved_config,
+            prepare_custom_agent_output,
         } => {
-            run_execute(
-                source,
-                safe_output_dir,
-                output_dir,
-                ado_org_url,
-                ado_project,
-                dry_run,
-                execute::ToolFilter { only, exclude },
-            )
-            .await?;
+            if let Some(output_path) = prepare_custom_agent_output {
+                if output_dir.is_some()
+                    || ado_org_url.is_some()
+                    || ado_project.is_some()
+                    || !only.is_empty()
+                    || !exclude.is_empty()
+                    || dry_run
+                {
+                    anyhow::bail!(
+                        "--prepare-custom-agent-output cannot be combined with --output-dir, \
+                         --ado-org-url, --ado-project, --dry-run, --only, or --exclude"
+                    );
+                }
+                let resolved_config = resolved_config
+                    .as_deref()
+                    .context("--prepare-custom-agent-output requires --resolved-config")?;
+                let count = execute::prepare_custom_agent_output(
+                    &safe_output_dir,
+                    resolved_config,
+                    &output_path,
+                )
+                .await?;
+                println!(
+                    "Prepared {count} Agent-output item(s) at {}",
+                    output_path.display()
+                );
+            } else {
+                run_execute(RunExecuteOptions {
+                    source,
+                    resolved_config,
+                    safe_output_dir,
+                    output_dir,
+                    ado_org_url,
+                    ado_project,
+                    dry_run,
+                    filter: execute::ToolFilter { only, exclude },
+                })
+                .await?;
+            }
         }
         Commands::Init {
             path,

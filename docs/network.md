@@ -185,6 +185,43 @@ network:
     - "*.github.com"         # Remove wildcard variant too
 ```
 
+## Repository resource endpoints
+
+Azure DevOps repository resources backed by an external service connection must
+declare `endpoint:`. ado-aw validates this at compile time so the generated YAML
+does not fail later in Azure Pipelines.
+
+| Repository `type` | `endpoint:` required? | Notes |
+|-------------------|-----------------------|-------|
+| `git` | No | Same-organization Azure Repos checkout using the build's OAuth token. |
+| `github` | Yes | Azure DevOps GitHub service connection. |
+| `githubenterprise` | Yes | Azure DevOps GitHub Enterprise service connection. |
+| `bitbucket` | Yes | Azure DevOps Bitbucket service connection. |
+
+```yaml
+repos:
+  - name: octo/shared-components
+    alias: shared-components
+    type: github
+    endpoint: github-shared-components
+    ref: refs/heads/main
+    checkout: false
+```
+
+### Template targets (`target: job` / `target: stage`)
+
+`target: job` and `target: stage` emit Azure DevOps templates, and templates
+cannot declare top-level `resources.repositories`. Ordinary `repos:` entries
+therefore remain the parent pipeline's responsibility.
+
+Standalone and 1ES targets own their top-level resources, so ado-aw emits the
+repository resource directly.
+
+Reusable markdown imports are resolved entirely at compile time and do not
+create runtime repository resources or use ADO service-connection endpoints.
+See [`imports:`](imports.md) for the ADO-first compile-time `repository` and
+`source` syntax.
+
 ## Permissions (ADO Access Tokens)
 
 ADO does not support fine-grained permissions — there are two access levels:

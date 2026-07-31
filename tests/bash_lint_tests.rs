@@ -84,6 +84,7 @@ const FIXTURES: &[&str] = &[
     "supply-chain-agent.md",
     "manual-review-agent.md",
     "github-app-token-agent.md",
+    "custom-safe-output-bash-coverage.md",
 ];
 
 /// Step display names that the lint expects to find at least once across all
@@ -137,6 +138,10 @@ const REQUIRED_STEP_DISPLAY_NAMES: &[&str] = &[
     "Revoke GitHub App token", // src/compile/extensions/ado_script.rs github_app_token_revoke_step_typed() (activated by engine.github-app-token)
     "Prepare create-pull-request patch base", // src/compile/extensions/ado_script.rs prepare_pr_base_step_typed(PatchBase) (activated by safe-outputs.create-pull-request)
     "Prepare create-pull-request target worktree ref", // src/compile/extensions/ado_script.rs prepare_pr_base_step_typed(TargetWorktree) (activated by safe-outputs.create-pull-request)
+    "Detect custom proposals", // src/compile/agentic_pipeline.rs detect_custom_proposals_step
+    "Prepare custom safe-output executor", // src/compile/agentic_pipeline.rs prepare_custom_executor_binary_step
+    "Write custom job runtime config", // src/compile/agentic_pipeline.rs write_custom_runtime_config_step
+    "Prepare custom Agent output", // src/compile/agentic_pipeline.rs prepare_custom_agent_output_step
 ];
 
 fn ado_aw_binary() -> PathBuf {
@@ -185,6 +190,26 @@ fn compile_fixture_with_flags(
     let src = fixtures_dir().join(fixture);
     let dest = workspace.join(fixture);
     std::fs::copy(&src, &dest).unwrap_or_else(|e| panic!("copy fixture {fixture}: {e}"));
+    if fixture == "custom-safe-output-bash-coverage.md" {
+        let cached_component = workspace
+            .join("component-fixture")
+            .join("components")
+            .join("custom-build-tags")
+            .join("component.md");
+        std::fs::create_dir_all(cached_component.parent().unwrap())
+            .expect("create custom component directory");
+        std::fs::copy(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join("compiler-smoke-e2e")
+                .join("component-fixture")
+                .join("components")
+                .join("custom-build-tags")
+                .join("component.md"),
+            &cached_component,
+        )
+        .expect("copy custom component manifest");
+    }
 
     let mut args = vec!["compile", dest.to_str().unwrap()];
     args.extend_from_slice(extra_flags);

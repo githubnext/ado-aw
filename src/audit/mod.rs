@@ -15,6 +15,22 @@ pub use cli::{AuditOptions, default_cache_root, dispatch, fetch_audit_data};
 #[allow(unused_imports)]
 pub use model::*;
 
+pub(crate) fn malformed_aw_info_warning() -> model::ErrorInfo {
+    model::ErrorInfo {
+        source: String::from("audit::aw_info"),
+        message: String::from(
+            "aw_info.json could not be read or parsed; optional engine metadata and pipeline graph correlation are unavailable",
+        ),
+        timestamp: None,
+    }
+}
+
+pub(crate) fn push_warning_once(audit: &mut model::AuditData, warning: model::ErrorInfo) {
+    if !audit.warnings.contains(&warning) {
+        audit.warnings.push(warning);
+    }
+}
+
 /// Compare two `<prefix>_<id>` directory names by their trailing
 /// integer suffix, falling back to a full lexicographic comparison
 /// when the suffix isn't a u64.
