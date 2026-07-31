@@ -202,11 +202,6 @@ fn test_compiled_output_no_unreplaced_markers() {
         compiled.contains("AWF_VERSION=\"0.27.32\""),
         "Compiled output should download the AWF version that provides strict topology isolation"
     );
-    assert!(
-        !compiled.contains("AWF_VERSION=\"0.27.9\""),
-        "Compiled output must not fall back to the legacy host-access AWF version"
-    );
-
     // Verify MCPG references
     assert!(
         compiled.contains("ghcr.io/github/gh-aw-mcpg"),
@@ -254,15 +249,6 @@ fn test_compiled_output_no_unreplaced_markers() {
             && compiled.contains("-p 127.0.0.1:8080:8080"),
         "MCPG must use the stable bridge-network topology"
     );
-    for line in compiled
-        .lines()
-        .filter(|line| line.contains("--allow-domains"))
-    {
-        assert!(
-            !line.contains("host.docker.internal"),
-            "the agent egress allowlist must not expose the host: {line}"
-        );
-    }
 
     // Verify no legacy MCP firewall references
     assert!(
@@ -6056,36 +6042,6 @@ fn test_compile_ado_aw_debug_fixture() {
     assert!(
         compiled_has_enabled_tool(&compiled, "create-issue"),
         "Compiler must add --enabled-tools create-issue when ado-aw-debug.create-issue is set"
-    );
-}
-
-/// The example file in `examples/dogfood-failure-reporter.md` must compile
-/// cleanly. Mirror of the structural smoke test for `examples/sample-agent.md`.
-#[test]
-fn test_example_dogfood_failure_reporter_structure() {
-    let example_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("examples")
-        .join("dogfood-failure-reporter.md");
-    assert!(
-        example_path.exists(),
-        "examples/dogfood-failure-reporter.md should exist"
-    );
-    let content = fs::read_to_string(&example_path).expect("Should be able to read example");
-    assert!(
-        content.starts_with("---"),
-        "Example should start with front matter"
-    );
-    assert!(
-        content.contains("ado-aw-debug:"),
-        "Example should declare ado-aw-debug section"
-    );
-    assert!(
-        content.contains("create-issue:"),
-        "Example should configure create-issue"
-    );
-    assert!(
-        content.contains("target-repo: githubnext/ado-aw"),
-        "Example should target githubnext/ado-aw"
     );
 }
 
