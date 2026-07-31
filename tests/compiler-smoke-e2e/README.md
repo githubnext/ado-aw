@@ -190,8 +190,12 @@ az pipelines create \
 
 Then, on the new definition:
 
-- provision its **own** secret `GITHUB_TOKEN` — server-side definition cloning
-  does not copy secret values, and it cannot be scripted from a checkout;
+- add its id to `$copilotDefinitionIds` in
+  [`scripts/rotate-agentplayground-secrets.ps1`](../../scripts/rotate-agentplayground-secrets.ps1),
+  then run that script to provision its secret `GITHUB_TOKEN`. This is the only
+  supported way to set it — server-side definition cloning does not copy secret
+  values, and a definition missing from that list silently loses Copilot auth
+  at the next rotation;
 - authorize the service connections the fixture's `permissions:` block declares
   (`agent-playground-read`, plus `agent-playground-write` only if it proposes a
   safe output that writes to ADO);
