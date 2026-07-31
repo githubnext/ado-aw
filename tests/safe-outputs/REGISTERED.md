@@ -9,7 +9,7 @@ cutover.
 | Fixture | Schedule | Pipeline ID | Notes |
 | --- | --- | --- | --- |
 | `canary.md` | `daily around 03:00` | `2545` | Omnibus: noop + create-work-item + add-build-tag in one agentic run. Proves Stage 1 → 2 → 3 end-to-end. |
-| `azure-cli.md` | `daily around 03:00` | `2546` | Verifies AWF az CLI mount + ADO auth via `AZURE_DEVOPS_EXT_PAT`. |
+| `azure-cli.md` | `daily around 03:00` | `2546` | Verifies the AWF az CLI mount and `az devops` command-group availability; direct ADO auth is not expected. |
 | `noop-target.md` | _no schedule_ | `2547` | Target of the `queue-build` executor-e2e scenario. `E2E_QUEUE_PIPELINE_ID=2547` on executor definition `2550`. |
 | `janitor.md` | `weekly on monday around 02:00` | `2548` | Prunes `ado-aw-smoke-*` artifacts older than 30 days. |
 | `smoke-failure-reporter.md` | `daily around 04:30` | `2549` | Files `[smoke-failure] …` issues on `jamesadevine/ado-aw-issues`. Requires the `ADO_AW_DEBUG_GITHUB_TOKEN` secret pipeline variable, **only on this pipeline**. |

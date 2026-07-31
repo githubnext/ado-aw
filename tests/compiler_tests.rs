@@ -5762,8 +5762,8 @@ fn test_default_pipeline_mounts_az_and_allows_azure_hosts() {
 
     // (1b) Conditional prompt-append step: when az is detected, the
     // agent prompt receives an Azure CLI advisory section so the
-    // agent knows az is on PATH, what it's good for, and the auth
-    // model. The step is gated by `condition: ne(variables['AW_AZ_MOUNTS'], '')`
+    // agent knows az is on PATH and that no Azure/ADO credential is
+    // injected. The step is gated by `condition: ne(variables['AW_AZ_MOUNTS'], '')`
     // so agents on runners WITHOUT az never see the advisory and
     // never try to call az.
     assert!(
@@ -5796,7 +5796,9 @@ fn test_default_pipeline_mounts_az_and_allows_azure_hosts() {
     for anchor in [
         "/usr/bin/az",
         "az devops",
-        "AZURE_DEVOPS_EXT_PAT",
+        "not pre-authenticated",
+        "azure-devops",
+        "Do not sign in",
         "missing-tool",
     ] {
         assert!(

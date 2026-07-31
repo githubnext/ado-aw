@@ -27,7 +27,7 @@ five pipelines:
 | File | Purpose |
 | --- | --- |
 | `canary.md` / `canary.lock.yml` | Daily omnibus canary: the agent emits `noop` + `create-work-item` + `add-build-tag` in one run. Proves the full agentic loop with two distinct ADO write paths. |
-| `azure-cli.md` / `azure-cli.lock.yml` | Daily: verifies the AWF az CLI extension is mounted, the `az devops` subcommand authenticates via `AZURE_DEVOPS_EXT_PAT`, and the sandbox can reach the ADO control plane. |
+| `azure-cli.md` / `azure-cli.lock.yml` | Daily: verifies the AWF az CLI extension is mounted and the `az devops` command group is available. It does not claim authenticated direct ADO access. |
 | `noop-target.md` / `noop-target.lock.yml` | No-schedule target pipeline queued by the `queue-build` executor-e2e scenario (its ID feeds `E2E_QUEUE_PIPELINE_ID`). |
 | `janitor.md` / `janitor.lock.yml` | Weekly: prunes `ado-aw-smoke-*` artifacts (work items, branches, wiki pages, tags, PRs) older than 30 days from AgentPlayground. |
 | `smoke-failure-reporter.md` / `smoke-failure-reporter.lock.yml` | Daily ~04:30: queries the canary and azure-cli pipelines for failures and files `[smoke-failure] …` issues on `jamesadevine/ado-aw-issues` while canonical-repo credentials are unavailable. |

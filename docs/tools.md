@@ -86,7 +86,9 @@ When enabled, the compiler:
 - Auto-infers org from the git remote URL at compile time (overridable via `org:` field)
 - Fails compilation if org cannot be determined (no explicit override and no ADO git remote)
 
-> **Note:** `AZURE_DEVOPS_EXT_PAT` is a separate variable — it is injected by AWF into the agent sandbox for use by `az devops` CLI subcommands (see [Built-in CLIs — Azure CLI](#azure-cli-az) below), not by this extension for the MCP container.
+> **Note:** the first-party MCP uses `ADO_MCP_AUTH_TOKEN`. The compiler does
+> not inject `AZURE_DEVOPS_EXT_PAT` or another Azure credential into the Agent
+> sandbox for direct CLI use.
 
 ## Built-in CLIs
 
@@ -140,24 +142,16 @@ preventing "told to use `az`, fails with command not found" loops.
 | 1ES self-hosted pool with `azure-cli` | Same as above                                             |
 | 1ES self-hosted pool *without* `az`   | Pipeline runs; warning in ADO log; `az` is `command not found` inside the sandbox |
 
-**Auth scope (important).** The compiler does not authenticate `az` for
-general use. Two paths are supported:
-
-1. **`az devops *` subcommands** (work items, repos, pipelines, etc.)
-   are automatically authenticated via `AZURE_DEVOPS_EXT_PAT`, which
-   the compiler populates inside AWF whenever `permissions.read` is
-   configured. No extra steps needed.
-2. **General `az` / ARM / Graph commands** (`az account get-access-token`,
-   `az resource ...`, `az ad ...`, etc.) require their own
-   authentication. The agent has no inherited cloud identity; you
-   must `az login` explicitly (e.g. via a federated identity flow you
-   provision yourself) before calling these commands.
+**Auth scope (important).** The compiler exposes the binary but does not
+authenticate direct `az` commands. This includes `az devops`, ARM, and Graph
+subcommands. When configured, use `tools.azure-devops` for authenticated ADO
+reads. Do not run `az login` or inject Azure credentials into the Agent
+sandbox; use SafeOutputs or request a supported tool instead.
 
 A daily smoke pipeline at
 [`tests/safe-outputs/azure-cli.md`](../tests/safe-outputs/azure-cli.md)
-exercises this wiring (calls `az --version` and `az devops project list`
-against the host org) — see its compiled lock file for the exact
-generated YAML.
+exercises binary/subcommand availability without claiming authenticated direct
+ADO access.
 
 ### GitHub CLI (`gh`)
 

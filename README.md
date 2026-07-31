@@ -24,7 +24,7 @@ DevOps pipeline built around three core security stages:
 │                        │     │                      │     │                       │
 │  • Runs inside AWF     │     │  • Reviews proposed  │     │  • Creates PRs        │
 │    network sandbox     │     │    actions for safety│     │  • Creates work items │
-│  • Read-only ADO token │     │  • Checks for prompt │     │  • Write ADO token    │
+│  • Scoped ADO tools     │     │  • Checks for prompt │     │  • Write ADO token    │
 │  • Produces safe       │     │    injection, leaks  │     │  • Never exposed to   │
 │    output proposals    │     │                      │     │    the agent          │
 └────────────────────────┘     └──────────────────────┘     └───────────────────────┘
@@ -176,42 +176,45 @@ Push both files to your Azure DevOps repository.
 ### Step 3: Set Up ARM Service Connections for Permissions
 
 This is the most important configuration step. Azure DevOps does not support
-fine-grained PAT scoping — tokens are either read or read-write across the
-project. To maintain security isolation between the agent and the executor,
-**you need two separate ARM service connections**:
+an AAD token whose "read-only" status is implied by the ARM service-connection
+name. Azure DevOps authorizes the identity separately from its Azure RBAC
+scope. Configure only the connections the workflow needs and grant their
+underlying identities the minimum Azure DevOps permissions.
 
-#### Why Two Connections?
+#### Connection Roles
 
 | | Read Connection | Write Connection |
 |---|---|---|
-| **Used by** | Stage 1 — the AI agent | Stage 3 — the safe outputs executor |
-| **Purpose** | Query ADO APIs (work items, repos, PRs) | Create PRs, work items, link artifacts |
-| **Exposed to agent?** | ✅ Yes (inside network sandbox) | ❌ Never |
+| **Used by** | Stage 1 trusted ADO MCP backend | Stage 3 safe outputs executor |
+| **Purpose** | Query ADO APIs through configured MCP tools | Create PRs, work items, link artifacts |
+| **Exposed to agent?** | Raw token: no; MCP tools: yes | No |
 | **Token variable** | `SC_READ_TOKEN` | `SC_WRITE_TOKEN` |
 | **Front matter field** | `permissions.read` | `permissions.write` |
 
-The agent runs in a network-isolated sandbox (AWF) with only the read token.
-Even if the agent were compromised or prompt-injected, it cannot perform write
-operations. Write actions are only executed in Stage 3 (`SafeOutputs`)
-after threat analysis, using a completely separate token that the agent never
-sees.
+The raw Stage 1 token is passed to the trusted Azure DevOps MCP backend, not to
+the Agent process or direct `az devops` commands. The current MCP backend still
+relies on the identity's Azure DevOps permissions, so operators must configure
+that identity as least-privileged. Write actions belong in Stage 3
+(`SafeOutputs`) after threat analysis.
 
 #### Creating the Service Connections
 
 1. **Navigate** to **Project Settings → Service connections → New service connection**
 2. Choose **Azure Resource Manager → Service principal (automatic)** (or manual if
    your organization requires it)
-3. Create two connections:
+3. Create the connections your workflow needs:
 
    **Read connection** (e.g., `ado-agent-read`):
    - Scope: subscription or resource group level
-   - Grants: the ability to mint read-only ADO-scoped tokens
-   - Used by: the agent job to call `az account get-access-token` with the
-     ADO resource ID (`499b84ac-1321-427f-aa17-267ca6975798`)
+   - Used by: the Agent job to mint an ADO-audience token for the trusted
+     Azure DevOps MCP backend (`499b84ac-1321-427f-aa17-267ca6975798`)
+   - Required ADO setup: grant the underlying identity only the Azure DevOps
+     read permissions the workflow needs; the ARM scope does not enforce this
 
    **Write connection** (e.g., `ado-agent-write`):
    - Scope: subscription or resource group level
-   - Grants: the ability to mint read-write ADO-scoped tokens
+   - Used to mint an ADO-audience token whose effective permissions come from
+     the underlying identity's Azure DevOps grants
    - Used by: the executor job to create PRs, work items, etc.
 
 4. **Reference them** in your agent front matter:
@@ -231,12 +234,12 @@ sees.
 
 #### Permission Combinations
 
-| Configuration | Agent can read ADO? | Safe outputs can write? |
+| Configuration | Trusted ADO MCP can authenticate? | Safe outputs can write? |
 |---|---|---|
-| Both `read` + `write` | ✅ | ✅ (via ARM-minted token) |
-| Only `read` | ✅ | ✅ (via `$(System.AccessToken)`) |
-| Only `write` | ❌ | ✅ (via ARM-minted token) |
-| Neither (default) | ❌ | ✅ (via `$(System.AccessToken)`) |
+| Both `read` + `write` | Yes, when `tools.azure-devops` is enabled | Yes (via ARM-minted token) |
+| Only `read` | Yes, when `tools.azure-devops` is enabled | Yes (via `$(System.AccessToken)`) |
+| Only `write` | No | Yes (via ARM-minted token) |
+| Neither (default) | No | Yes (via `$(System.AccessToken)`) |
 
 ### Step 4: Authorize the Pipeline
 

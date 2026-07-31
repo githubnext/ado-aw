@@ -218,7 +218,7 @@ network:                       # optional network policy (standalone target only
 # variable-groups:              # optional: import ADO Library variable groups (standalone/1es only)
 #   - My Variable Group         # each entry must be the exact ADO Library group name (see "Variable Groups" section)
 permissions:                   # optional ADO access token configuration (see docs/network.md#permissions-ado-access-tokens)
-  read: my-read-arm-connection   # ARM service connection for read-only ADO access (Stage 1 agent)
+  read: my-read-arm-connection   # ARM SC for Stage 1 trusted ADO MCP auth; raw token is not in Agent env
   write: my-write-arm-connection # OPTIONAL ARM SC for Stage 3 executor writes.
                                  # Default: executor uses $(System.AccessToken).
                                  # Set this only for cross-org writes or

@@ -29,24 +29,20 @@ Steps (run each in turn using your bash tool):
    az --version | head -3
    ```
 
-2. Confirm ADO subcommand auth works using `AZURE_DEVOPS_EXT_PAT`
-   (populated automatically when `permissions.read` is set). List up to
-   3 projects from the current organization:
+2. Confirm the Azure DevOps command group is installed and can render help.
+   This smoke does not expect direct ADO authentication:
 
    ```
-   az devops project list \
-     --organization "$(System.CollectionUri)" \
-     --query 'value[0:3].name' \
-     -o tsv
+   az devops -h | head -20
    ```
 
-   Capture the combined stdout/stderr (truncated to 400 characters if
-   longer) for the safe-output context below.
+   Capture the combined stdout/stderr (truncated to 400 characters if longer)
+   for the safe-output context below.
 
 3. Call exactly one safe-output tool, `noop`, with:
 
    - context: a brief one-line proof-of-life containing the az version
-     string and the captured project-list output, prefixed with
+     string and command-group help output, prefixed with
      `ado-aw-smoke-$(Build.BuildId)-azure-cli:`.
 
 Do not call any other tool. After the safe output is emitted, stop.

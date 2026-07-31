@@ -52,11 +52,10 @@ use crate::compile::ir::step::{BashStep, Step};
 /// can't reach and a command that doesn't resolve is harmless and
 /// keeps the compiled YAML deterministic across runner types).
 ///
-/// **Auth.** `az devops` subcommands read `AZURE_DEVOPS_EXT_PAT` (set
-/// inside AWF when `permissions.read` is configured). General `az`
-/// commands (`az account get-access-token`, `az resource ...`, Graph
-/// calls) require separate authentication and are out of scope for this
-/// extension.
+/// **Auth.** This extension only exposes the binary. It does not inject an
+/// Azure or Azure DevOps credential into the agent sandbox.
+/// `permissions.read` authenticates the optional first-party Azure DevOps MCP
+/// backend; it does not populate `AZURE_DEVOPS_EXT_PAT` for direct CLI use.
 pub struct AzureCliExtension;
 
 impl CompilerExtension for AzureCliExtension {
@@ -121,11 +120,11 @@ fn prompt_append_bash_step() -> BashStep {
 \n\
 ## Azure CLI (`az`)\n\
 \n\
-The Azure CLI is available inside this sandbox at `/usr/bin/az`. Prefer it over hand-rolled curl calls when it covers what you need:\n\
+The Azure CLI is available inside this sandbox at `/usr/bin/az`, but ado-aw does not inject an Azure or Azure DevOps credential into the sandbox:\n\
 \n\
-- **Azure DevOps management** \u{2014} `az devops`, `az pipelines`, `az repos`, `az boards`. These are authenticated automatically from `$AZURE_DEVOPS_EXT_PAT` when the pipeline declares `permissions: read:`. List/inspect operations Just Work; write operations honour the PAT's scopes.\n\
-- **Azure Resource Manager** \u{2014} `az resource`, `az account`, `az group`. These require a separate Azure identity that ado-aw does not provision out of the box; sign in with `az login` using credentials supplied by another mechanism (e.g. a service connection writing them into your sandbox env) before invoking them.\n\
-- **Microsoft Graph** \u{2014} `az ad`, `az rest`. Same caveat as ARM.\n\
+- **Azure DevOps** \u{2014} `az devops`, `az pipelines`, `az repos`, and `az boards` are not pre-authenticated. When configured, use the `azure-devops` MCP tools for authenticated ADO reads.\n\
+- **Azure Resource Manager and Microsoft Graph** \u{2014} `az resource`, `az account`, `az group`, `az ad`, and authenticated `az rest` calls are not configured for agent use.\n\
+- Do not sign in or place Azure credentials in the sandbox. Request a supported tool instead.\n\
 \n\
 If a command you need isn't covered above, file a `missing-tool` safe output naming `azure-cli` so the operator can extend coverage rather than blocking on it silently.\n\
 AZURE_CLI_PROMPT_EOF\n\
@@ -394,7 +393,7 @@ mod tests {
     #[test]
     fn test_azure_cli_prompt_append_step_has_advisory_anchors() {
         // Lock the advisory wording to the load-bearing parts: tool
-        // names, env var, and the missing-tool escape hatch. Style
+        // names, auth boundary, and the missing-tool escape hatch. Style
         // changes elsewhere in the prose are free; these anchors aren't.
         let ext = AzureCliExtension;
         let fm = fm();
@@ -405,7 +404,9 @@ mod tests {
             "Azure CLI",
             "/usr/bin/az",
             "az devops",
-            "AZURE_DEVOPS_EXT_PAT",
+            "not pre-authenticated",
+            "azure-devops",
+            "Do not sign in",
             "missing-tool",
         ] {
             assert!(
@@ -414,17 +415,17 @@ mod tests {
                 append.script
             );
         }
+        assert!(
+            !append.script.contains("AZURE_DEVOPS_EXT_PAT"),
+            "the Agent prompt must not claim the direct CLI receives an ADO credential"
+        );
     }
 
     #[test]
     fn test_azure_cli_prompt_append_uses_single_quoted_heredoc() {
-        // The advisory body contains `$AZURE_DEVOPS_EXT_PAT` and other
-        // literal dollar references. Single-quoting the heredoc
-        // delimiter (`<< 'DELIM'`) is what prevents bash from
-        // expanding them while building the prompt file. If anyone
-        // ever swaps to an unquoted heredoc, `$AZURE_DEVOPS_EXT_PAT`
-        // would be replaced by the runner's PAT value (a secret) and
-        // baked into the agent prompt — a real leak.
+        // Keep the prompt heredoc non-expanding. Future advisory text may
+        // contain environment-variable names, and changing this to an
+        // unquoted delimiter could bake a secret into the agent prompt.
         let ext = AzureCliExtension;
         let fm = fm();
         let ctx = CompileContext::for_test(&fm);
@@ -433,8 +434,8 @@ mod tests {
         assert!(
             append.script.contains("<< 'AZURE_CLI_PROMPT_EOF'"),
             "prompt-append heredoc delimiter must be single-quoted to \
-             prevent expansion of $AZURE_DEVOPS_EXT_PAT and similar \
-             literals inside the prompt body. Step:\n{}",
+             prevent expansion of environment references inside the prompt \
+             body. Step:\n{}",
             append.script
         );
     }
