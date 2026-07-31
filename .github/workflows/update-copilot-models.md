@@ -175,12 +175,12 @@ Search for open PRs whose titles start with
 
 Edit `src/inspect/catalog.rs` and open a PR.
 
-> **Do not create a branch, and do not commit.** The `create-pull-request` safe
-> output builds the PR from the *uncommitted* changes in your working tree — it
-> creates the branch, commits and pushes on your behalf, using a token you do
-> not have. If you run `git checkout -b` / `git commit` yourself, your changes
-> are no longer pending in the working tree and the safe output fails with
-> `No commits were found`. Just edit the file and call the tool.
+> **Do not run any `git` command.** No `git checkout -b`, no `git branch`, no
+> `git add`, no `git commit`. Edit `src/inspect/catalog.rs` in place, leave the
+> change sitting in the working tree, and call `create-pull-request`. The safe
+> output creates the branch, stages, commits and pushes for you using a token
+> you do not have. Running git yourself is at best redundant and at worst moves
+> the change out of the state the tool inspects.
 
 ### 4a — Update `src/inspect/catalog.rs`
 
