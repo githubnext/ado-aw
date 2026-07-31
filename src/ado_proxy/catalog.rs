@@ -67,6 +67,50 @@ pub enum Capability {
     Boards,
 }
 
+impl Capability {
+    /// Every capability the catalog defines.
+    ///
+    /// Exhaustive by construction: the `match` below fails to compile if a
+    /// variant is added without being listed here, which in turn drives the
+    /// front-matter coverage guard in `crate::compile::types`.
+    ///
+    /// Only the front-matter guard consumes this today; the compiler wiring
+    /// that emits the policy document will be its second caller.
+    #[allow(dead_code)]
+    pub const ALL: &'static [Self] = &[
+        Self::Discovery,
+        Self::Core,
+        Self::Repos,
+        Self::Pipelines,
+        Self::Boards,
+    ];
+
+    /// Whether the proxy enables this capability regardless of author opt-in.
+    ///
+    /// `discovery` is always on: `az` and the REST SDKs call `resourceareas`
+    /// and `connectiondata` before anything else, so a policy without it would
+    /// produce a proxy no supported client can actually use. It exposes only
+    /// service-topology metadata, never repository, pipeline, or work-item
+    /// content, so it is not a meaningful widening.
+    #[allow(dead_code)]
+    pub const fn is_always_on(self) -> bool {
+        match self {
+            Self::Discovery => true,
+            Self::Core | Self::Repos | Self::Pipelines | Self::Boards => false,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Discovery => "discovery",
+            Self::Core => "core",
+            Self::Repos => "repos",
+            Self::Pipelines => "pipelines",
+            Self::Boards => "boards",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum HostPolicy {

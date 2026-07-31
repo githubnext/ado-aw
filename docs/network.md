@@ -251,6 +251,26 @@ agents. Set `permissions.write` only when you need:
   Azure DevOps permissions on the underlying identity remain the authorization
   boundary until the policy proxy described in
   [`ado-proxy-design.md`](ado-proxy-design.md) is implemented.
+
+  An **object form** of `permissions.read` is reserved for that proxy:
+
+  ```yaml
+  permissions:
+    read:
+      service-connection: my-read-sc
+      capabilities: [core, repos]        # discovery is always on
+      allow:                             # beyond the current org/project/repo
+        - organization: other-org
+          projects:
+            - project: Other Project
+              repositories: [other-repo] # omit for project-scoped reads only
+  ```
+
+  It **fails compilation today**, deliberately: accepting it while the proxy
+  is unwired would silently ignore every restriction it declares, which is
+  strictly worse than rejecting it. An organization entry with no `projects`
+  is also rejected, because granting an entire organization by *omitting* a
+  key is the class of accident this proxy exists to prevent.
 - **`permissions.write` (optional)**: Mints a write-capable ADO-scoped token
   used **only** by the executor in Stage 3 (`SafeOutputs` job). Overrides
   the default `$(System.AccessToken)` for write operations. Never exposed

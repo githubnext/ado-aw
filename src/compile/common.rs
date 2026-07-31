@@ -461,20 +461,40 @@ pub fn validate_front_matter_identity(front_matter: &FrontMatter) -> Result<()> 
 /// silently ignore scope/capability restrictions. Fail closed until the proxy
 /// wiring consumes the policy.
 pub fn validate_permissions_read_policy(front_matter: &FrontMatter) -> Result<()> {
-    let explicit_options = front_matter
+    let Some(options) = front_matter
         .permissions
         .as_ref()
         .and_then(|permissions| permissions.read.as_ref())
-        .and_then(crate::compile::types::ReadPermissionConfig::options);
+        .and_then(crate::compile::types::ReadPermissionConfig::options)
+    else {
+        return Ok(());
+    };
 
-    if explicit_options.is_some() {
-        anyhow::bail!(
-            "permissions.read object form requires the credential-isolated Azure DevOps proxy, \
-             which is not enabled in this compiler yet. Use the scalar service-connection \
-             shorthand for the current trusted MCP behavior."
-        );
-    }
-    Ok(())
+    // Run the structural rules first even though the object form is refused
+    // below. They are the rules that will govern the policy document once the
+    // proxy is wired, so keeping them on the live path means they are exercised
+    // by every fixture that uses the object form rather than only by unit
+    // tests — a scope mistake cannot lie dormant until the day we enable it.
+    options.validate()?;
+
+    // Echo back what was requested. Without this the author cannot tell whether
+    // the compiler understood their policy or choked on the first key.
+    let requested = if options.capabilities.is_empty() {
+        "the default capability set".to_string()
+    } else {
+        options
+            .capabilities
+            .iter()
+            .map(|capability| capability.to_catalog().as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    anyhow::bail!(
+        "permissions.read object form requires the credential-isolated Azure DevOps proxy, \
+         which is not enabled in this compiler yet (requested: {requested}). Use the scalar \
+         service-connection shorthand for the current trusted MCP behavior."
+    )
 }
 
 /// Validate the `variable-groups:` front-matter block (issue #1385).

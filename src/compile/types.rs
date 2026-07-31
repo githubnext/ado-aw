@@ -1910,7 +1910,43 @@ pub struct ReadPermissionOptions {
     pub allow: Vec<AdoReadOrganizationScope>,
 }
 
+impl ReadPermissionOptions {
+    /// Cross-field rules the schema alone cannot express.
+    ///
+    /// Listing an organization with no projects would grant every project in
+    /// that organization — a large widening produced by *omitting* a key, which
+    /// is exactly the accident this proxy exists to prevent. An author who
+    /// genuinely wants breadth should have to name it.
+    ///
+    /// An empty `repositories` list is deliberately allowed: it grants the
+    /// project-scoped reads without any repository-scoped read, so it narrows
+    /// rather than widens.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for scope in &self.allow {
+            if scope.projects.is_empty() {
+                anyhow::bail!(
+                    "permissions.read.allow entry for organization '{}' lists no projects. \
+                     Name the projects to allow; an empty list would grant every project in \
+                     the organization.",
+                    scope.organization.as_str()
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Coarse catalog groups authors may enable for Stage 1 ADO reads.
+///
+/// This is the **author-facing** subset of [`crate::ado_proxy::catalog::Capability`],
+/// which is authoritative. It is a separate type only because not every catalog
+/// capability is selectable: `discovery` is always on, so offering it as a
+/// toggle would imply an author could turn it off and get a working proxy.
+///
+/// [`AdoReadCapability::to_catalog`] is the single mapping point, and
+/// `front_matter_capabilities_cover_the_catalog` fails if the catalog gains a
+/// selectable capability this enum does not expose — so the two cannot drift
+/// into silently offering authors less than the proxy enforces.
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum AdoReadCapability {
@@ -1921,11 +1957,43 @@ pub enum AdoReadCapability {
     Boards,
 }
 
+impl AdoReadCapability {
+    /// Project onto the authoritative catalog capability.
+    ///
+    /// Exhaustive on purpose: adding a variant here without giving it a catalog
+    /// counterpart is a compile error rather than a policy document the sidecar
+    /// would reject at runtime.
+    pub const fn to_catalog(self) -> crate::ado_proxy::catalog::Capability {
+        use crate::ado_proxy::catalog::Capability;
+        match self {
+            Self::Core => Capability::Core,
+            Self::Repositories => Capability::Repos,
+            Self::Pipelines => Capability::Pipelines,
+            Self::Boards => Capability::Boards,
+        }
+    }
+
+    /// Every capability an author may name in front matter.
+    ///
+    /// Consumed by the drift guard that keeps this enum aligned with the
+    /// catalog; the policy-document emitter will be its second caller.
+    #[allow(dead_code)]
+    pub const ALL: &'static [Self] = &[
+        Self::Core,
+        Self::Repositories,
+        Self::Pipelines,
+        Self::Boards,
+    ];
+}
+
 /// Explicit Azure DevOps organization scope.
 #[derive(Debug, Deserialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AdoReadOrganizationScope {
     pub organization: crate::secure::AdoOrganization,
+    /// Projects to allow within this organization.
+    ///
+    /// Required and non-empty — see [`ReadPermissionOptions::validate`].
     #[serde(default)]
     pub projects: Vec<AdoReadProjectScope>,
 }
@@ -1935,6 +2003,11 @@ pub struct AdoReadOrganizationScope {
 #[serde(deny_unknown_fields)]
 pub struct AdoReadProjectScope {
     pub project: crate::secure::AdoProject,
+    /// Repositories to allow within this project.
+    ///
+    /// May be omitted. Unlike an organization with no projects, this is not a
+    /// silent widening: it grants the project-scoped reads (pipelines, builds,
+    /// work items) without granting any repository-scoped read.
     #[serde(default)]
     pub repositories: Vec<crate::secure::AdoRepository>,
 }
@@ -4011,6 +4084,92 @@ read:
                 "invalid read policy must fail deserialization:\n{yaml}"
             );
         }
+    }
+
+    /// The author-facing capability enum is a hand-written projection of the
+    /// authoritative catalog. Nothing but this test stops the catalog from
+    /// gaining a selectable capability that authors can never enable — the
+    /// proxy would enforce a policy the front matter cannot express.
+    #[test]
+    fn front_matter_capabilities_cover_the_catalog() {
+        use crate::ado_proxy::catalog::Capability;
+
+        let selectable: Vec<Capability> = AdoReadCapability::ALL
+            .iter()
+            .map(|capability| capability.to_catalog())
+            .collect();
+
+        for capability in Capability::ALL {
+            if capability.is_always_on() {
+                assert!(
+                    !selectable.contains(capability),
+                    "{} is always on and must not be offered as a front-matter toggle, \
+                     or authors will believe they can disable it",
+                    capability.as_str()
+                );
+                continue;
+            }
+            assert!(
+                selectable.contains(capability),
+                "catalog capability {} is not reachable from front matter; add it to \
+                 AdoReadCapability so authors can enable what the proxy enforces",
+                capability.as_str()
+            );
+        }
+    }
+
+    /// Guards the wire format in the other direction: the YAML an author writes
+    /// must deserialize to the capability whose name they used.
+    #[test]
+    fn front_matter_capability_names_match_the_catalog() {
+        for capability in AdoReadCapability::ALL {
+            let name = capability.to_catalog().as_str();
+            let yaml = format!("read:\n  service-connection: sc\n  capabilities: ['{name}']");
+            let parsed: PermissionsConfig = serde_yaml::from_str(&yaml)
+                .unwrap_or_else(|error| panic!("capability {name} must parse: {error}"));
+            assert_eq!(
+                parsed.read.as_ref().unwrap().options().unwrap().capabilities,
+                vec![*capability],
+                "front-matter name for {name} does not round-trip"
+            );
+        }
+    }
+
+    /// The `allow` list must not widen to a whole organization by omission.
+    #[test]
+    fn read_policy_rejects_an_organization_with_no_projects() {
+        let yaml = "read:\n  service-connection: sc\n  allow:\n    - organization: other-org";
+        let parsed: PermissionsConfig = serde_yaml::from_str(yaml).unwrap();
+        let error = parsed
+            .read
+            .as_ref()
+            .unwrap()
+            .options()
+            .unwrap()
+            .validate()
+            .expect_err("an organization with no projects must be rejected");
+        assert!(
+            error.to_string().contains("lists no projects"),
+            "error should name the cause: {error}"
+        );
+    }
+
+    /// A project with no repositories narrows rather than widens, so it stands.
+    #[test]
+    fn read_policy_allows_a_project_without_repositories() {
+        let yaml = "read:\n  service-connection: sc\n  allow:\n    - organization: other-org\n      projects:\n        - project: Other Project";
+        let parsed: PermissionsConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            parsed
+                .read
+                .as_ref()
+                .unwrap()
+                .options()
+                .unwrap()
+                .validate()
+                .is_ok(),
+            "project-scoped reads without repository access must be permitted"
+        );
     }
 
     #[test]
