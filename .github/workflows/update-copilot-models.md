@@ -175,6 +175,13 @@ Search for open PRs whose titles start with
 
 Edit `src/inspect/catalog.rs` and open a PR.
 
+> **Do not create a branch, and do not commit.** The `create-pull-request` safe
+> output builds the PR from the *uncommitted* changes in your working tree — it
+> creates the branch, commits and pushes on your behalf, using a token you do
+> not have. If you run `git checkout -b` / `git commit` yourself, your changes
+> are no longer pending in the working tree and the safe output fails with
+> `No commits were found`. Just edit the file and call the tool.
+
 ### 4a — Update `src/inspect/catalog.rs`
 
 Locate the `models()` function. Its body is a `vec![...]` literal.
