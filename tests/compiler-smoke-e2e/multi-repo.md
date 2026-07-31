@@ -29,7 +29,13 @@ safe-outputs:
   # agent is told to emit only `noop` and is granted no `edit` tool, so there
   # is nothing to propose and no write ever reaches ADO.
   create-pull-request:
+    # `target-branch` is the fallback for EVERY checked-out repo, so it must
+    # name a branch that exists in each of them. `ado-aw-smoke-candidate-base`
+    # exists only in the mirror (`self`); the additional checkout needs its own
+    # override or `prepare-pr-base` warns that it cannot resolve a merge-base.
     target-branch: ado-aw-smoke-candidate-base
+    target-branches:
+      e2e-fixture: main
 steps:
   - bash: |
       set -euo pipefail
