@@ -67,6 +67,11 @@ pub struct ExecutionContext {
     pub working_directory: std::path::PathBuf,
     /// Source checkout directory (BUILD_SOURCESDIRECTORY) where git repos are checked out
     pub source_directory: std::path::PathBuf,
+    /// Exact checkout directory for the pipeline's `self` repository.
+    ///
+    /// In a multi-checkout job `BUILD_SOURCESDIRECTORY` is the common checkout
+    /// root, so the compiler passes this path explicitly.
+    pub self_repository_directory: std::path::PathBuf,
     /// Per-tool configuration, keyed by tool name
     pub tool_configs: HashMap<String, serde_json::Value>,
     /// Debug-only tools (e.g. `create-issue`) that the operator authorized
@@ -75,9 +80,19 @@ pub struct ExecutionContext {
     /// whose tool name is absent from this set — otherwise a forged entry
     /// could bypass the MCP-layer default-deny gate. Empty by default.
     pub debug_enabled_tools: HashSet<String>,
-    /// Repository ID (from BUILD_REPOSITORY_ID)
+    /// Exact `self` repository ID.
+    ///
+    /// Compiled pipelines no longer project an ID: the compiler resolves the
+    /// `self` repository by **name** at compile time, and ADO's REST API
+    /// accepts a repository name wherever it accepts an ID. This is populated
+    /// only from `ADO_AW_SELF_REPOSITORY_ID`, or from `BUILD_REPOSITORY_ID`
+    /// for direct/legacy invocations with no compiler-supplied identity. See
+    /// [`ExecutionContext::from_env_lookup`] for why the two sources are never
+    /// mixed.
     pub repository_id: Option<String>,
-    /// Repository name (from BUILD_REPOSITORY_NAME)
+    /// Exact `self` repository name. Compiled pipelines provide
+    /// `ADO_AW_SELF_REPOSITORY_NAME`; direct/legacy invocations fall back to
+    /// `BUILD_REPOSITORY_NAME`.
     pub repository_name: Option<String>,
     /// Allowed repositories for PRs: "self" + checkout list aliases
     /// Maps alias to ADO repo name (e.g., "other-repo" -> "org/other-repo")
@@ -239,6 +254,27 @@ impl ExecutionContext {
         let source_directory = env("BUILD_SOURCESDIRECTORY")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let self_repository_directory = env("ADO_AW_SELF_REPOSITORY_DIRECTORY")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| source_directory.clone());
+
+        // Resolve `self`'s identity from exactly one source, never a mix.
+        //
+        // `BUILD_REPOSITORY_*` describes the repository that *triggered* the
+        // run, which is not `checkout: self` on repository-resource-triggered
+        // builds (issue #1731). Pairing a compiler-supplied self name with a
+        // trigger-scoped ID would be worse than either alone, because
+        // consumers that prefer the ID would silently target the wrong
+        // repository. So if the compiler supplied either half, the
+        // `BUILD_REPOSITORY_*` pair is ignored entirely.
+        let compiled_repository_id = env("ADO_AW_SELF_REPOSITORY_ID");
+        let compiled_repository_name = env("ADO_AW_SELF_REPOSITORY_NAME");
+        let (repository_id, repository_name) =
+            if compiled_repository_id.is_some() || compiled_repository_name.is_some() {
+                (compiled_repository_id, compiled_repository_name)
+            } else {
+                (env("BUILD_REPOSITORY_ID"), env("BUILD_REPOSITORY_NAME"))
+            };
 
         Self {
             ado_org_url,
@@ -249,10 +285,11 @@ impl ExecutionContext {
             github_token: env("ADO_AW_DEBUG_GITHUB_TOKEN"),
             working_directory: std::env::current_dir().unwrap_or_default(),
             source_directory,
+            self_repository_directory,
             tool_configs: HashMap::new(),
             debug_enabled_tools: HashSet::new(),
-            repository_id: env("BUILD_REPOSITORY_ID"),
-            repository_name: env("BUILD_REPOSITORY_NAME"),
+            repository_id,
+            repository_name,
             allowed_repositories: HashMap::new(),
             repo_refs: HashMap::new(),
             agent_stats: None,
@@ -898,6 +935,82 @@ mod tests {
         assert_eq!(ctx.source_branch.as_deref(), Some("refs/heads/main"));
         assert_eq!(ctx.source_branch_name.as_deref(), Some("main"));
         assert_eq!(ctx.source_version.as_deref(), Some("abc1234"));
+    }
+
+    #[test]
+    fn test_from_env_lookup_populates_checkout_directories() {
+        let ctx = ExecutionContext::from_env_lookup(env_from(&[
+            ("BUILD_SOURCESDIRECTORY", "C:\\agent\\s"),
+            (
+                "ADO_AW_SELF_REPOSITORY_DIRECTORY",
+                "C:\\agent\\s\\ado-aw",
+            ),
+        ]));
+
+        assert_eq!(
+            ctx.source_directory,
+            std::path::PathBuf::from("C:\\agent\\s")
+        );
+        assert_eq!(
+            ctx.self_repository_directory,
+            std::path::PathBuf::from("C:\\agent\\s\\ado-aw")
+        );
+    }
+
+    #[test]
+    fn test_from_env_lookup_self_directory_falls_back_to_source_directory() {
+        let ctx = ExecutionContext::from_env_lookup(env_from(&[(
+            "BUILD_SOURCESDIRECTORY",
+            "C:\\agent\\s",
+        )]));
+
+        assert_eq!(ctx.self_repository_directory, ctx.source_directory);
+    }
+
+    #[test]
+    fn test_from_env_lookup_prefers_compiler_owned_self_identity() {
+        // Both halves supplied explicitly (manual/testing): use them as a pair.
+        let ctx = ExecutionContext::from_env_lookup(env_from(&[
+            ("ADO_AW_SELF_REPOSITORY_ID", "self-id"),
+            ("ADO_AW_SELF_REPOSITORY_NAME", "project/self-repo"),
+            ("BUILD_REPOSITORY_ID", "trigger-id"),
+            ("BUILD_REPOSITORY_NAME", "project/trigger-repo"),
+        ]));
+
+        assert_eq!(ctx.repository_id.as_deref(), Some("self-id"));
+        assert_eq!(
+            ctx.repository_name.as_deref(),
+            Some("project/self-repo")
+        );
+    }
+
+    #[test]
+    fn test_from_env_lookup_name_only_self_identity_ignores_trigger_id() {
+        // The shape compiled pipelines emit: a compile-time self name and no
+        // ID. The trigger-scoped BUILD_REPOSITORY_ID must NOT be paired with
+        // it, or consumers preferring the ID would target the wrong repo.
+        let ctx = ExecutionContext::from_env_lookup(env_from(&[
+            ("ADO_AW_SELF_REPOSITORY_NAME", "self-repo"),
+            ("BUILD_REPOSITORY_ID", "trigger-id"),
+            ("BUILD_REPOSITORY_NAME", "trigger-repo"),
+        ]));
+
+        assert_eq!(ctx.repository_name.as_deref(), Some("self-repo"));
+        assert_eq!(ctx.repository_id, None);
+    }
+
+    #[test]
+    fn test_from_env_lookup_self_identity_falls_back_to_build_variables() {
+        let ctx = ExecutionContext::from_env_lookup(env_from(&[
+            ("BUILD_REPOSITORY_ID", "build-id"),
+            ("BUILD_REPOSITORY_NAME", "project/build-repo"),
+        ]));
+
+        assert_eq!(ctx.repository_id.as_deref(), Some("build-id"));
+        assert_eq!(
+            ctx.repository_name.as_deref(),
+            Some("project/build-repo")
+        );
     }
 
     #[test]

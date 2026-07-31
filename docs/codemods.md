@@ -369,7 +369,7 @@ fold substituted the directory markers:
 
 | Marker | Resolved to |
 |--------|-------------|
-| `{{ workspace }}`, `{{ working_directory }}` | the resolved working directory (`$(Build.SourcesDirectory)`, `$(Build.SourcesDirectory)/$(Build.Repository.Name)`, or `$(Build.SourcesDirectory)/<alias>`) |
+| `{{ workspace }}`, `{{ working_directory }}` | the resolved working directory (`$(Build.SourcesDirectory)`, `$(Build.SourcesDirectory)/self`, or `$(Build.SourcesDirectory)/<alias>`) |
 | `{{ trigger_repo_directory }}` | the trigger ("self") repo dir |
 
 After the IR migration these markers flow through verbatim and are no

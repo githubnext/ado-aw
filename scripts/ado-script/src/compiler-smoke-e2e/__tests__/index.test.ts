@@ -21,6 +21,7 @@ const baseEnv = {
   COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID: "3003",
   COMPILER_SMOKE_REPORTER_DEFINITION_ID: "3004",
   COMPILER_SMOKE_CUSTOM_SAFE_OUTPUT_DEFINITION_ID: "3005",
+  COMPILER_SMOKE_MULTI_REPO_DEFINITION_ID: "3006",
   COMPILER_SMOKE_CHILD_TIMEOUT_MS: "5000",
   COMPILER_SMOKE_POLL_MS: "1",
 };
@@ -103,6 +104,8 @@ vi.mock("../git.js", async (importOriginal) => {
         "tests/safe-outputs/smoke-failure-reporter.lock.yml",
         "tests/compiler-smoke-e2e/custom-safe-output.md",
         "tests/compiler-smoke-e2e/custom-safe-output.lock.yml",
+        "tests/compiler-smoke-e2e/multi-repo.md",
+        "tests/compiler-smoke-e2e/multi-repo.lock.yml",
       ];
     }),
     commitAll: vi.fn(async () => {
@@ -221,6 +224,7 @@ describe("compiler-smoke-e2e index.main (happy path)", () => {
       "tests/safe-outputs/noop-target.md",
       "tests/safe-outputs/smoke-failure-reporter.md",
       "tests/compiler-smoke-e2e/custom-safe-output.md",
+      "tests/compiler-smoke-e2e/multi-repo.md",
     ]);
     expect(compiledFixturePaths).not.toContain("tests/safe-outputs/janitor.md");
     expect(queuedFixtureNames).toEqual([
@@ -229,6 +233,7 @@ describe("compiler-smoke-e2e index.main (happy path)", () => {
       "noop-target",
       "smoke-failure-reporter",
       "custom-safe-output",
+      "multi-repo",
     ]);
     expect(queuedFixtureNames).not.toContain("janitor");
 

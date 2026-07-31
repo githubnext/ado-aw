@@ -45,8 +45,8 @@ along with any author-written markers.
   `{{#runtime-import ../../../../etc/passwd}}` are both compile-time errors.
 - **Compiler-generated marker for the agent body** uses a **trigger-repo-relative**
   path resolved against `--base "$(Build.SourcesDirectory)"` — e.g. `agents/foo.md`,
-  or `$(Build.Repository.Name)/agents/foo.md` under multi-checkout (ADO expands the
-  macro before the resolver runs). It is deliberately relative, not absolute:
+  or `self/agents/foo.md` under multi-checkout. It is deliberately relative,
+  not absolute:
   `import.js` rejects absolute paths for everyone. The compile-time `..`/absolute
   restriction is a compile-host guard and does not constrain this tooling-generated
   path beyond the runtime resolver's own absolute/`..` rejection.
@@ -60,7 +60,7 @@ by the runtime resolver:
 |----------|------------|
 | `$(Build.BuildId)` | the current build ID |
 | `$(Build.SourcesDirectory)` | the checkout root |
-| `$(Build.Repository.Name)` | the trigger repo's subfolder name (multi-checkout) |
+| `$(Build.Repository.Name)` | the triggering repository name (not the compiler-owned `self` path) |
 | `$(System.CollectionUri)` | the Azure DevOps collection URL |
 
 The compiler passes these to `import.js` as `--var name=$(name)` flags (ADO expands

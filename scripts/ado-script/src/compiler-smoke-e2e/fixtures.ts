@@ -1,13 +1,13 @@
 /**
- * Manifest of the five fixed compiler-smoke fixtures.
+ * Manifest of the fixed compiler-smoke fixtures.
  *
- * Four reuse release-backed sources under `tests/safe-outputs/`; the fifth is
- * candidate-only and lives beside this harness. The weekly janitor is
+ * Four reuse release-backed sources under `tests/safe-outputs/`; the rest are
+ * candidate-only and live beside this harness. The weekly janitor is
  * deliberately excluded from candidate checks. The harness reads every source
  * from the detached candidate worktree (an exact checkout of
  * `BUILD_SOURCEVERSION`, never `BUILD_SOURCESDIRECTORY`, which may sit at a
  * different commit), stages a pinned `supply-chain.pipeline-artifact`
- * transform, recompiles, and queues the five fixed candidate-lane definitions
+ * transform, recompiles, and queues the fixed candidate-lane definitions
  * tracked in `tests/compiler-smoke-e2e/REGISTERED.md`.
  *
  * Test-harness module; not shipped in `ado-script.zip`.
@@ -32,8 +32,8 @@ export interface FixturePaths {
 
 /** Repo-relative paths and signal contract for one fixture. */
 export function fixturePaths(name: FixtureName): FixturePaths {
-  const directory =
-    name === "custom-safe-output" ? CANDIDATE_FIXTURE_DIR : RELEASE_FIXTURE_DIR;
+  const candidateOnly = name === "custom-safe-output" || name === "multi-repo";
+  const directory = candidateOnly ? CANDIDATE_FIXTURE_DIR : RELEASE_FIXTURE_DIR;
   const requiredBuildTags =
     name === "custom-safe-output"
       ? (buildId: number): readonly string[] => [`ado-aw-custom-job-${buildId}`]
@@ -46,7 +46,7 @@ export function fixturePaths(name: FixtureName): FixturePaths {
   };
 }
 
-/** All five candidate fixtures in the stable order used throughout the harness. */
+/** Every candidate fixture in the stable order used throughout the harness. */
 export const ALL_FIXTURES: readonly FixturePaths[] =
   CANDIDATE_FIXTURE_NAMES.map(fixturePaths);
 
@@ -60,7 +60,7 @@ export function fixtureByName(name: FixtureName): FixturePaths {
 
 /**
  * The exact set of repo-relative paths the candidate-staging commit may touch:
- * five markdown sources, five compiled locks, and the compiler-managed root
+ * every markdown source, its compiled lock, and the compiler-managed root
  * `.gitattributes` block. Any other changed path fails before push.
  */
 export function allowedChangedPaths(): Set<string> {

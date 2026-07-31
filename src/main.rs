@@ -241,6 +241,9 @@ enum Commands {
         output_directory: String,
         /// Guard against directory traversal attacks by specifying the agent cannot influence folders outside this path
         bounding_directory: String,
+        /// Exact checkout directory for the pipeline's self repository.
+        #[arg(long)]
+        self_repository_directory: Option<String>,
         /// Only expose these safe output tools (can be repeated). If omitted, all tools are exposed.
         #[arg(long = "enabled-tools")]
         enabled_tools: Vec<String>,
@@ -1267,6 +1270,7 @@ async fn main() -> Result<()> {
         Commands::Mcp {
             output_directory,
             bounding_directory,
+            self_repository_directory,
             enabled_tools,
             custom_tools,
         } => {
@@ -1278,6 +1282,7 @@ async fn main() -> Result<()> {
             mcp::run(
                 &output_directory,
                 &bounding_directory,
+                self_repository_directory.as_deref(),
                 filter.as_deref(),
                 custom_tools.as_deref(),
             )

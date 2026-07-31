@@ -33,6 +33,7 @@ export const CANDIDATE_FIXTURE_NAMES = [
   "noop-target",
   "smoke-failure-reporter",
   "custom-safe-output",
+  "multi-repo",
 ] as const;
 
 export type FixtureName = (typeof CANDIDATE_FIXTURE_NAMES)[number];
@@ -90,6 +91,7 @@ const DEFINITION_ID_ENV_BY_FIXTURE: Readonly<Record<FixtureName, string>> = {
   "noop-target": "COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID",
   "smoke-failure-reporter": "COMPILER_SMOKE_REPORTER_DEFINITION_ID",
   "custom-safe-output": "COMPILER_SMOKE_CUSTOM_SAFE_OUTPUT_DEFINITION_ID",
+  "multi-repo": "COMPILER_SMOKE_MULTI_REPO_DEFINITION_ID",
 };
 
 /** ADO macros that failed to expand look like `$(NAME)`; treat them as unset. */

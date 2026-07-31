@@ -138,11 +138,6 @@ pub(crate) fn build_pipeline_context(
     // ─── Validations (reuse all shared validators) ────────────────
     common::validate_front_matter_identity(front_matter)?;
     common::validate_variable_groups(front_matter)?;
-    common::validate_checkout_self_collision(
-        &front_matter.repositories,
-        &front_matter.checkout,
-        ctx.ado_context.as_ref().map(|c| c.repo_name.as_str()),
-    )?;
     common::validate_safe_outputs_keys(front_matter)?;
     front_matter
         .validate_threat_detection_config(&threat_detection, &detection_engine_config)?;
@@ -181,6 +176,35 @@ pub(crate) fn build_pipeline_context(
     )?;
     let working_directory = common::generate_working_directory(&effective_workspace);
     let trigger_repo_directory = common::generate_trigger_repo_directory(&front_matter.checkout);
+    // Identity of the `self` repository, resolved at compile time.
+    //
+    // `self` is the repository this workflow is compiled in, and (because the
+    // executor's `--source` resolves beneath the `self` checkout) also the
+    // repository whose pipeline runs it — for template targets that is the
+    // parent pipeline's repository. The compiler therefore already knows the
+    // name, and the `ado-aw-marker` extension already bakes it into the lock,
+    // so `ado-aw check` fails loudly if the baked value ever drifts from the
+    // repository the pipeline actually runs in.
+    //
+    // The `$(Build.Repository.Name)` fallback is deliberately last: it names
+    // the *triggering* repository, which differs from `self` on
+    // repository-resource-triggered runs (issue #1731). Warn rather than fail,
+    // because compiling outside an ADO clone is a supported developer path.
+    let self_repository_name = match ctx.ado_context.as_ref() {
+        Some(ado) => EnvValue::literal(ado.repo_name.clone()),
+        None => {
+            eprintln!(
+                "Warning: could not resolve the Azure DevOps repository for agent '{}' \
+                (no ADO git remote and no ADO_AW_COMPILE_REMOTE_URL). Falling back to \
+                $(Build.Repository.Name) for the 'self' repository identity, which names \
+                the TRIGGERING repository — safe-outputs targeting `repository: self` may \
+                resolve to the wrong repository on repository-resource-triggered runs. \
+                Compile from an Azure DevOps clone, or set ADO_AW_COMPILE_REMOTE_URL.",
+                front_matter.name
+            );
+            EnvValue::ado_macro("Build.Repository.Name")?
+        }
+    };
     let pools = common::resolve_pool_overrides_typed(
         front_matter.target.clone(),
         front_matter.pool.as_ref(),
@@ -329,6 +353,7 @@ pub(crate) fn build_pipeline_context(
             )
         })?;
     crate::validate::reject_pipeline_injection(source_path_suffix, "workflow source path")?;
+    let source_relative_path = source_path_suffix.to_string();
     let source_path =
         source_path_raw.replace("{{ trigger_repo_directory }}", &trigger_repo_directory);
     let pipeline_path = common::generate_pipeline_path(output_path);
@@ -411,6 +436,7 @@ pub(crate) fn build_pipeline_context(
             .unwrap_or_default(),
         working_directory: working_directory.clone(),
         trigger_repo_directory: trigger_repo_directory.clone(),
+        self_repository_name,
         compiler_version: compiler_version.clone(),
         engine_install_steps_yaml,
         detection_engine_install_steps_yaml,
@@ -430,6 +456,7 @@ pub(crate) fn build_pipeline_context(
         mcpg_docker_env,
         mcpg_step_env,
         source_path,
+        source_relative_path,
         pipeline_path: pipeline_path.clone(),
         acquire_read_token,
         acquire_write_token,
@@ -636,6 +663,10 @@ pub(crate) struct StandaloneCtx {
     pub(crate) self_checkout_fetch: CheckoutFetchOpts,
     pub(crate) working_directory: String,
     pub(crate) trigger_repo_directory: String,
+    /// Identity of the `self` repository, resolved at compile time from the ADO
+    /// git remote. Falls back to the `$(Build.Repository.Name)` macro (with a
+    /// compile warning) when no ADO context is available.
+    pub(crate) self_repository_name: EnvValue,
     pub(crate) compiler_version: String,
     /// Engine install steps as a YAML string (`Engine::install_steps`
     /// returns YAML today). Lowered through `Step::RawYaml` because
@@ -670,6 +701,9 @@ pub(crate) struct StandaloneCtx {
     /// `env:` block for the MCPG step (`env:\n  KEY: ...`).
     pub(crate) mcpg_step_env: String,
     pub(crate) source_path: String,
+    /// Validated path to the workflow source relative to the trigger repository.
+    /// SafeOutputs variants combine this with their job-local checkout layout.
+    pub(crate) source_relative_path: String,
     pub(crate) pipeline_path: String,
     /// `AzureCLI@2` task YAML body (or empty when no read service connection).
     pub(crate) acquire_read_token: String,
@@ -923,7 +957,7 @@ fn build_setup_job(
         return Ok(None);
     }
     let mut steps: Vec<Step> = Vec::new();
-    steps.push(checkout_self_step(&cfg.self_checkout_fetch));
+    steps.push(checkout_self_step(&cfg.self_checkout_fetch, false));
     steps.extend(ext_setup_steps.iter().cloned());
 
     // User setup steps as RawYaml — they're arbitrary user-authored ADO YAML
@@ -981,7 +1015,10 @@ fn build_agent_job(
     let mut steps: Vec<Step> = Vec::new();
 
     // 1. checkout: self
-    steps.push(checkout_self_step(&cfg.self_checkout_fetch));
+    steps.push(checkout_self_step(
+        &cfg.self_checkout_fetch,
+        !front_matter.checkout.is_empty(),
+    ));
     // 2. additional repo checkouts
     for repo in &front_matter.checkout {
         let fetch = front_matter
@@ -991,12 +1028,12 @@ fn build_agent_job(
             .unwrap_or_default();
         steps.push(Step::Checkout(CheckoutStep {
             repository: CheckoutRepo::Named(repo.clone()),
+            path: Some(format!("s/{repo}")),
             clean: None,
             submodules: None,
             fetch_depth: fetch.depth_for_emit(),
             fetch_tags: fetch.fetch_tags,
             persist_credentials: None,
-            path: None,
         }));
     }
 
@@ -1090,7 +1127,7 @@ fn build_agent_job(
         // only, so it never double-prints when the same step is also emitted in
         // the SafeOutputs job (issue #1453).
         warn_create_pr_target_inference(front_matter);
-        let repos = create_pr_prepare_repos(front_matter, &cfg.working_directory);
+        let repos = create_pr_prepare_repos(front_matter, &cfg.trigger_repo_directory);
         steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
             super::extensions::ado_script::PreparePrBaseMode::PatchBase,
             &repos,
@@ -1286,7 +1323,7 @@ fn build_detection_job(
     prefix: &JobPrefix<'_>,
 ) -> Result<Job> {
     let mut steps: Vec<Step> = Vec::new();
-    steps.push(checkout_self_step(&cfg.self_checkout_fetch));
+    steps.push(checkout_self_step(&cfg.self_checkout_fetch, false));
     // Detection job pulls the Agent's output artifact via cross-job download
     steps.push(Step::Download(DownloadStep {
         source: "current".to_string(),
@@ -1446,6 +1483,54 @@ struct SafeOutputsVariant {
     /// Whether this is the manual-review-gated `SafeOutputs_Reviewed` variant.
     /// Used to select the correct pool override without relying on the job name.
     is_reviewed: bool,
+}
+
+/// Checkout-dependent paths for one SafeOutputs job.
+///
+/// Split approval can produce two Stage 3 jobs with different checkout sets,
+/// so workflow-global paths cannot be reused blindly by both variants.
+struct SafeOutputsCheckoutLayout {
+    source_path: String,
+    self_repository_directory: String,
+    multi_checkout: bool,
+}
+
+impl SafeOutputsCheckoutLayout {
+    fn for_variant(
+        front_matter: &FrontMatter,
+        cfg: &StandaloneCtx,
+        variant: &SafeOutputsVariant,
+    ) -> Self {
+        let has_additional_checkouts =
+            variant.runs_create_pull_request && !front_matter.checkout.is_empty();
+        let self_repository_directory = if has_additional_checkouts {
+            // This job emits the same multi-checkout layout as the Agent job, so
+            // `self` sits at the compiler-owned `MULTI_CHECKOUT_SELF_PATH`. That
+            // is exactly what `generate_trigger_repo_directory` produces for a
+            // non-empty checkout list, which is how `cfg.trigger_repo_directory`
+            // was built — assert the two stay in agreement.
+            debug_assert_eq!(
+                cfg.trigger_repo_directory,
+                common::MULTI_CHECKOUT_SELF_DIRECTORY,
+                "multi-checkout self directory must match the fixed `s/self` path"
+            );
+            cfg.trigger_repo_directory.clone()
+        } else {
+            // Only `checkout: self` runs here, so ADO places it at the root
+            // regardless of what the workflow-wide layout looks like.
+            common::generate_trigger_repo_directory(&[])
+        };
+        let source_path = format!(
+            "{}/{}",
+            self_repository_directory, cfg.source_relative_path
+        );
+
+        Self {
+            source_path,
+            self_repository_directory,
+            multi_checkout: has_additional_checkouts,
+        }
+    }
 }
 
 impl SafeOutputsVariant {
@@ -1955,10 +2040,10 @@ fn shell_quote(raw: &str) -> String {
 }
 
 /// Build the `(dir, target-branch)` pairs the `prepare-pr-base` bundle must
-/// fetch/deepen — one per allowed `create-pull-request` repo, mirroring
-/// `mcp.rs::resolve_git_dir_for_patch`: `working_directory` (for `self`) and
-/// `working_directory/<alias>` for each `checkout:` alias. Each dir is paired
-/// with THAT repo's resolved target branch
+/// fetch/deepen — one per allowed `create-pull-request` repo. `self` uses its
+/// exact checkout directory, while named repositories are siblings beneath
+/// `$(Build.SourcesDirectory)`. Each dir is paired with THAT repo's resolved
+/// target branch
 /// (`CreatePrConfig::resolve_target_branch` — explicit override, inferred
 /// checkout ref, or the literal default), so a PR to any repo deepens the branch
 /// it actually targets. A single `self` checkout ⇒ one pair. Returns an empty
@@ -1970,7 +2055,7 @@ fn shell_quote(raw: &str) -> String {
 /// jobs (issue #1453).
 fn create_pr_prepare_repos(
     front_matter: &FrontMatter,
-    working_directory: &str,
+    self_repository_directory: &str,
 ) -> Vec<super::extensions::ado_script::PreparePrBaseRepo> {
     use super::extensions::ado_script::PreparePrBaseRepo;
 
@@ -1979,7 +2064,7 @@ fn create_pr_prepare_repos(
     };
     let repo_refs = front_matter.checkout_repo_refs();
     let mut repos = vec![PreparePrBaseRepo {
-        dir: working_directory.to_string(),
+        dir: self_repository_directory.to_string(),
         // Read BUILD_SOURCEBRANCH directly in the Node process. Embedding the
         // runtime branch value into bash argv would make valid `$()`/backtick
         // ref characters subject to shell command substitution.
@@ -1988,7 +2073,7 @@ fn create_pr_prepare_repos(
     }];
     for alias in &front_matter.checkout {
         repos.push(PreparePrBaseRepo {
-            dir: format!("{working_directory}/{alias}"),
+            dir: format!("$(Build.SourcesDirectory)/{alias}"),
             source_ref: repo_refs.get(alias).cloned(),
             target_branch: pr_cfg.resolve_target_branch(alias, &repo_refs),
         });
@@ -2034,8 +2119,40 @@ fn build_safeoutputs_job(
     prefix: &JobPrefix<'_>,
     variant: &SafeOutputsVariant,
 ) -> Result<Job> {
+    let layout = SafeOutputsCheckoutLayout::for_variant(front_matter, cfg, variant);
     let mut steps: Vec<Step> = Vec::new();
-    steps.push(checkout_self_step(&cfg.self_checkout_fetch));
+    steps.push(checkout_self_step(
+        &cfg.self_checkout_fetch,
+        layout.multi_checkout,
+    ));
+    // When `create-pull-request` is configured and there are additional
+    // checked-out repos, the SafeOutputs job must replicate the Agent job's
+    // multi-checkout layout (issue #1731). Without these checkouts:
+    //   • The additional repo directories don't exist in the SafeOutputs
+    //     workspace, so `prepare-pr-base.js` and `ado-aw execute` fail.
+    // `self` uses the compiler-owned `s/self` path in this layout so neither a
+    // repository-resource trigger nor an additional alias can change where the
+    // executor finds the workflow source.
+    // Only emit these for the variant that actually runs `create-pull-request`;
+    // other variants (and split-approval auto-SafeOutputs) don't need them.
+    if variant.runs_create_pull_request {
+        for repo in &front_matter.checkout {
+            let fetch = front_matter
+                .checkout_fetch
+                .get(repo)
+                .cloned()
+                .unwrap_or_default();
+            steps.push(Step::Checkout(CheckoutStep {
+                repository: CheckoutRepo::Named(repo.clone()),
+                path: Some(format!("s/{repo}")),
+                clean: None,
+                submodules: None,
+                fetch_depth: fetch.depth_for_emit(),
+                fetch_tags: fetch.fetch_tags,
+                persist_credentials: None,
+            }));
+        }
+    }
     // Acquire write token (when configured)
     push_raw_yaml_if_nonempty(&mut steps, &cfg.acquire_write_token)?;
     // Download analyzed outputs
@@ -2082,7 +2199,7 @@ fn build_safeoutputs_job(
                 front_matter.supply_chain(),
             ),
         );
-        let repos = create_pr_prepare_repos(front_matter, &cfg.working_directory);
+        let repos = create_pr_prepare_repos(front_matter, &layout.self_repository_directory);
         steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
             super::extensions::ado_script::PreparePrBaseMode::TargetWorktree,
             &repos,
@@ -2095,9 +2212,10 @@ fn build_safeoutputs_job(
     )?));
     // Execute safe outputs (Stage 3) — typed BashStep with typed env block
     steps.push(Step::Bash(execute_safe_outputs_step(
-        &cfg.source_path,
+        &layout.source_path,
         resolved_config_path,
-        &cfg.working_directory,
+        &layout.self_repository_directory,
+        &cfg.self_repository_name,
         &cfg.executor_ado_env,
         &variant.filter_args,
     )?));
@@ -2366,7 +2484,7 @@ fn build_teardown_job(
         return Ok(None);
     }
     let mut steps: Vec<Step> = Vec::new();
-    steps.push(checkout_self_step(&cfg.self_checkout_fetch));
+    steps.push(checkout_self_step(&cfg.self_checkout_fetch, false));
     for user_step_val in &front_matter.teardown {
         steps.push(Step::RawYaml(step_to_raw_yaml_string(user_step_val)?));
     }
@@ -2806,31 +2924,34 @@ fn wire_explicit_dependencies(
 // Step body builders — typed BashStep/TaskStep with format!() bodies
 // ─────────────────────────────────────────────────────────────────────
 
-fn checkout_self_step(fetch: &CheckoutFetchOpts) -> Step {
-    checkout_self_step_with_path(fetch, None)
+fn checkout_self_step(fetch: &CheckoutFetchOpts, multi_checkout: bool) -> Step {
+    checkout_self_step_with_path(
+        fetch,
+        multi_checkout.then_some(common::MULTI_CHECKOUT_SELF_PATH),
+    )
 }
 
 fn checkout_self_step_with_path(fetch: &CheckoutFetchOpts, path: Option<&str>) -> Step {
     Step::Checkout(CheckoutStep {
         repository: CheckoutRepo::Self_,
+        path: path.map(str::to_string),
         clean: None,
         submodules: None,
         fetch_depth: fetch.depth_for_emit(),
         fetch_tags: fetch.fetch_tags,
         persist_credentials: None,
-        path: path.map(str::to_string),
     })
 }
 
 fn checkout_none_step() -> Step {
     Step::Checkout(CheckoutStep {
         repository: CheckoutRepo::None,
+        path: None,
         clean: None,
         submodules: None,
         fetch_depth: None,
         fetch_tags: None,
         persist_credentials: None,
-        path: None,
     })
 }
 
@@ -3712,7 +3833,11 @@ fn run_agent_step(
 fn execute_safe_outputs_step(
     source_path: &str,
     resolved_config_path: &str,
-    working_directory: &str,
+    // Stage 3 runs git operations against `repository: self`, so the executor's
+    // working directory is the exact self checkout — not the resolved
+    // `workspace:` directory, which may point at another repository's alias.
+    self_repository_directory: &str,
+    self_repository_name: &EnvValue,
     executor_ado_env: &str,
     filter_args: &str,
 ) -> Result<BashStep> {
@@ -3728,10 +3853,24 @@ fn execute_safe_outputs_step(
          exit $EXIT_CODE\n",
     );
     let mut step = bash("Execute safe outputs (Stage 3)", script);
-    step.working_directory = Some(working_directory.to_string());
+    step.working_directory = Some(self_repository_directory.to_string());
     for (k, v) in parse_env_block(executor_ado_env)? {
         step = step.with_env(k, v);
     }
+    step = step.with_env(
+        "ADO_AW_SELF_REPOSITORY_DIRECTORY",
+        // The value embeds `$(Build.SourcesDirectory)`, but it is still a
+        // `Literal`: ADO expands `$(...)` macros in step `env:` values at agent
+        // runtime, so the macro reaches the executor already resolved.
+        // `EnvValue::AdoMacro` is for values that are *only* a macro; this one
+        // is a macro-plus-suffix path, and `Concat` would add no value because
+        // no part of it needs separate lowering.
+        EnvValue::literal(self_repository_directory),
+    );
+    step = step.with_env(
+        "ADO_AW_SELF_REPOSITORY_NAME",
+        self_repository_name.clone(),
+    );
     Ok(step)
 }
 
@@ -4549,6 +4688,7 @@ mod tests {
             self_checkout_fetch: CheckoutFetchOpts::default(),
             working_directory: "$(Build.SourcesDirectory)".to_string(),
             trigger_repo_directory: "$(Build.SourcesDirectory)".to_string(),
+            self_repository_name: EnvValue::literal("test-repo"),
             compiler_version: "0.0.0-test".to_string(),
             engine_install_steps_yaml: String::new(),
             detection_engine_install_steps_yaml: String::new(),
@@ -4568,6 +4708,7 @@ mod tests {
             mcpg_docker_env: String::new(),
             mcpg_step_env: String::new(),
             source_path: "$(Build.SourcesDirectory)/agents/test.md".to_string(),
+            source_relative_path: "agents/test.md".to_string(),
             pipeline_path: "$(Build.SourcesDirectory)/agents/test.lock.yml".to_string(),
             acquire_read_token: String::new(),
             acquire_write_token: String::new(),
@@ -5201,6 +5342,7 @@ safe-outputs:
             trigger_repo_directory: super::super::common::generate_trigger_repo_directory(
                 &fm.checkout,
             ),
+            self_repository_name: EnvValue::literal("test-repo"),
             compiler_version: "0.0.0-test".to_string(),
             engine_install_steps_yaml: String::new(),
             detection_engine_install_steps_yaml: String::new(),
@@ -5220,6 +5362,7 @@ safe-outputs:
             mcpg_docker_env: String::new(),
             mcpg_step_env: String::new(),
             source_path: "source.md".to_string(),
+            source_relative_path: "source.md".to_string(),
             pipeline_path: "source.lock.yml".to_string(),
             acquire_read_token: String::new(),
             acquire_write_token: String::new(),

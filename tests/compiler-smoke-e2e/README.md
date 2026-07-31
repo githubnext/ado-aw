@@ -1,12 +1,48 @@
 # Candidate compiler agentic smoke
 
 This suite validates compiler changes before release. It builds `ado-aw` and
-`ado-script` from the exact pull-request or `main` commit, recompiles four
-selected release workflows under [`tests/safe-outputs/`](../safe-outputs/)
-(canary, azure-cli, noop-target, and failure reporter) plus the candidate-only
-custom-safe-output workflow in this directory, and queues five fixed
-AgentPlayground definitions against the regenerated YAML. The weekly janitor is
-intentionally outside the candidate lane.
+`ado-script` from the exact pull-request or `main` commit, recompiles the
+selected workflows below, and queues the matching fixed AgentPlayground
+definitions against the regenerated YAML. The weekly janitor remains covered by
+the release-backed lane and is intentionally excluded here.
+
+| Fixture | Source | Covers |
+| --- | --- | --- |
+| `canary` | [`tests/safe-outputs/`](../safe-outputs/) | Full agentic loop with two ADO write paths |
+| `azure-cli` | [`tests/safe-outputs/`](../safe-outputs/) | AWF `az` extension and ADO control-plane reach |
+| `noop-target` | [`tests/safe-outputs/`](../safe-outputs/) | Minimal Stage 1 → 3 shape |
+| `smoke-failure-reporter` | [`tests/safe-outputs/`](../safe-outputs/) | Debug-only `create-issue` path |
+| `custom-safe-output` | [`custom-safe-output.md`](custom-safe-output.md) | **Candidate-only.** Imported jobs-style custom safe output, verified via a build tag |
+| `multi-repo` | [`multi-repo.md`](multi-repo.md) | **Candidate-only.** Multi-checkout layout and compile-time `self` identity |
+
+The first four are release-backed sources that also feed the release lane. The
+candidate-only fixtures have no released lock file and no release definition,
+so they live beside this lane's own files — a lock committed under
+`tests/safe-outputs/` would have no released compiler that owns it.
+
+### What `multi-repo` proves
+
+Compiler tests assert the *emitted YAML*; the executor-e2e suite asserts Stage 3
+against directories it creates itself. Neither proves that **Azure DevOps puts
+repositories where the compiler said**. `multi-repo` closes that gap on live
+ADO by checking, before the agent starts, that:
+
+1. `self` is at `$(Build.SourcesDirectory)/self` (the compiler-owned
+   `path: s/self`) and holds the exact candidate commit;
+2. the additional repository is at `$(Build.SourcesDirectory)/pinned-base` and
+   resolves to a *different* commit, so a collapsed or missing checkout is
+   detectable;
+3. the compiled pipeline is reachable beneath the `self` checkout — the same
+   path Stage 3 passes to `ado-aw execute --source`;
+4. the `self` repository name baked in at compile time matches the repository
+   the build is actually running against.
+
+It declares `create-pull-request` so the compiler emits the multi-checkout
+SafeOutputs job shape (issue #1731), but instructs the agent to emit only
+`noop` and grants no `edit` tool — so Stage 3 exercises the layout while
+proposing nothing and writing nothing. The SafeOutputs job's own layout is
+verified implicitly: if its `self` checkout were misplaced, `--source` would
+not resolve and Stage 3 would fail.
 
 It complements rather than replaces the release-backed daily smoke:
 
@@ -30,7 +66,7 @@ check and downloaded binary cannot drift.
    `ado-aw-linux-x64`, `awf-linux-x64`, `ado-script.zip`, `checksums.txt`, and
    `provenance.json`.
 4. The test-only `compiler-smoke-e2e` TypeScript harness creates a detached
-   worktree, adds an exact `supply-chain.pipeline-artifact` source to all five
+   worktree, adds an exact `supply-chain.pipeline-artifact` source to every
    smoke files, removes their schedules, recompiles them with the candidate
    compiler, and runs `ado-aw check`. Both compiler subprocesses receive
    `ADO_AW_COMPILE_REMOTE_URL` set to the target `ado-aw-mirror` URL, so
@@ -39,7 +75,7 @@ check and downloaded binary cannot drift.
 5. The harness pushes the worktree commit to
    `refs/heads/ado-aw-smoke-candidate/<producer-build-id>` in the Azure Repo
    `ado-aw-mirror`.
-6. Five fixed child definitions are queued concurrently with both that ref and
+6. Each fixed child definition is queued concurrently with both that ref and
    its exact commit SHA. Each generated pipeline downloads and verifies the
    artifact from the still-running producer build.
 7. The custom child imports a self-contained jobs-style tool from the
@@ -98,11 +134,12 @@ comment-gated in addition to that manifest.
 
 The definitions are registered against `ado-aw-mirror`, not GitHub. Their
 default branch is the permanent inert ref
-`refs/heads/ado-aw-smoke-candidate-base`, whose five lock-file paths contain
+`refs/heads/ado-aw-smoke-candidate-base`, whose lock-file paths contain
 hand-authored `trigger: none`, `pr: none`, schedule-free placeholders. A child
 therefore runs only when the orchestrator explicitly supplies a candidate ref.
-The checked-in [`inert-child.yml`](inert-child.yml) is copied to those five
-paths when the base ref is created.
+The checked-in [`inert-child.yml`](inert-child.yml) is copied to each of those
+paths — when the base ref is first created, and again for each fixture added
+later (see **Adding a new candidate fixture** below).
 
 The candidate-only custom source is
 [`custom-safe-output.md`](custom-safe-output.md). Its self-contained component
@@ -112,13 +149,106 @@ commit.
 
 See [`REGISTERED.md`](REGISTERED.md) for definition IDs and variables.
 
+## Adding a new candidate fixture
+
+`<name>` is the fixture name; `multi-repo` is the worked example.
+
+> **Order matters.** Phase B must be complete before Phase A merges — the
+> harness fails closed on an unset `*_DEFINITION_ID`, so an unregistered
+> fixture breaks the whole lane.
+
+### Phase A — repository (one PR)
+
+1. Author `<name>.md` beside this README. Do **not** commit a lock file:
+   candidate-only fixtures have no released compiler that owns one.
+2. Wire it up in five places:
+
+   | File | Change |
+   | --- | --- |
+   | `config.ts` | add `<name>` to `FIXTURE_NAMES` |
+   | `config.ts` | add `COMPILER_SMOKE_<NAME>_DEFINITION_ID` to `DEFINITION_ID_ENV_BY_FIXTURE` |
+   | `fixtures.ts` | add `<name>` to `FIXTURE_DIR_BY_NAME` |
+   | `azure-pipelines.yml` | add the `EFFECTIVE_*` variable **and** its env passthrough |
+   | `__tests__/{config,index}.test.ts` | add the ID to both env builders |
+
+   (All five live under `scripts/ado-script/src/compiler-smoke-e2e/` except the
+   pipeline YAML.)
+3. `npx vitest run src/compiler-smoke-e2e && npm run typecheck`.
+
+### Phase B — Azure DevOps (once, needs mirror push + definition-create rights)
+
+```bash
+# 1. Seed an inert placeholder so the definition has a valid default branch.
+git clone -b ado-aw-smoke-candidate-base \
+  https://dev.azure.com/msazuresphere/AgentPlayground/_git/ado-aw-mirror
+cd ado-aw-mirror
+cp /path/to/ado-aw/tests/compiler-smoke-e2e/inert-child.yml \
+  tests/compiler-smoke-e2e/<name>.lock.yml
+git add -A && git commit -m "chore(smoke): seed inert <name> child" && git push
+
+# 2. Create the definition (no run; triggers stay off).
+az pipelines create \
+  --org https://dev.azure.com/msazuresphere --project AgentPlayground \
+  --name "Candidate compiler smoke - <name>" \
+  --repository ado-aw-mirror --repository-type tfsgit \
+  --branch ado-aw-smoke-candidate-base \
+  --yaml-path tests/compiler-smoke-e2e/<name>.lock.yml \
+  --folder-path '\compiler-smoke-e2e' --skip-run true
+```
+
+> **`az pipelines create` does not produce a compliant definition.** It adds a
+> `continuousIntegration` trigger and picks a default hosted queue. Candidate
+> children must have **no** triggers — the generated locks emit no `trigger:`
+> key, and a YAML pipeline without one defaults to CI on every branch, so a
+> definition-level trigger would let a candidate-ref push start builds outside
+> the orchestrator. Immediately after creating, GET the definition, set
+> `triggers` to `[]` and `queue` to the pool the other children use, and PUT it
+> back (`az rest --resource 499b84ac-1321-427f-aa17-267ca6975798`). Then
+> confirm it matches a known-good child:
+>
+> ```bash
+> az pipelines show --org … --project AgentPlayground --id <new-id> \
+>   --query '{yaml:process.yamlFilename,branch:repository.defaultBranch,queue:queue.name,triggers:triggers,scope:jobAuthorizationScope}'
+> ```
+
+Then, on the new definition:
+
+- add its id to `$copilotDefinitionIds` in
+  [`scripts/rotate-agentplayground-secrets.ps1`](../../scripts/rotate-agentplayground-secrets.ps1),
+  then run that script to provision its secret `GITHUB_TOKEN`. This is the only
+  supported way to set it — server-side definition cloning does not copy secret
+  values, and a definition missing from that list silently loses Copilot auth
+  at the next rotation;
+- authorize the service connections the fixture's `permissions:` block declares
+  (`agent-playground-read`, plus `agent-playground-write` only if it proposes a
+  safe output that writes to ADO);
+- set `COMPILER_SMOKE_<NAME>_DEFINITION_ID` on orchestrator `2559`:
+
+  ```bash
+  az pipelines variable create --org … --project AgentPlayground \
+    --pipeline-id 2559 --name COMPILER_SMOKE_<NAME>_DEFINITION_ID --value <new-id>
+  ```
+
+### Phase C — verify
+
+`/azp run` the orchestrator on the Phase A PR, confirm the new child appears in
+the results table, then record its ID in [`REGISTERED.md`](REGISTERED.md).
+
+> Checking out an **additional** repository grants no permissions by itself:
+> the child's build identity needs Code Read on it. `multi-repo` checks out
+> `ado-aw-e2e-fixture` alongside `self`. Prefer a genuinely different
+> repository over checking `self`'s repository out twice — two checkouts of one
+> repository contend for the agent's single per-repository cache directory,
+> which warns (`Unable move and reuse existing repository`) and forces a
+> re-clone on every run.
+
 ## Required permissions
 
 The principal behind `agent-playground-write`, used only after artifact
 publication, needs:
 
 - Contribute/Create branch/Delete refs on `ado-aw-mirror`;
-- Queue builds and Stop builds on the five child definitions;
+- Queue builds and Stop builds on the child definitions;
 - Read builds and artifacts in AgentPlayground.
 
 Child build identities need Code Read on `ado-aw-mirror` and Build Read on the
@@ -144,6 +274,7 @@ COMPILER_SMOKE_AZURE_CLI_DEFINITION_ID
 COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID
 COMPILER_SMOKE_REPORTER_DEFINITION_ID
 COMPILER_SMOKE_CUSTOM_SAFE_OUTPUT_DEFINITION_ID
+COMPILER_SMOKE_MULTI_REPO_DEFINITION_ID
 ```
 
 Optional overrides:
@@ -174,7 +305,7 @@ The full live contract requires AgentPlayground and the fixed definitions:
 
 1. the producer remains in progress after publishing its artifact;
 2. every child downloads the exact producer `run-id`;
-3. all five children succeed;
+3. every child succeeds;
 4. the custom child carries
    `ado-aw-custom-job-<child-build-id>`;
 5. child provenance identifies the producer definition, build, and source SHA;

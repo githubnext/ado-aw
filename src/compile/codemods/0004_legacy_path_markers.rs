@@ -7,7 +7,7 @@
 //!
 //! - `{{ workspace }}` and `{{ working_directory }}` → the resolved
 //!   working directory (`$(Build.SourcesDirectory)`,
-//!   `$(Build.SourcesDirectory)/$(Build.Repository.Name)`, or
+//!   `$(Build.SourcesDirectory)/self`, or
 //!   `$(Build.SourcesDirectory)/<alias>`).
 //! - `{{ trigger_repo_directory }}` → the trigger ("self") repo dir.
 //!
@@ -254,7 +254,7 @@ mod tests {
         assert!(changed);
         assert_eq!(
             step_script(&fm),
-            "cd $(Build.SourcesDirectory)/$(Build.Repository.Name)"
+            "cd $(Build.SourcesDirectory)/self"
         );
     }
 
@@ -275,7 +275,7 @@ mod tests {
         apply_codemod(&mut fm, &ctx()).expect("apply");
         assert_eq!(
             step_script(&fm),
-            "cat $(Build.SourcesDirectory)/$(Build.Repository.Name)/file"
+            "cat $(Build.SourcesDirectory)/self/file"
         );
     }
 

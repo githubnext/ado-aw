@@ -17,7 +17,7 @@ describe("fixturePaths", () => {
     });
   });
 
-  it("uses the candidate-only directory for the custom fixture", () => {
+  it("uses the candidate-only directory for candidate-only fixtures", () => {
     const fixture = fixturePaths("custom-safe-output");
     expect(fixture.relMd).toBe(
       "tests/compiler-smoke-e2e/custom-safe-output.md",
@@ -26,17 +26,26 @@ describe("fixturePaths", () => {
       "tests/compiler-smoke-e2e/custom-safe-output.lock.yml",
     );
     expect(fixture.requiredBuildTags?.(42)).toEqual(["ado-aw-custom-job-42"]);
+
+    const multiRepo = fixturePaths("multi-repo");
+    expect(multiRepo.relMd).toBe("tests/compiler-smoke-e2e/multi-repo.md");
+    expect(multiRepo.relLock).toBe(
+      "tests/compiler-smoke-e2e/multi-repo.lock.yml",
+    );
+    // Its assertions run inside the pipeline, so it publishes no build tag.
+    expect(multiRepo.requiredBuildTags).toBeUndefined();
   });
 });
 
 describe("ALL_FIXTURES", () => {
-  it("has exactly the five candidate fixtures in the required stable order", () => {
+  it("has exactly the candidate fixtures in the required stable order", () => {
     expect(ALL_FIXTURES.map((f) => f.name)).toEqual([
       "canary",
       "azure-cli",
       "noop-target",
       "smoke-failure-reporter",
       "custom-safe-output",
+      "multi-repo",
     ]);
     expect(ALL_FIXTURES.map((f) => f.name)).not.toContain("janitor");
   });
@@ -44,7 +53,7 @@ describe("ALL_FIXTURES", () => {
   it("keeps release and candidate-only fixture paths separate", () => {
     for (const fixture of ALL_FIXTURES) {
       const directory =
-        fixture.name === "custom-safe-output"
+        fixture.name === "custom-safe-output" || fixture.name === "multi-repo"
           ? CANDIDATE_FIXTURE_DIR
           : RELEASE_FIXTURE_DIR;
       expect(fixture.relMd.startsWith(`${directory}/`)).toBe(true);
@@ -54,9 +63,9 @@ describe("ALL_FIXTURES", () => {
 });
 
 describe("allowedChangedPaths", () => {
-  it("contains the five source/lock pairs and root compiler-managed attributes", () => {
+  it("contains every source/lock pair and root compiler-managed attributes", () => {
     const allowed = allowedChangedPaths();
-    expect(allowed.size).toBe(11);
+    expect(allowed.size).toBe(ALL_FIXTURES.length * 2 + 1);
     expect(allowed.has(".gitattributes")).toBe(true);
     for (const f of ALL_FIXTURES) {
       expect(allowed.has(f.relMd)).toBe(true);

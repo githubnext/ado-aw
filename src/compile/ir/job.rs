@@ -273,12 +273,12 @@ mod tests {
         );
         j.push_step(Step::Checkout(super::super::step::CheckoutStep {
             repository: super::super::step::CheckoutRepo::Self_,
+            path: None,
             clean: None,
             submodules: None,
             fetch_depth: None,
             fetch_tags: None,
             persist_credentials: None,
-            path: None,
         }));
         assert_eq!(j.steps.len(), 1);
     }

@@ -382,6 +382,10 @@ fn log_execution_context(safe_output_dir: &Path, ctx: &ExecutionContext) {
     debug!("Safe output directory: {}", safe_output_dir.display());
     debug!("Source directory: {}", ctx.source_directory.display());
     debug!(
+        "Self repository directory: {}",
+        ctx.self_repository_directory.display()
+    );
+    debug!(
         "ADO org: {}",
         ctx.ado_org_url.as_deref().unwrap_or("<not set>")
     );

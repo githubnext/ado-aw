@@ -56,7 +56,13 @@ All deterministically-assertable ADO-write safe outputs plus the flagship
 - **Git:** `create-branch`, `create-git-tag`
 - **Build:** `add-build-tag`, `queue-build`, `upload-build-attachment`,
   `upload-pipeline-artifact`
-- **Flagship:** `create-pull-request`
+- **Flagship:** `create-pull-request` covers both a named additional checkout at
+  `<BUILD_SOURCESDIRECTORY>/<alias>` and `repository: self` beneath a non-Git
+  multi-checkout root, with compiler-owned self repository identity taking
+  precedence over trigger-scoped `BUILD_REPOSITORY_*` values. The `self`
+  scenario supplies only `ADO_AW_SELF_REPOSITORY_NAME` — matching what the
+  compiler emits — so it also proves the executor resolves a repository from
+  its name alone.
 
 Excluded (out of scope or GitHub-only): the GitHub-only `create-issue`.
 

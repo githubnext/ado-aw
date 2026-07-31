@@ -643,34 +643,14 @@ impl Executor for CreatePrResult {
             "Validating repository '{}' against allowed list",
             self.repository
         );
-        let repo_id = if crate::safe_outputs::input_refers_to_self(&self.repository, ctx) {
-            // "self" or a name match against the pipeline's own repository
-            debug!("Using 'self' repository (matched '{}')", self.repository);
-            ctx.repository_id
-                .as_ref()
-                .or(ctx.repository_name.as_ref())
-                .context("Repository ID not configured for 'self'")?
-                .clone()
-        } else if let Some(ado_repo_name) = crate::safe_outputs::lookup_allowed_repository(
-            &self.repository,
-            &ctx.allowed_repositories,
-        ) {
-            // Matched against allowed list (by alias, full value, or trailing name)
-            debug!(
-                "Repository '{}' resolved to '{}'",
-                self.repository, ado_repo_name
-            );
-            ado_repo_name.clone()
-        } else if ctx.allowed_repositories.is_empty() {
-            // No allowed_repositories configured - fall back to default repo (backward compat)
-            debug!("No allowed_repositories configured, using default repo");
-            ctx.repository_id
-                .as_ref()
-                .or(ctx.repository_name.as_ref())
-                .context("Repository ID not configured")?
-                .clone()
-        } else {
-            // Repository not in allowed list
+        let repository_alias =
+            crate::safe_outputs::canonical_repository_alias(&self.repository, ctx)
+                .or_else(|| {
+                    ctx.allowed_repositories
+                        .is_empty()
+                        .then(|| "self".to_string())
+                });
+        let Some(repository_alias) = repository_alias else {
             warn!(
                 "Repository '{}' not in allowed list: {:?}",
                 self.repository,
@@ -684,6 +664,34 @@ impl Executor for CreatePrResult {
                     .cloned()
                     .collect::<Vec<_>>()
                     .join(", ")
+            )));
+        };
+        let repo_id = if repository_alias == "self" {
+            // "self" or a name match against the pipeline's own repository
+            debug!("Using 'self' repository (matched '{}')", self.repository);
+            ctx.repository_id
+                .as_ref()
+                .or(ctx.repository_name.as_ref())
+                .context("Repository ID not configured for 'self'")?
+                .clone()
+        } else if let Some(ado_repo_name) = ctx.allowed_repositories.get(&repository_alias) {
+            debug!(
+                "Repository '{}' resolved through alias '{}' to '{}'",
+                self.repository, repository_alias, ado_repo_name
+            );
+            ado_repo_name.clone()
+        } else {
+            // Unreachable: `repository_alias` is either "self" (handled above)
+            // or a key produced by iterating `ctx.allowed_repositories`, so the
+            // lookup cannot miss. Kept as a fail-closed guard in case the
+            // canonicalization and the map ever drift apart.
+            debug_assert!(
+                false,
+                "canonical alias '{repository_alias}' is absent from allowed_repositories"
+            );
+            return Ok(ExecutionResult::failure(format!(
+                "Repository alias '{}' has no configured repository",
+                repository_alias
             )));
         };
         debug!("Resolved repository ID: {}", repo_id);
@@ -830,20 +838,15 @@ impl Executor for CreatePrResult {
         // literal `target-branch`. Resolution is shared with the compiler's
         // prepare-pr-base deepening, so the branch we PR into is the branch that
         // was fetched/deepened.
-        let target_branch = config.resolve_target_branch(&self.repository, &ctx.repo_refs);
+        let target_branch = config.resolve_target_branch(&repository_alias, &ctx.repo_refs);
         let target_branch = target_branch.as_str();
         let mut source_branch = self.source_branch.clone();
         let mut source_ref = format!("refs/heads/{}", source_branch);
         let target_ref = format!("refs/heads/{}", target_branch);
         debug!("Source ref: {}, Target ref: {}", source_ref, target_ref);
 
-        // Determine the git repository directory from the source checkout
-        // For "self", use the source directory; for other repos, use the subdirectory
-        let repo_git_dir = if self.repository == "self" {
-            ctx.source_directory.clone()
-        } else {
-            ctx.source_directory.join(&self.repository)
-        };
+        let repo_git_dir =
+            crate::safe_outputs::resolve_repository_checkout_dir(&repository_alias, ctx)?;
         debug!("Git repository directory: {}", repo_git_dir.display());
 
         // Verify this is a git repository
@@ -2560,6 +2563,31 @@ mod tests {
     }
 
     #[test]
+    fn test_full_repository_name_canonicalizes_before_target_resolution() {
+        let ctx = ExecutionContext {
+            repository_name: Some("Project/meta".to_string()),
+            allowed_repositories: std::collections::HashMap::from([(
+                "tools".to_string(),
+                "Project/tools".to_string(),
+            )]),
+            repo_refs: std::collections::HashMap::from([(
+                "tools".to_string(),
+                "refs/heads/release".to_string(),
+            )]),
+            ..Default::default()
+        };
+        let alias =
+            crate::safe_outputs::canonical_repository_alias("Project/tools", &ctx).unwrap();
+        let cfg = CreatePrConfig {
+            infer_target_from_checkout_ref: true,
+            ..Default::default()
+        };
+
+        assert_eq!(alias, "tools");
+        assert_eq!(cfg.resolve_target_branch(&alias, &ctx.repo_refs), "release");
+    }
+
+    #[test]
     fn test_short_branch_strips_heads_prefix() {
         assert_eq!(short_branch("refs/heads/main"), "main");
         assert_eq!(short_branch("refs/heads/release/2.x"), "release/2.x");
@@ -3154,6 +3182,7 @@ index 0000000..abcdefg
             access_token: Some("fake-token".to_string()),
             github_token: None,
             source_directory: dir.path().to_path_buf(),
+            self_repository_directory: dir.path().to_path_buf(),
             working_directory: dir.path().to_path_buf(),
             tool_configs: std::collections::HashMap::new(),
             debug_enabled_tools: std::collections::HashSet::new(),

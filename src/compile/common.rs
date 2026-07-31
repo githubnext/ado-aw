@@ -780,20 +780,27 @@ pub fn lower_repos(items: &[ReposItem]) -> Result<LoweredRepos> {
             );
         }
 
-        // Reject duplicate aliases
-        if !seen_aliases.insert(alias.clone()) {
+        // Reject duplicate aliases case-insensitively. Checkout paths are
+        // filesystem paths, so aliases that differ only by case collide on
+        // Windows agents.
+        if !seen_aliases.insert(alias.to_ascii_lowercase()) {
             anyhow::bail!(
-                "Duplicate repository alias '{}' in repos. \
+                "Duplicate repository alias '{}' in repos (aliases are compared \
+                case-insensitively). \
                 Use the `alias` field (or `alias=org/repo` shorthand) to disambiguate.",
                 alias
             );
         }
 
-        // Reject reserved names
-        if RESERVED_WORKSPACE_NAMES.contains(&alias.as_str()) {
+        // Reject reserved names case-insensitively. In particular, no casing
+        // of `self` may collide with the compiler-owned `s/self` checkout.
+        if RESERVED_WORKSPACE_NAMES
+            .iter()
+            .any(|reserved| reserved.eq_ignore_ascii_case(&alias))
+        {
             anyhow::bail!(
                 "Repository alias '{}' is reserved by the 'workspace:' resolver ({:?}). \
-                Rename the alias to avoid ambiguity.",
+                Reserved names are case-insensitive; rename the alias to avoid ambiguity.",
                 alias,
                 RESERVED_WORKSPACE_NAMES
             );
@@ -940,71 +947,6 @@ pub fn resolve_repos(front_matter: &FrontMatter) -> Result<LoweredRepos> {
 /// wrong working directory. We reject this at compile time instead.
 const RESERVED_WORKSPACE_NAMES: &[&str] = &["root", "repo", "self"];
 
-/// Validate that no entry in `checkout` resolves to the same on-disk
-/// directory as the `self` checkout.
-///
-/// In ADO multi-repo checkout, both `checkout: self` and an additional
-/// `checkout: <alias>` land in `s/<RepositoryName>`, where
-/// `<RepositoryName>` is `Build.Repository.Name` for `self` and the
-/// trailing path segment of the `name:` field for each `repositories:`
-/// entry. When these collide, the second checkout runs `git clean -ffdx`
-/// and resets to its configured ref, silently wiping files that exist on
-/// the trigger branch but not on the workspace ref. Failing fast at
-/// compile time is much more discoverable than the resulting runtime
-/// "file not found" errors downstream.
-///
-/// `self_repo_name` is the trigger repo's `Build.Repository.Name` —
-/// usually the trailing segment of the trigger repo's full name, inferred
-/// from the local git remote. When `None` (e.g. compiling outside an ADO
-/// clone, or in unit tests) the check is skipped because we have no
-/// reliable identity for `self`.
-pub fn validate_checkout_self_collision(
-    repositories: &[Repository],
-    checkout: &[String],
-    self_repo_name: Option<&str>,
-) -> Result<()> {
-    let Some(self_name) = self_repo_name else {
-        return Ok(());
-    };
-    if checkout.is_empty() {
-        return Ok(());
-    }
-
-    for alias in checkout {
-        let Some(repo) = repositories.iter().find(|r| r.repository == *alias) else {
-            // Unknown aliases are reported by `validate_checkout_list`.
-            continue;
-        };
-        // `rsplit('/').next()` on any &str always yields `Some` — even for
-        // names without a slash the whole string is returned.
-        let last_segment = repo
-            .name
-            .rsplit('/')
-            .next()
-            .expect("rsplit always yields one item");
-        // ADO is case-insensitive on Windows agents and case-sensitive on
-        // Linux. Use a case-insensitive comparison so the collision is
-        // caught regardless of agent OS — the resulting pipeline would
-        // break on at least one platform either way.
-        if last_segment.eq_ignore_ascii_case(self_name) {
-            anyhow::bail!(
-                "Checkout entry '{}' (repository name '{}') resolves to the same \
-                directory ('s/{}') as the trigger repository checked out as 'self'. \
-                The second checkout would overwrite the first, replacing files \
-                from the trigger branch with the workspace ref. Remove '{}' from \
-                'checkout:' — the 'self' checkout already provides access to this \
-                repository.",
-                alias,
-                repo.name,
-                self_name,
-                alias,
-            );
-        }
-    }
-
-    Ok(())
-}
-
 /// Validate that all entries in checkout list exist in repositories
 pub fn validate_checkout_list(repositories: &[Repository], checkout: &[String]) -> Result<()> {
     if checkout.is_empty() {
@@ -1022,10 +964,13 @@ pub fn validate_checkout_list(repositories: &[Repository], checkout: &[String]) 
                 repo_names
             );
         }
-        if RESERVED_WORKSPACE_NAMES.contains(&name.as_str()) {
+        if RESERVED_WORKSPACE_NAMES
+            .iter()
+            .any(|reserved| reserved.eq_ignore_ascii_case(name))
+        {
             anyhow::bail!(
                 "Checkout entry '{}' uses a name reserved by the 'workspace:' resolver \
-                ({:?}). Rename the repository alias to avoid ambiguity with \
+                ({:?}). Reserved names are case-insensitive; rename the repository alias to avoid ambiguity with \
                 'workspace: {}'.",
                 name,
                 RESERVED_WORKSPACE_NAMES,
@@ -1112,7 +1057,10 @@ fn resolve_effective_workspace(
             let ws = ws.as_str();
             match ws {
                 "root" => Ok(("root".to_string(), false)),
-                "repo" | "self" => Ok(("repo".to_string(), !has_additional_checkouts)),
+                "repo" | "self" if has_additional_checkouts => {
+                    Ok(("repo".to_string(), false))
+                }
+                "repo" | "self" => Ok(("root".to_string(), true)),
                 alias => {
                     // Defense in depth: even though aliases are constrained
                     // by `validate_checkout_list` to match a `repository:`
@@ -1190,15 +1138,23 @@ pub(crate) fn contains_template_marker(input: &str, name: &str) -> bool {
     false
 }
 
+/// Checkout path for `self` when a job checks out additional repositories.
+///
+/// The `self` alias is reserved, so using the same fixed segment for its
+/// compiler-owned path cannot collide with a user-declared repository alias.
+pub const MULTI_CHECKOUT_SELF_PATH: &str = "s/self";
+
+/// Absolute ADO expression corresponding to [`MULTI_CHECKOUT_SELF_PATH`].
+pub const MULTI_CHECKOUT_SELF_DIRECTORY: &str = "$(Build.SourcesDirectory)/self";
+
 /// Generate the directory where the trigger ("self") repository is checked out.
 ///
 /// This is independent of `workspace:` — it depends only on whether any
 /// additional repositories are checked out:
 /// - No additional checkouts → `$(Build.SourcesDirectory)` (ADO checks `self`
 ///   into the root).
-/// - One or more additional checkouts → `$(Build.SourcesDirectory)/$(Build.Repository.Name)`
-///   (ADO puts each checked-out repo, including `self`, into a subfolder named
-///   after the repository).
+/// - One or more additional checkouts → `$(Build.SourcesDirectory)/self`
+///   (the compiler gives `self` a fixed explicit path).
 ///
 /// Used to anchor paths to files that ship in the trigger repo (e.g. the agent
 /// markdown source and the compiled pipeline yaml itself), regardless of where
@@ -1207,7 +1163,7 @@ pub fn generate_trigger_repo_directory(checkout: &[String]) -> String {
     if checkout.is_empty() {
         "$(Build.SourcesDirectory)".to_string()
     } else {
-        "$(Build.SourcesDirectory)/$(Build.Repository.Name)".to_string()
+        MULTI_CHECKOUT_SELF_DIRECTORY.to_string()
     }
 }
 
@@ -1217,7 +1173,7 @@ pub fn generate_working_directory(effective_workspace: &str) -> String {
         return format!("$(Build.SourcesDirectory)/{}", alias);
     }
     match effective_workspace {
-        "repo" => "$(Build.SourcesDirectory)/$(Build.Repository.Name)".to_string(),
+        "repo" => MULTI_CHECKOUT_SELF_DIRECTORY.to_string(),
         "root" => "$(Build.SourcesDirectory)".to_string(),
         // compute_effective_workspace only ever returns "root", "repo", or an
         // "alias:<name>" sentinel; any other value indicates a programming
@@ -2543,6 +2499,7 @@ pub fn generate_mcpg_config(
         &front_matter.name,
     )?;
     let working_directory = generate_working_directory(&effective_workspace);
+    let trigger_repo_directory = generate_trigger_repo_directory(&front_matter.checkout);
     let registry_base = front_matter
         .supply_chain()
         .and_then(|sc| sc.registry.as_ref())
@@ -2564,7 +2521,24 @@ pub fn generate_mcpg_config(
             "/safeoutputs/custom-tools.json".to_string(),
         ]);
     }
-    safeoutputs_entrypoint_args.extend(["/safeoutputs".to_string(), working_directory.clone()]);
+    safeoutputs_entrypoint_args.extend([
+        "--self-repository-directory".to_string(),
+        trigger_repo_directory.clone(),
+        "/safeoutputs".to_string(),
+        working_directory.clone(),
+    ]);
+    let mut safeoutputs_mounts = vec![
+        "/tmp/awf-tools/ado-aw:/usr/local/bin/ado-aw:ro".to_string(),
+        format!("{working_directory}:{working_directory}:rw"),
+    ];
+    if trigger_repo_directory != working_directory
+        && !trigger_repo_directory.starts_with(&format!("{working_directory}/"))
+    {
+        safeoutputs_mounts.push(format!(
+            "{trigger_repo_directory}:{trigger_repo_directory}:rw"
+        ));
+    }
+    safeoutputs_mounts.push("/tmp/awf-tools/staging:/safeoutputs:rw".to_string());
     mcp_servers.insert(
         "safeoutputs".to_string(),
         McpgServerConfig {
@@ -2572,11 +2546,7 @@ pub fn generate_mcpg_config(
             container: Some(safeoutputs_image),
             entrypoint: Some("/usr/local/bin/ado-aw".to_string()),
             entrypoint_args: Some(safeoutputs_entrypoint_args),
-            mounts: Some(vec![
-                "/tmp/awf-tools/ado-aw:/usr/local/bin/ado-aw:ro".to_string(),
-                format!("{working_directory}:{working_directory}:rw"),
-                "/tmp/awf-tools/staging:/safeoutputs:rw".to_string(),
-            ]),
+            mounts: Some(safeoutputs_mounts),
             args: Some(vec![
                 "--network".to_string(),
                 "none".to_string(),
@@ -3609,7 +3579,7 @@ mod tests {
         assert_eq!(ws, "repo");
         assert_eq!(
             generate_working_directory(&ws),
-            "$(Build.SourcesDirectory)/$(Build.Repository.Name)"
+            "$(Build.SourcesDirectory)/self"
         );
     }
 
@@ -3622,7 +3592,7 @@ mod tests {
         assert_eq!(ws, "repo");
         assert_eq!(
             generate_working_directory(&ws),
-            "$(Build.SourcesDirectory)/$(Build.Repository.Name)"
+            "$(Build.SourcesDirectory)/self"
         );
     }
 
@@ -3640,10 +3610,10 @@ mod tests {
     }
 
     #[test]
-    fn test_workspace_explicit_repo_no_checkouts_still_returns_repo() {
-        // Emits a warning but still returns "repo"
+    fn test_workspace_explicit_repo_no_checkouts_resolves_to_root() {
+        // Emits a warning and preserves the single-checkout root layout.
         let ws = compute_effective_workspace(&Some("repo".to_string()), &[], "agent").unwrap();
-        assert_eq!(ws, "repo");
+        assert_eq!(ws, "root");
     }
 
     #[test]
@@ -3777,87 +3747,6 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("reserved"), "msg: {msg}");
         assert!(msg.contains("'repo'"), "msg: {msg}");
-    }
-
-    // ─── validate_checkout_self_collision ────────────────────────────────────
-
-    #[test]
-    fn test_validate_self_collision_detects_match() {
-        // Workspace repo's name last segment matches the self repo's name,
-        // so both `checkout: self` and `checkout: my-repo` would land in
-        // `s/my-repo`. Must error.
-        let repos = vec![Repository {
-            repository: "my-repo".to_string(),
-            repo_type: "git".to_string(),
-            name: "some-org/my-repo".to_string(),
-            repo_ref: "refs/heads/main".to_string(),
-            endpoint: None,
-        }];
-        let checkout = vec!["my-repo".to_string()];
-        let err = validate_checkout_self_collision(&repos, &checkout, Some("my-repo")).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("'my-repo'"), "msg: {msg}");
-        assert!(msg.contains("same"), "msg: {msg}");
-        assert!(msg.contains("'self'"), "msg: {msg}");
-    }
-
-    #[test]
-    fn test_validate_self_collision_no_collision_passes() {
-        // Different repo name → different `s/<name>` directory, no collision.
-        let repos = vec![Repository {
-            repository: "other".to_string(),
-            repo_type: "git".to_string(),
-            name: "some-org/other".to_string(),
-            repo_ref: "refs/heads/main".to_string(),
-            endpoint: None,
-        }];
-        let checkout = vec!["other".to_string()];
-        let result = validate_checkout_self_collision(&repos, &checkout, Some("my-repo"));
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_self_collision_case_insensitive() {
-        // ADO is case-insensitive on Windows; treat differing-only-by-case
-        // names as a collision so the pipeline doesn't break on one OS.
-        let repos = vec![Repository {
-            repository: "my-repo".to_string(),
-            repo_type: "git".to_string(),
-            name: "Some-Org/My-Repo".to_string(),
-            repo_ref: "refs/heads/main".to_string(),
-            endpoint: None,
-        }];
-        let checkout = vec!["my-repo".to_string()];
-        let err = validate_checkout_self_collision(&repos, &checkout, Some("my-repo")).unwrap_err();
-        assert!(err.to_string().contains("same"));
-    }
-
-    #[test]
-    fn test_validate_self_collision_no_self_name_skipped() {
-        // No git remote / no inferred self name → can't detect, skip.
-        let repos = vec![Repository {
-            repository: "my-repo".to_string(),
-            repo_type: "git".to_string(),
-            name: "org/my-repo".to_string(),
-            repo_ref: "refs/heads/main".to_string(),
-            endpoint: None,
-        }];
-        let checkout = vec!["my-repo".to_string()];
-        let result = validate_checkout_self_collision(&repos, &checkout, None);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_self_collision_empty_checkout_passes() {
-        let repos = vec![Repository {
-            repository: "my-repo".to_string(),
-            repo_type: "git".to_string(),
-            name: "org/my-repo".to_string(),
-            repo_ref: "refs/heads/main".to_string(),
-            endpoint: None,
-        }];
-        let result = validate_checkout_self_collision(&repos, &[], Some("my-repo"));
-        assert!(result.is_ok());
     }
 
     // ─── Engine::args (copilot params) ──────────────────────────────────────
@@ -4449,11 +4338,10 @@ mod tests {
 
     #[test]
     fn test_generate_trigger_repo_directory_with_additional_checkouts() {
-        // As soon as any additional repo is checked out, ADO places every
-        // checked-out repo (including `self`) into a subdirectory named
-        // after the repository.
+        // The compiler pins self to a reserved path so trigger metadata cannot
+        // change the checkout location.
         let result = generate_trigger_repo_directory(&["exp23-a7-nw".to_string()]);
-        assert_eq!(result, "$(Build.SourcesDirectory)/$(Build.Repository.Name)");
+        assert_eq!(result, "$(Build.SourcesDirectory)/self");
     }
 
     #[test]
@@ -4469,10 +4357,7 @@ mod tests {
                 .unwrap();
         let working_dir = generate_working_directory(&workspace);
 
-        assert_eq!(
-            trigger,
-            "$(Build.SourcesDirectory)/$(Build.Repository.Name)"
-        );
+        assert_eq!(trigger, "$(Build.SourcesDirectory)/self");
         assert_eq!(working_dir, "$(Build.SourcesDirectory)/exp23-a7-nw");
         assert_ne!(
             trigger, working_dir,
@@ -6167,6 +6052,33 @@ safe-outputs:
             entrypoint_args.starts_with(&["mcp".to_string()]),
             "SafeOutputs should use the stdio MCP subcommand: {entrypoint_args:?}"
         );
+        assert!(
+            entrypoint_args.windows(2).any(|args| {
+                args
+                    == [
+                        "--self-repository-directory".to_string(),
+                        "$(Build.SourcesDirectory)".to_string(),
+                    ]
+            }),
+            "SafeOutputs should receive the exact self checkout: {entrypoint_args:?}"
+        );
+    }
+
+    #[test]
+    fn test_generate_mcpg_config_mounts_self_when_workspace_is_sibling_alias() {
+        let mut fm = minimal_front_matter();
+        fm.checkout = vec!["tools".to_string()];
+        fm.workspace = Some("tools".to_string());
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
+        let so = config.mcp_servers.get("safeoutputs").unwrap();
+
+        assert!(
+            so.mounts.as_ref().unwrap().iter().any(|mount| {
+                mount
+                    == "$(Build.SourcesDirectory)/self:$(Build.SourcesDirectory)/self:rw"
+            }),
+            "self checkout must be mounted when it is outside the selected workspace"
+        );
     }
 
     #[test]
@@ -7218,6 +7130,19 @@ safe-outputs:
     }
 
     #[test]
+    fn test_repos_rejects_case_only_duplicate_aliases() {
+        let items = vec![
+            ReposItem::Shorthand("org/Tools".to_string()),
+            ReposItem::Shorthand("other-org/tools".to_string()),
+        ];
+        let err = lower_repos(&items).unwrap_err();
+        assert!(
+            err.to_string().contains("case-insensitively"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn test_repos_rejects_reserved_alias() {
         let items = vec![ReposItem::Shorthand("org/self".to_string())];
         let err = lower_repos(&items).unwrap_err();
@@ -7245,6 +7170,27 @@ safe-outputs:
         })];
         let err = lower_repos(&items).unwrap_err();
         assert!(err.to_string().contains("reserved"), "{err}");
+    }
+
+    #[test]
+    fn test_repos_rejects_reserved_alias_case_insensitively() {
+        for alias in ["Self", "SELF", "Repo", "ROOT"] {
+            let items = vec![ReposItem::Full(RepoEntry {
+                name: "org/fine-repo".to_string(),
+                alias: Some(alias.to_string()),
+                repo_type: "git".to_string(),
+                repo_ref: "refs/heads/main".to_string(),
+                endpoint: None,
+                checkout: true,
+                fetch_depth: None,
+                fetch_tags: None,
+            })];
+            let err = lower_repos(&items).unwrap_err();
+            assert!(
+                err.to_string().contains("case-insensitive"),
+                "{alias}: {err}"
+            );
+        }
     }
 
     #[test]

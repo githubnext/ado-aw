@@ -25,6 +25,7 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - Useful for CI checks to ensure pipelines are regenerated after source changes
 - `mcp <output_directory> <bounding_directory>` - Run SafeOutputs as a stdio MCP server. **This is what compiled pipelines use**: MCPG spawns it as a hardened, network-isolated sibling container entrypoint (see [`docs/mcpg.md`](mcpg.md)).
   - `--enabled-tools <name>` - Restrict available tools to those named (repeatable)
+  - `--self-repository-directory <path>` - Exact `self` checkout used for Git patch generation when the bounding workspace is a multi-checkout root or another repository.
 - `mcp-author` - Run the author-facing stdio MCP server for IDE/Copilot Chat integrations. See [`mcp-author.md`](mcp-author.md) for the full tool surface and trust model.
 - `execute` - Execute safe outputs from Stage 1 (Stage 3 of pipeline)
   - `--source, -s <path>` - Path to source markdown file

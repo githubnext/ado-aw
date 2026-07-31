@@ -12,14 +12,18 @@ These definitions live in
 | `Candidate compiler smoke - noop-target` | `ado-aw-mirror` | `tests/safe-outputs/noop-target.lock.yml` | `2556` |
 | `Candidate compiler smoke - failure reporter` | `ado-aw-mirror` | `tests/safe-outputs/smoke-failure-reporter.lock.yml` | `2558` |
 | `Candidate compiler smoke - custom safe outputs` | `ado-aw-mirror` | `tests/compiler-smoke-e2e/custom-safe-output.lock.yml` | `2564` |
+| `Candidate compiler smoke - multi-repo` | `ado-aw-mirror` | `tests/compiler-smoke-e2e/multi-repo.lock.yml` | `2565` |
 
-All five child definitions use
+All child definitions use
 `refs/heads/ado-aw-smoke-candidate-base` as their default branch. The ref is
 permanent and inert; the harness never deletes it.
 
 The custom child imports its self-contained component from the candidate
 commit under `tests/compiler-smoke-e2e/component-fixture/`; it requires no
 external repository resource authorization.
+
+To add a new child definition, follow **Adding a new candidate fixture** in
+[`README.md`](README.md), then record the returned ID in the table above.
 
 Candidate janitor definition `2557` was retired. The release-backed janitor
 definition `2548` remains scheduled weekly and is not part of this lane.
