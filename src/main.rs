@@ -622,6 +622,36 @@ enum Commands {
     },
 }
 
+impl Commands {
+    fn command_name(&self) -> &'static str {
+        match self {
+            Commands::Compile { .. } => "compile",
+            Commands::Check { .. } => "check",
+            Commands::Mcp { .. } => "mcp",
+            Commands::McpAuthor {} => "mcp-author",
+            Commands::Execute { .. } => "execute",
+            Commands::Init { .. } => "init",
+            Commands::Configure { .. } => "configure",
+            Commands::Secrets { .. } => "secrets",
+            Commands::Enable { .. } => "enable",
+            Commands::Disable { .. } => "disable",
+            Commands::Remove { .. } => "remove",
+            Commands::List { .. } => "list",
+            Commands::Status { .. } => "status",
+            Commands::Run { .. } => "run",
+            Commands::Audit { .. } => "audit",
+            Commands::Trace { .. } => "trace",
+            Commands::ExportGateSchema { .. } => "export-gate-schema",
+            Commands::ExportFactCatalog { .. } => "export-fact-catalog",
+            Commands::Inspect { .. } => "inspect",
+            Commands::Graph { .. } => "graph",
+            Commands::Whatif { .. } => "whatif",
+            Commands::Lint { .. } => "lint",
+            Commands::Catalog { .. } => "catalog",
+        }
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(version, about = "Compiler for Azure DevOps Agentic Workflows")]
 struct Args {
@@ -636,6 +666,25 @@ struct Args {
     log_output_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+/// Write `content` to `output` if given, otherwise print it to stdout.
+/// Creates any missing parent directories when writing to a file.
+fn write_or_print(content: &str, output: Option<PathBuf>) -> Result<()> {
+    match output {
+        Some(path) => {
+            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating parent dir for {}", path.display()))?;
+            }
+            std::fs::write(&path, content)
+                .with_context(|| format!("writing to {}", path.display()))
+        }
+        None => {
+            print!("{}", content);
+            Ok(())
+        }
+    }
 }
 
 async fn run_compile(
@@ -1156,32 +1205,11 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     // Determine command name for logging
-    let command_name = match &args.command {
-        Some(Commands::Compile { .. }) => "compile",
-        Some(Commands::Check { .. }) => "check",
-        Some(Commands::Mcp { .. }) => "mcp",
-        Some(Commands::McpAuthor { .. }) => "mcp-author",
-        Some(Commands::Execute { .. }) => "execute",
-        Some(Commands::Init { .. }) => "init",
-        Some(Commands::Configure { .. }) => "configure",
-        Some(Commands::Secrets { .. }) => "secrets",
-        Some(Commands::Enable { .. }) => "enable",
-        Some(Commands::Disable { .. }) => "disable",
-        Some(Commands::Remove { .. }) => "remove",
-        Some(Commands::List { .. }) => "list",
-        Some(Commands::Status { .. }) => "status",
-        Some(Commands::Run { .. }) => "run",
-        Some(Commands::Audit { .. }) => "audit",
-        Some(Commands::Trace { .. }) => "trace",
-        Some(Commands::ExportGateSchema { .. }) => "export-gate-schema",
-        Some(Commands::ExportFactCatalog { .. }) => "export-fact-catalog",
-        Some(Commands::Inspect { .. }) => "inspect",
-        Some(Commands::Graph { .. }) => "graph",
-        Some(Commands::Whatif { .. }) => "whatif",
-        Some(Commands::Lint { .. }) => "lint",
-        Some(Commands::Catalog { .. }) => "catalog",
-        None => "ado-aw",
-    };
+    let command_name = args
+        .command
+        .as_ref()
+        .map(Commands::command_name)
+        .unwrap_or("ado-aw");
 
     // Initialize file-based logging to a daily log file.
     let _log_path = logging::init_logging(
@@ -1599,39 +1627,11 @@ async fn main() -> Result<()> {
         }
         Commands::ExportGateSchema { output } => {
             let schema = compile::filter_ir::generate_gate_spec_schema();
-            match output {
-                Some(path) => {
-                    if let Some(parent) = path
-                        .parent()
-                        .filter(|parent| !parent.as_os_str().is_empty())
-                    {
-                        std::fs::create_dir_all(parent).with_context(|| {
-                            format!("creating parent dir for gate schema: {}", parent.display())
-                        })?;
-                    }
-                    std::fs::write(&path, &schema)
-                        .with_context(|| format!("writing gate schema to {}", path.display()))?;
-                }
-                None => print!("{}", schema),
-            }
+            write_or_print(&schema, output)?;
         }
         Commands::ExportFactCatalog { output } => {
             let catalog = compile::filter_ir::generate_fact_catalog();
-            match output {
-                Some(path) => {
-                    if let Some(parent) = path
-                        .parent()
-                        .filter(|parent| !parent.as_os_str().is_empty())
-                    {
-                        std::fs::create_dir_all(parent).with_context(|| {
-                            format!("creating parent dir for fact catalog: {}", parent.display())
-                        })?;
-                    }
-                    std::fs::write(&path, &catalog)
-                        .with_context(|| format!("writing fact catalog to {}", path.display()))?;
-                }
-                None => print!("{}", catalog),
-            }
+            write_or_print(&catalog, output)?;
         }
         Commands::Inspect { source, json } => {
             inspect::dispatch_inspect(inspect::InspectOptions {
