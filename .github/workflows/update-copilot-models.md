@@ -95,13 +95,20 @@ if [ -n "$MODELS_URL" ]; then
 fi
 ```
 
-Record the resulting identifiers as `api_models`, keeping only those the
-Copilot CLI `--model` flag accepts — concrete model identifiers such as
-`claude-opus-4.7` or `gpt-5.4`. **Exclude capability aliases** (`agent`,
-`large`, `small`, `mini`, `sonnet`, `opus`, `haiku`, `reasoning`, `coding`,
-`auto`, and similar), any entry containing a wildcard `*`, and any
-provider-prefixed form such as `copilot/…` or `anthropic/…` — reduce those to
-the bare identifier.
+Record the resulting identifiers as `api_models`, keeping only models the
+Copilot CLI `--model` flag accepts. Specifically:
+
+- **Exclude capability aliases** (`agent`, `large`, `small`, `mini`, `sonnet`,
+  `opus`, `haiku`, `reasoning`, `coding`, `auto`, and similar), anything
+  containing a wildcard `*`, and any provider-prefixed form such as
+  `copilot/…` or `anthropic/…` — reduce those to the bare identifier.
+- **Exclude non-chat models.** The endpoint also advertises embedding and
+  internal utility models, which are not valid `--model` values. Drop anything
+  matching `text-embedding*`, `*-inference`, or `trajectory-*`.
+- **Exclude dated snapshot duplicates** where an undated identifier for the
+  same model is already present (for example keep `gpt-4o`, drop
+  `gpt-4o-2024-05-13`), so the catalog tracks stable names rather than every
+  pinned revision.
 
 If the call fails, the `endpoints` array is empty, the response contains an
 `error` field, or `api_models` ends up empty, emit a `report-incomplete` safe
@@ -140,11 +147,17 @@ Compute:
 If both are empty, **stop** — emit a `noop` safe output with the message
 `"Copilot model list is current; no changes needed."` and exit.
 
-Sanity-check before proceeding: if `gone_models` would remove more than half of
-the current list, or `new_models` contains more than 20 entries, treat the
-response as suspect and emit `report-incomplete` instead of opening a PR. A
-sudden wholesale change is far more likely to be a malformed response than a
-real platform change.
+### Sanity checks before proceeding
+
+The point of these is to refuse to act on a malformed response, **not** to cap
+legitimate drift. The catalog may be many models behind, so a large
+`new_models` set is expected and fine.
+
+- If `api_models` does **not** contain the current `DEFAULT_COPILOT_MODEL`
+  value, the response is not describing the models this workflow's own engine
+  uses. Emit `report-incomplete` and stop.
+- If `gone_models` would remove more than half of the current non-default
+  entries, treat it as suspect and emit `report-incomplete` instead of a PR.
 
 ### Check for an existing open PR
 
