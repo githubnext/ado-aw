@@ -17,10 +17,10 @@ use tokio::io::AsyncWriteExt;
 use crate::ndjson::{self, EXECUTED_NDJSON_FILENAME, SAFE_OUTPUT_FILENAME};
 use crate::safe_outputs::{
     AddBuildTagResult, AddPrCommentResult, CommentOnWorkItemResult, CreateBranchResult,
-    CreateGitTagResult, CreateIssueResult, CreatePrResult, CreateWikiPageResult,
+    CreateGitTagResult, CreateGithubIssueResult, CreatePrResult, CreateWikiPageResult,
     CreateWorkItemResult, ExecutionContext, ExecutionResult, Executor, LinkWorkItemsResult,
     MissingDataResult, MissingToolResult, NoopResult, QueueBuildResult, ReplyToPrCommentResult,
-    ReportIncompleteResult, ResolvePrThreadResult, SetIssueTypeResult, SubmitPrReviewResult,
+    ReportIncompleteResult, ResolvePrThreadResult, SetGithubIssueTypeResult, SubmitPrReviewResult,
     ToolResult,
     UpdatePrResult, UpdateWikiPageResult, UpdateWorkItemResult, UploadBuildAttachmentResult,
     UploadPipelineArtifactResult, UploadWorkitemAttachmentResult,
@@ -245,8 +245,8 @@ pub async fn execute_safe_outputs(
         SubmitPrReviewResult,
         ReplyToPrCommentResult,
         ResolvePrThreadResult,
-        CreateIssueResult,
-        SetIssueTypeResult,
+        CreateGithubIssueResult,
+        SetGithubIssueTypeResult,
     );
 
     let mut results = Vec::new();
@@ -751,8 +751,8 @@ async fn dispatch_github_tools(
     ctx: &ExecutionContext,
 ) -> Result<Option<ExecutionResult>> {
     dispatch_executor_tools!(tool_name, entry, ctx, {
-        "create-issue" => CreateIssueResult,
-        "set-issue-type" => SetIssueTypeResult,
+        "create-github-issue" => CreateGithubIssueResult,
+        "set-github-issue-type" => SetGithubIssueTypeResult,
     })
 }
 

@@ -11,7 +11,7 @@ the release-backed lane and is intentionally excluded here.
 | `canary` | [`tests/safe-outputs/`](../safe-outputs/) | Full agentic loop with two ADO write paths |
 | `azure-cli` | [`tests/safe-outputs/`](../safe-outputs/) | AWF `az` extension and ADO control-plane reach |
 | `noop-target` | [`tests/safe-outputs/`](../safe-outputs/) | Minimal Stage 1 → 3 shape |
-| `smoke-failure-reporter` | [`tests/safe-outputs/`](../safe-outputs/) | Debug-only `create-issue` path |
+| `smoke-failure-reporter` | [`tests/safe-outputs/`](../safe-outputs/) | Debug-only `create-github-issue` path |
 | `custom-safe-output` | [`custom-safe-output.md`](custom-safe-output.md) | **Candidate-only.** Imported jobs-style custom safe output, verified via a build tag |
 | `multi-repo` | [`multi-repo.md`](multi-repo.md) | **Candidate-only.** Multi-checkout layout and compile-time `self` identity |
 

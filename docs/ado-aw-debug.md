@@ -30,12 +30,12 @@ GitHub issue filing is now a regular safe output:
 
 ```yaml
 safe-outputs:
-  create-issue:
+  create-github-issue:
     target-repo: githubnext/ado-aw
 ```
 
 The front-matter codemod moves legacy `ado-aw-debug.create-issue` configuration
-to `safe-outputs.create-issue`. When no public GitHub auth is already
+to `safe-outputs.create-github-issue`. When no public GitHub auth is already
 configured, it also adds:
 
 ```yaml

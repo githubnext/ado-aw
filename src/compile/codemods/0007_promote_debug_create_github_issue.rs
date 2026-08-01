@@ -1,4 +1,4 @@
-//! `ado-aw-debug.create-issue` -> `safe-outputs.create-issue`
+//! `ado-aw-debug.create-issue` -> `safe-outputs.create-github-issue`
 //!
 //! The GitHub issue tool graduated from the dogfood-only debug surface to a
 //! regular safe output. This codemod performs a one-way migration and removes
@@ -23,8 +23,8 @@ use super::{Codemod, CodemodContext};
 const INTRODUCED_IN: &str = "0.46.0";
 
 pub static CODEMOD: Codemod = Codemod {
-    id: "promote_debug_create_issue",
-    summary: "ado-aw-debug.create-issue moved to safe-outputs.create-issue",
+    id: "promote_debug_create_github_issue",
+    summary: "ado-aw-debug.create-issue moved to safe-outputs.create-github-issue",
     introduced_in: INTRODUCED_IN,
     apply: apply_codemod,
 };
@@ -40,7 +40,7 @@ fn apply_codemod(fm: &mut Mapping, _ctx: &CodemodContext) -> Result<bool> {
     let Some(debug_map) = debug.as_mapping() else {
         return Ok(false);
     };
-    let Some(create_issue) = debug_map.get(key("create-issue")).cloned() else {
+    let Some(create_github_issue) = debug_map.get(key("create-issue")).cloned() else {
         return Ok(false);
     };
 
@@ -57,10 +57,10 @@ fn apply_codemod(fm: &mut Mapping, _ctx: &CodemodContext) -> Result<bool> {
         None => Mapping::new(),
     };
 
-    if safe_outputs.contains_key(key("create-issue")) {
+    if safe_outputs.contains_key(key("create-github-issue")) {
         bail!(
             "manual migration required: both `ado-aw-debug.create-issue` and \
-             `safe-outputs.create-issue` are configured"
+             `safe-outputs.create-github-issue` are configured"
         );
     }
 
@@ -72,7 +72,7 @@ fn apply_codemod(fm: &mut Mapping, _ctx: &CodemodContext) -> Result<bool> {
             Value::String("$(ADO_AW_DEBUG_GITHUB_TOKEN)".to_string()),
         );
     }
-    safe_outputs.insert(key("create-issue"), create_issue);
+    safe_outputs.insert(key("create-github-issue"), create_github_issue);
 
     if migrated_debug.is_empty() {
         fm.remove(key("ado-aw-debug"));
@@ -98,7 +98,7 @@ mod tests {
     }
 
     #[test]
-    fn moves_create_issue_and_preserves_other_debug_fields() {
+    fn moves_create_github_issue_and_preserves_other_debug_fields() {
         let mut fm = map(
             "ado-aw-debug:\n  skip-integrity: true\n  create-issue:\n    target-repo: octo/repo\n",
         );
@@ -115,7 +115,7 @@ mod tests {
             .get(key("safe-outputs"))
             .and_then(Value::as_mapping)
             .unwrap();
-        assert!(safe_outputs.contains_key(key("create-issue")));
+        assert!(safe_outputs.contains_key(key("create-github-issue")));
         assert_eq!(
             safe_outputs
                 .get(key("github-token"))
@@ -153,7 +153,7 @@ mod tests {
     #[test]
     fn errors_without_mutation_when_new_key_already_exists() {
         let mut fm = map(
-            "ado-aw-debug:\n  create-issue:\n    target-repo: old/repo\nsafe-outputs:\n  create-issue:\n    target-repo: new/repo\n",
+            "ado-aw-debug:\n  create-issue:\n    target-repo: old/repo\nsafe-outputs:\n  create-github-issue:\n    target-repo: new/repo\n",
         );
         let snapshot = fm.clone();
         let err = apply_codemod(&mut fm, &ctx()).unwrap_err().to_string();

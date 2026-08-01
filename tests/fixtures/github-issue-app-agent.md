@@ -13,11 +13,11 @@ engine:
       contents: read
       issues: read
 safe-outputs:
-  create-issue:
+  create-github-issue:
     target-repo: octo-org/octo-repo
     require-temporary-id: true
     max: 1
-  set-issue-type:
+  set-github-issue-type:
     target-repo: octo-org/octo-repo
     allowed:
       - Bug

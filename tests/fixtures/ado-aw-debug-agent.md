@@ -4,7 +4,7 @@ description: "Fixture exercising skip-integrity plus public GitHub issue output"
 ado-aw-debug:
   skip-integrity: true
 safe-outputs:
-  create-issue:
+  create-github-issue:
     target-repo: githubnext/ado-aw
     title-prefix: "[pipeline-failure] "
     labels:

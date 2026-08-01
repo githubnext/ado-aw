@@ -1,4 +1,4 @@
-//! `set-issue-type` safe output.
+//! `set-github-issue-type` safe output.
 
 use anyhow::Context;
 use log::{debug, info};
@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
-use super::create_issue::{resolve_target_repo, validate_target_repo};
+use super::create_github_issue::{resolve_target_repo, validate_target_repo};
 use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize_config};
 use crate::secure::GithubTemporaryId;
@@ -70,14 +70,14 @@ impl<'de> Deserialize<'de> for GithubIssueNumber {
 }
 
 #[derive(Deserialize, JsonSchema)]
-pub struct SetIssueTypeParams {
-    /// Positive GitHub issue number or a temporary ID from create_issue.
+pub struct SetGithubIssueTypeParams {
+    /// Positive GitHub issue number or a temporary ID from create-github-issue.
     pub issue_number: GithubIssueNumber,
     /// Native issue type name. An empty string clears the type.
     pub issue_type: String,
 }
 
-impl Validate for SetIssueTypeParams {
+impl Validate for SetGithubIssueTypeParams {
     fn validate(&self) -> anyhow::Result<()> {
         if let GithubIssueNumber::Number(number) = self.issue_number {
             anyhow::ensure!(number > 0, "issue_number must be positive");
@@ -86,24 +86,24 @@ impl Validate for SetIssueTypeParams {
             self.issue_type.len() <= 128,
             "issue_type must be 128 characters or fewer"
         );
-        reject_pipeline_injection(&self.issue_type, "set-issue-type.issue_type")?;
+        reject_pipeline_injection(&self.issue_type, "set-github-issue-type.issue_type")?;
         Ok(())
     }
 }
 
 tool_result! {
-    name = "set-issue-type",
+    name = "set-github-issue-type",
     write = true,
-    params = SetIssueTypeParams,
+    params = SetGithubIssueTypeParams,
     default_max = 5,
     /// Result of setting or clearing a GitHub issue's native type.
-    pub struct SetIssueTypeResult {
+    pub struct SetGithubIssueTypeResult {
         issue_number: GithubIssueNumber,
         issue_type: String,
     }
 }
 
-impl SanitizeContent for SetIssueTypeResult {
+impl SanitizeContent for SetGithubIssueTypeResult {
     fn sanitize_content_fields(&mut self) {
         self.issue_type = sanitize_config(&self.issue_type);
     }
@@ -111,7 +111,7 @@ impl SanitizeContent for SetIssueTypeResult {
 
 #[derive(Debug, Clone, Default, SanitizeConfig, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SetIssueTypeConfig {
+pub struct SetGithubIssueTypeConfig {
     #[serde(default, rename = "target-repo")]
     pub target_repo: Option<String>,
     #[serde(default)]
@@ -122,7 +122,7 @@ pub struct SetIssueTypeConfig {
 }
 
 #[async_trait::async_trait]
-impl Executor for SetIssueTypeResult {
+impl Executor for SetGithubIssueTypeResult {
     fn dry_run_summary(&self) -> String {
         let target = match &self.issue_number {
             GithubIssueNumber::Number(number) => format!("#{number}"),
@@ -136,9 +136,9 @@ impl Executor for SetIssueTypeResult {
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
-        if !ctx.tool_configs.contains_key("set-issue-type") {
+        if !ctx.tool_configs.contains_key("set-github-issue-type") {
             return Ok(ExecutionResult::failure(
-                "set-issue-type is not configured for this workflow",
+                "set-github-issue-type is not configured for this workflow",
             ));
         }
 
@@ -151,7 +151,7 @@ impl Executor for SetIssueTypeResult {
                 ));
             }
         };
-        let config: SetIssueTypeConfig = ctx.get_tool_config("set-issue-type");
+        let config: SetGithubIssueTypeConfig = ctx.get_tool_config("set-github-issue-type");
 
         let resolved_type = if self.issue_type.is_empty() {
             String::new()
@@ -182,7 +182,7 @@ impl Executor for SetIssueTypeResult {
             GithubIssueNumber::Temporary(temporary_id) => {
                 let Some(issue) = ctx.resolve_github_issue(temporary_id)? else {
                     return Ok(ExecutionResult::failure(format!(
-                        "temporary issue ID '{}' has not been resolved; create-issue must \
+                        "temporary issue ID '{}' has not been resolved; create-github-issue must \
                          succeed earlier in the same SafeOutputs job",
                         temporary_id.canonical()
                     )));
@@ -194,7 +194,7 @@ impl Executor for SetIssueTypeResult {
                     if !configured.eq_ignore_ascii_case(&issue.repository) {
                         return Ok(ExecutionResult::failure(format!(
                             "temporary issue ID '{}' resolved to repository '{}', which does \
-                             not match set-issue-type.target-repo '{}'",
+                             not match set-github-issue-type.target-repo '{}'",
                             temporary_id.canonical(),
                             issue.repository,
                             configured
@@ -217,7 +217,7 @@ impl Executor for SetIssueTypeResult {
         );
         debug!("PATCHing GitHub issue type at {url}");
 
-        // gh-aw's set-issue-type contract uses an empty string to clear the
+        // gh-aw's set-github-issue-type contract uses an empty string to clear the
         // native type; preserve that wire behavior for front-matter parity.
         let response = reqwest::Client::new()
             .patch(&url)
@@ -269,19 +269,19 @@ impl Executor for SetIssueTypeResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safe_outputs::{CreateIssueParams, ToolResult};
+    use crate::safe_outputs::{CreateGithubIssueParams, ToolResult};
     use std::collections::HashMap;
 
     #[test]
     fn result_name_and_default_budget_match_contract() {
-        assert_eq!(SetIssueTypeResult::NAME, "set-issue-type");
-        assert_eq!(SetIssueTypeResult::DEFAULT_MAX, 5);
+        assert_eq!(SetGithubIssueTypeResult::NAME, "set-github-issue-type");
+        assert_eq!(SetGithubIssueTypeResult::DEFAULT_MAX, 5);
     }
 
     #[test]
     fn validates_numeric_and_temporary_targets() {
         assert!(
-            SetIssueTypeParams {
+            SetGithubIssueTypeParams {
                 issue_number: GithubIssueNumber::Number(1),
                 issue_type: "Bug".to_string(),
             }
@@ -289,7 +289,7 @@ mod tests {
             .is_ok()
         );
         assert!(
-            SetIssueTypeParams {
+            SetGithubIssueTypeParams {
                 issue_number: GithubIssueNumber::Temporary(
                     GithubTemporaryId::parse("#aw_bug1").unwrap()
                 ),
@@ -302,7 +302,7 @@ mod tests {
 
     #[test]
     fn rejects_zero_issue_number() {
-        let result = SetIssueTypeParams {
+        let result = SetGithubIssueTypeParams {
             issue_number: GithubIssueNumber::Number(0),
             issue_type: "Bug".to_string(),
         }
@@ -312,7 +312,7 @@ mod tests {
 
     #[test]
     fn quoted_numeric_issue_number_deserializes_as_number() {
-        let params: SetIssueTypeParams = serde_json::from_value(serde_json::json!({
+        let params: SetGithubIssueTypeParams = serde_json::from_value(serde_json::json!({
             "issue_number": "42",
             "issue_type": "Bug"
         }))
@@ -348,14 +348,14 @@ mod tests {
 
         let mut tool_configs = HashMap::new();
         tool_configs.insert(
-            "create-issue".to_string(),
+            "create-github-issue".to_string(),
             serde_json::json!({
                 "target-repo": "octo/repo",
                 "require-temporary-id": true
             }),
         );
         tool_configs.insert(
-            "set-issue-type".to_string(),
+            "set-github-issue-type".to_string(),
             serde_json::json!({
                 "target-repo": "octo/repo",
                 "allowed": ["Bug", "Feature"]
@@ -368,7 +368,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut create: crate::safe_outputs::CreateIssueResult = CreateIssueParams {
+        let mut create: crate::safe_outputs::CreateGithubIssueResult = CreateGithubIssueParams {
             title: "A real issue title".to_string(),
             body: "A detailed issue body that is long enough for validation.".to_string(),
             labels: vec![],
@@ -380,7 +380,7 @@ mod tests {
         let created = create.execute_sanitized(&ctx).await.unwrap();
         assert!(created.success, "create failed: {}", created.message);
 
-        let mut duplicate: crate::safe_outputs::CreateIssueResult = CreateIssueParams {
+        let mut duplicate: crate::safe_outputs::CreateGithubIssueResult = CreateGithubIssueParams {
             title: "A second real issue title".to_string(),
             body: "Another detailed issue body that is long enough for validation.".to_string(),
             labels: vec![],
@@ -393,7 +393,7 @@ mod tests {
         assert!(!duplicate_result.success);
         assert!(duplicate_result.message.contains("already used"));
 
-        let mut set_type: SetIssueTypeResult = SetIssueTypeParams {
+        let mut set_type: SetGithubIssueTypeResult = SetGithubIssueTypeParams {
             issue_number: GithubIssueNumber::Temporary(
                 GithubTemporaryId::parse("aw_bug1").unwrap(),
             ),
@@ -416,7 +416,7 @@ mod tests {
     async fn unresolved_temporary_id_fails_before_http() {
         let mut tool_configs = HashMap::new();
         tool_configs.insert(
-            "set-issue-type".to_string(),
+            "set-github-issue-type".to_string(),
             serde_json::json!({"target-repo": "octo/repo"}),
         );
         let ctx = ExecutionContext {
@@ -424,7 +424,7 @@ mod tests {
             tool_configs,
             ..Default::default()
         };
-        let mut result: SetIssueTypeResult = SetIssueTypeParams {
+        let mut result: SetGithubIssueTypeResult = SetGithubIssueTypeParams {
             issue_number: GithubIssueNumber::Temporary(
                 GithubTemporaryId::parse("#aw_missing").unwrap(),
             ),
@@ -443,7 +443,7 @@ mod tests {
             github_token: Some("token-that-must-not-be-used".to_string()),
             ..Default::default()
         };
-        let mut result: SetIssueTypeResult = SetIssueTypeParams {
+        let mut result: SetGithubIssueTypeResult = SetGithubIssueTypeParams {
             issue_number: GithubIssueNumber::Number(1),
             issue_type: "Bug".to_string(),
         }
@@ -469,7 +469,7 @@ mod tests {
             .await;
         let mut tool_configs = HashMap::new();
         tool_configs.insert(
-            "set-issue-type".to_string(),
+            "set-github-issue-type".to_string(),
             serde_json::json!({
                 "target-repo": "octo/repo",
                 "allowed": ["Bug"]
@@ -481,7 +481,7 @@ mod tests {
             tool_configs,
             ..Default::default()
         };
-        let mut result: SetIssueTypeResult = SetIssueTypeParams {
+        let mut result: SetGithubIssueTypeResult = SetGithubIssueTypeParams {
             issue_number: GithubIssueNumber::Number(7),
             issue_type: String::new(),
         }

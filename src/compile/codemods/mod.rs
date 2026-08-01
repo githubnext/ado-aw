@@ -45,8 +45,8 @@ mod m0004_legacy_path_markers;
 mod m0005_drop_build_attachment_allowed_build_ids;
 #[path = "0006_explicit_push_trigger.rs"]
 mod m0006_explicit_push_trigger;
-#[path = "0007_promote_debug_create_issue.rs"]
-mod m0007_promote_debug_create_issue;
+#[path = "0007_promote_debug_create_github_issue.rs"]
+mod m0007_promote_debug_create_github_issue;
 
 #[allow(unused_imports)] // Re-exported for future codemods; only `take_key` is in-tree use.
 pub use helpers::{ConflictPolicy, insert_no_overwrite, rename_key, take_key};
@@ -151,7 +151,7 @@ pub static CODEMODS: &[&Codemod] = &[
     &m0004_legacy_path_markers::CODEMOD,
     &m0005_drop_build_attachment_allowed_build_ids::CODEMOD,
     &m0006_explicit_push_trigger::CODEMOD,
-    &m0007_promote_debug_create_issue::CODEMOD,
+    &m0007_promote_debug_create_github_issue::CODEMOD,
 ];
 
 /// Result of running the codemod registry on a single front-matter

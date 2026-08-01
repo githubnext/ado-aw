@@ -201,7 +201,7 @@ pub struct ExecutionContext {
     /// the `Clone` semantics need to share state. Each `Default` instance
     /// gets its own fresh empty set, which is correct for tests.
     pub uploaded_pipeline_artifact_keys: Arc<Mutex<HashSet<String>>>,
-    /// Temporary GitHub issue IDs resolved by successful `create-issue` calls.
+    /// Temporary GitHub issue IDs resolved by successful `create-github-issue` calls.
     pub resolved_github_issues: Arc<Mutex<HashMap<String, ResolvedGithubIssue>>>,
 }
 

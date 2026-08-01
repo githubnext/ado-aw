@@ -95,7 +95,7 @@ When you add `src/safe_outputs/<new-tool>.rs`:
 4. Only add a dedicated agentic smoke here if the new tool requires
    a fundamentally new kind of agent prompt or MCP wiring that the
    existing `canary.md` does not exercise.
-5. Debug-only tools (currently only `create-issue`) are excluded from
+5. Debug-only tools (currently only `create-github-issue`) are excluded from
    both suites — exercised by `smoke-failure-reporter.md`.
 
 ## Running locally

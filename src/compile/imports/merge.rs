@@ -970,24 +970,24 @@ mod tests {
     #[test]
     fn safe_output_duplicates_fail_and_consumer_builtins_override() {
         let duplicate = [
-            local("safe-outputs:\n  create-issue:\n    max: 1", ""),
-            local("safe-outputs:\n  create-issue:\n    max: 2", ""),
+            local("safe-outputs:\n  create-github-issue:\n    max: 1", ""),
+            local("safe-outputs:\n  create-github-issue:\n    max: 2", ""),
         ];
         assert!(
             merge_resolved(&mut ymap("name: c"), "", &duplicate)
                 .unwrap_err()
                 .to_string()
-                .contains("safe-outputs.create-issue")
+                .contains("safe-outputs.create-github-issue")
         );
 
-        let mut consumer = ymap("safe-outputs:\n  create-issue:\n    max: 9");
+        let mut consumer = ymap("safe-outputs:\n  create-github-issue:\n    max: 9");
         merge_resolved(
             &mut consumer,
             "",
-            &[local("safe-outputs:\n  create-issue:\n    max: 1", "")],
+            &[local("safe-outputs:\n  create-github-issue:\n    max: 1", "")],
         )
         .unwrap();
-        assert_eq!(consumer["safe-outputs"]["create-issue"]["max"], 9);
+        assert_eq!(consumer["safe-outputs"]["create-github-issue"]["max"], 9);
     }
 
     #[test]

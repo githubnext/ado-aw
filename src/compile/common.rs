@@ -1684,7 +1684,7 @@ pub fn generate_integrity_check(skip: bool) -> String {
 
 /// Validate the `ado-aw-debug:` section.
 ///
-/// When `create-issue:` is present:
+/// When `create-github-issue:` is present:
 /// * `target-repo` is required and must be `owner/repo`-shaped.
 /// * Operator-supplied strings (target-repo, title-prefix, labels,
 ///   allowed-labels, assignees) must not contain ADO pipeline-injection
@@ -1719,68 +1719,68 @@ pub fn validate_ado_aw_debug_config(front_matter: &FrontMatter) -> Result<()> {
 }
 
 pub fn validate_github_issue_outputs_config(front_matter: &FrontMatter) -> Result<()> {
-    if let Some(config) = front_matter.create_issue_config()? {
+    if let Some(config) = front_matter.create_github_issue_config()? {
         if let Some(target_repo) = config.target_repo.as_deref() {
             crate::safe_outputs::validate_target_repo(target_repo)?;
             crate::validate::reject_pipeline_injection(
                 target_repo,
-                "safe-outputs.create-issue.target-repo",
+                "safe-outputs.create-github-issue.target-repo",
             )?;
         }
         if let Some(prefix) = config.title_prefix.as_deref() {
             crate::validate::reject_pipeline_injection(
                 prefix,
-                "safe-outputs.create-issue.title-prefix",
+                "safe-outputs.create-github-issue.title-prefix",
             )?;
         }
         for label in &config.labels {
             crate::validate::reject_pipeline_injection(
                 label,
-                "safe-outputs.create-issue.labels",
+                "safe-outputs.create-github-issue.labels",
             )?;
         }
         for label in &config.allowed_labels {
             crate::validate::reject_pipeline_injection(
                 label,
-                "safe-outputs.create-issue.allowed-labels",
+                "safe-outputs.create-github-issue.allowed-labels",
             )?;
         }
         for assignee in &config.assignees {
             crate::validate::reject_pipeline_injection(
                 assignee,
-                "safe-outputs.create-issue.assignees",
+                "safe-outputs.create-github-issue.assignees",
             )?;
         }
     }
 
-    if let Some(config) = front_matter.set_issue_type_config()? {
+    if let Some(config) = front_matter.set_github_issue_type_config()? {
         if let Some(target_repo) = config.target_repo.as_deref() {
             crate::safe_outputs::validate_target_repo(target_repo)?;
             crate::validate::reject_pipeline_injection(
                 target_repo,
-                "safe-outputs.set-issue-type.target-repo",
+                "safe-outputs.set-github-issue-type.target-repo",
             )?;
         }
         for issue_type in &config.allowed {
             crate::validate::reject_pipeline_injection(
                 issue_type,
-                "safe-outputs.set-issue-type.allowed",
+                "safe-outputs.set-github-issue-type.allowed",
             )?;
         }
     }
 
-    if front_matter.safe_outputs.contains_key("create-issue")
-        && front_matter.safe_outputs.contains_key("set-issue-type")
+    if front_matter.safe_outputs.contains_key("create-github-issue")
+        && front_matter.safe_outputs.contains_key("set-github-issue-type")
     {
         let create_reviewed = front_matter
-            .tool_requires_approval("create-issue")
+            .tool_requires_approval("create-github-issue")
             .is_some();
         let type_reviewed = front_matter
-            .tool_requires_approval("set-issue-type")
+            .tool_requires_approval("set-github-issue-type")
             .is_some();
         if create_reviewed != type_reviewed {
             anyhow::bail!(
-                "safe-outputs.create-issue and safe-outputs.set-issue-type must have the \
+                "safe-outputs.create-github-issue and safe-outputs.set-github-issue-type must have the \
                  same effective require-approval setting so temporary issue IDs remain in \
                  one SafeOutputs job"
             );
@@ -1972,13 +1972,13 @@ pub fn generate_executor_ado_env(
 /// Generate `--enabled-tools` CLI args for the SafeOutputs MCP server.
 ///
 /// Derives the tool list from `safe-outputs:` front matter keys plus always-on
-/// diagnostic tools, plus any debug-only safe outputs activated via the
-/// `ado-aw-debug:` section (e.g. `create-issue`).
+/// diagnostic tools. Configured-only tools (e.g. `create-github-issue`) are
+/// stripped by the MCP layer unless they appear here, so they become reachable
+/// only when the author declared their `safe-outputs:` key.
 ///
-/// If `safe-outputs:` is empty AND no `ado-aw-debug` debug-only tool is
-/// configured, returns an empty string (all non-debug tools enabled for
-/// backward compatibility — debug-only tools remain stripped at the MCP
-/// layer regardless).
+/// If `safe-outputs:` is empty, returns an empty string (all non-gated tools
+/// enabled for backward compatibility — debug-only and configured-only tools
+/// remain stripped at the MCP layer regardless).
 ///
 /// Tool names are validated to contain only ASCII alphanumerics and hyphens
 /// to prevent shell injection when the args are embedded in bash commands.
@@ -4773,20 +4773,20 @@ safe-outputs:
     // ─── GitHub issue output wiring ─────────────────────────────────────────
 
     #[test]
-    fn test_generate_enabled_tools_args_create_issue_alone() {
+    fn test_generate_enabled_tools_args_create_github_issue_alone() {
         let yaml = r#"---
 name: test
 description: test
 safe-outputs:
-  create-issue:
+  create-github-issue:
     target-repo: githubnext/ado-aw
 ---
 "#;
         let (fm, _) = parse_markdown(yaml).unwrap();
         let args = generate_enabled_tools_args(&fm);
         assert!(
-            args.contains("--enabled-tools create-issue"),
-            "safe-outputs.create-issue should add create-issue to --enabled-tools, got: {}",
+            args.contains("--enabled-tools create-github-issue"),
+            "safe-outputs.create-github-issue should add create-github-issue to --enabled-tools, got: {}",
             args
         );
         // Always-on tools should also be present so the filter activates.
@@ -4794,27 +4794,27 @@ safe-outputs:
     }
 
     #[test]
-    fn test_generate_enabled_tools_args_create_issue_plus_other_output() {
+    fn test_generate_enabled_tools_args_create_github_issue_plus_other_output() {
         let yaml = r#"---
 name: test
 description: test
 safe-outputs:
   create-pull-request:
     target-branch: main
-  create-issue:
+  create-github-issue:
     target-repo: githubnext/ado-aw
 ---
 "#;
         let (fm, _) = parse_markdown(yaml).unwrap();
         let args = generate_enabled_tools_args(&fm);
         assert!(args.contains("--enabled-tools create-pull-request"));
-        assert!(args.contains("--enabled-tools create-issue"));
+        assert!(args.contains("--enabled-tools create-github-issue"));
         // No duplicate
-        assert_eq!(args.matches("--enabled-tools create-issue").count(), 1);
+        assert_eq!(args.matches("--enabled-tools create-github-issue").count(), 1);
     }
 
     #[test]
-    fn test_generate_enabled_tools_args_without_create_issue_does_not_emit_it() {
+    fn test_generate_enabled_tools_args_without_create_github_issue_does_not_emit_it() {
         let yaml = r#"---
 name: test
 description: test
@@ -4826,8 +4826,8 @@ safe-outputs:
         let (fm, _) = parse_markdown(yaml).unwrap();
         let args = generate_enabled_tools_args(&fm);
         assert!(
-            !args.contains("create-issue"),
-            "create-issue must not appear unless configured"
+            !args.contains("create-github-issue"),
+            "create-github-issue must not appear unless configured"
         );
     }
 
@@ -4837,7 +4837,7 @@ safe-outputs:
 name: test
 description: test
 safe-outputs:
-  create-issue:
+  create-github-issue:
     target-repo: githubnext/ado-aw
     title-prefix: "[bug] "
     labels: [pipeline-failure]
@@ -4860,8 +4860,8 @@ safe-outputs:
         let yaml = r#"---
 name: test
 description: test
-ado-aw-debug:
-  create-issue:
+safe-outputs:
+  create-github-issue:
     target-repo: ""
 ---
 "#;
@@ -4877,8 +4877,8 @@ ado-aw-debug:
         let yaml = r#"---
 name: test
 description: test
-ado-aw-debug:
-  create-issue:
+safe-outputs:
+  create-github-issue:
     target-repo: not-a-valid-shape
 ---
 "#;
@@ -4894,8 +4894,8 @@ ado-aw-debug:
         let yaml = r###"---
 name: test
 description: test
-ado-aw-debug:
-  create-issue:
+safe-outputs:
+  create-github-issue:
     target-repo: githubnext/ado-aw
     labels:
       - "##vso[task.complete]"
@@ -4911,8 +4911,8 @@ ado-aw-debug:
         let yaml = r###"---
 name: test
 description: test
-ado-aw-debug:
-  create-issue:
+safe-outputs:
+  create-github-issue:
     target-repo: githubnext/ado-aw
     title-prefix: "##vso[task.complete]"
 ---
@@ -5063,12 +5063,12 @@ safe-outputs:
     }
 
     #[test]
-    fn test_validate_safe_outputs_keys_accepts_create_issue() {
+    fn test_validate_safe_outputs_keys_accepts_create_github_issue() {
         let yaml = r#"---
 name: test
 description: test
 safe-outputs:
-  create-issue:
+  create-github-issue:
     target-repo: githubnext/ado-aw
 ---
 "#;
@@ -5144,12 +5144,12 @@ safe-outputs:
     }
 
     #[test]
-    fn test_validate_accepts_create_issue_under_safe_outputs() {
+    fn test_validate_accepts_create_github_issue_under_safe_outputs() {
         let yaml = r#"---
 name: test
 description: test
 safe-outputs:
-  create-issue:
+  create-github-issue:
     target-repo: githubnext/ado-aw
 ---
 "#;
@@ -5164,10 +5164,10 @@ safe-outputs:
 name: test
 description: test
 safe-outputs:
-  create-issue:
+  create-github-issue:
     target-repo: githubnext/ado-aw
     require-approval: true
-  set-issue-type:
+  set-github-issue-type:
     target-repo: githubnext/ado-aw
     require-approval: false
 ---
@@ -5190,7 +5190,7 @@ safe-outputs:
     client-id: Iv23liExample
     owner: githubnext
     repositories: [ado-aw]
-  create-issue:
+  create-github-issue:
     target-repo: githubnext/ado-aw
 ---
 "#;
@@ -5432,7 +5432,7 @@ safe-outputs:
     }
 
     #[test]
-    fn test_generate_executor_ado_env_with_create_issue_only() {
+    fn test_generate_executor_ado_env_with_create_github_issue_only() {
         let auth = crate::compile::types::GithubSafeOutputsAuth::Token {
             variable: "MY_GITHUB_WRITE_TOKEN".to_string(),
             api_url: "https://api.github.com".to_string(),

@@ -64,7 +64,7 @@ All deterministically-assertable ADO-write safe outputs plus the flagship
   compiler emits — so it also proves the executor resolves a repository from
   its name alone.
 
-Excluded (out of scope or GitHub-only): the GitHub-only `create-issue`.
+Excluded (out of scope or GitHub-only): the GitHub-only `create-github-issue`.
 
 > **Coverage note.** The signal scenarios (`noop`, `missing-tool`,
 > `missing-data`, `report-incomplete`) were previously exercised only by

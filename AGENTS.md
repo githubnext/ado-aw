@@ -109,7 +109,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   │   ├── 0003_flatten_work_item_config.rs # Legacy work-item config flatten codemod
 │   │   │   ├── 0004_legacy_path_markers.rs # Migrate {{ workspace }}/{{ working_directory }}/{{ trigger_repo_directory }} markers → explicit ADO path exprs (resolved from workspace:/repos:)
 │   │   │   ├── 0005_drop_build_attachment_allowed_build_ids.rs # Remove inert safe-outputs.upload-build-attachment.allowed-build-ids key (build attachments are current-run only)
-│   │   │   ├── 0006_promote_debug_create_issue.rs # Move legacy ado-aw-debug.create-issue into public safe-outputs.create-issue with auth bridge
+│   │   │   ├── 0006_promote_debug_create_github_issue.rs # Move legacy ado-aw-debug.create-issue into public safe-outputs.create-github-issue with auth bridge
 │   │   │   └── helpers.rs # take_key, insert_no_overwrite, rename_key, ConflictPolicy
 │   │   ├── codemod_integration_test.rs # White-box rewrite-path tests (stub registry injection)
 │   │   ├── types.rs      # Front matter grammar and types
@@ -195,7 +195,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── comment_on_work_item.rs
 │   │   ├── create_branch.rs
 │   │   ├── create_git_tag.rs
-│   │   ├── create_issue.rs
+│   │   ├── create_github_issue.rs
 │   │   ├── create_pull_request.rs
 │   │   ├── create_wiki_page.rs
 │   │   ├── create_work_item.rs

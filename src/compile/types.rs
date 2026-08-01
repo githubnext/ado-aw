@@ -2038,8 +2038,8 @@ impl FrontMatter {
     }
 
     pub fn has_github_issue_outputs(&self) -> bool {
-        self.safe_outputs.contains_key("create-issue")
-            || self.safe_outputs.contains_key("set-issue-type")
+        self.safe_outputs.contains_key("create-github-issue")
+            || self.safe_outputs.contains_key("set-github-issue-type")
     }
 
     fn typed_safe_output_config<T>(&self, key: &str) -> anyhow::Result<Option<T>>
@@ -2064,16 +2064,16 @@ impl FrontMatter {
         Ok(Some(config))
     }
 
-    pub fn create_issue_config(
+    pub fn create_github_issue_config(
         &self,
-    ) -> anyhow::Result<Option<crate::safe_outputs::CreateIssueConfig>> {
-        self.typed_safe_output_config("create-issue")
+    ) -> anyhow::Result<Option<crate::safe_outputs::CreateGithubIssueConfig>> {
+        self.typed_safe_output_config("create-github-issue")
     }
 
-    pub fn set_issue_type_config(
+    pub fn set_github_issue_type_config(
         &self,
-    ) -> anyhow::Result<Option<crate::safe_outputs::SetIssueTypeConfig>> {
-        self.typed_safe_output_config("set-issue-type")
+    ) -> anyhow::Result<Option<crate::safe_outputs::SetGithubIssueTypeConfig>> {
+        self.typed_safe_output_config("set-github-issue-type")
     }
 
     fn parse_safe_outputs_github_token(raw: &str) -> anyhow::Result<String> {
@@ -2143,18 +2143,18 @@ impl FrontMatter {
         }
         let mut targets = Vec::new();
         let mut has_implicit_target = false;
-        if self.safe_outputs.contains_key("create-issue") {
+        if self.safe_outputs.contains_key("create-github-issue") {
             match self
-                .create_issue_config()?
+                .create_github_issue_config()?
                 .and_then(|config| config.target_repo)
             {
                 Some(target) => targets.push(target),
                 None => has_implicit_target = true,
             }
         }
-        if self.safe_outputs.contains_key("set-issue-type") {
+        if self.safe_outputs.contains_key("set-github-issue-type") {
             match self
-                .set_issue_type_config()?
+                .set_github_issue_type_config()?
                 .and_then(|config| config.target_repo)
             {
                 Some(target)
@@ -2170,7 +2170,7 @@ impl FrontMatter {
         }
         if has_implicit_target && !targets.is_empty() {
             anyhow::bail!(
-                "GitHub App-backed create-issue and set-issue-type cannot mix implicit current \
+                "GitHub App-backed create-github-issue and set-github-issue-type cannot mix implicit current \
                  repository targets with explicit target-repo values; configure target-repo \
                  consistently for both tools"
             );
@@ -4934,7 +4934,7 @@ github-app-token:
     #[test]
     fn github_issue_outputs_default_to_separate_stage3_pat() {
         let (fm, _) = super::super::common::parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  create-issue:\n    target-repo: octo/repo\n---\n",
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
         )
         .unwrap();
         let auth = fm.github_safe_outputs_auth().unwrap().unwrap();
@@ -4948,7 +4948,7 @@ github-app-token:
     #[test]
     fn github_issue_outputs_accept_explicit_pat_macro() {
         let (fm, _) = super::super::common::parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-token: $(MY_ISSUES_TOKEN)\n  create-issue:\n    target-repo: octo/repo\n---\n",
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-token: $(MY_ISSUES_TOKEN)\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
         )
         .unwrap();
         let auth = fm.github_safe_outputs_auth().unwrap().unwrap();
@@ -4961,7 +4961,7 @@ github-app-token:
     #[test]
     fn github_issue_outputs_reject_literal_pat() {
         let (fm, _) = super::super::common::parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-token: literal-secret\n  create-issue:\n    target-repo: octo/repo\n---\n",
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-token: literal-secret\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
         )
         .unwrap();
         let error = fm.github_safe_outputs_auth().unwrap_err().to_string();
@@ -4971,7 +4971,7 @@ github-app-token:
     #[test]
     fn github_issue_outputs_reject_agent_github_token_variable() {
         let (fm, _) = super::super::common::parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-token: $(GITHUB_TOKEN)\n  create-issue:\n    target-repo: octo/repo\n---\n",
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-token: $(GITHUB_TOKEN)\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
         )
         .unwrap();
         let error = fm.github_safe_outputs_auth().unwrap_err().to_string();
@@ -4981,7 +4981,7 @@ github-app-token:
     #[test]
     fn github_issue_pat_accepts_explicit_api_url() {
         let (fm, _) = super::super::common::parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-api-url: https://ghe.example.com/api/v3/\n  create-issue:\n    target-repo: octo/repo\n---\n",
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-api-url: https://ghe.example.com/api/v3/\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
         )
         .unwrap();
         let auth = fm.github_safe_outputs_auth().unwrap().unwrap();
@@ -4991,7 +4991,7 @@ github-app-token:
     #[test]
     fn github_issue_pat_rejects_api_url_injection() {
         let (fm, _) = super::super::common::parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-api-url: \"https://api.github.com/\\n  BASH_ENV: $(EVIL)\"\n  create-issue:\n    target-repo: octo/repo\n---\n",
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-api-url: \"https://api.github.com/\\n  BASH_ENV: $(EVIL)\"\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
         )
         .unwrap();
         let error = fm.github_safe_outputs_auth().unwrap_err().to_string();
@@ -5004,7 +5004,7 @@ github-app-token:
     #[test]
     fn github_issue_pat_rejects_api_url_fragment() {
         let (fm, _) = super::super::common::parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-api-url: https://api.github.com/api/v3#fragment\n  create-issue:\n    target-repo: octo/repo\n---\n",
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-api-url: https://api.github.com/api/v3#fragment\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
         )
         .unwrap();
         let error = fm.github_safe_outputs_auth().unwrap_err().to_string();
@@ -5014,7 +5014,7 @@ github-app-token:
     #[test]
     fn github_issue_outputs_require_read_only_engine_app_permissions() {
         let (fm, _) = super::super::common::parse_markdown(
-            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  github-app-token:\n    app-id: 123\n    owner: octo\n    repositories: [repo]\nsafe-outputs:\n  create-issue:\n    target-repo: octo/repo\n---\n",
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  github-app-token:\n    app-id: 123\n    owner: octo\n    repositories: [repo]\nsafe-outputs:\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
         )
         .unwrap();
         let error = fm.github_safe_outputs_auth().unwrap_err().to_string();
@@ -5024,7 +5024,7 @@ github-app-token:
     #[test]
     fn safe_outputs_github_app_accepts_client_id_alias_and_scopes_repo() {
         let (fm, _) = super::super::common::parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-app:\n    client-id: Iv23liExample\n    owner: octo\n    repositories: [broader-repo]\n  create-issue:\n    target-repo: octo/repo\n---\n",
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-app:\n    client-id: Iv23liExample\n    owner: octo\n    repositories: [broader-repo]\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
         )
         .unwrap();
         let auth = fm.github_safe_outputs_auth().unwrap().unwrap();
@@ -5038,7 +5038,7 @@ github-app-token:
     #[test]
     fn github_app_rejects_mixed_implicit_and_explicit_issue_targets() {
         let (fm, _) = super::super::common::parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-app:\n    client-id: Iv23liExample\n    owner: octo\n    repositories: [repo]\n  create-issue: {}\n  set-issue-type:\n    target-repo: octo/repo\n---\n",
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-app:\n    client-id: Iv23liExample\n    owner: octo\n    repositories: [repo]\n  create-github-issue: {}\n  set-github-issue-type:\n    target-repo: octo/repo\n---\n",
         )
         .unwrap();
         let error = fm.github_safe_outputs_auth().unwrap_err().to_string();
@@ -5899,10 +5899,10 @@ Body
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
         let debug = fm.ado_aw_debug.expect("ado-aw-debug should parse");
         assert!(debug.skip_integrity);
-        let ci: crate::safe_outputs::CreateIssueConfig = serde_json::from_value(
+        let ci: crate::safe_outputs::CreateGithubIssueConfig = serde_json::from_value(
             fm.safe_outputs
-                .get("create-issue")
-                .expect("codemod should move create-issue")
+                .get("create-github-issue")
+                .expect("codemod should move create-github-issue")
                 .clone(),
         )
         .unwrap();

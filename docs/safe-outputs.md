@@ -421,7 +421,7 @@ provided by Azure Pipelines. Custom component code is trusted privileged code.
 
 ## GitHub issue safe outputs
 
-`create-issue` and `set-issue-type` call GitHub only from Stage 3, after threat
+`create-github-issue` and `set-github-issue-type` call GitHub only from Stage 3, after threat
 detection. The GitHub write credential is never exposed to Agent or Detection.
 The MCP routes are configured-only: GitHub auth by itself does not expose them
 to the agent; each tool appears only when its own front-matter key is present.
@@ -433,7 +433,7 @@ With no explicit auth, Stage 3 uses the secret ADO pipeline variable
 
 ```yaml
 safe-outputs:
-  create-issue:
+  create-github-issue:
     target-repo: octo-org/octo-repo
 ```
 
@@ -450,7 +450,7 @@ differently named secret, provide exactly one ADO macro:
 safe-outputs:
   github-token: "$(MY_GITHUB_ISSUES_TOKEN)"
   github-api-url: https://ghe.example.com/api/v3  # optional PAT API base
-  create-issue:
+  create-github-issue:
     target-repo: octo-org/octo-repo
 ```
 
@@ -480,7 +480,7 @@ engine:
       pull-requests: read
 
 safe-outputs:
-  create-issue:
+  create-github-issue:
     target-repo: octo-org/octo-repo
 ```
 
@@ -503,7 +503,7 @@ safe-outputs:
     repositories: [octo-repo]
     api-url: https://api.github.com
     skip-token-revocation: false
-  create-issue:
+  create-github-issue:
     target-repo: octo-org/octo-repo
 ```
 
@@ -529,7 +529,7 @@ its real number exists:
 ```
 
 The ID format is `#aw_` plus 3-12 ASCII alphanumeric/underscore characters;
-the leading `#` is optional. `create-issue` must run first and succeed.
+the leading `#` is optional. `create-github-issue` must run first and succeed.
 Duplicate, unresolved, cross-repository, or reversed references fail before an
 API call.
 
@@ -540,22 +540,22 @@ section-level gate is the simplest form:
 ```yaml
 safe-outputs:
   require-approval: true
-  create-issue:
+  create-github-issue:
     target-repo: octo-org/octo-repo
     require-temporary-id: true
-  set-issue-type:
+  set-github-issue-type:
     target-repo: octo-org/octo-repo
 ```
 
 ## Available Safe Output Tools
 
-### create-issue
+### create-github-issue
 
 Creates a GitHub issue.
 
 ```yaml
 safe-outputs:
-  create-issue:
+  create-github-issue:
     target-repo: octo-org/octo-repo
     title-prefix: "[agent] "
     labels: [automation]
@@ -579,13 +579,13 @@ safe-outputs:
 Agent parameters are `title`, `body`, optional `labels`, optional `assignees`,
 and optional `temporary_id`.
 
-### set-issue-type
+### set-github-issue-type
 
 Sets or clears a native GitHub Issue Type:
 
 ```yaml
 safe-outputs:
-  set-issue-type:
+  set-github-issue-type:
     target-repo: octo-org/octo-repo
     allowed: [Bug, Feature, Task]
     max: 5

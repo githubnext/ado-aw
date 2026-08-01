@@ -101,7 +101,7 @@ use super::types::{
 /// name `FrontMatter::create_pr_config`/`partition_safe_outputs_by_approval` use.
 const CREATE_PULL_REQUEST_TOOL: &str = "create-pull-request";
 const CUSTOM_PROPOSALS_STEP_ID: &str = "customProposals";
-const GITHUB_ISSUE_TOOLS: &[&str] = &["create-issue", "set-issue-type"];
+const GITHUB_ISSUE_TOOLS: &[&str] = &["create-github-issue", "set-github-issue-type"];
 
 /// Built pipeline context — the result of running every validation,
 /// scalar computation, extension declaration fanout, and canonical-

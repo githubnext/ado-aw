@@ -13,13 +13,13 @@ use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
 use crate::safe_outputs::{
     AddBuildTagParams, AddBuildTagResult, AddPrCommentParams, AddPrCommentResult,
     CommentOnWorkItemParams, CommentOnWorkItemResult, CreateBranchParams, CreateBranchResult,
-    CreateGitTagParams, CreateGitTagResult, CreateIssueParams, CreateIssueResult, CreatePrParams,
+    CreateGitTagParams, CreateGitTagResult, CreateGithubIssueParams, CreateGithubIssueResult, CreatePrParams,
     CreatePrResult, CreateWikiPageParams, CreateWikiPageResult, CreateWorkItemParams,
     CreateWorkItemResult, DEFAULT_MAX_FILE_SIZE, LinkWorkItemsParams, LinkWorkItemsResult,
     MissingDataParams, MissingDataResult, MissingToolParams, MissingToolResult, NoopParams,
     NoopResult, PIPELINE_ARTIFACT_DEFAULT_MAX_FILE_SIZE, QueueBuildParams, QueueBuildResult,
     ReplyToPrCommentParams, ReplyToPrCommentResult, ReportIncompleteParams, ReportIncompleteResult,
-    ResolvePrThreadParams, ResolvePrThreadResult, SetIssueTypeParams, SetIssueTypeResult,
+    ResolvePrThreadParams, ResolvePrThreadResult, SetGithubIssueTypeParams, SetGithubIssueTypeResult,
     SubmitPrReviewParams, SubmitPrReviewResult, ToolResult, UpdatePrParams, UpdatePrResult,
     UpdateWikiPageParams, UpdateWikiPageResult, UpdateWorkItemParams, UpdateWorkItemResult,
     UploadBuildAttachmentParams,
@@ -553,9 +553,10 @@ impl SafeOutputs {
 
         // Apply tool filtering. Three categories:
         //   * ALWAYS_ON_TOOLS — diagnostic/transparency tools always served.
-        //   * DEBUG_ONLY_TOOLS — gated tools (e.g. `create-issue`) that are
-        //     stripped even when `enabled_tools` is `None`. They become
-        //     reachable only when explicitly listed in `enabled_tools`.
+        //   * DEBUG_ONLY_TOOLS / CONFIGURED_ONLY_TOOLS — gated tools (e.g.
+        //     `create-github-issue`) that are stripped even when
+        //     `enabled_tools` is `None`. They become reachable only when
+        //     explicitly listed in `enabled_tools`.
         //   * Everything else — permissive default when `enabled_tools` is
         //     `None`; otherwise filtered against the explicit allowlist.
         apply_tool_filter(&mut tool_router, enabled_tools);
@@ -758,37 +759,37 @@ impl SafeOutputs {
 
     /// File a GitHub issue through the Stage 3 safe-output executor.
     #[tool(
-        name = "create-issue",
+        name = "create-github-issue",
         description = "Create a GitHub issue against the operator-configured target repository. \
 Provide the final title and markdown body. Optional labels are subject to the configured \
 allowlist. Set temporary_id when a later safe output must refer to the newly-created issue."
     )]
-    async fn create_issue(
+    async fn create_github_issue(
         &self,
-        params: Parameters<CreateIssueParams>,
+        params: Parameters<CreateGithubIssueParams>,
     ) -> Result<CallToolResult, McpError> {
-        info!("Tool called: create-issue - '{}'", params.0.title);
+        info!("Tool called: create-github-issue - '{}'", params.0.title);
         debug!("Body length: {} chars", params.0.body.len());
         let mut sanitized = params.0;
         sanitized.title = sanitize_text(&sanitized.title);
         sanitized.body = sanitize_text(&sanitized.body);
-        let result: CreateIssueResult = sanitized.try_into()?;
+        let result: CreateGithubIssueResult = sanitized.try_into()?;
         let _ = self.write_safe_output_file(&result).await;
         info!("Issue queued for creation");
         Ok(CallToolResult::success(vec![]))
     }
 
     #[tool(
-        name = "set-issue-type",
+        name = "set-github-issue-type",
         description = "Set the native GitHub issue type. issue_number may be a positive issue \
-number or a temporary_id from an earlier create_issue call in the same run. Pass an empty \
+number or a temporary_id from an earlier create-github-issue call in the same run. Pass an empty \
 issue_type to clear the current type."
     )]
-    async fn set_issue_type(
+    async fn set_github_issue_type(
         &self,
-        params: Parameters<SetIssueTypeParams>,
+        params: Parameters<SetGithubIssueTypeParams>,
     ) -> Result<CallToolResult, McpError> {
-        let result: SetIssueTypeResult = params.0.try_into()?;
+        let result: SetGithubIssueTypeResult = params.0.try_into()?;
         let _ = self.write_safe_output_file(&result).await;
         info!("Issue type update queued");
         Ok(CallToolResult::success(vec![]))
@@ -2146,7 +2147,7 @@ safe-outputs:
     }
 
     /// Asserts that ALL_KNOWN_SAFE_OUTPUTS contains every NON-DEBUG-ONLY tool
-    /// registered in the router. Debug-only tools (e.g. `create-issue`) are
+    /// registered in the router. Debug-only tools (e.g. `create-github-issue`) are
     /// intentionally absent from the list because they're not regular
     /// safe-outputs.
     #[tokio::test]
@@ -2206,14 +2207,14 @@ safe-outputs:
         }
         // Spot check a regular tool is present in the permissive default.
         assert!(tool_names.contains(&"create-work-item".to_string()));
-        assert!(!tool_names.contains(&"create-issue".to_string()));
-        assert!(!tool_names.contains(&"set-issue-type".to_string()));
+        assert!(!tool_names.contains(&"create-github-issue".to_string()));
+        assert!(!tool_names.contains(&"set-github-issue-type".to_string()));
     }
 
     #[tokio::test]
-    async fn test_filter_keeps_create_issue_when_explicitly_enabled() {
+    async fn test_filter_keeps_create_github_issue_when_explicitly_enabled() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let enabled = vec!["create-issue".to_string()];
+        let enabled = vec!["create-github-issue".to_string()];
         let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled), None)
             .await
             .unwrap();
@@ -2224,15 +2225,15 @@ safe-outputs:
             .map(|t| t.name.to_string())
             .collect();
         assert!(
-            tool_names.contains(&"create-issue".to_string()),
-            "Explicitly enabled create-issue tool should be present, got: {:?}",
+            tool_names.contains(&"create-github-issue".to_string()),
+            "Explicitly enabled create-github-issue tool should be present, got: {:?}",
             tool_names
         );
-        assert!(!tool_names.contains(&"set-issue-type".to_string()));
+        assert!(!tool_names.contains(&"set-github-issue-type".to_string()));
     }
 
     #[tokio::test]
-    async fn test_filter_strips_create_issue_when_other_tool_enabled() {
+    async fn test_filter_strips_create_github_issue_when_other_tool_enabled() {
         let temp_dir = tempfile::tempdir().unwrap();
         let enabled = vec!["create-work-item".to_string()];
         let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled), None)
@@ -2245,8 +2246,8 @@ safe-outputs:
             .map(|t| t.name.to_string())
             .collect();
         assert!(
-            !tool_names.contains(&"create-issue".to_string()),
-            "create-issue must remain filtered when not explicitly enabled"
+            !tool_names.contains(&"create-github-issue".to_string()),
+            "create-github-issue must remain filtered when not explicitly enabled"
         );
         assert!(tool_names.contains(&"create-work-item".to_string()));
     }

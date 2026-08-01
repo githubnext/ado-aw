@@ -392,8 +392,8 @@ local diagnostics. It is **not** a regular safe-output tool. Use
 `skip-integrity` to omit generated pipeline integrity verification; see
 [`ado-aw-debug.md`](ado-aw-debug.md) for the full reference.
 
-GitHub issue filing now uses regular `safe-outputs.create-issue` and
-`safe-outputs.set-issue-type`; see
+GitHub issue filing now uses regular `safe-outputs.create-github-issue` and
+`safe-outputs.set-github-issue-type`; see
 [`safe-outputs.md`](safe-outputs.md#github-issue-safe-outputs).
 
 ## Per-Job Pool Overrides (`pool.overrides:`)

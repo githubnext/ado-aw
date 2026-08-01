@@ -147,9 +147,10 @@ fn compile_migrates_debug_create_issue_to_public_safe_output() {
     assert!(after.contains("ado-aw-debug:\n  skip-integrity: true"));
     assert!(after.contains("safe-outputs:"));
     assert!(after.contains("github-token: $(ADO_AW_DEBUG_GITHUB_TOKEN)"));
-    assert_eq!(after.matches("create-issue:").count(), 1);
+    assert!(after.contains("create-github-issue:"));
+    assert_eq!(after.matches("create-issue:").count(), 0);
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("promote_debug_create_issue")
+        String::from_utf8_lossy(&output.stderr).contains("promote_debug_create_github_issue")
     );
 }
 

@@ -6,7 +6,7 @@ on:
 permissions:
   read: my-read-arm-connection
 safe-outputs:
-  create-issue:
+  create-github-issue:
     target-repo: githubnext/ado-aw
     title-prefix: "[pipeline-failure] "
     labels:
@@ -30,7 +30,7 @@ in Azure DevOps inside an AWF-isolated sandbox.
 1. Read the pipeline run logs available under `$BUILD_SOURCESDIRECTORY`
    for any signs of recent failures.
 2. For each distinct failure, file **one** GitHub issue using the
-   `create-issue` MCP tool with:
+   `create-github-issue` MCP tool with:
    - A concise `title` describing the failure.
    - A markdown `body` with reproduction steps, log excerpts, and links
      to relevant ADO build URLs.

@@ -45,7 +45,7 @@ pub const DEBUG_ONLY_TOOLS: &[&str] = &[];
 
 /// Public tools exposed only when explicitly configured in `safe-outputs:`.
 pub const CONFIGURED_ONLY_TOOLS: &[&str] =
-    tool_names![CreateIssueResult, SetIssueTypeResult];
+    tool_names![CreateGithubIssueResult, SetGithubIssueTypeResult];
 
 /// All recognised safe-output keys accepted in front matter `safe-outputs:`.
 /// This is the union of write-requiring tool types and diagnostic tool types.
@@ -75,8 +75,8 @@ pub const ALL_KNOWN_SAFE_OUTPUTS: &[&str] = all_safe_output_names![
     SubmitPrReviewResult,
     ReplyToPrCommentResult,
     ResolvePrThreadResult,
-    CreateIssueResult,
-    SetIssueTypeResult,
+    CreateGithubIssueResult,
+    SetGithubIssueTypeResult,
     // Always-on diagnostics
     NoopResult,
     MissingDataResult,
@@ -432,7 +432,7 @@ mod add_pr_comment;
 mod comment_on_work_item;
 mod create_branch;
 mod create_git_tag;
-mod create_issue;
+mod create_github_issue;
 mod create_pull_request;
 mod create_wiki_page;
 mod create_work_item;
@@ -445,7 +445,7 @@ mod reply_to_pr_comment;
 mod report_incomplete;
 mod resolve_pr_thread;
 mod result;
-mod set_issue_type;
+mod set_github_issue_type;
 mod submit_pr_review;
 mod update_pr;
 mod update_wiki_page;
@@ -459,8 +459,8 @@ pub use add_pr_comment::*;
 pub use comment_on_work_item::*;
 pub use create_branch::*;
 pub use create_git_tag::*;
-pub(crate) use create_issue::validate_target_repo;
-pub use create_issue::*;
+pub(crate) use create_github_issue::validate_target_repo;
+pub use create_github_issue::*;
 pub use create_pull_request::*;
 pub use create_wiki_page::*;
 pub use create_work_item::*;
@@ -476,7 +476,7 @@ pub use result::{
     ExecutionContext, ExecutionResult, Executor, ResolvedGithubIssue, ToolResult, Validate,
     anyhow_to_mcp_error, org_from_url,
 };
-pub use set_issue_type::*;
+pub use set_github_issue_type::*;
 pub use submit_pr_review::*;
 pub use update_pr::*;
 pub use update_wiki_page::*;
@@ -517,10 +517,10 @@ mod tests {
     fn test_requires_write_consistency() {
         // Write-requiring tools
         const {
-            assert!(CreateIssueResult::REQUIRES_WRITE);
+            assert!(CreateGithubIssueResult::REQUIRES_WRITE);
         }
         const {
-            assert!(SetIssueTypeResult::REQUIRES_WRITE);
+            assert!(SetGithubIssueTypeResult::REQUIRES_WRITE);
         }
         const {
             assert!(CreateWorkItemResult::REQUIRES_WRITE);
