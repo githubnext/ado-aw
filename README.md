@@ -260,6 +260,8 @@ the service connections. Approve the permissions and the pipeline is ready.
 | `workspace` | `root` \| `repo` \| `self` \| *alias* | auto | Working directory mode. `self` is an alias for `repo`; any checked-out repo alias is also accepted. |
 | `repos` | list | — | Compact repository declarations (replaces legacy `repositories:` + `checkout:`) |
 | `variable-groups` | list | — | ADO Library variable group names to import (emits `variables: - group: <name>` in the lock). Not supported on `target: job` or `target: stage`. |
+| `imports` | list | — | Reusable markdown components (local paths or SHA-pinned cross-repository specs) composed at compile time. See [imports reference](docs/imports.md). |
+| `permissions-required` | object | — | Abstract `read` / `write` requirements declared by this agent or its imports. The compiler validates that concrete `permissions:` service connections satisfy them. See [imports reference](docs/imports.md#permissions-required). |
 | `mcp-servers` | map | — | MCP server configuration |
 | `tools` | object | — | Tool configuration (`bash`, `edit`, `cache-memory`, `azure-devops`) |
 | `runtimes` | object | — | Runtime environment configuration (`lean`, `python`, `node`, `dotnet`) |
