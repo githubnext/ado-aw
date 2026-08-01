@@ -323,37 +323,67 @@ re-derived.
 | OS trust store alone is **not** sufficient | `az` fails `CERTIFICATE_VERIFY_FAILED`; Python `requests` uses its own `certifi/cacert.pem` |
 | The MCP cannot be redirected by configuration | `src/index.ts`: `const orgUrl = "https://dev.azure.com/" + orgName`, no env override |
 | The MCP would partially bypass a proxy-env-var approach | 8 raw `fetch()` call sites; undici ignores `HTTP(S)_PROXY` without `NODE_USE_ENV_PROXY`, which needs Node ≥24.5 against a pinned `node:20-slim` |
-| `az` reaches a hardcoded SPS host | `OPTIONS`/`GET` to `app.vssps.visualstudio.com` not redirected by `--organization` — see open questions |
+| **`--add-host` redirects a container to the proxy, TLS verified** | A `node:20-slim` container given `--add-host dev.azure.com:<ip>` and `NODE_EXTRA_CA_CERTS` reached the stand-in proxy over **both** `node:https` *and* global `fetch`, with `rejectUnauthorized` left on. Server observed `Host: dev.azure.com`, so the client genuinely believed it was talking to Azure DevOps |
+| **The redirect is narrow** | In the same run an unrelated host failed `ENOTFOUND` — only the named host is affected |
+| **SPS is avoidable, and `az` completes entirely against the policy endpoint** | Three scenarios (`scripts/sps-probe.mjs`): a *minimal* discovery document fails (`location` area not registered); *faithful* document + a sparse area list falls back to `app.vssps.visualstudio.com`; *faithful* document + a **complete** area list — real area GUIDs, every `locationUrl` pointing back at the endpoint — completed with **exit 0** and never contacted SPS |
 | Upstream verification is real | The engine refused a self-signed upstream with `unable to verify the first certificate` |
 | Denials surface usefully to clients | `az` printed the engine's `WrappedException` message verbatim |
 
-The harness is `scripts/az-probe.mjs`. It stands up a fake Squid and a fake
-Azure DevOps, runs the real `az` through the real bundle with a canary bearer,
-and asserts both that allowed reads carry the injected credential and that
-denials never reach the upstream. It should become the basis of a conformance
-test rather than remaining a one-off.
+Three harnesses produce this evidence and should become conformance tests:
+
+- `scripts/az-probe.mjs` stands up a fake Squid and a fake Azure DevOps, runs
+  the real `az` through the real bundle with a canary bearer, and asserts both
+  that allowed reads carry the injected credential and that denials never reach
+  the upstream.
+- `scripts/add-host-probe.mjs` proves the container-level redirection the MCP
+  path depends on, including the undici path and the negative control.
+- `scripts/sps-probe.mjs` proves which discovery-document shape keeps `az` on
+  the policy endpoint.
+
+Both container probes were run on Docker Desktop 29.6.2 (`linux/arm64`).
+
+### Consequence for the resource-area response
+
+`az` resolves service locations from `/_apis/resourceAreas`, so that response
+determines whether it stays on the policy endpoint:
+
+- omit the `location` area → `az` fails outright (`API resource location
+  e81700f7-… is not registered`);
+- advertise it but return an incomplete area list → `az` falls back to
+  deployment-level SPS;
+- return the real area GUIDs with every `locationUrl` pointing at the policy
+  endpoint → `az` completes without ever contacting SPS.
+
+The engine must therefore **rewrite** `locationUrl` to itself rather than
+merely filtering the list. A filter that drops entries not matching a protected
+host would empty the list and reintroduce the SPS fallback — the opposite of
+the intent. This supersedes the drop-only `filter-resource-areas` behaviour
+currently implemented in `response.ts`.
 
 ## Open questions
 
 These gate implementation and are unresolved at the time of writing:
 
-1. **Is the SPS call avoidable?** `az` contacted `app.vssps.visualstudio.com`
-   despite a custom base URL. This is likely an artifact of the probe serving an
-   incomplete resource-location document, since that document — which the engine
-   controls in the broker model — is what tells `az` where each area lives. If
-   it is *not* avoidable, the sidecar reaches real SPS directly. That is
-   probably acceptable, as SPS returns service topology rather than project
-   data, but it must be a decision rather than an accident.
-2. **Does Docker's embedded DNS reliably win for a public FQDN alias?** The MCP
-   path depends entirely on this and it has not been tested on a real runner.
-3. **How does the engine obtain egress?** AWF's `DOCKER-USER` rules block the
-   default bridge — the reason the MCP runs `--network host` today — so it needs
-   `awf-net`. Whether that attachment can be made from the pipeline, or requires
-   AWF to own the sidecar's lifecycle, determines how much of the AWF change is
-   avoidable.
-4. **Does the MCP still start without npm registry access?** `npx -y
+1. **How does the engine obtain egress?** AWF's `DOCKER-USER` rules block the
+   default bridge — the reason the MCP runs `--network host` today. The jump
+   rule is scoped `-i <awf bridge>`, so a container of ours should be
+   unaffected, but this needs confirming on a real runner.
+2. **Does the MCP still start without npm registry access?** `npx -y
    @azure-devops/mcp` resolves at spawn time. Pre-baking the image removes this
    dependency and is preferable on supply-chain grounds regardless.
+
+Resolved since the first draft:
+
+- ~~Does Docker's embedded DNS reliably win for a public FQDN alias?~~ Moot:
+  `--add-host` is used instead, and is proven above. It needs no DNS at all,
+  which is why it is preferred — AWF itself falls back to `/etc/hosts` because
+  embedded DNS is unreachable under gVisor and on ARC/DinD.
+- ~~Is the SPS call avoidable?~~ **Yes**, provided the engine returns a
+  complete resource-area list pointing at itself (see above). SPS therefore
+  need not be reached at all on the `az` path. The catalog retains
+  `discovery.sps-host-options` and `discovery.sps-resource-area` as a
+  defence-in-depth affordance for clients that still fall back; both return
+  service topology only.
 
 ## Production gates
 
