@@ -466,6 +466,12 @@ tools:
     allowed-extensions: [.md, .json]
 ```
 
+> **Tip:** Enabling `cache-memory` auto-injects a `clearMemory` boolean
+> parameter into the pipeline, so anyone queuing a run manually in the ADO UI
+> can wipe the agent's persisted memory before it starts. See
+> [`docs/parameters.md`](docs/parameters.md) for the full runtime-parameters
+> reference.
+
 ### Custom MCP Servers (via `mcp-servers:`)
 
 For external or third-party MCPs, use the `mcp-servers:` field. Each entry is
