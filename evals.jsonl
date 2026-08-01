@@ -1,2 +1,2 @@
-{"id":"review_submitted","question":"Did the agent submit a pull request review?","answer":"NO","model":"small","timestamp":"2026-07-31T22:13:15.145Z","runid":"30668998653"}
-{"id":"test_focused","question":"Does the agent output show that the findings are about test quality rather than production code quality?","answer":"YES","model":"small","timestamp":"2026-07-31T22:13:15.145Z","runid":"30668998653"}
+{"id":"review_submitted","question":"Did the agent submit a pull request review?","answer":"NO","model":"small","timestamp":"2026-08-01T07:41:51.683Z","runid":"30690130967"}
+{"id":"test_focused","question":"Does the agent output show that the findings are about test quality rather than production code quality?","answer":"UNKNOWN","model":"small","timestamp":"2026-08-01T07:41:51.683Z","runid":"30690130967"}
