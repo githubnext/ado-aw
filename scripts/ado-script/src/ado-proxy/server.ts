@@ -351,7 +351,14 @@ async function handleProtected(
 
     const body = await readBounded(upstreamResponse, decision.operation.max_response_bytes);
     const status = upstreamResponse.statusCode ?? 502;
-    const outcome = filterResponse(decision.operation, deps.config.policy, body);
+    // Service locations must point back at the origin the client is already
+    // using, which is the intercepted hostname — not the upstream's own.
+    const outcome = filterResponse(
+      decision.operation,
+      deps.config.policy,
+      body,
+      `https://${host}`,
+    );
 
     if (outcome.kind === "deny") {
       deps.log.write({

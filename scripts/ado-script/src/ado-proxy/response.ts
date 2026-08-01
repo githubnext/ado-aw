@@ -71,6 +71,14 @@ export function filterResponse(
   operation: Operation,
   policy: ProxyPolicy,
   body: Buffer,
+  /**
+   * Origin the client used to reach this proxy, e.g. `https://dev.azure.com`.
+   *
+   * Only the resource-area rewrite needs it: service locations must point back
+   * at whatever origin the client is already talking to, which differs between
+   * the intercepted MCP path and the `az` broker path.
+   */
+  selfOrigin: string,
 ): FilterOutcome {
   const responsePolicy: ResponsePolicy = operation.response;
   if (responsePolicy === "json") return forward(body);
@@ -106,14 +114,28 @@ export function filterResponse(
     case "filter-resource-areas": {
       const values = listValues(record);
       if (values === undefined) return denyBody("resource area list had no value array");
-      // A resource area whose locationUrl points outside the protected set
-      // would send the client — and therefore the next request — to a host this
-      // proxy does not police. Drop those rather than rewriting them.
-      const kept = values.filter((entry) => {
-        const area = asRecord(entry);
-        if (area === undefined) return false;
-        return isProtectedLocation(area.locationUrl);
-      });
+      // Rewrite, do not merely filter.
+      //
+      // `az` resolves service locations from this response, and it is the
+      // single point that decides whether it stays on the policy endpoint.
+      // Measured (scripts/sps-probe.mjs): omit the `location` area and `az`
+      // fails outright; return an incomplete list and it falls back to
+      // deployment-level SPS; return the real areas pointing back at the
+      // policy endpoint and it completes without ever contacting SPS.
+      //
+      // Dropping entries whose `locationUrl` is not already a protected host
+      // would empty the list and reintroduce exactly that fallback — the
+      // opposite of the intent. So each URL is rewritten to the origin the
+      // client is already talking to, and only entries that cannot be
+      // rewritten are dropped.
+      const kept: unknown[] = [];
+      for (const value of values) {
+        const area = asRecord(value);
+        if (area === undefined) continue;
+        const rewritten = rewriteLocationUrl(area.locationUrl, selfOrigin);
+        if (rewritten === undefined) continue;
+        kept.push({ ...area, locationUrl: rewritten });
+      }
       return reserialize({ count: kept.length, value: kept });
     }
 
@@ -159,6 +181,32 @@ export function filterResponse(
       return denyBody(`unimplemented response policy ${String(exhaustive)}`);
     }
   }
+}
+
+/**
+ * Point a service `locationUrl` back at the proxy, preserving its path.
+ *
+ * Azure DevOps returns absolute URLs like
+ * `https://dev.azure.com/contoso/` — the host must become the origin the client
+ * is already using, or the client's next request leaves the policed path.
+ * Returns `undefined` for anything unparseable, which the caller drops.
+ */
+export function rewriteLocationUrl(
+  locationUrl: unknown,
+  selfOrigin: string,
+): string | undefined {
+  if (typeof locationUrl !== "string") return undefined;
+  let parsed: URL;
+  let origin: URL;
+  try {
+    parsed = new URL(locationUrl);
+    origin = new URL(selfOrigin);
+  } catch {
+    return undefined;
+  }
+  parsed.protocol = origin.protocol;
+  parsed.host = origin.host;
+  return parsed.toString();
 }
 
 /** True when a discovery `locationUrl` resolves to a protected host. */

@@ -122,10 +122,31 @@ function resourceLocations(host) {
 
   const value = [
     entry("603fe2ac-9723-48b9-88ad-09305aa6c6e1", "core", "projects", "_apis/{resource}/{*projectId}"),
+    // The `location` area is required: without it `az` fails outright with
+    // "API resource location e81700f7-… is not registered".
+    entry("e81700f7-3be2-46de-8624-2eb35882fcaa", "location", "resourceAreas", "_apis/{resource}/{areaId}"),
     entry("225f7195-f9c7-4d14-ab28-a83f7ff77e1f", "git", "repositories", "{project}/_apis/git/{resource}/{repositoryId}"),
     entry("dbeaf647-6167-421a-bda9-c9327b25e2e6", "build", "builds", "{project}/_apis/build/{resource}/{buildId}"),
   ];
   return { count: value.length, value };
+}
+
+/**
+ * The upstream's own resource-area list.
+ *
+ * Deliberately points at hosts *other* than the intercepted one, so the run
+ * proves the proxy rewrites them rather than the fake upstream having been
+ * pre-cooked to look correct.
+ */
+function upstreamResourceAreas() {
+  const upstream = `https://vsrm.dev.azure.com/${ORG}/`;
+  return [
+    { id: "79134c72-4a58-4b42-976c-04e7115f32bf", name: "core", locationUrl: upstream },
+    { id: "4e080c62-fa21-4fbc-8fef-2a10a2b38049", name: "git", locationUrl: upstream },
+    { id: "5d6898bb-45ec-463f-95f9-54d49c71752e", name: "build", locationUrl: upstream },
+    { id: "5264459e-e5e0-4bd8-b118-0985e68a4ec5", name: "wit", locationUrl: upstream },
+    { id: "e81700f7-3be2-46de-8624-2eb35882fcaa", name: "location", locationUrl: upstream },
+  ];
 }
 
 /** Realistic Azure DevOps responses for the routes az actually calls. */
@@ -139,13 +160,14 @@ function respond(url, method, host, response) {
 
   if (method === "OPTIONS") return json(resourceLocations(host));
 
-  // The location service: every area resolves to the organization host, which
-  // is what sends az back to dev.azure.com for real data.
+  // The location service. The upstream advertises non-intercepted hosts; the
+  // proxy's rewrite is what must bring them back to the policed origin.
   if (path.includes("/_apis/resourceareas")) {
     if (path.endsWith("/resourceareas")) {
-      return json({ count: 1, value: [{ id: "79134c72-4a58-4b42-976c-04e7115f32bf", name: "git", locationUrl: `https://dev.azure.com/${ORG}/` }] });
+      const areas = upstreamResourceAreas();
+      return json({ count: areas.length, value: areas });
     }
-    return json({ id: path.split("/").pop(), name: "git", locationUrl: `https://dev.azure.com/${ORG}/` });
+    return json({ id: path.split("/").pop(), name: "git", locationUrl: `https://vsrm.dev.azure.com/${ORG}/` });
   }
 
   if (path.endsWith("/_apis/projects")) {
@@ -181,13 +203,15 @@ async function start() {
   const adoCert = mintCa(adoDir, ["dev.azure.com", "app.vssps.visualstudio.com"]);
 
   const adoApp = createHttpServer((request, response) => {
+    const host = String(request.headers.host ?? "").split(":")[0].toLowerCase();
     upstreamCalls.push({
       method: request.method,
       url: request.url,
+      host,
       authorization: request.headers.authorization ?? "(none)",
       accept: request.headers.accept ?? "(none)",
     });
-    respond(request.url, request.method, response);
+    respond(request.url, request.method, host, response);
   });
   const adoTls = createTlsServer({ key: adoCert.key, cert: adoCert.cert });
   adoTls.on("secureConnection", (socket) => adoApp.emit("connection", socket));
@@ -353,7 +377,9 @@ for (const [label, args] of scenarios) {
   const before = upstreamCalls.length;
   const result = await runAz(args, azEnv);
   console.log(`  exit code: ${result.code}`);
-  writeFileSync(join(process.cwd(), `az-${label.split(" ")[0]}-stderr.log`), result.stderr ?? "");
+  // Full stderr goes to the OS temp dir, not the repo — these are debug
+  // artifacts of a probe run, not source.
+  writeFileSync(join(tmpdir(), `az-probe-${label.split(" ")[0]}-stderr.log`), result.stderr ?? "");
   if (!result.ok) console.log(`  stderr: ${(result.stderr || "(empty)").split("\n").filter((l) => l.includes("ERROR")).slice(0, 4).join("\n          ")}`);
   else console.log(`  stdout: ${result.stdout.slice(0, 300).replace(/\s+/g, " ")}`);
   console.log(`  upstream requests: ${upstreamCalls.length - before}`);

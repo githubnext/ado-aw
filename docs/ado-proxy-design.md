@@ -326,6 +326,7 @@ re-derived.
 | **`--add-host` redirects a container to the proxy, TLS verified** | A `node:20-slim` container given `--add-host dev.azure.com:<ip>` and `NODE_EXTRA_CA_CERTS` reached the stand-in proxy over **both** `node:https` *and* global `fetch`, with `rejectUnauthorized` left on. Server observed `Host: dev.azure.com`, so the client genuinely believed it was talking to Azure DevOps |
 | **The redirect is narrow** | In the same run an unrelated host failed `ENOTFOUND` — only the named host is affected |
 | **SPS is avoidable, and `az` completes entirely against the policy endpoint** | Three scenarios (`scripts/sps-probe.mjs`): a *minimal* discovery document fails (`location` area not registered); *faithful* document + a sparse area list falls back to `app.vssps.visualstudio.com`; *faithful* document + a **complete** area list — real area GUIDs, every `locationUrl` pointing back at the endpoint — completed with **exit 0** and never contacted SPS |
+| **Stock `az` works end to end through the real bundle with no real credential** | With the rewrite implemented, `az devops project list` and `az repos show` both returned **exit 0** and correct JSON. The fake upstream deliberately advertised `vsrm.dev.azure.com`; `az` stayed on the policed origin throughout, and SPS was never contacted. Every request was matched to a catalogued operation (`discovery.host-options`, `discovery.resource-areas`, `core.project-validation-probe`, `repos.repository-get`); the sentinel PAT never reached the upstream and the injected bearer did |
 | Upstream verification is real | The engine refused a self-signed upstream with `unable to verify the first certificate` |
 | Denials surface usefully to clients | `az` printed the engine's `WrappedException` message verbatim |
 
@@ -357,8 +358,10 @@ determines whether it stays on the policy endpoint:
 The engine must therefore **rewrite** `locationUrl` to itself rather than
 merely filtering the list. A filter that drops entries not matching a protected
 host would empty the list and reintroduce the SPS fallback — the opposite of
-the intent. This supersedes the drop-only `filter-resource-areas` behaviour
-currently implemented in `response.ts`.
+the intent. Implemented in `response.ts` as the `filter-resource-areas` policy:
+each URL's scheme and host are replaced with the origin the client is already
+using, the path is preserved, and only entries that cannot be rewritten at all
+are dropped.
 
 ## Open questions
 

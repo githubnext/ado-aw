@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { CATALOG_SCHEMA_VERSION, OPERATIONS } from "./catalog.js";
 import type { ProxyPolicy } from "./config.js";
-import { filterResponse, isProtectedLocation } from "./response.js";
+import { filterResponse, isProtectedLocation, rewriteLocationUrl } from "./response.js";
 import type { Operation } from "../shared/ado-proxy-catalog.types.gen.js";
 
 const POLICY: ProxyPolicy = {
@@ -24,11 +24,14 @@ function operation(id: string): Operation {
   return found;
 }
 
+const SELF_ORIGIN = "https://dev.azure.com";
+
 function apply(id: string, document: unknown): ReturnType<typeof filterResponse> {
   return filterResponse(
     operation(id),
     POLICY,
     Buffer.from(JSON.stringify(document), "utf8"),
+    SELF_ORIGIN,
   );
 }
 
@@ -41,7 +44,7 @@ function forwarded(outcome: ReturnType<typeof filterResponse>): unknown {
 describe("filterResponse — pass-through", () => {
   it("forwards a plain JSON operation byte-for-byte", () => {
     const body = Buffer.from('{"id":"not even valid for this shape"}', "utf8");
-    const outcome = filterResponse(operation("core.project-get"), POLICY, body);
+    const outcome = filterResponse(operation("core.project-get"), POLICY, body, SELF_ORIGIN);
     expect(outcome.kind).toBe("forward");
     if (outcome.kind === "forward") expect(outcome.body.equals(body)).toBe(true);
   });
@@ -75,26 +78,69 @@ describe("filterResponse — project list", () => {
       operation("core.project-validation-probe"),
       POLICY,
       Buffer.from("<html>sign in</html>", "utf8"),
+      SELF_ORIGIN,
     );
     expect(outcome.kind).toBe("deny");
   });
 });
 
 describe("filterResponse — resource areas", () => {
-  it("drops areas that point outside the protected set", () => {
-    // A retained entry would send the client's next call to a host this proxy
-    // does not police.
+  it("rewrites every locationUrl back to the proxy", () => {
+    // This response is what tells `az` where each service lives. Measured:
+    // return the real areas pointing at the policy endpoint and `az` completes
+    // without ever contacting deployment-level SPS.
     const outcome = apply("discovery.resource-areas", {
       count: 2,
       value: [
-        { id: "a", locationUrl: "https://dev.azure.com/contoso/" },
-        { id: "b", locationUrl: "https://vsrm.dev.azure.com/contoso/" },
+        { id: "a", name: "core", locationUrl: "https://dev.azure.com/contoso/" },
+        { id: "b", name: "git", locationUrl: "https://vsrm.dev.azure.com/contoso/" },
       ],
     });
     expect(forwarded(outcome)).toEqual({
-      count: 1,
-      value: [{ id: "a", locationUrl: "https://dev.azure.com/contoso/" }],
+      count: 2,
+      value: [
+        { id: "a", name: "core", locationUrl: "https://dev.azure.com/contoso/" },
+        // Rewritten off the unpoliced host rather than dropped — dropping it
+        // would shrink the list and send `az` to the SPS fallback.
+        { id: "b", name: "git", locationUrl: "https://dev.azure.com/contoso/" },
+      ],
     });
+  });
+
+  it("preserves the path while replacing the host", () => {
+    const outcome = apply("discovery.resource-areas", {
+      count: 1,
+      value: [{ id: "a", locationUrl: "https://other.example/contoso/sub/path" }],
+    });
+    const body = forwarded(outcome) as { value: { locationUrl: string }[] };
+    expect(body.value[0]?.locationUrl).toBe("https://dev.azure.com/contoso/sub/path");
+  });
+
+  it("drops only entries whose locationUrl cannot be rewritten", () => {
+    const outcome = apply("discovery.resource-areas", {
+      count: 3,
+      value: [
+        { id: "a", locationUrl: "https://dev.azure.com/contoso/" },
+        { id: "b", locationUrl: "not a url" },
+        { id: "c" },
+      ],
+    });
+    const body = forwarded(outcome) as { count: number };
+    expect(body.count).toBe(1);
+  });
+});
+
+describe("rewriteLocationUrl", () => {
+  it("replaces scheme and host, keeps the path", () => {
+    expect(rewriteLocationUrl("https://vsrm.dev.azure.com/org/", "https://proxy:8443")).toBe(
+      "https://proxy:8443/org/",
+    );
+  });
+
+  it("returns undefined for unusable input", () => {
+    expect(rewriteLocationUrl("nonsense", "https://proxy")).toBeUndefined();
+    expect(rewriteLocationUrl(undefined, "https://proxy")).toBeUndefined();
+    expect(rewriteLocationUrl(42, "https://proxy")).toBeUndefined();
   });
 });
 
