@@ -1,2 +1,2 @@
-{"id":"review_submitted","question":"Did the agent submit a pull request review?","answer":"YES","model":"small","timestamp":"2026-07-31T22:12:37.534Z","runid":"30668998911"}
-{"id":"findings_in_diff","question":"Does the agent output show that every posted comment targets a line that appears in the pull request diff rather than unchanged code?","answer":"UNKNOWN","model":"small","timestamp":"2026-07-31T22:12:37.534Z","runid":"30668998911"}
+{"id":"review_submitted","question":"Did the agent submit a pull request review?","answer":"NO","model":"small","timestamp":"2026-08-01T07:42:25.632Z","runid":"30690129377"}
+{"id":"findings_in_diff","question":"Does the agent output show that every posted comment targets a line that appears in the pull request diff rather than unchanged code?","answer":"UNKNOWN","model":"small","timestamp":"2026-08-01T07:42:25.632Z","runid":"30690129377"}
