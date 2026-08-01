@@ -553,6 +553,10 @@ safe-outputs:
     auto-complete: true
     delete-source-branch: true
     squash-merge: true
+    max-files: 50             # Reject the PR if it touches more files than this (default: 100)
+    protected-files: blocked  # "blocked" (default) rejects edits to manifest/CI files; "allowed" permits them
+    excluded-files:
+      - "**/*.generated.ts"
     reviewers:
       - "reviewer@example.com"
     labels:
@@ -560,6 +564,14 @@ safe-outputs:
     work-items:
       - 12345
 ```
+
+`max-files` and `protected-files` are safety limits, not cosmetic knobs — they
+reject an agent-authored PR outright if it touches too many files or edits a
+protected manifest/CI path (e.g. `package-lock.json`, `.github/`, `*.lock`).
+See [`docs/safe-outputs.md`](docs/safe-outputs.md) for the full field list,
+including `target-branches`, `infer-target-from-checkout-ref`, `title-prefix`,
+`if-no-changes`, `allowed-labels`, `fallback-record-branch`, and
+`include-stats`.
 
 ### Example: Work Item Configuration
 
