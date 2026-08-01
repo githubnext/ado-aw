@@ -64,30 +64,119 @@ ado-aw uses AWF `--network-isolation`. `awf-net` is an internal Docker network;
 the Agent has no direct internet route and there is no legacy iptables/DNAT
 fallback.
 
-The target path is policy-first:
+**Enforcement comes from topology, not from client cooperation.** Squid denies
+the protected Azure DevOps hosts to the Agent, so the only route to them is
+through the policy engine. A client that is misconfigured, ignores proxy
+environment variables, or declines to trust the interception certificate does
+not reach Azure DevOps unpoliced — it fails.
 
-1. AWF points Agent HTTP(S) proxy variables at a hardened managed sidecar.
-2. The sidecar MITMs only compiler-owned Azure DevOps REST hosts.
-3. Non-Azure-DevOps traffic is tunneled unchanged to Squid.
-4. Approved Azure DevOps requests are also sent upstream through Squid.
-5. Squid source ACLs deny protected Azure DevOps destinations when the Agent
-   tries to address Squid directly, but allow them from the policy sidecar.
-6. Clearing proxy variables or opening a direct internet socket has no route.
+That gives a useful property: certificate trust is an **availability** control,
+not a security one. It decides whether a given client *succeeds* or *fails
+closed*. It never decides whether policy applies. This is what allows trust to
+be distributed narrowly, per client, instead of container-wide.
 
-The sidecar is safe even when directly reachable from another `awf-net` peer:
-it applies the same policy to every caller, is not a generic relay, and can
-reach the internet only through Squid.
+### Ingress is per client; policy is shared
+
+Different clients reach the policy engine by different means, because they
+differ in what they can be told. All of them terminate at the same catalog, so
+there is exactly one place where "what may be read" is decided.
+
+| Client | Ingress | Certificate trust scope |
+|---|---|---|
+| Azure CLI (`az`) | RPC broker: an agent-side wrapper forwards argv to a sidecar that runs the real `az`, pointed at the policy engine with `--organization https://<engine>/<org>` | the `az` process only |
+| Azure DevOps MCP | container attached only to an internal network where `dev.azure.com` is a DNS alias for the policy engine | the MCP container only |
+| Hand-rolled `curl` / SDK calls from the Agent | none — Squid denies the protected hosts | none; fails closed |
+
+**Why `az` uses the broker.** `az` accepts an arbitrary base URL, so it can be
+*told* to talk to the policy engine rather than deceived about a public
+hostname. Verified: pointed at `https://localhost:<port>/<org>`, `az devops
+project list` issued `OPTIONS /<org>/_apis` followed by `GET
+/<org>/_apis/projects` to that endpoint, with TLS verified against a
+certificate trusted only by that process. No public hostname is impersonated
+and no CA is installed anywhere. This mirrors AWF's existing `cli-proxy`
+sidecar, which relocates `gh` into a sidecar holding `GH_TOKEN` and points it
+at a guard via `GH_HOST`.
+
+**Why the MCP uses a DNS alias.** It cannot be told. `@azure-devops/mcp`
+derives its base URL as `"https://dev.azure.com/" + orgName` with no override,
+so redirection has to happen at name resolution. A Docker network alias also
+covers the server's raw `fetch()` call sites, which ignore proxy environment
+variables regardless of configuration, and therefore removes any dependency on
+`NODE_USE_ENV_PROXY` (unavailable on the pinned Node 20 image).
+
+The alias must live on a network that Squid is **not** attached to. Squid
+resolves `dev.azure.com` for the policy engine's own egress; if it saw the
+alias, that egress would loop back to the engine.
+
+### Attack surface this leaves
+
+- The Agent may still address the policy engine directly on the internal
+  network. That is safe by construction: the engine applies the same policy to
+  every caller, is not a generic relay, and can reach the internet only through
+  Squid.
+- `az rest` and `az devops invoke` can express arbitrary REST calls. Command
+  -level filtering alone does not contain them; they are contained because they
+  travel the same base URL and are therefore subject to the catalog.
+- Requests the client sends to a host outside the protected set are not
+  policed by the catalog and are not intended to be. Squid's domain policy is
+  the control there, exactly as for any other traffic.
 
 ## Authentication and TLS
 
-The Agent receives at most a fixed non-secret sentinel needed for client-side
-preflight. The proxy removes all client authorization and injects the current
-ADO bearer only after the request matches an allowed operation and resource
-scope.
+The Agent never holds an Azure DevOps credential. The policy engine removes all
+client-supplied authorization and injects the current bearer only after a
+request matches an allowed operation and resource scope.
 
-The proxy creates an ephemeral interception CA. Its private key exists only on
-sidecar tmpfs. AWF installs only the public certificate into supported client
-trust stores.
+### Certificate strategy, per client
+
+The engine mints certificates at startup; private keys exist only on its own
+tmpfs. What differs per client is *which name* is certified and *who trusts it*.
+
+**`az` — a certificate for an endpoint we own.** The broker points `az` at the
+engine's own hostname, so the certificate is issued for that name rather than
+for `dev.azure.com`. Trust is supplied to the single `az` process via
+`REQUESTS_CA_BUNDLE`. Nothing impersonates a public hostname, and no trust
+anchor is installed in any trust store.
+
+**MCP — an interception certificate for `dev.azure.com`.** Because the base URL
+is hardcoded, the engine must present a certificate for the real name, served
+by SNI. Trust is installed **only in the MCP container**, whose image, network,
+and environment we fully control.
+
+This split matters. A CA trusted container-wide is trusted for *every* host by
+*every* process for the whole run; scoping it to one container bounds that to a
+single, purpose-built process. The engine also mints leaves only for protected
+hosts, so even within that container it cannot impersonate anything else.
+
+### Why not install the CA container-wide
+
+The earlier design installed one CA into the Agent's trust stores. It was
+rejected on evidence:
+
+- There is no single trust store. `update-ca-certificates` covers curl, git,
+  Go, and .NET, but Python's `requests` uses its own bundled
+  `certifi/cacert.pem` and Node ignores the OS store entirely. Measured: with
+  the OS store updated and nothing else, `az` still fails
+  `CERTIFICATE_VERIFY_FAILED`.
+- The remedies are themselves sharp. `REQUESTS_CA_BUNDLE`/`SSL_CERT_FILE`
+  *replace* rather than extend the bundle, so they must carry the public roots
+  too or every non-Azure-DevOps HTTPS request breaks.
+  `NODE_EXTRA_CA_CERTS` takes a single path, so it must be concatenated with
+  any ssl-bump CA rather than overwritten.
+- Each additional runtime — Go, Java, .NET — needs its own handling, so the
+  mechanism does not converge.
+
+Per-client scoping avoids all of this and yields a smaller blast radius.
+
+### Upstream leg
+
+The engine verifies the real Azure DevOps certificate normally;
+`rejectUnauthorized` is never disabled. Interception is trusted at both ends
+rather than bypassed at either. This is load-bearing and observable: during
+testing the engine correctly refused a self-signed upstream with `unable to
+verify the first certificate`.
+
+### Credential renewal
 
 Production must support WIF renewal beyond the original assertion lifetime.
 The expected trusted path requests a fresh assertion from
@@ -151,20 +240,24 @@ closed.
 
 Request handling has exactly two paths:
 
-- **Non-protected destination.** For `CONNECT`, the proxy opens a tunnel
-  through Squid and byte-tunnels in both directions. It does not terminate
-  TLS, parse the payload, or touch the client's own credentials, so package
-  feeds and every other allowed host behave exactly as they do without the
-  sidecar. Absolute-form plain HTTP is relayed to Squid unchanged, because the
-  agent's `HTTP_PROXY` points here and refusing cleartext would silently break
-  `http://` package sources.
-- **Protected destination.** The proxy terminates TLS with an ephemeral leaf
-  (ALPN pinned to `http/1.1`), normalizes the request, evaluates it against
-  the versioned catalog, drops every client credential and forwarding header,
-  and — only after a complete allow decision, and only for a protected
-  upstream — attaches the current bearer and sends the request through Squid.
-  Plain HTTP to a protected host, and `CONNECT` to a protected host on any
-  port other than 443, are denied outright.
+- **Direct TLS on the protected path.** Both the broker (`az`) and the
+  DNS-aliased MCP connect straight to the engine on 443. It terminates TLS with
+  a leaf selected by SNI (ALPN pinned to `http/1.1`), normalizes the request,
+  evaluates it against the versioned catalog, drops every client credential and
+  forwarding header, and — only after a complete allow decision, and only for a
+  protected upstream — attaches the current bearer and forwards through Squid.
+- **`CONNECT` for proxy-style clients.** Retained for clients configured with
+  `HTTPS_PROXY`. Protected destinations are intercepted as above; non-protected
+  destinations are byte-tunnelled to Squid untouched, so package feeds behave
+  exactly as they do without the sidecar. Plain HTTP to a protected host, and
+  `CONNECT` to a protected host on any port other than 443, are denied.
+
+> **Superseded.** Earlier drafts made `CONNECT` the *only* ingress by pointing
+> the Agent's `HTTPS_PROXY` at the engine, which put it on the path for all
+> traffic. Under the per-client model the engine sees only Azure DevOps
+> traffic; everything else keeps its existing route to Squid and is provably
+> unaffected. The byte-tunnel path is therefore a compatibility affordance
+> rather than the primary design, and can be removed if no client needs it.
 
 Request normalization is deliberately strict rather than lenient: a target
 that would need rewriting to become safe is refused instead, so the bytes the
@@ -216,12 +309,58 @@ Custody rules the implementation enforces:
   supplied and the proxy stripped. Raw paths, query values, headers, bodies,
   and credentials have nowhere to go in the record type.
 
+## Evidence
+
+Findings from driving the real Azure CLI against the implemented engine. These
+are what moved the design from container-wide interception to per-client
+ingress; they are recorded so the reasoning can be re-checked rather than
+re-derived.
+
+| Claim | Evidence |
+|---|---|
+| `az` honours a non-`dev.azure.com` base URL | Pointed at `https://localhost:<port>/<org>`, it issued `OPTIONS /<org>/_apis` then `GET /<org>/_apis/projects` to that endpoint |
+| Per-process trust is sufficient for `az` | The above verified TLS using `REQUESTS_CA_BUNDLE` alone, with no trust store modified |
+| OS trust store alone is **not** sufficient | `az` fails `CERTIFICATE_VERIFY_FAILED`; Python `requests` uses its own `certifi/cacert.pem` |
+| The MCP cannot be redirected by configuration | `src/index.ts`: `const orgUrl = "https://dev.azure.com/" + orgName`, no env override |
+| The MCP would partially bypass a proxy-env-var approach | 8 raw `fetch()` call sites; undici ignores `HTTP(S)_PROXY` without `NODE_USE_ENV_PROXY`, which needs Node ≥24.5 against a pinned `node:20-slim` |
+| `az` reaches a hardcoded SPS host | `OPTIONS`/`GET` to `app.vssps.visualstudio.com` not redirected by `--organization` — see open questions |
+| Upstream verification is real | The engine refused a self-signed upstream with `unable to verify the first certificate` |
+| Denials surface usefully to clients | `az` printed the engine's `WrappedException` message verbatim |
+
+The harness is `scripts/az-probe.mjs`. It stands up a fake Squid and a fake
+Azure DevOps, runs the real `az` through the real bundle with a canary bearer,
+and asserts both that allowed reads carry the injected credential and that
+denials never reach the upstream. It should become the basis of a conformance
+test rather than remaining a one-off.
+
+## Open questions
+
+These gate implementation and are unresolved at the time of writing:
+
+1. **Is the SPS call avoidable?** `az` contacted `app.vssps.visualstudio.com`
+   despite a custom base URL. This is likely an artifact of the probe serving an
+   incomplete resource-location document, since that document — which the engine
+   controls in the broker model — is what tells `az` where each area lives. If
+   it is *not* avoidable, the sidecar reaches real SPS directly. That is
+   probably acceptable, as SPS returns service topology rather than project
+   data, but it must be a decision rather than an accident.
+2. **Does Docker's embedded DNS reliably win for a public FQDN alias?** The MCP
+   path depends entirely on this and it has not been tested on a real runner.
+3. **How does the engine obtain egress?** AWF's `DOCKER-USER` rules block the
+   default bridge — the reason the MCP runs `--network host` today — so it needs
+   `awf-net`. Whether that attachment can be made from the pipeline, or requires
+   AWF to own the sidecar's lifecycle, determines how much of the AWF change is
+   avoidable.
+4. **Does the MCP still start without npm registry access?** `npx -y
+   @azure-devops/mcp` resolves at spawn time. Pre-baking the image removes this
+   dependency and is preferable on supply-chain grounds regardless.
+
 ## Production gates
 
 Default-on rollout requires evidence that:
 
-- stock `az`, curl, Python clients, and the ADO MCP can perform allowed scoped
-  reads with no real client credential;
+- stock `az` and the ADO MCP can perform allowed scoped reads with no real
+  client credential;
 - write, cross-scope, sensitive, unknown, alternate-host, direct-Squid, and
   direct-socket requests do not reach the upstream operation;
 - WIF renewal works after the original assertion expires;
@@ -229,5 +368,5 @@ Default-on rollout requires evidence that:
   artifacts;
 - package restore and non-ADO network behavior remain intact;
 - all compile targets emit the same boundary;
-- a released, pinned AWF image implements the managed proxy/CA path and required
-  internal mirrors contain that image.
+- a released, pinned AWF image implements the required sidecar and network
+  wiring, and internal mirrors contain that image.

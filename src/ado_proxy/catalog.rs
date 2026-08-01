@@ -243,6 +243,28 @@ pub fn operations() -> Vec<Operation> {
             max_response_bytes: JSON_LIMIT,
         },
         Operation {
+            id: "discovery.sps-host-options",
+            capability: Capability::Discovery,
+            method: HttpMethod::Options,
+            host: HostPolicy::SpsFallback,
+            // No `{org}` segment: SPS is a deployment-level service, so this
+            // route is organization-agnostic.
+            //
+            // Verified against the real Azure CLI: `az repos show` issues
+            // `OPTIONS https://app.vssps.visualstudio.com/_apis` before its
+            // first data call and fails outright without it. It returns the
+            // same resource-location document as the organization-host variant
+            // — service topology only, never repository, pipeline, or work-item
+            // content — so allowing it does not widen data access.
+            route: "/_apis",
+            api_version: API_VERSION_ABSENT,
+            scope: ScopePolicy::CurrentOrganization,
+            response: ResponsePolicy::Json,
+            allowed_query: &["allHostTypes"],
+            denied_query: NO_QUERY,
+            max_response_bytes: JSON_LIMIT,
+        },
+        Operation {
             id: "discovery.area-options",
             capability: Capability::Discovery,
             method: HttpMethod::Options,
