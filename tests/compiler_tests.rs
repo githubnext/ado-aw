@@ -1609,17 +1609,19 @@ Vote on pull requests.
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
-/// Test that update-pr compiles successfully when vote is restricted via allowed-operations
+/// Test that update-pr compiles successfully whether the vote operation is made
+/// unreachable via `allowed-operations` (excluding "vote") or is reachable but
+/// backed by a non-empty `allowed-votes` list. Both configurations satisfy
+/// `validate_update_pr_votes` and must compile with identical observable
+/// wiring (--enabled-tools update-pr, SC_WRITE_TOKEN); this is verified for
+/// both front-matter shapes in one test to avoid duplicating the near-identical
+/// compile/assert scaffolding twice.
 #[test]
-fn test_update_pr_compiles_when_vote_excluded_from_allowed_operations() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-uprnotvote-{}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
-
-    let test_input = temp_dir.join("upr-agent.md");
-    let test_content = r#"---
+fn test_update_pr_compiles_with_vote_excluded_or_allowed_votes_set() {
+    let configs = [
+        (
+            "agentic-pipeline-uprnotvote",
+            r#"---
 name: "Update PR Agent"
 description: "Agent that sets reviewers but cannot vote"
 permissions:
@@ -1634,54 +1636,12 @@ safe-outputs:
 ## Update PR Agent
 
 Manage pull requests.
-"#;
-    fs::write(&test_input, test_content).expect("Failed to write test input");
-
-    let output_path = temp_dir.join("upr-agent.yml");
-    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
-    let output = std::process::Command::new(&binary_path)
-        .args([
-            "compile",
-            test_input.to_str().unwrap(),
-            "-o",
-            output_path.to_str().unwrap(),
-        ])
-        .output()
-        .expect("Failed to run compiler");
-
-    assert!(
-        output.status.success(),
-        "Compiler should succeed when vote is excluded from allowed-operations: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
-
-    // update-pr must be listed as an enabled tool for the agent
-    assert!(
-        compiled_has_enabled_tool(&compiled, "update-pr"),
-        "Compiled output should contain --enabled-tools update-pr"
-    );
-    // Stage 3 must acquire a write token (permissions.write is set)
-    assert!(
-        compiled.contains("SC_WRITE_TOKEN"),
-        "Compiled output should contain SC_WRITE_TOKEN for write service connection"
-    );
-
-    let _ = fs::remove_dir_all(&temp_dir);
-}
-
-/// Test that update-pr compiles successfully when allowed-votes is set
-#[test]
-fn test_update_pr_compiles_when_allowed_votes_set() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-uprvoteset-{}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
-
-    let test_input = temp_dir.join("upr-agent.md");
-    let test_content = r#"---
+"#,
+            "vote is excluded from allowed-operations",
+        ),
+        (
+            "agentic-pipeline-uprvoteset",
+            r#"---
 name: "Update PR Agent"
 description: "Agent that can vote on PRs with proper config"
 permissions:
@@ -1696,41 +1656,55 @@ safe-outputs:
 ## Update PR Agent
 
 Vote on pull requests.
-"#;
-    fs::write(&test_input, test_content).expect("Failed to write test input");
+"#,
+            "allowed-votes is set with vote reachable",
+        ),
+    ];
 
-    let output_path = temp_dir.join("upr-agent.yml");
-    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
-    let output = std::process::Command::new(&binary_path)
-        .args([
-            "compile",
-            test_input.to_str().unwrap(),
-            "-o",
-            output_path.to_str().unwrap(),
-        ])
-        .output()
-        .expect("Failed to run compiler");
+    for (dir_prefix, test_content, case_desc) in configs {
+        let temp_dir =
+            std::env::temp_dir().join(format!("{}-{}", dir_prefix, std::process::id()));
+        fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
-    assert!(
-        output.status.success(),
-        "Compiler should succeed with proper update-pr vote config: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+        let test_input = temp_dir.join("upr-agent.md");
+        fs::write(&test_input, test_content).expect("Failed to write test input");
 
-    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+        let output_path = temp_dir.join("upr-agent.yml");
+        let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+        let output = std::process::Command::new(&binary_path)
+            .args([
+                "compile",
+                test_input.to_str().unwrap(),
+                "-o",
+                output_path.to_str().unwrap(),
+            ])
+            .output()
+            .expect("Failed to run compiler");
 
-    // update-pr must be listed as an enabled tool for the agent
-    assert!(
-        compiled_has_enabled_tool(&compiled, "update-pr"),
-        "Compiled output should contain --enabled-tools update-pr"
-    );
-    // Stage 3 must acquire a write token (permissions.write is set)
-    assert!(
-        compiled.contains("SC_WRITE_TOKEN"),
-        "Compiled output should contain SC_WRITE_TOKEN for write service connection"
-    );
+        assert!(
+            output.status.success(),
+            "Compiler should succeed when {}: {}",
+            case_desc,
+            String::from_utf8_lossy(&output.stderr)
+        );
 
-    let _ = fs::remove_dir_all(&temp_dir);
+        let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+
+        // update-pr must be listed as an enabled tool for the agent
+        assert!(
+            compiled_has_enabled_tool(&compiled, "update-pr"),
+            "Compiled output should contain --enabled-tools update-pr (case: {})",
+            case_desc
+        );
+        // Stage 3 must acquire a write token (permissions.write is set)
+        assert!(
+            compiled.contains("SC_WRITE_TOKEN"),
+            "Compiled output should contain SC_WRITE_TOKEN for write service connection (case: {})",
+            case_desc
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
 }
 
 /// Integration test: compiling a pipeline with safe-outputs produces --enabled-tools flags
