@@ -26,6 +26,7 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
 - `mcp <output_directory> <bounding_directory>` - Run SafeOutputs as a stdio MCP server. **This is what compiled pipelines use**: MCPG spawns it as a hardened, network-isolated sibling container entrypoint (see [`docs/mcpg.md`](mcpg.md)).
   - `--enabled-tools <name>` - Restrict available tools to those named (repeatable)
   - `--self-repository-directory <path>` - Exact `self` checkout used for Git patch generation when the bounding workspace is a multi-checkout root or another repository.
+  - `--custom-tools <path>` - Path to a compiler-generated JSON file of custom safe-output tool definitions to register as dynamic MCP tools (see [`docs/safe-outputs.md`](safe-outputs.md#custom-safe-output-jobs)).
 - `mcp-author` - Run the author-facing stdio MCP server for IDE/Copilot Chat integrations. See [`mcp-author.md`](mcp-author.md) for the full tool surface and trust model.
 - `execute` - Execute safe outputs from Stage 1 (Stage 3 of pipeline)
   - `--source, -s <path>` - Path to source markdown file
@@ -36,6 +37,8 @@ Global flags (apply to all subcommands): `--verbose, -v` (enable info-level logg
   - `--dry-run` - Validate inputs but skip ADO API calls (useful for local testing and QA review)
   - `--only <tool>` - Execute only these safe-output tools (repeatable). Used by the manual-review split for the approval-gated `SafeOutputs_Reviewed` job.
   - `--exclude <tool>` - Skip these safe-output tools (repeatable). Used by the manual-review split so the automatic `SafeOutputs` job applies non-gated outputs while reviewed ones wait. See [`docs/safe-outputs.md`](safe-outputs.md#manual-review-require-approval).
+  - `--resolved-config <path>` - Compiler-generated resolved safe-output configuration JSON (threat-detection results, gated/non-gated split, etc.) consumed by Stage 3.
+  - `--prepare-custom-agent-output <path>` - Validate, sanitize, and materialize the aggregate `ADO_AW_AGENT_OUTPUT` JSON for custom safe-output jobs instead of running the built-in executor.
 
 - `configure` *(deprecated; hidden in --help)* - Alias forwarding to `secrets set GITHUB_TOKEN`. Existing scripts keep working but get a stderr warning.
 
