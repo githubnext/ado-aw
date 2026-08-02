@@ -2,115 +2,133 @@
  * Parser tests for the piped interception material.
  *
  * These use synthetic PEM blocks rather than real `openssl` output: the parser
- * cares about *structure*, and shape-only fixtures keep the suite fast and
- * free of a toolchain dependency. Real material is exercised end to end in
+ * cares about *structure*, and shape-only fixtures keep the suite fast and free
+ * of a toolchain dependency. Real material is exercised end to end in
  * `proxy.e2e.test.ts`.
  */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, openSync, closeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { CaError, parseCaMaterials, publishCaCertificate, readCaMaterials } from "./ca.js";
+import {
+  CaError,
+  MATERIAL_SCHEMA,
+  parseCaMaterials,
+  publishCaCertificate,
+  readCaMaterials,
+} from "./ca.js";
 
 const KEY = "-----BEGIN PRIVATE KEY-----\nMIIfake\n-----END PRIVATE KEY-----\n";
 const CERT = "-----BEGIN CERTIFICATE-----\nMIIfake\n-----END CERTIFICATE-----\n";
+const TOKEN = "canary-bearer";
 
-function stream(...sections: string[]): string {
-  return sections.join("");
+const b64 = (value: string): string => Buffer.from(value, "utf8").toString("base64");
+
+function material(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    schema: MATERIAL_SCHEMA,
+    ca_cert: b64(CERT),
+    token: b64(TOKEN),
+    leaves: { "dev.azure.com": { key: b64(KEY), cert: b64(CERT) } },
+    ...overrides,
+  });
 }
 
-const CA_SECTION = `### CA\n${CERT}`;
-const TOKEN_SECTION = "### TOKEN\ncanary-bearer\n";
-const host = (name: string): string => `### HOST ${name}\n${KEY}${CERT}`;
-
 describe("parseCaMaterials", () => {
-  it("parses a CA and its leaves", () => {
-    const materials = parseCaMaterials(
-      stream(CA_SECTION, TOKEN_SECTION, host("dev.azure.com"), host("app.vssps.visualstudio.com")),
-    );
+  it("parses a well-formed document", () => {
+    const materials = parseCaMaterials(material());
     expect(materials.caCertPem).toContain("BEGIN CERTIFICATE");
-    expect([...materials.leaves.keys()].sort()).toEqual([
-      "app.vssps.visualstudio.com",
-      "dev.azure.com",
-    ]);
+    expect(materials.token).toBe(TOKEN);
     expect(materials.leaves.get("dev.azure.com")?.key).toContain("BEGIN PRIVATE KEY");
   });
 
   it("lowercases hostnames so SNI lookup cannot miss on case", () => {
-    const materials = parseCaMaterials(stream(CA_SECTION, TOKEN_SECTION, host("DEV.Azure.COM")));
+    const materials = parseCaMaterials(
+      material({ leaves: { "DEV.Azure.COM": { key: b64(KEY), cert: b64(CERT) } } }),
+    );
     expect(materials.leaves.has("dev.azure.com")).toBe(true);
   });
 
   it("rejects an empty stream", () => {
     // The likeliest real failure: the container was started without the pipe.
-    expect(() => parseCaMaterials("")).toThrow(/no certificate material on stdin/);
+    expect(() => parseCaMaterials("")).toThrow(/no material on stdin/);
     expect(() => parseCaMaterials("   \n ")).toThrow(CaError);
   });
 
-  it("rejects a stream with no CA", () => {
-    expect(() => parseCaMaterials(stream(host("dev.azure.com")))).toThrow(/no CA section/);
+  it("rejects a truncated document loudly", () => {
+    // The previous marker-based format could accept a partial stream; JSON
+    // cannot, which is the main reason for the change.
+    expect(() => parseCaMaterials(material().slice(0, 80))).toThrow(/not valid JSON/);
   });
 
-  it("rejects a stream with no leaves", () => {
+  it("rejects a schema it does not implement", () => {
+    // Producer and consumer are generated and shipped together; a mismatch
+    // means one of them is stale, which must not silently under-enforce.
+    expect(() => parseCaMaterials(material({ schema: "ado-aw/other/v9" }))).toThrow(
+      /does not match/,
+    );
+    expect(() => parseCaMaterials(material({ schema: undefined }))).toThrow(/does not match/);
+  });
+
+  it("rejects a non-object document", () => {
+    expect(() => parseCaMaterials("[]")).toThrow(/must be a JSON object/);
+    expect(() => parseCaMaterials("null")).toThrow(/must be a JSON object/);
+    expect(() => parseCaMaterials('"a string"')).toThrow(/must be a JSON object/);
+  });
+
+  it("rejects a missing or empty bearer", () => {
+    expect(() => parseCaMaterials(material({ token: undefined }))).toThrow(/token/);
+    expect(() => parseCaMaterials(material({ token: "" }))).toThrow(/token/);
+    expect(() => parseCaMaterials(material({ token: b64("   ") }))).toThrow(/token/);
+  });
+
+  it("rejects a document with no leaves", () => {
     // Without a leaf there is nothing to serve, so every intercepted request
     // would fail at handshake time with no clue as to why.
-    expect(() => parseCaMaterials(stream(CA_SECTION, TOKEN_SECTION))).toThrow(
-      /no host leaves/,
+    expect(() => parseCaMaterials(material({ leaves: {} }))).toThrow(/no host leaves/);
+    expect(() => parseCaMaterials(material({ leaves: undefined }))).toThrow(
+      /must be a JSON object/,
     );
-  });
-
-  it("rejects a stream with no bearer", () => {
-    // Certificates without a credential would mean every allowed request is
-    // forwarded unauthenticated, and Azure DevOps answers those with a sign-in
-    // page a client can mistake for data.
-    expect(() => parseCaMaterials(stream(CA_SECTION, host("dev.azure.com")))).toThrow(
-      /no Azure DevOps bearer/,
-    );
-  });
-
-  it("rejects an empty bearer section", () => {
-    expect(() =>
-      parseCaMaterials(stream(CA_SECTION, "### TOKEN\n   \n", host("dev.azure.com"))),
-    ).toThrow(/no Azure DevOps bearer/);
-  });
-
-  it("carries the bearer through", () => {
-    const materials = parseCaMaterials(
-      stream(CA_SECTION, TOKEN_SECTION, host("dev.azure.com")),
-    );
-    expect(materials.token).toBe("canary-bearer");
   });
 
   it("rejects a half-formed leaf rather than serving it", () => {
     expect(() =>
-      parseCaMaterials(stream(CA_SECTION, `### HOST dev.azure.com\n${CERT}`)),
-    ).toThrow(/missing its key/);
+      parseCaMaterials(material({ leaves: { "dev.azure.com": { cert: b64(CERT) } } })),
+    ).toThrow(/key must be a non-empty base64 string/);
     expect(() =>
-      parseCaMaterials(stream(CA_SECTION, `### HOST dev.azure.com\n${KEY}`)),
-    ).toThrow(/missing its certificate/);
+      parseCaMaterials(material({ leaves: { "dev.azure.com": { key: b64(KEY) } } })),
+    ).toThrow(/cert must be a non-empty base64 string/);
   });
 
-  it("rejects a CA section carrying no certificate", () => {
-    expect(() => parseCaMaterials(stream("### CA\n(nothing)\n", host("h")))).toThrow(
-      /CA section carried no certificate/,
+  it("rejects a blob that is not really base64", () => {
+    // Node's decoder silently drops invalid characters, so without the
+    // round-trip check a corrupted blob would decode to wrong-but-plausible
+    // bytes.
+    expect(() => parseCaMaterials(material({ ca_cert: "not!valid!base64!" }))).toThrow(
+      /not valid base64/,
     );
   });
 
-  it("rejects a host section with no hostname", () => {
-    expect(() => parseCaMaterials(stream(CA_SECTION, `### HOST \n${KEY}${CERT}`))).toThrow(
-      /no hostname/,
+  it("rejects base64 that decodes to something other than the expected PEM", () => {
+    expect(() => parseCaMaterials(material({ ca_cert: b64("hello") }))).toThrow(
+      /expected PEM block/,
     );
+    expect(() =>
+      parseCaMaterials(material({ leaves: { h: { key: b64(CERT), cert: b64(CERT) } } })),
+    ).toThrow(/key does not contain the expected PEM block/);
   });
 
-  it("ignores unrecognised sections rather than failing", () => {
-    // Forward compatibility: a generator adding a section this build does not
-    // know about must not take the proxy down.
+  it("cannot be tricked into fabricating a section from a value", () => {
+    // The defect that motivated the format change: the old marker parser split
+    // on "### " anywhere in the stream, so a value containing the marker text
+    // produced a phantom host. JSON has no such ambiguity.
     const materials = parseCaMaterials(
-      stream(CA_SECTION, TOKEN_SECTION, "### FUTURE thing\nwhatever\n", host("dev.azure.com")),
+      material({ token: b64('### HOST evil\n-----BEGIN PRIVATE KEY-----') }),
     );
-    expect(materials.leaves.size).toBe(1);
+    expect([...materials.leaves.keys()]).toEqual(["dev.azure.com"]);
+    expect(materials.token).toContain("### HOST evil");
   });
 });
 
@@ -126,15 +144,12 @@ describe("publishCaCertificate", () => {
   });
 
   it("writes the public certificate", () => {
-    const path = join(directory, "ca.pem");
-    publishCaCertificate(path, CERT);
-    expect(readCaMaterials).toBeTypeOf("function");
-    expect(() => publishCaCertificate(path, CERT)).not.toThrow();
+    expect(() => publishCaCertificate(join(directory, "ca.pem"), CERT)).not.toThrow();
   });
 
   it("refuses to publish anything containing a private key", () => {
-    // This path is mounted into the MCP container; a key reaching it would
-    // hand out the ability to impersonate any protected host.
+    // This path is mounted into the MCP container; a key reaching it would hand
+    // out the ability to impersonate any protected host.
     expect(() => publishCaCertificate(join(directory, "ca.pem"), `${CERT}${KEY}`)).toThrow(
       /private key/,
     );
@@ -153,10 +168,8 @@ describe("readCaMaterials", () => {
   });
 
   it("reads and parses from a descriptor", () => {
-    const path = join(directory, "material.pem");
-    writeFileSync(path, stream(CA_SECTION, TOKEN_SECTION, host("dev.azure.com")));
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { openSync, closeSync } = require("node:fs") as typeof import("node:fs");
+    const path = join(directory, "material.json");
+    writeFileSync(path, material());
     const fd = openSync(path, "r");
     try {
       expect(readCaMaterials(fd).leaves.has("dev.azure.com")).toBe(true);

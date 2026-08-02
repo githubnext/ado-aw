@@ -31,7 +31,7 @@ import {
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { parseCaMaterials, type CaMaterials } from "./ca.js";
+import { MATERIAL_SCHEMA, parseCaMaterials, type CaMaterials } from "./ca.js";
 import { CATALOG_SCHEMA_VERSION } from "./catalog.js";
 import type { ProxyConfig, ProxyPolicy } from "./config.js";
 import { DecisionLog } from "./log.js";
@@ -97,7 +97,7 @@ interface Harness {
   readonly proxyCaPem: string;
   readonly upstreamCalls: UpstreamCall[];
   readonly tunnelTargets: string[];
-  readonly materialStream: string;
+  readonly materialDocument: string;
 }
 
 let workdir: string;
@@ -115,15 +115,16 @@ function listen(server: { listen: (...args: never[]) => void }): Promise<number>
 }
 
 /**
- * Mint CA material in the stream format the engine consumes.
+ * Mint certificate material in the document format the engine consumes.
  *
  * The engine no longer mints its own certificates — a host pipeline step does,
  * and pipes them in — so this stands in for that step. It returns the parsed
- * form for the harness's own servers, and the raw stream for feeding the engine.
+ * form for the harness's own servers, and the raw document for feeding the
+ * engine.
  */
 function mintForTest(directory: string, hosts: readonly string[]): {
   materials: CaMaterials;
-  stream: string;
+  document: string;
 } {
   mkdirSync(directory, { recursive: true });
   const run = (args: readonly string[]): void => {
@@ -132,6 +133,8 @@ function mintForTest(directory: string, hosts: readonly string[]): {
       stdio: ["ignore", "ignore", "pipe"],
     });
   };
+  const b64 = (path: string): string =>
+    Buffer.from(readFileSync(join(directory, path), "utf8"), "utf8").toString("base64");
 
   run([
     "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
@@ -139,8 +142,7 @@ function mintForTest(directory: string, hosts: readonly string[]): {
     "-addext", "basicConstraints=critical,CA:TRUE,pathlen:0",
   ]);
 
-  let stream = `### CA\n${readFileSync(join(directory, "ca.pem"), "utf8")}`;
-
+  const leaves: Record<string, { key: string; cert: string }> = {};
   for (const host of hosts) {
     writeFileSync(join(directory, "leaf.ext"),
       "basicConstraints=CA:FALSE\n" +
@@ -151,12 +153,17 @@ function mintForTest(directory: string, hosts: readonly string[]): {
       "-keyout", "leaf.key", "-out", "leaf.csr"]);
     run(["x509", "-req", "-in", "leaf.csr", "-CA", "ca.pem", "-CAkey", "ca.key",
       "-CAcreateserial", "-days", "2", "-extfile", "leaf.ext", "-out", "leaf.pem"]);
-    stream += `### HOST ${host}\n` +
-      readFileSync(join(directory, "leaf.key"), "utf8") +
-      readFileSync(join(directory, "leaf.pem"), "utf8");
+    leaves[host] = { key: b64("leaf.key"), cert: b64("leaf.pem") };
   }
 
-  return { materials: parseCaMaterials(`${stream}### TOKEN\n${CANARY}\n`), stream };
+  const document = JSON.stringify({
+    schema: MATERIAL_SCHEMA,
+    ca_cert: b64("ca.pem"),
+    token: Buffer.from(CANARY, "utf8").toString("base64"),
+    leaves,
+  });
+
+  return { materials: parseCaMaterials(document), document };
 }
 
 /** A TLS server standing in for `dev.azure.com`. */
@@ -421,7 +428,7 @@ beforeAll(async () => {
   const plainCa = mintForTest(join(workdir, "plain-ca"), ["example.test"]).materials;
   const proxyMaterial = mintForTest(join(workdir, "proxy-ca"), POLICY.protected_hosts);
   const proxyCa = proxyMaterial.materials;
-  const proxyCaStream = `${proxyMaterial.stream}### TOKEN\n${CANARY}\n`;
+  const proxyCaDocument = proxyMaterial.document;
 
   const upstreamCalls: UpstreamCall[] = [];
   const tunnelTargets: string[] = [];
@@ -475,7 +482,7 @@ beforeAll(async () => {
     proxyCaPem: proxyCa.caCertPem,
     upstreamCalls,
     tunnelTargets,
-    materialStream: proxyCaStream,
+    materialDocument: proxyCaDocument,
   };
 
   // Keep the plain CA reachable for the tunnel assertion.
@@ -695,11 +702,21 @@ suite("ado-proxy end to end", () => {
   });
 
   it("refuses to start without a bearer, rather than forwarding unauthenticated", () => {
-    // A stream carrying certificates but no token must not yield a running
+    // A document carrying certificates but no token must not yield a running
     // proxy: Azure DevOps answers an unauthenticated request with a sign-in
     // page, which a client can mistake for data.
-    const withoutToken = harness.materialStream.replace(/### TOKEN\n[\s\S]*$/, "");
-    expect(() => parseCaMaterials(withoutToken)).toThrow(/no Azure DevOps bearer/);
+    const parsed = JSON.parse(harness.materialDocument) as Record<string, unknown>;
+    delete parsed.token;
+    expect(() => parseCaMaterials(JSON.stringify(parsed))).toThrow(/token/);
+  });
+
+  it("cannot have a section fabricated by a value it carries", () => {
+    // Regression for the format this replaced: a marker-delimited stream let a
+    // value containing the marker text invent a host section.
+    const parsed = JSON.parse(harness.materialDocument) as Record<string, unknown>;
+    parsed.token = Buffer.from("### HOST evil\nx", "utf8").toString("base64");
+    const materials = parseCaMaterials(JSON.stringify(parsed));
+    expect([...materials.leaves.keys()]).not.toContain("evil");
   });
 
   it("keeps the bearer out of argv and the environment", () => {
