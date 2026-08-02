@@ -9,11 +9,20 @@
 # `github.event.issue.number` or `github.event.pull_request.number` in the
 # payload — the PR identity arrives only in the `aw_context` input as
 # `{item_type: "pull_request", item_number: "<N>"}`. gh-aw's `github.aw.context.*`
-# namespace resolves this, but it is a prompt-only virtual namespace and is not
-# transformed inside step `env:`, so the fallback is spelled out here in the raw
-# `fromJSON(...)` form the compiler would otherwise generate. The `item_type`
-# guard is required (per gh-aw ADR-31820): `item_number` is shared across entity
-# kinds, so an issue-routed run must not populate the PR number slot.
+# namespace resolves this, but it is a prompt-only virtual namespace
+# (`transformAwContextExpression` runs during markdown expression extraction) and
+# is not transformed inside step `env:`, so the fallback is spelled out here in
+# the exact raw form the compiler emits — including the
+# `github.event.client_payload.aw_context` arm it uses for `repository_dispatch`
+# hops. The `item_type` guard matters because `item_number` is shared across
+# entity kinds, so an issue-routed run must not populate the PR number slot.
+#
+# Belt and braces: if that still yields nothing, the PR is resolved from the
+# checked-out branch. The router always dispatches on the PR head ref, so
+# `GITHUB_REF_NAME` identifies the PR even if the context payload changes shape
+# again. Only when both paths fail does the step fail loudly — writing empty
+# files instead would make the reviewer report a successful "nothing to review"
+# run and hide the breakage.
 #
 # Outputs, all under /tmp/gh-aw/agent/ so they are captured in the run artifact:
 #   pr-diff.patch            — unified diff, generated files excluded, capped
@@ -30,10 +39,10 @@
 #
 # Usage:
 #   cache:
-#     key: pr-prefetch-${{ github.event.pull_request.number || fromJSON(github.event.inputs.aw_context || '{}').item_number }}-${{ github.event.pull_request.head.sha || github.run_id }}
+#     key: pr-prefetch-${{ github.event.pull_request.number || fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_number }}-${{ github.event.pull_request.head.sha || github.run_id }}
 #     path: /tmp/gh-aw/agent
 #     restore-keys:
-#       - pr-prefetch-${{ github.event.pull_request.number || fromJSON(github.event.inputs.aw_context || '{}').item_number }}-
+#       - pr-prefetch-${{ github.event.pull_request.number || fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_number }}-
 #   imports:
 #     - shared/pr-diff-data-fetch.md
 #
@@ -48,7 +57,7 @@ pre-agent-steps:
   - name: Pre-fetch PR diff, metadata and review comments
     env:
       GH_TOKEN: ${{ github.token }}
-      PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number || (fromJSON(github.event.inputs.aw_context || '{}').item_type == 'pull_request' && fromJSON(github.event.inputs.aw_context || '{}').item_number) || '' }}
+      PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number || (fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_type == 'pull_request' && fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_number) || '' }}
       PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       EXPR_GITHUB_REPOSITORY: ${{ github.repository }}
       PR_DIFF_MAX_LINES: "3000"
@@ -57,12 +66,25 @@ pre-agent-steps:
       mkdir -p /tmp/gh-aw/agent
 
       if [ -z "${PR_NUMBER:-}" ]; then
+        # The centralized router always dispatches on the PR head ref, so the
+        # branch identifies the PR even when the context payload does not.
+        BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}"
+        if [ -n "$BRANCH" ]; then
+          PR_NUMBER=$(gh pr list --repo "$EXPR_GITHUB_REPOSITORY" --head "$BRANCH" \
+            --state open --limit 1 --json number --jq '.[0].number // empty' 2>/dev/null || true)
+          if [ -n "$PR_NUMBER" ]; then
+            echo "::warning::PR number missing from the event payload; resolved #${PR_NUMBER} from branch ${BRANCH}."
+          fi
+        fi
+      fi
+
+      if [ -z "${PR_NUMBER:-}" ]; then
         # Every consumer of this component is a PR reviewer, so an unresolved PR
         # number is always a bug — most likely the routing context changed shape.
         # Fail loudly: silently writing empty files makes the reviewer report a
         # successful "nothing to review" run and hides the breakage.
-        echo "::error::Could not resolve a PR number from the event payload or aw_context input." >&2
-        echo "event_name=${GITHUB_EVENT_NAME:-unknown}" >&2
+        echo "::error::Could not resolve a PR number from the event payload, the aw_context input or the checked-out branch." >&2
+        echo "event_name=${GITHUB_EVENT_NAME:-unknown} ref_name=${GITHUB_REF_NAME:-unknown}" >&2
         exit 1
       fi
 
