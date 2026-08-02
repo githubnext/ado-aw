@@ -245,6 +245,40 @@ rather than bypassed at either. This is load-bearing and observable: during
 testing the engine correctly refused a self-signed upstream with `unable to
 verify the first certificate`.
 
+### Credential delivery
+
+Acquisition already exists: `generate_acquire_ado_token` emits an `AzureCLI@2`
+step that mints an ADO-audience token from the ARM service connection and stores
+it as the secret pipeline variable `SC_READ_TOKEN`.
+
+**Delivery must not use a runner path.** The engine reads its bearer from
+`--token-file`, and the obvious choice — a file under the runner's `/tmp` —
+is unsafe for the same reason the CA private key was: AWF mounts `/tmp` into the
+agent at both `/tmp` and `/host/tmp` (`agent-service.ts`), which is exactly how
+AWF installs its own `gh` wrapper. A token written there is agent-readable, and
+the boundary is gone.
+
+Two mechanisms avoid a shared path, both to be settled by
+`proxy-token-delivery`:
+
+- **stdin**, alongside the CA material — simplest, but one-shot, so it cannot
+  rotate;
+- **`docker cp` into the running container**, or a named volume mounted only
+  into the engine — supports rotation, at the cost of a refresh loop running
+  during the agent step.
+
+An ADO access token is typically valid ~1 hour, so a single token covers most
+runs; rotation matters for long ones. WIF assertions are much shorter
+(~5–10 min), but they are consumed at mint time and never reach the engine.
+
+**The MCP must stop receiving the real token.** Today the compiler passes
+`-e ADO_MCP_AUTH_TOKEN="$SC_READ_TOKEN"` straight into the MCP container. Under
+interception the engine holds the credential and injects it after an allow
+decision, so the MCP must be given a non-secret sentinel instead. Leaving the
+real token in its environment would make the proxy decorative on that path: the
+MCP could still authenticate directly if it ever reached Azure DevOps another
+way.
+
 ### Credential renewal
 
 Production must support WIF renewal beyond the original assertion lifetime.
@@ -396,6 +430,8 @@ re-derived.
 | **The redirect is narrow** | In the same run an unrelated host failed `ENOTFOUND` — only the named host is affected |
 | **SPS is avoidable, and `az` completes entirely against the policy endpoint** | Three scenarios (`scripts/sps-probe.mjs`): a *minimal* discovery document fails (`location` area not registered); *faithful* document + a sparse area list falls back to `app.vssps.visualstudio.com`; *faithful* document + a **complete** area list — real area GUIDs, every `locationUrl` pointing back at the endpoint — completed with **exit 0** and never contacted SPS |
 | **Stock `az` works end to end through the real bundle with no real credential** | With the rewrite implemented, `az devops project list` and `az repos show` both returned **exit 0** and correct JSON. The fake upstream deliberately advertised `vsrm.dev.azure.com`; `az` stayed on the policed origin throughout, and SPS was never contacted. Every request was matched to a catalogued operation (`discovery.host-options`, `discovery.resource-areas`, `core.project-validation-probe`, `repos.repository-get`); the sentinel PAT never reached the upstream and the injected bearer did |
+| **The MCP runs from a host-installed mount, with no network at all** | `@azure-devops/mcp@2.8.1` installed on the host and mounted read-only at `/app/node_modules` completed an MCP `initialize` handshake inside `node:20-slim` with `--network none`, returning its full tool capabilities. No pre-baked image is needed, so nothing new enters the supply chain |
+| **The MCP's startup tenant lookup is non-fatal** | In that run `org-tenants.js` failed its `fetchTenantFromApi` call (`TypeError: fetch failed`) and the server logged the error and carried on serving. It targets `vssps.dev.azure.com`, which is *not* in the protected set, so under interception it will fail the same way rather than blocking startup |
 | Upstream verification is real | The engine refused a self-signed upstream with `unable to verify the first certificate` |
 | Denials surface usefully to clients | `az` printed the engine's `WrappedException` message verbatim |
 
