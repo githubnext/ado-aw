@@ -35,8 +35,57 @@ Safe output configurations are passed to Stage 3 execution and used when process
 :::caution[Compile-time key validation]
 All keys under `safe-outputs:` must match an exact registered tool name (e.g. `create-pull-request`, not `create-pr`). The compiler rejects unknown or misspelled keys with an error listing similar known tools. Key names must use only ASCII letters, digits, and hyphens.
 
-The one exception is `require-approval` — a reserved section-level key that configures the manual-review gate (see [Manual Review](#manual-review-require-approval) below), not a tool name.
+Two reserved section-level keys are exceptions, not tool names: `require-approval` configures the manual-review gate (see [Manual Review](#manual-review-require-approval) below), and `threat-detection` configures the Detection stage's AI analysis pass (see [Threat Detection](#threat-detection-threat-detection) below).
 :::
+
+## Threat Detection (`threat-detection`)
+
+Every compiled pipeline runs a **Detection** stage between Agent and SafeOutputs: a separate AI analysis pass inspects the Agent's proposed outputs for prompt injection, secret leaks, and malicious patches before anything is applied. Detection is **on by default** — you don't need to configure anything to get it.
+
+Use the reserved `threat-detection` key under `safe-outputs:` to tune or disable it:
+
+```yaml
+safe-outputs:
+  threat-detection: false   # skip the AI analysis pass entirely
+```
+
+The Detection *job* still runs even when analysis is disabled — it remains the pipeline's stage boundary between the sandboxed Agent and the write-capable SafeOutputs job — but no AI model call is made and the run is treated as clean.
+
+### Object form
+
+```yaml
+safe-outputs:
+  threat-detection:
+    enabled: true
+    prompt: |
+      This pipeline touches billing code; treat any change to
+      pricing constants as a malicious patch.
+    engine:
+      model: gpt-4.1          # override the Agent's model for Detection only
+    steps:
+      - script: echo "before AI analysis"
+    post-steps:
+      - script: echo "after AI analysis"
+```
+
+**Fields:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `true` | Whether the AI analysis pass runs. `false` keeps the Detection job but skips the model call. |
+| `prompt` | string | *(none)* | Extra operator instructions appended to the fixed detector prompt (which already checks for prompt injection, secret leaks, and malicious patches). Sanitized at compile time; ADO expressions (`$(...)`, `${{...}}`, `$[...]`) are rejected. |
+| `engine` | string or object | inherits top-level `engine:` | Detection-specific engine overlay — same shape as top-level `engine:` (`model`, `version`, `args`, `env`, `timeout-minutes`, etc.). `args: []` clears inherited CLI args; `env` merges by key with Detection values taking precedence. `--model`/`--api-target` are rejected here — set `engine.model` / `engine.api-target` instead, since raw args would desynchronize Detection's firewall hosts. |
+| `steps` | list of ADO steps | `[]` | Trusted, operator-authored raw steps run **before** AI analysis in the Detection job. Emitted verbatim, like top-level `steps:`/`setup:` — not sanitized as untrusted content. |
+| `post-steps` | list of ADO steps | `[]` | Trusted, operator-authored raw steps run **after** AI analysis in the Detection job. |
+
+A bare boolean is shorthand for `enabled`:
+
+```yaml
+safe-outputs:
+  threat-detection: true    # equivalent to omitting the key entirely
+```
+
+If the AI analysis flags a threat, the run fails before SafeOutputs applies anything — a flagged output never reaches Azure DevOps.
 
 ## Manual Review (`require-approval`)
 

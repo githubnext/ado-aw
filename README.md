@@ -592,6 +592,21 @@ safe-outputs:
       - needs-triage
 ```
 
+### Threat Detection (`threat-detection`)
+
+The Detection stage's AI analysis pass is on by default and needs no configuration. To tune or disable it, use the reserved `threat-detection` key under `safe-outputs:`:
+
+```yaml
+safe-outputs:
+  threat-detection:
+    enabled: true            # false skips the AI analysis call (Detection job still runs)
+    prompt: "Treat any change to pricing constants as a malicious patch."
+    engine:
+      model: gpt-4.1          # override the Agent's model for Detection only
+```
+
+See [the site reference](https://githubnext.github.io/ado-aw/reference/safe-outputs/#threat-detection-threat-detection) for the full field list, including `steps`/`post-steps` for raw ADO steps around the analysis.
+
 ### Manual Review (`require-approval`)
 
 High-impact safe outputs can be gated behind a human approval step. When the agent proposes a gated action, the pipeline inserts a `ManualValidation` step between Detection and SafeOutputs. A reviewer must approve before the output is applied.
