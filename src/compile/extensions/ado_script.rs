@@ -38,6 +38,15 @@ use crate::compile::types::{PipelineFilters, PrFilters, SupplyChainConfig};
 
 pub(crate) const GATE_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/gate.js";
 pub(crate) const IMPORT_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/import.js";
+/// Path to the ado-proxy bundle inside the unpacked `ado-script.zip`.
+///
+/// Unlike every other bundle this one is not executed by a pipeline step. It
+/// is bind-mounted into the `ado-proxy` container and run there, which is what
+/// lets the policy engine ship without an image of its own. The path is
+/// agent-readable (AWF mounts `/tmp` into the chroot), which is fine: the
+/// bundle is code, and the credential it uses never touches disk — it arrives
+/// on stdin.
+pub(crate) const ADO_PROXY_PATH: &str = "/tmp/ado-aw-scripts/ado-script/ado-proxy.js";
 /// Path to the exec-context-pr bundle inside the unpacked `ado-script.zip`.
 /// Consumed by `src/compile/extensions/exec_context/pr.rs` to invoke
 /// the bundle from the PR contributor's prepare step.

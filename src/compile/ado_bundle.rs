@@ -63,6 +63,17 @@ pub enum Bundle {
     /// containerized SafeOutputs MCP server can compute a diff base on
     /// shallow-default pools.
     PreparePrBase,
+    /// Credential-isolated Azure DevOps policy engine. Unlike every other
+    /// bundle it is not invoked by a pipeline step: it is bind-mounted into
+    /// the `ado-proxy` container and run there, for the whole lifetime of the
+    /// Agent job.
+    ///
+    /// Its auth is [`BundleAuth::None`] despite being the one bundle that
+    /// holds an ADO bearer. The bearer is *not* an env var: it arrives inside
+    /// the interception-material document on stdin, so that neither the
+    /// process table, the container's `Env`, nor any file can expose it. See
+    /// `scripts/ado-script/src/ado-proxy/ca.ts`.
+    AdoProxy,
 }
 
 /// The auth contract a bundle requires from the step that invokes it.
@@ -142,6 +153,7 @@ impl Bundle {
         Bundle::Conclusion,
         Bundle::GithubAppToken,
         Bundle::PreparePrBase,
+        Bundle::AdoProxy,
     ];
 
     /// The bundle's unpacked on-disk path inside the runtime VM. The Conclusion
@@ -168,6 +180,7 @@ impl Bundle {
             Bundle::Conclusion => paths::CONCLUSION_PATH,
             Bundle::GithubAppToken => paths::GITHUB_APP_TOKEN_PATH,
             Bundle::PreparePrBase => paths::PREPARE_PR_BASE_PATH,
+            Bundle::AdoProxy => paths::ADO_PROXY_PATH,
         }
     }
 
@@ -194,7 +207,11 @@ impl Bundle {
             | Bundle::ApprovalSummary
             // Authenticates to the GitHub API with its own App JWT / minted
             // token, not the ADO bearer.
-            | Bundle::GithubAppToken => BundleAuth::None,
+            | Bundle::GithubAppToken
+            // Receives its ADO bearer inside the stdin material document, not
+            // from the environment — deliberately, so the credential is not
+            // visible in the container's `Env` or the process table.
+            | Bundle::AdoProxy => BundleAuth::None,
         }
     }
 }

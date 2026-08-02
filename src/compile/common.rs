@@ -1607,6 +1607,47 @@ pub const ADO_MCP_PACKAGE: &str = "@azure-devops/mcp";
 /// Reserved MCPG server name for the auto-configured ADO MCP.
 pub const ADO_MCP_SERVER_NAME: &str = "azure-devops";
 
+/// Stable container name for the `ado-proxy` policy engine.
+///
+/// Doubles as the DNS name the agent uses to reach it, matching the MCPG
+/// convention, and is the name passed to AWF's `--topology-attach`.
+#[allow(dead_code)]
+pub const ADO_PROXY_CONTAINER_NAME: &str = "awmg-ado-proxy";
+
+/// Base image for the `ado-proxy` container.
+///
+/// The proxy ships as an `ado-script` bundle that is already downloaded onto
+/// the runner, so it needs no image of its own — it is mounted into the same
+/// stock Node image the ADO MCP uses. That keeps the supply chain unchanged:
+/// no new image to build, publish, pin, or mirror.
+#[allow(dead_code)]
+pub const ADO_PROXY_IMAGE: &str = ADO_MCP_IMAGE;
+
+/// Port `ado-proxy` accepts `CONNECT`-style proxy clients on.
+#[allow(dead_code)]
+pub const ADO_PROXY_LISTEN_PORT: u16 = 11080;
+
+/// Port `ado-proxy` terminates direct TLS on.
+///
+/// Must be 443: clients redirected with `--add-host` believe they are talking
+/// to `dev.azure.com` and will not use a non-default port.
+#[allow(dead_code)]
+pub const ADO_PROXY_TLS_PORT: u16 = 443;
+
+/// AWF's Squid proxy, addressed by IP on the AWF network.
+///
+/// AWF fixes this address as a constant (`SQUID_IP` in its `constants.ts`,
+/// within the `172.30.0.0/24` `awf-net` subnet), so it can be configured
+/// before AWF has started rather than discovered afterwards. Addressing it by
+/// IP rather than by name also sidesteps the embedded-DNS failures AWF itself
+/// works around under gVisor and ARC/DinD.
+///
+/// Routing the proxy's own egress through Squid rather than exempting it from
+/// the firewall follows AWF's own API-proxy sidecar, which is deliberately
+/// given no iptables exemption for the same reason.
+#[allow(dead_code)]
+pub const AWF_SQUID_URL: &str = "http://172.30.0.10:3128";
+
 /// Rewrite a GHCR image reference onto an internal registry when configured.
 ///
 /// Only the final artifact name is preserved under the configured registry

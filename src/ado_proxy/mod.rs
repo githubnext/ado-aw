@@ -35,3 +35,4 @@
 //! pattern used by the gate evaluator.
 
 pub mod catalog;
+pub mod policy;
