@@ -595,6 +595,12 @@ safe-outputs:
   issue numbers; temporary IDs carry their created repository.
 - `allowed` *(optional)* - case-insensitive type allowlist. Empty/absent allows
   any configured repository type. Clearing is always allowed.
+
+  > **Note the deliberate asymmetry** with `create-github-issue.allowed-labels`,
+  > which is default-**deny**. Issue types are a closed set defined by the
+  > repository owner, so "any configured repository type" is already bounded by
+  > configuration the agent cannot influence. Labels are free-form strings the
+  > agent can invent, so an empty `allowed-labels` accepts none.
 - `max` *(optional, default `5`)* - per-run update budget.
 
 Agent parameters are required `issue_number` (positive number or temporary ID)

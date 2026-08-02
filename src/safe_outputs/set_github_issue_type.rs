@@ -490,4 +490,130 @@ mod tests {
         let execution = result.execute_sanitized(&ctx).await.unwrap();
         assert!(execution.success, "clear failed: {}", execution.message);
     }
+
+    /// Deliberate asymmetry with `create-github-issue.allowed-labels`, which is
+    /// default-**deny**. Issue types are a closed set defined by the repository
+    /// owner, so an empty `allowed:` means "any type the repo already defines"
+    /// rather than "no types". Labels are free-form strings the agent can
+    /// invent, hence the stricter default there. This test pins the documented
+    /// behaviour so a well-meaning "make it consistent" change is caught.
+    #[tokio::test]
+    async fn empty_allowed_list_permits_any_issue_type() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/repos/octo/repo/issues/7"))
+            .and(body_json(serde_json::json!({ "type": "Epic" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut tool_configs = HashMap::new();
+        tool_configs.insert(
+            "set-github-issue-type".to_string(),
+            serde_json::json!({ "target-repo": "octo/repo" }),
+        );
+        let ctx = ExecutionContext {
+            github_token: Some("token".to_string()),
+            github_api_url: server.uri(),
+            tool_configs,
+            ..Default::default()
+        };
+        let mut result: SetGithubIssueTypeResult = SetGithubIssueTypeParams {
+            issue_number: GithubIssueNumber::Number(7),
+            issue_type: "Epic".to_string(),
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(
+            execution.success,
+            "empty allowed list must not deny: {}",
+            execution.message
+        );
+    }
+
+    /// The counterpart: once `allowed:` is non-empty it is strictly enforced,
+    /// and the rejection happens before any HTTP call is made.
+    #[tokio::test]
+    async fn non_empty_allowed_list_rejects_unlisted_type_before_http() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        let mut tool_configs = HashMap::new();
+        tool_configs.insert(
+            "set-github-issue-type".to_string(),
+            serde_json::json!({
+                "target-repo": "octo/repo",
+                "allowed": ["Bug", "Task"]
+            }),
+        );
+        let ctx = ExecutionContext {
+            github_token: Some("token".to_string()),
+            github_api_url: server.uri(),
+            tool_configs,
+            ..Default::default()
+        };
+        let mut result: SetGithubIssueTypeResult = SetGithubIssueTypeParams {
+            issue_number: GithubIssueNumber::Number(7),
+            issue_type: "Epic".to_string(),
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!execution.success);
+        assert!(
+            execution.message.contains("not in the allowed list"),
+            "unexpected message: {}",
+            execution.message
+        );
+        // No mock was mounted, so any outbound PATCH would have surfaced as a
+        // wiremock "unmatched request" rather than a clean allowlist failure.
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    /// A matching entry is echoed back using the *configured* casing, so the
+    /// repository sees the canonical type name rather than the agent's casing.
+    #[tokio::test]
+    async fn allowed_match_is_case_insensitive_and_uses_configured_casing() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/repos/octo/repo/issues/7"))
+            .and(body_json(serde_json::json!({ "type": "Bug" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut tool_configs = HashMap::new();
+        tool_configs.insert(
+            "set-github-issue-type".to_string(),
+            serde_json::json!({
+                "target-repo": "octo/repo",
+                "allowed": ["Bug"]
+            }),
+        );
+        let ctx = ExecutionContext {
+            github_token: Some("token".to_string()),
+            github_api_url: server.uri(),
+            tool_configs,
+            ..Default::default()
+        };
+        let mut result: SetGithubIssueTypeResult = SetGithubIssueTypeParams {
+            issue_number: GithubIssueNumber::Number(7),
+            issue_type: "bUg".to_string(),
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(
+            execution.success,
+            "case-insensitive match failed: {}",
+            execution.message
+        );
+    }
 }

@@ -5022,6 +5022,46 @@ github-app-token:
     }
 
     #[test]
+    fn github_issue_outputs_reject_write_scoped_engine_app_permissions() {
+        // When GitHub issue safe outputs inherit the engine App credentials,
+        // that App token is also handed to Agent/Detection. A `write` scope
+        // there would leak write-capable GitHub credentials into Stage 1,
+        // breaking the "isolate credentials to Stage 3" invariant.
+        let (fm, _) = super::super::common::parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  github-app-token:\n    app-id: 123\n    owner: octo\n    repositories: [repo]\n    permissions:\n      issues: write\nsafe-outputs:\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
+        )
+        .unwrap();
+        let error = fm.github_safe_outputs_auth().unwrap_err().to_string();
+        assert!(
+            error.contains("issues") && error.contains("`write`"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.contains("read-only"),
+            "error should steer the author to a read-only token: {error}"
+        );
+    }
+
+    #[test]
+    fn github_issue_outputs_accept_read_only_engine_app_permissions() {
+        // The positive counterpart: an explicitly read-only engine App token is
+        // accepted and scoped to the configured issue target.
+        let (fm, _) = super::super::common::parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  github-app-token:\n    app-id: 123\n    owner: octo\n    repositories: [repo]\n    permissions:\n      issues: read\nsafe-outputs:\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
+        )
+        .unwrap();
+        let auth = fm.github_safe_outputs_auth().unwrap().unwrap();
+        let GithubSafeOutputsAuth::App { config } = auth else {
+            panic!("expected app auth");
+        };
+        assert_eq!(config.repositories, vec!["repo".to_string()]);
+        assert_eq!(
+            config.permissions.get("issues"),
+            Some(&GithubAppPermissionLevel::Read)
+        );
+    }
+
+    #[test]
     fn safe_outputs_github_app_accepts_client_id_alias_and_scopes_repo() {
         let (fm, _) = super::super::common::parse_markdown(
             "---\nname: test\ndescription: test\nsafe-outputs:\n  github-app:\n    client-id: Iv23liExample\n    owner: octo\n    repositories: [broader-repo]\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
