@@ -208,6 +208,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── report_incomplete.rs
 │   │   ├── resolve_pr_thread.rs
 │   │   ├── result.rs
+│   │   ├── set_github_issue_type.rs
 │   │   ├── submit_pr_review.rs
 │   │   ├── update_pr.rs
 │   │   ├── update_wiki_page.rs
