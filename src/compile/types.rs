@@ -2811,6 +2811,18 @@ pub struct OnConfig {
     /// PR trigger configuration (native ADO branch/path filters + runtime filters)
     #[serde(default)]
     pub pr: Option<PrTriggerConfig>,
+    /// CI (push) trigger configuration — the top-level `trigger:` key.
+    ///
+    /// Omitting `on.ci` keeps ADO's implicit default ("build every branch
+    /// push"), which `on.pr.mode: synthetic` depends on. Set it to make that
+    /// choice explicit:
+    ///
+    /// * `ci: none` — never start on a push. This is the ONLY way to express
+    ///   that intent, because ADO reads a *missing* `trigger:` key as
+    ///   "CI on every branch" rather than "no CI".
+    /// * `ci: { branches: …, paths: … }` — start on pushes matching the filter.
+    #[serde(default)]
+    pub ci: Option<CiTriggerConfig>,
 }
 
 impl SanitizeConfigTrait for OnConfig {
@@ -3286,6 +3298,58 @@ impl SanitizeConfigTrait for RepoContextConfig {
 }
 
 // ─── PR Trigger Types ───────────────────────────────────────────────────────
+
+/// CI (push) trigger configuration — the top-level `trigger:` key.
+///
+/// Accepts either the literal scalar `none` or a mapping of native ADO
+/// branch/path filters:
+///
+/// ```yaml
+/// on:
+///   ci: none                 # never start on a push
+/// ```
+/// ```yaml
+/// on:
+///   ci:                      # start only on pushes to main under src/
+///     branches:
+///       include: [main]
+///     paths:
+///       include: ["src/**"]
+/// ```
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum CiTriggerConfig {
+    /// `ci: none`.
+    Disabled(CiNone),
+    /// `ci: { branches, paths }`.
+    Filtered(CiFilterConfig),
+}
+
+/// The literal scalar `none` accepted by [`CiTriggerConfig`].
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CiNone {
+    None,
+}
+
+/// Native ADO branch/path filters for a CI (push) trigger.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct CiFilterConfig {
+    /// Native ADO branch filter for CI triggers.
+    #[serde(default)]
+    pub branches: Option<BranchFilter>,
+    /// Native ADO path filter for CI triggers.
+    #[serde(default)]
+    pub paths: Option<PathFilter>,
+}
+
+impl SanitizeConfigTrait for CiTriggerConfig {
+    fn sanitize_config_fields(&mut self) {
+        if let CiTriggerConfig::Filtered(f) = self {
+            f.sanitize_config_fields();
+        }
+    }
+}
 
 /// PR trigger configuration with native ADO filters and runtime gate filters.
 #[derive(Debug, Deserialize, Clone, Default)]
