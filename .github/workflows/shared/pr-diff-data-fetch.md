@@ -2,9 +2,18 @@
 # Shared `pre-agent-steps` that pre-fetch the PR diff, metadata and existing
 # inline review comments before any reviewer agent starts.
 #
-# Works for both `pull_request` events and slash-command runs on a PR, because
-# the PR number is resolved from `github.event.issue.number` or
-# `github.event.pull_request.number`, whichever is present.
+# Works for `pull_request` events, inline slash-command runs, and centralized
+# `/review` runs. The last case is the subtle one: with
+# `slash_command.strategy: centralized`, the generated `agentic_commands.yml`
+# router dispatches each reviewer via `workflow_dispatch`, so there is **no**
+# `github.event.issue.number` or `github.event.pull_request.number` in the
+# payload — the PR identity arrives only in the `aw_context` input as
+# `{item_type: "pull_request", item_number: "<N>"}`. gh-aw's `github.aw.context.*`
+# namespace resolves this, but it is a prompt-only virtual namespace and is not
+# transformed inside step `env:`, so the fallback is spelled out here in the raw
+# `fromJSON(...)` form the compiler would otherwise generate. The `item_type`
+# guard is required (per gh-aw ADR-31820): `item_number` is shared across entity
+# kinds, so an issue-routed run must not populate the PR number slot.
 #
 # Outputs, all under /tmp/gh-aw/agent/ so they are captured in the run artifact:
 #   pr-diff.patch            — unified diff, generated files excluded, capped
@@ -14,15 +23,17 @@
 #
 # The fetch is skipped entirely when all four files exist and the cached head
 # SHA still matches the PR head, which is the common case: `pr-data-prefetch.yml`
-# warms the `pr-prefetch-<sha>` Actions cache in ~30-60s while the reviewer
-# activation jobs are still starting up.
+# warms the `pr-prefetch-<pr-number>-<sha>` Actions cache in ~30-60s while the
+# reviewer activation jobs are still starting up. Dispatch runs know the PR
+# number but not the head SHA, so they rely on the `restore-keys` prefix to find
+# the newest entry and on `pr-data-head-sha.txt` to reject it if it is stale.
 #
 # Usage:
 #   cache:
-#     key: pr-prefetch-${{ github.event.pull_request.head.sha || github.event.issue.number }}
+#     key: pr-prefetch-${{ github.event.pull_request.number || fromJSON(github.event.inputs.aw_context || '{}').item_number }}-${{ github.event.pull_request.head.sha || github.run_id }}
 #     path: /tmp/gh-aw/agent
 #     restore-keys:
-#       - pr-prefetch-${{ github.event.pull_request.number || github.event.issue.number }}-
+#       - pr-prefetch-${{ github.event.pull_request.number || fromJSON(github.event.inputs.aw_context || '{}').item_number }}-
 #   imports:
 #     - shared/pr-diff-data-fetch.md
 #
@@ -37,7 +48,7 @@ pre-agent-steps:
   - name: Pre-fetch PR diff, metadata and review comments
     env:
       GH_TOKEN: ${{ github.token }}
-      PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+      PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number || (fromJSON(github.event.inputs.aw_context || '{}').item_type == 'pull_request' && fromJSON(github.event.inputs.aw_context || '{}').item_number) || '' }}
       PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       EXPR_GITHUB_REPOSITORY: ${{ github.repository }}
       PR_DIFF_MAX_LINES: "3000"
@@ -46,12 +57,13 @@ pre-agent-steps:
       mkdir -p /tmp/gh-aw/agent
 
       if [ -z "${PR_NUMBER:-}" ]; then
-        echo "No PR number in the event payload; writing empty pre-fetch files." >&2
-        : > /tmp/gh-aw/agent/pr-diff.patch
-        echo '{}' > /tmp/gh-aw/agent/pr-meta.json
-        echo '[]' > /tmp/gh-aw/agent/pr-review-comments.json
-        rm -f /tmp/gh-aw/agent/pr-data-head-sha.txt
-        exit 0
+        # Every consumer of this component is a PR reviewer, so an unresolved PR
+        # number is always a bug — most likely the routing context changed shape.
+        # Fail loudly: silently writing empty files makes the reviewer report a
+        # successful "nothing to review" run and hides the breakage.
+        echo "::error::Could not resolve a PR number from the event payload or aw_context input." >&2
+        echo "event_name=${GITHUB_EVENT_NAME:-unknown}" >&2
+        exit 1
       fi
 
       CURRENT_HEAD_SHA="${PR_HEAD_SHA:-}"
