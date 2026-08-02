@@ -18,7 +18,7 @@
  * fails here.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer, request as httpRequest, type Server } from "node:http";
 import { connect as netConnect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -31,7 +31,7 @@ import {
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { mintCa, type CaMaterials } from "./ca.js";
+import { parseCaMaterials, type CaMaterials } from "./ca.js";
 import { CATALOG_SCHEMA_VERSION } from "./catalog.js";
 import type { ProxyConfig, ProxyPolicy } from "./config.js";
 import { DecisionLog } from "./log.js";
@@ -111,6 +111,51 @@ function listen(server: { listen: (...args: never[]) => void }): Promise<number>
       resolve(typeof address === "object" && address !== null ? address.port : 0);
     });
   });
+}
+
+/**
+ * Mint CA material in the stream format the engine consumes.
+ *
+ * The engine no longer mints its own certificates — a host pipeline step does,
+ * and pipes them in — so this stands in for that step. It returns the parsed
+ * form for the harness's own servers, and the raw stream for feeding the engine.
+ */
+function mintForTest(directory: string, hosts: readonly string[]): {
+  materials: CaMaterials;
+  stream: string;
+} {
+  mkdirSync(directory, { recursive: true });
+  const run = (args: readonly string[]): void => {
+    execFileSync("openssl", args as string[], {
+      cwd: directory,
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+  };
+
+  run([
+    "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
+    "-subj", "/CN=ado-proxy test CA", "-keyout", "ca.key", "-out", "ca.pem",
+    "-addext", "basicConstraints=critical,CA:TRUE,pathlen:0",
+  ]);
+
+  let stream = `### CA\n${readFileSync(join(directory, "ca.pem"), "utf8")}`;
+
+  for (const host of hosts) {
+    writeFileSync(join(directory, "leaf.ext"),
+      "basicConstraints=CA:FALSE\n" +
+      "keyUsage=critical,digitalSignature,keyEncipherment\n" +
+      "extendedKeyUsage=serverAuth\n" +
+      `subjectAltName=DNS:${host}\n`);
+    run(["req", "-new", "-newkey", "rsa:2048", "-nodes", "-subj", `/CN=${host}`,
+      "-keyout", "leaf.key", "-out", "leaf.csr"]);
+    run(["x509", "-req", "-in", "leaf.csr", "-CA", "ca.pem", "-CAkey", "ca.key",
+      "-CAcreateserial", "-days", "2", "-extfile", "leaf.ext", "-out", "leaf.pem"]);
+    stream += `### HOST ${host}\n` +
+      readFileSync(join(directory, "leaf.key"), "utf8") +
+      readFileSync(join(directory, "leaf.pem"), "utf8");
+  }
+
+  return { materials: parseCaMaterials(stream), stream };
 }
 
 /** A TLS server standing in for `dev.azure.com`. */
@@ -328,9 +373,9 @@ beforeAll(async () => {
   if (!hasOpenssl) return;
   workdir = mkdtempSync(join(tmpdir(), "ado-proxy-e2e-"));
 
-  const upstreamCa = mintCa(join(workdir, "upstream-ca"), ["dev.azure.com"]);
-  const plainCa = mintCa(join(workdir, "plain-ca"), ["example.test"]);
-  const proxyCa = mintCa(join(workdir, "proxy-ca"), POLICY.protected_hosts);
+  const upstreamCa = mintForTest(join(workdir, "upstream-ca"), ["dev.azure.com"]).materials;
+  const plainCa = mintForTest(join(workdir, "plain-ca"), ["example.test"]).materials;
+  const proxyCa = mintForTest(join(workdir, "proxy-ca"), POLICY.protected_hosts).materials;
 
   const upstreamCalls: UpstreamCall[] = [];
   const tunnelTargets: string[] = [];

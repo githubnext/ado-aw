@@ -1,177 +1,148 @@
 /**
- * Ephemeral interception CA and per-host leaf certificates.
+ * Interception certificate material, supplied on stdin.
  *
- * Node cannot *create* X.509 certificates: `node:crypto` can generate key pairs
- * and parse certificates, but has no issuance API. The options are a native
- * crypto dependency (which is what pushed this runtime off Rust in the first
- * place) or the `openssl` binary that is already present in the AWF agent image
- * and already used by AWF's own ssl-bump setup. This module takes the second
- * path, so the bundle keeps zero runtime dependencies.
+ * The engine does **not** mint its own certificates. A host pipeline step runs
+ * `openssl` — already an unconditional dependency of every compiled pipeline,
+ * which mints the MCPG API key with `openssl rand` — and pipes the CA plus one
+ * leaf per protected host straight into `docker run -i`. Two consequences:
  *
- * Key custody: every private key is written under a caller-supplied directory
- * that must be container tmpfs. Only the CA's *public* certificate is ever
- * copied out, into the pre-created file AWF installs into the agent's trust
- * stores.
+ *   - **The private keys touch no filesystem.** Not the runner's, not the
+ *     container's. AWF's chroot makes the agent's root the host's `/host` bind
+ *     mount, so the agent's `/tmp` *is* the runner's `/tmp`; a key written to a
+ *     host path would be agent-readable. Keeping it on stdin sidesteps that
+ *     rather than relying on deleting it in time. There is no exposure window
+ *     to get wrong either, because the engine starts before AWF — at generation
+ *     time no agent exists at all.
+ *   - **The engine needs no `openssl`,** so it runs on `node:20-slim` (which
+ *     has none) rather than the full `node:20`. That is already the image the
+ *     Azure DevOps MCP uses, so it adds nothing to mirror.
+ *
+ * The protected host set is compiler-known, so every leaf can be generated
+ * ahead of time. Nothing here has to *issue* a certificate — fortunate, since
+ * Node can parse X.509 but not issue it.
  */
-import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, writeFileSync } from "node:fs";
 
 export class CaError extends Error {}
 
-/** A minted leaf certificate for one protected host. */
+/** A leaf certificate and its key, for one protected host. */
 export interface Leaf {
   readonly key: string;
   readonly cert: string;
 }
 
-/** Materials produced by {@link mintCa}. */
+/** Parsed interception material. */
 export interface CaMaterials {
   /** PEM of the CA certificate. Safe to publish. */
   readonly caCertPem: string;
-  /** Leaf key/cert per protected host, keyed by lowercase hostname. */
+  /** Leaf key/cert per host, keyed by lowercase hostname. */
   readonly leaves: ReadonlyMap<string, Leaf>;
 }
 
-const DAYS = "2";
-const SUBJECT = "/CN=ado-proxy ephemeral interception CA";
+/**
+ * Section markers in the piped stream.
+ *
+ * A marker format rather than bare PEM concatenation, because each leaf's key
+ * and certificate must stay associated with *its* hostname — relying on order
+ * alone would be a silent correctness trap if the generator ever changed.
+ */
+const CA_MARKER = "### CA";
+const HOST_MARKER = "### HOST ";
 
-function openssl(args: readonly string[], cwd: string): void {
-  try {
-    execFileSync("openssl", args as string[], {
-      cwd,
-      stdio: ["ignore", "ignore", "pipe"],
-      timeout: 60_000,
-    });
-  } catch (error) {
-    const stderr = (error as { stderr?: Buffer }).stderr?.toString().trim();
-    throw new CaError(
-      `openssl ${args[0]} failed${stderr === undefined || stderr === "" ? "" : `: ${stderr}`}`,
-    );
-  }
-}
+const PRIVATE_KEY =
+  /-----BEGIN (?:RSA |EC )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC )?PRIVATE KEY-----/;
+const CERTIFICATE = /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/;
 
 /**
- * Generate a fresh CA and one leaf per protected host.
+ * Parse the certificate stream.
  *
- * All hosts are known at startup — the protected set is compiler-pinned and
- * tiny — so leaves are minted eagerly. That keeps `openssl` off the request
- * path entirely and means a broken toolchain fails at startup rather than on
- * the first intercepted connection.
+ * Fails closed on anything incomplete: a missing CA, a host section without
+ * both a key and a certificate, or a stream carrying no hosts at all. Each
+ * would otherwise surface as an opaque TLS handshake failure on the first
+ * intercepted request, long after the cause.
  */
-export function mintCa(
-  directory: string,
-  hosts: readonly string[],
-): CaMaterials {
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
+export function parseCaMaterials(raw: string): CaMaterials {
+  if (raw.trim() === "") {
+    throw new CaError(
+      "no certificate material on stdin; the host generation step must pipe the " +
+        "CA and leaves into this container",
+    );
+  }
 
-  openssl(
-    [
-      "req",
-      "-x509",
-      "-newkey",
-      "rsa:2048",
-      "-nodes",
-      "-days",
-      DAYS,
-      "-subj",
-      SUBJECT,
-      "-keyout",
-      "ca.key",
-      "-out",
-      "ca.pem",
-      "-addext",
-      "basicConstraints=critical,CA:TRUE,pathlen:0",
-      "-addext",
-      "keyUsage=critical,keyCertSign,cRLSign",
-    ],
-    directory,
-  );
-
+  const sections = raw.split("### ").slice(1);
+  let caCertPem: string | undefined;
   const leaves = new Map<string, Leaf>();
-  for (const rawHost of hosts) {
-    const host = rawHost.toLowerCase();
-    if (leaves.has(host)) continue;
-    if (!/^[a-z0-9.-]+$/.test(host)) {
-      // The protected set is compiler-owned, but this string ends up in an
-      // openssl config file; refuse anything that could break out of it.
-      throw new CaError(`refusing to mint a certificate for host ${rawHost}`);
+
+  for (const section of sections) {
+    const body = `### ${section}`;
+
+    if (body.startsWith(CA_MARKER)) {
+      const cert = CERTIFICATE.exec(body)?.[0];
+      if (cert === undefined) throw new CaError("CA section carried no certificate");
+      caCertPem = cert;
+      continue;
     }
 
-    const keyFile = `${host}.key`;
-    const csrFile = `${host}.csr`;
-    const certFile = `${host}.pem`;
-    const extFile = `${host}.ext`;
+    if (!body.startsWith(HOST_MARKER)) continue;
 
-    writeFileSync(
-      join(directory, extFile),
-      [
-        "basicConstraints=CA:FALSE",
-        "keyUsage=critical,digitalSignature,keyEncipherment",
-        "extendedKeyUsage=serverAuth",
-        `subjectAltName=DNS:${host}`,
-        "",
-      ].join("\n"),
-      { mode: 0o600 },
-    );
+    const newline = body.indexOf("\n");
+    const host = body
+      .slice(HOST_MARKER.length, newline === -1 ? undefined : newline)
+      .trim()
+      .toLowerCase();
+    if (host === "") throw new CaError("host section carried no hostname");
 
-    openssl(
-      [
-        "req",
-        "-new",
-        "-newkey",
-        "rsa:2048",
-        "-nodes",
-        "-subj",
-        `/CN=${host}`,
-        "-keyout",
-        keyFile,
-        "-out",
-        csrFile,
-      ],
-      directory,
-    );
-
-    openssl(
-      [
-        "x509",
-        "-req",
-        "-in",
-        csrFile,
-        "-CA",
-        "ca.pem",
-        "-CAkey",
-        "ca.key",
-        "-CAcreateserial",
-        "-days",
-        DAYS,
-        "-extfile",
-        extFile,
-        "-out",
-        certFile,
-      ],
-      directory,
-    );
-
-    leaves.set(host, {
-      key: readFileSync(join(directory, keyFile), "utf8"),
-      cert: readFileSync(join(directory, certFile), "utf8"),
-    });
+    const key = PRIVATE_KEY.exec(body)?.[0];
+    const cert = CERTIFICATE.exec(body)?.[0];
+    if (key === undefined || cert === undefined) {
+      // Half a leaf is worse than none: TLS would fail at handshake time with
+      // nothing to indicate the *material* was the problem.
+      throw new CaError(
+        `leaf for ${host} is missing its ${key === undefined ? "key" : "certificate"}`,
+      );
+    }
+    leaves.set(host, { key, cert });
   }
 
-  return {
-    caCertPem: readFileSync(join(directory, "ca.pem"), "utf8"),
-    leaves,
-  };
+  if (caCertPem === undefined) {
+    throw new CaError("certificate stream carried no CA section");
+  }
+  if (leaves.size === 0) {
+    throw new CaError("certificate stream carried no host leaves");
+  }
+
+  return { caCertPem, leaves };
 }
 
 /**
- * Publish the CA certificate where AWF expects it.
+ * Read the material from a file descriptor, defaulting to stdin.
  *
- * AWF pre-creates this path as a regular file before the sidecar starts, so a
- * symlink cannot be swapped in between creation and write. Only the public
- * certificate is ever written; the private key stays in the tmpfs directory.
+ * Read once at startup and held in memory only. A restart therefore has no
+ * material and fails closed, which is intended: a fresh CA would not be trusted
+ * by the already-running MCP, so continuing would break every intercepted
+ * request in a way that looks like a policy error rather than a restart.
+ */
+export function readCaMaterials(fd: number = 0): CaMaterials {
+  let raw: string;
+  try {
+    raw = readFileSync(fd, "utf8");
+  } catch (error) {
+    throw new CaError(`cannot read certificate material: ${(error as Error).message}`);
+  }
+  return parseCaMaterials(raw);
+}
+
+/**
+ * Publish the CA certificate where the MCP container can mount it.
+ *
+ * Only the public certificate is ever written out; the private keys stay in
+ * this process.
  */
 export function publishCaCertificate(path: string, caCertPem: string): void {
+  if (PRIVATE_KEY.test(caCertPem)) {
+    // Defence in depth: this path is mounted into another container, so a key
+    // reaching it would hand out the ability to impersonate any protected host.
+    throw new CaError("refusing to publish certificate material containing a private key");
+  }
   writeFileSync(path, caCertPem, { mode: 0o644 });
 }

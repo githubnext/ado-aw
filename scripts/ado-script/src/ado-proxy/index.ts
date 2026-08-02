@@ -18,18 +18,15 @@
  *     decision.
  *
  * The bearer is never in argv or the environment: it is read from a private
- * file the trusted host task rotates. Only the *public* interception
- * certificate is ever written out.
+ * file the trusted host task rotates. The interception certificates arrive on
+ * stdin from a host generation step, so their private keys touch no filesystem;
+ * only the *public* CA certificate is ever written out.
  *
  * Unlike the other `ado-script` bundles, which are short-lived pipeline steps,
  * this one is a long-running server: it starts before the agent and is torn
  * down by AWF when the agent exits.
  */
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-
-import { CaError, mintCa, publishCaCertificate } from "./ca.js";
+import { CaError, publishCaCertificate, readCaMaterials } from "./ca.js";
 import { ConfigError, loadConfig, type ProxyConfig } from "./config.js";
 import { DecisionLog } from "./log.js";
 import { createProxyServer } from "./server.js";
@@ -38,22 +35,6 @@ import { UpstreamError, parseUpstreamProxy } from "./upstream.js";
 
 function report(message: string): void {
   process.stderr.write(`[ado-proxy] ${message}\n`);
-}
-
-/**
- * Where the CA private key lives.
- *
- * AWF mounts tmpfs at this path so the key never touches a host filesystem or
- * any volume the agent can see. When it is absent — as in tests — fall back to
- * a private temporary directory rather than failing, since the key is
- * regenerated per process either way.
- */
-function keyDirectory(): string {
-  const configured = process.env.AWF_POLICY_PROXY_TMPFS_DIR;
-  if (configured !== undefined && configured !== "") {
-    return join(configured, "ado-proxy-ca");
-  }
-  return mkdtempSync(join(tmpdir(), "ado-proxy-ca-"));
 }
 
 /** Start the proxy and resolve with the process exit code once it stops. */
@@ -79,14 +60,15 @@ export async function run(argv: readonly string[]): Promise<number> {
 
   let ca;
   try {
-    ca = mintCa(keyDirectory(), config.policy.protected_hosts);
+    // Read before anything else binds a port: without an interception identity
+    // there is nothing safe to serve, and the agent's clients would reject
+    // interception anyway. The only "fix" for that would be to stop
+    // intercepting, which is exactly what this proxy exists to prevent.
+    ca = readCaMaterials();
     publishCaCertificate(config.publicCaFile, ca.caCertPem);
   } catch (error) {
     if (!(error instanceof CaError)) throw error;
-    // Without a trusted CA the agent's clients reject interception, and the
-    // only "fix" would be to stop intercepting — which is the thing this proxy
-    // exists to prevent.
-    report(`cannot establish the interception CA: ${error.message}`);
+    report(`cannot establish the interception identity: ${error.message}`);
     return 1;
   }
 

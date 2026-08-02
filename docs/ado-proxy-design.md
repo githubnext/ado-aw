@@ -168,6 +168,75 @@ rejected on evidence:
 
 Per-client scoping avoids all of this and yields a smaller blast radius.
 
+### Where the CA is minted
+
+The constraint is narrow: **the CA private key must never be readable by the
+agent.** It does not follow that the key must be minted inside the engine's
+container — an earlier draft claimed that, and it was wrong.
+
+Two facts make a simpler arrangement safe. The engine starts *before* the AWF
+invocation, so during CA setup no agent exists to read anything. And the
+material can be passed on **stdin**, so it never touches a filesystem at all —
+not the runner's, not the container's.
+
+Because the protected host set is compiler-known, the **leaves are generated
+alongside the CA**, and the whole lot arrives as one PEM stream from a host
+pipeline step:
+
+```sh
+# host step: mints CA + one leaf per protected host, straight to stdout
+generate_ca_material \
+  | docker run -i --name ado-proxy … node:20-slim ado-proxy.js
+```
+
+Generation runs directly on the runner with `openssl`, not in a helper
+container. Every compiled pipeline **already** depends on host `openssl` —
+`prepare_mcpg_config_step` mints the MCPG API key with `openssl rand` on every
+run — so this adds no new dependency, no second image to pull, and nothing
+further for `supply-chain:` to mirror. A helper container would have been pure
+overhead.
+
+Verified end to end: CA and all three leaves (`dev.azure.com`,
+`app.vssps.visualstudio.com`, and the engine's own broker hostname) reach the
+container, and a client verifies the served identity **as `dev.azure.com`
+against the piped CA** (`authorized: true`). Piping configuration into a
+container this way is the pattern MCPG already uses (`echo "$MCPG_CONFIG" |
+docker run -i …`).
+
+`openssl` being absent is a hard failure, not a degradation: the step must exit
+non-zero rather than continue without an interception identity.
+
+
+
+Why this matters for the agent: AWF's chroot makes the agent's root the host's
+`/host` bind mount, so the agent's `/tmp` **is** the runner's `/tmp` — which is
+how AWF installs its own `gh` wrapper (`cp … /host/tmp/awf-lib/gh` appears
+inside the chroot as `/tmp/awf-lib/gh`). A key written to a host path would
+therefore be agent-readable. Keeping it on stdin sidesteps that entirely, rather
+than relying on deleting it in time.
+
+Only the **public** certificate is written to a host path, so it can be mounted
+into the MCP container for `NODE_EXTRA_CA_CERTS`.
+
+This also frees the base image. `ca.ts` shells out to `openssl` because Node can
+parse X.509 but cannot issue it, and adding a certificate library would
+reintroduce the native dependency this runtime exists to avoid. Measured:
+
+| Image | `openssl` |
+|---|---|
+| `node:20-slim`, `node:20-bookworm-slim` | **absent** |
+| `node:20` | present (3.0.19) |
+
+With both CA and leaves generated on the host ahead of the engine, the engine
+needs no `openssl` at all and runs on `node:20-slim`. A restart is fail-closed:
+the engine holds the material in memory only, so a dead container ends the run
+rather than silently serving a new CA the MCP does not trust.
+
+`ca.ts` therefore changes from *minting* to *parsing* — it keeps the same
+`CaMaterials` shape so nothing downstream moves.
+
+
+
 ### Upstream leg
 
 The engine verifies the real Azure DevOps certificate normally;
