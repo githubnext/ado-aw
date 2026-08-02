@@ -135,6 +135,9 @@ pub(crate) fn build_pipeline_context(
     // ─── Validations (reuse all shared validators) ────────────────
     common::validate_front_matter_identity(front_matter)?;
     common::validate_permissions_read_policy(front_matter)?;
+    if let Some(minutes) = front_matter.engine.timeout_minutes() {
+        common::validate_proxied_timeout(front_matter, minutes)?;
+    }
     common::validate_variable_groups(front_matter)?;
     common::validate_checkout_self_collision(
         &front_matter.repositories,

@@ -97,7 +97,7 @@ interface Harness {
   readonly proxyCaPem: string;
   readonly upstreamCalls: UpstreamCall[];
   readonly tunnelTargets: string[];
-  readonly tokenFile: string;
+  readonly materialStream: string;
 }
 
 let workdir: string;
@@ -156,7 +156,7 @@ function mintForTest(directory: string, hosts: readonly string[]): {
       readFileSync(join(directory, "leaf.pem"), "utf8");
   }
 
-  return { materials: parseCaMaterials(stream), stream };
+  return { materials: parseCaMaterials(`${stream}### TOKEN\n${CANARY}\n`), stream };
 }
 
 /** A TLS server standing in for `dev.azure.com`. */
@@ -419,7 +419,9 @@ beforeAll(async () => {
 
   const upstreamCa = mintForTest(join(workdir, "upstream-ca"), ["dev.azure.com"]).materials;
   const plainCa = mintForTest(join(workdir, "plain-ca"), ["example.test"]).materials;
-  const proxyCa = mintForTest(join(workdir, "proxy-ca"), POLICY.protected_hosts).materials;
+  const proxyMaterial = mintForTest(join(workdir, "proxy-ca"), POLICY.protected_hosts);
+  const proxyCa = proxyMaterial.materials;
+  const proxyCaStream = `${proxyMaterial.stream}### TOKEN\n${CANARY}\n`;
 
   const upstreamCalls: UpstreamCall[] = [];
   const tunnelTargets: string[] = [];
@@ -435,16 +437,12 @@ beforeAll(async () => {
     plainHttpPort,
   );
 
-  const tokenFile = join(workdir, "token");
-  writeFileSync(tokenFile, `${CANARY}\n`, { mode: 0o600 });
-
   const config: ProxyConfig = {
     listenAddress: "127.0.0.1",
     listenPort: 0,
     // 443 needs privileges; the direct-TLS listener is bound explicitly below.
     tlsPort: 0,
     upstreamProxy: `http://127.0.0.1:${squidPort}`,
-    tokenFile,
     publicCaFile: join(workdir, "ca.pem"),
     policy: POLICY,
   };
@@ -452,7 +450,7 @@ beforeAll(async () => {
   const server = createProxyServer({
     config,
     ca: proxyCa,
-    tokens: new TokenSource(tokenFile),
+    tokens: new TokenSource(CANARY),
     log: new DecisionLog(join(workdir, "decisions")),
     upstreamCa: upstreamCa.caCertPem,
   });
@@ -464,7 +462,7 @@ beforeAll(async () => {
   const tlsServer = createDirectTlsServer({
     config,
     ca: proxyCa,
-    tokens: new TokenSource(tokenFile),
+    tokens: new TokenSource(CANARY),
     log: new DecisionLog(join(workdir, "decisions")),
     upstreamCa: upstreamCa.caCertPem,
   });
@@ -477,7 +475,7 @@ beforeAll(async () => {
     proxyCaPem: proxyCa.caCertPem,
     upstreamCalls,
     tunnelTargets,
-    tokenFile,
+    materialStream: proxyCaStream,
   };
 
   // Keep the plain CA reachable for the tunnel assertion.
@@ -696,39 +694,18 @@ suite("ado-proxy end to end", () => {
     expect(response.headers.location).toBeUndefined();
   });
 
-  it("fails closed, not unauthenticated, when the credential is missing", async () => {
-    writeFileSync(harness.tokenFile, "   \n", { mode: 0o600 });
-    const before = harness.upstreamCalls.length;
-    try {
-      const response = await requestThroughProxy(
-        harness.proxyPort,
-        "dev.azure.com",
-        `/${ORGANIZATION}/_apis/projects/Widgets?api-version=7.1`,
-        { ca: harness.proxyCaPem },
-      );
-      // 502 rather than 401/429/503: msrest retries those, which would turn one
-      // failure into several upstream calls.
-      expect(response.status).toBe(502);
-      expect(harness.upstreamCalls.length).toBe(before);
-    } finally {
-      writeFileSync(harness.tokenFile, `${CANARY}\n`, { mode: 0o600 });
-    }
+  it("refuses to start without a bearer, rather than forwarding unauthenticated", () => {
+    // A stream carrying certificates but no token must not yield a running
+    // proxy: Azure DevOps answers an unauthenticated request with a sign-in
+    // page, which a client can mistake for data.
+    const withoutToken = harness.materialStream.replace(/### TOKEN\n[\s\S]*$/, "");
+    expect(() => parseCaMaterials(withoutToken)).toThrow(/no Azure DevOps bearer/);
   });
 
-  it("picks up a rotated token without a restart", async () => {
-    const rotated = "rotated-bearer-1a2b3c4d";
-    writeFileSync(harness.tokenFile, `${rotated}\n`, { mode: 0o600 });
-    try {
-      const before = harness.upstreamCalls.length;
-      await requestThroughProxy(
-        harness.proxyPort,
-        "dev.azure.com",
-        `/${ORGANIZATION}/_apis/projects/Widgets?api-version=7.1`,
-        { ca: harness.proxyCaPem },
-      );
-      expect(harness.upstreamCalls[before]?.authorization).toBe(`Bearer ${rotated}`);
-    } finally {
-      writeFileSync(harness.tokenFile, `${CANARY}\n`, { mode: 0o600 });
-    }
+  it("keeps the bearer out of argv and the environment", () => {
+    // The token arrives on stdin precisely so it is not readable from the
+    // process table or /proc.
+    expect(process.argv.join(" ")).not.toContain(CANARY);
+    expect(JSON.stringify(process.env)).not.toContain(CANARY);
   });
 });

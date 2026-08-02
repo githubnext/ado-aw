@@ -32,7 +32,6 @@ function policyJson(overrides: Record<string, unknown> = {}): string {
 /** Env vars the loader reads; cleared so host state cannot leak into a test. */
 const PROXY_ENV_KEYS = [
   "ADO_PROXY_POLICY_FILE",
-  "ADO_PROXY_TOKEN_FILE",
   "AWF_POLICY_PROXY_LISTEN_ADDRESS",
   "AWF_POLICY_PROXY_LISTEN_PORT",
   "AWF_POLICY_PROXY_UPSTREAM_PROXY",
@@ -123,8 +122,6 @@ describe("loadConfig", () => {
   const baseArgs = (policyFile: string): string[] => [
     "--policy-file",
     policyFile,
-    "--token-file",
-    "/private/token",
     "--public-ca-file",
     "/ca/ca.pem",
     "--upstream-proxy",
@@ -143,7 +140,6 @@ describe("loadConfig", () => {
     const policyFile = writePolicy();
     const config = loadConfig([
       `--policy-file=${policyFile}`,
-      "--token-file=/private/token",
       "--public-ca-file=/ca/ca.pem",
       "--upstream-proxy=http://squid-proxy:3128",
       "--listen-port=12000",
@@ -154,14 +150,12 @@ describe("loadConfig", () => {
   it("falls back to the AWF environment contract", () => {
     const policyFile = writePolicy();
     process.env.ADO_PROXY_POLICY_FILE = policyFile;
-    process.env.ADO_PROXY_TOKEN_FILE = "/private/token";
     process.env.AWF_POLICY_PROXY_PUBLIC_CA_PATH = "/ca/ca.pem";
     process.env.AWF_POLICY_PROXY_UPSTREAM_PROXY = "http://squid-proxy:3128";
     process.env.AWF_POLICY_PROXY_LISTEN_PORT = "13000";
 
     const config = loadConfig([]);
     expect(config.listenPort).toBe(13000);
-    expect(config.tokenFile).toBe("/private/token");
   });
 
   it("requires an upstream proxy", () => {
@@ -172,8 +166,6 @@ describe("loadConfig", () => {
       loadConfig([
         "--policy-file",
         policyFile,
-        "--token-file",
-        "/private/token",
         "--public-ca-file",
         "/ca/ca.pem",
       ]),
@@ -200,6 +192,5 @@ describe("loadConfig", () => {
     // its *path* may appear in configuration.
     const config = loadConfig(baseArgs(writePolicy()));
     expect(JSON.stringify(config)).not.toContain("Bearer");
-    expect(config.tokenFile).toBe("/private/token");
   });
 });

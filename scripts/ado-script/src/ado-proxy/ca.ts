@@ -37,6 +37,14 @@ export interface CaMaterials {
   readonly caCertPem: string;
   /** Leaf key/cert per host, keyed by lowercase hostname. */
   readonly leaves: ReadonlyMap<string, Leaf>;
+  /**
+   * The Azure DevOps bearer.
+   *
+   * Carried in the same stream as the certificates because it has the same
+   * custody requirement: it must reach this process without touching a path
+   * the agent can read.
+   */
+  readonly token: string;
 }
 
 /**
@@ -48,6 +56,8 @@ export interface CaMaterials {
  */
 const CA_MARKER = "### CA";
 const HOST_MARKER = "### HOST ";
+const TOKEN_MARKER = "### TOKEN";
+
 
 const PRIVATE_KEY =
   /-----BEGIN (?:RSA |EC )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC )?PRIVATE KEY-----/;
@@ -71,6 +81,7 @@ export function parseCaMaterials(raw: string): CaMaterials {
 
   const sections = raw.split("### ").slice(1);
   let caCertPem: string | undefined;
+  let token: string | undefined;
   const leaves = new Map<string, Leaf>();
 
   for (const section of sections) {
@@ -83,7 +94,14 @@ export function parseCaMaterials(raw: string): CaMaterials {
       continue;
     }
 
+    if (body.startsWith(TOKEN_MARKER)) {
+      const newline = body.indexOf("\n");
+      token = newline === -1 ? "" : body.slice(newline + 1).trim();
+      continue;
+    }
+
     if (!body.startsWith(HOST_MARKER)) continue;
+
 
     const newline = body.indexOf("\n");
     const host = body
@@ -110,8 +128,14 @@ export function parseCaMaterials(raw: string): CaMaterials {
   if (leaves.size === 0) {
     throw new CaError("certificate stream carried no host leaves");
   }
+  if (token === undefined || token === "") {
+    // Starting without a bearer would mean every allowed request is forwarded
+    // unauthenticated, and Azure DevOps answers those with a sign-in page a
+    // client can mistake for data. Refuse instead.
+    throw new CaError("stream carried no Azure DevOps bearer");
+  }
 
-  return { caCertPem, leaves };
+  return { caCertPem, leaves, token };
 }
 
 /**

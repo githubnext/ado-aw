@@ -22,12 +22,13 @@ function stream(...sections: string[]): string {
 }
 
 const CA_SECTION = `### CA\n${CERT}`;
+const TOKEN_SECTION = "### TOKEN\ncanary-bearer\n";
 const host = (name: string): string => `### HOST ${name}\n${KEY}${CERT}`;
 
 describe("parseCaMaterials", () => {
   it("parses a CA and its leaves", () => {
     const materials = parseCaMaterials(
-      stream(CA_SECTION, host("dev.azure.com"), host("app.vssps.visualstudio.com")),
+      stream(CA_SECTION, TOKEN_SECTION, host("dev.azure.com"), host("app.vssps.visualstudio.com")),
     );
     expect(materials.caCertPem).toContain("BEGIN CERTIFICATE");
     expect([...materials.leaves.keys()].sort()).toEqual([
@@ -38,7 +39,7 @@ describe("parseCaMaterials", () => {
   });
 
   it("lowercases hostnames so SNI lookup cannot miss on case", () => {
-    const materials = parseCaMaterials(stream(CA_SECTION, host("DEV.Azure.COM")));
+    const materials = parseCaMaterials(stream(CA_SECTION, TOKEN_SECTION, host("DEV.Azure.COM")));
     expect(materials.leaves.has("dev.azure.com")).toBe(true);
   });
 
@@ -55,7 +56,31 @@ describe("parseCaMaterials", () => {
   it("rejects a stream with no leaves", () => {
     // Without a leaf there is nothing to serve, so every intercepted request
     // would fail at handshake time with no clue as to why.
-    expect(() => parseCaMaterials(CA_SECTION)).toThrow(/no host leaves/);
+    expect(() => parseCaMaterials(stream(CA_SECTION, TOKEN_SECTION))).toThrow(
+      /no host leaves/,
+    );
+  });
+
+  it("rejects a stream with no bearer", () => {
+    // Certificates without a credential would mean every allowed request is
+    // forwarded unauthenticated, and Azure DevOps answers those with a sign-in
+    // page a client can mistake for data.
+    expect(() => parseCaMaterials(stream(CA_SECTION, host("dev.azure.com")))).toThrow(
+      /no Azure DevOps bearer/,
+    );
+  });
+
+  it("rejects an empty bearer section", () => {
+    expect(() =>
+      parseCaMaterials(stream(CA_SECTION, "### TOKEN\n   \n", host("dev.azure.com"))),
+    ).toThrow(/no Azure DevOps bearer/);
+  });
+
+  it("carries the bearer through", () => {
+    const materials = parseCaMaterials(
+      stream(CA_SECTION, TOKEN_SECTION, host("dev.azure.com")),
+    );
+    expect(materials.token).toBe("canary-bearer");
   });
 
   it("rejects a half-formed leaf rather than serving it", () => {
@@ -83,7 +108,7 @@ describe("parseCaMaterials", () => {
     // Forward compatibility: a generator adding a section this build does not
     // know about must not take the proxy down.
     const materials = parseCaMaterials(
-      stream(CA_SECTION, "### FUTURE thing\nwhatever\n", host("dev.azure.com")),
+      stream(CA_SECTION, TOKEN_SECTION, "### FUTURE thing\nwhatever\n", host("dev.azure.com")),
     );
     expect(materials.leaves.size).toBe(1);
   });
@@ -129,7 +154,7 @@ describe("readCaMaterials", () => {
 
   it("reads and parses from a descriptor", () => {
     const path = join(directory, "material.pem");
-    writeFileSync(path, stream(CA_SECTION, host("dev.azure.com")));
+    writeFileSync(path, stream(CA_SECTION, TOKEN_SECTION, host("dev.azure.com")));
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { openSync, closeSync } = require("node:fs") as typeof import("node:fs");
     const fd = openSync(path, "r");

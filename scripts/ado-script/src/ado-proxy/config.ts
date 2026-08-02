@@ -23,8 +23,6 @@ export interface ProxyConfig {
   readonly listenPort: number;
   /** Squid URL. The proxy's only route out; there is no direct-internet path. */
   readonly upstreamProxy: string;
-  /** Private file the trusted host task rotates the ADO bearer into. */
-  readonly tokenFile: string;
   /** Pre-created file the public interception certificate is written into. */
   readonly publicCaFile: string;
   /** Directory for the sanitized JSONL decision log, when configured. */
@@ -281,7 +279,6 @@ export function loadConfig(argv: readonly string[]): ProxyConfig {
       "upstream-proxy",
       "AWF_POLICY_PROXY_UPSTREAM_PROXY",
     ),
-    tokenFile: requireOption(argv, "token-file", "ADO_PROXY_TOKEN_FILE"),
     publicCaFile: requireOption(
       argv,
       "public-ca-file",

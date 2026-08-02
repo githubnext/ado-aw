@@ -75,7 +75,7 @@ export async function run(argv: readonly string[]): Promise<number> {
   const deps = {
     config,
     ca,
-    tokens: new TokenSource(config.tokenFile),
+    tokens: new TokenSource(ca.token),
     log: new DecisionLog(config.logDir),
   };
   const server = createProxyServer(deps);

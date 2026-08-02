@@ -453,6 +453,46 @@ pub fn validate_front_matter_identity(front_matter: &FrontMatter) -> Result<()> 
     Ok(())
 }
 
+/// Longest `timeout-minutes` a proxied workflow may declare.
+///
+/// The engine receives one Azure DevOps bearer on stdin and cannot rotate it,
+/// so a run must not outlive the token. Azure DevOps access tokens are
+/// typically valid for about an hour; 50 minutes leaves headroom for the token
+/// being minted before the Agent job starts and for clock skew.
+///
+/// This is a *compile-time* bound on purpose. Without it the failure surfaces
+/// mid-run as opaque `502`s from the engine — worse than today's behaviour,
+/// because the agent cannot tell an expired credential from a policy denial.
+/// Raising it requires a rotating delivery mechanism, not a bigger number.
+pub const MAX_PROXIED_TIMEOUT_MINUTES: u32 = 50;
+
+/// Reject a `timeout-minutes` that could outlive the proxy's bearer.
+///
+/// Only applies once a workflow opts into the proxied read path; unproxied
+/// workflows are unaffected, since their agent holds no Azure DevOps
+/// credential to expire.
+pub fn validate_proxied_timeout(front_matter: &FrontMatter, timeout_minutes: u32) -> Result<()> {
+    if timeout_minutes <= MAX_PROXIED_TIMEOUT_MINUTES {
+        return Ok(());
+    }
+    let uses_proxy = front_matter
+        .permissions
+        .as_ref()
+        .and_then(|permissions| permissions.read.as_ref())
+        .and_then(crate::compile::types::ReadPermissionConfig::options)
+        .is_some();
+    if !uses_proxy {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "timeout-minutes: {timeout_minutes} exceeds the maximum of \
+         {MAX_PROXIED_TIMEOUT_MINUTES} for workflows using the credential-isolated Azure \
+         DevOps proxy. The proxy holds a single Azure DevOps token that it cannot renew, so \
+         a longer run would start failing Azure DevOps reads partway through. Lower \
+         timeout-minutes, or split the work across runs."
+    )
+}
+
 /// Reject explicit Stage 1 read-policy options until the credential-isolated
 /// proxy enforces them.
 ///
@@ -5419,6 +5459,45 @@ safe-outputs:
             .unwrap_err()
             .to_string();
         assert!(error.contains("credential-isolated Azure DevOps proxy"));
+    }
+
+    /// The proxy holds one non-renewable bearer, so a run must not be able to
+    /// outlive it. Enforced at compile time because the alternative is opaque
+    /// 502s partway through a run.
+    #[test]
+    fn proxied_timeout_is_bounded_by_the_token_lifetime() {
+        let proxied = "---\nname: t\ndescription: d\npermissions:\n  read:\n    service-connection: sc\n---\n";
+        let (fm, _) = parse_markdown(proxied).unwrap();
+
+        assert!(validate_proxied_timeout(&fm, MAX_PROXIED_TIMEOUT_MINUTES).is_ok());
+
+        let error = validate_proxied_timeout(&fm, MAX_PROXIED_TIMEOUT_MINUTES + 1)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("cannot renew"),
+            "the message must say why, not just that it is too long: {error}"
+        );
+        assert!(
+            error.contains(&MAX_PROXIED_TIMEOUT_MINUTES.to_string()),
+            "the message must name the limit: {error}"
+        );
+    }
+
+    /// Workflows that do not use the proxy hold no Azure DevOps credential in
+    /// the agent, so there is nothing to expire and no reason to bound them.
+    #[test]
+    fn unproxied_timeout_is_not_bounded() {
+        for source in [
+            "---\nname: t\ndescription: d\n---\n",
+            "---\nname: t\ndescription: d\npermissions:\n  read: my-read-sc\n---\n",
+        ] {
+            let (fm, _) = parse_markdown(source).unwrap();
+            assert!(
+                validate_proxied_timeout(&fm, MAX_PROXIED_TIMEOUT_MINUTES * 10).is_ok(),
+                "a workflow without the proxy must not be limited: {source}"
+            );
+        }
     }
 
     #[test]
