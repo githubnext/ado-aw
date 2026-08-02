@@ -27,10 +27,10 @@ imports:
       min-integrity: approved
   - shared/pr-diff-data-fetch.md
 cache:
-  key: pr-prefetch-${{ github.event.pull_request.head.sha || github.event.issue.number }}
+  key: pr-prefetch-${{ github.event.pull_request.number || fromJSON(github.event.inputs.aw_context || '{}').item_number }}-${{ github.event.pull_request.head.sha || github.run_id }}
   path: /tmp/gh-aw/agent
   restore-keys:
-    - pr-prefetch-${{ github.event.pull_request.number || github.event.issue.number }}-
+    - pr-prefetch-${{ github.event.pull_request.number || fromJSON(github.event.inputs.aw_context || '{}').item_number }}-
 safe-outputs:
   messages:
     footer: "> 🧪 *Test quality analysis by [{workflow_name}]({run_url})*{ai_credits_suffix}{history_link}"
@@ -57,7 +57,7 @@ diff would actually **catch a regression**.
 ## Context
 
 - **Repository**: ${{ github.repository }}
-- **Pull request**: #${{ github.event.issue.number || github.event.pull_request.number }}
+- **Pull request**: see `pull-request-number` in the `<github-context>` block above — it is populated for both native PR events and centralized `/review` dispatches
 - **Triggered by**: @${{ github.actor }}
 
 ## How ado-aw is tested

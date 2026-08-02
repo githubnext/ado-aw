@@ -1,11 +1,19 @@
 name: PR Data Prefetch
 
 # Fetches the PR diff, metadata and existing inline review comments once per
-# commit and saves them to the Actions cache under `pr-prefetch-<head-sha>`.
+# commit and saves them to the Actions cache under
+# `pr-prefetch-<pr-number>-<head-sha>`.
+#
+# The PR number is part of the key so that the reviewers' `restore-keys` prefix
+# (`pr-prefetch-<pr-number>-`) can find the newest entry for a PR even when the
+# head SHA is unknown — which is the case for `/review` slash-command runs,
+# where the centralized router dispatches `workflow_dispatch` with no PR payload.
 #
 # The five `/review` reviewers all restore that cache and run the shared
 # `pre-agent-steps` from `.github/workflows/shared/pr-diff-data-fetch.md`, which
 # detects the pre-fetched files and skips its own GitHub API calls entirely.
+# The `pr-data-head-sha.txt` marker is what makes a prefix-matched restore safe:
+# a stale entry is detected and refetched rather than silently reviewed.
 #
 # This works because the workflow has no AI engine: it finishes in ~30-60s,
 # while the reviewers' activation jobs take ~60-90s. By the time their agent
@@ -83,5 +91,5 @@ jobs:
       - name: Save PR data to cache
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          key: pr-prefetch-${{ github.event.pull_request.head.sha }}
+          key: pr-prefetch-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
           path: /tmp/gh-aw/agent
