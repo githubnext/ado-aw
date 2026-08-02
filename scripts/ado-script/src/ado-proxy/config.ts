@@ -29,6 +29,15 @@ export interface ProxyConfig {
   readonly publicCaFile: string;
   /** Directory for the sanitized JSONL decision log, when configured. */
   readonly logDir?: string;
+  /**
+   * Port for direct TLS, where clients connect believing they are talking to
+   * Azure DevOps itself.
+   *
+   * Defaults to 443, since a client redirected by `--add-host` or pointed at
+   * the engine's hostname uses the ordinary HTTPS port. Configurable only so
+   * tests can run unprivileged.
+   */
+  readonly tlsPort: number;
   /** The scope and capability policy this proxy enforces. */
   readonly policy: ProxyPolicy;
 }
@@ -259,12 +268,14 @@ export function loadConfig(argv: readonly string[]): ProxyConfig {
 
   const listenPortRaw =
     readOption(argv, "listen-port", "AWF_POLICY_PROXY_LISTEN_PORT") ?? "11080";
+  const tlsPortRaw = readOption(argv, "tls-port", "ADO_PROXY_TLS_PORT") ?? "443";
 
   return {
     listenAddress:
       readOption(argv, "listen-address", "AWF_POLICY_PROXY_LISTEN_ADDRESS") ??
       "0.0.0.0",
     listenPort: parsePort(listenPortRaw, "--listen-port"),
+    tlsPort: parsePort(tlsPortRaw, "--tls-port"),
     upstreamProxy: requireOption(
       argv,
       "upstream-proxy",

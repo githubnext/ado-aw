@@ -35,7 +35,7 @@ import { parseCaMaterials, type CaMaterials } from "./ca.js";
 import { CATALOG_SCHEMA_VERSION } from "./catalog.js";
 import type { ProxyConfig, ProxyPolicy } from "./config.js";
 import { DecisionLog } from "./log.js";
-import { HEALTH_PATH, createProxyServer } from "./server.js";
+import { createDirectTlsServer, HEALTH_PATH, createProxyServer } from "./server.js";
 import { TokenSource } from "./token.js";
 
 /**
@@ -93,6 +93,7 @@ interface UpstreamCall {
 
 interface Harness {
   readonly proxyPort: number;
+  readonly directTlsPort: number;
   readonly proxyCaPem: string;
   readonly upstreamCalls: UpstreamCall[];
   readonly tunnelTargets: string[];
@@ -369,6 +370,49 @@ function plainHttpThroughProxy(proxyPort: number, target: string): Promise<Clien
   });
 }
 
+/**
+ * Connect straight to the direct-TLS listener, as a redirected client does.
+ *
+ * No CONNECT and no proxy configuration: this is what `--add-host` produces for
+ * the MCP, and what the `az` wrapper produces by being pointed at the engine.
+ */
+function directTlsRequest(
+  port: number,
+  host: string,
+  path: string,
+  options: { method?: string; headers?: Record<string, string>; ca: string },
+): Promise<ClientResponse> {
+  return new Promise((resolve, reject) => {
+    const secured = tlsConnect({ host: "127.0.0.1", port, servername: host, ca: options.ca }, () => {
+      const headerLines = Object.entries(options.headers ?? {})
+        .map(([name, value]) => `${name}: ${value}\r\n`)
+        .join("");
+      secured.write(
+        `${options.method ?? "GET"} ${path} HTTP/1.1\r\nHost: ${host}\r\n` +
+          `${headerLines}Connection: close\r\n\r\n`,
+      );
+    });
+
+    let raw = "";
+    secured.on("data", (chunk: Buffer) => {
+      raw += chunk.toString("utf8");
+    });
+    secured.on("error", reject);
+    secured.on("close", () => {
+      const headerEnd = raw.indexOf("\r\n\r\n");
+      const head = headerEnd === -1 ? raw : raw.slice(0, headerEnd);
+      const body = headerEnd === -1 ? "" : raw.slice(headerEnd + 4);
+      const headers: Record<string, string> = {};
+      for (const line of head.split("\r\n").slice(1)) {
+        const colon = line.indexOf(":");
+        if (colon === -1) continue;
+        headers[line.slice(0, colon).trim().toLowerCase()] = line.slice(colon + 1).trim();
+      }
+      resolve({ status: Number(head.split("\r\n")[0]?.split(" ")[1] ?? 0), body, headers });
+    });
+  });
+}
+
 beforeAll(async () => {
   if (!hasOpenssl) return;
   workdir = mkdtempSync(join(tmpdir(), "ado-proxy-e2e-"));
@@ -397,6 +441,8 @@ beforeAll(async () => {
   const config: ProxyConfig = {
     listenAddress: "127.0.0.1",
     listenPort: 0,
+    // 443 needs privileges; the direct-TLS listener is bound explicitly below.
+    tlsPort: 0,
     upstreamProxy: `http://127.0.0.1:${squidPort}`,
     tokenFile,
     publicCaFile: join(workdir, "ca.pem"),
@@ -413,8 +459,21 @@ beforeAll(async () => {
   servers.push(server);
   const proxyPort = await listen(server as never);
 
+  // The listener the redirected MCP and the `az` wrapper actually use: no
+  // CONNECT, just a TLS handshake straight to the port.
+  const tlsServer = createDirectTlsServer({
+    config,
+    ca: proxyCa,
+    tokens: new TokenSource(tokenFile),
+    log: new DecisionLog(join(workdir, "decisions")),
+    upstreamCa: upstreamCa.caCertPem,
+  });
+  servers.push(tlsServer);
+  const directTlsPort = await listen(tlsServer as never);
+
   harness = {
     proxyPort,
+    directTlsPort,
     proxyCaPem: proxyCa.caCertPem,
     upstreamCalls,
     tunnelTargets,
@@ -447,6 +506,46 @@ afterAll(async () => {
 const suite = hasOpenssl ? describe : describe.skip;
 
 suite("ado-proxy end to end", () => {
+  it("serves an allowed read over direct TLS, with no proxy configuration", async () => {
+    // How the redirected MCP and the `az` wrapper actually arrive: a TLS
+    // handshake straight to the port, host chosen by SNI, no CONNECT.
+    const before = harness.upstreamCalls.length;
+    const response = await directTlsRequest(
+      harness.directTlsPort,
+      "dev.azure.com",
+      `/${ORGANIZATION}/_apis/projects?api-version=7.1&stateFilter=all&$top=1&$skip=0`,
+      { ca: harness.proxyCaPem },
+    );
+
+    expect(response.status).toBe(200);
+    // The same enforcement applies as on the CONNECT path — one policy
+    // implementation, two ingresses.
+    expect(harness.upstreamCalls[before]?.authorization).toBe(`Bearer ${CANARY}`);
+    expect(response.body).not.toContain(CANARY);
+  });
+
+  it("denies over direct TLS without contacting the upstream", async () => {
+    const before = harness.upstreamCalls.length;
+    const response = await directTlsRequest(
+      harness.directTlsPort,
+      "dev.azure.com",
+      `/${ORGANIZATION}/_apis/serviceendpoint/endpoints?api-version=7.1`,
+      { ca: harness.proxyCaPem },
+    );
+    expect(response.status).toBe(403);
+    expect(harness.upstreamCalls.length).toBe(before);
+  });
+
+  it("refuses a TLS handshake for a host it does not police", async () => {
+    // No leaf exists for it, so there is nothing to impersonate — and serving
+    // one would mean intercepting traffic the catalog has no rules for.
+    await expect(
+      directTlsRequest(harness.directTlsPort, "example.test", "/", {
+        ca: harness.proxyCaPem,
+      }),
+    ).rejects.toThrow();
+  });
+
   it("injects the bearer only on an allowed read, and strips the client's", async () => {
     const before = harness.upstreamCalls.length;
     const response = await requestThroughProxy(
@@ -545,8 +644,6 @@ suite("ado-proxy end to end", () => {
   });
 
   it("answers the readiness probe without revealing policy detail", async () => {
-    // AWF polls this before starting the agent so the agent cannot race a
-    // proxy that has not finished minting its CA.
     const response = await plainHttpThroughProxy(harness.proxyPort, HEALTH_PATH);
     expect(response.status).toBe(200);
     expect(JSON.parse(response.body)).toEqual({ status: "ok" });

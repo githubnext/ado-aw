@@ -18,7 +18,7 @@
 import { randomUUID } from "node:crypto";
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse, request as httpRequest } from "node:http";
 import type { Server } from "node:http";
-import type { Socket } from "node:net";
+import { createServer as createNetServer, type Server as NetServer, type Socket } from "node:net";
 import { connect as tlsConnect, createSecureContext, createServer as createTlsServer, type TLSSocket } from "node:tls";
 
 import type { CaMaterials } from "./ca.js";
@@ -418,7 +418,12 @@ async function handleProtected(
  * Sockets are handed to an inner HTTP server so Node parses the tunnelled
  * requests for us.
  */
-function createInterceptor(deps: ProxyDeps): (socket: Socket, host: string) => void {
+function createInterceptor(deps: ProxyDeps): {
+  /** Hand an already-accepted socket to the TLS terminator. */
+  attach: (socket: Socket, host: string) => void;
+  /** Accept a socket whose host is not yet known — SNI decides. */
+  accept: (socket: Socket) => void;
+} {
   const inner = createHttpServer((request, response) => {
     const socket = request.socket as TLSSocket;
     const host = canonicalizeHost(socket.servername || "");
@@ -438,8 +443,10 @@ function createInterceptor(deps: ProxyDeps): (socket: Socket, host: string) => v
       const leaf = deps.ca.leaves.get(canonicalizeHost(servername));
       if (leaf === undefined) {
         // Only compiler-pinned protected hosts have leaves. Anything else
-        // reaching the interceptor is a mismatch between the CONNECT target and
-        // the SNI, which is a smuggling attempt, not a supported client.
+        // reaching the interceptor is either a CONNECT-target/SNI mismatch or a
+        // client that resolved us for a host we do not police — neither is
+        // supported, and serving it would mean impersonating something the
+        // policy has no rules for.
         callback(new Error(`no certificate for ${servername}`));
         return;
       }
@@ -447,13 +454,19 @@ function createInterceptor(deps: ProxyDeps): (socket: Socket, host: string) => v
     },
   });
   tls.on("secureConnection", (socket) => inner.emit("connection", socket));
+  // A handshake failure (unknown SNI, untrusting client) must not be an
+  // unhandled 'error' event; the process serves every other client too.
+  tls.on("tlsClientError", (_error, socket) => socket.destroy());
 
-  return (socket: Socket, host: string) => {
-    if (!deps.ca.leaves.has(host)) {
-      socket.destroy();
-      return;
-    }
-    tls.emit("connection", socket);
+  return {
+    attach: (socket: Socket, host: string) => {
+      if (!deps.ca.leaves.has(host)) {
+        socket.destroy();
+        return;
+      }
+      tls.emit("connection", socket);
+    },
+    accept: (socket: Socket) => tls.emit("connection", socket),
   };
 }
 
@@ -534,7 +547,7 @@ export function createProxyServer(deps: ProxyDeps): Server {
       }
       if (head.length > 0) socket.unshift(head);
       socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-      intercept(socket, host);
+      intercept.attach(socket, host);
       return;
     }
     void tunnel(deps, socket, head, host, port);
@@ -545,5 +558,32 @@ export function createProxyServer(deps: ProxyDeps): Server {
     (socket as Socket).destroy();
   });
 
+  return server;
+}
+
+/**
+ * Create the direct-TLS listener.
+ *
+ * The proxy-style listener above expects HTTP — a `CONNECT`, or an
+ * absolute-form request. But the two production clients do not use a proxy at
+ * all: the Azure DevOps MCP is redirected by `--add-host`, and the `az` wrapper
+ * is pointed at the engine's own hostname. Both therefore open a TLS
+ * connection *directly* and would otherwise hand raw handshake bytes to an
+ * HTTP parser.
+ *
+ * The host is chosen by SNI rather than a `CONNECT` target, and everything
+ * after the handshake — normalization, catalog enforcement, credential
+ * injection, response filtering — is the identical code path. There is no
+ * second policy implementation.
+ */
+export function createDirectTlsServer(deps: ProxyDeps): NetServer {
+  const intercept = createInterceptor(deps);
+  const server = createNetServer((socket) => {
+    // Errors before the handshake completes belong to the raw socket, which has
+    // no other handler; without this a client that resets mid-handshake would
+    // take the process down.
+    socket.on("error", () => socket.destroy());
+    intercept.accept(socket);
+  });
   return server;
 }

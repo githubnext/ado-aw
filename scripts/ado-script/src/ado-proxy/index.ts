@@ -29,7 +29,7 @@
 import { CaError, publishCaCertificate, readCaMaterials } from "./ca.js";
 import { ConfigError, loadConfig, type ProxyConfig } from "./config.js";
 import { DecisionLog } from "./log.js";
-import { createProxyServer } from "./server.js";
+import { createDirectTlsServer, createProxyServer } from "./server.js";
 import { TokenSource } from "./token.js";
 import { UpstreamError, parseUpstreamProxy } from "./upstream.js";
 
@@ -72,20 +72,30 @@ export async function run(argv: readonly string[]): Promise<number> {
     return 1;
   }
 
-  const server = createProxyServer({
+  const deps = {
     config,
     ca,
     tokens: new TokenSource(config.tokenFile),
     log: new DecisionLog(config.logDir),
-  });
+  };
+  const server = createProxyServer(deps);
+  const tlsServer = createDirectTlsServer(deps);
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(config.listenPort, config.listenAddress, resolve);
   });
 
+  // The direct-TLS listener is what the redirected MCP and the `az` wrapper
+  // actually use; the proxy-style listener above remains for CONNECT clients.
+  await new Promise<void>((resolve, reject) => {
+    tlsServer.once("error", reject);
+    tlsServer.listen(config.tlsPort, config.listenAddress, resolve);
+  });
+
   report(
-    `listening on ${config.listenAddress}:${config.listenPort}; ` +
+    `listening on ${config.listenAddress}:${config.listenPort} (proxy) and ` +
+      `${config.listenAddress}:${config.tlsPort} (direct TLS); ` +
       `org=${config.policy.organization} project=${config.policy.project} ` +
       `capabilities=${config.policy.capabilities.join(",") || "(none)"} ` +
       `protected=${config.policy.protected_hosts.join(",")}`,
@@ -96,7 +106,13 @@ export async function run(argv: readonly string[]): Promise<number> {
   await new Promise<void>((resolve) => {
     const shutdown = (signal: string): void => {
       report(`received ${signal}; shutting down`);
-      server.close(() => resolve());
+      let remaining = 2;
+      const done = (): void => {
+        remaining -= 1;
+        if (remaining === 0) resolve();
+      };
+      server.close(done);
+      tlsServer.close(done);
       setTimeout(resolve, 5_000).unref();
     };
     process.once("SIGTERM", () => shutdown("SIGTERM"));
