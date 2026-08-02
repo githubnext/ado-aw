@@ -1218,7 +1218,7 @@ Body
 
     #[tokio::test]
     async fn relative_local_import_source_resolves_repository_root() {
-        let input = Path::new("tests/compiler-smoke-e2e/custom-safe-output.md");
+        let input = Path::new("tests/smoke/custom-safe-output.md");
         let (front_matter, _) = build_pipeline_ir(input).await.unwrap();
 
         assert!(front_matter.imports.is_empty());

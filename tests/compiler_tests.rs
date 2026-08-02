@@ -9994,7 +9994,7 @@ fn custom_safe_output_secret_scope_excludes_agent_and_detection() {
 fn candidate_custom_safe_output_fixture_compiles_with_local_component() {
     let repo = tempfile::tempdir().expect("create candidate fixture repo");
     let source_rel = PathBuf::from("tests")
-        .join("compiler-smoke-e2e")
+        .join("smoke")
         .join("custom-safe-output.md");
     let source = repo.path().join(&source_rel);
     fs::create_dir_all(source.parent().unwrap()).expect("create source directory");
@@ -10005,7 +10005,7 @@ fn candidate_custom_safe_output_fixture_compiles_with_local_component() {
     .expect("copy candidate source");
 
     let component_rel = PathBuf::from("tests")
-        .join("compiler-smoke-e2e")
+        .join("smoke")
         .join("component-fixture")
         .join("components")
         .join("custom-build-tags")
@@ -10015,7 +10015,7 @@ fn candidate_custom_safe_output_fixture_compiles_with_local_component() {
     fs::copy(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests")
-            .join("compiler-smoke-e2e")
+            .join("smoke")
             .join("component-fixture")
             .join("components")
             .join("custom-build-tags")

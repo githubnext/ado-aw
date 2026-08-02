@@ -1,6 +1,6 @@
 /**
- * Post-compile assertions run against each fixture's freshly regenerated
- * `*.lock.yml` inside the detached worktree, before anything is committed or
+ * Post-compile assertions run against each case's freshly regenerated
+ * pipeline YAML inside the detached worktree, before anything is committed or
  * pushed.
  *
  * Test-harness module; not shipped in `ado-script.zip`.
@@ -11,20 +11,82 @@ import { parseAllDocuments } from "yaml";
  * Release URLs the candidate lane must never reference — the whole point of
  * pinning `supply-chain.pipeline-artifact` is to source every binary
  * (compiler, AWF, ado-script) from the current build's own artifact instead
- * of a public release.
+ * of a public release. In `released` mode the polarity is inverted: at least
+ * one of these must be present, otherwise the run silently stopped exercising
+ * release packaging.
  */
-const FORBIDDEN_URL_SNIPPETS = [
+const RELEASE_URL_SNIPPETS = [
   "github.com/githubnext/ado-aw/releases",
   "github.com/github/gh-aw-firewall/releases",
 ] as const;
 
 /** Throws if the compiled YAML still references a public release download URL. */
 export function assertNoForbiddenReleaseUrls(yamlText: string, label: string): void {
-  for (const snippet of FORBIDDEN_URL_SNIPPETS) {
+  for (const snippet of RELEASE_URL_SNIPPETS) {
     if (yamlText.includes(snippet)) {
       throw new Error(
-        `${label}: compiled pipeline still references a release URL ('${snippet}') — the candidate lane must source binaries exclusively from the pinned pipeline artifact`,
+        `${label}: compiled pipeline still references a release URL ('${snippet}') — candidate mode must source binaries exclusively from the pinned pipeline artifact`,
       );
+    }
+  }
+}
+
+/**
+ * Throws unless the compiled YAML references a public release download URL.
+ *
+ * The mirror image of {@link assertNoForbiddenReleaseUrls}, and the reason
+ * released mode can replace the retired committed lock files: it proves the
+ * staged pipeline will actually fetch released assets at run time.
+ */
+export function assertReleaseUrlsPresent(yamlText: string, label: string): void {
+  if (!RELEASE_URL_SNIPPETS.some((snippet) => yamlText.includes(snippet))) {
+    throw new Error(
+      `${label}: compiled pipeline references no release URL (expected one of ${RELEASE_URL_SNIPPETS.join(", ")}) — released mode must exercise release asset download`,
+    );
+  }
+}
+
+/**
+ * Assert a staged case carries no trigger of any kind.
+ *
+ * Load-bearing under the lane model: every case is staged to the same
+ * `.smoke/pipeline.yml` path against the same lane definition, so a case that
+ * compiled a real `trigger:`/`pr:`/`schedules:` block would cause its ref push
+ * to CI-trigger the lane *in addition to* the API-queued run — double-queueing
+ * the lane and burning parallel jobs.
+ *
+ * Applies to `raw` cases too, where no front-matter transform runs at all.
+ */
+export function assertNoTriggers(yamlText: string, label: string): void {
+  const docs = parseAllDocuments(yamlText, { merge: false }).map((d) => d.toJS());
+  for (const doc of docs) {
+    if (!doc || typeof doc !== "object" || Array.isArray(doc)) continue;
+    const root = doc as Record<string, unknown>;
+
+    for (const key of ["trigger", "pr"] as const) {
+      if (root[key] !== "none") {
+        throw new Error(
+          `${label}: staged pipeline must declare '${key}: none', got ${JSON.stringify(root[key] ?? null)}`,
+        );
+      }
+    }
+
+    if (root.schedules !== undefined) {
+      throw new Error(
+        `${label}: staged pipeline must not declare 'schedules:' — the orchestrator owns scheduling`,
+      );
+    }
+
+    const resources = root.resources as Record<string, unknown> | undefined;
+    const pipelines = resources?.pipelines;
+    if (Array.isArray(pipelines)) {
+      for (const entry of pipelines) {
+        if (entry && typeof entry === "object" && (entry as Record<string, unknown>).trigger !== undefined) {
+          throw new Error(
+            `${label}: staged pipeline must not declare a 'resources.pipelines[].trigger'`,
+          );
+        }
+      }
     }
   }
 }

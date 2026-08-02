@@ -5,7 +5,7 @@ import { renderResultsTable } from "../report.js";
 
 function result(overrides: Partial<FixtureBuildResult>): FixtureBuildResult {
   return {
-    name: "canary",
+    caseId: "canary", lane: "agentic",
     definitionId: 2601,
     status: "succeeded",
     durationMs: 12_345,
@@ -15,13 +15,14 @@ function result(overrides: Partial<FixtureBuildResult>): FixtureBuildResult {
 }
 
 describe("renderResultsTable", () => {
-  it("renders a header row and one row per fixture", () => {
+  it("renders a header row and one row per case", () => {
     const table = renderResultsTable([
-      result({ name: "canary", buildId: 1, url: "https://x/1", result: "succeeded" }),
-      result({ name: "azure-cli", definitionId: 2602, buildId: 2, url: "https://x/2", result: "succeeded" }),
+      result({ caseId: "canary", lane: "agentic", buildId: 1, url: "https://x/1", result: "succeeded" }),
+      result({ caseId: "azure-cli", lane: "agentic", definitionId: 2602, buildId: 2, url: "https://x/2", result: "succeeded" }),
     ]);
     const lines = table.split("\n");
-    expect(lines[0]).toMatch(/fixture/);
+    expect(lines[0]).toMatch(/case/);
+    expect(lines[0]).toMatch(/lane/);
     expect(lines[0]).toMatch(/definition/);
     expect(lines[0]).toMatch(/result/);
     expect(table).toContain("canary");
@@ -32,8 +33,8 @@ describe("renderResultsTable", () => {
 
   it("preserves the caller's declaration order", () => {
     const table = renderResultsTable([
-      result({ name: "smoke-failure-reporter", definitionId: 2604 }),
-      result({ name: "canary", definitionId: 2601 }),
+      result({ caseId: "smoke-failure-reporter", lane: "agentic", definitionId: 2604 }),
+      result({ caseId: "canary", lane: "agentic", definitionId: 2601 }),
     ]);
     const reporterIdx = table.indexOf("smoke-failure-reporter");
     const canaryIdx = table.indexOf("canary");

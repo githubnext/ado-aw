@@ -1,8 +1,21 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 
 const mockCalls: string[] = [];
-const compiledFixturePaths: string[] = [];
-let queuedFixtureNames: string[] = [];
+const compiledCasePaths: string[] = [];
+const stagedWrites: { to: string; contents: string }[] = [];
+let queuedCaseIds: string[] = [];
+let queuedRequests: { caseId: string; lane: string; definitionId: number; sourceBranch: string }[] = [];
+let deletedRefs: string[] = [];
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = join(HERE, "..", "..", "..", "..", "..");
+/** The REAL shipped manifest, so these tests fail if `cases.json` drifts. */
+const REAL_MANIFEST = readFileSync(join(REPO_ROOT, "tests", "smoke", "cases.json"), "utf8");
+
+const WORKTREE = "C:\\tmp\\ado-aw-smoke-xyz";
 
 const baseEnv = {
   SYSTEM_COLLECTIONURI: "https://dev.azure.com/org/",
@@ -13,21 +26,33 @@ const baseEnv = {
   BUILD_SOURCEVERSION: "basecommit",
   BUILD_SOURCESDIRECTORY: "C:\\repo",
   SYSTEM_DEFINITIONID: "2560",
-  COMPILER_SMOKE_ADO_AW_BIN: "C:\\bin\\ado-aw.exe",
-  COMPILER_SMOKE_ARTIFACT_NAME: "ado-aw-candidate",
-  COMPILER_SMOKE_MIRROR_REPO: "ado-aw-mirror",
-  COMPILER_SMOKE_CANARY_DEFINITION_ID: "3001",
-  COMPILER_SMOKE_AZURE_CLI_DEFINITION_ID: "3002",
-  COMPILER_SMOKE_NOOP_TARGET_DEFINITION_ID: "3003",
-  COMPILER_SMOKE_REPORTER_DEFINITION_ID: "3004",
-  COMPILER_SMOKE_CUSTOM_SAFE_OUTPUT_DEFINITION_ID: "3005",
-  COMPILER_SMOKE_MULTI_REPO_DEFINITION_ID: "3006",
-  COMPILER_SMOKE_CHILD_TIMEOUT_MS: "5000",
-  COMPILER_SMOKE_POLL_MS: "1",
+  SMOKE_ADO_AW_BIN: "C:\\bin\\ado-aw.exe",
+  SMOKE_ARTIFACT_NAME: "ado-aw-candidate",
+  SMOKE_MIRROR_REPO: "ado-aw-mirror",
+  SMOKE_COMPILER_SOURCE: "candidate",
+  SMOKE_LANE_AGENTIC_DEFINITION_ID: "3001",
+  SMOKE_LANE_DEBUG_DEFINITION_ID: "3002",
+  SMOKE_LANE_INFRA_DEFINITION_ID: "3003",
+  SMOKE_CHILD_TIMEOUT_MS: "5000",
+  SMOKE_POLL_MS: "1",
 };
 
+/**
+ * Compiled output shaped enough to satisfy every candidate-mode assertion.
+ *
+ * Carries explicit `trigger: none` / `pr: none`, because that is what
+ * `ado-aw compile` emits once `prepareCaseSource` has stripped the `on:`
+ * block — `on:` is the complete declaration of when a pipeline runs, so its
+ * absence compiles to a manual / API-queued-only pipeline. The harness no
+ * longer patches these keys in; `assertNoTriggers` verifies the compiler
+ * produced them, so a compiler that regressed to omitting them (which ADO
+ * reads as "CI on every branch") fails the run instead of silently
+ * double-queueing the lane.
+ */
 function specificRunYaml(): string {
   return `
+trigger: none
+pr: none
 jobs:
   - job: Agent
     steps:
@@ -61,15 +86,11 @@ vi.mock("../ado-rest.js", () => {
           mockCalls.push("getArtifact");
           return { name: "ado-aw-candidate" };
         }),
-        getBuild: vi.fn(async () => ({
-          status: "completed",
-          result: "succeeded",
-        })),
-        getBuildTags: vi.fn(async (buildId: number) => [
-          `ado-aw-custom-job-${buildId}`,
-        ]),
+        getBuild: vi.fn(async () => ({ status: "completed", result: "succeeded" })),
+        getBuildTags: vi.fn(async (buildId: number) => [`ado-aw-custom-job-${buildId}`]),
         queueBuild: vi.fn(async () => ({ id: 1 })),
         cancelBuild: vi.fn(async () => {}),
+        addBuildTags: vi.fn(async () => {}),
         buildUrl: (id: number) => `https://example/${id}`,
       };
     }),
@@ -91,22 +112,14 @@ vi.mock("../git.js", async (importOriginal) => {
     removeWorktree: vi.fn(async () => {
       mockCalls.push("removeWorktree");
     }),
+    resetWorktree: vi.fn(async () => {
+      mockCalls.push("resetWorktree");
+    }),
+    // Only the paths one case is allowed to touch — the harness resets
+    // between cases, so a per-case commit never sees a sibling's changes.
     worktreeChangedFiles: vi.fn(async () => {
       mockCalls.push("worktreeChangedFiles");
-      return [
-        "tests/safe-outputs/canary.md",
-        "tests/safe-outputs/canary.lock.yml",
-        "tests/safe-outputs/azure-cli.md",
-        "tests/safe-outputs/azure-cli.lock.yml",
-        "tests/safe-outputs/noop-target.md",
-        "tests/safe-outputs/noop-target.lock.yml",
-        "tests/safe-outputs/smoke-failure-reporter.md",
-        "tests/safe-outputs/smoke-failure-reporter.lock.yml",
-        "tests/compiler-smoke-e2e/custom-safe-output.md",
-        "tests/compiler-smoke-e2e/custom-safe-output.lock.yml",
-        "tests/compiler-smoke-e2e/multi-repo.md",
-        "tests/compiler-smoke-e2e/multi-repo.lock.yml",
-      ];
+      return [".smoke/pipeline.yml"];
     }),
     commitAll: vi.fn(async () => {
       mockCalls.push("commitAll");
@@ -118,8 +131,9 @@ vi.mock("../git.js", async (importOriginal) => {
     verifyRemoteRef: vi.fn(async () => {
       mockCalls.push("verifyRemoteRef");
     }),
-    deleteRemoteRef: vi.fn(async () => {
-      mockCalls.push("deleteRemoteRef");
+    deleteRemoteRefs: vi.fn(async (opts: { refs: readonly string[] }) => {
+      mockCalls.push("deleteRemoteRefs");
+      deletedRefs.push(...opts.refs);
     }),
     listCandidateRefs: vi.fn(async () => {
       mockCalls.push("listCandidateRefs");
@@ -131,7 +145,7 @@ vi.mock("../git.js", async (importOriginal) => {
 vi.mock("../compile-cli.js", () => ({
   compileAndCheck: vi.fn(async (opts: { relMd: string }) => {
     mockCalls.push("compileAndCheck");
-    compiledFixturePaths.push(opts.relMd);
+    compiledCasePaths.push(opts.relMd);
     return { ok: true, stdout: "", stderr: "" };
   }),
 }));
@@ -141,15 +155,20 @@ vi.mock("../runner.js", async (importOriginal) => {
   return {
     ...actual,
     runFixtures: vi.fn(
-      async (_client: unknown, requests: { name: string }[]) => {
+      async (
+        _client: unknown,
+        requests: { caseId: string; lane: string; definitionId: number; sourceBranch: string }[],
+      ) => {
         mockCalls.push("runFixtures");
-        queuedFixtureNames = requests.map((request) => request.name);
+        queuedCaseIds = requests.map((request) => request.caseId);
+        queuedRequests = requests.map((r) => ({ ...r }));
         return {
           ok: true,
           allTerminal: true,
           results: requests.map((r) => ({
-            name: r.name,
-            definitionId: 0,
+            caseId: r.caseId,
+            lane: r.lane,
+            definitionId: r.definitionId,
             buildId: 1,
             url: "https://example/1",
             status: "succeeded" as const,
@@ -167,36 +186,42 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   return {
     ...actual,
-    mkdtemp: vi.fn(async () => "C:\\tmp\\compiler-smoke-xyz"),
+    mkdtemp: vi.fn(async () => WORKTREE),
+    mkdir: vi.fn(async () => undefined),
     readFile: vi.fn(async (path: string) => {
-      if (String(path).endsWith(".lock.yml")) {
-        return specificRunYaml();
-      }
-      return "---\nname: fixture\n---\nBody.\n";
+      const p = String(path);
+      // Serve the REAL manifest so these tests exercise the shipped cases.
+      if (p.endsWith("cases.json")) return REAL_MANIFEST;
+      if (p.endsWith(".lock.yml") || p.endsWith(".yml")) return specificRunYaml();
+      return "---\nname: case\n---\nBody.\n";
     }),
-    writeFile: vi.fn(async () => {}),
+    writeFile: vi.fn(async (path: string, contents: string) => {
+      const p = String(path);
+      if (p.endsWith("pipeline.yml")) stagedWrites.push({ to: p, contents: String(contents) });
+    }),
     rm: vi.fn(async () => {}),
   };
 });
 
 beforeEach(() => {
   mockCalls.length = 0;
-  compiledFixturePaths.length = 0;
-  queuedFixtureNames = [];
+  compiledCasePaths.length = 0;
+  stagedWrites.length = 0;
+  queuedCaseIds = [];
+  queuedRequests = [];
+  deletedRefs = [];
   vi.clearAllMocks();
 });
 
-describe("compiler-smoke-e2e index.main (happy path)", () => {
-  it("checks artifact visibility before any git work, and deletes the ref before removing the worktree", async () => {
+describe("smoke-e2e index.main (happy path, candidate mode)", () => {
+  it("gates on artifact visibility, stages per case, and deletes refs before removing the worktree", async () => {
     process.env = { ...process.env, ...baseEnv, VITEST: "true" };
     const { main } = await import("../index.js");
     const code = await main();
     expect(code).toBe(0);
 
     expect(mockCalls.indexOf("getArtifact")).toBeGreaterThanOrEqual(0);
-    expect(mockCalls.indexOf("getArtifact")).toBeLessThan(
-      mockCalls.indexOf("verifyLocalCommit"),
-    );
+    expect(mockCalls.indexOf("getArtifact")).toBeLessThan(mockCalls.indexOf("verifyLocalCommit"));
     expect(mockCalls.indexOf("verifyLocalCommit")).toBeLessThan(
       mockCalls.indexOf("createDetachedWorktree"),
     );
@@ -206,52 +231,110 @@ describe("compiler-smoke-e2e index.main (happy path)", () => {
     expect(mockCalls.indexOf("compileAndCheck")).toBeLessThan(
       mockCalls.indexOf("worktreeChangedFiles"),
     );
-    expect(mockCalls.indexOf("worktreeChangedFiles")).toBeLessThan(
-      mockCalls.indexOf("commitAll"),
-    );
-    expect(mockCalls.indexOf("commitAll")).toBeLessThan(
-      mockCalls.indexOf("pushCandidate"),
-    );
-    expect(mockCalls.indexOf("pushCandidate")).toBeLessThan(
-      mockCalls.indexOf("verifyRemoteRef"),
-    );
-    expect(mockCalls.indexOf("verifyRemoteRef")).toBeLessThan(
-      mockCalls.indexOf("runFixtures"),
-    );
-    expect(compiledFixturePaths).toEqual([
-      "tests/safe-outputs/canary.md",
-      "tests/safe-outputs/azure-cli.md",
-      "tests/safe-outputs/noop-target.md",
-      "tests/safe-outputs/smoke-failure-reporter.md",
-      "tests/compiler-smoke-e2e/custom-safe-output.md",
-      "tests/compiler-smoke-e2e/multi-repo.md",
-    ]);
-    expect(compiledFixturePaths).not.toContain("tests/safe-outputs/janitor.md");
-    expect(queuedFixtureNames).toEqual([
+    expect(mockCalls.indexOf("worktreeChangedFiles")).toBeLessThan(mockCalls.indexOf("commitAll"));
+    expect(mockCalls.indexOf("commitAll")).toBeLessThan(mockCalls.indexOf("pushCandidate"));
+    expect(mockCalls.indexOf("pushCandidate")).toBeLessThan(mockCalls.indexOf("verifyRemoteRef"));
+    expect(mockCalls.indexOf("verifyRemoteRef")).toBeLessThan(mockCalls.indexOf("runFixtures"));
+
+    // Candidate mode runs exactly the cases the manifest declares for it.
+    expect(queuedCaseIds).toEqual([
       "canary",
       "azure-cli",
       "noop-target",
-      "smoke-failure-reporter",
       "custom-safe-output",
       "multi-repo",
     ]);
-    expect(queuedFixtureNames).not.toContain("janitor");
+    expect(queuedCaseIds).not.toContain("janitor");
+    expect(queuedCaseIds).not.toContain("smoke-failure-reporter");
+    expect(compiledCasePaths).toEqual([
+      "tests/safe-outputs/canary.md",
+      "tests/safe-outputs/azure-cli.md",
+      "tests/safe-outputs/noop-target.md",
+      "tests/smoke/custom-safe-output.md",
+      "tests/smoke/multi-repo.md",
+    ]);
 
-    // Cleanup ordering: the remote candidate ref must be deleted BEFORE the
-    // local worktree is removed (never leave the ref hanging around).
-    expect(mockCalls.indexOf("deleteRemoteRef")).toBeGreaterThanOrEqual(0);
-    expect(mockCalls.indexOf("removeWorktree")).toBeGreaterThanOrEqual(0);
-    expect(mockCalls.indexOf("deleteRemoteRef")).toBeLessThan(
-      mockCalls.indexOf("removeWorktree"),
-    );
+    // Cleanup ordering: remote refs deleted BEFORE the local worktree is removed.
+    expect(mockCalls.indexOf("deleteRemoteRefs")).toBeGreaterThanOrEqual(0);
+    expect(mockCalls.indexOf("deleteRemoteRefs")).toBeLessThan(mockCalls.indexOf("removeWorktree"));
   }, 60_000);
+
+  it("gives every case its own ref and stages all of them to the one fixed path", async () => {
+    process.env = { ...process.env, ...baseEnv, VITEST: "true" };
+    const { main } = await import("../index.js");
+    expect(await main()).toBe(0);
+
+    expect(queuedRequests.map((r) => r.sourceBranch)).toEqual([
+      "refs/heads/ado-aw-smoke-candidate/630001/canary",
+      "refs/heads/ado-aw-smoke-candidate/630001/azure-cli",
+      "refs/heads/ado-aw-smoke-candidate/630001/noop-target",
+      "refs/heads/ado-aw-smoke-candidate/630001/custom-safe-output",
+      "refs/heads/ado-aw-smoke-candidate/630001/multi-repo",
+    ]);
+    // Every case is staged to the SAME path — the ref is what distinguishes them.
+    expect(stagedWrites.length).toBe(5);
+    for (const write of stagedWrites) {
+      expect(write.to).toBe(join(WORKTREE, "candidate", ".smoke", "pipeline.yml"));
+      // The compiler emits no trigger keys once `on:` is stripped, and a
+      // MISSING `trigger:` means "CI on every branch" in ADO — which would
+      // let this ref push queue the shared lane on top of the API-queued run.
+      expect(write.contents).toMatch(/^trigger: none$/m);
+      expect(write.contents).toMatch(/^pr: none$/m);
+    }
+    expect(deletedRefs).toEqual(queuedRequests.map((r) => r.sourceBranch));
+  });
+
+  it("routes every candidate case to its lane definition, not a per-case definition", async () => {
+    process.env = { ...process.env, ...baseEnv, VITEST: "true" };
+    const { main } = await import("../index.js");
+    expect(await main()).toBe(0);
+
+    for (const request of queuedRequests) {
+      expect(request.lane).toBe("agentic");
+      expect(request.definitionId).toBe(3001);
+    }
+  });
+
+  it("resets the worktree between cases so each commit is a sibling of BUILD_SOURCEVERSION", async () => {
+    process.env = { ...process.env, ...baseEnv, VITEST: "true" };
+    const { main } = await import("../index.js");
+    expect(await main()).toBe(0);
+
+    const gitModule = await import("../git.js");
+    const resets = vi.mocked(gitModule.resetWorktree).mock.calls;
+    expect(resets.length).toBe(5);
+    for (const call of resets) {
+      expect(call[0]).toMatchObject({ commitish: "basecommit" });
+    }
+  });
 });
 
-describe("compiler-smoke-e2e index.main (unexpected path guard)", () => {
+describe("smoke-e2e index.main (released mode)", () => {
+  it("skips the artifact gate and runs the released-mode case set", async () => {
+    process.env = {
+      ...process.env,
+      ...baseEnv,
+      SMOKE_COMPILER_SOURCE: "released",
+      VITEST: "true",
+    };
+    const { main } = await import("../index.js");
+    // Released mode asserts release URLs are PRESENT; the fake compiled YAML
+    // has none, so staging is expected to fail closed rather than silently pass.
+    const code = await main();
+    expect(code).toBe(1);
+
+    // The artifact-visibility gate is candidate-only: there is no candidate
+    // artifact to gate on in released mode.
+    expect(mockCalls).not.toContain("getArtifact");
+    expect(mockCalls).toContain("createDetachedWorktree");
+  });
+});
+
+describe("smoke-e2e index.main (unexpected path guard)", () => {
   it("refuses to push and never deletes a ref that was never pushed, but still removes the worktree", async () => {
     const gitModule = await import("../git.js");
     vi.mocked(gitModule.worktreeChangedFiles).mockResolvedValueOnce([
-      "tests/safe-outputs/canary.md",
+      ".smoke/pipeline.yml",
       "src/main.rs", // unexpected — must abort before any commit/push
     ]);
 
@@ -262,35 +345,32 @@ describe("compiler-smoke-e2e index.main (unexpected path guard)", () => {
 
     expect(mockCalls).not.toContain("commitAll");
     expect(mockCalls).not.toContain("pushCandidate");
-    expect(mockCalls).not.toContain("deleteRemoteRef");
+    expect(mockCalls).not.toContain("deleteRemoteRefs");
     expect(mockCalls).toContain("removeWorktree");
   });
 });
 
-describe("compiler-smoke-e2e index.main (stageFixtures reads from the worktree, not BUILD_SOURCESDIRECTORY)", () => {
-  it("reads every fixture markdown source from the detached worktree — never from BUILD_SOURCESDIRECTORY (which may sit at a different commit when verifyLocalCommit falls back to the object-existence check)", async () => {
+describe("smoke-e2e index.main (sources read from the worktree, not BUILD_SOURCESDIRECTORY)", () => {
+  it("reads every case source from the detached worktree", async () => {
     process.env = { ...process.env, ...baseEnv, VITEST: "true" };
     const { main } = await import("../index.js");
     const fsModule = await import("node:fs/promises");
-    const code = await main();
-    expect(code).toBe(0);
+    expect(await main()).toBe(0);
 
-    const mdReadPaths = vi
+    const readPaths = vi
       .mocked(fsModule.readFile)
       .mock.calls.map((call) => String(call[0]))
-      .filter((p) => p.endsWith(".md"));
-    expect(mdReadPaths.length).toBeGreaterThan(0);
-    for (const p of mdReadPaths) {
-      // The worktree lives under the mocked mkdtemp() result, never under
-      // BUILD_SOURCESDIRECTORY ("C:\repo").
-      expect(p.startsWith("C:\\tmp\\compiler-smoke-xyz")).toBe(true);
+      .filter((p) => p.endsWith(".md") || p.endsWith("cases.json"));
+    expect(readPaths.length).toBeGreaterThan(0);
+    for (const p of readPaths) {
+      expect(p.startsWith(WORKTREE)).toBe(true);
       expect(p.startsWith("C:\\repo")).toBe(false);
     }
   });
 });
 
-describe("compiler-smoke-e2e index.main (PR base-ref regression — Fix #1)", () => {
-  it("never fetches BUILD_SOURCEBRANCH from the mirror for a GitHub PR build; the worktree is based on the local BUILD_SOURCEVERSION", async () => {
+describe("smoke-e2e index.main (PR base-ref regression)", () => {
+  it("never fetches BUILD_SOURCEBRANCH from the mirror for a GitHub PR build", async () => {
     process.env = {
       ...process.env,
       ...baseEnv,
@@ -300,79 +380,89 @@ describe("compiler-smoke-e2e index.main (PR base-ref regression — Fix #1)", ()
     };
     const { main } = await import("../index.js");
     const gitModule = await import("../git.js");
-    const code = await main();
-    expect(code).toBe(0);
+    expect(await main()).toBe(0);
 
-    // verifyLocalCommit must be asked to verify the LOCAL BUILD_SOURCEVERSION
-    // — never the PR ref.
-    expect(
-      vi.mocked(gitModule.verifyLocalCommit).mock.calls[0]?.[0],
-    ).toMatchObject({
+    expect(vi.mocked(gitModule.verifyLocalCommit).mock.calls[0]?.[0]).toMatchObject({
       cwd: "C:\\repo",
       expectedSha: "pr-head-sha",
     });
-    // The worktree is created directly from that same local commit; it must
-    // never receive `refs/pull/123/merge` as the commitish.
-    const worktreeArgs = vi.mocked(gitModule.createDetachedWorktree).mock
-      .calls[0]?.[0] as { commitish?: string } | undefined;
+    const worktreeArgs = vi.mocked(gitModule.createDetachedWorktree).mock.calls[0]?.[0] as
+      | { commitish?: string }
+      | undefined;
     expect(worktreeArgs?.commitish).toBe("pr-head-sha");
     expect(worktreeArgs?.commitish).not.toBe("refs/pull/123/merge");
   });
 });
 
-describe("compiler-smoke-e2e index.main (unproven-terminal ref retention — Fix #3)", () => {
-  it("retains (does not delete) the candidate ref when runFixtures cannot prove every build reached a terminal state", async () => {
+describe("smoke-e2e index.main (per-case ref retention)", () => {
+  it("retains only the unproven case's ref and still deletes the proven ones", async () => {
     const runnerModule = await import("../runner.js");
-    vi.mocked(runnerModule.runFixtures).mockResolvedValueOnce({
-      ok: false,
-      allTerminal: false,
-      results: [
-        {
-          name: "canary",
-          definitionId: 3001,
-          buildId: 1,
-          url: "https://example/1",
-          status: "failed",
-          message: "getBuild kept failing",
+    vi.mocked(runnerModule.runFixtures).mockImplementationOnce(
+      async (_client: unknown, requests: readonly { caseId: string; lane: string; definitionId: number }[]) => ({
+        ok: false,
+        allTerminal: false,
+        results: requests.map((r, i) => ({
+          caseId: r.caseId,
+          lane: r.lane,
+          definitionId: r.definitionId,
+          buildId: i + 1,
+          url: `https://example/${i + 1}`,
+          status: (i === 1 ? "failed" : "succeeded") as "failed" | "succeeded",
+          message: i === 1 ? "getBuild kept failing" : undefined,
           durationMs: 1,
-          terminalProven: false,
-        },
-      ],
-    });
+          // Only the second case could not be proven terminal.
+          terminalProven: i !== 1,
+        })),
+      }),
+    );
 
     process.env = { ...process.env, ...baseEnv, VITEST: "true" };
     const { main } = await import("../index.js");
-    const code = await main();
-    expect(code).toBe(1);
+    expect(await main()).toBe(1);
 
-    // The push itself succeeded, but the ref must be RETAINED, not deleted,
-    // because this run could not prove the build actually stopped.
     expect(mockCalls).toContain("pushCandidate");
-    expect(mockCalls).not.toContain("deleteRemoteRef");
+    // All but one ref is provably safe to delete; the unproven one is kept
+    // for the stale-ref scanner. Under the old shared-ref model, one unproven
+    // build stranded every case's ref.
+    expect(deletedRefs).toEqual([
+      "refs/heads/ado-aw-smoke-candidate/630001/canary",
+      "refs/heads/ado-aw-smoke-candidate/630001/noop-target",
+      "refs/heads/ado-aw-smoke-candidate/630001/custom-safe-output",
+      "refs/heads/ado-aw-smoke-candidate/630001/multi-repo",
+    ]);
+    expect(deletedRefs).not.toContain("refs/heads/ado-aw-smoke-candidate/630001/azure-cli");
+  });
+
+  it("retains every pushed ref when runFixtures throws, because builds may already be queued", async () => {
+    // Fail-closed regression: a throw out of runFixtures leaves no results at
+    // all, which must NOT be mistaken for "nothing was queued". Deleting here
+    // would pull refs out from under builds that may still be running.
+    const runnerModule = await import("../runner.js");
+    vi.mocked(runnerModule.runFixtures).mockRejectedValueOnce(new Error("runner exploded"));
+
+    process.env = { ...process.env, ...baseEnv, VITEST: "true" };
+    const { main } = await import("../index.js");
+    expect(await main()).toBe(1);
+
+    expect(mockCalls).toContain("pushCandidate");
+    expect(deletedRefs).toEqual([]);
     expect(mockCalls).toContain("removeWorktree");
   });
 
-  it("retains (does not delete) the candidate ref when runFixtures itself throws unexpectedly (never trusts the fail-closed default's absence of proof)", async () => {
-    const runnerModule = await import("../runner.js");
-    vi.mocked(runnerModule.runFixtures).mockImplementationOnce(async () => {
-      mockCalls.push("runFixtures");
-      throw new Error(
-        "runner crashed after queueing an unknown number of builds",
-      );
-    });
+  it("still deletes pushed refs when staging fails before any build is queued", async () => {
+    // The mirror image: if we never reached runFixtures, no build can exist,
+    // so retaining refs would just leak them.
+    const gitModule = await import("../git.js");
+    vi.mocked(gitModule.worktreeChangedFiles)
+      .mockResolvedValueOnce([".smoke/pipeline.yml"])
+      .mockResolvedValueOnce([".smoke/pipeline.yml", "src/main.rs"]);
 
     process.env = { ...process.env, ...baseEnv, VITEST: "true" };
     const { main } = await import("../index.js");
-    const code = await main();
-    expect(code).toBe(1);
+    expect(await main()).toBe(1);
 
-    // The push succeeded and runFixtures was entered, but because it threw
-    // instead of returning a proven outcome, `allChildrenTerminal` must
-    // still be `false` (its pre-call fail-closed value) — the ref must be
-    // retained, never deleted.
-    expect(mockCalls).toContain("pushCandidate");
-    expect(mockCalls).toContain("runFixtures");
-    expect(mockCalls).not.toContain("deleteRemoteRef");
-    expect(mockCalls).toContain("removeWorktree");
+    expect(mockCalls).not.toContain("runFixtures");
+    // The first case was pushed before the second tripped the allowlist guard.
+    expect(deletedRefs).toEqual(["refs/heads/ado-aw-smoke-candidate/630001/canary"]);
   });
 });

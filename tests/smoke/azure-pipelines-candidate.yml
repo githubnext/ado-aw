@@ -1,0 +1,53 @@
+# Candidate-mode smoke orchestrator.
+#
+# Builds ado-aw and ado-script from the exact checked-out PR/main commit,
+# publishes an immutable candidate artifact, compiles every candidate-mode case
+# in tests/smoke/cases.json, stages each on its own short-lived ado-aw-mirror
+# ref, and queues each against its credential lane definition.
+#
+# PR eligibility remains path-filtered below, but the definition requires a
+# collaborator comment before queueing. Trigger it from GitHub with:
+# /azp run ado-aw candidate compiler smoke
+#
+# The released-mode counterpart is azure-pipelines-release.yml. The two share
+# orchestrator-steps.yml and orchestrator-variables.yml but keep separate root
+# files so their trigger blocks cannot leak into one another.
+
+trigger: none
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - src/**
+      - ado-aw-derive/**
+      - scripts/ado-script/**
+      - tests/safe-outputs/**
+      - tests/smoke/**
+      - Cargo.toml
+      - Cargo.lock
+
+schedules:
+  - cron: "0 1 * * *"
+    displayName: Nightly candidate compiler smoke
+    branches:
+      include:
+        - main
+    always: true
+
+pool:
+  name: AZS-1ES-L-Playground-ubuntu-22.04
+
+variables:
+  - template: orchestrator-variables.yml
+
+jobs:
+  - job: CandidateSmoke
+    displayName: Build and run candidate smoke cases
+    timeoutInMinutes: 180
+    steps:
+      - template: orchestrator-steps.yml
+        parameters:
+          compilerSource: candidate

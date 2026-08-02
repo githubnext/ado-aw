@@ -111,7 +111,7 @@ steps:
       SELF_DIR: $(Build.SourcesDirectory)/self
       FIXTURE_DIR: $(Build.SourcesDirectory)/e2e-fixture
       SOURCE_VERSION: $(Build.SourceVersion)
-      LOCK_FILE: $(Build.SourcesDirectory)/self/tests/compiler-smoke-e2e/multi-repo.lock.yml
+      LOCK_FILE: $(Build.SourcesDirectory)/self/tests/smoke/multi-repo.lock.yml
 ---
 
 ## Multi-repo checkout smoke

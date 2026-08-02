@@ -4,7 +4,9 @@ import {
   assertAgentCommandPolicy,
   assertAdoTokenIsolation,
   assertNoForbiddenReleaseUrls,
+  assertNoTriggers,
   assertPipelineArtifactValues,
+  assertReleaseUrlsPresent,
 } from "../assertions.js";
 
 const EXPECTED = {
@@ -211,5 +213,100 @@ stages:
               artifact: ${EXPECTED.artifact}
 `;
     expect(() => assertPipelineArtifactValues(yaml, "canary", EXPECTED)).not.toThrow();
+  });
+});
+
+describe("assertReleaseUrlsPresent", () => {
+  it("passes when the compiled pipeline downloads a released asset", () => {
+    expect(() =>
+      assertReleaseUrlsPresent(
+        "steps:\n  - bash: curl -L https://github.com/githubnext/ado-aw/releases/download/v1/ado-aw\n",
+        "canary",
+      ),
+    ).not.toThrow();
+  });
+
+  it("accepts the AWF release URL alone", () => {
+    expect(() =>
+      assertReleaseUrlsPresent(
+        "steps:\n  - bash: curl -L https://github.com/github/gh-aw-firewall/releases/download/v1/awf\n",
+        "canary",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("fails closed when released mode silently stopped downloading release assets", () => {
+    // Without this, a released-mode run that accidentally pinned a pipeline
+    // artifact would go green while testing nothing about release packaging.
+    expect(() => assertReleaseUrlsPresent("steps:\n  - bash: echo hi\n", "canary")).toThrow(
+      /references no release URL/,
+    );
+  });
+
+  it("is the exact mirror image of assertNoForbiddenReleaseUrls", () => {
+    const withRelease =
+      "steps:\n  - bash: curl -L https://github.com/githubnext/ado-aw/releases/download/v1/ado-aw\n";
+    expect(() => assertNoForbiddenReleaseUrls(withRelease, "x")).toThrow();
+    expect(() => assertReleaseUrlsPresent(withRelease, "x")).not.toThrow();
+
+    const withoutRelease = "steps:\n  - bash: echo hi\n";
+    expect(() => assertNoForbiddenReleaseUrls(withoutRelease, "x")).not.toThrow();
+    expect(() => assertReleaseUrlsPresent(withoutRelease, "x")).toThrow();
+  });
+});
+
+describe("assertNoTriggers", () => {
+  const clean = "trigger: none\npr: none\njobs:\n  - job: Agent\n";
+
+  it("passes for a pipeline that declares trigger: none and pr: none", () => {
+    expect(() => assertNoTriggers(clean, "canary")).not.toThrow();
+  });
+
+  it("rejects a CI trigger", () => {
+    // Load-bearing: every case in a lane shares one definition AND one YAML
+    // path, so a surviving trigger would make the ref push CI-trigger the lane
+    // on top of the API-queued run.
+    expect(() =>
+      assertNoTriggers("trigger:\n  branches:\n    include:\n      - main\npr: none\n", "canary"),
+    ).toThrow(/must declare 'trigger: none'/);
+  });
+
+  it("rejects a PR trigger", () => {
+    expect(() =>
+      assertNoTriggers("trigger: none\npr:\n  branches:\n    include:\n      - main\n", "canary"),
+    ).toThrow(/must declare 'pr: none'/);
+  });
+
+  it("rejects a missing trigger key rather than assuming a safe default", () => {
+    expect(() => assertNoTriggers("pr: none\njobs: []\n", "canary")).toThrow(
+      /must declare 'trigger: none'/,
+    );
+  });
+
+  it("rejects a schedules block", () => {
+    expect(() =>
+      assertNoTriggers(
+        "trigger: none\npr: none\nschedules:\n  - cron: '0 3 * * *'\n",
+        "canary",
+      ),
+    ).toThrow(/must not declare 'schedules:'/);
+  });
+
+  it("rejects a pipeline resource trigger", () => {
+    expect(() =>
+      assertNoTriggers(
+        "trigger: none\npr: none\nresources:\n  pipelines:\n    - pipeline: up\n      source: Other\n      trigger: true\n",
+        "canary",
+      ),
+    ).toThrow(/resources\.pipelines\[\]\.trigger/);
+  });
+
+  it("allows a pipeline resource without a trigger", () => {
+    expect(() =>
+      assertNoTriggers(
+        "trigger: none\npr: none\nresources:\n  pipelines:\n    - pipeline: up\n      source: Other\n",
+        "canary",
+      ),
+    ).not.toThrow();
   });
 });

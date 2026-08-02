@@ -110,12 +110,17 @@ so frame it as "CI will fail" rather than as a silent risk.
 If any `.github/workflows/*.md` changed without its `.lock.yml`, the workflow
 will not run as written. Fix: `gh aw compile`.
 
-### Release-owned fixtures
+### Markdown-only smoke sources
 
-`tests/safe-outputs/*.lock.yml` are the **latest released** customer contract.
-Their runtime integrity step downloads the released compiler, so regenerating
-them from an unreleased checkout produces drift even when Cargo reports the same
-version. If this PR modifies them outside the release workflow, flag it.
+`tests/safe-outputs/` holds smoke **sources only** — no `*.lock.yml` files are
+committed there, and both smoke lanes recompile each markdown source at run
+time. If this PR adds a committed lock file under `tests/safe-outputs/`, that is
+a finding: it reintroduces the drift the lane model removed.
+
+Adding a smoke should be a markdown source plus one entry in
+`tests/smoke/cases.json`. A PR that instead registers a new ADO definition per
+test case, or adds a per-case `*_DEFINITION_ID` orchestrator variable, is
+working against the design — flag it.
 
 ## Step 3 — Schema and registry contracts
 

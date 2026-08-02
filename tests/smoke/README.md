@@ -1,0 +1,228 @@
+# ado-aw smoke suite
+
+Agentic end-to-end coverage for `ado-aw`, run against the
+[AgentPlayground](https://dev.azure.com/msazuresphere/AgentPlayground) ADO
+sandbox.
+
+**Adding a smoke is two files: a markdown source and one entry in
+[`cases.json`](cases.json).** No ADO definition to register, no secret to
+provision, no orchestrator variable, no lock file to commit.
+
+## The model
+
+An ADO definition binds `(repo, yamlFilename)`, but the *ref* is supplied per
+queue. So every case compiles to the **same** path, `.smoke/pipeline.yml`, and
+is pushed to its **own** branch:
+
+```
+refs/heads/ado-aw-smoke-candidate/<buildId>/<caseId>
+```
+
+Queueing the same definition with different `sourceBranch` values therefore
+runs different pipelines. That inverts the old mapping:
+
+> **The ref carries the test case. The definition carries only the
+> credentials. The markdown is the only committed artefact.**
+
+A definition is now a *credential boundary*, not a test case — so the number of
+definitions is bounded by how many distinct credential sets exist (three), not
+by how many things we want to test.
+
+### Lanes
+
+Every case in a lane can read that lane's secrets, so lanes are cut strictly by
+credential class:
+
+| Lane | Secrets / service connections | Cases |
+| --- | --- | --- |
+| `agentic` | `GITHUB_TOKEN`, `agent-playground-read`/`-write` | canary, azure-cli, noop-target, custom-safe-output, multi-repo, janitor |
+| `debug` | the above **plus** `ADO_AW_DEBUG_GITHUB_TOKEN` | smoke-failure-reporter |
+| `infra` | none | *(reserved for AWF and the ado-proxy sidecar)* |
+
+`smoke-failure-reporter` is isolated because it files GitHub issues on
+`jamesadevine/ado-aw-issues`; nothing else should be able to read that token.
+
+### Modes
+
+The same machinery runs against two compiler sources, selected by
+`SMOKE_COMPILER_SOURCE` and declared per case as `modes`:
+
+| | `candidate` | `released` |
+| --- | --- | --- |
+| Orchestrator | [`azure-pipelines-candidate.yml`](azure-pipelines-candidate.yml) | [`azure-pipelines-release.yml`](azure-pipelines-release.yml) |
+| Trigger | PR (comment-gated) + nightly 01:00 UTC | scheduled daily 03:00 UTC |
+| Compiler | built from the checked-out commit | latest GitHub Release asset |
+| Binaries in staged YAML | pinned to this run's `pipeline-artifact` | public release URLs |
+| Release-URL assertion | must be **absent** | must be **present** |
+| Answers | "does unreleased compiler output still work?" | "can customers download and run the released compiler?" |
+
+Released mode is what replaced the retired committed `*.lock.yml` files. It
+preserves their signal — a released asset is downloaded to compile with, and
+every child downloads released assets again through its own integrity step — so
+a broken or missing release asset fails the run in two places.
+`assertReleaseUrlsPresent` makes a silently-degraded run fail closed rather
+than pass while testing nothing.
+
+## Flow
+
+For build `#8801` at commit `abc123`:
+
+```
+GitHub githubnext/ado-aw @abc123
+  1  checkout, build (candidate) or download (released) the ado-aw binary
+  2  candidate only: publish artifact `ado-aw-candidate` on #8801
+  3  candidate only: artifact-visibility gate before any git work
+  4  worktree add --detach <tmp> abc123        (LOCAL checkout, never the mirror)
+  5  read cases.json FROM THE WORKTREE, select cases for this mode
+  6  best-effort stale-ref scan
+  7  per case:
+       transform front matter (strip `on:`; candidate also pins supply-chain)
+       compile + check with the binary under test
+       assert: token isolation, no triggers, mode-specific release/artifact rules
+       copy the compiled YAML -> .smoke/pipeline.yml
+       per-case changed-path allowlist
+       commit (parent = abc123) -> push to .../8801/<caseId> -> verify
+       git reset --hard abc123                 (next case starts clean)
+  8  queue each case against its LANE definition with its own ref + SHA
+  9  poll, verify declared build tags, cancel non-terminal on timeout
+ 10  delete each ref iff THAT case proved terminal
+```
+
+Because every commit is parented on `abc123`, the per-case commits are
+siblings: one bulk object push plus N tiny deltas.
+
+### `ado-aw-mirror` is not a mirror
+
+Nothing syncs GitHub into it, and `main` does not exist there. It holds exactly
+two things:
+
+- `refs/heads/ado-aw-smoke-candidate-base` — permanent and inert. Its
+  `.smoke/pipeline.yml` is [`inert-child.yml`](inert-child.yml), which fails on
+  purpose. It is every lane definition's default branch, so a lane can never be
+  run without an explicitly supplied case ref.
+- `refs/heads/ado-aw-smoke-candidate/<buildId>/<caseId>` — ephemeral, deleted
+  when the run finishes.
+
+It is a *staging repo*, not a replica. Candidate refs are never pushed to
+GitHub.
+
+## Adding a smoke
+
+1. Write the markdown (anywhere under `tests/`; `tests/safe-outputs/` is the
+   usual home).
+2. Add an entry to [`cases.json`](cases.json):
+
+```jsonc
+{
+  "id": "my-case",              // ^[a-z0-9][a-z0-9-]{0,48}$ — becomes a git ref segment
+  "lane": "agentic",            // must already exist; a NEW lane costs a registration
+  "kind": "compiled",           // or "raw" for hand-written YAML
+  "modes": ["candidate", "released"],
+  "source": "tests/safe-outputs/my-case.md"
+}
+```
+
+Requirements, all enforced at load time:
+
+- `target: standalone` — the case runs as the definition's root YAML.
+- No `supply-chain.feed` or `supply-chain.pipeline-artifact`; candidate mode
+  injects the latter and refuses to overwrite an existing binary source.
+- Any `on:` block is stripped — the orchestrator owns scheduling.
+- The case's credential needs must be a **subset** of its lane's.
+
+Optional per-case assertions, so novel checks stay out of the harness code:
+
+```jsonc
+"assertions": {
+  "agentCommand": { "required": ["shell(az"], "forbidden": ["--allow-all-tools"] },
+  "requiredBuildTags": ["ado-aw-custom-job-{buildId}"]
+}
+```
+
+### `kind: raw`
+
+For pipelines that aren't compiled from front matter — the forthcoming AWF and
+ado-proxy sidecar smokes. The source YAML is copied verbatim to
+`.smoke/pipeline.yml`; compile and artifact assertions are skipped, but
+`assertNoTriggers` still applies. Point it at the `infra` lane, which carries no
+GitHub token.
+
+## Why triggers are stripped and re-asserted
+
+Every case in a lane shares one definition *and* one YAML path. A case that
+reached ADO with an active trigger would make its ref push queue the lane **in
+addition to** the API-queued run — double-queueing and burning parallel jobs.
+
+Two steps:
+
+1. `prepareCaseSource` removes the whole `on:` block from the markdown. Because
+   `on:` is the complete declaration of when a pipeline runs, its absence
+   compiles to a manual / API-queued-only pipeline: the compiler emits explicit
+   `trigger: none` and `pr: none`.
+2. `assertNoTriggers` independently verifies the staged bytes before push. This
+   is not ceremony — ADO reads a *missing* `trigger:` as **"CI on every
+   branch"**, not "no CI", so a compiler that regressed to omitting the key
+   would silently re-arm the exact failure mode this design removes. The
+   assertion demands the keys be present and `none`, so that regression fails
+   the run instead.
+
+The staged copy is byte-identical to the compiled lock file, which is committed
+pristine alongside it: the pipeline's own runtime integrity step runs
+`ado-aw check <original lock path>`, and the `# ado-aw-metadata` comment marker
+survives byte-for-byte.
+
+`kind: raw` sources are copied verbatim with no compiler in the loop, so they
+must declare `trigger: none` / `pr: none` themselves; `assertNoTriggers` applies
+to them unchanged.
+
+## Local validation
+
+The harness is deterministic under unit tests; all ADO and git calls are
+injected behind fakes.
+
+```bash
+cd scripts/ado-script
+npm ci
+npm run typecheck
+npx vitest run src/compiler-smoke-e2e
+npm run build:compiler-smoke-e2e
+```
+
+`cases.test.ts` and `index.test.ts` both load the **real** `cases.json`, so a
+malformed or mis-laned manifest fails locally rather than in ADO.
+
+## Live contract
+
+| # | Assertion | Mode |
+| --- | --- | --- |
+| 1 | Producer remains in progress after publishing its artifact | candidate |
+| 2 | Every child downloads the exact producer `run-id` | candidate |
+| 3 | Every child downloads released assets from GitHub Releases | released |
+| 4 | All in-mode cases succeed | both |
+| 5 | `custom-safe-output` carries `ado-aw-custom-job-<child-build-id>` | candidate |
+| 6 | Exactly one ref per case is created, and every ref is deleted | both |
+| 7 | Each build ran its lane definition on that case's own ref | both |
+| 8 | Queued build count equals case count (no ref push CI-triggered a lane) | both |
+
+## Fork security boundary
+
+The candidate orchestrator executes PR-built code with protected
+AgentPlayground resources, so fork PRs are prohibited at the ADO definition
+boundary. Every credentialed GitHub-backed PR definition must persist:
+
+```text
+forks.enabled = false
+forks.allowSecrets = false
+forks.allowFullAccessToken = false
+pipelineTriggerSettings.buildsEnabledForForks = false
+isCommentRequiredForPullRequest = true
+isCommentRequiredForInternalRepoPRs = true
+commentOptionInternalRepos = all
+```
+
+The YAML also rejects `System.PullRequest.IsFork` as defence in depth, but that
+is not the boundary — a PR can modify its own YAML. Live definition settings are
+audited from [`trigger-policy.json`](trigger-policy.json) on every run.
+
+See [`REGISTERED.md`](REGISTERED.md) for definition IDs, variables and the
+one-time setup runbook.

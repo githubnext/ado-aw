@@ -1,0 +1,32 @@
+# Permanent queue target for the executor-e2e `queue-build` scenario.
+#
+# The Stage 3 `queue-build` safe-output executor needs *a definition it is
+# allowed to queue*; it does not need that definition to do anything. This used
+# to point at the `noop-target` smoke definition (2547), which coupled a
+# deterministic executor test to the agentic smoke suite's registration
+# lifecycle — retiring that definition would have silently broken the scenario.
+#
+# This pipeline exists solely to be queued. It is intentionally:
+#   - trigger-free, so only an explicit API queue starts it;
+#   - non-agentic, so it needs no GITHUB_TOKEN, service connection or sandbox;
+#   - fast and deterministic, so it never becomes a source of flakes.
+#
+# Its definition id is configured on the executor-e2e definition as
+# `E2E_QUEUE_PIPELINE_ID`. See tests/executor-e2e/README.md.
+#
+# `noop-target` remains a smoke *case* in tests/smoke/cases.json for
+# behavioural coverage; this is only the queue *target*.
+
+trigger: none
+pr: none
+
+pool:
+  name: AZS-1ES-L-Playground-ubuntu-22.04
+
+steps:
+  - checkout: none
+
+  - bash: |
+      set -euo pipefail
+      echo "queued by build $(Build.BuildId) on $(Build.SourceBranch)"
+    displayName: Acknowledge queue-build request
