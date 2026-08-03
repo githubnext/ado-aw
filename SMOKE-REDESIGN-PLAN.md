@@ -2,8 +2,8 @@
 
 > **Status.** Code, tests and docs are complete and verified locally
 > (`cargo test`, `npm run typecheck`, `npx vitest run`). What remains is the
-> ADO-side work that cannot be done from a checkout: registering the three lane
-> definitions, the released orchestrator and the queue target, then a live
+> ADO-side work that cannot be done from a checkout: registering the `agentic`
+> lane definition, the released orchestrator and the queue target, then a live
 > validation run and retiring the ten old definitions. See **Remaining work**.
 >
 > **Location.** Committed to the repository root as `SMOKE-REDESIGN-PLAN.md` so
@@ -16,11 +16,11 @@
    - create `refs/heads/ado-aw-smoke-candidate-base` on `ado-aw-mirror` with a
      single `.smoke/pipeline.yml` (contents of `inert-child.yml`), deleting the
      five legacy placeholder lock paths in the same commit;
-   - register the three lane definitions, the released orchestrator, and the
+   - register the `agentic` lane definition, the released orchestrator, and the
      executor-e2e queue target;
-   - provision `GITHUB_TOKEN` (agentic, debug) and `ADO_AW_GITHUB_TOKEN`
-     (debug only); authorize service connections;
-   - set `SMOKE_LANE_*_DEFINITION_ID` on both orchestrators and
+   - provision `GITHUB_TOKEN` and `ADO_AW_GITHUB_TOKEN` on the `agentic` lane;
+     authorize service connections;
+   - set `SMOKE_LANE_AGENTIC_DEFINITION_ID` on both orchestrators and
      `E2E_QUEUE_PIPELINE_ID` on definition `2550`.
 2. Record the new ids in `tests/smoke/REGISTERED.md` (marked `_TBD_`) and add
    them to `scheduled_only_definition_ids` in `tests/smoke/trigger-policy.json`
@@ -92,8 +92,9 @@ BEFORE   10 definitions + 5 committed locks
 
 AFTER    3 lane definitions + 1 queue target, zero committed locks
   lane agentic  <- .smoke/pipeline.yml  <- refs .../<buildId>/{canary,azure-cli,
-                                                  noop-target,custom-safe-output}
-  lane debug    <- .smoke/pipeline.yml  <- refs .../<buildId>/{smoke-failure-reporter}
+                                                  noop-target,custom-safe-output,
+                                                  multi-repo,smoke-failure-reporter,
+                                                  janitor}
   lane infra    <- .smoke/pipeline.yml  <- (ready for AWF / ado-proxy)
   queue-target  <- static YAML, permanent, not a smoke (executor-e2e dependency)
 
@@ -104,10 +105,18 @@ AFTER    3 lane definitions + 1 queue target, zero committed locks
 
 ### Confirmed decisions
 
-1. **Three lanes** — `agentic` (canary, azure-cli, noop-target,
-   custom-safe-output), `debug` (smoke-failure-reporter, which additionally
-   needs `ADO_AW_GITHUB_TOKEN`), `infra` (no GitHub token; reserved for
-   AWF and ado-proxy).
+1. **Two lanes** — `agentic` (every current case; holds `GITHUB_TOKEN`,
+   `ADO_AW_GITHUB_TOKEN` and the `agent-playground-*` service connections),
+   `infra` (no credentials at all; reserved for AWF and ado-proxy).
+
+   An earlier revision split `smoke-failure-reporter` into its own `debug`
+   lane for `ADO_AW_GITHUB_TOKEN`. That was dropped once GitHub issue filing
+   became the public `create-github-issue` safe output rather than a
+   debug-only capability: a lane per credential fragments as more cases adopt
+   it, and the isolation is enforced where it cannot drift — the compiler
+   confines the token to the Stage 3 executor, and `assertAdoTokenIsolation`
+   fails the run if it reaches Agent or Detection. That prevents the leak
+   rather than bounding its blast radius.
 2. **Big-bang cutover** — all cases move in one PR. Mitigated by a manual
    pre-merge live run in both modes, and by *disabling* rather than deleting
    old definitions for one release cycle.
@@ -147,7 +156,6 @@ or missing release asset fails the run in both places.
   "yamlPath": ".smoke/pipeline.yml",
   "lanes": {
     "agentic": { "definitionIdEnv": "SMOKE_LANE_AGENTIC_DEFINITION_ID" },
-    "debug":   { "definitionIdEnv": "SMOKE_LANE_DEBUG_DEFINITION_ID" },
     "infra":   { "definitionIdEnv": "SMOKE_LANE_INFRA_DEFINITION_ID" }
   },
   "cases": [
@@ -170,7 +178,7 @@ or missing release asset fails the run in both places.
       "modes": ["candidate"],
       "source": "tests/smoke/custom-safe-output.md",
       "assertions": { "requiredBuildTags": ["ado-aw-custom-job-{buildId}"] } },
-    { "id": "smoke-failure-reporter", "lane": "debug", "kind": "compiled",
+    { "id": "smoke-failure-reporter", "lane": "agentic", "kind": "compiled",
       "modes": ["released"],
       "source": "tests/safe-outputs/smoke-failure-reporter.md" },
     { "id": "janitor",     "lane": "agentic", "kind": "compiled",
@@ -262,7 +270,7 @@ legitimately share it. `runner.ts`'s `describeMismatch` identity check still
 works and is strengthened in practice: `sourceBranch` is now unique per case, so
 it alone disambiguates.
 
-`stale.ts` `childDefinitionIds` becomes the three lane definition ids.
+`stale.ts` `childDefinitionIds` becomes the registered lane definition ids.
 
 ### Assertions become declarative
 
@@ -293,8 +301,7 @@ parameters.
 
 | Definition | Repo | `yamlFilename` | Default branch | Secrets | Service connections |
 | --- | --- | --- | --- | --- | --- |
-| smoke lane `agentic` | `ado-aw-mirror` | `/.smoke/pipeline.yml` | `refs/heads/ado-aw-smoke-candidate-base` | `GITHUB_TOKEN` | `agent-playground-read/write` |
-| smoke lane `debug` | `ado-aw-mirror` | `/.smoke/pipeline.yml` | same | `GITHUB_TOKEN`, `ADO_AW_GITHUB_TOKEN` | same |
+| smoke lane `agentic` | `ado-aw-mirror` | `/.smoke/pipeline.yml` | `refs/heads/ado-aw-smoke-candidate-base` | `GITHUB_TOKEN`, `ADO_AW_GITHUB_TOKEN` | `agent-playground-read/write` |
 | smoke lane `infra` | `ado-aw-mirror` | `/.smoke/pipeline.yml` | same | none | none |
 | release orchestrator | `githubnext/ado-aw` | `tests/smoke/azure-pipelines-release.yml` | `main` | none | `githubnext`, `agent-playground-write` |
 | queue target | `githubnext/ado-aw` | `tests/executor-e2e/queue-target.yml` | `main` | none | `githubnext` |
@@ -352,7 +359,7 @@ done now.
 Every code/docs todo below is **done**; items 22–25 are the ADO-side work
 summarised under *Remaining work* at the top.
 
-1. **manifest-schema** — ✅ `tests/smoke/cases.json` (three lanes, six cases,
+1. **manifest-schema** — ✅ `tests/smoke/cases.json` (two lanes, seven cases,
    `modes`, declarative assertions).
 2. **manifest-loader** — ✅ `cases.ts`: strict fail-closed validation and
    `loadCases(worktreeDir, env, mode)`.
@@ -449,7 +456,8 @@ must be checked after `delete-locks`.
 | Loss of GitHub-backed / committed-artifact execution | Accepted (decision 4). Re-add a single GitHub-backed canary if a metadata regression escapes |
 | `E2E_QUEUE_PIPELINE_ID` breakage | Explicit `queue-target` todo; live assertion #9 |
 | Janitor stops pruning; AgentPlayground fills up | Janitor becomes a daily released-mode case; idempotent 30-day window |
-| Credential union inside a lane | Lanes cut strictly by credential class; `debug` isolated; `infra` holds nothing |
+| GitHub PAT reaches the agent | Compiler confines it to the Stage 3 executor; `assertAdoTokenIsolation` fails the run on freshly compiled YAML if it appears in Agent or Detection |
+| Credential creep into the credential-free lane | `infra` holds nothing, and a manifest test asserts it carries no cases |
 | A case with a stray trigger double-queues its whole lane | `assertNoTriggers` + full `on:` strip, both fail-closed before push |
 | Malicious/typo `caseId` injected into a git ref name | Strict `^[a-z0-9][a-z0-9-]{0,48}$` at manifest load, before any git call |
 | Released mode silently degrades to candidate behaviour | Inverted release-URL assertion makes a missing release URL a hard failure |

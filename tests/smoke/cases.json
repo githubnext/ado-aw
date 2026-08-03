@@ -4,15 +4,11 @@
   "lanes": {
     "agentic": {
       "definitionIdEnv": "SMOKE_LANE_AGENTIC_DEFINITION_ID",
-      "description": "GITHUB_TOKEN + agent-playground-read/write."
-    },
-    "debug": {
-      "definitionIdEnv": "SMOKE_LANE_DEBUG_DEFINITION_ID",
-      "description": "Everything in agentic, plus ADO_AW_GITHUB_TOKEN."
+      "description": "GITHUB_TOKEN, ADO_AW_GITHUB_TOKEN, agent-playground-read/write."
     },
     "infra": {
       "definitionIdEnv": "SMOKE_LANE_INFRA_DEFINITION_ID",
-      "description": "No GitHub token. Reserved for AWF and the ado-proxy sidecar."
+      "description": "No credentials. Reserved for AWF and the ado-proxy sidecar."
     }
   },
   "cases": [
@@ -62,7 +58,7 @@
     },
     {
       "id": "smoke-failure-reporter",
-      "lane": "debug",
+      "lane": "agentic",
       "kind": "compiled",
       "modes": ["released"],
       "source": "tests/safe-outputs/smoke-failure-reporter.md"

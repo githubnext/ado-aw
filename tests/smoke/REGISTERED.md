@@ -12,7 +12,6 @@ not add a definition here; only a genuinely new credential class does.
 | Definition | Repository | YAML path | Default branch | Definition ID |
 | --- | --- | --- | --- | ---: |
 | `ado-aw smoke lane - agentic` | `ado-aw-mirror` | `/.smoke/pipeline.yml` | `refs/heads/ado-aw-smoke-candidate-base` | _TBD_ |
-| `ado-aw smoke lane - debug` | `ado-aw-mirror` | `/.smoke/pipeline.yml` | `refs/heads/ado-aw-smoke-candidate-base` | _TBD_ |
 | `ado-aw smoke lane - infra` | `ado-aw-mirror` | `/.smoke/pipeline.yml` | `refs/heads/ado-aw-smoke-candidate-base` | _not yet registered_ |
 
 All are **API-queued only**: no CI trigger, no PR trigger, no schedule.
@@ -21,6 +20,9 @@ an explicitly supplied case ref.
 
 `infra` carries no cases yet, and a lane with no case in the running mode is
 never resolved, so it needs no definition until the first `infra` case lands.
+
+**Only `agentic` needs registering at cutover** — one definition for the whole
+suite.
 
 ## Orchestrators
 
@@ -43,7 +45,6 @@ Set on **both** orchestrator definitions — one per lane, never per case:
 
 ```text
 SMOKE_LANE_AGENTIC_DEFINITION_ID
-SMOKE_LANE_DEBUG_DEFINITION_ID
 SMOKE_LANE_INFRA_DEFINITION_ID
 ```
 
@@ -65,11 +66,11 @@ them explicitly on each definition.
 
 | Secret | On | Scope |
 | --- | --- | --- |
-| `GITHUB_TOKEN` | `agentic`, `debug` lanes | Copilot CLI authentication |
-| `ADO_AW_GITHUB_TOKEN` | `debug` lane **only** | GitHub fine-grained PAT, Issues read/write limited to `jamesadevine/ado-aw-issues`. Read by the `create-github-issue` safe output in Stage 3 only. |
+| `GITHUB_TOKEN` | `agentic` lane | Copilot CLI authentication |
+| `ADO_AW_GITHUB_TOKEN` | `agentic` lane | GitHub fine-grained PAT, Issues read/write limited to `jamesadevine/ado-aw-issues`. Read by the `create-github-issue` safe output in Stage 3 only — the compiler never projects it into Agent or Detection, and `assertAdoTokenIsolation` fails the run if it ever appears there. |
 
-The `infra` lane holds no secrets. Do not put either token in a variable group
-or on an orchestrator.
+The `infra` lane holds no secrets, and nothing should ever be provisioned onto
+it. Do not put either token in a variable group or on an orchestrator.
 
 ## Required permissions
 
@@ -77,7 +78,7 @@ The principal behind `agent-playground-write`, used only after artifact
 publication, needs:
 
 - Contribute / Create branch / Delete refs on `ado-aw-mirror`;
-- Queue builds and Stop builds on the three lane definitions;
+- Queue builds and Stop builds on the registered lane definitions;
 - Read builds and artifacts in AgentPlayground.
 
 Lane build identities need Code Read on `ado-aw-mirror` and, for candidate
@@ -92,26 +93,24 @@ mode, Build Read on the candidate orchestrator definition.
    placeholder lock paths in the same commit. The ref is permanent — the
    harness never deletes it.
 
-2. **Register the lane definitions** against `ado-aw-mirror`, YAML path
-   `/.smoke/pipeline.yml`, default branch as above. Create them explicitly
+2. **Register the `agentic` lane definition** against `ado-aw-mirror`, YAML path
+   `/.smoke/pipeline.yml`, default branch as above. Create it explicitly
    (e.g. `az pipelines create --skip-run true`); `ado-aw enable` reuses an
-   existing definition with the same YAML path and cannot create three
+   existing definition with the same YAML path, so it cannot create multiple
    definitions that share one.
 
-   Only **`agentic` and `debug`** are needed at cutover. `loadCases` resolves a
-   definition id per lane *in play for the mode being run*, so an unused lane
-   needs no definition and no variable: candidate mode uses `agentic` alone,
-   released mode uses `agentic` + `debug`. Register `infra` when the first
-   `infra` case lands, not before — an unregistered lane cannot be queued by
-   accident.
+   Only `agentic` is needed at cutover. `loadCases` resolves a definition id
+   per lane *in play for the mode being run*, and every current case is
+   `agentic`, so `infra` needs no definition and no variable until its first
+   case lands. An unregistered lane cannot be queued by accident.
 
-3. **Strip all triggers** on each lane: no CI, no PR, no schedule.
+3. **Strip all triggers** on the lane: no CI, no PR, no schedule.
 
-4. **Provision secrets** per the table above.
+4. **Provision secrets** per the table above — `GITHUB_TOKEN` and
+   `ADO_AW_GITHUB_TOKEN`, both on the `agentic` lane.
 
 5. **Authorize service connections** (`agent-playground-read`,
-   `agent-playground-write`) on the lanes that need them — `agentic` and
-   `debug` only.
+   `agent-playground-write`) on the `agentic` lane.
 
 6. **Register the released orchestrator** from
    `tests/smoke/azure-pipelines-release.yml` on `githubnext/ado-aw` via the
@@ -120,17 +119,23 @@ mode, Build Read on the candidate orchestrator definition.
 7. **Register the queue target** from `tests/executor-e2e/queue-target.yml`
    and set `E2E_QUEUE_PIPELINE_ID` on executor-e2e definition `2550` to its id.
 
-8. **Set the lane definition id variables** on both orchestrators.
+8. **Set `SMOKE_LANE_AGENTIC_DEFINITION_ID`** on both orchestrators.
 
 9. **Record every id** in the tables above and open a docs-only PR. In the same
-   PR, repoint `scripts/rotate-agentplayground-secrets.ps1` at the lane
-   definitions: `$copilotDefinitionIds` becomes the `agentic` + `debug` lanes
-   and `$reporterDefinitionIds` becomes the `debug` lane alone. Leaving the
-   retired per-case ids there would rotate secrets onto disabled definitions
-   and silently skip the lanes that actually run.
+   PR, repoint `scripts/rotate-agentplayground-secrets.ps1` at the lane:
+   both `$copilotDefinitionIds` and `$reporterDefinitionIds` become the
+   `agentic` lane id. Leaving the retired per-case ids there would rotate
+   secrets onto definitions that no longer exist and silently skip the lane
+   that actually runs.
 
-10. **Trigger one manual run of each orchestrator.** ADO scheduled triggers do
-    not fire until a definition has had at least one run.
+10. **Trigger one manual run of each orchestrator** and check the live
+    assertions in [`README.md`](README.md). ADO scheduled triggers do not fire
+    until a definition has had at least one run.
+
+11. **Only once both runs are green**, delete the retired definitions and
+    remove `2545`–`2549` from
+    [`trigger-policy.json`](trigger-policy.json) in the same commit. Deletion
+    is not reversible, so this step is deliberately last.
 
 ## Security record
 

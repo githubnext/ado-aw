@@ -35,12 +35,22 @@ credential class:
 
 | Lane | Secrets / service connections | Cases |
 | --- | --- | --- |
-| `agentic` | `GITHUB_TOKEN`, `agent-playground-read`/`-write` | canary, azure-cli, noop-target, custom-safe-output, multi-repo, janitor |
-| `debug` | the above **plus** `ADO_AW_GITHUB_TOKEN` | smoke-failure-reporter |
+| `agentic` | `GITHUB_TOKEN`, `ADO_AW_GITHUB_TOKEN`, `agent-playground-read`/`-write` | canary, azure-cli, noop-target, custom-safe-output, multi-repo, smoke-failure-reporter, janitor |
 | `infra` | none | *(reserved for AWF and the ado-proxy sidecar)* |
 
-`smoke-failure-reporter` is isolated because it files GitHub issues on
-`jamesadevine/ado-aw-issues`; nothing else should be able to read that token.
+`ADO_AW_GITHUB_TOKEN` (Issues write on `jamesadevine/ado-aw-issues`) once had a
+lane of its own, when GitHub issue filing was a debug-only capability used by a
+single case. It is now the public `create-github-issue` safe output, so a lane
+per credential would fragment as more cases adopt it.
+
+The isolation that matters is enforced where it cannot drift: the compiler
+projects that token into the Stage 3 executor only, never Agent or Detection,
+and `assertAdoTokenIsolation` fails the run on freshly compiled YAML — before
+push — if it ever appears in either. That prevents the leak rather than merely
+bounding its blast radius, which is what a separate definition bought.
+
+`infra` remains a genuine boundary: no GitHub token, no service connections,
+nothing an AWF or ado-proxy smoke could reach.
 
 ### Modes
 
@@ -128,17 +138,18 @@ Enforced by the harness, fail-closed before push:
   injects the latter and refuses to overwrite an existing binary source.
 - Any `on:` block is stripped, and the resulting `trigger: none` / `pr: none`
   is re-asserted on the staged bytes.
-- Agent and Detection receive no ADO credential (`assertAdoTokenIsolation`).
+- Agent and Detection receive neither an ADO credential nor
+  `ADO_AW_GITHUB_TOKEN` (`assertAdoTokenIsolation`).
 - Only that case's own paths changed in the worktree.
 
 Author's responsibility, **not** currently checked by the harness:
 
 - `target: standalone` — the case runs as the definition's root YAML.
-- The case's credential needs must be a **subset** of its lane's. Declaring a
-  safe output whose token the lane does not carry (e.g. `create-github-issue`
-  outside the `debug` lane) compiles and pushes fine, then fails in Stage 3.
-  Resist the temptation to fix that by adding the token to `agentic` — that
-  collapses the isolation the lanes exist to provide. Move the case instead.
+- The case's credential needs must be a **subset** of its lane's. A case in
+  `infra` that declares any credentialed safe output compiles and pushes fine,
+  then fails in Stage 3. Fix it by moving the case to `agentic`, never by
+  provisioning a secret onto `infra` — that lane's whole value is holding
+  nothing.
 
 Optional per-case assertions, so novel checks stay out of the harness code:
 

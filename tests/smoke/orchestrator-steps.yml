@@ -458,7 +458,6 @@ steps:
       # One variable per credential lane, not per case. Adding a smoke case
       # never adds a variable here.
       SMOKE_LANE_AGENTIC_DEFINITION_ID: $(EFFECTIVE_SMOKE_LANE_AGENTIC_DEFINITION_ID)
-      SMOKE_LANE_DEBUG_DEFINITION_ID: $(EFFECTIVE_SMOKE_LANE_DEBUG_DEFINITION_ID)
       SMOKE_LANE_INFRA_DEFINITION_ID: $(EFFECTIVE_SMOKE_LANE_INFRA_DEFINITION_ID)
 
   - task: PublishPipelineArtifact@1

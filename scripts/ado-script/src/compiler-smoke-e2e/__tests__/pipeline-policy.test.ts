@@ -81,7 +81,6 @@ describe("candidate orchestrator trigger policy", () => {
     expect(env.SMOKE_COMPILER_SOURCE).toBe("${{ parameters.compilerSource }}");
     expect(Object.keys(env).filter((key) => key.endsWith("_DEFINITION_ID")).sort()).toEqual([
       "SMOKE_LANE_AGENTIC_DEFINITION_ID",
-      "SMOKE_LANE_DEBUG_DEFINITION_ID",
       "SMOKE_LANE_INFRA_DEFINITION_ID",
     ]);
   });

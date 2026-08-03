@@ -357,13 +357,15 @@ describe("the real shipped tests/smoke/cases.json", () => {
     expect(parsed.yamlPath).toBe(".smoke/pipeline.yml");
   });
 
-  it("keeps the debug-token case in its own lane", () => {
-    // smoke-failure-reporter needs ADO_AW_DEBUG_GITHUB_TOKEN; isolating it
-    // stops that credential being readable by every other case.
-    const reporter = parsed.cases.find((entry) => entry.id === "smoke-failure-reporter");
-    expect(reporter?.lane).toBe("debug");
-    const others = parsed.cases.filter((entry) => entry.id !== "smoke-failure-reporter");
-    expect(others.every((entry) => entry.lane !== "debug")).toBe(true);
+  it("keeps the credential-free infra lane free of cases", () => {
+    // `infra` is the remaining credential boundary: it holds no GITHUB_TOKEN,
+    // no ADO_AW_GITHUB_TOKEN and no service connections, so the AWF and
+    // ado-proxy smokes can run without any credential in reach. A case landing
+    // here by accident would silently fail at Stage 3 rather than leak, but
+    // the reverse — quietly provisioning `infra` with a token to make such a
+    // case pass — is what would dissolve the boundary.
+    const infraCases = parsed.cases.filter((entry) => entry.lane === "infra");
+    expect(infraCases).toEqual([]);
   });
 
   it("declares an infra lane ready for the AWF / ado-proxy smokes", () => {
