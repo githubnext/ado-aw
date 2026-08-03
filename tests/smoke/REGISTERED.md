@@ -101,6 +101,10 @@ publication, needs:
 Lane build identities need Code Read on `ado-aw-mirror` and, for candidate
 mode, Build Read on the candidate orchestrator definition.
 
+A new lane definition also needs the **agent pool** explicitly authorized for
+it (see step 5b) — this is a distinct grant from the service connections, and
+its absence stalls builds silently rather than failing them.
+
 ## One-time setup runbook
 
 Steps 1–3, 5 and part of 8 are **already done** (see the ✅ marks). The rest
@@ -128,13 +132,38 @@ PR merges.
 3. ✅ **No triggers on `2567`** — verified `triggers: null`, so it is
    API-queued only.
 
-4. ⛔ **Provision `GITHUB_TOKEN` on `2567`.** **Requires the secret value**,
-   which ADO never returns over the API, so this cannot be scripted from a
-   checkout. Nothing can run until this is done.
+4. ✅ **`GITHUB_TOKEN` provisioned on `2567`.**
    `scripts/rotate-agentplayground-secrets.ps1` covers `2567`.
+
+   `ADO_AW_GITHUB_TOKEN` is also present but currently **unused** — no case
+   files GitHub issues since `smoke-failure-reporter` was removed. Harmless
+   (nothing reads it), and it can be deleted until [#1796](https://github.com/githubnext/ado-aw/issues/1796)
+   lands, which puts it on the *orchestrator* rather than the lane.
 
 5. ✅ **Service connections authorized** on `2567`:
    `agent-playground-read` and `agent-playground-write`.
+
+5b. ✅ **Agent pool authorized** on `2567` (queue `1453`,
+   `AZS-1ES-L-Playground-ubuntu-22.04`).
+
+   Easy to miss, and it does **not** surface as an error: the build queues,
+   sits at `status: notStarted` indefinitely, and its timeline shows
+   `Checkpoint.Authorization: inProgress`. There is no failure and no
+   timeout — it simply never starts. Pool authorization is separate from
+   service-connection authorization:
+
+   ```
+   PATCH _apis/pipelines/pipelinePermissions/queue/1453?api-version=7.1-preview.1
+   { "pipelines": [ { "id": <definitionId>, "authorized": true } ] }
+   ```
+
+5c. ✅ **Lane wiring verified live.** Queued `2567` on the base ref
+   (build `629504`); it failed at `Reject inert candidate-smoke base` with
+   *"Candidate compiler smoke must be queued with an explicit generated ref."*
+
+   That failure is the **pass condition** — it proves checkout, pool, YAML
+   path and the inert guard all work, and that a lane cannot run without an
+   explicitly supplied case ref. Re-run this after any lane change.
 
 6. ⏳ **Register the released orchestrator** from
    `tests/smoke/azure-pipelines-release.yml` via the `github.com_githubnext`

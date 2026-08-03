@@ -12,19 +12,20 @@
 
 ## Remaining work (ADO-side, cannot be done from a checkout)
 
-The lane definition, base ref and service-connection authorizations are
-**already provisioned** — see the ✅ marks in
+The `agentic` lane is **fully provisioned and verified live** — base ref, lane
+definition `2567`, secrets, service connections, agent-pool authorization, and
+a confirming run against the inert base ref. See the ✅ marks in
 [`tests/smoke/REGISTERED.md`](tests/smoke/REGISTERED.md). What is left:
 
-1. Provision `GITHUB_TOKEN` and `ADO_AW_GITHUB_TOKEN` on lane `2567`. Needs the
-   secret values, which ADO never returns over the API.
-2. At merge: repoint definition `2559` at
+1. At merge: repoint definition `2559` at
    `tests/smoke/azure-pipelines-candidate.yml` (its current path is deleted by
-   this change), register the released orchestrator and the executor-e2e queue
-   target, and set `E2E_QUEUE_PIPELINE_ID` off the retiring `2547`.
-3. Manually run both orchestrators and check the live assertions in
+   this change) and drop its six dead `COMPILER_SMOKE_*_DEFINITION_ID`
+   variables; register the released orchestrator and the executor-e2e queue
+   target; and set `E2E_QUEUE_PIPELINE_ID` off the retiring `2547`.
+   Authorize the agent pool on every new definition.
+2. Manually run both orchestrators and check the live assertions in
    `tests/smoke/README.md`.
-4. Only once green: delete definitions `2545`–`2549`, `2554`–`2558`,
+3. Only once green: delete definitions `2545`–`2549`, `2554`–`2558`,
    `2564`–`2565`; drop the legacy lock paths from the base ref; and remove
    `2545`–`2549` from `tests/smoke/trigger-policy.json` in the same commit —
    the policy audit fetches every listed id and a 404 aborts the run.
