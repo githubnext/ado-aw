@@ -122,13 +122,23 @@ GitHub.
 }
 ```
 
-Requirements, all enforced at load time:
+Enforced by the harness, fail-closed before push:
+
+- No `supply-chain.feed` or `supply-chain.pipeline-artifact` — candidate mode
+  injects the latter and refuses to overwrite an existing binary source.
+- Any `on:` block is stripped, and the resulting `trigger: none` / `pr: none`
+  is re-asserted on the staged bytes.
+- Agent and Detection receive no ADO credential (`assertAdoTokenIsolation`).
+- Only that case's own paths changed in the worktree.
+
+Author's responsibility, **not** currently checked by the harness:
 
 - `target: standalone` — the case runs as the definition's root YAML.
-- No `supply-chain.feed` or `supply-chain.pipeline-artifact`; candidate mode
-  injects the latter and refuses to overwrite an existing binary source.
-- Any `on:` block is stripped — the orchestrator owns scheduling.
-- The case's credential needs must be a **subset** of its lane's.
+- The case's credential needs must be a **subset** of its lane's. Declaring a
+  safe output whose token the lane does not carry (e.g. `create-github-issue`
+  outside the `debug` lane) compiles and pushes fine, then fails in Stage 3.
+  Resist the temptation to fix that by adding the token to `agentic` — that
+  collapses the isolation the lanes exist to provide. Move the case instead.
 
 Optional per-case assertions, so novel checks stay out of the harness code:
 
