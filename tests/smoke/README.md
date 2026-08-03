@@ -154,6 +154,13 @@ Author's responsibility, **not** currently checked by the harness:
   then fails in Stage 3. Fix it by moving the case to `agentic`, never by
   provisioning a secret onto `infra` — that lane's whole value is holding
   nothing.
+- **A case adding a new `repos:` entry needs that repository authorized on the
+  lane definition, once.** This is the one piece of per-case ADO setup the lane
+  model does not remove. Without it the child build queues and sits at
+  `status: notStarted` forever with `Checkpoint.Authorization: inProgress` —
+  no logs, no error, no timeout. See *Repository resources* in
+  [`REGISTERED.md`](REGISTERED.md). If a case hangs with no output, check this
+  first.
 
 Optional per-case assertions, so novel checks stay out of the harness code:
 

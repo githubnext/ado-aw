@@ -95,8 +95,9 @@ Lane build identities need Code Read on `ado-aw-mirror` and, for candidate
 mode, Build Read on the candidate orchestrator definition.
 
 A new lane definition also needs the **agent pool** explicitly authorized for
-it (see step 5b) — this is a distinct grant from the service connections, and
-its absence stalls builds silently rather than failing them.
+it (step 5b), and a **repository resource** authorized for every extra repo any
+of its cases checks out (step 5d). Both are distinct grants from the service
+connections, and both stall builds silently rather than failing them.
 
 ## One-time setup runbook
 
@@ -148,6 +149,26 @@ orchestrators, then deleting the retired definitions.
    PATCH _apis/pipelines/pipelinePermissions/queue/1453?api-version=7.1-preview.1
    { "pipelines": [ { "id": <definitionId>, "authorized": true } ] }
    ```
+
+5d. ✅ **Repository resources authorized** on `2567` — `ado-aw-e2e-fixture`,
+   checked out by the `multi-repo` case via its `repos:` block.
+
+   Same silent stall as the pool, and the same shape of grant, but a
+   **different resource type** and therefore a separate call. It bites only
+   the cases that check out an extra repo, so four of five cases in the first
+   live run went green while `multi-repo` sat at `notStarted`. The old
+   per-case definitions had this grant (`2544`, `2564`, `2565`); the lane
+   inherited nothing.
+
+   ```
+   PATCH _apis/pipelines/pipelinePermissions/repository/<projectId>.<repoId>?api-version=7.1-preview.1
+   { "pipelines": [ { "id": <definitionId>, "authorized": true } ] }
+   ```
+
+   **Any case adding a new `repos:` entry needs this for the lane**, once,
+   before that case can run. It is the one piece of per-case ADO setup the
+   lane model does not remove — worth checking first whenever a case hangs
+   with no logs.
 
 5c. ✅ **Lane wiring verified live.** Queued `2567` on the base ref
    (build `629504`); it failed at `Reject inert candidate-smoke base` with
