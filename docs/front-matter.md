@@ -353,6 +353,15 @@ Supported types are `string`, `number`, `boolean`, `choice`, `array`, and
 [`imports.md`](imports.md) for the full syntax, cache layout, merge semantics,
 limitations, and custom safe-output component examples.
 
+### Abstract permission requirements (`permissions-required:`)
+
+Imported components can declare `permissions-required: { read: true, write:
+true }` to assert they need concrete `permissions:` service connections from
+the consumer. Import merging unions these requirements across the whole import
+graph; the compiler then validates that the consumer's `permissions:` block
+supplies matching connections. See [`imports.md#permissions-required`](imports.md#permissions-required)
+for the full field reference and examples.
+
 ## Inline step validation (`setup` / `steps` / `post-steps` / `teardown`)
 
 Inline steps under `setup`, `steps`, `post-steps`, `teardown`,

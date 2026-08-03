@@ -183,6 +183,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   └── catalog.rs    # `ado-aw catalog`: list in-tree registries (safe-outputs, runtimes, tools, engines, models, pinned versions)
 │   ├── detect.rs         # Agentic workflow detection — discovers compiled pipelines; used by all lifecycle commands
 │   ├── update_check.rs   # Version update check — queries GitHub Releases and prints advisory when newer version is available
+│   ├── version.rs        # Semver parsing/comparison shared by update_check and codemod cutover checks
 │   ├── ndjson.rs         # NDJSON parsing utilities
 │   ├── sanitize.rs       # Input sanitization for safe outputs
 │   ├── secure.rs         # Validated newtype value objects (parse-don't-validate path/identifier types)
