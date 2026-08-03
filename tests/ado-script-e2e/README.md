@@ -44,5 +44,5 @@ Although this pipeline does not consume the candidate-smoke write connection,
 it is a GitHub-backed AgentPlayground PR definition with protected repository
 access. Its live ADO trigger must keep fork builds and fork secrets disabled;
 definition `2544` is included in
-[`tests/compiler-smoke-e2e/trigger-policy.json`](../compiler-smoke-e2e/trigger-policy.json)
+[`tests/smoke/trigger-policy.json`](../smoke/trigger-policy.json)
 and the trusted candidate-smoke audit.

@@ -1,8 +1,8 @@
 /**
- * Git operations for staging a compiler candidate onto the mirror repo:
- * fetch the base ref into the self checkout's object store, spin up a
- * detached temp worktree, commit the transformed fixtures, push to a
- * per-run candidate ref, verify, and clean up (remote ref + worktree).
+ * Git operations for staging smoke cases onto the mirror repo: spin up a
+ * detached temp worktree, and for each case commit the staged pipeline, push
+ * it to a per-case candidate ref, verify, then reset ready for the next case.
+ * Cleans up the remote refs and the worktree at the end.
  *
  * Also implements the startup stale-ref scanner (see {@link scanStaleRefs}
  * usage in `index.ts`).
@@ -46,9 +46,9 @@ export const COMMIT_IDENTITY = {
   email: "ado-aw-smoke-e2e@users.noreply.github.com",
 } as const;
 
-/** Deterministic commit message: `test(smoke): stage compiler candidate <buildId>`. */
-export function commitMessage(buildId: number): string {
-  return `test(smoke): stage compiler candidate ${buildId}`;
+/** Deterministic commit message: `test(smoke): stage <caseId> for candidate <buildId>`. */
+export function commitMessage(buildId: number, caseId: string): string {
+  return `test(smoke): stage ${caseId} for candidate ${buildId}`;
 }
 
 /** Build the ADO Git remote URL for `<orgUrl>/<project>/_git/<repo>`. */
@@ -179,7 +179,7 @@ export function disallowedChanges(changed: readonly string[], allowed: ReadonlyS
 
 /** Stage all changes and commit with the deterministic identity/message. Returns the new commit SHA. */
 export async function commitAll(
-  opts: { worktreeDir: string; buildId: number; timeoutMs: number },
+  opts: { worktreeDir: string; buildId: number; caseId: string; timeoutMs: number },
   runner: GitRunner = defaultGitRunner,
 ): Promise<string> {
   await run(["add", "-A"], { cwd: opts.worktreeDir, timeoutMs: opts.timeoutMs }, runner);
@@ -191,12 +191,35 @@ export async function commitAll(
       `user.email=${COMMIT_IDENTITY.email}`,
       "commit",
       "-m",
-      commitMessage(opts.buildId),
+      commitMessage(opts.buildId, opts.caseId),
     ],
     { cwd: opts.worktreeDir, timeoutMs: opts.timeoutMs },
     runner,
   );
   return run(["rev-parse", "HEAD"], { cwd: opts.worktreeDir, timeoutMs: opts.timeoutMs }, runner);
+}
+
+/**
+ * Hard-reset the worktree back to `commitish` and remove untracked files.
+ *
+ * Called between cases so every candidate commit is a *sibling* parented
+ * directly on `BUILD_SOURCEVERSION` rather than a chain — each per-case ref
+ * then contains exactly its own case's staged pipeline, and all refs share
+ * the bulk of their objects so the pushes stay cheap.
+ *
+ * `clean -fdx` is deliberate: the compiler writes generated artefacts (lock
+ * files, `.ado-aw/imports/`) that must not leak from one case into the next.
+ */
+export async function resetWorktree(
+  opts: { worktreeDir: string; commitish: string; timeoutMs: number },
+  runner: GitRunner = defaultGitRunner,
+): Promise<void> {
+  await run(
+    ["reset", "--hard", opts.commitish],
+    { cwd: opts.worktreeDir, timeoutMs: opts.timeoutMs },
+    runner,
+  );
+  await run(["clean", "-fdx"], { cwd: opts.worktreeDir, timeoutMs: opts.timeoutMs }, runner);
 }
 
 /** Push the worktree's HEAD to `ref` on the mirror repo (never force). */
@@ -238,13 +261,54 @@ export async function deleteRemoteRef(
   opts: { cwd: string; mirrorUrl: string; ref: string; token: string; timeoutMs: number },
   runner: GitRunner = defaultGitRunner,
 ): Promise<void> {
+  await deleteRemoteRefs({ ...opts, refs: [opts.ref] }, runner);
+}
+
+/**
+ * Delete one or more candidate refs on the mirror repo in a single push.
+ *
+ * Batched because the lane model creates one ref per case per run, so a
+ * five-case run would otherwise pay five round trips. Falls back to
+ * individual deletes if the batch fails, so one bad ref cannot strand the
+ * rest.
+ */
+export async function deleteRemoteRefs(
+  opts: { cwd: string; mirrorUrl: string; refs: readonly string[]; token: string; timeoutMs: number },
+  runner: GitRunner = defaultGitRunner,
+): Promise<void> {
+  if (opts.refs.length === 0) return;
   const env = bearerEnv(opts.token);
-  await run(
-    ["push", "--porcelain", opts.mirrorUrl, "--delete", opts.ref],
-    { cwd: opts.cwd, env, timeoutMs: opts.timeoutMs },
-    runner,
-    [opts.token],
-  );
+  const run1 = (refs: readonly string[]): Promise<string> =>
+    run(
+      ["push", "--porcelain", opts.mirrorUrl, "--delete", ...refs],
+      { cwd: opts.cwd, env, timeoutMs: opts.timeoutMs },
+      runner,
+      [opts.token],
+    );
+
+  if (opts.refs.length === 1) {
+    await run1(opts.refs);
+    return;
+  }
+
+  try {
+    await run1(opts.refs);
+  } catch (batchErr) {
+    const failures: string[] = [];
+    for (const ref of opts.refs) {
+      try {
+        await run1([ref]);
+      } catch (err) {
+        failures.push(`${ref}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    if (failures.length > 0) {
+      throw new Error(
+        `batched ref delete failed (${batchErr instanceof Error ? batchErr.message : String(batchErr)}); ` +
+          `per-ref fallback also failed for: ${failures.join("; ")}`,
+      );
+    }
+  }
 }
 
 export interface RemoteRef {
@@ -259,7 +323,11 @@ export async function listCandidateRefs(
 ): Promise<RemoteRef[]> {
   const env = bearerEnv(opts.token);
   const stdout = await run(
-    ["ls-remote", "--heads", opts.mirrorUrl, `refs/heads/${CANDIDATE_BRANCH_PREFIX}/*`],
+    // `**` rather than `*`: candidate refs now carry a per-case segment
+    // (`<buildId>/<caseId>`), and some git/server implementations do not match
+    // `/` with a single `*`. The exact-prefix guard below remains the real
+    // filter either way.
+    ["ls-remote", "--heads", opts.mirrorUrl, `refs/heads/${CANDIDATE_BRANCH_PREFIX}/**`],
     { cwd: opts.cwd, env, timeoutMs: opts.timeoutMs },
     runner,
     [opts.token],
@@ -280,12 +348,27 @@ export async function listCandidateRefs(
   return refs;
 }
 
-/** Parse the numeric build id embedded in a candidate ref name, or `undefined` if malformed. */
-export function parseCandidateBuildId(ref: string): number | undefined {
+/** A parsed candidate ref: the orchestrator build that created it, and the case it stages. */
+export interface ParsedCandidateRef {
+  readonly buildId: number;
+  readonly caseId: string;
+}
+
+/**
+ * Parse the build id and case id out of a candidate ref, or `undefined` if the
+ * ref does not match `refs/heads/<prefix>/<buildId>/<caseId>` exactly.
+ *
+ * The `caseId` pattern mirrors the manifest's `CASE_ID_RE`. Anything that
+ * fails to parse is reported as ambiguous by the stale-ref scanner and never
+ * deleted — a fail-closed posture is preferred over guessing at another run's
+ * identity.
+ */
+export function parseCandidateRef(ref: string): ParsedCandidateRef | undefined {
   const prefix = `refs/heads/${CANDIDATE_BRANCH_PREFIX}/`;
   if (!ref.startsWith(prefix)) return undefined;
-  const suffix = ref.slice(prefix.length);
-  if (!/^[0-9]+$/.test(suffix)) return undefined;
-  const id = Number(suffix);
-  return Number.isSafeInteger(id) && id > 0 ? id : undefined;
+  const match = /^([0-9]+)\/([a-z0-9][a-z0-9-]{0,48})$/.exec(ref.slice(prefix.length));
+  if (!match) return undefined;
+  const buildId = Number(match[1]);
+  if (!Number.isSafeInteger(buildId) || buildId <= 0) return undefined;
+  return { buildId, caseId: match[2]! };
 }

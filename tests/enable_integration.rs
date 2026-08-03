@@ -89,10 +89,15 @@ async fn enable_dry_run_against_subdirectory_uses_repo_root_relative_yaml_path()
     // Regression: previously `enable PATH` joined `pipeline.source`
     // against the scan root rather than the repo root, producing
     // doubled paths like
-    //   C:\repo\tests\safe-outputs\tests\safe-outputs\noop.md
+    //   C:\repo\tests\fixtures\tests\fixtures\job-agent.md
     // for every fixture, and posted a yamlFilename of
-    // `/noop.lock.yml` (relative to scan root) instead of the
-    // real repo-relative `/tests/safe-outputs/noop.lock.yml`.
+    // `/job-agent.lock.yml` (relative to scan root) instead of the
+    // real repo-relative `/tests/fixtures/job-agent.lock.yml`.
+    //
+    // Scans `tests/fixtures` because it is the in-repo directory that
+    // still holds committed `*.lock.yml` files; `tests/safe-outputs`
+    // is markdown-only now that both smoke lanes recompile at run time.
+    // Any subdirectory with a compiled pipeline exercises this path.
     //
     // `enable` always calls `list_definitions` (to know which
     // fixtures already exist) even in --dry-run, so we point at a
@@ -124,7 +129,7 @@ async fn enable_dry_run_against_subdirectory_uses_repo_root_relative_yaml_path()
             "--pat",
             "dummy-pat-for-dry-run",
             "--dry-run",
-            "tests/safe-outputs",
+            "tests/fixtures",
         ])
         // Redirect ADO REST calls at the wiremock; explicit dummy
         // PAT keeps `resolve_auth` off the Azure-CLI / interactive-
@@ -145,7 +150,7 @@ async fn enable_dry_run_against_subdirectory_uses_repo_root_relative_yaml_path()
         "expected pipeline-discovery line, got:\n{stdout}"
     );
     assert!(
-        stdout.contains("\"yamlFilename\": \"/tests/safe-outputs/"),
+        stdout.contains("\"yamlFilename\": \"/tests/fixtures/"),
         "yamlFilename must be repo-root-relative, got:\n{stdout}"
     );
     assert!(

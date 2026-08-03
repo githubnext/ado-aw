@@ -7,12 +7,12 @@
  * scanner can PROVE, via the ADO Build REST API, that (a) the ref name
  * encodes a build id of THIS orchestrator's own definition
  * (`SYSTEM_DEFINITIONID`), (b) that build is old enough
- * (`COMPILER_SMOKE_STALE_REF_HOURS`), and (c) that parent build is
+ * (`SMOKE_STALE_REF_HOURS`), and (c) that parent build is
  * terminal. Note that (c) is NOT by itself proof the orchestration it
  * started is done — an abruptly canceled/killed parent process can reach a
  * terminal ADO build status while the fixture builds it queued are still
- * running. The scanner therefore also queries each configured FIXED
- * child definitions on the ref's exact branch (see
+ * running. The scanner therefore also queries each configured lane
+ * definition on the ref's exact branch (see
  * `listBuildsForDefinitionBranch`) and inspects their statuses directly;
  * only when every child build found there is ALSO terminal (or none exist)
  * is a ref considered `"eligible"` for deletion. Any active child, or any
@@ -25,7 +25,7 @@
  *
  * Test-harness module; not shipped in `ado-script.zip`.
  */
-import { parseCandidateBuildId, type RemoteRef } from "./git.js";
+import { parseCandidateRef, type RemoteRef } from "./git.js";
 
 export type StaleRefOutcome = "eligible" | "too-recent" | "active" | "ambiguous";
 
@@ -66,7 +66,7 @@ export interface ScanStaleRefsOptions {
    * deletion once none of these definitions has a still-active build on
    * that ref's exact branch.
    */
-  childDefinitionIds: readonly number[];
+  laneDefinitionIds: readonly number[];
   staleRefHours: number;
   client: StaleScanClient;
   /** Injectable clock for deterministic tests. */
@@ -88,16 +88,17 @@ export async function scanStaleRefs(opts: ScanStaleRefsOptions): Promise<StaleRe
   for (const { ref, sha } of opts.refs) {
     if (ref === opts.baseRef || ref === opts.ownRef) continue;
 
-    const buildId = parseCandidateBuildId(ref);
-    if (buildId === undefined) {
+    const parsed = parseCandidateRef(ref);
+    if (parsed === undefined) {
       decisions.push({
         ref,
         sha,
         outcome: "ambiguous",
-        reason: "ref name does not match the expected <prefix>/<buildId> pattern",
+        reason: "ref name does not match the expected <prefix>/<buildId>/<caseId> pattern",
       });
       continue;
     }
+    const { buildId } = parsed;
 
     let build: StaleScanBuild;
     try {
@@ -164,19 +165,19 @@ export async function scanStaleRefs(opts: ScanStaleRefsOptions): Promise<StaleRe
     // the ref deletable; any lookup failure or non-completed child build
     // fails closed.
     let childLookupError: string | undefined;
-    let activeChildDefinitionId: number | undefined;
-    for (const childDefinitionId of opts.childDefinitionIds) {
+    let activeLaneDefinitionId: number | undefined;
+    for (const laneDefinitionId of opts.laneDefinitionIds) {
       let childBuilds: StaleScanBuild[];
       try {
-        childBuilds = await opts.client.listBuildsForDefinitionBranch(childDefinitionId, ref);
+        childBuilds = await opts.client.listBuildsForDefinitionBranch(laneDefinitionId, ref);
       } catch (err) {
-        childLookupError = `child definition ${childDefinitionId} build lookup on ${ref} failed: ${
+        childLookupError = `lane definition ${laneDefinitionId} build lookup on ${ref} failed: ${
           err instanceof Error ? err.message : String(err)
         }`;
         break;
       }
       if (childBuilds.some((b) => b.status !== "completed")) {
-        activeChildDefinitionId = childDefinitionId;
+        activeLaneDefinitionId = laneDefinitionId;
         break;
       }
     }
@@ -186,12 +187,12 @@ export async function scanStaleRefs(opts: ScanStaleRefsOptions): Promise<StaleRe
       continue;
     }
 
-    if (activeChildDefinitionId !== undefined) {
+    if (activeLaneDefinitionId !== undefined) {
       decisions.push({
         ref,
         sha,
         outcome: "active",
-        reason: `fixture definition ${activeChildDefinitionId} still has a non-completed build on ${ref}`,
+        reason: `lane definition ${activeLaneDefinitionId} still has a non-completed build on ${ref}`,
       });
       continue;
     }
@@ -200,7 +201,7 @@ export async function scanStaleRefs(opts: ScanStaleRefsOptions): Promise<StaleRe
       ref,
       sha,
       outcome: "eligible",
-      reason: `orchestrator build #${buildId} completed ${Math.round(ageMs / 3_600_000)}h ago and no fixture build is active on ${ref}`,
+      reason: `orchestrator build #${buildId} completed ${Math.round(ageMs / 3_600_000)}h ago and no lane build is active on ${ref}`,
     });
   }
 

@@ -1,0 +1,16 @@
+# Shared orchestrator variables for the ado-aw smoke suite.
+#
+# Included by both root pipelines so candidate and released mode can never
+# drift apart. Every value is overridable by a same-named definition variable;
+# the `EFFECTIVE_` indirection exists so a definition-level override wins over
+# the YAML default without shadowing.
+#
+# Note there is ONE definition-id variable per credential *lane*, not per test
+# case. Adding a smoke case is a `cases.json` entry and never touches this file.
+
+variables:
+  EFFECTIVE_SMOKE_ARTIFACT_NAME: $[ coalesce(variables['SMOKE_ARTIFACT_NAME'], 'ado-aw-candidate') ]
+  EFFECTIVE_SMOKE_MIRROR_REPO: $[ coalesce(variables['SMOKE_MIRROR_REPO'], 'ado-aw-mirror') ]
+  EFFECTIVE_SMOKE_LANE_AGENTIC_DEFINITION_ID: $[ coalesce(variables['SMOKE_LANE_AGENTIC_DEFINITION_ID'], '') ]
+  EFFECTIVE_SMOKE_LANE_INFRA_DEFINITION_ID: $[ coalesce(variables['SMOKE_LANE_INFRA_DEFINITION_ID'], '') ]
+  EFFECTIVE_CRATES_IO_FEED: $[ coalesce(variables['CRATES_IO_FEED'], 'sparse+https://pkgs.dev.azure.com/msazuresphere/AgentPlayground/_packaging/cargo/Cargo/index/') ]

@@ -201,7 +201,7 @@ fn compile_fixture_with_flags(
         std::fs::copy(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("tests")
-                .join("compiler-smoke-e2e")
+                .join("smoke")
                 .join("component-fixture")
                 .join("components")
                 .join("custom-build-tags")

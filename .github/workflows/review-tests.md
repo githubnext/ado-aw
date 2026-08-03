@@ -75,9 +75,12 @@ Two ado-aw-specific rules worth knowing:
 - **Any new `bash:` step in generated pipeline YAML must be covered by
   `tests/bash_lint_tests.rs`.** ADO's "fail on last command" default lets silent
   failures through, which is exactly what that test exists to catch.
-- **`tests/safe-outputs/*.lock.yml` are release-owned.** They are the latest
-  released customer contract and must not be regenerated from a development
-  checkout. If this PR regenerates them, that is a finding.
+- **`tests/safe-outputs/` is markdown-only.** Smoke sources are recompiled at
+  run time by both smoke lanes; no `*.lock.yml` is committed there. A PR that
+  adds one has reintroduced lock drift — that is a finding.
+- **New smokes should cost two files.** A markdown source plus one entry in
+  `tests/smoke/cases.json`. A PR that registers a per-case ADO definition or
+  adds a per-case `*_DEFINITION_ID` variable is working against the lane model.
 
 ## Step 1 — Load the pre-fetched data
 

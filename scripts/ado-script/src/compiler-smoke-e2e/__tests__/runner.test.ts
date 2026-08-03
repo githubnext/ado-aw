@@ -62,6 +62,7 @@ function makeFakeClient(opts: {
       cancelled.push(buildId);
       opts.onCancel?.(buildId);
     },
+    async addBuildTags() {},
     buildUrl(buildId) {
       return `https://example/_build/results?buildId=${buildId}`;
     },
@@ -69,8 +70,8 @@ function makeFakeClient(opts: {
   return { client, cancelled };
 }
 
-function req(name: FixtureBuildRequest["name"], definitionId: number): FixtureBuildRequest {
-  return { name, definitionId, sourceBranch: "refs/heads/x", sourceVersion: "sha" };
+function req(caseId: string, definitionId: number): FixtureBuildRequest {
+  return { caseId, lane: "agentic", definitionId, sourceBranch: "refs/heads/x", sourceVersion: "sha" };
 }
 
 const noopSleep = async (): Promise<void> => {};
@@ -120,7 +121,7 @@ describe("runFixtures", () => {
       log: () => {},
       sleepImpl: noopSleep,
     });
-    expect(outcome.results.map((r) => r.name)).toEqual(["canary", "azure-cli"]);
+    expect(outcome.results.map((r) => r.caseId)).toEqual(["canary", "azure-cli"]);
     expect(outcome.results.every((r) => r.status === "succeeded")).toBe(true);
   });
 
@@ -142,8 +143,8 @@ describe("runFixtures", () => {
       sleepImpl: noopSleep,
     });
     expect(outcome.ok).toBe(false);
-    const canary = outcome.results.find((r) => r.name === "canary")!;
-    const azureCli = outcome.results.find((r) => r.name === "azure-cli")!;
+    const canary = outcome.results.find((r) => r.caseId === "canary")!;
+    const azureCli = outcome.results.find((r) => r.caseId === "azure-cli")!;
     expect(canary.status).toBe("queue-failed");
     expect(canary.message).toMatch(/definition disabled/);
     expect(azureCli.status).toBe("succeeded");
@@ -174,8 +175,8 @@ describe("runFixtures", () => {
       cancelGraceMs: 5,
     });
     expect(outcome.ok).toBe(false);
-    const canary = outcome.results.find((r) => r.name === "canary")!;
-    const azureCli = outcome.results.find((r) => r.name === "azure-cli")!;
+    const canary = outcome.results.find((r) => r.caseId === "canary")!;
+    const azureCli = outcome.results.find((r) => r.caseId === "azure-cli")!;
     expect(canary.status).toBe("failed");
     expect(azureCli.status === "canceled" || azureCli.status === "timed-out").toBe(true);
     expect(cancelled).toContain(402);
@@ -222,7 +223,7 @@ describe("runFixtures", () => {
       sleepImpl: noopSleep,
       cancelGraceMs: 5,
     });
-    const azureCli = outcome.results.find((r) => r.name === "azure-cli")!;
+    const azureCli = outcome.results.find((r) => r.caseId === "azure-cli")!;
     expect(azureCli.status).toBe("timed-out");
     expect(azureCli.message).toMatch(/cancellation grace period/);
   });
@@ -234,7 +235,7 @@ describe("runFixtures", () => {
       "canary",
       "azure-cli",
       "noop-target",
-      "smoke-failure-reporter",
+      "multi-repo",
     ] as const;
     const buildIds = [701, 702, 703, 704];
 
@@ -250,6 +251,7 @@ describe("runFixtures", () => {
         return { status: "completed", result: "succeeded" };
       },
       async cancelBuild() {},
+      addBuildTags: async () => {},
       buildUrl: (id) => `https://example/${id}`,
     };
 
@@ -274,6 +276,7 @@ describe("runFixtures", () => {
         throw new Error("transient network error");
       },
       async cancelBuild() {},
+      addBuildTags: async () => {},
       buildUrl: (id) => `https://example/${id}`,
     };
     const outcome = await runFixtures(client, [req("canary", 1)], {
@@ -309,6 +312,7 @@ describe("runFixtures", () => {
         };
       },
       async cancelBuild() {},
+      addBuildTags: async () => {},
       buildUrl: (id) => `https://example/${id}`,
     };
     const outcome = await runFixtures(client, [req("canary", 1)], {
@@ -336,6 +340,7 @@ describe("runFixtures", () => {
       async cancelBuild() {
         throw new Error("cancel API rejected");
       },
+      addBuildTags: async () => {},
       buildUrl: (id) => `https://example/${id}`,
     };
     const outcome = await runFixtures(client, [req("canary", 1)], {
@@ -385,6 +390,7 @@ describe("runFixtures", () => {
       async cancelBuild(buildId) {
         cancelled.push(buildId);
       },
+      addBuildTags: async () => {},
       buildUrl: (id) => `https://example/${id}`,
     };
     const outcome = await runFixtures(client, [req("canary", 1), req("azure-cli", 2)], {
@@ -396,7 +402,7 @@ describe("runFixtures", () => {
       cancelGraceMs: 5,
     });
     expect(outcome.ok).toBe(false);
-    const canary = outcome.results.find((r) => r.name === "canary")!;
+    const canary = outcome.results.find((r) => r.caseId === "canary")!;
     expect(canary.status).toBe("failed");
     expect(canary.terminalProven).toBe(true);
     expect(canary.message).toMatch(/does not match the requested queue parameters/);
@@ -420,6 +426,7 @@ describe("runFixtures", () => {
         };
       },
       async cancelBuild() {},
+      addBuildTags: async () => {},
       buildUrl: (id) => `https://example/${id}`,
     };
     const outcome = await runFixtures(client, [req("canary", 1)], {
@@ -451,6 +458,7 @@ describe("runFixtures", () => {
         };
       },
       async cancelBuild() {},
+      addBuildTags: async () => {},
       buildUrl: (id) => `https://example/${id}`,
     };
     const outcome = await runFixtures(client, [req("canary", 1)], {
@@ -477,6 +485,7 @@ describe("runFixtures", () => {
         return { status: "completed", result: "succeeded" };
       },
       async cancelBuild() {},
+      addBuildTags: async () => {},
       buildUrl: (id) => `https://example/${id}`,
     };
     const outcome = await runFixtures(client, [req("canary", 1)], {
@@ -533,6 +542,7 @@ describe("runFixtures", () => {
       async cancelBuild(buildId) {
         cancelled.push(buildId);
       },
+      addBuildTags: async () => {},
       buildUrl: (id) => `https://example/${id}`,
     };
     const outcome = await runFixtures(client, [req("canary", 1), req("azure-cli", 2)], {
@@ -545,10 +555,10 @@ describe("runFixtures", () => {
     });
     expect(outcome.ok).toBe(false);
     expect(cancelled).toContain(902);
-    const azureCli = outcome.results.find((r) => r.name === "azure-cli")!;
+    const azureCli = outcome.results.find((r) => r.caseId === "azure-cli")!;
     expect(azureCli.status).toBe("canceled");
     expect(azureCli.terminalProven).toBe(true);
-    const canary = outcome.results.find((r) => r.name === "canary")!;
+    const canary = outcome.results.find((r) => r.caseId === "canary")!;
     expect(canary.status).toBe("queue-failed");
     // Ambiguous queue failure: never proven, so the overall run can't
     // claim every build is terminal even though the sibling was cancelled
@@ -585,6 +595,7 @@ describe("runFixtures", () => {
         };
       },
       async cancelBuild() {},
+      addBuildTags: async () => {},
       buildUrl: (id) => `https://example/${id}`,
     };
     const outcome = await runFixtures(
@@ -593,7 +604,7 @@ describe("runFixtures", () => {
       { concurrency: 3, timeoutMs: 10_000, pollMs: 1, log: () => {} },
     );
     expect(resolveOrder.indexOf(1)).toBe(2); // definition 1 resolves LAST despite being declared first
-    expect(outcome.results.map((r) => r.name)).toEqual(["canary", "azure-cli", "noop-target"]);
+    expect(outcome.results.map((r) => r.caseId)).toEqual(["canary", "azure-cli", "noop-target"]);
     expect(outcome.results.every((r) => r.status === "succeeded")).toBe(true);
   });
 });

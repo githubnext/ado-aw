@@ -106,7 +106,7 @@ export EXECUTOR_E2E_ADO_REPO="agent-definitions"
 # Optional:
 # export EXECUTOR_E2E_GITHUB_TOKEN="<fine-grained PAT: Issues rw on jamesadevine/ado-aw-issues>"
 # export EXECUTOR_E2E_ISSUE_REPO="jamesadevine/ado-aw-issues"
-# export E2E_QUEUE_PIPELINE_ID="<noop-target pipeline id>"
+# export E2E_QUEUE_PIPELINE_ID="<queue-target pipeline id>"
 # Optional timeout tuning (milliseconds) for slow environments:
 # export EXECUTOR_E2E_REST_TIMEOUT_MS=30000     # per ADO REST call (default 30000)
 # export EXECUTOR_E2E_EXECUTE_TIMEOUT_MS=600000 # per `ado-aw execute` run (default 600000)
@@ -123,7 +123,8 @@ no current build. The harness exits non-zero if any scenario fails.
 In `https://dev.azure.com/msazuresphere/AgentPlayground`:
 
 > Current registration: definition `2550` in `\executor-e2e`, with
-> `E2E_QUEUE_PIPELINE_ID=2547`.
+> `E2E_QUEUE_PIPELINE_ID` pointing at the `queue-target` definition
+> registered from [`queue-target.yml`](queue-target.yml).
 
 1. **Register the pipeline.** New pipeline → GitHub through the
    `githubnext` service connection → existing YAML →
@@ -131,7 +132,7 @@ In `https://dev.azure.com/msazuresphere/AgentPlayground`:
    folder and skip the first run until variables are configured.
    In the live pull-request trigger settings, disable builds from forks and
    disable fork access to secrets/full tokens. Definition `2550` is audited by
-   `tests/compiler-smoke-e2e/trigger-policy.json`.
+   `tests/smoke/trigger-policy.json`.
 2. **Grant the principal behind `agent-playground-write` write access** on the
    `agent-definitions` repo (Contribute, Create branch, Contribute to PRs) and
    on Build (add tags). The YAML maps its AAD token to
@@ -149,6 +150,10 @@ In `https://dev.azure.com/msazuresphere/AgentPlayground`:
 4. Set `EXECUTOR_E2E_ISSUE_REPO=jamesadevine/ado-aw-issues`.
    Confirm the target repository has `executor-e2e-failure` and
    `pipeline-failure` labels.
-5. Set `E2E_QUEUE_PIPELINE_ID` to the replacement `noop-target` definition ID.
+5. Set `E2E_QUEUE_PIPELINE_ID` to the `queue-target` definition ID (register
+   [`queue-target.yml`](queue-target.yml) if it does not exist yet). It is a
+   permanent, trigger-free, non-agentic pipeline that exists only to be
+   queued, so this scenario no longer depends on the smoke suite's
+   registration lifecycle.
    *(Optional)* Set `E2E_WIKI_NAME` to enable the wiki scenarios.
 6. **Trigger one manual run** to seed the schedule.

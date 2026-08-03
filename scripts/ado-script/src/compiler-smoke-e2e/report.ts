@@ -1,5 +1,5 @@
 /**
- * Concise final results table: fixture / definition / build / url / result / duration.
+ * Concise final results table: case / lane / definition / build / url / result / duration.
  *
  * Test-harness module; not shipped in `ado-script.zip`.
  */
@@ -9,11 +9,12 @@ function pad(value: string, width: number): string {
   return value.length >= width ? value : value + " ".repeat(width - value.length);
 }
 
-/** Render the final per-fixture outcome table, in the caller's declaration order. */
+/** Render the final per-case outcome table, in the caller's declaration order. */
 export function renderResultsTable(results: readonly FixtureBuildResult[]): string {
-  const headers = ["fixture", "definition", "build", "url", "result", "duration"];
+  const headers = ["case", "lane", "definition", "build", "url", "result", "duration"];
   const rows = results.map((r) => [
-    r.name,
+    r.caseId,
+    r.lane,
     String(r.definitionId),
     r.buildId !== undefined ? String(r.buildId) : "-",
     r.url ?? "-",
@@ -28,7 +29,7 @@ export function renderResultsTable(results: readonly FixtureBuildResult[]): stri
     ...rows.map((row) => row.map((cell, i) => pad(cell, widths[i] ?? cell.length)).join("  ")),
   ];
   for (const r of results) {
-    if (r.message) lines.push(`  [${r.name}] ${r.message}`);
+    if (r.message) lines.push(`  [${r.caseId}] ${r.message}`);
   }
   return lines.join("\n");
 }

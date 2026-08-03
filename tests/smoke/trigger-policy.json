@@ -1,0 +1,17 @@
+{
+  "schema": "ado-aw/agentplayground-trigger-policy/1",
+  "_note": "Audited on every smoke orchestrator run: pr_definition_ids must keep their fork hardening, and scheduled_only_definition_ids must carry no CI or PR trigger metadata. The smoke lane definitions, the released orchestrator, and the executor-e2e queue target are all API-queued or scheduled-only and MUST be added to scheduled_only_definition_ids once registered (see tests/smoke/REGISTERED.md). Every listed id is fetched with curl --fail-with-body, so an id whose definition has been DELETED 404s and aborts the run after three retries — remove retired ids from this file in the same commit that deletes the definitions.",
+  "pr_definition_ids": [
+    2544,
+    2550
+  ],
+  "scheduled_only_definition_ids": [
+    2545,
+    2546,
+    2547,
+    2548,
+    2549,
+    2551,
+    2567
+  ]
+}

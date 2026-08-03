@@ -220,6 +220,22 @@ export class AdoRest {
   }
 
   /**
+   * Add labelling tags to a queued build.
+   *
+   * Every case in a lane shares one definition, so tags (alongside the
+   * per-case `sourceBranch`) are how a run is identified in the lane's
+   * history. Callers treat failures here as non-fatal.
+   */
+  async addBuildTags(buildId: number, tags: readonly string[]): Promise<void> {
+    for (const tag of tags) {
+      const path = this.projPath(
+        `_apis/build/builds/${buildId}/tags/${AdoRest.seg(tag)}?api-version=7.1`,
+      );
+      await this.request(path, { method: "PUT" });
+    }
+  }
+
+  /**
    * Queue a build of `definitionId`, pointed at the staged candidate branch
    * + exact commit. Both are always supplied (never sourceBranch alone) so
    * a slow/racing ref update on the mirror repo can never cause ADO to

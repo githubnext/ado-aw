@@ -1,0 +1,67 @@
+{
+  "schema": "ado-aw/smoke-cases/1",
+  "yamlPath": ".smoke/pipeline.yml",
+  "lanes": {
+    "agentic": {
+      "definitionIdEnv": "SMOKE_LANE_AGENTIC_DEFINITION_ID",
+      "description": "GITHUB_TOKEN, ADO_AW_GITHUB_TOKEN, agent-playground-read/write."
+    },
+    "infra": {
+      "definitionIdEnv": "SMOKE_LANE_INFRA_DEFINITION_ID",
+      "description": "No credentials. Reserved for AWF and the ado-proxy sidecar."
+    }
+  },
+  "cases": [
+    {
+      "id": "canary",
+      "lane": "agentic",
+      "kind": "compiled",
+      "modes": ["candidate", "released"],
+      "source": "tests/safe-outputs/canary.md"
+    },
+    {
+      "id": "azure-cli",
+      "lane": "agentic",
+      "kind": "compiled",
+      "modes": ["candidate", "released"],
+      "source": "tests/safe-outputs/azure-cli.md",
+      "assertions": {
+        "agentCommand": {
+          "required": ["shell(az", "shell(head"],
+          "forbidden": ["--allow-all-tools", "--allow-all-paths"]
+        }
+      }
+    },
+    {
+      "id": "noop-target",
+      "lane": "agentic",
+      "kind": "compiled",
+      "modes": ["candidate", "released"],
+      "source": "tests/safe-outputs/noop-target.md"
+    },
+    {
+      "id": "custom-safe-output",
+      "lane": "agentic",
+      "kind": "compiled",
+      "modes": ["candidate"],
+      "source": "tests/smoke/custom-safe-output.md",
+      "assertions": {
+        "requiredBuildTags": ["ado-aw-custom-job-{buildId}"]
+      }
+    },
+    {
+      "id": "multi-repo",
+      "lane": "agentic",
+      "kind": "compiled",
+      "modes": ["candidate"],
+      "source": "tests/smoke/multi-repo.md"
+    },
+    {
+      "id": "janitor",
+      "lane": "agentic",
+      "kind": "compiled",
+      "modes": ["released"],
+      "source": "tests/safe-outputs/janitor.md"
+    }
+  ]
+}

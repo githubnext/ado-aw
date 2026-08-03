@@ -1,0 +1,469 @@
+# Shared orchestrator steps for the ado-aw smoke suite.
+#
+# Consumed by two thin root pipelines so their trigger blocks can never leak
+# into one another:
+#   - azure-pipelines-candidate.yml  (compilerSource: candidate)  PR + nightly
+#   - azure-pipelines-release.yml    (compilerSource: released)   scheduled
+#
+# `candidate` builds the compiler from the checked-out commit and publishes an
+# immutable artifact every staged case is pinned to. `released` downloads the
+# latest released binary instead and leaves the compiled output pointing at
+# public release assets, so release packaging and asset availability are
+# exercised — this is what replaces the retired committed *.lock.yml files.
+
+parameters:
+  - name: compilerSource
+    type: string
+    values:
+      - candidate
+      - released
+
+steps:
+  - checkout: self
+    fetchDepth: 0
+    fetchTags: false
+    persistCredentials: false
+    displayName: Checkout ado-aw candidate
+
+  - script: |
+      set -euo pipefail
+      DIAGNOSTICS="$(Build.ArtifactStagingDirectory)/smoke-diagnostics"
+      mkdir -p "$DIAGNOSTICS"
+      jq -n \
+        --arg schema "ado-aw/smoke-diagnostics/1" \
+        --arg build_id "$(Build.BuildId)" \
+        --arg definition_id "$(System.DefinitionId)" \
+        --arg reason "$(Build.Reason)" \
+        --arg source_branch "$(Build.SourceBranch)" \
+        --arg source_version "$(Build.SourceVersion)" \
+        '{
+          schema: $schema,
+          build_id: $build_id,
+          definition_id: $definition_id,
+          reason: $reason,
+          source_branch: $source_branch,
+          source_version: $source_version
+        }' > "$DIAGNOSTICS/context.json"
+    displayName: Initialize smoke diagnostics
+
+  - script: |
+      set -euo pipefail
+      if [ "${SYSTEM_PULLREQUEST_ISFORK:-false}" = "True" ] || \
+         [ "${SYSTEM_PULLREQUEST_ISFORK:-false}" = "true" ]; then
+        echo "Fork PRs may not run this credentialed pipeline." >&2
+        exit 1
+      fi
+    displayName: Reject fork PR execution
+    env:
+      SYSTEM_PULLREQUEST_ISFORK: $(System.PullRequest.IsFork)
+
+  - ${{ if eq(parameters.compilerSource, 'candidate') }}:
+      - script: |
+          set -euo pipefail
+          mkdir -p .cargo
+          {
+            printf '\n[registries]\ncargo = { index = "%s" }\n\n' "$(EFFECTIVE_CRATES_IO_FEED)"
+            printf '[source.crates-io]\nreplace-with = "cargo"\n'
+          } >> .cargo/config.toml
+          echo "----- .cargo/config.toml -----"
+          cat .cargo/config.toml
+        displayName: Write cargo config for internal crates.io feed
+
+      - task: CargoAuthenticate@0
+        inputs:
+          configFile: ".cargo/config.toml"
+        displayName: Authenticate with cargo (internal feeds)
+
+      - task: RustInstaller@1
+        inputs:
+          rustVersion: ms-stable
+          toolchainFeed: "https://pkgs.dev.azure.com/msazuresphere/AgentPlayground/_packaging/AgentPlaygroundRustTools%40Local/nuget/v3/index.json"
+          cratesIoFeedOverride: "$(EFFECTIVE_CRATES_IO_FEED)"
+        displayName: Install Rust toolchain
+
+      - script: |
+          set -euo pipefail
+          cargo build --release --bin ado-aw
+          target/release/ado-aw --version
+        displayName: Build ado-aw candidate
+
+  # Released mode never compiles Rust: it downloads the exact binary customers
+  # get. A missing or broken release asset fails the run here, which is one of
+  # the two places release packaging is now exercised (the other being each
+  # staged case's own integrity step at run time).
+  - ${{ if eq(parameters.compilerSource, 'released') }}:
+      - script: |
+          set -euo pipefail
+          mkdir -p target/release
+          TAG="$(curl -fsSL --retry 3 --retry-delay 5 \
+            https://api.github.com/repos/githubnext/ado-aw/releases/latest | jq -er '.tag_name')"
+          echo "Latest released ado-aw: $TAG"
+          curl -fsSL --retry 3 --retry-delay 5 \
+            "https://github.com/githubnext/ado-aw/releases/download/${TAG}/ado-aw-linux-x64" \
+            -o target/release/ado-aw
+          chmod +x target/release/ado-aw
+          target/release/ado-aw --version
+          echo "##vso[task.setvariable variable=SMOKE_RELEASED_TAG]$TAG"
+        displayName: Download latest released ado-aw
+
+  - task: UseNode@1
+    inputs:
+      version: "20.x"
+    displayName: Use Node.js 20
+
+  - script: |
+      set -euo pipefail
+      npm ci
+      npm run build
+      npm run build:compiler-smoke-e2e
+    workingDirectory: scripts/ado-script
+    displayName: Build ado-script and smoke harness
+
+  # Candidate mode only: released mode consumes public release assets, so it
+  # has no candidate artifact to package or publish.
+  - ${{ if eq(parameters.compilerSource, 'candidate') }}:
+      - script: |
+          set -euo pipefail
+          STAGE="$(Build.ArtifactStagingDirectory)/$(EFFECTIVE_SMOKE_ARTIFACT_NAME)"
+          mkdir -p "$STAGE"
+          cp target/release/ado-aw "$STAGE/ado-aw-linux-x64"
+
+          (
+            cd scripts
+            shopt -s nullglob
+            bundles=(ado-script/*.js)
+            if [ "${#bundles[@]}" -eq 0 ]; then
+              echo "No ado-script bundles were produced." >&2
+              exit 1
+            fi
+            zip -q -r "$STAGE/ado-script.zip" "${bundles[@]}"
+          )
+
+          VERSION_JSON="$(target/release/ado-aw catalog --kind versions --json)"
+          AWF_VERSION="$(printf '%s' "$VERSION_JSON" | jq -er '.versions.awf')"
+          AWF_BASE="https://github.com/github/gh-aw-firewall/releases/download/v${AWF_VERSION}"
+          curl -fsSL --retry 3 --retry-delay 5 \
+            "$AWF_BASE/awf-linux-x64" -o "$STAGE/awf-linux-x64"
+          curl -fsSL --retry 3 --retry-delay 5 \
+            "$AWF_BASE/checksums.txt" -o "$STAGE/awf-upstream-checksums.txt"
+
+          EXPECTED_AWF="$(
+            awk '$2 == "awf-linux-x64" || $2 == "*awf-linux-x64" { print $1; exit }' \
+              "$STAGE/awf-upstream-checksums.txt"
+          )"
+          ACTUAL_AWF="$(sha256sum "$STAGE/awf-linux-x64" | awk '{ print $1 }')"
+          test -n "$EXPECTED_AWF"
+          test "$EXPECTED_AWF" = "$ACTUAL_AWF"
+          rm "$STAGE/awf-upstream-checksums.txt"
+
+          (
+            cd "$STAGE"
+            sha256sum ado-aw-linux-x64 awf-linux-x64 ado-script.zip > checksums.txt
+          )
+
+          COMPILER_VERSION="$(target/release/ado-aw --version | awk '{ print $2 }')"
+          jq -n \
+            --arg schema "ado-aw/candidate-artifact/1" \
+            --arg repository "$(Build.Repository.Name)" \
+            --arg source_ref "$(Build.SourceBranch)" \
+            --arg source_version "$(Build.SourceVersion)" \
+            --arg reason "$(Build.Reason)" \
+            --arg project "$(System.TeamProject)" \
+            --arg build_url "$(System.CollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)" \
+            --arg compiler_version "$COMPILER_VERSION" \
+            --arg awf_version "$AWF_VERSION" \
+            --argjson producer_definition_id "$(System.DefinitionId)" \
+            --argjson producer_build_id "$(Build.BuildId)" \
+            --arg ado_aw_sha256 "$(awk '$2 == "ado-aw-linux-x64" { print $1 }' "$STAGE/checksums.txt")" \
+            --arg awf_sha256 "$(awk '$2 == "awf-linux-x64" { print $1 }' "$STAGE/checksums.txt")" \
+            --arg ado_script_sha256 "$(awk '$2 == "ado-script.zip" { print $1 }' "$STAGE/checksums.txt")" \
+            '{
+              schema: $schema,
+              repository: $repository,
+              source_ref: $source_ref,
+              source_version: $source_version,
+              reason: $reason,
+              project: $project,
+              producer_definition_id: $producer_definition_id,
+              producer_build_id: $producer_build_id,
+              build_url: $build_url,
+              compiler_version: $compiler_version,
+              awf_version: $awf_version,
+              assets: {
+                "ado-aw-linux-x64": {
+                  origin: "built-from-checkout",
+                  sha256: $ado_aw_sha256
+                },
+                "awf-linux-x64": {
+                  origin: "verified-upstream-release",
+                  sha256: $awf_sha256
+                },
+                "ado-script.zip": {
+                  origin: "built-from-checkout",
+                  sha256: $ado_script_sha256
+                }
+              }
+            }' > "$STAGE/provenance.json"
+
+          jq -e \
+            --argjson definition "$(System.DefinitionId)" \
+            --argjson build "$(Build.BuildId)" \
+            '.schema == "ado-aw/candidate-artifact/1"
+             and .producer_definition_id == $definition
+             and .producer_build_id == $build' \
+            "$STAGE/provenance.json" >/dev/null
+          (
+            cd "$STAGE"
+            for asset in ado-aw-linux-x64 awf-linux-x64 ado-script.zip; do
+              awk -v name="$asset" '$2 == name { print; found=1 } END { exit(found ? 0 : 1) }' \
+                checksums.txt | sha256sum -c -
+            done
+          )
+          cat "$STAGE/provenance.json"
+        displayName: Package candidate compiler supply chain
+
+      - task: PublishPipelineArtifact@1
+        inputs:
+          targetPath: "$(Build.ArtifactStagingDirectory)/$(EFFECTIVE_SMOKE_ARTIFACT_NAME)"
+          artifact: "$(EFFECTIVE_SMOKE_ARTIFACT_NAME)"
+          publishLocation: pipeline
+        displayName: Publish candidate compiler artifact
+
+  - task: AzureCLI@2
+    displayName: Acquire ADO orchestration token
+    inputs:
+      azureSubscription: agent-playground-write
+      scriptType: bash
+      scriptLocation: inlineScript
+      addSpnToEnvironment: true
+      inlineScript: |
+        set -euo pipefail
+        ADO_TOKEN=$(az account get-access-token \
+          --resource 499b84ac-1321-427f-aa17-267ca6975798 \
+          --query accessToken -o tsv)
+        echo "##vso[task.setvariable variable=SC_WRITE_TOKEN;issecret=true]$ADO_TOKEN"
+
+  - script: |
+      set -euo pipefail
+      BASE="$(System.CollectionUri)$(System.TeamProject)/_apis/build/definitions"
+      POLICY="tests/smoke/trigger-policy.json"
+      DIAGNOSTICS="$(Build.ArtifactStagingDirectory)/smoke-diagnostics"
+      RAW_DIAGNOSTICS="$(Agent.TempDirectory)/smoke-policy"
+      SELF_ID="$(System.DefinitionId)"
+      mkdir -p "$RAW_DIAGNOSTICS"
+
+      fetch_definition() {
+        local id="$1"
+        local attempt
+        local body
+        local curl_exit
+        local curl_metadata
+        local headers
+        local jq_error
+        local metadata
+        local raw_headers
+        local response_bytes
+        local sample
+
+        for attempt in 1 2 3; do
+          body="$RAW_DIAGNOSTICS/definition-${id}-attempt-${attempt}.body"
+          raw_headers="$RAW_DIAGNOSTICS/definition-${id}-attempt-${attempt}.headers.raw"
+          headers="$DIAGNOSTICS/definition-${id}-attempt-${attempt}.headers"
+          metadata="$DIAGNOSTICS/definition-${id}-attempt-${attempt}.metadata"
+          jq_error="$DIAGNOSTICS/definition-${id}-attempt-${attempt}.jq-error"
+          sample="$DIAGNOSTICS/definition-${id}-attempt-${attempt}.body-sample"
+          : > "$body"
+          : > "$raw_headers"
+          : > "$jq_error"
+          curl_exit=0
+          curl_metadata=""
+
+          if curl_metadata="$(curl -sS --fail-with-body \
+            --connect-timeout 15 \
+            --max-time 60 \
+            --dump-header "$raw_headers" \
+            --output "$body" \
+            --write-out 'http_code=%{http_code}\ncontent_type=%{content_type}\nnum_redirects=%{num_redirects}\nurl_effective=%{url_effective}\ntime_total=%{time_total}\n' \
+            -H "Authorization: Bearer $SYSTEM_ACCESSTOKEN" \
+            "$BASE/$id?api-version=7.1")"; then
+            :
+          else
+            curl_exit=$?
+          fi
+
+          awk '{
+            lower = tolower($0)
+            if ($0 ~ /^HTTP\// ||
+                lower ~ /^(content-type|content-length|x-vss-e2eid|x-tfs-session|activityid|request-context):/) {
+              print
+            }
+          }' "$raw_headers" > "$headers"
+          rm -f "$raw_headers"
+
+          response_bytes="$(wc -c < "$body" | tr -d ' ')"
+          {
+            printf 'definition_id=%s\n' "$id"
+            printf 'attempt=%s\n' "$attempt"
+            printf 'curl_exit=%s\n' "$curl_exit"
+            printf 'response_bytes=%s\n' "$response_bytes"
+            printf '%s\n' "$curl_metadata"
+          } > "$metadata"
+
+          if [ "$curl_exit" -eq 0 ] &&
+             jq -e 'type == "object"' "$body" >/dev/null 2>"$jq_error"; then
+            jq '{
+              id,
+              name,
+              revision,
+              triggers,
+              repository: (.repository | {id, name, type, defaultBranch}),
+              variable_names: ((.variables // {}) | keys)
+            }' "$body" > "$DIAGNOSTICS/definition-${id}-snapshot.json"
+            rm -f "$jq_error"
+            cat "$body"
+            rm -f "$body"
+            return 0
+          fi
+
+          head -c 16384 "$body" > "$sample"
+          rm -f "$body"
+          {
+            echo "ADO definition response validation failed for definition $id (attempt $attempt/3)."
+            cat "$metadata"
+            if [ -s "$headers" ]; then
+              echo "response_headers_begin"
+              cat "$headers"
+              echo "response_headers_end"
+            fi
+            if [ -s "$jq_error" ]; then
+              echo "jq_error_begin"
+              cat "$jq_error"
+              echo "jq_error_end"
+            fi
+            if [ -s "$sample" ]; then
+              echo "response_sample_begin"
+              head -c 2048 "$sample" | LC_ALL=C tr -c '\11\12\15\40-\176' '?'
+              echo
+              echo "response_sample_end"
+            fi
+          } >&2
+
+          if [ "$attempt" -lt 3 ]; then
+            sleep "$((attempt * 2))"
+          fi
+        done
+
+        return 1
+      }
+
+      PR_IDS="$(
+        jq -er '
+          select(.schema == "ado-aw/agentplayground-trigger-policy/1")
+          | .pr_definition_ids[]
+        ' "$POLICY"
+      ) $SELF_ID"
+      SCHEDULED_ONLY_IDS="$(
+        jq -er '
+          select(.schema == "ado-aw/agentplayground-trigger-policy/1")
+          | .scheduled_only_definition_ids[]
+        ' "$POLICY"
+      )"
+
+      SELF_JSON=""
+      for id in $PR_IDS; do
+        if ! JSON="$(fetch_definition "$id")"; then
+          echo "Unable to audit PR definition $id after 3 attempts; see smoke-diagnostics." >&2
+          exit 1
+        fi
+        if [ "$id" = "$SELF_ID" ]; then
+          SELF_JSON="$JSON"
+        fi
+        if ! printf '%s' "$JSON" | jq -e '
+          ([.triggers[]? | select(.triggerType == "continuousIntegration")] | length == 0)
+          and any(
+              .triggers[]?;
+              .triggerType == "pullRequest"
+              and .forks.enabled == false
+              and .forks.allowSecrets == false
+              and .forks.allowFullAccessToken == false
+              and .pipelineTriggerSettings.buildsEnabledForForks == false
+            )' >/dev/null; then
+          NAME="$(printf '%s' "$JSON" | jq -r '.name // "unknown"')"
+          echo "PR trigger policy drift detected for definition $id ($NAME)." >&2
+          printf '%s' "$JSON" | jq '{id, name, revision, triggers}' >&2
+          exit 1
+        fi
+      done
+
+      if [ -z "$SELF_JSON" ]; then
+        echo "Candidate definition $SELF_ID was not included in the PR policy audit." >&2
+        exit 1
+      fi
+      if ! printf '%s' "$SELF_JSON" | jq -e '
+        any(
+          .triggers[]?;
+          .triggerType == "pullRequest"
+          and .isCommentRequiredForPullRequest == true
+          and .requireCommentsForNonTeamMembersOnly == false
+          and .requireCommentsForNonTeamMemberAndNonContributors == false
+          and .isCommentRequiredForInternalRepoPRs == true
+          and .commentOptionInternalRepos == "all"
+        )' >/dev/null; then
+        echo "Candidate compiler PR comment-gate policy drift detected for definition $SELF_ID." >&2
+        printf '%s' "$SELF_JSON" | jq '{id, name, revision, triggers}' >&2
+        exit 1
+      fi
+
+      for id in $SCHEDULED_ONLY_IDS; do
+        if ! JSON="$(fetch_definition "$id")"; then
+          echo "Unable to audit scheduled-only definition $id after 3 attempts; see smoke-diagnostics." >&2
+          exit 1
+        fi
+        if ! printf '%s' "$JSON" | jq -e '
+          [.triggers[]?
+            | select(
+                .triggerType == "continuousIntegration"
+                or .triggerType == "pullRequest"
+              )]
+          | length == 0' >/dev/null; then
+          NAME="$(printf '%s' "$JSON" | jq -r '.name // "unknown"')"
+          echo "Scheduled-only trigger policy drift detected for definition $id ($NAME)." >&2
+          printf '%s' "$JSON" | jq '{id, name, revision, triggers}' >&2
+          exit 1
+        fi
+      done
+    displayName: Audit AgentPlayground trigger policy
+    env:
+      SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)
+
+  - script: |
+      set -euo pipefail
+      mkdir -p "$(Build.ArtifactStagingDirectory)/smoke-diagnostics"
+      node scripts/ado-script/test-bin/compiler-smoke-e2e.js \
+        2>&1 | tee "$(Build.ArtifactStagingDirectory)/smoke-diagnostics/run.log"
+    displayName: Run all smoke cases (${{ parameters.compilerSource }})
+    env:
+      SYSTEM_COLLECTIONURI: $(System.CollectionUri)
+      SYSTEM_TEAMPROJECT: $(System.TeamProject)
+      SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)
+      BUILD_BUILDID: $(Build.BuildId)
+      BUILD_SOURCEBRANCH: $(Build.SourceBranch)
+      BUILD_SOURCEVERSION: $(Build.SourceVersion)
+      BUILD_SOURCESDIRECTORY: $(Build.SourcesDirectory)
+      SYSTEM_DEFINITIONID: $(System.DefinitionId)
+      SMOKE_COMPILER_SOURCE: ${{ parameters.compilerSource }}
+      SMOKE_ADO_AW_BIN: $(Build.SourcesDirectory)/target/release/ado-aw
+      SMOKE_ARTIFACT_NAME: $(EFFECTIVE_SMOKE_ARTIFACT_NAME)
+      SMOKE_MIRROR_REPO: $(EFFECTIVE_SMOKE_MIRROR_REPO)
+      # One variable per credential lane, not per case. Adding a smoke case
+      # never adds a variable here.
+      SMOKE_LANE_AGENTIC_DEFINITION_ID: $(EFFECTIVE_SMOKE_LANE_AGENTIC_DEFINITION_ID)
+      SMOKE_LANE_INFRA_DEFINITION_ID: $(EFFECTIVE_SMOKE_LANE_INFRA_DEFINITION_ID)
+
+  - task: PublishPipelineArtifact@1
+    condition: always()
+    inputs:
+      targetPath: "$(Build.ArtifactStagingDirectory)/smoke-diagnostics"
+      artifact: smoke-diagnostics
+      publishLocation: pipeline
+    displayName: Publish smoke diagnostics
