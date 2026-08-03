@@ -109,6 +109,8 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   │   ├── 0003_flatten_work_item_config.rs # Legacy work-item config flatten codemod
 │   │   │   ├── 0004_legacy_path_markers.rs # Migrate {{ workspace }}/{{ working_directory }}/{{ trigger_repo_directory }} markers → explicit ADO path exprs (resolved from workspace:/repos:)
 │   │   │   ├── 0005_drop_build_attachment_allowed_build_ids.rs # Remove inert safe-outputs.upload-build-attachment.allowed-build-ids key (build attachments are current-run only)
+│   │   │   ├── 0006_explicit_push_trigger.rs # Pin the legacy implicit all-branches push trigger for sources whose committed lock predates 0.49.0
+│   │   │   ├── 0007_promote_debug_create_github_issue.rs # Move legacy ado-aw-debug.create-issue into public safe-outputs.create-github-issue with auth bridge
 │   │   │   └── helpers.rs # take_key, insert_no_overwrite, rename_key, ConflictPolicy
 │   │   ├── codemod_integration_test.rs # White-box rewrite-path tests (stub registry injection)
 │   │   ├── types.rs      # Front matter grammar and types
@@ -194,7 +196,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── comment_on_work_item.rs
 │   │   ├── create_branch.rs
 │   │   ├── create_git_tag.rs
-│   │   ├── create_issue.rs
+│   │   ├── create_github_issue.rs
 │   │   ├── create_pull_request.rs
 │   │   ├── create_wiki_page.rs
 │   │   ├── create_work_item.rs
@@ -207,6 +209,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── report_incomplete.rs
 │   │   ├── resolve_pr_thread.rs
 │   │   ├── result.rs
+│   │   ├── set_github_issue_type.rs
 │   │   ├── submit_pr_review.rs
 │   │   ├── update_pr.rs
 │   │   ├── update_wiki_page.rs
@@ -366,9 +369,9 @@ index to jump to the right page.
   `$(System.AccessToken)` semantics, the "Limit job authorization
   scope to current project" toggle, permission-bitmask decoder,
   REST recipe for inspecting ACEs, and the three fix paths.
-- [`docs/ado-aw-debug.md`](docs/ado-aw-debug.md) — debug-only `ado-aw-debug:`
-  front-matter section (`skip-integrity`, `create-issue` for filing GitHub
-  issues from dogfood pipelines). NOT a regular safe-output.
+- [`docs/ado-aw-debug.md`](docs/ado-aw-debug.md) — debug-only
+  `ado-aw-debug.skip-integrity` front-matter control. GitHub issue filing is a
+  regular safe output.
 - [`docs/supply-chain.md`](docs/supply-chain.md) — optional `supply-chain:`
   front-matter section that mirrors the compiler, AWF binary, ado-script
   bundle, and AWF/MCPG images from an internal Azure DevOps Artifacts feed,

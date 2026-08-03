@@ -1,15 +1,8 @@
-//! Debug-only `create-issue` safe output.
+//! `create-github-issue` safe output.
 //!
 //! Files a GitHub issue against an operator-configured target repository.
-//! This is **not** a regular safe output — it is gated entirely by the
-//! `ado-aw-debug.create-issue` front-matter section and stripped from the
-//! SafeOutputs MCP server unless explicitly enabled (see
-//! [`crate::safe_outputs::DEBUG_ONLY_TOOLS`]).
-//!
-//! Intended use: dogfood pipelines compiled from `githubnext/ado-aw` that need
-//! to file failure reports back to GitHub for triage. Stage 3 authenticates
-//! with a dedicated PAT exposed via the `ADO_AW_DEBUG_GITHUB_TOKEN` pipeline
-//! variable and surfaced through [`ExecutionContext::github_token`].
+//! Stage 3 authenticates with the credential exposed through
+//! [`ExecutionContext::github_token`]; Agent and Detection never see it.
 //!
 //! Notable design points:
 //! * `target-repo` is operator-only — the agent never supplies it and cannot
@@ -31,13 +24,14 @@ use std::sync::OnceLock;
 use super::PATH_SEGMENT;
 use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
+use crate::secure::GithubTemporaryId;
 use crate::tool_result;
 use crate::validate::reject_pipeline_injection;
 use ado_aw_derive::SanitizeConfig;
 
-/// Parameters the agent supplies when calling the `create-issue` MCP tool.
+/// Parameters the agent supplies when calling the `create-github-issue` MCP tool.
 #[derive(Deserialize, JsonSchema)]
-pub struct CreateIssueParams {
+pub struct CreateGithubIssueParams {
     /// Concise issue title summarizing the bug, feature, or task.
     pub title: String,
 
@@ -52,9 +46,13 @@ pub struct CreateIssueParams {
     /// GitHub usernames to assign to the issue.
     #[serde(default)]
     pub assignees: Vec<String>,
+
+    /// Temporary identifier used by later safe outputs in the same run.
+    #[serde(default)]
+    pub temporary_id: Option<GithubTemporaryId>,
 }
 
-impl Validate for CreateIssueParams {
+impl Validate for CreateGithubIssueParams {
     fn validate(&self) -> anyhow::Result<()> {
         // Note: length checks are byte-based (`str::len()`), which is acceptable
         // here because limits are defensive bounds rather than user-facing quotas.
@@ -66,32 +64,34 @@ impl Validate for CreateIssueParams {
         );
         for label in &self.labels {
             ensure!(!label.is_empty(), "label must not be empty");
-            reject_pipeline_injection(label, "create-issue.label")?;
+            reject_pipeline_injection(label, "create-github-issue.label")?;
         }
         for assignee in &self.assignees {
             ensure!(!assignee.is_empty(), "assignee must not be empty");
-            reject_pipeline_injection(assignee, "create-issue.assignee")?;
+            reject_pipeline_injection(assignee, "create-github-issue.assignee")?;
         }
         Ok(())
     }
 }
 
 tool_result! {
-    name = "create-issue",
+    name = "create-github-issue",
     write = true,
-    params = CreateIssueParams,
+    params = CreateGithubIssueParams,
     /// Result of filing a GitHub issue.
-    pub struct CreateIssueResult {
+    pub struct CreateGithubIssueResult {
         title: String,
         body: String,
         #[serde(default)]
         labels: Vec<String>,
         #[serde(default)]
         assignees: Vec<String>,
+        #[serde(default)]
+        temporary_id: Option<GithubTemporaryId>,
     }
 }
 
-impl SanitizeContent for CreateIssueResult {
+impl SanitizeContent for CreateGithubIssueResult {
     fn sanitize_content_fields(&mut self) {
         self.title = sanitize_text(&self.title);
         self.body = sanitize_text(&self.body);
@@ -104,16 +104,14 @@ impl SanitizeContent for CreateIssueResult {
     }
 }
 
-/// Operator-side configuration for `ado-aw-debug.create-issue`.
-///
-/// Lives under `ado-aw-debug:` rather than `safe-outputs:` to keep the tool
-/// out of the regular safe-output surface.
+/// Operator-side configuration for `safe-outputs.create-github-issue`.
 #[derive(Debug, Clone, Default, SanitizeConfig, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CreateIssueConfig {
-    /// Required: target GitHub repository in `owner/repo` form.
-    #[serde(rename = "target-repo")]
-    pub target_repo: String,
+pub struct CreateGithubIssueConfig {
+    /// Target GitHub repository in `owner/repo` form. When omitted, Stage 3
+    /// resolves the current repository only for GitHub-backed ADO builds.
+    #[serde(default, rename = "target-repo")]
+    pub target_repo: Option<String>,
 
     /// Optional prefix prepended to every agent-supplied title (e.g.
     /// `"[pipeline-failure] "`).
@@ -137,9 +135,13 @@ pub struct CreateIssueConfig {
     #[serde(default)]
     pub assignees: Vec<String>,
 
+    /// Require every proposal to include a temporary ID.
+    #[serde(default, rename = "require-temporary-id")]
+    #[sanitize_config(skip)]
+    pub require_temporary_id: bool,
+
     /// Per-run budget (max number of issues filed). Read by the generic
-    /// budget machinery in `crate::execute`. Stored here so
-    /// `deny_unknown_fields` accepts it under `ado-aw-debug.create-issue`.
+    /// budget machinery in `crate::execute`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[sanitize_config(skip)]
     pub max: Option<u32>,
@@ -165,21 +167,57 @@ fn target_repo_regex() -> &'static Regex {
 pub(crate) fn validate_target_repo(target_repo: &str) -> anyhow::Result<()> {
     ensure!(
         !target_repo.is_empty(),
-        "ado-aw-debug.create-issue.target-repo is required (expected 'owner/repo')"
+        "target-repo is required (expected 'owner/repo')"
     );
     ensure!(
         target_repo_regex().is_match(target_repo),
-        "ado-aw-debug.create-issue.target-repo '{}' is not in 'owner/repo' format \
+        "target-repo '{}' is not in 'owner/repo' format \
          (owner: alphanumerics/hyphens; repo: alphanumerics/dots/hyphens/underscores)",
         target_repo
     );
     if let Some((_owner, repo)) = target_repo.split_once('/') {
         ensure!(
             repo != "." && repo != "..",
-            "ado-aw-debug.create-issue.target-repo repo segment must not be '.' or '..'"
+            "target-repo repo segment must not be '.' or '..'"
         );
     }
     Ok(())
+}
+
+pub(crate) fn resolve_target_repo(
+    configured: Option<&str>,
+    ctx: &ExecutionContext,
+) -> Result<String, ExecutionResult> {
+    let target = if let Some(target) = configured {
+        target.to_string()
+    } else {
+        let provider = ctx.repository_provider.as_deref().unwrap_or_default();
+        if !provider.eq_ignore_ascii_case("github")
+            && !provider.eq_ignore_ascii_case("githubenterprise")
+        {
+            return Err(ExecutionResult::failure(
+                "target-repo is required when the Azure DevOps pipeline source is not GitHub",
+            ));
+        }
+        if provider.eq_ignore_ascii_case("githubenterprise")
+            && ctx.github_api_url.eq_ignore_ascii_case("https://api.github.com")
+        {
+            return Err(ExecutionResult::failure(
+                "safe-outputs.github-api-url or GitHub App api-url is required for a \
+                 GitHub Enterprise source",
+            ));
+        }
+        match ctx.repository_name.clone() {
+            Some(name) => name,
+            None => {
+                return Err(ExecutionResult::failure(
+                    "BUILD_REPOSITORY_NAME is not set; configure target-repo explicitly",
+                ));
+            }
+        }
+    };
+    validate_target_repo(&target).map_err(|e| ExecutionResult::failure(e.to_string()))?;
+    Ok(target)
 }
 
 /// Build the auto-appended traceability footer.
@@ -238,7 +276,7 @@ const ALLOWED_LABELS_ANY: &str = "*";
 const MAX_FINAL_TITLE_LEN: usize = 256;
 
 #[async_trait::async_trait]
-impl Executor for CreateIssueResult {
+impl Executor for CreateGithubIssueResult {
     fn dry_run_summary(&self) -> String {
         format!("create GitHub issue: '{}'", self.title)
     }
@@ -250,20 +288,9 @@ impl Executor for CreateIssueResult {
             self.body.len()
         );
 
-        // SECURITY GATE: independently of the SafeOutputs MCP filter, refuse
-        // to act on a `create-issue` NDJSON entry unless the operator
-        // authorised it via the `ado-aw-debug.create-issue` front-matter
-        // section. This closes the gap where a forged NDJSON entry (or a
-        // mis-placed `safe-outputs.create-issue` config) could otherwise
-        // bypass the MCP-layer default-deny.
-        if !ctx
-            .debug_enabled_tools
-            .contains(<Self as crate::safe_outputs::ToolResult>::NAME)
-        {
+        if !ctx.tool_configs.contains_key("create-github-issue") {
             return Ok(ExecutionResult::failure(
-                "create-issue is a debug-only tool and is not enabled for this \
-                 pipeline. Configure `ado-aw-debug.create-issue` in front matter \
-                 to authorise it.",
+                "create-github-issue is not configured for this workflow",
             ));
         }
 
@@ -271,16 +298,31 @@ impl Executor for CreateIssueResult {
             Some(t) => t,
             None => {
                 return Ok(ExecutionResult::failure(
-                    "ADO_AW_DEBUG_GITHUB_TOKEN not set; required by ado-aw-debug.create-issue",
+                    "ADO_AW_GITHUB_TOKEN is not set; configure safe-outputs.github-token \
+                     or safe-outputs.github-app",
                 ));
             }
         };
 
-        let config: CreateIssueConfig = ctx.get_tool_config("create-issue");
-        debug!("create-issue: target-repo={}", config.target_repo);
-
-        if let Err(e) = validate_target_repo(&config.target_repo) {
-            return Ok(ExecutionResult::failure(e.to_string()));
+        let config: CreateGithubIssueConfig = ctx.get_tool_config("create-github-issue");
+        if config.require_temporary_id && self.temporary_id.is_none() {
+            return Ok(ExecutionResult::failure(
+                "create-github-issue requires temporary_id because \
+                 safe-outputs.create-github-issue.require-temporary-id is true",
+            ));
+        }
+        let target_repo = match resolve_target_repo(config.target_repo.as_deref(), ctx) {
+            Ok(target) => target,
+            Err(result) => return Ok(result),
+        };
+        debug!("create-github-issue: target-repo={target_repo}");
+        if let Some(temporary_id) = &self.temporary_id
+            && ctx.has_resolved_github_issue(temporary_id)?
+        {
+            return Ok(ExecutionResult::failure(format!(
+                "temporary_id '{}' was already used in this run",
+                temporary_id.canonical()
+            )));
         }
 
         // Validate agent-supplied labels against allowed-labels.
@@ -345,13 +387,13 @@ impl Executor for CreateIssueResult {
         let all_assignees = merge_dedup_strings(&config.assignees, &self.assignees);
 
         // Split target-repo only after validation.
-        let (owner, repo) = config
-            .target_repo
+        let (owner, repo) = target_repo
             .split_once('/')
             .context("target-repo must be 'owner/repo'")?;
 
         let url = format!(
-            "https://api.github.com/repos/{}/{}/issues",
+            "{}/repos/{}/{}/issues",
+            ctx.github_api_url.trim_end_matches('/'),
             utf8_percent_encode(owner, PATH_SEGMENT),
             utf8_percent_encode(repo, PATH_SEGMENT),
         );
@@ -383,7 +425,15 @@ impl Executor for CreateIssueResult {
                 .json()
                 .await
                 .context("Failed to parse GitHub API response")?;
-            let number = body.get("number").and_then(|v| v.as_i64()).unwrap_or(0);
+            let Some(number) = body
+                .get("number")
+                .and_then(|v| v.as_u64())
+                .filter(|number| *number > 0)
+            else {
+                return Ok(ExecutionResult::failure(
+                    "GitHub create-github-issue response contained no positive issue number",
+                ));
+            };
             let html_url = body
                 .get("html_url")
                 .and_then(|v| v.as_str())
@@ -391,17 +441,41 @@ impl Executor for CreateIssueResult {
                 .to_string();
             info!(
                 "Filed GitHub issue {}#{}: {}",
-                config.target_repo, number, html_url
+                target_repo, number, html_url
             );
+            if let Some(temporary_id) = &self.temporary_id
+                && let Err(error) = ctx.register_resolved_github_issue(
+                    temporary_id,
+                    crate::safe_outputs::ResolvedGithubIssue {
+                        repository: target_repo.clone(),
+                        number,
+                        url: html_url.clone(),
+                    },
+                )
+            {
+                return Ok(ExecutionResult::failure_with_data(
+                    format!(
+                        "Filed issue {}#{} but failed to register temporary_id '{}': {}",
+                        target_repo,
+                        number,
+                        temporary_id.canonical(),
+                        crate::sanitize::neutralize_pipeline_commands(&error.to_string())
+                    ),
+                    serde_json::json!({
+                        "number": number,
+                        "url": html_url,
+                        "target_repo": target_repo,
+                        "temporary_id": temporary_id.canonical(),
+                    }),
+                ));
+            }
             Ok(ExecutionResult::success_with_data(
-                format!(
-                    "Filed issue {}#{}: {}",
-                    config.target_repo, number, html_url
-                ),
+                format!("Filed issue {}#{}: {}", target_repo, number, html_url),
                 serde_json::json!({
                     "number": number,
                     "url": html_url,
-                    "target_repo": config.target_repo,
+                    "target_repo": target_repo,
+                    "temporary_id": self.temporary_id.as_ref().map(GithubTemporaryId::canonical),
                 }),
             ))
         } else {
@@ -411,7 +485,8 @@ impl Executor for CreateIssueResult {
                 .unwrap_or_else(|_| "<unable to read response body>".to_string());
             Ok(ExecutionResult::failure(format!(
                 "Failed to file GitHub issue (HTTP {}): {}",
-                status, body_text
+                status,
+                crate::sanitize::neutralize_pipeline_commands(&body_text)
             )))
         }
     }
@@ -429,96 +504,76 @@ mod tests {
         github_token: Option<String>,
     ) -> ExecutionContext {
         let mut tool_configs: HashMap<String, serde_json::Value> = HashMap::new();
-        tool_configs.insert("create-issue".to_string(), config);
-        let mut debug_enabled_tools = std::collections::HashSet::new();
-        debug_enabled_tools.insert("create-issue".to_string());
+        tool_configs.insert("create-github-issue".to_string(), config);
         ExecutionContext {
             github_token,
             tool_configs,
-            debug_enabled_tools,
             working_directory: PathBuf::from("."),
             source_directory: PathBuf::from("."),
             ..Default::default()
         }
     }
 
-    /// Build a context that mirrors a forged-NDJSON scenario: tool config is
-    /// present, but the operator never authorised the debug tool via
-    /// `ado-aw-debug.create-issue`, so `debug_enabled_tools` is empty.
-    fn ctx_unauthorized(
-        config: serde_json::Value,
-        github_token: Option<String>,
-    ) -> ExecutionContext {
-        let mut tool_configs: HashMap<String, serde_json::Value> = HashMap::new();
-        tool_configs.insert("create-issue".to_string(), config);
-        ExecutionContext {
-            github_token,
-            tool_configs,
-            debug_enabled_tools: std::collections::HashSet::new(),
-            working_directory: PathBuf::from("."),
-            source_directory: PathBuf::from("."),
-            ..Default::default()
-        }
-    }
-
-    fn valid_params() -> CreateIssueParams {
-        CreateIssueParams {
+    fn valid_params() -> CreateGithubIssueParams {
+        CreateGithubIssueParams {
             title: "Pipeline failure on main".to_string(),
             body: "The agent step failed during stage 1 with a network timeout.".to_string(),
             labels: vec![],
             assignees: vec![],
+            temporary_id: None,
         }
     }
 
     #[test]
     fn test_result_has_correct_name() {
-        assert_eq!(CreateIssueResult::NAME, "create-issue");
+        assert_eq!(CreateGithubIssueResult::NAME, "create-github-issue");
     }
 
     #[test]
     fn test_validate_rejects_short_title() {
-        let params = CreateIssueParams {
+        let params = CreateGithubIssueParams {
             title: "Hi".to_string(),
             ..valid_params()
         };
-        assert!(<CreateIssueParams as Validate>::validate(&params).is_err());
+        assert!(<CreateGithubIssueParams as Validate>::validate(&params).is_err());
     }
 
     #[test]
     fn test_validate_rejects_short_body() {
-        let params = CreateIssueParams {
+        let params = CreateGithubIssueParams {
             body: "too short".to_string(),
             ..valid_params()
         };
-        assert!(<CreateIssueParams as Validate>::validate(&params).is_err());
+        assert!(<CreateGithubIssueParams as Validate>::validate(&params).is_err());
     }
 
     #[test]
     fn test_validate_rejects_pipeline_injection_in_label() {
-        let params = CreateIssueParams {
+        let params = CreateGithubIssueParams {
             labels: vec!["##vso[task.complete]".to_string()],
             ..valid_params()
         };
-        assert!(<CreateIssueParams as Validate>::validate(&params).is_err());
+        assert!(<CreateGithubIssueParams as Validate>::validate(&params).is_err());
     }
 
     #[test]
     fn test_validate_rejects_pipeline_injection_in_assignee() {
-        let params = CreateIssueParams {
+        let params = CreateGithubIssueParams {
             assignees: vec!["$(SYSTEM_ACCESSTOKEN)".to_string()],
             ..valid_params()
         };
-        assert!(<CreateIssueParams as Validate>::validate(&params).is_err());
+        assert!(<CreateGithubIssueParams as Validate>::validate(&params).is_err());
     }
 
     #[test]
     fn test_sanitize_strips_control_chars() {
-        let mut result = CreateIssueResult {
-            name: "create-issue".to_string(),
+        let mut result = CreateGithubIssueResult {
+            name: "create-github-issue".to_string(),
             title: "ok\u{0007}title".to_string(),
             body: "body\u{0008}with\u{0001}ctl chars (more than 30 characters total)".to_string(),
             labels: vec!["la\u{0007}bel".to_string()],
             assignees: vec!["jo\u{0008}hn".to_string()],
+            temporary_id: None,
         };
         result.sanitize_content_fields();
         assert!(!result.title.contains('\u{0007}'));
@@ -530,12 +585,13 @@ mod tests {
 
     #[test]
     fn test_dry_run_summary_format() {
-        let result = CreateIssueResult {
-            name: "create-issue".to_string(),
+        let result = CreateGithubIssueResult {
+            name: "create-github-issue".to_string(),
             title: "Fix the build".to_string(),
             body: "anything".to_string(),
             labels: vec![],
             assignees: vec![],
+            temporary_id: None,
         };
         assert_eq!(
             result.dry_run_summary(),
@@ -571,6 +627,111 @@ mod tests {
     }
 
     #[test]
+    fn resolve_target_repo_uses_current_github_source() {
+        let ctx = ExecutionContext {
+            repository_provider: Some("GitHub".to_string()),
+            repository_name: Some("octo/repo".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_target_repo(None, &ctx).unwrap(), "octo/repo");
+    }
+
+    #[test]
+    fn resolve_target_repo_rejects_azure_repos_default() {
+        let ctx = ExecutionContext {
+            repository_provider: Some("TfsGit".to_string()),
+            repository_name: Some("repo".to_string()),
+            ..Default::default()
+        };
+        let error = resolve_target_repo(None, &ctx).unwrap_err();
+        assert!(error.message.contains("target-repo is required"));
+    }
+
+    #[test]
+    fn resolve_target_repo_rejects_ghe_source_left_on_dotcom_api_url() {
+        // A GitHub Enterprise pipeline source whose API URL was never overridden
+        // still points at api.github.com, so implicitly resolving the current
+        // repository would file the issue on the wrong host entirely.
+        let ctx = ExecutionContext {
+            repository_provider: Some("GitHubEnterprise".to_string()),
+            repository_name: Some("octo/repo".to_string()),
+            github_api_url: "https://api.github.com".to_string(),
+            ..Default::default()
+        };
+        let error = resolve_target_repo(None, &ctx).unwrap_err();
+        assert!(
+            error.message.contains("GitHub Enterprise source"),
+            "unexpected message: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn resolve_target_repo_accepts_ghe_source_with_explicit_api_url() {
+        // The positive counterpart: once the GHE API URL is set, implicit
+        // resolution of the current repository is allowed again.
+        let ctx = ExecutionContext {
+            repository_provider: Some("GitHubEnterprise".to_string()),
+            repository_name: Some("octo/repo".to_string()),
+            github_api_url: "https://ghe.example.com/api/v3".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(resolve_target_repo(None, &ctx).unwrap(), "octo/repo");
+    }
+
+    #[test]
+    fn resolve_target_repo_rejects_missing_build_repository_name() {
+        // GitHub-backed build, but ADO did not surface BUILD_REPOSITORY_NAME.
+        // There is nothing safe to fall back to, so this must fail rather than
+        // resolve to an empty or guessed slug.
+        let ctx = ExecutionContext {
+            repository_provider: Some("GitHub".to_string()),
+            repository_name: None,
+            ..Default::default()
+        };
+        let error = resolve_target_repo(None, &ctx).unwrap_err();
+        assert!(
+            error.message.contains("BUILD_REPOSITORY_NAME is not set"),
+            "unexpected message: {}",
+            error.message
+        );
+    }
+
+    /// `ExecutionContext::get_tool_config` deserializes with
+    /// `.ok().unwrap_or_default()`, so a config that fails to deserialize
+    /// silently becomes `Default` — i.e. `target_repo: None`, which resolves to
+    /// the *current* repository. That is why `target-repo` stays a plain
+    /// `String` validated by `validate_target_repo()` at each call site rather
+    /// than a `secure.rs` newtype validated at deserialization time: a newtype
+    /// would turn a malformed value into a silent redirect instead of a loud
+    /// failure. `test_execute_fails_when_target_repo_invalid` covers the plain
+    /// rejection; this pins the *no silent redirect* half, with a usable
+    /// current repository deliberately present in the context.
+    #[tokio::test]
+    async fn malformed_target_repo_does_not_redirect_to_current_repository() {
+        let mut ctx = ctx_with_config(
+            serde_json::json!({ "target-repo": "not a valid slug" }),
+            Some("fake-pat".to_string()),
+        );
+        ctx.repository_provider = Some("GitHub".to_string());
+        ctx.repository_name = Some("octo/current".to_string());
+
+        let mut result: CreateGithubIssueResult = valid_params().try_into().unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!execution.success);
+        assert!(
+            execution.message.contains("target-repo"),
+            "expected an explicit target-repo rejection, got: {}",
+            execution.message
+        );
+        assert!(
+            !execution.message.contains("octo/current"),
+            "must not silently fall back to the current repository: {}",
+            execution.message
+        );
+    }
+
+    #[test]
     fn test_merge_dedup_strings_dedupes_case_insensitively() {
         let merged = merge_dedup_strings(
             &["bug".into(), "Triage".into()],
@@ -585,7 +746,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_fails_when_github_token_missing() {
         let params = valid_params();
-        let mut result: CreateIssueResult = params.try_into().unwrap();
+        let mut result: CreateGithubIssueResult = params.try_into().unwrap();
         let ctx = ctx_with_config(
             serde_json::json!({"target-repo": "githubnext/ado-aw"}),
             None,
@@ -593,16 +754,29 @@ mod tests {
         let exec = result.execute_sanitized(&ctx).await.unwrap();
         assert!(!exec.success);
         assert!(
-            exec.message.contains("ADO_AW_DEBUG_GITHUB_TOKEN"),
-            "expected ADO_AW_DEBUG_GITHUB_TOKEN message, got: {}",
+            exec.message.contains("ADO_AW_GITHUB_TOKEN"),
+            "expected ADO_AW_GITHUB_TOKEN message, got: {}",
             exec.message
         );
     }
 
     #[tokio::test]
+    async fn test_execute_rejects_when_tool_not_configured() {
+        let params = valid_params();
+        let mut result: CreateGithubIssueResult = params.try_into().unwrap();
+        let ctx = ExecutionContext {
+            github_token: Some("token-that-must-not-be-used".to_string()),
+            ..Default::default()
+        };
+        let exec = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!exec.success);
+        assert!(exec.message.contains("not configured"));
+    }
+
+    #[tokio::test]
     async fn test_execute_fails_when_target_repo_invalid() {
         let params = valid_params();
-        let mut result: CreateIssueResult = params.try_into().unwrap();
+        let mut result: CreateGithubIssueResult = params.try_into().unwrap();
         let ctx = ctx_with_config(
             serde_json::json!({"target-repo": "not-a-valid-repo"}),
             Some("fake-pat".to_string()),
@@ -617,12 +791,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_execute_requires_temporary_id_when_configured() {
+        let params = valid_params();
+        let mut result: CreateGithubIssueResult = params.try_into().unwrap();
+        let ctx = ctx_with_config(
+            serde_json::json!({
+                "target-repo": "githubnext/ado-aw",
+                "require-temporary-id": true
+            }),
+            Some("fake-pat".to_string()),
+        );
+        let exec = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!exec.success);
+        assert!(exec.message.contains("requires temporary_id"));
+    }
+
+    #[tokio::test]
+    async fn target_configuration_error_precedes_duplicate_temporary_id() {
+        let temporary_id = GithubTemporaryId::parse("#aw_dup1").unwrap();
+        let mut params = valid_params();
+        params.temporary_id = Some(temporary_id.clone());
+        let mut result: CreateGithubIssueResult = params.try_into().unwrap();
+        let ctx = ctx_with_config(
+            serde_json::json!({"require-temporary-id": true}),
+            Some("token".to_string()),
+        );
+        ctx.register_resolved_github_issue(
+            &temporary_id,
+            crate::safe_outputs::ResolvedGithubIssue {
+                repository: "octo/repo".to_string(),
+                number: 1,
+                url: "https://github.com/octo/repo/issues/1".to_string(),
+            },
+        )
+        .unwrap();
+
+        let exec = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!exec.success);
+        assert!(exec.message.contains("target-repo is required"));
+        assert!(!exec.message.contains("already used"));
+    }
+
+    #[tokio::test]
     async fn test_execute_rejects_disallowed_label() {
-        let params = CreateIssueParams {
+        let params = CreateGithubIssueParams {
             labels: vec!["manual".to_string()],
             ..valid_params()
         };
-        let mut result: CreateIssueResult = params.try_into().unwrap();
+        let mut result: CreateGithubIssueResult = params.try_into().unwrap();
         let ctx = ctx_with_config(
             serde_json::json!({
                 "target-repo": "githubnext/ado-aw",
@@ -641,11 +857,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_accepts_label_matching_wildcard() {
-        let params = CreateIssueParams {
+        let params = CreateGithubIssueParams {
             labels: vec!["agent-created".to_string()],
             ..valid_params()
         };
-        let mut result: CreateIssueResult = params.try_into().unwrap();
+        let mut result: CreateGithubIssueResult = params.try_into().unwrap();
         let ctx = ctx_with_config(
             serde_json::json!({
                 "target-repo": "githubnext/ado-aw",
@@ -667,42 +883,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_execute_rejects_when_debug_tool_not_authorized() {
-        // Forged-NDJSON scenario: payload contains a `create-issue` entry
-        // and ctx.tool_configs has a config under "create-issue" — but the
-        // operator never set `ado-aw-debug.create-issue`, so
-        // `debug_enabled_tools` is empty. The executor MUST refuse before
-        // touching the token.
-        let params = valid_params();
-        let mut result: CreateIssueResult = params.try_into().unwrap();
-        let ctx = ctx_unauthorized(
-            serde_json::json!({"target-repo": "githubnext/ado-aw"}),
-            Some("token-that-must-not-be-used".to_string()),
-        );
-        let exec = result.execute_sanitized(&ctx).await.unwrap();
-        assert!(!exec.success);
-        assert!(
-            exec.message.contains("debug-only tool"),
-            "expected debug-only refusal, got: {}",
-            exec.message
-        );
-        // Also confirm the message does NOT mention the token — a token
-        // mention would imply we made it past the gate.
-        assert!(
-            !exec.message.contains("GITHUB_TOKEN"),
-            "executor must refuse before checking token: {}",
-            exec.message
-        );
-    }
-
-    #[tokio::test]
     async fn test_execute_rejects_agent_label_when_allowed_labels_empty() {
         // Default-deny: empty allowed-labels means no agent labels allowed.
-        let params = CreateIssueParams {
+        let params = CreateGithubIssueParams {
             labels: vec!["bug".to_string()],
             ..valid_params()
         };
-        let mut result: CreateIssueResult = params.try_into().unwrap();
+        let mut result: CreateGithubIssueResult = params.try_into().unwrap();
         let ctx = ctx_with_config(
             serde_json::json!({"target-repo": "githubnext/ado-aw"}),
             Some("fake-pat".to_string()),
@@ -718,11 +905,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_accepts_any_agent_label_with_star_allowlist() {
-        let params = CreateIssueParams {
+        let params = CreateGithubIssueParams {
             labels: vec!["arbitrary-label".to_string()],
             ..valid_params()
         };
-        let mut result: CreateIssueResult = params.try_into().unwrap();
+        let mut result: CreateGithubIssueResult = params.try_into().unwrap();
         let ctx = ctx_with_config(
             serde_json::json!({
                 "target-repo": "githubnext/ado-aw",
@@ -745,11 +932,11 @@ mod tests {
     #[tokio::test]
     async fn test_execute_rejects_overlong_final_title_after_prefix() {
         let long_prefix = "X".repeat(250);
-        let params = CreateIssueParams {
+        let params = CreateGithubIssueParams {
             title: "valid title here".to_string(),
             ..valid_params()
         };
-        let mut result: CreateIssueResult = params.try_into().unwrap();
+        let mut result: CreateGithubIssueResult = params.try_into().unwrap();
         let ctx = ctx_with_config(
             serde_json::json!({
                 "target-repo": "githubnext/ado-aw",
@@ -773,12 +960,13 @@ mod tests {
         // contain ##vso[...] in labels. The error message must neutralise
         // these sequences so they can't act as live ADO pipeline commands
         // when the message is echoed to stdout.
-        let mut result = CreateIssueResult {
-            name: "create-issue".to_string(),
+        let mut result = CreateGithubIssueResult {
+            name: "create-github-issue".to_string(),
             title: "Pipeline failure on main".to_string(),
             body: "This is a sufficiently long body for the issue parameters.".to_string(),
             labels: vec!["##vso[task.complete]".to_string()],
             assignees: vec![],
+            temporary_id: None,
         };
         let ctx = ctx_with_config(
             serde_json::json!({
@@ -820,8 +1008,8 @@ labels: [a]
 allowed-labels: ["agent-*"]
 assignees: [u1]
 "#;
-        let cfg: CreateIssueConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(cfg.target_repo, "githubnext/ado-aw");
+        let cfg: CreateGithubIssueConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.target_repo.as_deref(), Some("githubnext/ado-aw"));
         assert_eq!(cfg.title_prefix.as_deref(), Some("[bug] "));
         assert_eq!(cfg.labels, vec!["a".to_string()]);
         assert_eq!(cfg.allowed_labels, vec!["agent-*".to_string()]);
@@ -834,7 +1022,7 @@ assignees: [u1]
 target-repo: githubnext/ado-aw
 unexpected: oops
 "#;
-        let result: Result<CreateIssueConfig, _> = serde_yaml::from_str(yaml);
+        let result: Result<CreateGithubIssueConfig, _> = serde_yaml::from_str(yaml);
         assert!(
             result.is_err(),
             "deny_unknown_fields should reject unexpected key"

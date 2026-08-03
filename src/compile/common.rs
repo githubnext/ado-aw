@@ -1682,20 +1682,9 @@ pub fn generate_integrity_check(skip: bool) -> String {
         .to_string()
 }
 
-/// Returns `true` when the agent's front matter sets
-/// `ado-aw-debug.create-issue:` — the gate that activates the debug-only
-/// `create-issue` safe output.
-pub(crate) fn debug_create_issue_enabled(front_matter: &FrontMatter) -> bool {
-    front_matter
-        .ado_aw_debug
-        .as_ref()
-        .and_then(|d| d.create_issue.as_ref())
-        .is_some()
-}
-
 /// Validate the `ado-aw-debug:` section.
 ///
-/// When `create-issue:` is present:
+/// When `create-github-issue:` is present:
 /// * `target-repo` is required and must be `owner/repo`-shaped.
 /// * Operator-supplied strings (target-repo, title-prefix, labels,
 ///   allowed-labels, assignees) must not contain ADO pipeline-injection
@@ -1726,40 +1715,79 @@ pub fn validate_ado_aw_debug_config(front_matter: &FrontMatter) -> Result<()> {
         }
     }
 
-    let Some(debug) = front_matter.ado_aw_debug.as_ref() else {
-        return Ok(());
-    };
-    let Some(ci) = debug.create_issue.as_ref() else {
-        return Ok(());
-    };
+    Ok(())
+}
 
-    crate::safe_outputs::validate_target_repo(&ci.target_repo)?;
+pub fn validate_github_issue_outputs_config(front_matter: &FrontMatter) -> Result<()> {
+    if let Some(config) = front_matter.create_github_issue_config()? {
+        if let Some(target_repo) = config.target_repo.as_deref() {
+            crate::safe_outputs::validate_target_repo(target_repo)?;
+            crate::validate::reject_pipeline_injection(
+                target_repo,
+                "safe-outputs.create-github-issue.target-repo",
+            )?;
+        }
+        if let Some(prefix) = config.title_prefix.as_deref() {
+            crate::validate::reject_pipeline_injection(
+                prefix,
+                "safe-outputs.create-github-issue.title-prefix",
+            )?;
+        }
+        for label in &config.labels {
+            crate::validate::reject_pipeline_injection(
+                label,
+                "safe-outputs.create-github-issue.labels",
+            )?;
+        }
+        for label in &config.allowed_labels {
+            crate::validate::reject_pipeline_injection(
+                label,
+                "safe-outputs.create-github-issue.allowed-labels",
+            )?;
+        }
+        for assignee in &config.assignees {
+            crate::validate::reject_pipeline_injection(
+                assignee,
+                "safe-outputs.create-github-issue.assignees",
+            )?;
+        }
+    }
 
-    crate::validate::reject_pipeline_injection(
-        &ci.target_repo,
-        "ado-aw-debug.create-issue.target-repo",
-    )?;
-    if let Some(prefix) = ci.title_prefix.as_deref() {
-        crate::validate::reject_pipeline_injection(
-            prefix,
-            "ado-aw-debug.create-issue.title-prefix",
-        )?;
+    if let Some(config) = front_matter.set_github_issue_type_config()? {
+        if let Some(target_repo) = config.target_repo.as_deref() {
+            crate::safe_outputs::validate_target_repo(target_repo)?;
+            crate::validate::reject_pipeline_injection(
+                target_repo,
+                "safe-outputs.set-github-issue-type.target-repo",
+            )?;
+        }
+        for issue_type in &config.allowed {
+            crate::validate::reject_pipeline_injection(
+                issue_type,
+                "safe-outputs.set-github-issue-type.allowed",
+            )?;
+        }
     }
-    for label in &ci.labels {
-        crate::validate::reject_pipeline_injection(label, "ado-aw-debug.create-issue.labels")?;
+
+    if front_matter.safe_outputs.contains_key("create-github-issue")
+        && front_matter.safe_outputs.contains_key("set-github-issue-type")
+    {
+        let create_reviewed = front_matter
+            .tool_requires_approval("create-github-issue")
+            .is_some();
+        let type_reviewed = front_matter
+            .tool_requires_approval("set-github-issue-type")
+            .is_some();
+        if create_reviewed != type_reviewed {
+            anyhow::bail!(
+                "safe-outputs.create-github-issue and safe-outputs.set-github-issue-type must have the \
+                 same effective require-approval setting so temporary issue IDs remain in \
+                 one SafeOutputs job"
+            );
+        }
     }
-    for label in &ci.allowed_labels {
-        crate::validate::reject_pipeline_injection(
-            label,
-            "ado-aw-debug.create-issue.allowed-labels",
-        )?;
-    }
-    for assignee in &ci.assignees {
-        crate::validate::reject_pipeline_injection(
-            assignee,
-            "ado-aw-debug.create-issue.assignees",
-        )?;
-    }
+
+    let _ = front_matter.github_safe_outputs_auth()?;
     Ok(())
 }
 
@@ -1908,22 +1936,26 @@ pub fn generate_acquire_ado_token(service_connection: Option<&str>, variable_nam
 ///   scope" settings. Avoids the operational overhead of an ARM service
 ///   connection. The agent (Stage 1) never maps this variable, so the
 ///   token remains executor-only.
-/// * `ADO_AW_DEBUG_GITHUB_TOKEN: $(ADO_AW_DEBUG_GITHUB_TOKEN)` when
-///   `debug_create_issue_enabled` is `true` — GitHub PAT used by the
-///   `ado-aw-debug.create-issue` safe output. Sourced from a dedicated
-///   pipeline variable so it stays separate from the read-only `GITHUB_TOKEN`
-///   the agent (Stage 1) sees.
+/// * `ADO_AW_GITHUB_TOKEN` and `ADO_AW_GITHUB_API_URL` when GitHub issue
+///   outputs are configured. The token source is a Stage 3 PAT or separately
+///   minted App token and remains isolated from Agent/Detection.
 pub fn generate_executor_ado_env(
     write_service_connection: Option<&str>,
-    debug_create_issue_enabled: bool,
+    github_auth: Option<&crate::compile::types::GithubSafeOutputsAuth>,
 ) -> String {
     let mut lines: Vec<String> = Vec::new();
     // Select the ADO bearer via the shared `token_source_for` helper so the
     // executor and the Conclusion job cannot disagree on the token source.
     let token = crate::compile::ado_bundle::token_source_for(write_service_connection);
     lines.push(format!("SYSTEM_ACCESSTOKEN: $({})", token.variable()));
-    if debug_create_issue_enabled {
-        lines.push("ADO_AW_DEBUG_GITHUB_TOKEN: $(ADO_AW_DEBUG_GITHUB_TOKEN)".to_string());
+    if let Some(github_auth) = github_auth {
+        lines.push(format!(
+            "ADO_AW_GITHUB_TOKEN: $({})",
+            github_auth.executor_token_var()
+        ));
+        let api_url = serde_json::to_string(github_auth.api_url())
+            .expect("serializing a validated GitHub API URL cannot fail");
+        lines.push(format!("ADO_AW_GITHUB_API_URL: {api_url}"));
     }
     // The two-space indent on each value line is the YAML relative indent for
     // a key nested under `env:`. replace_with_indent prepends the base
@@ -1940,13 +1972,13 @@ pub fn generate_executor_ado_env(
 /// Generate `--enabled-tools` CLI args for the SafeOutputs MCP server.
 ///
 /// Derives the tool list from `safe-outputs:` front matter keys plus always-on
-/// diagnostic tools, plus any debug-only safe outputs activated via the
-/// `ado-aw-debug:` section (e.g. `create-issue`).
+/// diagnostic tools. Configured-only tools (e.g. `create-github-issue`) are
+/// stripped by the MCP layer unless they appear here, so they become reachable
+/// only when the author declared their `safe-outputs:` key.
 ///
-/// If `safe-outputs:` is empty AND no `ado-aw-debug` debug-only tool is
-/// configured, returns an empty string (all non-debug tools enabled for
-/// backward compatibility — debug-only tools remain stripped at the MCP
-/// layer regardless).
+/// If `safe-outputs:` is empty, returns an empty string (all non-gated tools
+/// enabled for backward compatibility — debug-only and configured-only tools
+/// remain stripped at the MCP layer regardless).
 ///
 /// Tool names are validated to contain only ASCII alphanumerics and hyphens
 /// to prevent shell injection when the args are embedded in bash commands.
@@ -1955,9 +1987,7 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
     use crate::safe_outputs::{ALL_KNOWN_SAFE_OUTPUTS, ALWAYS_ON_TOOLS, NON_MCP_SAFE_OUTPUT_KEYS};
     use std::collections::HashSet;
 
-    let debug_create_issue = debug_create_issue_enabled(front_matter);
-
-    if front_matter.safe_outputs.is_empty() && !debug_create_issue {
+    if front_matter.safe_outputs.is_empty() {
         return String::new();
     }
 
@@ -1996,13 +2026,6 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
         if seen.insert(key.clone()) {
             tools.push(key.clone());
         }
-    }
-
-    // Debug-only tools must be added explicitly — they're stripped from the
-    // MCP layer by default and only become reachable when listed here.
-    if debug_create_issue && seen.insert("create-issue".to_string()) {
-        tools.push("create-issue".to_string());
-        effective_mcp_tool_count += 1;
     }
 
     if effective_mcp_tool_count == 0 && front_matter.custom_safe_output_tool_names().is_empty() {
@@ -4451,37 +4474,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_debug_create_issue_enabled_helper() {
-        let yaml_off = "---\nname: test\ndescription: test\n---\n";
-        let (fm_off, _) = parse_markdown(yaml_off).unwrap();
-        assert!(!debug_create_issue_enabled(&fm_off));
-
-        let yaml_on = r#"---
-name: test
-description: test
-ado-aw-debug:
-  create-issue:
-    target-repo: githubnext/ado-aw
----
-"#;
-        let (fm_on, _) = parse_markdown(yaml_on).unwrap();
-        assert!(debug_create_issue_enabled(&fm_on));
-
-        let yaml_section_only = r#"---
-name: test
-description: test
-ado-aw-debug:
-  skip-integrity: true
----
-"#;
-        let (fm_section, _) = parse_markdown(yaml_section_only).unwrap();
-        assert!(
-            !debug_create_issue_enabled(&fm_section),
-            "ado-aw-debug.skip-integrity alone must NOT enable create-issue"
-        );
-    }
-
     // ─── generate_debug_pipeline_replacements ────────────────────────────────
 
     // ─── validate_submit_pr_review_events ────────────────────────────────────
@@ -4769,23 +4761,32 @@ safe-outputs:
         );
     }
 
-    // ─── ado-aw-debug wiring ────────────────────────────────────────────────
+    #[test]
+    fn test_github_auth_without_issue_tools_does_not_enable_them() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-token: $(TOKEN)\n---\n",
+        )
+        .unwrap();
+        assert!(generate_enabled_tools_args(&fm).is_empty());
+    }
+
+    // ─── GitHub issue output wiring ─────────────────────────────────────────
 
     #[test]
-    fn test_generate_enabled_tools_args_debug_create_issue_alone() {
+    fn test_generate_enabled_tools_args_create_github_issue_alone() {
         let yaml = r#"---
 name: test
 description: test
-ado-aw-debug:
-  create-issue:
+safe-outputs:
+  create-github-issue:
     target-repo: githubnext/ado-aw
 ---
 "#;
         let (fm, _) = parse_markdown(yaml).unwrap();
         let args = generate_enabled_tools_args(&fm);
         assert!(
-            args.contains("--enabled-tools create-issue"),
-            "ado-aw-debug.create-issue should add create-issue to --enabled-tools, got: {}",
+            args.contains("--enabled-tools create-github-issue"),
+            "safe-outputs.create-github-issue should add create-github-issue to --enabled-tools, got: {}",
             args
         );
         // Always-on tools should also be present so the filter activates.
@@ -4793,28 +4794,27 @@ ado-aw-debug:
     }
 
     #[test]
-    fn test_generate_enabled_tools_args_debug_plus_safe_outputs() {
+    fn test_generate_enabled_tools_args_create_github_issue_plus_other_output() {
         let yaml = r#"---
 name: test
 description: test
 safe-outputs:
   create-pull-request:
     target-branch: main
-ado-aw-debug:
-  create-issue:
+  create-github-issue:
     target-repo: githubnext/ado-aw
 ---
 "#;
         let (fm, _) = parse_markdown(yaml).unwrap();
         let args = generate_enabled_tools_args(&fm);
         assert!(args.contains("--enabled-tools create-pull-request"));
-        assert!(args.contains("--enabled-tools create-issue"));
+        assert!(args.contains("--enabled-tools create-github-issue"));
         // No duplicate
-        assert_eq!(args.matches("--enabled-tools create-issue").count(), 1);
+        assert_eq!(args.matches("--enabled-tools create-github-issue").count(), 1);
     }
 
     #[test]
-    fn test_generate_enabled_tools_args_no_debug_does_not_emit_create_issue() {
+    fn test_generate_enabled_tools_args_without_create_github_issue_does_not_emit_it() {
         let yaml = r#"---
 name: test
 description: test
@@ -4826,18 +4826,18 @@ safe-outputs:
         let (fm, _) = parse_markdown(yaml).unwrap();
         let args = generate_enabled_tools_args(&fm);
         assert!(
-            !args.contains("create-issue"),
-            "create-issue must not appear without ado-aw-debug.create-issue"
+            !args.contains("create-github-issue"),
+            "create-github-issue must not appear unless configured"
         );
     }
 
     #[test]
-    fn test_validate_ado_aw_debug_config_accepts_valid_config() {
+    fn test_validate_github_issue_outputs_accepts_valid_config() {
         let yaml = r#"---
 name: test
 description: test
-ado-aw-debug:
-  create-issue:
+safe-outputs:
+  create-github-issue:
     target-repo: githubnext/ado-aw
     title-prefix: "[bug] "
     labels: [pipeline-failure]
@@ -4846,7 +4846,7 @@ ado-aw-debug:
 ---
 "#;
         let (fm, _) = parse_markdown(yaml).unwrap();
-        assert!(validate_ado_aw_debug_config(&fm).is_ok());
+        assert!(validate_github_issue_outputs_config(&fm).is_ok());
     }
 
     #[test]
@@ -4856,69 +4856,69 @@ ado-aw-debug:
     }
 
     #[test]
-    fn test_validate_ado_aw_debug_config_rejects_missing_target_repo() {
+    fn test_validate_github_issue_outputs_rejects_empty_target_repo() {
         let yaml = r#"---
 name: test
 description: test
-ado-aw-debug:
-  create-issue:
+safe-outputs:
+  create-github-issue:
     target-repo: ""
 ---
 "#;
         let (fm, _) = parse_markdown(yaml).unwrap();
-        let result = validate_ado_aw_debug_config(&fm);
+        let result = validate_github_issue_outputs_config(&fm);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("target-repo"), "msg: {}", msg);
     }
 
     #[test]
-    fn test_validate_ado_aw_debug_config_rejects_invalid_target_repo() {
+    fn test_validate_github_issue_outputs_rejects_invalid_target_repo() {
         let yaml = r#"---
 name: test
 description: test
-ado-aw-debug:
-  create-issue:
+safe-outputs:
+  create-github-issue:
     target-repo: not-a-valid-shape
 ---
 "#;
         let (fm, _) = parse_markdown(yaml).unwrap();
-        let result = validate_ado_aw_debug_config(&fm);
+        let result = validate_github_issue_outputs_config(&fm);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("owner/repo"), "msg: {}", msg);
     }
 
     #[test]
-    fn test_validate_ado_aw_debug_config_rejects_pipeline_injection_in_label() {
+    fn test_validate_github_issue_outputs_rejects_pipeline_injection_in_label() {
         let yaml = r###"---
 name: test
 description: test
-ado-aw-debug:
-  create-issue:
+safe-outputs:
+  create-github-issue:
     target-repo: githubnext/ado-aw
     labels:
       - "##vso[task.complete]"
 ---
 "###;
         let (fm, _) = parse_markdown(yaml).unwrap();
-        let result = validate_ado_aw_debug_config(&fm);
+        let result = validate_github_issue_outputs_config(&fm);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_validate_ado_aw_debug_config_rejects_pipeline_injection_in_title_prefix() {
+    fn test_validate_github_issue_outputs_rejects_pipeline_injection_in_title_prefix() {
         let yaml = r###"---
 name: test
 description: test
-ado-aw-debug:
-  create-issue:
+safe-outputs:
+  create-github-issue:
     target-repo: githubnext/ado-aw
     title-prefix: "##vso[task.complete]"
 ---
 "###;
         let (fm, _) = parse_markdown(yaml).unwrap();
-        let result = validate_ado_aw_debug_config(&fm);
+        let result = validate_github_issue_outputs_config(&fm);
         assert!(result.is_err());
     }
 
@@ -5063,15 +5063,12 @@ safe-outputs:
     }
 
     #[test]
-    fn test_validate_safe_outputs_keys_does_not_double_report_debug_only_tool() {
-        // create-issue is in DEBUG_ONLY_TOOLS — validate_ado_aw_debug_config
-        // gives a better error for it. This validator should skip rather
-        // than redundantly flag it as "unknown".
+    fn test_validate_safe_outputs_keys_accepts_create_github_issue() {
         let yaml = r#"---
 name: test
 description: test
 safe-outputs:
-  create-issue:
+  create-github-issue:
     target-repo: githubnext/ado-aw
 ---
 "#;
@@ -5147,28 +5144,61 @@ safe-outputs:
     }
 
     #[test]
-    fn test_validate_rejects_create_issue_under_safe_outputs() {
-        // Defence-in-depth: `create-issue` MUST NOT appear under
-        // `safe-outputs:` even when `ado-aw-debug:` isn't set. Allowing it
-        // there would let a forged config flow into ctx.tool_configs and
-        // sidestep the executor-side gate.
+    fn test_validate_accepts_create_github_issue_under_safe_outputs() {
         let yaml = r#"---
 name: test
 description: test
 safe-outputs:
-  create-issue:
+  create-github-issue:
     target-repo: githubnext/ado-aw
 ---
 "#;
         let (fm, _) = parse_markdown(yaml).unwrap();
-        let result = validate_ado_aw_debug_config(&fm);
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("debug-only") && msg.contains("ado-aw-debug"),
-            "expected debug-only redirection error, got: {}",
-            msg
-        );
+        assert!(validate_ado_aw_debug_config(&fm).is_ok());
+        assert!(validate_github_issue_outputs_config(&fm).is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_mixed_approval_lanes_for_linked_issue_tools() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  create-github-issue:
+    target-repo: githubnext/ado-aw
+    require-approval: true
+  set-github-issue-type:
+    target-repo: githubnext/ado-aw
+    require-approval: false
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let error = validate_github_issue_outputs_config(&fm)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("same effective require-approval"));
+    }
+
+    #[test]
+    fn test_validate_rejects_pat_and_app_auth_together() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  github-token: $(TOKEN)
+  github-app:
+    client-id: Iv23liExample
+    owner: githubnext
+    repositories: [ado-aw]
+  create-github-issue:
+    target-repo: githubnext/ado-aw
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let error = validate_github_issue_outputs_config(&fm)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("mutually exclusive"));
     }
 
     #[test]
@@ -5356,7 +5386,7 @@ safe-outputs:
 
     #[test]
     fn test_generate_executor_ado_env_with_connection() {
-        let result = generate_executor_ado_env(Some("my-sc"), false);
+        let result = generate_executor_ado_env(Some("my-sc"), None);
         assert!(
             result.contains("env:"),
             "Executor env block should include the 'env:' key"
@@ -5375,14 +5405,14 @@ safe-outputs:
             "When write SC is configured, fall back to ARM-minted token, not System.AccessToken"
         );
         assert!(
-            !result.contains("ADO_AW_DEBUG_GITHUB_TOKEN"),
-            "Without debug flag, GitHub token must not be exposed to executor"
+            !result.contains("ADO_AW_GITHUB_TOKEN"),
+            "Without GitHub issue outputs, GitHub token must not be exposed"
         );
     }
 
     #[test]
     fn test_generate_executor_ado_env_none_uses_system_access_token() {
-        let result = generate_executor_ado_env(None, false);
+        let result = generate_executor_ado_env(None, None);
         assert!(
             result.starts_with("env:\n"),
             "Should always emit env: block (executor needs SYSTEM_ACCESSTOKEN)"
@@ -5396,22 +5426,30 @@ safe-outputs:
             "Without write SC, must not reference SC_WRITE_TOKEN"
         );
         assert!(
-            !result.contains("ADO_AW_DEBUG_GITHUB_TOKEN"),
-            "Without debug flag, GitHub token must not appear"
+            !result.contains("ADO_AW_GITHUB_TOKEN"),
+            "Without GitHub issue outputs, GitHub token must not appear"
         );
     }
 
     #[test]
-    fn test_generate_executor_ado_env_with_create_issue_only() {
-        let result = generate_executor_ado_env(None, true);
+    fn test_generate_executor_ado_env_with_create_github_issue_only() {
+        let auth = crate::compile::types::GithubSafeOutputsAuth::Token {
+            variable: "MY_GITHUB_WRITE_TOKEN".to_string(),
+            api_url: "https://api.github.com".to_string(),
+        };
+        let result = generate_executor_ado_env(None, Some(&auth));
         assert!(result.starts_with("env:\n"), "Should emit env: block");
         assert!(
             result.contains("SYSTEM_ACCESSTOKEN: $(System.AccessToken)"),
             "Default executor token is $(System.AccessToken) even with debug enabled"
         );
         assert!(
-            result.contains("ADO_AW_DEBUG_GITHUB_TOKEN: $(ADO_AW_DEBUG_GITHUB_TOKEN)"),
-            "Debug flag should expose the GitHub PAT pipeline variable"
+            result.contains("ADO_AW_GITHUB_TOKEN: $(MY_GITHUB_WRITE_TOKEN)"),
+            "Executor should map the configured Stage 3 GitHub token"
+        );
+        assert!(
+            result.contains("ADO_AW_GITHUB_API_URL: \"https://api.github.com\""),
+            "GitHub API URL must be emitted as a quoted YAML scalar"
         );
         assert!(
             !result.contains("SC_WRITE_TOKEN"),
@@ -5421,9 +5459,13 @@ safe-outputs:
 
     #[test]
     fn test_generate_executor_ado_env_with_both_tokens() {
-        let result = generate_executor_ado_env(Some("write-sc"), true);
+        let auth = crate::compile::types::GithubSafeOutputsAuth::Token {
+            variable: "ADO_AW_GITHUB_TOKEN".to_string(),
+            api_url: "https://api.github.com".to_string(),
+        };
+        let result = generate_executor_ado_env(Some("write-sc"), Some(&auth));
         assert!(result.contains("SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)"));
-        assert!(result.contains("ADO_AW_DEBUG_GITHUB_TOKEN: $(ADO_AW_DEBUG_GITHUB_TOKEN)"));
+        assert!(result.contains("ADO_AW_GITHUB_TOKEN: $(ADO_AW_GITHUB_TOKEN)"));
         assert!(
             !result.contains("$(System.AccessToken)"),
             "Write SC overrides System.AccessToken default"

@@ -234,6 +234,16 @@ async fn compile_pipeline_inner(
     if let Some(advisory) = crate::engine::github_app_token_secrecy_advisory(&front_matter.engine) {
         eprintln!("Warning: {advisory}");
     }
+    if front_matter.safe_outputs.contains_key("github-app")
+        && let Some(crate::compile::types::GithubSafeOutputsAuth::App { config }) =
+            front_matter.github_safe_outputs_auth()?
+    {
+        eprintln!(
+            "Warning: safe-outputs.github-app uses pipeline variable '{}' for the GitHub App \
+             private key. Ensure it is stored as a SECRET.",
+            config.private_key_var()
+        );
+    }
 
     // Determine output path. By default use `.lock.yml` to match
     // gh-aw's convention for compiled-pipeline files (so they can be

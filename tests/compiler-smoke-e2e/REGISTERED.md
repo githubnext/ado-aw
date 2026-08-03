@@ -70,7 +70,7 @@ and stores the five child definition IDs as non-secret definition variables.
 
 Every child definition needs its own secret `GITHUB_TOKEN` for Copilot CLI
 authentication. Definition `2558` additionally needs
-`ADO_AW_DEBUG_GITHUB_TOKEN`; server-side definition cloning does not copy
+`ADO_AW_GITHUB_TOKEN`; server-side definition cloning does not copy
 secret values.
 
 The custom child ID is configured on `2559` as

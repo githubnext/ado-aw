@@ -775,8 +775,6 @@ struct ResolvedExecutionConfig {
     repo_refs: std::collections::HashMap<String, String>,
     #[serde(default)]
     cache_memory: Option<ResolvedCacheMemory>,
-    #[serde(default)]
-    debug_create_issue: Option<crate::safe_outputs::CreateIssueConfig>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -843,17 +841,6 @@ async fn build_execution_context_from_resolved(
     }
     ctx.working_directory = safe_output_dir.to_path_buf();
     ctx.tool_configs = config.tool_configs.clone();
-    if let Some(create_issue) = config.debug_create_issue.as_ref() {
-        match serde_json::to_value(create_issue) {
-            Ok(value) => {
-                ctx.tool_configs.insert("create-issue".to_string(), value);
-                ctx.debug_enabled_tools.insert("create-issue".to_string());
-            }
-            Err(error) => {
-                log::warn!("Failed to serialize resolved debug create-issue config: {error}")
-            }
-        }
-    }
     ctx.allowed_repositories = allowed_repositories;
     ctx.repo_refs = config.repo_refs.clone();
     ctx.dry_run = dry_run;
@@ -1060,26 +1047,6 @@ async fn build_execution_context(
         config.insert("staged".to_string(), serde_json::Value::Bool(staged));
         ctx.tool_configs
             .insert(tool, serde_json::Value::Object(config));
-    }
-    // Merge ado-aw-debug.create-issue config under the same tool_configs map
-    // so Stage 3's `ctx.get_tool_config::<CreateIssueConfig>("create-issue")`
-    // works exactly like every other safe-output. Without this merge the
-    // executor would only ever see Default::default().
-    //
-    // Crucially, also record `create-issue` in `debug_enabled_tools` so the
-    // Stage 3 executor can independently enforce the `ado-aw-debug` gate
-    // — without this, a forged NDJSON entry whose tool name is `create-issue`
-    // could bypass the MCP-layer default-deny.
-    if let Some(d) = front_matter.ado_aw_debug.as_ref()
-        && let Some(ci) = d.create_issue.as_ref()
-    {
-        match serde_json::to_value(ci) {
-            Ok(v) => {
-                ctx.tool_configs.insert("create-issue".to_string(), v);
-                ctx.debug_enabled_tools.insert("create-issue".to_string());
-            }
-            Err(e) => log::warn!("Failed to serialize ado-aw-debug.create-issue config: {e}"),
-        }
     }
     ctx.allowed_repositories = allowed_repositories;
     // Per-checkout-alias git refs, so Stage 3 can resolve a per-repo

@@ -4,6 +4,7 @@ import { generateKeyPairSync, createVerify } from "node:crypto";
 import {
   buildAppJwt,
   parseArgs,
+  parsePermissions,
   parseRepositories,
   resolveInstallationId,
   mintInstallationToken,
@@ -131,6 +132,33 @@ describe("parseRepositories", () => {
     expect(parseRepositories("")).toEqual([]);
     expect(parseRepositories("  single  ")).toEqual(["single"]);
   });
+
+  describe("parsePermissions", () => {
+    it("parses read/write permission JSON", () => {
+      expect(
+        parsePermissions('{"contents":"read","issues":"write"}'),
+      ).toEqual({
+        contents: "read",
+        issues: "write",
+      });
+      expect(parsePermissions(undefined)).toEqual({});
+    });
+
+    it("rejects invalid permission names and levels", () => {
+      expect(() => parsePermissions('{"pull-requests":"read"}')).toThrow(
+        /permission name/,
+      );
+      expect(() => parsePermissions('{"issues":"admin"}')).toThrow(
+        /read.*write/,
+      );
+      expect(() => parsePermissions('{"__proto__":"read"}')).toThrow(
+        /reserved/,
+      );
+      expect(() => parsePermissions('{"constructor":"read"}')).toThrow(
+        /reserved/,
+      );
+    });
+  });
 });
 
 describe("resolveInstallationId", () => {
@@ -213,6 +241,24 @@ describe("mintInstallationToken", () => {
     expect(JSON.parse(fetchFn.mock.calls[0]![1].body)).toEqual({});
   });
 
+  it("includes an explicit permission subset", async () => {
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(201, { token: "ghs_scoped" }));
+    await mintInstallationToken(
+      fetchFn as never,
+      "https://api.github.com",
+      "jwt",
+      1,
+      ["repo-a"],
+      { issues: "write" },
+    );
+    expect(JSON.parse(fetchFn.mock.calls[0]![1].body)).toEqual({
+      repositories: ["repo-a"],
+      permissions: { issues: "write" },
+    });
+  });
+
   it("throws on a non-2xx response", async () => {
     const fetchFn = vi
       .fn()
@@ -240,6 +286,8 @@ describe("parseArgs", () => {
       "GITHUB_APP_TOKEN",
       "--repositories",
       "repo-a repo-b",
+      "--permissions-json",
+      '{"issues":"write"}',
       "--api-url",
       "https://ghe.example.com/api/v3",
     ]);
@@ -248,6 +296,7 @@ describe("parseArgs", () => {
       owner: "octo-org",
       outputVar: "GITHUB_APP_TOKEN",
       repositories: "repo-a repo-b",
+      permissionsJson: '{"issues":"write"}',
       apiUrl: "https://ghe.example.com/api/v3",
     });
   });
@@ -304,6 +353,7 @@ describe("main", () => {
         owner: "octo-org",
         outputVar: "GITHUB_APP_TOKEN",
         repositories: "repo-a repo-b",
+        permissionsJson: '{"issues":"write"}',
       },
       { GH_APP_PRIVATE_KEY: privateKey } as NodeJS.ProcessEnv,
       fetchFn as never,
@@ -315,6 +365,10 @@ describe("main", () => {
     expect(out).toContain(
       "##vso[task.setvariable variable=GITHUB_APP_TOKEN;issecret=true]ghs_minted",
     );
+    expect(JSON.parse(fetchFn.mock.calls[1]![1].body)).toEqual({
+      repositories: ["repo-a", "repo-b"],
+      permissions: { issues: "write" },
+    });
   });
 
   it("honours --api-url and --output-var", async () => {

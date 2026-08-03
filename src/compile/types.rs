@@ -382,8 +382,9 @@ pub struct EngineOptions {
     /// `github-app-token` ado-script bundle) immediately before the Copilot
     /// invocation in the Agent and Detection jobs. The minted GitHub App
     /// installation token is wired into `GITHUB_TOKEN` for the Copilot engine
-    /// env only — never SafeOutputs, user steps, ManualReview, Teardown, or
-    /// Conclusion. Absent ⇒ `GITHUB_TOKEN` is sourced from the
+    /// env only. GitHub issue SafeOutputs may reuse the App credentials to mint
+    /// a separate scoped Stage 3 token; they never receive the engine token.
+    /// Absent ⇒ `GITHUB_TOKEN` is sourced from the
     /// `$(GITHUB_TOKEN)` pipeline variable as before.
     #[serde(default, rename = "github-app-token")]
     #[sanitize_config(skip)]
@@ -592,14 +593,34 @@ impl ThreatDetectionSetting {
 ///     repositories: [octo-repo]  # optional; scopes the installation token
 ///     # private-key: MY_SECRET   # optional; defaults to GITHUB_APP_PRIVATE_KEY
 /// ```
-#[derive(Debug, Deserialize, Clone, SanitizeConfig)]
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum GithubAppPermissionLevel {
+    Read,
+    Write,
+}
+
+impl GithubAppPermissionLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, SanitizeConfig)]
 pub struct GithubAppTokenConfig {
     /// The GitHub App ID — a **literal** value, either a numeric App ID
     /// (e.g. `1234567`, quoted or unquoted) or an alphanumeric client ID
     /// (e.g. `Iv23liABC…`). The App ID is not secret (it is visible in the
     /// App's settings and is the JWT `iss`), so it is plain per-app config like
     /// `owner` — it is emitted verbatim, never indirected through a variable.
-    #[serde(rename = "app-id", deserialize_with = "de_string_or_number")]
+    #[serde(
+        rename = "app-id",
+        alias = "client-id",
+        deserialize_with = "de_string_or_number"
+    )]
     pub app_id: String,
     /// Optional name of the ADO **secret** pipeline variable holding the GitHub
     /// App private key (PEM). Defaults to
@@ -630,6 +651,45 @@ pub struct GithubAppTokenConfig {
     /// valid for its full ~1h lifetime.
     #[serde(default, rename = "skip-token-revocation")]
     pub skip_token_revocation: bool,
+    /// Optional repository-permission subset requested at token mint time.
+    #[serde(default)]
+    #[sanitize_config(skip)]
+    pub permissions: std::collections::BTreeMap<String, GithubAppPermissionLevel>,
+}
+
+pub const DEFAULT_SAFE_OUTPUTS_GITHUB_TOKEN_VAR: &str = "ADO_AW_GITHUB_TOKEN";
+pub const SAFE_OUTPUTS_GITHUB_APP_TOKEN_VAR: &str = "ADO_AW_SAFE_OUTPUTS_GITHUB_APP_TOKEN";
+
+#[derive(Debug, Clone)]
+pub enum GithubSafeOutputsAuth {
+    Token { variable: String, api_url: String },
+    App { config: GithubAppTokenConfig },
+}
+
+impl GithubSafeOutputsAuth {
+    pub fn executor_token_var(&self) -> &str {
+        match self {
+            Self::Token { variable, .. } => variable,
+            Self::App { .. } => SAFE_OUTPUTS_GITHUB_APP_TOKEN_VAR,
+        }
+    }
+
+    pub fn api_url(&self) -> &str {
+        match self {
+            Self::Token { api_url, .. } => api_url,
+            Self::App { config } => config
+                .api_url
+                .as_deref()
+                .unwrap_or("https://api.github.com"),
+        }
+    }
+
+    pub fn app_config(&self) -> Option<&GithubAppTokenConfig> {
+        match self {
+            Self::App { config } => Some(config),
+            Self::Token { .. } => None,
+        }
+    }
 }
 
 /// Default name of the ADO secret pipeline variable holding the GitHub App
@@ -685,6 +745,10 @@ impl GithubAppTokenConfig {
     /// each `repositories` entry must be a single safe path segment; `api-url`
     /// (when set) must be an `https://` URL with a host.
     pub fn validate(&self) -> anyhow::Result<()> {
+        self.validate_for("engine.github-app-token")
+    }
+
+    pub fn validate_for(&self, path: &str) -> anyhow::Result<()> {
         use crate::validate::{is_safe_path_segment, is_valid_ado_variable_name};
         if self.app_id.is_empty()
             || !self.app_id.starts_with(|c: char| c.is_ascii_alphanumeric())
@@ -694,7 +758,7 @@ impl GithubAppTokenConfig {
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
         {
             anyhow::bail!(
-                "engine.github-app-token.app-id '{}' must be a non-empty GitHub App ID \
+                "{path}.app-id '{}' must be a non-empty GitHub App ID \
                  (numeric, e.g. 1234567) or client ID (e.g. Iv23liABC): it must start with \
                  an alphanumeric character and contain only [A-Za-z0-9._-]. It is a literal \
                  value, not a variable name (a leading '-', e.g. a negative number, is invalid).",
@@ -705,7 +769,7 @@ impl GithubAppTokenConfig {
             && !is_valid_ado_variable_name(private_key)
         {
             anyhow::bail!(
-                "engine.github-app-token.private-key '{}' must be an ADO variable name \
+                "{path}.private-key '{}' must be an ADO variable name \
                  starting with a letter, digit, or '_' and containing only letters, digits, \
                  '.', '_', or '-' (it names the secret variable holding the PEM; omit it to \
                  use the default '{}').",
@@ -715,7 +779,7 @@ impl GithubAppTokenConfig {
         }
         if !is_safe_path_segment(&self.owner) {
             anyhow::bail!(
-                "engine.github-app-token.owner '{}' is not a valid GitHub owner name \
+                "{path}.owner '{}' is not a valid GitHub owner name \
                  (allowed: [A-Za-z0-9._-], no '/', no leading '.').",
                 self.owner
             );
@@ -723,7 +787,7 @@ impl GithubAppTokenConfig {
         for repo in &self.repositories {
             if !is_safe_path_segment(repo) {
                 anyhow::bail!(
-                    "engine.github-app-token.repositories entry '{}' is not a valid \
+                    "{path}.repositories entry '{}' is not a valid \
                      GitHub repository name (allowed: [A-Za-z0-9._-], no '/', no \
                      leading '.').",
                     repo
@@ -731,18 +795,67 @@ impl GithubAppTokenConfig {
             }
         }
         if let Some(api_url) = &self.api_url {
+            crate::validate::reject_pipeline_injection(
+                api_url,
+                &format!("{path}.api-url"),
+            )?;
             let parsed = url::Url::parse(api_url).map_err(|e| {
                 anyhow::anyhow!(
-                    "engine.github-app-token.api-url '{}' is not a valid URL: {}",
+                    "{path}.api-url '{}' is not a valid URL: {}",
                     api_url,
                     e
                 )
             })?;
             if parsed.scheme() != "https" || parsed.host_str().is_none() {
                 anyhow::bail!(
-                    "engine.github-app-token.api-url '{}' must be an https:// URL with a host \
+                    "{path}.api-url '{}' must be an https:// URL with a host \
                      (e.g. https://ghe.example.com/api/v3).",
                     api_url
+                );
+            }
+            if parsed.query().is_some() || parsed.fragment().is_some() {
+                anyhow::bail!(
+                    "{path}.api-url '{}' must not contain a query string or fragment",
+                    api_url
+                );
+            }
+        }
+        for permission in self.permissions.keys() {
+            if matches!(
+                permission.as_str(),
+                "__proto__" | "prototype" | "constructor"
+            ) {
+                anyhow::bail!(
+                    "{path}.permissions key '{}' is reserved and cannot be used",
+                    permission
+                );
+            }
+            if permission.is_empty()
+                || !permission
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_'))
+            {
+                anyhow::bail!(
+                    "{path}.permissions key '{}' must contain only lowercase ASCII letters, \
+                     digits, '-' or '_'",
+                    permission
+                );
+            }
+        }
+        // The App-token mint step normalizes '-' to '_' before serializing
+        // `--permissions-json` (the GitHub API spells permissions with
+        // underscores). Two keys differing only by separator therefore collapse
+        // onto one entry, and the survivor silently wins — which can flip an
+        // intended `read` to `write`. Reject the collision here rather than
+        // letting the mint step drop a permission the author declared.
+        let mut normalized_keys: std::collections::BTreeMap<String, &String> =
+            std::collections::BTreeMap::new();
+        for permission in self.permissions.keys() {
+            let normalized = permission.replace('-', "_");
+            if let Some(existing) = normalized_keys.insert(normalized.clone(), permission) {
+                anyhow::bail!(
+                    "{path}.permissions keys '{existing}' and '{permission}' both normalize to \
+                     '{normalized}'; use a single spelling"
                 );
             }
         }
@@ -1270,11 +1383,8 @@ pub struct FrontMatter {
     /// Per-tool configuration for safe outputs
     #[serde(default, rename = "safe-outputs")]
     pub safe_outputs: HashMap<String, serde_json::Value>,
-    /// Debug-only configuration. Top-level section that gates features only
-    /// intended for ado-aw dogfood/debug pipelines (e.g., `create-issue` for
-    /// filing failure reports back to GitHub during local testing). NOT a
-    /// regular safe-output section — anything declared here is omitted from
-    /// the regular safe-outputs documentation surface.
+    /// Debug-only configuration. Top-level section for compiler dogfood knobs
+    /// that are not part of the regular safe-output surface.
     #[serde(default, rename = "ado-aw-debug")]
     pub ado_aw_debug: Option<AdoAwDebugConfig>,
     /// Unified trigger configuration: schedule, pipeline, PR triggers and filters
@@ -1739,6 +1849,9 @@ pub const SAFE_OUTPUT_RESERVED_KEYS: &[&str] = &[
     "staged",
     "scripts",
     "jobs",
+    "github-token",
+    "github-api-url",
+    "github-app",
     THREAT_DETECTION_KEY,
 ];
 
@@ -1939,6 +2052,266 @@ impl FrontMatter {
             app.validate()?;
         }
         Ok(())
+    }
+
+    pub fn has_github_issue_outputs(&self) -> bool {
+        self.safe_outputs.contains_key("create-github-issue")
+            || self.safe_outputs.contains_key("set-github-issue-type")
+    }
+
+    fn typed_safe_output_config<T>(&self, key: &str) -> anyhow::Result<Option<T>>
+    where
+        T: serde::de::DeserializeOwned + Default + SanitizeConfigTrait,
+    {
+        let Some(raw) = self.safe_outputs.get(key) else {
+            return Ok(None);
+        };
+        if raw.is_null() {
+            let mut config = T::default();
+            config.sanitize_config_fields();
+            return Ok(Some(config));
+        }
+        let mut raw = raw.clone();
+        if let Some(object) = raw.as_object_mut() {
+            object.remove("require-approval");
+        }
+        let mut config: T = serde_json::from_value(raw)
+            .map_err(|e| anyhow::anyhow!("safe-outputs.{key} has invalid configuration: {e}"))?;
+        config.sanitize_config_fields();
+        Ok(Some(config))
+    }
+
+    pub fn create_github_issue_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::CreateGithubIssueConfig>> {
+        self.typed_safe_output_config("create-github-issue")
+    }
+
+    pub fn set_github_issue_type_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::SetGithubIssueTypeConfig>> {
+        self.typed_safe_output_config("set-github-issue-type")
+    }
+
+    fn parse_safe_outputs_github_token(raw: &str) -> anyhow::Result<String> {
+        let variable = raw
+            .strip_prefix("$(")
+            .and_then(|value| value.strip_suffix(')'))
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "safe-outputs.github-token must be exactly one ADO secret-variable macro \
+                     such as `$(ADO_AW_GITHUB_TOKEN)`"
+                )
+            })?;
+        if !crate::validate::is_valid_ado_variable_name(variable) {
+            anyhow::bail!(
+                "safe-outputs.github-token references invalid ADO variable name '{}'",
+                variable
+            );
+        }
+        if variable.eq_ignore_ascii_case("GITHUB_TOKEN")
+            || variable.eq_ignore_ascii_case(crate::engine::GITHUB_APP_TOKEN_VAR)
+        {
+            anyhow::bail!(
+                "safe-outputs.github-token must reference a dedicated Stage 3 secret, not \
+                 the Agent/Detection credential '{}'",
+                variable
+            );
+        }
+        Ok(variable.to_string())
+    }
+
+    fn parse_safe_outputs_github_api_url(raw: Option<&serde_json::Value>) -> anyhow::Result<String> {
+        let Some(raw) = raw else {
+            return Ok("https://api.github.com".to_string());
+        };
+        let raw = raw.as_str().ok_or_else(|| {
+            anyhow::anyhow!("safe-outputs.github-api-url must be an https:// URL string")
+        })?;
+        crate::validate::reject_pipeline_injection(raw, "safe-outputs.github-api-url")?;
+        let parsed = url::Url::parse(raw).map_err(|e| {
+            anyhow::anyhow!("safe-outputs.github-api-url '{}' is invalid: {}", raw, e)
+        })?;
+        if parsed.scheme() != "https" || parsed.host_str().is_none() {
+            anyhow::bail!(
+                "safe-outputs.github-api-url '{}' must be an https:// URL with a host",
+                raw
+            );
+        }
+        if parsed.query().is_some() || parsed.fragment().is_some() {
+            anyhow::bail!(
+                "safe-outputs.github-api-url '{}' must not contain a query string or fragment",
+                raw
+            );
+        }
+        Ok(parsed.to_string().trim_end_matches('/').to_string())
+    }
+
+    fn scope_github_app_to_issue_targets(
+        &self,
+        mut config: GithubAppTokenConfig,
+        path: &str,
+    ) -> anyhow::Result<GithubAppTokenConfig> {
+        if let Some(api_url) = config.api_url.take() {
+            let parsed = url::Url::parse(&api_url)
+                .map_err(|e| anyhow::anyhow!("{path}.api-url is invalid: {e}"))?;
+            config.api_url = Some(parsed.to_string().trim_end_matches('/').to_string());
+        }
+        let mut targets = Vec::new();
+        let mut has_implicit_target = false;
+        if self.safe_outputs.contains_key("create-github-issue") {
+            match self
+                .create_github_issue_config()?
+                .and_then(|config| config.target_repo)
+            {
+                Some(target) => targets.push(target),
+                None => has_implicit_target = true,
+            }
+        }
+        if self.safe_outputs.contains_key("set-github-issue-type") {
+            match self
+                .set_github_issue_type_config()?
+                .and_then(|config| config.target_repo)
+            {
+                Some(target)
+                    if !targets
+                        .iter()
+                        .any(|existing| existing.eq_ignore_ascii_case(&target)) =>
+                {
+                    targets.push(target);
+                }
+                Some(_) => {}
+                None => has_implicit_target = true,
+            }
+        }
+        if has_implicit_target && !targets.is_empty() {
+            anyhow::bail!(
+                "GitHub App-backed create-github-issue and set-github-issue-type cannot mix implicit current \
+                 repository targets with explicit target-repo values; configure target-repo \
+                 consistently for both tools"
+            );
+        }
+
+        if targets.is_empty() {
+            if config.repositories.is_empty() {
+                anyhow::bail!(
+                    "{path}.repositories must be set when GitHub issue outputs omit target-repo; \
+                     the compiler cannot safely scope the App token to a runtime repository"
+                );
+            }
+            return Ok(config);
+        }
+
+        let mut repositories = Vec::new();
+        for target in targets {
+            crate::safe_outputs::validate_target_repo(&target)
+                .map_err(|e| anyhow::anyhow!("safe-outputs target-repo: {e}"))?;
+            let (owner, repository) = target
+                .split_once('/')
+                .expect("validated target-repo contains slash");
+            if !owner.eq_ignore_ascii_case(&config.owner) {
+                anyhow::bail!(
+                    "{path}.owner '{}' does not match target repository owner '{}'",
+                    config.owner,
+                    owner
+                );
+            }
+            if !repositories
+                .iter()
+                .any(|existing: &String| existing.eq_ignore_ascii_case(repository))
+            {
+                repositories.push(repository.to_string());
+            }
+        }
+        config.repositories = repositories;
+        Ok(config)
+    }
+
+    pub fn github_safe_outputs_auth(
+        &self,
+    ) -> anyhow::Result<Option<GithubSafeOutputsAuth>> {
+        if !self.has_github_issue_outputs() {
+            return Ok(None);
+        }
+
+        let explicit_token = self.safe_outputs.get("github-token");
+        let explicit_api_url = self.safe_outputs.get("github-api-url");
+        let explicit_app = self.safe_outputs.get("github-app");
+        if explicit_token.is_some() && explicit_app.is_some() {
+            anyhow::bail!(
+                "safe-outputs.github-token and safe-outputs.github-app are mutually exclusive"
+            );
+        }
+
+        if let Some(raw) = explicit_app {
+            if explicit_api_url.is_some() {
+                anyhow::bail!(
+                    "safe-outputs.github-api-url applies only to PAT auth; set \
+                     safe-outputs.github-app.api-url for GitHub App auth"
+                );
+            }
+            let config: GithubAppTokenConfig = serde_json::from_value(raw.clone()).map_err(|e| {
+                anyhow::anyhow!("safe-outputs.github-app has invalid configuration: {e}")
+            })?;
+            config.validate_for("safe-outputs.github-app")?;
+            if !config.permissions.is_empty() {
+                anyhow::bail!(
+                    "safe-outputs.github-app.permissions is not supported for GitHub issue \
+                     outputs; ado-aw derives the minimum `issues: write` permission"
+                );
+            }
+            let config =
+                self.scope_github_app_to_issue_targets(config, "safe-outputs.github-app")?;
+            return Ok(Some(GithubSafeOutputsAuth::App { config }));
+        }
+
+        if let Some(raw) = explicit_token {
+            let raw = raw.as_str().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "safe-outputs.github-token must be a string containing an ADO macro"
+                )
+            })?;
+            return Ok(Some(GithubSafeOutputsAuth::Token {
+                variable: Self::parse_safe_outputs_github_token(raw)?,
+                api_url: Self::parse_safe_outputs_github_api_url(explicit_api_url)?,
+            }));
+        }
+
+        if let Some(engine_app) = self.engine.github_app_token() {
+            if explicit_api_url.is_some() {
+                anyhow::bail!(
+                    "safe-outputs.github-api-url applies only to PAT auth; set \
+                     engine.github-app-token.api-url for inherited App auth"
+                );
+            }
+            engine_app.validate()?;
+            if engine_app.permissions.is_empty() {
+                anyhow::bail!(
+                    "GitHub issue safe outputs inherit engine.github-app-token credentials, \
+                     but engine.github-app-token.permissions is empty. Configure explicit \
+                     read-only repository permissions or separate SafeOutputs auth."
+                );
+            }
+            if let Some((name, _)) = engine_app
+                .permissions
+                .iter()
+                .find(|(_, level)| **level == GithubAppPermissionLevel::Write)
+            {
+                anyhow::bail!(
+                    "engine.github-app-token.permissions.{name} is `write`; shared App \
+                     credentials require an explicitly read-only Agent/Detection token"
+                );
+            }
+            let config = self
+                .scope_github_app_to_issue_targets(engine_app.clone(), "engine.github-app-token")?;
+            return Ok(Some(GithubSafeOutputsAuth::App { config }));
+        }
+
+        Ok(Some(GithubSafeOutputsAuth::Token {
+            variable: DEFAULT_SAFE_OUTPUTS_GITHUB_TOKEN_VAR.to_string(),
+            api_url: Self::parse_safe_outputs_github_api_url(explicit_api_url)?,
+        }))
     }
 
     /// The parsed, sanitized `create-pull-request` config, or `None` when the
@@ -2358,14 +2731,9 @@ pub struct PermissionsConfig {
 /// Debug-only configuration block.
 ///
 /// Lives under the `ado-aw-debug:` top-level front-matter key. Holds knobs
-/// that only make sense for pipelines we're actively dogfooding from
-/// `githubnext/ado-aw` and that we explicitly do **not** want to advertise
-/// as part of the regular agent surface.
-///
-/// Adding a new field: pair the front-matter knob with a corresponding
-/// compile-side hook (e.g., a debug-only safe output should also be added
-/// to `crate::safe_outputs::DEBUG_ONLY_TOOLS` so the MCP layer enforces a
-/// matching default-deny gate).
+/// that only make sense for pipelines we're actively dogfooding and that we
+/// explicitly do **not** want to advertise as part of the regular agent
+/// surface.
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct AdoAwDebugConfig {
@@ -2374,20 +2742,11 @@ pub struct AdoAwDebugConfig {
     /// CLI flag.
     #[serde(default, rename = "skip-integrity")]
     pub skip_integrity: bool,
-
-    /// Configuration for the debug-only `create-issue` safe output.
-    /// Presence of this field is what enables the tool — when omitted
-    /// the SafeOutputs MCP layer hides it via `DEBUG_ONLY_TOOLS`.
-    #[serde(default, rename = "create-issue")]
-    pub create_issue: Option<crate::safe_outputs::CreateIssueConfig>,
 }
 
 impl SanitizeConfigTrait for AdoAwDebugConfig {
     fn sanitize_config_fields(&mut self) {
         // skip_integrity: bool — nothing to sanitize
-        if let Some(ref mut ci) = self.create_issue {
-            ci.sanitize_config_fields();
-        }
     }
 }
 
@@ -4590,6 +4949,204 @@ github-app-token:
     }
 
     #[test]
+    fn github_issue_outputs_default_to_separate_stage3_pat() {
+        let (fm, _) = super::super::common::parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
+        )
+        .unwrap();
+        let auth = fm.github_safe_outputs_auth().unwrap().unwrap();
+        assert!(matches!(
+            auth,
+            GithubSafeOutputsAuth::Token { variable, .. }
+                if variable == DEFAULT_SAFE_OUTPUTS_GITHUB_TOKEN_VAR
+        ));
+    }
+
+    #[test]
+    fn github_issue_outputs_accept_explicit_pat_macro() {
+        let (fm, _) = super::super::common::parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-token: $(MY_ISSUES_TOKEN)\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
+        )
+        .unwrap();
+        let auth = fm.github_safe_outputs_auth().unwrap().unwrap();
+        assert!(matches!(
+            auth,
+            GithubSafeOutputsAuth::Token { variable, .. } if variable == "MY_ISSUES_TOKEN"
+        ));
+    }
+
+    #[test]
+    fn github_issue_outputs_reject_literal_pat() {
+        let (fm, _) = super::super::common::parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-token: literal-secret\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
+        )
+        .unwrap();
+        let error = fm.github_safe_outputs_auth().unwrap_err().to_string();
+        assert!(error.contains("exactly one ADO secret-variable macro"));
+    }
+
+    #[test]
+    fn github_issue_outputs_reject_agent_github_token_variable() {
+        let (fm, _) = super::super::common::parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-token: $(GITHUB_TOKEN)\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
+        )
+        .unwrap();
+        let error = fm.github_safe_outputs_auth().unwrap_err().to_string();
+        assert!(error.contains("dedicated Stage 3 secret"));
+    }
+
+    #[test]
+    fn github_issue_pat_accepts_explicit_api_url() {
+        let (fm, _) = super::super::common::parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-api-url: https://ghe.example.com/api/v3/\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
+        )
+        .unwrap();
+        let auth = fm.github_safe_outputs_auth().unwrap().unwrap();
+        assert_eq!(auth.api_url(), "https://ghe.example.com/api/v3");
+    }
+
+    #[test]
+    fn github_issue_pat_rejects_api_url_injection() {
+        let (fm, _) = super::super::common::parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-api-url: \"https://api.github.com/\\n  BASH_ENV: $(EVIL)\"\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
+        )
+        .unwrap();
+        let error = fm.github_safe_outputs_auth().unwrap_err().to_string();
+        assert!(
+            error.contains("ADO expression") || error.contains("newlines"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn github_issue_pat_rejects_api_url_fragment() {
+        let (fm, _) = super::super::common::parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-api-url: https://api.github.com/api/v3#fragment\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
+        )
+        .unwrap();
+        let error = fm.github_safe_outputs_auth().unwrap_err().to_string();
+        assert!(error.contains("query string or fragment"));
+    }
+
+    #[test]
+    fn github_issue_outputs_require_read_only_engine_app_permissions() {
+        let (fm, _) = super::super::common::parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  github-app-token:\n    app-id: 123\n    owner: octo\n    repositories: [repo]\nsafe-outputs:\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
+        )
+        .unwrap();
+        let error = fm.github_safe_outputs_auth().unwrap_err().to_string();
+        assert!(error.contains("permissions is empty"));
+    }
+
+    #[test]
+    fn github_issue_outputs_reject_write_scoped_engine_app_permissions() {
+        // When GitHub issue safe outputs inherit the engine App credentials,
+        // that App token is also handed to Agent/Detection. A `write` scope
+        // there would leak write-capable GitHub credentials into Stage 1,
+        // breaking the "isolate credentials to Stage 3" invariant.
+        let (fm, _) = super::super::common::parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  github-app-token:\n    app-id: 123\n    owner: octo\n    repositories: [repo]\n    permissions:\n      issues: write\nsafe-outputs:\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
+        )
+        .unwrap();
+        let error = fm.github_safe_outputs_auth().unwrap_err().to_string();
+        assert!(
+            error.contains("issues") && error.contains("`write`"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.contains("read-only"),
+            "error should steer the author to a read-only token: {error}"
+        );
+    }
+
+    #[test]
+    fn github_app_permissions_reject_separator_only_key_collision() {
+        // '-' and '_' spellings collapse onto one key when the mint step
+        // serializes --permissions-json, so the survivor would silently win and
+        // could flip an intended `read` to `write`. Reject at compile time.
+        let gat = GithubAppTokenConfig {
+            app_id: "123".to_string(),
+            private_key: None,
+            owner: "octo".to_string(),
+            repositories: vec!["repo".to_string()],
+            api_url: None,
+            skip_token_revocation: false,
+            permissions: [
+                ("pull-requests".to_string(), GithubAppPermissionLevel::Read),
+                ("pull_requests".to_string(), GithubAppPermissionLevel::Write),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let error = gat.validate().unwrap_err().to_string();
+        assert!(
+            error.contains("normalize to") && error.contains("pull_requests"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn github_app_permissions_accept_single_dashed_spelling() {
+        // The dashed spelling on its own stays valid — only the collision is an
+        // error, so existing `pull-requests: read` front matter keeps working.
+        let gat = GithubAppTokenConfig {
+            app_id: "123".to_string(),
+            private_key: None,
+            owner: "octo".to_string(),
+            repositories: vec!["repo".to_string()],
+            api_url: None,
+            skip_token_revocation: false,
+            permissions: [("pull-requests".to_string(), GithubAppPermissionLevel::Read)]
+                .into_iter()
+                .collect(),
+        };
+        assert!(gat.validate().is_ok());
+    }
+
+    #[test]
+    fn github_issue_outputs_accept_read_only_engine_app_permissions() {
+        // The positive counterpart: an explicitly read-only engine App token is
+        // accepted and scoped to the configured issue target.
+        let (fm, _) = super::super::common::parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  github-app-token:\n    app-id: 123\n    owner: octo\n    repositories: [repo]\n    permissions:\n      issues: read\nsafe-outputs:\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
+        )
+        .unwrap();
+        let auth = fm.github_safe_outputs_auth().unwrap().unwrap();
+        let GithubSafeOutputsAuth::App { config } = auth else {
+            panic!("expected app auth");
+        };
+        assert_eq!(config.repositories, vec!["repo".to_string()]);
+        assert_eq!(
+            config.permissions.get("issues"),
+            Some(&GithubAppPermissionLevel::Read)
+        );
+    }
+
+    #[test]
+    fn safe_outputs_github_app_accepts_client_id_alias_and_scopes_repo() {
+        let (fm, _) = super::super::common::parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-app:\n    client-id: Iv23liExample\n    owner: octo\n    repositories: [broader-repo]\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
+        )
+        .unwrap();
+        let auth = fm.github_safe_outputs_auth().unwrap().unwrap();
+        let GithubSafeOutputsAuth::App { config } = auth else {
+            panic!("expected app auth");
+        };
+        assert_eq!(config.app_id, "Iv23liExample");
+        assert_eq!(config.repositories, vec!["repo".to_string()]);
+    }
+
+    #[test]
+    fn github_app_rejects_mixed_implicit_and_explicit_issue_targets() {
+        let (fm, _) = super::super::common::parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-app:\n    client-id: Iv23liExample\n    owner: octo\n    repositories: [repo]\n  create-github-issue: {}\n  set-github-issue-type:\n    target-repo: octo/repo\n---\n",
+        )
+        .unwrap();
+        let error = fm.github_safe_outputs_auth().unwrap_err().to_string();
+        assert!(error.contains("cannot mix implicit current repository targets"));
+    }
+
+    #[test]
     fn test_github_app_token_validate_rejects_bad_app_id() {
         let gat = GithubAppTokenConfig {
             app_id: "not a valid id".to_string(),
@@ -4598,6 +5155,7 @@ github-app-token:
             repositories: vec![],
             api_url: None,
             skip_token_revocation: false,
+            permissions: Default::default(),
         };
         let err = gat.validate().unwrap_err().to_string();
         assert!(err.contains("app-id"), "unexpected error: {err}");
@@ -4633,6 +5191,7 @@ github-app-token:
             repositories: vec![],
             api_url: None,
             skip_token_revocation: false,
+            permissions: Default::default(),
         };
         let err = gat.validate().unwrap_err().to_string();
         assert!(err.contains("private-key"), "unexpected error: {err}");
@@ -4647,6 +5206,7 @@ github-app-token:
             repositories: vec![],
             api_url: None,
             skip_token_revocation: false,
+            permissions: Default::default(),
         };
         gat.validate()
             .expect("hyphenated ADO variable names are valid macro targets");
@@ -4674,6 +5234,7 @@ github-app-token:
                 repositories: vec![],
                 api_url: None,
                 skip_token_revocation: false,
+                permissions: Default::default(),
             };
             let err = gat.validate().unwrap_err().to_string();
             assert!(
@@ -4692,6 +5253,7 @@ github-app-token:
             repositories: vec![],
             api_url: None,
             skip_token_revocation: false,
+            permissions: Default::default(),
         };
         let err = gat.validate().unwrap_err().to_string();
         assert!(err.contains("owner"), "unexpected error: {err}");
@@ -4706,9 +5268,28 @@ github-app-token:
             repositories: vec!["ok-repo".to_string(), "bad;repo".to_string()],
             api_url: None,
             skip_token_revocation: false,
+            permissions: Default::default(),
         };
         let err = gat.validate().unwrap_err().to_string();
         assert!(err.contains("repositories"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_github_app_token_validate_rejects_reserved_permission_key() {
+        let gat = GithubAppTokenConfig {
+            app_id: "1234567".to_string(),
+            private_key: None,
+            owner: "octo-org".to_string(),
+            repositories: vec!["repo".to_string()],
+            api_url: None,
+            skip_token_revocation: false,
+            permissions: std::collections::BTreeMap::from([(
+                "__proto__".to_string(),
+                GithubAppPermissionLevel::Read,
+            )]),
+        };
+        let error = gat.validate().unwrap_err().to_string();
+        assert!(error.contains("reserved"));
     }
 
     // ─── PermissionsConfig deserialization ───────────────────────────────
@@ -5419,12 +6000,24 @@ Body
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
         let debug = fm.ado_aw_debug.expect("ado-aw-debug should parse");
         assert!(debug.skip_integrity);
-        let ci = debug.create_issue.expect("create-issue should parse");
-        assert_eq!(ci.target_repo, "githubnext/ado-aw");
+        let ci: crate::safe_outputs::CreateGithubIssueConfig = serde_json::from_value(
+            fm.safe_outputs
+                .get("create-github-issue")
+                .expect("codemod should move create-github-issue")
+                .clone(),
+        )
+        .unwrap();
+        assert_eq!(ci.target_repo.as_deref(), Some("githubnext/ado-aw"));
         assert_eq!(ci.title_prefix.as_deref(), Some("[bug] "));
         assert_eq!(ci.labels, vec!["pipeline-failure".to_string()]);
         assert_eq!(ci.allowed_labels, vec!["agent-*".to_string()]);
         assert_eq!(ci.assignees, vec!["jamesdevine".to_string()]);
+        assert_eq!(
+            fm.safe_outputs
+                .get("github-token")
+                .and_then(|v| v.as_str()),
+            Some("$(ADO_AW_DEBUG_GITHUB_TOKEN)")
+        );
     }
 
     #[test]
@@ -5440,7 +6033,6 @@ Body
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
         let debug = fm.ado_aw_debug.unwrap();
         assert!(!debug.skip_integrity);
-        assert!(debug.create_issue.is_none());
     }
 
     #[test]

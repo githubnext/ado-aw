@@ -95,7 +95,7 @@ When you add `src/safe_outputs/<new-tool>.rs`:
 4. Only add a dedicated agentic smoke here if the new tool requires
    a fundamentally new kind of agent prompt or MCP wiring that the
    existing `canary.md` does not exercise.
-5. Debug-only tools (currently only `create-issue`) are excluded from
+5. Debug-only tools (currently only `create-github-issue`) are excluded from
    both suites — exercised by `smoke-failure-reporter.md`.
 
 ## Running locally
@@ -136,7 +136,7 @@ In `https://dev.azure.com/msazuresphere/AgentPlayground`:
    validated by `tests/compiler-smoke-e2e/`.
 
 3. Capture each Pipeline ID and update `REGISTERED.md`.
-4. Provision the `ADO_AW_DEBUG_GITHUB_TOKEN` secret (fine-grained PAT,
+4. Provision the `ADO_AW_GITHUB_TOKEN` secret (fine-grained PAT,
    Issues: read/write on `jamesadevine/ado-aw-issues`) on the
    `smoke-failure-reporter` pipeline **only**. Confirm the staging repository
    has the `pipeline-failure` and `ado-aw-smoke` labels.

@@ -132,6 +132,28 @@ fn compile_migrates_legacy_workspace_marker_in_steps() {
     );
 }
 
+#[test]
+fn compile_migrates_debug_create_issue_to_public_safe_output() {
+    let dir = fresh_temp_dir();
+    let original = "---\nname: issue-migration\ndescription: d\nado-aw-debug:\n  skip-integrity: true\n  create-issue:\n    target-repo: octo/repo\n---\nbody\n";
+    let source = write_source(dir.path(), original);
+    let output = run_compile(&source);
+    assert!(
+        output.status.success(),
+        "compile should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let after = fs::read_to_string(&source).expect("re-read source");
+    assert!(after.contains("ado-aw-debug:\n  skip-integrity: true"));
+    assert!(after.contains("safe-outputs:"));
+    assert!(after.contains("github-token: $(ADO_AW_DEBUG_GITHUB_TOKEN)"));
+    assert!(after.contains("create-github-issue:"));
+    assert_eq!(after.matches("create-issue:").count(), 0);
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("promote_debug_create_github_issue")
+    );
+}
+
 // ─── Healthy compile (no codemods needed) ──────────────────────────────────
 
 #[test]

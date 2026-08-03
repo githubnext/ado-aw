@@ -266,6 +266,42 @@ validated_string! {
 }
 
 validated_string! {
+    /// A temporary GitHub issue identifier used to link safe outputs in one run.
+    ///
+    /// Accepts gh-aw's canonical `#aw_<id>` form and the bare `aw_<id>` alias,
+    /// where `<id>` is 3-12 ASCII alphanumeric/underscore characters.
+    GithubTemporaryId, "temporary_id", |value: &str, label: &str| {
+        let bare = value.strip_prefix('#').unwrap_or(value);
+        let Some(suffix) = bare.strip_prefix("aw_") else {
+            anyhow::bail!(
+                "{label} must use `#aw_` followed by 3-12 ASCII alphanumeric/underscore characters"
+            );
+        };
+        if !(3..=12).contains(&suffix.len())
+            || !suffix
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            anyhow::bail!(
+                "{label} must use `#aw_` followed by 3-12 ASCII alphanumeric/underscore characters"
+            );
+        }
+        Ok(())
+    }
+}
+
+impl GithubTemporaryId {
+    /// Canonical map/reference form with the leading `#`.
+    pub fn canonical(&self) -> String {
+        if self.as_str().starts_with('#') {
+            self.as_str().to_string()
+        } else {
+            format!("#{}", self.as_str())
+        }
+    }
+}
+
+validated_string! {
     /// A DNS-style hostname.
     HostName, "hostname", |value: &str, label: &str| {
         if validate::is_valid_hostname(value) {

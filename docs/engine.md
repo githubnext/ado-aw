@@ -105,6 +105,9 @@ engine:
     app-id: 1234567            # literal App ID or client ID (required)
     owner: octo-org            # installation owner (org or user login)
     repositories: [octo-repo]  # optional; scopes the token to these repos
+    permissions:               # optional normally; required for safe-output reuse
+      contents: read
+      issues: read
     # api-url: https://ghe.example.com/api/v3   # optional; GHES base URL
     # skip-token-revocation: false              # optional; revoke by default
     # private-key: MY_SECRET_VAR                # optional override; see below
@@ -124,6 +127,7 @@ ado-aw secrets set GITHUB_APP_PRIVATE_KEY "$(cat app-private-key.pem)"
 | `api-url` | no | GitHub API base URL. Defaults to `https://api.github.com` (GHEC). For GitHub Enterprise Server, set the `/api/v3` base URL (e.g. `https://ghe.example.com/api/v3`). Must be an `https://` URL. |
 | `skip-token-revocation` | no | When `true`, do not revoke the minted token after the Copilot run. Defaults to `false` (the token is revoked — see below). |
 | `private-key` | no | Name of the ADO **secret** pipeline variable holding the private key (PEM). **Defaults to `GITHUB_APP_PRIVATE_KEY`** — the compiler owns the name, exactly like `GITHUB_TOKEN`, so the common case sets no field and just runs `ado-aw secrets set GITHUB_APP_PRIVATE_KEY …`. The value is an ADO variable macro target, so names with hyphens are accepted (for example Key Vault-backed variable groups commonly expose secrets as `AGENTIC-WORKFLOWS-GITHUB-APP-PRIVATE-KEY`). The mint bundle normalizes common ADO PEM representations (raw multiline PEM, escaped-newline text like `\\n`/`\\r\\n`, and whitespace-collapsed PEM bodies). Set this only to point at a differently-named secret (e.g. reusing an existing variable). |
+| `permissions` | no | Repository-permission subset requested for each Agent/Detection token. Values are `read` or `write`; hyphenated names are normalized for the GitHub API. When GitHub issue safe outputs inherit these App credentials, this map is required and every repository permission must be read-only. |
 
 #### Setup
 
@@ -152,7 +156,7 @@ ado-aw secrets set GITHUB_APP_PRIVATE_KEY "$(cat app-private-key.pem)"
   immediately before the Copilot invocation in **both** the Agent and Detection
   jobs. It builds a short-lived RS256 JWT from the App ID + private key,
   resolves the installation for `owner`, exchanges it for an installation
-  access token (optionally scoped to `repositories`), and exposes it as a
+  access token (optionally scoped to `repositories` and `permissions`), and exposes it as a
   **masked, same-job** `GITHUB_APP_TOKEN` variable.
 - The Copilot engine's `GITHUB_TOKEN` is then sourced from `$(GITHUB_APP_TOKEN)`
   instead of the operator-provided `$(GITHUB_TOKEN)` variable.
@@ -161,8 +165,10 @@ ado-aw secrets set GITHUB_APP_PRIVATE_KEY "$(cat app-private-key.pem)"
   (`DELETE /installation/token`) so it does not remain valid for its full ~1h
   lifetime — matching `actions/create-github-app-token`'s default. Revocation is
   best-effort (`always()` + `continueOnError`) and never fails the build.
-- The token is **never** provided to SafeOutputs, user-authored `steps:`,
-  ManualReview, Teardown, or Conclusion.
+- The Agent/Detection token is **never** provided to SafeOutputs,
+  user-authored `steps:`, ManualReview, Teardown, or Conclusion. GitHub issue
+  safe outputs may reuse the App credentials to mint a separate
+  `issues: write` token in Stage 3; they never reuse the engine token itself.
 
 The mint/revoke steps run **outside** the AWF network sandbox (like the
 ADO-token and execution-context steps), reaching the GitHub API over the build
@@ -174,13 +180,16 @@ agent pool's normal network — no AWF `network.allowed` entry is required.
   entirely separate: they describe Azure DevOps OAuth/service-connection tokens
   used by the pipeline and Stage 3 executor. The GitHub App token has no effect
   on them.
-- The GitHub App token is for **Copilot engine authentication only**. It does
-  **not** authenticate the `gh` CLI, grant GitHub MCP permissions, or give the
-  agent sandbox GitHub write access.
-- There is **no `permissions:` sub-field** to scope the token. Copilot access
-  rides on the App's own granted capability (configured App/org-side); narrowing
-  the installation token's permissions at mint time cannot grant Copilot access
-  and risks stripping the capability it needs.
+- The engine token authenticates Copilot and the read-only GitHub access
+  available through that engine path. It does not authenticate user-authored
+  `gh` CLI steps.
+- `permissions:` can only narrow permissions already granted to the App
+  installation. It cannot grant Copilot capability; that remains configured on
+  the App/org side.
+- When the same App also backs GitHub issue safe outputs, ado-aw requires an
+  explicitly read-only engine permission map and mints a distinct Stage 3 token
+  with `issues: write`. See
+  [`docs/safe-outputs.md`](safe-outputs.md#github-issue-safe-outputs).
 
 #### Notes and limitations
 

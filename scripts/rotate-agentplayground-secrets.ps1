@@ -63,7 +63,7 @@ try {
     }
     else {
         Set-AdoAwSecret `
-            -Name "ADO_AW_DEBUG_GITHUB_TOKEN" `
+            -Name "ADO_AW_GITHUB_TOKEN" `
             -Value $issuesToken `
             -DefinitionIds $reporterDefinitionIds
 

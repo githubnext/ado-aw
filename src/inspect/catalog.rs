@@ -237,7 +237,7 @@ fn safe_output_description(name: &str) -> &'static str {
         "comment-on-work-item" => "Parameters for commenting on a work item",
         "create-branch" => "Parameters for creating a branch",
         "create-git-tag" => "Parameters for creating a git tag (agent-provided)",
-        "create-issue" => "Files a GitHub issue against an operator-configured target repository.",
+        "create-github-issue" => "Files a GitHub issue against an operator-configured target repository.",
         "create-pull-request" => "Parameters for creating a pull request",
         "create-wiki-page" => "Parameters for creating a wiki page (agent-provided)",
         "create-work-item" => "Parameters for creating a work item",
@@ -251,6 +251,7 @@ fn safe_output_description(name: &str) -> &'static str {
         }
         "report-incomplete" => "Parameters for reporting that a task could not be completed",
         "resolve-pr-thread" => "Parameters for resolving or reactivating a PR review thread",
+        "set-github-issue-type" => "Sets or clears the native type on a GitHub issue",
         "submit-pr-review" => "Parameters for submitting a pull request review",
         "update-pr" => "Parameters for updating a pull request",
         "update-wiki-page" => "Parameters for editing a wiki page (agent-provided)",

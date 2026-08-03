@@ -56,11 +56,11 @@ pipeline** as runtime helpers. Today it produces thirteen bundles:
   review is configured), and attaches it to the build's
   `ado-aw-safe-outputs` summary tab via `##vso[task.uploadsummary]`. See
   [`safe-outputs.md`](safe-outputs.md).
-- `github-app-token.js` — GitHub App token minter that runs immediately
-  before the Copilot invocation in the **Agent and Detection jobs** when
-  `engine.github-app-token` is configured. Builds an RS256 JWT from the App ID
-  (argv) + private key (masked env secret), resolves the installation for the
-  owner, exchanges it for an installation access token, and exposes it as a
+- `github-app-token.js` — GitHub App token minter used by Agent/Detection and
+  GitHub issue SafeOutputs. Builds an RS256 JWT from the App ID (argv) +
+  private key (masked env secret), resolves the installation for the owner,
+  exchanges it for a repository/permission-scoped installation access token,
+  and exposes it as a
   masked same-job `GITHUB_APP_TOKEN`. Invoked again with a `revoke` argument
   after the Copilot run (best-effort) to delete the token via
   `DELETE /installation/token`. Compiler-owned, non-secret inputs (`--app-id`,
@@ -570,7 +570,7 @@ scripts/ado-script/
 │   │   ├── index.ts             # main(): inspect upstream results + safe-outputs manifest → file/append work items
 │   │   └── __tests__/           # unit tests for signal detection and work-item filing behaviour
 │   ├── github-app-token/        # github-app-token.js entry point + GitHub App token minter
-│   │   ├── index.ts             # main(): RS256 JWT → resolve installation → mint installation token → masked GITHUB_APP_TOKEN
+│   │   ├── index.ts             # main(): RS256 JWT → resolve installation → mint scoped installation token → masked same-job variable
 │   │   └── __tests__/           # unit tests for JWT signing / installation resolution / token minting
 │   ├── prepare-pr-base/         # prepare-pr-base.js entry point + create-pull-request base-ref fetch/deepen
 │   │   ├── index.ts             # main(): fetch/deepen target branch + set origin/HEAD so mcp.rs finds a diff base

@@ -6000,9 +6000,8 @@ fn test_default_pipeline_mounts_az_and_allows_azure_hosts() {
 /// Compile the `ado-aw-debug-agent.md` fixture and assert the
 /// front-matter section's compile-time effects:
 /// 1. The integrity check step is omitted (`skip-integrity: true`).
-/// 2. The Stage 3 executor `env:` block exposes
-///    `ADO_AW_DEBUG_GITHUB_TOKEN`.
-/// 3. `--enabled-tools create-issue` is wired into the SafeOutputs MCP
+/// 2. The Stage 3 executor `env:` block exposes `ADO_AW_GITHUB_TOKEN`.
+/// 3. `--enabled-tools create-github-issue` is wired into the SafeOutputs MCP
 ///    invocation.
 /// 4. The output is otherwise valid YAML.
 #[test]
@@ -6022,15 +6021,44 @@ fn test_compile_ado_aw_debug_fixture() {
         .expect("Should have executor step");
     let after_execute = &compiled[execute_block_start..];
     assert!(
-        after_execute.contains("ADO_AW_DEBUG_GITHUB_TOKEN: $(ADO_AW_DEBUG_GITHUB_TOKEN)"),
-        "Executor step must expose ADO_AW_DEBUG_GITHUB_TOKEN when ado-aw-debug.create-issue is set: {after_execute}"
+        after_execute.contains("ADO_AW_GITHUB_TOKEN: $(ADO_AW_GITHUB_TOKEN)"),
+        "Executor step must expose ADO_AW_GITHUB_TOKEN when safe-outputs.create-github-issue is set: {after_execute}"
     );
 
-    // --enabled-tools includes create-issue
+    // --enabled-tools includes create-github-issue
     assert!(
-        compiled_has_enabled_tool(&compiled, "create-issue"),
-        "Compiler must add --enabled-tools create-issue when ado-aw-debug.create-issue is set"
+        compiled_has_enabled_tool(&compiled, "create-github-issue"),
+        "Compiler must add --enabled-tools create-github-issue when safe-outputs.create-github-issue is set"
     );
+}
+
+#[test]
+fn test_compile_github_issue_app_fixture_scopes_tokens_by_stage() {
+    let compiled = compile_fixture("github-issue-app-agent.md");
+    assert_valid_yaml(&compiled, "github-issue-app-agent.md");
+    assert!(compiled_has_enabled_tool(&compiled, "create-github-issue"));
+    assert!(compiled_has_enabled_tool(&compiled, "set-github-issue-type"));
+    assert!(compiled.contains("Mint GitHub App token (SafeOutputs)"));
+    assert!(compiled.contains("--output-var 'ADO_AW_SAFE_OUTPUTS_GITHUB_APP_TOKEN'"));
+    assert!(compiled.contains("--permissions-json '{\"issues\":\"write\"}'"));
+    assert!(compiled.contains(
+        "ADO_AW_GITHUB_TOKEN: $(ADO_AW_SAFE_OUTPUTS_GITHUB_APP_TOKEN)"
+    ));
+
+    let agent_start = compiled.find("- job: Agent").expect("Agent job");
+    let detection_start = compiled.find("- job: Detection").expect("Detection job");
+    let safe_outputs_start = compiled
+        .find("- job: SafeOutputs")
+        .expect("SafeOutputs job");
+    for block in [
+        &compiled[agent_start..detection_start],
+        &compiled[detection_start..safe_outputs_start],
+    ] {
+        assert!(block.contains(
+            "--permissions-json '{\"contents\":\"read\",\"issues\":\"read\"}'"
+        ));
+        assert!(!block.contains("ADO_AW_GITHUB_TOKEN"));
+    }
 }
 
 /// The example file in `examples/dogfood-failure-reporter.md` must compile
@@ -6050,12 +6078,12 @@ fn test_example_dogfood_failure_reporter_structure() {
         "Example should start with front matter"
     );
     assert!(
-        content.contains("ado-aw-debug:"),
-        "Example should declare ado-aw-debug section"
+        content.contains("safe-outputs:"),
+        "Example should declare safe-outputs section"
     );
     assert!(
-        content.contains("create-issue:"),
-        "Example should configure create-issue"
+        content.contains("create-github-issue:"),
+        "Example should configure create-github-issue"
     );
     assert!(
         content.contains("target-repo: githubnext/ado-aw"),
