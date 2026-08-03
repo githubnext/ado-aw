@@ -89,7 +89,7 @@ When you add `src/safe_outputs/<new-tool>.rs`:
    entry in [`tests/smoke/cases.json`](../smoke/cases.json).
 5. **If the tool writes to GitHub rather than ADO** (`create-github-issue`,
    `set-github-issue-type`), neither suite covers it today — see
-   [#1797](https://github.com/githubnext/ado-aw/issues/1797). Executor-e2e is
+   [#1798](https://github.com/githubnext/ado-aw/issues/1798). Executor-e2e is
    the right home; it already files GitHub issues from its own failure
    reporter, so the REST plumbing exists.
 
