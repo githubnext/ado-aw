@@ -154,7 +154,7 @@ If you prefer full control, you can author agent files by hand.
    This file combines YAML front matter for configuration with markdown instructions for the agent.
 
    :::note[Manual queuing]
-   All Azure DevOps pipelines can be queued manually from the ADO UI — no special `on:` configuration is needed for that. The `on:` key is for automatic triggers such as schedules (`on.schedule:`), PR events (`on.pr:`), or upstream pipeline completion (`on.pipeline:`). Omitting `on:` means the pipeline only runs when you queue it manually (plus any CI triggers ADO applies by default).
+   All Azure DevOps pipelines can be queued manually from the ADO UI — no special `on:` configuration is needed for that. The `on:` key is for automatic triggers such as pushes (`on.push:`), schedules (`on.schedule:`), PR events (`on.pr:`), or upstream pipeline completion (`on.pipeline:`). `on:` is the **complete** declaration of when the pipeline runs — omitting it entirely means the pipeline only runs when you queue it manually or via the API, with no automatic CI trigger.
    :::
 
 2. **Compile it**
