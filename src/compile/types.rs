@@ -842,6 +842,23 @@ impl GithubAppTokenConfig {
                 );
             }
         }
+        // The App-token mint step normalizes '-' to '_' before serializing
+        // `--permissions-json` (the GitHub API spells permissions with
+        // underscores). Two keys differing only by separator therefore collapse
+        // onto one entry, and the survivor silently wins — which can flip an
+        // intended `read` to `write`. Reject the collision here rather than
+        // letting the mint step drop a permission the author declared.
+        let mut normalized_keys: std::collections::BTreeMap<String, &String> =
+            std::collections::BTreeMap::new();
+        for permission in self.permissions.keys() {
+            let normalized = permission.replace('-', "_");
+            if let Some(existing) = normalized_keys.insert(normalized.clone(), permission) {
+                anyhow::bail!(
+                    "{path}.permissions keys '{existing}' and '{permission}' both normalize to \
+                     '{normalized}'; use a single spelling"
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -5040,6 +5057,50 @@ github-app-token:
             error.contains("read-only"),
             "error should steer the author to a read-only token: {error}"
         );
+    }
+
+    #[test]
+    fn github_app_permissions_reject_separator_only_key_collision() {
+        // '-' and '_' spellings collapse onto one key when the mint step
+        // serializes --permissions-json, so the survivor would silently win and
+        // could flip an intended `read` to `write`. Reject at compile time.
+        let gat = GithubAppTokenConfig {
+            app_id: "123".to_string(),
+            private_key: None,
+            owner: "octo".to_string(),
+            repositories: vec!["repo".to_string()],
+            api_url: None,
+            skip_token_revocation: false,
+            permissions: [
+                ("pull-requests".to_string(), GithubAppPermissionLevel::Read),
+                ("pull_requests".to_string(), GithubAppPermissionLevel::Write),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let error = gat.validate().unwrap_err().to_string();
+        assert!(
+            error.contains("normalize to") && error.contains("pull_requests"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn github_app_permissions_accept_single_dashed_spelling() {
+        // The dashed spelling on its own stays valid — only the collision is an
+        // error, so existing `pull-requests: read` front matter keeps working.
+        let gat = GithubAppTokenConfig {
+            app_id: "123".to_string(),
+            private_key: None,
+            owner: "octo".to_string(),
+            repositories: vec!["repo".to_string()],
+            api_url: None,
+            skip_token_revocation: false,
+            permissions: [("pull-requests".to_string(), GithubAppPermissionLevel::Read)]
+                .into_iter()
+                .collect(),
+        };
+        assert!(gat.validate().is_ok());
     }
 
     #[test]

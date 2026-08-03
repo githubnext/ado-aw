@@ -648,6 +648,90 @@ mod tests {
     }
 
     #[test]
+    fn resolve_target_repo_rejects_ghe_source_left_on_dotcom_api_url() {
+        // A GitHub Enterprise pipeline source whose API URL was never overridden
+        // still points at api.github.com, so implicitly resolving the current
+        // repository would file the issue on the wrong host entirely.
+        let ctx = ExecutionContext {
+            repository_provider: Some("GitHubEnterprise".to_string()),
+            repository_name: Some("octo/repo".to_string()),
+            github_api_url: "https://api.github.com".to_string(),
+            ..Default::default()
+        };
+        let error = resolve_target_repo(None, &ctx).unwrap_err();
+        assert!(
+            error.message.contains("GitHub Enterprise source"),
+            "unexpected message: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn resolve_target_repo_accepts_ghe_source_with_explicit_api_url() {
+        // The positive counterpart: once the GHE API URL is set, implicit
+        // resolution of the current repository is allowed again.
+        let ctx = ExecutionContext {
+            repository_provider: Some("GitHubEnterprise".to_string()),
+            repository_name: Some("octo/repo".to_string()),
+            github_api_url: "https://ghe.example.com/api/v3".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(resolve_target_repo(None, &ctx).unwrap(), "octo/repo");
+    }
+
+    #[test]
+    fn resolve_target_repo_rejects_missing_build_repository_name() {
+        // GitHub-backed build, but ADO did not surface BUILD_REPOSITORY_NAME.
+        // There is nothing safe to fall back to, so this must fail rather than
+        // resolve to an empty or guessed slug.
+        let ctx = ExecutionContext {
+            repository_provider: Some("GitHub".to_string()),
+            repository_name: None,
+            ..Default::default()
+        };
+        let error = resolve_target_repo(None, &ctx).unwrap_err();
+        assert!(
+            error.message.contains("BUILD_REPOSITORY_NAME is not set"),
+            "unexpected message: {}",
+            error.message
+        );
+    }
+
+    /// `ExecutionContext::get_tool_config` deserializes with
+    /// `.ok().unwrap_or_default()`, so a config that fails to deserialize
+    /// silently becomes `Default` — i.e. `target_repo: None`, which resolves to
+    /// the *current* repository. That is why `target-repo` stays a plain
+    /// `String` validated by `validate_target_repo()` at each call site rather
+    /// than a `secure.rs` newtype validated at deserialization time: a newtype
+    /// would turn a malformed value into a silent redirect instead of a loud
+    /// failure. `test_execute_fails_when_target_repo_invalid` covers the plain
+    /// rejection; this pins the *no silent redirect* half, with a usable
+    /// current repository deliberately present in the context.
+    #[tokio::test]
+    async fn malformed_target_repo_does_not_redirect_to_current_repository() {
+        let mut ctx = ctx_with_config(
+            serde_json::json!({ "target-repo": "not a valid slug" }),
+            Some("fake-pat".to_string()),
+        );
+        ctx.repository_provider = Some("GitHub".to_string());
+        ctx.repository_name = Some("octo/current".to_string());
+
+        let mut result: CreateGithubIssueResult = valid_params().try_into().unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!execution.success);
+        assert!(
+            execution.message.contains("target-repo"),
+            "expected an explicit target-repo rejection, got: {}",
+            execution.message
+        );
+        assert!(
+            !execution.message.contains("octo/current"),
+            "must not silently fall back to the current repository: {}",
+            execution.message
+        );
+    }
+
+    #[test]
     fn test_merge_dedup_strings_dedupes_case_insensitively() {
         let merged = merge_dedup_strings(
             &["bug".into(), "Triage".into()],
