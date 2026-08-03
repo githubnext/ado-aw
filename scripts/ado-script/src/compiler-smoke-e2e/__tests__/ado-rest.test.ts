@@ -248,3 +248,40 @@ describe("redactToken", () => {
     );
   });
 });
+
+describe("AdoRest.addBuildTags", () => {
+  // Regression: tags were sent one-per-request as PUT .../tags/<tag>, putting
+  // the tag in the URL PATH. ADO's ASP.NET front end validates the *decoded*
+  // path, so `smoke-case:canary` was rejected with HTTP 400 "A potentially
+  // dangerous Request.Path value was detected from the client (:)" even
+  // correctly encoded as %3A — which is every tag this harness writes.
+  // Observed live on build 629522's children.
+  it("sends tags in the request body, never in the URL path", async () => {
+    const calls: { url: string; method?: string; body?: unknown }[] = [];
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, method: init?.method, body: init?.body });
+      return jsonResponse(200, { count: 2, value: ["smoke-case:canary"] });
+    });
+    const rest = makeRest(fetchImpl as unknown as typeof fetch);
+
+    await rest.addBuildTags(4242, ["smoke-case:canary", "smoke-candidate:99"]);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.method).toBe("POST");
+    expect(calls[0]!.url).toContain("/build/builds/4242/tags?api-version=");
+    // The colon-bearing values must not reach the path in any encoding.
+    expect(calls[0]!.url).not.toContain("smoke-case");
+    expect(calls[0]!.url).not.toContain("%3A");
+    expect(JSON.parse(String(calls[0]!.body))).toEqual([
+      "smoke-case:canary",
+      "smoke-candidate:99",
+    ]);
+  });
+
+  it("makes no request when there are no tags", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(200, {}));
+    const rest = makeRest(fetchImpl as unknown as typeof fetch);
+    await rest.addBuildTags(1, []);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});

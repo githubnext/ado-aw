@@ -225,14 +225,20 @@ export class AdoRest {
    * Every case in a lane shares one definition, so tags (alongside the
    * per-case `sourceBranch`) are how a run is identified in the lane's
    * history. Callers treat failures here as non-fatal.
+   *
+   * Uses the **body** form (`POST .../tags`) rather than the per-tag path form
+   * (`PUT .../tags/{tag}`). ADO's ASP.NET front end validates the *decoded*
+   * request path, so a tag containing `:` is rejected with HTTP 400 "A
+   * potentially dangerous Request.Path value was detected from the client (:)"
+   * even when correctly percent-encoded as `%3A`. Our tags are
+   * `smoke-case:<id>` / `smoke-candidate:<buildId>`, so every one of them hit
+   * that. Sending them in the body sidesteps path validation entirely, and
+   * tags all of them in a single request.
    */
   async addBuildTags(buildId: number, tags: readonly string[]): Promise<void> {
-    for (const tag of tags) {
-      const path = this.projPath(
-        `_apis/build/builds/${buildId}/tags/${AdoRest.seg(tag)}?api-version=7.1`,
-      );
-      await this.request(path, { method: "PUT" });
-    }
+    if (tags.length === 0) return;
+    const path = this.projPath(`_apis/build/builds/${buildId}/tags?api-version=7.1`);
+    await this.request(path, { method: "POST", body: [...tags] });
   }
 
   /**
