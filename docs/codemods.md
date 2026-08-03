@@ -135,7 +135,8 @@ src/compile/codemods/
 ├── 0002_pool_object_form.rs # Legacy scalar pool → explicit object form codemod
 ├── 0003_flatten_work_item_config.rs # Legacy work-item config flatten codemod
 ├── 0004_legacy_path_markers.rs # {{ workspace }} / {{ working_directory }} / {{ trigger_repo_directory }} → explicit ADO path exprs
-└── 0005_drop_build_attachment_allowed_build_ids.rs # remove no-op upload-build-attachment.allowed-build-ids
+├── 0005_drop_build_attachment_allowed_build_ids.rs # remove no-op upload-build-attachment.allowed-build-ids
+└── 0006_explicit_push_trigger.rs # absent `on:` → explicit `on.push` (all branches) for pre-change sources
 ```
 
 (New codemods are appended as `<NNNN>_<id>.rs` files.)
