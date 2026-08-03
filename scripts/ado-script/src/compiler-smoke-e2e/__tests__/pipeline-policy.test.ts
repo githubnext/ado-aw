@@ -149,7 +149,6 @@ describe("candidate orchestrator trigger policy", () => {
     expect(audit?.script).toContain("jq_error_begin");
     expect(audit?.script).toContain('head -c 16384 "$body"');
     expect(audit?.script).toContain("response_sample_begin");
-
     const publish = steps.find(
       (step) => step.displayName === "Publish smoke diagnostics",
     );
@@ -162,6 +161,30 @@ describe("candidate orchestrator trigger policy", () => {
       },
       task: "PublishPipelineArtifact@1",
     });
+  });
+
+  it("audits SELF under the rule matching how the orchestrator is triggered", () => {
+    // Regression: SELF_ID was unconditionally appended to the PR-definition
+    // list, so the released orchestrator - scheduled-only by design - was
+    // required to carry a pullRequest trigger it must never have, and failed
+    // its own audit. Caught by the first live released run (build 629514).
+    const audit = steps.find(
+      (step) => step.displayName === "Audit AgentPlayground trigger policy",
+    );
+    expect(audit?.script).toContain(
+      "SELF_IS_PR_DEFINITION=${{ eq(parameters.compilerSource, 'candidate') }}",
+    );
+    // SELF must land in exactly one list, never unconditionally in PR_IDS.
+    expect(audit?.script).not.toMatch(/\.pr_definition_ids\[\]\s*'\s*"\$POLICY"\s*\)\s*\$SELF_ID"/);
+    expect(audit?.script).toContain('PR_IDS="$PR_IDS $SELF_ID"');
+    expect(audit?.script).toContain(
+      'SCHEDULED_ONLY_IDS="$SCHEDULED_ONLY_IDS $SELF_ID"',
+    );
+    // The comment-gate assertion is PR-only; in released mode there is no PR
+    // trigger to carry a comment gate.
+    expect(audit?.script).toMatch(
+      /if \[ "\$SELF_IS_PR_DEFINITION" = "True" \]; then[\s\S]*was not included in the PR policy audit/,
+    );
   });
 });
 
