@@ -25,24 +25,24 @@
 # run and hide the breakage.
 #
 # Outputs, all under /tmp/gh-aw/agent/ so they are captured in the run artifact:
-#   pr-diff.patch            — unified diff, generated files excluded, capped
+#   pr-diff.patch            — complete unified diff, generated files excluded
 #   pr-meta.json             — PR metadata
 #   pr-review-comments.json  — existing inline review comments (for dedup)
 #   pr-data-head-sha.txt     — cache validity marker
 #
 # The fetch is skipped entirely when all four files exist and the cached head
 # SHA still matches the PR head, which is the common case: `pr-data-prefetch.yml`
-# warms the `pr-prefetch-<pr-number>-<sha>` Actions cache in ~30-60s while the
+# warms the `pr-prefetch-full-v1-<pr-number>-<sha>` Actions cache in ~30-60s while the
 # reviewer activation jobs are still starting up. Dispatch runs know the PR
 # number but not the head SHA, so they rely on the `restore-keys` prefix to find
 # the newest entry and on `pr-data-head-sha.txt` to reject it if it is stale.
 #
 # Usage:
 #   cache:
-#     key: pr-prefetch-${{ github.event.pull_request.number || fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_number }}-${{ github.event.pull_request.head.sha || github.run_id }}
+#     key: pr-prefetch-full-v1-${{ github.event.pull_request.number || fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_number }}-${{ github.event.pull_request.head.sha || github.run_id }}
 #     path: /tmp/gh-aw/agent
 #     restore-keys:
-#       - pr-prefetch-${{ github.event.pull_request.number || fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_number }}-
+#       - pr-prefetch-full-v1-${{ github.event.pull_request.number || fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_number }}-
 #   imports:
 #     - shared/pr-diff-data-fetch.md
 #
@@ -60,7 +60,6 @@ pre-agent-steps:
       PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number || (fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_type == 'pull_request' && fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_number) || '' }}
       PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       EXPR_GITHUB_REPOSITORY: ${{ github.repository }}
-      PR_DIFF_MAX_LINES: "3000"
     run: |
       set -euo pipefail
       mkdir -p /tmp/gh-aw/agent
@@ -109,7 +108,7 @@ pre-agent-steps:
         exit 0
       fi
 
-      { gh pr diff "$PR_NUMBER" --repo "$EXPR_GITHUB_REPOSITORY" \
+      gh pr diff "$PR_NUMBER" --repo "$EXPR_GITHUB_REPOSITORY" \
           --exclude '**/*.lock.yml' \
           --exclude 'scripts/ado-script/*.js' \
           --exclude 'scripts/ado-script/test-bin/**' \
@@ -117,7 +116,7 @@ pre-agent-steps:
           --exclude '**/*.gen.json' \
           --exclude '**/dist/**' \
           --exclude 'Cargo.lock' \
-          || true; } | head -n "${PR_DIFF_MAX_LINES}" > /tmp/gh-aw/agent/pr-diff.patch
+          > /tmp/gh-aw/agent/pr-diff.patch
       LINES=$(wc -l < /tmp/gh-aw/agent/pr-diff.patch)
 
       gh pr view "$PR_NUMBER" \

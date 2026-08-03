@@ -2,10 +2,10 @@ name: PR Data Prefetch
 
 # Fetches the PR diff, metadata and existing inline review comments once per
 # commit and saves them to the Actions cache under
-# `pr-prefetch-<pr-number>-<head-sha>`.
+# `pr-prefetch-full-v1-<pr-number>-<head-sha>`.
 #
 # The PR number is part of the key so that the reviewers' `restore-keys` prefix
-# (`pr-prefetch-<pr-number>-`) can find the newest entry for a PR even when the
+# (`pr-prefetch-full-v1-<pr-number>-`) can find the newest entry for a PR even when the
 # head SHA is unknown — which is the case for `/review` slash-command runs,
 # where the centralized router dispatches `workflow_dispatch` with no PR payload.
 #
@@ -51,7 +51,6 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           TARGET_REPOSITORY: ${{ github.repository }}
-          PR_DIFF_MAX_LINES: "3000"
         run: |
           set -euo pipefail
           mkdir -p /tmp/gh-aw/agent
@@ -59,7 +58,7 @@ jobs:
           # Exclusions must stay in sync with
           # .github/workflows/shared/pr-diff-data-fetch.md — these are all
           # generated artefacts, and line-commenting on them is pure noise.
-          { gh pr diff "$PR_NUMBER" --repo "$TARGET_REPOSITORY" \
+          gh pr diff "$PR_NUMBER" --repo "$TARGET_REPOSITORY" \
               --exclude '**/*.lock.yml' \
               --exclude 'scripts/ado-script/*.js' \
               --exclude 'scripts/ado-script/test-bin/**' \
@@ -67,7 +66,7 @@ jobs:
               --exclude '**/*.gen.json' \
               --exclude '**/dist/**' \
               --exclude 'Cargo.lock' \
-              || true; } | head -n "${PR_DIFF_MAX_LINES}" > /tmp/gh-aw/agent/pr-diff.patch
+              > /tmp/gh-aw/agent/pr-diff.patch
           LINES=$(wc -l < /tmp/gh-aw/agent/pr-diff.patch)
 
           gh pr view "$PR_NUMBER" \
@@ -91,5 +90,5 @@ jobs:
       - name: Save PR data to cache
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          key: pr-prefetch-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+          key: pr-prefetch-full-v1-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
           path: /tmp/gh-aw/agent
