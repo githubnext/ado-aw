@@ -9,10 +9,12 @@ on:
     paths:
       - "src/**"
       - "ado-aw-derive/**"
-      - "tests/**"
-      - "docs/**"
+      - "Cargo.toml"
       - "AGENTS.md"
-      - "scripts/ado-script/**"
+      - "scripts/ado-script/src/**"
+      - "scripts/ado-script/package.json"
+      - "scripts/ado-script/package-lock.json"
+      - "scripts/ado-script/tsconfig.json"
       - ".github/workflows/**"
   slash_command:
     strategy: centralized
