@@ -13,11 +13,14 @@ not add a definition here; only a genuinely new credential class does.
 | --- | --- | --- | --- | ---: |
 | `ado-aw smoke lane - agentic` | `ado-aw-mirror` | `/.smoke/pipeline.yml` | `refs/heads/ado-aw-smoke-candidate-base` | _TBD_ |
 | `ado-aw smoke lane - debug` | `ado-aw-mirror` | `/.smoke/pipeline.yml` | `refs/heads/ado-aw-smoke-candidate-base` | _TBD_ |
-| `ado-aw smoke lane - infra` | `ado-aw-mirror` | `/.smoke/pipeline.yml` | `refs/heads/ado-aw-smoke-candidate-base` | _TBD_ |
+| `ado-aw smoke lane - infra` | `ado-aw-mirror` | `/.smoke/pipeline.yml` | `refs/heads/ado-aw-smoke-candidate-base` | _not yet registered_ |
 
-All three are **API-queued only**: no CI trigger, no PR trigger, no schedule.
+All are **API-queued only**: no CI trigger, no PR trigger, no schedule.
 Their default branch is the permanent inert ref, so a lane cannot run without
 an explicitly supplied case ref.
+
+`infra` carries no cases yet, and a lane with no case in the running mode is
+never resolved, so it needs no definition until the first `infra` case lands.
 
 ## Orchestrators
 
@@ -63,7 +66,7 @@ them explicitly on each definition.
 | Secret | On | Scope |
 | --- | --- | --- |
 | `GITHUB_TOKEN` | `agentic`, `debug` lanes | Copilot CLI authentication |
-| `ADO_AW_DEBUG_GITHUB_TOKEN` | `debug` lane **only** | GitHub fine-grained PAT, Issues read/write limited to `jamesadevine/ado-aw-issues` |
+| `ADO_AW_GITHUB_TOKEN` | `debug` lane **only** | GitHub fine-grained PAT, Issues read/write limited to `jamesadevine/ado-aw-issues`. Read by the `create-github-issue` safe output in Stage 3 only. |
 
 The `infra` lane holds no secrets. Do not put either token in a variable group
 or on an orchestrator.
@@ -89,11 +92,18 @@ mode, Build Read on the candidate orchestrator definition.
    placeholder lock paths in the same commit. The ref is permanent — the
    harness never deletes it.
 
-2. **Register the three lane definitions** against `ado-aw-mirror`, YAML path
+2. **Register the lane definitions** against `ado-aw-mirror`, YAML path
    `/.smoke/pipeline.yml`, default branch as above. Create them explicitly
    (e.g. `az pipelines create --skip-run true`); `ado-aw enable` reuses an
    existing definition with the same YAML path and cannot create three
    definitions that share one.
+
+   Only **`agentic` and `debug`** are needed at cutover. `loadCases` resolves a
+   definition id per lane *in play for the mode being run*, so an unused lane
+   needs no definition and no variable: candidate mode uses `agentic` alone,
+   released mode uses `agentic` + `debug`. Register `infra` when the first
+   `infra` case lands, not before — an unregistered lane cannot be queued by
+   accident.
 
 3. **Strip all triggers** on each lane: no CI, no PR, no schedule.
 

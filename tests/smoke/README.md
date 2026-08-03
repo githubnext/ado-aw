@@ -36,7 +36,7 @@ credential class:
 | Lane | Secrets / service connections | Cases |
 | --- | --- | --- |
 | `agentic` | `GITHUB_TOKEN`, `agent-playground-read`/`-write` | canary, azure-cli, noop-target, custom-safe-output, multi-repo, janitor |
-| `debug` | the above **plus** `ADO_AW_DEBUG_GITHUB_TOKEN` | smoke-failure-reporter |
+| `debug` | the above **plus** `ADO_AW_GITHUB_TOKEN` | smoke-failure-reporter |
 | `infra` | none | *(reserved for AWF and the ado-proxy sidecar)* |
 
 `smoke-failure-reporter` is isolated because it files GitHub issues on

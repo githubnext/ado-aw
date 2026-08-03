@@ -8,7 +8,7 @@
     },
     "debug": {
       "definitionIdEnv": "SMOKE_LANE_DEBUG_DEFINITION_ID",
-      "description": "Everything in agentic, plus ADO_AW_DEBUG_GITHUB_TOKEN."
+      "description": "Everything in agentic, plus ADO_AW_GITHUB_TOKEN."
     },
     "infra": {
       "definitionIdEnv": "SMOKE_LANE_INFRA_DEFINITION_ID",

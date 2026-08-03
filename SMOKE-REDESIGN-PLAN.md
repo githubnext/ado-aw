@@ -18,7 +18,7 @@
      five legacy placeholder lock paths in the same commit;
    - register the three lane definitions, the released orchestrator, and the
      executor-e2e queue target;
-   - provision `GITHUB_TOKEN` (agentic, debug) and `ADO_AW_DEBUG_GITHUB_TOKEN`
+   - provision `GITHUB_TOKEN` (agentic, debug) and `ADO_AW_GITHUB_TOKEN`
      (debug only); authorize service connections;
    - set `SMOKE_LANE_*_DEFINITION_ID` on both orchestrators and
      `E2E_QUEUE_PIPELINE_ID` on definition `2550`.
@@ -103,7 +103,7 @@ AFTER    3 lane definitions + 1 queue target, zero committed locks
 
 1. **Three lanes** — `agentic` (canary, azure-cli, noop-target,
    custom-safe-output), `debug` (smoke-failure-reporter, which additionally
-   needs `ADO_AW_DEBUG_GITHUB_TOKEN`), `infra` (no GitHub token; reserved for
+   needs `ADO_AW_GITHUB_TOKEN`), `infra` (no GitHub token; reserved for
    AWF and ado-proxy).
 2. **Big-bang cutover** — all cases move in one PR. Mitigated by a manual
    pre-merge live run in both modes, and by *disabling* rather than deleting
@@ -291,7 +291,7 @@ parameters.
 | Definition | Repo | `yamlFilename` | Default branch | Secrets | Service connections |
 | --- | --- | --- | --- | --- | --- |
 | smoke lane `agentic` | `ado-aw-mirror` | `/.smoke/pipeline.yml` | `refs/heads/ado-aw-smoke-candidate-base` | `GITHUB_TOKEN` | `agent-playground-read/write` |
-| smoke lane `debug` | `ado-aw-mirror` | `/.smoke/pipeline.yml` | same | `GITHUB_TOKEN`, `ADO_AW_DEBUG_GITHUB_TOKEN` | same |
+| smoke lane `debug` | `ado-aw-mirror` | `/.smoke/pipeline.yml` | same | `GITHUB_TOKEN`, `ADO_AW_GITHUB_TOKEN` | same |
 | smoke lane `infra` | `ado-aw-mirror` | `/.smoke/pipeline.yml` | same | none | none |
 | release orchestrator | `githubnext/ado-aw` | `tests/smoke/azure-pipelines-release.yml` | `main` | none | `githubnext`, `agent-playground-write` |
 | queue target | `githubnext/ado-aw` | `tests/executor-e2e/queue-target.yml` | `main` | none | `githubnext` |
