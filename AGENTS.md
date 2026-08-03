@@ -635,8 +635,8 @@ overlap. All of them post **inline line comments**
 | `review-rust.md` | Rust engineering quality — `anyhow` context, `unwrap` on user paths, lossy casts, cross-platform paths, async correctness | `ready_for_review` **and every push** |
 | `review-typescript.md` | `scripts/ado-script/` quality — unhandled rejections, `any` leakage, unvalidated external input, secret handling | `ready_for_review` **and every push** |
 | `review-tests.md` | Test quality beyond coverage — untested behaviour, weakened assertions, implementation-detail tests | `ready_for_review` |
-| `review-compiler-contract.md` | ado-aw domain contracts — front-matter/safe-output schemas, typed IR, **bundle and codegen drift**, docs sync | `ready_for_review` |
-| `review-security.md` | Diff-scoped security regressions — injection into generated YAML, weakened validation, token scope, allowlist widening | `ready_for_review` |
+| `review-compiler-contract.md` | ado-aw domain contracts — front-matter/safe-output schemas, typed IR, **bundle and codegen drift**, docs sync | `ready_for_review` for compiler/runtime/workflow-source changes |
+| `review-security.md` | Diff-scoped security regressions — injection into generated YAML, weakened validation, token scope, allowlist widening | `ready_for_review` for security-sensitive code/workflow changes |
 
 Only the two code-quality reviewers re-run on every push; the rest run once the
 PR is ready and on demand via `/review`.

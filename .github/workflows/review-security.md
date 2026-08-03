@@ -6,6 +6,14 @@ on:
   pull_request:
     types: [ready_for_review]
     draft: false
+    paths:
+      - "src/**"
+      - "ado-aw-derive/**"
+      - "Cargo.toml"
+      - "scripts/ado-script/src/**"
+      - "scripts/ado-script/package.json"
+      - "scripts/ado-script/package-lock.json"
+      - ".github/workflows/**"
   slash_command:
     strategy: centralized
     name: review
