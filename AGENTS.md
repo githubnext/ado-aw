@@ -327,6 +327,8 @@ index to jump to the right page.
 
 - [`docs/front-matter.md`](docs/front-matter.md) — full agent file format
   (markdown body + YAML front matter grammar) with every supported field.
+  `docs/reference/front-matter.md` is a redirect stub to this page (kept for
+  old links).
 - [`docs/imports.md`](docs/imports.md) — reusable local and SHA-pinned
   cross-repository markdown components: `imports:`, `import-schema:`, committed
   `.ado-aw/imports/` cache, merge semantics, and custom safe-output component
@@ -337,7 +339,8 @@ index to jump to the right page.
   syntax (`daily around 14:00`, `weekly on monday`, timezones, scattering).
 - [`docs/engine.md`](docs/engine.md) — `engine:` configuration (model,
   `timeout-minutes`, `version`, `agent`, `api-target`, `args`, `env`,
-  `provider`, `command`, `github-app-token`).
+  `provider`, `command`, `github-app-token`). `docs/engines.md` is a redirect
+  stub to this page (kept for old links).
 - [`docs/parameters.md`](docs/parameters.md) — ADO runtime parameters surfaced
   in the pipeline UI, including the auto-injected `clearMemory` parameter.
 - [`docs/conclusion.md`](docs/conclusion.md) — Conclusion job — the
