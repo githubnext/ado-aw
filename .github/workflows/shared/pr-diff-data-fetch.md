@@ -47,8 +47,8 @@
 #     - shared/pr-diff-data-fetch.md
 #
 # Exclusions are ado-aw specific. Reviewing generated output is pure noise: the
-# compiled `*.lock.yml` pipelines, the ncc bundles committed at
-# scripts/ado-script/*.js, the schemars-driven types.gen.ts / fact-catalog.gen.json,
+# compiled `*.lock.yml` pipelines, the ncc bundles at scripts/ado-script/*.js,
+# the schemars-driven types.gen.ts / fact-catalog.gen.json,
 # and Cargo.lock are all machine-written. Drift in them is a real concern, but it
 # is `review-compiler-contract`'s job to spot it from pr-meta.json's file list,
 # not something to be line-commented.

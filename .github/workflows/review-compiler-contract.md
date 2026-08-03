@@ -1,7 +1,7 @@
 ---
 name: Compiler Contract Reviewer
 emoji: "🏗️"
-description: Enforces ado-aw's compiler contracts — front-matter and safe-output schemas, typed IR, bundle and codegen drift, and documentation sync
+description: Enforces ado-aw's compiler contracts — front-matter and safe-output schemas, typed IR, generated-artifact drift, and documentation sync
 on:
   pull_request:
     types: [ready_for_review]
@@ -81,28 +81,15 @@ should have moved and did not will be *absent* from `files`.
 These are pure set comparisons on the `files` list. They are your highest-value
 findings because **CI does not currently catch most of them**.
 
-### Bundle drift — the big one
+### Ado-script bundle source changes (informational only)
 
-Every `scripts/ado-script/src/<name>/` directory is bundled by `ncc` into a
-committed `scripts/ado-script/<name>.js`. The bundles are what actually execute
-inside customer pipelines, so a source change without a rebuilt bundle is a
-change that **does nothing at runtime**.
+Each `scripts/ado-script/src/<name>/` directory is bundled by `ncc` into
+`scripts/ado-script/<name>.js`, but those `.js` bundles are generated
+build-time artefacts and are gitignored in this repository.
 
-Bundled directories map one-to-one onto a committed `.js` file: `gate`,
-`import`, `exec-context-pr`, `exec-context-pr-synth`, `exec-context-manual`,
-`exec-context-pipeline`, `exec-context-ci-push`, `exec-context-workitem`,
-`exec-context-schedule`, `exec-context-pr-checks`, `exec-context-repo`,
-`conclusion`, `approval-summary`, `github-app-token`, `prepare-pr-base`.
-
-Changes to `scripts/ado-script/src/shared/**` affect **every** bundle, since
-shared modules are inlined into each one.
-
-The non-bundle directories `executor-e2e`, `trigger-e2e` and
-`compiler-smoke-e2e` build to `test-bin/` and are **not** shipped — do not flag
-those.
-
-If `src/<name>/**` changed and `<name>.js` is not in the file list, flag it and
-say the fix is `npm --prefix scripts/ado-script run build`.
+Do **not** raise findings that ask contributors to add or update
+`scripts/ado-script/*.js` files in a PR. Missing bundle files in `pr-meta.json`
+are expected and are never a blocking issue.
 
 > Note: CI (`.github/workflows/ado-script.yml`) rebuilds the bundles but never
 > diffs them, so nothing else in the repository will catch this.
@@ -192,7 +179,7 @@ for safe outputs, `docs/front-matter.md` for grammar, `docs/ir.md` for the IR,
 Post findings with `create-pull-request-review-comment` against a line in the
 diff. Budget of 10, prioritised:
 
-1. Bundle drift, codegen drift, lock drift, and raw-`String` identifier fields — up to 6
+1. Codegen drift, lock drift, and raw-`String` identifier fields — up to 6
 2. Missing codemod for a breaking grammar change, unregistered extension, public
    summary contract breakage — up to 3
 3. Documentation sync — up to 1
@@ -203,8 +190,8 @@ attaching it to an unrelated line.
 
 Skip anything already raised in `pr-review-comments.json`.
 
-Call `submit-pull-request-review` once. Use `REQUEST_CHANGES` for bundle drift,
-a missing codemod on a breaking grammar change, a raw `String` where a
+Call `submit-pull-request-review` once. Use `REQUEST_CHANGES` for a missing
+codemod on a breaking grammar change, a raw `String` where a
 `src/secure.rs` newtype is required, or hand-regenerated release-owned fixtures.
 Otherwise `COMMENT`.
 
