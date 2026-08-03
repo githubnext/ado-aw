@@ -79,6 +79,10 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── path_layout_check.rs # Warning-only checkout-aware path validation: $(Build.SourcesDirectory)/<seg> refs in steps, runtime-import targets, deprecated directory markers in the body
 │   │   ├── custom_tools.rs # Typed custom safe-output job model, closed MCP schemas, resolved execution config, and shared argument validation
 │   │   ├── imports/      # Reusable component imports: ADO-first source/ref resolution, bounded nested graph + SHA-keyed cache, import-schema substitution, and field-specific merge semantics
+│   │   │   ├── mod.rs    # Resolution entry point: source/ref parsing, nested import graph, SHA-keyed `.ado-aw/imports/` cache
+│   │   │   ├── schema.rs # import-schema input substitution
+│   │   │   ├── merge.rs  # Field-specific merge semantics for imported front matter
+│   │   │   └── integration_tests.rs # Import resolution + merge integration tests
 │   │   ├── extensions/   # CompilerExtension trait and infrastructure extensions
 │   │   │   ├── mod.rs    # Trait, Extension enum, collect_extensions(), re-exports
 │   │   │   ├── ado_aw_marker.rs # Always-on metadata marker extension (emits # ado-aw-metadata JSON)
