@@ -1646,6 +1646,20 @@ pub const ADO_PROXY_NETWORK_NAME: &str = "ado-aw-proxy-net";
 /// Path the public interception CA is mounted at inside client containers.
 pub const ADO_MCP_CA_MOUNT: &str = "/etc/ado-proxy/ca.pem";
 
+/// Whether this workflow routes Azure DevOps access through the policy engine.
+///
+/// Enabling `tools.azure-devops` is what pulls in the engine: the MCP is
+/// redirected at it and the `az` wrapper points at it. Both the pipeline
+/// builder and the Azure CLI extension need this answer and must not disagree —
+/// a mismatch would either install a wrapper pointing at an engine that was
+/// never started, or start an engine that nothing routes through.
+pub fn ado_proxy_enabled(front_matter: &FrontMatter) -> bool {
+    front_matter
+        .tools
+        .as_ref()
+        .is_some_and(|tools| tools.azure_devops.is_some())
+}
+
 /// Directory the generated `az` wrapper is installed into inside the sandbox.
 ///
 /// Separate from the ado-script bundle directory because it is prepended to
@@ -1671,7 +1685,13 @@ pub const AZ_WRAPPER_CA_PATH: &str = "/tmp/ado-aw-lib/ado-proxy-ca.pem";
 pub const AZ_ALLOWED_GROUPS: &[&str] = &["devops", "repos", "pipelines", "boards", "artifacts"];
 
 /// Runner-side path of the CA certificate the policy engine publishes.
-pub const ADO_PROXY_PUBLIC_CA_HOST_PATH: &str = "/tmp/gh-aw/ado-proxy/ado-proxy-ca.pem";
+///
+/// Deliberately inside [`AZ_WRAPPER_DIR`]: AWF mounts `/tmp` into the agent
+/// chroot, so this single published file is what the `az` wrapper reads *and*
+/// what the MCP container mounts. Publishing once removes the possibility of a
+/// client trusting a stale copy. Only the certificate goes here — the matching
+/// private key is destroyed by the step that starts the engine.
+pub const ADO_PROXY_PUBLIC_CA_HOST_PATH: &str = "/tmp/ado-aw-lib/ado-proxy-ca.pem";
 
 /// Default entrypoint args for the Azure DevOps MCP npm package.
 pub const ADO_MCP_PACKAGE: &str = "@azure-devops/mcp";

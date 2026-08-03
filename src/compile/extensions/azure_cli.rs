@@ -1,4 +1,8 @@
 use super::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
+use crate::compile::common::{
+    ADO_MCP_TOKEN_SENTINEL, ADO_PROXY_CONTAINER_NAME, ADO_PROXY_LISTEN_PORT, AZ_WRAPPER_DIR,
+    AZ_WRAPPER_PATH,
+};
 use crate::compile::ir::condition::{Condition, Expr};
 use crate::compile::ir::step::{BashStep, Step};
 
@@ -75,7 +79,17 @@ impl CompilerExtension for AzureCliExtension {
     /// step uses [`Condition::Ne`] of that pipeline variable against
     /// the empty-string literal — same wire shape as today's
     /// `condition: ne(variables['AW_AZ_MOUNTS'], '')`.
-    fn declarations(&self, _ctx: &CompileContext) -> anyhow::Result<Declarations> {
+    fn declarations(&self, ctx: &CompileContext) -> anyhow::Result<Declarations> {
+        let proxied = crate::compile::common::ado_proxy_enabled(ctx.front_matter);
+
+        let mut agent_prepare_steps = vec![Step::Bash(detection_bash_step())];
+        if proxied {
+            // Installed before the prompt is appended so the advisory and the
+            // wrapper cannot describe different worlds.
+            agent_prepare_steps.push(Step::Bash(install_az_wrapper_step()));
+        }
+        agent_prepare_steps.push(Step::Bash(prompt_append_bash_step()));
+
         Ok(Declarations {
             network_hosts: vec![
                 // OAuth + sign-in
@@ -89,13 +103,53 @@ impl CompilerExtension for AzureCliExtension {
                 "aka.ms".to_string(),
             ],
             bash_commands: vec!["az".to_string()],
-            agent_prepare_steps: vec![
-                Step::Bash(detection_bash_step()),
-                Step::Bash(prompt_append_bash_step()),
-            ],
+            agent_prepare_steps,
+            // Shadow the real `az` with the wrapper. Both the file and this
+            // prepend are needed: the agent runs in a chroot, so the container's
+            // /usr/local/bin is not the chroot's, and only PATH order decides
+            // which binary the agent actually invokes. AWF installs its own `gh`
+            // wrapper the same way.
+            awf_path_prepends: if proxied {
+                vec![AZ_WRAPPER_DIR.to_string()]
+            } else {
+                Vec::new()
+            },
             ..Declarations::default()
         })
     }
+}
+
+/// Install the generated `az` wrapper into the sandbox.
+///
+/// No mount is required: AWF bind-mounts the runner's `/tmp` into the agent
+/// chroot, which is the same mechanism that delivers the agent prompt and the
+/// Copilot binary. Writing the file here therefore makes it visible to the
+/// agent at the same path.
+///
+/// Gated on the same `AW_AZ_MOUNTS` signal as the prompt advisory: with no
+/// `az` on the runner there is nothing for the wrapper to exec, and shadowing a
+/// missing binary would turn a clear "command not found" into a confusing
+/// wrapper error.
+fn install_az_wrapper_step() -> BashStep {
+    let wrapper = crate::compile::az_wrapper::render_az_wrapper(
+        ADO_PROXY_CONTAINER_NAME,
+        ADO_PROXY_LISTEN_PORT,
+        ADO_MCP_TOKEN_SENTINEL,
+    );
+    // Indent the body for the heredoc without altering its content.
+    let script = format!(
+        "set -eo pipefail\n\
+         mkdir -p {AZ_WRAPPER_DIR}\n\
+         cat > '{AZ_WRAPPER_PATH}' << 'ADO_AW_AZ_WRAPPER_EOF'\n\
+         {wrapper}\n\
+         ADO_AW_AZ_WRAPPER_EOF\n\
+         chmod 755 '{AZ_WRAPPER_PATH}'\n\
+         echo \"az wrapper installed at {AZ_WRAPPER_PATH}\"\n"
+    );
+    BashStep::new("Install az wrapper (ado-proxy)", script).with_condition(Condition::Ne(
+        Expr::Variable("AW_AZ_MOUNTS".to_string()),
+        Expr::Literal(String::new()),
+    ))
 }
 
 /// Detect azure-cli on the host and set the `AW_AZ_MOUNTS` pipeline
@@ -144,6 +198,91 @@ mod tests {
 
     fn fm() -> FrontMatter {
         serde_yaml::from_str("name: t\ndescription: x\n").expect("front matter parses")
+    }
+
+    /// Front matter that enables the Azure DevOps tool, which is what pulls in
+    /// the policy engine and therefore the wrapper.
+    fn fm_proxied() -> FrontMatter {
+        serde_yaml::from_str("name: t\ndescription: x\ntools:\n  azure-devops:\n    org: myorg\n")
+            .expect("front matter parses")
+    }
+
+    fn wrapper_step(front_matter: &FrontMatter) -> Option<BashStep> {
+        let ctx = CompileContext::for_test(front_matter);
+        AzureCliExtension
+            .declarations(&ctx)
+            .unwrap()
+            .agent_prepare_steps
+            .into_iter()
+            .filter_map(|step| match step {
+                Step::Bash(b) if b.display_name.contains("az wrapper") => Some(b),
+                _ => None,
+            })
+            .next()
+    }
+
+    #[test]
+    fn the_wrapper_is_installed_only_when_traffic_is_policed() {
+        // Without the policy engine there is nothing to redirect to, and
+        // shadowing `az` would break it rather than contain it.
+        assert!(wrapper_step(&fm()).is_none());
+        assert!(wrapper_step(&fm_proxied()).is_some());
+    }
+
+    #[test]
+    fn the_wrapper_directory_shadows_the_real_az() {
+        // The file alone is not enough: the agent runs in a chroot, so only
+        // PATH order decides which binary it actually invokes.
+        let plain = fm();
+        let ctx_plain = CompileContext::for_test(&plain);
+        assert!(
+            AzureCliExtension
+                .declarations(&ctx_plain)
+                .unwrap()
+                .awf_path_prepends
+                .is_empty()
+        );
+
+        let proxied = fm_proxied();
+        let ctx = CompileContext::for_test(&proxied);
+        assert_eq!(
+            AzureCliExtension
+                .declarations(&ctx)
+                .unwrap()
+                .awf_path_prepends,
+            vec![AZ_WRAPPER_DIR.to_string()]
+        );
+    }
+
+    #[test]
+    fn the_wrapper_install_is_gated_on_az_being_present() {
+        // With no `az` on the runner there is nothing for the wrapper to exec,
+        // and shadowing a missing binary turns a clear "command not found"
+        // into a confusing wrapper error.
+        let step = wrapper_step(&fm_proxied()).expect("wrapper step");
+        assert_eq!(
+            step.condition,
+            Some(Condition::Ne(
+                Expr::Variable("AW_AZ_MOUNTS".to_string()),
+                Expr::Literal(String::new()),
+            ))
+        );
+    }
+
+    #[test]
+    fn the_installed_wrapper_is_executable_and_starts_with_a_shebang() {
+        let step = wrapper_step(&fm_proxied()).expect("wrapper step");
+        assert!(step.script.contains(&format!("chmod 755 '{AZ_WRAPPER_PATH}'")));
+        // The heredoc body must not be indented: a shebang preceded by
+        // whitespace is not a shebang, and the file would fail to exec.
+        assert!(
+            step.script.contains("ADO_AW_AZ_WRAPPER_EOF'\n#!/bin/sh"),
+            "the wrapper body must start at column 0: {}",
+            step.script
+        );
+        // A quoted heredoc delimiter keeps the shell from expanding `$PATH`,
+        // `$@` and friends while writing the file.
+        assert!(step.script.contains("<< 'ADO_AW_AZ_WRAPPER_EOF'"));
     }
 
     fn agent_prepare_steps(ext: &AzureCliExtension, ctx: &CompileContext<'_>) -> Vec<Step> {

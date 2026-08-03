@@ -67,8 +67,8 @@ use super::common::PerJobPools;
 use super::common::{
     self, ADO_BUILD_ID_SUFFIX, ADO_MCP_HOST_NODE_MODULES, ADO_MCP_PACKAGE, ADO_MCP_VERSION,
     ADO_PROXY_CONTAINER_NAME, ADO_PROXY_IMAGE, ADO_PROXY_LISTEN_PORT, ADO_PROXY_NETWORK_NAME,
-    ADO_PROXY_PUBLIC_CA_HOST_PATH, ADO_PROXY_TLS_PORT, AWF_SQUID_URL, AWF_VERSION, HEADER_MARKER,
-    MCPG_CONTAINER_NAME, MCPG_DOMAIN, MCPG_IMAGE, MCPG_PORT, MCPG_VERSION, image_ref,
+    ADO_PROXY_PUBLIC_CA_HOST_PATH, ADO_PROXY_TLS_PORT, AWF_SQUID_URL, AWF_VERSION, AZ_WRAPPER_DIR,
+    HEADER_MARKER, MCPG_CONTAINER_NAME, MCPG_DOMAIN, MCPG_IMAGE, MCPG_PORT, MCPG_VERSION, image_ref,
 };
 use super::extensions::ado_script as paths;
 use crate::ado_proxy::catalog::{self, Capability};
@@ -3411,10 +3411,11 @@ fn start_ado_proxy_step(capabilities: &[Capability]) -> BashStep {
          \n\
          # The proxy publishes its own interception CA certificate for clients\n\
          # to trust. It goes under /tmp deliberately: AWF mounts /tmp into the\n\
-         # agent chroot, and this is a public certificate that az and the ADO\n\
-         # MCP must be able to read. The matching private key never leaves\n\
-         # $PROXY_DIR and is destroyed below.\n\
-         mkdir -p /tmp/gh-aw/ado-proxy\n\
+         # agent chroot, so this one file is what the az wrapper reads and what\n\
+         # the MCP container mounts. Publishing once means no client can trust\n\
+         # a stale copy. The matching private key never leaves $PROXY_DIR and\n\
+         # is destroyed below.\n\
+         mkdir -p {az_wrapper_dir}\n\
          echo \"##vso[task.setvariable variable=ADO_PROXY_CA_FILE]{ca_host_path}\"\n\
          \n\
          # Build the material document. jq assembles it so that a value\n\
@@ -3441,7 +3442,7 @@ fn start_ado_proxy_step(capabilities: &[Capability]) -> BashStep {
            --network {ADO_PROXY_NETWORK_NAME} \\\n  \
            -v \"{ado_proxy_path}:/app/ado-proxy.js:ro\" \\\n  \
            -v \"$PROXY_DIR/policy:/etc/ado-proxy:ro\" \\\n  \
-           -v /tmp/gh-aw/ado-proxy:/var/lib/ado-proxy \\\n  \
+           -v /tmp/ado-aw-lib:/var/lib/ado-proxy \\\n  \
            -v /tmp/gh-aw/ado-proxy-logs:/var/log/ado-proxy \\\n  \
            {ado_proxy_image} \\\n  \
            node /app/ado-proxy.js \\\n  \
@@ -3480,6 +3481,7 @@ fn start_ado_proxy_step(capabilities: &[Capability]) -> BashStep {
          echo \"##vso[task.setvariable variable=ADO_PROXY_IP]$ADO_PROXY_IP\"\n",
         ado_proxy_path = paths::ADO_PROXY_PATH,
         ca_host_path = ADO_PROXY_PUBLIC_CA_HOST_PATH,
+        az_wrapper_dir = AZ_WRAPPER_DIR,
         ado_proxy_image = ADO_PROXY_IMAGE,
         squid_url = AWF_SQUID_URL,
         listen_port = ADO_PROXY_LISTEN_PORT,
@@ -4518,11 +4520,11 @@ mod tests {
         // CA there so clients can trust it. It must land somewhere the agent
         // can read (AWF mounts /tmp into the chroot) — unlike the signing key.
         assert!(script.contains("--public-ca-file /var/lib/ado-proxy/ado-proxy-ca.pem"));
-        assert!(script.contains("-v /tmp/gh-aw/ado-proxy:/var/lib/ado-proxy"));
+        assert!(script.contains(&format!("-v {AZ_WRAPPER_DIR}:/var/lib/ado-proxy")));
         assert!(
-            script.contains(
-                "##vso[task.setvariable variable=ADO_PROXY_CA_FILE]/tmp/gh-aw/ado-proxy/ado-proxy-ca.pem"
-            ),
+            script.contains(&format!(
+                "##vso[task.setvariable variable=ADO_PROXY_CA_FILE]{ADO_PROXY_PUBLIC_CA_HOST_PATH}"
+            )),
             "clients need the published certificate's path: {script}"
         );
         assert!(
