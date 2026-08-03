@@ -26,4 +26,18 @@ describe("scenario registry", () => {
     expect(ids).toContain("create-pull-request");
     expect(ids).toContain("create-pull-request-self-multi-checkout");
   });
+
+  it("registers the GitHub issue scenarios with unique ids", () => {
+    const ids = allScenarios.map((scenario) => scenario.id ?? scenario.tool);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const id of [
+      "create-github-issue",
+      "create-github-issue-label-denied",
+      "set-github-issue-type",
+      "set-github-issue-type-clear",
+      "create-github-issue-temporary-id-handoff",
+    ]) {
+      expect(ids).toContain(id);
+    }
+  });
 });
