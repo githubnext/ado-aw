@@ -106,11 +106,14 @@ to stage `create-github-issue` as an extra NDJSON line ahead of its own, in the
 same executor process. The assertion is that the `set-github-issue-type` record
 reports the issue number `create-github-issue` actually filed.
 
-> **Known gap (not covered here).** Because the registry is per-process, putting
-> `require-approval` on exactly one of the two tools splits Stage 3 into two
-> `ado-aw execute` processes (`SafeOutputs` and `SafeOutputs_Reviewed`), and a
-> `temporary_id` minted in one cannot resolve in the other. There is currently
-> no compile-time guard against that configuration.
+> **Why this can't be split across jobs.** Because the registry is per-process,
+> putting `require-approval` on only one of the two tools would split Stage 3
+> into two `ado-aw execute` processes (`SafeOutputs` and `SafeOutputs_Reviewed`),
+> and a `temporary_id` minted in one could not resolve in the other. The
+> compiler rejects that configuration up front —
+> `validate_github_issue_outputs_config` in `src/compile/common.rs` requires both
+> tools to have the same *effective* `require-approval` setting, so the
+> section-level default and a per-tool override are both accounted for.
 
 ### A product bug these scenarios caught
 
