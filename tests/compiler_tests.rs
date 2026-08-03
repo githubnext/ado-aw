@@ -10118,3 +10118,81 @@ safe-outputs:
         "NuGetAuthenticate@1 must not appear when dotnet: false\n{compiled}"
     );
 }
+
+/// `runtimes: node: false` must not add npm ecosystem domains to the AWF
+/// allow-domains list or emit npm authentication steps.
+///
+/// Note: `UseNode@1` itself always appears in compiled output regardless
+/// of `runtimes.node` — it is an infrastructure-level install used to run
+/// the bundled `ado-script` JS helpers (gate evaluator, conclusion
+/// reporter, etc.), independent of the user-facing `runtimes.node`
+/// feature. This test therefore asserts on signals that are unique to the
+/// `runtimes.node` extension: the npm ecosystem domains and the
+/// `npmAuthenticate@0` task it contributes when enabled.
+///
+/// Guards against accidental `is_enabled()` logic inversion — if
+/// `NodeRuntimeConfig::Enabled(false)` were treated as enabled, the npm
+/// registry domains (e.g. `registry.npmjs.org`) would leak into the
+/// allow-domains list even though the author explicitly opted out.
+#[test]
+fn test_node_runtime_disabled_emits_no_node_ecosystem_domains() {
+    let compiled = compile_inline_agent(
+        "node-disabled",
+        r#"---
+name: "Node Disabled Agent"
+description: "Agent with node explicitly disabled"
+runtimes:
+  node: false
+safe-outputs:
+  noop: {}
+---
+
+## Node Disabled Agent
+"#,
+    );
+    assert!(
+        !compiled.contains("registry.npmjs.org"),
+        "registry.npmjs.org must not appear in allow-domains when node: false\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("npmAuthenticate@0"),
+        "npmAuthenticate@0 must not appear when node: false\n{compiled}"
+    );
+}
+
+/// `runtimes: lean: false` must emit no elan/Lean install step, no Lean
+/// network host, and no Lean bash commands.
+///
+/// Guards against accidental `is_enabled()` logic inversion — if
+/// `LeanRuntimeConfig::Enabled(false)` were treated as enabled, the
+/// elan installer step and `elan.lean-lang.org` host would appear even
+/// though the author explicitly opted out.
+#[test]
+fn test_lean_runtime_disabled_emits_no_lean_steps() {
+    let compiled = compile_inline_agent(
+        "lean-disabled",
+        r#"---
+name: "Lean Disabled Agent"
+description: "Agent with lean explicitly disabled"
+runtimes:
+  lean: false
+safe-outputs:
+  noop: {}
+---
+
+## Lean Disabled Agent
+"#,
+    );
+    assert!(
+        !compiled.contains("elan-init.sh"),
+        "elan-init.sh installer must not appear when lean: false\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("elan.lean-lang.org"),
+        "elan.lean-lang.org must not appear in allow-domains when lean: false\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("Install Lean 4 (elan)"),
+        "'Install Lean 4 (elan)' step must not appear when lean: false\n{compiled}"
+    );
+}
