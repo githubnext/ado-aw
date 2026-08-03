@@ -5808,4 +5808,115 @@ safe-outputs:
             "parse error should name the accepted shapes, got: {msg}"
         );
     }
+
+    // ─── copilot_byom_exclude_keys ────────────────────────────────────────────
+
+    #[test]
+    fn copilot_byom_exclude_keys_non_copilot_always_empty() {
+        // is_copilot = false must short-circuit to [] regardless of engine
+        // config — even when the engine env contains BYOM credential keys or a
+        // provider token is configured. This prevents a future non-Copilot
+        // engine whose env happens to contain COPILOT_PROVIDER_* keys from
+        // accidentally leaking those keys into AWF --exclude-env.
+        let fm_with_keys = test_front_matter(
+            "name: t\ndescription: d\nengine:\n  id: copilot\n  env:\n    COPILOT_PROVIDER_API_KEY: sk-123\n",
+        );
+        assert!(
+            copilot_byom_exclude_keys(false, &fm_with_keys.engine).is_empty(),
+            "non-copilot must return empty even when BYOM credential env keys are present"
+        );
+
+        // Also verify that a provider-token-configured engine is still excluded
+        // when is_copilot is false.
+        let fm_with_token = test_front_matter(
+            "name: t\ndescription: d\nengine:\n  id: copilot\n  provider:\n    base-url: https://example.com/v1\n    token:\n      service-connection: sc\n",
+        );
+        assert!(
+            copilot_byom_exclude_keys(false, &fm_with_token.engine).is_empty(),
+            "non-copilot must return empty even when provider.token is configured"
+        );
+    }
+
+    #[test]
+    fn copilot_byom_exclude_keys_copilot_no_credentials_empty() {
+        // A plain Copilot engine with no provider config at all produces no
+        // --exclude-env keys.
+        let fm = test_front_matter("name: t\ndescription: d\n");
+        assert!(
+            copilot_byom_exclude_keys(true, &fm.engine).is_empty(),
+            "default copilot engine should produce no exclude keys"
+        );
+
+        // An engine with only non-credential COPILOT_PROVIDER_WIRE_API should
+        // also produce no exclude keys (WIRE_API is config, not a credential).
+        let fm_wire = test_front_matter(
+            "name: t\ndescription: d\nengine:\n  id: copilot\n  env:\n    COPILOT_PROVIDER_WIRE_API: responses\n",
+        );
+        assert!(
+            copilot_byom_exclude_keys(true, &fm_wire.engine).is_empty(),
+            "COPILOT_PROVIDER_WIRE_API alone must not produce exclude keys"
+        );
+    }
+
+    #[test]
+    fn copilot_byom_exclude_keys_copilot_env_credential_keys_no_token() {
+        // When BYOM credential env keys are present but no provider.token is
+        // configured, the helper returns exactly those keys (sorted), with no
+        // AW_PROVIDER_BEARER_TOKEN appended.
+        let fm = test_front_matter(
+            "name: t\ndescription: d\nengine:\n  id: copilot\n  env:\n    COPILOT_PROVIDER_BASE_URL: https://example.com/v1\n    COPILOT_PROVIDER_API_KEY: sk-abc\n",
+        );
+        let keys = copilot_byom_exclude_keys(true, &fm.engine);
+        assert_eq!(
+            keys,
+            vec![
+                "COPILOT_PROVIDER_API_KEY".to_string(),
+                "COPILOT_PROVIDER_BASE_URL".to_string(),
+            ],
+            "should return sorted credential keys only, with no bearer-token var appended"
+        );
+    }
+
+    #[test]
+    fn copilot_byom_exclude_keys_copilot_provider_token_includes_derived_and_bearer_var() {
+        // When provider.token is set, the compiler derives COPILOT_PROVIDER_BASE_URL
+        // (from provider.base-url) and COPILOT_PROVIDER_API_KEY (because the minted
+        // AW_PROVIDER_BEARER_TOKEN is wired into that slot) — these appear as
+        // credential keys from copilot_byom_credential_keys. On top of those,
+        // AW_PROVIDER_BEARER_TOKEN is appended by the helper because provider.token
+        // is present.
+        let fm = test_front_matter(
+            "name: t\ndescription: d\nengine:\n  id: copilot\n  provider:\n    base-url: https://example.com/v1\n    token:\n      service-connection: sc\n",
+        );
+        let keys = copilot_byom_exclude_keys(true, &fm.engine);
+        assert_eq!(
+            keys,
+            vec![
+                "COPILOT_PROVIDER_API_KEY".to_string(),
+                "COPILOT_PROVIDER_BASE_URL".to_string(),
+                crate::compile::types::PROVIDER_BEARER_TOKEN_VAR.to_string(),
+            ],
+            "provider.token should produce derived credential keys + AW_PROVIDER_BEARER_TOKEN"
+        );
+    }
+
+    #[test]
+    fn copilot_byom_exclude_keys_copilot_provider_api_key_no_bearer_token_var() {
+        // When provider.api-key (static key) is used instead of provider.token,
+        // AW_PROVIDER_BEARER_TOKEN must NOT be appended. The helper only appends
+        // that var when provider.token is present because only then does the compiler
+        // mint the same-job secret that needs to be excluded from AWF --env-all.
+        let fm = test_front_matter(
+            "name: t\ndescription: d\nengine:\n  id: copilot\n  provider:\n    base-url: https://example.com/v1\n    api-key: $(FOUNDRY_KEY)\n",
+        );
+        let keys = copilot_byom_exclude_keys(true, &fm.engine);
+        assert_eq!(
+            keys,
+            vec![
+                "COPILOT_PROVIDER_API_KEY".to_string(),
+                "COPILOT_PROVIDER_BASE_URL".to_string(),
+            ],
+            "provider.api-key (no token) must not append AW_PROVIDER_BEARER_TOKEN"
+        );
+    }
 }
