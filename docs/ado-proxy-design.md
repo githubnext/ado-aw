@@ -83,19 +83,28 @@ there is exactly one place where "what may be read" is decided.
 
 | Client | Ingress | Certificate trust scope |
 |---|---|---|
-| Azure CLI (`az`) | RPC broker: an agent-side wrapper forwards argv to a sidecar that runs the real `az`, pointed at the policy engine with `--organization https://<engine>/<org>` | the `az` process only |
+| Azure CLI (`az`) | an agent-side wrapper sets `HTTPS_PROXY` at the engine's `CONNECT` port and execs stock `az`, which keeps the canonical `dev.azure.com` URL | the `az` process only |
 | Azure DevOps MCP | container on a Docker `--internal` network, where `dev.azure.com` is redirected at the policy engine via `--add-host`. Internal is load-bearing: a normal bridge has outbound NAT and would leave a direct route past the engine | the MCP container only |
 | Hand-rolled `curl` / SDK calls from the Agent | none — Squid denies the protected hosts | none; fails closed |
 
-**Why `az` uses the broker.** `az` accepts an arbitrary base URL, so it can be
-*told* to talk to the policy engine rather than deceived about a public
-hostname. Verified: pointed at `https://localhost:<port>/<org>`, `az devops
-project list` issued `OPTIONS /<org>/_apis` followed by `GET
-/<org>/_apis/projects` to that endpoint, with TLS verified against a
-certificate trusted only by that process. No public hostname is impersonated
-and no CA is installed anywhere. This mirrors AWF's existing `cli-proxy`
-sidecar, which relocates `gh` into a sidecar holding `GH_TOKEN` and points it
-at a guard via `GH_HOST`.
+**Why `az` needs no argument rewriting.** Earlier drafts pointed `az` at the
+engine with `--organization https://<engine>/<org>`. That works — `az` accepts
+an arbitrary base URL — but it is both harder and weaker than redirecting the
+transport. Harder, because the organization can also arrive via `--org`,
+`AZURE_DEVOPS_ORG`, or a stored `az devops configure --defaults` value, so the
+wrapper would have to enumerate every form and stay correct as the CLI evolves;
+a missed form silently escapes the policy. Weaker, because a non-canonical
+hostname has no interception leaf and matches no catalogued route — both are
+keyed to `dev.azure.com`.
+
+Setting `HTTPS_PROXY` instead puts the redirect *below* the CLI's own
+configuration, so every form resolves to the same canonical host and that host
+is what gets intercepted. Verified with real `az` 2.86 against the live engine:
+`az devops project list --organization https://dev.azure.com/contoso` completed
+the `CONNECT`, verified the intercepted certificate from `REQUESTS_CA_BUNDLE`
+alone, and the request arriving upstream carried the injected bearer rather
+than the sentinel the CLI held. No public hostname is impersonated to anything
+but this one process, and no CA is installed system-wide.
 
 **Why the MCP uses a DNS alias.** It cannot be told. `@azure-devops/mcp`
 derives its base URL as `"https://dev.azure.com/" + orgName` with no override,
@@ -444,6 +453,8 @@ re-derived.
 | **Denied requests never reach the upstream** | Against the same live chain, `distributedtask/variablegroups`, `serviceendpoint`, a `POST` write, and an unknown route all returned `403` with distinct reasons, and the upstream request count was **unchanged** across all four |
 | **The MCP cannot see the credential** | Scanning the MCP container's environment, every mount, `/tmp`, and the process table for the canary found **0 occurrences**; `ADO_MCP_AUTH_TOKEN` held the sentinel |
 | **The MCP starts with no registry access** | On the internal network `npm view` failed `EAI_AGAIN`, yet the MCP completed an `initialize` handshake from the mounted package |
+| **Stock `az` needs no argument rewriting at all** | With `HTTPS_PROXY` pointed at the engine's `CONNECT` port, `REQUESTS_CA_BUNDLE` at the published CA, and a sentinel PAT, real `az` 2.86 ran `az devops project list --organization https://dev.azure.com/contoso` straight through the engine. The request arriving upstream (`OPTIONS /contoso/_apis`) carried the **injected** bearer; the sentinel never appeared there. Because the redirect happens below the CLI's own configuration, `--organization`, `--org`, `AZURE_DEVOPS_ORG` and stored defaults all work without the wrapper interpreting any of them |
+| **A `pathlen` CA without `keyCertSign` breaks strict verifiers** | The first `az` run failed `CERTIFICATE_VERIFY_FAILED … Path length given without key usage keyCertSign`. Every Node client had accepted the same CA — only Python's `requests`, which verifies strictly, rejected it. The CA now declares `keyUsage=critical,keyCertSign,cRLSign`, after which `az` completed TLS and reached policy |
 
 Three harnesses produce this evidence and should become conformance tests:
 

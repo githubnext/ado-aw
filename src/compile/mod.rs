@@ -7,6 +7,7 @@
 //! - **1ES**: Integration with 1ES Pipeline Templates for SDL compliance
 
 mod common;
+pub mod az_wrapper;
 pub(crate) use common::resolve_repos;
 pub(crate) mod ado_bundle;
 pub(crate) mod agentic_pipeline;

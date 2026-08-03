@@ -1646,6 +1646,30 @@ pub const ADO_PROXY_NETWORK_NAME: &str = "ado-aw-proxy-net";
 /// Path the public interception CA is mounted at inside client containers.
 pub const ADO_MCP_CA_MOUNT: &str = "/etc/ado-proxy/ca.pem";
 
+/// Directory the generated `az` wrapper is installed into inside the sandbox.
+///
+/// Separate from the ado-script bundle directory because it is prepended to
+/// `PATH`: anything placed here shadows a real executable of the same name.
+#[allow(dead_code)]
+pub const AZ_WRAPPER_DIR: &str = "/tmp/ado-aw-lib";
+
+/// Full path of the generated `az` wrapper.
+#[allow(dead_code)]
+pub const AZ_WRAPPER_PATH: &str = "/tmp/ado-aw-lib/az";
+
+/// Path the public interception CA is staged at for the `az` wrapper.
+#[allow(dead_code)]
+pub const AZ_WRAPPER_CA_PATH: &str = "/tmp/ado-aw-lib/ado-proxy-ca.pem";
+
+/// Azure CLI command groups the wrapper permits.
+///
+/// These are the groups whose traffic the catalog actually describes. Anything
+/// else — `az vm`, `az storage`, `az ad` — would leave the policed surface, so
+/// the wrapper refuses it with an explanation rather than letting it fail
+/// somewhere less legible.
+#[allow(dead_code)]
+pub const AZ_ALLOWED_GROUPS: &[&str] = &["devops", "repos", "pipelines", "boards", "artifacts"];
+
 /// Runner-side path of the CA certificate the policy engine publishes.
 pub const ADO_PROXY_PUBLIC_CA_HOST_PATH: &str = "/tmp/gh-aw/ado-proxy/ado-proxy-ca.pem";
 

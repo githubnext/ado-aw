@@ -3398,7 +3398,8 @@ fn start_ado_proxy_step(capabilities: &[Capability]) -> BashStep {
          openssl req -x509 -newkey rsa:2048 -nodes -days 2 \\\n  \
            -subj \"/CN=ado-aw ado-proxy interception CA\" \\\n  \
            -keyout \"$PROXY_DIR/ca.key\" -out \"$PROXY_DIR/ca.pem\" \\\n  \
-           -addext \"basicConstraints=critical,CA:TRUE,pathlen:0\" 2>/dev/null\n\
+           -addext \"basicConstraints=critical,CA:TRUE,pathlen:0\" \\\n  \
+           -addext \"keyUsage=critical,keyCertSign,cRLSign\" 2>/dev/null\n\
          for PROXY_HOST in {leaf_loop}; do\n  \
            printf 'basicConstraints=CA:FALSE\\nkeyUsage=critical,digitalSignature,keyEncipherment\\nextendedKeyUsage=serverAuth\\nsubjectAltName=DNS:%s\\n' \"$PROXY_HOST\" > \"$PROXY_DIR/leaf.ext\"\n  \
            openssl req -new -newkey rsa:2048 -nodes -subj \"/CN=$PROXY_HOST\" \\\n    \
@@ -4332,6 +4333,20 @@ mod tests {
         assert!(
             script.contains("$MCP_INSTALLED\" != \"") ,
             "the resolved version must be verified, not just requested: {script}"
+        );
+    }
+
+    #[test]
+    fn the_interception_ca_is_usable_by_strict_verifiers() {
+        // `pathlen` without `keyCertSign` is accepted by Node but rejected by
+        // OpenSSL 3 with "Path length given without key usage keyCertSign".
+        // Real `az` hit exactly that: Python's requests verified the chain
+        // strictly and refused, while every Node client had been happy. The
+        // key usage must therefore be declared explicitly.
+        let script = start_ado_proxy_step(&[]).script;
+        assert!(
+            script.contains("keyUsage=critical,keyCertSign,cRLSign"),
+            "the CA must declare keyCertSign or strict verifiers reject it: {script}"
         );
     }
 
