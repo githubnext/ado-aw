@@ -221,16 +221,38 @@ impl ExecutionContext {
             .get(tool_name)
             .cloned()
             .map(|mut value| {
-                // Approval is compiler orchestration metadata, not executor
-                // configuration. Strip it before typed configs with
-                // deny_unknown_fields are deserialized.
+                // Compiler orchestration metadata, not executor configuration.
+                // Both keys are injected into EVERY tool config by Stage 3
+                // (`main.rs` for `--source`, `compile/custom_tools.rs` for the
+                // `--resolved-config` production path), so a config struct
+                // declared `deny_unknown_fields` fails to deserialize unless
+                // they are stripped first. Because the error is swallowed
+                // below, that manifests as the operator's config being
+                // silently replaced by `Default::default()` rather than as a
+                // visible failure — keep this list in sync with every key the
+                // compiler injects.
                 if let Some(object) = value.as_object_mut() {
                     object.remove("require-approval");
+                    object.remove("staged");
                 }
                 value
             });
         let mut config: T = value
-            .and_then(|v| serde_json::from_value(v).ok())
+            .map(|v| match serde_json::from_value(v) {
+                Ok(config) => config,
+                Err(error) => {
+                    // Never fail silently: a config-shape mismatch here wipes
+                    // every operator-supplied setting for the tool (target
+                    // repos, allowlists, budgets), which is easy to mistake for
+                    // a product bug at runtime.
+                    log::warn!(
+                        "Failed to deserialize config for tool '{tool_name}': {error}. \
+                         Falling back to defaults; operator-supplied settings for this \
+                         tool will NOT be applied."
+                    );
+                    T::default()
+                }
+            })
             .unwrap_or_default();
         config.sanitize_config_fields();
         config
@@ -1188,5 +1210,73 @@ mod tests {
         assert!(ctx.pull_request_id.is_none());
         assert!(ctx.pull_request_source_branch.is_none());
         assert!(ctx.pull_request_target_branch.is_none());
+    }
+
+    /// Build a context whose tool config carries the orchestration keys the
+    /// compiler injects into EVERY tool config.
+    fn ctx_with_injected_keys(tool: &str, mut config: serde_json::Value) -> ExecutionContext {
+        let object = config.as_object_mut().expect("config must be an object");
+        // Mirrors `main.rs` (--source) and `compile/custom_tools.rs`
+        // (--resolved-config, the production path).
+        object.insert("staged".to_string(), serde_json::Value::Bool(false));
+        object.insert(
+            "require-approval".to_string(),
+            serde_json::Value::Bool(false),
+        );
+        let mut tool_configs = HashMap::new();
+        tool_configs.insert(tool.to_string(), config);
+        ExecutionContext {
+            tool_configs,
+            ..Default::default()
+        }
+    }
+
+    /// Regression guard for a silent config wipe.
+    ///
+    /// `CreateGithubIssueConfig` and `SetGithubIssueTypeConfig` are declared
+    /// `#[serde(deny_unknown_fields)]`, so the compiler-injected `staged` /
+    /// `require-approval` keys made deserialization fail. `get_tool_config`
+    /// swallowed the error and returned `Default::default()`, silently
+    /// discarding every operator setting (`target-repo`, `allowed-labels`,
+    /// budgets, …) instead of failing visibly.
+    #[test]
+    fn test_get_tool_config_survives_compiler_injected_orchestration_keys() {
+        let ctx = ctx_with_injected_keys(
+            "create-github-issue",
+            serde_json::json!({
+                "target-repo": "octo/scratch",
+                "title-prefix": "[prefix] ",
+                "labels": ["static-label"],
+                "allowed-labels": ["agent-*"],
+                "require-temporary-id": true,
+                "max": 3,
+            }),
+        );
+        let config: crate::safe_outputs::CreateGithubIssueConfig =
+            ctx.get_tool_config("create-github-issue");
+        assert_eq!(
+            config.target_repo.as_deref(),
+            Some("octo/scratch"),
+            "operator target-repo must survive the injected orchestration keys"
+        );
+        assert_eq!(config.title_prefix.as_deref(), Some("[prefix] "));
+        assert_eq!(config.labels, vec!["static-label".to_string()]);
+        assert_eq!(config.allowed_labels, vec!["agent-*".to_string()]);
+        assert!(config.require_temporary_id);
+        assert_eq!(config.max, Some(3));
+    }
+
+    #[test]
+    fn test_get_tool_config_survives_injected_keys_for_set_github_issue_type() {
+        let ctx = ctx_with_injected_keys(
+            "set-github-issue-type",
+            serde_json::json!({ "target-repo": "octo/scratch", "allowed": ["Bug"] }),
+        );
+        let config: crate::safe_outputs::SetGithubIssueTypeConfig =
+            ctx.get_tool_config("set-github-issue-type");
+        assert_eq!(config.target_repo.as_deref(), Some("octo/scratch"));
+        // An empty `allowed` list is default-ALLOW, so a silent wipe here fails
+        // open — any issue type would be accepted.
+        assert_eq!(config.allowed, vec!["Bug".to_string()]);
     }
 }
