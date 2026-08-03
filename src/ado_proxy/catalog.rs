@@ -109,6 +109,27 @@ impl Capability {
             Self::Boards => "boards",
         }
     }
+
+    /// The `az` command group this capability makes usable, if any.
+    ///
+    /// The `az` wrapper's allow-list is derived from this rather than
+    /// maintained by hand, so a capability the policy does not grant cannot be
+    /// advertised to the agent. Without it the two drift: `az artifacts` was
+    /// briefly permitted by the wrapper while no catalogued operation backed
+    /// it, so the call passed the wrapper and was refused by the engine.
+    ///
+    /// `Discovery` maps to nothing: it is the service-topology lookup every
+    /// client performs before its first real call, not a command group an
+    /// agent invokes.
+    pub const fn az_command_group(self) -> Option<&'static str> {
+        match self {
+            Self::Discovery => None,
+            Self::Core => Some("devops"),
+            Self::Repos => Some("repos"),
+            Self::Pipelines => Some("pipelines"),
+            Self::Boards => Some("boards"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]

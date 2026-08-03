@@ -1,4 +1,5 @@
 use super::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
+use crate::ado_proxy::catalog::Capability;
 use crate::compile::common::{
     ADO_MCP_TOKEN_SENTINEL, ADO_PROXY_CONTAINER_NAME, ADO_PROXY_LISTEN_PORT, AZ_WRAPPER_DIR,
     AZ_WRAPPER_PATH,
@@ -81,14 +82,15 @@ impl CompilerExtension for AzureCliExtension {
     /// `condition: ne(variables['AW_AZ_MOUNTS'], '')`.
     fn declarations(&self, ctx: &CompileContext) -> anyhow::Result<Declarations> {
         let proxied = crate::compile::common::ado_proxy_enabled(ctx.front_matter);
+        let capabilities = crate::compile::common::ado_proxy_capabilities(ctx.front_matter);
 
         let mut agent_prepare_steps = vec![Step::Bash(detection_bash_step())];
         if proxied {
             // Installed before the prompt is appended so the advisory and the
             // wrapper cannot describe different worlds.
-            agent_prepare_steps.push(Step::Bash(install_az_wrapper_step()));
+            agent_prepare_steps.push(Step::Bash(install_az_wrapper_step(&capabilities)));
         }
-        agent_prepare_steps.push(Step::Bash(prompt_append_bash_step()));
+        agent_prepare_steps.push(Step::Bash(prompt_append_bash_step(proxied, &capabilities)));
 
         Ok(Declarations {
             network_hosts: vec![
@@ -130,11 +132,12 @@ impl CompilerExtension for AzureCliExtension {
 /// `az` on the runner there is nothing for the wrapper to exec, and shadowing a
 /// missing binary would turn a clear "command not found" into a confusing
 /// wrapper error.
-fn install_az_wrapper_step() -> BashStep {
+fn install_az_wrapper_step(capabilities: &[Capability]) -> BashStep {
     let wrapper = crate::compile::az_wrapper::render_az_wrapper(
         ADO_PROXY_CONTAINER_NAME,
         ADO_PROXY_LISTEN_PORT,
         ADO_MCP_TOKEN_SENTINEL,
+        capabilities,
     );
     // Indent the body for the heredoc without altering its content.
     let script = format!(
@@ -167,9 +170,37 @@ fn detection_bash_step() -> BashStep {
 }
 
 /// Append an Azure CLI advisory when the detection step found `az`.
-fn prompt_append_bash_step() -> BashStep {
-    let script = "cat >> \"/tmp/awf-tools/agent-prompt.md\" << 'AZURE_CLI_PROMPT_EOF'\n\
+///
+/// Two quite different messages, because the agent's actual capability differs.
+/// Getting this wrong is not cosmetic: an agent told a command is unavailable
+/// will not try it, and one told it has access it lacks will retry a failing
+/// call or invent a workaround. The unproxied text deliberately claims nothing
+/// beyond "not pre-authenticated" — an earlier revision overclaimed here.
+fn prompt_append_bash_step(proxied: bool, capabilities: &[Capability]) -> BashStep {
+    let body = if proxied {
+        let groups = crate::compile::common::az_allowed_groups(capabilities);
+        let group_list = groups
+            .iter()
+            .map(|g| format!("`az {g}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "\n\
+---\n\
 \n\
+## Azure CLI (`az`)\n\
+\n\
+The Azure CLI is available and **pre-configured for Azure DevOps reads**. You do not need to sign in, and no credential is present in this sandbox for you to use or leak.\n\
+\n\
+- **Available** — {group_list}, scoped to the current organization and project. These are **read-only**: listing and getting work, and the results are real. `az rest` and `az devops invoke` also work for Azure DevOps reads, so a catalogued endpoint without a dedicated command is still reachable.\n\
+- **Not available** — creating, updating or deleting anything; reading secrets (service connections, variable groups, secure files, tokens, permissions); any other organization or project; and every other `az` command group, including Azure Resource Manager (`az resource`, `az account`, `az group`) and Microsoft Graph (`az ad`).\n\
+\n\
+Requests outside that boundary are refused by a policy proxy, not by a misconfiguration — retrying, changing the URL, or trying to authenticate will not help. To *change* anything, emit a safe output instead; that is the supported path for writes.\n\
+\n\
+If a read you need is refused, file a `missing-tool` safe output naming `azure-cli` and the exact command, so the operator can extend the catalog rather than leaving you blocked.\n"
+        )
+    } else {
+        "\n\
 ---\n\
 \n\
 ## Azure CLI (`az`)\n\
@@ -180,10 +211,17 @@ The Azure CLI is available inside this sandbox at `/usr/bin/az`, but ado-aw does
 - **Azure Resource Manager and Microsoft Graph** \u{2014} `az resource`, `az account`, `az group`, `az ad`, and authenticated `az rest` calls are not configured for agent use.\n\
 - Do not sign in or place Azure credentials in the sandbox. Request a supported tool instead.\n\
 \n\
-If a command you need isn't covered above, file a `missing-tool` safe output naming `azure-cli` so the operator can extend coverage rather than blocking on it silently.\n\
+If a command you need isn't covered above, file a `missing-tool` safe output naming `azure-cli` so the operator can extend coverage rather than blocking on it silently.\n"
+            .to_string()
+    };
+
+    let script = format!(
+        "cat >> \"/tmp/awf-tools/agent-prompt.md\" << 'AZURE_CLI_PROMPT_EOF'\n\
+{body}\
 AZURE_CLI_PROMPT_EOF\n\
 \n\
-echo \"Azure CLI prompt appended\"\n";
+echo \"Azure CLI prompt appended\"\n"
+    );
     BashStep::new("Append Azure CLI prompt", script).with_condition(Condition::Ne(
         Expr::Variable("AW_AZ_MOUNTS".to_string()),
         Expr::Literal(String::new()),

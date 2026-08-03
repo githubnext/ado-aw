@@ -32,17 +32,30 @@
 //! *availability* control: enforcement comes from routing, so a client that
 //! declines the certificate fails closed rather than escaping the policy.
 
-use super::common::{AZ_ALLOWED_GROUPS, AZ_WRAPPER_CA_PATH, AZ_WRAPPER_DIR};
+use super::common::{AZ_WRAPPER_CA_PATH, AZ_WRAPPER_DIR, az_allowed_groups};
+use crate::ado_proxy::catalog::Capability;
 
 /// Render the wrapper script.
 ///
 /// `engine_host` is the policy engine's container name, which AWF registers in
 /// the agent's `/etc/hosts` when it attaches the container to the internal
-/// network.
+/// network. `capabilities` are the ones the policy actually grants, so the
+/// wrapper refuses a command group the engine would refuse anyway — with an
+/// explanation, rather than an opaque `403` several layers down.
 #[allow(dead_code)]
-pub fn render_az_wrapper(engine_host: &str, connect_port: u16, sentinel: &str) -> String {
-    let allowed_list = AZ_ALLOWED_GROUPS.join(" ");
-    let allowed_display = AZ_ALLOWED_GROUPS.join(", ");
+pub fn render_az_wrapper(
+    engine_host: &str,
+    connect_port: u16,
+    sentinel: &str,
+    capabilities: &[Capability],
+) -> String {
+    let groups = az_allowed_groups(capabilities);
+    let allowed_list = groups.join(" ");
+    let allowed_display = if groups.is_empty() {
+        "none".to_string()
+    } else {
+        groups.join(", ")
+    };
 
     format!(
         r##"#!/bin/sh
@@ -134,7 +147,12 @@ mod tests {
     use crate::compile::common::ADO_MCP_TOKEN_SENTINEL;
 
     fn wrapper() -> String {
-        render_az_wrapper("awmg-ado-proxy", 11080, ADO_MCP_TOKEN_SENTINEL)
+        render_az_wrapper(
+            "awmg-ado-proxy",
+            11080,
+            ADO_MCP_TOKEN_SENTINEL,
+            Capability::ALL,
+        )
     }
 
     #[test]
@@ -194,16 +212,57 @@ mod tests {
     #[test]
     fn refuses_command_groups_outside_the_policed_surface() {
         let script = wrapper();
-        for group in AZ_ALLOWED_GROUPS {
-            assert!(
-                script.contains(group),
-                "{group} is catalogued and must be permitted"
-            );
+        for capability in Capability::ALL {
+            if let Some(group) = capability.az_command_group() {
+                assert!(
+                    script.contains(group),
+                    "{group} is catalogued and must be permitted"
+                );
+            }
         }
         assert!(script.contains("is not available to this agent"));
         // An actionable message: a bare denial invites the agent to retry the
         // same call, or to conclude the pipeline is broken.
         assert!(script.contains("safe-outputs.md"));
+    }
+
+    #[test]
+    fn advertises_only_what_the_policy_actually_grants() {
+        // `az artifacts` was briefly permitted while no catalogued operation
+        // backed it, so the call passed the wrapper and was refused by the
+        // engine. The allow-list is now derived from the granted capabilities.
+        assert!(!wrapper().contains("artifacts"));
+
+        // Narrowing the policy narrows the wrapper with it.
+        let repos_only = render_az_wrapper(
+            "awmg-ado-proxy",
+            11080,
+            ADO_MCP_TOKEN_SENTINEL,
+            &[Capability::Discovery, Capability::Repos],
+        );
+        assert!(repos_only.contains(" repos "));
+        for absent in ["devops", "boards", "pipelines"] {
+            assert!(
+                !repos_only.contains(&format!(" {absent} ")),
+                "{absent} is not granted and must not be advertised: {repos_only}"
+            );
+        }
+    }
+
+    #[test]
+    fn rest_stays_available_whatever_the_capabilities() {
+        // `az rest` is contained by the catalog, not by this list: measured
+        // against a live engine it completed a catalogued read and was refused
+        // 403 for a denied route family and for a POST. Excluding it would
+        // also contradict `az devops invoke`, which reaches the same surface.
+        assert!(wrapper().contains(" rest "));
+        let narrow = render_az_wrapper(
+            "awmg-ado-proxy",
+            11080,
+            ADO_MCP_TOKEN_SENTINEL,
+            &[Capability::Discovery],
+        );
+        assert!(narrow.contains(" rest "));
     }
 
     #[test]

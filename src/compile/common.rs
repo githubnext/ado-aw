@@ -11,6 +11,7 @@ use super::types::{
     CheckoutFetchOpts, CompileTarget, FrontMatter, PipelineParameter, PoolConfig, ReposItem,
     Repository, SELF_CHECKOUT_ALIAS,
 };
+use crate::ado_proxy::catalog::Capability;
 use crate::allowed_hosts::{CORE_ALLOWED_HOSTS, mcp_required_hosts};
 use crate::compile::types::McpConfig;
 use crate::ecosystem_domains::{
@@ -1677,12 +1678,45 @@ pub const AZ_WRAPPER_CA_PATH: &str = "/tmp/ado-aw-lib/ado-proxy-ca.pem";
 
 /// Azure CLI command groups the wrapper permits.
 ///
-/// These are the groups whose traffic the catalog actually describes. Anything
-/// else — `az vm`, `az storage`, `az ad` — would leave the policed surface, so
-/// the wrapper refuses it with an explanation rather than letting it fail
-/// somewhere less legible.
-#[allow(dead_code)]
-pub const AZ_ALLOWED_GROUPS: &[&str] = &["devops", "repos", "pipelines", "boards", "artifacts"];
+/// Derived from the capabilities the policy actually grants, so the wrapper
+/// cannot advertise a command group the engine would refuse. Hand-maintaining
+/// this list let `az artifacts` through the wrapper while no catalogued
+/// operation backed it.
+///
+/// `rest` is always present and is deliberately not capability-derived. It is
+/// a general REST escape hatch, and the catalog — not this list — is what
+/// contains it: measured against a live engine, `az rest` completed a
+/// catalogued read, and was refused `403` for both a denied route family and a
+/// `POST`. Excluding it would also be incoherent, since `az devops invoke`
+/// expresses the same arbitrary Azure DevOps REST from inside an allowed
+/// group. It reaches non-Azure-DevOps hosts exactly as before — tunnelled to
+/// Squid, with no credential attached.
+pub fn az_allowed_groups(capabilities: &[Capability]) -> Vec<&'static str> {
+    let mut groups: Vec<&'static str> = Capability::ALL
+        .iter()
+        .filter(|capability| capabilities.contains(capability))
+        .filter_map(|capability| capability.az_command_group())
+        .collect();
+    groups.push("rest");
+    groups
+}
+
+/// Resolve the capabilities the policy engine should enable.
+///
+/// Defaults to the full catalog. That is deliberately broad *within* a narrow
+/// boundary: every catalogued operation is a `GET` or `OPTIONS`, and the
+/// always-denied route families exclude ACLs, tokens, service endpoints,
+/// variable groups and secure files. So the default grants read access to
+/// project metadata the agent could already reach, while removing the
+/// credential that previously made writes and secret reads possible at all.
+///
+/// Starting narrower would leave the Azure DevOps MCP unable to answer most
+/// questions, which pushes authors back towards handing agents raw
+/// credentials — the outcome this design exists to prevent. `permissions.read`
+/// narrows this set once its object form is accepted.
+pub fn ado_proxy_capabilities(_front_matter: &FrontMatter) -> Vec<Capability> {
+    Capability::ALL.to_vec()
+}
 
 /// Runner-side path of the CA certificate the policy engine publishes.
 ///

@@ -1001,9 +1001,9 @@ fn build_agent_job(
         .is_some_and(|tools| tools.azure_devops.is_some());
     if ado_proxy_enabled {
         steps.push(Step::Bash(prepare_ado_proxy_clients_step()));
-        steps.push(Step::Bash(start_ado_proxy_step(&ado_proxy_capabilities(
-            front_matter,
-        ))));
+        steps.push(Step::Bash(start_ado_proxy_step(
+            &common::ado_proxy_capabilities(front_matter),
+        )));
     }
 
     // 15. MCP Gateway (MCPG), which launches SafeOutputs as a stdio child.
@@ -3228,23 +3228,6 @@ fn safe_outputs_summary_step(reviewed: &[String]) -> BashStep {
         .with_condition(Condition::Always)
 }
 
-/// Resolve the capabilities the policy engine should enable.
-///
-/// Defaults to the full catalog. That is deliberately broad *within* a narrow
-/// boundary: every catalogued operation is a `GET` or `OPTIONS`, and the
-/// always-denied route families exclude ACLs, tokens, service endpoints,
-/// variable groups and secure files. So the default grants read access to
-/// project metadata the agent could already reach, while removing the
-/// credential that previously made writes and secret reads possible at all.
-///
-/// Starting narrower would leave the Azure DevOps MCP unable to answer most
-/// questions, which pushes authors back towards handing agents raw
-/// credentials — the outcome this design exists to prevent. `permissions.read`
-/// narrows this set once its object form is accepted.
-fn ado_proxy_capabilities(_front_matter: &FrontMatter) -> Vec<Capability> {
-    Capability::ALL.to_vec()
-}
-
 /// Prepare the host-side prerequisites for routing the Azure DevOps MCP
 /// through the policy engine.
 ///
@@ -4376,7 +4359,10 @@ mod tests {
             "---\nname: t\ndescription: x\ntools:\n  azure-devops:\n    org: 'myorg'\n---\n",
         )
         .unwrap();
-        assert_eq!(ado_proxy_capabilities(&fm), Capability::ALL.to_vec());
+        assert_eq!(
+            common::ado_proxy_capabilities(&fm),
+            Capability::ALL.to_vec()
+        );
     }
 
     // ── run_agent_step topology attachment ──────────────────────────────────
