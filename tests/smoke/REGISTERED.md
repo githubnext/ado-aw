@@ -11,7 +11,7 @@ not add a definition here; only a genuinely new credential class does.
 
 | Definition | Repository | YAML path | Default branch | Definition ID |
 | --- | --- | --- | --- | ---: |
-| `ado-aw smoke lane - agentic` | `ado-aw-mirror` | `/.smoke/pipeline.yml` | `refs/heads/ado-aw-smoke-candidate-base` | _TBD_ |
+| `ado-aw smoke lane - agentic` | `ado-aw-mirror` | `/.smoke/pipeline.yml` | `refs/heads/ado-aw-smoke-candidate-base` | `2567` |
 | `ado-aw smoke lane - infra` | `ado-aw-mirror` | `/.smoke/pipeline.yml` | `refs/heads/ado-aw-smoke-candidate-base` | _not yet registered_ |
 
 All are **API-queued only**: no CI trigger, no PR trigger, no schedule.
@@ -32,6 +32,13 @@ suite.
 | `ado-aw released smoke` | `githubnext/ado-aw` | `tests/smoke/azure-pipelines-release.yml` | scheduled daily 03:00 UTC | _TBD_ |
 
 Both use the `github.com_githubnext` service connection.
+
+> **Definition `2559` still points at the OLD path**
+> (`/tests/compiler-smoke-e2e/azure-pipelines.yml`), which this change deletes.
+> Its `process.yamlFilename` **must** be repointed at
+> `/tests/smoke/azure-pipelines-candidate.yml` when the PR merges, or the
+> candidate orchestrator breaks on its next run. It cannot be repointed in
+> advance, because the new path does not exist on `main` until then.
 
 ## Supporting definitions
 
@@ -86,56 +93,67 @@ mode, Build Read on the candidate orchestrator definition.
 
 ## One-time setup runbook
 
-1. **Create the base ref.** On `ado-aw-mirror`, create
-   `refs/heads/ado-aw-smoke-candidate-base` containing a single file
-   `.smoke/pipeline.yml` with the contents of
-   [`inert-child.yml`](inert-child.yml). If migrating, delete the five legacy
-   placeholder lock paths in the same commit. The ref is permanent — the
-   harness never deletes it.
+Steps 1–3, 5 and part of 8 are **already done** (see the ✅ marks). The rest
+either need a credential no checkout has, or a file that only exists once this
+PR merges.
 
-2. **Register the `agentic` lane definition** against `ado-aw-mirror`, YAML path
-   `/.smoke/pipeline.yml`, default branch as above. Create it explicitly
-   (e.g. `az pipelines create --skip-run true`); `ado-aw enable` reuses an
-   existing definition with the same YAML path, so it cannot create multiple
-   definitions that share one.
+1. ✅ **Base ref created.** `refs/heads/ado-aw-smoke-candidate-base` on
+   `ado-aw-mirror` now carries `.smoke/pipeline.yml` with the contents of
+   [`inert-child.yml`](inert-child.yml) (commit `1d173bc`). The ref is
+   permanent — the harness never deletes it.
 
-   Only `agentic` is needed at cutover. `loadCases` resolves a definition id
-   per lane *in play for the mode being run*, and every current case is
-   `agentic`, so `infra` needs no definition and no variable until its first
-   case lands. An unregistered lane cannot be queued by accident.
+   The legacy `tests/**/*.lock.yml` paths on that ref were **deliberately left
+   in place**: the ten retired definitions still point at them, so deleting
+   them before cutover would break the currently-running smokes. They go with
+   the definitions in step 11.
 
-3. **Strip all triggers** on the lane: no CI, no PR, no schedule.
+2. ✅ **`agentic` lane registered as `2567`** against `ado-aw-mirror`, YAML
+   path `/.smoke/pipeline.yml`, default branch as above.
 
-4. **Provision secrets** per the table above — `GITHUB_TOKEN` and
-   `ADO_AW_GITHUB_TOKEN`, both on the `agentic` lane.
+   Only `agentic` is needed. `loadCases` resolves a definition id per lane *in
+   play for the mode being run*, and every current case is `agentic`, so
+   `infra` needs no definition and no variable until its first case lands. An
+   unregistered lane cannot be queued by accident.
 
-5. **Authorize service connections** (`agent-playground-read`,
-   `agent-playground-write`) on the `agentic` lane.
+3. ✅ **No triggers on `2567`** — verified `triggers: null`, so it is
+   API-queued only.
 
-6. **Register the released orchestrator** from
-   `tests/smoke/azure-pipelines-release.yml` on `githubnext/ado-aw` via the
-   `github.com_githubnext` connection, and harden its fork settings (below).
+4. ⛔ **Provision secrets on `2567`** — `GITHUB_TOKEN` and
+   `ADO_AW_GITHUB_TOKEN`, per the table above. **Requires the secret values**,
+   which ADO never returns over the API, so this cannot be scripted from a
+   checkout. Nothing can run until this is done.
 
-7. **Register the queue target** from `tests/executor-e2e/queue-target.yml`
-   and set `E2E_QUEUE_PIPELINE_ID` on executor-e2e definition `2550` to its id.
+5. ✅ **Service connections authorized** on `2567`:
+   `agent-playground-read` and `agent-playground-write`.
+
+6. ⏳ **Register the released orchestrator** from
+   `tests/smoke/azure-pipelines-release.yml` via the `github.com_githubnext`
+   connection, and harden its fork settings (below). *Blocked until merge —
+   the file does not exist on `main` yet.*
+
+7. ⏳ **Register the queue target** from `tests/executor-e2e/queue-target.yml`,
+   then set `E2E_QUEUE_PIPELINE_ID` on executor-e2e definition `2550` to its
+   id. It is currently `2547`, which step 11 deletes. *Blocked until merge.*
 
 8. **Set `SMOKE_LANE_AGENTIC_DEFINITION_ID`** on both orchestrators.
+   ✅ Done on `2559`; the released orchestrator gets it at step 6.
 
-9. **Record every id** in the tables above and open a docs-only PR. In the same
-   PR, repoint `scripts/rotate-agentplayground-secrets.ps1` at the lane:
-   both `$copilotDefinitionIds` and `$reporterDefinitionIds` become the
-   `agentic` lane id. Leaving the retired per-case ids there would rotate
-   secrets onto definitions that no longer exist and silently skip the lane
-   that actually runs.
+9. ⏳ **Repoint `2559`** at `/tests/smoke/azure-pipelines-candidate.yml` — see
+   the warning above. *Do this at merge, before the next scheduled run.*
 
-10. **Trigger one manual run of each orchestrator** and check the live
+10. ⏳ **Trigger one manual run of each orchestrator** and check the live
     assertions in [`README.md`](README.md). ADO scheduled triggers do not fire
     until a definition has had at least one run.
 
-11. **Only once both runs are green**, delete the retired definitions and
-    remove `2545`–`2549` from
+11. ⏳ **Only once both runs are green**, delete the retired definitions, drop
+    the legacy lock paths from the base ref, and remove `2545`–`2549` from
     [`trigger-policy.json`](trigger-policy.json) in the same commit. Deletion
     is not reversible, so this step is deliberately last.
+
+12. ⏳ **Repoint `scripts/rotate-agentplayground-secrets.ps1`** at the lane:
+    both `$copilotDefinitionIds` and `$reporterDefinitionIds` become `2567`.
+    Leaving the retired per-case ids there would rotate secrets onto
+    definitions that no longer exist and silently skip the lane that runs.
 
 ## Security record
 

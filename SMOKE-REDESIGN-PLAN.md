@@ -12,25 +12,22 @@
 
 ## Remaining work (ADO-side, cannot be done from a checkout)
 
-1. Run the setup runbook in `tests/smoke/REGISTERED.md`:
-   - create `refs/heads/ado-aw-smoke-candidate-base` on `ado-aw-mirror` with a
-     single `.smoke/pipeline.yml` (contents of `inert-child.yml`), deleting the
-     five legacy placeholder lock paths in the same commit;
-   - register the `agentic` lane definition, the released orchestrator, and the
-     executor-e2e queue target;
-   - provision `GITHUB_TOKEN` and `ADO_AW_GITHUB_TOKEN` on the `agentic` lane;
-     authorize service connections;
-   - set `SMOKE_LANE_AGENTIC_DEFINITION_ID` on both orchestrators and
-     `E2E_QUEUE_PIPELINE_ID` on definition `2550`.
-2. Record the new ids in `tests/smoke/REGISTERED.md` (marked `_TBD_`) and add
-   them to `scheduled_only_definition_ids` in `tests/smoke/trigger-policy.json`
-   (the `_note` field in that file states this).
-3. Manually run **both** orchestrators and check the eight live assertions in
+The lane definition, base ref and service-connection authorizations are
+**already provisioned** — see the ✅ marks in
+[`tests/smoke/REGISTERED.md`](tests/smoke/REGISTERED.md). What is left:
+
+1. Provision `GITHUB_TOKEN` and `ADO_AW_GITHUB_TOKEN` on lane `2567`. Needs the
+   secret values, which ADO never returns over the API.
+2. At merge: repoint definition `2559` at
+   `tests/smoke/azure-pipelines-candidate.yml` (its current path is deleted by
+   this change), register the released orchestrator and the executor-e2e queue
+   target, and set `E2E_QUEUE_PIPELINE_ID` off the retiring `2547`.
+3. Manually run both orchestrators and check the live assertions in
    `tests/smoke/README.md`.
-4. Delete definitions `2545`–`2549`, `2554`–`2558` and `2564`–`2565`, removing
-   `2545`–`2549` from `scheduled_only_definition_ids` in
-   `tests/smoke/trigger-policy.json` in the same commit — the policy audit
-   fetches every listed id and a 404 aborts the run.
+4. Only once green: delete definitions `2545`–`2549`, `2554`–`2558`,
+   `2564`–`2565`; drop the legacy lock paths from the base ref; and remove
+   `2545`–`2549` from `tests/smoke/trigger-policy.json` in the same commit —
+   the policy audit fetches every listed id and a 404 aborts the run.
 
 ## Problem
 
