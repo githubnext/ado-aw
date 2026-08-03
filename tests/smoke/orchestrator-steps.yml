@@ -356,18 +356,39 @@ steps:
         return 1
       }
 
+      # Which list SELF belongs in depends on how this orchestrator is
+      # triggered, and the two are mutually exclusive:
+      #
+      #   candidate - PR-triggered, so it MUST carry the fork hardening and
+      #               the collaborator comment gate (it runs PR-authored code
+      #               against credentialed resources).
+      #   released  - scheduled-only by design, so it must carry NO CI and NO
+      #               PR trigger at all.
+      #
+      # Auditing self as a PR definition in released mode would demand a
+      # pullRequest trigger that must not exist. Keyed off the compile mode
+      # rather than off the definition's own triggers, so a definition that
+      # LOST its PR trigger still fails closed instead of quietly reclassifying
+      # itself into the weaker rule.
+      SELF_IS_PR_DEFINITION=${{ eq(parameters.compilerSource, 'candidate') }}
+
       PR_IDS="$(
         jq -er '
           select(.schema == "ado-aw/agentplayground-trigger-policy/1")
           | .pr_definition_ids[]
         ' "$POLICY"
-      ) $SELF_ID"
+      )"
       SCHEDULED_ONLY_IDS="$(
         jq -er '
           select(.schema == "ado-aw/agentplayground-trigger-policy/1")
           | .scheduled_only_definition_ids[]
         ' "$POLICY"
       )"
+      if [ "$SELF_IS_PR_DEFINITION" = "True" ]; then
+        PR_IDS="$PR_IDS $SELF_ID"
+      else
+        SCHEDULED_ONLY_IDS="$SCHEDULED_ONLY_IDS $SELF_ID"
+      fi
 
       SELF_JSON=""
       for id in $PR_IDS; do
@@ -395,23 +416,25 @@ steps:
         fi
       done
 
-      if [ -z "$SELF_JSON" ]; then
-        echo "Candidate definition $SELF_ID was not included in the PR policy audit." >&2
-        exit 1
-      fi
-      if ! printf '%s' "$SELF_JSON" | jq -e '
-        any(
-          .triggers[]?;
-          .triggerType == "pullRequest"
-          and .isCommentRequiredForPullRequest == true
-          and .requireCommentsForNonTeamMembersOnly == false
-          and .requireCommentsForNonTeamMemberAndNonContributors == false
-          and .isCommentRequiredForInternalRepoPRs == true
-          and .commentOptionInternalRepos == "all"
-        )' >/dev/null; then
-        echo "Candidate compiler PR comment-gate policy drift detected for definition $SELF_ID." >&2
-        printf '%s' "$SELF_JSON" | jq '{id, name, revision, triggers}' >&2
-        exit 1
+      if [ "$SELF_IS_PR_DEFINITION" = "True" ]; then
+        if [ -z "$SELF_JSON" ]; then
+          echo "Candidate definition $SELF_ID was not included in the PR policy audit." >&2
+          exit 1
+        fi
+        if ! printf '%s' "$SELF_JSON" | jq -e '
+          any(
+            .triggers[]?;
+            .triggerType == "pullRequest"
+            and .isCommentRequiredForPullRequest == true
+            and .requireCommentsForNonTeamMembersOnly == false
+            and .requireCommentsForNonTeamMemberAndNonContributors == false
+            and .isCommentRequiredForInternalRepoPRs == true
+            and .commentOptionInternalRepos == "all"
+          )' >/dev/null; then
+          echo "Candidate compiler PR comment-gate policy drift detected for definition $SELF_ID." >&2
+          printf '%s' "$SELF_JSON" | jq '{id, name, revision, triggers}' >&2
+          exit 1
+        fi
       fi
 
       for id in $SCHEDULED_ONLY_IDS; do
