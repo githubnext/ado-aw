@@ -64,6 +64,7 @@ describe("assertAdoTokenIsolation", () => {
     "SC_READ_TOKEN",
     "SC_WRITE_TOKEN",
     "SYSTEM_ACCESSTOKEN",
+    "ADO_AW_GITHUB_TOKEN",
   ])("rejects %s on the Agent", (credential) => {
     expect(() =>
       assertAdoTokenIsolation(
@@ -80,6 +81,7 @@ describe("assertAdoTokenIsolation", () => {
     "SC_READ_TOKEN",
     "SC_WRITE_TOKEN",
     "SYSTEM_ACCESSTOKEN",
+    "ADO_AW_GITHUB_TOKEN",
   ])("rejects %s on Detection", (credential) => {
     expect(() =>
       assertAdoTokenIsolation(
@@ -89,6 +91,13 @@ describe("assertAdoTokenIsolation", () => {
         "canary",
       ),
     ).toThrow(new RegExp(`Detection must not receive ${credential}`));
+  });
+
+  it("still allows GITHUB_TOKEN, which is Copilot CLI auth and not a write credential", () => {
+    // The base fixture already maps GITHUB_TOKEN into both steps. Pinning it
+    // explicitly so a future tightening cannot break every agentic case by
+    // conflating Copilot auth with the external-write PAT.
+    expect(() => assertAdoTokenIsolation(agentTokenYaml(), "canary")).not.toThrow();
   });
 });
 

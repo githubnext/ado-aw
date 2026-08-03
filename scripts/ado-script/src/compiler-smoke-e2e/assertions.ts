@@ -150,10 +150,20 @@ function singleStep(
 }
 
 /**
- * Assert the Stage 1 ADO credential boundary in freshly compiled YAML.
+ * Assert the Stage 1 credential boundary in freshly compiled YAML.
  *
  * Agent and Detection must not receive any ADO credential, regardless of
  * whether the workflow configures `permissions.read`.
+ *
+ * `ADO_AW_GITHUB_TOKEN` is included because it is the only credential in the
+ * suite that grants write access OUTSIDE the AgentPlayground project (Issues
+ * write on an external GitHub repo). The compiler already confines it to the
+ * Stage 3 executor env, but nothing else here would catch a regression that
+ * projected it into Stage 1 — which is exactly the reach-outside-ADO escape
+ * the lane split exists to bound.
+ *
+ * Note `GITHUB_TOKEN` is deliberately NOT forbidden: that is Copilot CLI
+ * authentication and the Agent legitimately receives it.
  */
 export function assertAdoTokenIsolation(
   yamlText: string,
@@ -165,22 +175,20 @@ export function assertAdoTokenIsolation(
   const agentEnv = (agent.env ?? {}) as Record<string, unknown>;
   const detectionEnv = (detection.env ?? {}) as Record<string, unknown>;
 
-  for (const forbidden of [
+  const FORBIDDEN = [
     "AZURE_DEVOPS_EXT_PAT",
     "SC_READ_TOKEN",
     "SC_WRITE_TOKEN",
     "SYSTEM_ACCESSTOKEN",
-  ]) {
+    "ADO_AW_GITHUB_TOKEN",
+  ] as const;
+
+  for (const forbidden of FORBIDDEN) {
     if (agentEnv[forbidden] !== undefined) {
       throw new Error(`${label}: Agent must not receive ${forbidden}`);
     }
   }
-  for (const forbidden of [
-    "AZURE_DEVOPS_EXT_PAT",
-    "SC_READ_TOKEN",
-    "SC_WRITE_TOKEN",
-    "SYSTEM_ACCESSTOKEN",
-  ]) {
+  for (const forbidden of FORBIDDEN) {
     if (detectionEnv[forbidden] !== undefined) {
       throw new Error(`${label}: Detection must not receive ${forbidden}`);
     }
