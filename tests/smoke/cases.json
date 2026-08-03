@@ -57,13 +57,6 @@
       "source": "tests/smoke/multi-repo.md"
     },
     {
-      "id": "smoke-failure-reporter",
-      "lane": "agentic",
-      "kind": "compiled",
-      "modes": ["released"],
-      "source": "tests/safe-outputs/smoke-failure-reporter.md"
-    },
-    {
       "id": "janitor",
       "lane": "agentic",
       "kind": "compiled",

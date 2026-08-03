@@ -33,13 +33,13 @@ describe("renderResultsTable", () => {
 
   it("preserves the caller's declaration order", () => {
     const table = renderResultsTable([
-      result({ caseId: "smoke-failure-reporter", lane: "agentic", definitionId: 2604 }),
+      result({ caseId: "multi-repo", lane: "agentic", definitionId: 2604 }),
       result({ caseId: "canary", lane: "agentic", definitionId: 2601 }),
     ]);
-    const reporterIdx = table.indexOf("smoke-failure-reporter");
+    const multiRepoIdx = table.indexOf("multi-repo");
     const canaryIdx = table.indexOf("canary");
-    expect(reporterIdx).toBeGreaterThan(-1);
-    expect(canaryIdx).toBeGreaterThan(reporterIdx);
+    expect(multiRepoIdx).toBeGreaterThan(-1);
+    expect(canaryIdx).toBeGreaterThan(multiRepoIdx);
   });
 
   it("renders a '-' placeholder for missing buildId/url", () => {

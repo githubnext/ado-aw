@@ -84,7 +84,7 @@ them explicitly on each definition.
 | Secret | On | Scope |
 | --- | --- | --- |
 | `GITHUB_TOKEN` | `agentic` lane | Copilot CLI authentication |
-| `ADO_AW_GITHUB_TOKEN` | `agentic` lane | GitHub fine-grained PAT, Issues read/write limited to `jamesadevine/ado-aw-issues`. Read by the `create-github-issue` safe output in Stage 3 only — the compiler never projects it into Agent or Detection, and `assertAdoTokenIsolation` fails the run if it ever appears there. |
+| `ADO_AW_GITHUB_TOKEN` | *(none currently)* | GitHub fine-grained PAT for `create-github-issue`. No case files GitHub issues today; provision it on the `agentic` lane if one adopts that safe output. |
 
 The `infra` lane holds no secrets, and nothing should ever be provisioned onto
 it. Do not put either token in a variable group or on an orchestrator.
@@ -128,10 +128,10 @@ PR merges.
 3. ✅ **No triggers on `2567`** — verified `triggers: null`, so it is
    API-queued only.
 
-4. ⛔ **Provision secrets on `2567`** — `GITHUB_TOKEN` and
-   `ADO_AW_GITHUB_TOKEN`, per the table above. **Requires the secret values**,
+4. ⛔ **Provision `GITHUB_TOKEN` on `2567`.** **Requires the secret value**,
    which ADO never returns over the API, so this cannot be scripted from a
    checkout. Nothing can run until this is done.
+   `scripts/rotate-agentplayground-secrets.ps1` covers `2567`.
 
 5. ✅ **Service connections authorized** on `2567`:
    `agent-playground-read` and `agent-playground-write`.

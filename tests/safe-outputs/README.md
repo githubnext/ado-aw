@@ -32,7 +32,6 @@ A single successful run proves all three.
 | `azure-cli.md` | Verifies the AWF az CLI extension is mounted, `az devops` authenticates via `AZURE_DEVOPS_EXT_PAT`, and the sandbox can reach the ADO control plane. |
 | `noop-target.md` | Minimal agentic pipeline. (The executor-e2e `queue-build` target is now the separate, non-agentic [`tests/executor-e2e/queue-target.yml`](../executor-e2e/queue-target.yml).) |
 | `janitor.md` | Prunes `ado-aw-smoke-*` artifacts (work items, branches, wiki pages, tags, PRs) older than 30 days from AgentPlayground. Runs in released mode. |
-| `smoke-failure-reporter.md` | Queries smoke pipelines for failures and files `[smoke-failure] …` issues on `jamesadevine/ado-aw-issues`. Runs in the isolated `debug` lane because it needs `ADO_AW_DEBUG_GITHUB_TOKEN`. |
 
 Schedules in these sources' front matter are **stripped at staging time** — the
 orchestrator owns scheduling, because every case in a lane shares one

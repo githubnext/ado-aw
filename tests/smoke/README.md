@@ -35,22 +35,14 @@ credential class:
 
 | Lane | Secrets / service connections | Cases |
 | --- | --- | --- |
-| `agentic` | `GITHUB_TOKEN`, `ADO_AW_GITHUB_TOKEN`, `agent-playground-read`/`-write` | canary, azure-cli, noop-target, custom-safe-output, multi-repo, smoke-failure-reporter, janitor |
+| `agentic` | `GITHUB_TOKEN`, `agent-playground-read`/`-write` | canary, azure-cli, noop-target, custom-safe-output, multi-repo, janitor |
 | `infra` | none | *(reserved for AWF and the ado-proxy sidecar)* |
 
-`ADO_AW_GITHUB_TOKEN` (Issues write on `jamesadevine/ado-aw-issues`) once had a
-lane of its own, when GitHub issue filing was a debug-only capability used by a
-single case. It is now the public `create-github-issue` safe output, so a lane
-per credential would fragment as more cases adopt it.
-
-The isolation that matters is enforced where it cannot drift: the compiler
-projects that token into the Stage 3 executor only, never Agent or Detection,
-and `assertAdoTokenIsolation` fails the run on freshly compiled YAML — before
-push — if it ever appears in either. That prevents the leak rather than merely
-bounding its blast radius, which is what a separate definition bought.
-
-`infra` remains a genuine boundary: no GitHub token, no service connections,
-nothing an AWF or ado-proxy smoke could reach.
+No case currently files GitHub issues, so the lane holds no GitHub PAT beyond
+`GITHUB_TOKEN` (Copilot CLI auth). If a case ever adopts `create-github-issue`,
+`ADO_AW_GITHUB_TOKEN` is provisioned on this lane — the compiler confines it to
+the Stage 3 executor, and `assertAdoTokenIsolation` fails the run if it reaches
+Agent or Detection.
 
 ### Modes
 
@@ -84,10 +76,6 @@ than pass while testing nothing.
 > merging and the next release. When adding a front-matter feature used by a
 > released-mode case, either keep the case on `modes: ["candidate"]` until the
 > release ships, or expect released mode to fail until it does.
->
-> Known instance: `smoke-failure-reporter` adopted `create-github-issue`
-> (#1670), which is unreleased as of v0.48.0, so its released-mode case fails
-> until the next release. The other released-mode cases are unaffected.
 
 ## Flow
 

@@ -235,7 +235,7 @@ describe("runFixtures", () => {
       "canary",
       "azure-cli",
       "noop-target",
-      "smoke-failure-reporter",
+      "multi-repo",
     ] as const;
     const buildIds = [701, 702, 703, 704];
 

@@ -9,20 +9,16 @@ $ErrorActionPreference = "Stop"
 
 $copilotDefinitionIds = @(2545, 2546, 2547, 2548, 2549, 2554, 2555, 2556, 2558, 2564, 2565, 2567)
 
-# The issues-only PAT is read under two different variable names during the
-# cutover, so both are set from the same value:
+# The issues-only PAT is still read by the committed release-owned locks that
+# definitions 2549 and 2558 run today, under the legacy
+# `ado-aw-debug.create-issue` variable name. Drop this list, and the
+# ADO_AW_DEBUG_GITHUB_TOKEN block below, when those definitions are deleted at
+# the end of the smoke cutover (tests/smoke/REGISTERED.md step 11).
 #
-#   ADO_AW_DEBUG_GITHUB_TOKEN - the legacy `ado-aw-debug.create-issue` name,
-#     still read by the committed release-owned locks that definitions 2549
-#     and 2558 run today.
-#   ADO_AW_GITHUB_TOKEN - the name #1670 introduced with the public
-#     `create-github-issue` safe output, read by the smoke lane once a release
-#     ships that change.
-#
-# Drop ADO_AW_DEBUG_GITHUB_TOKEN, and 2549/2558, when those definitions are
-# deleted at the end of the smoke cutover (tests/smoke/REGISTERED.md step 11).
+# No smoke case files GitHub issues any more, so ADO_AW_GITHUB_TOKEN (the name
+# #1670 introduced for the public `create-github-issue` safe output) is not
+# provisioned anywhere. Add the lane id here if a case ever adopts it.
 $legacyReporterDefinitionIds = @(2549, 2558)
-$reporterDefinitionIds = @(2567)
 $executorDefinitionIds = @(2550)
 $triggerDefinitionIds = @(2551)
 $allDefinitionIds = @(
@@ -80,11 +76,6 @@ try {
             -Name "ADO_AW_GITHUB_TOKEN" `
             -Value $issuesToken `
             -DefinitionIds $legacyReporterDefinitionIds
-
-        Set-AdoAwSecret `
-            -Name "ADO_AW_GITHUB_TOKEN" `
-            -Value $issuesToken `
-            -DefinitionIds $reporterDefinitionIds
 
         Set-AdoAwSecret `
             -Name "EXECUTOR_E2E_GITHUB_TOKEN" `

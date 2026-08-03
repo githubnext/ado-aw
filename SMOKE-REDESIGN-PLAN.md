@@ -90,8 +90,7 @@ BEFORE   10 definitions + 5 committed locks
 AFTER    3 lane definitions + 1 queue target, zero committed locks
   lane agentic  <- .smoke/pipeline.yml  <- refs .../<buildId>/{canary,azure-cli,
                                                   noop-target,custom-safe-output,
-                                                  multi-repo,smoke-failure-reporter,
-                                                  janitor}
+                                                  multi-repo,janitor}
   lane infra    <- .smoke/pipeline.yml  <- (ready for AWF / ado-proxy)
   queue-target  <- static YAML, permanent, not a smoke (executor-e2e dependency)
 
@@ -102,18 +101,17 @@ AFTER    3 lane definitions + 1 queue target, zero committed locks
 
 ### Confirmed decisions
 
-1. **Two lanes** — `agentic` (every current case; holds `GITHUB_TOKEN`,
-   `ADO_AW_GITHUB_TOKEN` and the `agent-playground-*` service connections),
-   `infra` (no credentials at all; reserved for AWF and ado-proxy).
+1. **Two lanes** — `agentic` (every current case; holds `GITHUB_TOKEN` and the
+   `agent-playground-*` service connections), `infra` (no credentials at all;
+   reserved for AWF and ado-proxy).
 
-   An earlier revision split `smoke-failure-reporter` into its own `debug`
-   lane for `ADO_AW_GITHUB_TOKEN`. That was dropped once GitHub issue filing
-   became the public `create-github-issue` safe output rather than a
-   debug-only capability: a lane per credential fragments as more cases adopt
-   it, and the isolation is enforced where it cannot drift — the compiler
-   confines the token to the Stage 3 executor, and `assertAdoTokenIsolation`
-   fails the run if it reaches Agent or Detection. That prevents the leak
-   rather than bounding its blast radius.
+   Earlier revisions split `smoke-failure-reporter` into its own `debug` lane
+   for its GitHub Issues PAT. That case has since been removed entirely — it
+   resolved its targets by ADO definition *name*, which the lane model
+   abolishes for cases, and two of the three names it watched are deleted at
+   cutover. Its intent (turn a failed scheduled run into a GitHub issue) is
+   tracked as a follow-up and belongs in the orchestrator as a deterministic
+   step, not in an agent holding a PAT.
 2. **Big-bang cutover** — all cases move in one PR. Mitigated by a manual
    pre-merge live run in both modes, and by *disabling* rather than deleting
    old definitions for one release cycle.
@@ -175,9 +173,6 @@ or missing release asset fails the run in both places.
       "modes": ["candidate"],
       "source": "tests/smoke/custom-safe-output.md",
       "assertions": { "requiredBuildTags": ["ado-aw-custom-job-{buildId}"] } },
-    { "id": "smoke-failure-reporter", "lane": "agentic", "kind": "compiled",
-      "modes": ["released"],
-      "source": "tests/safe-outputs/smoke-failure-reporter.md" },
     { "id": "janitor",     "lane": "agentic", "kind": "compiled",
       "modes": ["released"],
       "source": "tests/safe-outputs/janitor.md" }

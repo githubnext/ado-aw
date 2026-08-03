@@ -244,7 +244,6 @@ describe("smoke-e2e index.main (happy path, candidate mode)", () => {
       "multi-repo",
     ]);
     expect(queuedCaseIds).not.toContain("janitor");
-    expect(queuedCaseIds).not.toContain("smoke-failure-reporter");
     expect(compiledCasePaths).toEqual([
       "tests/safe-outputs/canary.md",
       "tests/safe-outputs/azure-cli.md",
