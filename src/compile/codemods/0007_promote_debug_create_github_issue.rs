@@ -90,6 +90,9 @@ mod tests {
     fn ctx() -> CodemodContext {
         CodemodContext {
             compiler_version: INTRODUCED_IN,
+            // This codemod migrates a renamed key, not a changed default, so it
+            // is unconditional and ignores source provenance entirely.
+            source_compiler_version: None,
         }
     }
 
