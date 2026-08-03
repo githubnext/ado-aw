@@ -288,8 +288,37 @@ natural language describing the task, constraints, and expected behavior.
 
 ## Trigger Configuration
 
-The `on:` field configures when an agent pipeline fires. Three trigger types
-are supported — mix and match as needed.
+The `on:` field is the **complete declaration** of when an agent pipeline
+fires. Four trigger types are supported — `push`, `schedule`, `pr`, and
+`pipeline` — mix and match as needed. If a workflow has no `on:` key at all,
+it compiles to a manual / API-queued-only pipeline: Azure DevOps normally
+treats a missing top-level `trigger:` as "run CI on every branch", so the
+compiler always emits an explicit `trigger:` (and `pr:`) instead of relying
+on that implicit default.
+
+### on.push — push (CI) trigger
+
+Maps directly to ADO's native `trigger:` key.
+
+```yaml
+on:
+  push: none              # never start on a push
+
+on:
+  push:                   # start only on matching pushes
+    branches:
+      include: [main]
+      exclude: [wip/*]
+    paths:
+      include: ["src/**"]
+```
+
+An explicit `on.push` always wins over the all-branches trigger that
+`on.pr`'s default `mode: synthetic` emits, and over the `none` that
+`on.schedule` or `on.pr.mode: policy` would otherwise produce. It controls
+only `trigger:` — `on.pr` independently drives the `pr:` key. See the
+[front-matter reference](docs/front-matter.md#push-ci-triggering-onpush)
+for the full precedence table.
 
 ### on.schedule — recurring schedule
 

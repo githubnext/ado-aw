@@ -61,18 +61,17 @@ each reviewer prompt only where a specialism needs to sharpen them.
 
 ### Read the pre-fetched data — do not call the API for it
 
-The PR diff, metadata and existing review comments are already on disk, capped
-and cached (see `shared/pr-diff-data-fetch.md`):
+The PR diff, metadata and existing review comments are already on disk and
+cached (see `shared/pr-diff-data-fetch.md`):
 
 | File | Content |
 |---|---|
-| `/tmp/gh-aw/agent/pr-diff.patch` | Unified diff, generated/lock/bundle files excluded, capped at 3000 lines |
+| `/tmp/gh-aw/agent/pr-diff.patch` | Complete unified diff, generated/lock/bundle files excluded |
 | `/tmp/gh-aw/agent/pr-meta.json` | `number, title, body, headRefName, headRefOid, additions, deletions, changedFiles, files` |
 | `/tmp/gh-aw/agent/pr-review-comments.json` | Existing inline comments as `{id, path, line, body, user}` |
 
 **Do not** call `get_diff` or `get_review_comments` — the pre-fetched files are
-already capped to keep the context small, and re-fetching burns tokens for no
-new information.
+complete, and re-fetching burns tokens for no new information.
 
 ### Comment only on changed lines
 
