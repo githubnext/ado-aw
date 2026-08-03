@@ -5,7 +5,7 @@ use std::fmt;
 
 use serde::Serialize;
 
-use crate::compile::{AWF_VERSION, MCPG_VERSION};
+use crate::compile::{ADO_MCP_VERSION, AWF_VERSION, MCPG_VERSION};
 use crate::engine::{COPILOT_CLI_VERSION, DEFAULT_COPILOT_MODEL};
 use crate::safe_outputs::{ALL_KNOWN_SAFE_OUTPUTS, ALWAYS_ON_TOOLS, DEBUG_ONLY_TOOLS};
 
@@ -42,6 +42,13 @@ pub struct VersionCatalog {
     pub awf: String,
     /// Pinned MCP Gateway version (`compile::common::MCPG_VERSION`).
     pub mcpg: String,
+    /// Pinned Azure DevOps MCP npm package version
+    /// (`compile::common::ADO_MCP_VERSION`).
+    ///
+    /// Fetched on the runner and mounted into a container with no registry
+    /// access of its own, so an unpinned fetch would let the agent's tool
+    /// surface vary between runs.
+    pub ado_mcp: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
@@ -202,6 +209,7 @@ pub fn render_text(catalog: &Catalog) -> String {
         out.push_str(&format!("  copilot-cli {}\n", versions.copilot_cli));
         out.push_str(&format!("  awf {}\n", versions.awf));
         out.push_str(&format!("  mcpg {}\n", versions.mcpg));
+        out.push_str(&format!("  ado-mcp {}\n", versions.ado_mcp));
         out.push('\n');
     }
     if let Some(proxy) = &catalog.ado_proxy {
@@ -233,6 +241,7 @@ fn versions() -> VersionCatalog {
         copilot_cli: COPILOT_CLI_VERSION.to_string(),
         awf: AWF_VERSION.to_string(),
         mcpg: MCPG_VERSION.to_string(),
+        ado_mcp: ADO_MCP_VERSION.to_string(),
     }
 }
 

@@ -1599,10 +1599,63 @@ pub const MCPG_CONTAINER_NAME: &str = MCPG_DOMAIN;
 pub const ADO_MCP_IMAGE: &str = "node:20-slim";
 
 /// Default entrypoint for the Azure DevOps MCP container.
-pub const ADO_MCP_ENTRYPOINT: &str = "npx";
+///
+/// The MCP is launched directly rather than through `npx`: the package is
+/// installed on the runner and mounted in, so the container needs no registry
+/// access and resolves nothing at start time.
+pub const ADO_MCP_ENTRYPOINT: &str = "node";
+
+/// Mount point for the pre-installed Azure DevOps MCP package.
+///
+/// Load-bearing: Node resolves dependencies by walking *upward* from the
+/// importing file, so the tree must sit at `/app/node_modules` for the MCP's
+/// own dependencies to resolve. Mounting it anywhere else fails at import with
+/// `ERR_MODULE_NOT_FOUND` for `@modelcontextprotocol/sdk`.
+pub const ADO_MCP_NODE_MODULES: &str = "/app/node_modules";
+
+/// Entry script of the Azure DevOps MCP package inside the container.
+pub const ADO_MCP_ENTRY_SCRIPT: &str = "/app/node_modules/@azure-devops/mcp/dist/index.js";
+
+/// Where the runner stages the installed MCP package for mounting.
+pub const ADO_MCP_HOST_NODE_MODULES: &str = "/tmp/ado-aw-mcp/node_modules";
+
+/// Non-secret placeholder handed to the MCP in place of an Azure DevOps token.
+///
+/// The MCP authenticates with whatever is in `ADO_MCP_AUTH_TOKEN`, but under
+/// interception it never talks to Azure DevOps directly: the policy engine
+/// strips every client credential and attaches the real bearer only after a
+/// complete allow decision. Passing the real token here would make the proxy
+/// decorative on this path — the MCP could authenticate directly if it ever
+/// reached Azure DevOps by another route, and the credential would sit in a
+/// container the agent can influence through tool calls.
+///
+/// Deliberately self-describing: it shows up in logs and error messages, where
+/// it should read as intentional rather than as a misconfiguration.
+pub const ADO_MCP_TOKEN_SENTINEL: &str = "ado-proxy-injects-the-real-credential";
+
+/// Docker network shared by the policy engine and the Azure DevOps MCP.
+///
+/// Separate from AWF's `awf-net`: AWF's `DOCKER-USER` rules are scoped to its
+/// own bridge (`-i <awf bridge>`), so they do not filter this network. That is
+/// what lets the MCP reach the engine here while still having no unpoliced
+/// route out — its only reachable peer is the engine.
+pub const ADO_PROXY_NETWORK_NAME: &str = "ado-aw-proxy-net";
+
+/// Path the public interception CA is mounted at inside client containers.
+pub const ADO_MCP_CA_MOUNT: &str = "/etc/ado-proxy/ca.pem";
+
+/// Runner-side path of the CA certificate the policy engine publishes.
+pub const ADO_PROXY_PUBLIC_CA_HOST_PATH: &str = "/tmp/gh-aw/ado-proxy/ado-proxy-ca.pem";
 
 /// Default entrypoint args for the Azure DevOps MCP npm package.
 pub const ADO_MCP_PACKAGE: &str = "@azure-devops/mcp";
+
+/// Pinned Azure DevOps MCP package version.
+///
+/// Pinned rather than floating because the package is fetched on the runner
+/// and mounted into a container that has no registry access of its own; an
+/// unpinned fetch would make the agent's tool surface vary run to run.
+pub const ADO_MCP_VERSION: &str = "2.8.1";
 
 /// Reserved MCPG server name for the auto-configured ADO MCP.
 pub const ADO_MCP_SERVER_NAME: &str = "azure-devops";
@@ -6331,16 +6384,17 @@ safe-outputs:
 
     #[test]
     fn test_generate_mcpg_docker_env_with_permissions_read() {
-        // When ADO tool is enabled with permissions.read, the extension's
-        // required_pipeline_vars should produce the -e flag
+        // `permissions.read` selects the service connection the *engine* uses.
+        // It must not cause the token to be projected into MCPG's own
+        // environment, from where it would reach the MCP container.
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\npermissions:\n  read: my-read-sc\n---\n",
         ).unwrap();
         let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
         let env = generate_mcpg_docker_env(&fm, &declarations);
         assert!(
-            env.contains("-e ADO_MCP_AUTH_TOKEN=\"$SC_READ_TOKEN\""),
-            "Should map ADO token via extension pipeline var"
+            !env.contains("-e ADO_MCP_AUTH_TOKEN=\"$SC_READ_TOKEN\""),
+            "the credential must not be mapped into MCPG: {env}"
         );
     }
 
@@ -6439,6 +6493,9 @@ safe-outputs:
 
     #[test]
     fn test_generate_mcpg_step_env_with_ado_extension() {
+        // The ADO tool no longer contributes any pipeline variable: it used to
+        // map SC_READ_TOKEN into the MCPG step so the MCP could authenticate
+        // directly. Nothing should replace it.
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\n---\n",
         )
@@ -6446,12 +6503,8 @@ safe-outputs:
         let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
         let env = generate_mcpg_step_env(&declarations);
         assert!(
-            env.starts_with("env:\n"),
-            "Should emit full env: block header"
-        );
-        assert!(
-            env.contains("SC_READ_TOKEN: $(SC_READ_TOKEN)"),
-            "Should map SC_READ_TOKEN for ADO extension"
+            !env.contains("SC_READ_TOKEN"),
+            "the ADO tool must not surface the read token to MCPG: {env}"
         );
     }
 
@@ -6513,12 +6566,15 @@ safe-outputs:
         assert_eq!(ado.container.as_deref(), Some(ADO_MCP_IMAGE));
         assert_eq!(ado.entrypoint.as_deref(), Some(ADO_MCP_ENTRYPOINT));
         let args = ado.entrypoint_args.as_ref().unwrap();
-        assert!(args.contains(&"-y".to_string()));
-        assert!(args.contains(&ADO_MCP_PACKAGE.to_string()));
+        assert!(args.contains(&ADO_MCP_ENTRY_SCRIPT.to_string()));
         assert!(args.contains(&"inferred-org".to_string()));
-        // Should have ADO_MCP_AUTH_TOKEN in env (for bearer token via envvar auth)
+        // The token is a sentinel: the engine injects the real bearer only
+        // after a complete allow decision.
         let env = ado.env.as_ref().unwrap();
-        assert!(env.contains_key("ADO_MCP_AUTH_TOKEN"));
+        assert_eq!(
+            env.get("ADO_MCP_AUTH_TOKEN").map(String::as_str),
+            Some(ADO_MCP_TOKEN_SENTINEL)
+        );
     }
 
     #[test]
@@ -6673,6 +6729,11 @@ safe-outputs:
 
     #[test]
     fn test_ado_tool_docker_env_passthrough() {
+        // Regression guard for the hole this proxy closes: the MCP used to be
+        // handed the real Azure DevOps bearer via
+        // `-e ADO_MCP_AUTH_TOKEN="$SC_READ_TOKEN"`. Under interception the
+        // policy engine holds the only copy, so nothing may project a
+        // credential into the MCP container.
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\npermissions:\n  read: my-read-sc\n---\n",
         )
@@ -6680,8 +6741,8 @@ safe-outputs:
         let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
         let env = generate_mcpg_docker_env(&fm, &declarations);
         assert!(
-            env.contains("ADO_MCP_AUTH_TOKEN"),
-            "Should include ADO token passthrough when permissions.read is set"
+            !env.contains("SC_READ_TOKEN"),
+            "the real bearer must never reach the MCP container: {env}"
         );
     }
 

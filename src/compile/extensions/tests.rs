@@ -301,12 +301,14 @@ fn test_lean_validate_bash_not_disabled_no_warning() {
 
 #[test]
 fn test_ado_required_hosts() {
+    // The MCP is redirected at the policy engine and fetches nothing at start
+    // time, so it needs no allow-listed hosts of its own. Re-adding
+    // dev.azure.com here would only matter if something reached it directly —
+    // which is exactly what this design removes.
     let ext = AzureDevOpsExtension::new(AzureDevOpsToolConfig::Enabled(true));
     let fm = minimal_front_matter();
     let hosts = declarations_with_org(&ext, &fm).network_hosts;
-    assert!(hosts.contains(&"dev.azure.com".to_string()));
-    // Node ecosystem is required for npx to resolve @azure-devops/mcp
-    assert!(hosts.contains(&"node".to_string()));
+    assert!(hosts.is_empty(), "expected no direct egress hosts: {hosts:?}");
 }
 
 #[test]
@@ -326,9 +328,11 @@ fn test_ado_mcpg_servers_with_inferred_org() {
             .unwrap()
             .contains(&"myorg".to_string())
     );
-    // Trusted MCP backends retain direct host-network egress outside AWF.
+    // Host networking would put the MCP on the runner's own stack, where it
+    // could reach Azure DevOps directly and bypass the policy entirely.
     let args = servers[0].1.args.as_ref().expect("args should be set");
-    assert_eq!(args, &vec!["--network".to_string(), "host".to_string()]);
+    assert!(!args.contains(&"host".to_string()), "{args:?}");
+    assert!(args.contains(&"--add-host".to_string()), "{args:?}");
 }
 
 #[test]

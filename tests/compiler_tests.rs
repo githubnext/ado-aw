@@ -1933,22 +1933,30 @@ fn test_fixture_azure_devops_mcp_compiled_output() {
         "MCPG config should NOT use command field"
     );
 
-    // Should contain env for ADO_MCP_AUTH_TOKEN (envvar auth for @azure-devops/mcp)
+    // The MCP receives a sentinel, never a credential: the policy engine holds
+    // the only copy and attaches it after a complete allow decision.
     assert!(
         compiled.contains("ADO_MCP_AUTH_TOKEN"),
         "Should reference ADO_MCP_AUTH_TOKEN"
     );
-
-    // Should contain SC_READ_TOKEN (from permissions.read)
     assert!(
-        compiled.contains("SC_READ_TOKEN"),
-        "Should contain SC_READ_TOKEN"
+        compiled.contains("ado-proxy-injects-the-real-credential"),
+        "the MCP's token must be the non-secret sentinel"
     );
 
-    // Should contain the MCPG docker env passthrough (auto-mapped ADO token)
+    // Regression guard for the hole the policy engine closes. `SC_READ_TOKEN`
+    // still appears elsewhere in the pipeline — the engine is given it — but it
+    // must never be projected into the MCP container.
     assert!(
-        compiled.contains("-e ADO_MCP_AUTH_TOKEN=\"$SC_READ_TOKEN\""),
-        "Should auto-map SC_READ_TOKEN to ADO_MCP_AUTH_TOKEN on MCPG Docker run"
+        !compiled.contains("-e ADO_MCP_AUTH_TOKEN=\"$SC_READ_TOKEN\""),
+        "the real Azure DevOps bearer must not reach the MCP container"
+    );
+
+    // Host networking would put the MCP on the runner's stack, where it could
+    // reach Azure DevOps directly and bypass the policy entirely.
+    assert!(
+        compiled.contains("--add-host"),
+        "the MCP must be redirected at the policy engine"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);

@@ -65,9 +65,10 @@ use std::path::Path;
 
 use super::common::PerJobPools;
 use super::common::{
-    self, ADO_BUILD_ID_SUFFIX, ADO_PROXY_CONTAINER_NAME, ADO_PROXY_IMAGE, ADO_PROXY_LISTEN_PORT,
-    ADO_PROXY_TLS_PORT, AWF_SQUID_URL, AWF_VERSION, HEADER_MARKER, MCPG_CONTAINER_NAME,
-    MCPG_DOMAIN, MCPG_IMAGE, MCPG_PORT, MCPG_VERSION, image_ref,
+    self, ADO_BUILD_ID_SUFFIX, ADO_MCP_HOST_NODE_MODULES, ADO_MCP_PACKAGE, ADO_MCP_VERSION,
+    ADO_PROXY_CONTAINER_NAME, ADO_PROXY_IMAGE, ADO_PROXY_LISTEN_PORT, ADO_PROXY_NETWORK_NAME,
+    ADO_PROXY_PUBLIC_CA_HOST_PATH, ADO_PROXY_TLS_PORT, AWF_SQUID_URL, AWF_VERSION, HEADER_MARKER,
+    MCPG_CONTAINER_NAME, MCPG_DOMAIN, MCPG_IMAGE, MCPG_PORT, MCPG_VERSION, image_ref,
 };
 use super::extensions::ado_script as paths;
 use crate::ado_proxy::catalog::{self, Capability};
@@ -989,6 +990,22 @@ fn build_agent_job(
     // 14. AWF path step (when extensions declare path prepends)
     push_raw_yaml_if_nonempty(&mut steps, &cfg.awf_path_step_yaml)?;
 
+    // 14a. Credential-isolated Azure DevOps policy engine.
+    //
+    //      Must precede MCPG: the Azure DevOps MCP is redirected at the
+    //      engine's container address, and that address does not exist until
+    //      the engine is running.
+    let ado_proxy_enabled = front_matter
+        .tools
+        .as_ref()
+        .is_some_and(|tools| tools.azure_devops.is_some());
+    if ado_proxy_enabled {
+        steps.push(Step::Bash(prepare_ado_proxy_clients_step()));
+        steps.push(Step::Bash(start_ado_proxy_step(&ado_proxy_capabilities(
+            front_matter,
+        ))));
+    }
+
     // 15. MCP Gateway (MCPG), which launches SafeOutputs as a stdio child.
     steps.push(Step::Bash(start_mcpg_step(
         &cfg.mcpg_docker_env,
@@ -1059,10 +1076,7 @@ fn build_agent_job(
         &cfg.engine_env,
         &cfg.byom_exclude_keys,
         front_matter.supply_chain(),
-        // Not yet enabled anywhere: the policy engine is wired in behind the
-        // `permissions.read` policy in a later change. Passing `false` keeps
-        // compiled output byte-identical until then.
-        false,
+        ado_proxy_enabled,
     )?));
 
     // 18a. Revoke the GitHub App token (best-effort, always) once the Copilot
@@ -1093,6 +1107,15 @@ fn build_agent_job(
 
     // 20. Stop MCPG and SafeOutputs
     steps.push(Step::Bash(stop_mcpg_step()));
+
+    // 20a. Stop the policy engine, then remove its network. `--rm` only fires
+    //      on a clean exit, so an OOM or SIGKILL would otherwise leave the
+    //      container — and the credential it holds in memory — running past
+    //      the job.
+    if ado_proxy_enabled {
+        steps.push(Step::Bash(stop_ado_proxy_step()));
+        steps.push(Step::Bash(teardown_ado_proxy_network_step()));
+    }
 
     // 21. User post_steps (finalize_steps)
     for user_step_val in &front_matter.post_steps {
@@ -2850,7 +2873,17 @@ fn start_mcpg_step(
            -e \"s|\\${{MCP_RUNNER_UID}}|$MCP_RUNNER_UID|g\" \\\n  \
            -e \"s|\\${{MCP_RUNNER_GID}}|$MCP_RUNNER_GID|g\" \\\n  \
            -e \"s|\\${{MCP_GATEWAY_API_KEY}}|$(MCP_GATEWAY_API_KEY)|g\" \\\n  \
+           -e \"s|\\${{ADO_PROXY_IP}}|${{ADO_PROXY_IP:-}}|g\" \\\n  \
            /tmp/awf-tools/staging/mcpg-config.json)\n\
+         \n\
+         # A client redirected at an empty address would resolve the real\n\
+         # Azure DevOps instead of the policy engine, quietly restoring the\n\
+         # direct path this design removes. Fail loudly rather than start.\n\
+         if grep -q 'ADO_PROXY_IP' /tmp/awf-tools/staging/mcpg-config.json \\\n  \
+            && [ -z \"${{ADO_PROXY_IP:-}}\" ]; then\n  \
+           echo \"##vso[task.complete result=Failed]ado-proxy address is unknown; refusing to start MCP clients unredirected\"\n  \
+           exit 1\n\
+         fi\n\
          \n\
          # Log the template config (before API key substitution) for debugging.\n\
          echo \"Starting MCPG with config template:\"\n\
@@ -3195,6 +3228,91 @@ fn safe_outputs_summary_step(reviewed: &[String]) -> BashStep {
         .with_condition(Condition::Always)
 }
 
+/// Resolve the capabilities the policy engine should enable.
+///
+/// Defaults to the full catalog. That is deliberately broad *within* a narrow
+/// boundary: every catalogued operation is a `GET` or `OPTIONS`, and the
+/// always-denied route families exclude ACLs, tokens, service endpoints,
+/// variable groups and secure files. So the default grants read access to
+/// project metadata the agent could already reach, while removing the
+/// credential that previously made writes and secret reads possible at all.
+///
+/// Starting narrower would leave the Azure DevOps MCP unable to answer most
+/// questions, which pushes authors back towards handing agents raw
+/// credentials — the outcome this design exists to prevent. `permissions.read`
+/// narrows this set once its object form is accepted.
+fn ado_proxy_capabilities(_front_matter: &FrontMatter) -> Vec<Capability> {
+    Capability::ALL.to_vec()
+}
+
+/// Prepare the host-side prerequisites for routing the Azure DevOps MCP
+/// through the policy engine.
+///
+/// Two things the engine cannot do for itself:
+///
+/// 1. **A shared network.** The MCP reaches the engine here rather than over
+///    AWF's network, which it is not attached to. AWF's `DOCKER-USER` rules are
+///    scoped to its own bridge, so they do not filter this one — the MCP can
+///    reach the engine, and nothing else.
+/// 2. **The MCP package.** It is installed on the runner, which has registry
+///    access, and mounted read-only into a container that does not. That keeps
+///    the MCP image stock (`node:20-slim`) so nothing new enters the supply
+///    chain, and removes `npx`'s start-time registry dependency.
+///
+/// The mount point is load-bearing: Node resolves dependencies by walking
+/// upward from the importing file, so the tree must land at
+/// `/app/node_modules` or the MCP's own imports fail to resolve.
+fn prepare_ado_proxy_clients_step() -> BashStep {
+    let script = format!(
+        "set -euo pipefail\n\
+         \n\
+         # Network shared by the policy engine and the Azure DevOps MCP.\n\
+         if ! docker network inspect {ADO_PROXY_NETWORK_NAME} >/dev/null 2>&1; then\n  \
+           docker network create {ADO_PROXY_NETWORK_NAME}\n\
+         fi\n\
+         \n\
+         # Install the MCP on the runner and stage it for mounting. The\n\
+         # container it is mounted into can reach nothing but the engine, so it\n\
+         # cannot fetch this itself.\n\
+         MCP_STAGE=\"$(dirname {ADO_MCP_HOST_NODE_MODULES})\"\n\
+         rm -rf \"$MCP_STAGE\"\n\
+         mkdir -p \"$MCP_STAGE\"\n\
+         cd \"$MCP_STAGE\"\n\
+         npm init -y >/dev/null 2>&1\n\
+         npm install --omit=dev --no-audit --no-fund --save-exact \\\n  \
+           \"{ADO_MCP_PACKAGE}@{ADO_MCP_VERSION}\"\n\
+         \n\
+         # Verify the pin actually took. `npm install` resolves a *range* for\n\
+         # anything it also has to satisfy transitively, so a matching request\n\
+         # does not by itself guarantee a matching tree — and the agent's tool\n\
+         # surface is defined by whatever ends up on disk here.\n\
+         MCP_INSTALLED=$(node -p \\\n  \
+           \"require('{ADO_MCP_HOST_NODE_MODULES}/{ADO_MCP_PACKAGE}/package.json').version\")\n\
+         if [ \"$MCP_INSTALLED\" != \"{ADO_MCP_VERSION}\" ]; then\n  \
+           echo \"##vso[task.complete result=Failed]Azure DevOps MCP resolved to $MCP_INSTALLED, expected {ADO_MCP_VERSION}\"\n  \
+           exit 1\n\
+         fi\n\
+         \n\
+         # Fail here rather than at MCP start time, where a missing entry\n\
+         # script surfaces as an opaque MCPG backend error.\n\
+         if [ ! -f \"{ADO_MCP_HOST_NODE_MODULES}/{ADO_MCP_PACKAGE}/dist/index.js\" ]; then\n  \
+           echo \"##vso[task.complete result=Failed]Azure DevOps MCP package did not install\"\n  \
+           exit 1\n\
+         fi\n\
+         echo \"Azure DevOps MCP $MCP_INSTALLED staged at {ADO_MCP_HOST_NODE_MODULES}\"\n"
+    );
+    bash("Prepare Azure DevOps MCP and proxy network", script)
+}
+
+/// Remove the network created for the policy engine and its clients.
+fn teardown_ado_proxy_network_step() -> BashStep {
+    let script = format!(
+        "# Remove the policy-engine network once its containers are gone\n\
+         docker network rm {ADO_PROXY_NETWORK_NAME} 2>/dev/null || true\n"
+    );
+    bash("Remove ado-proxy network", script).with_condition(Condition::Always)
+}
+
 fn stop_mcpg_step() -> BashStep {
     let script = format!(
         "# Stop MCPG container\n\
@@ -3224,7 +3342,6 @@ fn stop_mcpg_step() -> BashStep {
 /// design exists to withhold.
 ///
 /// Not yet emitted: see [`stop_ado_proxy_step`].
-#[allow(dead_code)]
 fn start_ado_proxy_step(capabilities: &[Capability]) -> BashStep {
     let policy = PolicyDocument::new(capabilities).to_json();
     let hosts = catalog::catalog().protected_hosts;
@@ -3288,7 +3405,7 @@ fn start_ado_proxy_step(capabilities: &[Capability]) -> BashStep {
          # MCP must be able to read. The matching private key never leaves\n\
          # $PROXY_DIR and is destroyed below.\n\
          mkdir -p /tmp/gh-aw/ado-proxy\n\
-         echo \"##vso[task.setvariable variable=ADO_PROXY_CA_FILE]/tmp/gh-aw/ado-proxy/ado-proxy-ca.pem\"\n\
+         echo \"##vso[task.setvariable variable=ADO_PROXY_CA_FILE]{ca_host_path}\"\n\
          \n\
          # Build the material document. jq assembles it so that a value\n\
          # containing JSON metacharacters cannot alter the document shape.\n\
@@ -3311,7 +3428,7 @@ fn start_ado_proxy_step(capabilities: &[Capability]) -> BashStep {
          \n\
          printf '%s' \"$PROXY_MATERIAL\" | docker run -i --rm \\\n  \
            --name {ADO_PROXY_CONTAINER_NAME} \\\n  \
-           --network bridge \\\n  \
+           --network {ADO_PROXY_NETWORK_NAME} \\\n  \
            -v \"{ado_proxy_path}:/app/ado-proxy.js:ro\" \\\n  \
            -v \"$PROXY_DIR/policy:/etc/ado-proxy:ro\" \\\n  \
            -v /tmp/gh-aw/ado-proxy:/var/lib/ado-proxy \\\n  \
@@ -3352,6 +3469,7 @@ fn start_ado_proxy_step(capabilities: &[Capability]) -> BashStep {
          echo \"ado-proxy is ready at $ADO_PROXY_IP\"\n\
          echo \"##vso[task.setvariable variable=ADO_PROXY_IP]$ADO_PROXY_IP\"\n",
         ado_proxy_path = paths::ADO_PROXY_PATH,
+        ca_host_path = ADO_PROXY_PUBLIC_CA_HOST_PATH,
         ado_proxy_image = ADO_PROXY_IMAGE,
         squid_url = AWF_SQUID_URL,
         listen_port = ADO_PROXY_LISTEN_PORT,
@@ -3374,7 +3492,6 @@ fn start_ado_proxy_step(capabilities: &[Capability]) -> BashStep {
 /// Not yet emitted: the Agent job gains these steps in `proxy-topology-attach`,
 /// once AWF is also told to attach the container. Landing the lifecycle first
 /// keeps that change to the wiring alone.
-#[allow(dead_code)]
 fn stop_ado_proxy_step() -> BashStep {
     let script = format!(
         "# Stop the ado-proxy policy engine\n\
@@ -4185,6 +4302,40 @@ mod tests {
         assert!(msg.contains("missing `env:` key"), "got: {msg}");
     }
 
+
+    #[test]
+    fn the_policy_engine_starts_before_the_mcp_gateway() {
+        // The Azure DevOps MCP is redirected at the engine's container
+        // address, which does not exist until the engine is running. Starting
+        // MCPG first would leave the redirect unresolvable.
+        let script = prepare_ado_proxy_clients_step().script;
+        assert!(script.contains(&format!("docker network create {ADO_PROXY_NETWORK_NAME}")));
+        assert!(
+            script.contains(&format!("{ADO_MCP_PACKAGE}@{ADO_MCP_VERSION}")),
+            "the MCP package must be pinned, not floating: {script}"
+        );
+        assert!(
+            script.contains("--save-exact"),
+            "an unpinned resolve would vary the agent's tool surface between runs"
+        );
+        assert!(
+            script.contains("$MCP_INSTALLED\" != \"") ,
+            "the resolved version must be verified, not just requested: {script}"
+        );
+    }
+
+    #[test]
+    fn the_default_capability_set_is_the_whole_catalog() {
+        // Deliberately broad within a narrow boundary: every catalogued
+        // operation is a GET or OPTIONS, and secret-bearing route families are
+        // denied outright. Starting narrower would leave the MCP unable to
+        // answer most questions, pushing authors back to raw credentials.
+        let (fm, _) = crate::compile::parse_markdown(
+            "---\nname: t\ndescription: x\ntools:\n  azure-devops:\n    org: 'myorg'\n---\n",
+        )
+        .unwrap();
+        assert_eq!(ado_proxy_capabilities(&fm), Capability::ALL.to_vec());
+    }
 
     // ── run_agent_step topology attachment ──────────────────────────────────
 
