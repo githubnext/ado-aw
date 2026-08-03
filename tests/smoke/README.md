@@ -76,6 +76,13 @@ than pass while testing nothing.
 > merging and the next release. When adding a front-matter feature used by a
 > released-mode case, either keep the case on `modes: ["candidate"]` until the
 > release ships, or expect released mode to fail until it does.
+>
+> **Currently active.** Released mode fails with
+> `canary: staged pipeline must declare 'trigger: none', got null`, because
+> v0.48.0 predates the change making an absent `on:` emit explicit
+> `trigger: none` / `pr: none`. `assertNoTriggers` is correctly rejecting a
+> pipeline ADO would otherwise CI-trigger on every branch. The next release
+> clears it; candidate mode is unaffected and green.
 
 ## Flow
 

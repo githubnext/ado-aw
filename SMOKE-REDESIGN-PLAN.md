@@ -19,14 +19,21 @@ See the ✅ marks in [`tests/smoke/REGISTERED.md`](tests/smoke/REGISTERED.md).
 
 What is left:
 
-1. A green manual run of both orchestrators. The first released run
-   (`629514`) failed in the trigger-policy audit rather than in a case —
-   fixed by #1799; re-run once that merges.
-2. Only once green: delete definitions `2545`–`2549`, `2554`–`2558`,
-   `2564`–`2565`; drop the legacy lock paths from the base ref; and remove
-   `2545`–`2549` from `tests/smoke/trigger-policy.json` in the same commit —
-   the policy audit fetches every listed id and a 404 aborts the run.
+1. **Released mode is blocked on the next release**, not on configuration.
+   Build `629516` fails with
+   `canary: staged pipeline must declare 'trigger: none', got null` — released
+   mode compiles with the last released binary (v0.48.0), which predates the
+   change making an absent `on:` emit explicit `trigger: none` / `pr: none`.
+   Reproduced locally against the real v0.48.0 asset. Cutting a release clears
+   it.
+2. Only once released mode is green too: delete definitions `2545`–`2549`,
+   `2554`–`2558`, `2564`–`2565`; drop the legacy lock paths from the base ref;
+   and remove `2545`–`2549` from `tests/smoke/trigger-policy.json` in the same
+   commit — the policy audit fetches every listed id and a 404 aborts the run.
 3. Repoint `scripts/rotate-agentplayground-secrets.ps1` at `2567`.
+
+Candidate mode is **verified green end to end** (build `629522`,
+`Overall: PASSED`): five cases, one lane, five per-case refs, all cleaned up.
 
 ## Problem
 

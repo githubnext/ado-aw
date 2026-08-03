@@ -199,15 +199,29 @@ orchestrators, then deleting the retired definitions.
    have broken the running smoke, and leaving them would have preserved
    pointers to deleted definitions.
 
-10. ⏳ **Trigger one manual run of each orchestrator** and check the live
-    assertions in [`README.md`](README.md). ADO scheduled triggers do not fire
-    until a definition has had at least one run.
+10. ✅ **Candidate orchestrator verified green.** Build `629522` ran all five
+    candidate cases on lane `2567`, each on its own per-case ref, and reported
+    `Overall: PASSED`:
 
-    First released run (build `629514`) failed in the trigger-policy audit,
-    not in a case: the audit required `SELF` to be a PR definition, which the
-    scheduled-only released orchestrator is not. Fixed by
-    [#1799](https://github.com/githubnext/ado-aw/pull/1799) — re-run once that
-    merges.
+    | case | build | result |
+    | --- | ---: | --- |
+    | canary | `629523` | succeeded |
+    | azure-cli | `629525` | succeeded |
+    | noop-target | `629524` | succeeded |
+    | custom-safe-output | `629527` | succeeded |
+    | multi-repo | `629526` | succeeded |
+
+    All five refs were deleted afterwards — the mirror holds only
+    `ado-aw-smoke-candidate-base` and `main`, confirming per-case cleanup.
+
+    ⏳ **Released mode is still blocked**, and not by configuration. Build
+    `629516` failed with `canary: staged pipeline must declare 'trigger: none',
+    got null`. Released mode compiles with the **last released** binary, and
+    v0.48.0 predates the change that made an absent `on:` emit explicit
+    `trigger: none` / `pr: none` — so `assertNoTriggers` correctly rejects its
+    output. Reproduced locally against the real v0.48.0 asset. **The next
+    release clears it**; no action needed beyond cutting one. See *Version
+    skew* in [`README.md`](README.md).
 
 11. ⏳ **Only once both runs are green**, delete the retired definitions, drop
     the legacy lock paths from the base ref, and remove `2545`–`2549` from
