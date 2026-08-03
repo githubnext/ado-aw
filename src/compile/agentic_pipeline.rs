@@ -1059,6 +1059,10 @@ fn build_agent_job(
         &cfg.engine_env,
         &cfg.byom_exclude_keys,
         front_matter.supply_chain(),
+        // Not yet enabled anywhere: the policy engine is wired in behind the
+        // `permissions.read` policy in a later change. Passing `false` keeps
+        // compiled output byte-identical until then.
+        false,
     )?));
 
     // 18a. Revoke the GitHub App token (best-effort, always) once the Copilot
@@ -2987,6 +2991,7 @@ fn awf_exclude_env_flags(exclude_keys: &[String]) -> String {
     block
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_agent_step(
     allowed_domains: &str,
     awf_mounts: &str,
@@ -2995,6 +3000,7 @@ fn run_agent_step(
     engine_env: &str,
     byom_exclude_keys: &[String],
     supply_chain: Option<&SupplyChainConfig>,
+    ado_proxy_enabled: bool,
 ) -> Result<BashStep> {
     // The awf_mounts string is a `\`-joined chain of `--mount "..."` lines.
     // Render each at 2-space indent inside the bash body (the surrounding
@@ -3011,8 +3017,40 @@ fn run_agent_step(
     };
     let image_flags_block = awf_image_flags(supply_chain);
     let exclude_env_block = awf_exclude_env_flags(byom_exclude_keys);
+
+    // AWF attaches externally-launched trusted containers to its internal
+    // network by name. The flag is repeatable (verified against the pinned
+    // v0.27.32 binary: "Repeatable. Example: --topology-attach mcp-gateway
+    // --topology-attach difc-proxy"), which is what lets the policy engine
+    // join alongside MCPG.
+    //
+    // Attaching also gives the agent an `/etc/hosts` entry for the container,
+    // so the `az` wrapper can resolve the engine by name without relying on
+    // Docker's embedded DNS — which AWF itself works around under gVisor and
+    // ARC/DinD.
+    let topology_attach_block = {
+        // The preceding `--network-isolation` continuation supplies the indent
+        // for the first line; any additional line must carry its own, matching
+        // `awf_image_flags`.
+        let mut block = format!("--topology-attach \"{MCPG_CONTAINER_NAME}\" \\\n");
+        if ado_proxy_enabled {
+            block.push_str(&format!(
+                "  --topology-attach \"{ADO_PROXY_CONTAINER_NAME}\" \\\n"
+            ));
+        }
+        block
+    };
+
+    // Trusted peers must bypass Squid: their names are not public DNS, and
+    // routing them through the proxy would break the very connection that
+    // reaches the policy engine.
+    let no_proxy_peers = if ado_proxy_enabled {
+        format!("{MCPG_CONTAINER_NAME},{ADO_PROXY_CONTAINER_NAME}")
+    } else {
+        MCPG_CONTAINER_NAME.to_string()
+    };
     let routed_engine_run = format!(
-        "export NO_PROXY=\"${{NO_PROXY:+$NO_PROXY,}}{MCPG_CONTAINER_NAME}\"; \
+        "export NO_PROXY=\"${{NO_PROXY:+$NO_PROXY,}}{no_proxy_peers}\"; \
          export no_proxy=\"$NO_PROXY\"; {engine_run}"
     );
     let script = format!(
@@ -3037,7 +3075,7 @@ fn run_agent_step(
          \"$(Pipeline.Workspace)/awf/awf\" \\\n  \
            --allow-domains \"{allowed_domains}\" \\\n  \
            --network-isolation \\\n  \
-           --topology-attach \"{MCPG_CONTAINER_NAME}\" \\\n\
+{topology_attach_block}\
 {image_flags_block}\
            --skip-pull \\\n  \
            --env-all \\\n  \
@@ -4145,6 +4183,82 @@ mod tests {
         let err = parse_env_block("other: value\n").unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("missing `env:` key"), "got: {msg}");
+    }
+
+
+    // ── run_agent_step topology attachment ──────────────────────────────────
+
+    fn agent_step_for_test(ado_proxy_enabled: bool) -> String {
+        run_agent_step(
+            "example.com",
+            "\\",
+            "/work",
+            "copilot -p prompt",
+            "FOO: bar",
+            &[],
+            None,
+            ado_proxy_enabled,
+        )
+        .expect("run_agent_step should build")
+        .script
+    }
+
+    #[test]
+    fn agent_attaches_only_mcpg_when_the_policy_engine_is_disabled() {
+        let script = agent_step_for_test(false);
+        assert_eq!(
+            script.matches("--topology-attach").count(),
+            1,
+            "compiled output must be unchanged while the engine is unwired: {script}"
+        );
+        assert!(!script.contains(ADO_PROXY_CONTAINER_NAME));
+    }
+
+    #[test]
+    fn agent_attaches_both_peers_when_the_policy_engine_is_enabled() {
+        let script = agent_step_for_test(true);
+        // Verified against the pinned AWF v0.27.32 binary, whose --help states
+        // the flag is "Repeatable" and gives a two-peer example.
+        assert_eq!(script.matches("--topology-attach").count(), 2);
+        assert!(script.contains(&format!("--topology-attach \"{MCPG_CONTAINER_NAME}\"")));
+        assert!(script.contains(&format!("--topology-attach \"{ADO_PROXY_CONTAINER_NAME}\"")));
+    }
+
+    #[test]
+    fn trusted_peers_bypass_squid() {
+        // The peer names are not public DNS. Routing them through Squid would
+        // break the very connection that reaches the policy engine.
+        let disabled = agent_step_for_test(false);
+        assert!(disabled.contains(&format!("NO_PROXY:+$NO_PROXY,}}{MCPG_CONTAINER_NAME}")));
+        assert!(!disabled.contains(ADO_PROXY_CONTAINER_NAME));
+
+        let enabled = agent_step_for_test(true);
+        assert!(enabled.contains(&format!(
+            "NO_PROXY:+$NO_PROXY,}}{MCPG_CONTAINER_NAME},{ADO_PROXY_CONTAINER_NAME}"
+        )));
+    }
+
+    #[test]
+    fn enabling_the_policy_engine_changes_only_attachment_and_no_proxy() {
+        // Guards against the continuation-indent damage that a hand-built
+        // multi-line flag block can silently do to the surrounding invocation.
+        let disabled = agent_step_for_test(false);
+        let enabled = agent_step_for_test(true);
+
+        let normalize = |script: &str| {
+            script
+                .lines()
+                .filter(|line| {
+                    !line.contains("--topology-attach") && !line.contains("NO_PROXY")
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert_eq!(
+            normalize(&disabled),
+            normalize(&enabled),
+            "no other part of the AWF invocation may shift"
+        );
     }
 
 
