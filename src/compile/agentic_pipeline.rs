@@ -115,6 +115,36 @@ pub(crate) struct BuiltPipelineContext {
     pub(crate) jobs: Vec<Job>,
 }
 
+/// Computes the AWF `--exclude-env` key list for BYOM/BYOK provider
+/// credentials on a Copilot engine. Returns an empty list for
+/// non-Copilot engines — gating on the engine type ensures a future
+/// non-Copilot engine whose env happens to contain a
+/// `COPILOT_PROVIDER_*` key is never treated as a Copilot provider
+/// credential.
+///
+/// Defense-in-depth: when the compiler mints the provider bearer
+/// token, also excludes the intermediate same-job secret var
+/// (`AW_PROVIDER_BEARER_TOKEN`) from the AWF `--env-all` passthrough.
+/// Today ADO never exposes an `issecret=true` variable as a process
+/// env var, so it is not in the AWF host env and could not be
+/// forwarded anyway — but excluding it explicitly makes the isolation
+/// intent self-documenting and fail-safe rather than relying on that
+/// implicit ADO behaviour.
+fn copilot_byom_exclude_keys(is_copilot: bool, engine_config: &EngineConfig) -> Vec<String> {
+    if !is_copilot {
+        return Vec::new();
+    }
+    let mut keys = crate::engine::copilot_byom_credential_keys(engine_config);
+    if engine_config
+        .provider()
+        .and_then(|p| p.token.as_ref())
+        .is_some()
+    {
+        keys.push(crate::compile::types::PROVIDER_BEARER_TOKEN_VAR.to_string());
+    }
+    keys
+}
+
 /// Shared back-end for the three IR-driven target compilers
 /// (standalone / stage / job). Performs all the heavy lifting:
 /// validates the front matter, computes every scalar, fans out
@@ -246,43 +276,10 @@ pub(crate) fn build_pipeline_context(
     // future non-Copilot engine whose env happens to contain a COPILOT_PROVIDER_*
     // key is never treated as a Copilot provider credential.
     let is_copilot = matches!(ctx.engine, crate::engine::Engine::Copilot);
-    // Actual provider credential keys (user's casing) for AWF `--exclude-env`.
-    let mut byom_exclude_keys = if is_copilot {
-        crate::engine::copilot_byom_credential_keys(&front_matter.engine)
-    } else {
-        Vec::new()
-    };
-    // Defense-in-depth: when the compiler mints the provider bearer token, also
-    // exclude the intermediate same-job secret var (AW_PROVIDER_BEARER_TOKEN)
-    // from the AWF `--env-all` passthrough. Today ADO never exposes an
-    // `issecret=true` variable as a process env var, so it is not in the AWF host
-    // env and could not be forwarded anyway — but excluding it explicitly makes
-    // the isolation intent self-documenting and fail-safe rather than relying on
-    // that implicit ADO behaviour.
-    if is_copilot
-        && front_matter
-            .engine
-            .provider()
-            .and_then(|p| p.token.as_ref())
-            .is_some()
-    {
-        byom_exclude_keys.push(crate::compile::types::PROVIDER_BEARER_TOKEN_VAR.to_string());
-    }
+    let byom_exclude_keys = copilot_byom_exclude_keys(is_copilot, &front_matter.engine);
     let detection_is_copilot = matches!(detection_engine, crate::engine::Engine::Copilot);
-    let mut detection_byom_exclude_keys = if detection_is_copilot {
-        crate::engine::copilot_byom_credential_keys(&detection_engine_config)
-    } else {
-        Vec::new()
-    };
-    if detection_is_copilot
-        && detection_engine_config
-            .provider()
-            .and_then(|p| p.token.as_ref())
-            .is_some()
-    {
-        detection_byom_exclude_keys
-            .push(crate::compile::types::PROVIDER_BEARER_TOKEN_VAR.to_string());
-    };
+    let detection_byom_exclude_keys =
+        copilot_byom_exclude_keys(detection_is_copilot, &detection_engine_config);
     let detection_engine_env = if detection_is_copilot {
         crate::engine::copilot_detection_env(&detection_engine_config)?
     } else {
