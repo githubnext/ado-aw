@@ -1635,10 +1635,12 @@ pub const ADO_MCP_TOKEN_SENTINEL: &str = "ado-proxy-injects-the-real-credential"
 
 /// Docker network shared by the policy engine and the Azure DevOps MCP.
 ///
-/// Separate from AWF's `awf-net`: AWF's `DOCKER-USER` rules are scoped to its
-/// own bridge (`-i <awf bridge>`), so they do not filter this network. That is
-/// what lets the MCP reach the engine here while still having no unpoliced
-/// route out — its only reachable peer is the engine.
+/// Created `--internal`: a normal user-defined bridge has outbound NAT, which
+/// would leave the MCP a direct route to the internet and reduce the engine to
+/// policing only the single hostname the redirect overrides. Internal networks
+/// still route between their own members, so the MCP reaches the engine and
+/// nothing else. The engine keeps its own egress because AWF dual-homes it
+/// onto `awf-net`, where Squid lives.
 pub const ADO_PROXY_NETWORK_NAME: &str = "ado-aw-proxy-net";
 
 /// Path the public interception CA is mounted at inside client containers.

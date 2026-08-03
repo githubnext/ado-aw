@@ -84,7 +84,7 @@ there is exactly one place where "what may be read" is decided.
 | Client | Ingress | Certificate trust scope |
 |---|---|---|
 | Azure CLI (`az`) | RPC broker: an agent-side wrapper forwards argv to a sidecar that runs the real `az`, pointed at the policy engine with `--organization https://<engine>/<org>` | the `az` process only |
-| Azure DevOps MCP | container attached only to an internal network where `dev.azure.com` is a DNS alias for the policy engine | the MCP container only |
+| Azure DevOps MCP | container on a Docker `--internal` network, where `dev.azure.com` is redirected at the policy engine via `--add-host`. Internal is load-bearing: a normal bridge has outbound NAT and would leave a direct route past the engine | the MCP container only |
 | Hand-rolled `curl` / SDK calls from the Agent | none — Squid denies the protected hosts | none; fails closed |
 
 **Why `az` uses the broker.** `az` accepts an arbitrary base URL, so it can be
@@ -439,6 +439,11 @@ re-derived.
 | **The real container starts from exactly that document** | Piping the captured material into `node:20-slim` with the generated policy mounted brought the engine up on both ingresses (`0.0.0.0:11080` proxy, `0.0.0.0:443` direct TLS) and it published its interception CA to the shared host directory |
 | **The engine polices live traffic through `--add-host`** | A separate container redirected at the engine's IP, trusting only the published CA with verification on, got: allowed discovery → `502 upstream-failed` (policy allowed; egress attempted **only** via the configured Squid, absent locally); a `repos` route outside the granted capabilities → `403 unknown-route`; `/_apis/distributedtask/variablegroups` → `403` always-denied route family. No denial reached an upstream |
 | `--public-ca-file` is an **output**, not a trust store | It is where the engine *writes* its interception CA for clients. Pointing it at `/etc/ssl/certs/ca-certificates.crt` failed `EROFS`. Upstream verification instead uses Node's bundled roots — `node:20-slim` ships **no** OS trust store but carries 144 roots — so nothing needs mounting for it |
+| **A shared bridge is not a boundary; `--internal` is** | A container on a normal user-defined bridge reached `https://example.com` (status 200) through Docker's outbound NAT. On an `--internal` bridge the same request failed, while the container still routed to its peers. A dual-homed container kept full egress via its *second* network. This is why the MCP network is created `--internal`: otherwise the MCP keeps a direct route to every Azure DevOps host the redirect does not override, and the engine polices one hostname rather than the boundary. It corrects an earlier claim in this document that AWF's `DOCKER-USER` scoping alone left the MCP with "no unpoliced route out" |
+| **The full chain works end to end, and the engine injects the credential** | With a fake Squid and a fake Azure DevOps behind it, a client on the internal network got `200` and real JSON. Every request reaching the upstream carried an `Authorization` header, it was the **injected canary**, and the sentinel the client held **never** appeared upstream |
+| **Denied requests never reach the upstream** | Against the same live chain, `distributedtask/variablegroups`, `serviceendpoint`, a `POST` write, and an unknown route all returned `403` with distinct reasons, and the upstream request count was **unchanged** across all four |
+| **The MCP cannot see the credential** | Scanning the MCP container's environment, every mount, `/tmp`, and the process table for the canary found **0 occurrences**; `ADO_MCP_AUTH_TOKEN` held the sentinel |
+| **The MCP starts with no registry access** | On the internal network `npm view` failed `EAI_AGAIN`, yet the MCP completed an `initialize` handshake from the mounted package |
 
 Three harnesses produce this evidence and should become conformance tests:
 

@@ -3267,8 +3267,17 @@ fn prepare_ado_proxy_clients_step() -> BashStep {
         "set -euo pipefail\n\
          \n\
          # Network shared by the policy engine and the Azure DevOps MCP.\n\
+         #\n\
+         # `--internal` is load-bearing, not tidiness. A normal user-defined\n\
+         # bridge has outbound NAT, so the MCP would keep a direct route to the\n\
+         # internet — including Azure DevOps hosts that are not redirected —\n\
+         # and the engine would police only the one hostname we happen to\n\
+         # override. Measured: a container on a normal bridge reaches the\n\
+         # internet; on an internal bridge it cannot, while still reaching its\n\
+         # peers. The engine keeps its own egress because AWF dual-homes it\n\
+         # onto awf-net, where Squid lives.\n\
          if ! docker network inspect {ADO_PROXY_NETWORK_NAME} >/dev/null 2>&1; then\n  \
-           docker network create {ADO_PROXY_NETWORK_NAME}\n\
+           docker network create --internal {ADO_PROXY_NETWORK_NAME}\n\
          fi\n\
          \n\
          # Install the MCP on the runner and stage it for mounting. The\n\
@@ -4309,7 +4318,9 @@ mod tests {
         // address, which does not exist until the engine is running. Starting
         // MCPG first would leave the redirect unresolvable.
         let script = prepare_ado_proxy_clients_step().script;
-        assert!(script.contains(&format!("docker network create {ADO_PROXY_NETWORK_NAME}")));
+        assert!(script.contains(&format!(
+            "docker network create --internal {ADO_PROXY_NETWORK_NAME}"
+        )));
         assert!(
             script.contains(&format!("{ADO_MCP_PACKAGE}@{ADO_MCP_VERSION}")),
             "the MCP package must be pinned, not floating: {script}"
@@ -4321,6 +4332,20 @@ mod tests {
         assert!(
             script.contains("$MCP_INSTALLED\" != \"") ,
             "the resolved version must be verified, not just requested: {script}"
+        );
+    }
+
+    #[test]
+    fn the_mcp_network_has_no_route_to_the_internet() {
+        // Measured, not assumed: a container on a normal user-defined bridge
+        // reaches the internet through Docker's outbound NAT. Without
+        // `--internal` the MCP would keep a direct route to every Azure DevOps
+        // host the redirect does not override, and the engine would police one
+        // hostname rather than the boundary.
+        let script = prepare_ado_proxy_clients_step().script;
+        assert!(
+            script.contains("--internal"),
+            "the MCP must not be able to route past the policy engine: {script}"
         );
     }
 
