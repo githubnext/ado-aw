@@ -26,6 +26,16 @@ suite.
 
 ## Orchestrators
 
+The orchestrators are **not** replaced by the lane model, and are not
+themselves smoke cases. A lane runs a staged `.smoke/pipeline.yml` from
+`ado-aw-mirror`; an orchestrator runs from `githubnext/ado-aw`, builds or
+downloads the compiler, publishes the candidate artifact, stages each case to
+its own ref, and queues the lane. That work cannot live in a lane — it is what
+*drives* the lanes.
+
+What the lane model replaced is the **per-case child definitions**
+(`2554`–`2565`), one per test case. Those are in the retirement table below.
+
 | Definition | Repository | YAML path | Triggers | Definition ID |
 | --- | --- | --- | --- | ---: |
 | `ado-aw candidate compiler smoke` | `githubnext/ado-aw` | `tests/smoke/azure-pipelines-candidate.yml` | PR (comment-gated) + nightly 01:00 UTC | `2559` |
@@ -139,7 +149,12 @@ PR merges.
    ✅ Done on `2559`; the released orchestrator gets it at step 6.
 
 9. ⏳ **Repoint `2559`** at `/tests/smoke/azure-pipelines-candidate.yml` — see
-   the warning above. *Do this at merge, before the next scheduled run.*
+   the warning above — and in the same edit delete its six now-dead
+   `COMPILER_SMOKE_*_DEFINITION_ID` variables. They must go *together*: the old
+   orchestrator YAML reads those variables, and the new one never does, so
+   removing them earlier breaks the running smoke and leaving them afterwards
+   preserves pointers to deleted definitions. *Do this at merge, before the
+   next scheduled run.*
 
 10. ⏳ **Trigger one manual run of each orchestrator** and check the live
     assertions in [`README.md`](README.md). ADO scheduled triggers do not fire
