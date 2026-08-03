@@ -5225,21 +5225,6 @@ fn test_pipeline_filter_has_resources_and_gate() {
     );
 }
 
-/// Agent job depends on Setup when filters are active.
-#[test]
-fn test_pr_filter_agent_depends_on_setup() {
-    let compiled = compile_fixture("pr-filter-tier1-agent.md");
-
-    assert!(
-        compiled.contains("dependsOn: Setup"),
-        "Agent job should depend on Setup"
-    );
-    assert!(
-        compiled.contains("prGate.SHOULD_RUN"),
-        "Agent job condition should reference gate output"
-    );
-}
-
 /// Regression guard for the synth-mode gate-bypass bug: with `mode:
 /// synthetic` (the default) AND `on.pr.filters` present, the Agent-job
 /// condition must REQUIRE the gate to pass for real-PR and synth-PR
@@ -5249,6 +5234,15 @@ fn test_pr_filter_agent_depends_on_setup() {
 #[test]
 fn test_pr_filter_synth_mode_agent_condition_enforces_gate() {
     let compiled = compile_fixture("pr-filter-tier1-agent.md");
+
+    // Agent job must depend on Setup when PR filters are active — the gate
+    // step lives in Setup and the Agent job's condition below reads its
+    // output via `dependencies.Setup.outputs[...]`, which requires the
+    // dependsOn edge to exist.
+    assert!(
+        compiled.contains("dependsOn: Setup"),
+        "Agent job should depend on Setup"
+    );
 
     // Extract the Agent-job dependsOn condition body so the assertions
     // target only that section (the same strings can appear elsewhere —
