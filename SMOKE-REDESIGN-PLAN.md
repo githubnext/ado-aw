@@ -12,23 +12,21 @@
 
 ## Remaining work (ADO-side, cannot be done from a checkout)
 
-The `agentic` lane is **fully provisioned and verified live** — base ref, lane
-definition `2567`, secrets, service connections, agent-pool authorization, and
-a confirming run against the inert base ref. See the ✅ marks in
-[`tests/smoke/REGISTERED.md`](tests/smoke/REGISTERED.md). What is left:
+Provisioning is **complete** — lane `2567`, released orchestrator `2568`,
+queue target `2569`, `2559` repointed, all pool and service-connection
+authorizations, and `E2E_QUEUE_PIPELINE_ID` moved off the retiring `2547`.
+See the ✅ marks in [`tests/smoke/REGISTERED.md`](tests/smoke/REGISTERED.md).
 
-1. At merge: repoint definition `2559` at
-   `tests/smoke/azure-pipelines-candidate.yml` (its current path is deleted by
-   this change) and drop its six dead `COMPILER_SMOKE_*_DEFINITION_ID`
-   variables; register the released orchestrator and the executor-e2e queue
-   target; and set `E2E_QUEUE_PIPELINE_ID` off the retiring `2547`.
-   Authorize the agent pool on every new definition.
-2. Manually run both orchestrators and check the live assertions in
-   `tests/smoke/README.md`.
-3. Only once green: delete definitions `2545`–`2549`, `2554`–`2558`,
+What is left:
+
+1. A green manual run of both orchestrators. The first released run
+   (`629514`) failed in the trigger-policy audit rather than in a case —
+   fixed by #1799; re-run once that merges.
+2. Only once green: delete definitions `2545`–`2549`, `2554`–`2558`,
    `2564`–`2565`; drop the legacy lock paths from the base ref; and remove
    `2545`–`2549` from `tests/smoke/trigger-policy.json` in the same commit —
    the policy audit fetches every listed id and a 404 aborts the run.
+3. Repoint `scripts/rotate-agentplayground-secrets.ps1` at `2567`.
 
 ## Problem
 

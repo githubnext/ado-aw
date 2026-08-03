@@ -39,22 +39,15 @@ What the lane model replaced is the **per-case child definitions**
 | Definition | Repository | YAML path | Triggers | Definition ID |
 | --- | --- | --- | --- | ---: |
 | `ado-aw candidate compiler smoke` | `githubnext/ado-aw` | `tests/smoke/azure-pipelines-candidate.yml` | PR (comment-gated) + nightly 01:00 UTC | `2559` |
-| `ado-aw released smoke` | `githubnext/ado-aw` | `tests/smoke/azure-pipelines-release.yml` | scheduled daily 03:00 UTC | _TBD_ |
+| `ado-aw released smoke` | `githubnext/ado-aw` | `tests/smoke/azure-pipelines-release.yml` | scheduled daily 03:00 UTC | `2568` |
 
 Both use the `github.com_githubnext` service connection.
-
-> **Definition `2559` still points at the OLD path**
-> (`/tests/compiler-smoke-e2e/azure-pipelines.yml`), which this change deletes.
-> Its `process.yamlFilename` **must** be repointed at
-> `/tests/smoke/azure-pipelines-candidate.yml` when the PR merges, or the
-> candidate orchestrator breaks on its next run. It cannot be repointed in
-> advance, because the new path does not exist on `main` until then.
 
 ## Supporting definitions
 
 | Definition | Repository | YAML path | Purpose | Definition ID |
 | --- | --- | --- | --- | ---: |
-| `executor-e2e queue target` | `githubnext/ado-aw` | `tests/executor-e2e/queue-target.yml` | Queue target for the executor-e2e `queue-build` scenario (`E2E_QUEUE_PIPELINE_ID`) | _TBD_ |
+| `executor-e2e queue target` | `githubnext/ado-aw` | `tests/executor-e2e/queue-target.yml` | Queue target for the executor-e2e `queue-build` scenario (`E2E_QUEUE_PIPELINE_ID`) | `2569` |
 
 ## Orchestrator variables
 
@@ -107,9 +100,8 @@ its absence stalls builds silently rather than failing them.
 
 ## One-time setup runbook
 
-Steps 1–3, 5 and part of 8 are **already done** (see the ✅ marks). The rest
-either need a credential no checkout has, or a file that only exists once this
-PR merges.
+Steps 1–9 are **done** (✅). What remains is a live green run of both
+orchestrators, then deleting the retired definitions.
 
 1. ✅ **Base ref created.** `refs/heads/ado-aw-smoke-candidate-base` on
    `ado-aw-mirror` now carries `.smoke/pipeline.yml` with the contents of
@@ -165,29 +157,36 @@ PR merges.
    path and the inert guard all work, and that a lane cannot run without an
    explicitly supplied case ref. Re-run this after any lane change.
 
-6. ⏳ **Register the released orchestrator** from
+6. ✅ **Released orchestrator registered as `2568`** from
    `tests/smoke/azure-pipelines-release.yml` via the `github.com_githubnext`
-   connection, and harden its fork settings (below). *Blocked until merge —
-   the file does not exist on `main` yet.*
+   connection. Pool `1453` and all three service connections authorized.
+   Fork hardening still to apply (below) before it is PR-eligible — it is
+   scheduled-only, so this is defence in depth rather than a gate.
 
-7. ⏳ **Register the queue target** from `tests/executor-e2e/queue-target.yml`,
-   then set `E2E_QUEUE_PIPELINE_ID` on executor-e2e definition `2550` to its
-   id. It is currently `2547`, which step 11 deletes. *Blocked until merge.*
+7. ✅ **Queue target registered as `2569`** from
+   `tests/executor-e2e/queue-target.yml`; `E2E_QUEUE_PIPELINE_ID` on
+   executor-e2e definition `2550` repointed `2547` → `2569`. Verified green
+   (build `629513`).
 
-8. **Set `SMOKE_LANE_AGENTIC_DEFINITION_ID`** on both orchestrators.
-   ✅ Done on `2559`; the released orchestrator gets it at step 6.
+8. ✅ **`SMOKE_LANE_AGENTIC_DEFINITION_ID=2567`** set on both orchestrators
+   (`2559` and `2568`).
 
-9. ⏳ **Repoint `2559`** at `/tests/smoke/azure-pipelines-candidate.yml` — see
-   the warning above — and in the same edit delete its six now-dead
-   `COMPILER_SMOKE_*_DEFINITION_ID` variables. They must go *together*: the old
-   orchestrator YAML reads those variables, and the new one never does, so
-   removing them earlier breaks the running smoke and leaving them afterwards
-   preserves pointers to deleted definitions. *Do this at merge, before the
-   next scheduled run.*
+9. ✅ **`2559` repointed** at `/tests/smoke/azure-pipelines-candidate.yml`,
+   and its six dead `COMPILER_SMOKE_*_DEFINITION_ID` variables deleted in the
+   same edit (rev 11). They had to go together: the old orchestrator YAML read
+   those variables and the new one never does, so removing them earlier would
+   have broken the running smoke, and leaving them would have preserved
+   pointers to deleted definitions.
 
 10. ⏳ **Trigger one manual run of each orchestrator** and check the live
     assertions in [`README.md`](README.md). ADO scheduled triggers do not fire
     until a definition has had at least one run.
+
+    First released run (build `629514`) failed in the trigger-policy audit,
+    not in a case: the audit required `SELF` to be a PR definition, which the
+    scheduled-only released orchestrator is not. Fixed by
+    [#1799](https://github.com/githubnext/ado-aw/pull/1799) — re-run once that
+    merges.
 
 11. ⏳ **Only once both runs are green**, delete the retired definitions, drop
     the legacy lock paths from the base ref, and remove `2545`–`2549` from
@@ -195,9 +194,10 @@ PR merges.
     is not reversible, so this step is deliberately last.
 
 12. ⏳ **Repoint `scripts/rotate-agentplayground-secrets.ps1`** at the lane:
-    both `$copilotDefinitionIds` and `$reporterDefinitionIds` become `2567`.
-    Leaving the retired per-case ids there would rotate secrets onto
-    definitions that no longer exist and silently skip the lane that runs.
+    `$copilotDefinitionIds` becomes `2567` and `$legacyReporterDefinitionIds`
+    is dropped entirely. Leaving the retired per-case ids there would rotate
+    secrets onto definitions that no longer exist and silently skip the lane
+    that runs.
 
 ## Security record
 
