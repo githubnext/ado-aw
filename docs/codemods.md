@@ -21,6 +21,29 @@ whether the input contains the deprecated shape it knows about, and
 either rewrites it or returns "no-op". The whole registry runs on
 every compile; codemods that don't match are essentially free.
 
+### Source provenance (`CodemodContext`)
+
+Most codemods need no context: a renamed or removed key is
+self-evidently the old shape, so detection is enough.
+
+A codemod that migrates a **changed default** cannot work that way,
+because the shape it must detect is an *absence*, and the same absence
+is usually the valid new spelling of something else. Such a codemod
+needs to know how old the source is, and `CodemodContext` carries two
+distinct versions for that:
+
+| Field | Meaning |
+|---|---|
+| `compiler_version` | The **running** `ado-aw` binary. Always at or above any released threshold in production, so it cannot tell an old source from a new one — only tests vary it. |
+| `source_compiler_version` | The version recorded in the source's committed `.lock.yml` header (`# @ado-aw … version=…`), or `None` when there is no compiled output to read it from. This is the only real provenance a codemod gets. |
+
+The **caller** reads the lock header and passes the value in, so
+codemods stay pure (invariant 4). `None` means "treat as newly
+authored" — never migrate on a guess.
+
+A provenance-gated codemod self-retires: once every source has been
+recompiled, its own output records the new version and it stops firing.
+
 ### The compile flow
 
 1. `ado-aw compile` reads the source `.md` and parses the front
@@ -197,9 +220,14 @@ review + per-codemod tests:
    rather than guess. Use `helpers::rename_key` with
    `ConflictPolicy::Error` (the default) to get this for free.
 4. **Pure.** No I/O, no env, no time/randomness. (Convention; not
-   type-enforced.)
+   type-enforced.) Anything ambient a codemod needs is read by the
+   *caller* and handed over on `CodemodContext`.
 5. **Mapping-only.** Cannot inspect the markdown body, the file
-   path, the lock file, or git state.
+   path, or git state. The one piece of outside information
+   available is `CodemodContext::source_compiler_version` — the
+   version from the source's committed `.lock.yml`, read by the
+   caller. Reach for it only to gate a **changed default**; a
+   renamed or removed key never needs it.
 6. **Order-aware.** If codemod B depends on shapes produced by
    codemod A, A must precede B in the registry. Document the
    ordering requirement in B's doc comment.
@@ -407,6 +435,45 @@ standard codemod compile warning tells the author it was auto-removed. It does
 **not** touch `safe-outputs.upload-pipeline-artifact.allowed-build-ids`, which
 stays meaningful (pipeline artifacts use the Build Artifacts `Create` API, which
 can target an arbitrary build).
+
+## Explicit push trigger (`0006_explicit_push_trigger`)
+
+`on:` is the complete declaration of when a pipeline runs, so a source with
+no `on:` key compiles to a manual / API-queued-only pipeline (`trigger: none`
++ `pr: none`). See
+[`docs/front-matter.md`](front-matter.md#push-ci-triggering-onpush).
+
+Before v0.49.0 the compiler emitted **no** top-level `trigger:` key in that
+case, and Azure DevOps reads a missing `trigger:` as *"run CI on every
+branch"* rather than *"no CI"*. Workflows authored against the old compiler
+therefore relied on an implicit all-branches push trigger that the new
+semantics would silently switch off.
+
+This codemod pins the legacy behaviour explicitly, so an `on:`-less source
+becomes:
+
+```yaml
+on:
+  push:
+    branches:
+      include:
+        - '*'
+```
+
+It fires only when the source's committed `.lock.yml` records a version
+older than 0.49.0 — see [Source provenance](#source-provenance-codemodcontext).
+That gate is essential rather than cosmetic: the shape being migrated is an
+*absence*, and under the new semantics the same absence is the intentional
+spelling of "manual-only". Without the gate, every newly authored `on:`-less
+workflow would have a push trigger injected back into its source, making
+manual-only pipelines unreachable.
+
+It does not fire when `on:` already declares any of `push`, `pr`, `schedule`,
+or `pipeline` — those authors already chose. It also migrates only the
+`trigger:` half: the old compiler emitted no `pr:` key either, but in Azure
+Repos the YAML `pr:` block is inert without a server-side Build Validation
+policy, so synthesising an `on.pr` would switch on the whole synthetic-PR
+machinery — a far larger change than the one being preserved.
 
 ## Tests
 

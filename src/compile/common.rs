@@ -195,7 +195,25 @@ pub(crate) fn split_markdown_front_matter(
 /// command). Callers that only want the typed view of the front matter
 /// should use the backward-compatible [`parse_markdown`] wrapper.
 pub fn parse_markdown_detailed(content: &str) -> Result<ParsedSource> {
-    parse_markdown_detailed_with_registry(content, super::codemods::CODEMODS)
+    parse_markdown_detailed_with_registry(content, super::codemods::CODEMODS, None)
+}
+
+/// Variant of [`parse_markdown_detailed`] that supplies the compiler
+/// version recorded in the source's existing `.lock.yml` header.
+///
+/// Codemods that migrate a *changed default* (as opposed to a renamed
+/// key) can only tell an old source from a newly authored one by this
+/// value, so every caller that has the compiled output at hand should
+/// use this entry point rather than [`parse_markdown_detailed`].
+pub fn parse_markdown_detailed_for_source(
+    content: &str,
+    source_compiler_version: Option<&str>,
+) -> Result<ParsedSource> {
+    parse_markdown_detailed_with_registry(
+        content,
+        super::codemods::CODEMODS,
+        source_compiler_version,
+    )
 }
 
 /// Variant of [`parse_markdown_detailed`] that allows injecting an
@@ -205,6 +223,7 @@ pub fn parse_markdown_detailed(content: &str) -> Result<ParsedSource> {
 pub(crate) fn parse_markdown_detailed_with_registry(
     content: &str,
     registry: &[&'static super::codemods::Codemod],
+    source_compiler_version: Option<&str>,
 ) -> Result<ParsedSource> {
     use sha2::Digest;
 
@@ -234,7 +253,7 @@ pub(crate) fn parse_markdown_detailed_with_registry(
     };
 
     // Stage 2: run the codemod registry against the untyped mapping.
-    let report = super::codemods::apply_codemods_with(&mut mapping, registry)
+    let report = super::codemods::apply_codemods_with(&mut mapping, registry, source_compiler_version)
         .context("Failed to apply codemods")?;
 
     // Stage 3: deserialize the (possibly modified) mapping into the
@@ -484,6 +503,39 @@ pub fn validate_front_matter_identity(front_matter: &FrontMatter) -> Result<()> 
                     validate::reject_pipeline_injection(
                         p,
                         &format!("on.pr.paths.exclude entry {:?}", p),
+                    )?;
+                }
+            }
+        }
+
+        // Validate on.push branch/path filters for newlines and ADO expressions
+        if let Some(crate::compile::types::PushTriggerConfig::Filtered(push)) = &trigger_config.push
+        {
+            if let Some(branches) = &push.branches {
+                for b in &branches.include {
+                    validate::reject_pipeline_injection(
+                        b,
+                        &format!("on.push.branches.include entry {:?}", b),
+                    )?;
+                }
+                for b in &branches.exclude {
+                    validate::reject_pipeline_injection(
+                        b,
+                        &format!("on.push.branches.exclude entry {:?}", b),
+                    )?;
+                }
+            }
+            if let Some(paths) = &push.paths {
+                for p in &paths.include {
+                    validate::reject_pipeline_injection(
+                        p,
+                        &format!("on.push.paths.include entry {:?}", p),
+                    )?;
+                }
+                for p in &paths.exclude {
+                    validate::reject_pipeline_injection(
+                        p,
+                        &format!("on.push.paths.exclude entry {:?}", p),
                     )?;
                 }
             }
@@ -5530,6 +5582,7 @@ safe-outputs:
             }),
             pr: None,
             schedule: None,
+            push: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -5548,6 +5601,7 @@ safe-outputs:
             }),
             pr: None,
             schedule: None,
+            push: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -5571,6 +5625,7 @@ safe-outputs:
             }),
             pr: None,
             schedule: None,
+            push: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -5597,6 +5652,7 @@ safe-outputs:
                 ..Default::default()
             }),
             schedule: None,
+            push: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -5623,6 +5679,7 @@ safe-outputs:
                 ..Default::default()
             }),
             schedule: None,
+            push: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -5649,6 +5706,7 @@ safe-outputs:
                 ..Default::default()
             }),
             schedule: None,
+            push: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -5675,6 +5733,7 @@ safe-outputs:
                 ..Default::default()
             }),
             schedule: None,
+            push: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -5701,6 +5760,7 @@ safe-outputs:
                 ..Default::default()
             }),
             schedule: None,
+            push: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -5725,9 +5785,126 @@ safe-outputs:
                 ..Default::default()
             }),
             schedule: None,
+            push: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_ok());
+    }
+
+    /// Build an `on.push` filter config for the injection tests.
+    fn push_filtered(
+        branches: Option<crate::compile::types::BranchFilter>,
+        paths: Option<crate::compile::types::PathFilter>,
+    ) -> OnConfig {
+        OnConfig {
+            pipeline: None,
+            pr: None,
+            schedule: None,
+            push: Some(crate::compile::types::PushTriggerConfig::Filtered(
+                crate::compile::types::PushFilterConfig { branches, paths },
+            )),
+        }
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_newline_in_push_branch_include() {
+        let mut fm = minimal_front_matter();
+        fm.on_config = Some(push_filtered(
+            Some(crate::compile::types::BranchFilter {
+                include: vec!["main\ninjected: true".to_string()],
+                exclude: vec![],
+            }),
+            None,
+        ));
+        let err = validate_front_matter_identity(&fm).unwrap_err().to_string();
+        assert!(err.contains("on.push.branches.include"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_newline_in_push_branch_exclude() {
+        let mut fm = minimal_front_matter();
+        fm.on_config = Some(push_filtered(
+            Some(crate::compile::types::BranchFilter {
+                include: vec![],
+                exclude: vec!["feature\ninjected: true".to_string()],
+            }),
+            None,
+        ));
+        let err = validate_front_matter_identity(&fm).unwrap_err().to_string();
+        assert!(err.contains("on.push.branches.exclude"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_newline_in_push_path_include() {
+        let mut fm = minimal_front_matter();
+        fm.on_config = Some(push_filtered(
+            None,
+            Some(crate::compile::types::PathFilter {
+                include: vec!["src/\ninjected: true".to_string()],
+                exclude: vec![],
+            }),
+        ));
+        let err = validate_front_matter_identity(&fm).unwrap_err().to_string();
+        assert!(err.contains("on.push.paths.include"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_newline_in_push_path_exclude() {
+        let mut fm = minimal_front_matter();
+        fm.on_config = Some(push_filtered(
+            None,
+            Some(crate::compile::types::PathFilter {
+                include: vec![],
+                exclude: vec!["tests/\ninjected: true".to_string()],
+            }),
+        ));
+        let err = validate_front_matter_identity(&fm).unwrap_err().to_string();
+        assert!(err.contains("on.push.paths.exclude"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_ado_expression_in_push_branch() {
+        let mut fm = minimal_front_matter();
+        fm.on_config = Some(push_filtered(
+            Some(crate::compile::types::BranchFilter {
+                include: vec!["$(System.AccessToken)".to_string()],
+                exclude: vec![],
+            }),
+            None,
+        ));
+        assert!(validate_front_matter_identity(&fm).is_err());
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_allows_valid_push_branches_and_paths() {
+        let mut fm = minimal_front_matter();
+        fm.on_config = Some(push_filtered(
+            Some(crate::compile::types::BranchFilter {
+                include: vec!["main".to_string(), "release/*".to_string()],
+                exclude: vec!["feature/*".to_string()],
+            }),
+            Some(crate::compile::types::PathFilter {
+                include: vec!["src/**".to_string()],
+                exclude: vec!["tests/**".to_string()],
+            }),
+        ));
+        assert!(validate_front_matter_identity(&fm).is_ok());
+    }
+
+    /// `push: none` carries no free-form strings, so it must never trip
+    /// the injection sweep.
+    #[test]
+    fn test_validate_front_matter_identity_allows_push_none() {
+        let mut fm = minimal_front_matter();
+        fm.on_config = Some(OnConfig {
+            pipeline: None,
+            pr: None,
+            schedule: None,
+            push: Some(crate::compile::types::PushTriggerConfig::Disabled(
+                crate::compile::types::PushNone::None,
+            )),
+        });
+        assert!(validate_front_matter_identity(&fm).is_ok());
     }
 
     #[test]
@@ -5751,6 +5928,7 @@ safe-outputs:
             }),
             pr: None,
             schedule: None,
+            push: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_ok());
@@ -5786,6 +5964,7 @@ safe-outputs:
             }),
             pr: None,
             schedule: None,
+            push: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -5804,6 +5983,7 @@ safe-outputs:
             }),
             pr: None,
             schedule: None,
+            push: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -5822,6 +6002,7 @@ safe-outputs:
             }),
             pr: None,
             schedule: None,
+            push: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());

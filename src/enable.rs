@@ -780,6 +780,9 @@ async fn process_one(
         .with_context(|| format!("Failed to read source: {}", source_path.display()))?;
     let parsed = compile::parse_markdown_detailed(&content)
         .with_context(|| format!("Failed to parse front matter: {}", source_path.display()))?;
+    // NOTE: `enable` only reads `front_matter.name` for the ADO display name,
+    // which no codemod affects, so it deliberately does not resolve the
+    // source's compiled-output version here.
     let sanitized = sanitize_ado_display_name(&parsed.front_matter.name);
 
     let yaml_filename = compute_yaml_filename(yaml_path);

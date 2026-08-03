@@ -48,7 +48,10 @@ pub use common::normalize_source_path;
 #[allow(unused_imports)]
 pub use common::parse_markdown;
 #[allow(unused_imports)]
-pub use common::{ParsedSource, atomic_write, parse_markdown_detailed, reconstruct_source};
+pub use common::{
+    ParsedSource, atomic_write, parse_markdown_detailed, parse_markdown_detailed_for_source,
+    reconstruct_source,
+};
 pub use types::{CompileTarget, FrontMatter};
 
 /// Trait for pipeline compilers.
@@ -150,7 +153,18 @@ async fn compile_pipeline_inner(
         .with_context(|| format!("Failed to read input file: {}", input_path.display()))?;
     debug!("Input file size: {} bytes", content.len());
 
-    let parsed = common::parse_markdown_detailed_with_registry(&content, registry)?;
+    // Resolve the output path and snapshot the version recorded in any
+    // existing compiled output BEFORE parsing: codemods that migrate a
+    // changed default need it to tell an old source from a new one, and
+    // it also drives the version upgrade note below.
+    let yaml_output_path = resolve_output_path(input_path, output_path)?;
+    let existing_version = read_existing_pipeline_version(&yaml_output_path).await;
+
+    let parsed = common::parse_markdown_detailed_with_registry(
+        &content,
+        registry,
+        existing_version.as_deref(),
+    )?;
     let mut front_matter = parsed.front_matter;
     let mut markdown_body = parsed.markdown_body;
     let codemod_report = parsed.codemods;
@@ -227,17 +241,12 @@ async fn compile_pipeline_inner(
     // caller passes an existing directory, place the compiled file inside
     // it using the default filename derived from the input markdown's stem
     // (e.g. `foo.md` -> `<dir>/foo.lock.yml`).
-    let yaml_output_path = resolve_output_path(input_path, output_path)?;
 
     // Select compiler based on target
     let compiler = select_compiler(&front_matter.target);
     info!("Using {} compiler", compiler.target_name());
 
     log_pipeline_metadata(&front_matter);
-
-    // Snapshot the version in the existing output file before overwriting it.
-    // Used below to emit an upgrade note when the compiler version changes.
-    let existing_version = read_existing_pipeline_version(&yaml_output_path).await;
 
     // Compile (no source mutation yet — a failure here must leave the
     // source byte-identical).
@@ -616,7 +625,10 @@ pub async fn check_pipeline(pipeline_path: &str) -> Result<()> {
             )
         })?;
 
-    let parsed = parse_markdown_detailed(&content)?;
+    let parsed = parse_markdown_detailed_for_source(
+        &content,
+        Some(header_meta.version.as_str()).filter(|v| !v.is_empty()),
+    )?;
 
     // Pending-migration enforcement: `check` MUST NOT silently let
     // a stale source pass. The runtime integrity check inside
@@ -1016,7 +1028,12 @@ pub async fn build_pipeline_ir(input_path: &Path) -> Result<(FrontMatter, ir::Pi
         .await
         .with_context(|| format!("Failed to read input file: {}", input_path.display()))?;
 
-    let parsed = common::parse_markdown_detailed(&content)?;
+    // Match `compile`'s view of the source: codemods that migrate a changed
+    // default are gated on the version recorded in the committed output, so
+    // reading the IR without it would diverge from what `compile` produces.
+    let existing_version =
+        read_existing_pipeline_version(&input_path.with_extension("lock.yml")).await;
+    let parsed = common::parse_markdown_detailed_for_source(&content, existing_version.as_deref())?;
     let mut front_matter = parsed.front_matter;
 
     // Resolve + merge `imports:` so `inspect`/`graph`/`whatif`/`lint`/`trace`
