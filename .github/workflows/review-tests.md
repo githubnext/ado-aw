@@ -27,10 +27,10 @@ imports:
       min-integrity: approved
   - shared/pr-diff-data-fetch.md
 cache:
-  key: pr-prefetch-${{ github.event.pull_request.number || fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_number }}-${{ github.event.pull_request.head.sha || github.run_id }}
+  key: pr-prefetch-full-v1-${{ github.event.pull_request.number || fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_number }}-${{ github.event.pull_request.head.sha || github.run_id }}
   path: /tmp/gh-aw/agent
   restore-keys:
-    - pr-prefetch-${{ github.event.pull_request.number || fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_number }}-
+    - pr-prefetch-full-v1-${{ github.event.pull_request.number || fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_number }}-
 safe-outputs:
   messages:
     footer: "> 🧪 *Test quality analysis by [{workflow_name}]({run_url})*{ai_credits_suffix}{history_link}"
