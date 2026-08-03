@@ -58,9 +58,9 @@ TypeScript *as TypeScript*.
 ## Why this code is unusual
 
 These are not ordinary Node scripts. Each `src/<name>/index.ts` is bundled by
-`ncc` into a single committed `*.js` file that runs on an Azure DevOps build
-agent, often inside a network-isolated sandbox, frequently holding an ADO access
-token. That means:
+`ncc` into a single `*.js` file that runs on an Azure DevOps build agent, often
+inside a network-isolated sandbox, frequently holding an ADO access token. That
+means:
 
 - **A thrown error becomes a failed pipeline stage.** Unhandled rejections are
   not a developer inconvenience; they break customer builds.
@@ -83,8 +83,8 @@ In **one parallel turn**, read:
 - `/tmp/gh-aw/agent/pr-review-comments.json`
 
 Restrict yourself to `scripts/ado-script/**` files in that diff. Note that the
-committed `*.js` bundles and `*.gen.ts` / `*.gen.json` files are deliberately
-excluded from the diff — they are generated, and reviewing them is noise.
+`*.js` bundles and `*.gen.ts` / `*.gen.json` files are deliberately excluded
+from the diff — they are generated, and reviewing them is noise.
 
 **In the same turn**, start the `ts-critic` sub-agent in the background with the
 TypeScript portion of the diff.
