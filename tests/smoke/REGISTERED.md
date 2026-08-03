@@ -162,14 +162,25 @@ access queues it with:
 
 The released orchestrator has no PR trigger at all, so it is scheduled-only and
 belongs in `scheduled_only_definition_ids` in
-[`trigger-policy.json`](trigger-policy.json), alongside the three lanes.
+[`trigger-policy.json`](trigger-policy.json), alongside each registered lane.
 
 No secret values belong in this file.
 
 ## Retired definitions
 
-Superseded by the lane model. **Disable, do not delete, for one release
-cycle** — rollback is re-enabling them plus reverting one PR.
+Superseded by the lane model, and deleted at cutover.
+
+**Delete the ids from [`trigger-policy.json`](trigger-policy.json) first, in
+the same commit that deletes the definitions.** `2545`–`2549` are currently in
+`scheduled_only_definition_ids`, and the audit fetches every listed id with
+`curl --fail-with-body`: a deleted definition returns 404, which fails
+validation, exhausts all three retries, and aborts the run with *"Unable to
+audit scheduled-only definition &lt;id&gt;"*. It fails closed rather than passing
+silently, but it fails **every** smoke run until the file is corrected.
+
+That is the only reason these ids are tracked. Once a definition is gone its
+id means nothing: there is no rollback to re-enable and no trigger left to
+drift. The table below is a record of what was removed, not a live registry.
 
 | Definition IDs | Was | Replaced by |
 | --- | --- | --- |
@@ -178,6 +189,9 @@ cycle** — rollback is re-enabling them plus reverting one PR.
 | `2547` | Also served as the executor-e2e `queue-build` target | Dedicated `queue-target` definition |
 | `2548` | Weekly janitor | `janitor` released-mode case (now daily; its 30-day prune window is idempotent) |
 | `2557` | Candidate janitor | Retired earlier; not reinstated |
+
+Only `2545`–`2549` appear in `trigger-policy.json`; the candidate-lane ids were
+never listed. `2551` stays — it is trigger-e2e, not a retired smoke.
 
 The deterministic E2E definitions are unaffected:
 

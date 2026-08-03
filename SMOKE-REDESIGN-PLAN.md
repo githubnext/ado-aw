@@ -27,7 +27,10 @@
    (the `_note` field in that file states this).
 3. Manually run **both** orchestrators and check the eight live assertions in
    `tests/smoke/README.md`.
-4. Disable — do not delete — definitions `2545`–`2549` and `2554`–`2564`.
+4. Delete definitions `2545`–`2549`, `2554`–`2558` and `2564`–`2565`, removing
+   `2545`–`2549` from `scheduled_only_definition_ids` in
+   `tests/smoke/trigger-policy.json` in the same commit — the policy audit
+   fetches every listed id and a 404 aborts the run.
 
 ## Problem
 
@@ -442,7 +445,7 @@ must be checked after `delete-locks`.
 
 | Risk | Mitigation |
 | --- | --- |
-| Big-bang cutover removes **both** existing smoke signals at once | Manual live run of both orchestrators before merge; all ten old definitions disabled not deleted, so rollback is re-enabling them and reverting one PR |
+| Big-bang cutover removes **both** existing smoke signals at once | Manual live run of both orchestrators before the old definitions are deleted; the new lanes must be proven green first, since deletion is not reversible |
 | Loss of GitHub-backed / committed-artifact execution | Accepted (decision 4). Re-add a single GitHub-backed canary if a metadata regression escapes |
 | `E2E_QUEUE_PIPELINE_ID` breakage | Explicit `queue-target` todo; live assertion #9 |
 | Janitor stops pruning; AgentPlayground fills up | Janitor becomes a daily released-mode case; idempotent 30-day window |
