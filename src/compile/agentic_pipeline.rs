@@ -873,44 +873,69 @@ fn build_triggers(on: &Option<OnConfig>, front_matter: &FrontMatter) -> Result<T
         });
     }
 
-    let has_schedule = !schedules.is_empty();
-    let has_pipeline_trigger = on.as_ref().and_then(|t| t.pipeline.as_ref()).is_some();
+    // `on:` declares when this pipeline runs, and both keys are ALWAYS
+    // emitted: Azure DevOps reads a missing `trigger:` / `pr:` key as
+    // "run on every branch", not "never run". So absence of an `on.*` key
+    // means the corresponding trigger is explicitly disabled, and nothing
+    // needs to "suppress" anything.
 
-    // PR trigger — three branches mirroring `generate_pr_trigger`:
-    //   - explicit `triggers.pr` override → typed PrTrigger { disabled: false, … }
-    //   - suppression (pipeline or schedule configured) → pr: none
-    //   - otherwise → no key (None)
-    let pr = match on.as_ref().and_then(|o| o.pr.as_ref()) {
-        Some(pr_cfg) => Some(build_pr_trigger_from_config(pr_cfg)),
-        None => {
-            if has_pipeline_trigger || has_schedule {
-                Some(PrTrigger {
-                    branches_include: Vec::new(),
-                    branches_exclude: Vec::new(),
-                    paths_include: Vec::new(),
-                    paths_exclude: Vec::new(),
-                    disabled: true,
-                })
-            } else {
-                None
-            }
-        }
-    };
+    // PR trigger — from `on.pr`, else `pr: none`.
+    let pr = Some(match on.as_ref().and_then(|o| o.pr.as_ref()) {
+        Some(pr_cfg) => build_pr_trigger_from_config(pr_cfg),
+        None => PrTrigger::disabled(),
+    });
 
-    // CI trigger — `trigger: none` when pipeline/schedule or policy mode active.
-    let ci = if has_pipeline_trigger || has_schedule {
-        Some(CiTrigger { disabled: true })
-    } else if let Some(pr_cfg) = on.as_ref().and_then(|o| o.pr.as_ref())
-        && matches!(pr_cfg.mode, PrMode::Policy)
-    {
-        Some(CiTrigger { disabled: true })
-    } else {
-        None
-    };
+    // CI/push trigger:
+    //   - explicit `on.push` always wins, including over the synthetic
+    //     mechanism below;
+    //   - `on.pr` in the default `synthetic` mode needs CI-triggered builds
+    //     to react to (it resolves the open PR for `Build.SourceBranch` at
+    //     runtime), so the compiler emits the all-branches trigger as a
+    //     MECHANISM for delivering `on.pr` — not as user intent;
+    //   - otherwise the pipeline does not start on a push.
+    let synthetic_pr = on
+        .as_ref()
+        .and_then(|o| o.pr.as_ref())
+        .is_some_and(|pr_cfg| matches!(pr_cfg.mode, PrMode::Synthetic));
+    let ci = Some(match on.as_ref().and_then(|o| o.push.as_ref()) {
+        Some(push_cfg) => build_ci_trigger_from_config(push_cfg),
+        None if synthetic_pr => CiTrigger::all_branches(),
+        None => CiTrigger::disabled(),
+    });
 
     // Pipeline resources — none for standalone today (handled via legacy
     // generate_pipeline_resources but standalone fixtures don't exercise it).
     Ok(Triggers { schedules, pr, ci })
+}
+
+/// Build the typed CI trigger from an explicit `on.push` block.
+fn build_ci_trigger_from_config(push: &crate::compile::types::PushTriggerConfig) -> CiTrigger {
+    use crate::compile::types::PushTriggerConfig;
+    let filters = match push {
+        PushTriggerConfig::Disabled(_) => return CiTrigger::disabled(),
+        PushTriggerConfig::Filtered(f) => f,
+    };
+    let (b_inc, b_exc) = match &filters.branches {
+        Some(b) => (b.include.clone(), b.exclude.clone()),
+        None => (Vec::new(), Vec::new()),
+    };
+    let (p_inc, p_exc) = match &filters.paths {
+        Some(p) => (p.include.clone(), p.exclude.clone()),
+        None => (Vec::new(), Vec::new()),
+    };
+    // `push: {}` (or one with only empty filter lists) carries no
+    // information; treat it as "every branch" rather than emitting an
+    // invalid empty `trigger:` mapping.
+    if b_inc.is_empty() && b_exc.is_empty() && p_inc.is_empty() && p_exc.is_empty() {
+        return CiTrigger::all_branches();
+    }
+    CiTrigger {
+        branches_include: b_inc,
+        branches_exclude: b_exc,
+        paths_include: p_inc,
+        paths_exclude: p_exc,
+        disabled: false,
+    }
 }
 
 fn build_pr_trigger_from_config(pr: &crate::compile::types::PrTriggerConfig) -> PrTrigger {
@@ -5637,5 +5662,153 @@ safe-outputs:
         )
         .unwrap();
         assert_eq!(out, "Imported guidance line.\n\nConsumer body.");
+    }
+
+    // ─── `on.push` / trigger truth table ────────────────────────────────
+    //
+    // `on:` is the complete declaration of when a pipeline runs. Azure
+    // DevOps reads a *missing* `trigger:` / `pr:` key as "run on every
+    // branch", so the compiler always emits both keys — absence of an
+    // `on.*` key means that trigger is explicitly disabled.
+
+    fn triggers_for(yaml: &str) -> Triggers {
+        let fm = test_front_matter(yaml);
+        build_triggers(&fm.on_config, &fm).expect("build_triggers should succeed")
+    }
+
+    const BASE: &str = "name: t\ndescription: d\n";
+
+    #[test]
+    fn build_triggers_no_on_config_yields_manual_only_pipeline() {
+        let t = triggers_for(BASE);
+        assert!(
+            t.ci.as_ref().expect("ci trigger emitted").disabled,
+            "no `on:` must emit `trigger: none` — a pipeline that never self-starts"
+        );
+        assert!(
+            t.pr.as_ref().expect("pr trigger emitted").disabled,
+            "no `on:` must emit `pr: none`"
+        );
+        assert!(t.schedules.is_empty());
+    }
+
+    #[test]
+    fn build_triggers_push_none_disables_ci() {
+        let t = triggers_for(&format!("{BASE}on:\n  push: none\n"));
+        assert!(t.ci.as_ref().unwrap().disabled);
+    }
+
+    #[test]
+    fn build_triggers_push_filters_emit_branches_and_paths() {
+        let t = triggers_for(&format!(
+            "{BASE}on:\n  push:\n    branches:\n      include: [main]\n      exclude: [wip/*]\n    paths:\n      include: [\"src/**\"]\n      exclude: [\"docs/**\"]\n"
+        ));
+        let ci = t.ci.as_ref().unwrap();
+        assert!(!ci.disabled);
+        assert_eq!(ci.branches_include, vec!["main".to_string()]);
+        assert_eq!(ci.branches_exclude, vec!["wip/*".to_string()]);
+        assert_eq!(ci.paths_include, vec!["src/**".to_string()]);
+        assert_eq!(ci.paths_exclude, vec!["docs/**".to_string()]);
+    }
+
+    #[test]
+    fn build_triggers_synthetic_pr_emits_all_branches_ci_trigger() {
+        // `mode: synthetic` (the default) resolves the open PR for
+        // `Build.SourceBranch` at runtime, so it needs CI-triggered builds
+        // to react to. The all-branches trigger is the MECHANISM that
+        // delivers `on.pr`, not independent user intent.
+        let t = triggers_for(&format!(
+            "{BASE}on:\n  pr:\n    branches:\n      include: [main]\n"
+        ));
+        let ci = t.ci.as_ref().unwrap();
+        assert!(
+            !ci.disabled,
+            "synthetic PR mode needs push-triggered builds"
+        );
+        assert_eq!(ci.branches_include, vec!["*".to_string()]);
+        assert!(!t.pr.as_ref().unwrap().disabled);
+    }
+
+    #[test]
+    fn build_triggers_policy_pr_mode_disables_ci() {
+        // A Build Validation policy fires real PR builds, so a CI trigger
+        // would only queue duplicate feature-branch builds alongside it.
+        let t = triggers_for(&format!(
+            "{BASE}on:\n  pr:\n    mode: policy\n    branches:\n      include: [main]\n"
+        ));
+        assert!(t.ci.as_ref().unwrap().disabled);
+        assert!(!t.pr.as_ref().unwrap().disabled);
+    }
+
+    #[test]
+    fn build_triggers_schedule_alone_disables_ci_and_pr() {
+        let t = triggers_for(&format!("{BASE}on:\n  schedule: daily around 03:00\n"));
+        assert!(t.ci.as_ref().unwrap().disabled);
+        assert!(t.pr.as_ref().unwrap().disabled);
+        assert_eq!(t.schedules.len(), 1);
+    }
+
+    #[test]
+    fn build_triggers_explicit_push_wins_over_schedule() {
+        // "Run nightly, and also whenever `main` moves" is a legitimate
+        // shape — the schedule must not silently swallow `on.push`.
+        let t = triggers_for(&format!(
+            "{BASE}on:\n  schedule: daily around 03:00\n  push:\n    branches:\n      include: [main]\n"
+        ));
+        let ci = t.ci.as_ref().unwrap();
+        assert!(
+            !ci.disabled,
+            "explicit `on.push` must override the schedule"
+        );
+        assert_eq!(ci.branches_include, vec!["main".to_string()]);
+        assert_eq!(t.schedules.len(), 1);
+        assert!(
+            t.pr.as_ref().unwrap().disabled,
+            "`on.push` controls only `trigger:` — `pr:` stays driven by `on.pr`"
+        );
+    }
+
+    #[test]
+    fn build_triggers_explicit_push_wins_over_policy_pr_mode() {
+        let t = triggers_for(&format!(
+            "{BASE}on:\n  pr:\n    mode: policy\n    branches:\n      include: [main]\n  push:\n    branches:\n      include: [main]\n"
+        ));
+        let ci = t.ci.as_ref().unwrap();
+        assert!(!ci.disabled);
+        assert_eq!(ci.branches_include, vec!["main".to_string()]);
+    }
+
+    #[test]
+    fn build_triggers_explicit_push_none_wins_over_synthetic_pr_mode() {
+        // Opting out of push builds defeats synthetic PR resolution, but
+        // it is what the author asked for and must not be second-guessed.
+        let t = triggers_for(&format!(
+            "{BASE}on:\n  push: none\n  pr:\n    branches:\n      include: [main]\n"
+        ));
+        assert!(t.ci.as_ref().unwrap().disabled);
+        assert!(!t.pr.as_ref().unwrap().disabled);
+    }
+
+    #[test]
+    fn build_triggers_empty_push_mapping_means_every_branch() {
+        // `push: {}` carries no filter information; emitting `trigger: {}`
+        // would be invalid ADO, so it degrades to the all-branches form.
+        let t = triggers_for(&format!("{BASE}on:\n  push: {{}}\n"));
+        let ci = t.ci.as_ref().unwrap();
+        assert!(!ci.disabled);
+        assert_eq!(ci.branches_include, vec!["*".to_string()]);
+    }
+
+    #[test]
+    fn on_push_rejects_unknown_scalar_with_actionable_message() {
+        // `push` is an untagged enum; serde's default failure message is
+        // "data did not match any variant", so `expecting` supplies a hint.
+        let err = serde_yaml::from_str::<FrontMatter>(&format!("{BASE}on:\n  push: always\n"))
+            .expect_err("`push: always` must not parse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("none") && msg.contains("branches"),
+            "parse error should name the accepted shapes, got: {msg}"
+        );
     }
 }

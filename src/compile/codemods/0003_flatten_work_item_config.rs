@@ -120,6 +120,7 @@ mod tests {
     fn ctx() -> CodemodContext {
         CodemodContext {
             compiler_version: "0.37.0",
+            source_compiler_version: None,
         }
     }
 

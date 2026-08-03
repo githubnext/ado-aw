@@ -31,14 +31,7 @@ pub static CODEMOD: Codemod = Codemod {
 /// Simple major.minor.patch comparison. Returns true when `version`
 /// is greater than or equal to `threshold`.
 fn version_gte(version: &str, threshold: &str) -> bool {
-    let parse = |s: &str| -> (u32, u32, u32) {
-        let mut parts = s.split('.');
-        let major = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
-        let minor = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
-        let patch = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
-        (major, minor, patch)
-    };
-    parse(version) >= parse(threshold)
+    crate::version::is_at_least(version, threshold)
 }
 
 fn apply_codemod(fm: &mut Mapping, ctx: &CodemodContext) -> Result<bool> {
@@ -88,6 +81,7 @@ mod tests {
     fn ctx(version: &'static str) -> CodemodContext {
         CodemodContext {
             compiler_version: version,
+            source_compiler_version: None,
         }
     }
 

@@ -21,4 +21,5 @@ The compiled YAML must contain:
 - A `PR_SYNTH_SPEC:` env var carrying the base64 spec
 - The broadened `exec-context-pr.js` condition (`or(...)`)
 - The Agent-job `dependsOn` condition with the `AW_SYNTHETIC_PR_SKIP` guard
-- No top-level `trigger:` block (ADO default = "trigger on every branch")
+- A top-level `trigger:` block including every branch (`'*'`), which is the
+  mechanism that delivers the CI-triggered builds synthetic mode reacts to

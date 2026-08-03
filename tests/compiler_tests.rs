@@ -10196,3 +10196,149 @@ safe-outputs:
         "'Install Lean 4 (elan)' step must not appear when lean: false\n{compiled}"
     );
 }
+// ─── `on.push` / top-level trigger emission ─────────────────────────────────
+//
+// `on:` is the complete declaration of when a pipeline runs. Azure DevOps
+// reads a *missing* top-level `trigger:` / `pr:` key as "run on every branch",
+// so the compiler always emits both keys explicitly.
+
+/// Parse compiled YAML and return the top-level `trigger:` node.
+fn top_level_trigger(compiled: &str, fixture: &str) -> serde_yaml::Value {
+    let doc: serde_yaml::Value = serde_yaml::from_str(compiled)
+        .unwrap_or_else(|e| panic!("{fixture} must be valid YAML: {e}"));
+    doc.get("trigger")
+        .unwrap_or_else(|| panic!("{fixture} must emit a top-level `trigger:` key\n{compiled}"))
+        .clone()
+}
+
+fn string_seq(node: &serde_yaml::Value, path: &[&str]) -> Vec<String> {
+    let mut cur = node;
+    for key in path {
+        cur = cur
+            .get(key)
+            .unwrap_or_else(|| panic!("expected `{key}` under {cur:?}"));
+    }
+    cur.as_sequence()
+        .expect("expected a sequence")
+        .iter()
+        .map(|v| v.as_str().expect("expected a string").to_string())
+        .collect()
+}
+
+/// A workflow with no `on:` at all is a manual / API-queued pipeline: it must
+/// never self-start on a push or a pull request.
+#[test]
+fn test_no_on_config_emits_manual_only_pipeline() {
+    let compiled = compile_fixture("minimal-agent.md");
+    assert_valid_yaml(&compiled, "minimal-agent.md");
+    assert!(
+        compiled.contains("trigger: none"),
+        "no `on:` must emit `trigger: none`\n{compiled}"
+    );
+    assert!(
+        compiled.contains("pr: none"),
+        "no `on:` must emit `pr: none`\n{compiled}"
+    );
+}
+
+/// `on.push` with filters lowers to a native ADO `trigger:` block.
+#[test]
+fn test_push_trigger_emits_native_branch_and_path_filters() {
+    let compiled = compile_fixture("push-trigger-agent.md");
+    assert_valid_yaml(&compiled, "push-trigger-agent.md");
+    let trigger = top_level_trigger(&compiled, "push-trigger-agent.md");
+    assert_eq!(
+        string_seq(&trigger, &["branches", "include"]),
+        vec!["main".to_string(), "release/*".to_string()]
+    );
+    assert_eq!(
+        string_seq(&trigger, &["branches", "exclude"]),
+        vec!["wip/*".to_string()]
+    );
+    assert_eq!(
+        string_seq(&trigger, &["paths", "include"]),
+        vec!["src/**".to_string()]
+    );
+    assert_eq!(
+        string_seq(&trigger, &["paths", "exclude"]),
+        vec!["docs/**".to_string()]
+    );
+    // `on.push` controls only `trigger:`; with no `on.pr` the PR half is off.
+    assert!(
+        compiled.contains("pr: none"),
+        "`on.push` alone must still disable PR triggering\n{compiled}"
+    );
+}
+
+/// `on.push: none` wins over the all-branches trigger that synthetic PR mode
+/// would otherwise emit.
+#[test]
+fn test_push_none_overrides_synthetic_pr_ci_trigger() {
+    let compiled = compile_fixture("push-none-agent.md");
+    assert_valid_yaml(&compiled, "push-none-agent.md");
+    let trigger = top_level_trigger(&compiled, "push-none-agent.md");
+    assert_eq!(
+        trigger.as_str(),
+        Some("none"),
+        "explicit `push: none` must win over synthetic mode\n{compiled}"
+    );
+    // The PR half is untouched by `on.push`.
+    assert!(
+        !compiled.contains("pr: none"),
+        "`on.pr` filters must survive `push: none`\n{compiled}"
+    );
+}
+
+/// An explicit `on.push` survives the schedule trigger suppression.
+#[test]
+fn test_push_trigger_survives_schedule_suppression() {
+    let compiled = compile_fixture("push-with-schedule-agent.md");
+    assert_valid_yaml(&compiled, "push-with-schedule-agent.md");
+    let trigger = top_level_trigger(&compiled, "push-with-schedule-agent.md");
+    assert_eq!(
+        string_seq(&trigger, &["branches", "include"]),
+        vec!["main".to_string()],
+        "explicit `on.push` must not be swallowed by the schedule\n{compiled}"
+    );
+    assert!(
+        compiled.contains("schedules:"),
+        "the schedule must still be emitted\n{compiled}"
+    );
+    assert!(
+        compiled.contains("pr: none"),
+        "`on.push` controls only `trigger:`; `pr:` stays suppressed\n{compiled}"
+    );
+}
+
+/// `on.pr` in the default synthetic mode needs CI-triggered builds to react
+/// to, so the compiler emits the all-branches trigger as its mechanism.
+#[test]
+fn test_synthetic_pr_mode_emits_all_branches_ci_trigger() {
+    let compiled = compile_fixture("synthetic-pr-default.md");
+    assert_valid_yaml(&compiled, "synthetic-pr-default.md");
+    let trigger = top_level_trigger(&compiled, "synthetic-pr-default.md");
+    assert_eq!(
+        string_seq(&trigger, &["branches", "include"]),
+        vec!["*".to_string()],
+        "synthetic mode must emit an explicit all-branches trigger\n{compiled}"
+    );
+}
+
+/// Job and stage template targets carry no triggers at all — the consuming
+/// pipeline owns them.
+#[test]
+fn test_template_targets_emit_no_top_level_trigger() {
+    for fixture in ["job-agent.md", "stage-agent.md"] {
+        let compiled = compile_fixture(fixture);
+        let doc: serde_yaml::Value = serde_yaml::from_str(&compiled)
+            .unwrap_or_else(|e| panic!("{fixture} must be valid YAML: {e}"));
+        assert!(
+            doc.get("trigger").is_none(),
+            "{fixture} (template target) must not emit a top-level `trigger:`\n{compiled}"
+        );
+        assert!(
+            doc.get("pr").is_none(),
+            "{fixture} (template target) must not emit a top-level `pr:`\n{compiled}"
+        );
+    }
+}

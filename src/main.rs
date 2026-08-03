@@ -31,6 +31,7 @@ mod status;
 mod tools;
 mod update_check;
 pub mod validate;
+mod version;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};

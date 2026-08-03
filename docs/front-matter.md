@@ -136,6 +136,17 @@ safe-outputs:                  # optional per-tool configuration for safe output
     post-steps:                # trusted ADO steps after AI analysis
       - bash: echo "Run additional scanner"
 on:                            # trigger configuration (unified under on: key)
+                               # `on:` is the COMPLETE declaration of when this
+                               # pipeline runs. Omitting it entirely produces a
+                               # manual / API-queued-only pipeline.
+                               # See "Push (CI) Triggering" below.
+  push:                        # optional: start on pushes (ADO `trigger:`)
+    branches:                  #   `push: none` never starts on a push
+      include: [main]
+      exclude: [wip/*]
+    paths:
+      include: ["src/**"]
+      exclude: ["docs/**"]
   schedule: daily around 14:00 # fuzzy schedule - see docs/schedule-syntax.md
   pipeline:
     name: "Build Pipeline"     # source pipeline name
@@ -167,8 +178,9 @@ on:                            # trigger configuration (unified under on: key)
                                #     matches `branches`/`paths`. No Build
                                #     Validation branch policy required. Zero
                                #     or multiple matches → Agent job
-                               #     self-skips cleanly. CI trigger stays at
-                               #     the ADO default (all branches).
+                               #     self-skips cleanly. Emits an
+                               #     all-branches `trigger:` so those CI
+                               #     builds actually happen.
                                #   - policy: the operator has installed a
                                #     Build Validation branch policy. Compiler
                                #     omits all synth wiring AND emits
@@ -787,6 +799,67 @@ If the token is unavailable, the gate step logs a warning and the build
 completes as "Succeeded" (with the agent job skipped via condition)
 rather than "Cancelled".
 
+## Push (CI) Triggering (`on.push`)
+
+`on:` is the **complete declaration of when a pipeline runs**. If a workflow
+does not ask for a trigger, it does not get one — a workflow with no `on:` key
+at all compiles to a manual / API-queued-only pipeline.
+
+That has to be stated explicitly in the compiled YAML, because Azure DevOps
+reads a **missing** top-level `trigger:` key as *"run CI on every branch"*,
+not *"no CI"*. The compiler therefore always emits both `trigger:` and `pr:`.
+
+```yaml
+on:
+  push: none                   # never start on a push
+```
+
+```yaml
+on:
+  push:                        # start only on pushes to main touching src/
+    branches:
+      include: [main, "release/*"]
+      exclude: ["wip/*"]
+    paths:
+      include: ["src/**"]
+      exclude: ["docs/**"]
+```
+
+`branches` and `paths` are passed through to ADO's native `trigger:` filters
+verbatim; the compiler does not rewrite or narrow them.
+
+### What gets emitted
+
+| Front matter | Top-level `trigger:` |
+|---|---|
+| no `on:` at all | `none` — manual / API-queued only |
+| `on.schedule` or `on.pipeline` only | `none` |
+| `on.pr` (default `mode: synthetic`) | all branches (`include: ['*']`) |
+| `on.pr.mode: policy` | `none` |
+| `on.push: none` | `none` |
+| `on.push: {branches, paths}` | the authored filter block |
+
+**An explicit `on.push` always wins**, including over the all-branches trigger
+that `mode: synthetic` emits and over the `none` that a schedule or
+`mode: policy` would otherwise produce. "Run nightly, *and* whenever `main`
+moves" is a legitimate shape:
+
+```yaml
+on:
+  schedule: daily around 03:00
+  push:
+    branches:
+      include: [main]
+```
+
+`on.push` controls **only** the `trigger:` key. The `pr:` key is independent
+and stays driven by [`on.pr`](#pr-triggering-in-azure-repos) — setting
+`on.push` never enables or disables PR triggering.
+
+> **Note:** `on.push` is unrelated to
+> [`execution-context.ci-push`](execution-context.md), which stages context
+> facts *inside* a build that has already started.
+
 ## PR Triggering in Azure Repos
 
 Azure DevOps Services **ignores the YAML `pr:` block unless a per-branch
@@ -801,8 +874,11 @@ is skipped. PR-aware agents (e.g. PR reviewers) silently degrade.
 
 | `on.pr.mode` | Synthesis wiring | Top-level `trigger:` | Use when |
 |---|---|---|---|
-| `synthetic` (default) | emitted (synthPr Setup step, coalesced env, broadened conditions) | ADO default (all branches) | No branch policy. **The vast majority of agents.** |
+| `synthetic` (default) | emitted (synthPr Setup step, coalesced env, broadened conditions) | all branches (`include: ['*']`) | No branch policy. **The vast majority of agents.** |
 | `policy` | omitted | `trigger: none` | Operator has installed a Build Validation branch policy and wants real PR-typed builds only, no duplicate CI builds. |
+
+An explicit [`on.push`](#push-ci-triggering-onpush) overrides the `trigger:`
+column in both rows.
 
 ### `mode: synthetic` — how it works under the hood
 
@@ -839,12 +915,17 @@ ADO `trigger:` fires on pushes **to** the listed branches. Narrowing
 `trigger:` to `pr.branches.include` would suppress CI on the feature
 branches synthPr actually needs to react to (pushing to `feature/x`
 with an open PR `feature/x → main` would never queue a build). The
-compiler therefore leaves the top-level `trigger:` at the ADO default
-("trigger on every branch") in synth mode, and relies on the synthPr
-Setup step's fast-exit for cost control: a single
+compiler therefore emits an all-branches `trigger:` in synth mode, and
+relies on the synthPr Setup step's fast-exit for cost control: a single
 `listActivePullRequestsBySourceRef` call returns `[]` on branches
 without a matching PR and the Agent job self-skips cleanly via
 `AW_SYNTHETIC_PR_SKIP=true`.
+
+If you do want to narrow it, set [`on.push`](#push-ci-triggering-onpush)
+explicitly — but remember it must cover the **source** branches of the PRs
+you care about, not their target branches. Setting `on.push: none` alongside
+`mode: synthetic` disables synthesis in practice, because there are no CI
+builds left for the synthPr step to run on.
 
 ### `mode: policy` — when to choose it
 

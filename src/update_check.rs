@@ -22,14 +22,14 @@ pub async fn check_for_update() {
     match fetch_latest_tag().await {
         Ok(tag) => {
             let latest = tag.trim_start_matches('v');
-            // Only print if the version parses to a valid semver triple so we
+            // Only print if the version parses to valid semver so we
             // never forward raw API content (e.g. ANSI escape sequences) to
             // the terminal.  Use the reconstructed string, not `latest`.
-            if let Some((maj, min, pat)) = parse_version(latest)
-                && (maj, min, pat) > parse_version(CURRENT_VERSION).unwrap_or((0, 0, 0))
+            if let Some(parsed) = crate::version::parse(latest)
+                && crate::version::parse(CURRENT_VERSION).is_some_and(|cur| parsed > cur)
             {
                 eprintln!(
-                    "A newer version of ado-aw is available: v{maj}.{min}.{pat} (you have v{CURRENT_VERSION}).\n\
+                    "A newer version of ado-aw is available: v{parsed} (you have v{CURRENT_VERSION}).\n\
                      Update at: https://github.com/githubnext/ado-aw/releases/latest"
                 );
             }
@@ -57,31 +57,11 @@ async fn fetch_latest_tag() -> anyhow::Result<String> {
     Ok(release.tag_name)
 }
 
-/// Parse a bare semver string like `"0.31.0"` into `(major, minor, patch)`.
-/// Pre-release suffixes on the patch component (e.g. `"3-beta"`) are accepted;
-/// only the leading numeric part of patch is used.  Returns `None` if the
-/// string is not a valid semver triple.
-fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
-    let mut it = s.split('.');
-    let major = it.next()?.parse().ok()?;
-    let minor = it.next()?.parse().ok()?;
-    let patch: u64 = it
-        .next()?
-        .split(|c: char| !c.is_ascii_digit())
-        .next()
-        .and_then(|n| n.parse().ok())?;
-    Some((major, minor, patch))
-}
-
 /// Returns `true` when `latest` is strictly greater than `current`.
 /// Both strings are expected to be bare semver triples, e.g. `"0.31.0"`.
-/// Extra version components (pre-release suffixes, build metadata) are ignored.
 #[cfg(test)]
 fn is_newer(latest: &str, current: &str) -> bool {
-    match (parse_version(latest), parse_version(current)) {
-        (Some(l), Some(c)) => l > c,
-        _ => false,
-    }
+    crate::version::is_older_than(current, latest)
 }
 
 #[cfg(test)]
