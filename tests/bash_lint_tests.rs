@@ -85,6 +85,7 @@ const FIXTURES: &[&str] = &[
     "manual-review-agent.md",
     "github-app-token-agent.md",
     "custom-safe-output-bash-coverage.md",
+    "pipeline-artifact-agent.md",
 ];
 
 /// Step display names that the lint expects to find at least once across all
@@ -142,6 +143,7 @@ const REQUIRED_STEP_DISPLAY_NAMES: &[&str] = &[
     "Prepare custom safe-output executor", // src/compile/agentic_pipeline.rs prepare_custom_executor_binary_step
     "Write custom job runtime config", // src/compile/agentic_pipeline.rs write_custom_runtime_config_step
     "Prepare custom Agent output", // src/compile/agentic_pipeline.rs prepare_custom_agent_output_step
+    "Stage candidate ado-aw scripts", // src/compile/extensions/ado_script.rs install_and_download_steps_typed() (activated by supply-chain.pipeline-artifact)
 ];
 
 fn ado_aw_binary() -> PathBuf {
