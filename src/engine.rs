@@ -1100,23 +1100,21 @@ fn copilot_install_steps(
                 // system variable $(System.CollectionUri) at runtime and
                 // stores it as a pipeline variable.
                 //
-                // $(System.CollectionUri) is expanded by ADO before bash runs
-                // (e.g. "https://dev.azure.com/myorg/"); the parameter
-                // expansions strip the prefix and trailing slash to yield just
-                // the org name ("myorg").
-                let step = "\
+                // Uses the shared derivation so this and the ado-proxy policy
+                // step cannot disagree about what the organization is. The
+                // previous local implementation stripped a literal
+                // `https://dev.azure.com/` prefix, which is a no-op for a
+                // `*.visualstudio.com` or on-prem collection URL.
+                let resolve = crate::compile::resolve_ado_organization_bash("    ");
+                let step = format!(
+                    "\
 - bash: |
     set -eo pipefail
-    # $(System.CollectionUri) is expanded by ADO before bash runs,
-    # e.g. \"https://dev.azure.com/myorg/\".
-    _COLLECTION_URI=\"$(System.CollectionUri)\"
-    _ORG=\"${_COLLECTION_URI#https://dev.azure.com/}\"
-    _ORG=\"${_ORG%/}\"
-    echo \"##vso[task.setvariable variable=AW_ADO_ORG]$_ORG\"
+{resolve}    echo \"##vso[task.setvariable variable=AW_ADO_ORG]$ADO_PROXY_ORGANIZATION\"
   displayName: \"Resolve ADO organization\"
 
 "
-                .to_string();
+                );
                 (step, "$(AW_ADO_ORG)".to_string())
             }
         };

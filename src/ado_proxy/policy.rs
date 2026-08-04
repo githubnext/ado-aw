@@ -19,12 +19,67 @@ use serde::Serialize;
 use super::catalog::{
     CATALOG_SCHEMA_VERSION, Capability, ORGANIZATION_HOST, SPS_FALLBACK_HOST,
 };
+use crate::compile::types::FrontMatter;
+
+/// Resolve the capabilities the policy engine should enable.
+///
+/// An author who names `capabilities:` gets exactly those, plus the always-on
+/// ones. Omitting the key selects the whole catalog — deliberately broad
+/// *within* a narrow boundary: every catalogued operation is a `GET` or
+/// `OPTIONS`, and the always-denied route families exclude ACLs, tokens,
+/// service endpoints, variable groups and secure files. Starting narrower
+/// would leave the Azure DevOps MCP unable to answer most questions, which
+/// pushes authors back towards handing agents raw credentials — the outcome
+/// this design exists to prevent.
+///
+/// The result is always in [`Capability::ALL`] order, so reordering a
+/// `capabilities:` list cannot change the compiled pipeline.
+pub fn ado_proxy_capabilities(front_matter: &FrontMatter) -> Vec<Capability> {
+    let requested: Option<Vec<Capability>> = front_matter
+        .permissions
+        .as_ref()
+        .and_then(|permissions| permissions.read.as_ref())
+        .and_then(crate::compile::types::ReadPermissionConfig::options)
+        .filter(|options| !options.capabilities.is_empty())
+        .map(|options| {
+            options
+                .capabilities
+                .iter()
+                .map(|capability| capability.to_catalog())
+                .collect()
+        });
+
+    Capability::ALL
+        .iter()
+        .copied()
+        .filter(|capability| match &requested {
+            // `discovery` is always on: every client resolves resource areas
+            // before its first real call, so a policy without it produces a
+            // proxy no supported client can actually use.
+            Some(selected) => capability.is_always_on() || selected.contains(capability),
+            None => true,
+        })
+        .collect()
+}
 
 /// Placeholder substituted with the organization name at step time.
 pub const ORGANIZATION_PLACEHOLDER: &str = "${ADO_PROXY_ORGANIZATION}";
 
 /// Placeholder substituted with the project name at step time.
 pub const PROJECT_PLACEHOLDER: &str = "${ADO_PROXY_PROJECT}";
+
+/// Placeholder substituted with the project GUID at step time.
+///
+/// Clients address the current project by name in some calls and by GUID in
+/// others — `az` substitutes whichever it cached — so both forms must be
+/// present or a GUID-addressed request is denied.
+pub const PROJECT_ID_PLACEHOLDER: &str = "${ADO_PROXY_PROJECT_ID}";
+
+/// Placeholder substituted with the current repository name at step time.
+pub const REPOSITORY_PLACEHOLDER: &str = "${ADO_PROXY_REPOSITORY}";
+
+/// Placeholder substituted with the current repository GUID at step time.
+pub const REPOSITORY_ID_PLACEHOLDER: &str = "${ADO_PROXY_REPOSITORY_ID}";
 
 /// The policy document handed to the `ado-proxy` bundle via `--policy-file`.
 ///
@@ -48,19 +103,29 @@ pub struct PolicyDocument {
 }
 
 impl PolicyDocument {
-    /// Build the document for a set of author-requested capabilities.
+    /// Build the document from the compiler's own configuration.
+    ///
+    /// Taking [`FrontMatter`] rather than a capability slice is deliberate. A
+    /// constructor narrower than the configuration cannot express it, so every
+    /// input it cannot see becomes a silent default — and because the bundle
+    /// treats an absent field as "match nothing", each of those defaults is an
+    /// invisible *denial* rather than a loud error. That is how the current
+    /// repository came to be unreachable: `repository` was hard-coded `None`,
+    /// omitted from the JSON, and twelve catalogued operations denied
+    /// unconditionally without a single test noticing.
+    ///
+    /// Adding a field to this struct should therefore force a decision about
+    /// which piece of configuration populates it.
     ///
     /// Always-on capabilities are added regardless of what the author asked
     /// for, and the result is emitted in [`Capability::ALL`] order so the
     /// document is stable no matter how the front matter was written — an
     /// author reordering their `capabilities:` list must not produce a
     /// different pipeline.
-    pub fn new(requested: &[Capability]) -> Self {
-        let capabilities = Capability::ALL
+    pub fn new(front_matter: &FrontMatter) -> Self {
+        let requested = ado_proxy_capabilities(front_matter);
+        let capabilities = requested
             .iter()
-            .filter(|capability| {
-                capability.is_always_on() || requested.contains(capability)
-            })
             .map(|capability| capability.as_str())
             .collect();
 
@@ -68,9 +133,13 @@ impl PolicyDocument {
             catalog_version: CATALOG_SCHEMA_VERSION,
             organization: ORGANIZATION_PLACEHOLDER.to_string(),
             project: PROJECT_PLACEHOLDER.to_string(),
-            project_id: None,
-            repository: None,
-            repository_id: None,
+            // Substituted at step time like the organization and project. A
+            // compiled pipeline is routinely queued against a different
+            // project than the one it was compiled in, so baking these in
+            // would make a lock file wrong the moment it moved.
+            project_id: Some(PROJECT_ID_PLACEHOLDER.to_string()),
+            repository: Some(REPOSITORY_PLACEHOLDER.to_string()),
+            repository_id: Some(REPOSITORY_ID_PLACEHOLDER.to_string()),
             capabilities,
             // Every catalogued host must appear: one the bundle policed but
             // the document omitted would be byte-tunnelled to Squid instead,
@@ -90,9 +159,26 @@ impl PolicyDocument {
 mod tests {
     use super::*;
 
+    /// Front matter with no explicit read policy — the common case.
+    fn plain() -> FrontMatter {
+        crate::compile::parse_markdown("---\nname: t\ndescription: x\n---\n")
+            .unwrap()
+            .0
+    }
+
+    /// Front matter naming an explicit capability set.
+    fn with_capabilities(list: &str) -> FrontMatter {
+        crate::compile::parse_markdown(&format!(
+            "---\nname: t\ndescription: x\npermissions:\n  read:\n    \
+             service-connection: my-read-sc\n    capabilities: [{list}]\n---\n"
+        ))
+        .unwrap()
+        .0
+    }
+
     #[test]
     fn discovery_is_present_even_when_unrequested() {
-        let document = PolicyDocument::new(&[Capability::Repos]);
+        let document = PolicyDocument::new(&with_capabilities("repos"));
         assert!(
             document.capabilities.contains(&"discovery"),
             "discovery is always on; without it no supported client can \
@@ -103,8 +189,8 @@ mod tests {
 
     #[test]
     fn capability_order_is_independent_of_request_order() {
-        let one = PolicyDocument::new(&[Capability::Boards, Capability::Core]);
-        let two = PolicyDocument::new(&[Capability::Core, Capability::Boards]);
+        let one = PolicyDocument::new(&with_capabilities("boards, core"));
+        let two = PolicyDocument::new(&with_capabilities("core, boards"));
         assert_eq!(
             one.capabilities, two.capabilities,
             "author-visible ordering must not change the compiled pipeline"
@@ -113,14 +199,31 @@ mod tests {
 
     #[test]
     fn unrequested_capabilities_are_absent() {
-        let document = PolicyDocument::new(&[]);
+        let document = PolicyDocument::new(&with_capabilities("repos"));
         for capability in Capability::ALL {
-            if capability.is_always_on() {
+            if capability.is_always_on() || *capability == Capability::Repos {
                 continue;
             }
             assert!(
                 !document.capabilities.contains(&capability.as_str()),
-                "{} was never requested and must not be granted",
+                "{} was never requested and must not be granted: {:?}",
+                capability.as_str(),
+                document.capabilities
+            );
+        }
+    }
+
+    #[test]
+    fn omitting_capabilities_selects_the_whole_catalog() {
+        // Deliberately broad within a narrow boundary: every catalogued
+        // operation is a GET or OPTIONS, and secret-bearing route families are
+        // denied outright. Starting narrower would leave the MCP unable to
+        // answer most questions.
+        let document = PolicyDocument::new(&plain());
+        for capability in Capability::ALL {
+            assert!(
+                document.capabilities.contains(&capability.as_str()),
+                "{} must be granted when the author names none",
                 capability.as_str()
             );
         }
@@ -128,7 +231,7 @@ mod tests {
 
     #[test]
     fn every_catalogued_protected_host_is_declared() {
-        let document = PolicyDocument::new(&[]);
+        let document = PolicyDocument::new(&plain());
         for host in super::super::catalog::catalog().protected_hosts {
             assert!(
                 document.protected_hosts.contains(host),
@@ -140,7 +243,7 @@ mod tests {
 
     #[test]
     fn catalog_version_matches_the_catalog() {
-        let document = PolicyDocument::new(&[]);
+        let document = PolicyDocument::new(&plain());
         assert_eq!(
             document.catalog_version,
             catalog_version_from_catalog(),
@@ -153,20 +256,43 @@ mod tests {
     }
 
     #[test]
-    fn scope_is_left_as_placeholders_for_step_time_substitution() {
-        let document = PolicyDocument::new(&[]);
-        assert_eq!(document.organization, ORGANIZATION_PLACEHOLDER);
-        assert_eq!(document.project, PROJECT_PLACEHOLDER);
+    fn every_current_scope_identifier_is_emitted() {
+        // The regression that motivated taking the config: `repository` was
+        // hard-coded `None` and omitted from the JSON, so the bundle — which
+        // treats absent as "match nothing" — denied all twelve catalogued
+        // repository operations without a single test noticing.
+        let json = PolicyDocument::new(&plain()).to_json();
+        for field in [
+            "organization",
+            "project",
+            "project_id",
+            "repository",
+            "repository_id",
+        ] {
+            assert!(
+                json.contains(&format!("\"{field}\"")),
+                "{field} is absent, which the bundle reads as match-nothing: {json}"
+            );
+        }
+        assert!(
+            !json.contains("null"),
+            "a present-but-null field is not the same as an absent one: {json}"
+        );
     }
 
     #[test]
-    fn json_omits_unset_optional_scope_fields() {
-        // The bundle rejects unknown keys, and treats a present-but-null
-        // narrowing field differently from an absent one. Emitting `null`
-        // would be a startup failure.
-        let json = PolicyDocument::new(&[]).to_json();
-        assert!(!json.contains("null"), "unset scope fields must be omitted: {json}");
-        assert!(!json.contains("project_id"));
-        assert!(!json.contains("repository"));
+    fn scope_is_left_as_placeholders_for_step_time_substitution() {
+        // A compiled pipeline is routinely queued against a different project
+        // than it was compiled in, so baking any of these in would make a lock
+        // file wrong the moment it moved.
+        let document = PolicyDocument::new(&plain());
+        assert_eq!(document.organization, ORGANIZATION_PLACEHOLDER);
+        assert_eq!(document.project, PROJECT_PLACEHOLDER);
+        assert_eq!(document.project_id.as_deref(), Some(PROJECT_ID_PLACEHOLDER));
+        assert_eq!(document.repository.as_deref(), Some(REPOSITORY_PLACEHOLDER));
+        assert_eq!(
+            document.repository_id.as_deref(),
+            Some(REPOSITORY_ID_PLACEHOLDER)
+        );
     }
 }

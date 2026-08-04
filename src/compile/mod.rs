@@ -51,6 +51,7 @@ pub use common::AWF_VERSION;
 pub use common::HEADER_MARKER;
 pub use common::MCPG_VERSION;
 pub use common::normalize_source_path;
+pub use common::resolve_ado_organization_bash;
 #[allow(unused_imports)]
 pub use common::parse_markdown;
 #[allow(unused_imports)]

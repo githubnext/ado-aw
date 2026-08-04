@@ -1647,6 +1647,42 @@ pub const ADO_PROXY_NETWORK_NAME: &str = "ado-aw-proxy-net";
 /// Path the public interception CA is mounted at inside client containers.
 pub const ADO_MCP_CA_MOUNT: &str = "/etc/ado-proxy/ca.pem";
 
+/// Bash that derives the Azure DevOps organization name from
+/// `$(System.CollectionUri)` into `$ADO_PROXY_ORGANIZATION`.
+///
+/// `indent` is the leading whitespace each emitted line needs, so the same
+/// helper can be dropped into differently-indented bodies.
+///
+/// One implementation on purpose, because the two it replaced were both wrong
+/// for a form the other handled. `engine.rs` stripped a literal
+/// `https://dev.azure.com/` prefix, a no-op for `https://myorg.visualstudio.com/`
+/// that yields the whole URL; taking the last path segment gets `dev.azure.com`
+/// URLs right but returns `myorg.visualstudio.com` for the legacy host form.
+///
+/// Both collection shapes are still issued by Azure DevOps, so this handles
+/// each explicitly: with a path segment after the host, the last segment is
+/// the organization (or collection); with none, the first label of the host
+/// is. Getting this wrong is not cosmetic — in a policy document a wrong
+/// organization matches nothing, denying every request in a way that reads as
+/// a deliberate policy decision.
+pub fn resolve_ado_organization_bash(indent: &str) -> String {
+    format!(
+        "{indent}# $(System.CollectionUri) is expanded by ADO before bash runs. Two\n\
+         {indent}# shapes are in use: \"https://dev.azure.com/myorg/\" (organization in\n\
+         {indent}# the path) and the legacy \"https://myorg.visualstudio.com/\"\n\
+         {indent}# (organization in the host). Handle both — a fixed-prefix strip or a\n\
+         {indent}# bare last-segment rule is silently wrong for one of them.\n\
+         {indent}ADO_PROXY_COLLECTION=\"$(System.CollectionUri)\"\n\
+         {indent}ADO_PROXY_ORGANIZATION=$(printf '%s' \"$ADO_PROXY_COLLECTION\" \\\n\
+         {indent}  | sed -e 's#^https\\?://##' -e 's#/*$##' \\\n\
+         {indent}  | awk -F/ '{{ if (NF>1) print $NF; else {{ sub(/\\..*$/, \"\", $1); print $1 }} }}')\n\
+         {indent}if [ -z \"$ADO_PROXY_ORGANIZATION\" ]; then\n\
+         {indent}  echo \"##vso[task.complete result=Failed]cannot determine the Azure DevOps organization from System.CollectionUri\"\n\
+         {indent}  exit 1\n\
+         {indent}fi\n"
+    )
+}
+
 /// Whether this workflow routes Azure DevOps access through the policy engine.
 ///
 /// Enabling `tools.azure-devops` is what pulls in the engine: the MCP is
@@ -1703,20 +1739,10 @@ pub fn az_allowed_groups(capabilities: &[Capability]) -> Vec<&'static str> {
 
 /// Resolve the capabilities the policy engine should enable.
 ///
-/// Defaults to the full catalog. That is deliberately broad *within* a narrow
-/// boundary: every catalogued operation is a `GET` or `OPTIONS`, and the
-/// always-denied route families exclude ACLs, tokens, service endpoints,
-/// variable groups and secure files. So the default grants read access to
-/// project metadata the agent could already reach, while removing the
-/// credential that previously made writes and secret reads possible at all.
-///
-/// Starting narrower would leave the Azure DevOps MCP unable to answer most
-/// questions, which pushes authors back towards handing agents raw
-/// credentials — the outcome this design exists to prevent. `permissions.read`
-/// narrows this set once its object form is accepted.
-pub fn ado_proxy_capabilities(_front_matter: &FrontMatter) -> Vec<Capability> {
-    Capability::ALL.to_vec()
-}
+/// Re-exported from [`crate::ado_proxy::policy`], which owns the rule, so the
+/// `az` wrapper's allow-list and the emitted policy document cannot disagree
+/// about what the agent may read.
+pub use crate::ado_proxy::policy::ado_proxy_capabilities;
 
 /// Runner-side path of the CA certificate the policy engine publishes.
 ///
@@ -5618,7 +5644,46 @@ safe-outputs:
     }
 
     #[test]
+    fn resolve_ado_organization_handles_every_collection_form() {
+        // Regression guard for the two derivations this replaced, each of
+        // which was silently wrong for a form the other handled: a literal
+        // `https://dev.azure.com/` prefix strip is a no-op for
+        // `https://myorg.visualstudio.com/`, while a bare last-path-segment
+        // rule returns `myorg.visualstudio.com` for that same URL. Measured
+        // against both shapes plus an on-prem collection.
+        let script = resolve_ado_organization_bash("");
+        assert!(
+            !script.contains("#https://dev.azure.com/"),
+            "must not strip a fixed prefix: {script}"
+        );
+        assert!(
+            script.contains("if (NF>1) print $NF"),
+            "path form must yield the last segment: {script}"
+        );
+        assert!(
+            script.contains("sub(/\\..*$/, \"\", $1)"),
+            "host form must yield the first host label: {script}"
+        );
+        assert!(
+            script.contains("cannot determine the Azure DevOps organization"),
+            "an empty organization must fail loudly, not match nothing"
+        );
+    }
+
+    #[test]
+    fn resolve_ado_organization_indents_every_line() {
+        let script = resolve_ado_organization_bash("    ");
+        for line in script.lines().filter(|line| !line.is_empty()) {
+            assert!(
+                line.starts_with("    "),
+                "every line must carry the requested indent: {line:?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_validate_permissions_read_policy_allows_scalar_and_rejects_object() {
+
         let (scalar, _) = parse_markdown(
             "---\nname: test\ndescription: test\npermissions:\n  read: my-read-sc\n---\n",
         )

@@ -71,7 +71,7 @@ use super::common::{
     HEADER_MARKER, MCPG_CONTAINER_NAME, MCPG_DOMAIN, MCPG_IMAGE, MCPG_PORT, MCPG_VERSION, image_ref,
 };
 use super::extensions::ado_script as paths;
-use crate::ado_proxy::catalog::{self, Capability};
+use crate::ado_proxy::catalog;
 use crate::ado_proxy::policy::PolicyDocument;
 use super::extensions::{CompileContext, CompilerExtension, Declarations, Extension, McpgConfig};
 use super::ir::condition::{Condition, Expr};
@@ -1001,9 +1001,7 @@ fn build_agent_job(
         .is_some_and(|tools| tools.azure_devops.is_some());
     if ado_proxy_enabled {
         steps.push(Step::Bash(prepare_ado_proxy_clients_step()));
-        steps.push(Step::Bash(start_ado_proxy_step(
-            &common::ado_proxy_capabilities(front_matter),
-        )));
+        steps.push(Step::Bash(start_ado_proxy_step(front_matter)));
     }
 
     // 15. MCP Gateway (MCPG), which launches SafeOutputs as a stdio child.
@@ -3334,8 +3332,8 @@ fn stop_mcpg_step() -> BashStep {
 /// design exists to withhold.
 ///
 /// Not yet emitted: see [`stop_ado_proxy_step`].
-fn start_ado_proxy_step(capabilities: &[Capability]) -> BashStep {
-    let policy = PolicyDocument::new(capabilities).to_json();
+fn start_ado_proxy_step(front_matter: &FrontMatter) -> BashStep {
+    let policy = PolicyDocument::new(front_matter).to_json();
     let hosts = catalog::catalog().protected_hosts;
     // Mint one leaf per catalogued protected host. A host without a leaf
     // cannot be intercepted, so this list must track the catalog rather than
@@ -3363,9 +3361,16 @@ fn start_ado_proxy_step(capabilities: &[Capability]) -> BashStep {
          # Policy document. Non-secret, so it is mounted rather than streamed.\n\
          # Scope is substituted here rather than at compile time so the same\n\
          # compiled pipeline can be queued against a different project.\n\
-         ADO_PROXY_COLLECTION=\"$(System.CollectionUri)\"\n\
-         ADO_PROXY_ORGANIZATION=$(printf '%s' \"$ADO_PROXY_COLLECTION\" | sed -e 's#/*$##' -e 's#.*/##')\n\
+         #\n\
+         # Both the name and the GUID of the project and repository are\n\
+         # supplied: clients address them either way — `az` substitutes\n\
+         # whichever it cached — and the bundle treats an absent identifier as\n\
+         # matching nothing, so omitting one is a silent denial.\n\
+{org_resolve}\
          ADO_PROXY_PROJECT=\"$(System.TeamProject)\"\n\
+         ADO_PROXY_PROJECT_ID=\"$(System.TeamProjectId)\"\n\
+         ADO_PROXY_REPOSITORY=\"$(Build.Repository.Name)\"\n\
+         ADO_PROXY_REPOSITORY_ID=\"$(Build.Repository.ID)\"\n\
          mkdir -p \"$PROXY_DIR/policy\"\n\
          cat > \"$PROXY_DIR/policy/policy.json\" <<'ADO_PROXY_POLICY_EOF'\n\
          {policy}\n\
@@ -3373,7 +3378,18 @@ fn start_ado_proxy_step(capabilities: &[Capability]) -> BashStep {
          sed -i \\\n  \
            -e \"s|\\${{ADO_PROXY_ORGANIZATION}}|$ADO_PROXY_ORGANIZATION|g\" \\\n  \
            -e \"s|\\${{ADO_PROXY_PROJECT}}|$ADO_PROXY_PROJECT|g\" \\\n  \
+           -e \"s|\\${{ADO_PROXY_PROJECT_ID}}|$ADO_PROXY_PROJECT_ID|g\" \\\n  \
+           -e \"s|\\${{ADO_PROXY_REPOSITORY}}|$ADO_PROXY_REPOSITORY|g\" \\\n  \
+           -e \"s|\\${{ADO_PROXY_REPOSITORY_ID}}|$ADO_PROXY_REPOSITORY_ID|g\" \\\n  \
            \"$PROXY_DIR/policy/policy.json\"\n\
+         \n\
+         # A surviving placeholder would be read as a literal organization or\n\
+         # repository name, matching nothing — a total denial that reads as a\n\
+         # policy decision rather than a bug.\n\
+         if grep -q 'ADO_PROXY_' \"$PROXY_DIR/policy/policy.json\"; then\n  \
+           echo \"##vso[task.complete result=Failed]ado-proxy policy still contains an unsubstituted placeholder\"\n  \
+           exit 1\n\
+         fi\n\
          echo \"ado-proxy policy:\"\n\
          python3 -m json.tool < \"$PROXY_DIR/policy/policy.json\"\n\
          \n\
@@ -3462,6 +3478,7 @@ fn start_ado_proxy_step(capabilities: &[Capability]) -> BashStep {
          fi\n\
          echo \"ado-proxy is ready at $ADO_PROXY_IP\"\n\
          echo \"##vso[task.setvariable variable=ADO_PROXY_IP]$ADO_PROXY_IP\"\n",
+        org_resolve = common::resolve_ado_organization_bash("         "),
         ado_proxy_path = paths::ADO_PROXY_PATH,
         ca_host_path = ADO_PROXY_PUBLIC_CA_HOST_PATH,
         az_wrapper_dir = AZ_WRAPPER_DIR,
@@ -4328,7 +4345,7 @@ mod tests {
         // Real `az` hit exactly that: Python's requests verified the chain
         // strictly and refused, while every Node client had been happy. The
         // key usage must therefore be declared explicitly.
-        let script = start_ado_proxy_step(&[]).script;
+        let script = start_ado_proxy_step(&proxy_fm()).script;
         assert!(
             script.contains("keyUsage=critical,keyCertSign,cRLSign"),
             "the CA must declare keyCertSign or strict verifiers reject it: {script}"
@@ -4350,18 +4367,53 @@ mod tests {
     }
 
     #[test]
-    fn the_default_capability_set_is_the_whole_catalog() {
-        // Deliberately broad within a narrow boundary: every catalogued
-        // operation is a GET or OPTIONS, and secret-bearing route families are
-        // denied outright. Starting narrower would leave the MCP unable to
-        // answer most questions, pushing authors back to raw credentials.
-        let (fm, _) = crate::compile::parse_markdown(
-            "---\nname: t\ndescription: x\ntools:\n  azure-devops:\n    org: 'myorg'\n---\n",
-        )
-        .unwrap();
+    fn ado_proxy_supplies_every_current_scope_identifier() {
+        // The bundle treats an absent identifier as matching nothing, so a
+        // missing one is a silent denial rather than an error. `repository`
+        // was previously omitted entirely, which killed all twelve catalogued
+        // repository operations without any test noticing.
+        let script = start_ado_proxy_step(&proxy_fm()).script;
+        for (variable, macro_name) in [
+            ("ADO_PROXY_PROJECT", "System.TeamProject"),
+            ("ADO_PROXY_PROJECT_ID", "System.TeamProjectId"),
+            ("ADO_PROXY_REPOSITORY", "Build.Repository.Name"),
+            ("ADO_PROXY_REPOSITORY_ID", "Build.Repository.ID"),
+        ] {
+            assert!(
+                script.contains(&format!("{variable}=\"$({macro_name})\"")),
+                "{variable} must be sourced from $({macro_name}): {script}"
+            );
+            assert!(
+                script.contains(&format!("s|\\${{{variable}}}|${variable}|g")),
+                "{variable} must be substituted into the policy: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn ado_proxy_refuses_to_start_on_an_unsubstituted_placeholder() {
+        // A surviving `${ADO_PROXY_*}` would be read as a literal
+        // organization or repository name, matching nothing — a total denial
+        // that reads as a policy decision rather than a bug.
+        let script = start_ado_proxy_step(&proxy_fm()).script;
+        assert!(script.contains("grep -q 'ADO_PROXY_' \"$PROXY_DIR/policy/policy.json\""));
+        assert!(script.contains("unsubstituted placeholder"));
+    }
+
+    #[test]
+    fn ado_proxy_derives_the_organization_from_the_collection_uri() {
+        // A fixed-prefix strip is a no-op for a *.visualstudio.com collection
+        // URL, and a bare last-path-segment rule returns the whole host for
+        // it. Both shapes are handled by the shared helper.
+        let script = start_ado_proxy_step(&proxy_fm()).script;
+        assert!(
+            script.contains("if (NF>1) print $NF"),
+            "organization derivation must handle both collection forms: {script}"
+        );
         assert_eq!(
-            common::ado_proxy_capabilities(&fm),
-            Capability::ALL.to_vec()
+            script.matches("ADO_PROXY_ORGANIZATION=$(").count(),
+            1,
+            "exactly one derivation, shared with engine.rs"
         );
     }
 
@@ -4441,6 +4493,16 @@ mod tests {
     }
 
 
+    /// Front matter for the proxy step tests: the ADO tool enabled with a read
+    /// service connection, which is the configuration that turns the engine on.
+    fn proxy_fm() -> FrontMatter {
+        crate::compile::parse_markdown(
+            "---\nname: t\ndescription: x\ntools:\n  azure-devops:\n    org: myorg\npermissions:\n  read: my-read-sc\n---\n",
+        )
+        .unwrap()
+        .0
+    }
+
     // ── start_ado_proxy_step / stop_ado_proxy_step ──────────────────────────
 
     #[test]
@@ -4448,7 +4510,7 @@ mod tests {
         // AWF chroots the agent with /tmp mounted at both /tmp and /host/tmp,
         // so anything the step writes under /tmp is agent-readable. The
         // credential this design exists to withhold must not land there.
-        let script = start_ado_proxy_step(&[]).script;
+        let script = start_ado_proxy_step(&proxy_fm()).script;
 
         assert!(
             script.contains("mktemp -d \"$(Agent.TempDirectory)/ado-proxy."),
@@ -4466,7 +4528,7 @@ mod tests {
 
     #[test]
     fn ado_proxy_streams_material_on_stdin_rather_than_via_env_or_argv() {
-        let step = start_ado_proxy_step(&[]);
+        let step = start_ado_proxy_step(&proxy_fm());
 
         assert!(
             step.script.contains("printf '%s' \"$PROXY_MATERIAL\" | docker run -i"),
@@ -4488,7 +4550,7 @@ mod tests {
 
     #[test]
     fn ado_proxy_destroys_the_signing_key_after_handover() {
-        let script = start_ado_proxy_step(&[]).script;
+        let script = start_ado_proxy_step(&proxy_fm()).script;
         assert!(
             script.contains("shred -u \"$PROXY_DIR/ca.key\""),
             "the CA signing key must not outlive handover: {script}"
@@ -4501,7 +4563,7 @@ mod tests {
 
     #[test]
     fn ado_proxy_publishes_only_the_ca_certificate() {
-        let script = start_ado_proxy_step(&[]).script;
+        let script = start_ado_proxy_step(&proxy_fm()).script;
         // `--public-ca-file` is an *output*: the proxy writes its interception
         // CA there so clients can trust it. It must land somewhere the agent
         // can read (AWF mounts /tmp into the chroot) — unlike the signing key.
@@ -4521,7 +4583,7 @@ mod tests {
 
     #[test]
     fn ado_proxy_mints_a_leaf_for_every_catalogued_protected_host() {
-        let script = start_ado_proxy_step(&[]).script;
+        let script = start_ado_proxy_step(&proxy_fm()).script;
         for host in catalog::catalog().protected_hosts {
             assert!(
                 script.contains(&format!("\"{host}\"")),
@@ -4533,7 +4595,7 @@ mod tests {
 
     #[test]
     fn ado_proxy_egresses_only_through_squid() {
-        let script = start_ado_proxy_step(&[]).script;
+        let script = start_ado_proxy_step(&proxy_fm()).script;
         assert!(
             script.contains(&format!("--upstream-proxy {AWF_SQUID_URL}")),
             "the only egress must be Squid, so an outage is a 502 not a direct socket"
@@ -4552,7 +4614,7 @@ mod tests {
     fn ado_proxy_reuses_the_existing_node_image() {
         // The proxy ships as an ado-script bundle already downloaded onto the
         // runner, so it must not introduce an image to build, pin or mirror.
-        let script = start_ado_proxy_step(&[]).script;
+        let script = start_ado_proxy_step(&proxy_fm()).script;
         assert_eq!(ADO_PROXY_IMAGE, common::ADO_MCP_IMAGE);
         assert!(script.contains(&format!("{ADO_PROXY_IMAGE} \\")));
         assert!(script.contains(&format!("{}:/app/ado-proxy.js:ro", paths::ADO_PROXY_PATH)));
@@ -4560,7 +4622,13 @@ mod tests {
 
     #[test]
     fn ado_proxy_embeds_a_policy_the_bundle_will_accept() {
-        let script = start_ado_proxy_step(&[Capability::Repos]).script;
+        let narrowed = crate::compile::parse_markdown(
+            "---\nname: t\ndescription: x\ntools:\n  azure-devops:\n    org: myorg\n\
+             permissions:\n  read:\n    service-connection: my-read-sc\n    capabilities: [repos]\n---\n",
+        )
+        .unwrap()
+        .0;
+        let script = start_ado_proxy_step(&narrowed).script;
         assert!(script.contains("\"catalog_version\""));
         assert!(
             script.contains("\"discovery\""),
@@ -4578,7 +4646,7 @@ mod tests {
         // --rm only fires on clean exit; an OOM or SIGKILL leaves the
         // container, and with it a live credential, behind.
         assert!(
-            start_ado_proxy_step(&[])
+            start_ado_proxy_step(&proxy_fm())
                 .script
                 .contains(&format!("docker rm -f {ADO_PROXY_CONTAINER_NAME}"))
         );
