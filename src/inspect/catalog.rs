@@ -428,14 +428,14 @@ mod tests {
     }
 
     #[test]
-    fn ado_proxy_catalog_reports_policy_only_runtime() {
+    fn ado_proxy_catalog_reports_available_runtime() {
         let catalog = catalog_kind("ado-proxy").unwrap();
         let proxy = catalog.ado_proxy.unwrap();
         assert_eq!(
             proxy.schema_version,
             crate::ado_proxy::catalog::CATALOG_SCHEMA_VERSION
         );
-        assert!(!proxy.runtime_available);
+        assert!(proxy.runtime_available);
         assert!(!proxy.operations.is_empty());
         assert!(catalog.safe_outputs.is_empty());
     }

@@ -1,9 +1,8 @@
 # Credential-Isolated Azure DevOps Proxy (`ado-proxy`)
 
 _Security contract and implementation design. The runtime is wired into
-generated pipelines when `tools.azure-devops` is enabled. The catalog still
-reports `runtime_available: false` until the final author-facing availability
-flip lands._
+generated pipelines when `tools.azure-devops` is enabled, and the catalog
+reports `runtime_available: true`._
 
 ## Why this is required
 
@@ -296,10 +295,9 @@ version, organization-relative project/repository scope, and bounded
 operation-specific request fields. Every catalogued operation is `GET` or
 `OPTIONS`; all other methods are rejected before route matching.
 
-The in-tree catalog can be inspected before runtime enablement with
-`ado-aw catalog --kind ado-proxy --json`. Its
-`runtime_available` field remains `false` until the credential and AWF wiring
-are enabled.
+The in-tree catalog can be inspected with
+`ado-aw catalog --kind ado-proxy --json`. Its `runtime_available` field is
+`true`; the credential, topology, client and scope wiring are enabled.
 
 Unknown hosts, methods, routes, API versions, redirects, or body shapes fail
 closed. Client authorization is never preferred over the proxy credential.

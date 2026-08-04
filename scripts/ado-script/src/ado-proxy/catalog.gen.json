@@ -1,6 +1,6 @@
 {
   "schema_version": "ado-aw/ado-proxy-catalog/v1",
-  "runtime_available": false,
+  "runtime_available": true,
   "protected_hosts": [
     "dev.azure.com",
     "app.vssps.visualstudio.com"

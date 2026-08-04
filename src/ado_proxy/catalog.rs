@@ -7,12 +7,12 @@ pub const CATALOG_SCHEMA_VERSION: &str = "ado-aw/ado-proxy-catalog/v1";
 
 /// Whether authors can actually reach this catalog through a compiled pipeline.
 ///
-/// This gates the *author-facing* path, not the existence of the runtime: the
-/// `ado-proxy` bundle is implemented and tested, but nothing emits its sidecar,
-/// policy document, or credential lifecycle yet. It flips only once
-/// `compiler-proxy-wiring` lands against a pinned AWF release whose agent image
-/// supports the managed policy proxy and CA.
-pub const RUNTIME_AVAILABLE: bool = false;
+/// This gates the *author-facing* catalog response. It is true only after the
+/// complete path is wired and proven: compiler-emitted policy, stdin-only
+/// credential custody, host-started proxy container, repeatable AWF topology
+/// attachment, internal MCP network, sentinel clients, generated `az` wrapper,
+/// capability narrowing, and organization-relative scope enforcement.
+pub const RUNTIME_AVAILABLE: bool = true;
 
 /// Canonical Azure DevOps Services REST host for the current organization.
 pub const ORGANIZATION_HOST: &str = "dev.azure.com";
@@ -681,10 +681,13 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn catalog_is_versioned_and_runtime_stays_disabled() {
+    fn catalog_is_versioned_and_runtime_is_available() {
         let catalog = catalog();
         assert_eq!(catalog.schema_version, CATALOG_SCHEMA_VERSION);
-        assert!(!catalog.runtime_available);
+        assert!(
+            catalog.runtime_available,
+            "the compiler, topology, credential and scope wiring are complete"
+        );
         assert!(!catalog.operations.is_empty());
     }
 

@@ -91,10 +91,11 @@ describe("ado-proxy catalog drift guard", () => {
     expect(catalog.schema_version).toBe("ado-aw/ado-proxy-catalog/v1");
   });
 
-  it("keeps the runtime unreachable until the compiler wiring lands", () => {
-    // The bundle exists and is tested, but nothing emits its sidecar or policy
-    // document yet, so authors must not be told the capability is available.
-    expect(readSnapshot().runtime_available).toBe(false);
+  it("reports the runtime available after the full wiring lands", () => {
+    // Author-facing availability is the final gate: policy emission, stdin
+    // credential custody, topology attachment, sentinel clients and scoped
+    // authorization are all wired and covered by integration tests.
+    expect(readSnapshot().runtime_available).toBe(true);
   });
 
   it("protects only Azure DevOps REST hosts", () => {
