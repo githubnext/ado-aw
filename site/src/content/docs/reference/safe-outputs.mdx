@@ -267,6 +267,140 @@ safe-outputs:
 
 **Security note:** Every field that can be modified requires explicit opt-in (`true`) in the front matter configuration. If the `max` limit is exceeded, additional entries are skipped rather than aborting the entire batch.
 
+## GitHub issue safe outputs
+
+`create-github-issue` and `set-github-issue-type` are the two safe outputs that
+write to **GitHub** rather than Azure DevOps. Both call GitHub only from Stage 3
+(SafeOutputs), after threat detection — the GitHub write credential is never
+exposed to the Agent or Detection stage. Each tool's MCP route only appears
+when its own front-matter key is present; configuring GitHub auth alone does
+not expose either tool to the agent.
+
+### Authentication
+
+With no explicit auth, Stage 3 reads the write token from the secret ADO
+pipeline variable `ADO_AW_GITHUB_TOKEN`:
+
+```yaml
+safe-outputs:
+  create-github-issue:
+    target-repo: octo-org/octo-repo
+```
+
+Set the secret once with:
+
+```bash
+ado-aw secrets set ADO_AW_GITHUB_TOKEN <fine-grained-token>
+```
+
+The token needs **Issues: read and write** on the target repository. To use a
+differently named secret, set `github-token` to exactly one ADO macro at the
+`safe-outputs:` section level:
+
+```yaml
+safe-outputs:
+  github-token: "$(MY_GITHUB_ISSUES_TOKEN)"
+  github-api-url: https://ghe.example.com/api/v3  # optional; PAT auth only
+  create-github-issue:
+    target-repo: octo-org/octo-repo
+```
+
+Literal tokens and compound expressions are rejected at compile time.
+`$(GITHUB_TOKEN)` is intentionally not the default and is rejected if supplied
+explicitly, since that variable is reserved for the read-only Agent/Detection
+path. `github-api-url` defaults to `https://api.github.com` and accepts only
+an `https://` URL.
+
+You can also reuse a GitHub App already configured for `engine.github-app-token`,
+or configure a separate write-only App under `safe-outputs.github-app` — see
+[`docs/safe-outputs.md`](https://github.com/githubnext/ado-aw/blob/main/docs/safe-outputs.md#github-issue-safe-outputs)
+for both forms.
+
+### Target repository
+
+`target-repo` (`owner/repo`) is operator-controlled and may be omitted only
+when the ADO build's source provider is GitHub and `BUILD_REPOSITORY_NAME` is
+already an `owner/repo` slug. Azure Repos-backed pipelines must set it
+explicitly.
+
+### create-github-issue
+
+Creates a GitHub issue.
+
+```yaml
+safe-outputs:
+  create-github-issue:
+    target-repo: octo-org/octo-repo
+    title-prefix: "[agent] "
+    labels: [automation]
+    allowed-labels: ["agent-*", bug]
+    assignees: [octocat]
+    require-temporary-id: true
+    max: 1
+```
+
+**Agent parameters:** `title`, `body`, optional `labels`, optional `assignees`,
+and optional `temporary_id`.
+
+**Configuration options (front matter):**
+- `target-repo` *(optional only for GitHub-backed builds)* - fixed `owner/repo` target.
+- `title-prefix` *(optional)* - prepended to the title in Stage 3.
+- `labels` *(optional)* - static labels always applied.
+- `allowed-labels` *(optional)* - allowlist for agent-supplied labels. Empty/absent is default-**deny**; `["*"]` permits any label.
+- `assignees` *(optional)* - static assignees merged with agent input.
+- `require-temporary-id` *(optional, default `false`)* - reject proposals that omit `temporary_id`.
+- `max` *(optional, default `1`)* - per-run creation budget.
+
+### set-github-issue-type
+
+Sets or clears a native GitHub Issue Type on an issue created by
+`create-github-issue` (or any existing issue number).
+
+```yaml
+safe-outputs:
+  set-github-issue-type:
+    target-repo: octo-org/octo-repo
+    allowed: [Bug, Feature, Task]
+    max: 5
+```
+
+**Agent parameters:** required `issue_number` (positive number, or a
+`create-github-issue` temporary ID) and required `issue_type` (pass `""` to
+clear the type).
+
+**Configuration options (front matter):**
+- `target-repo` *(optional only for GitHub-backed builds)* - target for numeric issue numbers; temporary IDs already carry their created repository.
+- `allowed` *(optional)* - case-insensitive type allowlist. Empty/absent allows any type configured on the repository — types are a closed, owner-defined set, so this is intentionally less restrictive than `create-github-issue.allowed-labels`, which is free-form and default-deny. Clearing a type is always allowed.
+- `max` *(optional, default `5`)* - per-run update budget.
+
+### Temporary IDs
+
+Use a gh-aw-compatible temporary ID to refer to an issue `create-github-issue`
+is about to create, before its real number exists:
+
+```json
+{"title":"Build failure","body":"Detailed failure report long enough for validation.","temporary_id":"#aw_bug1"}
+{"issue_number":"#aw_bug1","issue_type":"Bug"}
+```
+
+The ID format is `#aw_` plus 3-12 alphanumeric/underscore characters; the
+leading `#` is optional. `create-github-issue` must run first and succeed —
+duplicate, unresolved, cross-repository, or reversed references fail before
+any GitHub API call.
+
+When both tools are configured together, they must share the same effective
+`require-approval` setting so they execute in the same SafeOutputs job:
+
+```yaml
+safe-outputs:
+  require-approval: true
+  create-github-issue:
+    target-repo: octo-org/octo-repo
+    require-temporary-id: true
+  set-github-issue-type:
+    target-repo: octo-org/octo-repo
+```
+
 ### create-pull-request
 Creates a pull request with code changes made by the agent. When invoked:
 1. Generates a patch file from `git diff` capturing all changes in the specified repository

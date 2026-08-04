@@ -573,6 +573,8 @@ actions, and the executor processes them after threat analysis.
 | `upload-build-attachment` | Attaches a file to a build (accessible via REST API or custom extension only) |
 | `upload-pipeline-artifact` | Publishes a file as a pipeline artifact visible in the ADO Artifacts tab |
 | `upload-workitem-attachment` | Uploads a workspace file as an attachment to a work item |
+| `create-github-issue` | Creates a GitHub issue (Stage 3 only; needs a separate GitHub write token) |
+| `set-github-issue-type` | Sets or clears a native GitHub Issue Type on an issue |
 | `report-incomplete` | Reports that a task could not be completed |
 | `noop` | Reports no action was needed |
 | `missing-data` | Reports required data was unavailable |
@@ -620,6 +622,28 @@ safe-outputs:
       - agent-created
       - needs-triage
 ```
+
+### Example: GitHub Issue Configuration
+
+Unlike every other safe output, `create-github-issue` and `set-github-issue-type`
+write to **GitHub**, not Azure DevOps, and only run in Stage 3 with a dedicated
+GitHub write token — the Agent and Detection stages never see it:
+
+```yaml
+safe-outputs:
+  create-github-issue:
+    target-repo: octo-org/octo-repo   # required unless the ADO build source is that GitHub repo
+    allowed-labels: ["agent-*", bug]
+    require-temporary-id: true
+  set-github-issue-type:
+    target-repo: octo-org/octo-repo
+    allowed: [Bug, Feature, Task]
+```
+
+Set the write token once with `ado-aw secrets set ADO_AW_GITHUB_TOKEN <token>`
+(needs **Issues: read and write** on the target repo). See
+[the site reference](https://githubnext.github.io/ado-aw/reference/safe-outputs/#github-issue-safe-outputs)
+for GitHub App auth and temporary-ID linkage between the two tools.
 
 ### Threat Detection (`threat-detection`)
 
