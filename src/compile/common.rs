@@ -46,6 +46,37 @@ pub async fn atomic_write(path: &Path, contents: &str) -> Result<()> {
         .context("atomic_write task panicked")?
 }
 
+#[test]
+fn test_validate_permissions_read_policy_requires_token_source_when_proxied() {
+    let (missing, _) = parse_markdown(
+        "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: contoso\n---\n",
+    )
+    .unwrap();
+
+    let error = validate_permissions_read_policy(&missing)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("tools.azure-devops requires `permissions.read`"),
+        "message must name the missing configuration: {error}"
+    );
+    assert!(
+        error.contains("agent and Azure DevOps MCP receive no real credential"),
+        "message must explain custody rather than asking the author to expose a token: {error}"
+    );
+}
+
+#[test]
+fn test_validate_permissions_read_policy_ignores_explicitly_disabled_tool() {
+    let (disabled, _) = parse_markdown(
+        "---\nname: test\ndescription: test\ntools:\n  azure-devops: false\n---\n",
+    )
+    .unwrap();
+
+    validate_permissions_read_policy(&disabled).unwrap();
+    assert!(!ado_proxy_enabled(&disabled));
+}
+
 /// Returns the directory in which the atomic tempfile should be created for a
 /// write to `path`.  The tempfile must live on the same filesystem as `path`
 /// so that the final `persist()` rename is atomic (EXDEV guard).
@@ -502,6 +533,22 @@ pub fn validate_proxied_timeout(front_matter: &FrontMatter, timeout_minutes: u32
 /// the compile path so a widening produced by omission — such as naming an
 /// organization with no projects — fails before any pipeline is emitted.
 pub fn validate_permissions_read_policy(front_matter: &FrontMatter) -> Result<()> {
+    if ado_proxy_enabled(front_matter)
+        && front_matter
+            .permissions
+            .as_ref()
+            .and_then(|permissions| permissions.read.as_ref())
+            .is_none()
+    {
+        anyhow::bail!(
+            "tools.azure-devops requires `permissions.read` so the trusted ado-proxy \
+             process can acquire an Azure DevOps token. Add either \
+             `permissions:\\n  read: <arm-service-connection>` or the object form \
+             with `service-connection:`. The token is delivered only to the proxy; \
+             the agent and Azure DevOps MCP receive no real credential."
+        );
+    }
+
     let Some(options) = front_matter
         .permissions
         .as_ref()
@@ -1670,7 +1717,8 @@ pub fn ado_proxy_enabled(front_matter: &FrontMatter) -> bool {
     front_matter
         .tools
         .as_ref()
-        .is_some_and(|tools| tools.azure_devops.is_some())
+        .and_then(|tools| tools.azure_devops.as_ref())
+        .is_some_and(crate::compile::types::AzureDevOpsToolConfig::is_enabled)
 }
 
 /// Directory the generated `az` wrapper is installed into inside the sandbox.

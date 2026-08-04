@@ -1862,6 +1862,41 @@ Call the noop tool exactly once.
 
 // ==================== Azure DevOps MCP Integration Tests ====================
 
+#[test]
+fn test_fixture_azure_devops_mcp_requires_read_permission() {
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp directory");
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("azure-devops-mcp-missing-read.md");
+    let output_path = temp_dir.path().join("missing-read.lock.yml");
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            fixture_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "compilation must fail before emitting a proxy with no token source"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("tools.azure-devops requires `permissions.read`"),
+        "error must name the missing front-matter key: {stderr}"
+    );
+    assert!(
+        !output_path.exists(),
+        "a failed validation must not leave a success-shaped pipeline"
+    );
+}
+
 /// Test that the Azure DevOps MCP fixture compiles successfully with no unreplaced markers
 #[test]
 fn test_fixture_azure_devops_mcp_compiled_output() {
