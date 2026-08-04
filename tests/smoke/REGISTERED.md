@@ -39,22 +39,15 @@ What the lane model replaced is the **per-case child definitions**
 | Definition | Repository | YAML path | Triggers | Definition ID |
 | --- | --- | --- | --- | ---: |
 | `ado-aw candidate compiler smoke` | `githubnext/ado-aw` | `tests/smoke/azure-pipelines-candidate.yml` | PR (comment-gated) + nightly 01:00 UTC | `2559` |
-| `ado-aw released smoke` | `githubnext/ado-aw` | `tests/smoke/azure-pipelines-release.yml` | scheduled daily 03:00 UTC | _TBD_ |
+| `ado-aw released smoke` | `githubnext/ado-aw` | `tests/smoke/azure-pipelines-release.yml` | scheduled daily 03:00 UTC | `2568` |
 
 Both use the `github.com_githubnext` service connection.
-
-> **Definition `2559` still points at the OLD path**
-> (`/tests/compiler-smoke-e2e/azure-pipelines.yml`), which this change deletes.
-> Its `process.yamlFilename` **must** be repointed at
-> `/tests/smoke/azure-pipelines-candidate.yml` when the PR merges, or the
-> candidate orchestrator breaks on its next run. It cannot be repointed in
-> advance, because the new path does not exist on `main` until then.
 
 ## Supporting definitions
 
 | Definition | Repository | YAML path | Purpose | Definition ID |
 | --- | --- | --- | --- | ---: |
-| `executor-e2e queue target` | `githubnext/ado-aw` | `tests/executor-e2e/queue-target.yml` | Queue target for the executor-e2e `queue-build` scenario (`E2E_QUEUE_PIPELINE_ID`) | _TBD_ |
+| `executor-e2e queue target` | `githubnext/ado-aw` | `tests/executor-e2e/queue-target.yml` | Queue target for the executor-e2e `queue-build` scenario (`E2E_QUEUE_PIPELINE_ID`) | `2569` |
 
 ## Orchestrator variables
 
@@ -102,14 +95,14 @@ Lane build identities need Code Read on `ado-aw-mirror` and, for candidate
 mode, Build Read on the candidate orchestrator definition.
 
 A new lane definition also needs the **agent pool** explicitly authorized for
-it (see step 5b) — this is a distinct grant from the service connections, and
-its absence stalls builds silently rather than failing them.
+it (step 5b), and a **repository resource** authorized for every extra repo any
+of its cases checks out (step 5d). Both are distinct grants from the service
+connections, and both stall builds silently rather than failing them.
 
 ## One-time setup runbook
 
-Steps 1–3, 5 and part of 8 are **already done** (see the ✅ marks). The rest
-either need a credential no checkout has, or a file that only exists once this
-PR merges.
+Steps 1–9 are **done** (✅). What remains is a live green run of both
+orchestrators, then deleting the retired definitions.
 
 1. ✅ **Base ref created.** `refs/heads/ado-aw-smoke-candidate-base` on
    `ado-aw-mirror` now carries `.smoke/pipeline.yml` with the contents of
@@ -157,6 +150,26 @@ PR merges.
    { "pipelines": [ { "id": <definitionId>, "authorized": true } ] }
    ```
 
+5d. ✅ **Repository resources authorized** on `2567` — `ado-aw-e2e-fixture`,
+   checked out by the `multi-repo` case via its `repos:` block.
+
+   Same silent stall as the pool, and the same shape of grant, but a
+   **different resource type** and therefore a separate call. It bites only
+   the cases that check out an extra repo, so four of five cases in the first
+   live run went green while `multi-repo` sat at `notStarted`. The old
+   per-case definitions had this grant (`2544`, `2564`, `2565`); the lane
+   inherited nothing.
+
+   ```
+   PATCH _apis/pipelines/pipelinePermissions/repository/<projectId>.<repoId>?api-version=7.1-preview.1
+   { "pipelines": [ { "id": <definitionId>, "authorized": true } ] }
+   ```
+
+   **Any case adding a new `repos:` entry needs this for the lane**, once,
+   before that case can run. It is the one piece of per-case ADO setup the
+   lane model does not remove — worth checking first whenever a case hangs
+   with no logs.
+
 5c. ✅ **Lane wiring verified live.** Queued `2567` on the base ref
    (build `629504`); it failed at `Reject inert candidate-smoke base` with
    *"Candidate compiler smoke must be queued with an explicit generated ref."*
@@ -165,29 +178,50 @@ PR merges.
    path and the inert guard all work, and that a lane cannot run without an
    explicitly supplied case ref. Re-run this after any lane change.
 
-6. ⏳ **Register the released orchestrator** from
+6. ✅ **Released orchestrator registered as `2568`** from
    `tests/smoke/azure-pipelines-release.yml` via the `github.com_githubnext`
-   connection, and harden its fork settings (below). *Blocked until merge —
-   the file does not exist on `main` yet.*
+   connection. Pool `1453` and all three service connections authorized.
+   Fork hardening still to apply (below) before it is PR-eligible — it is
+   scheduled-only, so this is defence in depth rather than a gate.
 
-7. ⏳ **Register the queue target** from `tests/executor-e2e/queue-target.yml`,
-   then set `E2E_QUEUE_PIPELINE_ID` on executor-e2e definition `2550` to its
-   id. It is currently `2547`, which step 11 deletes. *Blocked until merge.*
+7. ✅ **Queue target registered as `2569`** from
+   `tests/executor-e2e/queue-target.yml`; `E2E_QUEUE_PIPELINE_ID` on
+   executor-e2e definition `2550` repointed `2547` → `2569`. Verified green
+   (build `629513`).
 
-8. **Set `SMOKE_LANE_AGENTIC_DEFINITION_ID`** on both orchestrators.
-   ✅ Done on `2559`; the released orchestrator gets it at step 6.
+8. ✅ **`SMOKE_LANE_AGENTIC_DEFINITION_ID=2567`** set on both orchestrators
+   (`2559` and `2568`).
 
-9. ⏳ **Repoint `2559`** at `/tests/smoke/azure-pipelines-candidate.yml` — see
-   the warning above — and in the same edit delete its six now-dead
-   `COMPILER_SMOKE_*_DEFINITION_ID` variables. They must go *together*: the old
-   orchestrator YAML reads those variables, and the new one never does, so
-   removing them earlier breaks the running smoke and leaving them afterwards
-   preserves pointers to deleted definitions. *Do this at merge, before the
-   next scheduled run.*
+9. ✅ **`2559` repointed** at `/tests/smoke/azure-pipelines-candidate.yml`,
+   and its six dead `COMPILER_SMOKE_*_DEFINITION_ID` variables deleted in the
+   same edit (rev 11). They had to go together: the old orchestrator YAML read
+   those variables and the new one never does, so removing them earlier would
+   have broken the running smoke, and leaving them would have preserved
+   pointers to deleted definitions.
 
-10. ⏳ **Trigger one manual run of each orchestrator** and check the live
-    assertions in [`README.md`](README.md). ADO scheduled triggers do not fire
-    until a definition has had at least one run.
+10. ✅ **Candidate orchestrator verified green.** Build `629522` ran all five
+    candidate cases on lane `2567`, each on its own per-case ref, and reported
+    `Overall: PASSED`:
+
+    | case | build | result |
+    | --- | ---: | --- |
+    | canary | `629523` | succeeded |
+    | azure-cli | `629525` | succeeded |
+    | noop-target | `629524` | succeeded |
+    | custom-safe-output | `629527` | succeeded |
+    | multi-repo | `629526` | succeeded |
+
+    All five refs were deleted afterwards — the mirror holds only
+    `ado-aw-smoke-candidate-base` and `main`, confirming per-case cleanup.
+
+    ⏳ **Released mode is still blocked**, and not by configuration. Build
+    `629516` failed with `canary: staged pipeline must declare 'trigger: none',
+    got null`. Released mode compiles with the **last released** binary, and
+    v0.48.0 predates the change that made an absent `on:` emit explicit
+    `trigger: none` / `pr: none` — so `assertNoTriggers` correctly rejects its
+    output. Reproduced locally against the real v0.48.0 asset. **The next
+    release clears it**; no action needed beyond cutting one. See *Version
+    skew* in [`README.md`](README.md).
 
 11. ⏳ **Only once both runs are green**, delete the retired definitions, drop
     the legacy lock paths from the base ref, and remove `2545`–`2549` from
@@ -195,9 +229,10 @@ PR merges.
     is not reversible, so this step is deliberately last.
 
 12. ⏳ **Repoint `scripts/rotate-agentplayground-secrets.ps1`** at the lane:
-    both `$copilotDefinitionIds` and `$reporterDefinitionIds` become `2567`.
-    Leaving the retired per-case ids there would rotate secrets onto
-    definitions that no longer exist and silently skip the lane that runs.
+    `$copilotDefinitionIds` becomes `2567` and `$legacyReporterDefinitionIds`
+    is dropped entirely. Leaving the retired per-case ids there would rotate
+    secrets onto definitions that no longer exist and silently skip the lane
+    that runs.
 
 ## Security record
 
