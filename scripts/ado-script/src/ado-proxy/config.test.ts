@@ -89,6 +89,79 @@ describe("parsePolicy", () => {
     );
   });
 
+  it("accepts well-formed additional scopes", () => {
+    const policy = parsePolicy(
+      policyJson({
+        additional_scopes: [
+          {
+            organization: "fabrikam",
+            projects: [
+              {
+                project: "Shared",
+                project_id: "33333333-3333-3333-3333-333333333333",
+                project_scoped: true,
+                repositories: ["shared-api"],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    expect(policy.additional_scopes).toEqual([
+      {
+        organization: "fabrikam",
+        projects: [
+          {
+            project: "Shared",
+            project_id: "33333333-3333-3333-3333-333333333333",
+            project_scoped: true,
+            repositories: ["shared-api"],
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("rejects unknown keys at every additional-scope level", () => {
+    expect(() =>
+      parsePolicy(
+        policyJson({
+          additional_scopes: [
+            {
+              organization: "fabrikam",
+              projects: [{ project: "Shared" }],
+              all_projects: true,
+            },
+          ],
+        }),
+      ),
+    ).toThrow(/additional_scopes\[0\].*unknown key/);
+
+    expect(() =>
+      parsePolicy(
+        policyJson({
+          additional_scopes: [
+            {
+              organization: "fabrikam",
+              projects: [{ project: "Shared", all_repositories: true }],
+            },
+          ],
+        }),
+      ),
+    ).toThrow(/projects\[0\].*unknown key/);
+  });
+
+  it("rejects an organization scope naming no projects", () => {
+    expect(() =>
+      parsePolicy(
+        policyJson({
+          additional_scopes: [{ organization: "fabrikam", projects: [] }],
+        }),
+      ),
+    ).toThrow(/lists no projects/);
+  });
+
   it.each([
     ["organization", { organization: "" }],
     ["project", { project: "" }],
