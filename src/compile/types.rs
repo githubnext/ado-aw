@@ -1859,8 +1859,7 @@ pub struct PermissionsConfig {
 ///
 /// The scalar form remains shorthand for a service connection with the
 /// compiler-owned current-organization/project/repository policy. The object
-/// form prepares explicit policy configuration for the credential-isolated
-/// proxy and is rejected by compilation until that runtime is wired.
+/// form configures the credential-isolated proxy's capability and scope tree.
 #[derive(Debug, Deserialize, Clone, PartialEq)]
 #[serde(untagged)]
 pub enum ReadPermissionConfig {

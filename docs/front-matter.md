@@ -218,7 +218,16 @@ network:                       # optional network policy (standalone target only
 # variable-groups:              # optional: import ADO Library variable groups (standalone/1es only)
 #   - My Variable Group         # each entry must be the exact ADO Library group name (see "Variable Groups" section)
 permissions:                   # optional ADO access token configuration (see docs/network.md#permissions-ado-access-tokens)
-  read: my-read-arm-connection   # ARM SC for Stage 1 trusted ADO MCP auth; raw token is not in Agent env
+  read: my-read-arm-connection   # shorthand: proxy gets the ARM SC token; Agent/MCP/az get no real token
+  # read:                        # object form: narrow capabilities / add cross-org or project scope
+  #   service-connection: my-read-arm-connection
+  #   capabilities: [core, repos] # discovery is always enabled
+  #   allow:                     # additive to current org/project/repo and type: git repos:
+  #     - organization: partner-org # same AAD tenant; cross-tenant needs another credential
+  #       projects:
+  #         - project: Shared
+  #           project-id: 33333333-3333-3333-3333-333333333333 # optional GUID-form calls
+  #           repositories: [shared-api] # empty/omitted => project reads only
   write: my-write-arm-connection # OPTIONAL ARM SC for Stage 3 executor writes.
                                  # Default: executor uses $(System.AccessToken).
                                  # Set this only for cross-org writes or

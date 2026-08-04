@@ -441,8 +441,10 @@ the codegen output.
 
 ## `ado-proxy`: the same contract, applied to policy
 
-`ado-proxy.js` is the credential-isolated Azure DevOps policy proxy AWF runs as
-a managed sidecar (see [`ado-proxy-design.md`](ado-proxy-design.md)). It is the
+`ado-proxy.js` is the credential-isolated Azure DevOps policy proxy. A host
+step mounts it into `node:20-slim`, and AWF attaches that externally launched
+container to its internal network (see
+[`ado-proxy-design.md`](ado-proxy-design.md)). It is the
 one bundle that is a **long-running server** rather than a single-shot step: it
 starts before the agent and is torn down when the agent exits.
 
@@ -474,16 +476,17 @@ each boundary can be tested in isolation:
 
 | Module | Responsibility |
 |---|---|
-| `config.ts` | Parse argv / the generic `AWF_POLICY_PROXY_*` env contract and the mounted policy document. Fail-closed on anything unrecognized. |
+| `config.ts` | Parse argv / env and the mounted policy document. Fail-closed on anything unrecognized, including nested scope keys. |
 | `catalog.ts` | Load the generated snapshot; canonicalize hosts (case, `host:port`, trailing DNS dot) for the protected-set check. |
 | `route.ts` | Normalize the request target and match catalog route templates. Refuses ambiguous encodings rather than rewriting them. |
 | `api-version.ts` | Resolve the API version from both the query string and the `Accept` header, and reject disagreement or an out-of-window value. |
+| `scope.ts` | Build the organization-relative current/additional scope index once at startup, preserving repository-only grants. |
 | `policy.ts` | The allow/deny decision: method, denied family, route, capability, version, query, and scope. |
 | `headers.ts` | Allow-list request and response headers; strip every client credential. |
-| `token.ts` | Read the rotating bearer file, cached on mtime and size. |
-| `ca.ts` | Mint the ephemeral CA and per-host leaves via `openssl`; publish only the public PEM. |
+| `token.ts` | Hold the one-shot stdin bearer in memory. |
+| `ca.ts` | Parse the versioned stdin material document (CA, per-host leaves, bearer) and publish only the public PEM. |
 | `upstream.ts` | CONNECT through Squid — the sidecar's only route out. |
-| `response.ts` | Bound and filter response bodies; validate organization-addressed reads against the pinned scope. |
+| `response.ts` | Bound and filter response bodies; validate organization-addressed reads against the organization-relative scope index. |
 | `log.ts` | The schema-versioned, sanitized JSONL decision stream. |
 | `server.ts` | Wire the two request paths together. |
 

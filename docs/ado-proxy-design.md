@@ -1,10 +1,9 @@
 # Credential-Isolated Azure DevOps Proxy (`ado-proxy`)
 
-_Security contract and implementation design. The runtime described here is
-implemented behind a hidden, pipeline-internal CLI surface, but it is not yet
-wired into generated pipelines: `ado-aw catalog --kind ado-proxy`
-still reports `runtime_available: false` until the compiler, credential, and
-AWF wiring land._
+_Security contract and implementation design. The runtime is wired into
+generated pipelines when `tools.azure-devops` is enabled. The catalog still
+reports `runtime_available: false` until the final author-facing availability
+flip lands._
 
 ## Why this is required
 
@@ -15,18 +14,26 @@ inherits that identity's Azure DevOps permissions. The compiler therefore
 cannot safely treat the service-connection name or ARM scope as an
 authorization boundary.
 
-The current implementation keeps `SC_READ_TOKEN` out of the Agent process and
-passes it only to the trusted first-party Azure DevOps MCP backend. Direct
-`az devops`, curl, and SDK calls are not authenticated. Issues
-[#1652](https://github.com/githubnext/ado-aw/issues/1652) and
-[#1717](https://github.com/githubnext/ado-aw/issues/1717) track the missing
-credential-isolated direct HTTP path and the earlier documentation mismatch.
+The implementation keeps `SC_READ_TOKEN` out of the Agent, MCPG, Azure DevOps
+MCP container, and Azure CLI. Only `ado-proxy` holds it. The MCP is redirected
+at the proxy with `--add-host`; a generated `az` wrapper sets `HTTPS_PROXY`,
+process-scoped CA trust, and a non-secret sentinel PAT.
 
 ## Scope
 
-The first production provider supports Azure DevOps Services reads for the
-current organization, project, and repository. Broader scopes require explicit
-configuration. The following remain outside this provider:
+The provider supports Azure DevOps Services reads for:
+
+- the current organization/project/repository (by name or GUID);
+- Azure Repos `type: git` resources declared under `repos:`, repository-only;
+- additional organizations/projects/repositories declared under
+  `permissions.read.allow`, resolved organization-relatively.
+
+Capabilities are global across those scopes and may be narrowed under
+`permissions.read.capabilities`; discovery is always enabled. Cross-org works
+only where the one service-connection identity has access in the same AAD
+tenant. Cross-tenant reads need another credential and are unsupported.
+
+The following remain outside this provider:
 
 - Azure Resource Manager, Microsoft Graph, and Azure data-plane APIs;
 - Stage 1 mutations;
@@ -256,61 +263,38 @@ verify the first certificate`.
 
 ### Credential delivery
 
-Acquisition already exists: `generate_acquire_ado_token` emits an `AzureCLI@2`
+`generate_acquire_ado_token` emits an `AzureCLI@2`
 step that mints an ADO-audience token from the ARM service connection and stores
 it as the secret pipeline variable `SC_READ_TOKEN`.
 
-**Delivery must not use a runner path.** The engine reads its bearer from
-`--token-file`, and the obvious choice — a file under the runner's `/tmp` —
-is unsafe for the same reason the CA private key was: AWF mounts `/tmp` into the
-agent at both `/tmp` and `/host/tmp` (`agent-service.ts`), which is exactly how
-AWF installs its own `gh` wrapper. A token written there is agent-readable, and
-the boundary is gone.
+**Delivery never uses a runner path.** AWF mounts the runner's `/tmp` into the
+agent at both `/tmp` and `/host/tmp`; a bearer written there is agent-readable
+and destroys the boundary. Instead, the host step builds one versioned JSON
+document containing base64 certificate material and the bearer and pipes it to
+`docker run -i`. The engine reads it once from stdin and holds private material
+in memory. The CA signing key and leaf keys are shredded immediately after
+handover; only the public interception certificate is published.
 
-Two mechanisms avoid a shared path, both to be settled by
-`proxy-token-delivery`:
+The MCP and `az` wrapper receive a non-secret sentinel. The proxy strips all
+client credential headers and attaches its bearer only after a complete allow
+decision. The token is not exposed in container `Env`, argv, the process table,
+or an agent-readable mount.
 
-- **stdin**, alongside the CA material — simplest, but one-shot, so it cannot
-  rotate;
-- **`docker cp` into the running container**, or a named volume mounted only
-  into the engine — supports rotation, at the cost of a refresh loop running
-  during the agent step.
-
-An ADO access token is typically valid ~1 hour, so a single token covers most
-runs; rotation matters for long ones. WIF assertions are much shorter
-(~5–10 min), but they are consumed at mint time and never reach the engine.
-
-**The MCP must stop receiving the real token.** Today the compiler passes
-`-e ADO_MCP_AUTH_TOKEN="$SC_READ_TOKEN"` straight into the MCP container. Under
-interception the engine holds the credential and injects it after an allow
-decision, so the MCP must be given a non-secret sentinel instead. Leaving the
-real token in its environment would make the proxy decorative on that path: the
-MCP could still authenticate directly if it ever reached Azure DevOps another
-way.
+The token is not rotated. Proxied workflows are therefore bounded at compile
+time to 50 minutes so the run cannot silently outlive its credential.
 
 ### Credential renewal
 
-Production must support WIF renewal beyond the original assertion lifetime.
-The expected trusted path requests a fresh assertion from
-`$(System.OidcRequestUri)` using a host-task-only `$(System.AccessToken)`,
-re-authenticates outside AWF, and atomically updates a proxy-only token file.
-If this cannot be demonstrated without exposing identity material, rollout
-stops rather than falling back to an Agent credential.
-
-This is an Azure Pipelines-supported pattern rather than a custom refresh
-protocol. `AzureCLI@2` implements the same behavior behind its experimental
-`keepAzSessionActive` input: for WIF connections it requests a new OIDC token
-and repeats `az login --federated-token` on an interval. The proxy integration
-must use `addSpnToEnvironment: false`; client ID, tenant ID, and service
-connection ID are non-secret task metadata, while the raw OIDC assertion and
-`System.AccessToken` remain trusted-task-only.
+Renewal is deferred. Extending the 50-minute limit requires a trusted refresh
+path that never exposes a WIF assertion, `System.AccessToken`, or refreshed ADO
+bearer to the agent. Rollout must not fall back to an agent credential.
 
 ## Authorization contract
 
 The operation catalog matches normalized host, method, route template, API
-version, current organization/project/repository scope, and bounded
-operation-specific request fields. It explicitly models read-like POSTs;
-method alone never determines safety.
+version, organization-relative project/repository scope, and bounded
+operation-specific request fields. Every catalogued operation is `GET` or
+`OPTIONS`; all other methods are rejected before route matching.
 
 The in-tree catalog can be inspected before runtime enablement with
 `ado-aw catalog --kind ado-proxy --json`. Its
@@ -332,9 +316,10 @@ classification or exfiltration-prevention system.
 
 The proxy ships as **`ado-proxy`**, a TypeScript bundle in
 `scripts/ado-script/`, packaged in `ado-script.zip` alongside the other
-`ado-script` bundles and already covered by the `supply-chain:` mirror. AWF
-runs it as the managed sidecar's entrypoint from the pinned AWF agent image,
-the same entrypoint-override pattern SafeOutputs already uses.
+`ado-script` bundles and already covered by the `supply-chain:` mirror. A host
+step bind-mounts the bundle into the existing `node:20-slim` image and starts
+it before AWF. AWF's repeatable `--topology-attach` then dual-homes that
+container onto `awf-net`; no new image is built, published, pinned, or mirrored.
 
 It is not a Rust subcommand. A Rust implementation would need a TLS stack plus
 certificate minting (`rustls` + `rcgen` → `ring`), which would make a native C
@@ -343,23 +328,22 @@ pure-Rust and must stay buildable without one. Node's built-in `tls`, `http`,
 and `net` modules cover the same ground with no new runtime dependency, and
 match how AWF implements its own credential-isolating sidecars.
 
-Configuration follows the generic `AWF_POLICY_PROXY_*` contract AWF publishes
-for any policy-proxy sidecar. No credential is ever passed through argv or the
-environment: the bearer is read from a private, rotating token file, and the
-policy document is a mounted read-only JSON file carrying the
-`catalog_version` the bundle re-checks at startup, so a stale policy fails
-closed.
+Configuration is supplied by compiler-owned flags plus a mounted, read-only
+policy JSON document. No credential is passed through argv, environment, or a
+runner file: the bearer arrives in the versioned stdin material document. The
+policy carries the `catalog_version` the bundle re-checks at startup, so a
+stale compiler/bundle pair fails closed.
 
 Request handling has exactly two paths:
 
-- **Direct TLS on the protected path.** Both the broker (`az`) and the
-  DNS-aliased MCP connect straight to the engine on 443. It terminates TLS with
-  a leaf selected by SNI (ALPN pinned to `http/1.1`), normalizes the request,
+- **Direct TLS for the DNS-redirected MCP.** The MCP connects to
+  `dev.azure.com:443`, which `--add-host` redirects to the engine. It terminates
+  TLS with a leaf selected by SNI (ALPN pinned to `http/1.1`), normalizes the request,
   evaluates it against the versioned catalog, drops every client credential and
   forwarding header, and — only after a complete allow decision, and only for a
   protected upstream — attaches the current bearer and forwards through Squid.
-- **`CONNECT` for proxy-style clients.** Retained for clients configured with
-  `HTTPS_PROXY`. Protected destinations are intercepted as above; non-protected
+- **`CONNECT` for `az`.** The generated wrapper sets `HTTPS_PROXY` to the
+  engine's port 11080. Protected destinations are intercepted as above; non-protected
   destinations are byte-tunnelled to Squid untouched, so package feeds behave
   exactly as they do without the sidecar. Plain HTTP to a protected host, and
   `CONNECT` to a protected host on any port other than 443, are denied.

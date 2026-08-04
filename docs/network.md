@@ -92,10 +92,11 @@ When (and only when) `AW_AZ_MOUNTS` is non-empty, a follow-up
 *Append Azure CLI prompt* step appends an Azure CLI advisory section
 to `/tmp/awf-tools/agent-prompt.md`. The agent reads the prompt on
 startup and learns that `az` is on PATH, what it's good for
-(`az devops` and Azure commands are not pre-authenticated), the authenticated
-ADO MCP alternative, and the fallback path (`missing-tool` safe output naming
-`azure-cli`). The advisory tells the agent not to sign in or place Azure
-credentials in the sandbox.
+(catalogued Azure DevOps reads through `az devops`, `az repos`, `az pipelines`,
+`az boards`, and `az rest`), what is deliberately unavailable (writes, secrets,
+ARM, and Graph), and the fallback path (`missing-tool` safe output naming
+`azure-cli`). The advisory tells the agent not to sign in: the wrapper carries
+only a sentinel and the proxy owns the real credential.
 
 The step is gated by `condition: ne(variables['AW_AZ_MOUNTS'], '')`,
 which reuses the same pipeline variable the detection step writes.
@@ -225,7 +226,7 @@ Operators can scope further per-pipeline by editing the build definition's
 
 ```yaml
 permissions:
-  read: my-read-arm-connection    # Stage 1 trusted ADO MCP credential
+  read: my-read-arm-connection    # trusted ado-proxy token source
   # write: my-write-arm-connection  # Optional — see below
 ```
 
@@ -246,13 +247,19 @@ agents. Set `permissions.write` only when you need:
 ### Security Model
 
 - **`permissions.read`**: Mints an ADO-audience token for the trusted
-  first-party Azure DevOps MCP backend when `tools.azure-devops` is enabled.
-  The raw token is not injected into the Agent process or direct Azure CLI.
-  Azure DevOps permissions on the underlying identity remain the authorization
-  boundary until the policy proxy described in
-  [`ado-proxy-design.md`](ado-proxy-design.md) is implemented.
+  `ado-proxy` process when `tools.azure-devops` is enabled. The raw token is
+  not injected into the Agent, Azure CLI, MCPG, or Azure DevOps MCP container.
+  The proxy attaches it only after a deny-by-default catalog and scope check.
 
-  An **object form** of `permissions.read` is reserved for that proxy:
+  The scalar form enables all read capabilities for the implicit current
+  organization/project/repository scope:
+
+  ```yaml
+  permissions:
+    read: my-read-sc
+  ```
+
+  The **object form** narrows capabilities and adds explicit scopes:
 
   ```yaml
   permissions:
@@ -263,14 +270,25 @@ agents. Set `permissions.write` only when you need:
         - organization: other-org
           projects:
             - project: Other Project
+              project-id: 33333333-3333-3333-3333-333333333333 # optional
               repositories: [other-repo] # omit for project-scoped reads only
   ```
 
-  It **fails compilation today**, deliberately: accepting it while the proxy
-  is unwired would silently ignore every restriction it declares, which is
-  strictly worse than rejecting it. An organization entry with no `projects`
-  is also rejected, because granting an entire organization by *omitting* a
-  key is the class of accident this proxy exists to prevent.
+  `allow:` is additive to the current scope. It is organization-relative: a
+  project granted in one organization does not match the same project name in
+  another. `project-id` is optional; without it, name-form calls work and a
+  client using a cached GUID fails closed.
+
+  Azure Repos `type: git` entries under `repos:` also grant API reads for that
+  repository, including `checkout: false`. This is repository-only: declaring
+  `Project/repo` does **not** grant work-item, build, or pipeline reads for
+  `Project`. Non-ADO repository types grant nothing.
+
+  Cross-organization reads use the same ADO-audience token and therefore work
+  only where the service-connection identity has access in the same AAD
+  tenant. Cross-tenant reads require another credential and are unsupported.
+  An organization entry with no `projects` is rejected because omission must
+  never grant an entire organization.
 - **`permissions.write` (optional)**: Mints a write-capable ADO-scoped token
   used **only** by the executor in Stage 3 (`SafeOutputs` job). Overrides
   the default `$(System.AccessToken)` for write operations. Never exposed

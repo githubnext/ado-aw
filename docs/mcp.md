@@ -70,11 +70,11 @@ env:
   STATIC_CONFIG: "some-value"     # Literal value embedded in config
 ```
 
-For the first-party `tools.azure-devops` integration, the compiler maps
-`SC_READ_TOKEN` to `ADO_MCP_AUTH_TOKEN` on MCPG, and MCPG passes that value to
-the trusted ADO MCP child. This automatic mapping does not apply to arbitrary
-user-defined `mcp-servers:` entries and does not populate
-`AZURE_DEVOPS_EXT_PAT` in the Agent sandbox.
+The first-party `tools.azure-devops` integration is deliberately different:
+it gives the MCP a non-secret sentinel in `ADO_MCP_AUTH_TOKEN`. The real
+`SC_READ_TOKEN` is delivered only to `ado-proxy` over stdin and is injected
+into an upstream request only after policy allows it. This behavior does not
+apply to arbitrary user-defined `mcp-servers:` entries.
 
 ## Example: Azure DevOps MCP with Authentication
 

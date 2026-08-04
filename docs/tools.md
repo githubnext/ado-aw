@@ -64,7 +64,8 @@ During Stage 3 execution, memory files are validated (path safety, extension fil
 
 ### Azure DevOps MCP (`azure-devops:`)
 
-First-class Azure DevOps MCP integration. Auto-configures the ADO MCP container, token mapping, MCPG entry, and network allowlist.
+First-class Azure DevOps MCP integration. Auto-configures the ADO MCP
+container, credential-isolated policy proxy, and MCPG entry.
 
 ```yaml
 # Simple enablement (auto-infers org from git remote)
@@ -80,15 +81,22 @@ tools:
 ```
 
 When enabled, the compiler:
-- Generates a containerized stdio MCP entry (`node:20-slim` + `npx @azure-devops/mcp`) in the MCPG config
-- Injects `ADO_MCP_AUTH_TOKEN` (sourced from `SC_READ_TOKEN`) into the MCP container when `permissions.read` is configured — this authenticates the ADO MCP
-- Adds ADO-specific hosts to the network allowlist
+- Requires `permissions.read` as the trusted proxy's token source
+- Installs the pinned `@azure-devops/mcp` package on the runner and mounts it
+  read-only into an unchanged `node:20-slim` container; the isolated container
+  needs no npm registry access
+- Runs that container on an internal network with `dev.azure.com` redirected
+  to `ado-proxy` and a public interception CA trusted only by that process
+- Gives the MCP a non-secret sentinel in `ADO_MCP_AUTH_TOKEN`; the real token
+  exists only in `ado-proxy`, which strips client credentials and attaches its
+  bearer after an allow decision
 - Auto-infers org from the git remote URL at compile time (overridable via `org:` field)
 - Fails compilation if org cannot be determined (no explicit override and no ADO git remote)
 
-> **Note:** the first-party MCP uses `ADO_MCP_AUTH_TOKEN`. The compiler does
-> not inject `AZURE_DEVOPS_EXT_PAT` or another Azure credential into the Agent
-> sandbox for direct CLI use.
+The generated `az` wrapper similarly carries only a sentinel PAT and routes
+Azure DevOps traffic through the proxy. Catalogued reads (`az devops`,
+`az repos`, `az pipelines`, `az boards`, and `az rest`) work without signing
+in; writes and secret-bearing route families fail closed.
 
 ## Built-in CLIs
 

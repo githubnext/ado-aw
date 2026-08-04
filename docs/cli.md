@@ -195,7 +195,8 @@ These commands are started by the pipeline itself (or by AWF on its behalf) and 
 > The credential-isolated Azure DevOps policy proxy is **not** an `ado-aw`
 > subcommand. It ships as the `ado-proxy` TypeScript bundle in
 > `scripts/ado-script/` (packaged in `ado-script.zip`, mirrored by
-> `supply-chain:`), and AWF runs it as the managed sidecar's entrypoint. See
+> `supply-chain:`). The pipeline starts it in `node:20-slim`, then AWF attaches
+> that trusted container to its isolated network. See
 > [`docs/ado-proxy-design.md`](ado-proxy-design.md) for its configuration
 > contract, and `ado-aw catalog --kind ado-proxy` for the versioned operation
 > catalog it enforces.
