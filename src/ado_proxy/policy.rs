@@ -167,7 +167,7 @@ impl PolicyDocument {
             project_id: Some(PROJECT_ID_PLACEHOLDER.to_string()),
             repository: Some(REPOSITORY_PLACEHOLDER.to_string()),
             repository_id: Some(REPOSITORY_ID_PLACEHOLDER.to_string()),
-            additional_scopes: Self::explicit_additional_scopes(front_matter),
+            additional_scopes: Self::additional_scopes(front_matter),
             capabilities,
             // Every catalogued host must appear: one the bundle policed but
             // the document omitted would be byte-tunnelled to Squid instead,
@@ -181,6 +181,12 @@ impl PolicyDocument {
     ///
     /// The nesting is preserved rather than flattened: a project granted in
     /// organization A must never match the same project name in organization B.
+    fn additional_scopes(front_matter: &FrontMatter) -> Vec<PolicyOrganizationScope> {
+        let mut scopes = Self::explicit_additional_scopes(front_matter);
+        scopes.extend(Self::repository_scopes(front_matter));
+        scopes
+    }
+
     fn explicit_additional_scopes(front_matter: &FrontMatter) -> Vec<PolicyOrganizationScope> {
         let options = front_matter
             .permissions
@@ -212,6 +218,49 @@ impl PolicyDocument {
                     .collect(),
             })
             .collect()
+    }
+
+    /// Derive repository-only grants from Azure Repos resources.
+    ///
+    /// For `type: git`, ADO's repository resource name is `project/repo`.
+    /// Declaring it already authorizes the build identity to resolve the
+    /// resource, and when checked out its entire working tree is in the
+    /// sandbox. Denying API metadata for that same repository would be
+    /// incoherent, so the repository is implicitly readable.
+    ///
+    /// The project itself is *not* granted: declaring one repository is not a
+    /// request for the work items, pipelines and builds beside it.
+    fn repository_scopes(front_matter: &FrontMatter) -> Vec<PolicyOrganizationScope> {
+        let projects = front_matter
+            .repositories
+            .iter()
+            .filter(|repository| repository.repo_type.eq_ignore_ascii_case("git"))
+            .filter_map(|repository| {
+                let (project, name) = repository.name.split_once('/')?;
+                if project.is_empty() || name.is_empty() {
+                    return None;
+                }
+                Some(PolicyProjectScope {
+                    project: project.to_string(),
+                    project_id: None,
+                    project_scoped: false,
+                    repositories: vec![name.to_string()],
+                })
+            })
+            .collect::<Vec<_>>();
+
+        if projects.is_empty() {
+            Vec::new()
+        } else {
+            vec![PolicyOrganizationScope {
+                // `type: git` resources are same-organization by construction.
+                // Cross-organization repositories require an explicit
+                // `permissions.read.allow` entry and, potentially, a different
+                // credential tenant.
+                organization: ORGANIZATION_PLACEHOLDER.to_string(),
+                projects,
+            }]
+        }
     }
 
     /// Render as the JSON the bundle reads from `--policy-file`.
@@ -262,6 +311,30 @@ permissions:
         )
         .unwrap()
         .0
+    }
+
+    fn with_repository_resources() -> FrontMatter {
+        let mut front_matter = crate::compile::parse_markdown(
+            r#"---
+name: t
+description: x
+repos:
+  - name: Shared/shared-api
+    checkout: false
+  - name: owner/github-repo
+    type: github
+  - name: local-repo
+---
+"#,
+        )
+        .unwrap()
+        .0;
+        let (repositories, checkout, checkout_fetch) =
+            crate::compile::resolve_repos(&front_matter).unwrap();
+        front_matter.repositories = repositories;
+        front_matter.checkout = checkout;
+        front_matter.checkout_fetch = checkout_fetch;
+        front_matter
     }
 
     #[test]
@@ -359,6 +432,32 @@ permissions:
             json.contains("\"additional_scopes\": []"),
             "additional_scopes must be explicit: {json}"
         );
+    }
+
+    #[test]
+    fn azure_repos_resources_grant_the_repository_but_not_the_project() {
+        let document = PolicyDocument::new(&with_repository_resources());
+
+        assert_eq!(
+            document.additional_scopes,
+            vec![PolicyOrganizationScope {
+                organization: ORGANIZATION_PLACEHOLDER.to_string(),
+                projects: vec![PolicyProjectScope {
+                    project: "Shared".to_string(),
+                    project_id: None,
+                    project_scoped: false,
+                    repositories: vec!["shared-api".to_string()],
+                }],
+            }]
+        );
+    }
+
+    #[test]
+    fn non_ado_and_bare_repository_resources_grant_nothing() {
+        let emitted = PolicyDocument::new(&with_repository_resources()).to_json();
+
+        assert!(!emitted.contains("github-repo"), "{emitted}");
+        assert!(!emitted.contains("local-repo"), "{emitted}");
     }
 
     #[test]

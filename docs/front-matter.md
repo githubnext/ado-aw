@@ -36,9 +36,9 @@ pool:                          # Optional pool configuration
 #     conclusion:
 #       vmImage: ubuntu-22.04
 repos:                           # compact repository declarations (replaces repositories: + checkout:)
-  - my-org/my-repo               # shorthand: alias="my-repo", type=git, ref=refs/heads/main, checkout=true
-  - reponame=my-org/another-repo # shorthand with explicit alias
-  - name: my-org/templates       # object form for full control
+  - MyProject/my-repo               # shorthand: alias="my-repo", type=git, ref=refs/heads/main, checkout=true
+  - reponame=MyProject/another-repo # shorthand with explicit alias
+  - name: MyProject/templates       # object form for full control
     ref: refs/heads/release/2.x
     checkout: false              # declared as resource only, not checked out by the agent
 tools:                         # optional tool configuration

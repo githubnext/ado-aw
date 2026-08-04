@@ -2280,7 +2280,10 @@ fn default_ref() -> String {
 /// Object form for a `repos:` entry.
 #[derive(Debug, Deserialize, Clone)]
 pub struct RepoEntry {
-    /// Full repo name in the form `org/repo` (maps to ADO `name:`).
+    /// Full Azure Repos name in the form `project/repo` (maps to ADO `name:`).
+    ///
+    /// Other repository resource types may use a different provider-specific
+    /// shape; only `type: git` participates in ado-proxy scope derivation.
     pub name: String,
     /// Optional alias (maps to ADO `repository:`). Defaults to the last segment of `name`.
     #[serde(default)]
@@ -2347,7 +2350,7 @@ impl CheckoutFetchOpts {
 /// A single item in the `repos:` list — either a string shorthand or an object.
 #[derive(Debug, Clone)]
 pub enum ReposItem {
-    /// String shorthand: `"org/repo"` or `"alias=org/repo"`.
+    /// String shorthand: `"project/repo"` or `"alias=project/repo"`.
     Shorthand(String),
     /// Full object form with explicit fields.
     Full(RepoEntry),
