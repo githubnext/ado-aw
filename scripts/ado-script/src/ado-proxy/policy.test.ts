@@ -17,6 +17,33 @@ const POLICY: ProxyPolicy = {
   allowed_resource_areas: ["79134c72-4a58-4b42-976c-04e7115f32bf"],
 };
 
+const MULTI_SCOPE_POLICY: ProxyPolicy = {
+  ...POLICY,
+  additional_scopes: [
+    {
+      organization: "fabrikam",
+      projects: [
+        {
+          project: "Shared",
+          project_id: "33333333-3333-3333-3333-333333333333",
+          project_scoped: true,
+          repositories: ["shared-api"],
+        },
+      ],
+    },
+    {
+      organization: "contoso",
+      projects: [
+        {
+          project: "RepoOnly",
+          project_scoped: false,
+          repositories: ["implicit-api"],
+        },
+      ],
+    },
+  ],
+};
+
 function decide(
   method: string,
   url: string,
@@ -232,6 +259,66 @@ describe("authorize — denials", () => {
       policy: { ...POLICY, capabilities: ["discovery", "core"] },
     });
     expect(decision.allow).toBe(true);
+  });
+});
+
+describe("authorize — additional organization-relative scopes", () => {
+  it("allows a project explicitly granted in another organization", () => {
+    expect(
+      decide("GET", "/fabrikam/_apis/projects/Shared?api-version=7.1", {
+        policy: MULTI_SCOPE_POLICY,
+      }).allow,
+    ).toBe(true);
+    expect(
+      decide(
+        "GET",
+        "/fabrikam/_apis/projects/33333333-3333-3333-3333-333333333333?api-version=7.1",
+        { policy: MULTI_SCOPE_POLICY },
+      ).allow,
+    ).toBe(true);
+  });
+
+  it("denies org B naming a project granted only in org A", () => {
+    // This must reach the scope check and fail there. A flat global project
+    // membership test would silently allow it.
+    const decision = decide(
+      "GET",
+      "/contoso/_apis/projects/Shared?api-version=7.1",
+      { policy: MULTI_SCOPE_POLICY },
+    );
+    expectDeny(decision, "out-of-scope");
+  });
+
+  it("allows a repos-derived repository without opening its project", () => {
+    expect(
+      decide(
+        "GET",
+        "/contoso/RepoOnly/_apis/git/repositories/implicit-api/refs?api-version=7.1&filter=heads",
+        { policy: MULTI_SCOPE_POLICY },
+      ).allow,
+    ).toBe(true);
+
+    expectDeny(
+      decide("GET", "/contoso/_apis/projects/RepoOnly?api-version=7.1", {
+        policy: MULTI_SCOPE_POLICY,
+      }),
+      "out-of-scope",
+    );
+    expectDeny(
+      decide("GET", "/contoso/RepoOnly/_apis/build/builds?api-version=7.1", {
+        policy: MULTI_SCOPE_POLICY,
+      }),
+      "out-of-scope",
+    );
+  });
+
+  it("denies projects outside every scope", () => {
+    expectDeny(
+      decide("GET", "/fabrikam/_apis/projects/Payroll?api-version=7.1", {
+        policy: MULTI_SCOPE_POLICY,
+      }),
+      "out-of-scope",
+    );
   });
 });
 

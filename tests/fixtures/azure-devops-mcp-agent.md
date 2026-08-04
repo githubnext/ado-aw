@@ -1,6 +1,12 @@
 ---
 name: "Azure DevOps MCP Agent"
 description: "Agent with Azure DevOps MCP via first-class tool integration"
+repos:
+  - name: LocalProject/implicit-api
+    checkout: false
+  - name: owner/github-only
+    type: github
+    checkout: false
 tools:
   azure-devops:
     org: myorg
@@ -13,7 +19,7 @@ tools:
 permissions:
   read:
     service-connection: my-read-arm-connection
-    capabilities: [core, repos, pipelines, boards]
+    capabilities: [core, repos]
     allow:
       - organization: fabrikam
         projects:

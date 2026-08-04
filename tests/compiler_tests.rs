@@ -1930,6 +1930,23 @@ fn test_fixture_azure_devops_mcp_compiled_output() {
 
     let compiled = fs::read_to_string(&output_path).expect("Should read compiled output");
 
+    let policy_marker = "cat > \"$PROXY_DIR/policy/policy.json\" <<'ADO_PROXY_POLICY_EOF'\n";
+    let policy_start = compiled
+        .find(policy_marker)
+        .map(|index| index + policy_marker.len())
+        .expect("compiled pipeline must carry an ado-proxy policy document");
+    let policy_tail = &compiled[policy_start..];
+    let policy_end = policy_tail
+        .find("\n      ADO_PROXY_POLICY_EOF")
+        .expect("compiled policy heredoc must terminate");
+    let policy_json = policy_tail[..policy_end]
+        .lines()
+        .map(|line| line.strip_prefix("      ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let policy: serde_json::Value =
+        serde_json::from_str(&policy_json).expect("compiled policy must be valid JSON");
+
     // No unreplaced template markers (except ADO ${{ }} expressions)
     for line in compiled.lines() {
         let stripped = line.replace("${{", "");
@@ -2003,6 +2020,34 @@ fn test_fixture_azure_devops_mcp_compiled_output() {
             && compiled.contains("\"project_scoped\": true")
             && compiled.contains("\"shared-api\""),
         "the explicit cross-organization scope must survive compilation"
+    );
+    assert!(
+        compiled.contains("\"organization\": \"${ADO_PROXY_ORGANIZATION}\"")
+            && compiled.contains("\"project\": \"LocalProject\"")
+            && compiled.contains("\"project_scoped\": false")
+            && compiled.contains("\"implicit-api\""),
+        "the Azure Repos resource must emit a repository-only scope"
+    );
+    assert!(
+        !compiled.contains("\"github-only\""),
+        "a GitHub repository resource must not grant Azure DevOps scope"
+    );
+    assert_eq!(
+        policy["capabilities"],
+        serde_json::json!(["discovery", "core", "repos"]),
+        "only explicitly selected capabilities plus discovery may be emitted"
+    );
+    assert!(
+        compiled.contains("case \" devops repos rest \" in"),
+        "the az wrapper must narrow to the same capability set"
+    );
+    assert!(
+        compiled.contains("**Available** — `az devops`, `az repos`, `az rest`"),
+        "the prompt must advertise the same capability set"
+    );
+    assert!(
+        !compiled.contains("**Available** — `az devops`, `az repos`, `az pipelines`"),
+        "an ungranted capability must not leak into the prompt"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
