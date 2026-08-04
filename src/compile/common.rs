@@ -494,13 +494,13 @@ pub fn validate_proxied_timeout(front_matter: &FrontMatter, timeout_minutes: u32
     )
 }
 
-/// Reject explicit Stage 1 read-policy options until the credential-isolated
-/// proxy enforces them.
+/// Validate explicit Stage 1 read-policy options before policy emission.
 ///
-/// Deserializing the object form now lets the typed schema and validation
-/// evolve independently, but compiling it as the legacy scalar behavior would
-/// silently ignore scope/capability restrictions. Fail closed until the proxy
-/// wiring consumes the policy.
+/// The object form is now consumed by [`crate::ado_proxy::policy::PolicyDocument`]:
+/// capabilities narrow the operation catalog and `allow:` lowers into the
+/// bundle's organization-relative scope tree. Structural validation remains on
+/// the compile path so a widening produced by omission — such as naming an
+/// organization with no projects — fails before any pipeline is emitted.
 pub fn validate_permissions_read_policy(front_matter: &FrontMatter) -> Result<()> {
     let Some(options) = front_matter
         .permissions
@@ -511,31 +511,7 @@ pub fn validate_permissions_read_policy(front_matter: &FrontMatter) -> Result<()
         return Ok(());
     };
 
-    // Run the structural rules first even though the object form is refused
-    // below. They are the rules that will govern the policy document once the
-    // proxy is wired, so keeping them on the live path means they are exercised
-    // by every fixture that uses the object form rather than only by unit
-    // tests — a scope mistake cannot lie dormant until the day we enable it.
-    options.validate()?;
-
-    // Echo back what was requested. Without this the author cannot tell whether
-    // the compiler understood their policy or choked on the first key.
-    let requested = if options.capabilities.is_empty() {
-        "the default capability set".to_string()
-    } else {
-        options
-            .capabilities
-            .iter()
-            .map(|capability| capability.to_catalog().as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-
-    anyhow::bail!(
-        "permissions.read object form requires the credential-isolated Azure DevOps proxy, \
-         which is not enabled in this compiler yet (requested: {requested}). Use the scalar \
-         service-connection shorthand for the current trusted MCP behavior."
-    )
+    options.validate()
 }
 
 /// Validate the `variable-groups:` front-matter block (issue #1385).
@@ -5682,8 +5658,7 @@ safe-outputs:
     }
 
     #[test]
-    fn test_validate_permissions_read_policy_allows_scalar_and_rejects_object() {
-
+    fn test_validate_permissions_read_policy_accepts_scalar_and_object() {
         let (scalar, _) = parse_markdown(
             "---\nname: test\ndescription: test\npermissions:\n  read: my-read-sc\n---\n",
         )
@@ -5694,10 +5669,24 @@ safe-outputs:
             "---\nname: test\ndescription: test\npermissions:\n  read:\n    service-connection: my-read-sc\n    capabilities: [repos]\n---\n",
         )
         .unwrap();
+        validate_permissions_read_policy(&object).unwrap();
+    }
+
+    #[test]
+    fn test_validate_permissions_read_policy_rejects_org_without_projects() {
+        let (object, _) = parse_markdown(
+            "---\nname: test\ndescription: test\npermissions:\n  read:\n    \
+             service-connection: my-read-sc\n    allow:\n      - organization: fabrikam\n---\n",
+        )
+        .unwrap();
+
         let error = validate_permissions_read_policy(&object)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("credential-isolated Azure DevOps proxy"));
+        assert!(
+            error.contains("lists no projects"),
+            "must explain the widening omission: {error}"
+        );
     }
 
     /// The proxy holds one non-renewable bearer, so a run must not be able to

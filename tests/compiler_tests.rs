@@ -1958,6 +1958,17 @@ fn test_fixture_azure_devops_mcp_compiled_output() {
         compiled.contains("--add-host"),
         "the MCP must be redirected at the policy engine"
     );
+    assert!(
+        compiled.contains("\"additional_scopes\": ["),
+        "the object-form read policy must emit its scope tree"
+    );
+    assert!(
+        compiled.contains("\"organization\": \"fabrikam\"")
+            && compiled.contains("\"project\": \"Shared\"")
+            && compiled.contains("\"project_scoped\": true")
+            && compiled.contains("\"shared-api\""),
+        "the explicit cross-organization scope must survive compilation"
+    );
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
