@@ -12,6 +12,7 @@
  */
 import { PROTECTED_HOSTS } from "./catalog.js";
 import type { ProxyPolicy } from "./config.js";
+import { ScopeIndex } from "./scope.js";
 import type { Operation, ResponsePolicy } from "../shared/ado-proxy-catalog.types.gen.js";
 
 export type FilterOutcome =
@@ -38,14 +39,37 @@ function sameIdentifier(left: unknown, right: string | undefined): boolean {
   );
 }
 
-function isCurrentProject(value: unknown, policy: ProxyPolicy): boolean {
-  return sameIdentifier(value, policy.project) || sameIdentifier(value, policy.project_id);
+/**
+ * Whether a project named in a response body is in scope.
+ *
+ * Organization-relative: the project is resolved inside the organization the
+ * request was addressed to, so a project granted in a *different* organization
+ * cannot validate this response.
+ */
+function inScopeProject(
+  value: unknown,
+  scopes: ScopeIndex,
+  organization: string,
+): boolean {
+  return typeof value === "string" && scopes.allowsProject(organization, value);
 }
 
-function isCurrentRepository(value: unknown, policy: ProxyPolicy): boolean {
+/**
+ * Whether a repository named in a response body is in scope for its project.
+ *
+ * Checked against the repository grant rather than the project grant, because
+ * a `repos:`-derived scope grants the repository without granting the project.
+ */
+function inScopeRepository(
+  value: unknown,
+  project: unknown,
+  scopes: ScopeIndex,
+  organization: string,
+): boolean {
   return (
-    sameIdentifier(value, policy.repository) ||
-    sameIdentifier(value, policy.repository_id)
+    typeof value === "string" &&
+    typeof project === "string" &&
+    scopes.allowsRepository(organization, project, value)
   );
 }
 
@@ -79,6 +103,17 @@ export function filterResponse(
    * the intercepted MCP path and the `az` broker path.
    */
   selfOrigin: string,
+  /** Resolved scopes, so response validation agrees with request validation. */
+  scopes: ScopeIndex = ScopeIndex.from(policy),
+  /**
+   * Organization the request was addressed to.
+   *
+   * Response bodies carry a project but not an organization, so it has to come
+   * from the request. Without it the project check could not stay
+   * organization-relative, and a project granted in one organization would
+   * validate a response from another.
+   */
+  organization: string = policy.organization,
 ): FilterOutcome {
   const responsePolicy: ResponsePolicy = operation.response;
   if (responsePolicy === "json") return forward(body);
@@ -105,7 +140,8 @@ export function filterResponse(
         const project = asRecord(entry);
         return (
           project !== undefined &&
-          (isCurrentProject(project.name, policy) || isCurrentProject(project.id, policy))
+          (inScopeProject(project.name, scopes, organization) ||
+            inScopeProject(project.id, scopes, organization))
         );
       });
       return reserialize({ count: kept.length, value: kept });
@@ -147,7 +183,9 @@ export function filterResponse(
       const nested = asRecord(record.project);
       const fromFields = asRecord(record.fields)?.["System.TeamProject"];
       const candidates = [nested?.name, nested?.id, fromFields];
-      if (!candidates.some((candidate) => isCurrentProject(candidate, policy))) {
+      if (
+        !candidates.some((candidate) => inScopeProject(candidate, scopes, organization))
+      ) {
         return denyBody("resource belongs to a different project");
       }
       return forward(body);
@@ -159,17 +197,27 @@ export function filterResponse(
         return denyBody("response carried no repository to validate");
       }
       const project = asRecord(repository.project);
-      if (
-        !isCurrentProject(project?.name, policy) &&
-        !isCurrentProject(project?.id, policy)
-      ) {
-        return denyBody("resource belongs to a different project");
+      // A `repos:`-derived scope grants the repository without granting the
+      // project, so the repository check is what authorizes this response; the
+      // project is used only to resolve which grant applies.
+      const projectName =
+        typeof project?.name === "string" ? project.name : undefined;
+      const projectId = typeof project?.id === "string" ? project.id : undefined;
+      const projectKey = [projectName, projectId].find(
+        (candidate) =>
+          candidate !== undefined &&
+          (scopes.allowsProject(organization, candidate) ||
+            scopes.allowsRepository(organization, candidate, String(repository.name)) ||
+            scopes.allowsRepository(organization, candidate, String(repository.id))),
+      );
+      if (projectKey === undefined) {
+        return denyBody("resource belongs to a project outside the policy");
       }
       if (
-        !isCurrentRepository(repository.name, policy) &&
-        !isCurrentRepository(repository.id, policy)
+        !inScopeRepository(repository.name, projectKey, scopes, organization) &&
+        !inScopeRepository(repository.id, projectKey, scopes, organization)
       ) {
-        return denyBody("resource belongs to a different repository");
+        return denyBody("resource belongs to a repository outside the policy");
       }
       return forward(body);
     }

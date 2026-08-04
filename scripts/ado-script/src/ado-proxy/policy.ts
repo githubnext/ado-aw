@@ -8,6 +8,7 @@
  * — an unknown route, an unlisted parameter, an unmatched placeholder — is a
  * denial, never a pass-through.
  */
+import { ScopeIndex } from "./scope.js";
 import { ApiVersionError, resolveApiVersion, type ApiVersion } from "./api-version.js";
 import { DENIED_ROUTE_FAMILIES, OPERATIONS, PROTECTED_HOSTS } from "./catalog.js";
 import type { ProxyPolicy } from "./config.js";
@@ -123,15 +124,16 @@ function checkScope(
   operation: Operation,
   params: RouteParams,
   policy: ProxyPolicy,
+  scopes: ScopeIndex,
 ): Decision | undefined {
   const organization = params.org;
   // Every organization-hosted route carries `{org}`; the SPS fallback route
   // does not, and is scoped by resource-area id instead.
   if (operation.host === "current-organization") {
-    if (organization === undefined || !sameIdentifier(organization, policy.organization)) {
+    if (organization === undefined || !scopes.hasOrganization(organization)) {
       return deny(
         "out-of-scope",
-        "request names a different organization than the pinned one",
+        "request names an organization outside the policy",
         operation.id,
       );
     }
@@ -165,10 +167,13 @@ function checkScope(
 
     case "current-project-path": {
       const project = params.project;
-      if (project === undefined || !isCurrentProject(project, policy)) {
+      // Organization-relative: the project is looked up *inside* the
+      // organization named by this request, so a project granted in another
+      // organization cannot satisfy it.
+      if (project === undefined || !scopes.allowsProject(organization, project)) {
         return deny(
           "out-of-scope",
-          "request names a different project than the pinned one",
+          "request names a project outside the policy for this organization",
           operation.id,
         );
       }
@@ -178,17 +183,20 @@ function checkScope(
     case "current-repository-path": {
       const project = params.project;
       const repository = params.repository;
-      if (project === undefined || !isCurrentProject(project, policy)) {
-        return deny(
-          "out-of-scope",
-          "request names a different project than the pinned one",
-          operation.id,
-        );
+      if (project === undefined) {
+        return deny("out-of-scope", "request names no project", operation.id);
       }
-      if (repository === undefined || !isCurrentRepository(repository, policy)) {
+      // A repository grant does not imply a project grant — a `repos:`
+      // declaration asks for the repository, not the work items and pipelines
+      // beside it — so this checks the repository within the project rather
+      // than requiring the project itself to be in scope.
+      if (
+        repository === undefined ||
+        !scopes.allowsRepository(organization, project, repository)
+      ) {
         return deny(
           "out-of-scope",
-          "request names a different repository than the pinned one",
+          "request names a repository outside the policy for this project",
           operation.id,
         );
       }
@@ -221,7 +229,11 @@ export interface RequestFacts {
  * reported as such rather than as a generic "unknown route", which is what an
  * author needs to see to understand the denial.
  */
-export function authorize(facts: RequestFacts, policy: ProxyPolicy): Decision {
+export function authorize(
+  facts: RequestFacts,
+  policy: ProxyPolicy,
+  scopes: ScopeIndex = ScopeIndex.from(policy),
+): Decision {
   const method = facts.method.toUpperCase();
   if (method !== "GET" && method !== "OPTIONS") {
     return deny("method-not-read", `${method} is not a read method`);
@@ -276,7 +288,7 @@ export function authorize(facts: RequestFacts, policy: ProxyPolicy): Decision {
     const queryDenial = checkQuery(operation, facts.target);
     if (queryDenial !== undefined) return queryDenial;
 
-    const scopeDenial = checkScope(operation, params, policy);
+    const scopeDenial = checkScope(operation, params, policy, scopes);
     if (scopeDenial !== undefined) return scopeDenial;
 
     return apiVersion === undefined

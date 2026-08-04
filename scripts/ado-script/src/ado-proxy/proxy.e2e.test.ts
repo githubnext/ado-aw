@@ -36,6 +36,7 @@ import { CATALOG_SCHEMA_VERSION } from "./catalog.js";
 import type { ProxyConfig, ProxyPolicy } from "./config.js";
 import { DecisionLog } from "./log.js";
 import { createDirectTlsServer, HEALTH_PATH, createProxyServer } from "./server.js";
+import { ScopeIndex } from "./scope.js";
 import { TokenSource } from "./token.js";
 
 /**
@@ -458,6 +459,7 @@ beforeAll(async () => {
     config,
     ca: proxyCa,
     tokens: new TokenSource(CANARY),
+    scopes: ScopeIndex.from(POLICY),
     log: new DecisionLog(join(workdir, "decisions")),
     upstreamCa: upstreamCa.caCertPem,
   });
@@ -470,6 +472,7 @@ beforeAll(async () => {
     config,
     ca: proxyCa,
     tokens: new TokenSource(CANARY),
+    scopes: ScopeIndex.from(POLICY),
     log: new DecisionLog(join(workdir, "decisions")),
     upstreamCa: upstreamCa.caCertPem,
   });

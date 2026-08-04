@@ -30,6 +30,7 @@ import { CaError, publishCaCertificate, readCaMaterials } from "./ca.js";
 import { ConfigError, loadConfig, type ProxyConfig } from "./config.js";
 import { DecisionLog } from "./log.js";
 import { createDirectTlsServer, createProxyServer } from "./server.js";
+import { ScopeIndex } from "./scope.js";
 import { TokenSource } from "./token.js";
 import { UpstreamError, parseUpstreamProxy } from "./upstream.js";
 
@@ -77,6 +78,10 @@ export async function run(argv: readonly string[]): Promise<number> {
     ca,
     tokens: new TokenSource(ca.token),
     log: new DecisionLog(config.logDir),
+    // Built once here rather than per request: request and response validation
+    // must agree about what is in scope, and rebuilding per call would let the
+    // two drift.
+    scopes: ScopeIndex.from(config.policy),
   };
   const server = createProxyServer(deps);
   const tlsServer = createDirectTlsServer(deps);

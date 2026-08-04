@@ -22,6 +22,7 @@ import { createServer as createNetServer, type Server as NetServer, type Socket 
 import { connect as tlsConnect, createSecureContext, createServer as createTlsServer, type TLSSocket } from "node:tls";
 
 import type { CaMaterials } from "./ca.js";
+import { ScopeIndex } from "./scope.js";
 import { canonicalizeHost, isProtectedHost } from "./catalog.js";
 import type { ProxyConfig } from "./config.js";
 import { sanitizeRequestHeaders, sanitizeResponseHeaders } from "./headers.js";
@@ -75,6 +76,13 @@ export interface ProxyDeps {
    * trusts rather than disabling verification.
    */
   readonly upstreamCa?: string;
+  /**
+   * Resolved organization/project/repository scopes.
+   *
+   * Built once at startup from the policy so request and response validation
+   * cannot disagree about what is in scope.
+   */
+  readonly scopes: ScopeIndex;
 }
 
 /** Send a small JSON error body that no supported client will retry. */
@@ -264,7 +272,13 @@ async function handleProtected(
   const decision = authorize(
     { method, host, target, accept: Array.isArray(accept) ? accept[0] : accept },
     deps.config.policy,
+    deps.scopes,
   );
+
+  // Every organization-hosted route begins `/{org}/…`. Response bodies name a
+  // project but never an organization, so the request's own organization is
+  // what keeps response validation organization-relative.
+  const requestOrganization = target.segments[0];
 
   if (!decision.allow) {
     deps.log.write({
@@ -358,6 +372,8 @@ async function handleProtected(
       deps.config.policy,
       body,
       `https://${host}`,
+      deps.scopes,
+      requestOrganization ?? deps.config.policy.organization,
     );
 
     if (outcome.kind === "deny") {

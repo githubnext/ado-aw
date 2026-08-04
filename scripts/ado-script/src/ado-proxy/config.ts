@@ -14,6 +14,7 @@ import { readFileSync } from "node:fs";
 
 import type { Capability } from "../shared/ado-proxy-catalog.types.gen.js";
 import { CATALOG_SCHEMA_VERSION, PROTECTED_HOSTS } from "./catalog.js";
+import { projectScopeDefaults } from "./scope.js";
 
 /** Resolved, validated proxy configuration. */
 export interface ProxyConfig {
@@ -41,6 +42,31 @@ export interface ProxyConfig {
 }
 
 /** The compiler-emitted policy document. */
+/** One project's grant inside an organization scope. */
+export interface PolicyProjectScope {
+  /** Project name. */
+  readonly project: string;
+  /** Project id (GUID), when the author supplied one. */
+  readonly project_id?: string;
+  /**
+   * Whether project-addressed reads are granted.
+   *
+   * True when the author named the project in `permissions.read.allow`. False
+   * for a scope derived from a `repos:` declaration, which grants only the
+   * repositories it names — declaring a repository is not a request for the
+   * work items and pipelines beside it.
+   */
+  readonly project_scoped?: boolean;
+  /** Repository names and/or ids granted within this project. */
+  readonly repositories?: readonly string[];
+}
+
+/** An organization and the projects granted within it. */
+export interface PolicyOrganizationScope {
+  readonly organization: string;
+  readonly projects: readonly PolicyProjectScope[];
+}
+
 export interface ProxyPolicy {
   /**
    * Catalog version this document was generated against.
@@ -59,6 +85,14 @@ export interface ProxyPolicy {
   readonly repository?: string;
   /** Repository id (GUID), when the compiler could resolve one. */
   readonly repository_id?: string;
+  /**
+   * Scopes beyond the current organization and project.
+   *
+   * Empty or absent means the agent may read only the scope its own pipeline
+   * runs in. Entries come from `permissions.read.allow` (which grants the
+   * project) and from `repos:` declarations (which grant only the repository).
+   */
+  readonly additional_scopes?: readonly PolicyOrganizationScope[];
   /** Enabled capability groups; an operation outside these is denied. */
   readonly capabilities: readonly Capability[];
   /** Hosts whose traffic is TLS-terminated and policy-checked. */
@@ -179,7 +213,79 @@ const KNOWN_POLICY_KEYS: readonly string[] = [
   "capabilities",
   "protected_hosts",
   "allowed_resource_areas",
+  "additional_scopes",
 ];
+
+/** Keys a single `additional_scopes` entry may carry. */
+const KNOWN_SCOPE_KEYS: readonly string[] = ["organization", "projects"];
+
+/** Keys a single project entry may carry. */
+const KNOWN_PROJECT_KEYS: readonly string[] = [
+  "project",
+  "project_id",
+  "project_scoped",
+  "repositories",
+];
+
+/**
+ * Parse `additional_scopes`, failing closed on anything unrecognized.
+ *
+ * Strict for the same reason as the top-level document: a key this bundle does
+ * not implement means the compiler intended a constraint that would otherwise
+ * be silently dropped. An entry naming no projects is refused outright — in
+ * the front matter that would be a request to grant an entire organization,
+ * and a widening produced by *omitting* a key is exactly the accident this
+ * proxy exists to prevent.
+ */
+function parseAdditionalScopes(document: Record<string, unknown>): PolicyOrganizationScope[] {
+  const raw = document.additional_scopes;
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) fail("policy.additional_scopes must be an array");
+
+  return raw.map((entry, index) => {
+    const scope = asRecord(entry, `policy.additional_scopes[${index}]`);
+    for (const key of Object.keys(scope)) {
+      if (!KNOWN_SCOPE_KEYS.includes(key)) {
+        fail(`policy.additional_scopes[${index}] has unknown key ${JSON.stringify(key)}`);
+      }
+    }
+
+    const organization = requireString(scope, "organization");
+    const projects = scope.projects;
+    if (!Array.isArray(projects) || projects.length === 0) {
+      fail(
+        `policy.additional_scopes[${index}] (${organization}) lists no projects; ` +
+          "an empty list would grant the whole organization",
+      );
+    }
+
+    return {
+      organization,
+      projects: projects.map((projectEntry, projectIndex) => {
+        const label = `policy.additional_scopes[${index}].projects[${projectIndex}]`;
+        const project = asRecord(projectEntry, label);
+        for (const key of Object.keys(project)) {
+          if (!KNOWN_PROJECT_KEYS.includes(key)) {
+            fail(`${label} has unknown key ${JSON.stringify(key)}`);
+          }
+        }
+        const repositories = project.repositories;
+        if (repositories !== undefined && !Array.isArray(repositories)) {
+          fail(`${label}.repositories must be an array`);
+        }
+        if (project.project_scoped !== undefined && typeof project.project_scoped !== "boolean") {
+          fail(`${label}.project_scoped must be a boolean`);
+        }
+        return projectScopeDefaults({
+          project: requireString(project, "project"),
+          project_id: optionalString(project, "project_id"),
+          project_scoped: project.project_scoped as boolean | undefined,
+          repositories: (repositories ?? []) as readonly string[],
+        });
+      }),
+    };
+  });
+}
 
 /**
  * Parse and validate the compiler-emitted policy document.
@@ -251,6 +357,7 @@ export function parsePolicy(raw: string): ProxyPolicy {
     allowed_resource_areas: Array.isArray(document.allowed_resource_areas)
       ? requireStringArray(document, "allowed_resource_areas")
       : [],
+    additional_scopes: parseAdditionalScopes(document),
   };
 }
 
