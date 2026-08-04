@@ -6,6 +6,7 @@ import type { Scenario } from "../scenario.js";
 import { buildScenarios } from "./build.js";
 import { createPullRequestScenarios } from "./create-pull-request.js";
 import { gitScenarios } from "./git.js";
+import { githubIssueScenarios } from "./github-issue.js";
 import { prScenarios } from "./pr.js";
 import { signalScenarios } from "./signals.js";
 import { wikiScenarios } from "./wiki.js";
@@ -20,4 +21,5 @@ export const allScenarios: Scenario<unknown>[] = [
   ...gitScenarios,
   ...buildScenarios,
   ...createPullRequestScenarios,
+  ...githubIssueScenarios,
 ];

@@ -63,13 +63,120 @@ All deterministically-assertable ADO-write safe outputs plus the flagship
   scenario supplies only `ADO_AW_SELF_REPOSITORY_NAME` — matching what the
   compiler emits — so it also proves the executor resolves a repository from
   its name alone.
+- **GitHub issues:** `create-github-issue`, `set-github-issue-type`, and the
+  same-run `temporary_id` handoff between them. These are the only scenarios
+  that assert against **GitHub** rather than ADO — see
+  [GitHub issue scenarios](#github-issue-scenarios) below.
 
-Excluded (out of scope or GitHub-only): the GitHub-only `create-github-issue`.
+Excluded (out of scope): none of the currently shipped safe outputs.
 
 > **Coverage note.** The signal scenarios (`noop`, `missing-tool`,
 > `missing-data`, `report-incomplete`) were previously exercised only by
 > now-deleted per-tool agentic smoke pipelines. Adding them here closes
 > the coverage gap while keeping the test deterministic.
+
+## GitHub issue scenarios
+
+`create-github-issue` and `set-github-issue-type` had **zero runtime
+coverage** before these scenarios: their only proof was a wiremock unit test,
+and the last thing exercising `create-github-issue` end to end
+(`smoke-failure-reporter`) was removed by the smoke-suite rework.
+
+| Scenario id | Tool | What it proves |
+| --- | --- | --- |
+| `create-github-issue` | `create-github-issue` | final title is `title-prefix` + the agent title; the body carries the agent text and the `<!-- ado-aw -->` traceability footer; config-injected static labels merge with allowed agent labels |
+| `create-github-issue-label-denied` | `create-github-issue` | `allowed-labels` is **default-deny** — an agent label outside the allowlist is rejected and no issue is filed |
+| `set-github-issue-type` | `set-github-issue-type` | a native issue type is applied to an existing issue |
+| `set-github-issue-type-clear` | `set-github-issue-type` | the documented `issue_type: ""` clear operation |
+| `create-github-issue-temporary-id-handoff` | `set-github-issue-type` (with `create-github-issue` staged ahead of it) | the same-run `temporary_id` handoff |
+
+### Why the handoff scenario is shaped differently
+
+`create-github-issue` may mint a `temporary_id`, and
+`set-github-issue-type.issue_number` accepts either a real number or that id.
+The registry backing this (`ExecutionContext::resolved_github_issues`) is an
+in-process `Arc<Mutex<HashMap<…>>>` that is never persisted, so the handoff is
+only observable inside a **single `ado-aw execute` invocation**.
+
+That matches production — a SafeOutputs job runs one `ado-aw execute` over the
+whole `safe_outputs.ndjson` — but every other scenario here runs one entry per
+invocation. The handoff scenario therefore uses the harness's `priorEntries`
+hook (see `Scenario.priorEntries` in `scripts/ado-script/src/executor-e2e/scenario.ts`)
+to stage `create-github-issue` as an extra NDJSON line ahead of its own, in the
+same executor process. The assertion is that the `set-github-issue-type` record
+reports the issue number `create-github-issue` actually filed.
+
+> **Why this can't be split across jobs.** Because the registry is per-process,
+> putting `require-approval` on only one of the two tools would split Stage 3
+> into two `ado-aw execute` processes (`SafeOutputs` and `SafeOutputs_Reviewed`),
+> and a `temporary_id` minted in one could not resolve in the other. The
+> compiler rejects that configuration up front —
+> `validate_github_issue_outputs_config` in `src/compile/common.rs` requires both
+> tools to have the same *effective* `require-approval` setting, so the
+> section-level default and a per-tool override are both accounted for.
+
+### A product bug these scenarios caught
+
+Adding this coverage immediately found a real defect in Stage 3 config
+handling, now fixed in `ExecutionContext::get_tool_config`
+(`src/safe_outputs/result.rs`). It is recorded here because it is exactly the
+class of bug the wiremock unit tests structurally could not see.
+
+Stage 3 injects synthetic `staged` and `require-approval` keys into **every**
+tool config (`src/main.rs` for `--source`; `src/compile/custom_tools.rs` for the
+compiler-generated `--resolved-config` that production uses).
+`CreateGithubIssueConfig` and `SetGithubIssueTypeConfig` are the only
+safe-output configs declared `#[serde(deny_unknown_fields)]`, and neither
+declares a `staged` field — so deserialization failed, `get_tool_config`
+swallowed the error via `.ok().unwrap_or_default()`, and **the operator config
+was silently replaced with `Default::default()`**.
+
+Observable effects: `target-repo` ignored (Stage 3 failed outright on
+non-GitHub-backed ADO builds), `title-prefix` never applied, static
+`labels`/`assignees` dropped, `allowed-labels` emptied so default-deny rejected
+*every* agent label, `require-temporary-id` unenforced, and
+`set-github-issue-type.allowed` never gating anything — the last of which
+failed **open**.
+
+The unit tests missed it because they build an `ExecutionContext` directly with
+a config map that has no `staged` key, i.e. a shape that never occurs in
+production. The fix strips both orchestration keys and logs a warning instead of
+silently defaulting; `result.rs` carries regression tests asserting an operator
+config survives the injected keys.
+
+Note that `create-github-issue-label-denied` deliberately matches only the
+`labels not in allowed-labels` message. The alternative message
+(`no allowed-labels configured`) is precisely what the executor emitted when the
+config was dropped, so accepting both would have let the scenario pass either
+way — the failure mode this suite exists to prevent.
+
+### Close, don't delete
+
+GitHub has **no REST endpoint to delete an issue**. These scenarios are the only
+ones in the suite that cannot tear down completely: `cleanup()` closes each
+issue as `not_planned` instead.
+
+Every scratch issue title embeds the standard `ado-aw-det-$(Build.BuildId)-<id>`
+marker, so anything a cleanup misses is findable with a single search on the
+scratch repository. Cleanup also does **not** depend solely on state captured in
+`assert()` — when the executor filed an issue but the record came back
+non-`succeeded`, `assert()` never runs, so cleanup falls back to an exact-title
+search on that marker.
+
+Because issues accumulate (closed, never deleted), point these scenarios at a
+scratch repository, not a canonical one.
+
+### Environment
+
+| Variable | Meaning |
+| --- | --- |
+| `EXECUTOR_E2E_GITHUB_TOKEN` | Reused from failure-issue filing. It must now also carry **Issues: write** on the scratch repository, because these scenarios create, mutate, and close issues. |
+| `EXECUTOR_E2E_SCENARIO_ISSUE_REPO` | Optional. `owner/repo` for scratch issues; falls back to `EXECUTOR_E2E_ISSUE_REPO`. Set it to keep scenario issues away from the failure-report repository. |
+| `E2E_GITHUB_ISSUE_TYPE` | Optional. Forces a native issue-type name for environments where the token cannot read org metadata but the type is known to exist. |
+
+There is deliberately **no default repo** for these scenarios: when neither
+variable is set they skip rather than filing scratch issues onto
+`githubnext/ado-aw`.
 
 ### Scenarios that skip when a precondition is missing
 
@@ -82,6 +189,17 @@ when it is not available:
   no wiki exists, both skip.
 - `add-build-tag`, `upload-build-attachment`, `upload-pipeline-artifact` — need
   a real current build (`BUILD_BUILDID`); they skip when run outside a pipeline.
+- **All five GitHub issue scenarios** — need `EXECUTOR_E2E_GITHUB_TOKEN` and a
+  scratch repo (`EXECUTOR_E2E_SCENARIO_ISSUE_REPO` or `EXECUTOR_E2E_ISSUE_REPO`).
+  They also skip when the token authenticates but cannot write issues on that
+  repo, with the harness's auth diagnosis attached to the skip reason.
+- `set-github-issue-type` and, on the named-type path, the handoff — need a
+  native issue type to exist. Issue types are an **organisation-level**
+  construct (`GET /orgs/{org}/issue-types`) with no user-account equivalent, so
+  a **user-owned scratch repo can never expose one** and these skip
+  permanently there. The handoff scenario stays runnable by falling back to the
+  documented `issue_type: ""` clear operation; `set-github-issue-type-clear`
+  skips only if GitHub rejects the clear outright.
 
 ## Naming / cleanup convention
 
@@ -106,7 +224,11 @@ export EXECUTOR_E2E_ADO_REPO="agent-definitions"
 # Optional:
 # export EXECUTOR_E2E_GITHUB_TOKEN="<fine-grained PAT: Issues rw on jamesadevine/ado-aw-issues>"
 # export EXECUTOR_E2E_ISSUE_REPO="jamesadevine/ado-aw-issues"
-# export E2E_QUEUE_PIPELINE_ID="<queue-target pipeline id>"
+# Optional: keep GitHub issue scenario scratch issues out of the failure-report repo
+# export EXECUTOR_E2E_SCENARIO_ISSUE_REPO="<owner>/<scratch-repo>"
+# Optional: force a native issue-type name (org-owned repos only)
+# export E2E_GITHUB_ISSUE_TYPE="Bug"
+# export E2E_QUEUE_PIPELINE_ID="<noop-target pipeline id>"
 # Optional timeout tuning (milliseconds) for slow environments:
 # export EXECUTOR_E2E_REST_TIMEOUT_MS=30000     # per ADO REST call (default 30000)
 # export EXECUTOR_E2E_EXECUTE_TIMEOUT_MS=600000 # per `ado-aw execute` run (default 600000)
@@ -147,9 +269,23 @@ In `https://dev.azure.com/msazuresphere/AgentPlayground`:
      --value <fine-grained-pat-Issues-rw-on-jamesadevine/ado-aw-issues>
    ```
    Do **not** place this token in a shared variable group.
+
+   > The GitHub issue **scenarios** reuse this same token, so it needs
+   > **Issues: write** on the scratch repository — not just enough to file a
+   > failure report. When it can authenticate but not write, those scenarios
+   > skip with a diagnosis rather than failing the build.
 4. Set `EXECUTOR_E2E_ISSUE_REPO=jamesadevine/ado-aw-issues`.
    Confirm the target repository has `executor-e2e-failure` and
    `pipeline-failure` labels.
+   *(Optional)* Set `EXECUTOR_E2E_SCENARIO_ISSUE_REPO` to a separate scratch
+   repository so the GitHub issue scenarios do not accumulate closed issues
+   alongside the failure reports.
+
+   > `set-github-issue-type` and the named-type half of the handoff need a
+   > native issue type, which is an **organisation-level** construct. On a
+   > user-owned repo such as `jamesadevine/ado-aw-issues` they will skip on
+   > every run; point `EXECUTOR_E2E_SCENARIO_ISSUE_REPO` at an org-owned repo
+   > with issue types defined to enable them.
 5. Set `E2E_QUEUE_PIPELINE_ID` to the `queue-target` definition ID (register
    [`queue-target.yml`](queue-target.yml) if it does not exist yet). It is a
    permanent, trigger-free, non-agentic pipeline that exists only to be
