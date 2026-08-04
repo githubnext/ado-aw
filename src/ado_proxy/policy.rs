@@ -98,8 +98,35 @@ pub struct PolicyDocument {
     pub repository: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repository_id: Option<String>,
+    /// Scopes beyond the pipeline's own organization/project/repository.
+    ///
+    /// Empty is emitted rather than omitted so the compiler makes an explicit
+    /// statement that there are no additions. The bundle defaults an absent
+    /// value to empty for compatibility with older policies.
+    pub additional_scopes: Vec<PolicyOrganizationScope>,
     pub capabilities: Vec<&'static str>,
     pub protected_hosts: Vec<&'static str>,
+}
+
+/// One explicitly allowed organization and its projects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PolicyOrganizationScope {
+    pub organization: String,
+    pub projects: Vec<PolicyProjectScope>,
+}
+
+/// A project grant within one organization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PolicyProjectScope {
+    pub project: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// True because `permissions.read.allow` names this project deliberately.
+    ///
+    /// A later `repos:`-derived grant uses false so declaring a repository does
+    /// not unlock the work items, builds and pipelines beside it.
+    pub project_scoped: bool,
+    pub repositories: Vec<String>,
 }
 
 impl PolicyDocument {
@@ -140,12 +167,51 @@ impl PolicyDocument {
             project_id: Some(PROJECT_ID_PLACEHOLDER.to_string()),
             repository: Some(REPOSITORY_PLACEHOLDER.to_string()),
             repository_id: Some(REPOSITORY_ID_PLACEHOLDER.to_string()),
+            additional_scopes: Self::explicit_additional_scopes(front_matter),
             capabilities,
             // Every catalogued host must appear: one the bundle policed but
             // the document omitted would be byte-tunnelled to Squid instead,
             // which is the single failure mode the proxy cannot tolerate.
             protected_hosts: vec![ORGANIZATION_HOST, SPS_FALLBACK_HOST],
         }
+    }
+
+    /// Lower `permissions.read.allow` into the exact organization-relative tree
+    /// the bundle validates.
+    ///
+    /// The nesting is preserved rather than flattened: a project granted in
+    /// organization A must never match the same project name in organization B.
+    fn explicit_additional_scopes(front_matter: &FrontMatter) -> Vec<PolicyOrganizationScope> {
+        let options = front_matter
+            .permissions
+            .as_ref()
+            .and_then(|permissions| permissions.read.as_ref())
+            .and_then(crate::compile::types::ReadPermissionConfig::options);
+
+        options
+            .into_iter()
+            .flat_map(|options| &options.allow)
+            .map(|scope| PolicyOrganizationScope {
+                organization: scope.organization.as_str().to_string(),
+                projects: scope
+                    .projects
+                    .iter()
+                    .map(|project| PolicyProjectScope {
+                        project: project.project.as_str().to_string(),
+                        project_id: project
+                            .project_id
+                            .as_ref()
+                            .map(|value| value.as_str().to_string()),
+                        project_scoped: true,
+                        repositories: project
+                            .repositories
+                            .iter()
+                            .map(|repository| repository.as_str().to_string())
+                            .collect(),
+                    })
+                    .collect(),
+            })
+            .collect()
     }
 
     /// Render as the JSON the bundle reads from `--policy-file`.
@@ -172,6 +238,28 @@ mod tests {
             "---\nname: t\ndescription: x\npermissions:\n  read:\n    \
              service-connection: my-read-sc\n    capabilities: [{list}]\n---\n"
         ))
+        .unwrap()
+        .0
+    }
+
+    fn with_additional_scope() -> FrontMatter {
+        crate::compile::parse_markdown(
+            r#"---
+name: t
+description: x
+permissions:
+  read:
+    service-connection: my-read-sc
+    capabilities: [core, repos]
+    allow:
+      - organization: fabrikam
+        projects:
+          - project: Shared
+            project-id: 33333333-3333-3333-3333-333333333333
+            repositories: [shared-api]
+---
+"#,
+        )
         .unwrap()
         .0
     }
@@ -239,6 +327,38 @@ mod tests {
                  the bundle would byte-tunnel it to Squid unpoliced"
             );
         }
+    }
+
+    #[test]
+    fn explicit_allow_scopes_preserve_the_organization_project_tree() {
+        let document = PolicyDocument::new(&with_additional_scope());
+
+        assert_eq!(
+            document.additional_scopes,
+            vec![PolicyOrganizationScope {
+                organization: "fabrikam".to_string(),
+                projects: vec![PolicyProjectScope {
+                    project: "Shared".to_string(),
+                    project_id: Some(
+                        "33333333-3333-3333-3333-333333333333".to_string()
+                    ),
+                    project_scoped: true,
+                    repositories: vec!["shared-api".to_string()],
+                }],
+            }]
+        );
+    }
+
+    #[test]
+    fn additional_scopes_are_emitted_even_when_empty() {
+        // Explicit `[]` is the compiler stating there are no additions. The
+        // bundle also accepts absent for compatibility with old policies, but
+        // the current compiler should never leave this field undecided.
+        let json = PolicyDocument::new(&plain()).to_json();
+        assert!(
+            json.contains("\"additional_scopes\": []"),
+            "additional_scopes must be explicit: {json}"
+        );
     }
 
     #[test]

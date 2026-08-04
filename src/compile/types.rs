@@ -2003,6 +2003,15 @@ pub struct AdoReadOrganizationScope {
 #[serde(deny_unknown_fields)]
 pub struct AdoReadProjectScope {
     pub project: crate::secure::AdoProject,
+    /// Optional Azure DevOps project GUID.
+    ///
+    /// Additional scopes are known only from front matter, not from a runtime
+    /// discovery call. Clients — especially `az` — may address a project by a
+    /// cached GUID rather than by name, so authors can provide the GUID to make
+    /// both forms resolve. Without it, name-form requests still work and a
+    /// GUID-form request fails closed.
+    #[serde(default, rename = "project-id")]
+    pub project_id: Option<crate::secure::Guid>,
     /// Repositories to allow within this project.
     ///
     /// May be omitted. Unlike an organization with no projects, this is not a
@@ -4046,6 +4055,7 @@ read:
     - organization: other-org
       projects:
         - project: Other Project
+          project-id: 11111111-1111-1111-1111-111111111111
           repositories: [Repo One, 01234567-89ab-cdef-0123-456789abcdef]
 "#;
         let pc: PermissionsConfig = serde_yaml::from_str(yaml).unwrap();
@@ -4067,6 +4077,13 @@ read:
             "Other Project"
         );
         assert_eq!(
+            options.allow[0].projects[0]
+                .project_id
+                .as_ref()
+                .map(|value| value.as_str()),
+            Some("11111111-1111-1111-1111-111111111111")
+        );
+        assert_eq!(
             options.allow[0].projects[0].repositories[0].as_str(),
             "Repo One"
         );
@@ -4077,6 +4094,7 @@ read:
         for yaml in [
             "read:\n  service-connection: sc\n  allow:\n    - organization: 'bad/org'",
             "read:\n  service-connection: sc\n  allow:\n    - organization: org\n      projects:\n        - project: Project\n          repositories: ['../repo']",
+            "read:\n  service-connection: sc\n  allow:\n    - organization: org\n      projects:\n        - project: Project\n          project-id: not-a-guid",
             "read:\n  service-connection: sc\n  unknown: value",
         ] {
             assert!(
