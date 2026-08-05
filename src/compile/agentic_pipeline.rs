@@ -4459,7 +4459,17 @@ fn verify_trusted_topology_peers_step() -> BashStep {
            fi\n  \
            echo \"Trusted topology peer $PEER is running\"\n  \
          done\n\
-         echo \"ado-proxy policy and client configuration are ready; runtime denials will include the policy reason and sanitized decision logs\"\n"
+         if [ ! -r {ca_host_path} ]; then\n  \
+           echo \"##vso[task.logissue type=error]ado-proxy public CA is not readable by the runner/agent identity: {ca_host_path}\"\n  \
+           ls -l {ca_host_path} 2>&1 || true\n  \
+           echo \"The proxy publishes this intentionally public certificate for the wrapped az process and Azure DevOps MCP. A restrictive container umask must not leave it owner-only.\"\n  \
+           docker logs --tail 200 {ADO_PROXY_CONTAINER_NAME} 2>&1 || true\n  \
+           exit 1\n  \
+         fi\n\
+         CA_MODE=$(stat -c '%a' {ca_host_path} 2>/dev/null || echo unknown)\n\
+         echo \"ado-proxy public CA is readable (mode=$CA_MODE)\"\n\
+         echo \"ado-proxy policy and client configuration are ready; runtime denials will include the policy reason and sanitized decision logs\"\n",
+        ca_host_path = ADO_PROXY_PUBLIC_CA_HOST_PATH
     );
     bash("Verify trusted topology peers", script)
 }
@@ -6011,6 +6021,8 @@ safe-outputs:
         assert!(step.script.contains(ADO_PROXY_CONTAINER_NAME));
         assert!(step.script.contains("trusted topology peer $PEER is not running"));
         assert!(step.script.contains("docker logs --tail 200"));
+        assert!(step.script.contains("public CA is not readable"));
+        assert!(step.script.contains(ADO_PROXY_PUBLIC_CA_HOST_PATH));
         assert_eq!(step.display_name, "Verify trusted topology peers");
     }
 

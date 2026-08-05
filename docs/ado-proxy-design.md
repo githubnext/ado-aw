@@ -413,6 +413,9 @@ Operational diagnostics are equally deliberate:
 
 - startup waits for the private FIFO, completed material parse, published CA,
   listening log line, and container IP — not merely for `docker run` to return;
+- preflight also verifies that the intentionally public CA is readable by the
+  runner/agent identity and reports its mode. This catches a restrictive
+  container umask before `az` spends a run retrying `PermissionError(13)`;
 - immediately before AWF starts, a preflight verifies both externally launched
   topology peers (`awmg-mcpg` and `awmg-ado-proxy`) are still running. A missing
   peer prints Docker state and the last 200 log lines instead of deferring to

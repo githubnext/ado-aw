@@ -46,7 +46,7 @@
  * the marker text could fabricate a section — and duplicate sections resolved
  * silently to the last occurrence.
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 
 export class CaError extends Error {}
 
@@ -226,4 +226,10 @@ export function publishCaCertificate(path: string, caCertPem: string): void {
     throw new CaError("refusing to publish certificate material containing a private key");
   }
   writeFileSync(path, caCertPem, { mode: 0o644 });
+  // `mode` is filtered through the process umask. The container deliberately
+  // starts under `umask 077` so any accidentally-created private material is
+  // owner-only; that also turns the public CA into 0600 unless we explicitly
+  // correct it after creation. The MCP mount and the non-root AWF agent both
+  // need read access to this certificate.
+  chmodSync(path, 0o644);
 }

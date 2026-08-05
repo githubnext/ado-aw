@@ -6,7 +6,14 @@
  * of a toolchain dependency. Real material is exercised end to end in
  * `proxy.e2e.test.ts`.
  */
-import { mkdtempSync, rmSync, writeFileSync, openSync, closeSync } from "node:fs";
+import {
+  closeSync,
+  mkdtempSync,
+  openSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -145,6 +152,29 @@ describe("publishCaCertificate", () => {
 
   it("writes the public certificate", () => {
     expect(() => publishCaCertificate(join(directory, "ca.pem"), CERT)).not.toThrow();
+  });
+
+  it("makes the public certificate readable despite a restrictive umask", () => {
+    const path = join(directory, "ca.pem");
+    const previous = process.umask(0o077);
+    try {
+      publishCaCertificate(path, CERT);
+    } finally {
+      process.umask(previous);
+    }
+
+    // The non-root AWF agent and MCP child need read access. An observed runner
+    // failure left this file at 0600 when writeFileSync's mode was filtered
+    // through umask 077.
+    const mode = statSync(path).mode & 0o777;
+    if (process.platform === "win32") {
+      // Windows exposes only the read-only attribute through chmod/stat; Node
+      // commonly reports 0666 here. All three read bits are the portable
+      // invariant, while the Linux runner must be exactly 0644.
+      expect(mode & 0o444).toBe(0o444);
+    } else {
+      expect(mode).toBe(0o644);
+    }
   });
 
   it("refuses to publish anything containing a private key", () => {
