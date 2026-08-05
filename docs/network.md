@@ -49,11 +49,24 @@ The following domains are always allowed via `CORE_ALLOWED_HOSTS` in `allowed_ho
 | `rt.services.visualstudio.com` | Visual Studio runtime telemetry |
 | `config.edge.skype.com` | Configuration |
 
-The always-on Azure CLI extension additionally contributes `aka.ms` (Microsoft's link shortener, used by `az` subcommand metadata) to the AWF allowlist. See [Always-on Azure CLI (`az`)](#always-on-azure-cli-az) below.
+When `permissions.read` enables credential-isolated Azure DevOps reads, the
+Azure CLI extension additionally contributes `aka.ms` (Microsoft's link
+shortener, used by `az` subcommand metadata). See
+[Proxy-gated Azure CLI (`az`)](#proxy-gated-azure-cli-az) below.
 
-## Always-on Azure CLI (`az`)
+## Proxy-gated Azure CLI (`az`)
 
-Every compiled pipeline emits a small *Detect Azure CLI on host* prepare step that runs early in the Agent job. The always-on Azure CLI extension also adds `aka.ms` to the AWF allowlist (the auth and management hosts it declares are already present in `CORE_ALLOWED_HOSTS` above). This mirrors gh-aw's "assume `gh` is on the runner" model: agents can call `az` from their bash tool without opting in — *when the runner has it*.
+`permissions.read` is both the trusted `ado-proxy` token source and the
+activation gate for wrapped `az`. With no read permission, the compiler emits
+no Azure CLI detection, mount, PATH entry, shell permission, prompt, or proxy
+topology. The pinned AWF agent image contains no built-in `az`, so the command
+is absent rather than available unproxied.
+
+When `permissions.read` is present, the compiler emits a small *Detect Azure
+CLI on host* prepare step early in the Agent job. If the runner has Azure CLI,
+the real binary is mounted only behind the generated wrapper and running
+proxy. The extension also adds `aka.ms`; its other declared hosts already
+exist in `CORE_ALLOWED_HOSTS`.
 
 ### Runtime detection and graceful degradation
 

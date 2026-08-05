@@ -98,19 +98,18 @@ Azure DevOps traffic through the proxy. Catalogued reads (`az devops`,
 `az repos`, `az pipelines`, `az boards`, and `az rest`) work without signing
 in; writes and secret-bearing route families fail closed.
 
-## Built-in CLIs
-
-Two CLI tools are always available to the agent's bash tool without
-opting in. This mirrors gh-aw's "the runner has `gh`" assumption: the
-host is presumed to have each binary pre-installed.
+## Host-provided CLIs
 
 ### Azure CLI (`az`)
 
-Every compiled pipeline adds the Azure auth and management hosts
-(`login.microsoftonline.com`, `login.windows.net`,
-`management.azure.com`, `graph.microsoft.com`, `aka.ms`) to the AWF
-allowlist and emits a *Detect Azure CLI on host* prepare step in the
-Agent job. The compiler does not install `az`.
+Azure CLI is available only when `permissions.read` enables `ado-proxy`.
+Without it, the compiler emits no detection, mount, wrapper, PATH entry, shell
+permission, or Azure CLI-specific host contribution.
+
+With `permissions.read`, the compiler adds the relevant hosts and emits a
+*Detect Azure CLI on host* prepare step in the Agent job. The compiler does not
+install `az`; when the runner provides it, the binary is mounted only behind
+the generated wrapper.
 
 **Runtime detection + graceful degradation.** The detection step does
 two things at pipeline time:
@@ -132,7 +131,7 @@ the two mounts appear; absent → the line collapses to nothing. No
 static `--mount` is emitted for `/opt/az` or `/usr/bin/az`, so the
 pipeline never crashes `docker run` with "bind source path does not
 exist" on runners without `az`. See
-[`docs/network.md`](network.md#always-on-azure-cli-az) for the full
+[`docs/network.md`](network.md#proxy-gated-azure-cli-az) for the full
 design.
 
 **Conditional agent prompt advisory.** When (and only when) `az` is

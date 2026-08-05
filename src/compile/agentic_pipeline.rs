@@ -1140,12 +1140,12 @@ fn build_agent_job(
     //      Must precede MCPG: the Azure DevOps MCP is redirected at the
     //      engine's container address, and that address does not exist until
     //      the engine is running.
-    let ado_proxy_enabled = front_matter
-        .tools
-        .as_ref()
-        .is_some_and(|tools| tools.azure_devops.is_some());
+    let ado_proxy_enabled = common::ado_proxy_enabled(front_matter);
     if ado_proxy_enabled {
-        steps.push(Step::Bash(prepare_ado_proxy_clients_step()));
+        steps.push(Step::Bash(prepare_ado_proxy_network_step()));
+        if common::ado_mcp_enabled(front_matter) {
+            steps.push(Step::Bash(prepare_ado_mcp_step()));
+        }
         steps.push(Step::Bash(start_ado_proxy_step(front_matter)));
     }
 
@@ -4098,24 +4098,8 @@ fn safe_outputs_summary_step(reviewed: &[String]) -> BashStep {
         .with_condition(Condition::Always)
 }
 
-/// Prepare the host-side prerequisites for routing the Azure DevOps MCP
-/// through the policy engine.
-///
-/// Two things the engine cannot do for itself:
-///
-/// 1. **A shared network.** The MCP reaches the engine here rather than over
-///    AWF's network, which it is not attached to. AWF's `DOCKER-USER` rules are
-///    scoped to its own bridge, so they do not filter this one — the MCP can
-///    reach the engine, and nothing else.
-/// 2. **The MCP package.** It is installed on the runner, which has registry
-///    access, and mounted read-only into a container that does not. That keeps
-///    the MCP image stock (`node:20-slim`) so nothing new enters the supply
-///    chain, and removes `npx`'s start-time registry dependency.
-///
-/// The mount point is load-bearing: Node resolves dependencies by walking
-/// upward from the importing file, so the tree must land at
-/// `/app/node_modules` or the MCP's own imports fail to resolve.
-fn prepare_ado_proxy_clients_step() -> BashStep {
+/// Prepare the isolated Docker network shared by the proxy and optional MCP.
+fn prepare_ado_proxy_network_step() -> BashStep {
     let script = format!(
         "set -euo pipefail\n\
          \n\
@@ -4131,7 +4115,20 @@ fn prepare_ado_proxy_clients_step() -> BashStep {
          # onto awf-net, where Squid lives.\n\
          if ! docker network inspect {ADO_PROXY_NETWORK_NAME} >/dev/null 2>&1; then\n  \
            docker network create --internal {ADO_PROXY_NETWORK_NAME}\n\
-         fi\n\
+         fi\n"
+    );
+    bash("Prepare ado-proxy network", script)
+}
+
+/// Stage the Azure DevOps MCP package only when its tool is enabled.
+///
+/// It is installed on the runner, which has registry access, and mounted
+/// read-only into a container that does not. The mount point is load-bearing:
+/// Node resolves dependencies by walking upward from the importing file, so
+/// the tree must land at `/app/node_modules`.
+fn prepare_ado_mcp_step() -> BashStep {
+    let script = format!(
+        "set -euo pipefail\n\
          \n\
          # Install the MCP on the runner and stage it for mounting. The\n\
          # container it is mounted into can reach nothing but the engine, so it\n\
@@ -4163,7 +4160,7 @@ fn prepare_ado_proxy_clients_step() -> BashStep {
          fi\n\
          echo \"Azure DevOps MCP $MCP_INSTALLED staged at {ADO_MCP_HOST_NODE_MODULES}\"\n"
     );
-    bash("Prepare Azure DevOps MCP and proxy network", script)
+    bash("Prepare Azure DevOps MCP", script)
 }
 
 /// Remove the network created for the policy engine and its clients.
@@ -5764,10 +5761,11 @@ safe-outputs:
         // The Azure DevOps MCP is redirected at the engine's container
         // address, which does not exist until the engine is running. Starting
         // MCPG first would leave the redirect unresolvable.
-        let script = prepare_ado_proxy_clients_step().script;
-        assert!(script.contains(&format!(
+        let network_script = prepare_ado_proxy_network_step().script;
+        assert!(network_script.contains(&format!(
             "docker network create --internal {ADO_PROXY_NETWORK_NAME}"
         )));
+        let script = prepare_ado_mcp_step().script;
         assert!(
             script.contains(&format!("{ADO_MCP_PACKAGE}@{ADO_MCP_VERSION}")),
             "the MCP package must be pinned, not floating: {script}"
@@ -5803,7 +5801,7 @@ safe-outputs:
         // `--internal` the MCP would keep a direct route to every Azure DevOps
         // host the redirect does not override, and the engine would police one
         // hostname rather than the boundary.
-        let script = prepare_ado_proxy_clients_step().script;
+        let script = prepare_ado_proxy_network_step().script;
         assert!(
             script.contains("--internal"),
             "the MCP must not be able to route past the policy engine: {script}"

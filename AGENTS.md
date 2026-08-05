@@ -102,7 +102,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   │   │   ├── repo.rs   # RepoContextContributor — repository identity / remote facts
 │   │   │   │   ├── schedule.rs # ScheduleContextContributor — scheduled-run context facts
 │   │   │   │   └── workitem.rs # WorkItemContextContributor — linked work-item context facts
-│   │   │   ├── azure_cli.rs # Always-on Azure CLI extension (runtime detection, AWF mounts, az allowlist)
+│   │   │   ├── azure_cli.rs # permissions.read-gated Azure CLI extension (runtime detection, wrapper, AWF mounts, az policy prompt)
 │   │   │   └── tests.rs  # Extension integration tests
 │   │   ├── codemods/     # Front-matter codemods (one file per transformation)
 │   │   │   ├── mod.rs    # Codemod struct, CODEMODS registry, runner

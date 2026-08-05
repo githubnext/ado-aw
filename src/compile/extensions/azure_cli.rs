@@ -7,14 +7,13 @@ use crate::compile::common::{
 use crate::compile::ir::condition::{Condition, Expr};
 use crate::compile::ir::step::{BashStep, Step};
 
-// ─── Azure CLI (always-on, install-free, gh-aw parity) ────────────────
+// ─── Azure CLI (permissions.read-gated, install-free) ────────────────
 
 /// Azure CLI extension.
 ///
-/// Always-on internal extension that exposes the host's pre-installed
-/// `az` binary to the agent inside the AWF Docker container (when
-/// present), and adds the necessary Azure auth/management hosts to the
-/// AWF allowlist so `az` calls aren't blocked by the L7 proxy.
+/// Internal extension enabled only when `permissions.read` supplies the
+/// trusted ado-proxy token source. It exposes the host's pre-installed `az`
+/// binary only behind the generated wrapper and running proxy.
 ///
 /// **Install posture.** Mirrors gh-aw's "assume the CLI is on the
 /// runner" model: this extension does NOT install `az`. Microsoft-hosted
@@ -51,16 +50,10 @@ use crate::compile::ir::step::{BashStep, Step};
 /// either the two `--mount` args or nothing — bash word-splits on the
 /// expansion either way.
 ///
-/// **Allowlist + bash command.** The 5 Azure auth/management hosts and
-/// the `az` bash command name are added unconditionally — they are
-/// inert when the runtime detection skips the mount (allowing hosts you
-/// can't reach and a command that doesn't resolve is harmless and
-/// keeps the compiled YAML deterministic across runner types).
-///
-/// **Auth.** This extension only exposes the binary. It does not inject an
-/// Azure or Azure DevOps credential into the agent sandbox.
-/// `permissions.read` authenticates the optional first-party Azure DevOps MCP
-/// backend; it does not populate `AZURE_DEVOPS_EXT_PAT` for direct CLI use.
+/// Without `permissions.read`, the extension is not collected: no detection,
+/// mount, PATH entry, bash permission, Azure host contribution, or prompt is
+/// emitted. The pinned AWF agent image contains no built-in `az`, so raw CLI
+/// access is impossible in that state.
 pub struct AzureCliExtension;
 
 impl CompilerExtension for AzureCliExtension {
@@ -81,23 +74,23 @@ impl CompilerExtension for AzureCliExtension {
     /// the empty-string literal — same wire shape as today's
     /// `condition: ne(variables['AW_AZ_MOUNTS'], '')`.
     fn declarations(&self, ctx: &CompileContext) -> anyhow::Result<Declarations> {
-        let proxied = crate::compile::common::ado_proxy_enabled(ctx.front_matter);
+        debug_assert!(crate::compile::common::ado_proxy_enabled(
+            ctx.front_matter
+        ));
         let capabilities = crate::compile::common::ado_proxy_capabilities(ctx.front_matter);
 
         let mut agent_prepare_steps = vec![Step::Bash(detection_bash_step())];
-        if proxied {
-            // Installed before the prompt is appended so the advisory and the
-            // wrapper cannot describe different worlds.
-            agent_prepare_steps.push(Step::Bash(install_az_wrapper_step(&capabilities)));
-            // This advisory is independent of `az` detection: the same policy
-            // governs MCP reads, and the agent must understand effective
-            // front-matter scope even on a runner without Azure CLI.
-            agent_prepare_steps.push(Step::Bash(proxy_policy_prompt_step(
-                ctx.front_matter,
-                &capabilities,
-            )));
-        }
-        agent_prepare_steps.push(Step::Bash(prompt_append_bash_step(proxied, &capabilities)));
+        // Installed before the prompt is appended so the advisory and the
+        // wrapper cannot describe different worlds.
+        agent_prepare_steps.push(Step::Bash(install_az_wrapper_step(&capabilities)));
+        // This advisory is independent of `az` detection: the same policy
+        // governs MCP reads, and the agent must understand effective
+        // front-matter scope even on a runner without Azure CLI.
+        agent_prepare_steps.push(Step::Bash(proxy_policy_prompt_step(
+            ctx.front_matter,
+            &capabilities,
+        )));
+        agent_prepare_steps.push(Step::Bash(prompt_append_bash_step(&capabilities)));
 
         Ok(Declarations {
             network_hosts: vec![
@@ -118,11 +111,7 @@ impl CompilerExtension for AzureCliExtension {
             // /usr/local/bin is not the chroot's, and only PATH order decides
             // which binary the agent actually invokes. AWF installs its own `gh`
             // wrapper the same way.
-            awf_path_prepends: if proxied {
-                vec![AZ_WRAPPER_DIR.to_string()]
-            } else {
-                Vec::new()
-            },
+            awf_path_prepends: vec![AZ_WRAPPER_DIR.to_string()],
             ..Declarations::default()
         })
     }
@@ -270,15 +259,14 @@ echo \"ado-proxy policy prompt appended\"\n"
 /// will not try it, and one told it has access it lacks will retry a failing
 /// call or invent a workaround. The unproxied text deliberately claims nothing
 /// beyond "not pre-authenticated" — an earlier revision overclaimed here.
-fn prompt_append_bash_step(proxied: bool, capabilities: &[Capability]) -> BashStep {
-    let body = if proxied {
-        let groups = crate::compile::common::az_allowed_groups(capabilities);
-        let group_list = groups
-            .iter()
-            .map(|g| format!("`az {g}`"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!(
+fn prompt_append_bash_step(capabilities: &[Capability]) -> BashStep {
+    let groups = crate::compile::common::az_allowed_groups(capabilities);
+    let group_list = groups
+        .iter()
+        .map(|g| format!("`az {g}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let body = format!(
             "\n\
 ---\n\
 \n\
@@ -292,22 +280,7 @@ The Azure CLI is available and **pre-configured for Azure DevOps reads**. You do
 Requests outside that boundary are refused by a policy proxy, not by a misconfiguration — retrying, changing the URL, or trying to authenticate will not help. To *change* anything, emit a safe output instead; that is the supported path for writes.\n\
 \n\
 If a read you need is refused, file a `missing-tool` safe output naming `azure-cli` and the exact command, so the operator can extend the catalog rather than leaving you blocked.\n"
-        )
-    } else {
-        "\n\
----\n\
-\n\
-## Azure CLI (`az`)\n\
-\n\
-The Azure CLI is available inside this sandbox at `/usr/bin/az`, but ado-aw does not inject an Azure or Azure DevOps credential into the sandbox:\n\
-\n\
-- **Azure DevOps** \u{2014} `az devops`, `az pipelines`, `az repos`, and `az boards` are not pre-authenticated. When configured, use the `azure-devops` MCP tools for authenticated ADO reads.\n\
-- **Azure Resource Manager and Microsoft Graph** \u{2014} `az resource`, `az account`, `az group`, `az ad`, and authenticated `az rest` calls are not configured for agent use.\n\
-- Do not sign in or place Azure credentials in the sandbox. Request a supported tool instead.\n\
-\n\
-If a command you need isn't covered above, file a `missing-tool` safe output naming `azure-cli` so the operator can extend coverage rather than blocking on it silently.\n"
-            .to_string()
-    };
+    );
 
     let script = format!(
         "cat >> \"/tmp/awf-tools/agent-prompt.md\" << 'AZURE_CLI_PROMPT_EOF'\n\
@@ -329,14 +302,20 @@ mod tests {
     use crate::compile::types::FrontMatter;
 
     fn fm() -> FrontMatter {
+        serde_yaml::from_str(
+            "name: t\ndescription: x\npermissions:\n  read: my-read-sc\n",
+        )
+        .expect("front matter parses")
+    }
+
+    fn fm_unproxied() -> FrontMatter {
         serde_yaml::from_str("name: t\ndescription: x\n").expect("front matter parses")
     }
 
-    /// Front matter that enables the Azure DevOps tool, which is what pulls in
-    /// the policy engine and therefore the wrapper.
+    /// `permissions.read` pulls in the policy engine and therefore the wrapper;
+    /// the MCP tool is independent.
     fn fm_proxied() -> FrontMatter {
-        serde_yaml::from_str("name: t\ndescription: x\ntools:\n  azure-devops:\n    org: myorg\n")
-            .expect("front matter parses")
+        fm()
     }
 
     fn wrapper_step(front_matter: &FrontMatter) -> Option<BashStep> {
@@ -370,8 +349,16 @@ mod tests {
     #[test]
     fn the_wrapper_is_installed_only_when_traffic_is_policed() {
         // Without the policy engine there is nothing to redirect to, and
-        // shadowing `az` would break it rather than contain it.
-        assert!(wrapper_step(&fm()).is_none());
+        // the extension is not collected at all.
+        let unproxied = fm_unproxied();
+        assert!(
+            !crate::compile::extensions::collect_extensions(&unproxied)
+                .iter()
+                .any(|extension| matches!(
+                    extension,
+                    crate::compile::extensions::Extension::AzureCli(_)
+                ))
+        );
         assert!(wrapper_step(&fm_proxied()).is_some());
     }
 
@@ -379,16 +366,6 @@ mod tests {
     fn the_wrapper_directory_shadows_the_real_az() {
         // The file alone is not enough: the agent runs in a chroot, so only
         // PATH order decides which binary it actually invokes.
-        let plain = fm();
-        let ctx_plain = CompileContext::for_test(&plain);
-        assert!(
-            AzureCliExtension
-                .declarations(&ctx_plain)
-                .unwrap()
-                .awf_path_prepends
-                .is_empty()
-        );
-
         let proxied = fm_proxied();
         let ctx = CompileContext::for_test(&proxied);
         assert_eq!(
@@ -534,15 +511,15 @@ repos:
         let fm = fm();
         let ctx = CompileContext::for_test(&fm);
         let steps = agent_prepare_steps(&ext, &ctx);
-        // Two prepare steps: [0] detection (always runs), [1] conditional
-        // prompt-append (skipped when AW_AZ_MOUNTS is empty). The
+        // Four prepare steps: detection, wrapper install, policy prompt and
+        // conditional Azure CLI prompt. The
         // detection step MUST stay at index 0 — it is what sets the
         // pipeline variable that the prompt-append step's
         // `condition:` reads.
         assert_eq!(
             steps.len(),
-            2,
-            "expected two prepare steps (detection, conditional prompt-append), got: {steps:?}"
+            4,
+            "expected detection, wrapper, policy prompt and CLI prompt, got: {steps:?}"
         );
         let step = bash_step(&steps[0]);
         // Detection must check both the launcher shim and the venv
@@ -682,7 +659,7 @@ repos:
         );
     }
 
-    // ── Conditional prompt-append step (step index 1) ──────────────────────
+    // ── Conditional Azure CLI prompt step ──────────────────────────────────
 
     #[test]
     fn test_azure_cli_prompt_append_step_is_conditional() {
@@ -695,7 +672,11 @@ repos:
         let fm = fm();
         let ctx = CompileContext::for_test(&fm);
         let steps = agent_prepare_steps(&ext, &ctx);
-        let append = bash_step(&steps[1]);
+        let append = steps
+            .iter()
+            .map(bash_step)
+            .find(|step| step.display_name == "Append Azure CLI prompt")
+            .expect("Azure CLI prompt step");
         assert!(matches!(
             append.condition,
             Some(Condition::Ne(
@@ -714,7 +695,11 @@ repos:
         let fm = fm();
         let ctx = CompileContext::for_test(&fm);
         let steps = agent_prepare_steps(&ext, &ctx);
-        let append = bash_step(&steps[1]);
+        let append = steps
+            .iter()
+            .map(bash_step)
+            .find(|step| step.display_name == "Append Azure CLI prompt")
+            .expect("Azure CLI prompt step");
         assert!(
             append
                 .script
@@ -734,14 +719,17 @@ repos:
         let fm = fm();
         let ctx = CompileContext::for_test(&fm);
         let steps = agent_prepare_steps(&ext, &ctx);
-        let append = bash_step(&steps[1]);
+        let append = steps
+            .iter()
+            .map(bash_step)
+            .find(|step| step.display_name == "Append Azure CLI prompt")
+            .expect("Azure CLI prompt step");
         for anchor in [
             "Azure CLI",
-            "/usr/bin/az",
             "az devops",
-            "not pre-authenticated",
-            "azure-devops",
-            "Do not sign in",
+            "pre-configured for Azure DevOps reads",
+            "policy proxy",
+            "safe output",
             "missing-tool",
         ] {
             assert!(
@@ -765,7 +753,11 @@ repos:
         let fm = fm();
         let ctx = CompileContext::for_test(&fm);
         let steps = agent_prepare_steps(&ext, &ctx);
-        let append = bash_step(&steps[1]);
+        let append = steps
+            .iter()
+            .map(bash_step)
+            .find(|step| step.display_name == "Append Azure CLI prompt")
+            .expect("Azure CLI prompt step");
         assert!(
             append.script.contains("<< 'AZURE_CLI_PROMPT_EOF'"),
             "prompt-append heredoc delimiter must be single-quoted to \
@@ -786,7 +778,11 @@ repos:
         let fm = fm();
         let ctx = CompileContext::for_test(&fm);
         let steps = agent_prepare_steps(&ext, &ctx);
-        let append = bash_step(&steps[1]);
+        let append = steps
+            .iter()
+            .map(bash_step)
+            .find(|step| step.display_name == "Append Azure CLI prompt")
+            .expect("Azure CLI prompt step");
         assert_eq!(append.display_name, "Append Azure CLI prompt");
     }
 
@@ -813,15 +809,14 @@ repos:
     }
 
     #[test]
-    fn test_azure_cli_no_path_prepends() {
-        // Sanity check that the install-free posture isn't accidentally
-        // regressed by a future edit that adds a PATH munge.
+    fn test_azure_cli_prepends_the_wrapper_directory() {
+        // The wrapper must shadow the mounted real binary.
         let ext = AzureCliExtension;
         let fm = fm();
         let ctx = CompileContext::for_test(&fm);
-        assert!(
-            ext.declarations(&ctx).unwrap().awf_path_prepends.is_empty(),
-            "must not prepend any PATH entry — /usr/bin is already on PATH inside AWF"
+        assert_eq!(
+            ext.declarations(&ctx).unwrap().awf_path_prepends,
+            vec![AZ_WRAPPER_DIR.to_string()]
         );
     }
 }

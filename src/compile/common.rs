@@ -77,6 +77,32 @@ fn test_validate_permissions_read_policy_ignores_explicitly_disabled_tool() {
     assert!(!ado_proxy_enabled(&disabled));
 }
 
+#[test]
+fn test_ado_proxy_activation_follows_permissions_read_not_mcp_tool() {
+    for (source, expected) in [
+        ("---\nname: t\ndescription: x\n---\n", false),
+        (
+            "---\nname: t\ndescription: x\ntools:\n  azure-devops: true\n---\n",
+            false,
+        ),
+        (
+            "---\nname: t\ndescription: x\npermissions:\n  read: my-read-sc\n---\n",
+            true,
+        ),
+        (
+            "---\nname: t\ndescription: x\ntools:\n  azure-devops: false\npermissions:\n  read:\n    service-connection: my-read-sc\n    capabilities: [core]\n---\n",
+            true,
+        ),
+    ] {
+        let (front_matter, _) = parse_markdown(source).unwrap();
+        assert_eq!(
+            ado_proxy_enabled(&front_matter),
+            expected,
+            "unexpected activation for:\n{source}"
+        );
+    }
+}
+
 /// Returns the directory in which the atomic tempfile should be created for a
 /// write to `path`.  The tempfile must live on the same filesystem as `path`
 /// so that the final `persist()` rename is atomic (EXDEV guard).
@@ -599,12 +625,7 @@ pub fn validate_proxied_timeout(front_matter: &FrontMatter, timeout_minutes: u32
     if timeout_minutes <= MAX_PROXIED_TIMEOUT_MINUTES {
         return Ok(());
     }
-    let uses_proxy = front_matter
-        .permissions
-        .as_ref()
-        .and_then(|permissions| permissions.read.as_ref())
-        .and_then(crate::compile::types::ReadPermissionConfig::options)
-        .is_some();
+    let uses_proxy = ado_proxy_enabled(front_matter);
     if !uses_proxy {
         return Ok(());
     }
@@ -625,7 +646,7 @@ pub fn validate_proxied_timeout(front_matter: &FrontMatter, timeout_minutes: u32
 /// the compile path so a widening produced by omission — such as naming an
 /// organization with no projects — fails before any pipeline is emitted.
 pub fn validate_permissions_read_policy(front_matter: &FrontMatter) -> Result<()> {
-    if ado_proxy_enabled(front_matter)
+    if ado_mcp_enabled(front_matter)
         && front_matter
             .permissions
             .as_ref()
@@ -1798,12 +1819,24 @@ pub fn resolve_ado_organization_bash(indent: &str) -> String {
 
 /// Whether this workflow routes Azure DevOps access through the policy engine.
 ///
-/// Enabling `tools.azure-devops` is what pulls in the engine: the MCP is
-/// redirected at it and the `az` wrapper points at it. Both the pipeline
-/// builder and the Azure CLI extension need this answer and must not disagree —
-/// a mismatch would either install a wrapper pointing at an engine that was
-/// never started, or start an engine that nothing routes through.
+/// `permissions.read` is the activation switch and trusted token source. The
+/// pipeline builder and Azure CLI extension must not disagree: a mismatch
+/// would either install a wrapper pointing at an engine that was never started,
+/// or expose host `az` without the policy boundary.
 pub fn ado_proxy_enabled(front_matter: &FrontMatter) -> bool {
+    front_matter
+        .permissions
+        .as_ref()
+        .and_then(|permissions| permissions.read.as_ref())
+        .is_some()
+}
+
+/// Whether the first-party Azure DevOps MCP client is enabled.
+///
+/// This is deliberately narrower than [`ado_proxy_enabled`]: read permission
+/// activates the proxy and wrapped `az`, while `tools.azure-devops` alone
+/// controls MCP package staging and child configuration.
+pub fn ado_mcp_enabled(front_matter: &FrontMatter) -> bool {
     front_matter
         .tools
         .as_ref()
@@ -4185,20 +4218,25 @@ mod tests {
         });
         let params = engine_args_for(&fm).unwrap();
         // User-disabled bash must not produce a general bash allow-tool
-        // (shell(:*) / shell(*) / shell(bash)). Always-on extensions
-        // (e.g. Azure CLI) legitimately inject their own narrow
-        // shell(<cmd>) entries via `required_bash_commands()`; those are
-        // expected and should not regress this test.
+        // (shell(:*) / shell(*) / shell(bash)).
         assert!(!params.contains("shell(:*)"));
         assert!(!params.contains("shell(*)"));
         assert!(!params.contains("shell(bash)"));
-        // Sanity-check: the always-on Azure CLI extension still injects
-        // its bash requirement even when user bash is disabled — agents
-        // must be able to call `az` regardless of the user's `bash:`
-        // narrowing decisions.
+        assert!(
+            !params.contains("shell(az)"),
+            "without permissions.read, Azure CLI must not be exposed: {params}"
+        );
+
+        fm.permissions = Some(crate::compile::types::PermissionsConfig {
+            read: Some(crate::compile::types::ReadPermissionConfig::ServiceConnection(
+                crate::secure::ServiceConnection::parse("read-sc").unwrap(),
+            )),
+            write: None,
+        });
+        let params = engine_args_for(&fm).unwrap();
         assert!(
             params.contains("shell(az)"),
-            "always-on Azure CLI extension should still inject shell(az): {params}"
+            "permissions.read must add the wrapped az command even when the user's bash list is empty"
         );
     }
 
@@ -5959,38 +5997,38 @@ safe-outputs:
     /// 502s partway through a run.
     #[test]
     fn proxied_timeout_is_bounded_by_the_token_lifetime() {
-        let proxied = "---\nname: t\ndescription: d\npermissions:\n  read:\n    service-connection: sc\n---\n";
-        let (fm, _) = parse_markdown(proxied).unwrap();
+        for proxied in [
+            "---\nname: t\ndescription: d\npermissions:\n  read: sc\n---\n",
+            "---\nname: t\ndescription: d\npermissions:\n  read:\n    service-connection: sc\n---\n",
+        ] {
+            let (fm, _) = parse_markdown(proxied).unwrap();
 
-        assert!(validate_proxied_timeout(&fm, MAX_PROXIED_TIMEOUT_MINUTES).is_ok());
+            assert!(validate_proxied_timeout(&fm, MAX_PROXIED_TIMEOUT_MINUTES).is_ok());
 
-        let error = validate_proxied_timeout(&fm, MAX_PROXIED_TIMEOUT_MINUTES + 1)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("cannot renew"),
-            "the message must say why, not just that it is too long: {error}"
-        );
-        assert!(
-            error.contains(&MAX_PROXIED_TIMEOUT_MINUTES.to_string()),
-            "the message must name the limit: {error}"
-        );
+            let error = validate_proxied_timeout(&fm, MAX_PROXIED_TIMEOUT_MINUTES + 1)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("cannot renew"),
+                "the message must say why, not just that it is too long: {error}"
+            );
+            assert!(
+                error.contains(&MAX_PROXIED_TIMEOUT_MINUTES.to_string()),
+                "the message must name the limit: {error}"
+            );
+        }
     }
 
     /// Workflows that do not use the proxy hold no Azure DevOps credential in
     /// the agent, so there is nothing to expire and no reason to bound them.
     #[test]
     fn unproxied_timeout_is_not_bounded() {
-        for source in [
-            "---\nname: t\ndescription: d\n---\n",
-            "---\nname: t\ndescription: d\npermissions:\n  read: my-read-sc\n---\n",
-        ] {
-            let (fm, _) = parse_markdown(source).unwrap();
-            assert!(
-                validate_proxied_timeout(&fm, MAX_PROXIED_TIMEOUT_MINUTES * 10).is_ok(),
-                "a workflow without the proxy must not be limited: {source}"
-            );
-        }
+        let source = "---\nname: t\ndescription: d\n---\n";
+        let (fm, _) = parse_markdown(source).unwrap();
+        assert!(
+            validate_proxied_timeout(&fm, MAX_PROXIED_TIMEOUT_MINUTES * 10).is_ok(),
+            "a workflow without the proxy must not be limited: {source}"
+        );
     }
 
     #[test]
@@ -6473,22 +6511,29 @@ safe-outputs:
     // ─── generate_awf_mounts ──────────────────────────────────────────────
 
     #[test]
-    fn test_generate_awf_mounts_always_on_az_cli_baseline() {
-        // Even with a minimal front matter, the always-on Azure CLI
-        // extension contributes a `$(AW_AZ_MOUNTS) \` injection line
-        // (no static mounts — those are runtime-detected by the
-        // AzureCli prepare step which sets the pipeline variable).
-        // The "no mounts" name is historical; this test now verifies
-        // the always-on baseline.
+    fn test_generate_awf_mounts_omits_az_without_read_permission() {
         let fm = minimal_front_matter();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let _ctx = crate::compile::extensions::CompileContext::for_test(&fm);
+        let declarations = extension_declarations(&exts, &fm);
+        let result = generate_awf_mounts(&exts, &declarations);
+        assert!(
+            !result.contains("AW_AZ_MOUNTS"),
+            "without permissions.read, no Azure CLI runtime mount hook may be emitted: {result}"
+        );
+    }
+
+    #[test]
+    fn test_generate_awf_mounts_includes_runtime_az_hook_with_read_permission() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: d\npermissions:\n  read: read-sc\n---\n",
+        )
+        .unwrap();
+        let exts = crate::compile::extensions::collect_extensions(&fm);
         let declarations = extension_declarations(&exts, &fm);
         let result = generate_awf_mounts(&exts, &declarations);
         assert!(
             result.contains("$(AW_AZ_MOUNTS) \\"),
-            "always-on Azure CLI injection line $(AW_AZ_MOUNTS) \\ should be present \
-             (so the AzureCli prepare step's pipeline variable expands into runtime mounts): {result}"
+            "permissions.read must emit the conditional host-az mount hook: {result}"
         );
         assert!(
             !result.contains(r#"--mount "/opt/az:/opt/az:ro""#),
