@@ -105,8 +105,14 @@ async fn resolve_run_setup(opts: &AuditOptions<'_>) -> Result<AuditRunSetup> {
 async fn fetch_audit_data_inner(opts: AuditOptions<'_>) -> Result<FetchAuditDataResult> {
     let setup = resolve_run_setup(&opts).await?;
 
-    if let Some(cached) = try_serve_from_cache(opts.no_cache, opts.json, &setup.run_dir).await? {
+    if setup.artifact_filters.is_none()
+        && let Some(cached) =
+            try_serve_from_cache(opts.no_cache, opts.json, &setup.run_dir).await?
+    {
         return Ok(cached);
+    }
+    if let Some(filters) = setup.artifact_filters.as_deref() {
+        prune_unselected_artifacts(&setup.run_dir, filters).await?;
     }
 
     let client = reqwest::Client::builder()
@@ -137,6 +143,42 @@ async fn fetch_audit_data_inner(opts: AuditOptions<'_>) -> Result<FetchAuditData
             "failed to download artifacts and no local cache. Use 'az pipelines runs artifact download --run-id {}' to fetch them manually, then re-run.",
             setup.parsed.build_id
         );
+    }
+
+    async fn prune_unselected_artifacts(run_dir: &Path, filters: &[String]) -> Result<()> {
+        let mut entries = tokio::fs::read_dir(run_dir)
+            .await
+            .with_context(|| format!("read audit output directory {}", run_dir.display()))?;
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .with_context(|| format!("iterate audit output directory {}", run_dir.display()))?
+        {
+            if !entry
+                .file_type()
+                .await
+                .with_context(|| format!("inspect audit output path {}", entry.path().display()))?
+                .is_dir()
+            {
+                continue;
+            }
+            let name = entry.file_name();
+            let Some(prefix) = name.to_str().and_then(artifact_name_to_prefix) else {
+                continue;
+            };
+            let family = match prefix {
+                "agent_outputs" => "agent",
+                "analyzed_outputs" => "detection",
+                "safe_outputs" => "safe-outputs",
+                _ => continue,
+            };
+            if !artifact_family_selected(Some(filters), family) {
+                tokio::fs::remove_dir_all(entry.path())
+                    .await
+                    .with_context(|| format!("remove excluded artifact {}", entry.path().display()))?;
+            }
+        }
+        Ok(())
     }
 
     run_analyzers(

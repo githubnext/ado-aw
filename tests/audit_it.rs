@@ -98,17 +98,10 @@ fn artifact_zip(name: &str, repeated_root: bool, files: &[(&str, &[u8])]) -> Vec
             .expect("start fixture zip entry");
         writer.write_all(contents).expect("write fixture zip entry");
     }
-    writer
-        .finish()
-        .expect("finish fixture zip")
-        .into_inner()
+    writer.finish().expect("finish fixture zip").into_inner()
 }
 
-async fn mount_complete_build(
-    server: &MockServer,
-    repeated_root: bool,
-    malformed_aw_info: bool,
-) {
+async fn mount_complete_build(server: &MockServer, repeated_root: bool, malformed_aw_info: bool) {
     const BUILD_ID: u64 = 630125;
     let artifact_names = [
         format!("agent_outputs_{BUILD_ID}"),
@@ -170,9 +163,7 @@ async fn mount_complete_build(
         .collect::<Vec<_>>();
 
     Mock::given(method("GET"))
-        .and(path(format!(
-            "/test-project/_apis/build/builds/{BUILD_ID}"
-        )))
+        .and(path(format!("/test-project/_apis/build/builds/{BUILD_ID}")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": BUILD_ID,
             "status": "completed",
@@ -214,10 +205,11 @@ async fn mount_complete_build(
     ] {
         Mock::given(method("GET"))
             .and(path(format!("/download/{name}")))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_bytes(artifact_zip(name, repeated_root, files)),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(artifact_zip(
+                name,
+                repeated_root,
+                files,
+            )))
             .mount(server)
             .await;
     }
@@ -260,11 +252,7 @@ fn normalize_server_url(value: &mut Value) {
     value["overview"]["logs_path"] = Value::Null;
 }
 
-async fn run_mcp_author(
-    workspace: &Path,
-    cache_root: &Path,
-    server: &MockServer,
-) -> Vec<Value> {
+async fn run_mcp_author(workspace: &Path, cache_root: &Path, server: &MockServer) -> Vec<Value> {
     let mut child = Command::new(binary())
         .arg("mcp-author")
         .current_dir(workspace)
@@ -696,10 +684,14 @@ async fn audit_pipeline_artifact_layouts_are_equivalent_end_to_end() {
     let flat_output = TempDir::new().expect("create flat output");
     let repeated_output = TempDir::new().expect("create repeated output");
 
-    let mut flat =
-        run_audit_json(workspace.path(), flat_output.path(), &flat_server, &[]).await;
-    let mut repeated =
-        run_audit_json(workspace.path(), repeated_output.path(), &repeated_server, &[]).await;
+    let mut flat = run_audit_json(workspace.path(), flat_output.path(), &flat_server, &[]).await;
+    let mut repeated = run_audit_json(
+        workspace.path(),
+        repeated_output.path(),
+        &repeated_server,
+        &[],
+    )
+    .await;
     normalize_server_url(&mut flat);
     normalize_server_url(&mut repeated);
     assert_eq!(
@@ -724,9 +716,24 @@ async fn audit_pipeline_artifact_layouts_are_equivalent_end_to_end() {
         );
     }
     assert!(flat["metrics"]["token_usage"].as_u64().unwrap_or(0) > 0);
-    assert!(!flat["mcp_failures"].as_array().expect("MCP failures").is_empty());
-    assert!(!flat["missing_tools"].as_array().expect("missing tools").is_empty());
-    assert!(!flat["missing_data"].as_array().expect("missing data").is_empty());
+    assert!(
+        !flat["mcp_failures"]
+            .as_array()
+            .expect("MCP failures")
+            .is_empty()
+    );
+    assert!(
+        !flat["missing_tools"]
+            .as_array()
+            .expect("missing tools")
+            .is_empty()
+    );
+    assert!(
+        !flat["missing_data"]
+            .as_array()
+            .expect("missing data")
+            .is_empty()
+    );
     assert!(!flat["noops"].as_array().expect("noops").is_empty());
     assert_eq!(flat["jobs"].as_array().expect("jobs").len(), 3);
 
@@ -743,8 +750,7 @@ async fn audit_pipeline_artifact_layouts_are_equivalent_end_to_end() {
         );
     }
 
-    let cached =
-        run_audit_json(workspace.path(), flat_output.path(), &flat_server, &[]).await;
+    let cached = run_audit_json(workspace.path(), flat_output.path(), &flat_server, &[]).await;
     let refreshed = run_audit_json(
         workspace.path(),
         flat_output.path(),
@@ -763,7 +769,11 @@ async fn audit_pipeline_artifact_layouts_are_equivalent_end_to_end() {
         (
             "detection",
             vec!["detection_analysis"],
-            vec!["firewall_analysis", "engine_config", "safe_output_execution"],
+            vec![
+                "firewall_analysis",
+                "engine_config",
+                "safe_output_execution",
+            ],
         ),
         (
             "safe-outputs",
@@ -795,20 +805,38 @@ async fn audit_pipeline_artifact_layouts_are_equivalent_end_to_end() {
             .as_array()
             .expect("downloaded files");
         assert!(
-            files.iter().all(|file| file["path"]
-                .as_str()
-                .is_some_and(|path| match filter {
+            files.iter().all(
+                |file| file["path"].as_str().is_some_and(|path| match filter {
                     "agent" => path.starts_with("agent_outputs_"),
                     "detection" => path.starts_with("analyzed_outputs_"),
                     "safe-outputs" => path.starts_with("safe_outputs/"),
                     _ => false,
-                })),
+                })
+            ),
             "{filter} audit included an excluded artifact family: {files:?}"
         );
     }
+    let filter_cache = TempDir::new().expect("create filter cache");
+    let _ = run_audit_json(workspace.path(), filter_cache.path(), &flat_server, &[]).await;
+    let filtered_after_full = run_audit_json(
+        workspace.path(),
+        filter_cache.path(),
+        &flat_server,
+        &["--artifacts", "agent"],
+    )
+    .await;
+    assert!(
+        filtered_after_full["detection_analysis"].is_null(),
+        "an artifact filter must not reuse an incompatible full-audit cache"
+    );
 
-    let console =
-        run_audit(workspace.path(), flat_output.path(), "630125", Some(&flat_server)).await;
+    let console = run_audit(
+        workspace.path(),
+        flat_output.path(),
+        "630125",
+        Some(&flat_server),
+    )
+    .await;
     assert!(console.status.success(), "console audit should succeed");
     let console = String::from_utf8_lossy(&console.stdout);
     for heading in [
@@ -856,8 +884,7 @@ async fn audit_pipeline_artifact_layouts_are_equivalent_end_to_end() {
     assert_eq!(trace["build_id"], 630125);
 
     let mcp_cache = TempDir::new().expect("create MCP cache");
-    let responses =
-        run_mcp_author(workspace.path(), mcp_cache.path(), &flat_server).await;
+    let responses = run_mcp_author(workspace.path(), mcp_cache.path(), &flat_server).await;
     let audit_build = responses
         .iter()
         .find(|response| response["id"] == 2)
