@@ -5,6 +5,7 @@ import {
   assertAdoTokenIsolation,
   assertNoForbiddenReleaseUrls,
   assertNoTriggers,
+  assertPipelineTextPolicy,
   assertPipelineArtifactValues,
   assertReleaseUrlsPresent,
 } from "../assertions.js";
@@ -115,6 +116,33 @@ describe("assertAgentCommandPolicy", () => {
         ["--allow-all-tools", "--allow-all-paths"],
       ),
     ).not.toThrow();
+  });
+
+  describe("assertPipelineTextPolicy", () => {
+    it("accepts required snippets and absent forbidden snippets", () => {
+      expect(() =>
+        assertPipelineTextPolicy(
+          "Start ado-proxy\n--network ado-aw-proxy-net",
+          "ado-proxy",
+          ["Start ado-proxy", "ado-aw-proxy-net"],
+          ["$SC_READ_TOKEN", "--network host"],
+        ),
+      ).not.toThrow();
+    });
+
+    it("rejects a missing required or present forbidden snippet", () => {
+      expect(() =>
+        assertPipelineTextPolicy("Start ado-proxy", "ado-proxy", ["Stop ado-proxy"], []),
+      ).toThrow(/missing required snippet/);
+      expect(() =>
+        assertPipelineTextPolicy(
+          'ADO_MCP_AUTH_TOKEN="$SC_READ_TOKEN"',
+          "ado-proxy",
+          [],
+          ["$SC_READ_TOKEN"],
+        ),
+      ).toThrow(/forbidden snippet/);
+    });
   });
 
   it("rejects unrestricted Agent tools", () => {

@@ -58,6 +58,8 @@ export interface AgentCommandAssertion {
 export interface CaseAssertions {
   /** Snippets that must / must not appear in the Agent execution step's bash body. */
   readonly agentCommand?: AgentCommandAssertion;
+  /** Snippets that must / must not appear anywhere in the compiled pipeline YAML. */
+  readonly pipelineText?: AgentCommandAssertion;
   /** Build tags the child run must carry, with `{buildId}` expanded to the child build id. */
   readonly requiredBuildTags?: readonly string[];
 }
@@ -176,6 +178,27 @@ function parseAssertions(raw: unknown, caseId: string): CaseAssertions | undefin
     }
   }
 
+  let pipelineText: AgentCommandAssertion | undefined;
+  if (obj.pipelineText !== undefined) {
+    const pipeline = asRecord(
+      obj.pipelineText,
+      `case '${caseId}' assertions.pipelineText`,
+    );
+    pipelineText = {
+      required: asStringArray(
+        pipeline.required ?? [],
+        `case '${caseId}' assertions.pipelineText.required`,
+      ),
+      forbidden: asStringArray(
+        pipeline.forbidden ?? [],
+        `case '${caseId}' assertions.pipelineText.forbidden`,
+      ),
+    };
+    if (pipelineText.required.length === 0 && pipelineText.forbidden.length === 0) {
+      fail(`case '${caseId}' assertions.pipelineText must declare at least one snippet`);
+    }
+  }
+
   let requiredBuildTags: string[] | undefined;
   if (obj.requiredBuildTags !== undefined) {
     requiredBuildTags = asStringArray(
@@ -194,10 +217,16 @@ function parseAssertions(raw: unknown, caseId: string): CaseAssertions | undefin
     }
   }
 
-  if (agentCommand === undefined && requiredBuildTags === undefined) {
-    fail(`case '${caseId}' assertions must declare agentCommand and/or requiredBuildTags`);
+  if (
+    agentCommand === undefined &&
+    pipelineText === undefined &&
+    requiredBuildTags === undefined
+  ) {
+    fail(
+      `case '${caseId}' assertions must declare agentCommand, pipelineText and/or requiredBuildTags`,
+    );
   }
-  return { agentCommand, requiredBuildTags };
+  return { agentCommand, pipelineText, requiredBuildTags };
 }
 
 /** Expand `{buildId}` in a declared build tag. */

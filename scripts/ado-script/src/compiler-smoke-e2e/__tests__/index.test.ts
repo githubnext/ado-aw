@@ -55,10 +55,19 @@ pr: none
 jobs:
   - job: Agent
     steps:
-      - bash: copilot --allow-tool "shell(az)" --allow-tool "shell(head)"
+      - bash: >-
+          copilot --allow-tool "shell(az)" --allow-tool "shell(head)"
+          --topology-attach "awmg-mcpg"
+          --topology-attach "awmg-ado-proxy"
         displayName: Run copilot (AWF network isolated)
         env:
           GITHUB_TOKEN: $(GITHUB_TOKEN)
+      - bash: |
+          echo '"ADO_MCP_AUTH_TOKEN": "ado-proxy-injects-the-real-credential"'
+          echo '"--network", "ado-aw-proxy-net",'
+        displayName: Start ado-proxy policy engine
+      - bash: echo stop
+        displayName: Stop ado-proxy
       - task: DownloadPipelineArtifact@2
         inputs:
           targetPath: in
@@ -86,7 +95,13 @@ vi.mock("../ado-rest.js", () => {
           return { name: "ado-aw-candidate" };
         }),
         getBuild: vi.fn(async () => ({ status: "completed", result: "succeeded" })),
-        getBuildTags: vi.fn(async (buildId: number) => [`ado-aw-custom-job-${buildId}`]),
+        // The real manifest has two cases with runtime tag proofs. Returning
+        // both here keeps the generic build-id-only ADO mock independent of
+        // which case is currently being verified.
+        getBuildTags: vi.fn(async (buildId: number) => [
+          `ado-aw-custom-job-${buildId}`,
+          `ado-aw-proxy-${buildId}`,
+        ]),
         queueBuild: vi.fn(async () => ({ id: 1 })),
         cancelBuild: vi.fn(async () => {}),
         addBuildTags: vi.fn(async () => {}),
@@ -239,6 +254,7 @@ describe("smoke-e2e index.main (happy path, candidate mode)", () => {
     expect(queuedCaseIds).toEqual([
       "canary",
       "azure-cli",
+      "ado-proxy",
       "noop-target",
       "custom-safe-output",
       "multi-repo",
@@ -247,6 +263,7 @@ describe("smoke-e2e index.main (happy path, candidate mode)", () => {
     expect(compiledCasePaths).toEqual([
       "tests/safe-outputs/canary.md",
       "tests/safe-outputs/azure-cli.md",
+      "tests/smoke/ado-proxy.md",
       "tests/safe-outputs/noop-target.md",
       "tests/smoke/custom-safe-output.md",
       "tests/smoke/multi-repo.md",
@@ -265,12 +282,13 @@ describe("smoke-e2e index.main (happy path, candidate mode)", () => {
     expect(queuedRequests.map((r) => r.sourceBranch)).toEqual([
       "refs/heads/ado-aw-smoke-candidate/630001/canary",
       "refs/heads/ado-aw-smoke-candidate/630001/azure-cli",
+      "refs/heads/ado-aw-smoke-candidate/630001/ado-proxy",
       "refs/heads/ado-aw-smoke-candidate/630001/noop-target",
       "refs/heads/ado-aw-smoke-candidate/630001/custom-safe-output",
       "refs/heads/ado-aw-smoke-candidate/630001/multi-repo",
     ]);
     // Every case is staged to the SAME path — the ref is what distinguishes them.
-    expect(stagedWrites.length).toBe(5);
+    expect(stagedWrites.length).toBe(6);
     for (const write of stagedWrites) {
       expect(write.to).toBe(join(WORKTREE, "candidate", ".smoke", "pipeline.yml"));
       // The compiler emits no trigger keys once `on:` is stripped, and a
@@ -300,7 +318,7 @@ describe("smoke-e2e index.main (happy path, candidate mode)", () => {
 
     const gitModule = await import("../git.js");
     const resets = vi.mocked(gitModule.resetWorktree).mock.calls;
-    expect(resets.length).toBe(5);
+    expect(resets.length).toBe(6);
     for (const call of resets) {
       expect(call[0]).toMatchObject({ commitish: "basecommit" });
     }
@@ -424,6 +442,7 @@ describe("smoke-e2e index.main (per-case ref retention)", () => {
     // build stranded every case's ref.
     expect(deletedRefs).toEqual([
       "refs/heads/ado-aw-smoke-candidate/630001/canary",
+      "refs/heads/ado-aw-smoke-candidate/630001/ado-proxy",
       "refs/heads/ado-aw-smoke-candidate/630001/noop-target",
       "refs/heads/ado-aw-smoke-candidate/630001/custom-safe-output",
       "refs/heads/ado-aw-smoke-candidate/630001/multi-repo",

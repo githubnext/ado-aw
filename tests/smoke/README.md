@@ -35,7 +35,7 @@ credential class:
 
 | Lane | Secrets / service connections | Cases |
 | --- | --- | --- |
-| `agentic` | `GITHUB_TOKEN`, `agent-playground-read`/`-write` | canary, azure-cli, noop-target, custom-safe-output, multi-repo, janitor |
+| `agentic` | `GITHUB_TOKEN`, `agent-playground-read`/`-write` | canary, azure-cli, ado-proxy, noop-target, custom-safe-output, multi-repo, janitor |
 | `infra` | none | *(reserved for AWF and the ado-proxy sidecar)* |
 
 No case currently files GitHub issues, so the lane holds no GitHub PAT beyond
@@ -174,14 +174,18 @@ Optional per-case assertions, so novel checks stay out of the harness code:
 ```jsonc
 "assertions": {
   "agentCommand": { "required": ["shell(az"], "forbidden": ["--allow-all-tools"] },
+  "pipelineText": {
+    "required": ["displayName: Start ado-proxy policy engine"],
+    "forbidden": ["--network host"]
+  },
   "requiredBuildTags": ["ado-aw-custom-job-{buildId}"]
 }
 ```
 
 ### `kind: raw`
 
-For pipelines that aren't compiled from front matter — the forthcoming AWF and
-ado-proxy sidecar smokes. The source YAML is copied verbatim to
+For pipelines that aren't compiled from front matter — for example a future
+low-level AWF topology smoke that needs no compiler output. The source YAML is copied verbatim to
 `.smoke/pipeline.yml`; compile and artifact assertions are skipped, but
 `assertNoTriggers` still applies. Point it at the `infra` lane, which carries no
 GitHub token.

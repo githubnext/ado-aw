@@ -33,6 +33,35 @@
       }
     },
     {
+      "id": "ado-proxy",
+      "lane": "agentic",
+      "kind": "compiled",
+      "modes": ["candidate"],
+      "source": "tests/smoke/ado-proxy.md",
+      "assertions": {
+        "agentCommand": {
+          "required": [
+            "--topology-attach \"awmg-mcpg\"",
+            "--topology-attach \"awmg-ado-proxy\""
+          ]
+        },
+        "pipelineText": {
+          "required": [
+            "ado-proxy-injects-the-real-credential",
+            "\"--network\",",
+            "\"ado-aw-proxy-net\",",
+            "displayName: Start ado-proxy policy engine",
+            "displayName: Stop ado-proxy"
+          ],
+          "forbidden": [
+            "-e ADO_MCP_AUTH_TOKEN=\"$SC_READ_TOKEN\"",
+            "--network host"
+          ]
+        },
+        "requiredBuildTags": ["ado-aw-proxy-{buildId}"]
+      }
+    },
+    {
       "id": "noop-target",
       "lane": "agentic",
       "kind": "compiled",
