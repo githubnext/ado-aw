@@ -829,6 +829,12 @@ async fn audit_pipeline_artifact_layouts_are_equivalent_end_to_end() {
         filtered_after_full["detection_analysis"].is_null(),
         "an artifact filter must not reuse an incompatible full-audit cache"
     );
+    let full_after_filtered =
+        run_audit_json(workspace.path(), filter_cache.path(), &flat_server, &[]).await;
+    assert!(
+        !full_after_filtered["detection_analysis"].is_null(),
+        "a filtered audit must not poison a later unfiltered cache"
+    );
 
     let console = run_audit(
         workspace.path(),

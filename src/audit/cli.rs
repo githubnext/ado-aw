@@ -12,7 +12,9 @@ use crate::ado::{
 use crate::audit::analyzers::{
     custom_jobs, detection, firewall, jobs, mcp, missing, otel, policy, safe_outputs,
 };
-use crate::audit::cache::{RunSummary, load_run_summary, save_run_summary};
+use crate::audit::cache::{
+    RUN_SUMMARY_FILENAME, RunSummary, load_run_summary, save_run_summary,
+};
 use crate::audit::findings;
 use crate::audit::model::{AuditData, ErrorInfo, FileInfo, OverviewData};
 use crate::audit::pipeline_graph;
@@ -113,6 +115,7 @@ async fn fetch_audit_data_inner(opts: AuditOptions<'_>) -> Result<FetchAuditData
     }
     if let Some(filters) = setup.artifact_filters.as_deref() {
         prune_unselected_artifacts(&setup.run_dir, filters).await?;
+        remove_run_summary(&setup.run_dir).await?;
     }
 
     let client = reqwest::Client::builder()
@@ -196,16 +199,18 @@ async fn fetch_audit_data_inner(opts: AuditOptions<'_>) -> Result<FetchAuditData
     audit.metrics.error_count = audit.errors.len() as u64;
     derive_post_processing(&mut audit, &setup.run_dir).await;
 
-    save_run_summary(
-        &setup.run_dir,
-        &RunSummary {
-            ado_aw_version: env!("CARGO_PKG_VERSION").to_string(),
-            build_id: setup.parsed.build_id,
-            processed_at: Utc::now(),
-            audit_data: audit.clone(),
-        },
-    )
-    .await?;
+    if setup.artifact_filters.is_none() {
+        save_run_summary(
+            &setup.run_dir,
+            &RunSummary {
+                ado_aw_version: env!("CARGO_PKG_VERSION").to_string(),
+                build_id: setup.parsed.build_id,
+                processed_at: Utc::now(),
+                audit_data: audit.clone(),
+            },
+        )
+        .await?;
+    }
 
     Ok(FetchAuditDataResult {
         audit,
@@ -213,6 +218,14 @@ async fn fetch_audit_data_inner(opts: AuditOptions<'_>) -> Result<FetchAuditData
         json: opts.json,
         from_cache: false,
     })
+}
+
+async fn remove_run_summary(run_dir: &Path) -> Result<()> {
+    match tokio::fs::remove_file(run_dir.join(RUN_SUMMARY_FILENAME)).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("remove incompatible unfiltered audit cache"),
+    }
 }
 
 /// Try to serve an audit result from the local on-disk cache.

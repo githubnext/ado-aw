@@ -121,10 +121,21 @@ export async function verifyCandidateAudit(
       try {
         const audit = JSON.parse(outcome.stdout) as {
           overview?: { build_id?: number };
-          downloaded_files?: unknown[];
+          downloaded_files?: { path?: string }[];
         };
-        if (audit.overview?.build_id !== target.buildId || !audit.downloaded_files?.length) {
-          error = "JSON report did not contain the child build id and published artifact files";
+        const paths = audit.downloaded_files?.flatMap((file) => file.path ?? []) ?? [];
+        const expectedRoots = [
+          `agent_outputs_${target.buildId}/`,
+          `analyzed_outputs_${target.buildId}/`,
+          "safe_outputs/",
+        ];
+        const missingRoots = expectedRoots.filter(
+          (root) => !paths.some((path) => path.startsWith(root)),
+        );
+        if (audit.overview?.build_id !== target.buildId || missingRoots.length > 0) {
+          error =
+            `JSON report did not contain the child build id and every published artifact family; ` +
+            `missing roots: ${missingRoots.join(", ") || "<none>"}`;
         }
       } catch (parseError) {
         error = `invalid JSON report: ${parseError instanceof Error ? parseError.message : String(parseError)}`;
