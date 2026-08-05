@@ -64,7 +64,6 @@ pub(crate) async fn load_custom_tool_catalog(
     supplied_aw_info: Option<&AwInfo>,
 ) -> anyhow::Result<CustomToolCatalog> {
     let mut catalog = CustomToolCatalog::default();
-    let mut primary_catalog_loaded = false;
 
     if let Some(path) = find_metadata_file(download_root, CUSTOM_TOOLS_FILENAME).await? {
         let contents = tokio::fs::read_to_string(&path)
@@ -87,7 +86,6 @@ pub(crate) async fn load_custom_tool_catalog(
                 )
             })?
         };
-        primary_catalog_loaded = true;
         for config in resolved.custom_tools {
             let tool = config.name.trim();
             if tool.is_empty() {
@@ -117,14 +115,13 @@ pub(crate) async fn load_custom_tool_catalog(
     let disk_aw_info = if supplied_aw_info.is_none() {
         match load_aw_info(download_root).await {
             Ok(value) => value,
-            Err(error) if primary_catalog_loaded => {
+            Err(error) => {
                 warn!("Failed to read optional aw_info.json metadata: {error:#}");
                 catalog
                     .warnings
                     .push(crate::audit::malformed_aw_info_warning());
                 None
             }
-            Err(error) => return Err(error),
         }
     } else {
         None
