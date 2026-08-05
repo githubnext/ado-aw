@@ -11,6 +11,10 @@
  */
 import { expandBuildTag, type ResolvedCase } from "./cases.js";
 import type { FixtureBuildResult } from "./runner.js";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { redact, safeSpawn } from "./process.js";
 
 export interface BuildTagClient {
   getBuildTags(
@@ -71,4 +75,78 @@ export async function verifyCaseSignals(
     ok: verified.every((result) => result.status === "succeeded"),
     results: verified,
   };
+}
+
+/** Audit one completed candidate child through the released CLI contract. */
+export async function verifyCandidateAudit(
+  results: readonly FixtureBuildResult[],
+  options: {
+    adoAwBin: string;
+    cwd: string;
+    orgUrl: string;
+    project: string;
+    token: string;
+    timeoutMs: number;
+  },
+): Promise<SignalVerificationOutcome> {
+  const target = results.find(
+    (result) => result.caseId === "canary" && result.status === "succeeded" && result.buildId !== undefined,
+  );
+  if (!target?.buildId) return { ok: false, results: results.map((result) => ({ ...result })) };
+
+  const outputDir = await mkdtemp(join(tmpdir(), "ado-aw-smoke-audit-"));
+  try {
+    const outcome = await safeSpawn({
+      cmd: options.adoAwBin,
+      args: [
+        "audit",
+        String(target.buildId),
+        "--json",
+        "--no-cache",
+        "--output",
+        outputDir,
+        "--org",
+        options.orgUrl,
+        "--project",
+        options.project,
+      ],
+      cwd: options.cwd,
+      env: { AZURE_DEVOPS_EXT_PAT: options.token },
+      timeoutMs: options.timeoutMs,
+    });
+    let error: string | undefined;
+    if (outcome.timedOut || outcome.status !== 0) {
+      error = `exit=${outcome.status ?? "signal"} timedOut=${outcome.timedOut}; stderr=${redact(outcome.stderr, [options.token])}`;
+    } else {
+      try {
+        const audit = JSON.parse(outcome.stdout) as {
+          overview?: { build_id?: number };
+          downloaded_files?: unknown[];
+        };
+        if (audit.overview?.build_id !== target.buildId || !audit.downloaded_files?.length) {
+          error = "JSON report did not contain the child build id and published artifact files";
+        }
+      } catch (parseError) {
+        error = `invalid JSON report: ${parseError instanceof Error ? parseError.message : String(parseError)}`;
+      }
+    }
+    if (!error) return { ok: true, results: results.map((result) => ({ ...result })) };
+
+    return {
+      ok: false,
+      results: results.map((result) =>
+        result.caseId === target.caseId
+          ? {
+              ...result,
+              status: "failed",
+              message:
+                `candidate audit contract failed for build #${target.buildId} (${target.url ?? "URL unavailable"}); ` +
+                `expected artifacts agent_outputs_${target.buildId}, analyzed_outputs_${target.buildId}, and safe_outputs: ${error}`,
+            }
+          : { ...result },
+      ),
+    };
+  } finally {
+    await rm(outputDir, { recursive: true, force: true });
+  }
 }

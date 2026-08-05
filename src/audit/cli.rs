@@ -406,45 +406,51 @@ async fn run_analyzers(
         |a, files| a.downloaded_files = files,
     );
 
-    if let Some(agent_outputs_dir) = find_artifact_dir(run_dir, "agent_outputs").await {
-        run_agent_output_analyzers(&agent_outputs_dir, audit).await;
+    if artifact_family_selected(artifact_filters, "agent") {
+        if let Some(agent_outputs_dir) = find_artifact_dir(run_dir, "agent_outputs").await {
+            run_agent_output_analyzers(&agent_outputs_dir, audit).await;
+        }
+        run_analyzer(
+            audit,
+            "audit::missing_tools",
+            "missing-tool extraction failed",
+            missing::extract_missing_tools(run_dir).await,
+            |a, result| a.missing_tools = result,
+        );
+        run_analyzer(
+            audit,
+            "audit::missing_data",
+            "missing-data extraction failed",
+            missing::extract_missing_data(run_dir).await,
+            |a, result| a.missing_data = result,
+        );
+        run_analyzer(
+            audit,
+            "audit::noops",
+            "noop extraction failed",
+            missing::extract_noops(run_dir).await,
+            |a, result| a.noops = result,
+        );
     }
 
-    run_analyzer(
-        audit,
-        "audit::safe_outputs",
-        "safe-output analysis failed",
-        safe_outputs::analyze_safe_outputs(run_dir).await,
-        apply_safe_output_analysis,
-    );
-    run_analyzer(
-        audit,
-        "audit::detection",
-        "detection analysis failed",
-        detection::analyze_detection(run_dir).await,
-        |a, result| a.detection_analysis = result,
-    );
-    run_analyzer(
-        audit,
-        "audit::missing_tools",
-        "missing-tool extraction failed",
-        missing::extract_missing_tools(run_dir).await,
-        |a, result| a.missing_tools = result,
-    );
-    run_analyzer(
-        audit,
-        "audit::missing_data",
-        "missing-data extraction failed",
-        missing::extract_missing_data(run_dir).await,
-        |a, result| a.missing_data = result,
-    );
-    run_analyzer(
-        audit,
-        "audit::noops",
-        "noop extraction failed",
-        missing::extract_noops(run_dir).await,
-        |a, result| a.noops = result,
-    );
+    if artifact_family_selected(artifact_filters, "safe-outputs") {
+        run_analyzer(
+            audit,
+            "audit::safe_outputs",
+            "safe-output analysis failed",
+            safe_outputs::analyze_safe_outputs(run_dir).await,
+            apply_safe_output_analysis,
+        );
+    }
+    if artifact_family_selected(artifact_filters, "detection") {
+        run_analyzer(
+            audit,
+            "audit::detection",
+            "detection analysis failed",
+            detection::analyze_detection(run_dir).await,
+            |a, result| a.detection_analysis = result,
+        );
+    }
     run_analyzer(
         audit,
         "audit::jobs",
@@ -452,6 +458,10 @@ async fn run_analyzers(
         jobs::fetch_timeline(client, ctx, auth, build_id).await,
         |a, timeline| a.jobs = jobs::timeline_to_jobs(&timeline),
     );
+}
+
+fn artifact_family_selected(filters: Option<&[String]>, family: &str) -> bool {
+    filters.is_none_or(|filters| filters.iter().any(|filter| filter == family))
 }
 
 fn apply_safe_output_analysis(audit: &mut AuditData, result: safe_outputs::SafeOutputAnalysis) {

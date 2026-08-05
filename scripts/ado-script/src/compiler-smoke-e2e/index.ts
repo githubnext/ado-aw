@@ -58,7 +58,7 @@ import {
 import { prepareCaseSource } from "./source.js";
 import { renderResultsTable } from "./report.js";
 import { runFixtures, type FixtureBuildRequest, type FixtureBuildResult } from "./runner.js";
-import { verifyCaseSignals } from "./signals.js";
+import { verifyCandidateAudit, verifyCaseSignals } from "./signals.js";
 import { scanStaleRefs } from "./stale.js";
 
 function log(msg: string): void {
@@ -379,8 +379,19 @@ export async function main(): Promise<number> {
       log,
     });
     const signalOutcome = await verifyCaseSignals(rest, resolved.cases, outcome.results);
-    results = signalOutcome.results;
-    overallOk = outcome.ok && signalOutcome.ok;
+    const auditOutcome =
+      config.compilerSource === "candidate"
+        ? await verifyCandidateAudit(signalOutcome.results, {
+            adoAwBin: config.adoAwBin,
+            cwd: config.sourcesDirectory,
+            orgUrl: config.orgUrl,
+            project: config.project,
+            token: config.token,
+            timeoutMs: config.childTimeoutMs,
+          })
+        : signalOutcome;
+    results = auditOutcome.results;
+    overallOk = outcome.ok && signalOutcome.ok && auditOutcome.ok;
     allTerminal = outcome.allTerminal;
     if (!overallOk) failureMessage = "one or more smoke cases did not succeed";
     if (!allTerminal) {
