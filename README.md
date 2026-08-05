@@ -185,16 +185,18 @@ underlying identities the minimum Azure DevOps permissions.
 
 | | Read Connection | Write Connection |
 |---|---|---|
-| **Used by** | Stage 1 trusted ADO MCP backend | Stage 3 safe outputs executor |
-| **Purpose** | Query ADO APIs through configured MCP tools | Create PRs, work items, link artifacts |
-| **Exposed to agent?** | Raw token: no; MCP tools: yes | No |
+| **Used by** | Trusted Stage 1 `ado-proxy` process | Stage 3 safe outputs executor |
+| **Purpose** | Authenticate catalogued ADO reads from MCP tools and wrapped `az` | Create PRs, work items, link artifacts |
+| **Exposed to agent?** | Raw token: no; scoped read tools: yes | No |
 | **Token variable** | `SC_READ_TOKEN` | `SC_WRITE_TOKEN` |
 | **Front matter field** | `permissions.read` | `permissions.write` |
 
-The raw Stage 1 token is passed to the trusted Azure DevOps MCP backend, not to
-the Agent process or direct `az devops` commands. The current MCP backend still
-relies on the identity's Azure DevOps permissions, so operators must configure
-that identity as least-privileged. Write actions belong in Stage 3
+The raw Stage 1 token is delivered only to `ado-proxy` over stdin — never to
+the Agent, MCPG, Azure DevOps MCP container, or wrapped `az`. The proxy
+enforces a deny-by-default read catalog and organization-relative scope tree
+before attaching the bearer. Operators must still configure the identity as
+least-privileged: the proxy constrains the agent path, while Azure DevOps
+remains the upstream authorization boundary. Writes belong in Stage 3
 (`SafeOutputs`) after threat analysis.
 
 #### Creating the Service Connections
@@ -207,7 +209,7 @@ that identity as least-privileged. Write actions belong in Stage 3
    **Read connection** (e.g., `ado-agent-read`):
    - Scope: subscription or resource group level
    - Used by: the Agent job to mint an ADO-audience token for the trusted
-     Azure DevOps MCP backend (`499b84ac-1321-427f-aa17-267ca6975798`)
+     `ado-proxy` process (`499b84ac-1321-427f-aa17-267ca6975798`)
    - Required ADO setup: grant the underlying identity only the Azure DevOps
      read permissions the workflow needs; the ARM scope does not enforce this
 
@@ -234,7 +236,7 @@ that identity as least-privileged. Write actions belong in Stage 3
 
 #### Permission Combinations
 
-| Configuration | Trusted ADO MCP can authenticate? | Safe outputs can write? |
+| Configuration | Scoped Stage 1 ADO reads work? | Safe outputs can write? |
 |---|---|---|
 | Both `read` + `write` | Yes, when `tools.azure-devops` is enabled | Yes (via ARM-minted token) |
 | Only `read` | Yes, when `tools.azure-devops` is enabled | Yes (via `$(System.AccessToken)`) |

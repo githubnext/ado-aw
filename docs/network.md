@@ -300,7 +300,7 @@ agents. Set `permissions.write` only when you need:
 ### Examples
 
 ```yaml
-# Trusted ADO MCP can authenticate; executor writes via $(System.AccessToken).
+# Scoped MCP and wrapped-az reads work through ado-proxy; executor writes via $(System.AccessToken).
 permissions:
   read: my-read-sc
 

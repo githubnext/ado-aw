@@ -54,9 +54,10 @@ client-provided HTTP headers and bodies are untrusted.
 The protected credential set is:
 
 - the identity behind `permissions.read`;
-- workload-identity assertions and any `System.AccessToken` used to renew them;
+- workload-identity assertions and the host-task `System.AccessToken` used to
+  mint the one-shot ADO token;
 - every Azure DevOps REST bearer minted from that identity;
-- private token files and proxy CA private keys.
+- proxy CA and leaf private keys.
 
 Those values must never appear in Agent or Detection environment, argv,
 `/proc`, files, mounts, prompts, MCP configuration or payloads, logs, or
