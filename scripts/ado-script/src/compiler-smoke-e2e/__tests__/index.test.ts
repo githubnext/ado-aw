@@ -255,7 +255,6 @@ describe("smoke-e2e index.main (happy path, candidate mode)", () => {
     // Candidate mode runs exactly the cases the manifest declares for it.
     expect(queuedCaseIds).toEqual([
       "canary",
-      "azure-cli",
       "ado-proxy",
       "noop-target",
       "custom-safe-output",
@@ -264,7 +263,6 @@ describe("smoke-e2e index.main (happy path, candidate mode)", () => {
     expect(queuedCaseIds).not.toContain("janitor");
     expect(compiledCasePaths).toEqual([
       "tests/safe-outputs/canary.md",
-      "tests/safe-outputs/azure-cli.md",
       "tests/smoke/ado-proxy.md",
       "tests/safe-outputs/noop-target.md",
       "tests/smoke/custom-safe-output.md",
@@ -283,14 +281,13 @@ describe("smoke-e2e index.main (happy path, candidate mode)", () => {
 
     expect(queuedRequests.map((r) => r.sourceBranch)).toEqual([
       "refs/heads/ado-aw-smoke-candidate/630001/canary",
-      "refs/heads/ado-aw-smoke-candidate/630001/azure-cli",
       "refs/heads/ado-aw-smoke-candidate/630001/ado-proxy",
       "refs/heads/ado-aw-smoke-candidate/630001/noop-target",
       "refs/heads/ado-aw-smoke-candidate/630001/custom-safe-output",
       "refs/heads/ado-aw-smoke-candidate/630001/multi-repo",
     ]);
     // Every case is staged to the SAME path — the ref is what distinguishes them.
-    expect(stagedWrites.length).toBe(6);
+    expect(stagedWrites.length).toBe(5);
     for (const write of stagedWrites) {
       expect(write.to).toBe(join(WORKTREE, "candidate", ".smoke", "pipeline.yml"));
       // The compiler emits no trigger keys once `on:` is stripped, and a
@@ -320,7 +317,7 @@ describe("smoke-e2e index.main (happy path, candidate mode)", () => {
 
     const gitModule = await import("../git.js");
     const resets = vi.mocked(gitModule.resetWorktree).mock.calls;
-    expect(resets.length).toBe(6);
+    expect(resets.length).toBe(5);
     for (const call of resets) {
       expect(call[0]).toMatchObject({ commitish: "basecommit" });
     }
@@ -444,12 +441,11 @@ describe("smoke-e2e index.main (per-case ref retention)", () => {
     // build stranded every case's ref.
     expect(deletedRefs).toEqual([
       "refs/heads/ado-aw-smoke-candidate/630001/canary",
-      "refs/heads/ado-aw-smoke-candidate/630001/ado-proxy",
       "refs/heads/ado-aw-smoke-candidate/630001/noop-target",
       "refs/heads/ado-aw-smoke-candidate/630001/custom-safe-output",
       "refs/heads/ado-aw-smoke-candidate/630001/multi-repo",
     ]);
-    expect(deletedRefs).not.toContain("refs/heads/ado-aw-smoke-candidate/630001/azure-cli");
+    expect(deletedRefs).not.toContain("refs/heads/ado-aw-smoke-candidate/630001/ado-proxy");
   });
 
   it("retains every pushed ref when runFixtures throws, because builds may already be queued", async () => {

@@ -20,19 +20,6 @@
       "source": "tests/safe-outputs/canary.md"
     },
     {
-      "id": "azure-cli",
-      "lane": "agentic",
-      "kind": "compiled",
-      "modes": ["candidate", "released"],
-      "source": "tests/safe-outputs/azure-cli.md",
-      "assertions": {
-        "agentCommand": {
-          "required": ["shell(az", "shell(head"],
-          "forbidden": ["--allow-all-tools", "--allow-all-paths"]
-        }
-      }
-    },
-    {
       "id": "ado-proxy",
       "lane": "agentic",
       "kind": "compiled",

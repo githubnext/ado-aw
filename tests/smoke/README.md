@@ -35,7 +35,7 @@ credential class:
 
 | Lane | Secrets / service connections | Cases |
 | --- | --- | --- |
-| `agentic` | `GITHUB_TOKEN`, `agent-playground-read`/`-write` | canary, azure-cli, ado-proxy, noop-target, custom-safe-output, multi-repo, janitor |
+| `agentic` | `GITHUB_TOKEN`, `agent-playground-read`/`-write` | canary, ado-proxy, noop-target, custom-safe-output, multi-repo, janitor |
 | `infra` | none | *(reserved for AWF and the ado-proxy sidecar)* |
 
 No case currently files GitHub issues, so the lane holds no GitHub PAT beyond
