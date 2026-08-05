@@ -423,6 +423,12 @@ Operational diagnostics are equally deliberate:
 - teardown captures Docker lifecycle state/stdout, while sanitized decision
   JSONL and lifecycle logs are copied into
   `agent_outputs_<buildId>/logs/ado-proxy`;
+- `ado-aw audit` strictly reads the v1 decision stream plus
+  `container.log`/`container-state.txt` into an optional
+  `ado_proxy_analysis` section. It reports bounded operation/reason rollups,
+  recent deny/error events, and pre-teardown health without preserving raw
+  request content. `ado-aw trace` and the MCP-author audit/trace tools inherit
+  full or compact forms of the same diagnostics;
 - the generated agent prompt lists effective capabilities and scopes from the
   same front matter that produced the policy document, so predictable
   prompt/config conflicts are visible before the agent attempts an impossible
