@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use log::warn;
 
+use crate::audit::find_artifact_dir;
 use crate::audit::model::{AuditData, AwInfo, ErrorInfo, PipelineGraphSection};
 use crate::compile::ir::summary::{JobSummary, PipelineSummary};
 
@@ -195,21 +196,6 @@ async fn resolve_source_path(source: &str) -> Result<PathBuf> {
         .await
         .with_context(|| "validate aw_info.json source string from audited build artifact")?;
     Ok(validated.path)
-}
-
-async fn find_artifact_dir(run_dir: &Path, prefix: &str) -> Option<PathBuf> {
-    let mut entries = tokio::fs::read_dir(run_dir).await.ok()?;
-    let mut hits: Vec<(String, PathBuf)> = Vec::new();
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false)
-            && let Some(name) = entry.file_name().to_str()
-            && (name == prefix || name.starts_with(&format!("{prefix}_")))
-        {
-            hits.push((name.to_string(), entry.path()));
-        }
-    }
-    hits.sort_by(|(a, _), (b, _)| crate::audit::cmp_numeric_suffix(a, b));
-    hits.pop().map(|(_, path)| path)
 }
 
 fn record_warning(audit: &mut AuditData, source: &str, message: impl Into<String>) {

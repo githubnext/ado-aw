@@ -13,6 +13,7 @@ use crate::audit::analyzers::{
     ado_proxy, custom_jobs, detection, firewall, jobs, mcp, missing, otel, policy, safe_outputs,
 };
 use crate::audit::cache::{RunSummary, load_run_summary, save_run_summary};
+use crate::audit::find_artifact_dir;
 use crate::audit::findings;
 use crate::audit::model::{AuditData, ErrorInfo, FileInfo, OverviewData};
 use crate::audit::pipeline_graph;
@@ -970,23 +971,6 @@ async fn collect_files_under(run_dir: &Path, start_dir: &Path) -> Result<Vec<Fil
     }
 
     Ok(files)
-}
-
-async fn find_artifact_dir(run_dir: &Path, prefix: &str) -> Option<PathBuf> {
-    let mut entries = tokio::fs::read_dir(run_dir).await.ok()?;
-    let mut hits: Vec<(String, PathBuf)> = Vec::new();
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false)
-            && let Some(name) = entry.file_name().to_str()
-            && (name == prefix || name.starts_with(&format!("{}_", prefix)))
-        {
-            hits.push((name.to_string(), entry.path()));
-        }
-    }
-    // Numeric-suffix sort so `agent_outputs_10` outranks
-    // `agent_outputs_9` (lexicographic sort gets this wrong).
-    hits.sort_by(|(a, _), (b, _)| crate::audit::cmp_numeric_suffix(a, b));
-    hits.pop().map(|(_, path)| path)
 }
 
 fn is_authz_error(error: &anyhow::Error) -> bool {
