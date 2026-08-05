@@ -64,12 +64,52 @@ output. The parent smoke orchestrator will fail because the proof tag is absent.
      --output json | head -40
    ```
 
-4. Invoke the Azure DevOps MCP tool `core_list_projects`. Confirm its response
+4. Prove write methods are refused before route execution. This command must
+   fail and its error must contain `ado-proxy: POST is not a read method`:
+
+   ```bash
+   az rest \
+     --method post \
+     --url "$(System.CollectionUri)_apis/projects/$(System.TeamProjectId)?api-version=7.1" \
+     --body '{}'
+   ```
+
+5. Prove a secret-bearing route family is refused. This command must fail and
+   its error must contain
+   `ado-proxy: route family /_apis/serviceendpoint is always denied`:
+
+   ```bash
+   az rest \
+     --method get \
+     --url "$(System.CollectionUri)$(System.TeamProject)/_apis/serviceendpoint/endpoints?api-version=7.1"
+   ```
+
+6. Prove a real sibling project is refused. `msazuresphere/4x4` exists, but it
+   is not in this workflow's scope. This command must fail and its error must
+   contain `ado-proxy:` and `out-of-scope`:
+
+   ```bash
+   az rest \
+     --method get \
+     --url "$(System.CollectionUri)_apis/projects/4x4?api-version=7.1"
+   ```
+
+7. Prove an ungranted capability is refused. The front matter grants only
+   `core` and `repos`; this command must fail and its error must contain
+   `ado-proxy:` and `capability-disabled`:
+
+   ```bash
+   az rest \
+     --method get \
+     --url "$(System.CollectionUri)$(System.TeamProject)/_apis/pipelines?api-version=7.1"
+   ```
+
+8. Invoke the Azure DevOps MCP tool `core_list_projects`. Confirm its response
    includes `$(System.TeamProject)`. Use the native MCP tool interface, not
    `curl`, raw HTTP, or shell.
 
-5. Only after all four reads succeed, invoke the `add-build-tag` safe-output
-   tool with:
+9. Only after all allowed reads succeed and all four denials return the
+   expected policy reasons, invoke the `add-build-tag` safe-output tool with:
 
    - `build_id`: `$(Build.BuildId)`
    - `tag`: `$(Build.BuildId)`
