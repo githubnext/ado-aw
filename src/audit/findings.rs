@@ -13,6 +13,7 @@ pub fn derive_findings(audit: &mut AuditData) {
     let mut findings = audit.key_findings.clone();
     let mut recommendations = audit.recommendations.clone();
 
+    add_ado_proxy_findings(audit, &mut findings, &mut recommendations);
     add_elevated_mcp_error_rate(audit, &mut findings, &mut recommendations);
     add_denied_network_domains(audit, &mut findings, &mut recommendations);
     add_high_token_usage(audit, &mut findings, &mut recommendations);
@@ -25,6 +26,259 @@ pub fn derive_findings(audit: &mut AuditData) {
 
     audit.key_findings = findings;
     audit.recommendations = recommendations;
+}
+
+fn add_ado_proxy_findings(
+    audit: &AuditData,
+    findings: &mut Vec<Finding>,
+    recommendations: &mut Vec<Recommendation>,
+) {
+    let Some(proxy) = &audit.ado_proxy_analysis else {
+        return;
+    };
+
+    if proxy
+        .lifecycle
+        .as_ref()
+        .is_some_and(|lifecycle| !lifecycle.healthy_before_teardown)
+    {
+        push_finding(
+            findings,
+            Finding {
+                category: String::from("ado_proxy"),
+                severity: Severity::High,
+                title: String::from("ado-proxy was not healthy before teardown"),
+                description: String::from(
+                    "The proxy did not reach or retain its expected running/listening state before teardown.",
+                ),
+                impact: Some(String::from(
+                    "Azure DevOps reads through wrapped az or the Azure DevOps MCP may have failed.",
+                )),
+            },
+        );
+        push_recommendation(
+            recommendations,
+            Recommendation {
+                priority: String::from("high"),
+                action: String::from("Inspect ado-proxy lifecycle diagnostics"),
+                reason: String::from(
+                    "Container state and startup logs identify topology, CA, configuration, or lifecycle failures.",
+                ),
+                example: Some(String::from(
+                    "Inspect agent_outputs_<buildId>/logs/ado-proxy/container.log and container-state.txt",
+                )),
+            },
+        );
+    }
+
+    let credential_unavailable = proxy_reason_count(proxy, &["credential-unavailable"]);
+    if credential_unavailable > 0 {
+        push_finding(
+            findings,
+            Finding {
+                category: String::from("ado_proxy"),
+                severity: Severity::High,
+                title: String::from("ado-proxy credential was unavailable"),
+                description: format!(
+                    "The proxy could not acquire its Azure DevOps read credential for {credential_unavailable} request(s)."
+                ),
+                impact: Some(String::from(
+                    "Authorized Azure DevOps reads could not be forwarded upstream.",
+                )),
+            },
+        );
+        push_recommendation(
+            recommendations,
+            Recommendation {
+                priority: String::from("high"),
+                action: String::from("Inspect the permissions.read service connection"),
+                reason: String::from(
+                    "The trusted proxy token source failed; the credential must not be moved into the agent.",
+                ),
+                example: None,
+            },
+        );
+    }
+
+    let upstream_failed = proxy_reason_count(proxy, &["upstream-failed"]);
+    if upstream_failed > 0 {
+        push_finding(
+            findings,
+            Finding {
+                category: String::from("ado_proxy"),
+                severity: Severity::High,
+                title: String::from("ado-proxy could not reach Azure DevOps upstream"),
+                description: format!(
+                    "{upstream_failed} authorized request(s) failed while reaching the upstream service."
+                ),
+                impact: Some(String::from(
+                    "The agent's Azure DevOps reads may be incomplete even though policy allowed them.",
+                )),
+            },
+        );
+        push_recommendation(
+            recommendations,
+            Recommendation {
+                priority: String::from("high"),
+                action: String::from("Inspect ado-proxy upstream connectivity"),
+                reason: String::from(
+                    "AWF/Squid egress, CA trust, or Azure DevOps availability prevented an allowed request.",
+                ),
+                example: None,
+            },
+        );
+    }
+
+    let out_of_scope_response = proxy_reason_count(proxy, &["out-of-scope-response"]);
+    if out_of_scope_response > 0 {
+        push_finding(
+            findings,
+            Finding {
+                category: String::from("security"),
+                severity: Severity::High,
+                title: String::from("ado-proxy blocked an over-broad upstream response"),
+                description: format!(
+                    "Response filtering rejected {out_of_scope_response} response(s) containing resources outside the configured scope."
+                ),
+                impact: Some(String::from(
+                    "The proxy prevented out-of-scope Azure DevOps data from reaching the agent.",
+                )),
+            },
+        );
+        push_recommendation(
+            recommendations,
+            Recommendation {
+                priority: String::from("high"),
+                action: String::from(
+                    "Inspect the affected ado-proxy operation and response filter",
+                ),
+                reason: String::from(
+                    "The response shape may have changed or the operation may require a tighter catalog filter; do not bypass response filtering.",
+                ),
+                example: None,
+            },
+        );
+    }
+
+    let prompt_conflict_reasons = [
+        "capability-disabled",
+        "out-of-scope",
+        "api-version",
+        "query-not-allowed",
+    ];
+    let prompt_conflicts = proxy_reason_count(proxy, &prompt_conflict_reasons);
+    if prompt_conflicts > 0 {
+        push_finding(
+            findings,
+            Finding {
+                category: String::from("configuration"),
+                severity: Severity::Medium,
+                title: String::from("Agent requests conflicted with permissions.read"),
+                description: format!(
+                    "{prompt_conflicts} request(s) were denied by configured capability, scope, API-version, or query limits: {}.",
+                    format_proxy_reasons(proxy, &prompt_conflict_reasons)
+                ),
+                impact: None,
+            },
+        );
+        push_recommendation(
+            recommendations,
+            Recommendation {
+                priority: String::from("medium"),
+                action: String::from(
+                    "Align the agent prompt with effective Azure DevOps permissions",
+                ),
+                reason: String::from(
+                    "The prompt requested data outside the declared front-matter contract. Deliberately review front matter only when broader access is legitimate.",
+                ),
+                example: None,
+            },
+        );
+    }
+
+    let prohibited_reasons = [
+        "method-not-read",
+        "denied-route-family",
+        "unknown-route",
+        "unknown-host",
+        "malformed-target",
+    ];
+    let prohibited = proxy_reason_count(proxy, &prohibited_reasons);
+    if prohibited > 0 {
+        push_finding(
+            findings,
+            Finding {
+                category: String::from("security"),
+                severity: Severity::Medium,
+                title: String::from("ado-proxy blocked prohibited request shapes"),
+                description: format!(
+                    "{prohibited} direct write, denied-family, unknown, or malformed request(s) were blocked: {}.",
+                    format_proxy_reasons(proxy, &prohibited_reasons)
+                ),
+                impact: None,
+            },
+        );
+        push_recommendation(
+            recommendations,
+            Recommendation {
+                priority: String::from("medium"),
+                action: String::from("Remove unsupported Azure DevOps requests from the prompt"),
+                reason: String::from(
+                    "Direct writes and uncatalogued APIs must not be enabled by widening the proxy policy.",
+                ),
+                example: None,
+            },
+        );
+    }
+
+    if proxy.malformed_record_count > 0 {
+        push_finding(
+            findings,
+            Finding {
+                category: String::from("ado_proxy"),
+                severity: Severity::Medium,
+                title: String::from("ado-proxy decision log contained malformed records"),
+                description: format!(
+                    "{} decision record(s) did not match the declared v1 schema.",
+                    proxy.malformed_record_count
+                ),
+                impact: Some(String::from(
+                    "The audit summary may omit affected proxy decisions.",
+                )),
+            },
+        );
+        push_recommendation(
+            recommendations,
+            Recommendation {
+                priority: String::from("medium"),
+                action: String::from("Check ado-proxy bundle/compiler schema compatibility"),
+                reason: String::from(
+                    "The analyzer rejected records rather than guessing at an unknown shape.",
+                ),
+                example: None,
+            },
+        );
+    }
+}
+
+fn proxy_reason_count(proxy: &crate::audit::model::AdoProxyAnalysis, reasons: &[&str]) -> u64 {
+    proxy
+        .reasons
+        .iter()
+        .filter(|stat| reasons.contains(&stat.reason.as_str()))
+        .map(|stat| stat.count)
+        .sum()
+}
+
+fn format_proxy_reasons(proxy: &crate::audit::model::AdoProxyAnalysis, reasons: &[&str]) -> String {
+    proxy
+        .reasons
+        .iter()
+        .filter(|stat| reasons.contains(&stat.reason.as_str()))
+        .take(5)
+        .map(|stat| format!("{} ({})", stat.reason, stat.count))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn add_elevated_mcp_error_rate(
@@ -475,9 +729,9 @@ fn push_recommendation(recommendations: &mut Vec<Recommendation>, recommendation
 mod tests {
     use super::derive_findings;
     use crate::audit::model::{
-        AuditData, DomainStat, Finding, FirewallAnalysis, JobData, MCPServerHealth, MCPServerStats,
-        MetricsData, MissingDataReport, MissingToolReport, NoopReport, Recommendation,
-        SafeOutputSummary, Severity,
+        AdoProxyAnalysis, AdoProxyLifecycle, AdoProxyReasonStat, AuditData, DomainStat, Finding,
+        FirewallAnalysis, JobData, MCPServerHealth, MCPServerStats, MetricsData, MissingDataReport,
+        MissingToolReport, NoopReport, Recommendation, SafeOutputSummary, Severity,
     };
 
     fn finding_by_title<'a>(audit: &'a AuditData, title: &str) -> &'a Finding {
@@ -504,6 +758,146 @@ mod tests {
 
         assert!(audit.key_findings.is_empty());
         assert!(audit.recommendations.is_empty());
+    }
+
+    #[test]
+    fn unhealthy_proxy_lifecycle_emits_high_finding() {
+        let mut audit = AuditData {
+            ado_proxy_analysis: Some(AdoProxyAnalysis {
+                lifecycle: Some(AdoProxyLifecycle {
+                    state_before_teardown: Some(String::from("missing")),
+                    listening: false,
+                    healthy_before_teardown: false,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        derive_findings(&mut audit);
+
+        assert_eq!(
+            finding_by_title(&audit, "ado-proxy was not healthy before teardown").severity,
+            Severity::High
+        );
+        assert_eq!(
+            recommendation_by_action(&audit, "Inspect ado-proxy lifecycle diagnostics").priority,
+            "high"
+        );
+    }
+
+    #[test]
+    fn proxy_operational_and_response_failures_are_elevated() {
+        let mut audit = AuditData {
+            ado_proxy_analysis: Some(AdoProxyAnalysis {
+                reasons: vec![
+                    AdoProxyReasonStat {
+                        decision: String::from("error"),
+                        reason: String::from("credential-unavailable"),
+                        count: 1,
+                    },
+                    AdoProxyReasonStat {
+                        decision: String::from("error"),
+                        reason: String::from("upstream-failed"),
+                        count: 2,
+                    },
+                    AdoProxyReasonStat {
+                        decision: String::from("deny"),
+                        reason: String::from("out-of-scope-response"),
+                        count: 1,
+                    },
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        derive_findings(&mut audit);
+
+        for title in [
+            "ado-proxy credential was unavailable",
+            "ado-proxy could not reach Azure DevOps upstream",
+            "ado-proxy blocked an over-broad upstream response",
+        ] {
+            assert_eq!(finding_by_title(&audit, title).severity, Severity::High);
+        }
+    }
+
+    #[test]
+    fn proxy_policy_denials_are_aggregated_without_becoming_audit_errors() {
+        let mut audit = AuditData {
+            ado_proxy_analysis: Some(AdoProxyAnalysis {
+                deny_count: 4,
+                reasons: vec![
+                    AdoProxyReasonStat {
+                        decision: String::from("deny"),
+                        reason: String::from("out-of-scope"),
+                        count: 2,
+                    },
+                    AdoProxyReasonStat {
+                        decision: String::from("deny"),
+                        reason: String::from("capability-disabled"),
+                        count: 1,
+                    },
+                    AdoProxyReasonStat {
+                        decision: String::from("deny"),
+                        reason: String::from("method-not-read"),
+                        count: 1,
+                    },
+                ],
+                stripped_credentials: [("authorization".to_string(), 4)].into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        derive_findings(&mut audit);
+        derive_findings(&mut audit);
+
+        assert_eq!(audit.metrics.error_count, 0);
+        assert_eq!(
+            finding_by_title(&audit, "Agent requests conflicted with permissions.read").severity,
+            Severity::Medium
+        );
+        assert_eq!(
+            finding_by_title(&audit, "ado-proxy blocked prohibited request shapes").severity,
+            Severity::Medium
+        );
+        assert_eq!(
+            audit
+                .key_findings
+                .iter()
+                .filter(|finding| {
+                    finding.title == "Agent requests conflicted with permissions.read"
+                })
+                .count(),
+            1
+        );
+        assert!(
+            audit
+                .key_findings
+                .iter()
+                .all(|finding| !finding.title.contains("credential header"))
+        );
+    }
+
+    #[test]
+    fn malformed_proxy_records_emit_schema_finding() {
+        let mut audit = AuditData {
+            ado_proxy_analysis: Some(AdoProxyAnalysis {
+                malformed_record_count: 2,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        derive_findings(&mut audit);
+
+        assert_eq!(
+            finding_by_title(&audit, "ado-proxy decision log contained malformed records").severity,
+            Severity::Medium
+        );
     }
 
     #[test]

@@ -64,6 +64,9 @@ pub struct AuditData {
     /// MCP server reliability and call health derived from gateway logs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_server_health: Option<MCPServerHealth>,
+    /// Azure DevOps proxy request and lifecycle diagnostics derived from the Agent artifact.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ado_proxy_analysis: Option<AdoProxyAnalysis>,
     /// Optional typed-IR graph correlation for the pipeline source that produced this build.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pipeline_graph: Option<PipelineGraphSection>,
@@ -762,6 +765,177 @@ pub struct MCPServerStats {
     /// Whether the server should be considered unreliable.
     #[serde(default)]
     pub unreliable: bool,
+}
+
+/// Credential-isolated Azure DevOps proxy diagnostics for the audited run.
+///
+/// This section is derived from the sanitized decision JSONL and container
+/// lifecycle files under `agent_outputs_<BuildId>/logs/ado-proxy`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AdoProxyAnalysis {
+    /// Decision-log schema version accepted by the analyzer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_version: Option<String>,
+    /// Container readiness and pre-teardown state, when lifecycle logs were present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<AdoProxyLifecycle>,
+    /// Total valid decision records.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub total_requests: u64,
+    /// Allowed request count.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub allow_count: u64,
+    /// Denied request count.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub deny_count: u64,
+    /// Proxy/infrastructure error count.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub error_count: u64,
+    /// Deterministic request rollups per catalog operation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operations: Vec<AdoProxyOperationStat>,
+    /// Deterministic denial/error rollups per machine-readable reason.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<AdoProxyReasonStat>,
+    /// Upstream response status classes, such as `2xx` or `4xx`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub upstream_status_classes: BTreeMap<String, u64>,
+    /// Aggregate latency for records that carried latency data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency: Option<AdoProxyLatencyStats>,
+    /// Total response bytes recorded for allowed responses.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub response_bytes: u64,
+    /// Client credential-header names stripped by the proxy.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stripped_credentials: BTreeMap<String, u64>,
+    /// Decision records rejected as malformed or schema-incompatible.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub malformed_record_count: u64,
+    /// Bounded recent deny/error summaries in original log order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_problem_events: Vec<AdoProxyEventSummary>,
+}
+
+/// `ado-proxy` container lifecycle facts captured before pipeline teardown.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AdoProxyLifecycle {
+    /// Docker state observed before the teardown step stopped the container.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_before_teardown: Option<String>,
+    /// Docker exit code observed before teardown, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code_before_teardown: Option<i64>,
+    /// Docker-reported error text, normalized and bounded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub docker_error: Option<String>,
+    /// Whether the proxy emitted its listening/readiness marker.
+    #[serde(default)]
+    pub listening: bool,
+    /// Whether the observed pre-teardown lifecycle was healthy.
+    #[serde(default)]
+    pub healthy_before_teardown: bool,
+    /// Bounded recognized startup/runtime diagnostic messages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<String>,
+}
+
+/// Aggregate decision statistics for one catalog operation.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AdoProxyOperationStat {
+    /// Catalog operation identifier; absent when no operation matched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+    /// Total request records for this operation.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub request_count: u64,
+    /// Allowed request count.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub allow_count: u64,
+    /// Denied request count.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub deny_count: u64,
+    /// Proxy/infrastructure error count.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub error_count: u64,
+    /// Aggregate latency for this operation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency: Option<AdoProxyLatencyStats>,
+    /// Total response bytes for this operation.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub response_bytes: u64,
+}
+
+/// Aggregate decision statistics for one `(decision, reason)` pair.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AdoProxyReasonStat {
+    /// Machine-readable reason emitted by the proxy.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+    /// Decision class associated with the reason (`deny` or `error`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub decision: String,
+    /// Number of records carrying this reason.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub count: u64,
+}
+
+/// Aggregate latency statistics without retaining individual samples.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AdoProxyLatencyStats {
+    /// Number of records carrying latency data.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub observed_count: u64,
+    /// Sum of all observed latency values.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub total_ms: u64,
+    /// Arithmetic mean of observed latency values.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub average_ms: f64,
+    /// Maximum observed latency.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub max_ms: u64,
+}
+
+/// Sanitized summary of one recent denied or failed proxy request.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AdoProxyEventSummary {
+    /// Event timestamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+    /// Proxy request correlation identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// Protected destination host.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// HTTP method.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    /// Catalog operation identifier, when matched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+    /// Decision class (`deny` or `error`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub decision: String,
+    /// Machine-readable denial/error reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Bounded human-readable detail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Upstream status class, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_status_class: Option<String>,
+    /// Request latency in milliseconds, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
 }
 
 /// MCP-tool usage summary for the run.
