@@ -341,7 +341,16 @@ pub fn operations() -> Vec<Operation> {
             "/{org}/_apis/projects",
             FilterProjectsToCurrent,
             FilterProjects,
-            &["stateFilter", "$top", "$skip"]
+            &[
+                "stateFilter",
+                "$top",
+                "$skip",
+                // The first-party Azure DevOps MCP always sends this boolean
+                // from core_list_projects. It controls inclusion of a
+                // non-secret project/team image URL; response filtering still
+                // removes every project outside the authorized scope.
+                "getDefaultTeamImageUrl",
+            ]
         ),
         get!(
             "repos.repository-get",

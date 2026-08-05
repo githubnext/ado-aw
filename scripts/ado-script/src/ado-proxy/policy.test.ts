@@ -73,6 +73,17 @@ describe("authorize — allowed reads", () => {
     if (decision.allow) expect(decision.operation.id).toBe("core.project-get");
   });
 
+  it("allows the first-party MCP project-list query shape", () => {
+    const decision = decide(
+      "GET",
+      "/contoso/_apis/projects?api-version=7.1&getDefaultTeamImageUrl=true",
+    );
+    expect(decision.allow).toBe(true);
+    if (decision.allow) {
+      expect(decision.operation.id).toBe("core.project-validation-probe");
+    }
+  });
+
   it("accepts the project GUID as well as the name", () => {
     // `az` substitutes whichever identifier it cached, so both must work — but
     // only for the pinned project.

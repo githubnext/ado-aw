@@ -120,7 +120,8 @@
       "allowed_query": [
         "stateFilter",
         "$top",
-        "$skip"
+        "$skip",
+        "getDefaultTeamImageUrl"
       ],
       "denied_query": [],
       "max_response_bytes": 10485760
