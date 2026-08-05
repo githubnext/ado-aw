@@ -12,9 +12,7 @@ use crate::ado::{
 use crate::audit::analyzers::{
     custom_jobs, detection, firewall, jobs, mcp, missing, otel, policy, safe_outputs,
 };
-use crate::audit::cache::{
-    RUN_SUMMARY_FILENAME, RunSummary, load_run_summary, save_run_summary,
-};
+use crate::audit::cache::{RunSummary, load_run_summary, save_run_summary};
 use crate::audit::findings;
 use crate::audit::model::{AuditData, ErrorInfo, FileInfo, OverviewData};
 use crate::audit::pipeline_graph;
@@ -91,7 +89,10 @@ async fn resolve_run_setup(opts: &AuditOptions<'_>) -> Result<AuditRunSetup> {
         .context("Could not resolve current directory")?;
     let ctx = resolve_audit_context(&cwd, opts.org, opts.project, &parsed).await?;
     let auth = resolve_auth(opts.pat).await?;
-    let run_dir = opts.output.join(format!("build-{}", parsed.build_id));
+    let mut run_dir = opts.output.join(format!("build-{}", parsed.build_id));
+    if let Some(filters) = artifact_filters.as_deref() {
+        run_dir = run_dir.join(format!("artifacts-{}", filters.join("-")));
+    }
     tokio::fs::create_dir_all(&run_dir)
         .await
         .with_context(|| format!("create audit output directory {}", run_dir.display()))?;
@@ -113,11 +114,6 @@ async fn fetch_audit_data_inner(opts: AuditOptions<'_>) -> Result<FetchAuditData
     {
         return Ok(cached);
     }
-    if let Some(filters) = setup.artifact_filters.as_deref() {
-        prune_unselected_artifacts(&setup.run_dir, filters).await?;
-        remove_run_summary(&setup.run_dir).await?;
-    }
-
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
         .build()
@@ -146,42 +142,6 @@ async fn fetch_audit_data_inner(opts: AuditOptions<'_>) -> Result<FetchAuditData
             "failed to download artifacts and no local cache. Use 'az pipelines runs artifact download --run-id {}' to fetch them manually, then re-run.",
             setup.parsed.build_id
         );
-    }
-
-    async fn prune_unselected_artifacts(run_dir: &Path, filters: &[String]) -> Result<()> {
-        let mut entries = tokio::fs::read_dir(run_dir)
-            .await
-            .with_context(|| format!("read audit output directory {}", run_dir.display()))?;
-        while let Some(entry) = entries
-            .next_entry()
-            .await
-            .with_context(|| format!("iterate audit output directory {}", run_dir.display()))?
-        {
-            if !entry
-                .file_type()
-                .await
-                .with_context(|| format!("inspect audit output path {}", entry.path().display()))?
-                .is_dir()
-            {
-                continue;
-            }
-            let name = entry.file_name();
-            let Some(prefix) = name.to_str().and_then(artifact_name_to_prefix) else {
-                continue;
-            };
-            let family = match prefix {
-                "agent_outputs" => "agent",
-                "analyzed_outputs" => "detection",
-                "safe_outputs" => "safe-outputs",
-                _ => continue,
-            };
-            if !artifact_family_selected(Some(filters), family) {
-                tokio::fs::remove_dir_all(entry.path())
-                    .await
-                    .with_context(|| format!("remove excluded artifact {}", entry.path().display()))?;
-            }
-        }
-        Ok(())
     }
 
     run_analyzers(
@@ -218,14 +178,6 @@ async fn fetch_audit_data_inner(opts: AuditOptions<'_>) -> Result<FetchAuditData
         json: opts.json,
         from_cache: false,
     })
-}
-
-async fn remove_run_summary(run_dir: &Path) -> Result<()> {
-    match tokio::fs::remove_file(run_dir.join(RUN_SUMMARY_FILENAME)).await {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).context("remove incompatible unfiltered audit cache"),
-    }
 }
 
 /// Try to serve an audit result from the local on-disk cache.
@@ -845,6 +797,7 @@ fn normalize_artifact_filters(filters: Option<&[String]>) -> Result<Option<Vec<S
             normalized.push(canonical.to_string());
         }
     }
+    normalized.sort();
 
     Ok(Some(normalized))
 }
