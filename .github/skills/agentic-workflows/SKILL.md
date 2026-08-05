@@ -42,6 +42,7 @@ Load these files from `github/gh-aw` (they are not available locally).
 - `.github/aw/llms.md`
 - `.github/aw/loop.md`
 - `.github/aw/lsp.md`
+- `.github/aw/maintainer.md`
 - `.github/aw/mcp-clis.md`
 - `.github/aw/memory-stateful-patterns.md`
 - `.github/aw/memory.md`
@@ -71,6 +72,7 @@ Load these files from `github/gh-aw` (they are not available locally).
 - `.github/aw/test-coverage.md`
 - `.github/aw/test-expression.md`
 - `.github/aw/token-optimization-caching-budgets.md`
+- `.github/aw/token-optimization-observability.md`
 - `.github/aw/token-optimization.md`
 - `.github/aw/triggers.md`
 - `.github/aw/update-agentic-workflow.md`
