@@ -110,6 +110,18 @@ export https_proxy
 REQUESTS_CA_BUNDLE="{AZ_WRAPPER_CA_PATH}"
 export REQUESTS_CA_BUNDLE
 
+# Azure CLI writes extension metadata, command indexes and defaults beneath its
+# config directory. The rootless AWF agent cannot write the runner user's
+# default ~/.azure, so establish a private, writable sandbox-local default.
+# Honour an explicit caller override for tests and advanced use.
+AZURE_CONFIG_DIR="${{AZURE_CONFIG_DIR:-${{TMPDIR:-/tmp}}/ado-aw-az-config}}"
+export AZURE_CONFIG_DIR
+mkdir -p "$AZURE_CONFIG_DIR"
+if [ ! -w "$AZURE_CONFIG_DIR" ]; then
+  echo "ado-aw: Azure CLI config directory is not writable: $AZURE_CONFIG_DIR" >&2
+  exit 1
+fi
+
 # A non-secret placeholder. `az` requires *some* credential to attempt a call;
 # the engine strips whatever the client sent and attaches the real bearer only
 # after a complete allow decision.
@@ -173,6 +185,19 @@ mod tests {
         // certifi bundle. It would also widen trust beyond this one client.
         assert!(!script.contains("update-ca-certificates"));
         assert!(!script.contains("/usr/local/share/ca-certificates"));
+    }
+
+    #[test]
+    fn provides_a_writable_azure_cli_config_directory() {
+        let script = wrapper();
+        assert!(script.contains(
+            "AZURE_CONFIG_DIR=\"${AZURE_CONFIG_DIR:-${TMPDIR:-/tmp}/ado-aw-az-config}\""
+        ));
+        assert!(script.contains("mkdir -p \"$AZURE_CONFIG_DIR\""));
+        assert!(script.contains("if [ ! -w \"$AZURE_CONFIG_DIR\" ]"));
+        // A caller may deliberately isolate invocations further; the wrapper
+        // supplies a safe default rather than overriding one.
+        assert!(script.contains("${AZURE_CONFIG_DIR:-"));
     }
 
     #[test]
@@ -282,4 +307,3 @@ mod tests {
     }
 
 }
-

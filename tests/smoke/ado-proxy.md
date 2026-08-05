@@ -40,7 +40,7 @@ output. The parent smoke orchestrator will fail because the proof tag is absent.
    proxy:
 
    ```bash
-   AZURE_CONFIG_DIR=/tmp/ado-aw-az-config az devops project show \
+   az devops project show \
      --organization "$(System.CollectionUri)" \
      --project "$(System.TeamProject)" \
      --output json | head -40
@@ -49,7 +49,7 @@ output. The parent smoke orchestrator will fail because the proof tag is absent.
 2. Prove a GUID-addressed current-project read works through `az rest`:
 
    ```bash
-   AZURE_CONFIG_DIR=/tmp/ado-aw-az-config az rest \
+   az rest \
      --method get \
      --url "$(System.CollectionUri)_apis/projects/$(System.TeamProjectId)?api-version=7.1" \
      --output json | head -40
@@ -58,7 +58,7 @@ output. The parent smoke orchestrator will fail because the proof tag is absent.
 3. Prove the current repository is readable by repository GUID:
 
    ```bash
-   AZURE_CONFIG_DIR=/tmp/ado-aw-az-config az rest \
+   az rest \
      --method get \
      --url "$(System.CollectionUri)$(System.TeamProject)/_apis/git/repositories/$(Build.Repository.ID)/refs?api-version=7.1&filter=heads" \
      --output json | head -40
