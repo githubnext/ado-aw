@@ -7,13 +7,12 @@
  * per-host leaves, and the bearer straight into `docker run -i`. Two
  * consequences:
  *
- *   - **No private key or credential touches a filesystem.** Not the runner's,
- *     not the container's. AWF's chroot makes the agent's root the host's
- *     `/host` bind mount, so the agent's `/tmp` *is* the runner's `/tmp`;
- *     anything written to a runner path would be agent-readable. Keeping the
- *     material on stdin sidesteps that rather than relying on deleting it in
- *     time. There is no exposure window either, because the engine starts
- *     before AWF — at generation time no agent exists at all.
+ *   - **No bearer touches a filesystem, and no private key touches runner
+ *     `/tmp`.** The host generates keys under `$(Agent.TempDirectory)`,
+ *     streams them with the bearer through a container-local FIFO, and shreds
+ *     them immediately after handover. AWF exposes runner `/tmp` inside the
+ *     agent chroot, so using that path would make private material readable by
+ *     the agent. The FIFO itself stores no bytes.
  *   - **The engine needs no `openssl`,** so it runs on `node:20-slim` (which
  *     has none) rather than the full `node:20`. That is already the image the
  *     Azure DevOps MCP uses, so it adds nothing to mirror.

@@ -66,6 +66,8 @@ jobs:
           echo '"ADO_MCP_AUTH_TOKEN": "ado-proxy-injects-the-real-credential"'
           echo '"--network", "ado-aw-proxy-net",'
         displayName: Start ado-proxy policy engine
+      - bash: echo peers running
+        displayName: Verify trusted topology peers
       - bash: echo stop
         displayName: Stop ado-proxy
       - task: DownloadPipelineArtifact@2

@@ -191,18 +191,23 @@ agent.** It does not follow that the key must be minted inside the engine's
 container — an earlier draft claimed that, and it was wrong.
 
 Two facts make a simpler arrangement safe. The engine starts *before* the AWF
-invocation, so during CA setup no agent exists to read anything. And the
-material can be passed on **stdin**, so it never touches a filesystem at all —
-not the runner's, not the container's.
+invocation, so during CA setup no agent process exists. The host step generates
+private material under `$(Agent.TempDirectory)`, never runner `/tmp`, streams
+it into the detached container, then shreds every private key. The bearer is
+never written there: it exists only in the secret step environment and the
+in-memory material document.
 
 Because the protected host set is compiler-known, the **leaves are generated
-alongside the CA**, and the whole lot arrives as one PEM stream from a host
-pipeline step:
+alongside the CA**, and the whole lot arrives as one versioned JSON document:
 
 ```sh
-# host step: mints CA + one leaf per protected host, straight to stdout
-generate_ca_material \
-  | docker run -i --name ado-proxy … node:20-slim ado-proxy.js
+# container is detached and blocks on a private FIFO
+docker run -d --name awmg-ado-proxy … sh -c \
+  'mkfifo /tmp/material; node /app/ado-proxy.js … < /tmp/material'
+
+# host streams the in-memory document; FIFO stores no bytes
+printf '%s' "$PROXY_MATERIAL" \
+  | docker exec -i awmg-ado-proxy sh -c 'cat > /tmp/material'
 ```
 
 Generation runs directly on the runner with `openssl`, not in a helper
@@ -212,12 +217,11 @@ run — so this adds no new dependency, no second image to pull, and nothing
 further for `supply-chain:` to mirror. A helper container would have been pure
 overhead.
 
-Verified end to end: CA and all three leaves (`dev.azure.com`,
-`app.vssps.visualstudio.com`, and the engine's own broker hostname) reach the
-container, and a client verifies the served identity **as `dev.azure.com`
-against the piped CA** (`authorized: true`). Piping configuration into a
-container this way is the pattern MCPG already uses (`echo "$MCPG_CONFIG" |
-docker run -i …`).
+Verified end to end: CA and both protected-host leaves (`dev.azure.com` and
+`app.vssps.visualstudio.com`) reach the container, and a client verifies the
+served identity **as `dev.azure.com` against the published CA**. The detached
+container was also proven to remain running after the independent host process
+that started and fed it exited.
 
 `openssl` being absent is a hard failure, not a degradation: the step must exit
 non-zero rather than continue without an interception identity.
@@ -227,9 +231,9 @@ non-zero rather than continue without an interception identity.
 Why this matters for the agent: AWF's chroot makes the agent's root the host's
 `/host` bind mount, so the agent's `/tmp` **is** the runner's `/tmp` — which is
 how AWF installs its own `gh` wrapper (`cp … /host/tmp/awf-lib/gh` appears
-inside the chroot as `/tmp/awf-lib/gh`). A key written to a host path would
-therefore be agent-readable. Keeping it on stdin sidesteps that entirely, rather
-than relying on deleting it in time.
+inside the chroot as `/tmp/awf-lib/gh`). A key written under runner `/tmp` would therefore be agent-readable. Private
+keys instead use `$(Agent.TempDirectory)` only during the pre-agent setup step
+and are shredded immediately after FIFO handover.
 
 Only the **public** certificate is written to a host path, so it can be mounted
 into the MCP container for `NODE_EXTRA_CA_CERTS`.
@@ -385,24 +389,41 @@ Fail-closed behavior is structural rather than advisory:
 
 Custody rules the implementation enforces:
 
-- the CA and its per-host leaves are minted at startup with the `openssl`
-  binary already present in the AWF agent image (Node can parse but not issue
-  X.509, and adding a certificate library would reintroduce the native
-  dependency this runtime exists to avoid). Every private key is written only
-  under the container tmpfs directory AWF mounts for this purpose; only the
-  public CA PEM is copied out, into the file AWF pre-creates and bind-mounts
-  read-only into the agent;
-- the bearer is read from its private file, cached on the file's mtime and
-  size, so a rotation is observed on the next request and a removed or emptied
-  file immediately becomes an infrastructure failure rather than a stale
-  credential. It is applied to a copy of the sanitized header set *after* the
-  allow decision, so no code path can emit it for a denied request;
+- the host step mints the CA and per-host leaves with the runner's existing
+  `openssl`. Private keys live only under `$(Agent.TempDirectory)` — never
+  runner `/tmp`, which AWF exposes inside the agent chroot — and are shredded
+  immediately after handover. Only the public CA PEM is published under
+  `/tmp/ado-aw-lib` for the MCP and wrapped `az`;
+- the bearer and certificate material form one versioned JSON document. The
+  proxy container starts detached, blocks on a container-local FIFO, and the
+  host streams the document through `docker exec -i`. The FIFO stores no
+  bytes, and no bearer enters a runner file, container layer, environment, or
+  argv. The engine reads it once and keeps the bearer in memory for the
+  compile-time-bounded run. It applies the bearer to a copy of the sanitized
+  header set *after* the allow decision, so no code path can emit it for a
+  denied request;
 - the JSONL decision log is schema-versioned and carries only the timestamp,
   request id, protected host, method, normalized operation id, decision,
   machine-readable reason and short detail, upstream status class, latency,
   response byte count, and the names of any credential headers the client
   supplied and the proxy stripped. Raw paths, query values, headers, bodies,
   and credentials have nowhere to go in the record type.
+
+Operational diagnostics are equally deliberate:
+
+- startup waits for the private FIFO, completed material parse, published CA,
+  listening log line, and container IP — not merely for `docker run` to return;
+- immediately before AWF starts, a preflight verifies both externally launched
+  topology peers (`awmg-mcpg` and `awmg-ado-proxy`) are still running. A missing
+  peer prints Docker state and the last 200 log lines instead of deferring to
+  AWF's opaque `No such container`;
+- teardown captures Docker lifecycle state/stdout, while sanitized decision
+  JSONL and lifecycle logs are copied into
+  `agent_outputs_<buildId>/logs/ado-proxy`;
+- the generated agent prompt lists effective capabilities and scopes from the
+  same front matter that produced the policy document, so predictable
+  prompt/config conflicts are visible before the agent attempts an impossible
+  request. Runtime denials still return the machine-readable policy reason.
 
 ## Evidence
 

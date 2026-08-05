@@ -51,6 +51,7 @@
             "\"--network\",",
             "\"ado-aw-proxy-net\",",
             "displayName: Start ado-proxy policy engine",
+            "displayName: Verify trusted topology peers",
             "displayName: Stop ado-proxy"
           ],
           "forbidden": [

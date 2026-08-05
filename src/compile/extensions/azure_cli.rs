@@ -89,6 +89,13 @@ impl CompilerExtension for AzureCliExtension {
             // Installed before the prompt is appended so the advisory and the
             // wrapper cannot describe different worlds.
             agent_prepare_steps.push(Step::Bash(install_az_wrapper_step(&capabilities)));
+            // This advisory is independent of `az` detection: the same policy
+            // governs MCP reads, and the agent must understand effective
+            // front-matter scope even on a runner without Azure CLI.
+            agent_prepare_steps.push(Step::Bash(proxy_policy_prompt_step(
+                ctx.front_matter,
+                &capabilities,
+            )));
         }
         agent_prepare_steps.push(Step::Bash(prompt_append_bash_step(proxied, &capabilities)));
 
@@ -169,6 +176,93 @@ fn detection_bash_step() -> BashStep {
     BashStep::new("Detect Azure CLI on host (for AWF mount)", script)
 }
 
+/// Explain the effective compiler-owned ADO read policy to the agent.
+///
+/// This is generated from the same front matter as `PolicyDocument`, so prompt
+/// guidance cannot claim a scope the runtime denies (or hide one it allows).
+/// Runtime denial responses and the sanitized decision log remain
+/// authoritative; this text prevents predictable prompt/config conflicts
+/// before the agent starts retrying an impossible request.
+fn proxy_policy_prompt_step(
+    front_matter: &crate::compile::types::FrontMatter,
+    capabilities: &[Capability],
+) -> BashStep {
+    let capability_list = capabilities
+        .iter()
+        .map(|capability| format!("`{}`", capability.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut scope_lines = vec![
+        "- Current organization, project, and repository (by name or GUID).".to_string(),
+    ];
+    if let Some(options) = front_matter
+        .permissions
+        .as_ref()
+        .and_then(|permissions| permissions.read.as_ref())
+        .and_then(crate::compile::types::ReadPermissionConfig::options)
+    {
+        for organization in &options.allow {
+            for project in &organization.projects {
+                let repositories = if project.repositories.is_empty() {
+                    "project-scoped reads; no repository-scoped reads".to_string()
+                } else {
+                    format!(
+                        "project-scoped reads; repositories: {}",
+                        project
+                            .repositories
+                            .iter()
+                            .map(|repository| format!("`{}`", repository.as_str()))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                };
+                scope_lines.push(format!(
+                    "- Additional `{}/{}` ({repositories}).",
+                    organization.organization.as_str(),
+                    project.project.as_str(),
+                ));
+            }
+        }
+    }
+    for repository in &front_matter.repositories {
+        if repository.repo_type.eq_ignore_ascii_case("git")
+            && let Some((project, name)) = repository.name.split_once('/')
+        {
+            scope_lines.push(format!(
+                "- Repository-only `{project}/{name}` from `repos:`; this does **not** grant project work items, builds, or pipelines."
+            ));
+        }
+    }
+    let scope_list = scope_lines.join("\n");
+
+    let body = format!(
+        "\n\
+---\n\
+\n\
+## Azure DevOps read policy\n\
+\n\
+Azure DevOps reads are routed through a credential-isolated policy proxy. You, `az`, and the Azure DevOps MCP have no real Azure DevOps credential.\n\
+\n\
+**Enabled capabilities:** {capability_list}\n\
+\n\
+**Allowed scopes:**\n\
+{scope_list}\n\
+\n\
+Requests outside these capabilities or scopes, all writes, and secret-bearing route families are deliberately refused. A refusal is a policy result, not an authentication problem: do not sign in, change the URL, or retry it as a workaround. The error response names the denial reason, and sanitized proxy decision logs are published with the run for operators.\n\
+\n\
+If your task requires a read outside this list, report it as missing data/tooling and name the exact organization, project, repository, and operation that the front matter would need to grant.\n"
+    );
+    let script = format!(
+        "cat >> \"/tmp/awf-tools/agent-prompt.md\" << 'ADO_PROXY_POLICY_PROMPT_EOF'\n\
+{body}\
+ADO_PROXY_POLICY_PROMPT_EOF\n\
+\n\
+echo \"ado-proxy policy prompt appended\"\n"
+    );
+    BashStep::new("Append ado-proxy policy prompt", script)
+}
+
 /// Append an Azure CLI advisory when the detection step found `az`.
 ///
 /// Two quite different messages, because the agent's actual capability differs.
@@ -193,7 +287,7 @@ fn prompt_append_bash_step(proxied: bool, capabilities: &[Capability]) -> BashSt
 The Azure CLI is available and **pre-configured for Azure DevOps reads**. You do not need to sign in, and no credential is present in this sandbox for you to use or leak.\n\
 \n\
 - **Available** — {group_list}, scoped to the current organization and project. These are **read-only**: listing and getting work, and the results are real. `az rest` and `az devops invoke` also work for Azure DevOps reads, so a catalogued endpoint without a dedicated command is still reachable.\n\
-- **Not available** — creating, updating or deleting anything; reading secrets (service connections, variable groups, secure files, tokens, permissions); any other organization or project; and every other `az` command group, including Azure Resource Manager (`az resource`, `az account`, `az group`) and Microsoft Graph (`az ad`).\n\
+- **Not available** — creating, updating or deleting anything; reading secrets (service connections, variable groups, secure files, tokens, permissions); scopes not listed in the Azure DevOps read policy above; and every other `az` command group, including Azure Resource Manager (`az resource`, `az account`, `az group`) and Microsoft Graph (`az ad`).\n\
 \n\
 Requests outside that boundary are refused by a policy proxy, not by a misconfiguration — retrying, changing the URL, or trying to authenticate will not help. To *change* anything, emit a safe output instead; that is the supported path for writes.\n\
 \n\
@@ -254,6 +348,20 @@ mod tests {
             .into_iter()
             .filter_map(|step| match step {
                 Step::Bash(b) if b.display_name.contains("az wrapper") => Some(b),
+                _ => None,
+            })
+            .next()
+    }
+
+    fn policy_prompt_step(front_matter: &FrontMatter) -> Option<BashStep> {
+        let ctx = CompileContext::for_test(front_matter);
+        AzureCliExtension
+            .declarations(&ctx)
+            .unwrap()
+            .agent_prepare_steps
+            .into_iter()
+            .filter_map(|step| match step {
+                Step::Bash(b) if b.display_name.contains("policy prompt") => Some(b),
                 _ => None,
             })
             .next()
@@ -321,6 +429,56 @@ mod tests {
         // A quoted heredoc delimiter keeps the shell from expanding `$PATH`,
         // `$@` and friends while writing the file.
         assert!(step.script.contains("<< 'ADO_AW_AZ_WRAPPER_EOF'"));
+    }
+
+    #[test]
+    fn the_policy_prompt_is_present_even_when_az_is_not_detected() {
+        let step = policy_prompt_step(&fm_proxied()).expect("policy prompt");
+        assert!(
+            step.condition.is_none(),
+            "MCP reads use the same policy, so policy feedback must not depend on az detection"
+        );
+        assert!(step.script.contains("Enabled capabilities:"));
+        assert!(step.script.contains("sanitized proxy decision logs"));
+    }
+
+    #[test]
+    fn the_policy_prompt_lists_explicit_and_repository_only_scopes() {
+        let mut front_matter = crate::compile::parse_markdown(
+            r#"---
+name: t
+description: x
+tools:
+  azure-devops:
+    org: myorg
+permissions:
+  read:
+    service-connection: sc
+    capabilities: [core, repos]
+    allow:
+      - organization: fabrikam
+        projects:
+          - project: Shared
+            repositories: [shared-api]
+repos:
+  - LocalProject/implicit-api
+---
+"#,
+        )
+        .unwrap()
+        .0;
+        let (repositories, checkout, fetch) =
+            crate::compile::resolve_repos(&front_matter).unwrap();
+        front_matter.repositories = repositories;
+        front_matter.checkout = checkout;
+        front_matter.checkout_fetch = fetch;
+
+        let step = policy_prompt_step(&front_matter).expect("policy prompt");
+        assert!(step.script.contains("`fabrikam/Shared`"));
+        assert!(step.script.contains("repositories: `shared-api`"));
+        assert!(step.script.contains("Repository-only `LocalProject/implicit-api`"));
+        assert!(step.script.contains("does **not** grant project"));
+        assert!(step.script.contains("`discovery`, `core`, `repos`"));
     }
 
     fn agent_prepare_steps(ext: &AzureCliExtension, ctx: &CompileContext<'_>) -> Vec<Step> {

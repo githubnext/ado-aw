@@ -1157,6 +1157,14 @@ fn build_agent_job(
         front_matter.supply_chain(),
     )?));
 
+    // Both peers must still exist immediately before AWF creates `awf-net`.
+    // This catches a detached-process/lifecycle regression here, with each
+    // container's own logs, instead of letting AWF fail later with only
+    // "No such container".
+    if ado_proxy_enabled {
+        steps.push(Step::Bash(verify_trusted_topology_peers_step()));
+    }
+
     // 16. Verify MCP backends (debug-only)
     if cfg.debug_pipeline {
         steps.push(Step::Bash(verify_mcp_backends_step()));
@@ -4300,22 +4308,49 @@ fn start_ado_proxy_step(front_matter: &FrontMatter) -> BashStep {
          docker rm -f {ADO_PROXY_CONTAINER_NAME} 2>/dev/null || true\n\
          mkdir -p /tmp/gh-aw/ado-proxy-logs\n\
          \n\
-         printf '%s' \"$PROXY_MATERIAL\" | docker run -i --rm \\\n  \
+         # Start detached so the container lifetime belongs to Docker, not to\n\
+         # this Bash task's attached STDIO. Azure Pipelines cleans up inherited\n\
+         # child streams between tasks; an attached `docker run -i ... &` was\n\
+         # observed to exit and `--rm` itself before AWF could attach it.\n\
+         #\n\
+         # A container-local FIFO preserves the stdin-only custody contract:\n\
+         # material is streamed through `docker exec -i`, never written to a\n\
+         # runner path, container layer, argv, or environment.\n\
+         docker run -d \\\n  \
            --name {ADO_PROXY_CONTAINER_NAME} \\\n  \
            --network {ADO_PROXY_NETWORK_NAME} \\\n  \
+           --entrypoint sh \\\n  \
            -v \"{ado_proxy_path}:/app/ado-proxy.js:ro\" \\\n  \
            -v \"$PROXY_DIR/policy:/etc/ado-proxy:ro\" \\\n  \
            -v /tmp/ado-aw-lib:/var/lib/ado-proxy \\\n  \
            -v /tmp/gh-aw/ado-proxy-logs:/var/log/ado-proxy \\\n  \
            {ado_proxy_image} \\\n  \
-           node /app/ado-proxy.js \\\n  \
-           --policy-file /etc/ado-proxy/policy.json \\\n  \
-           --public-ca-file /var/lib/ado-proxy/ado-proxy-ca.pem \\\n  \
-           --upstream-proxy {squid_url} \\\n  \
-           --listen-port {listen_port} \\\n  \
-           --tls-port {tls_port} \\\n  \
-           --log-dir /var/log/ado-proxy \\\n  \
-           > /tmp/gh-aw/ado-proxy-logs/stdout.log 2>&1 &\n\
+           -c 'set -eu; umask 077; MATERIAL_FIFO=/tmp/ado-proxy-material; mkfifo \"$MATERIAL_FIFO\"; exec node /app/ado-proxy.js --policy-file /etc/ado-proxy/policy.json --public-ca-file /var/lib/ado-proxy/ado-proxy-ca.pem --upstream-proxy {squid_url} --listen-port {listen_port} --tls-port {tls_port} --log-dir /var/log/ado-proxy < \"$MATERIAL_FIFO\"' \\\n  \
+           >/dev/null\n\
+         \n\
+         # Wait until the detached container is blocked on its private FIFO,\n\
+         # then hand over the one-shot material. A transfer failure prints the\n\
+         # durable Docker log and container state before failing the pipeline.\n\
+         FIFO_READY=false\n\
+         for _i in $(seq 1 30); do\n  \
+           if docker exec {ADO_PROXY_CONTAINER_NAME} test -p /tmp/ado-proxy-material 2>/dev/null; then\n    \
+             FIFO_READY=true\n    \
+             break\n  \
+           fi\n  \
+           sleep 1\n\
+         done\n\
+         if [ \"$FIFO_READY\" != \"true\" ]; then\n  \
+           echo \"##vso[task.logissue type=error]ado-proxy container did not create its private material channel\"\n  \
+           docker inspect -f 'state={{{{.State.Status}}}} exit={{{{.State.ExitCode}}}} error={{{{.State.Error}}}}' {ADO_PROXY_CONTAINER_NAME} 2>/dev/null || true\n  \
+           docker logs --tail 200 {ADO_PROXY_CONTAINER_NAME} 2>&1 || true\n  \
+           exit 1\n\
+         fi\n\
+         if ! printf '%s' \"$PROXY_MATERIAL\" | docker exec -i {ADO_PROXY_CONTAINER_NAME} sh -c 'cat > /tmp/ado-proxy-material'; then\n  \
+           echo \"##vso[task.logissue type=error]ado-proxy material handover failed\"\n  \
+           docker inspect -f 'state={{{{.State.Status}}}} exit={{{{.State.ExitCode}}}} error={{{{.State.Error}}}}' {ADO_PROXY_CONTAINER_NAME} 2>/dev/null || true\n  \
+           docker logs --tail 200 {ADO_PROXY_CONTAINER_NAME} 2>&1 || true\n  \
+           exit 1\n\
+         fi\n\
          \n\
          # Drop the private material as soon as it has been handed over. The\n\
          # container has it in memory; nothing else needs it again.\n\
@@ -4323,24 +4358,31 @@ fn start_ado_proxy_step(front_matter: &FrontMatter) -> BashStep {
          unset PROXY_MATERIAL\n\
          shred -u \"$PROXY_DIR/ca.key\" \"$PROXY_DIR\"/*.key 2>/dev/null || rm -f \"$PROXY_DIR/ca.key\" \"$PROXY_DIR\"/*.key\n\
          \n\
-         # Resolve the container IP so the ADO MCP can be redirected at it.\n\
+         # Resolve the container IP only after the engine has parsed policy,\n\
+         # published its public CA and reached its listening state.\n\
          PROXY_READY=false\n\
-         # shellcheck disable=SC2034 # i is intentionally unused; wait-N-times loop\n\
-         for i in $(seq 1 30); do\n  \
+         for _i in $(seq 1 30); do\n  \
+           PROXY_STATE=$(docker inspect -f '{{{{.State.Status}}}}' {ADO_PROXY_CONTAINER_NAME} 2>/dev/null || true)\n  \
+           if [ \"$PROXY_STATE\" = \"exited\" ] || [ \"$PROXY_STATE\" = \"dead\" ]; then\n    \
+             break\n  \
+           fi\n  \
            ADO_PROXY_IP=$(docker inspect -f '{{{{range .NetworkSettings.Networks}}}}{{{{.IPAddress}}}}{{{{end}}}}' {ADO_PROXY_CONTAINER_NAME} 2>/dev/null || true)\n  \
-           if [ -n \"$ADO_PROXY_IP\" ]; then\n    \
+           if [ -n \"$ADO_PROXY_IP\" ] \\\n    \
+              && [ -f {ca_host_path} ] \\\n    \
+              && docker logs {ADO_PROXY_CONTAINER_NAME} 2>&1 | grep -q '\\[ado-proxy\\] listening'; then\n    \
              PROXY_READY=true\n    \
              break\n  \
            fi\n  \
            sleep 1\n\
          done\n\
          if [ \"$PROXY_READY\" != \"true\" ]; then\n  \
-           echo \"ado-proxy log tail:\"\n  \
-           cat /tmp/gh-aw/ado-proxy-logs/stdout.log 2>/dev/null || true\n  \
-           echo \"##vso[task.complete result=Failed]ado-proxy did not start within 30s\"\n  \
+           echo \"##vso[task.logissue type=error]ado-proxy did not become ready within 30s (state=${{PROXY_STATE:-missing}})\"\n  \
+           docker inspect -f 'state={{{{.State.Status}}}} exit={{{{.State.ExitCode}}}} error={{{{.State.Error}}}}' {ADO_PROXY_CONTAINER_NAME} 2>/dev/null || true\n  \
+           docker logs --tail 200 {ADO_PROXY_CONTAINER_NAME} 2>&1 || true\n  \
            exit 1\n\
          fi\n\
          echo \"ado-proxy is ready at $ADO_PROXY_IP\"\n\
+         docker logs --tail 1 {ADO_PROXY_CONTAINER_NAME} 2>&1 || true\n\
          echo \"##vso[task.setvariable variable=ADO_PROXY_IP]$ADO_PROXY_IP\"\n",
         org_resolve = common::resolve_ado_organization_bash("         "),
         ado_proxy_path = paths::ADO_PROXY_PATH,
@@ -4370,13 +4412,56 @@ fn start_ado_proxy_step(front_matter: &FrontMatter) -> BashStep {
 /// keeps that change to the wiring alone.
 fn stop_ado_proxy_step() -> BashStep {
     let script = format!(
-        "# Stop the ado-proxy policy engine\n\
+        "# Preserve auditable lifecycle output before stopping the policy engine\n\
+         mkdir -p /tmp/gh-aw/ado-proxy-logs\n\
+         if docker inspect {ADO_PROXY_CONTAINER_NAME} >/dev/null 2>&1; then\n  \
+           docker inspect -f 'state={{{{.State.Status}}}} exit={{{{.State.ExitCode}}}} error={{{{.State.Error}}}}' {ADO_PROXY_CONTAINER_NAME} \\\n    \
+             > /tmp/gh-aw/ado-proxy-logs/container-state.txt 2>&1 || true\n  \
+           docker logs {ADO_PROXY_CONTAINER_NAME} \\\n    \
+             > /tmp/gh-aw/ado-proxy-logs/container.log 2>&1 || true\n\
+         else\n  \
+           echo 'state=missing before teardown' > /tmp/gh-aw/ado-proxy-logs/container-state.txt\n\
+           echo \"##vso[task.logissue type=warning]ado-proxy container was already missing at teardown; inspect the preflight/AWF step and ado-proxy log artifact\"\n\
+         fi\n\
+         \n\
+         # Stop the ado-proxy policy engine\n\
          echo \"Stopping ado-proxy...\"\n\
          docker stop {ADO_PROXY_CONTAINER_NAME} 2>/dev/null || true\n\
          docker rm -f {ADO_PROXY_CONTAINER_NAME} 2>/dev/null || true\n\
          echo \"ado-proxy stopped\"\n"
     );
     bash("Stop ado-proxy", script).with_condition(Condition::Always)
+}
+
+/// Verify externally-launched peers still exist immediately before AWF tries
+/// to attach them to its internal network.
+///
+/// A peer may start successfully and disappear between pipeline tasks if its
+/// lifecycle accidentally remains attached to the launching task's STDIO.
+/// Reporting the peer's Docker state and logs here turns AWF's otherwise opaque
+/// "No such container" error into an actionable startup/lifecycle failure.
+fn verify_trusted_topology_peers_step() -> BashStep {
+    let script = format!(
+        "set -euo pipefail\n\
+         mkdir -p /tmp/gh-aw/ado-proxy-logs\n\
+         for PEER in {MCPG_CONTAINER_NAME} {ADO_PROXY_CONTAINER_NAME}; do\n  \
+           PEER_STATE=$(docker inspect -f '{{{{.State.Status}}}}' \"$PEER\" 2>/dev/null || true)\n  \
+           if [ \"$PEER_STATE\" != \"running\" ]; then\n    \
+             echo \"##vso[task.logissue type=error]trusted topology peer $PEER is not running before AWF attachment (state=${{PEER_STATE:-missing}})\"\n    \
+             docker ps -a --filter \"name=^/${{PEER}}$\" --no-trunc || true\n    \
+             if [ \"$PEER\" = \"{ADO_PROXY_CONTAINER_NAME}\" ]; then\n      \
+               docker logs --tail 200 \"$PEER\" 2>&1 \\\n        \
+                 | tee /tmp/gh-aw/ado-proxy-logs/container.log || true\n    \
+             else\n      \
+               docker logs --tail 200 \"$PEER\" 2>&1 || true\n    \
+             fi\n    \
+             exit 1\n  \
+           fi\n  \
+           echo \"Trusted topology peer $PEER is running\"\n  \
+         done\n\
+         echo \"ado-proxy policy and client configuration are ready; runtime denials will include the policy reason and sanitized decision logs\"\n"
+    );
+    bash("Verify trusted topology peers", script)
 }
 
 fn copy_logs_step(engine_log_dir: &str, is_detection: bool) -> BashStep {
@@ -4413,6 +4498,10 @@ fn copy_logs_step(engine_log_dir: &str, is_detection: bool) -> BashStep {
          if [ -d /tmp/gh-aw/mcp-logs ]; then\n  \
            mkdir -p \"$(Agent.TempDirectory)/staging/logs/mcpg\"\n  \
            cp -r /tmp/gh-aw/mcp-logs/* \"$(Agent.TempDirectory)/staging/logs/mcpg/\" 2>/dev/null || true\n\
+         fi\n\
+         if [ -d /tmp/gh-aw/ado-proxy-logs ]; then\n  \
+           mkdir -p \"$(Agent.TempDirectory)/staging/logs/ado-proxy\"\n  \
+           cp -r /tmp/gh-aw/ado-proxy-logs/* \"$(Agent.TempDirectory)/staging/logs/ado-proxy/\" 2>/dev/null || true\n  \
          fi\n\
          echo \"Logs copied to $(Agent.TempDirectory)/staging/logs\"\n\
          ls -la \"$(Agent.TempDirectory)/staging/logs\" 2>/dev/null || echo \"No logs found\"\n"
@@ -5863,8 +5952,11 @@ safe-outputs:
         );
         for private in ["ca.key", "$ADO_PROXY_BEARER", "PROXY_MATERIAL"] {
             for line in script.lines().filter(|line| line.contains(private)) {
+                let container_private_fifo = line.contains("docker exec -i")
+                    && line.contains("/tmp/ado-proxy-material");
                 assert!(
-                    !line.contains("/tmp/gh-aw") && !line.contains("> /tmp"),
+                    !line.contains("/tmp/gh-aw")
+                        && (!line.contains("> /tmp") || container_private_fifo),
                     "{private} must never be written under /tmp: {line}"
                 );
             }
@@ -5876,9 +5968,16 @@ safe-outputs:
         let step = start_ado_proxy_step(&proxy_fm());
 
         assert!(
-            step.script.contains("printf '%s' \"$PROXY_MATERIAL\" | docker run -i"),
-            "material must arrive on stdin: {}",
+            step.script.contains(
+                "printf '%s' \"$PROXY_MATERIAL\" | docker exec -i awmg-ado-proxy"
+            ) && step.script.contains("cat > /tmp/ado-proxy-material"),
+            "material must stream through the container-private FIFO: {}",
             step.script
+        );
+        assert!(
+            step.script.contains("docker run -d")
+                && step.script.contains("mkfifo \"$MATERIAL_FIFO\""),
+            "the container must be detached from the Bash task before material handover"
         );
         // A `-e` would put it in the container's `Env`, readable by anyone who
         // can call `docker inspect`; an argv flag would expose it in the
@@ -5890,6 +5989,44 @@ safe-outputs:
         assert!(
             !step.script.contains("--token"),
             "the bearer must not be passed as an argument"
+        );
+    }
+
+    #[test]
+    fn ado_proxy_container_lifecycle_is_independent_of_the_start_task() {
+        let script = start_ado_proxy_step(&proxy_fm()).script;
+        assert!(script.contains("docker run -d"));
+        assert!(
+            !script.contains("docker run -i --rm"),
+            "attached --rm containers disappear when Azure Pipelines cleans up task STDIO"
+        );
+        assert!(script.contains("docker logs --tail 200"));
+        assert!(script.contains("state={{.State.Status}} exit={{.State.ExitCode}}"));
+    }
+
+    #[test]
+    fn trusted_topology_preflight_reports_missing_peer_logs() {
+        let step = verify_trusted_topology_peers_step();
+        assert!(step.script.contains(MCPG_CONTAINER_NAME));
+        assert!(step.script.contains(ADO_PROXY_CONTAINER_NAME));
+        assert!(step.script.contains("trusted topology peer $PEER is not running"));
+        assert!(step.script.contains("docker logs --tail 200"));
+        assert_eq!(step.display_name, "Verify trusted topology peers");
+    }
+
+    #[test]
+    fn ado_proxy_lifecycle_and_decision_logs_are_published() {
+        let stop = stop_ado_proxy_step();
+        assert!(stop.script.contains("container-state.txt"));
+        assert!(stop.script.contains("container.log"));
+        assert!(stop.script.contains("already missing at teardown"));
+
+        let copy = copy_logs_step("/tmp/copilot", false);
+        assert!(copy.script.contains("/tmp/gh-aw/ado-proxy-logs"));
+        assert!(
+            copy.script
+                .contains("$(Agent.TempDirectory)/staging/logs/ado-proxy"),
+            "proxy lifecycle and sanitized decision logs must reach the agent artifact"
         );
     }
 
