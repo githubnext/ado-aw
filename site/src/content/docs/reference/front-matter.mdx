@@ -177,9 +177,46 @@ Build the project and run all tests...
 
 ## Triggers (`on:`)
 
-The `on:` field consolidates all trigger types under one key. Three
-sub-fields are supported — `schedule`, `pipeline`, and `pr` — and any
-combination of them is valid.
+The `on:` field is the **complete declaration** of when a pipeline runs. Four
+sub-fields are supported — `push`, `schedule`, `pipeline`, and `pr` — and any
+combination of them is valid. If a workflow has no `on:` key at all, it
+compiles to a manual / API-queued-only pipeline: Azure DevOps otherwise reads
+a **missing** top-level `trigger:` key as *"run CI on every branch"*, not
+*"no CI"*, so the compiler always emits an explicit `trigger:` (and `pr:`)
+instead of relying on that implicit default.
+
+### `on.push` — push (CI) trigger
+
+Maps directly onto ADO's native `trigger:` key.
+
+```yaml
+on:
+  push: none                   # never start on a push
+```
+
+```yaml
+on:
+  push:                        # start only on pushes to main touching src/
+    branches:
+      include: [main, "release/*"]
+      exclude: ["wip/*"]
+    paths:
+      include: ["src/**"]
+      exclude: ["docs/**"]
+```
+
+`branches` and `paths` are passed through to ADO's native `trigger:` filters
+verbatim.
+
+**An explicit `on.push` always wins**, including over the all-branches
+trigger that `on.pr`'s default `mode: synthetic` emits, and over the `none`
+that `on.schedule` or `on.pr.mode: policy` would otherwise produce. It
+controls only the top-level `trigger:` key — `on.pr` independently drives
+the `pr:` key, so setting `on.push` never enables or disables PR triggering.
+
+`on.push` is unrelated to
+[`execution-context.ci-push`](/ado-aw/reference/execution-context/), which
+stages context facts *inside* a build that has already started.
 
 ### `on.schedule` — recurring schedule
 
@@ -297,15 +334,17 @@ See the [Filter IR reference](/ado-aw/reference/filter-ir/) for compilation deta
 
 | `mode` | CI `trigger:` | Use when |
 |--------|---------------|----------|
-| `synthetic` (default) | ADO default (all branches) | No Build Validation branch policy is installed. Setup synthesizes PR context from the ADO API. **Recommended for most agents.** |
+| `synthetic` (default) | all branches (`include: ['*']`) | No Build Validation branch policy is installed. Setup synthesizes PR context from the ADO API. **Recommended for most agents.** |
 | `policy` | `trigger: none` | Operator has installed an ADO Build Validation branch policy. Prevents duplicate CI builds. |
+
+An explicit `on.push` overrides the `trigger:` column in both rows.
 
 :::note[ADO Azure Repos behavior]
 Azure DevOps ignores the YAML `pr:` block for **Azure Repos** repositories unless a [Build Validation branch policy](https://learn.microsoft.com/en-us/azure/devops/repos/git/branch-policies?view=azure-devops#build-validation) is registered server-side. Without one, every push fires as `Build.Reason = IndividualCI` even when a PR is open — PR-aware agents silently degrade.
 
 `ado-aw` offers two strategies:
 
-**`mode: synthetic` (default)** — fires the pipeline on every push (ADO `trigger:` at its default). A Setup-job step calls the ADO REST API to find an open PR for the pushed branch:
+**`mode: synthetic` (default)** — fires the pipeline on every push (all-branches ADO `trigger:`, unless overridden by an explicit `on.push`). A Setup-job step calls the ADO REST API to find an open PR for the pushed branch:
 - **PR found** → promotes the build to PR semantics (`AW_SYNTHETIC_PR=true`), evaluates `filters:`, and stages `aw-context/pr/` context for the agent.
 - **No PR found** → sets `AW_SYNTHETIC_PR_SKIP=true` and the Agent job self-skips cleanly — no noise, no red builds.
 
@@ -317,17 +356,18 @@ Azure DevOps ignores the YAML `pr:` block for **Azure Repos** repositories unles
 When `on.schedule` or `on.pipeline` is configured, the compiler emits
 `trigger: none` and `pr: none` to prevent the pipeline from also firing on
 every code push or PR. Setting `on.pr` explicitly re-enables the PR trigger
-regardless of whether `schedule` or `pipeline` is also set.
+regardless of whether `schedule` or `pipeline` is also set. An explicit
+`on.push` always overrides the CI (push) column below, in every row.
 
 | `on.schedule` | `on.pipeline` | `on.pr` | CI (push) | PR events |
 |:---:|:---:|:---:|---|---|
-| — | — | — | ADO default | ADO default |
+| — | — | — | `none` (manual / API-queued only) | `none` |
 | ✓ | — | — | `none` | `none` |
 | — | ✓ | — | `none` | `none` |
 | ✓ | ✓ | — | `none` | `none` |
-| — | — | ✓ | ADO default | ✓ enabled |
-| ✓ | — | ✓ | `none` | ✓ enabled |
-| — | ✓ | ✓ | `none` | ✓ enabled |
+| — | — | ✓ | all branches (synthetic mode) | ✓ enabled |
+| ✓ | — | ✓ | all branches (synthetic mode) | ✓ enabled |
+| — | ✓ | ✓ | all branches (synthetic mode) | ✓ enabled |
 
 ## Workspace Defaults
 
@@ -846,23 +886,52 @@ rather than "Cancelled".
 
 ## Execution Context
 
-The `execution-context:` block controls the **always-on execution-context plugin**
-that stages PR diff context on disk before the agent runs. For PR-triggered
-pipelines, it fetches the target branch and resolves the merge-base SHA, writes
-`aw-context/pr/base.sha` and `aw-context/pr/head.sha`, and appends a tailored
-prompt fragment — so the agent can run `git diff $BASE..$HEAD` directly without
-re-fetching anything.
+The `execution-context:` block controls the **always-on execution-context plugin**,
+which stages trigger-specific context files under `aw-context/` before the agent
+runs. Each contributor handles a different trigger type:
+
+| Contributor | Default | What it stages |
+|-------------|---------|----------------|
+| `pr` | on when `on.pr` is set | Merge-base SHA, head SHA, diff stats; `git diff $BASE..$HEAD` ready to run |
+| `workitem` | on when `pr` is active | Linked ADO work item titles, descriptions, acceptance criteria |
+| `pr.checks` | off (opt in) | Build Validation results for the current PR head |
+| `manual` | on when `parameters:` declared | Requestor identity, parameter snapshot |
+| `pipeline` | on when `on.pipeline` is set | Upstream build metadata (status, run URL, trigger definition) |
+| `ci-push` | off (opt in) | "Since last green build on this branch" diff context |
+| `schedule` | off (opt in) | "Since last run of this pipeline" diff context |
+| `repo` | off (opt in) | Branch, HEAD SHA, last release tag, commits-since-tag |
 
 ```yaml
 execution-context:
   enabled: true  # master switch; default: true
+
+  # --- auto-on contributors (activate based on your triggers) ---
   pr:
-    enabled: true  # default: true when on.pr is configured; set false to opt out
+    enabled: true  # default: true when on.pr is configured
+    checks:
+      enabled: false  # opt in to stage PR build-validation results
+  workitem:
+    enabled: true  # default: true when pr contributor is active
+    max-items: 5   # cap on linked WIs staged (default: 5)
+  manual:
+    enabled: true  # default: true when any parameters: block is declared
+  pipeline:
+    enabled: true  # default: true when on.pipeline is configured
+
+  # --- opt-in contributors (off by default) ---
+  ci-push:
+    enabled: false  # set true for "since last green build" diff on CI push builds
+  schedule:
+    enabled: false  # set true for "since last run" diff on scheduled builds
+  repo:
+    enabled: false  # set true for branch, SHA, last release tag, commits-since-tag
+    conventions: false  # also probe CODEOWNERS / CONTRIBUTING.md / AGENTS.md
 ```
 
-When the block is omitted entirely, the PR contributor activates automatically
-whenever `on.pr:` is configured.
+When the block is omitted entirely, contributors activate automatically based on
+your trigger configuration: `pr`, `workitem`, `manual`, and `pipeline` contributors
+turn on when their respective `on.*` trigger is configured.
 
 See the [Execution Context reference](/ado-aw/reference/execution-context/) for the
-full agent-visible layout, bash allow-list behavior, trust boundary, and migration
-notes.
+full agent-visible file layout, bash allow-list behavior, trust boundary, and
+migration notes.

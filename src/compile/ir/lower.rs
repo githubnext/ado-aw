@@ -355,12 +355,16 @@ fn lower_repository_resource(r: &RepositoryResource) -> Value {
             kind,
             name,
             r#ref,
+            endpoint,
         } => {
             m.insert(s("repository"), s(identifier));
             m.insert(s("type"), s(kind));
             m.insert(s("name"), s(name));
             if let Some(r) = r#ref {
                 m.insert(s("ref"), s(r));
+            }
+            if let Some(ep) = endpoint {
+                m.insert(s("endpoint"), s(ep));
             }
         }
     }
@@ -446,20 +450,49 @@ fn lower_pr_trigger(pr: Option<&PrTrigger>) -> Option<Value> {
     Some(Value::Mapping(m))
 }
 
-/// Lower a `trigger:` (CI) field. Returns `None` for "ADO default"
-/// (no key emitted). Returns `Some(scalar "none")` for the disabled
-/// form, which is the only non-default shape standalone uses today.
+/// Lower a `trigger:` (CI/push) field.
+///
+/// `disabled` emits the literal scalar `none`; otherwise the
+/// `branches:` / `paths:` mapping, mirroring [`lower_pr_trigger`].
+/// Returns `None` only when there is no trigger to emit at all
+/// (template shapes) or when a non-disabled trigger carries no
+/// filters — never emit a bare `trigger: {}`, which ADO rejects.
 fn lower_ci_trigger(ci: Option<&CiTrigger>) -> Option<Value> {
     let ci = ci?;
     if ci.disabled {
-        Some(s("none"))
-    } else {
-        // A fully-typed `trigger:` block (branches/paths) would land
-        // here. Standalone agents today either use the ADO default
-        // (no key) or `trigger: none`; the mapping shape can be
-        // added when an emitter actually needs it.
-        None
+        return Some(s("none"));
     }
+    let mut m = Mapping::new();
+    if !ci.branches_include.is_empty() || !ci.branches_exclude.is_empty() {
+        let mut branches_m = Mapping::new();
+        if !ci.branches_include.is_empty() {
+            let include: Vec<Value> = ci.branches_include.iter().map(s).collect();
+            branches_m.insert(s("include"), Value::Sequence(include));
+        }
+        if !ci.branches_exclude.is_empty() {
+            let exclude: Vec<Value> = ci.branches_exclude.iter().map(s).collect();
+            branches_m.insert(s("exclude"), Value::Sequence(exclude));
+        }
+        m.insert(s("branches"), Value::Mapping(branches_m));
+    }
+    if !ci.paths_include.is_empty() || !ci.paths_exclude.is_empty() {
+        let mut paths_m = Mapping::new();
+        if !ci.paths_include.is_empty() {
+            let include: Vec<Value> = ci.paths_include.iter().map(s).collect();
+            paths_m.insert(s("include"), Value::Sequence(include));
+        }
+        if !ci.paths_exclude.is_empty() {
+            let exclude: Vec<Value> = ci.paths_exclude.iter().map(s).collect();
+            paths_m.insert(s("exclude"), Value::Sequence(exclude));
+        }
+        m.insert(s("paths"), Value::Mapping(paths_m));
+    }
+    // Defensive: `build_triggers` never constructs an unfiltered,
+    // non-disabled trigger, but emitting `trigger: {}` would be invalid.
+    if m.is_empty() {
+        return None;
+    }
+    Some(Value::Mapping(m))
 }
 
 fn lower_variables(vars: &[PipelineVar]) -> Value {
@@ -1025,6 +1058,9 @@ fn lower_checkout(c: &CheckoutStep) -> Value {
             m.insert(s("checkout"), s(name));
         }
     }
+    if let Some(path) = &c.path {
+        m.insert(s("path"), s(path));
+    }
     if let Some(clean) = c.clean {
         m.insert(s("clean"), Value::Bool(clean));
     }
@@ -1044,6 +1080,9 @@ fn lower_checkout(c: &CheckoutStep) -> Value {
     }
     if let Some(pc) = c.persist_credentials {
         m.insert(s("persistCredentials"), Value::Bool(pc));
+    }
+    if let Some(path) = &c.path {
+        m.insert(s("path"), s(path));
     }
     Value::Mapping(m)
 }
@@ -1423,6 +1462,33 @@ mod tests {
     }
 
     #[test]
+    fn lower_named_repository_emits_endpoint_when_present() {
+        let r = RepositoryResource::Named {
+            identifier: "shared".to_string(),
+            kind: "github".to_string(),
+            name: "acme/shared".to_string(),
+            r#ref: Some("refs/heads/main".to_string()),
+            endpoint: Some("shared-conn".to_string()),
+        };
+        let v = lower_repository_resource(&r);
+        assert_eq!(v["endpoint"], Value::String("shared-conn".to_string()));
+        assert_eq!(v["type"], Value::String("github".to_string()));
+    }
+
+    #[test]
+    fn lower_named_repository_omits_endpoint_when_absent() {
+        let r = RepositoryResource::Named {
+            identifier: "shared".to_string(),
+            kind: "git".to_string(),
+            name: "proj/shared".to_string(),
+            r#ref: Some("refs/heads/main".to_string()),
+            endpoint: None,
+        };
+        let v = lower_repository_resource(&r);
+        assert!(v.get("endpoint").is_none());
+    }
+
+    #[test]
     fn lower_env_value_runtime_expression_emits_hoisted_macro() {
         let g = Graph::default();
         let job = JobId::new("J").unwrap();
@@ -1612,7 +1678,10 @@ mod tests {
             .and_then(|v| v.as_mapping())
             .expect("lowered job should contain pool mapping");
 
-        assert_eq!(pool.get(s("name")).and_then(|v| v.as_str()), Some("CustomPool"));
+        assert_eq!(
+            pool.get(s("name")).and_then(|v| v.as_str()),
+            Some("CustomPool")
+        );
         let demands: Vec<&str> = pool
             .get(s("demands"))
             .and_then(|v| v.as_sequence())
@@ -2454,7 +2523,7 @@ mod tests {
                     paths_exclude: Vec::new(),
                     disabled: true,
                 }),
-                ci: Some(CiTrigger { disabled: true }),
+                ci: Some(CiTrigger::disabled()),
             },
             variables: Vec::new(),
             body: PipelineBody::Jobs(Vec::new()),
@@ -2509,6 +2578,95 @@ mod tests {
         assert!(yaml.contains("docs/**"));
         // Defensive: must NOT collapse to `pr: none`.
         assert!(!yaml.contains("pr: none"));
+    }
+
+    /// `trigger:` mirrors `pr:` — the filtered form emits the full
+    /// `branches:` / `paths:` block rather than the `none` scalar.
+    #[test]
+    fn lower_ci_trigger_with_filters_emits_branches_and_paths_blocks() {
+        let p = Pipeline {
+            name: "P".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers {
+                schedules: Vec::new(),
+                pr: None,
+                ci: Some(CiTrigger {
+                    branches_include: vec!["main".into()],
+                    branches_exclude: vec!["wip/*".into()],
+                    paths_include: vec!["src/**".into()],
+                    paths_exclude: vec!["docs/**".into()],
+                    disabled: false,
+                }),
+            },
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(Vec::new()),
+            shape: PipelineShape::Standalone,
+        };
+        let g = Graph::default();
+        let v = lower_with_graph(&p, &g).unwrap();
+        let yaml = serde_yaml::to_string(&v).unwrap();
+        assert!(yaml.contains("trigger:"));
+        assert!(yaml.contains("- main"));
+        assert!(yaml.contains("- wip/*"));
+        assert!(yaml.contains("src/**"));
+        assert!(yaml.contains("docs/**"));
+        assert!(!yaml.contains("trigger: none"));
+    }
+
+    /// `CiTrigger::all_branches` is the explicit spelling of ADO's
+    /// implicit default, emitted so `on.pr.mode: synthetic` still gets
+    /// the CI-triggered builds it resolves PR context from.
+    #[test]
+    fn lower_ci_trigger_all_branches_emits_wildcard_include() {
+        let p = Pipeline {
+            name: "P".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers {
+                schedules: Vec::new(),
+                pr: None,
+                ci: Some(CiTrigger::all_branches()),
+            },
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(Vec::new()),
+            shape: PipelineShape::Standalone,
+        };
+        let g = Graph::default();
+        let v = lower_with_graph(&p, &g).unwrap();
+        let yaml = serde_yaml::to_string(&v).unwrap();
+        assert!(yaml.contains("trigger:"));
+        assert!(yaml.contains("- '*'"));
+        assert!(!yaml.contains("trigger: none"));
+    }
+
+    /// A non-disabled trigger carrying no filters at all would lower to
+    /// `trigger: {}`, which ADO rejects — emit nothing instead.
+    #[test]
+    fn lower_ci_trigger_without_filters_emits_no_key() {
+        let p = Pipeline {
+            name: "P".into(),
+            parameters: Vec::new(),
+            resources: Resources::default(),
+            triggers: Triggers {
+                schedules: Vec::new(),
+                pr: None,
+                ci: Some(CiTrigger {
+                    branches_include: Vec::new(),
+                    branches_exclude: Vec::new(),
+                    paths_include: Vec::new(),
+                    paths_exclude: Vec::new(),
+                    disabled: false,
+                }),
+            },
+            variables: Vec::new(),
+            body: PipelineBody::Jobs(Vec::new()),
+            shape: PipelineShape::Standalone,
+        };
+        let g = Graph::default();
+        let v = lower_with_graph(&p, &g).unwrap();
+        let yaml = serde_yaml::to_string(&v).unwrap();
+        assert!(!yaml.contains("trigger:"), "must not emit `trigger: {{}}`");
     }
 
     /// When `Triggers` defaults are used (no schedules, no pr, no
@@ -2647,7 +2805,7 @@ mod tests {
                     paths_exclude: Vec::new(),
                     disabled: true,
                 }),
-                ci: Some(CiTrigger { disabled: true }),
+                ci: Some(CiTrigger::disabled()),
             },
             variables: Vec::new(),
             body: PipelineBody::Stages(vec![stage]),
@@ -2885,18 +3043,38 @@ mod tests {
             fetch_depth: Some(1),
             fetch_tags: Some(false),
             persist_credentials: None,
+            path: Some("s/custom-checkout".to_string()),
         };
         let v = lower_checkout(&c);
         let m = v.as_mapping().unwrap();
         assert_eq!(m.get(s("checkout")).unwrap(), &s("self"));
         assert_eq!(m.get(s("fetchDepth")).unwrap(), &Value::from(1u32));
         assert_eq!(m.get(s("fetchTags")).unwrap(), &Value::Bool(false));
+        assert_eq!(m.get(s("path")).unwrap(), &s("s/custom-checkout"));
+    }
+
+    #[test]
+    fn lower_checkout_emits_explicit_path() {
+        let c = CheckoutStep {
+            repository: CheckoutRepo::Named("build-tools".to_string()),
+            path: Some("s/build-tools".to_string()),
+            clean: None,
+            submodules: None,
+            fetch_depth: None,
+            fetch_tags: None,
+            persist_credentials: None,
+        };
+        let v = lower_checkout(&c);
+        let m = v.as_mapping().unwrap();
+        assert_eq!(m.get(s("checkout")).unwrap(), &s("build-tools"));
+        assert_eq!(m.get(s("path")).unwrap(), &s("s/build-tools"));
     }
 
     #[test]
     fn lower_checkout_emits_zero_fetch_depth_explicitly() {
         let c = CheckoutStep {
             repository: CheckoutRepo::Self_,
+            path: None,
             clean: None,
             submodules: None,
             fetch_depth: Some(0),
@@ -2912,6 +3090,7 @@ mod tests {
     fn lower_checkout_omits_fetch_keys_when_none() {
         let c = CheckoutStep {
             repository: CheckoutRepo::Self_,
+            path: None,
             clean: None,
             submodules: None,
             fetch_depth: None,
@@ -2928,6 +3107,7 @@ mod tests {
     fn lower_checkout_none_emits_checkout_none() {
         let c = CheckoutStep {
             repository: CheckoutRepo::None,
+            path: None,
             clean: None,
             submodules: None,
             fetch_depth: None,

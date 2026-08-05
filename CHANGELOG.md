@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.48.0](https://github.com/githubnext/ado-aw/compare/v0.47.0...v0.48.0) (2026-07-31)
+
+
+### Features
+
+* **workflows:** overhaul PR review workflows around /review ([#1758](https://github.com/githubnext/ado-aw/issues/1758)) ([603279a](https://github.com/githubnext/ado-aw/commit/603279af578e112f6987e2bbc50a6322e93eeab6))
+
+
+### Bug Fixes
+
+* **compile:** checkout additional repos in SafeOutputs job for create-pull-request ([#1735](https://github.com/githubnext/ado-aw/issues/1735)) ([2eb5ec3](https://github.com/githubnext/ado-aw/commit/2eb5ec3d304f3dc3dacd9a1451f2be94009fae40))
+* **workflows:** repair the Copilot model list updater ([#1760](https://github.com/githubnext/ado-aw/issues/1760)) ([07ca947](https://github.com/githubnext/ado-aw/commit/07ca947d9c7666d4c0f9d57ee125f6d3e3f58b99))
+
+## [0.47.0](https://github.com/githubnext/ado-aw/compare/v0.46.0...v0.47.0) (2026-07-31)
+
+
+### Features
+
+* **agent_stats:** surface AI credits instead of token counts in safe-output consumption summary ([#1750](https://github.com/githubnext/ado-aw/issues/1750)) ([9b809d5](https://github.com/githubnext/ado-aw/commit/9b809d580a0d06ce8c784c2bb6057c24d70191ce))
+* **compile:** reusable cross-repository custom safe-output components ([#1730](https://github.com/githubnext/ado-aw/issues/1730)) ([15f32c4](https://github.com/githubnext/ado-aw/commit/15f32c4b62b3e3a1ad1a66846e210d4cc29bcea7))
+
+
+### Bug Fixes
+
+* **agent_stats:** ensure blank line before --- in stats footer to prevent setext heading ([#1748](https://github.com/githubnext/ado-aw/issues/1748)) ([1973df0](https://github.com/githubnext/ado-aw/commit/1973df0b5e8703d9ea8807ed60e73cbc57d3ac57))
+
 ## [0.46.0](https://github.com/githubnext/ado-aw/compare/v0.45.1...v0.46.0) (2026-07-30)
 
 

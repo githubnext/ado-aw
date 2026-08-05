@@ -10,7 +10,7 @@ import {
   disallowedChanges,
   listCandidateRefs,
   mirrorRepoUrl,
-  parseCandidateBuildId,
+  parseCandidateRef,
   pushCandidate,
   removeWorktree,
   verifyLocalCommit,
@@ -56,7 +56,7 @@ describe("mirrorRepoUrl", () => {
 
 describe("commitMessage", () => {
   it("matches the required exact format", () => {
-    expect(commitMessage(42)).toBe("test(smoke): stage compiler candidate 42");
+    expect(commitMessage(42, "canary")).toBe("test(smoke): stage canary for candidate 42");
   });
 });
 
@@ -84,28 +84,28 @@ describe("disallowedChanges", () => {
   });
 });
 
-describe("parseCandidateBuildId", () => {
-  it("parses the numeric build id from a well-formed candidate ref", () => {
-    expect(parseCandidateBuildId("refs/heads/ado-aw-smoke-candidate/123")).toBe(123);
+describe("parseCandidateRef", () => {
+  it("parses the build id and case id from a well-formed candidate ref", () => {
+    expect(parseCandidateRef("refs/heads/ado-aw-smoke-candidate/123/canary")).toEqual({ buildId: 123, caseId: "canary" });
   });
 
   it("returns undefined for a ref with the wrong prefix", () => {
-    expect(parseCandidateBuildId("refs/heads/main")).toBeUndefined();
+    expect(parseCandidateRef("refs/heads/main")).toBeUndefined();
   });
 
   it("returns undefined for a non-numeric suffix", () => {
-    expect(parseCandidateBuildId("refs/heads/ado-aw-smoke-candidate/abc")).toBeUndefined();
+    expect(parseCandidateRef("refs/heads/ado-aw-smoke-candidate/abc")).toBeUndefined();
   });
 
   it("returns undefined for a zero or negative-looking suffix", () => {
-    expect(parseCandidateBuildId("refs/heads/ado-aw-smoke-candidate/0")).toBeUndefined();
-    expect(parseCandidateBuildId("refs/heads/ado-aw-smoke-candidate/-5")).toBeUndefined();
+    expect(parseCandidateRef("refs/heads/ado-aw-smoke-candidate/0")).toBeUndefined();
+    expect(parseCandidateRef("refs/heads/ado-aw-smoke-candidate/-5")).toBeUndefined();
   });
 });
 
 describe("worktreeChangedFiles", () => {
   it("parses git status --porcelain=v1 output, one path per line", async () => {
-    const { runner } = fakeRunner(() => ({
+    const { runner, calls } = fakeRunner(() => ({
       status: 0,
       stdout: " M tests/safe-outputs/canary.md\n?? tests/safe-outputs/canary.lock.yml\n",
     }));
@@ -113,6 +113,29 @@ describe("worktreeChangedFiles", () => {
     expect(files).toEqual([
       "tests/safe-outputs/canary.md",
       "tests/safe-outputs/canary.lock.yml",
+    ]);
+    expect(calls[0]?.args).toEqual([
+      "status",
+      "--porcelain=v1",
+      "--untracked-files=all",
+    ]);
+  });
+
+  it("receives untracked import-cache files individually instead of a collapsed directory", async () => {
+    const { runner } = fakeRunner(() => ({
+      status: 0,
+      stdout: [
+        "?? .ado-aw/imports/.gitattributes",
+        "?? .ado-aw/imports/owner/repo/sha/component.md",
+        "?? .ado-aw/imports/owner/repo/sha/component.md.sha256",
+      ].join("\n"),
+    }));
+    await expect(
+      worktreeChangedFiles({ worktreeDir: "/wt", timeoutMs: 1000 }, runner),
+    ).resolves.toEqual([
+      ".ado-aw/imports/.gitattributes",
+      ".ado-aw/imports/owner/repo/sha/component.md",
+      ".ado-aw/imports/owner/repo/sha/component.md.sha256",
     ]);
   });
 
@@ -206,13 +229,13 @@ describe("commitAll", () => {
       if (args[0] === "rev-parse") return { status: 0, stdout: "cafebabe\n" };
       throw new Error(`unexpected args: ${args.join(" ")}`);
     });
-    const sha = await commitAll({ worktreeDir: "/wt", buildId: 42, timeoutMs: 1000 }, runner);
+    const sha = await commitAll({ worktreeDir: "/wt", buildId: 42, caseId: "canary", timeoutMs: 1000 }, runner);
     expect(sha).toBe("cafebabe");
     expect(calls[0]?.args).toEqual(["add", "-A"]);
     const commitCall = calls[1]?.args ?? [];
     expect(commitCall).toContain(`user.name=${COMMIT_IDENTITY.name}`);
     expect(commitCall).toContain(`user.email=${COMMIT_IDENTITY.email}`);
-    expect(commitCall).toContain("test(smoke): stage compiler candidate 42");
+    expect(commitCall).toContain("test(smoke): stage canary for candidate 42");
   });
 });
 

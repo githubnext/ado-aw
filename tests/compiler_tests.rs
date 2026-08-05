@@ -497,6 +497,13 @@ Do something.
         compiled.contains("my-read-sc"),
         "Compiled output should contain the read service connection name"
     );
+    let document = parse_compiled_yaml(&compiled);
+    assert_job_execution_env_excludes_ado_credentials(
+        &document,
+        "Agent",
+        "=== Running AI agent with AWF",
+        "read/write Agent",
+    );
 
     // Should contain write token acquisition (SC_WRITE_TOKEN)
     assert!(
@@ -772,11 +779,73 @@ Do something.
         "Compiled output should contain SC_READ_TOKEN"
     );
     assert!(
+        compiled.contains("my-read-sc"),
+        "Compiled output should contain the read service connection name"
+    );
+    let document = parse_compiled_yaml(&compiled);
+    assert_job_execution_env_excludes_ado_credentials(
+        &document,
+        "Agent",
+        "=== Running AI agent with AWF",
+        "read-only Agent",
+    );
+    assert!(
         !compiled.contains("SC_WRITE_TOKEN"),
         "Compiled output should not contain SC_WRITE_TOKEN when only read is configured"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_permissions_ado_token_isolation_for_all_targets() {
+    for target in [None, Some("1es"), Some("job"), Some("stage")] {
+        let label = target.unwrap_or("standalone");
+        let target_line = target
+            .map(|value| format!("target: {value}\n"))
+            .unwrap_or_default();
+        let source = format!(
+            r#"---
+name: "ADO Token Isolation {label}"
+description: "Ensures Agent and Detection receive no ADO credentials"
+{target_line}permissions:
+  read: agent-read
+  write: executor-write
+safe-outputs:
+  noop: {{}}
+---
+
+## Test
+
+Call noop.
+"#
+        );
+        let (ok, compiled, stderr) =
+            compile_inline_source(&format!("ado-token-isolation-{label}"), &source);
+        assert!(ok, "{label}: compilation failed:\n{stderr}");
+        assert!(
+            compiled.contains("SC_READ_TOKEN"),
+            "{label}: permissions.read must still acquire SC_READ_TOKEN"
+        );
+        assert!(
+            compiled.contains("agent-read"),
+            "{label}: compiled output must retain the read service connection"
+        );
+
+        let document = parse_compiled_yaml(&compiled);
+        assert_job_execution_env_excludes_ado_credentials(
+            &document,
+            "Agent",
+            "=== Running AI agent with AWF",
+            &format!("{label} Agent"),
+        );
+        assert_job_execution_env_excludes_ado_credentials(
+            &document,
+            "Detection",
+            "# Run threat analysis with AWF network isolation",
+            &format!("{label} Detection"),
+        );
+    }
 }
 
 /// Test that the 1ES fixture compiles correctly with no unreplaced markers
@@ -1540,17 +1609,19 @@ Vote on pull requests.
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
-/// Test that update-pr compiles successfully when vote is restricted via allowed-operations
+/// Test that update-pr compiles successfully whether the vote operation is made
+/// unreachable via `allowed-operations` (excluding "vote") or is reachable but
+/// backed by a non-empty `allowed-votes` list. Both configurations satisfy
+/// `validate_update_pr_votes` and must compile with identical observable
+/// wiring (--enabled-tools update-pr, SC_WRITE_TOKEN); this is verified for
+/// both front-matter shapes in one test to avoid duplicating the near-identical
+/// compile/assert scaffolding twice.
 #[test]
-fn test_update_pr_compiles_when_vote_excluded_from_allowed_operations() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-uprnotvote-{}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
-
-    let test_input = temp_dir.join("upr-agent.md");
-    let test_content = r#"---
+fn test_update_pr_compiles_with_vote_excluded_or_allowed_votes_set() {
+    let configs = [
+        (
+            "agentic-pipeline-uprnotvote",
+            r#"---
 name: "Update PR Agent"
 description: "Agent that sets reviewers but cannot vote"
 permissions:
@@ -1565,54 +1636,12 @@ safe-outputs:
 ## Update PR Agent
 
 Manage pull requests.
-"#;
-    fs::write(&test_input, test_content).expect("Failed to write test input");
-
-    let output_path = temp_dir.join("upr-agent.yml");
-    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
-    let output = std::process::Command::new(&binary_path)
-        .args([
-            "compile",
-            test_input.to_str().unwrap(),
-            "-o",
-            output_path.to_str().unwrap(),
-        ])
-        .output()
-        .expect("Failed to run compiler");
-
-    assert!(
-        output.status.success(),
-        "Compiler should succeed when vote is excluded from allowed-operations: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
-
-    // update-pr must be listed as an enabled tool for the agent
-    assert!(
-        compiled_has_enabled_tool(&compiled, "update-pr"),
-        "Compiled output should contain --enabled-tools update-pr"
-    );
-    // Stage 3 must acquire a write token (permissions.write is set)
-    assert!(
-        compiled.contains("SC_WRITE_TOKEN"),
-        "Compiled output should contain SC_WRITE_TOKEN for write service connection"
-    );
-
-    let _ = fs::remove_dir_all(&temp_dir);
-}
-
-/// Test that update-pr compiles successfully when allowed-votes is set
-#[test]
-fn test_update_pr_compiles_when_allowed_votes_set() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-uprvoteset-{}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
-
-    let test_input = temp_dir.join("upr-agent.md");
-    let test_content = r#"---
+"#,
+            "vote is excluded from allowed-operations",
+        ),
+        (
+            "agentic-pipeline-uprvoteset",
+            r#"---
 name: "Update PR Agent"
 description: "Agent that can vote on PRs with proper config"
 permissions:
@@ -1627,41 +1656,55 @@ safe-outputs:
 ## Update PR Agent
 
 Vote on pull requests.
-"#;
-    fs::write(&test_input, test_content).expect("Failed to write test input");
+"#,
+            "allowed-votes is set with vote reachable",
+        ),
+    ];
 
-    let output_path = temp_dir.join("upr-agent.yml");
-    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
-    let output = std::process::Command::new(&binary_path)
-        .args([
-            "compile",
-            test_input.to_str().unwrap(),
-            "-o",
-            output_path.to_str().unwrap(),
-        ])
-        .output()
-        .expect("Failed to run compiler");
+    for (dir_prefix, test_content, case_desc) in configs {
+        let temp_dir =
+            std::env::temp_dir().join(format!("{}-{}", dir_prefix, std::process::id()));
+        fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
-    assert!(
-        output.status.success(),
-        "Compiler should succeed with proper update-pr vote config: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+        let test_input = temp_dir.join("upr-agent.md");
+        fs::write(&test_input, test_content).expect("Failed to write test input");
 
-    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+        let output_path = temp_dir.join("upr-agent.yml");
+        let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+        let output = std::process::Command::new(&binary_path)
+            .args([
+                "compile",
+                test_input.to_str().unwrap(),
+                "-o",
+                output_path.to_str().unwrap(),
+            ])
+            .output()
+            .expect("Failed to run compiler");
 
-    // update-pr must be listed as an enabled tool for the agent
-    assert!(
-        compiled_has_enabled_tool(&compiled, "update-pr"),
-        "Compiled output should contain --enabled-tools update-pr"
-    );
-    // Stage 3 must acquire a write token (permissions.write is set)
-    assert!(
-        compiled.contains("SC_WRITE_TOKEN"),
-        "Compiled output should contain SC_WRITE_TOKEN for write service connection"
-    );
+        assert!(
+            output.status.success(),
+            "Compiler should succeed when {}: {}",
+            case_desc,
+            String::from_utf8_lossy(&output.stderr)
+        );
 
-    let _ = fs::remove_dir_all(&temp_dir);
+        let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+
+        // update-pr must be listed as an enabled tool for the agent
+        assert!(
+            compiled_has_enabled_tool(&compiled, "update-pr"),
+            "Compiled output should contain --enabled-tools update-pr (case: {})",
+            case_desc
+        );
+        // Stage 3 must acquire a write token (permissions.write is set)
+        assert!(
+            compiled.contains("SC_WRITE_TOKEN"),
+            "Compiled output should contain SC_WRITE_TOKEN for write service connection (case: {})",
+            case_desc
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
 }
 
 /// Integration test: compiling a pipeline with safe-outputs produces --enabled-tools flags
@@ -1857,6 +1900,51 @@ Call the noop tool exactly once.
     assert!(
         agent.contains("--additional-mcp-config @/tmp/awf-tools/mcp-config.json"),
         "restricted tools path should still use the compiler-emitted MCP config: {agent}"
+    );
+}
+
+// ==================== Copilot CLI OTel wiring smoke ====================
+
+/// Verify that a compiled Copilot pipeline sets all three OTel env vars in
+/// the Agent job with the exact values the Stage 3 executor expects when it
+/// reads back `agent_stats::OTEL_FILENAME` from the staging directory.
+///
+/// The three vars must be present AND the file path must match
+/// `/tmp/awf-tools/staging/otel.jsonl` — that path is the link between the
+/// compile-time env configuration and the `ado-aw execute` read-back path.
+#[test]
+fn test_compiled_copilot_agent_job_sets_otel_env_vars() {
+    let compiled = compile_inline_agent(
+        "copilot-otel-env",
+        r#"---
+name: "Copilot OTel Env"
+description: "Compile-time contract for Copilot OTel env var wiring"
+engine:
+  id: copilot
+  model: gpt-5-mini
+safe-outputs:
+  noop: {}
+---
+
+## Agent
+
+Call the noop tool exactly once.
+"#,
+    );
+
+    let agent = extract_job_block(&compiled, "Agent").expect("Agent job should exist");
+
+    assert!(
+        agent.contains("COPILOT_OTEL_ENABLED: 'true'"),
+        "Agent job must enable Copilot OTel: {agent}"
+    );
+    assert!(
+        agent.contains("COPILOT_OTEL_EXPORTER_TYPE: file"),
+        "Agent job must configure file-based OTel exporter: {agent}"
+    );
+    assert!(
+        agent.contains("COPILOT_OTEL_FILE_EXPORTER_PATH: /tmp/awf-tools/staging/otel.jsonl"),
+        "Agent job must write OTel to the staging path read by the executor: {agent}"
     );
 }
 
@@ -3532,7 +3620,9 @@ fn find_job_mapping_by_display_name<'a>(
 ) -> Option<&'a serde_yaml::Mapping> {
     match value {
         serde_yaml::Value::Mapping(map) => {
-            if map.get(yaml_key("displayName")).and_then(|v| v.as_str()) == Some(display_name) {
+            if map.contains_key(yaml_key("job"))
+                && map.get(yaml_key("displayName")).and_then(|v| v.as_str()) == Some(display_name)
+            {
                 return Some(map);
             }
             map.values()
@@ -3549,19 +3639,59 @@ fn find_bash_step_containing<'a>(
     job: &'a serde_yaml::Mapping,
     needle: &str,
 ) -> Option<&'a serde_yaml::Mapping> {
-    job.get(yaml_key("steps"))
-        .and_then(|v| v.as_sequence())
-        .and_then(|steps| {
-            steps.iter().find_map(|step| {
-                let map = step.as_mapping()?;
-                let bash = map.get(yaml_key("bash")).and_then(|v| v.as_str())?;
-                if bash.contains(needle) {
-                    Some(map)
-                } else {
-                    None
-                }
-            })
-        })
+    job.values()
+        .find_map(|value| find_bash_step_containing_value(value, needle))
+}
+
+fn find_bash_step_containing_value<'a>(
+    value: &'a serde_yaml::Value,
+    needle: &str,
+) -> Option<&'a serde_yaml::Mapping> {
+    match value {
+        serde_yaml::Value::Mapping(map) => {
+            if map
+                .get(yaml_key("bash"))
+                .and_then(|value| value.as_str())
+                .is_some_and(|bash| bash.contains(needle))
+            {
+                return Some(map);
+            }
+            map.values()
+                .find_map(|child| find_bash_step_containing_value(child, needle))
+        }
+        serde_yaml::Value::Sequence(items) => items
+            .iter()
+            .find_map(|child| find_bash_step_containing_value(child, needle)),
+        _ => None,
+    }
+}
+
+fn assert_job_execution_env_excludes_ado_credentials(
+    document: &serde_yaml::Value,
+    job_display_name: &str,
+    script_needle: &str,
+    label: &str,
+) {
+    let job = find_job_mapping_by_display_name(document, job_display_name)
+        .unwrap_or_else(|| panic!("{label}: missing {job_display_name} job"));
+    let step = find_bash_step_containing(job, script_needle)
+        .unwrap_or_else(|| panic!("{label}: missing execution step"));
+    if let Some(env) = step
+        .get(yaml_key("env"))
+        .and_then(|value| value.as_mapping())
+    {
+        for forbidden in [
+            "AZURE_DEVOPS_EXT_PAT",
+            "SC_READ_TOKEN",
+            "SC_WRITE_TOKEN",
+            "SYSTEM_ACCESSTOKEN",
+        ] {
+            assert!(
+                !env.contains_key(yaml_key(forbidden)),
+                "{label}: execution env must not expose {forbidden}"
+            );
+        }
+    }
 }
 
 fn assert_named_pool_demands(pool: &serde_yaml::Mapping, expected_os: Option<&str>) {
@@ -5194,21 +5324,6 @@ fn test_pipeline_filter_has_resources_and_gate() {
     );
 }
 
-/// Agent job depends on Setup when filters are active.
-#[test]
-fn test_pr_filter_agent_depends_on_setup() {
-    let compiled = compile_fixture("pr-filter-tier1-agent.md");
-
-    assert!(
-        compiled.contains("dependsOn: Setup"),
-        "Agent job should depend on Setup"
-    );
-    assert!(
-        compiled.contains("prGate.SHOULD_RUN"),
-        "Agent job condition should reference gate output"
-    );
-}
-
 /// Regression guard for the synth-mode gate-bypass bug: with `mode:
 /// synthetic` (the default) AND `on.pr.filters` present, the Agent-job
 /// condition must REQUIRE the gate to pass for real-PR and synth-PR
@@ -5218,6 +5333,15 @@ fn test_pr_filter_agent_depends_on_setup() {
 #[test]
 fn test_pr_filter_synth_mode_agent_condition_enforces_gate() {
     let compiled = compile_fixture("pr-filter-tier1-agent.md");
+
+    // Agent job must depend on Setup when PR filters are active — the gate
+    // step lives in Setup and the Agent job's condition below reads its
+    // output via `dependencies.Setup.outputs[...]`, which requires the
+    // dependsOn edge to exist.
+    assert!(
+        compiled.contains("dependsOn: Setup"),
+        "Agent job should depend on Setup"
+    );
 
     // Extract the Agent-job dependsOn condition body so the assertions
     // target only that section (the same strings can appear elsewhere —
@@ -5971,9 +6095,8 @@ fn test_default_pipeline_mounts_az_and_allows_azure_hosts() {
 /// Compile the `ado-aw-debug-agent.md` fixture and assert the
 /// front-matter section's compile-time effects:
 /// 1. The integrity check step is omitted (`skip-integrity: true`).
-/// 2. The Stage 3 executor `env:` block exposes
-///    `ADO_AW_DEBUG_GITHUB_TOKEN`.
-/// 3. `--enabled-tools create-issue` is wired into the SafeOutputs MCP
+/// 2. The Stage 3 executor `env:` block exposes `ADO_AW_GITHUB_TOKEN`.
+/// 3. `--enabled-tools create-github-issue` is wired into the SafeOutputs MCP
 ///    invocation.
 /// 4. The output is otherwise valid YAML.
 #[test]
@@ -5993,15 +6116,44 @@ fn test_compile_ado_aw_debug_fixture() {
         .expect("Should have executor step");
     let after_execute = &compiled[execute_block_start..];
     assert!(
-        after_execute.contains("ADO_AW_DEBUG_GITHUB_TOKEN: $(ADO_AW_DEBUG_GITHUB_TOKEN)"),
-        "Executor step must expose ADO_AW_DEBUG_GITHUB_TOKEN when ado-aw-debug.create-issue is set: {after_execute}"
+        after_execute.contains("ADO_AW_GITHUB_TOKEN: $(ADO_AW_GITHUB_TOKEN)"),
+        "Executor step must expose ADO_AW_GITHUB_TOKEN when safe-outputs.create-github-issue is set: {after_execute}"
     );
 
-    // --enabled-tools includes create-issue
+    // --enabled-tools includes create-github-issue
     assert!(
-        compiled_has_enabled_tool(&compiled, "create-issue"),
-        "Compiler must add --enabled-tools create-issue when ado-aw-debug.create-issue is set"
+        compiled_has_enabled_tool(&compiled, "create-github-issue"),
+        "Compiler must add --enabled-tools create-github-issue when safe-outputs.create-github-issue is set"
     );
+}
+
+#[test]
+fn test_compile_github_issue_app_fixture_scopes_tokens_by_stage() {
+    let compiled = compile_fixture("github-issue-app-agent.md");
+    assert_valid_yaml(&compiled, "github-issue-app-agent.md");
+    assert!(compiled_has_enabled_tool(&compiled, "create-github-issue"));
+    assert!(compiled_has_enabled_tool(&compiled, "set-github-issue-type"));
+    assert!(compiled.contains("Mint GitHub App token (SafeOutputs)"));
+    assert!(compiled.contains("--output-var 'ADO_AW_SAFE_OUTPUTS_GITHUB_APP_TOKEN'"));
+    assert!(compiled.contains("--permissions-json '{\"issues\":\"write\"}'"));
+    assert!(compiled.contains(
+        "ADO_AW_GITHUB_TOKEN: $(ADO_AW_SAFE_OUTPUTS_GITHUB_APP_TOKEN)"
+    ));
+
+    let agent_start = compiled.find("- job: Agent").expect("Agent job");
+    let detection_start = compiled.find("- job: Detection").expect("Detection job");
+    let safe_outputs_start = compiled
+        .find("- job: SafeOutputs")
+        .expect("SafeOutputs job");
+    for block in [
+        &compiled[agent_start..detection_start],
+        &compiled[detection_start..safe_outputs_start],
+    ] {
+        assert!(block.contains(
+            "--permissions-json '{\"contents\":\"read\",\"issues\":\"read\"}'"
+        ));
+        assert!(!block.contains("ADO_AW_GITHUB_TOKEN"));
+    }
 }
 
 /// The example file in `examples/dogfood-failure-reporter.md` must compile
@@ -6021,12 +6173,12 @@ fn test_example_dogfood_failure_reporter_structure() {
         "Example should start with front matter"
     );
     assert!(
-        content.contains("ado-aw-debug:"),
-        "Example should declare ado-aw-debug section"
+        content.contains("safe-outputs:"),
+        "Example should declare safe-outputs section"
     );
     assert!(
-        content.contains("create-issue:"),
-        "Example should configure create-issue"
+        content.contains("create-github-issue:"),
+        "Example should configure create-github-issue"
     );
     assert!(
         content.contains("target-repo: githubnext/ado-aw"),
@@ -6345,40 +6497,45 @@ fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
     // The Stage step's own env block must NOT contain a direct
     // `dependencies.Setup.outputs[...]` reference. (The same expression
     // IS expected at Agent-job-level `variables:` scope, the documented
-    // safe location — that hoist is asserted separately.) Scope this
-    // check by isolating the Stage step's bash + env body.
-    let stage_step = compiled
-        .split("Stage PR execution context")
-        .nth(1)
-        .map(|tail| {
-            // Stop at the next step (`- bash:` / `- task:` / `- script:`)
-            // or end of the job (a less-indented key).
-            let stop_at = ["\n      - bash:", "\n      - task:", "\n      - script:"];
-            let end = stop_at
-                .iter()
-                .filter_map(|needle| tail.find(needle))
-                .min()
-                .unwrap_or(tail.len());
-            &tail[..end]
+    // safe location — that hoist is asserted separately.)
+    let parsed = parse_compiled_yaml(&compiled);
+    let agent_job = find_job_mapping(&parsed, "Agent")
+        .expect("compiled YAML must contain the Agent job");
+    let stage_step = agent_job
+        .get(yaml_key("steps"))
+        .and_then(|v| v.as_sequence())
+        .and_then(|steps| {
+            steps.iter().find(|step| {
+                step.as_mapping()
+                    .and_then(|m| m.get(yaml_key("displayName")))
+                    .and_then(|v| v.as_str())
+                    == Some("Stage PR execution context (aw-context/pr/*)")
+            })
         })
-        .unwrap_or("");
+        .and_then(|step| step.as_mapping())
+        .expect("compiled YAML must contain the PR execution-context step");
+    let stage_env = stage_step
+        .get(yaml_key("env"))
+        .and_then(|value| value.as_mapping())
+        .expect("PR execution-context step must have an env block");
+    let stage_env = serde_yaml::to_string(stage_env).expect("stage env must serialize");
     assert!(
-        !stage_step.contains("dependencies.Setup.outputs['synthPr."),
+        !stage_env.contains("dependencies.Setup.outputs['synthPr."),
         "Stage step's own env block must NOT reference \
          `dependencies.Setup.outputs[...]` — that is cross-job syntax. The cross-job \
          output is hoisted into Agent-job-level `variables:` (see \
          `generate_agent_job_variables`) and the Stage step reads it via the \
-         `$(AW_PR_*)` macros. Stage step body: {stage_step}"
+         `$(AW_PR_*)` macros. Stage step env: {stage_env}"
     );
     // ADO does NOT evaluate `$[ ... ]` runtime expressions inside step
     // `env:` values — only inside `variables:` mappings and
     // `condition:` fields. Any `$[ ` in this step's env block would be
     // passed through to bash as a literal string (the bug fixed here).
     assert!(
-        !stage_step.contains("$["),
+        !stage_env.contains("$["),
         "Stage step's env block must not contain `$[ ` runtime expressions \
          (ADO doesn't evaluate them at step-env scope). Use the Agent-job-level \
-         `variables:` hoist + `$(name)` macros instead. Stage step body: {stage_step}"
+         `variables:` hoist + `$(name)` macros instead. Stage step env: {stage_env}"
     );
     assert!(
         compiled.contains("SYSTEM_ACCESSTOKEN: $(System.AccessToken)"),
@@ -8701,6 +8858,14 @@ description: "no fetch tuning"
 /// Compile inline agent `content` in an isolated temp dir and return the
 /// compiled YAML. Panics on compile failure.
 fn compile_inline_agent(tag: &str, content: &str) -> String {
+    compile_inline_agent_with_env(tag, content, &[])
+}
+
+/// Compile inline agent `content` with additional environment variables set on
+/// the compiler subprocess. Used to exercise compile-time ADO context
+/// resolution (`ADO_AW_COMPILE_REMOTE_URL`) without mutating the test
+/// process's own environment, which parallel tests share.
+fn compile_inline_agent_with_env(tag: &str, content: &str, env: &[(&str, &str)]) -> String {
     let temp_dir =
         std::env::temp_dir().join(format!("agentic-pipeline-{tag}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&temp_dir);
@@ -8709,15 +8874,17 @@ fn compile_inline_agent(tag: &str, content: &str) -> String {
     fs::write(&input, content).expect("Failed to write test input");
     let output_path = temp_dir.join(format!("{tag}-agent.yml"));
     let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
-    let output = std::process::Command::new(&binary_path)
-        .args([
-            "compile",
-            input.to_str().unwrap(),
-            "-o",
-            output_path.to_str().unwrap(),
-        ])
-        .output()
-        .expect("Failed to run compiler");
+    let mut command = std::process::Command::new(&binary_path);
+    command.args([
+        "compile",
+        input.to_str().unwrap(),
+        "-o",
+        output_path.to_str().unwrap(),
+    ]);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command.output().expect("Failed to run compiler");
     assert!(
         output.status.success(),
         "compile should succeed for {tag}.\nstderr: {}",
@@ -9197,9 +9364,8 @@ fn test_create_pull_request_prepare_step_defaults_target_branch() {
 }
 
 /// Multi-repo: with additional `checkout:` repos, the prepare step deepens the
-/// target branch in the self working dir AND each alias dir — mirroring
-/// `mcp.rs::resolve_git_dir_for_patch` so a PR to any allowed repo works on a
-/// shallow pool.
+/// target branch in the exact self checkout AND each alias checkout so a PR to
+/// any allowed repo works on a shallow pool.
 #[test]
 fn test_create_pull_request_prepare_step_covers_all_checkout_repos() {
     let compiled = compile_inline_agent(
@@ -9207,15 +9373,15 @@ fn test_create_pull_request_prepare_step_covers_all_checkout_repos() {
         "---\nname: \"Multi PR Agent\"\ndescription: \"opens PRs across repos\"\nworkspace: root\nrepos:\n  - my-org/tools\n  - my-org/lib\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n\n## Agent\n\nDo work.\n",
     );
     let agent = job_block(&compiled, "Agent");
-    // self (working_directory == $(Build.SourcesDirectory) under workspace: root)
-    // + one dir per derived alias (my-org/tools -> tools, my-org/lib -> lib).
+    // self uses the compiler-owned multi-checkout path; aliases are siblings
+    // under the checkout root (my-org/tools -> tools, my-org/lib -> lib).
     assert_eq!(
         agent.matches("--repo-dir ").count(),
         3,
         "multi-repo agent must emit one --repo-dir per allowed repo (self + 2 aliases):\n{agent}"
     );
     assert!(
-        agent.contains("--repo-dir \"$(Build.SourcesDirectory)\""),
+        agent.contains("--repo-dir \"$(Build.SourcesDirectory)/self\""),
         "self dir must be covered:\n{agent}"
     );
     assert!(
@@ -9240,7 +9406,7 @@ fn test_create_pull_request_prepare_step_per_repo_targets() {
     let agent = job_block(&compiled, "Agent");
     // self ⇒ literal default 'main' (self never infers).
     assert!(
-        agent.contains("--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
+        agent.contains("--repo-dir \"$(Build.SourcesDirectory)/self\" --target-branch 'main'"),
         "self must target the literal default 'main':\n{agent}"
     );
     // tools ⇒ inferred from its checkout ref (refs/heads/release → release).
@@ -9305,7 +9471,7 @@ fn test_create_pull_request_safeoutputs_prepare_step_covers_all_checkout_repos()
     );
     let safeoutputs = job_block(&compiled, "SafeOutputs");
     assert!(
-        safeoutputs.contains("--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
+        safeoutputs.contains("--repo-dir \"$(Build.SourcesDirectory)/self\" --target-branch 'main'"),
         "self must target the literal default 'main' in the SafeOutputs job:\n{safeoutputs}"
     );
     assert!(
@@ -9394,31 +9560,836 @@ fn test_no_create_pull_request_omits_prepare_pr_base_step() {
     );
 }
 
+// ── Issue #1731: SafeOutputs must check out additional repos for create-pr ──
+
+/// Issue #1731: when `create-pull-request` is configured with additional
+/// checked-out repos, the SafeOutputs job must emit a `checkout` step for each
+/// `checkout: true` repo so that:
+///   • The additional repo directories exist before `prepare-pr-base.js` runs.
+///   • `self` stays at the compiler-owned `$(Build.SourcesDirectory)/self`
+///     path regardless of trigger metadata or repository aliases.
+///
+/// A `checkout: false` repo must remain resource-only (no checkout step).
 #[test]
-fn test_smoke_failure_reporter_uses_registered_ado_names_and_staging_repo() {
-    let reporter_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+fn test_issue_1731_safeoutputs_checks_out_additional_repos_for_create_pr() {
+    let compiled = compile_inline_agent(
+        "issue-1731-multi-checkout",
+        "---\nname: \"Multi-repo PR\"\ndescription: \"Opens a PR in an additional repo\"\nworkspace: root\nrepos:\n  - name: my-org/tools\n    alias: build-tools\n  - my-org/docs\n  - name: my-org/scripts\n    checkout: false\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let agent = job_block(&compiled, "Agent");
+    let safeoutputs = job_block(&compiled, "SafeOutputs");
+
+    // Agent job: self + both checked-out repos.
+    assert!(
+        agent.contains("- checkout: self") && agent.contains("path: s/self"),
+        "Agent must check out self at its fixed multi-checkout path:\n{agent}"
+    );
+    assert!(
+        agent.contains("- checkout: build-tools")
+            && agent.contains("path: s/build-tools"),
+        "Agent must check out tools at its explicit alias path:\n{agent}"
+    );
+    assert!(
+        agent.contains("- checkout: docs"),
+        "Agent must check out docs:\n{agent}"
+    );
+    // scripts has checkout: false — resource-only, no checkout step in Agent.
+    assert!(
+        !agent.contains("- checkout: scripts"),
+        "Agent must NOT check out scripts (checkout: false):\n{agent}"
+    );
+
+    // SafeOutputs job: same three checkouts must precede prepare-pr-base.js.
+    assert!(
+        safeoutputs.contains("- checkout: self") && safeoutputs.contains("path: s/self"),
+        "SafeOutputs must check out self at its fixed multi-checkout path:\n{safeoutputs}"
+    );
+    assert!(
+        safeoutputs.contains("- checkout: build-tools")
+            && safeoutputs.contains("path: s/build-tools"),
+        "SafeOutputs must check out tools at its explicit alias path (issue #1731):\n{safeoutputs}"
+    );
+    assert!(
+        safeoutputs.contains("- checkout: docs"),
+        "SafeOutputs must check out docs (issue #1731):\n{safeoutputs}"
+    );
+    // scripts has checkout: false — must not appear in SafeOutputs either.
+    assert!(
+        !safeoutputs.contains("- checkout: scripts"),
+        "SafeOutputs must NOT check out scripts (checkout: false):\n{safeoutputs}"
+    );
+    assert!(
+        safeoutputs.contains("--repo-dir \"$(Build.SourcesDirectory)/build-tools\""),
+        "prepare-pr-base must use the explicit alias checkout path:\n{safeoutputs}"
+    );
+
+    // Checkouts must appear before the prepare-pr-base.js invocation.
+    let tools_checkout_at = safeoutputs
+        .find("- checkout: build-tools")
+        .expect("tools checkout present");
+    let prepare_at = safeoutputs
+        .find("prepare-pr-base.js")
+        .expect("prepare-pr-base.js present");
+    assert!(
+        tools_checkout_at < prepare_at,
+        "additional checkouts must precede prepare-pr-base.js in SafeOutputs:\n{safeoutputs}"
+    );
+}
+
+#[test]
+fn test_issue_1731_fixed_self_path_cannot_collide_with_repository_alias() {
+    let compiled = compile_inline_agent(
+        "issue-1731-self-alias-collision",
+        "---\nname: \"Collision proof\"\ndescription: \"Keeps self separate from a same-named alias\"\nrepos:\n  - name: another-project/orchestrator\n    alias: orchestrator\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let agent = job_block(&compiled, "Agent");
+    let safeoutputs = job_block(&compiled, "SafeOutputs");
+
+    for job in [agent, safeoutputs] {
+        assert!(
+            job.contains("- checkout: self")
+                && job.contains("path: s/self")
+                && job.contains("- checkout: orchestrator")
+                && job.contains("path: s/orchestrator"),
+            "self and the named checkout must use distinct explicit paths:\n{job}"
+        );
+    }
+}
+
+/// Issue #1731: with additional checked-out repos the executor `--source` path
+/// uses the compiler-owned multi-checkout layout
+/// `$(Build.SourcesDirectory)/self/...`.
+#[test]
+fn test_issue_1731_safeoutputs_executor_source_path_uses_multi_checkout_layout() {
+    let compiled = compile_inline_agent(
+        "issue-1731-source-path",
+        "---\nname: \"Multi-repo PR\"\ndescription: \"Opens a PR in an additional repo\"\nworkspace: root\nrepos:\n  - my-org/tools\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let safeoutputs = job_block(&compiled, "SafeOutputs");
+    // With additional repos, self is pinned to $(Build.SourcesDirectory)/self.
+    assert!(
+        safeoutputs
+            .contains("ado-aw execute --source \"$(Build.SourcesDirectory)/self/"),
+        "SafeOutputs executor --source must use the multi-checkout layout path:\n{safeoutputs}"
+    );
+    assert!(
+        safeoutputs
+            .contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"),
+        "SafeOutputs must pass the exact self checkout to the executor:\n{safeoutputs}"
+    );
+    assert!(
+        safeoutputs.contains("ADO_AW_SELF_REPOSITORY_NAME:")
+            && !safeoutputs.contains("ADO_AW_SELF_REPOSITORY_ID:"),
+        "SafeOutputs must identify self by name only (the ID is resolved from it):\n{safeoutputs}"
+    );
+    assert!(
+        !safeoutputs.contains("resources.repositories['self'].id")
+            && !safeoutputs.contains("resources.repositories['self'].name"),
+        "self identity must be resolved at compile time, not via runtime expressions:\n{safeoutputs}"
+    );
+}
+
+/// Issue #1731: `self`'s repository identity is resolved at compile time from
+/// the ADO git remote, so Stage 3 never has to infer it from the
+/// trigger-scoped `Build.Repository.*` variables.
+#[test]
+fn test_issue_1731_self_repository_name_is_resolved_at_compile_time() {
+    let compiled = compile_inline_agent_with_env(
+        "issue-1731-baked-identity",
+        "---\nname: \"Multi-repo PR\"\ndescription: \"Opens a PR in an additional repo\"\nworkspace: root\nrepos:\n  - my-org/tools\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n\n## Agent\n\nDo work.\n",
+        &[(
+            "ADO_AW_COMPILE_REMOTE_URL",
+            "https://dev.azure.com/msazuresphere/AgentPlayground/_git/ado-aw-mirror",
+        )],
+    );
+    let safeoutputs = job_block(&compiled, "SafeOutputs");
+    assert!(
+        safeoutputs.contains("ADO_AW_SELF_REPOSITORY_NAME: ado-aw-mirror"),
+        "the compile-time repository name must be baked into the executor env:\n{safeoutputs}"
+    );
+    assert!(
+        !safeoutputs.contains("$(Build.Repository.Name)"),
+        "the trigger-scoped macro must not appear when ADO context resolves:\n{safeoutputs}"
+    );
+}
+
+/// Without a resolvable ADO remote the compiler falls back to the
+/// trigger-scoped macro. That is a degraded mode, so it must be accompanied by
+/// a warning rather than silently emitting a value that can name the wrong
+/// repository on repository-resource-triggered runs.
+#[test]
+fn test_issue_1731_unresolvable_ado_context_falls_back_with_warning() {
+    let (ok, compiled, stderr) = compile_inline_source(
+        "issue-1731-identity-fallback",
+        "---\nname: \"Fallback PR\"\ndescription: \"No ADO remote available\"\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n\n## Agent\n\nDo work.\n",
+    );
+    assert!(ok, "fallback must not fail the compile: {stderr}");
+    assert!(
+        compiled.contains("ADO_AW_SELF_REPOSITORY_NAME: $(Build.Repository.Name)"),
+        "fallback must emit the trigger-scoped macro:\n{compiled}"
+    );
+    assert!(
+        stderr.contains("TRIGGERING repository"),
+        "fallback must warn that the identity may be wrong:\n{stderr}"
+    );
+}
+
+/// Issue #1731, split-approval variant: when `create-pull-request` is
+/// review-gated and additional repos are checked out, the additional checkout
+/// steps must appear ONLY in `SafeOutputs_Reviewed` (the variant that actually
+/// runs the PR tool). The auto `SafeOutputs` job must not have them — it never
+/// executes `create-pull-request` and should not pay for the extra checkouts.
+#[test]
+fn test_issue_1731_split_approval_additional_checkouts_only_in_pr_variant() {
+    let compiled = compile_inline_agent(
+        "issue-1731-split-checkout",
+        "---\nname: \"Split PR\"\ndescription: \"Gated PR with extra repos\"\nworkspace: root\nrepos:\n  - my-org/tools\nsafe-outputs:\n  add-build-tag:\n    tag: ci\n  create-pull-request:\n    target-branch: main\n    require-approval: true\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let auto = job_block(&compiled, "SafeOutputs");
+    let reviewed = job_block(&compiled, "SafeOutputs_Reviewed");
+
+    // Reviewed job runs create-pull-request → must check out additional repos.
+    assert!(
+        reviewed.contains("- checkout: tools"),
+        "SafeOutputs_Reviewed must check out additional repos (issue #1731):\n{reviewed}"
+    );
+
+    // Auto job excludes create-pull-request → must NOT check out additional repos.
+    assert!(
+        !auto.contains("- checkout: tools"),
+        "auto SafeOutputs must NOT check out additional repos (it never runs create-pull-request):\n{auto}"
+    );
+    assert!(
+        auto.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/")
+            && !auto.contains(
+                "ado-aw execute --source \"$(Build.SourcesDirectory)/self/"
+            ),
+        "self-only SafeOutputs must use its single-checkout source path:\n{auto}"
+    );
+    assert!(
+        auto.contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)")
+            && !auto.contains(
+                "ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"
+            ),
+        "self-only SafeOutputs must pass its checkout root as the self repo:\n{auto}"
+    );
+    assert!(
+        reviewed.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/self/")
+            && reviewed.contains(
+                "ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"
+            ),
+        "PR-capable reviewed job must use its multi-checkout self path:\n{reviewed}"
+    );
+}
+
+/// Mirror of the split-approval case: when `create-pull-request` is NOT gated
+/// but a sibling tool is, the PR tool runs in the auto `SafeOutputs` job.
+/// Additional checkouts must therefore appear in the auto job and NOT in
+/// `SafeOutputs_Reviewed`.
+#[test]
+fn test_issue_1731_split_approval_additional_checkouts_in_auto_when_sibling_gated() {
+    let compiled = compile_inline_agent(
+        "issue-1731-split-checkout-auto",
+        "---\nname: \"Split PR auto\"\ndescription: \"Non-gated PR with gated sibling and extra repos\"\nworkspace: root\nrepos:\n  - my-org/tools\nsafe-outputs:\n  add-build-tag:\n    tag: ci\n    require-approval: true\n  create-pull-request:\n    target-branch: main\n---\n\n## Agent\n\nDo work.\n",
+    );
+    let auto = job_block(&compiled, "SafeOutputs");
+    let reviewed = job_block(&compiled, "SafeOutputs_Reviewed");
+
+    // Auto job runs create-pull-request → must check out additional repos.
+    assert!(
+        auto.contains("- checkout: tools"),
+        "auto SafeOutputs must check out additional repos when it runs create-pull-request:\n{auto}"
+    );
+
+    // Reviewed job excludes create-pull-request → must NOT check out additional repos.
+    assert!(
+        !reviewed.contains("- checkout: tools"),
+        "SafeOutputs_Reviewed must NOT check out additional repos when it doesn't run create-pull-request:\n{reviewed}"
+    );
+    assert!(
+        auto.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/self/")
+            && auto.contains(
+                "ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"
+            ),
+        "PR-capable automatic job must use its multi-checkout self path:\n{auto}"
+    );
+    assert!(
+        reviewed.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/")
+            && !reviewed.contains(
+                "ado-aw execute --source \"$(Build.SourcesDirectory)/self/"
+            ),
+        "self-only reviewed job must use its single-checkout source path:\n{reviewed}"
+    );
+    assert!(
+        reviewed.contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)")
+            && !reviewed.contains(
+                "ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"
+            ),
+        "self-only reviewed job must pass its checkout root as the self repo:\n{reviewed}"
+    );
+}
+
+#[test]
+fn test_issue_1731_split_checkout_layout_compiles_for_every_target() {
+    for target in ["standalone", "1es", "job", "stage"] {
+        let compiled = compile_inline_agent(
+            &format!("issue-1731-{target}"),
+            &format!(
+                "---\nname: \"Split PR {target}\"\ndescription: \"Cross-target split checkout layout\"\ntarget: {target}\nworkspace: root\nrepos:\n  - my-org/tools\nsafe-outputs:\n  add-build-tag:\n    tag: ci\n  create-pull-request:\n    target-branch: main\n    require-approval: true\n---\n\n## Agent\n\nDo work.\n"
+            ),
+        );
+
+        assert_eq!(
+            compiled.matches("- checkout: tools").count(),
+            2,
+            "{target}: tools must be checked out in Agent and the PR-capable Stage 3 job only:\n{compiled}"
+        );
+        assert!(
+            compiled.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/self/"),
+            "{target}: PR-capable Stage 3 source must use multi-checkout layout:\n{compiled}"
+        );
+        assert!(
+            compiled.contains("ADO_AW_SELF_REPOSITORY_NAME:")
+                && !compiled.contains("resources.repositories['self'].id")
+                && !compiled.contains("resources.repositories['self'].name"),
+            "{target}: Stage 3 self identity must be compile-time resolved:\n{compiled}"
+        );
+        assert!(
+            compiled.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/")
+                && compiled.contains(
+                    "ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)"
+                ),
+            "{target}: self-only Stage 3 sibling must use single-checkout layout:\n{compiled}"
+        );
+    }
+}
+
+#[test]
+fn test_azure_cli_smoke_uses_non_blocking_noop_flow() {
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("safe-outputs")
-        .join("smoke-failure-reporter.md");
-    let reporter = fs::read_to_string(reporter_path).expect("read smoke-failure-reporter fixture");
+        .join("azure-cli.md");
+    let fixture = fs::read_to_string(fixture_path)
+        .expect("read azure-cli smoke fixture")
+        .replace("\r\n", "\n");
 
-    for definition_name in [
-        "Daily safe-output smoke canary",
-        "Daily smoke az CLI access",
+    for contract in [
+        "Capture the combined stdout/stderr",
+        "Invoke exactly one MCP tool: `noop` from the `safeoutputs`",
+        "bash:\n    - az\n    - head",
+        "edit: false",
+        "Do not inspect MCP configuration",
+        "Do not invoke SafeOutputs through",
+        "Actually invoke the MCP tool",
     ] {
         assert!(
-            reporter.contains(&format!("- `{definition_name}`")),
-            "reporter must query the ADO-safe definition name '{definition_name}'"
+            fixture.contains(contract),
+            "Azure CLI smoke must preserve its non-blocking restricted flow; missing contract: {contract}"
+        );
+    }
+    for forbidden in ["report-incomplete", "Do not call `noop`"] {
+        assert!(
+            !fixture.contains(forbidden),
+            "Azure CLI smoke must not fail the candidate lane on unavailable direct auth: {forbidden}"
+        );
+    }
+
+    let (ok, compiled, stderr) = compile_inline_source("azure-cli-smoke-tool-policy", &fixture);
+    assert!(ok, "Azure CLI smoke should compile:\n{stderr}");
+    let document = parse_compiled_yaml(&compiled);
+    assert_job_execution_env_excludes_ado_credentials(
+        &document,
+        "Agent",
+        "=== Running AI agent with AWF",
+        "Azure CLI smoke Agent",
+    );
+    let agent = find_job_mapping_by_display_name(&document, "Agent")
+        .expect("Azure CLI smoke should contain the Agent job");
+    let run_agent = find_bash_step_containing(agent, "=== Running AI agent with AWF")
+        .expect("Azure CLI smoke should contain the Agent execution step");
+    let command = run_agent
+        .get(yaml_key("bash"))
+        .and_then(|value| value.as_str())
+        .expect("Agent execution step should have a bash body");
+    for required in ["shell(az)", "shell(head)"] {
+        assert!(
+            command.contains(required),
+            "Azure CLI Agent command should allow only its required shell command {required}:\n{command}"
+        );
+    }
+    for forbidden in ["--allow-all-tools", "--allow-all-paths"] {
+        assert!(
+            !command.contains(forbidden),
+            "Azure CLI Agent command must not contain {forbidden}:\n{command}"
+        );
+    }
+}
+
+// ─── Custom safe-output jobs acceptance matrix ───────────────────────────────
+
+/// Compile the custom jobs-style fixture with the front-matter `target:`
+/// swapped to `target`, returning the compiled YAML.
+fn compile_custom_for_target(target: Option<&str>) -> String {
+    let target_owned = target.map(str::to_string);
+    compile_fixture_tree_with_flags(
+        "custom-safe-output-scripts.md",
+        &[],
+        &["--skip-integrity"],
+        move |contents| match &target_owned {
+            Some(t) => contents.replacen(
+                "description: A workflow",
+                &format!("target: {t}\ndescription: A workflow"),
+                1,
+            ),
+            None => contents,
+        },
+    )
+}
+
+#[test]
+fn custom_safe_output_emits_gated_executor_job_standalone() {
+    let compiled = compile_custom_for_target(None);
+    assert_valid_yaml(&compiled, "custom-safe-output-scripts.md");
+    // A dedicated per-definition custom job is emitted.
+    assert!(
+        compiled.contains("Custom_send_notification"),
+        "expected a Custom_send_notification job:\n{compiled}"
+    );
+    // It prepares one aggregate, validated Agent-output file.
+    assert!(
+        compiled.contains("--prepare-custom-agent-output"),
+        "expected the custom job to prepare aggregate Agent output:\n{compiled}"
+    );
+    // The generated closed MCP tool schema is wired into the server launch.
+    assert!(
+        compiled.contains("--custom-tools"),
+        "expected the SafeOutputs MCP server to receive --custom-tools:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("\"additionalProperties\":false")
+            || compiled.contains("\"additionalProperties\": false"),
+        "expected a closed (additionalProperties:false) generated schema:\n{compiled}"
+    );
+    // require-approval on the custom tool routes it through ManualReview.
+    assert!(
+        compiled.contains("- job: ManualReview"),
+        "reviewed custom tool must emit a ManualReview gate:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("HasCustom_send_notification"),
+        "Detection must publish a per-tool proposal signal:\n{compiled}"
+    );
+}
+
+#[test]
+fn custom_safe_output_compiles_for_all_targets() {
+    for target in [None, Some("1es"), Some("job"), Some("stage")] {
+        let compiled = compile_custom_for_target(target);
+        let label = target.unwrap_or("standalone");
+        assert_valid_yaml(
+            &compiled,
+            &format!("custom-safe-output-scripts.md ({label})"),
+        );
+        assert!(
+            compiled.contains("Custom_send_notification"),
+            "target {label}: expected a Custom_send_notification job:\n{compiled}"
+        );
+    }
+}
+
+#[test]
+fn custom_safe_output_secret_scope_excludes_agent_and_detection() {
+    let compiled = compile_custom_for_target(None);
+    let custom_start = compiled
+        .find("- job: Custom_send_notification")
+        .expect("custom job present");
+    let custom = &compiled[custom_start..];
+    let before_custom = &compiled[..custom_start];
+    assert!(custom.contains("NOTIFICATION_TOKEN: $(SHARED_NOTIFICATION_TOKEN)"));
+    assert!(!before_custom.contains("NOTIFICATION_TOKEN: $(SHARED_NOTIFICATION_TOKEN)"));
+    assert!(custom.contains("ADO_AW_AGENT_OUTPUT"));
+    assert!(custom.contains("checkout: none"));
+    assert!(!compiled.contains("custom_safe_output_send_notification"));
+}
+
+#[test]
+fn candidate_custom_safe_output_fixture_compiles_with_local_component() {
+    let repo = tempfile::tempdir().expect("create candidate fixture repo");
+    let source_rel = PathBuf::from("tests")
+        .join("smoke")
+        .join("custom-safe-output.md");
+    let source = repo.path().join(&source_rel);
+    fs::create_dir_all(source.parent().unwrap()).expect("create source directory");
+    fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(&source_rel),
+        &source,
+    )
+    .expect("copy candidate source");
+
+    let component_rel = PathBuf::from("tests")
+        .join("smoke")
+        .join("component-fixture")
+        .join("components")
+        .join("custom-build-tags")
+        .join("component.md");
+    let component = repo.path().join(component_rel);
+    fs::create_dir_all(component.parent().unwrap()).expect("create component directory");
+    fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("smoke")
+            .join("component-fixture")
+            .join("components")
+            .join("custom-build-tags")
+            .join("component.md"),
+        &component,
+    )
+    .expect("copy local component manifest");
+
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.name", "candidate-test"]);
+    git(&["config", "user.email", "candidate-test@example.com"]);
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "candidate fixture"]);
+
+    let output_path = repo.path().join("custom-safe-output.yml");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ado-aw"))
+        .args([
+            "compile",
+            source.to_str().unwrap(),
+            "--output",
+            output_path.to_str().unwrap(),
+            "--skip-integrity",
+        ])
+        .output()
+        .expect("compile candidate custom fixture");
+    assert!(
+        output.status.success(),
+        "candidate fixture compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let compiled = fs::read_to_string(output_path).expect("read candidate output");
+    assert_valid_yaml(&compiled, "custom-safe-output.md");
+    for expected in [
+        "Custom_candidate_job_build_tag",
+        "checkout: none",
+        "--prepare-custom-agent-output",
+        "ADO_AW_AGENT_OUTPUT",
+        "\"max\":1",
+        "Candidate build-tag proposal accepted.",
+        "\"--enabled-tools\"",
+        "\"noop\"",
+    ] {
+        assert!(
+            compiled.contains(expected),
+            "candidate output missing {expected}:\n{compiled}"
         );
     }
     assert!(
-        !reporter.contains("Daily safe-output smoke: canary")
-            && !reporter.contains("Daily smoke: az CLI access"),
-        "reporter must not query colon-containing front-matter names"
+        !compiled.contains("\"--enabled-tools\",\n              \"add-build-tag\""),
+        "candidate fixture must not expose built-in add-build-tag:\n{compiled}"
+    );
+    assert!(!compiled.contains("candidate-script-build-tag"));
+    assert!(!compiled.contains("checkout-component"));
+    assert!(!compiled.contains("custom_safe_output_"));
+}
+
+/// `runtimes: python: false` must emit no Python install or authenticate steps.
+///
+/// Guards against accidental `is_enabled()` logic inversion — if `Enabled(false)`
+/// were treated as enabled, `UsePythonVersion@0` and `PipAuthenticate@1` would
+/// appear in the compiled output.
+#[test]
+fn test_python_runtime_disabled_emits_no_python_steps() {
+    let compiled = compile_inline_agent(
+        "python-disabled",
+        r#"---
+name: "Python Disabled Agent"
+description: "Agent with python explicitly disabled"
+runtimes:
+  python: false
+safe-outputs:
+  noop: {}
+---
+
+## Python Disabled Agent
+"#,
     );
     assert!(
-        reporter.contains("target-repo: jamesadevine/ado-aw-issues")
-            && reporter.contains("Search open issues on `jamesadevine/ado-aw-issues`"),
-        "front matter and prompt must agree on the staging issue repository"
+        !compiled.contains("UsePythonVersion@0"),
+        "UsePythonVersion@0 must not appear when python: false\n{compiled}"
     );
+    assert!(
+        !compiled.contains("PipAuthenticate@1"),
+        "PipAuthenticate@1 must not appear when python: false\n{compiled}"
+    );
+}
+
+/// `runtimes: dotnet: false` must emit no .NET install or authenticate steps.
+///
+/// Guards against accidental `is_enabled()` logic inversion — if `Enabled(false)`
+/// were treated as enabled, `UseDotNet@2` and `NuGetAuthenticate@1` would appear.
+#[test]
+fn test_dotnet_runtime_disabled_emits_no_dotnet_steps() {
+    let compiled = compile_inline_agent(
+        "dotnet-disabled",
+        r#"---
+name: "Dotnet Disabled Agent"
+description: "Agent with dotnet explicitly disabled"
+runtimes:
+  dotnet: false
+safe-outputs:
+  noop: {}
+---
+
+## Dotnet Disabled Agent
+"#,
+    );
+    assert!(
+        !compiled.contains("UseDotNet@2"),
+        "UseDotNet@2 must not appear when dotnet: false\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("NuGetAuthenticate@1"),
+        "NuGetAuthenticate@1 must not appear when dotnet: false\n{compiled}"
+    );
+}
+
+/// `runtimes: node: false` must not add npm ecosystem domains to the AWF
+/// allow-domains list or emit npm authentication steps.
+///
+/// Note: `UseNode@1` itself always appears in compiled output regardless
+/// of `runtimes.node` — it is an infrastructure-level install used to run
+/// the bundled `ado-script` JS helpers (gate evaluator, conclusion
+/// reporter, etc.), independent of the user-facing `runtimes.node`
+/// feature. This test therefore asserts on signals that are unique to the
+/// `runtimes.node` extension: the npm ecosystem domains and the
+/// `npmAuthenticate@0` task it contributes when enabled.
+///
+/// Guards against accidental `is_enabled()` logic inversion — if
+/// `NodeRuntimeConfig::Enabled(false)` were treated as enabled, the npm
+/// registry domains (e.g. `registry.npmjs.org`) would leak into the
+/// allow-domains list even though the author explicitly opted out.
+#[test]
+fn test_node_runtime_disabled_emits_no_node_ecosystem_domains() {
+    let compiled = compile_inline_agent(
+        "node-disabled",
+        r#"---
+name: "Node Disabled Agent"
+description: "Agent with node explicitly disabled"
+runtimes:
+  node: false
+safe-outputs:
+  noop: {}
+---
+
+## Node Disabled Agent
+"#,
+    );
+    assert!(
+        !compiled.contains("registry.npmjs.org"),
+        "registry.npmjs.org must not appear in allow-domains when node: false\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("npmAuthenticate@0"),
+        "npmAuthenticate@0 must not appear when node: false\n{compiled}"
+    );
+}
+
+/// `runtimes: lean: false` must emit no elan/Lean install step, no Lean
+/// network host, and no Lean bash commands.
+///
+/// Guards against accidental `is_enabled()` logic inversion — if
+/// `LeanRuntimeConfig::Enabled(false)` were treated as enabled, the
+/// elan installer step and `elan.lean-lang.org` host would appear even
+/// though the author explicitly opted out.
+#[test]
+fn test_lean_runtime_disabled_emits_no_lean_steps() {
+    let compiled = compile_inline_agent(
+        "lean-disabled",
+        r#"---
+name: "Lean Disabled Agent"
+description: "Agent with lean explicitly disabled"
+runtimes:
+  lean: false
+safe-outputs:
+  noop: {}
+---
+
+## Lean Disabled Agent
+"#,
+    );
+    assert!(
+        !compiled.contains("elan-init.sh"),
+        "elan-init.sh installer must not appear when lean: false\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("elan.lean-lang.org"),
+        "elan.lean-lang.org must not appear in allow-domains when lean: false\n{compiled}"
+    );
+    assert!(
+        !compiled.contains("Install Lean 4 (elan)"),
+        "'Install Lean 4 (elan)' step must not appear when lean: false\n{compiled}"
+    );
+}
+// ─── `on.push` / top-level trigger emission ─────────────────────────────────
+//
+// `on:` is the complete declaration of when a pipeline runs. Azure DevOps
+// reads a *missing* top-level `trigger:` / `pr:` key as "run on every branch",
+// so the compiler always emits both keys explicitly.
+
+/// Parse compiled YAML and return the top-level `trigger:` node.
+fn top_level_trigger(compiled: &str, fixture: &str) -> serde_yaml::Value {
+    let doc: serde_yaml::Value = serde_yaml::from_str(compiled)
+        .unwrap_or_else(|e| panic!("{fixture} must be valid YAML: {e}"));
+    doc.get("trigger")
+        .unwrap_or_else(|| panic!("{fixture} must emit a top-level `trigger:` key\n{compiled}"))
+        .clone()
+}
+
+fn string_seq(node: &serde_yaml::Value, path: &[&str]) -> Vec<String> {
+    let mut cur = node;
+    for key in path {
+        cur = cur
+            .get(key)
+            .unwrap_or_else(|| panic!("expected `{key}` under {cur:?}"));
+    }
+    cur.as_sequence()
+        .expect("expected a sequence")
+        .iter()
+        .map(|v| v.as_str().expect("expected a string").to_string())
+        .collect()
+}
+
+/// A workflow with no `on:` at all is a manual / API-queued pipeline: it must
+/// never self-start on a push or a pull request.
+#[test]
+fn test_no_on_config_emits_manual_only_pipeline() {
+    let compiled = compile_fixture("minimal-agent.md");
+    assert_valid_yaml(&compiled, "minimal-agent.md");
+    assert!(
+        compiled.contains("trigger: none"),
+        "no `on:` must emit `trigger: none`\n{compiled}"
+    );
+    assert!(
+        compiled.contains("pr: none"),
+        "no `on:` must emit `pr: none`\n{compiled}"
+    );
+}
+
+/// `on.push` with filters lowers to a native ADO `trigger:` block.
+#[test]
+fn test_push_trigger_emits_native_branch_and_path_filters() {
+    let compiled = compile_fixture("push-trigger-agent.md");
+    assert_valid_yaml(&compiled, "push-trigger-agent.md");
+    let trigger = top_level_trigger(&compiled, "push-trigger-agent.md");
+    assert_eq!(
+        string_seq(&trigger, &["branches", "include"]),
+        vec!["main".to_string(), "release/*".to_string()]
+    );
+    assert_eq!(
+        string_seq(&trigger, &["branches", "exclude"]),
+        vec!["wip/*".to_string()]
+    );
+    assert_eq!(
+        string_seq(&trigger, &["paths", "include"]),
+        vec!["src/**".to_string()]
+    );
+    assert_eq!(
+        string_seq(&trigger, &["paths", "exclude"]),
+        vec!["docs/**".to_string()]
+    );
+    // `on.push` controls only `trigger:`; with no `on.pr` the PR half is off.
+    assert!(
+        compiled.contains("pr: none"),
+        "`on.push` alone must still disable PR triggering\n{compiled}"
+    );
+}
+
+/// `on.push: none` wins over the all-branches trigger that synthetic PR mode
+/// would otherwise emit.
+#[test]
+fn test_push_none_overrides_synthetic_pr_ci_trigger() {
+    let compiled = compile_fixture("push-none-agent.md");
+    assert_valid_yaml(&compiled, "push-none-agent.md");
+    let trigger = top_level_trigger(&compiled, "push-none-agent.md");
+    assert_eq!(
+        trigger.as_str(),
+        Some("none"),
+        "explicit `push: none` must win over synthetic mode\n{compiled}"
+    );
+    // The PR half is untouched by `on.push`.
+    assert!(
+        !compiled.contains("pr: none"),
+        "`on.pr` filters must survive `push: none`\n{compiled}"
+    );
+}
+
+/// An explicit `on.push` survives the schedule trigger suppression.
+#[test]
+fn test_push_trigger_survives_schedule_suppression() {
+    let compiled = compile_fixture("push-with-schedule-agent.md");
+    assert_valid_yaml(&compiled, "push-with-schedule-agent.md");
+    let trigger = top_level_trigger(&compiled, "push-with-schedule-agent.md");
+    assert_eq!(
+        string_seq(&trigger, &["branches", "include"]),
+        vec!["main".to_string()],
+        "explicit `on.push` must not be swallowed by the schedule\n{compiled}"
+    );
+    assert!(
+        compiled.contains("schedules:"),
+        "the schedule must still be emitted\n{compiled}"
+    );
+    assert!(
+        compiled.contains("pr: none"),
+        "`on.push` controls only `trigger:`; `pr:` stays suppressed\n{compiled}"
+    );
+}
+
+/// `on.pr` in the default synthetic mode needs CI-triggered builds to react
+/// to, so the compiler emits the all-branches trigger as its mechanism.
+#[test]
+fn test_synthetic_pr_mode_emits_all_branches_ci_trigger() {
+    let compiled = compile_fixture("synthetic-pr-default.md");
+    assert_valid_yaml(&compiled, "synthetic-pr-default.md");
+    let trigger = top_level_trigger(&compiled, "synthetic-pr-default.md");
+    assert_eq!(
+        string_seq(&trigger, &["branches", "include"]),
+        vec!["*".to_string()],
+        "synthetic mode must emit an explicit all-branches trigger\n{compiled}"
+    );
+}
+
+/// Job and stage template targets carry no triggers at all — the consuming
+/// pipeline owns them.
+#[test]
+fn test_template_targets_emit_no_top_level_trigger() {
+    for fixture in ["job-agent.md", "stage-agent.md"] {
+        let compiled = compile_fixture(fixture);
+        let doc: serde_yaml::Value = serde_yaml::from_str(&compiled)
+            .unwrap_or_else(|e| panic!("{fixture} must be valid YAML: {e}"));
+        assert!(
+            doc.get("trigger").is_none(),
+            "{fixture} (template target) must not emit a top-level `trigger:`\n{compiled}"
+        );
+        assert!(
+            doc.get("pr").is_none(),
+            "{fixture} (template target) must not emit a top-level `pr:`\n{compiled}"
+        );
+    }
 }

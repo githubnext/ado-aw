@@ -382,8 +382,9 @@ pub struct EngineOptions {
     /// `github-app-token` ado-script bundle) immediately before the Copilot
     /// invocation in the Agent and Detection jobs. The minted GitHub App
     /// installation token is wired into `GITHUB_TOKEN` for the Copilot engine
-    /// env only — never SafeOutputs, user steps, ManualReview, Teardown, or
-    /// Conclusion. Absent ⇒ `GITHUB_TOKEN` is sourced from the
+    /// env only. GitHub issue SafeOutputs may reuse the App credentials to mint
+    /// a separate scoped Stage 3 token; they never receive the engine token.
+    /// Absent ⇒ `GITHUB_TOKEN` is sourced from the
     /// `$(GITHUB_TOKEN)` pipeline variable as before.
     #[serde(default, rename = "github-app-token")]
     #[sanitize_config(skip)]
@@ -592,14 +593,34 @@ impl ThreatDetectionSetting {
 ///     repositories: [octo-repo]  # optional; scopes the installation token
 ///     # private-key: MY_SECRET   # optional; defaults to GITHUB_APP_PRIVATE_KEY
 /// ```
-#[derive(Debug, Deserialize, Clone, SanitizeConfig)]
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum GithubAppPermissionLevel {
+    Read,
+    Write,
+}
+
+impl GithubAppPermissionLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, SanitizeConfig)]
 pub struct GithubAppTokenConfig {
     /// The GitHub App ID — a **literal** value, either a numeric App ID
     /// (e.g. `1234567`, quoted or unquoted) or an alphanumeric client ID
     /// (e.g. `Iv23liABC…`). The App ID is not secret (it is visible in the
     /// App's settings and is the JWT `iss`), so it is plain per-app config like
     /// `owner` — it is emitted verbatim, never indirected through a variable.
-    #[serde(rename = "app-id", deserialize_with = "de_string_or_number")]
+    #[serde(
+        rename = "app-id",
+        alias = "client-id",
+        deserialize_with = "de_string_or_number"
+    )]
     pub app_id: String,
     /// Optional name of the ADO **secret** pipeline variable holding the GitHub
     /// App private key (PEM). Defaults to
@@ -630,6 +651,45 @@ pub struct GithubAppTokenConfig {
     /// valid for its full ~1h lifetime.
     #[serde(default, rename = "skip-token-revocation")]
     pub skip_token_revocation: bool,
+    /// Optional repository-permission subset requested at token mint time.
+    #[serde(default)]
+    #[sanitize_config(skip)]
+    pub permissions: std::collections::BTreeMap<String, GithubAppPermissionLevel>,
+}
+
+pub const DEFAULT_SAFE_OUTPUTS_GITHUB_TOKEN_VAR: &str = "ADO_AW_GITHUB_TOKEN";
+pub const SAFE_OUTPUTS_GITHUB_APP_TOKEN_VAR: &str = "ADO_AW_SAFE_OUTPUTS_GITHUB_APP_TOKEN";
+
+#[derive(Debug, Clone)]
+pub enum GithubSafeOutputsAuth {
+    Token { variable: String, api_url: String },
+    App { config: GithubAppTokenConfig },
+}
+
+impl GithubSafeOutputsAuth {
+    pub fn executor_token_var(&self) -> &str {
+        match self {
+            Self::Token { variable, .. } => variable,
+            Self::App { .. } => SAFE_OUTPUTS_GITHUB_APP_TOKEN_VAR,
+        }
+    }
+
+    pub fn api_url(&self) -> &str {
+        match self {
+            Self::Token { api_url, .. } => api_url,
+            Self::App { config } => config
+                .api_url
+                .as_deref()
+                .unwrap_or("https://api.github.com"),
+        }
+    }
+
+    pub fn app_config(&self) -> Option<&GithubAppTokenConfig> {
+        match self {
+            Self::App { config } => Some(config),
+            Self::Token { .. } => None,
+        }
+    }
 }
 
 /// Default name of the ADO secret pipeline variable holding the GitHub App
@@ -685,6 +745,10 @@ impl GithubAppTokenConfig {
     /// each `repositories` entry must be a single safe path segment; `api-url`
     /// (when set) must be an `https://` URL with a host.
     pub fn validate(&self) -> anyhow::Result<()> {
+        self.validate_for("engine.github-app-token")
+    }
+
+    pub fn validate_for(&self, path: &str) -> anyhow::Result<()> {
         use crate::validate::{is_safe_path_segment, is_valid_ado_variable_name};
         if self.app_id.is_empty()
             || !self.app_id.starts_with(|c: char| c.is_ascii_alphanumeric())
@@ -694,7 +758,7 @@ impl GithubAppTokenConfig {
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
         {
             anyhow::bail!(
-                "engine.github-app-token.app-id '{}' must be a non-empty GitHub App ID \
+                "{path}.app-id '{}' must be a non-empty GitHub App ID \
                  (numeric, e.g. 1234567) or client ID (e.g. Iv23liABC): it must start with \
                  an alphanumeric character and contain only [A-Za-z0-9._-]. It is a literal \
                  value, not a variable name (a leading '-', e.g. a negative number, is invalid).",
@@ -705,7 +769,7 @@ impl GithubAppTokenConfig {
             && !is_valid_ado_variable_name(private_key)
         {
             anyhow::bail!(
-                "engine.github-app-token.private-key '{}' must be an ADO variable name \
+                "{path}.private-key '{}' must be an ADO variable name \
                  starting with a letter, digit, or '_' and containing only letters, digits, \
                  '.', '_', or '-' (it names the secret variable holding the PEM; omit it to \
                  use the default '{}').",
@@ -715,7 +779,7 @@ impl GithubAppTokenConfig {
         }
         if !is_safe_path_segment(&self.owner) {
             anyhow::bail!(
-                "engine.github-app-token.owner '{}' is not a valid GitHub owner name \
+                "{path}.owner '{}' is not a valid GitHub owner name \
                  (allowed: [A-Za-z0-9._-], no '/', no leading '.').",
                 self.owner
             );
@@ -723,7 +787,7 @@ impl GithubAppTokenConfig {
         for repo in &self.repositories {
             if !is_safe_path_segment(repo) {
                 anyhow::bail!(
-                    "engine.github-app-token.repositories entry '{}' is not a valid \
+                    "{path}.repositories entry '{}' is not a valid \
                      GitHub repository name (allowed: [A-Za-z0-9._-], no '/', no \
                      leading '.').",
                     repo
@@ -731,18 +795,67 @@ impl GithubAppTokenConfig {
             }
         }
         if let Some(api_url) = &self.api_url {
+            crate::validate::reject_pipeline_injection(
+                api_url,
+                &format!("{path}.api-url"),
+            )?;
             let parsed = url::Url::parse(api_url).map_err(|e| {
                 anyhow::anyhow!(
-                    "engine.github-app-token.api-url '{}' is not a valid URL: {}",
+                    "{path}.api-url '{}' is not a valid URL: {}",
                     api_url,
                     e
                 )
             })?;
             if parsed.scheme() != "https" || parsed.host_str().is_none() {
                 anyhow::bail!(
-                    "engine.github-app-token.api-url '{}' must be an https:// URL with a host \
+                    "{path}.api-url '{}' must be an https:// URL with a host \
                      (e.g. https://ghe.example.com/api/v3).",
                     api_url
+                );
+            }
+            if parsed.query().is_some() || parsed.fragment().is_some() {
+                anyhow::bail!(
+                    "{path}.api-url '{}' must not contain a query string or fragment",
+                    api_url
+                );
+            }
+        }
+        for permission in self.permissions.keys() {
+            if matches!(
+                permission.as_str(),
+                "__proto__" | "prototype" | "constructor"
+            ) {
+                anyhow::bail!(
+                    "{path}.permissions key '{}' is reserved and cannot be used",
+                    permission
+                );
+            }
+            if permission.is_empty()
+                || !permission
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_'))
+            {
+                anyhow::bail!(
+                    "{path}.permissions key '{}' must contain only lowercase ASCII letters, \
+                     digits, '-' or '_'",
+                    permission
+                );
+            }
+        }
+        // The App-token mint step normalizes '-' to '_' before serializing
+        // `--permissions-json` (the GitHub API spells permissions with
+        // underscores). Two keys differing only by separator therefore collapse
+        // onto one entry, and the survivor silently wins — which can flip an
+        // intended `read` to `write`. Reject the collision here rather than
+        // letting the mint step drop a permission the author declared.
+        let mut normalized_keys: std::collections::BTreeMap<String, &String> =
+            std::collections::BTreeMap::new();
+        for permission in self.permissions.keys() {
+            let normalized = permission.replace('-', "_");
+            if let Some(existing) = normalized_keys.insert(normalized.clone(), permission) {
+                anyhow::bail!(
+                    "{path}.permissions keys '{existing}' and '{permission}' both normalize to \
+                     '{normalized}'; use a single spelling"
                 );
             }
         }
@@ -1263,14 +1376,15 @@ pub struct FrontMatter {
     /// MCP server configurations
     #[serde(default, rename = "mcp-servers")]
     pub mcp_servers: HashMap<String, McpConfig>,
+    /// Reusable workflow imports. Entries may be local paths or SHA-pinned
+    /// cross-repository specs, with optional import-schema inputs.
+    #[serde(default)]
+    pub imports: Vec<ImportEntry>,
     /// Per-tool configuration for safe outputs
     #[serde(default, rename = "safe-outputs")]
     pub safe_outputs: HashMap<String, serde_json::Value>,
-    /// Debug-only configuration. Top-level section that gates features only
-    /// intended for ado-aw dogfood/debug pipelines (e.g., `create-issue` for
-    /// filing failure reports back to GitHub during local testing). NOT a
-    /// regular safe-output section — anything declared here is omitted from
-    /// the regular safe-outputs documentation surface.
+    /// Debug-only configuration. Top-level section for compiler dogfood knobs
+    /// that are not part of the regular safe-output surface.
     #[serde(default, rename = "ado-aw-debug")]
     pub ado_aw_debug: Option<AdoAwDebugConfig>,
     /// Unified trigger configuration: schedule, pipeline, PR triggers and filters
@@ -1319,6 +1433,12 @@ pub struct FrontMatter {
     /// - `write`: ARM service connection used by the Stage 3 safe-output executor
     #[serde(default)]
     pub permissions: Option<PermissionsConfig>,
+    /// Abstract permissions required by this workflow and its imported
+    /// components. Import merging unions these requirements; the compiler then
+    /// validates that the consumer supplied matching concrete `permissions:`
+    /// service connections.
+    #[serde(default, rename = "permissions-required")]
+    pub permissions_required: PermissionsRequired,
     /// When `true`, the compiler inlines all `{{#runtime-import …}}` markers
     /// (including the implicit top-level body marker) at compile time,
     /// embedding referenced content directly into the emitted YAML. When
@@ -1362,12 +1482,378 @@ impl FrontMatter {
     }
 }
 
+/// Compile-time source for a remote reusable import.
+///
+/// The YAML form is intentionally a scalar:
+///
+/// - omitted: Azure Repos in the consumer's current organization
+/// - an Azure DevOps collection URL: Azure Repos in that organization
+/// - `github.com`: GitHub.com
+/// - any other validated host name: GitHub Enterprise Server
+///
+/// Imports are resolved and cached entirely at compile time. This type does
+/// not name an Azure DevOps service connection and never creates a runtime
+/// repository resource.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ImportSource {
+    /// Azure Repos. `None` means the consumer's current organization.
+    AzureRepos {
+        /// Explicit cross-organization collection URL.
+        collection: Option<crate::secure::AzureDevOpsOrgUrl>,
+    },
+    /// GitHub.com or GitHub Enterprise Server.
+    GitHub {
+        /// GitHub CLI host (`github.com` for GitHub.com).
+        host: crate::secure::HostName,
+    },
+}
+
+impl Default for ImportSource {
+    fn default() -> Self {
+        Self::AzureRepos { collection: None }
+    }
+}
+
+impl ImportSource {
+    /// Stable human-readable identity used in diagnostics and cache metadata.
+    pub fn identity(&self) -> String {
+        match self {
+            Self::AzureRepos { collection: None } => "azure-repos:current".to_string(),
+            Self::AzureRepos {
+                collection: Some(collection),
+            } => format!("azure-repos:{}", collection.as_str().trim_end_matches('/')),
+            Self::GitHub { host } => format!("github:{}", host.as_str().to_ascii_lowercase()),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ImportSource {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de;
+
+        struct SourceVisitor;
+
+        impl de::Visitor<'_> for SourceVisitor {
+            type Value = ImportSource;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str(
+                    "an Azure DevOps collection URL, `github.com`, or a GitHub Enterprise host",
+                )
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> std::result::Result<ImportSource, E> {
+                let value = value.trim();
+                if value.is_empty() {
+                    return Err(E::custom("import source must not be empty"));
+                }
+                if value.starts_with("https://") {
+                    let collection = crate::secure::AzureDevOpsOrgUrl::parse(value)
+                        .map_err(|error| E::custom(error.to_string()))?;
+                    return Ok(ImportSource::AzureRepos {
+                        collection: Some(collection),
+                    });
+                }
+
+                let host = crate::secure::HostName::parse(value)
+                    .map_err(|error| E::custom(error.to_string()))?;
+                Ok(ImportSource::GitHub { host })
+            }
+        }
+
+        deserializer.deserialize_str(SourceVisitor)
+    }
+}
+
+/// A single `imports:` entry — either a bare spec string or an object form.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportEntry {
+    /// The import spec string (`uses:` in object form).
+    pub uses: String,
+    /// Non-secret input values for the imported workflow schema.
+    pub with: serde_json::Map<String, serde_json::Value>,
+    /// Remote repository. A bare name uses the consumer's current ADO project;
+    /// `project/repository` is explicit. Omitted for local imports and the
+    /// accepted combined `project/repository/path@ref` shorthand.
+    pub repository: Option<String>,
+    /// Compile-time remote source. Omission defaults to same-org Azure Repos.
+    pub source: Option<ImportSource>,
+}
+
+impl<'de> Deserialize<'de> for ImportEntry {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de;
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ImportEntryObject {
+            uses: String,
+            #[serde(default)]
+            with: serde_json::Map<String, serde_json::Value>,
+            #[serde(default)]
+            repository: Option<String>,
+            #[serde(default)]
+            source: Option<ImportSource>,
+        }
+
+        struct ImportEntryVisitor;
+
+        impl<'de> de::Visitor<'de> for ImportEntryVisitor {
+            type Value = ImportEntry;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str(
+                    "a string import spec or an object with `uses`, optional `repository`, \
+                     optional scalar `source`, and optional `with`",
+                )
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> std::result::Result<ImportEntry, E> {
+                Ok(ImportEntry {
+                    uses: value.to_string(),
+                    with: serde_json::Map::new(),
+                    repository: None,
+                    source: None,
+                })
+            }
+
+            fn visit_map<M>(self, map: M) -> std::result::Result<ImportEntry, M::Error>
+            where
+                M: de::MapAccess<'de>,
+            {
+                let entry =
+                    ImportEntryObject::deserialize(de::value::MapAccessDeserializer::new(map))?;
+                Ok(ImportEntry {
+                    uses: entry.uses,
+                    with: entry.with,
+                    repository: entry.repository,
+                    source: entry.source,
+                })
+            }
+        }
+
+        deserializer.deserialize_any(ImportEntryVisitor)
+    }
+}
+
+/// Parsed local or remote import specification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum ParsedImportSpec {
+    /// Local import path within the current repository.
+    Local {
+        /// Relative path to the imported markdown file.
+        path: String,
+        /// Optional markdown section selector.
+        section: Option<String>,
+        /// Whether a missing import should be tolerated by later resolution.
+        optional: bool,
+    },
+    /// Compile-time remote import.
+    Remote {
+        /// Azure Repos or GitHub source.
+        source: ImportSource,
+        /// Explicit ADO project / GitHub owner. `None` means the consumer's
+        /// current ADO project and is only valid for Azure Repos.
+        project: Option<String>,
+        /// Repository name.
+        repository: String,
+        /// Path within the repository.
+        path: String,
+        /// Requested branch, tag, or full commit SHA.
+        requested_ref: String,
+        /// Optional markdown section selector.
+        section: Option<String>,
+        /// Whether a typed not-found result should skip this import.
+        optional: bool,
+    },
+}
+
+impl ImportEntry {
+    /// Parse and validate the import spec string.
+    #[allow(dead_code)]
+    pub fn parse_source(&self) -> anyhow::Result<ParsedImportSpec> {
+        let raw = self.uses.trim();
+        if raw.is_empty() {
+            anyhow::bail!("import spec must not be empty");
+        }
+        validate_import_literal("spec", raw)?;
+
+        let (without_optional, optional) = match raw.strip_suffix('?') {
+            Some(value) => (value, true),
+            None => (raw, false),
+        };
+
+        let (base, section) = match without_optional.split_once('#') {
+            Some((base, section)) => {
+                if section.is_empty() {
+                    anyhow::bail!("import section must not be empty");
+                }
+                validate_import_literal("section", section)?;
+                (base, Some(section.to_string()))
+            }
+            None => (without_optional, None),
+        };
+
+        if base.is_empty() {
+            anyhow::bail!("import path must not be empty");
+        }
+
+        if !base.contains('@') {
+            if self.repository.is_some() || self.source.is_some() {
+                anyhow::bail!(
+                    "local import `{raw}` must not set `repository` or `source`; \
+                     use a remote `path@ref` spec instead"
+                );
+            }
+            validate_import_literal("local path", base)?;
+            return Ok(ParsedImportSpec::Local {
+                path: base.to_string(),
+                section,
+                optional,
+            });
+        }
+
+        let (repo_and_path, ref_part) = base
+            .rsplit_once('@')
+            .ok_or_else(|| anyhow::anyhow!("remote import spec must contain `@`"))?;
+        if ref_part.is_empty() {
+            anyhow::bail!("remote import `{raw}` must name a branch, tag, or commit after `@`");
+        }
+        validate_import_literal("git ref", ref_part)?;
+        if ref_part.chars().any(char::is_whitespace) {
+            anyhow::bail!("remote import git ref must not contain whitespace: `{ref_part}`");
+        }
+        if crate::secure::CommitSha::parse(ref_part).is_err() {
+            crate::secure::GitRefName::parse(ref_part).map_err(|error| {
+                anyhow::anyhow!("remote import `{raw}` has invalid git ref `{ref_part}`: {error}")
+            })?;
+        }
+
+        let (project, repository, path) = match self.repository.as_deref() {
+            Some(repository) => {
+                let (project, repository) = parse_import_repository(repository)?;
+                (project, repository, repo_and_path.to_string())
+            }
+            None => {
+                let mut parts = repo_and_path.splitn(3, '/');
+                let project = parts.next().unwrap_or_default();
+                let repository = parts.next().unwrap_or_default();
+                let path = parts.next().unwrap_or_default();
+                if project.is_empty() || repository.is_empty() || path.is_empty() {
+                    anyhow::bail!(
+                        "remote import `{raw}` must use the canonical object form \
+                         (`uses: path@ref` plus `repository:`) or the combined \
+                         `project/repository/path@ref` shorthand"
+                    );
+                }
+                validate_import_repository_segment("project/owner", project)?;
+                validate_import_repository_segment("repository", repository)?;
+                (
+                    Some(project.to_string()),
+                    repository.to_string(),
+                    path.to_string(),
+                )
+            }
+        };
+        validate_import_manifest_path(&path)?;
+
+        let source = self.source.clone().unwrap_or_default();
+        if matches!(source, ImportSource::GitHub { .. }) && project.is_none() {
+            anyhow::bail!(
+                "GitHub import `{raw}` requires `repository: owner/repository`; \
+                 a bare repository name is only valid for Azure Repos"
+            );
+        }
+
+        Ok(ParsedImportSpec::Remote {
+            source,
+            project,
+            repository,
+            path,
+            requested_ref: ref_part.to_string(),
+            section,
+            optional,
+        })
+    }
+}
+
+fn parse_import_repository(value: &str) -> anyhow::Result<(Option<String>, String)> {
+    let value = value.trim();
+    let parts: Vec<&str> = value.split('/').collect();
+    match parts.as_slice() {
+        [repository] => {
+            validate_import_repository_segment("repository", repository)?;
+            Ok((None, (*repository).to_string()))
+        }
+        [project, repository] => {
+            validate_import_repository_segment("project/owner", project)?;
+            validate_import_repository_segment("repository", repository)?;
+            Ok((Some((*project).to_string()), (*repository).to_string()))
+        }
+        _ => anyhow::bail!(
+            "import repository must be `repository` or `project/repository`, got `{value}`"
+        ),
+    }
+}
+
+fn validate_import_repository_segment(label: &str, value: &str) -> anyhow::Result<()> {
+    validate_import_literal(label, value)?;
+    if value.is_empty() || matches!(value, "." | "..") || value.contains(['\\', '@', '#', '?']) {
+        anyhow::bail!("import {label} contains an invalid value: `{value}`");
+    }
+    Ok(())
+}
+
+fn validate_import_manifest_path(path: &str) -> anyhow::Result<()> {
+    validate_import_literal("manifest path", path)?;
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.contains('\\')
+        || path
+            .split('/')
+            .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+    {
+        anyhow::bail!("remote import path contains an invalid segment: `{path}`");
+    }
+    Ok(())
+}
+
+fn validate_import_literal(label: &str, value: &str) -> anyhow::Result<()> {
+    if value.chars().any(char::is_control)
+        || crate::validate::contains_pipeline_command(value)
+        || crate::validate::contains_ado_expression(value)
+        || crate::validate::contains_template_marker(value)
+    {
+        anyhow::bail!(
+            "import {label} must be a literal value without control characters, \
+             Azure DevOps expressions/commands, or template markers"
+        );
+    }
+    Ok(())
+}
+
 /// Reserved keys inside the `safe-outputs:` map that configure the section
 /// itself rather than naming a safe-output tool. These must never be treated
 /// as tool names (e.g. in `--enabled-tools`, Stage-3 budgets, or unknown-key
 /// validation).
 pub const THREAT_DETECTION_KEY: &str = "threat-detection";
-pub const SAFE_OUTPUT_RESERVED_KEYS: &[&str] = &["require-approval", THREAT_DETECTION_KEY];
+pub const SAFE_OUTPUT_RESERVED_KEYS: &[&str] = &[
+    "require-approval",
+    "staged",
+    "scripts",
+    "jobs",
+    "github-token",
+    "github-api-url",
+    "github-app",
+    THREAT_DETECTION_KEY,
+];
 
 /// Automatic action a manual-validation gate takes when its pending period
 /// elapses with no human response. Mirrors `ManualValidation@1`'s `onTimeout`.
@@ -1445,6 +1931,33 @@ impl FrontMatter {
             .filter(|k| !SAFE_OUTPUT_RESERVED_KEYS.contains(&k.as_str()))
     }
 
+    /// Names of custom safe-output jobs declared under
+    /// `safe-outputs.jobs.<name>`.
+    pub fn custom_safe_output_tool_names(&self) -> Vec<String> {
+        self.safe_outputs
+            .get("jobs")
+            .and_then(|value| value.as_object())
+            .map(|jobs| jobs.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// The full set of safe-output tool names for approval-partitioning and
+    /// emission: built-in tools (top-level keys) plus custom tools
+    /// (`scripts`/`jobs`). A top-level key that merely *configures* a custom
+    /// tool (same name) is folded into that custom tool rather than counted as a
+    /// separate built-in.
+    pub fn all_safe_output_tool_names(&self) -> Vec<String> {
+        let custom: std::collections::HashSet<String> =
+            self.custom_safe_output_tool_names().into_iter().collect();
+        let mut names: Vec<String> = self
+            .safe_output_tool_names()
+            .filter(|k| !custom.contains(*k))
+            .cloned()
+            .collect();
+        names.extend(custom);
+        names
+    }
+
     /// Whether the workflow enables **any** safe-output tool.
     ///
     /// Single source of truth for the safe-outputs-summary feature gate: it
@@ -1457,6 +1970,7 @@ impl FrontMatter {
     /// that was never downloaded.
     pub fn has_any_safe_output_tool(&self) -> bool {
         self.safe_output_tool_names().next().is_some()
+            || !self.custom_safe_output_tool_names().is_empty()
     }
 
     /// Parse the section-level threat-detection configuration.
@@ -1540,6 +2054,266 @@ impl FrontMatter {
         Ok(())
     }
 
+    pub fn has_github_issue_outputs(&self) -> bool {
+        self.safe_outputs.contains_key("create-github-issue")
+            || self.safe_outputs.contains_key("set-github-issue-type")
+    }
+
+    fn typed_safe_output_config<T>(&self, key: &str) -> anyhow::Result<Option<T>>
+    where
+        T: serde::de::DeserializeOwned + Default + SanitizeConfigTrait,
+    {
+        let Some(raw) = self.safe_outputs.get(key) else {
+            return Ok(None);
+        };
+        if raw.is_null() {
+            let mut config = T::default();
+            config.sanitize_config_fields();
+            return Ok(Some(config));
+        }
+        let mut raw = raw.clone();
+        if let Some(object) = raw.as_object_mut() {
+            object.remove("require-approval");
+        }
+        let mut config: T = serde_json::from_value(raw)
+            .map_err(|e| anyhow::anyhow!("safe-outputs.{key} has invalid configuration: {e}"))?;
+        config.sanitize_config_fields();
+        Ok(Some(config))
+    }
+
+    pub fn create_github_issue_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::CreateGithubIssueConfig>> {
+        self.typed_safe_output_config("create-github-issue")
+    }
+
+    pub fn set_github_issue_type_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::SetGithubIssueTypeConfig>> {
+        self.typed_safe_output_config("set-github-issue-type")
+    }
+
+    fn parse_safe_outputs_github_token(raw: &str) -> anyhow::Result<String> {
+        let variable = raw
+            .strip_prefix("$(")
+            .and_then(|value| value.strip_suffix(')'))
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "safe-outputs.github-token must be exactly one ADO secret-variable macro \
+                     such as `$(ADO_AW_GITHUB_TOKEN)`"
+                )
+            })?;
+        if !crate::validate::is_valid_ado_variable_name(variable) {
+            anyhow::bail!(
+                "safe-outputs.github-token references invalid ADO variable name '{}'",
+                variable
+            );
+        }
+        if variable.eq_ignore_ascii_case("GITHUB_TOKEN")
+            || variable.eq_ignore_ascii_case(crate::engine::GITHUB_APP_TOKEN_VAR)
+        {
+            anyhow::bail!(
+                "safe-outputs.github-token must reference a dedicated Stage 3 secret, not \
+                 the Agent/Detection credential '{}'",
+                variable
+            );
+        }
+        Ok(variable.to_string())
+    }
+
+    fn parse_safe_outputs_github_api_url(raw: Option<&serde_json::Value>) -> anyhow::Result<String> {
+        let Some(raw) = raw else {
+            return Ok("https://api.github.com".to_string());
+        };
+        let raw = raw.as_str().ok_or_else(|| {
+            anyhow::anyhow!("safe-outputs.github-api-url must be an https:// URL string")
+        })?;
+        crate::validate::reject_pipeline_injection(raw, "safe-outputs.github-api-url")?;
+        let parsed = url::Url::parse(raw).map_err(|e| {
+            anyhow::anyhow!("safe-outputs.github-api-url '{}' is invalid: {}", raw, e)
+        })?;
+        if parsed.scheme() != "https" || parsed.host_str().is_none() {
+            anyhow::bail!(
+                "safe-outputs.github-api-url '{}' must be an https:// URL with a host",
+                raw
+            );
+        }
+        if parsed.query().is_some() || parsed.fragment().is_some() {
+            anyhow::bail!(
+                "safe-outputs.github-api-url '{}' must not contain a query string or fragment",
+                raw
+            );
+        }
+        Ok(parsed.to_string().trim_end_matches('/').to_string())
+    }
+
+    fn scope_github_app_to_issue_targets(
+        &self,
+        mut config: GithubAppTokenConfig,
+        path: &str,
+    ) -> anyhow::Result<GithubAppTokenConfig> {
+        if let Some(api_url) = config.api_url.take() {
+            let parsed = url::Url::parse(&api_url)
+                .map_err(|e| anyhow::anyhow!("{path}.api-url is invalid: {e}"))?;
+            config.api_url = Some(parsed.to_string().trim_end_matches('/').to_string());
+        }
+        let mut targets = Vec::new();
+        let mut has_implicit_target = false;
+        if self.safe_outputs.contains_key("create-github-issue") {
+            match self
+                .create_github_issue_config()?
+                .and_then(|config| config.target_repo)
+            {
+                Some(target) => targets.push(target),
+                None => has_implicit_target = true,
+            }
+        }
+        if self.safe_outputs.contains_key("set-github-issue-type") {
+            match self
+                .set_github_issue_type_config()?
+                .and_then(|config| config.target_repo)
+            {
+                Some(target)
+                    if !targets
+                        .iter()
+                        .any(|existing| existing.eq_ignore_ascii_case(&target)) =>
+                {
+                    targets.push(target);
+                }
+                Some(_) => {}
+                None => has_implicit_target = true,
+            }
+        }
+        if has_implicit_target && !targets.is_empty() {
+            anyhow::bail!(
+                "GitHub App-backed create-github-issue and set-github-issue-type cannot mix implicit current \
+                 repository targets with explicit target-repo values; configure target-repo \
+                 consistently for both tools"
+            );
+        }
+
+        if targets.is_empty() {
+            if config.repositories.is_empty() {
+                anyhow::bail!(
+                    "{path}.repositories must be set when GitHub issue outputs omit target-repo; \
+                     the compiler cannot safely scope the App token to a runtime repository"
+                );
+            }
+            return Ok(config);
+        }
+
+        let mut repositories = Vec::new();
+        for target in targets {
+            crate::safe_outputs::validate_target_repo(&target)
+                .map_err(|e| anyhow::anyhow!("safe-outputs target-repo: {e}"))?;
+            let (owner, repository) = target
+                .split_once('/')
+                .expect("validated target-repo contains slash");
+            if !owner.eq_ignore_ascii_case(&config.owner) {
+                anyhow::bail!(
+                    "{path}.owner '{}' does not match target repository owner '{}'",
+                    config.owner,
+                    owner
+                );
+            }
+            if !repositories
+                .iter()
+                .any(|existing: &String| existing.eq_ignore_ascii_case(repository))
+            {
+                repositories.push(repository.to_string());
+            }
+        }
+        config.repositories = repositories;
+        Ok(config)
+    }
+
+    pub fn github_safe_outputs_auth(
+        &self,
+    ) -> anyhow::Result<Option<GithubSafeOutputsAuth>> {
+        if !self.has_github_issue_outputs() {
+            return Ok(None);
+        }
+
+        let explicit_token = self.safe_outputs.get("github-token");
+        let explicit_api_url = self.safe_outputs.get("github-api-url");
+        let explicit_app = self.safe_outputs.get("github-app");
+        if explicit_token.is_some() && explicit_app.is_some() {
+            anyhow::bail!(
+                "safe-outputs.github-token and safe-outputs.github-app are mutually exclusive"
+            );
+        }
+
+        if let Some(raw) = explicit_app {
+            if explicit_api_url.is_some() {
+                anyhow::bail!(
+                    "safe-outputs.github-api-url applies only to PAT auth; set \
+                     safe-outputs.github-app.api-url for GitHub App auth"
+                );
+            }
+            let config: GithubAppTokenConfig = serde_json::from_value(raw.clone()).map_err(|e| {
+                anyhow::anyhow!("safe-outputs.github-app has invalid configuration: {e}")
+            })?;
+            config.validate_for("safe-outputs.github-app")?;
+            if !config.permissions.is_empty() {
+                anyhow::bail!(
+                    "safe-outputs.github-app.permissions is not supported for GitHub issue \
+                     outputs; ado-aw derives the minimum `issues: write` permission"
+                );
+            }
+            let config =
+                self.scope_github_app_to_issue_targets(config, "safe-outputs.github-app")?;
+            return Ok(Some(GithubSafeOutputsAuth::App { config }));
+        }
+
+        if let Some(raw) = explicit_token {
+            let raw = raw.as_str().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "safe-outputs.github-token must be a string containing an ADO macro"
+                )
+            })?;
+            return Ok(Some(GithubSafeOutputsAuth::Token {
+                variable: Self::parse_safe_outputs_github_token(raw)?,
+                api_url: Self::parse_safe_outputs_github_api_url(explicit_api_url)?,
+            }));
+        }
+
+        if let Some(engine_app) = self.engine.github_app_token() {
+            if explicit_api_url.is_some() {
+                anyhow::bail!(
+                    "safe-outputs.github-api-url applies only to PAT auth; set \
+                     engine.github-app-token.api-url for inherited App auth"
+                );
+            }
+            engine_app.validate()?;
+            if engine_app.permissions.is_empty() {
+                anyhow::bail!(
+                    "GitHub issue safe outputs inherit engine.github-app-token credentials, \
+                     but engine.github-app-token.permissions is empty. Configure explicit \
+                     read-only repository permissions or separate SafeOutputs auth."
+                );
+            }
+            if let Some((name, _)) = engine_app
+                .permissions
+                .iter()
+                .find(|(_, level)| **level == GithubAppPermissionLevel::Write)
+            {
+                anyhow::bail!(
+                    "engine.github-app-token.permissions.{name} is `write`; shared App \
+                     credentials require an explicitly read-only Agent/Detection token"
+                );
+            }
+            let config = self
+                .scope_github_app_to_issue_targets(engine_app.clone(), "engine.github-app-token")?;
+            return Ok(Some(GithubSafeOutputsAuth::App { config }));
+        }
+
+        Ok(Some(GithubSafeOutputsAuth::Token {
+            variable: DEFAULT_SAFE_OUTPUTS_GITHUB_TOKEN_VAR.to_string(),
+            api_url: Self::parse_safe_outputs_github_api_url(explicit_api_url)?,
+        }))
+    }
+
     /// The parsed, sanitized `create-pull-request` config, or `None` when the
     /// tool is not configured. Mirrors Stage 3's `ExecutionContext::get_tool_config`
     /// (deserialize + `sanitize_config_fields`) so the compiler resolves per-repo
@@ -1612,17 +2386,36 @@ impl FrontMatter {
         setting.is_required().then(|| setting.config())
     }
 
+    /// Effective cooperative staged/preview setting for a safe-output tool.
+    ///
+    /// A per-tool `safe-outputs.<tool>.staged` boolean overrides the section
+    /// level `safe-outputs.staged` default.
+    pub fn tool_is_staged(&self, tool: &str) -> bool {
+        self.safe_outputs
+            .get(tool)
+            .and_then(|config| config.get("staged"))
+            .and_then(serde_json::Value::as_bool)
+            .or_else(|| {
+                self.safe_outputs
+                    .get("staged")
+                    .and_then(serde_json::Value::as_bool)
+            })
+            .unwrap_or(false)
+    }
+
     /// Partition enabled safe-output tool names into `(auto, reviewed)` where
     /// `reviewed` tools require manual approval and `auto` tools do not. Both
-    /// lists are sorted for deterministic emission.
+    /// lists are sorted for deterministic emission. Includes both built-in and
+    /// custom (`scripts`/`jobs`) tools; a custom tool's approval setting is read
+    /// from its top-level per-tool config key (or the section-level default).
     pub fn partition_safe_outputs_by_approval(&self) -> (Vec<String>, Vec<String>) {
         let mut auto = Vec::new();
         let mut reviewed = Vec::new();
-        for tool in self.safe_output_tool_names() {
-            if self.tool_requires_approval(tool).is_some() {
-                reviewed.push(tool.clone());
+        for tool in self.all_safe_output_tool_names() {
+            if self.tool_requires_approval(&tool).is_some() {
+                reviewed.push(tool);
             } else {
-                auto.push(tool.clone());
+                auto.push(tool);
             }
         }
         auto.sort();
@@ -1690,6 +2483,26 @@ impl FrontMatter {
                 .and_then(|c| c.get("require-approval"))
             {
                 check(&format!("safe-outputs.{tool}.require-approval"), v)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate global and per-tool staged settings eagerly.
+    pub fn validate_staged(&self) -> anyhow::Result<()> {
+        if let Some(value) = self.safe_outputs.get("staged") {
+            anyhow::ensure!(value.is_boolean(), "safe-outputs.staged must be a boolean");
+        }
+        for tool in self.all_safe_output_tool_names() {
+            if let Some(value) = self
+                .safe_outputs
+                .get(&tool)
+                .and_then(|config| config.get("staged"))
+            {
+                anyhow::ensure!(
+                    value.is_boolean(),
+                    "safe-outputs.{tool}.staged must be a boolean"
+                );
             }
         }
         Ok(())
@@ -1769,6 +2582,11 @@ impl SanitizeConfigTrait for FrontMatter {
         for mcp in self.mcp_servers.values_mut() {
             mcp.sanitize_config_fields();
         }
+        // Import specs are structural compile-time source identifiers. Their
+        // paths/refs are validated by ImportEntry::parse_source(), repository
+        // components by dedicated guards, and source hosts/URLs by validated
+        // newtypes. Sanitizing them here would mutate valid git refs or paths
+        // after parsing and could make cache identities disagree.
         // safe_outputs: HashMap<String, serde_json::Value> — opaque JSON, sanitized at
         // Stage 3 execution via get_tool_config() when deserialized into typed configs.
         if let Some(ref mut o) = self.on_config {
@@ -1819,6 +2637,61 @@ pub struct NetworkConfig {
     /// Blocked host patterns (takes precedence over allowed)
     #[serde(default)]
     pub blocked: Vec<String>,
+}
+
+/// Abstract ADO capabilities required by a workflow or reusable component.
+///
+/// Imported requirements are unioned (logical OR) and cannot be weakened by a
+/// consumer. The concrete credentials remain consumer-owned under
+/// [`PermissionsConfig`].
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PermissionsRequired {
+    /// The agent requires a read-capable ADO token.
+    #[serde(default)]
+    pub read: bool,
+    /// A safe-output executor requires write capability. Stage 3's ordinary
+    /// default `$(System.AccessToken)` satisfies this requirement; a concrete
+    /// `permissions.write` service connection is not required.
+    #[serde(default)]
+    pub write: bool,
+}
+
+impl PermissionsRequired {
+    /// Union another component's requirements into this set.
+    pub fn union(&mut self, other: Self) {
+        self.read |= other.read;
+        self.write |= other.write;
+    }
+
+    /// Return requirements not satisfied by the consumer's available
+    /// capabilities.
+    pub fn missing_from(self, permissions: Option<&PermissionsConfig>) -> Vec<&'static str> {
+        let read_available = permissions.and_then(|value| value.read.as_ref()).is_some();
+        let mut missing = Vec::new();
+        if self.read && !read_available {
+            missing.push("read");
+        }
+        // `write: true` is always satisfied by Stage 3's ordinary default
+        // $(System.AccessToken). `permissions.write` changes identity/scope,
+        // but is not necessary for baseline write capability.
+        missing
+    }
+
+    /// Validate imported abstract requirements against the consumer-owned
+    /// concrete `permissions:` configuration.
+    pub fn validate_against(self, permissions: Option<&PermissionsConfig>) -> anyhow::Result<()> {
+        let missing = self.missing_from(permissions);
+        if !missing.is_empty() {
+            anyhow::bail!(
+                "imported components require ADO {} permission{}, but the consumer does not \
+                 provide the required Agent read capability",
+                missing.join(" and "),
+                if missing.len() == 1 { "" } else { "s" },
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Permissions configuration for ADO access tokens.
@@ -2023,14 +2896,9 @@ pub struct AdoReadProjectScope {
 /// Debug-only configuration block.
 ///
 /// Lives under the `ado-aw-debug:` top-level front-matter key. Holds knobs
-/// that only make sense for pipelines we're actively dogfooding from
-/// `githubnext/ado-aw` and that we explicitly do **not** want to advertise
-/// as part of the regular agent surface.
-///
-/// Adding a new field: pair the front-matter knob with a corresponding
-/// compile-side hook (e.g., a debug-only safe output should also be added
-/// to `crate::safe_outputs::DEBUG_ONLY_TOOLS` so the MCP layer enforces a
-/// matching default-deny gate).
+/// that only make sense for pipelines we're actively dogfooding and that we
+/// explicitly do **not** want to advertise as part of the regular agent
+/// surface.
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct AdoAwDebugConfig {
@@ -2039,20 +2907,11 @@ pub struct AdoAwDebugConfig {
     /// CLI flag.
     #[serde(default, rename = "skip-integrity")]
     pub skip_integrity: bool,
-
-    /// Configuration for the debug-only `create-issue` safe output.
-    /// Presence of this field is what enables the tool — when omitted
-    /// the SafeOutputs MCP layer hides it via `DEBUG_ONLY_TOOLS`.
-    #[serde(default, rename = "create-issue")]
-    pub create_issue: Option<crate::safe_outputs::CreateIssueConfig>,
 }
 
 impl SanitizeConfigTrait for AdoAwDebugConfig {
     fn sanitize_config_fields(&mut self) {
         // skip_integrity: bool — nothing to sanitize
-        if let Some(ref mut ci) = self.create_issue {
-            ci.sanitize_config_fields();
-        }
     }
 }
 
@@ -2265,6 +3124,8 @@ pub struct Repository {
     #[serde(default = "default_ref")]
     #[serde(rename = "ref")]
     pub repo_ref: String,
+    #[serde(default)]
+    pub endpoint: Option<String>,
 }
 
 fn default_ref() -> String {
@@ -2293,6 +3154,9 @@ pub struct RepoEntry {
     /// Branch/tag ref. Defaults to `"refs/heads/main"`.
     #[serde(default = "default_ref", rename = "ref")]
     pub repo_ref: String,
+    /// Service connection name for GitHub/GitHub Enterprise repository resources.
+    #[serde(default)]
+    pub endpoint: Option<String>,
     /// Whether the agent job checks out this repository. Defaults to `true`.
     #[serde(default = "default_checkout")]
     pub checkout: bool,
@@ -2474,6 +3338,20 @@ pub struct OnConfig {
     /// PR trigger configuration (native ADO branch/path filters + runtime filters)
     #[serde(default)]
     pub pr: Option<PrTriggerConfig>,
+    /// Push (CI) trigger configuration — the top-level ADO `trigger:` key.
+    ///
+    /// `on:` declares when this pipeline runs, so omitting `push` means it
+    /// does NOT start on a push. That has to be stated explicitly in the
+    /// compiled YAML: Azure DevOps reads a *missing* `trigger:` key as
+    /// "run CI on every branch", not "no CI".
+    ///
+    /// * `push: none` — never start on a push (also the default).
+    /// * `push: { branches: …, paths: … }` — start on matching pushes.
+    ///
+    /// An explicit `push` always wins over everything else, including the
+    /// CI trigger `on.pr`'s synthetic mode would otherwise emit.
+    #[serde(default)]
+    pub push: Option<PushTriggerConfig>,
 }
 
 impl SanitizeConfigTrait for OnConfig {
@@ -2486,6 +3364,9 @@ impl SanitizeConfigTrait for OnConfig {
         }
         if let Some(ref mut pr) = self.pr {
             pr.sanitize_config_fields();
+        }
+        if let Some(ref mut push) = self.push {
+            push.sanitize_config_fields();
         }
     }
 }
@@ -2948,6 +3829,81 @@ impl SanitizeConfigTrait for RepoContextConfig {
     }
 }
 
+// ─── Push Trigger Types ─────────────────────────────────────────────────────
+
+/// Push (CI) trigger configuration — the top-level ADO `trigger:` key.
+///
+/// Accepts either the literal scalar `none` or a mapping of native ADO
+/// branch/path filters:
+///
+/// ```yaml
+/// on:
+///   push: none               # never start on a push
+/// ```
+/// ```yaml
+/// on:
+///   push:                    # start only on pushes to main under src/
+///     branches:
+///       include: [main]
+///     paths:
+///       include: ["src/**"]
+/// ```
+///
+/// Named `push` rather than `ci` because `on:` is an event vocabulary — it
+/// sits beside `on.schedule` / `on.pr` / `on.pipeline`. ADO's internal
+/// `continuousIntegration` trigger type is an implementation detail the
+/// compiler hides, exactly as `on.pr` hides Build Validation policies.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(
+    untagged,
+    expecting = "expected `none` or a mapping with `branches` / `paths`"
+)]
+pub enum PushTriggerConfig {
+    /// `push: none`.
+    Disabled(PushNone),
+    /// `push: { branches, paths }`.
+    Filtered(PushFilterConfig),
+}
+
+/// The literal scalar `none` accepted by [`PushTriggerConfig`].
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PushNone {
+    None,
+}
+
+/// Native ADO branch/path filters for a push (CI) trigger.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct PushFilterConfig {
+    /// Native ADO branch filter for push triggers.
+    #[serde(default)]
+    pub branches: Option<BranchFilter>,
+    /// Native ADO path filter for push triggers.
+    #[serde(default)]
+    pub paths: Option<PathFilter>,
+}
+
+impl SanitizeConfigTrait for PushFilterConfig {
+    fn sanitize_config_fields(&mut self) {
+        if let Some(ref mut b) = self.branches {
+            b.sanitize_config_fields();
+        }
+        if let Some(ref mut p) = self.paths {
+            p.sanitize_config_fields();
+        }
+    }
+}
+
+impl SanitizeConfigTrait for PushTriggerConfig {
+    fn sanitize_config_fields(&mut self) {
+        // `Disabled` carries no free-form strings — the unit variant is a
+        // closed enum rejected at deserialisation time if malformed.
+        if let PushTriggerConfig::Filtered(f) = self {
+            f.sanitize_config_fields();
+        }
+    }
+}
+
 // ─── PR Trigger Types ───────────────────────────────────────────────────────
 
 /// PR trigger configuration with native ADO filters and runtime gate filters.
@@ -3198,10 +4154,277 @@ impl SanitizeConfigTrait for LabelFilter {
 mod tests {
     use super::*;
 
+    const IMPORT_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn bare_import(uses: impl Into<String>) -> ImportEntry {
+        ImportEntry {
+            uses: uses.into(),
+            with: serde_json::Map::new(),
+            repository: None,
+            source: None,
+        }
+    }
+
     fn validate_threat_detection(fm: &FrontMatter) -> anyhow::Result<()> {
         let config = fm.threat_detection_config()?;
         let effective = fm.effective_detection_engine(&config);
         fm.validate_threat_detection_config(&config, &effective)
+    }
+
+    // ─── imports field and spec parsing ─────────────────────────────────────
+
+    #[test]
+    fn test_import_canonical_object_accepts_branch_and_defaults_to_ado() {
+        let entry: ImportEntry = serde_yaml::from_str(
+            r#"
+uses: components/deploy.md@release/v1
+repository: shared
+with:
+  region: us-east-1
+  retries: 3
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            entry.with.get("region").and_then(|v| v.as_str()),
+            Some("us-east-1")
+        );
+        assert_eq!(entry.with.get("retries").and_then(|v| v.as_i64()), Some(3));
+
+        match entry.parse_source().unwrap() {
+            ParsedImportSpec::Remote {
+                source,
+                project,
+                repository,
+                path,
+                requested_ref,
+                ..
+            } => {
+                assert_eq!(source, ImportSource::default());
+                assert_eq!(project, None);
+                assert_eq!(repository, "shared");
+                assert_eq!(path, "components/deploy.md");
+                assert_eq!(requested_ref, "release/v1");
+            }
+            other => panic!("expected remote import, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_import_object_supports_cross_org_ado_collection() {
+        let entry: ImportEntry = serde_yaml::from_str(&format!(
+            "uses: deploy.md@{IMPORT_SHA}\nrepository: project/repo\n\
+             source: https://dev.azure.com/other\n"
+        ))
+        .unwrap();
+        match entry.parse_source().unwrap() {
+            ParsedImportSpec::Remote {
+                source:
+                    ImportSource::AzureRepos {
+                        collection: Some(collection),
+                    },
+                project,
+                repository,
+                ..
+            } => {
+                assert_eq!(collection.as_str(), "https://dev.azure.com/other");
+                assert_eq!(project.as_deref(), Some("project"));
+                assert_eq!(repository, "repo");
+            }
+            other => panic!("expected remote import, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_import_object_supports_github_and_ghes_hosts() {
+        let entry: ImportEntry = serde_yaml::from_str(
+            "uses: deploy.md@main\nrepository: octo/components\nsource: github.com\n",
+        )
+        .unwrap();
+        match entry.parse_source().unwrap() {
+            ParsedImportSpec::Remote {
+                source: ImportSource::GitHub { host },
+                ..
+            } => {
+                assert_eq!(host.as_str(), "github.com");
+            }
+            other => panic!("expected GitHub import, got {other:?}"),
+        }
+
+        let entry: ImportEntry = serde_yaml::from_str(
+            "uses: deploy.md@v1\nrepository: octo/components\nsource: ghe.acme.com\n",
+        )
+        .unwrap();
+        match entry.parse_source().unwrap() {
+            ParsedImportSpec::Remote {
+                source: ImportSource::GitHub { host },
+                ..
+            } => assert_eq!(host.as_str(), "ghe.acme.com"),
+            other => panic!("expected GHES import, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_import_combined_gh_aw_shorthand_and_markers_parse() {
+        let entry = bare_import(format!("owner/repo/path.md@{IMPORT_SHA}#Deploy?"));
+        match entry.parse_source().unwrap() {
+            ParsedImportSpec::Remote {
+                project,
+                repository,
+                path,
+                requested_ref,
+                section,
+                optional,
+                ..
+            } => {
+                assert_eq!(project.as_deref(), Some("owner"));
+                assert_eq!(repository, "repo");
+                assert_eq!(path, "path.md");
+                assert_eq!(requested_ref, IMPORT_SHA);
+                assert_eq!(section.as_deref(), Some("Deploy"));
+                assert!(optional);
+            }
+            other => panic!("expected remote import, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_import_branch_tag_and_sha_refs_are_accepted() {
+        for ref_part in ["main", "v1.0.0", "abc123"] {
+            let entry = bare_import(format!("owner/repo/path.md@{ref_part}"));
+            assert!(matches!(
+                entry.parse_source().unwrap(),
+                ParsedImportSpec::Remote { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn test_import_local_path_parses_and_rejects_remote_fields() {
+        match bare_import("./shared/notify.md").parse_source().unwrap() {
+            ParsedImportSpec::Local {
+                path,
+                section,
+                optional,
+            } => {
+                assert_eq!(path, "./shared/notify.md");
+                assert_eq!(section, None);
+                assert!(!optional);
+            }
+            other => panic!("expected local import, got {other:?}"),
+        }
+
+        let error =
+            serde_yaml::from_str::<ImportEntry>("uses: ./local.md\nrepository: project/repo\n")
+                .unwrap()
+                .parse_source()
+                .unwrap_err();
+        assert!(error.to_string().contains("must not set `repository`"));
+    }
+
+    #[test]
+    fn test_import_rejects_github_bare_repository_and_invalid_source_url() {
+        let entry: ImportEntry =
+            serde_yaml::from_str("uses: component.md@main\nrepository: repo\nsource: github.com\n")
+                .unwrap();
+        assert!(
+            entry
+                .parse_source()
+                .unwrap_err()
+                .to_string()
+                .contains("owner/repository")
+        );
+
+        let error = serde_yaml::from_str::<ImportEntry>(
+            "uses: component.md@main\nrepository: project/repo\n\
+             source: https://attacker.example/org\n",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("dev.azure.com"), "{error}");
+    }
+
+    #[test]
+    fn test_import_identifiers_reject_expressions_and_pipeline_commands() {
+        for uses in [
+            "./##vso[task.setvariable]component.md",
+            "owner/repo/component.md@$(REF)",
+            "owner/repo/component.md@main#${{ variables.section }}",
+        ] {
+            let error = bare_import(uses).parse_source().unwrap_err();
+            assert!(error.to_string().contains("literal value"), "{error}");
+        }
+    }
+
+    #[test]
+    fn test_imports_field_deserializes_in_front_matter() {
+        let yaml = r#"
+name: Test Agent
+description: Test imports
+imports:
+  - ./shared/notify.md
+  - uses: deploy.md@main
+    repository: acme/shared
+    source: github.com
+    with:
+      region: us-east-1
+"#
+        .to_string();
+
+        let fm: FrontMatter = serde_yaml::from_str(&yaml).unwrap();
+
+        assert_eq!(fm.imports.len(), 2);
+        assert!(matches!(
+            fm.imports[0].parse_source().unwrap(),
+            ParsedImportSpec::Local { .. }
+        ));
+        assert_eq!(
+            fm.imports[1].with.get("region").and_then(|v| v.as_str()),
+            Some("us-east-1")
+        );
+        assert!(matches!(
+            fm.imports[1].parse_source().unwrap(),
+            ParsedImportSpec::Remote {
+                source: ImportSource::GitHub { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_permissions_required_validation_seam() {
+        let required = PermissionsRequired {
+            read: true,
+            write: true,
+        };
+        let concrete = PermissionsConfig {
+            read: Some(ReadPermissionConfig::ServiceConnection(
+                crate::secure::ServiceConnection::parse("read-connection").unwrap(),
+            )),
+            write: None,
+        };
+        assert!(required.missing_from(Some(&concrete)).is_empty());
+        assert!(required.validate_against(Some(&concrete)).is_ok());
+        assert_eq!(required.missing_from(None), vec!["read"]);
+        assert!(required.validate_against(None).is_err());
+        assert!(
+            PermissionsRequired {
+                read: false,
+                write: true,
+            }
+            .validate_against(None)
+            .is_ok()
+        );
+        assert!(
+            required
+                .validate_against(Some(&PermissionsConfig {
+                    read: Some(ReadPermissionConfig::ServiceConnection(
+                        crate::secure::ServiceConnection::parse("read").unwrap(),
+                    )),
+                    write: Some("write".to_string()),
+                }))
+                .is_ok()
+        );
     }
 
     // ─── SupplyChainConfig deserialization + resolution ──────────────────────
@@ -3898,6 +5121,204 @@ github-app-token:
     }
 
     #[test]
+    fn github_issue_outputs_default_to_separate_stage3_pat() {
+        let (fm, _) = super::super::common::parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
+        )
+        .unwrap();
+        let auth = fm.github_safe_outputs_auth().unwrap().unwrap();
+        assert!(matches!(
+            auth,
+            GithubSafeOutputsAuth::Token { variable, .. }
+                if variable == DEFAULT_SAFE_OUTPUTS_GITHUB_TOKEN_VAR
+        ));
+    }
+
+    #[test]
+    fn github_issue_outputs_accept_explicit_pat_macro() {
+        let (fm, _) = super::super::common::parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-token: $(MY_ISSUES_TOKEN)\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
+        )
+        .unwrap();
+        let auth = fm.github_safe_outputs_auth().unwrap().unwrap();
+        assert!(matches!(
+            auth,
+            GithubSafeOutputsAuth::Token { variable, .. } if variable == "MY_ISSUES_TOKEN"
+        ));
+    }
+
+    #[test]
+    fn github_issue_outputs_reject_literal_pat() {
+        let (fm, _) = super::super::common::parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-token: literal-secret\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
+        )
+        .unwrap();
+        let error = fm.github_safe_outputs_auth().unwrap_err().to_string();
+        assert!(error.contains("exactly one ADO secret-variable macro"));
+    }
+
+    #[test]
+    fn github_issue_outputs_reject_agent_github_token_variable() {
+        let (fm, _) = super::super::common::parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-token: $(GITHUB_TOKEN)\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
+        )
+        .unwrap();
+        let error = fm.github_safe_outputs_auth().unwrap_err().to_string();
+        assert!(error.contains("dedicated Stage 3 secret"));
+    }
+
+    #[test]
+    fn github_issue_pat_accepts_explicit_api_url() {
+        let (fm, _) = super::super::common::parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-api-url: https://ghe.example.com/api/v3/\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
+        )
+        .unwrap();
+        let auth = fm.github_safe_outputs_auth().unwrap().unwrap();
+        assert_eq!(auth.api_url(), "https://ghe.example.com/api/v3");
+    }
+
+    #[test]
+    fn github_issue_pat_rejects_api_url_injection() {
+        let (fm, _) = super::super::common::parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-api-url: \"https://api.github.com/\\n  BASH_ENV: $(EVIL)\"\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
+        )
+        .unwrap();
+        let error = fm.github_safe_outputs_auth().unwrap_err().to_string();
+        assert!(
+            error.contains("ADO expression") || error.contains("newlines"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn github_issue_pat_rejects_api_url_fragment() {
+        let (fm, _) = super::super::common::parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-api-url: https://api.github.com/api/v3#fragment\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
+        )
+        .unwrap();
+        let error = fm.github_safe_outputs_auth().unwrap_err().to_string();
+        assert!(error.contains("query string or fragment"));
+    }
+
+    #[test]
+    fn github_issue_outputs_require_read_only_engine_app_permissions() {
+        let (fm, _) = super::super::common::parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  github-app-token:\n    app-id: 123\n    owner: octo\n    repositories: [repo]\nsafe-outputs:\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
+        )
+        .unwrap();
+        let error = fm.github_safe_outputs_auth().unwrap_err().to_string();
+        assert!(error.contains("permissions is empty"));
+    }
+
+    #[test]
+    fn github_issue_outputs_reject_write_scoped_engine_app_permissions() {
+        // When GitHub issue safe outputs inherit the engine App credentials,
+        // that App token is also handed to Agent/Detection. A `write` scope
+        // there would leak write-capable GitHub credentials into Stage 1,
+        // breaking the "isolate credentials to Stage 3" invariant.
+        let (fm, _) = super::super::common::parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  github-app-token:\n    app-id: 123\n    owner: octo\n    repositories: [repo]\n    permissions:\n      issues: write\nsafe-outputs:\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
+        )
+        .unwrap();
+        let error = fm.github_safe_outputs_auth().unwrap_err().to_string();
+        assert!(
+            error.contains("issues") && error.contains("`write`"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.contains("read-only"),
+            "error should steer the author to a read-only token: {error}"
+        );
+    }
+
+    #[test]
+    fn github_app_permissions_reject_separator_only_key_collision() {
+        // '-' and '_' spellings collapse onto one key when the mint step
+        // serializes --permissions-json, so the survivor would silently win and
+        // could flip an intended `read` to `write`. Reject at compile time.
+        let gat = GithubAppTokenConfig {
+            app_id: "123".to_string(),
+            private_key: None,
+            owner: "octo".to_string(),
+            repositories: vec!["repo".to_string()],
+            api_url: None,
+            skip_token_revocation: false,
+            permissions: [
+                ("pull-requests".to_string(), GithubAppPermissionLevel::Read),
+                ("pull_requests".to_string(), GithubAppPermissionLevel::Write),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let error = gat.validate().unwrap_err().to_string();
+        assert!(
+            error.contains("normalize to") && error.contains("pull_requests"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn github_app_permissions_accept_single_dashed_spelling() {
+        // The dashed spelling on its own stays valid — only the collision is an
+        // error, so existing `pull-requests: read` front matter keeps working.
+        let gat = GithubAppTokenConfig {
+            app_id: "123".to_string(),
+            private_key: None,
+            owner: "octo".to_string(),
+            repositories: vec!["repo".to_string()],
+            api_url: None,
+            skip_token_revocation: false,
+            permissions: [("pull-requests".to_string(), GithubAppPermissionLevel::Read)]
+                .into_iter()
+                .collect(),
+        };
+        assert!(gat.validate().is_ok());
+    }
+
+    #[test]
+    fn github_issue_outputs_accept_read_only_engine_app_permissions() {
+        // The positive counterpart: an explicitly read-only engine App token is
+        // accepted and scoped to the configured issue target.
+        let (fm, _) = super::super::common::parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  github-app-token:\n    app-id: 123\n    owner: octo\n    repositories: [repo]\n    permissions:\n      issues: read\nsafe-outputs:\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
+        )
+        .unwrap();
+        let auth = fm.github_safe_outputs_auth().unwrap().unwrap();
+        let GithubSafeOutputsAuth::App { config } = auth else {
+            panic!("expected app auth");
+        };
+        assert_eq!(config.repositories, vec!["repo".to_string()]);
+        assert_eq!(
+            config.permissions.get("issues"),
+            Some(&GithubAppPermissionLevel::Read)
+        );
+    }
+
+    #[test]
+    fn safe_outputs_github_app_accepts_client_id_alias_and_scopes_repo() {
+        let (fm, _) = super::super::common::parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-app:\n    client-id: Iv23liExample\n    owner: octo\n    repositories: [broader-repo]\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
+        )
+        .unwrap();
+        let auth = fm.github_safe_outputs_auth().unwrap().unwrap();
+        let GithubSafeOutputsAuth::App { config } = auth else {
+            panic!("expected app auth");
+        };
+        assert_eq!(config.app_id, "Iv23liExample");
+        assert_eq!(config.repositories, vec!["repo".to_string()]);
+    }
+
+    #[test]
+    fn github_app_rejects_mixed_implicit_and_explicit_issue_targets() {
+        let (fm, _) = super::super::common::parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-app:\n    client-id: Iv23liExample\n    owner: octo\n    repositories: [repo]\n  create-github-issue: {}\n  set-github-issue-type:\n    target-repo: octo/repo\n---\n",
+        )
+        .unwrap();
+        let error = fm.github_safe_outputs_auth().unwrap_err().to_string();
+        assert!(error.contains("cannot mix implicit current repository targets"));
+    }
+
+    #[test]
     fn test_github_app_token_validate_rejects_bad_app_id() {
         let gat = GithubAppTokenConfig {
             app_id: "not a valid id".to_string(),
@@ -3906,6 +5327,7 @@ github-app-token:
             repositories: vec![],
             api_url: None,
             skip_token_revocation: false,
+            permissions: Default::default(),
         };
         let err = gat.validate().unwrap_err().to_string();
         assert!(err.contains("app-id"), "unexpected error: {err}");
@@ -3941,6 +5363,7 @@ github-app-token:
             repositories: vec![],
             api_url: None,
             skip_token_revocation: false,
+            permissions: Default::default(),
         };
         let err = gat.validate().unwrap_err().to_string();
         assert!(err.contains("private-key"), "unexpected error: {err}");
@@ -3955,6 +5378,7 @@ github-app-token:
             repositories: vec![],
             api_url: None,
             skip_token_revocation: false,
+            permissions: Default::default(),
         };
         gat.validate()
             .expect("hyphenated ADO variable names are valid macro targets");
@@ -3982,6 +5406,7 @@ github-app-token:
                 repositories: vec![],
                 api_url: None,
                 skip_token_revocation: false,
+                permissions: Default::default(),
             };
             let err = gat.validate().unwrap_err().to_string();
             assert!(
@@ -4000,6 +5425,7 @@ github-app-token:
             repositories: vec![],
             api_url: None,
             skip_token_revocation: false,
+            permissions: Default::default(),
         };
         let err = gat.validate().unwrap_err().to_string();
         assert!(err.contains("owner"), "unexpected error: {err}");
@@ -4014,9 +5440,28 @@ github-app-token:
             repositories: vec!["ok-repo".to_string(), "bad;repo".to_string()],
             api_url: None,
             skip_token_revocation: false,
+            permissions: Default::default(),
         };
         let err = gat.validate().unwrap_err().to_string();
         assert!(err.contains("repositories"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_github_app_token_validate_rejects_reserved_permission_key() {
+        let gat = GithubAppTokenConfig {
+            app_id: "1234567".to_string(),
+            private_key: None,
+            owner: "octo-org".to_string(),
+            repositories: vec!["repo".to_string()],
+            api_url: None,
+            skip_token_revocation: false,
+            permissions: std::collections::BTreeMap::from([(
+                "__proto__".to_string(),
+                GithubAppPermissionLevel::Read,
+            )]),
+        };
+        let error = gat.validate().unwrap_err().to_string();
+        assert!(error.contains("reserved"));
     }
 
     // ─── PermissionsConfig deserialization ───────────────────────────────
@@ -4674,6 +6119,41 @@ Body
     }
 
     #[test]
+    fn test_custom_tools_included_in_partition_and_names() {
+        let content = r#"---
+name: "Test"
+description: "Test"
+safe-outputs:
+  jobs:
+    send-notification:
+      description: Send notification.
+      steps:
+        - bash: echo notify
+    deploy-thing:
+      description: Deploy.
+      steps:
+        - bash: echo deploy
+  send-notification:
+    require-approval: true
+---
+
+Body
+"#;
+        let (fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let mut custom = fm.custom_safe_output_tool_names();
+        custom.sort();
+        assert_eq!(custom, vec!["deploy-thing", "send-notification"]);
+        // The top-level `send-notification` key is config, not a separate tool.
+        let mut all = fm.all_safe_output_tool_names();
+        all.sort();
+        assert_eq!(all, vec!["deploy-thing", "send-notification"]);
+        // require-approval on the custom tool routes it to reviewed.
+        let (auto, reviewed) = fm.partition_safe_outputs_by_approval();
+        assert_eq!(auto, vec!["deploy-thing"]);
+        assert_eq!(reviewed, vec!["send-notification"]);
+    }
+
+    #[test]
     fn test_require_approval_detailed_object() {
         let content = r#"---
 name: "Test"
@@ -4853,12 +6333,24 @@ Body
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
         let debug = fm.ado_aw_debug.expect("ado-aw-debug should parse");
         assert!(debug.skip_integrity);
-        let ci = debug.create_issue.expect("create-issue should parse");
-        assert_eq!(ci.target_repo, "githubnext/ado-aw");
+        let ci: crate::safe_outputs::CreateGithubIssueConfig = serde_json::from_value(
+            fm.safe_outputs
+                .get("create-github-issue")
+                .expect("codemod should move create-github-issue")
+                .clone(),
+        )
+        .unwrap();
+        assert_eq!(ci.target_repo.as_deref(), Some("githubnext/ado-aw"));
         assert_eq!(ci.title_prefix.as_deref(), Some("[bug] "));
         assert_eq!(ci.labels, vec!["pipeline-failure".to_string()]);
         assert_eq!(ci.allowed_labels, vec!["agent-*".to_string()]);
         assert_eq!(ci.assignees, vec!["jamesdevine".to_string()]);
+        assert_eq!(
+            fm.safe_outputs
+                .get("github-token")
+                .and_then(|v| v.as_str()),
+            Some("$(ADO_AW_DEBUG_GITHUB_TOKEN)")
+        );
     }
 
     #[test]
@@ -4874,7 +6366,6 @@ Body
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
         let debug = fm.ado_aw_debug.unwrap();
         assert!(!debug.skip_integrity);
-        assert!(debug.create_issue.is_none());
     }
 
     #[test]

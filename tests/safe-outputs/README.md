@@ -1,151 +1,109 @@
-# Safe-output smoke suite
+# Safe-output smoke sources
 
-This directory contains the agentic-pipeline fixtures that exercise the
-full Stage 1 → Stage 2 → Stage 3 pipeline shape against the
-[AgentPlayground](https://dev.azure.com/msazuresphere/AgentPlayground)
-ADO sandbox. Each `.md` is compiled by `ado-aw compile` to a sibling
-`*.lock.yml`, and each `*.lock.yml` is registered as one Azure DevOps
-pipeline.
+Agentic pipeline sources that exercise the full Stage 1 → Stage 2 → Stage 3
+shape against the
+[AgentPlayground](https://dev.azure.com/msazuresphere/AgentPlayground) ADO
+sandbox.
+
+**These are markdown sources only.** There are no committed `*.lock.yml` files
+here and no ADO definitions registered against this directory. Each source is
+recompiled at run time by the smoke orchestrators — see
+[`tests/smoke/`](../smoke/) for the lane model, how cases are declared in
+`cases.json`, and how to add one.
 
 ## Design: canary + infra, not one-per-tool
 
-The original suite had one daily agentic smoke per safe-output tool.
-That turned out to be unnecessary: the deterministic
-[`tests/executor-e2e/`](../executor-e2e/) suite already exercises every
-tool's Stage 3 ADO REST path directly (without an LLM). The agentic
-smoke only needs to prove:
+The original suite had one daily agentic smoke per safe-output tool. That
+turned out to be unnecessary: the deterministic
+[`tests/executor-e2e/`](../executor-e2e/) suite already exercises every tool's
+Stage 3 ADO REST path directly (without an LLM). The agentic smoke only needs
+to prove:
 
-1. Stage 1: an LLM agent discovers and emits a safe-output call given
-   the MCP tool list.
+1. Stage 1: an LLM agent discovers and emits a safe-output call given the MCP
+   tool list.
 2. Stage 2: the threat-detection pass clears the NDJSON output.
-3. Stage 1 → 2 → 3 handoff: the three-job pipeline shape runs
-   end-to-end.
+3. Stage 1 → 2 → 3 handoff: the three-job pipeline shape runs end-to-end.
 
-A single successful pipeline run proves all three. The suite is now
-five pipelines:
+A single successful run proves all three.
 
-| File | Purpose |
+| Source | Purpose |
 | --- | --- |
-| `canary.md` / `canary.lock.yml` | Daily omnibus canary: the agent emits `noop` + `create-work-item` + `add-build-tag` in one run. Proves the full agentic loop with two distinct ADO write paths. |
-| `azure-cli.md` / `azure-cli.lock.yml` | Daily: verifies the AWF az CLI extension is mounted and the `az devops` command group is available. It does not claim authenticated direct ADO access. |
-| `noop-target.md` / `noop-target.lock.yml` | No-schedule target pipeline queued by the `queue-build` executor-e2e scenario (its ID feeds `E2E_QUEUE_PIPELINE_ID`). |
-| `janitor.md` / `janitor.lock.yml` | Weekly: prunes `ado-aw-smoke-*` artifacts (work items, branches, wiki pages, tags, PRs) older than 30 days from AgentPlayground. |
-| `smoke-failure-reporter.md` / `smoke-failure-reporter.lock.yml` | Daily ~04:30: queries the canary and azure-cli pipelines for failures and files `[smoke-failure] …` issues on `jamesadevine/ado-aw-issues` while canonical-repo credentials are unavailable. |
-| `REGISTERED.md` | Contributor-maintained `fixture → ADO pipeline ID` mapping. |
+| `canary.md` | Omnibus canary: the agent emits `noop` + `create-work-item` + `add-build-tag` in one run. Proves the full agentic loop with two distinct ADO write paths. |
+| `azure-cli.md` | Verifies the generated `az` wrapper reaches Azure DevOps through `ado-proxy` with sentinel client auth, while the proxy injects the real bearer only after policy allows the read. |
+| `noop-target.md` | Minimal agentic pipeline. (The executor-e2e `queue-build` target is now the separate, non-agentic [`tests/executor-e2e/queue-target.yml`](../executor-e2e/queue-target.yml).) |
+| `janitor.md` | Prunes `ado-aw-smoke-*` artifacts (work items, branches, wiki pages, tags, PRs) older than 30 days from AgentPlayground. Runs in released mode. |
 
-## Release smoke and candidate smoke
+Schedules in these sources' front matter are **stripped at staging time** — the
+orchestrator owns scheduling, because every case in a lane shares one
+definition. Keep or remove `on.schedule` as documentation of intent; it has no
+runtime effect in the smoke suite.
 
-These five registered definitions remain the **release-backed** contract: their
-checked-in YAML downloads the latest released compiler/runtime assets. A
-separate [`tests/compiler-smoke-e2e/`](../compiler-smoke-e2e/) orchestrator
-builds four selected workflows with a compiler from the current PR or nightly
-`main`, stages the regenerated sources/YAML on a short-lived `ado-aw-mirror`
-ref, and runs four fixed candidate definitions. The weekly janitor remains
-release-only. Keeping both lanes distinguishes release packaging/download
-failures from regressions in unreleased compiler output.
+## Why there are no lock files here
 
-Do **not** regenerate the checked-in `tests/safe-outputs/*.lock.yml` files with
-an unreleased development build. Their integrity step downloads the released
-compiler, so a lock generated by newer `main` code will fail before the agent
-runs even when both files display the same Cargo semver. Compiler PRs are
-validated through the ephemeral candidate lane; the release workflow's
-`recompile-safe-output-fixtures` automation updates the checked-in locks only
-after matching release assets exist.
+Committed locks previously existed so five GitHub-backed definitions could run
+the exact bytes a customer would commit, using the released compiler. That cost
+a bot-maintained recompile workflow, five definitions, and a permanent drift
+risk between the checked-in lock and the released compiler.
 
-> **Deterministic complement.** For a flake-free regression check of
-> the Stage 3 executor with no LLM in the loop, see
-> [`tests/executor-e2e/`](../executor-e2e/). That suite covers all
-> 24 ADO-write and signal safe-output tools deterministically.
->
-> **Live GitHub Actions contract.** [`tests/awf-copilot-safeoutputs/run.sh`](../awf-copilot-safeoutputs/run.sh)
-> (driven by [`.github/workflows/copilot-cli-safeoutputs.yml`](../../.github/workflows/copilot-cli-safeoutputs.yml))
-> is the customer-focused contract gate for the local agent path: it manually
-> starts real MCPG and runs the Copilot CLI inside AWF's strict network
-> topology, with SafeOutputs wired as MCPG's hardened stdio child container —
-> mirroring the containerized shape compiled pipelines use (`ado-aw mcp`
-> spawned via the pinned AWF `agent` image, `--network none`, no host-side
-> HTTP server) — asserting one `noop` NDJSON record. It never invokes
-> `ado-aw compile` — compiler topology coverage is a separate concern, tested
-> in [`tests/compiler_tests.rs`](../compiler_tests.rs).
+Released mode replaces it: the orchestrator downloads the **latest released**
+`ado-aw`, recompiles these sources with it, and every child still downloads
+released assets through its own integrity step. `assertReleaseUrlsPresent`
+makes a run that stops exercising release packaging fail closed.
+
+What that trades away, deliberately: pipelines no longer run from a
+GitHub-backed definition with real GitHub repository metadata, and the exact
+committed bytes are no longer what executes. If a metadata regression ever
+escapes, the cheapest mitigation is to re-add a single GitHub-backed canary
+with a committed lock.
+
+
+> **Deterministic complement.** For a flake-free regression check of the
+> Stage 3 executor with no LLM in the loop, see
+> [`tests/executor-e2e/`](../executor-e2e/), which covers the ADO-write and
+> signal safe-output tools deterministically.
 
 ## Naming convention
 
 Every artifact a smoke creates uses the prefix
-`ado-aw-smoke-$(Build.BuildId)-<tool>`. The janitor deletes anything
-with that prefix older than 30 days, so cleanup is automatic.
+`ado-aw-smoke-$(Build.BuildId)-<tool>`. The janitor deletes anything with that
+prefix older than 30 days, so cleanup is automatic.
 
 ## Adding a new safe output
 
 When you add `src/safe_outputs/<new-tool>.rs`:
 
-1. The compiler's `validate_safe_outputs_keys` (in
-   `src/compile/common.rs`) ensures any user-written
-   `safe-outputs: <typo>:` block fails at compile time with a
-   "did you mean …?" suggestion rather than silently dropping the key.
-2. **If the tool has an ADO write path** (it calls any ADO REST API),
-   add a scenario in
+1. The compiler's `validate_safe_outputs_keys` (in `src/compile/common.rs`)
+   ensures any user-written `safe-outputs: <typo>:` block fails at compile time
+   with a "did you mean ...?" suggestion rather than silently dropping the key.
+2. **If the tool has an ADO write path** (it calls any ADO REST API), add a
+   scenario in
    [`scripts/ado-script/src/executor-e2e/scenarios/`](../../scripts/ado-script/src/executor-e2e/scenarios/):
-   set up preconditions, craft the NDJSON, assert the ADO effect, and
-   clean up. Wire it into `index.ts` via the appropriate scenario array.
-3. **If the tool is a signal-only tool** (no ADO side effect — like
-   `noop`, `missing-tool`, `missing-data`, `report-incomplete`), add a
-   scenario in the `signals.ts` file in the same directory instead.
-4. Only add a dedicated agentic smoke here if the new tool requires
-   a fundamentally new kind of agent prompt or MCP wiring that the
-   existing `canary.md` does not exercise.
-5. Debug-only tools (currently only `create-issue`) are excluded from
-   both suites — exercised by `smoke-failure-reporter.md`.
+   set up preconditions, craft the NDJSON, assert the ADO effect, and clean up.
+   Wire it into `index.ts` via the appropriate scenario array.
+3. **If the tool is a signal-only tool** (no ADO side effect — like `noop`,
+   `missing-tool`, `missing-data`, `report-incomplete`), add a scenario in
+   `signals.ts` in the same directory instead.
+4. Only add a dedicated agentic smoke here if the new tool requires a
+   fundamentally new kind of agent prompt or MCP wiring that the existing
+   `canary.md` does not exercise. A smoke case is a markdown file plus one
+   entry in [`tests/smoke/cases.json`](../smoke/cases.json).
+5. **If the tool writes to GitHub rather than ADO** (`create-github-issue`,
+   `set-github-issue-type`), neither suite covers it today — see
+   [#1798](https://github.com/githubnext/ado-aw/issues/1798). Executor-e2e is
+   the right home; it already files GitHub issues from its own failure
+   reporter, so the REST plumbing exists.
 
 ## Running locally
 
-```bash
-# Verify a checked-in release fixture with the matching released binary:
-ado-aw check tests/safe-outputs/canary.lock.yml
+These sources carry no committed lock files, so there is nothing to `check`
+against a released binary. To compile one with the binary under test:
 
-# Exercise an unreleased checkout without changing release locks:
-cd scripts/ado-script
-npm run build:compiler-smoke-e2e
+```bash
+cargo run -- compile --force tests/safe-outputs/canary.md
 ```
 
-Confirm `ado-aw --version` matches the version in the lock-file header before
-using `ado-aw check`. Never use `cargo run -- compile` to overwrite these
-release-owned locks; the candidate harness performs development recompilation
-inside a temporary worktree.
+Both smoke lanes recompile from source at run time, so a local compile is for
+inspection only — delete the generated `.lock.yml` rather than committing it.
 
-## Manual handoff (one-time ADO setup)
-
-In `https://dev.azure.com/msazuresphere/AgentPlayground`:
-
-1. Confirm or create service connections `agent-playground-read` and
-   `agent-playground-write`.
-2. Bulk-register the smoke pipelines with `ado-aw enable`:
-
-   ```powershell
-   cargo run -- enable `
-     --org msazuresphere --project AgentPlayground `
-     --service-connection github.com_githubnext `
-     --also-set-token `
-     --folder '\smoke' `
-     tests/safe-outputs/
-   ```
-
-   Keep CI and PR triggers disabled on every resulting release-smoke
-   definition. These definitions are scheduled/manual only; compiler PRs are
-   validated by `tests/compiler-smoke-e2e/`.
-
-3. Capture each Pipeline ID and update `REGISTERED.md`.
-4. Provision the `ADO_AW_DEBUG_GITHUB_TOKEN` secret (fine-grained PAT,
-   Issues: read/write on `jamesadevine/ado-aw-issues`) on the
-   `smoke-failure-reporter` pipeline **only**. Confirm the staging repository
-   has the `pipeline-failure` and `ado-aw-smoke` labels.
-5. Set `EXECUTOR_E2E_ISSUE_REPO=jamesadevine/ado-aw-issues` and
-   `E2E_QUEUE_PIPELINE_ID` on the
-   executor-e2e pipeline using the `noop-target` pipeline ID from
-   step 3.
-6. Trigger one manual run per pipeline to seed the schedule.
-
-> **Existing-definition cutover.** `ado-aw enable` matches definitions by YAML
-> path and will reuse the four legacy registrations. To create side-by-side
-> replacements before deleting the old definitions, register the five YAML
-> paths explicitly with `az pipelines create --skip-run true`, configure and
-> validate the returned IDs, then retire the legacy IDs.
+For the ADO-side setup runbook, see
+[`tests/smoke/REGISTERED.md`](../smoke/REGISTERED.md).

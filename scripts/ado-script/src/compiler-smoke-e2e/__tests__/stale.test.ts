@@ -8,7 +8,7 @@ const HOUR = 3_600_000;
 const CHILD_DEFINITION_IDS = [901, 902, 903];
 
 function ref(buildId: number): RemoteRef {
-  return { ref: `refs/heads/ado-aw-smoke-candidate/${buildId}`, sha: `sha-${buildId}` };
+  return { ref: `refs/heads/ado-aw-smoke-candidate/${buildId}/canary`, sha: `sha-${buildId}` };
 }
 
 interface ClientOpts {
@@ -36,9 +36,9 @@ function client(builds: Record<number, StaleScanBuild>, opts: ClientOpts = {}): 
 
 const baseOpts = {
   baseRef: "refs/heads/main",
-  ownRef: "refs/heads/ado-aw-smoke-candidate/999",
+  ownRef: "refs/heads/ado-aw-smoke-candidate/999/canary",
   definitionId: 42,
-  childDefinitionIds: CHILD_DEFINITION_IDS,
+  laneDefinitionIds: CHILD_DEFINITION_IDS,
   staleRefHours: 24,
 };
 
@@ -137,7 +137,7 @@ describe("scanStaleRefs", () => {
       ...baseOpts,
       refs: [
         { ref: "refs/heads/main", sha: "base" },
-        { ref: "refs/heads/ado-aw-smoke-candidate/999", sha: "own" },
+        { ref: "refs/heads/ado-aw-smoke-candidate/999/canary", sha: "own" },
       ],
       client: client({}),
       now: () => NOW,

@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use log::warn;
 
 use crate::audit::model::{AuditData, AwInfo, ErrorInfo, PipelineGraphSection};
 use crate::compile::ir::summary::{JobSummary, PipelineSummary};
@@ -13,6 +14,12 @@ use crate::compile::ir::summary::{JobSummary, PipelineSummary};
 /// emitted by the Agent job. Missing local sources are common when auditing an
 /// arbitrary build, so absence is recorded as a warning rather than an error.
 pub async fn populate_pipeline_graph(audit: &mut AuditData, run_dir: &Path) -> Result<()> {
+    audit.pipeline_graph = None;
+    for job in &mut audit.jobs {
+        job.upstream_jobs.clear();
+        job.downstream_jobs.clear();
+    }
+
     let source = match read_source_from_aw_info(run_dir).await {
         Some(Ok(value)) if !value.trim().is_empty() => Some(value),
         Some(Err(err)) => {
@@ -21,11 +28,8 @@ pub async fn populate_pipeline_graph(audit: &mut AuditData, run_dir: &Path) -> R
             // from a bad run is a realistic scenario; downgrade to
             // the same warn-and-continue path documented for
             // resolve_source_path failures below.
-            record_warning(
-                audit,
-                "audit::pipeline_graph",
-                format!("failed to read aw_info.json: {err:#}; skipping IR graph correlation"),
-            );
+            warn!("Failed to read aw_info.json; skipping IR graph correlation: {err:#}");
+            crate::audit::push_warning_once(audit, crate::audit::malformed_aw_info_warning());
             return Ok(());
         }
         _ => audit
@@ -85,7 +89,7 @@ pub async fn populate_pipeline_graph(audit: &mut AuditData, run_dir: &Path) -> R
 
 fn populate_job_edges(audit: &mut AuditData, summary: &PipelineSummary) {
     for job in &mut audit.jobs {
-        let Some(ir_job) = find_matching_job_summary(summary, &job.name) else {
+        let Some(ir_job) = find_matching_job_summary(summary, job) else {
             continue;
         };
         let job_id = ir_job.id.as_str();
@@ -108,11 +112,25 @@ fn populate_job_edges(audit: &mut AuditData, summary: &PipelineSummary) {
 
 fn find_matching_job_summary<'a>(
     summary: &'a PipelineSummary,
-    timeline_name: &str,
+    timeline_job: &crate::audit::model::JobData,
 ) -> Option<&'a JobSummary> {
-    summary
+    if let Some(job) = summary
         .all_jobs()
-        .find(|job| timeline_name_matches_job(timeline_name, &job.id, job.stage.as_deref()))
+        .find(|job| timeline_job.stable_matches_ir_id(&job.id))
+    {
+        return Some(job);
+    }
+    if let Some(job) = summary
+        .all_jobs()
+        .find(|job| timeline_name_matches_job(&timeline_job.name, &job.id, job.stage.as_deref()))
+    {
+        return Some(job);
+    }
+    let display_matches = summary
+        .all_jobs()
+        .filter(|job| job.display_name == timeline_job.name)
+        .collect::<Vec<_>>();
+    (display_matches.len() == 1).then(|| display_matches[0])
 }
 
 pub(crate) fn timeline_name_matches_job(
@@ -195,17 +213,21 @@ async fn find_artifact_dir(run_dir: &Path, prefix: &str) -> Option<PathBuf> {
 }
 
 fn record_warning(audit: &mut AuditData, source: &str, message: impl Into<String>) {
-    audit.warnings.push(ErrorInfo {
-        source: source.to_string(),
-        message: message.into(),
-        timestamp: None,
-    });
+    crate::audit::push_warning_once(
+        audit,
+        ErrorInfo {
+            source: source.to_string(),
+            message: message.into(),
+            timestamp: None,
+        },
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::audit::model::JobData;
+    use crate::compile::ir::summary::{GraphSummary, JobSummary, PipelineBodySummary, PoolSummary};
 
     #[tokio::test]
     async fn populate_pipeline_graph_correlates_jobs_from_aw_info_source() {
@@ -408,7 +430,30 @@ mod tests {
             .await
             .expect("write malformed aw_info");
 
-        let mut audit = AuditData::default();
+        let mut audit = AuditData {
+            pipeline_graph: Some(PipelineGraphSection {
+                source_path: String::from("stale.md"),
+                summary: PipelineSummary {
+                    schema_version: 1,
+                    name: String::from("stale"),
+                    shape: String::from("standalone"),
+                    body: PipelineBodySummary::Jobs { jobs: Vec::new() },
+                    graph: GraphSummary {
+                        step_locations: Vec::new(),
+                        job_edges: Vec::new(),
+                        stage_edges: Vec::new(),
+                        outputs_needing_is_output: Vec::new(),
+                    },
+                },
+            }),
+            jobs: vec![crate::audit::model::JobData {
+                name: String::from("Custom"),
+                upstream_jobs: vec![String::from("OldUpstream")],
+                downstream_jobs: vec![String::from("OldDownstream")],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
         populate_pipeline_graph(&mut audit, &run_dir)
             .await
             .expect("populate graph must not bail on corrupt aw_info.json");
@@ -417,14 +462,56 @@ mod tests {
             audit.pipeline_graph.is_none(),
             "corrupt aw_info.json must not populate pipeline_graph"
         );
+        assert!(audit.jobs[0].upstream_jobs.is_empty());
+        assert!(audit.jobs[0].downstream_jobs.is_empty());
         assert!(
-            audit
-                .warnings
-                .iter()
-                .any(|w| w.source == "audit::pipeline_graph"
-                    && w.message.contains("failed to read aw_info.json")),
+            audit.warnings.iter().any(|w| w.source == "audit::aw_info"
+                && w.message
+                    .contains("aw_info.json could not be read or parsed")),
             "expected a warning recording the read failure, got {:?}",
             audit.warnings
         );
+    }
+
+    #[test]
+    fn cached_display_name_matches_only_one_graph_job() {
+        let job = |id: &str| JobSummary {
+            id: id.to_string(),
+            stage: None,
+            display_name: String::from("Notify team"),
+            depends_on: Vec::new(),
+            condition: None,
+            pool: PoolSummary::Server,
+            steps: Vec::new(),
+        };
+        let summary = PipelineSummary {
+            schema_version: 1,
+            name: String::from("test"),
+            shape: String::from("standalone"),
+            body: PipelineBodySummary::Jobs {
+                jobs: vec![job("Custom_notify_team")],
+            },
+            graph: GraphSummary {
+                step_locations: Vec::new(),
+                job_edges: Vec::new(),
+                stage_edges: Vec::new(),
+                outputs_needing_is_output: Vec::new(),
+            },
+        };
+        let cached = JobData {
+            name: String::from("Notify team"),
+            ..Default::default()
+        };
+        assert_eq!(
+            find_matching_job_summary(&summary, &cached).map(|job| job.id.as_str()),
+            Some("Custom_notify_team")
+        );
+
+        let mut ambiguous = summary;
+        let PipelineBodySummary::Jobs { jobs } = &mut ambiguous.body else {
+            unreachable!()
+        };
+        jobs.push(job("Custom_publish_summary"));
+        assert!(find_matching_job_summary(&ambiguous, &cached).is_none());
     }
 }

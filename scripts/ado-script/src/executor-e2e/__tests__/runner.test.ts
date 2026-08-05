@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import { runScenario } from "../runner.js";
 import { SkipError } from "../scenario.js";
-import type { Scenario, ScenarioContext } from "../scenario.js";
+import type { ExecutedRecord, Scenario, ScenarioContext } from "../scenario.js";
 
 function fakeCtx(): ScenarioContext {
   return {
@@ -124,6 +124,147 @@ fs.writeFileSync(path.join(out, "safe-outputs-executed.ndjson"), JSON.stringify(
       expect(res).toMatchObject({ ok: true, tool: "upload-pipeline-artifact-sha-mismatch" });
       expect(asserted).toBe(false);
       expect(cleaned).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * `priorEntries` lets one scenario stage extra safe-output lines ahead of its
+ * primary entry inside a single `ado-aw execute` run. These tests use a fake
+ * binary that echoes the staged NDJSON back as executed records, so they
+ * exercise the real staging/ordering/validation path without a real executor.
+ */
+describe("runScenario prior entries", () => {
+  /**
+   * Fake `ado-aw` that turns every staged input line into an executed record,
+   * preserving order. `statuses` overrides the status for a given tool.
+   */
+  async function writeEchoBin(dir: string, statuses: Record<string, string> = {}): Promise<string> {
+    const bin = join(dir, "echo-ado-aw.js");
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+const out = process.argv[process.argv.indexOf("--safe-output-dir") + 1];
+const statuses = ${JSON.stringify(statuses)};
+const lines = fs.readFileSync(path.join(out, "safe_outputs.ndjson"), "utf8")
+  .split(/\\r?\\n/).filter((l) => l.trim());
+const records = lines.map((l, i) => {
+  const parsed = JSON.parse(l);
+  return {
+    name: parsed.name.replaceAll("-", "_"),
+    status: statuses[parsed.name] ?? "succeeded",
+    error: statuses[parsed.name] ? "synthetic prior failure" : null,
+    result: { order: i, tool: parsed.name },
+  };
+});
+fs.writeFileSync(
+  path.join(out, "safe-outputs-executed.ndjson"),
+  records.map((r) => JSON.stringify(r)).join("\\n") + "\\n",
+);
+`,
+      { encoding: "utf8", mode: 0o755 },
+    );
+    return bin;
+  }
+
+  function handoffScenario(
+    onAssert: (records: ExecutedRecord[]) => void,
+  ): Scenario<unknown> {
+    return {
+      id: "prior-entry-handoff",
+      tool: "set-github-issue-type",
+      config: () => ({ "target-repo": "o/r" }),
+      setup: async () => ({}),
+      priorEntries: async () => [
+        { tool: "create-github-issue", config: { "target-repo": "o/r" }, entry: { title: "t" } },
+      ],
+      ndjson: async () => ({ issue_number: "#aw_x1" }),
+      assert: async (_ctx, _state, _record, records) => onAssert(records),
+      cleanup: async () => {},
+    };
+  }
+
+  it("writes prior entries before the primary entry and exposes all records to assert", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ado-aw-runner-prior-"));
+    try {
+      const bin = await writeEchoBin(dir);
+      let seen: ExecutedRecord[] = [];
+      const res = await runScenario(
+        { ...fakeCtx(), adoAwBin: bin, workDir: dir },
+        handoffScenario((records) => {
+          seen = records;
+        }),
+      );
+      expect(res.ok).toBe(true);
+      // Ordering matters: the producer must execute first, otherwise the
+      // in-process temporary-id registry has nothing to resolve.
+      expect(seen.map((r) => r.name)).toEqual([
+        "create_github_issue",
+        "set_github_issue_type",
+      ]);
+      expect(seen[0]!.result!.order).toBe(0);
+      expect(seen[1]!.result!.order).toBe(1);
+
+      // Both tools must appear in the rendered front matter, or the executor
+      // would report "not configured for this workflow".
+      const source = await readFile(join(dir, "prior-entry-handoff", "source.md"), "utf8");
+      expect(source).toContain('"create-github-issue"');
+      expect(source).toContain('"set-github-issue-type"');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails in the execute phase when a prior entry did not succeed", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ado-aw-runner-prior-fail-"));
+    try {
+      const bin = await writeEchoBin(dir, { "create-github-issue": "failed" });
+      let asserted = false;
+      const res = await runScenario(
+        { ...fakeCtx(), adoAwBin: bin, workDir: dir },
+        handoffScenario(() => {
+          asserted = true;
+        }),
+      );
+      expect(res.ok).toBe(false);
+      expect(res.phase).toBe("execute");
+      expect(res.message).toContain("prior entry 'create-github-issue'");
+      // The prerequisite failure must not be reported as an assertion failure.
+      expect(asserted).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails in the execute phase when a prior entry produced no record", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ado-aw-runner-prior-missing-"));
+    try {
+      const bin = join(dir, "drop-prior.js");
+      await writeFile(
+        bin,
+        `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+const out = process.argv[process.argv.indexOf("--safe-output-dir") + 1];
+fs.writeFileSync(path.join(out, "safe-outputs-executed.ndjson"), JSON.stringify({
+  name: "set_github_issue_type",
+  status: "succeeded",
+  result: {},
+}) + "\\n");
+`,
+        { encoding: "utf8", mode: 0o755 },
+      );
+      const res = await runScenario(
+        { ...fakeCtx(), adoAwBin: bin, workDir: dir },
+        handoffScenario(() => {}),
+      );
+      expect(res.ok).toBe(false);
+      expect(res.phase).toBe("execute");
+      expect(res.message).toContain("produced no executed record");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

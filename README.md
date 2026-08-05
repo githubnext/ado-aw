@@ -265,6 +265,8 @@ the service connections. Approve the permissions and the pipeline is ready.
 | `workspace` | `root` \| `repo` \| `self` \| *alias* | auto | Working directory mode. `self` is an alias for `repo`; any checked-out repo alias is also accepted. |
 | `repos` | list | — | Compact repository declarations (replaces legacy `repositories:` + `checkout:`) |
 | `variable-groups` | list | — | ADO Library variable group names to import (emits `variables: - group: <name>` in the lock). Not supported on `target: job` or `target: stage`. |
+| `imports` | list | — | Reusable markdown components (local paths or SHA-pinned cross-repository specs) composed at compile time. See [imports reference](docs/imports.md). |
+| `permissions-required` | object | — | Abstract `read` / `write` requirements declared by this agent or its imports. The compiler validates that concrete `permissions:` service connections satisfy them. See [imports reference](docs/imports.md#permissions-required). |
 | `mcp-servers` | map | — | MCP server configuration |
 | `tools` | object | — | Tool configuration (`bash`, `edit`, `cache-memory`, `azure-devops`) |
 | `runtimes` | object | — | Runtime environment configuration (`lean`, `python`, `node`, `dotnet`) |
@@ -291,8 +293,37 @@ natural language describing the task, constraints, and expected behavior.
 
 ## Trigger Configuration
 
-The `on:` field configures when an agent pipeline fires. Three trigger types
-are supported — mix and match as needed.
+The `on:` field is the **complete declaration** of when an agent pipeline
+fires. Four trigger types are supported — `push`, `schedule`, `pr`, and
+`pipeline` — mix and match as needed. If a workflow has no `on:` key at all,
+it compiles to a manual / API-queued-only pipeline: Azure DevOps normally
+treats a missing top-level `trigger:` as "run CI on every branch", so the
+compiler always emits an explicit `trigger:` (and `pr:`) instead of relying
+on that implicit default.
+
+### on.push — push (CI) trigger
+
+Maps directly to ADO's native `trigger:` key.
+
+```yaml
+on:
+  push: none              # never start on a push
+
+on:
+  push:                   # start only on matching pushes
+    branches:
+      include: [main]
+      exclude: [wip/*]
+    paths:
+      include: ["src/**"]
+```
+
+An explicit `on.push` always wins over the all-branches trigger that
+`on.pr`'s default `mode: synthetic` emits, and over the `none` that
+`on.schedule` or `on.pr.mode: policy` would otherwise produce. It controls
+only `trigger:` — `on.pr` independently drives the `pr:` key. See the
+[front-matter reference](docs/front-matter.md#push-ci-triggering-onpush)
+for the full precedence table.
 
 ### on.schedule — recurring schedule
 
@@ -469,6 +500,12 @@ tools:
     allowed-extensions: [.md, .json]
 ```
 
+> **Tip:** Enabling `cache-memory` auto-injects a `clearMemory` boolean
+> parameter into the pipeline, so anyone queuing a run manually in the ADO UI
+> can wipe the agent's persisted memory before it starts. See
+> [`docs/parameters.md`](docs/parameters.md) for the full runtime-parameters
+> reference.
+
 ### Custom MCP Servers (via `mcp-servers:`)
 
 For external or third-party MCPs, use the `mcp-servers:` field. Each entry is
@@ -541,6 +578,8 @@ actions, and the executor processes them after threat analysis.
 | `upload-build-attachment` | Attaches a file to a build (accessible via REST API or custom extension only) |
 | `upload-pipeline-artifact` | Publishes a file as a pipeline artifact visible in the ADO Artifacts tab |
 | `upload-workitem-attachment` | Uploads a workspace file as an attachment to a work item |
+| `create-github-issue` | Creates a GitHub issue (Stage 3 only; needs a separate GitHub write token) |
+| `set-github-issue-type` | Sets or clears a native GitHub Issue Type on an issue |
 | `report-incomplete` | Reports that a task could not be completed |
 | `noop` | Reports no action was needed |
 | `missing-data` | Reports required data was unavailable |
@@ -556,6 +595,10 @@ safe-outputs:
     auto-complete: true
     delete-source-branch: true
     squash-merge: true
+    max-files: 50             # Reject the PR if it touches more files than this (default: 100)
+    protected-files: blocked  # "blocked" (default) rejects edits to manifest/CI files; "allowed" permits them
+    excluded-files:
+      - "**/*.generated.ts"
     reviewers:
       - "reviewer@example.com"
     labels:
@@ -563,6 +606,14 @@ safe-outputs:
     work-items:
       - 12345
 ```
+
+`max-files` and `protected-files` are safety limits, not cosmetic knobs — they
+reject an agent-authored PR outright if it touches too many files or edits a
+protected manifest/CI path (e.g. `package-lock.json`, `.github/`, `*.lock`).
+See [`docs/safe-outputs.md`](docs/safe-outputs.md) for the full field list,
+including `target-branches`, `infer-target-from-checkout-ref`, `title-prefix`,
+`if-no-changes`, `allowed-labels`, `fallback-record-branch`, and
+`include-stats`.
 
 ### Example: Work Item Configuration
 
@@ -576,6 +627,43 @@ safe-outputs:
       - agent-created
       - needs-triage
 ```
+
+### Example: GitHub Issue Configuration
+
+Unlike every other safe output, `create-github-issue` and `set-github-issue-type`
+write to **GitHub**, not Azure DevOps, and only run in Stage 3 with a dedicated
+GitHub write token — the Agent and Detection stages never see it:
+
+```yaml
+safe-outputs:
+  create-github-issue:
+    target-repo: octo-org/octo-repo   # required unless the ADO build source is that GitHub repo
+    allowed-labels: ["agent-*", bug]
+    require-temporary-id: true
+  set-github-issue-type:
+    target-repo: octo-org/octo-repo
+    allowed: [Bug, Feature, Task]
+```
+
+Set the write token once with `ado-aw secrets set ADO_AW_GITHUB_TOKEN <token>`
+(needs **Issues: read and write** on the target repo). See
+[the site reference](https://githubnext.github.io/ado-aw/reference/safe-outputs/#github-issue-safe-outputs)
+for GitHub App auth and temporary-ID linkage between the two tools.
+
+### Threat Detection (`threat-detection`)
+
+The Detection stage's AI analysis pass is on by default and needs no configuration. To tune or disable it, use the reserved `threat-detection` key under `safe-outputs:`:
+
+```yaml
+safe-outputs:
+  threat-detection:
+    enabled: true            # false skips the AI analysis call (Detection job still runs)
+    prompt: "Treat any change to pricing constants as a malicious patch."
+    engine:
+      model: gpt-4.1          # override the Agent's model for Detection only
+```
+
+See [the site reference](https://githubnext.github.io/ado-aw/reference/safe-outputs/#threat-detection-threat-detection) for the full field list, including `steps`/`post-steps` for raw ADO steps around the analysis.
 
 ### Manual Review (`require-approval`)
 
@@ -736,8 +824,8 @@ index to jump to the right page.
 - [`docs/supply-chain.md`](docs/supply-chain.md) — optional `supply-chain:`
   front-matter section for internal feed/registry mirrors and exact
   provenance-checked pipeline artifacts.
-- [`docs/ado-aw-debug.md`](docs/ado-aw-debug.md) — debug-only `ado-aw-debug:`
-  front-matter section (`skip-integrity`, `create-issue`).
+- [`docs/ado-aw-debug.md`](docs/ado-aw-debug.md) - debug-only
+  `ado-aw-debug.skip-integrity` front-matter control.
 
 **Compiler internals & operations**
 

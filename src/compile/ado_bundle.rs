@@ -199,7 +199,8 @@ impl Bundle {
             | Bundle::ExecContextSchedule
             | Bundle::Conclusion
             // Fetches/deepens the target branch over the ADO bearer (bearerEnv).
-            | Bundle::PreparePrBase => BundleAuth::Bearer,
+            | Bundle::PreparePrBase
+            => BundleAuth::Bearer,
             // Pure filesystem / git-without-auth / argv — no bearer.
             Bundle::Import
             | Bundle::ExecContextManual
@@ -271,8 +272,7 @@ mod tests {
     fn every_bundle_path_is_under_the_unpack_dir() {
         for b in Bundle::ALL {
             assert!(
-                b.path()
-                    .starts_with("/tmp/ado-aw-scripts/ado-script/"),
+                b.path().starts_with("/tmp/ado-aw-scripts/ado-script/"),
                 "{b:?} path must live under the unzip destination"
             );
             assert!(b.path().ends_with(".js"), "{b:?} path must be a .js bundle");
@@ -288,7 +288,7 @@ mod tests {
             match b.auth() {
                 BundleAuth::Bearer => assert!(
                     has_token,
-                    "{b:?} is Bearer and must carry SYSTEM_ACCESSTOKEN"
+                    "{b:?} requires a bearer and apply_bundle_auth must project it"
                 ),
                 BundleAuth::None => assert!(
                     !has_token,
@@ -306,10 +306,7 @@ mod tests {
             token_source_for(Some("my-sc")),
             TokenSource::WriteServiceConnection
         );
-        assert_eq!(
-            token_source_for(Some("my-sc")).variable(),
-            "SC_WRITE_TOKEN"
-        );
+        assert_eq!(token_source_for(Some("my-sc")).variable(), "SC_WRITE_TOKEN");
     }
 
     #[test]

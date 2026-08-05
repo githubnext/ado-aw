@@ -56,6 +56,7 @@ mod tests {
         let mut setup = Job::new(JobId::new("Setup").unwrap(), "Setup", pool());
         setup.push_step(Step::Checkout(CheckoutStep {
             repository: CheckoutRepo::Self_,
+            path: None,
             clean: Some(true),
             submodules: None,
             fetch_depth: None,

@@ -65,7 +65,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── mod.rs        # Module entry point and Compiler trait
 │   │   ├── common.rs     # Shared helpers across targets
 │   │   ├── ado_bundle.rs # Registry of ado-script bundles and their compile-time env contracts: Bundle enum (path + auth), apply_bundle_auth() (single chokepoint projecting SYSTEM_ACCESSTOKEN into every REST-calling bundle step), token_source_for() (System.AccessToken vs SC_WRITE_TOKEN selection), is_redundant_ado_mirror() (identifies auto-injected ADO predefined var re-projections)
-│   │   ├── agentic_pipeline.rs # Canonical Setup → Agent → Detection → (ManualReview?) → SafeOutputs(+SafeOutputs_Reviewed?) → Teardown → Conclusion shape (Conclusion emitted when configured; shared by every target); BuiltPipelineContext, build_pipeline_context, build_canonical_jobs, per-job builders incl. build_manual_review_job + SafeOutputsVariant split, fold_agent_conditions, agent_job_variables_hoist
+│   │   ├── agentic_pipeline.rs # Canonical Setup → Agent → Detection → (ManualReview?) → Custom_<tool>* → SafeOutputs(+SafeOutputs_Reviewed?) → Teardown → Conclusion shape (Conclusion emitted when configured; shared by every target); BuiltPipelineContext, build_pipeline_context, build_canonical_jobs, per-job builders incl. build_manual_review_job + custom safe-output jobs + SafeOutputsVariant split, fold_agent_conditions, agent_job_variables_hoist
 │   │   ├── standalone.rs # Standalone pipeline compiler
 │   │   ├── standalone_ir.rs # Standalone target typed-IR builder
 │   │   ├── onees.rs      # 1ES Pipeline Template compiler
@@ -79,6 +79,12 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── filter_ir.rs  # Filter expression IR: Fact/Predicate types, lowering, validation, codegen
 │   │   ├── pr_filters.rs # PR trigger filter generation (native ADO + gate steps)
 │   │   ├── path_layout_check.rs # Warning-only checkout-aware path validation: $(Build.SourcesDirectory)/<seg> refs in steps, runtime-import targets, deprecated directory markers in the body
+│   │   ├── custom_tools.rs # Typed custom safe-output job model, closed MCP schemas, resolved execution config, and shared argument validation
+│   │   ├── imports/      # Reusable component imports: ADO-first source/ref resolution, bounded nested graph + SHA-keyed cache, import-schema substitution, and field-specific merge semantics
+│   │   │   ├── mod.rs    # Resolution entry point: source/ref parsing, nested import graph, SHA-keyed `.ado-aw/imports/` cache
+│   │   │   ├── schema.rs # import-schema input substitution
+│   │   │   ├── merge.rs  # Field-specific merge semantics for imported front matter
+│   │   │   └── integration_tests.rs # Import resolution + merge integration tests
 │   │   ├── extensions/   # CompilerExtension trait and infrastructure extensions
 │   │   │   ├── mod.rs    # Trait, Extension enum, collect_extensions(), re-exports
 │   │   │   ├── ado_aw_marker.rs # Always-on metadata marker extension (emits # ado-aw-metadata JSON)
@@ -105,6 +111,8 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   │   ├── 0003_flatten_work_item_config.rs # Legacy work-item config flatten codemod
 │   │   │   ├── 0004_legacy_path_markers.rs # Migrate {{ workspace }}/{{ working_directory }}/{{ trigger_repo_directory }} markers → explicit ADO path exprs (resolved from workspace:/repos:)
 │   │   │   ├── 0005_drop_build_attachment_allowed_build_ids.rs # Remove inert safe-outputs.upload-build-attachment.allowed-build-ids key (build attachments are current-run only)
+│   │   │   ├── 0006_explicit_push_trigger.rs # Pin the legacy implicit all-branches push trigger for sources whose committed lock predates 0.49.0
+│   │   │   ├── 0007_promote_debug_create_github_issue.rs # Move legacy ado-aw-debug.create-issue into public safe-outputs.create-github-issue with auth bridge
 │   │   │   └── helpers.rs # take_key, insert_no_overwrite, rename_key, ConflictPolicy
 │   │   ├── codemod_integration_test.rs # White-box rewrite-path tests (stub registry injection)
 │   │   ├── types.rs      # Front matter grammar and types
@@ -123,10 +131,11 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │       ├── emit.rs   # Thin `lower() + serde_yaml::to_string()` wrapper
 │   │       └── summary.rs # Public, serializable PipelineSummary / GraphSummary for agent-facing tooling (see docs/ir.md Public JSON summary)
 │   ├── init.rs           # Repository initialization for AI-first authoring: scaffolds a dispatcher agent (.github/agents/ado-aw.agent.md) AND skill (.github/skills/ado-aw/SKILL.md); `--agency` plugin scaffold embeds agency/plugins/ado-aw/ via include_str!
-│   ├── execute.rs        # Stage 3 safe output execution
+│   ├── execute.rs        # Stage 3 built-in safe-output execution plus validation/materialization of aggregate ADO_AW_AGENT_OUTPUT for custom jobs
 │   ├── fuzzy_schedule.rs # Fuzzy schedule parsing
 │   ├── logging.rs        # File-based logging infrastructure
 │   ├── mcp.rs            # SafeOutputs stdio MCP server
+│   ├── mcp_custom_tools.rs # Dynamic SafeOutputs MCP tool registration from compiler-generated custom-tools JSON
 │   ├── mcp_author/       # Author-facing read-only MCP server for local IDE/Copilot Chat integrations
 │   │   ├── mod.rs        # Tool router + handlers for inspect/graph/deps/outputs/whatif/lint/catalog/trace/audit
 │   │   └── tests.rs      # MCP-author integration / contract tests
@@ -155,6 +164,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── url.rs        # Build-reference parsing (bare ID, full ADO URL)
 │   │   ├── analyzers/    # Per-signal analyzers that populate AuditData sections
 │   │   │   ├── mod.rs
+│   │   │   ├── custom_jobs.rs  # Job-level audit correlation for custom safe-output jobs
 │   │   │   ├── detection.rs    # Detection-stage artifact analysis
 │   │   │   ├── firewall.rs     # AWF network log analysis
 │   │   │   ├── jobs.rs         # Build timeline / job-level analysis
@@ -179,6 +189,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   └── catalog.rs    # `ado-aw catalog`: list in-tree registries (safe-outputs, runtimes, tools, engines, models, pinned versions)
 │   ├── detect.rs         # Agentic workflow detection — discovers compiled pipelines; used by all lifecycle commands
 │   ├── update_check.rs   # Version update check — queries GitHub Releases and prints advisory when newer version is available
+│   ├── version.rs        # Semver parsing/comparison shared across the CLI (pipeline header versions, release tags, codemod cutovers)
 │   ├── ndjson.rs         # NDJSON parsing utilities
 │   ├── sanitize.rs       # Input sanitization for safe outputs
 │   ├── secure.rs         # Validated newtype value objects (parse-don't-validate path/identifier types)
@@ -192,7 +203,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── comment_on_work_item.rs
 │   │   ├── create_branch.rs
 │   │   ├── create_git_tag.rs
-│   │   ├── create_issue.rs
+│   │   ├── create_github_issue.rs
 │   │   ├── create_pull_request.rs
 │   │   ├── create_wiki_page.rs
 │   │   ├── create_work_item.rs
@@ -205,6 +216,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── report_incomplete.rs
 │   │   ├── resolve_pr_thread.rs
 │   │   ├── result.rs
+│   │   ├── set_github_issue_type.rs
 │   │   ├── submit_pr_review.rs
 │   │   ├── update_pr.rs
 │   │   ├── update_wiki_page.rs
@@ -261,6 +273,8 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   ├── update-ado-agentic-workflow.md # Guide for modifying an existing agentic workflow
 │   └── debug-ado-agentic-workflow.md  # Guide for troubleshooting a failing agentic workflow (report-first; consent-gated filing)
 ├── scripts/              # Supporting scripts shipped as release artifacts
+│   ├── install/          # Platform install scripts (shipped as release assets): install-linux.sh, install-macos.sh, install-windows.ps1
+│   ├── rotate-agentplayground-secrets.ps1 # Ops utility: rotates GITHUB_TOKEN secrets on AgentPlayground smoke-test pipelines
 │   └── ado-script/       # TypeScript workspace for bundled gate/import helpers plus execution-context, conclusion, and approval-summary bundles
 │       └── src/
 │           ├── gate/     # Gate evaluator source (bundled to gate.js)
@@ -278,7 +292,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │           ├── approval-summary/ # Safe-outputs summary renderer (bundled to approval-summary.js; end-of-Agent-job summary tab)
 │           ├── github-app-token/ # GitHub App token minter (bundled to github-app-token.js; mints installation token in Agent + Detection when engine.github-app-token is set)
 │           ├── executor-e2e/ # Stage 3 safe-output E2E test harness (not a bundle; runs deterministic scenarios against a real ADO project and files a GitHub issue on failure)
-│           ├── compiler-smoke-e2e/ # Deterministic compiler-candidate smoke E2E orchestrator (not a bundle): stages a compiler candidate, pushes to a short-lived `ado-aw-mirror` branch, queues the four FIXED "candidate lane" pipeline definitions, and asserts they go green. Consumes fixtures from `tests/compiler-smoke-e2e/`; built to `test-bin/` by `build:compiler-smoke-e2e`, listed in `NON_BUNDLE_DIRS`.
+│           ├── compiler-smoke-e2e/ # Smoke E2E orchestrator (not a bundle): stages each case in `tests/smoke/cases.json` to the fixed `.smoke/pipeline.yml` path on its own per-case `ado-aw-mirror` ref, queues it against its credential *lane* definition, and asserts they go green. Two modes via `SMOKE_COMPILER_SOURCE`: `candidate` (compiler built from this commit, pinned pipeline-artifact) and `released` (latest release asset, release URLs required). Built to `test-bin/` by `build:compiler-smoke-e2e`, listed in `NON_BUNDLE_DIRS`.
 │           ├── prepare-pr-base/ # create-pull-request preparer (bundled to prepare-pr-base.js): Agent mode uses ADO diff metadata + bounded dual-ref fallback to make the merge-base reachable; SafeOutputs mode fetches only the target worktree tip
 │           ├── ado-proxy/ # Credential-isolated ADO policy proxy (bundled to ado-proxy.js). The pipeline mounts it into node:20-slim and starts it before AWF; AWF attaches the trusted container via --topology-attach. scope.ts builds the organization-relative current/additional scope index; catalog.gen.json + ../shared/ado-proxy-catalog.types.gen.ts are generated from Rust by export-ado-proxy-catalog{,-schema} and drift-guarded; a catalog_version mismatch fails closed at startup.
 │           ├── trigger-e2e/ # Test-only gate-spec / trigger-evaluation harness (not a bundle): mirrors Rust `Fact::ALL` in `gate-spec.ts`; `fact-catalog.gen.json` is generated by `export-fact-catalog` and drift-guarded by CI
@@ -324,13 +338,20 @@ index to jump to the right page.
 
 - [`docs/front-matter.md`](docs/front-matter.md) — full agent file format
   (markdown body + YAML front matter grammar) with every supported field.
+  `docs/reference/front-matter.md` is a redirect stub to this page (kept for
+  old links).
+- [`docs/imports.md`](docs/imports.md) — reusable local and SHA-pinned
+  cross-repository markdown components: `imports:`, `import-schema:`, committed
+  `.ado-aw/imports/` cache, merge semantics, and custom safe-output component
+  examples.
 - [`docs/runtime-imports.md`](docs/runtime-imports.md) — runtime prompt import
   markers, path resolution, and `inlined-imports:` behavior.
 - [`docs/schedule-syntax.md`](docs/schedule-syntax.md) — fuzzy schedule time
   syntax (`daily around 14:00`, `weekly on monday`, timezones, scattering).
 - [`docs/engine.md`](docs/engine.md) — `engine:` configuration (model,
   `timeout-minutes`, `version`, `agent`, `api-target`, `args`, `env`,
-  `provider`, `command`, `github-app-token`).
+  `provider`, `command`, `github-app-token`). `docs/engines.md` is a redirect
+  stub to this page (kept for old links).
 - [`docs/parameters.md`](docs/parameters.md) — ADO runtime parameters surfaced
   in the pipeline UI, including the auto-injected `clearMemory` parameter.
 - [`docs/conclusion.md`](docs/conclusion.md) — Conclusion job — the
@@ -348,16 +369,17 @@ index to jump to the right page.
   configured via the `execution-context:` front-matter block.
 - [`docs/safe-outputs.md`](docs/safe-outputs.md) — full reference for every
   safe-output tool agents can use to propose actions (PRs, work items, wiki
-  pages, comments, etc.) plus their per-agent configuration.
+  pages, comments, etc.) and custom `safe-outputs.jobs`
+  components, and per-agent configuration.
 - [`docs/safe-output-permissions.md`](docs/safe-output-permissions.md) —
   diagnosis and fix reference for Stage 3 401/403 failures: the
   default build identity (PCBS vs project-scoped Build Service),
   `$(System.AccessToken)` semantics, the "Limit job authorization
   scope to current project" toggle, permission-bitmask decoder,
   REST recipe for inspecting ACEs, and the three fix paths.
-- [`docs/ado-aw-debug.md`](docs/ado-aw-debug.md) — debug-only `ado-aw-debug:`
-  front-matter section (`skip-integrity`, `create-issue` for filing GitHub
-  issues from dogfood pipelines). NOT a regular safe-output.
+- [`docs/ado-aw-debug.md`](docs/ado-aw-debug.md) — debug-only
+  `ado-aw-debug.skip-integrity` front-matter control. GitHub issue filing is a
+  regular safe output.
 - [`docs/supply-chain.md`](docs/supply-chain.md) — optional `supply-chain:`
   front-matter section that mirrors the compiler, AWF binary, ado-script
   bundle, and AWF/MCPG images from an internal Azure DevOps Artifacts feed,
@@ -389,8 +411,9 @@ index to jump to the right page.
 - [`docs/mcpg.md`](docs/mcpg.md) — MCP Gateway architecture and pipeline
   integration.
 - [`docs/network.md`](docs/network.md) — AWF network isolation, default
-  allowed domains, ecosystem identifiers, blocking, and ADO `permissions:`
-  service-connection model.
+  allowed domains, ecosystem identifiers, blocking, repository-resource
+  `endpoint:` service connections, and ADO `permissions:` service-connection
+  model.
 - [`docs/ado-proxy-design.md`](docs/ado-proxy-design.md) —
   security contract and implementation design for credential-isolated
   Stage 1 Azure DevOps HTTP access.
@@ -528,16 +551,25 @@ anything it flags. If a finding is genuinely intentional, add a
 `# shellcheck disable=SCxxxx` comment immediately above the offending line in
 the bash body — shellcheck honours the directive and it's inert at runtime.
 
-### Release-owned smoke lock files
+### Markdown-only smoke suite
 
-`tests/safe-outputs/*.lock.yml` are the latest-release customer contract. Do
-not regenerate them with `cargo run -- compile` from an unreleased checkout:
-their runtime integrity step downloads the released compiler, so development
-output can drift even while Cargo still reports the same semver. Compiler PRs
-and nightly `main` are exercised by `tests/compiler-smoke-e2e/`, which
-recompiles four selected workflows in a temporary worktree and stages them on an
-ephemeral `ado-aw-mirror` ref. The release workflow updates the checked-in
-locks only after matching release assets exist.
+`tests/safe-outputs/` holds smoke *sources* only — there are no committed
+`*.lock.yml` files and no ADO definitions registered against that directory.
+Both smoke lanes recompile each markdown source at run time, so nothing can
+drift between a checked-in lock and the compiler.
+
+`tests/smoke/` owns the machinery. Every case is staged to one fixed path
+(`.smoke/pipeline.yml`) on its own per-case mirror ref
+(`refs/heads/ado-aw-smoke-candidate/<buildId>/<caseId>`) and queued against a
+*lane* definition, where a lane is a credential boundary (`agentic`, `debug`,
+`infra`) rather than a test case. Two orchestrators share the machinery:
+candidate mode (PR + nightly) compiles with the binary built from the checked-out
+commit; released mode (scheduled) compiles with the latest released binary and
+requires release URLs to survive into the output, which is what exercises
+release packaging.
+
+**Adding a smoke is a markdown file plus one entry in `tests/smoke/cases.json`
+— no ADO registration.** See `tests/smoke/README.md`.
 
 ## Common Tasks
 
@@ -604,6 +636,106 @@ cargo run -- lint ./path/to/agent.md
 # Classify what downstream jobs would be skipped if a step fails
 cargo run -- whatif ./path/to/agent.md --fail <step-id-or-job-id>
 ```
+
+## Repository agentic workflows
+
+This repository dogfoods [gh-aw](https://github.com/githubnext/gh-aw) for its own
+maintenance. Workflow sources live in `.github/workflows/*.md` and compile to
+committed `*.lock.yml` files via `gh aw compile`. **Never hand-edit a
+`.lock.yml`** — edit the `.md` and recompile.
+
+### Slash commands
+
+All slash commands use `strategy: centralized`, so they are dispatched by the
+generated router `.github/workflows/agentic_commands.yml` rather than each
+workflow listening to comment events itself. That file is generated — commit it
+alongside the lock files or commands silently stop routing.
+
+| Command | Where | Effect |
+|---|---|---|
+| `/review` | PR comment or review comment | Fans out to **five** reviewers in parallel (see below) |
+| `/souschef` | PR comment | Acknowledges, then triages that PR for anything blocking it |
+| `/risk` | PR / PR comment | Breaking-change risk assessment with an approve-or-request-changes verdict |
+| `/scout` | Issue / issue comment | Code-history investigation of the requested area |
+| `/plan` | Issue / issue comment | Issue investigation and implementation plan |
+
+### The `/review` fan-out
+
+Five specialists, each owning a distinct concern so their comments do not
+overlap. All of them post **inline line comments**
+(`create-pull-request-review-comment`) and batch them into a **single**
+`submit-pull-request-review`.
+
+| Workflow | Owns | Auto-trigger |
+|---|---|---|
+| `review-rust.md` | Rust engineering quality — `anyhow` context, `unwrap` on user paths, lossy casts, cross-platform paths, async correctness | `ready_for_review` **and every push** |
+| `review-typescript.md` | `scripts/ado-script/` quality — unhandled rejections, `any` leakage, unvalidated external input, secret handling | `ready_for_review` **and every push** |
+| `review-tests.md` | Test quality beyond coverage — untested behaviour, weakened assertions, implementation-detail tests | `ready_for_review` |
+| `review-compiler-contract.md` | ado-aw domain contracts — front-matter/safe-output schemas, typed IR, **bundle and codegen drift**, docs sync | `ready_for_review` for compiler/runtime/workflow-source changes |
+| `review-security.md` | Diff-scoped security regressions — injection into generated YAML, weakened validation, token scope, allowlist widening | `ready_for_review` for security-sensitive code/workflow changes |
+
+Only the two code-quality reviewers re-run on every push; the rest run once the
+PR is ready and on demand via `/review`.
+
+Because `review-rust.md` and `review-typescript.md` are language-generic by
+design, **all ado-aw-specific review logic belongs in
+`review-compiler-contract.md`**. Put a new domain invariant there, not in the
+language reviewers.
+
+### Shared review components
+
+- `shared/pr-review-base.md` — tools, network allowlist and the common review
+  safe-outputs. `submit-pull-request-review` pins
+  `allowed-events: [COMMENT, REQUEST_CHANGES]` because the GitHub Actions actor
+  **cannot approve a pull request**; it also sets `supersede-older-reviews`.
+- `shared/pr-diff-data-fetch.md` — `pre-agent-steps` that pre-fetch the diff,
+  metadata and **existing review comments** to `/tmp/gh-aw/agent/`, keyed on the
+  head SHA. Reviewers read these instead of calling the API, and consult
+  `pr-review-comments.json` to avoid re-posting on every push.
+- `pr-data-prefetch.yml` — an engine-less workflow that warms the
+  `pr-prefetch-<sha>` cache in ~30-60s so all five reviewers get a cache hit.
+
+Generated artefacts are excluded from the pre-fetched diff (`*.lock.yml`,
+`scripts/ado-script/*.js`, `*.gen.ts`, `*.gen.json`, `Cargo.lock`). Keep the
+exclusion lists in `shared/pr-diff-data-fetch.md` and `pr-data-prefetch.yml` in
+sync.
+
+### PR Sous Chef
+
+`pr-sous-chef.md` runs every 15 minutes (and on `/souschef`) and keeps open
+non-draft PRs moving. Per PR it posts **one** `@copilot` nudge carrying the
+hidden marker `<!-- ado-aw-pr-sous-chef-nudge -->`, listing unresolved review
+threads and failed checks. It also resolves review threads that already have a
+reply, dismisses stale bot reviews once every thread is resolved, refreshes the
+branch, and pushes `cargo fmt --all` fixes.
+
+Guards against nagging: a 30-minute marker cooldown, a skip when the latest
+comment is already one of ours (overridden when the branch is `CONFLICTING`), a
+skip while checks are running — with checks running over an hour treated as
+stale so long agentic jobs cannot block nudges forever — and a cap of four
+nudges per run. A marker comment that does **not** mention `@copilot` is
+informational and counts toward neither rule.
+
+It deliberately does **not** rebuild the TypeScript bundles: that needs `npm ci`
+plus two `cargo run` invocations, far too costly every 15 minutes. Bundle drift
+is reported by `review-compiler-contract.md` instead.
+
+### Working on these workflows
+
+```bash
+gh aw compile            # recompile every workflow (regenerates agentic_commands.yml)
+gh aw compile <name>     # recompile one
+gh aw validate           # validate without writing lock files
+gh aw lint               # actionlint over the lock files (needs docker)
+```
+
+Two gotchas worth knowing:
+
+- **`permissions:` cannot be inherited from an import.** Every workflow must
+  declare its own, even when it imports `shared/pr-review-base.md`.
+- **A literal `${{ ... }}` in the markdown body is parsed as an expression** and
+  will fail compilation with "unauthorized expressions". Describe the syntax in
+  prose instead of writing the literal token.
 
 ## File Naming Conventions
 

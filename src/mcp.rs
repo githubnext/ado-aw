@@ -7,20 +7,22 @@ use rmcp::{
 };
 use serde_json::Value;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
 use crate::safe_outputs::{
     AddBuildTagParams, AddBuildTagResult, AddPrCommentParams, AddPrCommentResult,
     CommentOnWorkItemParams, CommentOnWorkItemResult, CreateBranchParams, CreateBranchResult,
-    CreateGitTagParams, CreateGitTagResult, CreateIssueParams, CreateIssueResult, CreatePrParams,
+    CreateGitTagParams, CreateGitTagResult, CreateGithubIssueParams, CreateGithubIssueResult, CreatePrParams,
     CreatePrResult, CreateWikiPageParams, CreateWikiPageResult, CreateWorkItemParams,
     CreateWorkItemResult, DEFAULT_MAX_FILE_SIZE, LinkWorkItemsParams, LinkWorkItemsResult,
     MissingDataParams, MissingDataResult, MissingToolParams, MissingToolResult, NoopParams,
     NoopResult, PIPELINE_ARTIFACT_DEFAULT_MAX_FILE_SIZE, QueueBuildParams, QueueBuildResult,
     ReplyToPrCommentParams, ReplyToPrCommentResult, ReportIncompleteParams, ReportIncompleteResult,
-    ResolvePrThreadParams, ResolvePrThreadResult, SubmitPrReviewParams, SubmitPrReviewResult,
-    ToolResult, UpdatePrParams, UpdatePrResult, UpdateWikiPageParams, UpdateWikiPageResult,
-    UpdateWorkItemParams, UpdateWorkItemResult, UploadBuildAttachmentParams,
+    ResolvePrThreadParams, ResolvePrThreadResult, SetGithubIssueTypeParams, SetGithubIssueTypeResult,
+    SubmitPrReviewParams, SubmitPrReviewResult, ToolResult, UpdatePrParams, UpdatePrResult,
+    UpdateWikiPageParams, UpdateWikiPageResult, UpdateWorkItemParams, UpdateWorkItemResult,
+    UploadBuildAttachmentParams,
     UploadBuildAttachmentResult, UploadPipelineArtifactParams, UploadPipelineArtifactResult,
     UploadWorkitemAttachmentParams, UploadWorkitemAttachmentResult, anyhow_to_mcp_error,
 };
@@ -55,7 +57,7 @@ fn generate_short_id() -> String {
 }
 
 // Re-export from tools module
-use crate::safe_outputs::{ALWAYS_ON_TOOLS, DEBUG_ONLY_TOOLS};
+use crate::safe_outputs::{ALWAYS_ON_TOOLS, CONFIGURED_ONLY_TOOLS, DEBUG_ONLY_TOOLS};
 
 // ============================================================================
 // Git merge-base helpers (used by find_merge_base)
@@ -199,24 +201,27 @@ async fn try_root_commit_fallback(git_dir: &std::path::Path) -> Option<String> {
 #[derive(Clone, Debug)]
 pub struct SafeOutputs {
     bounding_directory: PathBuf,
+    self_repository_directory: PathBuf,
     output_directory: PathBuf,
-    /// ToolRouter is used by the rmcp framework's #[tool_handler] macro for
-    /// dispatching MCP tool calls. Clippy doesn't see this usage.
-    #[allow(dead_code)]
+    /// Runtime router used by the rmcp handler. This contains both the filtered
+    /// built-in routes and any dynamically registered custom routes.
     tool_router: ToolRouter<Self>,
+    /// Serializes custom-tool budget inspection and proposal append.
+    custom_proposal_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Resolve which git directory to use for patch generation.
 ///
-/// `repository` of `None` or `"self"` maps to `bounding_directory` directly;
-/// any other value is validated as a safe path segment and resolved as a
-/// subdirectory of `bounding_directory`.
+/// `repository` of `None` or `"self"` maps to the compiler-provided self
+/// checkout; any other value is validated as a safe path segment and resolved
+/// as a subdirectory of `bounding_directory`.
 fn resolve_git_dir_for_patch(
     bounding_directory: &std::path::Path,
+    self_repository_directory: &std::path::Path,
     repository: Option<&str>,
 ) -> Result<std::path::PathBuf, McpError> {
     match repository {
-        Some("self") | None => Ok(bounding_directory.to_owned()),
+        Some("self") | None => Ok(self_repository_directory.to_owned()),
         Some(repo_alias) => {
             if !crate::validate::is_safe_path_segment(repo_alias) {
                 return Err(anyhow_to_mcp_error(anyhow::anyhow!(
@@ -239,9 +244,7 @@ fn resolve_git_dir_for_patch(
 }
 
 /// Check whether the working tree has uncommitted changes (staged or unstaged).
-async fn check_uncommitted_changes(
-    git_dir: &std::path::Path,
-) -> Result<bool, McpError> {
+async fn check_uncommitted_changes(git_dir: &std::path::Path) -> Result<bool, McpError> {
     use tokio::process::Command;
     let status_output = Command::new("git")
         .args(["status", "--porcelain"])
@@ -375,12 +378,13 @@ async fn undo_synthetic_commit(git_dir: &std::path::Path) -> Result<(), McpError
 /// Decide whether a single tool should remain in the router after filtering.
 ///
 /// Three categories, evaluated in priority order:
-/// - `DEBUG_ONLY_TOOLS` — kept only when the caller explicitly lists the tool.
+/// - `DEBUG_ONLY_TOOLS` / `CONFIGURED_ONLY_TOOLS` — kept only when explicitly
+///   listed.
 /// - `ALWAYS_ON_TOOLS` — always kept regardless of the enabled list.
 /// - Everything else — permissive default when no list is provided; otherwise
 ///   filtered to what the caller requested.
 fn should_keep_tool(tool_name: &str, enabled_tools: Option<&[String]>) -> bool {
-    if DEBUG_ONLY_TOOLS.contains(&tool_name) {
+    if DEBUG_ONLY_TOOLS.contains(&tool_name) || CONFIGURED_ONLY_TOOLS.contains(&tool_name) {
         enabled_tools
             .map(|list| list.iter().any(|e| e.as_str() == tool_name))
             .unwrap_or(false)
@@ -395,10 +399,7 @@ fn should_keep_tool(tool_name: &str, enabled_tools: Option<&[String]>) -> bool {
 
 /// Apply the `enabled_tools` filter to `tool_router`, warn about unknown names,
 /// and log the before/after counts.
-fn apply_tool_filter(
-    tool_router: &mut ToolRouter<SafeOutputs>,
-    enabled_tools: Option<&[String]>,
-) {
+fn apply_tool_filter(tool_router: &mut ToolRouter<SafeOutputs>, enabled_tools: Option<&[String]>) {
     let all_tools: Vec<String> = tool_router
         .list_all()
         .iter()
@@ -438,7 +439,7 @@ fn apply_tool_filter(
         );
     } else {
         info!(
-            "Default tool exposure: {} of {} tools served (debug-only stripped)",
+            "Default tool exposure: {} of {} tools served",
             remaining.len(),
             total
         );
@@ -450,6 +451,16 @@ impl SafeOutputs {
     /// Get the full path to the safe output file
     fn safe_output_path(&self) -> PathBuf {
         self.output_directory.join(SAFE_OUTPUT_FILENAME)
+    }
+
+    /// Full path to the safe output NDJSON file, for dynamic custom-tool
+    /// handlers registered outside the static tool router.
+    pub(crate) fn custom_output_path(&self) -> PathBuf {
+        self.safe_output_path()
+    }
+
+    pub(crate) fn custom_proposal_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
+        self.custom_proposal_lock.clone()
     }
 
     /// Read the current contents of the safe output file as NDJSON
@@ -484,22 +495,49 @@ impl SafeOutputs {
         Ok(true)
     }
 
+    #[cfg(test)]
     async fn new(
         bounding_directory: impl Into<PathBuf>,
         output_directory: impl Into<PathBuf>,
         enabled_tools: Option<&[String]>,
+        custom_tools: Option<&std::path::Path>,
+    ) -> Result<Self> {
+        Self::new_with_self_repository_directory(
+            bounding_directory,
+            output_directory,
+            None,
+            enabled_tools,
+            custom_tools,
+        )
+        .await
+    }
+
+    async fn new_with_self_repository_directory(
+        bounding_directory: impl Into<PathBuf>,
+        output_directory: impl Into<PathBuf>,
+        self_repository_directory: Option<PathBuf>,
+        enabled_tools: Option<&[String]>,
+        custom_tools: Option<&std::path::Path>,
     ) -> Result<Self> {
         let bounding_dir = bounding_directory.into();
         let output_dir = output_directory.into();
+        let self_repository_dir =
+            self_repository_directory.unwrap_or_else(|| bounding_dir.clone());
         info!(
-            "Initializing SafeOutputs MCP server: bounding={}, output={}",
+            "Initializing SafeOutputs MCP server: bounding={}, self={}, output={}",
             bounding_dir.display(),
+            self_repository_dir.display(),
             output_dir.display()
         );
         anyhow::ensure!(
             bounding_dir.exists() && bounding_dir.is_dir(),
             "bounding_directory: {:?} is not a valid path or directory",
             bounding_dir
+        );
+        anyhow::ensure!(
+            self_repository_dir.exists() && self_repository_dir.is_dir(),
+            "self_repository_directory: {:?} is not a valid path or directory",
+            self_repository_dir
         );
         anyhow::ensure!(
             output_dir.exists() && output_dir.is_dir(),
@@ -515,27 +553,41 @@ impl SafeOutputs {
 
         // Apply tool filtering. Three categories:
         //   * ALWAYS_ON_TOOLS — diagnostic/transparency tools always served.
-        //   * DEBUG_ONLY_TOOLS — gated tools (e.g. `create-issue`) that are
-        //     stripped even when `enabled_tools` is `None`. They become
-        //     reachable only when explicitly listed in `enabled_tools`.
+        //   * DEBUG_ONLY_TOOLS / CONFIGURED_ONLY_TOOLS — gated tools (e.g.
+        //     `create-github-issue`) that are stripped even when
+        //     `enabled_tools` is `None`. They become reachable only when
+        //     explicitly listed in `enabled_tools`.
         //   * Everything else — permissive default when `enabled_tools` is
         //     `None`; otherwise filtered against the explicit allowlist.
         apply_tool_filter(&mut tool_router, enabled_tools);
 
+        // Register config-driven custom safe-output tools (if any). These are
+        // added AFTER the built-in filter so a custom tool can never shadow a
+        // built-in (collisions are skipped with a warning).
+        if let Some(path) = custom_tools {
+            crate::mcp_custom_tools::apply_custom_tools(&mut tool_router, path)?;
+        }
+
         Ok(Self {
             bounding_directory: bounding_dir,
+            self_repository_directory: self_repository_dir,
             output_directory: output_dir,
             tool_router,
+            custom_proposal_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
     /// Generate a git diff patch from a specific directory
-    /// If `repository` is Some, it's treated as a subdirectory of bounding_directory
-    /// If `repository` is None or "self", use bounding_directory directly
+    /// If `repository` is Some, it's treated as a subdirectory of bounding_directory.
+    /// If `repository` is None or "self", use the explicit self checkout.
     async fn generate_patch(&self, repository: Option<&str>) -> Result<(String, String), McpError> {
         use tokio::process::Command;
 
-        let git_dir = resolve_git_dir_for_patch(&self.bounding_directory, repository)?;
+        let git_dir = resolve_git_dir_for_patch(
+            &self.bounding_directory,
+            &self.self_repository_directory,
+            repository,
+        )?;
 
         // Generate patch using git format-patch for proper commit metadata,
         // rename detection, and binary file handling.
@@ -705,32 +757,41 @@ impl SafeOutputs {
         Ok(CallToolResult::success(vec![]))
     }
 
-    /// Debug-only: file a GitHub issue. Default-deny gated via
-    /// `DEBUG_ONLY_TOOLS` so this route is only reachable when the compiler
-    /// explicitly lists `create-issue` in `--enabled-tools` (which it does
-    /// only when the agent's front matter sets `ado-aw-debug.create-issue`).
-    /// Stage 3 authenticates against GitHub using the
-    /// `ADO_AW_DEBUG_GITHUB_TOKEN` pipeline variable.
+    /// File a GitHub issue through the Stage 3 safe-output executor.
     #[tool(
-        name = "create-issue",
-        description = "Debug-only: file a GitHub issue against the operator-configured \
-target repository. Provide a concise title and a markdown body. \
-Optional `labels` and `assignees` are subject to operator-controlled allowlists. \
-This tool is gated by the agent's `ado-aw-debug.create-issue` front-matter section \
-and is not available in regular pipelines."
+        name = "create-github-issue",
+        description = "Create a GitHub issue against the operator-configured target repository. \
+Provide the final title and markdown body. Optional labels are subject to the configured \
+allowlist. Set temporary_id when a later safe output must refer to the newly-created issue."
     )]
-    async fn create_issue(
+    async fn create_github_issue(
         &self,
-        params: Parameters<CreateIssueParams>,
+        params: Parameters<CreateGithubIssueParams>,
     ) -> Result<CallToolResult, McpError> {
-        info!("Tool called: create-issue - '{}'", params.0.title);
+        info!("Tool called: create-github-issue - '{}'", params.0.title);
         debug!("Body length: {} chars", params.0.body.len());
         let mut sanitized = params.0;
         sanitized.title = sanitize_text(&sanitized.title);
         sanitized.body = sanitize_text(&sanitized.body);
-        let result: CreateIssueResult = sanitized.try_into()?;
+        let result: CreateGithubIssueResult = sanitized.try_into()?;
         let _ = self.write_safe_output_file(&result).await;
         info!("Issue queued for creation");
+        Ok(CallToolResult::success(vec![]))
+    }
+
+    #[tool(
+        name = "set-github-issue-type",
+        description = "Set the native GitHub issue type. issue_number may be a positive issue \
+number or a temporary_id from an earlier create-github-issue call in the same run. Pass an empty \
+issue_type to clear the current type."
+    )]
+    async fn set_github_issue_type(
+        &self,
+        params: Parameters<SetGithubIssueTypeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: SetGithubIssueTypeResult = params.0.try_into()?;
+        let _ = self.write_safe_output_file(&result).await;
+        info!("Issue type update queued");
         Ok(CallToolResult::success(vec![]))
     }
 
@@ -1501,7 +1562,7 @@ agent attempted work but couldn't finish (e.g., API timeouts, build failures, re
 }
 
 // Implement the server handler
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for SafeOutputs {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
@@ -1512,16 +1573,24 @@ impl ServerHandler for SafeOutputs {
 pub async fn run(
     output_directory: &str,
     bounding_directory: &str,
+    self_repository_directory: Option<&str>,
     enabled_tools: Option<&[String]>,
+    custom_tools: Option<&std::path::Path>,
 ) -> Result<()> {
     // Create and run the server with STDIO transport
-    let service = SafeOutputs::new(bounding_directory, output_directory, enabled_tools)
-        .await?
-        .serve(stdio())
-        .await
-        .inspect_err(|e| {
-            error!("Error starting MCP server: {}", e);
-        })?;
+    let service = SafeOutputs::new_with_self_repository_directory(
+        bounding_directory,
+        output_directory,
+        self_repository_directory.map(PathBuf::from),
+        enabled_tools,
+        custom_tools,
+    )
+    .await?
+    .serve(stdio())
+    .await
+    .inspect_err(|e| {
+        error!("Error starting MCP server: {}", e);
+    })?;
     service
         .waiting()
         .await
@@ -1536,10 +1605,32 @@ mod tests {
 
     async fn create_test_safe_outputs() -> (SafeOutputs, tempfile::TempDir) {
         let temp_dir = tempdir().unwrap();
-        let safe_outputs = SafeOutputs::new(temp_dir.path(), temp_dir.path(), None)
+        let safe_outputs = SafeOutputs::new(temp_dir.path(), temp_dir.path(), None, None)
             .await
             .unwrap();
         (safe_outputs, temp_dir)
+    }
+
+    #[test]
+    fn test_resolve_git_dir_for_patch_uses_explicit_self_checkout() {
+        let root = tempdir().unwrap();
+        let self_dir = root.path().join("self-repo");
+        let alias_dir = root.path().join("tools");
+        std::fs::create_dir(&self_dir).unwrap();
+        std::fs::create_dir(&alias_dir).unwrap();
+
+        assert_eq!(
+            resolve_git_dir_for_patch(root.path(), &self_dir, Some("self")).unwrap(),
+            self_dir
+        );
+        assert_eq!(
+            resolve_git_dir_for_patch(root.path(), &self_dir, None).unwrap(),
+            self_dir
+        );
+        assert_eq!(
+            resolve_git_dir_for_patch(root.path(), &self_dir, Some("tools")).unwrap(),
+            alias_dir.canonicalize().unwrap()
+        );
     }
 
     #[test]
@@ -1640,7 +1731,9 @@ mod tests {
         git(&["add", "."]);
         git(&["commit", "-q", "-m", "agent change"]);
 
-        let base = SafeOutputs::find_merge_base(p).await.expect("resolves base");
+        let base = SafeOutputs::find_merge_base(p)
+            .await
+            .expect("resolves base");
         assert_eq!(
             base, base_sha,
             "merge-base must be the origin/main tip resolved via origin/HEAD"
@@ -1650,7 +1743,7 @@ mod tests {
     #[tokio::test]
     async fn test_new_fails_with_invalid_bounding_directory() {
         let temp_dir = tempdir().unwrap();
-        let result = SafeOutputs::new("/nonexistent/path", temp_dir.path(), None).await;
+        let result = SafeOutputs::new("/nonexistent/path", temp_dir.path(), None, None).await;
 
         assert!(result.is_err());
         assert!(
@@ -1664,7 +1757,7 @@ mod tests {
     #[tokio::test]
     async fn test_new_fails_with_invalid_output_directory() {
         let temp_dir = tempdir().unwrap();
-        let result = SafeOutputs::new(temp_dir.path(), "/nonexistent/path", None).await;
+        let result = SafeOutputs::new(temp_dir.path(), "/nonexistent/path", None, None).await;
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("output_directory"));
@@ -1839,12 +1932,132 @@ mod tests {
         assert_eq!(json["context"], "ctx");
     }
 
+    #[tokio::test]
+    async fn test_safe_outputs_new_exposes_generated_custom_tools() {
+        let fm: crate::compile::types::FrontMatter = serde_yaml::from_str(
+            r#"
+name: Test
+description: Test
+safe-outputs:
+  jobs:
+    send-notification:
+      description: Send a structured notification.
+      inputs:
+        title:
+          type: string
+          description: Notification title.
+          required: true
+      steps:
+        - bash: echo notify
+"#,
+        )
+        .unwrap();
+        let schemas = crate::compile::custom_tools::generate_custom_tool_schemas(&fm).unwrap();
+        let custom_tools_json = crate::compile::custom_tools::custom_tools_json(&schemas).unwrap();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let custom_tools_path = temp_dir.path().join("custom-tools.json");
+        std::fs::write(&custom_tools_path, custom_tools_json).unwrap();
+
+        let so = SafeOutputs::new(
+            temp_dir.path(),
+            temp_dir.path(),
+            None,
+            Some(&custom_tools_path),
+        )
+        .await
+        .unwrap();
+        let tool_names: Vec<String> = so
+            .tool_router
+            .list_all()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+
+        assert!(tool_names.contains(&"send-notification".to_string()));
+        assert!(tool_names.contains(&"noop".to_string()));
+        assert!(tool_names.contains(&"create-work-item".to_string()));
+        assert!(
+            <SafeOutputs as ServerHandler>::get_tool(&so, "send-notification").is_some(),
+            "the MCP protocol handler must use the runtime router, not rebuild the static router"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_server_handler_respects_runtime_tool_filter() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let enabled = vec!["noop".to_string()];
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled), None)
+            .await
+            .unwrap();
+
+        assert!(<SafeOutputs as ServerHandler>::get_tool(&so, "noop").is_some());
+        assert!(
+            <SafeOutputs as ServerHandler>::get_tool(&so, "add-build-tag").is_none(),
+            "the MCP protocol handler must honor the runtime enabled-tools filter"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_custom_tools_do_not_shadow_builtin_routes() {
+        let baseline_dir = tempfile::tempdir().unwrap();
+        let baseline = SafeOutputs::new(baseline_dir.path(), baseline_dir.path(), None, None)
+            .await
+            .unwrap();
+        let baseline_count = baseline.tool_router.list_all().len();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let custom_tools_path = temp_dir.path().join("custom-tools.json");
+        std::fs::write(
+            &custom_tools_path,
+            r#"[
+              {
+                "name": "create-work-item",
+                "description": "custom replacement",
+                "inputSchema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [],
+                  "properties": {}
+                }
+              }
+            ]"#,
+        )
+        .unwrap();
+
+        let so = SafeOutputs::new(
+            temp_dir.path(),
+            temp_dir.path(),
+            None,
+            Some(&custom_tools_path),
+        )
+        .await
+        .unwrap();
+        let tools = so.tool_router.list_all();
+        assert_eq!(tools.len(), baseline_count);
+        assert_eq!(
+            tools
+                .iter()
+                .filter(|tool| tool.name.as_ref() == "create-work-item")
+                .count(),
+            1
+        );
+        let create_work_item = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == "create-work-item")
+            .unwrap();
+        assert_ne!(
+            create_work_item.description.as_deref(),
+            Some("custom replacement")
+        );
+    }
+
     // ─── Tool filtering tests ───────────────────────────────────────────
 
     #[tokio::test]
     async fn test_tool_filtering_none_exposes_all() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), None)
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), None, None)
             .await
             .unwrap();
         let tools = so.tool_router.list_all();
@@ -1856,7 +2069,7 @@ mod tests {
     async fn test_tool_filtering_specific_tools() {
         let temp_dir = tempfile::tempdir().unwrap();
         let enabled = vec!["create-pull-request".to_string()];
-        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled))
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled), None)
             .await
             .unwrap();
         let tools = so.tool_router.list_all();
@@ -1879,7 +2092,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         // Enable only a tool that doesn't exist — should still have always-on tools
         let enabled = vec!["nonexistent-tool".to_string()];
-        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled))
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled), None)
             .await
             .unwrap();
         let tools = so.tool_router.list_all();
@@ -1902,7 +2115,7 @@ mod tests {
             "create-work-item".to_string(),
             "comment-on-work-item".to_string(),
         ];
-        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled))
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled), None)
             .await
             .unwrap();
         let tools = so.tool_router.list_all();
@@ -1934,7 +2147,7 @@ mod tests {
     }
 
     /// Asserts that ALL_KNOWN_SAFE_OUTPUTS contains every NON-DEBUG-ONLY tool
-    /// registered in the router. Debug-only tools (e.g. `create-issue`) are
+    /// registered in the router. Debug-only tools (e.g. `create-github-issue`) are
     /// intentionally absent from the list because they're not regular
     /// safe-outputs.
     #[tokio::test]
@@ -1942,10 +2155,15 @@ mod tests {
         use crate::safe_outputs::ALL_KNOWN_SAFE_OUTPUTS;
 
         let temp_dir = tempfile::tempdir().unwrap();
-        // Pass an enable list that includes every debug-only tool so they
-        // remain in the router for this introspection check.
-        let enabled: Vec<String> = DEBUG_ONLY_TOOLS.iter().map(|s| s.to_string()).collect();
-        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled))
+        // Pass an enable list that includes every debug-only and
+        // configured-only tool so they remain in the router for this
+        // introspection check.
+        let enabled: Vec<String> = DEBUG_ONLY_TOOLS
+            .iter()
+            .chain(CONFIGURED_ONLY_TOOLS.iter())
+            .map(|s| s.to_string())
+            .collect();
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled), None)
             .await
             .unwrap();
         let router_tools: Vec<String> = so
@@ -1969,9 +2187,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_filter_strips_debug_only_when_no_enabled_list() {
+    async fn test_default_filter_hides_configured_only_github_tools() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), None)
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), None, None)
             .await
             .unwrap();
         let tool_names: Vec<String> = so
@@ -1989,13 +2207,15 @@ mod tests {
         }
         // Spot check a regular tool is present in the permissive default.
         assert!(tool_names.contains(&"create-work-item".to_string()));
+        assert!(!tool_names.contains(&"create-github-issue".to_string()));
+        assert!(!tool_names.contains(&"set-github-issue-type".to_string()));
     }
 
     #[tokio::test]
-    async fn test_filter_keeps_debug_only_when_explicitly_enabled() {
+    async fn test_filter_keeps_create_github_issue_when_explicitly_enabled() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let enabled = vec!["create-issue".to_string()];
-        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled))
+        let enabled = vec!["create-github-issue".to_string()];
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled), None)
             .await
             .unwrap();
         let tool_names: Vec<String> = so
@@ -2005,17 +2225,18 @@ mod tests {
             .map(|t| t.name.to_string())
             .collect();
         assert!(
-            tool_names.contains(&"create-issue".to_string()),
-            "Explicitly enabled debug-only tool should be present, got: {:?}",
+            tool_names.contains(&"create-github-issue".to_string()),
+            "Explicitly enabled create-github-issue tool should be present, got: {:?}",
             tool_names
         );
+        assert!(!tool_names.contains(&"set-github-issue-type".to_string()));
     }
 
     #[tokio::test]
-    async fn test_filter_strips_debug_only_when_other_tool_enabled() {
+    async fn test_filter_strips_create_github_issue_when_other_tool_enabled() {
         let temp_dir = tempfile::tempdir().unwrap();
         let enabled = vec!["create-work-item".to_string()];
-        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled))
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled), None)
             .await
             .unwrap();
         let tool_names: Vec<String> = so
@@ -2025,8 +2246,8 @@ mod tests {
             .map(|t| t.name.to_string())
             .collect();
         assert!(
-            !tool_names.contains(&"create-issue".to_string()),
-            "Debug-only tool must remain stripped when not in the explicit enable list"
+            !tool_names.contains(&"create-github-issue".to_string()),
+            "create-github-issue must remain filtered when not explicitly enabled"
         );
         assert!(tool_names.contains(&"create-work-item".to_string()));
     }

@@ -5,8 +5,8 @@ on:
   schedule: daily
 permissions:
   read: my-read-arm-connection
-ado-aw-debug:
-  create-issue:
+safe-outputs:
+  create-github-issue:
     target-repo: githubnext/ado-aw
     title-prefix: "[pipeline-failure] "
     labels:
@@ -30,7 +30,7 @@ in Azure DevOps inside an AWF-isolated sandbox.
 1. Read the pipeline run logs available under `$BUILD_SOURCESDIRECTORY`
    for any signs of recent failures.
 2. For each distinct failure, file **one** GitHub issue using the
-   `create-issue` MCP tool with:
+   `create-github-issue` MCP tool with:
    - A concise `title` describing the failure.
    - A markdown `body` with reproduction steps, log excerpts, and links
      to relevant ADO build URLs.
@@ -44,7 +44,7 @@ in Azure DevOps inside an AWF-isolated sandbox.
 
 - Do not attempt to redirect issues to a different repository — the agent
   has no `target_repo` parameter and the target is fixed by the operator.
-- The `ADO_AW_DEBUG_GITHUB_TOKEN` PAT is **not** visible to you; it is
+- The `ADO_AW_GITHUB_TOKEN` PAT is **not** visible to you; it is
   used only by Stage 3 to authenticate against GitHub.
 - Issues are reviewed for prompt injection by Stage 2 before they are
   filed, so do not include text that looks like ADO pipeline commands

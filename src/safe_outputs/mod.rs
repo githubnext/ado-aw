@@ -33,18 +33,19 @@ pub const NON_MCP_SAFE_OUTPUT_KEYS: &[&str] = &[];
 /// registering a tool. Unlike [`NON_MCP_SAFE_OUTPUT_KEYS`], these are
 /// deliberately absent from [`ALL_KNOWN_SAFE_OUTPUTS`] (they have no tool type)
 /// and must be explicitly allowed in `validate_safe_outputs_keys`.
-pub const SAFE_OUTPUT_CONFIG_KEYS: &[&str] = &["report-failure-as-work-item"];
+pub const SAFE_OUTPUT_CONFIG_KEYS: &[&str] = &[
+    "report-failure-as-work-item",
+    "github-token",
+    "github-api-url",
+    "github-app",
+];
 
-/// Tools that are gated behind `ado-aw-debug:` front-matter sections and must
-/// NOT be exposed to a regular pipeline. The SafeOutputs MCP filter strips
-/// these even when `enabled_tools` is `None`, so they only become reachable
-/// when the compiler explicitly lists them in `--enabled-tools`.
-///
-/// Adding a new debug-only tool: register its result type with
-/// `tool_result! { write = true, ... }`, add it here, and gate the
-/// compiler-side `--enabled-tools` injection on its corresponding
-/// `ado-aw-debug.<tool>` front-matter section.
-pub const DEBUG_ONLY_TOOLS: &[&str] = tool_names![CreateIssueResult];
+/// Future tools gated behind `ado-aw-debug:` front matter.
+pub const DEBUG_ONLY_TOOLS: &[&str] = &[];
+
+/// Public tools exposed only when explicitly configured in `safe-outputs:`.
+pub const CONFIGURED_ONLY_TOOLS: &[&str] =
+    tool_names![CreateGithubIssueResult, SetGithubIssueTypeResult];
 
 /// All recognised safe-output keys accepted in front matter `safe-outputs:`.
 /// This is the union of write-requiring tool types and diagnostic tool types.
@@ -74,6 +75,8 @@ pub const ALL_KNOWN_SAFE_OUTPUTS: &[&str] = all_safe_output_names![
     SubmitPrReviewResult,
     ReplyToPrCommentResult,
     ResolvePrThreadResult,
+    CreateGithubIssueResult,
+    SetGithubIssueTypeResult,
     // Always-on diagnostics
     NoopResult,
     MissingDataResult,
@@ -181,34 +184,50 @@ pub(crate) async fn resolve_wiki_branch(
 /// 3. a case-insensitive match against the trailing repo-name part of the value
 ///    (e.g. `sdk-FtdiDeviceControl` for `4x4/sdk-FtdiDeviceControl`).
 ///
-/// Azure DevOps repository names are case-insensitive, so the trailing-name fallback
-/// matches case-insensitively. Returns the resolved alias key on success, or `None`
-/// if no entry matches.
+/// Azure DevOps repository names are case-insensitive, so the name-based
+/// fallbacks match case-insensitively. Returns the resolved alias key only when
+/// the match is unique; ambiguous names are rejected.
 pub(crate) fn lookup_allowed_repository_alias<'a>(
     input: &str,
     allowed_repositories: &'a std::collections::HashMap<String, String>,
 ) -> Option<&'a String> {
+    fn unique_alias<'a>(
+        mut matches: impl Iterator<Item = &'a String>,
+    ) -> Option<&'a String> {
+        let first = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(first)
+    }
+
     // 1. Exact alias key match
     if let Some((alias, _)) = allowed_repositories.get_key_value(input) {
         return Some(alias);
     }
-    // 2. Case-insensitive value match (full "project/repo" or just "repo").
+    // 2. Unique case-insensitive full-value match ("project/repo").
     // ADO repo names are case-insensitive, so accept any case for the full path.
-    if let Some((alias, _)) = allowed_repositories
-        .iter()
-        .find(|(_, v)| v.eq_ignore_ascii_case(input))
-    {
+    if let Some(alias) = unique_alias(
+        allowed_repositories
+            .iter()
+            .filter(|(_, value)| value.eq_ignore_ascii_case(input))
+            .map(|(alias, _)| alias),
+    ) {
         return Some(alias);
     }
-    // 3. Trailing repo-name part match (case-insensitive)
-    allowed_repositories.iter().find_map(|(alias, v)| {
-        let trailing = v.rsplit('/').next().unwrap_or(v.as_str());
-        if trailing.eq_ignore_ascii_case(input) {
-            Some(alias)
-        } else {
-            None
-        }
-    })
+    // 3. Unique trailing repo-name match (case-insensitive).
+    unique_alias(
+        allowed_repositories
+            .iter()
+            .filter(|(_, value)| {
+                value
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(value.as_str())
+                    .eq_ignore_ascii_case(input)
+            })
+            .map(|(alias, _)| alias),
+    )
 }
 
 /// Look up an ADO repo name in `allowed_repositories`, accepting either:
@@ -250,6 +269,60 @@ pub(crate) fn input_refers_to_self(input: &str, ctx: &ExecutionContext) -> bool 
     false
 }
 
+/// Normalize a repository selector to the compiler/runtime alias key.
+///
+/// Accepts a raw agent-supplied selector (`"self"`, `""`, an alias key, a full
+/// `project/repo` value, or a bare repo name) and returns the canonical alias
+/// key — `"self"` or a key of `ctx.allowed_repositories`.
+///
+/// **Idempotent**: passing an already-canonical alias returns it unchanged
+/// (`"self"` short-circuits on [`input_refers_to_self`]; an alias key hits the
+/// exact-key arm of [`lookup_allowed_repository_alias`]), so callers may
+/// canonicalize defensively without changing the result.
+///
+/// **Precedence**: self-identity wins over the alias map. A selector matching
+/// the pipeline repository's name resolves to `"self"` even if an alias of the
+/// same name is configured for a different repository.
+pub(crate) fn canonical_repository_alias(
+    repository: &str,
+    ctx: &ExecutionContext,
+) -> Option<String> {
+    if input_refers_to_self(repository, ctx) {
+        return Some("self".to_string());
+    }
+    lookup_allowed_repository_alias(repository, &ctx.allowed_repositories).cloned()
+}
+
+/// Resolve a repository selector to its checkout directory.
+///
+/// The checkout root and `self` directory differ in multi-checkout jobs.
+/// Named repositories are resolved through the configured alias map rather
+/// than appended from untrusted selector text.
+///
+/// `repository` may be **either** a raw agent-supplied selector or an alias
+/// already canonicalized by [`canonical_repository_alias`]; both are supported
+/// because that helper is idempotent. `add-pr-comment` passes the raw value
+/// straight from the agent, while `create-pull-request` canonicalizes first so
+/// it can reuse the alias for target-branch resolution. Callers must not build
+/// the path themselves — routing every selector through here is what keeps
+/// untrusted text out of the path join.
+pub(crate) fn resolve_repository_checkout_dir(
+    repository: &str,
+    ctx: &ExecutionContext,
+) -> anyhow::Result<std::path::PathBuf> {
+    let Some(alias) = canonical_repository_alias(repository, ctx) else {
+        anyhow::bail!(
+            "Repository '{}' is not in the allowed repository list",
+            repository
+        );
+    };
+    if alias == "self" {
+        return Ok(ctx.self_repository_directory.clone());
+    }
+
+    Ok(ctx.source_directory.join(alias))
+}
+
 /// Resolve a repository alias to its ADO repo name.
 ///
 /// Accepts `"self"` (or `None`) → `ctx.repository_name`, an alias key from
@@ -262,13 +335,20 @@ pub(crate) fn resolve_repo_name(
     ctx: &ExecutionContext,
 ) -> Result<String, ExecutionResult> {
     let alias = repo_alias.unwrap_or("self");
-    if input_refers_to_self(alias, ctx) {
+    let Some(alias) = canonical_repository_alias(alias, ctx) else {
+        return Err(ExecutionResult::failure(format!(
+            "Repository '{}' is not in the allowed repository list",
+            alias
+        )));
+    };
+    if alias == "self" {
         return ctx
             .repository_name
             .clone()
             .ok_or_else(|| ExecutionResult::failure("BUILD_REPOSITORY_NAME not set"));
     }
-    lookup_allowed_repository(alias, &ctx.allowed_repositories)
+    ctx.allowed_repositories
+        .get(&alias)
         .cloned()
         .ok_or_else(|| {
             ExecutionResult::failure(format!(
@@ -352,7 +432,7 @@ mod add_pr_comment;
 mod comment_on_work_item;
 mod create_branch;
 mod create_git_tag;
-mod create_issue;
+mod create_github_issue;
 mod create_pull_request;
 mod create_wiki_page;
 mod create_work_item;
@@ -365,6 +445,7 @@ mod reply_to_pr_comment;
 mod report_incomplete;
 mod resolve_pr_thread;
 mod result;
+mod set_github_issue_type;
 mod submit_pr_review;
 mod update_pr;
 mod update_wiki_page;
@@ -378,8 +459,8 @@ pub use add_pr_comment::*;
 pub use comment_on_work_item::*;
 pub use create_branch::*;
 pub use create_git_tag::*;
-pub(crate) use create_issue::validate_target_repo;
-pub use create_issue::*;
+pub(crate) use create_github_issue::validate_target_repo;
+pub use create_github_issue::*;
 pub use create_pull_request::*;
 pub use create_wiki_page::*;
 pub use create_work_item::*;
@@ -392,9 +473,10 @@ pub use reply_to_pr_comment::*;
 pub use report_incomplete::*;
 pub use resolve_pr_thread::*;
 pub use result::{
-    ExecutionContext, ExecutionResult, Executor, ToolResult, Validate, anyhow_to_mcp_error,
-    org_from_url,
+    ExecutionContext, ExecutionResult, Executor, ResolvedGithubIssue, ToolResult, Validate,
+    anyhow_to_mcp_error, org_from_url,
 };
+pub use set_github_issue_type::*;
 pub use submit_pr_review::*;
 pub use update_pr::*;
 pub use update_wiki_page::*;
@@ -435,7 +517,10 @@ mod tests {
     fn test_requires_write_consistency() {
         // Write-requiring tools
         const {
-            assert!(CreateIssueResult::REQUIRES_WRITE);
+            assert!(CreateGithubIssueResult::REQUIRES_WRITE);
+        }
+        const {
+            assert!(SetGithubIssueTypeResult::REQUIRES_WRITE);
         }
         const {
             assert!(CreateWorkItemResult::REQUIRES_WRITE);
@@ -819,6 +904,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_lookup_allowed_repository_rejects_ambiguous_bare_name() {
+        let allowed = std::collections::HashMap::from([
+            ("tools-a".to_string(), "ProjectA/tools".to_string()),
+            ("tools-b".to_string(), "ProjectB/tools".to_string()),
+        ]);
+
+        assert_eq!(lookup_allowed_repository_alias("tools", &allowed), None);
+        assert_eq!(lookup_allowed_repository("tools", &allowed), None);
+        assert_eq!(
+            lookup_allowed_repository_alias("ProjectA/tools", &allowed),
+            Some(&"tools-a".to_string())
+        );
+    }
+
     // ─── resolve_repo_name ──────────────────────────────────────────────
 
     fn ctx_with(
@@ -831,6 +931,42 @@ mod tests {
             repo_refs: std::collections::HashMap::new(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_resolve_repository_checkout_dir_distinguishes_root_and_self() {
+        let mut ctx = ctx_with(Some("4x4/current-repo"), sample_allowed());
+        ctx.source_directory = std::path::PathBuf::from("checkout-root");
+        ctx.self_repository_directory =
+            std::path::PathBuf::from("checkout-root").join("current-repo");
+
+        assert_eq!(
+            resolve_repository_checkout_dir("self", &ctx).unwrap(),
+            ctx.self_repository_directory
+        );
+        assert_eq!(
+            resolve_repository_checkout_dir("4X4/CURRENT-REPO", &ctx).unwrap(),
+            ctx.self_repository_directory
+        );
+        assert_eq!(
+            resolve_repository_checkout_dir("sdk-ftdidevicecontrol", &ctx).unwrap(),
+            ctx.source_directory.join("repo-sdk-ftdidevicecontrol")
+        );
+        assert_eq!(
+            resolve_repository_checkout_dir("4x4/sdk-DeviceCommunication", &ctx).unwrap(),
+            ctx.source_directory.join("repo-sdk-devicecommunication")
+        );
+    }
+
+    #[test]
+    fn test_resolve_repository_checkout_dir_rejects_unknown_selector() {
+        let ctx = ctx_with(Some("4x4/current-repo"), sample_allowed());
+        let err = resolve_repository_checkout_dir("../outside", &ctx).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("not in the allowed repository list"),
+            "got: {err}"
+        );
     }
 
     #[test]

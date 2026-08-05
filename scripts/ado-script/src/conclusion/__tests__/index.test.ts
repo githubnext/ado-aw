@@ -19,6 +19,9 @@ const {
       "AW_DETECTION_RESULT",
       "AW_SAFEOUTPUTS_RESULT",
       "AW_SAFEOUTPUTS_REVIEWED_RESULT",
+      "AW_CUSTOM_JOB_COUNT",
+      "AW_CUSTOM_JOB_0_NAME",
+      "AW_CUSTOM_JOB_0_RESULT",
       "AW_REPORT_FAILURE_AS_WORK_ITEM",
       "AW_SAFE_OUTPUT_DIR",
       "AW_PIPELINE_NAME",
@@ -91,6 +94,9 @@ const trackedEnvKeys = [
   "AW_SAFEOUTPUTS_RESULT",
   "AW_REPORT_FAILURE_AS_WORK_ITEM",
   "AW_SAFEOUTPUTS_REVIEWED_RESULT",
+  "AW_CUSTOM_JOB_COUNT",
+  "AW_CUSTOM_JOB_0_NAME",
+  "AW_CUSTOM_JOB_0_RESULT",
   "AW_SAFE_OUTPUT_DIR",
   "AW_PIPELINE_NAME",
   "AW_NOOP_REPORT_AS_WORK_ITEM",
@@ -122,6 +128,9 @@ function baseEnv(): Record<(typeof trackedEnvKeys)[number], string> {
     AW_DETECTION_RESULT: "Succeeded",
     AW_SAFEOUTPUTS_RESULT: "Succeeded",
     AW_SAFEOUTPUTS_REVIEWED_RESULT: "",
+    AW_CUSTOM_JOB_COUNT: "",
+    AW_CUSTOM_JOB_0_NAME: "",
+    AW_CUSTOM_JOB_0_RESULT: "",
     AW_REPORT_FAILURE_AS_WORK_ITEM: "true",
     AW_SAFE_OUTPUT_DIR: "C:\\software\\ado-aw-feature-reporter\\scripts\\ado-script\\src\\conclusion\\__tests__\\fixtures",
     AW_PIPELINE_NAME: "feature reporter",
@@ -261,6 +270,24 @@ describe("conclusion/main", () => {
       expect.objectContaining({ enabled: true, workItemType: "Task" }),
       "[ado-aw] Pipeline failure: feature reporter",
       expect.stringContaining("SafeOutputs_Reviewed (Failed)"),
+    );
+  });
+
+  it("files a pipeline-failure work item when a custom job failed", async () => {
+    applyEnv({
+      AW_CUSTOM_JOB_COUNT: "1",
+      AW_CUSTOM_JOB_0_NAME: "Custom safe output: notify-team",
+      AW_CUSTOM_JOB_0_RESULT: "Failed",
+    });
+
+    await expect(main()).resolves.toBe(0);
+
+    expect(fileOrAppendWorkItem).toHaveBeenCalledTimes(1);
+    expect(fileOrAppendWorkItem).toHaveBeenCalledWith(
+      "MyProject",
+      expect.objectContaining({ enabled: true, workItemType: "Task" }),
+      "[ado-aw] Pipeline failure: feature reporter",
+      expect.stringContaining("Custom safe output: notify-team (Failed)"),
     );
   });
 

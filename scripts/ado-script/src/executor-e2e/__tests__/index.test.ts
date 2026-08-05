@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { summarise } from "../index.js";
+import { allScenarios } from "../scenarios/index.js";
 import type { ScenarioResult } from "../scenario.js";
 
 describe("summarise", () => {
@@ -15,5 +16,28 @@ describe("summarise", () => {
     expect(text).toContain("[FAIL] add-pr-comment (assert: no thread)");
     expect(text).toContain("[SKIP] queue-build");
     expect(text).toContain("Total: 3 | Passed: 1 | Failed: 1 | Skipped: 1");
+  });
+});
+
+describe("scenario registry", () => {
+  it("registers both create-pull-request checkout layouts with unique ids", () => {
+    const ids = allScenarios.map((scenario) => scenario.id ?? scenario.tool);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toContain("create-pull-request");
+    expect(ids).toContain("create-pull-request-self-multi-checkout");
+  });
+
+  it("registers the GitHub issue scenarios with unique ids", () => {
+    const ids = allScenarios.map((scenario) => scenario.id ?? scenario.tool);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const id of [
+      "create-github-issue",
+      "create-github-issue-label-denied",
+      "set-github-issue-type",
+      "set-github-issue-type-clear",
+      "create-github-issue-temporary-id-handoff",
+    ]) {
+      expect(ids).toContain(id);
+    }
   });
 });

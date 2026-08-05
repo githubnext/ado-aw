@@ -117,6 +117,11 @@ pub struct CompileContext<'a> {
     /// Consumed by the always-on `ado-aw-marker` compiler extension to
     /// embed source-path metadata in the compiled YAML.
     pub input_path: Option<&'a Path>,
+    /// Substituted, joined bodies of any imported components, inlined into the
+    /// agent prompt at compile time. Empty when the workflow declares no
+    /// imports (or on paths that do not resolve imports, e.g. `build_pipeline_ir`
+    /// for `inspect`/`graph`). Both `compile` and `check` resolve imports.
+    pub imported_prompt_body: String,
 }
 
 impl<'a> CompileContext<'a> {
@@ -158,6 +163,7 @@ impl<'a> CompileContext<'a> {
             engine,
             compile_dir: Some(compile_dir),
             input_path: Some(input_path),
+            imported_prompt_body: String::new(),
         })
     }
 
@@ -234,6 +240,7 @@ impl<'a> CompileContext<'a> {
             engine: crate::engine::Engine::Copilot,
             compile_dir: None,
             input_path: None,
+            imported_prompt_body: String::new(),
         }
     }
 
@@ -251,6 +258,7 @@ impl<'a> CompileContext<'a> {
             engine: crate::engine::Engine::Copilot,
             compile_dir: None,
             input_path: None,
+            imported_prompt_body: String::new(),
         }
     }
 
@@ -264,6 +272,7 @@ impl<'a> CompileContext<'a> {
             engine: crate::engine::Engine::Copilot,
             compile_dir: Some(compile_dir),
             input_path: None,
+            imported_prompt_body: String::new(),
         }
     }
 }
@@ -712,7 +721,7 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
     // `NodeExtension`). The user's pinned Node version then "wins last"
     // on PATH for the rest of the Agent job.
     let mut extensions = vec![
-        Extension::AdoAwMarker(AdoAwMarkerExtension),
+        Extension::AdoAwMarker(AdoAwMarkerExtension::default()),
         Extension::GitHub(GitHubExtension),
         Extension::SafeOutputs(SafeOutputsExtension),
         Extension::AdoScript(Box::new({

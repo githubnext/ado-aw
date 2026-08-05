@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use crate::sanitize::{SanitizeConfig, SanitizeContent};
+use crate::secure::GithubTemporaryId;
 
 /// Trait for tool results that include a name field
 pub trait ToolResult: Serialize {
@@ -17,13 +18,14 @@ pub trait ToolResult: Serialize {
     /// Each tool can override this; the operator can further override via `max` in front matter.
     const DEFAULT_MAX: u32 = 1;
 
-    /// Whether this tool performs write operations against ADO.
+    /// Whether this tool performs an external write operation.
     ///
-    /// The Stage 3 executor always receives a write-capable token via
+    /// ADO-backed tools receive a write-capable token via
     /// `SYSTEM_ACCESSTOKEN`: by default the pipeline's built-in
     /// `$(System.AccessToken)` (scoped by pipeline settings), or
     /// `$(SC_WRITE_TOKEN)` minted from an ARM service connection when
-    /// `permissions.write` is configured.
+    /// `permissions.write` is configured. GitHub-backed tools use the separate
+    /// Stage 3 GitHub credential.
     ///
     /// This flag is informational — used by audit and (historically) by
     /// the compiler's permission validator. It is NOT a gate. Diagnostic /
@@ -42,6 +44,14 @@ pub trait Validate {
     }
 }
 
+/// A GitHub issue created earlier in the same Stage 3 execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedGithubIssue {
+    pub repository: String,
+    pub number: u64,
+    pub url: String,
+}
+
 /// Context provided to executors during Stage 3 execution
 #[derive(Debug, Clone)]
 pub struct ExecutionContext {
@@ -58,27 +68,37 @@ pub struct ExecutionContext {
     /// `$(System.AccessToken)` by default or `$(SC_WRITE_TOKEN)` (ARM-minted)
     /// when `permissions.write` is configured.
     pub access_token: Option<String>,
-    /// GitHub PAT used by debug-only safe outputs (e.g. `ado-aw-debug.create-issue`).
-    /// Sourced from the `ADO_AW_DEBUG_GITHUB_TOKEN` pipeline variable. Intentionally
-    /// **separate** from `access_token` (ADO) and from the read-only `GITHUB_TOKEN`
-    /// the agent sees in Stage 1 — only Stage 3 ever sees this token.
+    /// GitHub credential used by GitHub safe outputs in Stage 3.
     pub github_token: Option<String>,
+    /// GitHub REST API base URL for Stage 3 issue calls.
+    pub github_api_url: String,
     /// Working directory for file operations (safe outputs directory)
     pub working_directory: std::path::PathBuf,
     /// Source checkout directory (BUILD_SOURCESDIRECTORY) where git repos are checked out
     pub source_directory: std::path::PathBuf,
+    /// Exact checkout directory for the pipeline's `self` repository.
+    ///
+    /// In a multi-checkout job `BUILD_SOURCESDIRECTORY` is the common checkout
+    /// root, so the compiler passes this path explicitly.
+    pub self_repository_directory: std::path::PathBuf,
     /// Per-tool configuration, keyed by tool name
     pub tool_configs: HashMap<String, serde_json::Value>,
-    /// Debug-only tools (e.g. `create-issue`) that the operator authorized
-    /// via the `ado-aw-debug:` front-matter section. Stage 3 executors for
-    /// `crate::safe_outputs::DEBUG_ONLY_TOOLS` MUST reject NDJSON entries
-    /// whose tool name is absent from this set — otherwise a forged entry
-    /// could bypass the MCP-layer default-deny gate. Empty by default.
-    pub debug_enabled_tools: HashSet<String>,
-    /// Repository ID (from BUILD_REPOSITORY_ID)
+    /// Exact `self` repository ID.
+    ///
+    /// Compiled pipelines no longer project an ID: the compiler resolves the
+    /// `self` repository by **name** at compile time, and ADO's REST API
+    /// accepts a repository name wherever it accepts an ID. This is populated
+    /// only from `ADO_AW_SELF_REPOSITORY_ID`, or from `BUILD_REPOSITORY_ID`
+    /// for direct/legacy invocations with no compiler-supplied identity. See
+    /// [`ExecutionContext::from_env_lookup`] for why the two sources are never
+    /// mixed.
     pub repository_id: Option<String>,
-    /// Repository name (from BUILD_REPOSITORY_NAME)
+    /// Exact `self` repository name. Compiled pipelines provide
+    /// `ADO_AW_SELF_REPOSITORY_NAME`; direct/legacy invocations fall back to
+    /// `BUILD_REPOSITORY_NAME`.
     pub repository_name: Option<String>,
+    /// Repository provider (from BUILD_REPOSITORY_PROVIDER).
+    pub repository_provider: Option<String>,
     /// Allowed repositories for PRs: "self" + checkout list aliases
     /// Maps alias to ADO repo name (e.g., "other-repo" -> "org/other-repo")
     pub allowed_repositories: HashMap<String, String>,
@@ -181,6 +201,8 @@ pub struct ExecutionContext {
     /// the `Clone` semantics need to share state. Each `Default` instance
     /// gets its own fresh empty set, which is correct for tests.
     pub uploaded_pipeline_artifact_keys: Arc<Mutex<HashSet<String>>>,
+    /// Temporary GitHub issue IDs resolved by successful `create-github-issue` calls.
+    pub resolved_github_issues: Arc<Mutex<HashMap<String, ResolvedGithubIssue>>>,
 }
 
 impl ExecutionContext {
@@ -194,13 +216,85 @@ impl ExecutionContext {
         &self,
         tool_name: &str,
     ) -> T {
-        let mut config: T = self
+        let value = self
             .tool_configs
             .get(tool_name)
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .cloned()
+            .map(|mut value| {
+                // Compiler orchestration metadata, not executor configuration.
+                // Both keys are injected into EVERY tool config by Stage 3
+                // (`main.rs` for `--source`, `compile/custom_tools.rs` for the
+                // `--resolved-config` production path), so a config struct
+                // declared `deny_unknown_fields` fails to deserialize unless
+                // they are stripped first. Because the error is swallowed
+                // below, that manifests as the operator's config being
+                // silently replaced by `Default::default()` rather than as a
+                // visible failure — keep this list in sync with every key the
+                // compiler injects.
+                if let Some(object) = value.as_object_mut() {
+                    object.remove("require-approval");
+                    object.remove("staged");
+                }
+                value
+            });
+        let mut config: T = value
+            .map(|v| match serde_json::from_value(v) {
+                Ok(config) => config,
+                Err(error) => {
+                    // Never fail silently: a config-shape mismatch here wipes
+                    // every operator-supplied setting for the tool (target
+                    // repos, allowlists, budgets), which is easy to mistake for
+                    // a product bug at runtime.
+                    log::warn!(
+                        "Failed to deserialize config for tool '{tool_name}': {error}. \
+                         Falling back to defaults; operator-supplied settings for this \
+                         tool will NOT be applied."
+                    );
+                    T::default()
+                }
+            })
             .unwrap_or_default();
         config.sanitize_config_fields();
         config
+    }
+
+    pub fn has_resolved_github_issue(
+        &self,
+        temporary_id: &GithubTemporaryId,
+    ) -> anyhow::Result<bool> {
+        let issues = self
+            .resolved_github_issues
+            .lock()
+            .map_err(|_| anyhow::anyhow!("temporary GitHub issue map lock poisoned"))?;
+        Ok(issues.contains_key(&temporary_id.canonical()))
+    }
+
+    pub fn register_resolved_github_issue(
+        &self,
+        temporary_id: &GithubTemporaryId,
+        issue: ResolvedGithubIssue,
+    ) -> anyhow::Result<()> {
+        let id = temporary_id.canonical();
+        let mut issues = self
+            .resolved_github_issues
+            .lock()
+            .map_err(|_| anyhow::anyhow!("temporary GitHub issue map lock poisoned"))?;
+        if issues.contains_key(&id) {
+            anyhow::bail!("temporary_id '{id}' was already used in this run");
+        }
+        issues.insert(id, issue);
+        Ok(())
+    }
+
+    pub fn resolve_github_issue(
+        &self,
+        temporary_id: &GithubTemporaryId,
+    ) -> anyhow::Result<Option<ResolvedGithubIssue>> {
+        let issues = self
+            .resolved_github_issues
+            .lock()
+            .map_err(|_| anyhow::anyhow!("temporary GitHub issue map lock poisoned"))?;
+        Ok(issues.get(&temporary_id.canonical()).cloned())
     }
 }
 
@@ -239,6 +333,27 @@ impl ExecutionContext {
         let source_directory = env("BUILD_SOURCESDIRECTORY")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let self_repository_directory = env("ADO_AW_SELF_REPOSITORY_DIRECTORY")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| source_directory.clone());
+
+        // Resolve `self`'s identity from exactly one source, never a mix.
+        //
+        // `BUILD_REPOSITORY_*` describes the repository that *triggered* the
+        // run, which is not `checkout: self` on repository-resource-triggered
+        // builds (issue #1731). Pairing a compiler-supplied self name with a
+        // trigger-scoped ID would be worse than either alone, because
+        // consumers that prefer the ID would silently target the wrong
+        // repository. So if the compiler supplied either half, the
+        // `BUILD_REPOSITORY_*` pair is ignored entirely.
+        let compiled_repository_id = env("ADO_AW_SELF_REPOSITORY_ID");
+        let compiled_repository_name = env("ADO_AW_SELF_REPOSITORY_NAME");
+        let (repository_id, repository_name) =
+            if compiled_repository_id.is_some() || compiled_repository_name.is_some() {
+                (compiled_repository_id, compiled_repository_name)
+            } else {
+                (env("BUILD_REPOSITORY_ID"), env("BUILD_REPOSITORY_NAME"))
+            };
 
         Self {
             ado_org_url,
@@ -246,13 +361,16 @@ impl ExecutionContext {
             ado_project: env("SYSTEM_TEAMPROJECT"),
             ado_project_id: env("SYSTEM_TEAMPROJECTID"),
             access_token: env("SYSTEM_ACCESSTOKEN").or_else(|| env("AZURE_DEVOPS_EXT_PAT")),
-            github_token: env("ADO_AW_DEBUG_GITHUB_TOKEN"),
+            github_token: env("ADO_AW_GITHUB_TOKEN"),
+            github_api_url: env("ADO_AW_GITHUB_API_URL")
+                .unwrap_or_else(|| "https://api.github.com".to_string()),
             working_directory: std::env::current_dir().unwrap_or_default(),
             source_directory,
+            self_repository_directory,
             tool_configs: HashMap::new(),
-            debug_enabled_tools: HashSet::new(),
-            repository_id: env("BUILD_REPOSITORY_ID"),
-            repository_name: env("BUILD_REPOSITORY_NAME"),
+            repository_id,
+            repository_name,
+            repository_provider: env("BUILD_REPOSITORY_PROVIDER"),
             allowed_repositories: HashMap::new(),
             repo_refs: HashMap::new(),
             agent_stats: None,
@@ -287,6 +405,7 @@ impl ExecutionContext {
 
             // Per-run state for upload-pipeline-artifact dedupe.
             uploaded_pipeline_artifact_keys: Arc::new(Mutex::new(HashSet::new())),
+            resolved_github_issues: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -901,6 +1020,82 @@ mod tests {
     }
 
     #[test]
+    fn test_from_env_lookup_populates_checkout_directories() {
+        let ctx = ExecutionContext::from_env_lookup(env_from(&[
+            ("BUILD_SOURCESDIRECTORY", "C:\\agent\\s"),
+            (
+                "ADO_AW_SELF_REPOSITORY_DIRECTORY",
+                "C:\\agent\\s\\ado-aw",
+            ),
+        ]));
+
+        assert_eq!(
+            ctx.source_directory,
+            std::path::PathBuf::from("C:\\agent\\s")
+        );
+        assert_eq!(
+            ctx.self_repository_directory,
+            std::path::PathBuf::from("C:\\agent\\s\\ado-aw")
+        );
+    }
+
+    #[test]
+    fn test_from_env_lookup_self_directory_falls_back_to_source_directory() {
+        let ctx = ExecutionContext::from_env_lookup(env_from(&[(
+            "BUILD_SOURCESDIRECTORY",
+            "C:\\agent\\s",
+        )]));
+
+        assert_eq!(ctx.self_repository_directory, ctx.source_directory);
+    }
+
+    #[test]
+    fn test_from_env_lookup_prefers_compiler_owned_self_identity() {
+        // Both halves supplied explicitly (manual/testing): use them as a pair.
+        let ctx = ExecutionContext::from_env_lookup(env_from(&[
+            ("ADO_AW_SELF_REPOSITORY_ID", "self-id"),
+            ("ADO_AW_SELF_REPOSITORY_NAME", "project/self-repo"),
+            ("BUILD_REPOSITORY_ID", "trigger-id"),
+            ("BUILD_REPOSITORY_NAME", "project/trigger-repo"),
+        ]));
+
+        assert_eq!(ctx.repository_id.as_deref(), Some("self-id"));
+        assert_eq!(
+            ctx.repository_name.as_deref(),
+            Some("project/self-repo")
+        );
+    }
+
+    #[test]
+    fn test_from_env_lookup_name_only_self_identity_ignores_trigger_id() {
+        // The shape compiled pipelines emit: a compile-time self name and no
+        // ID. The trigger-scoped BUILD_REPOSITORY_ID must NOT be paired with
+        // it, or consumers preferring the ID would target the wrong repo.
+        let ctx = ExecutionContext::from_env_lookup(env_from(&[
+            ("ADO_AW_SELF_REPOSITORY_NAME", "self-repo"),
+            ("BUILD_REPOSITORY_ID", "trigger-id"),
+            ("BUILD_REPOSITORY_NAME", "trigger-repo"),
+        ]));
+
+        assert_eq!(ctx.repository_name.as_deref(), Some("self-repo"));
+        assert_eq!(ctx.repository_id, None);
+    }
+
+    #[test]
+    fn test_from_env_lookup_self_identity_falls_back_to_build_variables() {
+        let ctx = ExecutionContext::from_env_lookup(env_from(&[
+            ("BUILD_REPOSITORY_ID", "build-id"),
+            ("BUILD_REPOSITORY_NAME", "project/build-repo"),
+        ]));
+
+        assert_eq!(ctx.repository_id.as_deref(), Some("build-id"));
+        assert_eq!(
+            ctx.repository_name.as_deref(),
+            Some("project/build-repo")
+        );
+    }
+
+    #[test]
     fn test_from_env_lookup_build_id_none_for_non_numeric() {
         let ctx = ExecutionContext::from_env_lookup(env_from(&[("BUILD_BUILDID", "not-a-number")]));
         assert!(ctx.build_id.is_none());
@@ -1015,5 +1210,73 @@ mod tests {
         assert!(ctx.pull_request_id.is_none());
         assert!(ctx.pull_request_source_branch.is_none());
         assert!(ctx.pull_request_target_branch.is_none());
+    }
+
+    /// Build a context whose tool config carries the orchestration keys the
+    /// compiler injects into EVERY tool config.
+    fn ctx_with_injected_keys(tool: &str, mut config: serde_json::Value) -> ExecutionContext {
+        let object = config.as_object_mut().expect("config must be an object");
+        // Mirrors `main.rs` (--source) and `compile/custom_tools.rs`
+        // (--resolved-config, the production path).
+        object.insert("staged".to_string(), serde_json::Value::Bool(false));
+        object.insert(
+            "require-approval".to_string(),
+            serde_json::Value::Bool(false),
+        );
+        let mut tool_configs = HashMap::new();
+        tool_configs.insert(tool.to_string(), config);
+        ExecutionContext {
+            tool_configs,
+            ..Default::default()
+        }
+    }
+
+    /// Regression guard for a silent config wipe.
+    ///
+    /// `CreateGithubIssueConfig` and `SetGithubIssueTypeConfig` are declared
+    /// `#[serde(deny_unknown_fields)]`, so the compiler-injected `staged` /
+    /// `require-approval` keys made deserialization fail. `get_tool_config`
+    /// swallowed the error and returned `Default::default()`, silently
+    /// discarding every operator setting (`target-repo`, `allowed-labels`,
+    /// budgets, …) instead of failing visibly.
+    #[test]
+    fn test_get_tool_config_survives_compiler_injected_orchestration_keys() {
+        let ctx = ctx_with_injected_keys(
+            "create-github-issue",
+            serde_json::json!({
+                "target-repo": "octo/scratch",
+                "title-prefix": "[prefix] ",
+                "labels": ["static-label"],
+                "allowed-labels": ["agent-*"],
+                "require-temporary-id": true,
+                "max": 3,
+            }),
+        );
+        let config: crate::safe_outputs::CreateGithubIssueConfig =
+            ctx.get_tool_config("create-github-issue");
+        assert_eq!(
+            config.target_repo.as_deref(),
+            Some("octo/scratch"),
+            "operator target-repo must survive the injected orchestration keys"
+        );
+        assert_eq!(config.title_prefix.as_deref(), Some("[prefix] "));
+        assert_eq!(config.labels, vec!["static-label".to_string()]);
+        assert_eq!(config.allowed_labels, vec!["agent-*".to_string()]);
+        assert!(config.require_temporary_id);
+        assert_eq!(config.max, Some(3));
+    }
+
+    #[test]
+    fn test_get_tool_config_survives_injected_keys_for_set_github_issue_type() {
+        let ctx = ctx_with_injected_keys(
+            "set-github-issue-type",
+            serde_json::json!({ "target-repo": "octo/scratch", "allowed": ["Bug"] }),
+        );
+        let config: crate::safe_outputs::SetGithubIssueTypeConfig =
+            ctx.get_tool_config("set-github-issue-type");
+        assert_eq!(config.target_repo.as_deref(), Some("octo/scratch"));
+        // An empty `allowed` list is default-ALLOW, so a silent wipe here fails
+        // open — any issue type would be accepted.
+        assert_eq!(config.allowed, vec!["Bug".to_string()]);
     }
 }

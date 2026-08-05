@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 
 use crate::audit::model::{
-    CreatedItemReport, Finding, RejectedSafeOutputsRollup, SafeOutputExecution,
+    CreatedItemReport, ErrorInfo, Finding, RejectedSafeOutputsRollup, SafeOutputExecution,
     SafeOutputExecutionItem, SafeOutputStatus, SafeOutputSummary, Severity,
 };
 use crate::ndjson::{EXECUTED_NDJSON_FILENAME, SAFE_OUTPUT_FILENAME, read_ndjson_file};
@@ -21,6 +21,7 @@ pub struct SafeOutputAnalysis {
     pub execution: Option<crate::audit::model::SafeOutputExecution>,
     pub rollup: Option<crate::audit::model::RejectedSafeOutputsRollup>,
     pub created_items: Vec<crate::audit::model::CreatedItemReport>,
+    pub warnings: Vec<ErrorInfo>,
     /// Severity-`high` findings emitted when proposals were rejected by
     /// the aggregate detection gate. At most one finding per audit run.
     pub findings: Vec<crate::audit::model::Finding>,
@@ -41,6 +42,7 @@ struct ExecutionRecord {
     name: String,
     status: String,
     context: Option<String>,
+    proposal_index: Option<usize>,
     result: Option<Value>,
     error: Option<String>,
 }
@@ -67,9 +69,20 @@ pub async fn analyze_safe_outputs(
     let detection_path = find_detection_file(download_root).await?;
     let executions_paths = find_execution_files(download_root).await?;
 
-    let proposals = load_proposals(proposals_path.as_deref()).await?;
+    let custom_tool_catalog =
+        super::custom_jobs::load_custom_tool_catalog(download_root, None).await?;
+    let warnings = custom_tool_catalog.warnings.clone();
+    let custom_tools = custom_tool_catalog.names();
+    let (proposals, proposal_indexes) = exclude_custom_proposals(
+        load_proposals(proposals_path.as_deref()).await?,
+        &custom_tools,
+    );
     let detection = load_detection_verdict(detection_path.as_deref()).await?;
-    let executions = load_execution_records(&executions_paths).await?;
+    let executions = exclude_custom_executions(
+        load_execution_records(&executions_paths).await?,
+        &custom_tools,
+        &proposal_indexes,
+    );
     let detection_gate_fired = detection.as_ref().is_some_and(DetectionVerdict::gate_fired);
 
     let items = if detection_gate_fired {
@@ -146,8 +159,47 @@ pub async fn analyze_safe_outputs(
         execution,
         rollup,
         created_items,
+        warnings,
         findings,
     })
+}
+
+fn exclude_custom_proposals(
+    proposals: Vec<ProposalRecord>,
+    custom_tools: &std::collections::BTreeSet<String>,
+) -> (Vec<ProposalRecord>, BTreeMap<usize, usize>) {
+    let mut retained = Vec::new();
+    let mut indexes = BTreeMap::new();
+    for mut proposal in proposals {
+        if custom_tools.contains(&proposal.name) {
+            continue;
+        }
+        let original_index = proposal.index;
+        proposal.index = retained.len();
+        indexes.insert(original_index, proposal.index);
+        retained.push(proposal);
+    }
+    (retained, indexes)
+}
+
+fn exclude_custom_executions(
+    executions: Vec<IndexedExecutionRecord>,
+    custom_tools: &std::collections::BTreeSet<String>,
+    proposal_indexes: &BTreeMap<usize, usize>,
+) -> Vec<IndexedExecutionRecord> {
+    executions
+        .into_iter()
+        .filter(|execution| !custom_tools.contains(&execution.record.name))
+        .enumerate()
+        .map(|(index, mut execution)| {
+            execution.index = index;
+            execution.record.proposal_index = execution
+                .record
+                .proposal_index
+                .and_then(|original| proposal_indexes.get(&original).copied());
+            execution
+        })
+        .collect()
 }
 
 impl DetectionVerdict {
@@ -201,9 +253,7 @@ async fn load_detection_verdict(path: Option<&Path>) -> anyhow::Result<Option<De
     Ok(Some(verdict))
 }
 
-async fn load_execution_records(
-    paths: &[PathBuf],
-) -> anyhow::Result<Vec<IndexedExecutionRecord>> {
+async fn load_execution_records(paths: &[PathBuf]) -> anyhow::Result<Vec<IndexedExecutionRecord>> {
     let mut records = Vec::new();
     for path in paths {
         let values = read_ndjson_file(path).await?;
@@ -236,15 +286,20 @@ fn build_execution_items(
     let mut proposal_to_execution = vec![None; proposals.len()];
     let mut execution_matched = vec![false; executions.len()];
     let mut context_index = BTreeMap::<(String, String), VecDeque<usize>>::new();
+    let mut context_free_index = BTreeMap::<String, VecDeque<usize>>::new();
 
     for proposal in proposals {
-        let Some(context) = proposal.context.clone() else {
-            continue;
-        };
-        context_index
-            .entry((proposal.name.clone(), context))
-            .or_default()
-            .push_back(proposal.index);
+        if let Some(context) = proposal.context.clone() {
+            context_index
+                .entry((proposal.name.clone(), context))
+                .or_default()
+                .push_back(proposal.index);
+        } else {
+            context_free_index
+                .entry(proposal.name.clone())
+                .or_default()
+                .push_back(proposal.index);
+        }
     }
 
     for execution in executions {
@@ -270,15 +325,29 @@ fn build_execution_items(
             continue;
         }
 
-        let Some(proposal) = proposals.get(execution.index) else {
-            continue;
-        };
-        if proposal_to_execution[proposal.index].is_some() {
+        if let Some(proposal_index) = execution.record.proposal_index {
+            let Some(proposal) = proposals.get(proposal_index) else {
+                continue;
+            };
+            if proposal_to_execution[proposal.index].is_none()
+                && proposal.context.is_none()
+                && proposal.name == execution.record.name
+            {
+                proposal_to_execution[proposal.index] = Some(execution.index);
+                execution_matched[execution.index] = true;
+            }
             continue;
         }
-        if proposal.context.is_none() && proposal.name == execution.record.name {
-            proposal_to_execution[proposal.index] = Some(execution.index);
-            execution_matched[execution.index] = true;
+
+        let Some(proposal_indexes) = context_free_index.get_mut(&execution.record.name) else {
+            continue;
+        };
+        while let Some(proposal_index) = proposal_indexes.pop_front() {
+            if proposal_to_execution[proposal_index].is_none() {
+                proposal_to_execution[proposal_index] = Some(execution.index);
+                execution_matched[execution.index] = true;
+                break;
+            }
         }
     }
 
@@ -567,9 +636,13 @@ async fn find_execution_files(download_root: &Path) -> anyhow::Result<Vec<PathBu
     // With manual review, execution splits across multiple artifacts
     // (`safe_outputs/` for the automatic path and `safe_outputs_reviewed/`
     // for the approval-gated path), each with its own `executed.ndjson`.
-    // Collect them all so the audit reflects the complete set of actions.
+    // Search only those built-in artifacts. Legacy
+    // `custom_safe_output_*` artifacts are intentionally excluded because
+    // custom jobs are audited from proposals plus the ADO timeline.
     let mut matches = Vec::new();
-    collect_named_files(download_root, EXECUTED_NDJSON_FILENAME, &mut matches).await?;
+    for directory in top_level_dirs_with_prefix(download_root, "safe_outputs").await? {
+        collect_named_files(&directory, EXECUTED_NDJSON_FILENAME, &mut matches).await?;
+    }
     matches.sort();
     matches.dedup();
     Ok(matches)
@@ -661,8 +734,9 @@ fn collect_named_files<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        CreatedItemReport, EXECUTED_NDJSON_FILENAME, SAFE_OUTPUT_FILENAME, SafeOutputStatus,
-        Severity, analyze_safe_outputs,
+        CreatedItemReport, EXECUTED_NDJSON_FILENAME, ExecutionRecord, IndexedExecutionRecord,
+        ProposalRecord, SAFE_OUTPUT_FILENAME, SafeOutputStatus, Severity, analyze_safe_outputs,
+        build_execution_items,
     };
     use serde_json::{Value, json};
     use std::fs;
@@ -732,6 +806,168 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn custom_proposals_and_legacy_artifacts_are_excluded_from_builtin_execution() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        write_ndjson(
+            &temp_dir
+                .path()
+                .join("agent_outputs_42")
+                .join("staging")
+                .join(SAFE_OUTPUT_FILENAME),
+            &[
+                json!({"name": "custom_notify", "context": "custom-1"}),
+                json!({"name": "noop"}),
+            ],
+        );
+        write_json(
+            &temp_dir
+                .path()
+                .join("agent_outputs_42")
+                .join("staging")
+                .join("custom-tools.json"),
+            &json!([{
+                "name": "custom_notify",
+                "description": "Notify",
+                "inputSchema": {"type": "object"},
+                "max": 1,
+                "output": "Proposal accepted."
+            }]),
+        );
+        write_ndjson(
+            &temp_dir
+                .path()
+                .join("safe_outputs")
+                .join(EXECUTED_NDJSON_FILENAME),
+            &[json!({
+                "name": "noop",
+                "status": "succeeded",
+                "proposal_index": 1,
+                "result": {"status": "ok"}
+            })],
+        );
+        write_ndjson(
+            &temp_dir
+                .path()
+                .join("custom_safe_output_notify_42")
+                .join(EXECUTED_NDJSON_FILENAME),
+            &[json!({
+                "name": "custom_notify",
+                "status": "succeeded",
+                "context": "custom-1",
+                "component": {"sha": "legacy-runtime-record"},
+                "result": {"status": "must not be audited per item"}
+            })],
+        );
+
+        let analysis = analyze_safe_outputs(temp_dir.path())
+            .await
+            .expect("analyze built-in and custom safe outputs");
+
+        let summary = analysis.summary.expect("summary");
+        assert_eq!(summary.proposed_count, 1);
+        assert_eq!(summary.executed_count, 1);
+        let execution = analysis.execution.expect("execution");
+        assert_eq!(execution.items.len(), 1);
+        assert_eq!(execution.items[0].tool, "noop");
+        assert_eq!(execution.items[0].status, SafeOutputStatus::Executed);
+        assert!(analysis.findings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn malformed_optional_aw_info_does_not_hide_valid_safe_output_analysis() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let staging = temp_dir.path().join("agent_outputs_42").join("staging");
+        write_ndjson(
+            &staging.join(SAFE_OUTPUT_FILENAME),
+            &[
+                json!({"name": "custom_notify", "context": "custom-1"}),
+                json!({"name": "noop"}),
+            ],
+        );
+        write_json(
+            &staging.join("custom-tools.json"),
+            &json!([{
+                "name": "custom_notify",
+                "description": "Notify",
+                "inputSchema": {"type": "object"},
+                "max": 1
+            }]),
+        );
+        fs::write(staging.join("aw_info.json"), "{not valid json")
+            .expect("write malformed aw_info");
+        write_ndjson(
+            &temp_dir
+                .path()
+                .join("safe_outputs")
+                .join(EXECUTED_NDJSON_FILENAME),
+            &[json!({
+                "name": "noop",
+                "status": "succeeded",
+                "proposal_index": 1,
+                "result": {"status": "ok"}
+            })],
+        );
+
+        let analysis = analyze_safe_outputs(temp_dir.path())
+            .await
+            .expect("analyze with malformed optional metadata");
+
+        let summary = analysis.summary.expect("summary");
+        assert_eq!(summary.proposed_count, 1);
+        assert_eq!(summary.executed_count, 1);
+        assert_eq!(analysis.warnings.len(), 1);
+        assert!(
+            analysis.warnings[0]
+                .message
+                .contains("aw_info.json could not be read or parsed")
+        );
+    }
+
+    #[test]
+    fn proposal_index_and_legacy_tool_fifo_are_both_supported() {
+        let proposals = vec![
+            ProposalRecord {
+                index: 0,
+                name: String::from("noop"),
+                context: None,
+                proposal: json!({"name": "noop"}),
+            },
+            ProposalRecord {
+                index: 1,
+                name: String::from("create_issue"),
+                context: None,
+                proposal: json!({"name": "create_issue"}),
+            },
+        ];
+        let executions = vec![
+            IndexedExecutionRecord {
+                index: 0,
+                record: ExecutionRecord {
+                    name: String::from("create_issue"),
+                    status: String::from("succeeded"),
+                    proposal_index: Some(1),
+                    result: Some(json!({"matched": "indexed"})),
+                    ..ExecutionRecord::default()
+                },
+            },
+            IndexedExecutionRecord {
+                index: 1,
+                record: ExecutionRecord {
+                    name: String::from("noop"),
+                    status: String::from("succeeded"),
+                    proposal_index: None,
+                    result: Some(json!({"matched": "builtin"})),
+                    ..ExecutionRecord::default()
+                },
+            },
+        ];
+
+        let items = build_execution_items(&proposals, &executions);
+        assert_eq!(items[0].result, Some(json!({"matched": "builtin"})));
+        assert_eq!(items[1].result, Some(json!({"matched": "indexed"})));
+    }
+
+    #[tokio::test]
     async fn execution_records_aggregate_across_split_artifacts() {
         // Manual-review split: automatic outputs land in `safe_outputs/`,
         // reviewed (approval-gated) outputs in `safe_outputs_reviewed/`. The
@@ -753,14 +989,18 @@ mod tests {
                 .path()
                 .join("safe_outputs")
                 .join(EXECUTED_NDJSON_FILENAME),
-            &[json!({"name": "add_pr_comment", "status": "succeeded", "context": "c-1", "result": {"status": "ok"}})],
+            &[
+                json!({"name": "add_pr_comment", "status": "succeeded", "context": "c-1", "result": {"status": "ok"}}),
+            ],
         );
         write_ndjson(
             &temp_dir
                 .path()
                 .join("safe_outputs_reviewed")
                 .join(EXECUTED_NDJSON_FILENAME),
-            &[json!({"name": "create_pull_request", "status": "succeeded", "context": "pr-1", "result": {"number": 9}})],
+            &[
+                json!({"name": "create_pull_request", "status": "succeeded", "context": "pr-1", "result": {"number": 9}}),
+            ],
         );
 
         let analysis = analyze_safe_outputs(temp_dir.path())

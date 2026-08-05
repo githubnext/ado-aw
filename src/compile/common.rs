@@ -159,33 +159,24 @@ pub struct ParsedSource {
     pub source_sha256: [u8; 32],
 }
 
-/// Parse the markdown file, run the codemod registry on the front
-/// matter in memory, and return both the typed `FrontMatter` and the
-/// raw fragments needed to rewrite the source on disk byte-faithfully.
-///
-/// Use this from callers that may rewrite the source (the `compile`
-/// command). Callers that only want the typed view of the front matter
-/// should use the backward-compatible [`parse_markdown`] wrapper.
-pub fn parse_markdown_detailed(content: &str) -> Result<ParsedSource> {
-    parse_markdown_detailed_with_registry(content, super::codemods::CODEMODS)
+/// Raw markdown split result used by both the typed workflow parser and
+/// import resolution for component manifests that may omit typed fields.
+pub(crate) struct MarkdownFrontMatterParts {
+    pub leading_whitespace: String,
+    pub yaml_raw: Option<String>,
+    pub body_raw: String,
+    pub markdown_body: String,
 }
 
-/// Variant of [`parse_markdown_detailed`] that allows injecting an
-/// explicit codemod registry. Used by tests; production callers go
-/// through the no-arg version that reads the global
-/// [`super::codemods::CODEMODS`].
-pub(crate) fn parse_markdown_detailed_with_registry(
+/// Split optional YAML front matter from a markdown document.
+///
+/// When `require_front_matter` is true this preserves the historical workflow
+/// parser behavior and errors unless the file starts (modulo leading
+/// whitespace) with `---`.
+pub(crate) fn split_markdown_front_matter(
     content: &str,
-    registry: &[&'static super::codemods::Codemod],
-) -> Result<ParsedSource> {
-    use sha2::Digest;
-
-    // Lost-update protection: hash the raw input as it was provided, so
-    // a rewrite path can later re-read the file and compare.
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(content.as_bytes());
-    let source_sha256: [u8; 32] = hasher.finalize().into();
-
+    require_front_matter: bool,
+) -> Result<MarkdownFrontMatterParts> {
     // Allow leading whitespace before the opening fence (preserves
     // historical leniency). We compute a byte offset into `content` so
     // that `body_raw` extraction is purely byte-faithful, and we keep
@@ -199,7 +190,15 @@ pub(crate) fn parse_markdown_detailed_with_registry(
     let leading_whitespace = content[..leading_ws].to_string();
     let after_lead = &content[leading_ws..];
     if !after_lead.starts_with("---") {
-        anyhow::bail!("Markdown file must start with YAML front matter (---)");
+        if require_front_matter {
+            anyhow::bail!("Markdown file must start with YAML front matter (---)");
+        }
+        return Ok(MarkdownFrontMatterParts {
+            leading_whitespace,
+            yaml_raw: None,
+            body_raw: content.to_string(),
+            markdown_body: content.trim().to_string(),
+        });
     }
 
     let after_open = &after_lead[3..];
@@ -207,10 +206,70 @@ pub(crate) fn parse_markdown_detailed_with_registry(
         .find("\n---")
         .context("Could not find closing --- for front matter")?;
 
-    let yaml_str = &after_open[..end_idx];
+    let yaml_raw = after_open[..end_idx].to_string();
     let body_raw_slice = &after_open[end_idx + 4..];
     let body_raw = body_raw_slice.to_string();
     let markdown_body = body_raw_slice.trim().to_string();
+
+    Ok(MarkdownFrontMatterParts {
+        leading_whitespace,
+        yaml_raw: Some(yaml_raw),
+        body_raw,
+        markdown_body,
+    })
+}
+
+/// Parse the markdown file, run the codemod registry on the front
+/// matter in memory, and return both the typed `FrontMatter` and the
+/// raw fragments needed to rewrite the source on disk byte-faithfully.
+///
+/// Use this from callers that may rewrite the source (the `compile`
+/// command). Callers that only want the typed view of the front matter
+/// should use the backward-compatible [`parse_markdown`] wrapper.
+pub fn parse_markdown_detailed(content: &str) -> Result<ParsedSource> {
+    parse_markdown_detailed_with_registry(content, super::codemods::CODEMODS, None)
+}
+
+/// Variant of [`parse_markdown_detailed`] that supplies the compiler
+/// version recorded in the source's existing `.lock.yml` header.
+///
+/// Codemods that migrate a *changed default* (as opposed to a renamed
+/// key) can only tell an old source from a newly authored one by this
+/// value, so every caller that has the compiled output at hand should
+/// use this entry point rather than [`parse_markdown_detailed`].
+pub fn parse_markdown_detailed_for_source(
+    content: &str,
+    source_compiler_version: Option<&str>,
+) -> Result<ParsedSource> {
+    parse_markdown_detailed_with_registry(
+        content,
+        super::codemods::CODEMODS,
+        source_compiler_version,
+    )
+}
+
+/// Variant of [`parse_markdown_detailed`] that allows injecting an
+/// explicit codemod registry. Used by tests; production callers go
+/// through the no-arg version that reads the global
+/// [`super::codemods::CODEMODS`].
+pub(crate) fn parse_markdown_detailed_with_registry(
+    content: &str,
+    registry: &[&'static super::codemods::Codemod],
+    source_compiler_version: Option<&str>,
+) -> Result<ParsedSource> {
+    use sha2::Digest;
+
+    // Lost-update protection: hash the raw input as it was provided, so
+    // a rewrite path can later re-read the file and compare.
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(content.as_bytes());
+    let source_sha256: [u8; 32] = hasher.finalize().into();
+
+    let parts = split_markdown_front_matter(content, true)?;
+    let yaml_str = parts
+        .yaml_raw
+        .as_deref()
+        .expect("required front matter split must return YAML");
 
     // Stage 1: parse to untyped Value, reject non-mapping at top level.
     let parsed_value: serde_yaml::Value =
@@ -226,7 +285,7 @@ pub(crate) fn parse_markdown_detailed_with_registry(
     };
 
     // Stage 2: run the codemod registry against the untyped mapping.
-    let report = super::codemods::apply_codemods_with(&mut mapping, registry)
+    let report = super::codemods::apply_codemods_with(&mut mapping, registry, source_compiler_version)
         .context("Failed to apply codemods")?;
 
     // Stage 3: deserialize the (possibly modified) mapping into the
@@ -249,11 +308,11 @@ pub(crate) fn parse_markdown_detailed_with_registry(
 
     Ok(ParsedSource {
         front_matter,
-        markdown_body,
+        markdown_body: parts.markdown_body,
         codemods: report,
         front_matter_mapping: mapping,
-        leading_whitespace,
-        body_raw,
+        leading_whitespace: parts.leading_whitespace,
+        body_raw: parts.body_raw,
         source_sha256,
     })
 }
@@ -476,6 +535,39 @@ pub fn validate_front_matter_identity(front_matter: &FrontMatter) -> Result<()> 
                     validate::reject_pipeline_injection(
                         p,
                         &format!("on.pr.paths.exclude entry {:?}", p),
+                    )?;
+                }
+            }
+        }
+
+        // Validate on.push branch/path filters for newlines and ADO expressions
+        if let Some(crate::compile::types::PushTriggerConfig::Filtered(push)) = &trigger_config.push
+        {
+            if let Some(branches) = &push.branches {
+                for b in &branches.include {
+                    validate::reject_pipeline_injection(
+                        b,
+                        &format!("on.push.branches.include entry {:?}", b),
+                    )?;
+                }
+                for b in &branches.exclude {
+                    validate::reject_pipeline_injection(
+                        b,
+                        &format!("on.push.branches.exclude entry {:?}", b),
+                    )?;
+                }
+            }
+            if let Some(paths) = &push.paths {
+                for p in &paths.include {
+                    validate::reject_pipeline_injection(
+                        p,
+                        &format!("on.push.paths.include entry {:?}", p),
+                    )?;
+                }
+                for p in &paths.exclude {
+                    validate::reject_pipeline_injection(
+                        p,
+                        &format!("on.push.paths.exclude entry {:?}", p),
                     )?;
                 }
             }
@@ -728,7 +820,44 @@ pub fn build_parameters(
 /// The result of lowering a `repos:` list: the ADO repository resources, the
 /// checkout-alias list, and per-checkout fetch tuning keyed by alias (plus
 /// [`SELF_CHECKOUT_ALIAS`] for the trigger repo).
-pub type LoweredRepos = (Vec<Repository>, Vec<String>, HashMap<String, CheckoutFetchOpts>);
+pub type LoweredRepos = (
+    Vec<Repository>,
+    Vec<String>,
+    HashMap<String, CheckoutFetchOpts>,
+);
+
+/// Repository resource types that are backed by an Azure DevOps **service
+/// connection** and therefore require an `endpoint:` on the repository
+/// resource. Azure Repos (`git`) is same-organization and needs no endpoint.
+pub fn repo_type_requires_endpoint(repo_type: &str) -> bool {
+    matches!(repo_type, "github" | "githubenterprise" | "bitbucket")
+}
+
+/// Validate that a repository resource of a service-connection-backed type
+/// (`github` / `githubenterprise` / `bitbucket`) carries a non-empty
+/// `endpoint:`. Azure Repos (`git`) resources are exempt.
+///
+/// This closes a real gap: `repo_type` was previously an untested passthrough,
+/// so a `type: github` resource without an `endpoint:` compiled to invalid
+/// Azure DevOps YAML. Fail fast at compile time with an actionable message.
+pub fn validate_repo_endpoint(
+    repo_type: &str,
+    endpoint: &Option<String>,
+    name: &str,
+) -> Result<()> {
+    let has_endpoint = endpoint
+        .as_deref()
+        .map(|e| !e.trim().is_empty())
+        .unwrap_or(false);
+    if repo_type_requires_endpoint(repo_type) && !has_endpoint {
+        anyhow::bail!(
+            "Repository '{name}' has type '{repo_type}', which requires an `endpoint:` \
+            (an Azure DevOps service connection) to authenticate. Add \
+            `endpoint: <service-connection-name>` to this repository."
+        );
+    }
+    Ok(())
+}
 
 /// Lower a `repos:` list into the internal [`LoweredRepos`] triple consumed by
 /// the rest of the compiler. A reserved `self` entry (an entry whose *name* is
@@ -760,7 +889,7 @@ pub fn lower_repos(items: &[ReposItem]) -> Result<LoweredRepos> {
             continue;
         }
 
-        let (name, alias, repo_type, repo_ref, do_checkout, fetch_opts) = match item {
+        let (name, alias, repo_type, repo_ref, endpoint, do_checkout, fetch_opts) = match item {
             ReposItem::Shorthand(s) => {
                 let (alias, name) = parse_shorthand(s)?;
                 (
@@ -768,6 +897,7 @@ pub fn lower_repos(items: &[ReposItem]) -> Result<LoweredRepos> {
                     alias,
                     "git".to_string(),
                     "refs/heads/main".to_string(),
+                    None,
                     true,
                     CheckoutFetchOpts::default(),
                 )
@@ -782,6 +912,7 @@ pub fn lower_repos(items: &[ReposItem]) -> Result<LoweredRepos> {
                     alias,
                     entry.repo_type.clone(),
                     entry.repo_ref.clone(),
+                    entry.endpoint.clone(),
                     entry.checkout,
                     CheckoutFetchOpts {
                         fetch_depth: entry.fetch_depth,
@@ -809,20 +940,27 @@ pub fn lower_repos(items: &[ReposItem]) -> Result<LoweredRepos> {
             );
         }
 
-        // Reject duplicate aliases
-        if !seen_aliases.insert(alias.clone()) {
+        // Reject duplicate aliases case-insensitively. Checkout paths are
+        // filesystem paths, so aliases that differ only by case collide on
+        // Windows agents.
+        if !seen_aliases.insert(alias.to_ascii_lowercase()) {
             anyhow::bail!(
-                "Duplicate repository alias '{}' in repos. \
+                "Duplicate repository alias '{}' in repos (aliases are compared \
+                case-insensitively). \
                 Use the `alias` field (or `alias=org/repo` shorthand) to disambiguate.",
                 alias
             );
         }
 
-        // Reject reserved names
-        if RESERVED_WORKSPACE_NAMES.contains(&alias.as_str()) {
+        // Reject reserved names case-insensitively. In particular, no casing
+        // of `self` may collide with the compiler-owned `s/self` checkout.
+        if RESERVED_WORKSPACE_NAMES
+            .iter()
+            .any(|reserved| reserved.eq_ignore_ascii_case(&alias))
+        {
             anyhow::bail!(
                 "Repository alias '{}' is reserved by the 'workspace:' resolver ({:?}). \
-                Rename the alias to avoid ambiguity.",
+                Reserved names are case-insensitive; rename the alias to avoid ambiguity.",
                 alias,
                 RESERVED_WORKSPACE_NAMES
             );
@@ -838,11 +976,14 @@ pub fn lower_repos(items: &[ReposItem]) -> Result<LoweredRepos> {
             );
         }
 
+        validate_repo_endpoint(&repo_type, &endpoint, &name)?;
+
         repositories.push(Repository {
             repository: alias.clone(),
             repo_type,
             name,
             repo_ref,
+            endpoint,
         });
 
         if do_checkout {
@@ -966,71 +1107,6 @@ pub fn resolve_repos(front_matter: &FrontMatter) -> Result<LoweredRepos> {
 /// wrong working directory. We reject this at compile time instead.
 const RESERVED_WORKSPACE_NAMES: &[&str] = &["root", "repo", "self"];
 
-/// Validate that no entry in `checkout` resolves to the same on-disk
-/// directory as the `self` checkout.
-///
-/// In ADO multi-repo checkout, both `checkout: self` and an additional
-/// `checkout: <alias>` land in `s/<RepositoryName>`, where
-/// `<RepositoryName>` is `Build.Repository.Name` for `self` and the
-/// trailing path segment of the `name:` field for each `repositories:`
-/// entry. When these collide, the second checkout runs `git clean -ffdx`
-/// and resets to its configured ref, silently wiping files that exist on
-/// the trigger branch but not on the workspace ref. Failing fast at
-/// compile time is much more discoverable than the resulting runtime
-/// "file not found" errors downstream.
-///
-/// `self_repo_name` is the trigger repo's `Build.Repository.Name` —
-/// usually the trailing segment of the trigger repo's full name, inferred
-/// from the local git remote. When `None` (e.g. compiling outside an ADO
-/// clone, or in unit tests) the check is skipped because we have no
-/// reliable identity for `self`.
-pub fn validate_checkout_self_collision(
-    repositories: &[Repository],
-    checkout: &[String],
-    self_repo_name: Option<&str>,
-) -> Result<()> {
-    let Some(self_name) = self_repo_name else {
-        return Ok(());
-    };
-    if checkout.is_empty() {
-        return Ok(());
-    }
-
-    for alias in checkout {
-        let Some(repo) = repositories.iter().find(|r| r.repository == *alias) else {
-            // Unknown aliases are reported by `validate_checkout_list`.
-            continue;
-        };
-        // `rsplit('/').next()` on any &str always yields `Some` — even for
-        // names without a slash the whole string is returned.
-        let last_segment = repo
-            .name
-            .rsplit('/')
-            .next()
-            .expect("rsplit always yields one item");
-        // ADO is case-insensitive on Windows agents and case-sensitive on
-        // Linux. Use a case-insensitive comparison so the collision is
-        // caught regardless of agent OS — the resulting pipeline would
-        // break on at least one platform either way.
-        if last_segment.eq_ignore_ascii_case(self_name) {
-            anyhow::bail!(
-                "Checkout entry '{}' (repository name '{}') resolves to the same \
-                directory ('s/{}') as the trigger repository checked out as 'self'. \
-                The second checkout would overwrite the first, replacing files \
-                from the trigger branch with the workspace ref. Remove '{}' from \
-                'checkout:' — the 'self' checkout already provides access to this \
-                repository.",
-                alias,
-                repo.name,
-                self_name,
-                alias,
-            );
-        }
-    }
-
-    Ok(())
-}
-
 /// Validate that all entries in checkout list exist in repositories
 pub fn validate_checkout_list(repositories: &[Repository], checkout: &[String]) -> Result<()> {
     if checkout.is_empty() {
@@ -1048,10 +1124,13 @@ pub fn validate_checkout_list(repositories: &[Repository], checkout: &[String]) 
                 repo_names
             );
         }
-        if RESERVED_WORKSPACE_NAMES.contains(&name.as_str()) {
+        if RESERVED_WORKSPACE_NAMES
+            .iter()
+            .any(|reserved| reserved.eq_ignore_ascii_case(name))
+        {
             anyhow::bail!(
                 "Checkout entry '{}' uses a name reserved by the 'workspace:' resolver \
-                ({:?}). Rename the repository alias to avoid ambiguity with \
+                ({:?}). Reserved names are case-insensitive; rename the repository alias to avoid ambiguity with \
                 'workspace: {}'.",
                 name,
                 RESERVED_WORKSPACE_NAMES,
@@ -1138,7 +1217,10 @@ fn resolve_effective_workspace(
             let ws = ws.as_str();
             match ws {
                 "root" => Ok(("root".to_string(), false)),
-                "repo" | "self" => Ok(("repo".to_string(), !has_additional_checkouts)),
+                "repo" | "self" if has_additional_checkouts => {
+                    Ok(("repo".to_string(), false))
+                }
+                "repo" | "self" => Ok(("root".to_string(), true)),
                 alias => {
                     // Defense in depth: even though aliases are constrained
                     // by `validate_checkout_list` to match a `repository:`
@@ -1199,8 +1281,7 @@ pub(crate) fn contains_template_marker(input: &str, name: &str) -> bool {
         // legacy marker even if its inner content trims to `name`. Matching it
         // here would both raise a false positive and — in `replace_marker` —
         // splice `repl` after the `$`, corrupting the output.
-        let preceded_by_dollar =
-            marker_start > 0 && input.as_bytes()[marker_start - 1] == b'$';
+        let preceded_by_dollar = marker_start > 0 && input.as_bytes()[marker_start - 1] == b'$';
         if !preceded_by_dollar
             && let Some(close) = input[start..].find("}}")
             && input[start..start + close].trim() == name
@@ -1217,15 +1298,23 @@ pub(crate) fn contains_template_marker(input: &str, name: &str) -> bool {
     false
 }
 
+/// Checkout path for `self` when a job checks out additional repositories.
+///
+/// The `self` alias is reserved, so using the same fixed segment for its
+/// compiler-owned path cannot collide with a user-declared repository alias.
+pub const MULTI_CHECKOUT_SELF_PATH: &str = "s/self";
+
+/// Absolute ADO expression corresponding to [`MULTI_CHECKOUT_SELF_PATH`].
+pub const MULTI_CHECKOUT_SELF_DIRECTORY: &str = "$(Build.SourcesDirectory)/self";
+
 /// Generate the directory where the trigger ("self") repository is checked out.
 ///
 /// This is independent of `workspace:` — it depends only on whether any
 /// additional repositories are checked out:
 /// - No additional checkouts → `$(Build.SourcesDirectory)` (ADO checks `self`
 ///   into the root).
-/// - One or more additional checkouts → `$(Build.SourcesDirectory)/$(Build.Repository.Name)`
-///   (ADO puts each checked-out repo, including `self`, into a subfolder named
-///   after the repository).
+/// - One or more additional checkouts → `$(Build.SourcesDirectory)/self`
+///   (the compiler gives `self` a fixed explicit path).
 ///
 /// Used to anchor paths to files that ship in the trigger repo (e.g. the agent
 /// markdown source and the compiled pipeline yaml itself), regardless of where
@@ -1234,7 +1323,7 @@ pub fn generate_trigger_repo_directory(checkout: &[String]) -> String {
     if checkout.is_empty() {
         "$(Build.SourcesDirectory)".to_string()
     } else {
-        "$(Build.SourcesDirectory)/$(Build.Repository.Name)".to_string()
+        MULTI_CHECKOUT_SELF_DIRECTORY.to_string()
     }
 }
 
@@ -1244,7 +1333,7 @@ pub fn generate_working_directory(effective_workspace: &str) -> String {
         return format!("$(Build.SourcesDirectory)/{}", alias);
     }
     match effective_workspace {
-        "repo" => "$(Build.SourcesDirectory)/$(Build.Repository.Name)".to_string(),
+        "repo" => MULTI_CHECKOUT_SELF_DIRECTORY.to_string(),
         "root" => "$(Build.SourcesDirectory)".to_string(),
         // compute_effective_workspace only ever returns "root", "repo", or an
         // "alias:<name>" sentinel; any other value indicates a programming
@@ -1313,7 +1402,8 @@ pub fn resolve_pool_typed(
                         (Some(name), Some(vm_image)) => {
                             anyhow::bail!(
                                 "pool cannot specify both `name` and `vmImage` (got name='{}', vmImage='{}')",
-                                name, vm_image
+                                name,
+                                vm_image
                             );
                         }
                         (_, Some(vm_image)) => {
@@ -1900,20 +1990,9 @@ pub fn generate_integrity_check(skip: bool) -> String {
         .to_string()
 }
 
-/// Returns `true` when the agent's front matter sets
-/// `ado-aw-debug.create-issue:` — the gate that activates the debug-only
-/// `create-issue` safe output.
-pub(crate) fn debug_create_issue_enabled(front_matter: &FrontMatter) -> bool {
-    front_matter
-        .ado_aw_debug
-        .as_ref()
-        .and_then(|d| d.create_issue.as_ref())
-        .is_some()
-}
-
 /// Validate the `ado-aw-debug:` section.
 ///
-/// When `create-issue:` is present:
+/// When `create-github-issue:` is present:
 /// * `target-repo` is required and must be `owner/repo`-shaped.
 /// * Operator-supplied strings (target-repo, title-prefix, labels,
 ///   allowed-labels, assignees) must not contain ADO pipeline-injection
@@ -1944,40 +2023,79 @@ pub fn validate_ado_aw_debug_config(front_matter: &FrontMatter) -> Result<()> {
         }
     }
 
-    let Some(debug) = front_matter.ado_aw_debug.as_ref() else {
-        return Ok(());
-    };
-    let Some(ci) = debug.create_issue.as_ref() else {
-        return Ok(());
-    };
+    Ok(())
+}
 
-    crate::safe_outputs::validate_target_repo(&ci.target_repo)?;
+pub fn validate_github_issue_outputs_config(front_matter: &FrontMatter) -> Result<()> {
+    if let Some(config) = front_matter.create_github_issue_config()? {
+        if let Some(target_repo) = config.target_repo.as_deref() {
+            crate::safe_outputs::validate_target_repo(target_repo)?;
+            crate::validate::reject_pipeline_injection(
+                target_repo,
+                "safe-outputs.create-github-issue.target-repo",
+            )?;
+        }
+        if let Some(prefix) = config.title_prefix.as_deref() {
+            crate::validate::reject_pipeline_injection(
+                prefix,
+                "safe-outputs.create-github-issue.title-prefix",
+            )?;
+        }
+        for label in &config.labels {
+            crate::validate::reject_pipeline_injection(
+                label,
+                "safe-outputs.create-github-issue.labels",
+            )?;
+        }
+        for label in &config.allowed_labels {
+            crate::validate::reject_pipeline_injection(
+                label,
+                "safe-outputs.create-github-issue.allowed-labels",
+            )?;
+        }
+        for assignee in &config.assignees {
+            crate::validate::reject_pipeline_injection(
+                assignee,
+                "safe-outputs.create-github-issue.assignees",
+            )?;
+        }
+    }
 
-    crate::validate::reject_pipeline_injection(
-        &ci.target_repo,
-        "ado-aw-debug.create-issue.target-repo",
-    )?;
-    if let Some(prefix) = ci.title_prefix.as_deref() {
-        crate::validate::reject_pipeline_injection(
-            prefix,
-            "ado-aw-debug.create-issue.title-prefix",
-        )?;
+    if let Some(config) = front_matter.set_github_issue_type_config()? {
+        if let Some(target_repo) = config.target_repo.as_deref() {
+            crate::safe_outputs::validate_target_repo(target_repo)?;
+            crate::validate::reject_pipeline_injection(
+                target_repo,
+                "safe-outputs.set-github-issue-type.target-repo",
+            )?;
+        }
+        for issue_type in &config.allowed {
+            crate::validate::reject_pipeline_injection(
+                issue_type,
+                "safe-outputs.set-github-issue-type.allowed",
+            )?;
+        }
     }
-    for label in &ci.labels {
-        crate::validate::reject_pipeline_injection(label, "ado-aw-debug.create-issue.labels")?;
+
+    if front_matter.safe_outputs.contains_key("create-github-issue")
+        && front_matter.safe_outputs.contains_key("set-github-issue-type")
+    {
+        let create_reviewed = front_matter
+            .tool_requires_approval("create-github-issue")
+            .is_some();
+        let type_reviewed = front_matter
+            .tool_requires_approval("set-github-issue-type")
+            .is_some();
+        if create_reviewed != type_reviewed {
+            anyhow::bail!(
+                "safe-outputs.create-github-issue and safe-outputs.set-github-issue-type must have the \
+                 same effective require-approval setting so temporary issue IDs remain in \
+                 one SafeOutputs job"
+            );
+        }
     }
-    for label in &ci.allowed_labels {
-        crate::validate::reject_pipeline_injection(
-            label,
-            "ado-aw-debug.create-issue.allowed-labels",
-        )?;
-    }
-    for assignee in &ci.assignees {
-        crate::validate::reject_pipeline_injection(
-            assignee,
-            "ado-aw-debug.create-issue.assignees",
-        )?;
-    }
+
+    let _ = front_matter.github_safe_outputs_auth()?;
     Ok(())
 }
 
@@ -2126,22 +2244,26 @@ pub fn generate_acquire_ado_token(service_connection: Option<&str>, variable_nam
 ///   scope" settings. Avoids the operational overhead of an ARM service
 ///   connection. The agent (Stage 1) never maps this variable, so the
 ///   token remains executor-only.
-/// * `ADO_AW_DEBUG_GITHUB_TOKEN: $(ADO_AW_DEBUG_GITHUB_TOKEN)` when
-///   `debug_create_issue_enabled` is `true` — GitHub PAT used by the
-///   `ado-aw-debug.create-issue` safe output. Sourced from a dedicated
-///   pipeline variable so it stays separate from the read-only `GITHUB_TOKEN`
-///   the agent (Stage 1) sees.
+/// * `ADO_AW_GITHUB_TOKEN` and `ADO_AW_GITHUB_API_URL` when GitHub issue
+///   outputs are configured. The token source is a Stage 3 PAT or separately
+///   minted App token and remains isolated from Agent/Detection.
 pub fn generate_executor_ado_env(
     write_service_connection: Option<&str>,
-    debug_create_issue_enabled: bool,
+    github_auth: Option<&crate::compile::types::GithubSafeOutputsAuth>,
 ) -> String {
     let mut lines: Vec<String> = Vec::new();
     // Select the ADO bearer via the shared `token_source_for` helper so the
     // executor and the Conclusion job cannot disagree on the token source.
     let token = crate::compile::ado_bundle::token_source_for(write_service_connection);
     lines.push(format!("SYSTEM_ACCESSTOKEN: $({})", token.variable()));
-    if debug_create_issue_enabled {
-        lines.push("ADO_AW_DEBUG_GITHUB_TOKEN: $(ADO_AW_DEBUG_GITHUB_TOKEN)".to_string());
+    if let Some(github_auth) = github_auth {
+        lines.push(format!(
+            "ADO_AW_GITHUB_TOKEN: $({})",
+            github_auth.executor_token_var()
+        ));
+        let api_url = serde_json::to_string(github_auth.api_url())
+            .expect("serializing a validated GitHub API URL cannot fail");
+        lines.push(format!("ADO_AW_GITHUB_API_URL: {api_url}"));
     }
     // The two-space indent on each value line is the YAML relative indent for
     // a key nested under `env:`. replace_with_indent prepends the base
@@ -2158,13 +2280,13 @@ pub fn generate_executor_ado_env(
 /// Generate `--enabled-tools` CLI args for the SafeOutputs MCP server.
 ///
 /// Derives the tool list from `safe-outputs:` front matter keys plus always-on
-/// diagnostic tools, plus any debug-only safe outputs activated via the
-/// `ado-aw-debug:` section (e.g. `create-issue`).
+/// diagnostic tools. Configured-only tools (e.g. `create-github-issue`) are
+/// stripped by the MCP layer unless they appear here, so they become reachable
+/// only when the author declared their `safe-outputs:` key.
 ///
-/// If `safe-outputs:` is empty AND no `ado-aw-debug` debug-only tool is
-/// configured, returns an empty string (all non-debug tools enabled for
-/// backward compatibility — debug-only tools remain stripped at the MCP
-/// layer regardless).
+/// If `safe-outputs:` is empty, returns an empty string (all non-gated tools
+/// enabled for backward compatibility — debug-only and configured-only tools
+/// remain stripped at the MCP layer regardless).
 ///
 /// Tool names are validated to contain only ASCII alphanumerics and hyphens
 /// to prevent shell injection when the args are embedded in bash commands.
@@ -2173,9 +2295,7 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
     use crate::safe_outputs::{ALL_KNOWN_SAFE_OUTPUTS, ALWAYS_ON_TOOLS, NON_MCP_SAFE_OUTPUT_KEYS};
     use std::collections::HashSet;
 
-    let debug_create_issue = debug_create_issue_enabled(front_matter);
-
-    if front_matter.safe_outputs.is_empty() && !debug_create_issue {
+    if front_matter.safe_outputs.is_empty() {
         return String::new();
     }
 
@@ -2216,14 +2336,7 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
         }
     }
 
-    // Debug-only tools must be added explicitly — they're stripped from the
-    // MCP layer by default and only become reachable when listed here.
-    if debug_create_issue && seen.insert("create-issue".to_string()) {
-        tools.push("create-issue".to_string());
-        effective_mcp_tool_count += 1;
-    }
-
-    if effective_mcp_tool_count == 0 {
+    if effective_mcp_tool_count == 0 && front_matter.custom_safe_output_tool_names().is_empty() {
         // Every user-specified key was either a non-MCP key or a guard path
         // from the defensive check above. Return empty to keep all tools
         // available (backward compat).
@@ -2441,9 +2554,21 @@ pub fn validate_safe_outputs_keys(front_matter: &FrontMatter) -> Result<()> {
     let mut unknown: Vec<(String, Vec<&'static str>)> = Vec::new();
     let mut invalid_names: Vec<String> = Vec::new();
 
+    // Custom tools declared under `safe-outputs.jobs`. A top-level key that matches a custom tool name is that
+    // tool's *configuration* (e.g. `require-approval`) and must be accepted
+    // rather than treated as an unknown built-in.
+    let custom_names: std::collections::HashSet<String> = front_matter
+        .custom_safe_output_tool_names()
+        .into_iter()
+        .collect();
+
     for key in front_matter.safe_output_tool_names() {
         if !validate::is_safe_tool_name(key) {
             invalid_names.push(key.clone());
+            continue;
+        }
+        if custom_names.contains(key) {
+            // Consumer configuration for an imported custom tool.
             continue;
         }
         if NON_MCP_SAFE_OUTPUT_KEYS.contains(&key.as_str()) {
@@ -2507,6 +2632,50 @@ pub fn validate_safe_outputs_keys(front_matter: &FrontMatter) -> Result<()> {
         anyhow::bail!("{}", msg);
     }
 
+    validate_custom_safe_output_tools(front_matter)?;
+
+    Ok(())
+}
+
+/// Validate custom safe-output job names and structural shape.
+pub fn validate_custom_safe_output_tools(front_matter: &FrontMatter) -> Result<()> {
+    use crate::safe_outputs::ALL_KNOWN_SAFE_OUTPUTS;
+
+    if front_matter.safe_outputs.contains_key("scripts") {
+        anyhow::bail!(
+            "safe-outputs.scripts is not supported; use a self-contained \
+             safe-outputs.jobs executor"
+        );
+    }
+
+    for section in ["jobs"] {
+        let Some(value) = front_matter.safe_outputs.get(section) else {
+            continue;
+        };
+        if value.is_null() {
+            continue;
+        }
+        let Some(map) = value.as_object() else {
+            anyhow::bail!(
+                "safe-outputs.{section} must be a mapping of tool-name to definition. Example:\n\n  \
+                 safe-outputs:\n    {section}:\n      my-tool:\n        description: ...\n"
+            );
+        };
+        for name in map.keys() {
+            if !validate::is_safe_tool_name(name) {
+                anyhow::bail!(
+                    "safe-outputs.{section}.{name} has an invalid tool name. \
+                     Tool names must contain only ASCII letters, digits, and hyphens."
+                );
+            }
+            if ALL_KNOWN_SAFE_OUTPUTS.contains(&name.as_str()) {
+                anyhow::bail!(
+                    "safe-outputs.{section}.{name} collides with the built-in safe-output \
+                     tool '{name}'. Custom tool names must not shadow built-ins; rename it."
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2713,6 +2882,7 @@ pub fn generate_mcpg_config(
         &front_matter.name,
     )?;
     let working_directory = generate_working_directory(&effective_workspace);
+    let trigger_repo_directory = generate_trigger_repo_directory(&front_matter.checkout);
     let registry_base = front_matter
         .supply_chain()
         .and_then(|sc| sc.registry.as_ref())
@@ -2728,10 +2898,30 @@ pub fn generate_mcpg_config(
             .split_whitespace()
             .map(str::to_string),
     );
+    if !front_matter.custom_safe_output_tool_names().is_empty() {
+        safeoutputs_entrypoint_args.extend([
+            "--custom-tools".to_string(),
+            "/safeoutputs/custom-tools.json".to_string(),
+        ]);
+    }
     safeoutputs_entrypoint_args.extend([
+        "--self-repository-directory".to_string(),
+        trigger_repo_directory.clone(),
         "/safeoutputs".to_string(),
         working_directory.clone(),
     ]);
+    let mut safeoutputs_mounts = vec![
+        "/tmp/awf-tools/ado-aw:/usr/local/bin/ado-aw:ro".to_string(),
+        format!("{working_directory}:{working_directory}:rw"),
+    ];
+    if trigger_repo_directory != working_directory
+        && !trigger_repo_directory.starts_with(&format!("{working_directory}/"))
+    {
+        safeoutputs_mounts.push(format!(
+            "{trigger_repo_directory}:{trigger_repo_directory}:rw"
+        ));
+    }
+    safeoutputs_mounts.push("/tmp/awf-tools/staging:/safeoutputs:rw".to_string());
     mcp_servers.insert(
         "safeoutputs".to_string(),
         McpgServerConfig {
@@ -2739,11 +2929,7 @@ pub fn generate_mcpg_config(
             container: Some(safeoutputs_image),
             entrypoint: Some("/usr/local/bin/ado-aw".to_string()),
             entrypoint_args: Some(safeoutputs_entrypoint_args),
-            mounts: Some(vec![
-                "/tmp/awf-tools/ado-aw:/usr/local/bin/ado-aw:ro".to_string(),
-                format!("{working_directory}:{working_directory}:rw"),
-                "/tmp/awf-tools/staging:/safeoutputs:rw".to_string(),
-            ]),
+            mounts: Some(safeoutputs_mounts),
             args: Some(vec![
                 "--network".to_string(),
                 "none".to_string(),
@@ -2933,10 +3119,7 @@ fn add_extension_network_hosts(
 /// Ecosystem identifiers (e.g., `"python"`) are expanded to their domain
 /// lists. Raw domain names are validated against DNS-safe characters before
 /// insertion; an invalid name causes this function to return an error.
-fn add_user_network_hosts(
-    user_hosts: &[String],
-    hosts: &mut HashSet<String>,
-) -> Result<()> {
+fn add_user_network_hosts(user_hosts: &[String], hosts: &mut HashSet<String>) -> Result<()> {
     for host in user_hosts {
         if is_ecosystem_identifier(host) {
             let domains = get_ecosystem_domains(host);
@@ -3314,7 +3497,10 @@ mod tests {
         let err = resolve_pool_typed(CompileTarget::Standalone, Some(&pool))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("pool.demands requires `pool.name`"), "err: {err}");
+        assert!(
+            err.contains("pool.demands requires `pool.name`"),
+            "err: {err}"
+        );
     }
 
     #[test]
@@ -3429,9 +3615,8 @@ mod tests {
         // name-validation stage (before the duplicate check), because the raw
         // string is emitted verbatim into the YAML and would not match the ADO
         // group.
-        let src =
-            "---\nname: t\ndescription: d\nvariable-groups:\n  - \" Shared Secrets \"\n---\n"
-                .to_string();
+        let src = "---\nname: t\ndescription: d\nvariable-groups:\n  - \" Shared Secrets \"\n---\n"
+            .to_string();
         let (fm, _) = parse_markdown(&src).unwrap();
         let err = validate_variable_groups(&fm).unwrap_err().to_string();
         assert!(err.contains("is not a valid"), "err: {err}");
@@ -3622,9 +3807,18 @@ mod tests {
         // boundaries (e.g. tmpfs `/tmp` on Linux). Verify that the
         // extracted helper returns "." for a bare filename so the
         // tempfile lands on the same filesystem as the destination.
-        assert_eq!(atomic_write_parent_dir(Path::new("agent.md")), PathBuf::from("."));
-        assert_eq!(atomic_write_parent_dir(Path::new("subdir/agent.md")), PathBuf::from("subdir"));
-        assert_eq!(atomic_write_parent_dir(Path::new("/tmp/agent.md")), PathBuf::from("/tmp"));
+        assert_eq!(
+            atomic_write_parent_dir(Path::new("agent.md")),
+            PathBuf::from(".")
+        );
+        assert_eq!(
+            atomic_write_parent_dir(Path::new("subdir/agent.md")),
+            PathBuf::from("subdir")
+        );
+        assert_eq!(
+            atomic_write_parent_dir(Path::new("/tmp/agent.md")),
+            PathBuf::from("/tmp")
+        );
     }
 
     // ─── parse_markdown_detailed ──────────────────────────────────────────────
@@ -3768,7 +3962,7 @@ mod tests {
         assert_eq!(ws, "repo");
         assert_eq!(
             generate_working_directory(&ws),
-            "$(Build.SourcesDirectory)/$(Build.Repository.Name)"
+            "$(Build.SourcesDirectory)/self"
         );
     }
 
@@ -3781,7 +3975,7 @@ mod tests {
         assert_eq!(ws, "repo");
         assert_eq!(
             generate_working_directory(&ws),
-            "$(Build.SourcesDirectory)/$(Build.Repository.Name)"
+            "$(Build.SourcesDirectory)/self"
         );
     }
 
@@ -3799,10 +3993,10 @@ mod tests {
     }
 
     #[test]
-    fn test_workspace_explicit_repo_no_checkouts_still_returns_repo() {
-        // Emits a warning but still returns "repo"
+    fn test_workspace_explicit_repo_no_checkouts_resolves_to_root() {
+        // Emits a warning and preserves the single-checkout root layout.
         let ws = compute_effective_workspace(&Some("repo".to_string()), &[], "agent").unwrap();
-        assert_eq!(ws, "repo");
+        assert_eq!(ws, "root");
     }
 
     #[test]
@@ -3885,6 +4079,7 @@ mod tests {
             repo_type: "git".to_string(),
             name: "org/my-repo".to_string(),
             repo_ref: "refs/heads/main".to_string(),
+            endpoint: None,
         }];
         let checkout = vec!["my-repo".to_string()];
         let result = validate_checkout_list(&repos, &checkout);
@@ -3898,6 +4093,7 @@ mod tests {
             repo_type: "git".to_string(),
             name: "org/my-repo".to_string(),
             repo_ref: "refs/heads/main".to_string(),
+            endpoint: None,
         }];
         let checkout = vec!["unknown-alias".to_string()];
         let result = validate_checkout_list(&repos, &checkout);
@@ -3912,6 +4108,7 @@ mod tests {
             repo_type: "git".to_string(),
             name: "org/my-repo".to_string(),
             repo_ref: "refs/heads/main".to_string(),
+            endpoint: None,
         }];
         let result = validate_checkout_list(&repos, &[]);
         assert!(result.is_ok());
@@ -3926,88 +4123,13 @@ mod tests {
             repo_type: "git".to_string(),
             name: "org/repo".to_string(),
             repo_ref: "refs/heads/main".to_string(),
+            endpoint: None,
         }];
         let checkout = vec!["repo".to_string()];
         let err = validate_checkout_list(&repos, &checkout).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("reserved"), "msg: {msg}");
         assert!(msg.contains("'repo'"), "msg: {msg}");
-    }
-
-    // ─── validate_checkout_self_collision ────────────────────────────────────
-
-    #[test]
-    fn test_validate_self_collision_detects_match() {
-        // Workspace repo's name last segment matches the self repo's name,
-        // so both `checkout: self` and `checkout: my-repo` would land in
-        // `s/my-repo`. Must error.
-        let repos = vec![Repository {
-            repository: "my-repo".to_string(),
-            repo_type: "git".to_string(),
-            name: "some-org/my-repo".to_string(),
-            repo_ref: "refs/heads/main".to_string(),
-        }];
-        let checkout = vec!["my-repo".to_string()];
-        let err = validate_checkout_self_collision(&repos, &checkout, Some("my-repo")).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("'my-repo'"), "msg: {msg}");
-        assert!(msg.contains("same"), "msg: {msg}");
-        assert!(msg.contains("'self'"), "msg: {msg}");
-    }
-
-    #[test]
-    fn test_validate_self_collision_no_collision_passes() {
-        // Different repo name → different `s/<name>` directory, no collision.
-        let repos = vec![Repository {
-            repository: "other".to_string(),
-            repo_type: "git".to_string(),
-            name: "some-org/other".to_string(),
-            repo_ref: "refs/heads/main".to_string(),
-        }];
-        let checkout = vec!["other".to_string()];
-        let result = validate_checkout_self_collision(&repos, &checkout, Some("my-repo"));
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_self_collision_case_insensitive() {
-        // ADO is case-insensitive on Windows; treat differing-only-by-case
-        // names as a collision so the pipeline doesn't break on one OS.
-        let repos = vec![Repository {
-            repository: "my-repo".to_string(),
-            repo_type: "git".to_string(),
-            name: "Some-Org/My-Repo".to_string(),
-            repo_ref: "refs/heads/main".to_string(),
-        }];
-        let checkout = vec!["my-repo".to_string()];
-        let err = validate_checkout_self_collision(&repos, &checkout, Some("my-repo")).unwrap_err();
-        assert!(err.to_string().contains("same"));
-    }
-
-    #[test]
-    fn test_validate_self_collision_no_self_name_skipped() {
-        // No git remote / no inferred self name → can't detect, skip.
-        let repos = vec![Repository {
-            repository: "my-repo".to_string(),
-            repo_type: "git".to_string(),
-            name: "org/my-repo".to_string(),
-            repo_ref: "refs/heads/main".to_string(),
-        }];
-        let checkout = vec!["my-repo".to_string()];
-        let result = validate_checkout_self_collision(&repos, &checkout, None);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_self_collision_empty_checkout_passes() {
-        let repos = vec![Repository {
-            repository: "my-repo".to_string(),
-            repo_type: "git".to_string(),
-            name: "org/my-repo".to_string(),
-            repo_ref: "refs/heads/main".to_string(),
-        }];
-        let result = validate_checkout_self_collision(&repos, &[], Some("my-repo"));
-        assert!(result.is_ok());
     }
 
     // ─── Engine::args (copilot params) ──────────────────────────────────────
@@ -4599,11 +4721,10 @@ mod tests {
 
     #[test]
     fn test_generate_trigger_repo_directory_with_additional_checkouts() {
-        // As soon as any additional repo is checked out, ADO places every
-        // checked-out repo (including `self`) into a subdirectory named
-        // after the repository.
+        // The compiler pins self to a reserved path so trigger metadata cannot
+        // change the checkout location.
         let result = generate_trigger_repo_directory(&["exp23-a7-nw".to_string()]);
-        assert_eq!(result, "$(Build.SourcesDirectory)/$(Build.Repository.Name)");
+        assert_eq!(result, "$(Build.SourcesDirectory)/self");
     }
 
     #[test]
@@ -4619,10 +4740,7 @@ mod tests {
                 .unwrap();
         let working_dir = generate_working_directory(&workspace);
 
-        assert_eq!(
-            trigger,
-            "$(Build.SourcesDirectory)/$(Build.Repository.Name)"
-        );
+        assert_eq!(trigger, "$(Build.SourcesDirectory)/self");
         assert_eq!(working_dir, "$(Build.SourcesDirectory)/exp23-a7-nw");
         assert_ne!(
             trigger, working_dir,
@@ -4661,37 +4779,6 @@ mod tests {
         assert!(
             result.is_empty(),
             "Should produce empty string when skipping"
-        );
-    }
-
-    #[test]
-    fn test_debug_create_issue_enabled_helper() {
-        let yaml_off = "---\nname: test\ndescription: test\n---\n";
-        let (fm_off, _) = parse_markdown(yaml_off).unwrap();
-        assert!(!debug_create_issue_enabled(&fm_off));
-
-        let yaml_on = r#"---
-name: test
-description: test
-ado-aw-debug:
-  create-issue:
-    target-repo: githubnext/ado-aw
----
-"#;
-        let (fm_on, _) = parse_markdown(yaml_on).unwrap();
-        assert!(debug_create_issue_enabled(&fm_on));
-
-        let yaml_section_only = r#"---
-name: test
-description: test
-ado-aw-debug:
-  skip-integrity: true
----
-"#;
-        let (fm_section, _) = parse_markdown(yaml_section_only).unwrap();
-        assert!(
-            !debug_create_issue_enabled(&fm_section),
-            "ado-aw-debug.skip-integrity alone must NOT enable create-issue"
         );
     }
 
@@ -4887,6 +4974,30 @@ ado-aw-debug:
     }
 
     #[test]
+    fn custom_only_safe_outputs_emit_explicit_builtin_allowlist() {
+        let (fm, _) = parse_markdown(
+            r#"---
+name: test
+description: test
+safe-outputs:
+  jobs:
+    notify:
+      description: Notify.
+      steps:
+        - bash: echo notify
+---
+"#,
+        )
+        .unwrap();
+        let args = generate_enabled_tools_args(&fm);
+        assert!(!args.is_empty());
+        assert!(args.contains("--enabled-tools noop"));
+        assert!(args.contains("--enabled-tools missing-data"));
+        assert!(!args.contains("--enabled-tools create-work-item"));
+        assert!(!args.contains("--enabled-tools create-pull-request"));
+    }
+
+    #[test]
     fn test_generate_enabled_tools_args_skips_require_approval_reserved_key() {
         // The reserved section-level `require-approval` key must never be
         // treated as a tool name in `--enabled-tools`.
@@ -4958,23 +5069,32 @@ ado-aw-debug:
         );
     }
 
-    // ─── ado-aw-debug wiring ────────────────────────────────────────────────
+    #[test]
+    fn test_github_auth_without_issue_tools_does_not_enable_them() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-token: $(TOKEN)\n---\n",
+        )
+        .unwrap();
+        assert!(generate_enabled_tools_args(&fm).is_empty());
+    }
+
+    // ─── GitHub issue output wiring ─────────────────────────────────────────
 
     #[test]
-    fn test_generate_enabled_tools_args_debug_create_issue_alone() {
+    fn test_generate_enabled_tools_args_create_github_issue_alone() {
         let yaml = r#"---
 name: test
 description: test
-ado-aw-debug:
-  create-issue:
+safe-outputs:
+  create-github-issue:
     target-repo: githubnext/ado-aw
 ---
 "#;
         let (fm, _) = parse_markdown(yaml).unwrap();
         let args = generate_enabled_tools_args(&fm);
         assert!(
-            args.contains("--enabled-tools create-issue"),
-            "ado-aw-debug.create-issue should add create-issue to --enabled-tools, got: {}",
+            args.contains("--enabled-tools create-github-issue"),
+            "safe-outputs.create-github-issue should add create-github-issue to --enabled-tools, got: {}",
             args
         );
         // Always-on tools should also be present so the filter activates.
@@ -4982,28 +5102,27 @@ ado-aw-debug:
     }
 
     #[test]
-    fn test_generate_enabled_tools_args_debug_plus_safe_outputs() {
+    fn test_generate_enabled_tools_args_create_github_issue_plus_other_output() {
         let yaml = r#"---
 name: test
 description: test
 safe-outputs:
   create-pull-request:
     target-branch: main
-ado-aw-debug:
-  create-issue:
+  create-github-issue:
     target-repo: githubnext/ado-aw
 ---
 "#;
         let (fm, _) = parse_markdown(yaml).unwrap();
         let args = generate_enabled_tools_args(&fm);
         assert!(args.contains("--enabled-tools create-pull-request"));
-        assert!(args.contains("--enabled-tools create-issue"));
+        assert!(args.contains("--enabled-tools create-github-issue"));
         // No duplicate
-        assert_eq!(args.matches("--enabled-tools create-issue").count(), 1);
+        assert_eq!(args.matches("--enabled-tools create-github-issue").count(), 1);
     }
 
     #[test]
-    fn test_generate_enabled_tools_args_no_debug_does_not_emit_create_issue() {
+    fn test_generate_enabled_tools_args_without_create_github_issue_does_not_emit_it() {
         let yaml = r#"---
 name: test
 description: test
@@ -5015,18 +5134,18 @@ safe-outputs:
         let (fm, _) = parse_markdown(yaml).unwrap();
         let args = generate_enabled_tools_args(&fm);
         assert!(
-            !args.contains("create-issue"),
-            "create-issue must not appear without ado-aw-debug.create-issue"
+            !args.contains("create-github-issue"),
+            "create-github-issue must not appear unless configured"
         );
     }
 
     #[test]
-    fn test_validate_ado_aw_debug_config_accepts_valid_config() {
+    fn test_validate_github_issue_outputs_accepts_valid_config() {
         let yaml = r#"---
 name: test
 description: test
-ado-aw-debug:
-  create-issue:
+safe-outputs:
+  create-github-issue:
     target-repo: githubnext/ado-aw
     title-prefix: "[bug] "
     labels: [pipeline-failure]
@@ -5035,7 +5154,7 @@ ado-aw-debug:
 ---
 "#;
         let (fm, _) = parse_markdown(yaml).unwrap();
-        assert!(validate_ado_aw_debug_config(&fm).is_ok());
+        assert!(validate_github_issue_outputs_config(&fm).is_ok());
     }
 
     #[test]
@@ -5045,69 +5164,69 @@ ado-aw-debug:
     }
 
     #[test]
-    fn test_validate_ado_aw_debug_config_rejects_missing_target_repo() {
+    fn test_validate_github_issue_outputs_rejects_empty_target_repo() {
         let yaml = r#"---
 name: test
 description: test
-ado-aw-debug:
-  create-issue:
+safe-outputs:
+  create-github-issue:
     target-repo: ""
 ---
 "#;
         let (fm, _) = parse_markdown(yaml).unwrap();
-        let result = validate_ado_aw_debug_config(&fm);
+        let result = validate_github_issue_outputs_config(&fm);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("target-repo"), "msg: {}", msg);
     }
 
     #[test]
-    fn test_validate_ado_aw_debug_config_rejects_invalid_target_repo() {
+    fn test_validate_github_issue_outputs_rejects_invalid_target_repo() {
         let yaml = r#"---
 name: test
 description: test
-ado-aw-debug:
-  create-issue:
+safe-outputs:
+  create-github-issue:
     target-repo: not-a-valid-shape
 ---
 "#;
         let (fm, _) = parse_markdown(yaml).unwrap();
-        let result = validate_ado_aw_debug_config(&fm);
+        let result = validate_github_issue_outputs_config(&fm);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("owner/repo"), "msg: {}", msg);
     }
 
     #[test]
-    fn test_validate_ado_aw_debug_config_rejects_pipeline_injection_in_label() {
+    fn test_validate_github_issue_outputs_rejects_pipeline_injection_in_label() {
         let yaml = r###"---
 name: test
 description: test
-ado-aw-debug:
-  create-issue:
+safe-outputs:
+  create-github-issue:
     target-repo: githubnext/ado-aw
     labels:
       - "##vso[task.complete]"
 ---
 "###;
         let (fm, _) = parse_markdown(yaml).unwrap();
-        let result = validate_ado_aw_debug_config(&fm);
+        let result = validate_github_issue_outputs_config(&fm);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_validate_ado_aw_debug_config_rejects_pipeline_injection_in_title_prefix() {
+    fn test_validate_github_issue_outputs_rejects_pipeline_injection_in_title_prefix() {
         let yaml = r###"---
 name: test
 description: test
-ado-aw-debug:
-  create-issue:
+safe-outputs:
+  create-github-issue:
     target-repo: githubnext/ado-aw
     title-prefix: "##vso[task.complete]"
 ---
 "###;
         let (fm, _) = parse_markdown(yaml).unwrap();
-        let result = validate_ado_aw_debug_config(&fm);
+        let result = validate_github_issue_outputs_config(&fm);
         assert!(result.is_err());
     }
 
@@ -5181,6 +5300,59 @@ safe-outputs:
     }
 
     #[test]
+    fn test_validate_safe_outputs_keys_accepts_custom_tool_config() {
+        // A custom tool declared under scripts/jobs, with a top-level config key
+        // of the same name, must validate.
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  jobs:
+    send-notification:
+      description: Send a notification.
+      steps:
+        - bash: echo notify
+  send-notification:
+    require-approval: true
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        assert!(validate_safe_outputs_keys(&fm).is_ok());
+    }
+
+    #[test]
+    fn test_validate_custom_tool_rejects_builtin_collision() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  jobs:
+    create-pull-request:
+      description: Collision.
+      steps:
+        - bash: echo evil
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let err = validate_safe_outputs_keys(&fm).unwrap_err().to_string();
+        assert!(err.contains("collides with the built-in"), "{err}");
+    }
+
+    #[test]
+    fn test_validate_custom_tool_section_must_be_mapping() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  jobs: "not-a-map"
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let err = validate_safe_outputs_keys(&fm).unwrap_err().to_string();
+        assert!(err.contains("must be a mapping"), "{err}");
+    }
+
+    #[test]
     fn test_validate_safe_outputs_keys_rejects_unknown_no_close_match() {
         let yaml = r#"---
 name: test
@@ -5199,15 +5371,12 @@ safe-outputs:
     }
 
     #[test]
-    fn test_validate_safe_outputs_keys_does_not_double_report_debug_only_tool() {
-        // create-issue is in DEBUG_ONLY_TOOLS — validate_ado_aw_debug_config
-        // gives a better error for it. This validator should skip rather
-        // than redundantly flag it as "unknown".
+    fn test_validate_safe_outputs_keys_accepts_create_github_issue() {
         let yaml = r#"---
 name: test
 description: test
 safe-outputs:
-  create-issue:
+  create-github-issue:
     target-repo: githubnext/ado-aw
 ---
 "#;
@@ -5283,28 +5452,61 @@ safe-outputs:
     }
 
     #[test]
-    fn test_validate_rejects_create_issue_under_safe_outputs() {
-        // Defence-in-depth: `create-issue` MUST NOT appear under
-        // `safe-outputs:` even when `ado-aw-debug:` isn't set. Allowing it
-        // there would let a forged config flow into ctx.tool_configs and
-        // sidestep the executor-side gate.
+    fn test_validate_accepts_create_github_issue_under_safe_outputs() {
         let yaml = r#"---
 name: test
 description: test
 safe-outputs:
-  create-issue:
+  create-github-issue:
     target-repo: githubnext/ado-aw
 ---
 "#;
         let (fm, _) = parse_markdown(yaml).unwrap();
-        let result = validate_ado_aw_debug_config(&fm);
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("debug-only") && msg.contains("ado-aw-debug"),
-            "expected debug-only redirection error, got: {}",
-            msg
-        );
+        assert!(validate_ado_aw_debug_config(&fm).is_ok());
+        assert!(validate_github_issue_outputs_config(&fm).is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_mixed_approval_lanes_for_linked_issue_tools() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  create-github-issue:
+    target-repo: githubnext/ado-aw
+    require-approval: true
+  set-github-issue-type:
+    target-repo: githubnext/ado-aw
+    require-approval: false
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let error = validate_github_issue_outputs_config(&fm)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("same effective require-approval"));
+    }
+
+    #[test]
+    fn test_validate_rejects_pat_and_app_auth_together() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  github-token: $(TOKEN)
+  github-app:
+    client-id: Iv23liExample
+    owner: githubnext
+    repositories: [ado-aw]
+  create-github-issue:
+    target-repo: githubnext/ado-aw
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let error = validate_github_issue_outputs_config(&fm)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("mutually exclusive"));
     }
 
     #[test]
@@ -5492,7 +5694,7 @@ safe-outputs:
 
     #[test]
     fn test_generate_executor_ado_env_with_connection() {
-        let result = generate_executor_ado_env(Some("my-sc"), false);
+        let result = generate_executor_ado_env(Some("my-sc"), None);
         assert!(
             result.contains("env:"),
             "Executor env block should include the 'env:' key"
@@ -5511,14 +5713,14 @@ safe-outputs:
             "When write SC is configured, fall back to ARM-minted token, not System.AccessToken"
         );
         assert!(
-            !result.contains("ADO_AW_DEBUG_GITHUB_TOKEN"),
-            "Without debug flag, GitHub token must not be exposed to executor"
+            !result.contains("ADO_AW_GITHUB_TOKEN"),
+            "Without GitHub issue outputs, GitHub token must not be exposed"
         );
     }
 
     #[test]
     fn test_generate_executor_ado_env_none_uses_system_access_token() {
-        let result = generate_executor_ado_env(None, false);
+        let result = generate_executor_ado_env(None, None);
         assert!(
             result.starts_with("env:\n"),
             "Should always emit env: block (executor needs SYSTEM_ACCESSTOKEN)"
@@ -5532,22 +5734,30 @@ safe-outputs:
             "Without write SC, must not reference SC_WRITE_TOKEN"
         );
         assert!(
-            !result.contains("ADO_AW_DEBUG_GITHUB_TOKEN"),
-            "Without debug flag, GitHub token must not appear"
+            !result.contains("ADO_AW_GITHUB_TOKEN"),
+            "Without GitHub issue outputs, GitHub token must not appear"
         );
     }
 
     #[test]
-    fn test_generate_executor_ado_env_with_create_issue_only() {
-        let result = generate_executor_ado_env(None, true);
+    fn test_generate_executor_ado_env_with_create_github_issue_only() {
+        let auth = crate::compile::types::GithubSafeOutputsAuth::Token {
+            variable: "MY_GITHUB_WRITE_TOKEN".to_string(),
+            api_url: "https://api.github.com".to_string(),
+        };
+        let result = generate_executor_ado_env(None, Some(&auth));
         assert!(result.starts_with("env:\n"), "Should emit env: block");
         assert!(
             result.contains("SYSTEM_ACCESSTOKEN: $(System.AccessToken)"),
             "Default executor token is $(System.AccessToken) even with debug enabled"
         );
         assert!(
-            result.contains("ADO_AW_DEBUG_GITHUB_TOKEN: $(ADO_AW_DEBUG_GITHUB_TOKEN)"),
-            "Debug flag should expose the GitHub PAT pipeline variable"
+            result.contains("ADO_AW_GITHUB_TOKEN: $(MY_GITHUB_WRITE_TOKEN)"),
+            "Executor should map the configured Stage 3 GitHub token"
+        );
+        assert!(
+            result.contains("ADO_AW_GITHUB_API_URL: \"https://api.github.com\""),
+            "GitHub API URL must be emitted as a quoted YAML scalar"
         );
         assert!(
             !result.contains("SC_WRITE_TOKEN"),
@@ -5557,9 +5767,13 @@ safe-outputs:
 
     #[test]
     fn test_generate_executor_ado_env_with_both_tokens() {
-        let result = generate_executor_ado_env(Some("write-sc"), true);
+        let auth = crate::compile::types::GithubSafeOutputsAuth::Token {
+            variable: "ADO_AW_GITHUB_TOKEN".to_string(),
+            api_url: "https://api.github.com".to_string(),
+        };
+        let result = generate_executor_ado_env(Some("write-sc"), Some(&auth));
         assert!(result.contains("SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)"));
-        assert!(result.contains("ADO_AW_DEBUG_GITHUB_TOKEN: $(ADO_AW_DEBUG_GITHUB_TOKEN)"));
+        assert!(result.contains("ADO_AW_GITHUB_TOKEN: $(ADO_AW_GITHUB_TOKEN)"));
         assert!(
             !result.contains("$(System.AccessToken)"),
             "Write SC overrides System.AccessToken default"
@@ -5571,8 +5785,8 @@ safe-outputs:
     #[test]
     fn test_model_name_rejects_single_quote() {
         let mut fm = minimal_front_matter();
-        fm.engine =
-            crate::compile::types::EngineConfig::Full(Box::new(crate::compile::types::EngineOptions {
+        fm.engine = crate::compile::types::EngineConfig::Full(Box::new(
+            crate::compile::types::EngineOptions {
                 id: Some("copilot".to_string()),
                 model: Some("model' && echo pwned".to_string()),
                 version: None,
@@ -5584,7 +5798,8 @@ safe-outputs:
                 timeout_minutes: None,
                 github_app_token: None,
                 provider: None,
-            }));
+            },
+        ));
         let result = engine_args_for(&fm);
         assert!(result.is_err());
         assert!(
@@ -5598,8 +5813,8 @@ safe-outputs:
     #[test]
     fn test_model_name_rejects_space() {
         let mut fm = minimal_front_matter();
-        fm.engine =
-            crate::compile::types::EngineConfig::Full(Box::new(crate::compile::types::EngineOptions {
+        fm.engine = crate::compile::types::EngineConfig::Full(Box::new(
+            crate::compile::types::EngineOptions {
                 id: Some("copilot".to_string()),
                 model: Some("model && curl evil.com".to_string()),
                 version: None,
@@ -5611,7 +5826,8 @@ safe-outputs:
                 timeout_minutes: None,
                 github_app_token: None,
                 provider: None,
-            }));
+            },
+        ));
         let result = engine_args_for(&fm);
         assert!(result.is_err());
     }
@@ -5625,8 +5841,8 @@ safe-outputs:
             "my_model:latest",
         ] {
             let mut fm = minimal_front_matter();
-            fm.engine =
-                crate::compile::types::EngineConfig::Full(Box::new(crate::compile::types::EngineOptions {
+            fm.engine = crate::compile::types::EngineConfig::Full(Box::new(
+                crate::compile::types::EngineOptions {
                     id: Some("copilot".to_string()),
                     model: Some(name.to_string()),
                     version: None,
@@ -5638,7 +5854,8 @@ safe-outputs:
                     timeout_minutes: None,
                     github_app_token: None,
                     provider: None,
-                }));
+                },
+            ));
             let result = engine_args_for(&fm);
             assert!(result.is_ok(), "Model name '{}' should be valid", name);
         }
@@ -5824,6 +6041,7 @@ safe-outputs:
             }),
             pr: None,
             schedule: None,
+            push: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -5842,6 +6060,7 @@ safe-outputs:
             }),
             pr: None,
             schedule: None,
+            push: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -5865,6 +6084,7 @@ safe-outputs:
             }),
             pr: None,
             schedule: None,
+            push: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -5891,6 +6111,7 @@ safe-outputs:
                 ..Default::default()
             }),
             schedule: None,
+            push: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -5917,6 +6138,7 @@ safe-outputs:
                 ..Default::default()
             }),
             schedule: None,
+            push: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -5943,6 +6165,7 @@ safe-outputs:
                 ..Default::default()
             }),
             schedule: None,
+            push: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -5969,6 +6192,7 @@ safe-outputs:
                 ..Default::default()
             }),
             schedule: None,
+            push: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -5995,6 +6219,7 @@ safe-outputs:
                 ..Default::default()
             }),
             schedule: None,
+            push: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -6019,9 +6244,126 @@ safe-outputs:
                 ..Default::default()
             }),
             schedule: None,
+            push: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_ok());
+    }
+
+    /// Build an `on.push` filter config for the injection tests.
+    fn push_filtered(
+        branches: Option<crate::compile::types::BranchFilter>,
+        paths: Option<crate::compile::types::PathFilter>,
+    ) -> OnConfig {
+        OnConfig {
+            pipeline: None,
+            pr: None,
+            schedule: None,
+            push: Some(crate::compile::types::PushTriggerConfig::Filtered(
+                crate::compile::types::PushFilterConfig { branches, paths },
+            )),
+        }
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_newline_in_push_branch_include() {
+        let mut fm = minimal_front_matter();
+        fm.on_config = Some(push_filtered(
+            Some(crate::compile::types::BranchFilter {
+                include: vec!["main\ninjected: true".to_string()],
+                exclude: vec![],
+            }),
+            None,
+        ));
+        let err = validate_front_matter_identity(&fm).unwrap_err().to_string();
+        assert!(err.contains("on.push.branches.include"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_newline_in_push_branch_exclude() {
+        let mut fm = minimal_front_matter();
+        fm.on_config = Some(push_filtered(
+            Some(crate::compile::types::BranchFilter {
+                include: vec![],
+                exclude: vec!["feature\ninjected: true".to_string()],
+            }),
+            None,
+        ));
+        let err = validate_front_matter_identity(&fm).unwrap_err().to_string();
+        assert!(err.contains("on.push.branches.exclude"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_newline_in_push_path_include() {
+        let mut fm = minimal_front_matter();
+        fm.on_config = Some(push_filtered(
+            None,
+            Some(crate::compile::types::PathFilter {
+                include: vec!["src/\ninjected: true".to_string()],
+                exclude: vec![],
+            }),
+        ));
+        let err = validate_front_matter_identity(&fm).unwrap_err().to_string();
+        assert!(err.contains("on.push.paths.include"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_newline_in_push_path_exclude() {
+        let mut fm = minimal_front_matter();
+        fm.on_config = Some(push_filtered(
+            None,
+            Some(crate::compile::types::PathFilter {
+                include: vec![],
+                exclude: vec!["tests/\ninjected: true".to_string()],
+            }),
+        ));
+        let err = validate_front_matter_identity(&fm).unwrap_err().to_string();
+        assert!(err.contains("on.push.paths.exclude"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_rejects_ado_expression_in_push_branch() {
+        let mut fm = minimal_front_matter();
+        fm.on_config = Some(push_filtered(
+            Some(crate::compile::types::BranchFilter {
+                include: vec!["$(System.AccessToken)".to_string()],
+                exclude: vec![],
+            }),
+            None,
+        ));
+        assert!(validate_front_matter_identity(&fm).is_err());
+    }
+
+    #[test]
+    fn test_validate_front_matter_identity_allows_valid_push_branches_and_paths() {
+        let mut fm = minimal_front_matter();
+        fm.on_config = Some(push_filtered(
+            Some(crate::compile::types::BranchFilter {
+                include: vec!["main".to_string(), "release/*".to_string()],
+                exclude: vec!["feature/*".to_string()],
+            }),
+            Some(crate::compile::types::PathFilter {
+                include: vec!["src/**".to_string()],
+                exclude: vec!["tests/**".to_string()],
+            }),
+        ));
+        assert!(validate_front_matter_identity(&fm).is_ok());
+    }
+
+    /// `push: none` carries no free-form strings, so it must never trip
+    /// the injection sweep.
+    #[test]
+    fn test_validate_front_matter_identity_allows_push_none() {
+        let mut fm = minimal_front_matter();
+        fm.on_config = Some(OnConfig {
+            pipeline: None,
+            pr: None,
+            schedule: None,
+            push: Some(crate::compile::types::PushTriggerConfig::Disabled(
+                crate::compile::types::PushNone::None,
+            )),
+        });
+        assert!(validate_front_matter_identity(&fm).is_ok());
     }
 
     #[test]
@@ -6045,6 +6387,7 @@ safe-outputs:
             }),
             pr: None,
             schedule: None,
+            push: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_ok());
@@ -6080,6 +6423,7 @@ safe-outputs:
             }),
             pr: None,
             schedule: None,
+            push: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -6098,6 +6442,7 @@ safe-outputs:
             }),
             pr: None,
             schedule: None,
+            push: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -6116,6 +6461,7 @@ safe-outputs:
             }),
             pr: None,
             schedule: None,
+            push: None,
         });
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
@@ -6345,6 +6691,72 @@ safe-outputs:
         assert!(
             entrypoint_args.starts_with(&["mcp".to_string()]),
             "SafeOutputs should use the stdio MCP subcommand: {entrypoint_args:?}"
+        );
+        assert!(
+            entrypoint_args.windows(2).any(|args| {
+                args
+                    == [
+                        "--self-repository-directory".to_string(),
+                        "$(Build.SourcesDirectory)".to_string(),
+                    ]
+            }),
+            "SafeOutputs should receive the exact self checkout: {entrypoint_args:?}"
+        );
+    }
+
+    #[test]
+    fn test_generate_mcpg_config_mounts_self_when_workspace_is_sibling_alias() {
+        let mut fm = minimal_front_matter();
+        fm.checkout = vec!["tools".to_string()];
+        fm.workspace = Some("tools".to_string());
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
+        let so = config.mcp_servers.get("safeoutputs").unwrap();
+
+        assert!(
+            so.mounts.as_ref().unwrap().iter().any(|mount| {
+                mount
+                    == "$(Build.SourcesDirectory)/self:$(Build.SourcesDirectory)/self:rw"
+            }),
+            "self checkout must be mounted when it is outside the selected workspace"
+        );
+    }
+
+    #[test]
+    fn test_generate_mcpg_config_safeoutputs_receives_custom_tool_definitions() {
+        let mut fm = minimal_front_matter();
+        fm.safe_outputs.insert(
+            "jobs".to_string(),
+            serde_json::json!({
+                "notify": {
+                    "description": "Send a notification",
+                    "inputs": {
+                        "message": {
+                            "type": "string",
+                            "description": "Message to send",
+                            "required": true
+                        }
+                    },
+                    "steps": [{"bash": "echo notify"}]
+                }
+            }),
+        );
+
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
+        let args = config
+            .mcp_servers
+            .get("safeoutputs")
+            .unwrap()
+            .entrypoint_args
+            .as_ref()
+            .unwrap();
+        assert!(
+            args.windows(2).any(|pair| {
+                pair == [
+                    "--custom-tools".to_string(),
+                    "/safeoutputs/custom-tools.json".to_string(),
+                ]
+            }),
+            "SafeOutputs must load the staged custom tool definitions: {args:?}"
         );
     }
 
@@ -7261,6 +7673,7 @@ safe-outputs:
             alias: None,
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/main".to_string(),
+            endpoint: None,
             checkout: true,
             fetch_depth: None,
             fetch_tags: None,
@@ -7278,6 +7691,7 @@ safe-outputs:
             alias: None,
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/main".to_string(),
+            endpoint: None,
             checkout: false,
             fetch_depth: None,
             fetch_tags: None,
@@ -7295,6 +7709,7 @@ safe-outputs:
             alias: Some("docs-v2".to_string()),
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/release/2.x".to_string(),
+            endpoint: None,
             checkout: true,
             fetch_depth: None,
             fetch_tags: None,
@@ -7303,6 +7718,49 @@ safe-outputs:
         assert_eq!(repos[0].repository, "docs-v2");
         assert_eq!(repos[0].repo_ref, "refs/heads/release/2.x");
         assert_eq!(checkout, vec!["docs-v2"]);
+    }
+
+    #[test]
+    fn test_repos_github_type_requires_endpoint() {
+        let items = vec![ReposItem::Full(RepoEntry {
+            name: "acme/shared".to_string(),
+            alias: Some("shared".to_string()),
+            repo_type: "github".to_string(),
+            repo_ref: "refs/heads/main".to_string(),
+            endpoint: None,
+            checkout: true,
+            fetch_depth: None,
+            fetch_tags: None,
+        })];
+        let err = lower_repos(&items).unwrap_err();
+        assert!(err.to_string().contains("requires an `endpoint:`"), "{err}");
+        assert!(err.to_string().contains("acme/shared"), "{err}");
+    }
+
+    #[test]
+    fn test_repos_github_type_with_endpoint_ok() {
+        let items = vec![ReposItem::Full(RepoEntry {
+            name: "acme/shared".to_string(),
+            alias: Some("shared".to_string()),
+            repo_type: "githubenterprise".to_string(),
+            repo_ref: "refs/heads/main".to_string(),
+            endpoint: Some("shared-conn".to_string()),
+            checkout: true,
+            fetch_depth: None,
+            fetch_tags: None,
+        })];
+        let (repos, _checkout, _fetch) = lower_repos(&items).unwrap();
+        assert_eq!(repos[0].repo_type, "githubenterprise");
+        assert_eq!(repos[0].endpoint.as_deref(), Some("shared-conn"));
+    }
+
+    #[test]
+    fn test_repos_git_type_needs_no_endpoint() {
+        // Same-org Azure Repos (`git`) must NOT require an endpoint.
+        assert!(validate_repo_endpoint("git", &None, "proj/repo").is_ok());
+        assert!(repo_type_requires_endpoint("github"));
+        assert!(repo_type_requires_endpoint("githubenterprise"));
+        assert!(!repo_type_requires_endpoint("git"));
     }
 
     #[test]
@@ -7315,6 +7773,19 @@ safe-outputs:
         assert!(
             err.to_string()
                 .contains("Duplicate repository alias 'tools'"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_repos_rejects_case_only_duplicate_aliases() {
+        let items = vec![
+            ReposItem::Shorthand("org/Tools".to_string()),
+            ReposItem::Shorthand("other-org/tools".to_string()),
+        ];
+        let err = lower_repos(&items).unwrap_err();
+        assert!(
+            err.to_string().contains("case-insensitively"),
             "{err}"
         );
     }
@@ -7340,12 +7811,34 @@ safe-outputs:
             alias: Some("root".to_string()),
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/main".to_string(),
+            endpoint: None,
             checkout: true,
             fetch_depth: None,
             fetch_tags: None,
         })];
         let err = lower_repos(&items).unwrap_err();
         assert!(err.to_string().contains("reserved"), "{err}");
+    }
+
+    #[test]
+    fn test_repos_rejects_reserved_alias_case_insensitively() {
+        for alias in ["Self", "SELF", "Repo", "ROOT"] {
+            let items = vec![ReposItem::Full(RepoEntry {
+                name: "org/fine-repo".to_string(),
+                alias: Some(alias.to_string()),
+                repo_type: "git".to_string(),
+                repo_ref: "refs/heads/main".to_string(),
+                endpoint: None,
+                checkout: true,
+                fetch_depth: None,
+                fetch_tags: None,
+            })];
+            let err = lower_repos(&items).unwrap_err();
+            assert!(
+                err.to_string().contains("case-insensitive"),
+                "{alias}: {err}"
+            );
+        }
     }
 
     #[test]
@@ -7359,6 +7852,7 @@ safe-outputs:
                 alias: Some(bad.to_string()),
                 repo_type: "git".to_string(),
                 repo_ref: "refs/heads/main".to_string(),
+                endpoint: None,
                 checkout: true,
                 fetch_depth: None,
                 fetch_tags: None,
@@ -7376,6 +7870,7 @@ safe-outputs:
             alias: Some("my-tools_2".to_string()),
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/main".to_string(),
+            endpoint: None,
             checkout: true,
             fetch_depth: None,
             fetch_tags: None,
@@ -7393,6 +7888,7 @@ safe-outputs:
                 alias: None,
                 repo_type: "git".to_string(),
                 repo_ref: "refs/heads/main".to_string(),
+                endpoint: None,
                 checkout: false,
                 fetch_depth: None,
                 fetch_tags: None,
@@ -7412,6 +7908,7 @@ safe-outputs:
                 alias: None,
                 repo_type: "git".to_string(),
                 repo_ref: "refs/heads/main".to_string(),
+                endpoint: None,
                 checkout: true,
                 fetch_depth: Some(1),
                 fetch_tags: Some(false),
@@ -7437,6 +7934,7 @@ safe-outputs:
             alias: None,
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/main".to_string(),
+            endpoint: None,
             checkout: true,
             fetch_depth: Some(0),
             fetch_tags: Some(false),
@@ -7460,6 +7958,7 @@ safe-outputs:
                 alias: None,
                 repo_type: "git".to_string(),
                 repo_ref: "refs/heads/main".to_string(),
+                endpoint: None,
                 checkout: true,
                 fetch_depth: Some(1),
                 fetch_tags: None,
@@ -7469,6 +7968,7 @@ safe-outputs:
                 alias: None,
                 repo_type: "git".to_string(),
                 repo_ref: "refs/heads/main".to_string(),
+                endpoint: None,
                 checkout: true,
                 fetch_depth: None,
                 fetch_tags: Some(true),
@@ -7487,6 +7987,7 @@ safe-outputs:
             alias: Some("mine".to_string()),
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/feature".to_string(),
+            endpoint: None,
             checkout: false,
             fetch_depth: Some(1),
             fetch_tags: None,
@@ -7523,6 +8024,7 @@ safe-outputs:
             alias: None,
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/main".to_string(),
+            endpoint: None,
             checkout: false,
             fetch_depth: Some(1),
             fetch_tags: Some(false),
@@ -7741,10 +8243,7 @@ repos:
             err.contains("manual-review"),
             "error should mention key: {err}"
         );
-        assert!(
-            err.contains("agentless"),
-            "error should explain why: {err}"
-        );
+        assert!(err.contains("agentless"), "error should explain why: {err}");
     }
 
     #[test]
@@ -7786,15 +8285,18 @@ repos:
             resolve_pool_overrides_typed(CompileTarget::Standalone, Some(&default), &overrides)
                 .unwrap_err()
                 .to_string();
-        assert!(err.contains("name") && err.contains("vmImage"), "err: {err}");
+        assert!(
+            err.contains("name") && err.contains("vmImage"),
+            "err: {err}"
+        );
     }
 
     #[test]
     fn pool_overrides_no_default_pool_uses_ubuntu_fallback() {
         // When the top-level pool: is omitted, defaults to ubuntu-22.04.
         let overrides: HashMap<String, PoolConfig> = HashMap::new();
-        let per_job = resolve_pool_overrides_typed(CompileTarget::Standalone, None, &overrides)
-            .unwrap();
+        let per_job =
+            resolve_pool_overrides_typed(CompileTarget::Standalone, None, &overrides).unwrap();
         let expected = crate::compile::ir::job::Pool::VmImage("ubuntu-22.04".to_string());
         assert_eq!(per_job.agent, expected);
         assert_eq!(per_job.detection, expected);
@@ -7827,7 +8329,10 @@ repos:
         assert_eq!(pool_name(&per_job.agent), "AgentPool");
         assert_eq!(pool_name(&per_job.detection), "DetectionPool");
         assert_eq!(pool_name(&per_job.safe_outputs), "SafeOutputsPool");
-        assert_eq!(pool_name(&per_job.safe_outputs_reviewed), "SafeOutputsReviewedPool");
+        assert_eq!(
+            pool_name(&per_job.safe_outputs_reviewed),
+            "SafeOutputsReviewedPool"
+        );
         assert_eq!(pool_name(&per_job.teardown), "TeardownPool");
         assert_eq!(pool_name(&per_job.conclusion), "ConclusionPool");
     }

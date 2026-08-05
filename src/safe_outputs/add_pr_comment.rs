@@ -4,7 +4,7 @@ use log::{debug, info};
 use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::PATH_SEGMENT;
 use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
@@ -208,23 +208,6 @@ fn validate_file_path(path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn repository_checkout_dir(repository: &str, ctx: &ExecutionContext) -> anyhow::Result<PathBuf> {
-    if crate::safe_outputs::input_refers_to_self(repository, ctx) {
-        return Ok(ctx.source_directory.clone());
-    }
-
-    if let Some(alias) =
-        crate::safe_outputs::lookup_allowed_repository_alias(repository, &ctx.allowed_repositories)
-    {
-        return Ok(ctx.source_directory.join(alias));
-    }
-
-    anyhow::bail!(
-        "Repository alias '{}' not found in allowed repositories",
-        repository
-    )
-}
-
 fn build_inline_thread_context(
     workspace_root: &Path,
     repo_root: &Path,
@@ -280,6 +263,129 @@ fn build_inline_thread_context(
     }))
 }
 
+impl AddPrCommentResult {
+    /// Validates the request against the tool's config-driven policy
+    /// (allowed-repositories, allowed-statuses, known status value, and
+    /// file_path shape). Returns the resolved ADO status integer on success,
+    /// or a human-readable failure message on the first violated rule.
+    fn validate_against_config(&self, config: &AddPrCommentConfig) -> Result<i32, String> {
+        if !config.allowed_repositories.is_empty()
+            && !config.allowed_repositories.contains(&self.repository)
+        {
+            return Err(format!(
+                "Repository '{}' is not in the allowed-repositories list",
+                self.repository
+            ));
+        }
+
+        if !config.allowed_statuses.is_empty()
+            && !config
+                .allowed_statuses
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case(&self.status))
+        {
+            return Err(format!(
+                "Status '{}' is not in the allowed-statuses list",
+                self.status
+            ));
+        }
+
+        let status_int = status_to_int(&self.status).ok_or_else(|| {
+            format!(
+                "Invalid status '{}'. Valid statuses: {}",
+                self.status,
+                VALID_STATUSES.join(", ")
+            )
+        })?;
+
+        if let Some(ref fp) = self.file_path {
+            validate_file_path(fp).map_err(|e| format!("Invalid file_path: {e}"))?;
+        }
+
+        Ok(status_int)
+    }
+
+    /// Resolves the Azure DevOps repository name to comment on, honoring the
+    /// "self" alias as well as the checkout allowlist.
+    fn resolve_repo_name(&self, ctx: &ExecutionContext) -> Result<String, String> {
+        if self.repository == "self" || self.repository.is_empty() {
+            ctx.repository_name
+                .clone()
+                .ok_or_else(|| "BUILD_REPOSITORY_NAME not set and repository is 'self'".into())
+        } else {
+            crate::safe_outputs::lookup_allowed_repository(
+                &self.repository,
+                &ctx.allowed_repositories,
+            )
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "Repository alias '{}' not found in allowed repositories",
+                    self.repository
+                )
+            })
+        }
+    }
+
+    /// Builds the JSON body for the ADO "create thread" API call, attaching
+    /// `threadContext` for inline (file-anchored) comments.
+    fn build_thread_body(
+        &self,
+        ctx: &ExecutionContext,
+        config: &AddPrCommentConfig,
+        status_int: i32,
+    ) -> Result<serde_json::Value, String> {
+        let comment_body = match &config.comment_prefix {
+            Some(prefix) => format!("{}{}", prefix, self.content),
+            None => self.content.clone(),
+        };
+        let comment_body =
+            crate::agent_stats::append_stats_to_body(&comment_body, ctx, config.include_stats);
+
+        let comment_obj = serde_json::json!({
+            "parentCommentId": 0,
+            "content": comment_body,
+            "commentType": 1
+        });
+
+        let mut thread_body = serde_json::json!({
+            "comments": [comment_obj],
+            "status": status_int
+        });
+
+        if let Some(ref fp) = self.file_path {
+            let end_line = self.line.unwrap_or(1);
+            let start_line = self.start_line.unwrap_or(end_line);
+            let repo_root =
+                crate::safe_outputs::resolve_repository_checkout_dir(&self.repository, ctx)
+                    .and_then(|path| {
+                        crate::validate::ensure_path_within_base(
+                            &path,
+                            &ctx.source_directory,
+                            "Repository checkout root",
+                        )
+                    })
+                    .map_err(|err| {
+                        format!(
+                            "Failed to resolve repository checkout for '{}': {}",
+                            self.repository, err
+                        )
+                    })?;
+            let thread_context = build_inline_thread_context(
+                &ctx.source_directory,
+                &repo_root,
+                fp,
+                start_line,
+                end_line,
+            )
+            .map_err(|err| format!("Failed to anchor inline comment for '{}': {}", fp, err))?;
+            thread_body["threadContext"] = thread_context;
+        }
+
+        Ok(thread_body)
+    }
+}
+
 #[async_trait::async_trait]
 impl Executor for AddPrCommentResult {
     fn dry_run_summary(&self) -> String {
@@ -315,81 +421,21 @@ impl Executor for AddPrCommentResult {
         let config: AddPrCommentConfig = ctx.get_tool_config("add-pr-comment");
         debug!("Config: {:?}", config);
 
-        // Validate repository against allowed-repositories config
-        if !config.allowed_repositories.is_empty()
-            && !config.allowed_repositories.contains(&self.repository)
-        {
-            return Ok(ExecutionResult::failure(format!(
-                "Repository '{}' is not in the allowed-repositories list",
-                self.repository
-            )));
-        }
-
-        // Validate status against allowed-statuses config (case-insensitive)
-        if !config.allowed_statuses.is_empty()
-            && !config
-                .allowed_statuses
-                .iter()
-                .any(|s| s.eq_ignore_ascii_case(&self.status))
-        {
-            return Ok(ExecutionResult::failure(format!(
-                "Status '{}' is not in the allowed-statuses list",
-                self.status
-            )));
-        }
-
-        // Validate status is a known value
-        let status_int = match status_to_int(&self.status) {
-            Some(v) => v,
-            None => {
-                return Ok(ExecutionResult::failure(format!(
-                    "Invalid status '{}'. Valid statuses: {}",
-                    self.status,
-                    VALID_STATUSES.join(", ")
-                )));
-            }
+        let status_int = match self.validate_against_config(&config) {
+            Ok(v) => v,
+            Err(msg) => return Ok(ExecutionResult::failure(msg)),
         };
 
-        // Validate file_path if present
-        if let Some(ref fp) = self.file_path
-            && let Err(e) = validate_file_path(fp)
-        {
-            return Ok(ExecutionResult::failure(format!(
-                "Invalid file_path: {}",
-                e
-            )));
-        }
-
-        // Determine the repository name for the API call
-        let repo_name = if self.repository == "self" || self.repository.is_empty() {
-            ctx.repository_name
-                .as_ref()
-                .context("BUILD_REPOSITORY_NAME not set and repository is 'self'")?
-                .clone()
-        } else {
-            match crate::safe_outputs::lookup_allowed_repository(
-                &self.repository,
-                &ctx.allowed_repositories,
-            ) {
-                Some(name) => name.clone(),
-                None => {
-                    return Ok(ExecutionResult::failure(format!(
-                        "Repository alias '{}' not found in allowed repositories",
-                        self.repository
-                    )));
-                }
-            }
+        let repo_name = match self.resolve_repo_name(ctx) {
+            Ok(name) => name,
+            Err(msg) => return Ok(ExecutionResult::failure(msg)),
         };
 
-        // Build comment content with optional prefix
-        let comment_body = match &config.comment_prefix {
-            Some(prefix) => format!("{}{}", prefix, self.content),
-            None => self.content.clone(),
+        let thread_body = match self.build_thread_body(ctx, &config, status_int) {
+            Ok(body) => body,
+            Err(msg) => return Ok(ExecutionResult::failure(msg)),
         };
-        let comment_body =
-            crate::agent_stats::append_stats_to_body(&comment_body, ctx, config.include_stats);
 
-        // Build the API URL
         let url = format!(
             "{}/{}/_apis/git/repositories/{}/pullRequests/{}/threads?api-version=7.1",
             org_url.trim_end_matches('/'),
@@ -398,54 +444,6 @@ impl Executor for AddPrCommentResult {
             self.pull_request_id,
         );
         debug!("API URL: {}", url);
-
-        // Build the request body
-        let comment_obj = serde_json::json!({
-            "parentCommentId": 0,
-            "content": comment_body,
-            "commentType": 1
-        });
-
-        let mut thread_body = serde_json::json!({
-            "comments": [comment_obj],
-            "status": status_int
-        });
-
-        // Add thread context for inline comments
-        if let Some(ref fp) = self.file_path {
-            let end_line = self.line.unwrap_or(1);
-            let start_line = self.start_line.unwrap_or(end_line);
-            let repo_root = match repository_checkout_dir(&self.repository, ctx).and_then(|path| {
-                crate::validate::ensure_path_within_base(
-                    &path,
-                    &ctx.source_directory,
-                    "Repository checkout root",
-                )
-            }) {
-                Ok(path) => path,
-                Err(err) => {
-                    return Ok(ExecutionResult::failure(format!(
-                        "Failed to resolve repository checkout for '{}': {}",
-                        self.repository, err
-                    )));
-                }
-            };
-            match build_inline_thread_context(
-                &ctx.source_directory,
-                &repo_root,
-                fp,
-                start_line,
-                end_line,
-            ) {
-                Ok(thread_context) => thread_body["threadContext"] = thread_context,
-                Err(err) => {
-                    return Ok(ExecutionResult::failure(format!(
-                        "Failed to anchor inline comment for '{}': {}",
-                        fp, err
-                    )));
-                }
-            }
-        }
 
         let client = reqwest::Client::new();
 
@@ -553,7 +551,10 @@ mod tests {
         };
         let err: Result<AddPrCommentResult, _> = params.try_into();
         let err = err.unwrap_err().to_string();
-        assert!(err.contains("pull_request_id must be positive"), "got: {err}");
+        assert!(
+            err.contains("pull_request_id must be positive"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -569,7 +570,10 @@ mod tests {
         };
         let err: Result<AddPrCommentResult, _> = params.try_into();
         let err = err.unwrap_err().to_string();
-        assert!(err.contains("content must be at least 10 characters"), "got: {err}");
+        assert!(
+            err.contains("content must be at least 10 characters"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -875,7 +879,9 @@ allowed-statuses:
             ..Default::default()
         };
 
-        let resolved = repository_checkout_dir("4x4/sdk-ftdidevicecontrol", &ctx).unwrap();
+        let resolved =
+            crate::safe_outputs::resolve_repository_checkout_dir("4x4/sdk-ftdidevicecontrol", &ctx)
+                .unwrap();
 
         assert_eq!(resolved, alias_dir);
     }
@@ -899,7 +905,11 @@ allowed-statuses:
             ..Default::default()
         };
 
-        let resolved = repository_checkout_dir("repo-sdk-ftdidevicecontrol", &ctx).unwrap();
+        let resolved = crate::safe_outputs::resolve_repository_checkout_dir(
+            "repo-sdk-ftdidevicecontrol",
+            &ctx,
+        )
+        .unwrap();
 
         assert_eq!(resolved, alias_dir);
     }
@@ -907,14 +917,16 @@ allowed-statuses:
     #[test]
     fn test_repository_checkout_dir_treats_empty_repository_as_self() {
         let workspace = tempdir().unwrap();
+        let self_dir = workspace.path().join("current-repo");
         let ctx = ExecutionContext {
             source_directory: workspace.path().to_path_buf(),
+            self_repository_directory: self_dir.clone(),
             repository_name: Some("4x4/current-repo".to_string()),
             ..Default::default()
         };
 
-        let resolved = repository_checkout_dir("", &ctx).unwrap();
+        let resolved = crate::safe_outputs::resolve_repository_checkout_dir("", &ctx).unwrap();
 
-        assert_eq!(resolved, workspace.path());
+        assert_eq!(resolved, self_dir);
     }
 }

@@ -56,7 +56,7 @@ describe("loadIssueEnv", () => {
   it("prefers EXECUTOR_E2E_GITHUB_TOKEN and defaults repo/labels", () => {
     const env = loadIssueEnv({
       EXECUTOR_E2E_GITHUB_TOKEN: "tok",
-      ADO_AW_DEBUG_GITHUB_TOKEN: "other",
+      ADO_AW_GITHUB_TOKEN: "other",
       SYSTEM_TEAMPROJECT: "P",
     } as NodeJS.ProcessEnv);
     expect(env.token).toBe("tok");
@@ -64,8 +64,8 @@ describe("loadIssueEnv", () => {
     expect(env.labels).toContain("executor-e2e-failure");
   });
 
-  it("falls back to ADO_AW_DEBUG_GITHUB_TOKEN", () => {
-    const env = loadIssueEnv({ ADO_AW_DEBUG_GITHUB_TOKEN: "fallback" } as NodeJS.ProcessEnv);
+  it("falls back to ADO_AW_GITHUB_TOKEN", () => {
+    const env = loadIssueEnv({ ADO_AW_GITHUB_TOKEN: "fallback" } as NodeJS.ProcessEnv);
     expect(env.token).toBe("fallback");
   });
 

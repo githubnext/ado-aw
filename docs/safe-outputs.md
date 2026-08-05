@@ -2,12 +2,6 @@
 
 _Part of the [ado-aw documentation](../AGENTS.md)._
 
-> ℹ️ The debug-only `create-issue` tool (used by dogfood pipelines to file
-> failure reports back to GitHub) is **not** a safe output and is not
-> configurable here. It is gated by a separate `ado-aw-debug:` front-matter
-> section and stripped from the SafeOutputs MCP server unless explicitly
-> enabled. See [`docs/ado-aw-debug.md`](ado-aw-debug.md).
-
 ## Safe Outputs Configuration
 
 The front matter supports a `safe-outputs:` field for configuring specific tool behaviors:
@@ -248,7 +242,369 @@ ARM-minted token, e.g. for cross-org writes or named-identity attribution.
 See [`docs/network.md`](network.md) and
 [`docs/ir.md`](ir.md) for the typed SafeOutputs job wiring.
 
+## Custom safe-output jobs
+
+Reusable components imported with [`imports:`](imports.md) can add custom
+agent-callable tools under `safe-outputs.jobs.<name>`. Each definition compiles
+to a dedicated Azure Pipelines job:
+
+```text
+Agent proposal -> Detection -> optional ManualReview -> Custom_<tool>
+```
+
+The Agent sees only the generated MCP description and closed input schema. The
+custom job receives its authored environment variables and steps only after the
+proposal artifact has passed Detection (and approval when configured).
+
+### Job fields
+
+| Field | Description |
+|-------|-------------|
+| `display-name` | Optional ADO job display name. |
+| `description` | Required MCP tool description. |
+| `condition` | Optional ADO condition ANDed with compiler-owned gates. |
+| `needs` | Optional additional custom/canonical job dependencies. |
+| `timeout-minutes` | Optional ADO job timeout. Omission uses the platform/pool default. |
+| `max` | Per-run MCP call budget. Defaults to 1. |
+| `inputs` | Closed Agent-facing schema. Types: `string`, `boolean`, `choice`. |
+| `env` | Literal strings or explicit ADO macros such as `$(SHARED_TOKEN)`. |
+| `output` | Static acknowledgement returned when the Agent records a proposal; it is not the later job result. |
+| `steps` | Self-contained inline Bash/PowerShell steps or explicitly versioned ADO tasks. |
+
+Input definitions use the gh-aw-compatible fields `description`, `required`,
+`default`, `type`, and `options`. String arguments are limited to 10 KiB. Extra,
+missing, mistyped, invalid-choice, and oversized arguments are rejected by the
+MCP server and revalidated before the job runs.
+
+Custom job names stay hyphenated in MCP and in `item.type`; generated ADO job
+identifiers replace non-identifier characters with underscores.
+
+### Agent-output file
+
+Every custom job receives the same transport-sanitized aggregate file through
+`ADO_AW_AGENT_OUTPUT`:
+
+```json
+{
+  "items": [
+    {"type":"send-notification","title":"Release blocked","severity":"critical"}
+  ]
+}
+```
+
+The aggregate contains **only custom safe-output proposals**. Built-in
+proposals (`create-pull-request`, `create-work-item`, `add-build-tag`, …) are
+applied by Stage 3 itself and are never surfaced to a custom job, so an
+imported component cannot read proposal content it does not own.
+
+A component filters the items it owns:
+
+```bash
+jq -c '.items[] | select(.type == "send-notification")' \
+  "$ADO_AW_AGENT_OUTPUT"
+```
+
+The custom job's ADO timeline result is the execution outcome. There is no
+custom results file or per-proposal execution-record protocol.
+
+### Example
+
+```yaml
+safe-outputs:
+  jobs:
+    send-notification:
+      display-name: Send release notification
+      description: Notify release operators when human action is required.
+      max: 2
+      output: Notification proposal accepted.
+      inputs:
+        title:
+          description: Short operator-facing title.
+          type: string
+          required: true
+        severity:
+          description: Operational severity.
+          type: choice
+          options: [info, warning, critical]
+          required: true
+      env:
+        NOTIFICATION_DESTINATION: release-operations
+        NOTIFICATION_TOKEN: $(SHARED_NOTIFICATION_TOKEN)
+      steps:
+        - bash: |
+            set -euo pipefail
+            jq -c '.items[] | select(.type == "send-notification")' \
+              "$ADO_AW_AGENT_OUTPUT" |
+            while IFS= read -r item; do
+              if [ "$ADO_AW_SAFE_OUTPUTS_STAGED" = "true" ]; then
+                printf 'STAGED: %s\n' "$item"
+                continue
+              fi
+              curl -fsS https://notify.example/api/messages \
+                -H "Authorization: Bearer $NOTIFICATION_TOKEN" \
+                -H 'Content-Type: application/json' \
+                --data "$item"
+            done
+          displayName: Send notifications
+```
+
+`ADO_AW_AGENT_OUTPUT` is a Stage-3 materialized copy of the analyzed proposals,
+restricted to custom safe-output items. Before the file is written, ado-aw
+revalidates custom schemas and budgets, strips ANSI/unsafe control characters,
+and neutralizes Azure Pipelines logging commands (`##vso[` and `##[`) in string
+values and object keys. Custom values are revalidated after sanitization so
+required/type/size guarantees apply to the data the job receives; sanitized key
+collisions fail closed. URLs, mentions, HTML, markdown, and other
+external-system payload text are otherwise preserved. The analyzed proposal
+artifact remains unchanged for Detection and audit.
+String size is revalidated after transport sanitization, so a value whose
+neutralized form exceeds the 10 KiB custom-input limit fails materialization
+before any authored step runs.
+
+Treat the materialized values as untrusted integration data even after this
+transport sanitization. Parse JSON structurally, build outbound request bodies
+with tools such as `jq -n --arg`, and apply API-specific validation and escaping.
+Avoid printing raw scalar fields when they are not needed.
+
+Supported authored steps are inline `bash`, `powershell`, or `pwsh`, plus ADO
+tasks with an explicit numeric version such as `PowerShell@2`. Custom jobs reject
+`template:`, authored checkout, containers, and unversioned tasks. They do not
+automatically checkout the consumer or component repository; executor logic must
+be self-contained in the compiled steps.
+
+### Approval and dependencies
+
+Configure approval through the same top-level per-tool policy as built-ins:
+
+```yaml
+safe-outputs:
+  send-notification:
+    require-approval: true
+```
+
+Only directly reviewed tools appear in ManualReview. A non-reviewed custom job
+that depends on a reviewed job runs after the reviewed chain, uses the reviewed
+safe-output pool, and is not separately presented for approval.
+
+### Staged mode
+
+Custom staged mode follows gh-aw's cooperative model. Global or per-tool policy
+sets `ADO_AW_SAFE_OUTPUTS_STAGED=true`; trusted component steps must avoid the
+write and render their own preview. ado-aw does not claim to prove that arbitrary
+privileged component code made no external write.
+
+```yaml
+safe-outputs:
+  staged: false
+  send-notification:
+    staged: true
+```
+
+### Pools and secrets
+
+Components cannot choose pools. Consumers select the execution trust boundary:
+
+```yaml
+pool:
+  vmImage: ubuntu-22.04
+  overrides:
+    safe-outputs:
+      name: PrivilegedWriters
+    safe-outputs-reviewed:
+      name: ReviewedWriters
+```
+
+`env` values are emitted verbatim. Use ADO secret variables or authorized
+variable groups for macros such as `$(SHARED_NOTIFICATION_TOKEN)`. Secret values
+are not resolved into generated config or artifacts; runtime log masking is
+provided by Azure Pipelines. Custom component code is trusted privileged code.
+
+## GitHub issue safe outputs
+
+`create-github-issue` and `set-github-issue-type` call GitHub only from Stage 3, after threat
+detection. The GitHub write credential is never exposed to Agent or Detection.
+The MCP routes are configured-only: GitHub auth by itself does not expose them
+to the agent; each tool appears only when its own front-matter key is present.
+
+### Authentication
+
+With no explicit auth, Stage 3 uses the secret ADO pipeline variable
+`ADO_AW_GITHUB_TOKEN`:
+
+```yaml
+safe-outputs:
+  create-github-issue:
+    target-repo: octo-org/octo-repo
+```
+
+Set it with:
+
+```text
+ado-aw secrets set ADO_AW_GITHUB_TOKEN <fine-grained-token>
+```
+
+The token needs **Issues: read and write** on the target repository. To use a
+differently named secret, provide exactly one ADO macro:
+
+```yaml
+safe-outputs:
+  github-token: "$(MY_GITHUB_ISSUES_TOKEN)"
+  github-api-url: https://ghe.example.com/api/v3  # optional PAT API base
+  create-github-issue:
+    target-repo: octo-org/octo-repo
+```
+
+Literal tokens and compound expressions are rejected at compile time.
+`$(GITHUB_TOKEN)` is intentionally not the default because that variable is
+used by the read-only Agent/Detection path, and it is rejected if supplied
+explicitly. `github-api-url` defaults to `https://api.github.com`, accepts only
+an `https://` URL, and applies only to PAT auth; App auth uses its nested
+`api-url`.
+
+#### Shared GitHub App
+
+When `engine.github-app-token` is configured and neither SafeOutputs auth key is
+present, the App credentials are reused but the tokens are not:
+
+```yaml
+engine:
+  id: copilot
+  github-app-token:
+    app-id: 1234567
+    private-key: GITHUB_APP_PRIVATE_KEY
+    owner: octo-org
+    repositories: [octo-repo]
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+
+safe-outputs:
+  create-github-issue:
+    target-repo: octo-org/octo-repo
+```
+
+Agent and Detection each mint their own explicitly read-only token. SafeOutputs
+mints a separate token scoped to the configured target repository with only
+`issues: write`, then revokes it after execution. Shared credentials are
+rejected when the engine permission map is absent or contains a repository
+`write` permission.
+
+#### Separate SafeOutputs GitHub App
+
+Use `safe-outputs.github-app` to isolate the write App:
+
+```yaml
+safe-outputs:
+  github-app:
+    client-id: Iv23liSafeOutputsApp
+    private-key: SAFE_OUTPUTS_GITHUB_APP_PRIVATE_KEY
+    owner: octo-org
+    repositories: [octo-repo]
+    api-url: https://api.github.com
+    skip-token-revocation: false
+  create-github-issue:
+    target-repo: octo-org/octo-repo
+```
+
+`client-id` and `app-id` are aliases. `private-key` names an ADO secret
+variable; it is not the PEM value or a `$(...)` macro. SafeOutputs derives the
+minimum permission request, so arbitrary `github-app.permissions` overrides are
+not accepted here. `github-app` and `github-token` are mutually exclusive.
+
+### Target repository
+
+`target-repo` is operator-controlled. It may be omitted only when the ADO build
+source provider is GitHub and `BUILD_REPOSITORY_NAME` is an `owner/repo` slug.
+Azure Repos workflows must set it explicitly.
+
+### Temporary IDs and approval
+
+Use a gh-aw-compatible temporary ID to refer to a newly created issue before
+its real number exists:
+
+```json
+{"title":"Build failure","body":"Detailed failure report long enough for validation.","temporary_id":"#aw_bug1"}
+{"issue_number":"#aw_bug1","issue_type":"Bug"}
+```
+
+The ID format is `#aw_` plus 3-12 ASCII alphanumeric/underscore characters;
+the leading `#` is optional. `create-github-issue` must run first and succeed.
+Duplicate, unresolved, cross-repository, or reversed references fail before an
+API call.
+
+When both tools are configured, they must have the same effective
+`require-approval` setting so they execute in the same SafeOutputs job. A
+section-level gate is the simplest form:
+
+```yaml
+safe-outputs:
+  require-approval: true
+  create-github-issue:
+    target-repo: octo-org/octo-repo
+    require-temporary-id: true
+  set-github-issue-type:
+    target-repo: octo-org/octo-repo
+```
+
 ## Available Safe Output Tools
+
+### create-github-issue
+
+Creates a GitHub issue.
+
+```yaml
+safe-outputs:
+  create-github-issue:
+    target-repo: octo-org/octo-repo
+    title-prefix: "[agent] "
+    labels: [automation]
+    allowed-labels: ["agent-*", bug]
+    assignees: [octocat]
+    require-temporary-id: true
+    max: 1
+```
+
+- `target-repo` *(optional only for GitHub-backed builds)* - fixed
+  `owner/repo` target.
+- `title-prefix` *(optional)* - prepended in Stage 3.
+- `labels` *(optional)* - static labels always applied.
+- `allowed-labels` *(optional)* - allowlist for agent labels. Empty/absent is
+  default-deny; `["*"]` permits any label.
+- `assignees` *(optional)* - static assignees merged with agent input.
+- `require-temporary-id` *(optional, default `false`)* - reject proposals that
+  omit `temporary_id`.
+- `max` *(optional, default `1`)* - per-run creation budget.
+
+Agent parameters are `title`, `body`, optional `labels`, optional `assignees`,
+and optional `temporary_id`.
+
+### set-github-issue-type
+
+Sets or clears a native GitHub Issue Type:
+
+```yaml
+safe-outputs:
+  set-github-issue-type:
+    target-repo: octo-org/octo-repo
+    allowed: [Bug, Feature, Task]
+    max: 5
+```
+
+- `target-repo` *(optional only for GitHub-backed builds)* - target for numeric
+  issue numbers; temporary IDs carry their created repository.
+- `allowed` *(optional)* - case-insensitive type allowlist. Empty/absent allows
+  any configured repository type. Clearing is always allowed.
+
+  > **Note the deliberate asymmetry** with `create-github-issue.allowed-labels`,
+  > which is default-**deny**. Issue types are a closed set defined by the
+  > repository owner, so "any configured repository type" is already bounded by
+  > configuration the agent cannot influence. Labels are free-form strings the
+  > agent can invent, so an empty `allowed-labels` accepts none.
+- `max` *(optional, default `5`)* - per-run update budget.
+
+Agent parameters are required `issue_number` (positive number or temporary ID)
+and required `issue_type`. Pass `""` to clear the type.
 
 ### comment-on-work-item
 Adds a comment to an existing Azure DevOps work item. This is the ADO equivalent of gh-aw's `add-comment` tool.

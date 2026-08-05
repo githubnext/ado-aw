@@ -28,6 +28,7 @@
 //! - [`GitRefName`] — a git ref obeying `git check-ref-format`.
 //! - [`BranchName`] — a git branch ref with extra length / leading-`-` / space rules.
 //! - [`CommitSha`] — a full 40-character hex commit SHA.
+//! - [`AzureDevOpsOrgUrl`] — an HTTPS Azure DevOps organization collection URL.
 //! - [`ArtifactName`] — an ADO artifact / attachment name.
 //! - [`Identifier`] — an engine agent/model identifier.
 //! - [`HostName`] — a DNS-style hostname.
@@ -230,6 +231,11 @@ validated_string! {
 }
 
 validated_string! {
+    /// An HTTPS Azure DevOps organization collection URL.
+    AzureDevOpsOrgUrl, "Azure DevOps organization URL", validate::validate_ado_org_url
+}
+
+validated_string! {
     /// An Azure DevOps artifact / attachment name.
     ArtifactName, "artifact_name", |value: &str, label: &str| {
         if value.len() > 100 {
@@ -257,6 +263,42 @@ validated_string! {
             anyhow::bail!(
                 "{label} '{value}' must be non-empty and contain only [A-Za-z0-9._:-]"
             )
+        }
+    }
+}
+
+validated_string! {
+    /// A temporary GitHub issue identifier used to link safe outputs in one run.
+    ///
+    /// Accepts gh-aw's canonical `#aw_<id>` form and the bare `aw_<id>` alias,
+    /// where `<id>` is 3-12 ASCII alphanumeric/underscore characters.
+    GithubTemporaryId, "temporary_id", |value: &str, label: &str| {
+        let bare = value.strip_prefix('#').unwrap_or(value);
+        let Some(suffix) = bare.strip_prefix("aw_") else {
+            anyhow::bail!(
+                "{label} must use `#aw_` followed by 3-12 ASCII alphanumeric/underscore characters"
+            );
+        };
+        if !(3..=12).contains(&suffix.len())
+            || !suffix
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            anyhow::bail!(
+                "{label} must use `#aw_` followed by 3-12 ASCII alphanumeric/underscore characters"
+            );
+        }
+        Ok(())
+    }
+}
+
+impl GithubTemporaryId {
+    /// Canonical map/reference form with the leading `#`.
+    pub fn canonical(&self) -> String {
+        if self.as_str().starts_with('#') {
+            self.as_str().to_string()
+        } else {
+            format!("#{}", self.as_str())
         }
     }
 }
@@ -529,6 +571,13 @@ mod tests {
     fn commit_sha_rules() {
         assert!(CommitSha::parse("0123456789abcdef0123456789abcdef01234567").is_ok());
         assert!(CommitSha::parse("short").is_err());
+    }
+
+    #[test]
+    fn azure_devops_org_url_rules() {
+        assert!(AzureDevOpsOrgUrl::parse("https://dev.azure.com/myorg").is_ok());
+        assert!(AzureDevOpsOrgUrl::parse("https://myorg.visualstudio.com").is_ok());
+        assert!(AzureDevOpsOrgUrl::parse("https://attacker.example/myorg").is_err());
     }
 
     #[test]

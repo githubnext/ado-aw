@@ -8,8 +8,13 @@ pool:
   name: AZS-1ES-L-Playground-ubuntu-22.04
 engine:
   id: copilot
-  model: gpt-5-mini
+  model: claude-sonnet-4.6
   timeout-minutes: 15
+tools:
+  bash:
+    - az
+    - head
+  edit: false
 permissions:
   read: agent-playground-read
 safe-outputs:
@@ -39,10 +44,14 @@ Steps (run each in turn using your bash tool):
    Capture the combined stdout/stderr (truncated to 400 characters if longer)
    for the safe-output context below.
 
-3. Call exactly one safe-output tool, `noop`, with:
+3. Invoke exactly one MCP tool: `noop` from the `safeoutputs`
+   server, with:
 
    - context: a brief one-line proof-of-life containing the az version
      string and command-group help output, prefixed with
      `ado-aw-smoke-$(Build.BuildId)-azure-cli:`.
 
-Do not call any other tool. After the safe output is emitted, stop.
+Use the native Copilot MCP tool interface. Do not inspect MCP configuration,
+API keys, processes, files, or HTTP endpoints. Do not invoke SafeOutputs through
+bash, `curl`, or raw HTTP. Do not print or describe a JSON tool request.
+Actually invoke the MCP tool, then stop.

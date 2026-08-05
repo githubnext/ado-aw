@@ -16,15 +16,15 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 
-import type { ExecutedRecord } from "./scenario.js";
+import type { ExecutedRecord, PriorEntry } from "./scenario.js";
 
 const SAFE_OUTPUT_FILENAME = "safe_outputs.ndjson";
 const EXECUTED_FILENAME = "safe-outputs-executed.ndjson";
 
 export interface RenderSourceOptions {
   tool: string;
-  /** Per-tool `safe-outputs: <tool>:` config object. */
-  config: Record<string, unknown>;
+  /** Per-tool `safe-outputs: <tool>:` config map (one key per tool used). */
+  safeOutputs: Record<string, Record<string, unknown>>;
   /** ADO repo name for repo-targeting tools (emits a `repos:` block). */
   adoRepo?: string;
 }
@@ -53,9 +53,12 @@ export function renderSourceMarkdown(opts: RenderSourceOptions): string {
     lines.push(`  - ${JSON.stringify(`${opts.adoRepo}=${opts.adoRepo}`)}`);
   }
   lines.push("safe-outputs:");
-  // Quote the tool key (JSON string is valid YAML) so an unusual tool name
-  // containing ": " or a leading "{" can't emit broken YAML.
-  lines.push(`  ${JSON.stringify(opts.tool)}: ${JSON.stringify(opts.config)}`);
+  // Quote every tool key (a JSON string is valid YAML) so an unusual tool name
+  // containing ": " or a leading "{" can't emit broken YAML. A scenario using
+  // `priorEntries` contributes more than one key here.
+  for (const [tool, config] of Object.entries(opts.safeOutputs)) {
+    lines.push(`  ${JSON.stringify(tool)}: ${JSON.stringify(config)}`);
+  }
   lines.push("---");
   lines.push("");
   lines.push(`Deterministic executor E2E fixture for \`${opts.tool}\`.`);
@@ -77,6 +80,12 @@ export interface RunExecuteOptions {
   tool: string;
   config: Record<string, unknown>;
   entry: Record<string, unknown>;
+  /**
+   * Extra entries written to the NDJSON **before** `entry`, executed by the
+   * same `ado-aw execute` process in the order given. Their configs are merged
+   * into the rendered `safe-outputs:` block. See `PriorEntry` in `scenario.ts`.
+   */
+  priorEntries?: PriorEntry[];
   adoRepo?: string;
   orgUrl: string;
   project: string;
@@ -120,9 +129,15 @@ export async function runExecute(opts: RunExecuteOptions): Promise<RunExecuteRes
   await mkdir(safeOutputDir, { recursive: true });
 
   const sourcePath = join(opts.scenarioDir, "source.md");
+  const priorEntries = opts.priorEntries ?? [];
+  // Prior configs first so the primary tool's own config always wins if a
+  // scenario ever stages a prior entry for the same tool.
+  const safeOutputs: Record<string, Record<string, unknown>> = {};
+  for (const prior of priorEntries) safeOutputs[prior.tool] = prior.config;
+  safeOutputs[opts.tool] = opts.config;
   await writeFile(
     sourcePath,
-    renderSourceMarkdown({ tool: opts.tool, config: opts.config, adoRepo: opts.adoRepo }),
+    renderSourceMarkdown({ tool: opts.tool, safeOutputs, adoRepo: opts.adoRepo }),
     "utf8",
   );
 
@@ -139,11 +154,14 @@ export async function runExecute(opts: RunExecuteOptions): Promise<RunExecuteRes
     await writeFile(target, contents, "utf8");
   }
 
-  await writeFile(
-    join(safeOutputDir, SAFE_OUTPUT_FILENAME),
+  // Prior entries are written FIRST: `execute_safe_outputs` processes NDJSON
+  // lines sequentially in file order, so a tool that hands state to a later one
+  // (e.g. create-github-issue registering a temporary_id) must precede it.
+  const ndjson = [
+    ...priorEntries.map((prior) => renderNdjsonLine(prior.tool, prior.entry)),
     renderNdjsonLine(opts.tool, opts.entry),
-    "utf8",
-  );
+  ].join("");
+  await writeFile(join(safeOutputDir, SAFE_OUTPUT_FILENAME), ndjson, "utf8");
 
   const args = [
     "execute",

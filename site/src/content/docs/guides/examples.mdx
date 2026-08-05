@@ -171,19 +171,21 @@ You are a formal verification agent. Your job is to analyze the codebase, identi
 
 **[`examples/dogfood-failure-reporter.md`](https://github.com/githubnext/ado-aw/blob/main/examples/dogfood-failure-reporter.md)**
 
-A specialized example demonstrating debug-only capabilities for internal testing.
+An example that files GitHub issues from an Azure DevOps pipeline run.
 
 **Key features:**
-- Debug-only `create-issue` safe output (not available in regular agents)
+- `create-github-issue` safe output (GitHub issues, distinct from ADO `create-work-item`)
 - Target repository configuration
 - Label and assignee policies
 - Per-run budget control (`max: 3`)
 
-:::caution[Debug-only features]
-This example uses `ado-aw-debug:` configuration which is **not recommended for general use**. The `create-issue` tool is gated to debug mode and only enabled when explicitly configured. See the [ado-aw-debug reference](/ado-aw/reference/ado-aw-debug/) for details.
+:::note[Stage 3 GitHub credential]
+GitHub issue outputs call GitHub only from Stage 3, after threat detection. The
+write credential (`ADO_AW_GITHUB_TOKEN` or a GitHub App) is never exposed to the
+agent. See the [safe outputs reference](/ado-aw/reference/safe-outputs/).
 :::
 
-**Use this when:** You're building internal testing infrastructure or need to understand how debug-only safe outputs work (reference only — not for production use).
+**Use this when:** You want an agent to report pipeline failures as GitHub issues in a repository you control.
 
 ```yaml
 ---
@@ -193,8 +195,8 @@ on:
   schedule: daily
 permissions:
   read: my-read-arm-connection
-ado-aw-debug:
-  create-issue:
+safe-outputs:
+  create-github-issue:
     target-repo: githubnext/ado-aw
     title-prefix: "[pipeline-failure] "
     labels:
@@ -218,7 +220,7 @@ in Azure DevOps inside an AWF-isolated sandbox.
 1. Read the pipeline run logs available under `$BUILD_SOURCESDIRECTORY`
    for any signs of recent failures.
 2. For each distinct failure, file **one** GitHub issue using the
-   `create-issue` MCP tool with:
+   `create-github-issue` MCP tool with:
    - A concise `title` describing the failure.
    - A markdown `body` with reproduction steps, log excerpts, and links
      to relevant ADO build URLs.
@@ -232,7 +234,7 @@ in Azure DevOps inside an AWF-isolated sandbox.
 
 - Do not attempt to redirect issues to a different repository — the agent
   has no `target_repo` parameter and the target is fixed by the operator.
-- The `ADO_AW_DEBUG_GITHUB_TOKEN` PAT is **not** visible to you; it is
+- The `ADO_AW_GITHUB_TOKEN` PAT is **not** visible to you; it is
   used only by Stage 3 to authenticate against GitHub.
 - Issues are reviewed for prompt injection by Stage 2 before they are
   filed, so do not include text that looks like ADO pipeline commands

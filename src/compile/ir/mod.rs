@@ -251,6 +251,7 @@ pub enum RepositoryResource {
         kind: String,
         name: String,
         r#ref: Option<String>,
+        endpoint: Option<String>,
     },
 }
 
@@ -300,14 +301,61 @@ pub struct PrTrigger {
     pub disabled: bool,
 }
 
-/// `trigger:` (CI) configuration. Today standalone agents always
-/// emit `trigger: none` (CI is suppressed when schedules /
-/// pipeline-completion triggers are configured, and the default
-/// "trigger on any branch" case emits no `trigger:` key at all so
-/// callers can rely on ADO's implicit default).
+impl PrTrigger {
+    /// `pr: none` — the pipeline never starts on a pull request.
+    pub fn disabled() -> Self {
+        Self {
+            branches_include: Vec::new(),
+            branches_exclude: Vec::new(),
+            paths_include: Vec::new(),
+            paths_exclude: Vec::new(),
+            disabled: true,
+        }
+    }
+}
+
+/// `trigger:` (CI/push) configuration.
+///
+/// Always emitted for pipeline shapes that carry triggers. Azure DevOps
+/// reads a *missing* `trigger:` key as "run CI on every branch", so the
+/// compiler never omits it — `disabled` is the default, and
+/// [`CiTrigger::all_branches`] is what synthetic PR mode emits to obtain the
+/// CI-triggered builds it reacts to.
 #[derive(Debug, Clone)]
 pub struct CiTrigger {
+    /// Empty branch list means "default behaviour".
+    pub branches_include: Vec<String>,
+    pub branches_exclude: Vec<String>,
+    pub paths_include: Vec<String>,
+    pub paths_exclude: Vec<String>,
+    /// `trigger: none` short-circuits any branch / path filter and emits
+    /// the literal scalar `none` in place of the full block.
     pub disabled: bool,
+}
+
+impl CiTrigger {
+    /// `trigger: none` — the pipeline never starts on a push.
+    pub fn disabled() -> Self {
+        Self {
+            branches_include: Vec::new(),
+            branches_exclude: Vec::new(),
+            paths_include: Vec::new(),
+            paths_exclude: Vec::new(),
+            disabled: true,
+        }
+    }
+
+    /// `trigger:` matching every branch — the explicit form of the ADO
+    /// default that `on.pr.mode: synthetic` depends on.
+    pub fn all_branches() -> Self {
+        Self {
+            branches_include: vec!["*".to_string()],
+            branches_exclude: Vec::new(),
+            paths_include: Vec::new(),
+            paths_exclude: Vec::new(),
+            disabled: false,
+        }
+    }
 }
 
 /// A pipeline-level `variables:` entry.

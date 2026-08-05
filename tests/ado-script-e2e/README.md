@@ -19,8 +19,6 @@ Both pairs diverge from commit
 The registered definition is `\ado-script-e2e\ado-script e2e` (ID `2544`) in
 the `AgentPlayground` project. It uses Microsoft-hosted Ubuntu because the test
 needs only Node and Git; it does not depend on the internal executor E2E pool.
-The build identity needs Code Read on the fixture repository and each resource
-checkout must be authorized for the definition.
 
 Coverage:
 
@@ -46,5 +44,5 @@ Although this pipeline does not consume the candidate-smoke write connection,
 it is a GitHub-backed AgentPlayground PR definition with protected repository
 access. Its live ADO trigger must keep fork builds and fork secrets disabled;
 definition `2544` is included in
-[`tests/compiler-smoke-e2e/trigger-policy.json`](../compiler-smoke-e2e/trigger-policy.json)
+[`tests/smoke/trigger-policy.json`](../smoke/trigger-policy.json)
 and the trusted candidate-smoke audit.

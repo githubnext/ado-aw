@@ -26,8 +26,31 @@ export interface ExecutedRecord {
   timestamp?: string;
 }
 
-/** Shared, read-only context handed to every scenario phase. */
-export interface ScenarioContext {
+/**
+ * One extra safe-output entry staged **before** a scenario's primary entry, in
+ * the same `ado-aw execute` invocation.
+ *
+ * This exists because some safe outputs hand state to each other through
+ * in-process state that never touches disk. `create-github-issue` registers a
+ * `temporary_id` in `ExecutionContext.resolved_github_issues` — an
+ * `Arc<Mutex<HashMap<…>>>` — which `set-github-issue-type` then resolves. That
+ * handoff is only observable when both entries are lines in the same NDJSON
+ * processed by one executor process.
+ *
+ * That matches production: a SafeOutputs job runs a single `ado-aw execute`
+ * over the whole `safe_outputs.ndjson`, processing entries sequentially in file
+ * order. `priorEntries` reproduces exactly that shape.
+ */
+export interface PriorEntry {
+  /** kebab-case safe-output tool name for this line. */
+  readonly tool: string;
+  /** NDJSON params WITHOUT the `name` field — the runner injects it. */
+  readonly entry: Record<string, unknown>;
+  /** `safe-outputs: <tool>:` config fragment for this line's tool. */
+  readonly config: Record<string, unknown>;
+}
+
+/** Shared, read-only context handed to every scenario phase. */export interface ScenarioContext {
   /** ADO collection URI, e.g. https://dev.azure.com/msazuresphere/ */
   readonly orgUrl: string;
   /** ADO project name, e.g. AgentPlayground. */
@@ -92,6 +115,19 @@ export interface Scenario<State = unknown> {
    */
   ndjson(ctx: ScenarioContext, state: State): Promise<Record<string, unknown>>;
   /**
+   * Optional safe-output entries staged **before** `ndjson()`, executed by the
+   * same `ado-aw execute` process and in the returned order.
+   *
+   * Their `config` fragments are merged into the rendered `safe-outputs:` block
+   * alongside the primary tool's. The runner fails the scenario in the
+   * `execute` phase if any prior entry is missing from the executed NDJSON or
+   * did not report `succeeded`, so a broken prerequisite can never be mistaken
+   * for an assertion failure.
+   *
+   * See {@link PriorEntry} for why this mechanism exists.
+   */
+  priorEntries?(ctx: ScenarioContext, state: State): Promise<PriorEntry[]>;
+  /**
    * Optional extra files to stage into the safe-output dir before running the
    * executor (relative path -> UTF-8 contents). Used by attachment and
    * create-pull-request scenarios.
@@ -113,11 +149,20 @@ export interface Scenario<State = unknown> {
   /**
    * Assert the ADO side-effect actually happened. Throw on failure.
    *
+   * `record` is the executed record for this scenario's primary `tool`;
+   * `records` carries every parsed record from the run, which is how a scenario
+   * using {@link Scenario.priorEntries} reads results from its prior entries.
+   *
    * May populate fields on `state` (e.g. an id read from the executor result)
    * that `cleanup` needs — do this **before** any fallible check so cleanup can
    * still tear the object down if a later assertion throws.
    */
-  assert(ctx: ScenarioContext, state: State, record: ExecutedRecord): Promise<void>;
+  assert(
+    ctx: ScenarioContext,
+    state: State,
+    record: ExecutedRecord,
+    records: ExecutedRecord[],
+  ): Promise<void>;
   /** Best-effort teardown of everything setup/execute created. */
   cleanup(ctx: ScenarioContext, state: State): Promise<void>;
 }

@@ -1,0 +1,40 @@
+# Released-mode smoke orchestrator.
+#
+# Downloads the latest RELEASED ado-aw binary, compiles every released-mode
+# case in tests/smoke/cases.json with it, stages each on its own short-lived
+# ado-aw-mirror ref, and queues each against its credential lane definition.
+#
+# This replaces the retired committed tests/safe-outputs/*.lock.yml files and
+# their five per-case definitions. It preserves the release-packaging signal
+# they provided: the released asset is downloaded here to compile with, and
+# every staged case keeps its release-URL integrity step so each child
+# downloads released assets again at run time. `assertReleaseUrlsPresent`
+# makes a silently-degraded run fail closed.
+#
+# Scheduled and manual only — never PR or CI triggered.
+
+trigger: none
+pr: none
+
+schedules:
+  - cron: "0 3 * * *"
+    displayName: Daily released smoke
+    branches:
+      include:
+        - main
+    always: true
+
+pool:
+  name: AZS-1ES-L-Playground-ubuntu-22.04
+
+variables:
+  - template: orchestrator-variables.yml
+
+jobs:
+  - job: ReleasedSmoke
+    displayName: Run released smoke cases
+    timeoutInMinutes: 180
+    steps:
+      - template: orchestrator-steps.yml
+        parameters:
+          compilerSource: released

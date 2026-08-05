@@ -56,11 +56,11 @@ pipeline** as runtime helpers. Today it produces thirteen bundles:
   review is configured), and attaches it to the build's
   `ado-aw-safe-outputs` summary tab via `##vso[task.uploadsummary]`. See
   [`safe-outputs.md`](safe-outputs.md).
-- `github-app-token.js` — GitHub App token minter that runs immediately
-  before the Copilot invocation in the **Agent and Detection jobs** when
-  `engine.github-app-token` is configured. Builds an RS256 JWT from the App ID
-  (argv) + private key (masked env secret), resolves the installation for the
-  owner, exchanges it for an installation access token, and exposes it as a
+- `github-app-token.js` — GitHub App token minter used by Agent/Detection and
+  GitHub issue SafeOutputs. Builds an RS256 JWT from the App ID (argv) +
+  private key (masked env secret), resolves the installation for the owner,
+  exchanges it for a repository/permission-scoped installation access token,
+  and exposes it as a
   masked same-job `GITHUB_APP_TOKEN`. Invoked again with a `revoke` argument
   after the Copilot run (best-effort) to delete the token via
   `DELETE /installation/token`. Compiler-owned, non-secret inputs (`--app-id`,
@@ -113,13 +113,15 @@ pipeline** as runtime helpers. Today it produces thirteen bundles:
 > Rust-side `Fact::ALL` registry, catching drift at CI time.
 
 > **Test-only, not shipped: `compiler-smoke-e2e`.** The workspace also contains a
-> `src/compiler-smoke-e2e/` harness that drives the deterministic compiler-candidate
-> smoke E2E suite (see [`tests/compiler-smoke-e2e/`](../tests/compiler-smoke-e2e/)).
-> It stages the compiler candidate produced by the current build (PR or nightly `main`)
-> as a pinned `supply-chain.pipeline-artifact` source across the five real fixtures in
-> `tests/safe-outputs/`, pushes the staged candidate to a short-lived `ado-aw-mirror`
-> branch on the mirror repo, queues the five FIXED "candidate lane" pipeline definitions
-> (tracked in `tests/compiler-smoke-e2e/REGISTERED.md`), and asserts they all go green.
+> `src/compiler-smoke-e2e/` harness that drives the smoke E2E suite (see
+> [`tests/smoke/`](../tests/smoke/)). It stages every case declared in
+> `tests/smoke/cases.json` to the fixed `.smoke/pipeline.yml` path on its own
+> per-case `ado-aw-mirror` ref, then queues each against its credential *lane*
+> definition (tracked in `tests/smoke/REGISTERED.md`) and asserts they all go
+> green. Two modes, selected by `SMOKE_COMPILER_SOURCE`: `candidate` pins every
+> case to the compiler artifact built by the current run, while `released`
+> compiles with the latest release asset and requires release URLs to survive
+> into the output.
 > It is **not** a runtime bundle: it is built to the non-root `test-bin/compiler-smoke-e2e.js`
 > by `npm run build:compiler-smoke-e2e` (kept out of the main `build` chain and the
 > release `ado-script/*.js` glob), and `compiler-smoke-e2e` is listed in `NON_BUNDLE_DIRS`
@@ -171,11 +173,12 @@ node import.js <prompt-file> --base "$(Build.SourcesDirectory)" \
   compiler always passes `$(Build.SourcesDirectory)` (ADO expands the macro
   before node runs), and the compiler-emitted marker for the agent body is a
   **trigger-repo-relative** path (e.g. `agents/foo.md`, or
-  `$(Build.Repository.Name)/agents/foo.md` under multi-checkout) — not
+  `self/agents/foo.md` under multi-checkout) — not
   absolute. `import.js` rejects absolute and `..` paths.
 - `--var name=value` (repeatable) — a small, **compiler-owned allowlist** of
-  ADO path-anchor variables (currently `Build.SourcesDirectory` and
-  `Build.Repository.Name`, defined by `PROMPT_ADO_VARS` in
+  non-secret ADO variables (currently `Build.BuildId`,
+  `Build.Repository.Name`, `Build.SourcesDirectory`, and
+  `System.CollectionUri`, defined by `PROMPT_ADO_VARS` in
   `src/compile/extensions/ado_script.rs`). ADO expands the `$(...)` macro into
   the bash arg at runtime, so `import.js` receives the concrete value and
   literally substitutes every `$(name)` occurrence in the **final** prompt
@@ -626,7 +629,7 @@ scripts/ado-script/
 │   │   ├── index.ts             # main(): inspect upstream results + safe-outputs manifest → file/append work items
 │   │   └── __tests__/           # unit tests for signal detection and work-item filing behaviour
 │   ├── github-app-token/        # github-app-token.js entry point + GitHub App token minter
-│   │   ├── index.ts             # main(): RS256 JWT → resolve installation → mint installation token → masked GITHUB_APP_TOKEN
+│   │   ├── index.ts             # main(): RS256 JWT → resolve installation → mint scoped installation token → masked same-job variable
 │   │   └── __tests__/           # unit tests for JWT signing / installation resolution / token minting
 │   ├── prepare-pr-base/         # prepare-pr-base.js entry point + create-pull-request base-ref fetch/deepen
 │   │   ├── index.ts             # main(): fetch/deepen target branch + set origin/HEAD so mcp.rs finds a diff base
@@ -636,7 +639,7 @@ scripts/ado-script/
 │   │   ├── fact-catalog.gen.json # generated by `cargo run -- export-fact-catalog`; deep-compared by gate-spec.test.ts
 │   │   └── __tests__/           # gate-spec drift tests and trigger-evaluation scenario tests
 │   ├── executor-e2e/            # test-only: Stage 3 safe-output E2E harness (not a bundle; built to test-bin/executor-e2e.js)
-│   └── compiler-smoke-e2e/      # test-only: deterministic compiler-candidate smoke E2E orchestrator (not a bundle; built to test-bin/ by build:compiler-smoke-e2e)
+│   └── compiler-smoke-e2e/      # test-only: lane-based smoke E2E orchestrator (not a bundle; built to test-bin/ by build:compiler-smoke-e2e)
 ├── test/                        # End-to-end smoke tests (gate, import, exec-context-pr)
 ├── gate.js                      # ncc bundle output (gitignored)
 ├── import.js                    # ncc bundle output (gitignored)

@@ -38,9 +38,17 @@ pool:                          # Optional pool configuration
 repos:                           # compact repository declarations (replaces repositories: + checkout:)
   - MyProject/my-repo               # shorthand: alias="my-repo", type=git, ref=refs/heads/main, checkout=true
   - reponame=MyProject/another-repo # shorthand with explicit alias
-  - name: MyProject/templates       # object form for full control
+  - name: octo/templates           # object form for an external repository
+    type: github                 # external repo resource type; default is git
     ref: refs/heads/release/2.x
     checkout: false              # declared as resource only, not checked out by the agent
+    endpoint: github-templates   # required for type: github/githubenterprise/bitbucket
+imports:                         # reusable markdown components; see docs/imports.md
+  - ./components/local-guidance.md
+  - uses: octo/shared/components/notify.md@0123456789abcdef0123456789abcdef01234567
+    endpoint: github-shared-components
+    with:                        # non-secret import-schema inputs
+      channel: service-alerts
 tools:                         # optional tool configuration
   bash: ["cat", "ls", "grep"]  # explicit bash allow-list; when omitted, all bash tools are allowed (unrestricted)
   edit: true                   # enable file editing tool (default: true)
@@ -93,6 +101,7 @@ mcp-servers:
       Authorization: "Bearer $(MCP_TOKEN)"
     allowed: [search, fetch]
 safe-outputs:                  # optional per-tool configuration for safe outputs
+  staged: false               # cooperative preview default; per-tool override supported
   create-work-item:
     work-item-type: Task
     assignee: "user@example.com"
@@ -102,6 +111,20 @@ safe-outputs:                  # optional per-tool configuration for safe output
     artifact-link:             # optional: link work item to repository branch
       enabled: true
       branch: main
+  jobs:                       # custom Agent-callable jobs (see docs/safe-outputs.md)
+    send-notification:
+      description: Notify release operators.
+      max: 1
+      output: Notification proposal accepted.
+      inputs:
+        title:
+          description: Notification title.
+          type: string
+          required: true
+      env:
+        NOTIFICATION_TOKEN: $(SHARED_NOTIFICATION_TOKEN)
+      steps:
+        - bash: jq -e '.items[] | select(.type == "send-notification")' "$ADO_AW_AGENT_OUTPUT"
   threat-detection:            # section-level Detection configuration
     enabled: true              # boolean only; false keeps a pass-through Detection job
     prompt: |                  # appended to the fixed detector prompt
@@ -113,6 +136,17 @@ safe-outputs:                  # optional per-tool configuration for safe output
     post-steps:                # trusted ADO steps after AI analysis
       - bash: echo "Run additional scanner"
 on:                            # trigger configuration (unified under on: key)
+                               # `on:` is the COMPLETE declaration of when this
+                               # pipeline runs. Omitting it entirely produces a
+                               # manual / API-queued-only pipeline.
+                               # See "Push (CI) Triggering" below.
+  push:                        # optional: start on pushes (ADO `trigger:`)
+    branches:                  #   `push: none` never starts on a push
+      include: [main]
+      exclude: [wip/*]
+    paths:
+      include: ["src/**"]
+      exclude: ["docs/**"]
   schedule: daily around 14:00 # fuzzy schedule - see docs/schedule-syntax.md
   pipeline:
     name: "Build Pipeline"     # source pipeline name
@@ -144,8 +178,9 @@ on:                            # trigger configuration (unified under on: key)
                                #     matches `branches`/`paths`. No Build
                                #     Validation branch policy required. Zero
                                #     or multiple matches → Agent job
-                               #     self-skips cleanly. CI trigger stays at
-                               #     the ADO default (all branches).
+                               #     self-skips cleanly. Emits an
+                               #     all-branches `trigger:` so those CI
+                               #     builds actually happen.
                                #   - policy: the operator has installed a
                                #     Build Validation branch policy. Compiler
                                #     omits all synth wiring AND emits
@@ -247,7 +282,6 @@ supply-chain:                  # optional internal supply-chain mirror (see docs
   service-connection: shared-conn  # optional feed/registry fallback; never applies to pipeline-artifact
 # ado-aw-debug:                 # debug-only knobs; see docs/ado-aw-debug.md
 #   skip-integrity: false       # omit generated pipeline integrity verification
-#   create-issue: false         # dogfood-only GitHub issue filing for debug reports
 parameters:                    # optional ADO runtime parameters (surfaced in UI when queuing a run)
   - name: clearMemory
     displayName: "Clear agent memory"
@@ -266,7 +300,69 @@ runtime — write it as clear, structured natural-language instructions.
 > report on pipeline failures and surfaces diagnostic signals. See
 > [`docs/conclusion.md`](conclusion.md).
 
-## Inline step validation
+## Reusable Imports (`imports:` / `import-schema:`)
+
+`imports:` lets a workflow reuse local or cross-repository markdown components.
+Remote branches, tags, and SHAs resolve to an immutable commit SHA at compile
+time. Each imported file is parsed as regular ado-aw markdown with YAML front
+matter; the compiler validates optional `import-schema:` inputs, applies
+`{{ inputs.<key> }}` substitutions (a compile-time `{{ ... }}`
+replacement — not the ADO `${{ ... }}` template delimiter), then merges the
+imported front matter and body into the consumer workflow. Imported **body**
+content is inlined into the agent prompt at compile time (ahead of the
+consumer's own body); see [`imports.md`](imports.md) for the full reference.
+
+```yaml
+imports:
+  - ./components/local-policy.md
+  - PlatformProject/shared-agents/components/notify.md@v2
+  - uses: components/deploy.md@release/v2
+    repository: shared-agents
+    with:
+      environment: prod
+      region: westus3
+  - uses: components/github-notify.md@main
+    repository: octo/shared-agents
+    source: github.com
+```
+
+Object-form fields:
+
+| Field | Description |
+|-------|-------------|
+| `uses` | Local path, combined `project/repo/path@ref` shorthand, or canonical remote `path@ref`. |
+| `repository` | Remote repository. A bare name means the current ADO project; `project/repo` means the current ADO organization. |
+| `source` | Optional compile-time source: cross-org ADO collection URL, `github.com`, or a GHES host. Omitted means the current ADO organization. |
+| `with` | Non-secret values validated against the imported file's `import-schema:`. |
+
+Import specs may also include `#Section` to import only a markdown heading
+section, and a trailing `?` to make the import optional. Imports may themselves
+declare imports; expansion is breadth-first with cycle detection and bounded
+depth/count/manifest size.
+
+Reusable components declare compile-time inputs with `import-schema:`:
+
+```yaml
+import-schema:
+  channel:
+    type: string
+    required: true
+  severity:
+    type: choice
+    options: [info, warning, critical]
+    default: info
+  labels:
+    type: array
+    items:
+      type: string
+```
+
+Supported types are `string`, `number`, `boolean`, `choice`, `array`, and
+`object` (object properties are currently one level deep). See
+[`imports.md`](imports.md) for the full syntax, cache layout, merge semantics,
+limitations, and custom safe-output component examples.
+
+## Inline step validation (`setup` / `steps` / `post-steps` / `teardown`)
 
 Inline steps under `setup`, `steps`, `post-steps`, `teardown`,
 `safe-outputs.threat-detection.steps`, and
@@ -302,9 +398,12 @@ quiet. So adding validation coverage can only ever *surface* authoring mistakes
 
 `ado-aw-debug:` is accepted in front matter for repository dogfooding and
 local diagnostics. It is **not** a regular safe-output tool. Use
-`skip-integrity` to omit generated pipeline integrity verification, or
-`create-issue` to file a GitHub issue from debug pipelines; see
+`skip-integrity` to omit generated pipeline integrity verification; see
 [`ado-aw-debug.md`](ado-aw-debug.md) for the full reference.
+
+GitHub issue filing now uses regular `safe-outputs.create-github-issue` and
+`safe-outputs.set-github-issue-type`; see
+[`safe-outputs.md`](safe-outputs.md#github-issue-safe-outputs).
 
 ## Per-Job Pool Overrides (`pool.overrides:`)
 
@@ -336,6 +435,11 @@ pool:
 | `safe-outputs-reviewed` | SafeOutputs_Reviewed only (overrides the `safe-outputs` inheritance) |
 | `teardown` | Teardown (emitted only when `teardown:` steps are declared) |
 | `conclusion` | Conclusion (emitted only when `safe-outputs:` is configured) |
+
+The Teardown job runs with an `always()` condition, so its steps execute even
+when the Agent, Detection, SafeOutputs, or a custom safe-output job fails or is
+skipped. Write teardown steps as unconditional cleanup — do not assume the
+upstream jobs succeeded.
 
 `safe-outputs-reviewed` inherits the `safe-outputs` override unless it has its
 own entry. `manual-review` is **not** a valid key — the ManualReview job is
@@ -394,9 +498,18 @@ Reference the explicit ADO path instead:
 
 - `$(Build.SourcesDirectory)` — the checkout root (the trigger repo root when
   only `self` is checked out).
-- `$(Build.SourcesDirectory)/$(Build.Repository.Name)` — the trigger repo when
-  one or more additional repositories are checked out.
+- `$(Build.SourcesDirectory)/self` — the compiler-owned `self` checkout path
+  when one or more additional repositories are checked out.
 - `$(Build.SourcesDirectory)/<alias>` — a specific checked-out repository.
+
+> **`self` identity.** The compiler resolves the `self` repository's name at
+> compile time from the Azure DevOps git remote (or
+> `ADO_AW_COMPILE_REMOTE_URL`) and bakes it into the compiled pipeline, so
+> safe outputs targeting `repository: self` never depend on
+> `Build.Repository.*` — which names the *triggering* repository and differs
+> from `self` on repository-resource-triggered runs. If no ADO remote can be
+> resolved at compile time the compiler warns and falls back to
+> `$(Build.Repository.Name)`; compile from an Azure DevOps clone to avoid it.
 
 The `legacy_path_markers` codemod automatically rewrites any remaining markers
 in front matter to the path they resolved to on the next `compile` (see
@@ -428,9 +541,14 @@ Object fields:
 | `alias`       | last segment of `name` | Repository alias (maps to ADO `repository:`) |
 | `type`        | `git`                  | ADO repository resource type |
 | `ref`         | `refs/heads/main`      | Branch or tag reference |
+| `endpoint`    | *(none)*               | Azure DevOps service connection. Required for `type: github`, `githubenterprise`, or `bitbucket`; not needed for same-org Azure Repos `git`. |
 | `checkout`    | `true`                 | Whether the agent job clones this repo |
 | `fetch-depth` | *(ADO default)*        | Shallow-clone depth for this repo's checkout (ADO `fetchDepth`). `0` = full history |
 | `fetch-tags`  | *(ADO default)*        | Whether to fetch git tags during checkout (ADO `fetchTags`) |
+
+Aliases must be unique case-insensitively because they become checkout
+directory names on Windows agents. `root`, `repo`, and `self` are reserved in
+every casing; `self` is the compiler-owned path for the pipeline repository.
 
 ### Tuning checkout fetch behavior (`fetch-depth` / `fetch-tags`)
 
@@ -623,9 +741,11 @@ The trade-off is that the generated YAML is larger, and prompt-body
 edits require `ado-aw compile` plus committing the updated pipeline
 file.
 
-A small, fixed set of ADO path-anchor variables —
-`$(Build.SourcesDirectory)` and `$(Build.Repository.Name)` — is
-substituted into the prompt consistently in **both** modes. Arbitrary
+A small, fixed set of ADO path-anchor variables — including
+`$(Build.SourcesDirectory)` and `$(Build.Repository.Name)` — is substituted
+into the prompt consistently in **both** modes. `Build.Repository.Name`
+identifies the triggering repository and is not the compiler-owned `self`
+checkout path. Arbitrary
 `$(...)` macros and pipeline/secret variables are not expanded; see
 [ADO variables in the prompt](runtime-imports.md#ado-variables-in-the-prompt).
 
@@ -690,6 +810,67 @@ If the token is unavailable, the gate step logs a warning and the build
 completes as "Succeeded" (with the agent job skipped via condition)
 rather than "Cancelled".
 
+## Push (CI) Triggering (`on.push`)
+
+`on:` is the **complete declaration of when a pipeline runs**. If a workflow
+does not ask for a trigger, it does not get one — a workflow with no `on:` key
+at all compiles to a manual / API-queued-only pipeline.
+
+That has to be stated explicitly in the compiled YAML, because Azure DevOps
+reads a **missing** top-level `trigger:` key as *"run CI on every branch"*,
+not *"no CI"*. The compiler therefore always emits both `trigger:` and `pr:`.
+
+```yaml
+on:
+  push: none                   # never start on a push
+```
+
+```yaml
+on:
+  push:                        # start only on pushes to main touching src/
+    branches:
+      include: [main, "release/*"]
+      exclude: ["wip/*"]
+    paths:
+      include: ["src/**"]
+      exclude: ["docs/**"]
+```
+
+`branches` and `paths` are passed through to ADO's native `trigger:` filters
+verbatim; the compiler does not rewrite or narrow them.
+
+### What gets emitted
+
+| Front matter | Top-level `trigger:` |
+|---|---|
+| no `on:` at all | `none` — manual / API-queued only |
+| `on.schedule` or `on.pipeline` only | `none` |
+| `on.pr` (default `mode: synthetic`) | all branches (`include: ['*']`) |
+| `on.pr.mode: policy` | `none` |
+| `on.push: none` | `none` |
+| `on.push: {branches, paths}` | the authored filter block |
+
+**An explicit `on.push` always wins**, including over the all-branches trigger
+that `mode: synthetic` emits and over the `none` that a schedule or
+`mode: policy` would otherwise produce. "Run nightly, *and* whenever `main`
+moves" is a legitimate shape:
+
+```yaml
+on:
+  schedule: daily around 03:00
+  push:
+    branches:
+      include: [main]
+```
+
+`on.push` controls **only** the `trigger:` key. The `pr:` key is independent
+and stays driven by [`on.pr`](#pr-triggering-in-azure-repos) — setting
+`on.push` never enables or disables PR triggering.
+
+> **Note:** `on.push` is unrelated to
+> [`execution-context.ci-push`](execution-context.md), which stages context
+> facts *inside* a build that has already started.
+
 ## PR Triggering in Azure Repos
 
 Azure DevOps Services **ignores the YAML `pr:` block unless a per-branch
@@ -704,8 +885,11 @@ is skipped. PR-aware agents (e.g. PR reviewers) silently degrade.
 
 | `on.pr.mode` | Synthesis wiring | Top-level `trigger:` | Use when |
 |---|---|---|---|
-| `synthetic` (default) | emitted (synthPr Setup step, coalesced env, broadened conditions) | ADO default (all branches) | No branch policy. **The vast majority of agents.** |
+| `synthetic` (default) | emitted (synthPr Setup step, coalesced env, broadened conditions) | all branches (`include: ['*']`) | No branch policy. **The vast majority of agents.** |
 | `policy` | omitted | `trigger: none` | Operator has installed a Build Validation branch policy and wants real PR-typed builds only, no duplicate CI builds. |
+
+An explicit [`on.push`](#push-ci-triggering-onpush) overrides the `trigger:`
+column in both rows.
 
 ### `mode: synthetic` — how it works under the hood
 
@@ -742,12 +926,17 @@ ADO `trigger:` fires on pushes **to** the listed branches. Narrowing
 `trigger:` to `pr.branches.include` would suppress CI on the feature
 branches synthPr actually needs to react to (pushing to `feature/x`
 with an open PR `feature/x → main` would never queue a build). The
-compiler therefore leaves the top-level `trigger:` at the ADO default
-("trigger on every branch") in synth mode, and relies on the synthPr
-Setup step's fast-exit for cost control: a single
+compiler therefore emits an all-branches `trigger:` in synth mode, and
+relies on the synthPr Setup step's fast-exit for cost control: a single
 `listActivePullRequestsBySourceRef` call returns `[]` on branches
 without a matching PR and the Agent job self-skips cleanly via
 `AW_SYNTHETIC_PR_SKIP=true`.
+
+If you do want to narrow it, set [`on.push`](#push-ci-triggering-onpush)
+explicitly — but remember it must cover the **source** branches of the PRs
+you care about, not their target branches. Setting `on.push: none` alongside
+`mode: synthetic` disables synthesis in practice, because there are no CI
+builds left for the synthPr step to run on.
 
 ### `mode: policy` — when to choose it
 

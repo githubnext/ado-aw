@@ -6,6 +6,7 @@ repos:
     checkout: false
   - name: owner/github-only
     type: github
+    endpoint: github-templates
     checkout: false
 tools:
   azure-devops:

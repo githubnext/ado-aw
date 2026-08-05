@@ -19,6 +19,7 @@ mod list;
 mod logging;
 mod mcp;
 mod mcp_author;
+mod mcp_custom_tools;
 mod ndjson;
 mod remove;
 mod run;
@@ -31,6 +32,7 @@ mod status;
 mod tools;
 mod update_check;
 pub mod validate;
+mod version;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -201,6 +203,7 @@ enum GraphCmd {
 }
 
 #[derive(Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Compile markdown to pipeline definition (or recompile all detected pipelines)
     Compile {
@@ -240,17 +243,24 @@ enum Commands {
         output_directory: String,
         /// Guard against directory traversal attacks by specifying the agent cannot influence folders outside this path
         bounding_directory: String,
+        /// Exact checkout directory for the pipeline's self repository.
+        #[arg(long)]
+        self_repository_directory: Option<String>,
         /// Only expose these safe output tools (can be repeated). If omitted, all tools are exposed.
         #[arg(long = "enabled-tools")]
         enabled_tools: Vec<String>,
+        /// Path to a compiler-generated JSON file of custom safe-output tool
+        /// definitions to register as dynamic MCP tools.
+        #[arg(long = "custom-tools")]
+        custom_tools: Option<PathBuf>,
     },
     /// Run the author-facing MCP server over stdio (IDE/Copilot Chat integration)
     McpAuthor {},
     /// Execute safe outputs from Stage 1 (Stage 3 of the pipeline)
     Execute {
-        /// Path to the source markdown file (used to read tool configs from front matter)
+        /// Path to the source markdown file (used by built-in safe-output execution)
         #[arg(short, long)]
-        source: PathBuf,
+        source: Option<PathBuf>,
         /// Directory containing safe output NDJSON file
         #[arg(long, default_value = ".")]
         safe_output_dir: PathBuf,
@@ -275,6 +285,12 @@ enum Commands {
         /// tools wait for approval.
         #[arg(long = "exclude")]
         exclude: Vec<String>,
+        /// Compiler-generated resolved safe-output configuration.
+        #[arg(long = "resolved-config")]
+        resolved_config: Option<PathBuf>,
+        /// Validate, sanitize, and materialize Agent-output JSON for custom jobs.
+        #[arg(long = "prepare-custom-agent-output")]
+        prepare_custom_agent_output: Option<PathBuf>,
     },
     /// Initialize a repository for AI-first agentic workflow authoring
     Init {
@@ -627,6 +643,38 @@ enum Commands {
     },
 }
 
+impl Commands {
+    fn command_name(&self) -> &'static str {
+        match self {
+            Commands::Compile { .. } => "compile",
+            Commands::Check { .. } => "check",
+            Commands::Mcp { .. } => "mcp",
+            Commands::McpAuthor {} => "mcp-author",
+            Commands::Execute { .. } => "execute",
+            Commands::Init { .. } => "init",
+            Commands::Configure { .. } => "configure",
+            Commands::Secrets { .. } => "secrets",
+            Commands::Enable { .. } => "enable",
+            Commands::Disable { .. } => "disable",
+            Commands::Remove { .. } => "remove",
+            Commands::List { .. } => "list",
+            Commands::Status { .. } => "status",
+            Commands::Run { .. } => "run",
+            Commands::Audit { .. } => "audit",
+            Commands::Trace { .. } => "trace",
+            Commands::ExportGateSchema { .. } => "export-gate-schema",
+            Commands::ExportFactCatalog { .. } => "export-fact-catalog",
+            Commands::ExportAdoProxyCatalogSchema { .. } => "export-ado-proxy-catalog-schema",
+            Commands::ExportAdoProxyCatalog { .. } => "export-ado-proxy-catalog",
+            Commands::Inspect { .. } => "inspect",
+            Commands::Graph { .. } => "graph",
+            Commands::Whatif { .. } => "whatif",
+            Commands::Lint { .. } => "lint",
+            Commands::Catalog { .. } => "catalog",
+        }
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(version, about = "Compiler for Azure DevOps Agentic Workflows")]
 struct Args {
@@ -641,6 +689,25 @@ struct Args {
     log_output_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+/// Write `content` to `output` if given, otherwise print it to stdout.
+/// Creates any missing parent directories when writing to a file.
+fn write_or_print(content: &str, output: Option<PathBuf>) -> Result<()> {
+    match output {
+        Some(path) => {
+            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating parent dir for {}", path.display()))?;
+            }
+            std::fs::write(&path, content)
+                .with_context(|| format!("writing to {}", path.display()))
+        }
+        None => {
+            print!("{}", content);
+            Ok(())
+        }
+    }
 }
 
 async fn run_compile(
@@ -713,15 +780,160 @@ async fn ensure_non_github_remote_for_ado_aw(command_name: &str, repo_path: &Pat
     Ok(())
 }
 
-async fn run_execute(
-    source: PathBuf,
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolvedExecutionConfig {
+    name: String,
+    #[serde(default)]
+    tool_configs: std::collections::HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    repositories: Vec<ResolvedExecutionRepository>,
+    #[serde(default)]
+    checkout: Vec<String>,
+    #[serde(default)]
+    repo_refs: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    cache_memory: Option<ResolvedCacheMemory>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ResolvedExecutionRepository {
+    repository: String,
+    name: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolvedCacheMemory {
+    enabled: bool,
+    #[serde(default)]
+    allowed_extensions: Vec<String>,
+}
+
+impl ResolvedExecutionConfig {
+    fn cache_memory_tools(&self) -> Option<crate::compile::types::ToolsConfig> {
+        let memory = self.cache_memory.as_ref()?;
+        let cache_memory = if !memory.enabled {
+            crate::compile::types::CacheMemoryToolConfig::Enabled(false)
+        } else if memory.allowed_extensions.is_empty() {
+            crate::compile::types::CacheMemoryToolConfig::Enabled(true)
+        } else {
+            crate::compile::types::CacheMemoryToolConfig::WithOptions(
+                crate::compile::types::CacheMemoryOptions {
+                    allowed_extensions: memory.allowed_extensions.clone(),
+                },
+            )
+        };
+        Some(crate::compile::types::ToolsConfig {
+            cache_memory: Some(cache_memory),
+            ..Default::default()
+        })
+    }
+}
+
+async fn build_execution_context_from_resolved(
+    config: &ResolvedExecutionConfig,
+    safe_output_dir: &Path,
+    ado_org_url: Option<String>,
+    ado_project: Option<String>,
+    dry_run: bool,
+) -> crate::safe_outputs::ExecutionContext {
+    let allowed_repositories = config
+        .checkout
+        .iter()
+        .filter_map(|alias| {
+            config
+                .repositories
+                .iter()
+                .find(|repository| &repository.repository == alias)
+                .map(|repository| (alias.clone(), repository.name.clone()))
+        })
+        .collect();
+
+    let mut ctx = crate::safe_outputs::ExecutionContext::default();
+    if let Some(url) = ado_org_url {
+        ctx.ado_organization = crate::safe_outputs::org_from_url(&url);
+        ctx.ado_org_url = Some(url);
+    }
+    if let Some(project) = ado_project {
+        ctx.ado_project = Some(project);
+    }
+    ctx.working_directory = safe_output_dir.to_path_buf();
+    ctx.tool_configs = config.tool_configs.clone();
+    ctx.allowed_repositories = allowed_repositories;
+    ctx.repo_refs = config.repo_refs.clone();
+    ctx.dry_run = dry_run;
+
+    let otel_path = safe_output_dir.join(agent_stats::OTEL_FILENAME);
+    if otel_path.exists() {
+        match agent_stats::AgentStats::from_otel_file(&otel_path, &config.name).await {
+            Ok(stats) => ctx.agent_stats = Some(stats),
+            Err(error) => log::warn!("Failed to parse OTel stats file: {error}"),
+        }
+    }
+    ctx
+}
+
+struct RunExecuteOptions {
+    source: Option<PathBuf>,
+    resolved_config: Option<PathBuf>,
     safe_output_dir: PathBuf,
     output_dir: Option<PathBuf>,
     ado_org_url: Option<String>,
     ado_project: Option<String>,
     dry_run: bool,
     filter: execute::ToolFilter,
-) -> Result<()> {
+}
+
+async fn run_execute(options: RunExecuteOptions) -> Result<()> {
+    let RunExecuteOptions {
+        source,
+        resolved_config,
+        safe_output_dir,
+        output_dir,
+        ado_org_url,
+        ado_project,
+        dry_run,
+        filter,
+    } = options;
+    if let Some(resolved_config) = resolved_config {
+        let content = tokio::fs::read_to_string(&resolved_config)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to read resolved execution config: {}",
+                    resolved_config.display()
+                )
+            })?;
+        let config: ResolvedExecutionConfig =
+            serde_json::from_str(&content).with_context(|| {
+                format!(
+                    "Failed to parse resolved execution config: {}",
+                    resolved_config.display()
+                )
+            })?;
+        println!(
+            "Loaded resolved tool configs from: {}",
+            resolved_config.display()
+        );
+        let tools = config.cache_memory_tools();
+        let mut ctx = build_execution_context_from_resolved(
+            &config,
+            &safe_output_dir,
+            ado_org_url,
+            ado_project,
+            dry_run,
+        )
+        .await;
+        if let Some(source) = source.as_deref() {
+            ctx.agent_last_author = discover_last_author(source).await;
+        }
+        let results = execute::execute_safe_outputs(&safe_output_dir, &ctx, &filter).await?;
+        process_cache_memory(tools.as_ref(), &safe_output_dir, output_dir).await?;
+        return finish_execution(results);
+    }
+
+    let source = source.context("--source or --resolved-config is required for execution")?;
     // Read and parse source markdown to get tool configs.
     // Use parse_markdown_detailed so Stage 3 benefits from in-memory
     // codemod fixes when a source has deprecated shapes. Stage 3 must
@@ -785,10 +997,13 @@ async fn run_execute(
     // Process agent memory if cache-memory tool is enabled
     process_cache_memory(tools.as_ref(), &safe_output_dir, output_dir).await?;
 
-    print_execution_summary(&results);
+    finish_execution(results)
+}
 
-    let failure_count = results.iter().filter(|r| !r.success).count();
-    let warning_count = results.iter().filter(|r| r.is_warning()).count();
+fn finish_execution(results: Vec<crate::safe_outputs::ExecutionResult>) -> Result<()> {
+    print_execution_summary(&results);
+    let failure_count = results.iter().filter(|result| !result.success).count();
+    let warning_count = results.iter().filter(|result| result.is_warning()).count();
     if failure_count > 0 {
         std::process::exit(1);
     } else if warning_count > 0 {
@@ -837,30 +1052,20 @@ async fn build_execution_context(
     ctx.tool_configs = front_matter
         .safe_outputs
         .iter()
-        .filter(|(k, _)| {
-            !crate::compile::types::SAFE_OUTPUT_RESERVED_KEYS.contains(&k.as_str())
-        })
+        .filter(|(k, _)| !crate::compile::types::SAFE_OUTPUT_RESERVED_KEYS.contains(&k.as_str()))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    // Merge ado-aw-debug.create-issue config under the same tool_configs map
-    // so Stage 3's `ctx.get_tool_config::<CreateIssueConfig>("create-issue")`
-    // works exactly like every other safe-output. Without this merge the
-    // executor would only ever see Default::default().
-    //
-    // Crucially, also record `create-issue` in `debug_enabled_tools` so the
-    // Stage 3 executor can independently enforce the `ado-aw-debug` gate
-    // — without this, a forged NDJSON entry whose tool name is `create-issue`
-    // could bypass the MCP-layer default-deny.
-    if let Some(d) = front_matter.ado_aw_debug.as_ref()
-        && let Some(ci) = d.create_issue.as_ref()
-    {
-        match serde_json::to_value(ci) {
-            Ok(v) => {
-                ctx.tool_configs.insert("create-issue".to_string(), v);
-                ctx.debug_enabled_tools.insert("create-issue".to_string());
-            }
-            Err(e) => log::warn!("Failed to serialize ado-aw-debug.create-issue config: {e}"),
-        }
+    for tool in front_matter.all_safe_output_tool_names() {
+        let staged = front_matter.tool_is_staged(&tool);
+        // Take-normalize-reinsert keeps the object invariant structural: there is
+        // no intermediate state where a non-object value must be re-borrowed.
+        let mut config = match ctx.tool_configs.remove(&tool) {
+            Some(serde_json::Value::Object(config)) => config,
+            _ => serde_json::Map::new(),
+        };
+        config.insert("staged".to_string(), serde_json::Value::Bool(staged));
+        ctx.tool_configs
+            .insert(tool, serde_json::Value::Object(config));
     }
     ctx.allowed_repositories = allowed_repositories;
     // Per-checkout-alias git refs, so Stage 3 can resolve a per-repo
@@ -985,64 +1190,16 @@ fn print_execution_summary(results: &[crate::safe_outputs::ExecutionResult]) {
     );
 }
 
-/// Write a build-time generated artifact (JSON Schema or catalog data) to
-/// `output`, or to stdout when no path is given.
-///
-/// Shared by every `export-*` command so the parent-directory creation and
-/// error context stay identical across generators. `label` names the artifact
-/// in error messages (e.g. `"gate schema"`).
-fn write_generated_artifact(output: Option<&Path>, contents: &str, label: &str) -> Result<()> {
-    match output {
-        Some(path) => {
-            if let Some(parent) = path
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-            {
-                std::fs::create_dir_all(parent).with_context(|| {
-                    format!("creating parent dir for {label}: {}", parent.display())
-                })?;
-            }
-            std::fs::write(path, contents)
-                .with_context(|| format!("writing {label} to {}", path.display()))?;
-        }
-        None => print!("{}", contents),
-    }
-    Ok(())
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
     // Determine command name for logging
-    let command_name = match &args.command {
-        Some(Commands::Compile { .. }) => "compile",
-        Some(Commands::Check { .. }) => "check",
-        Some(Commands::Mcp { .. }) => "mcp",
-        Some(Commands::McpAuthor { .. }) => "mcp-author",
-        Some(Commands::Execute { .. }) => "execute",
-        Some(Commands::Init { .. }) => "init",
-        Some(Commands::Configure { .. }) => "configure",
-        Some(Commands::Secrets { .. }) => "secrets",
-        Some(Commands::Enable { .. }) => "enable",
-        Some(Commands::Disable { .. }) => "disable",
-        Some(Commands::Remove { .. }) => "remove",
-        Some(Commands::List { .. }) => "list",
-        Some(Commands::Status { .. }) => "status",
-        Some(Commands::Run { .. }) => "run",
-        Some(Commands::Audit { .. }) => "audit",
-        Some(Commands::Trace { .. }) => "trace",
-        Some(Commands::ExportGateSchema { .. }) => "export-gate-schema",
-        Some(Commands::ExportFactCatalog { .. }) => "export-fact-catalog",
-        Some(Commands::ExportAdoProxyCatalogSchema { .. }) => "export-ado-proxy-catalog-schema",
-        Some(Commands::ExportAdoProxyCatalog { .. }) => "export-ado-proxy-catalog",
-        Some(Commands::Inspect { .. }) => "inspect",
-        Some(Commands::Graph { .. }) => "graph",
-        Some(Commands::Whatif { .. }) => "whatif",
-        Some(Commands::Lint { .. }) => "lint",
-        Some(Commands::Catalog { .. }) => "catalog",
-        None => "ado-aw",
-    };
+    let command_name = args
+        .command
+        .as_ref()
+        .map(Commands::command_name)
+        .unwrap_or("ado-aw");
 
     // Initialize file-based logging to a daily log file.
     let _log_path = logging::init_logging(
@@ -1063,9 +1220,7 @@ async fn main() -> Result<()> {
     // Also skipped in CI environments to avoid unnecessary outbound calls.
     let is_pipeline_internal = matches!(
         command,
-        Commands::Execute { .. }
-            | Commands::Mcp { .. }
-            | Commands::McpAuthor { .. }
+        Commands::Execute { .. } | Commands::Mcp { .. } | Commands::McpAuthor { .. }
     );
     let update_handle = if !is_pipeline_internal && std::env::var_os("CI").is_none() {
         Some(tokio::spawn(update_check::check_for_update()))
@@ -1102,14 +1257,23 @@ async fn main() -> Result<()> {
         Commands::Mcp {
             output_directory,
             bounding_directory,
+            self_repository_directory,
             enabled_tools,
+            custom_tools,
         } => {
             let filter = if enabled_tools.is_empty() {
                 None
             } else {
                 Some(enabled_tools)
             };
-            mcp::run(&output_directory, &bounding_directory, filter.as_deref()).await?;
+            mcp::run(
+                &output_directory,
+                &bounding_directory,
+                self_repository_directory.as_deref(),
+                filter.as_deref(),
+                custom_tools.as_deref(),
+            )
+            .await?;
         }
         Commands::McpAuthor {} => {
             mcp_author::run_stdio().await?;
@@ -1123,17 +1287,48 @@ async fn main() -> Result<()> {
             dry_run,
             only,
             exclude,
+            resolved_config,
+            prepare_custom_agent_output,
         } => {
-            run_execute(
-                source,
-                safe_output_dir,
-                output_dir,
-                ado_org_url,
-                ado_project,
-                dry_run,
-                execute::ToolFilter { only, exclude },
-            )
-            .await?;
+            if let Some(output_path) = prepare_custom_agent_output {
+                if output_dir.is_some()
+                    || ado_org_url.is_some()
+                    || ado_project.is_some()
+                    || !only.is_empty()
+                    || !exclude.is_empty()
+                    || dry_run
+                {
+                    anyhow::bail!(
+                        "--prepare-custom-agent-output cannot be combined with --output-dir, \
+                         --ado-org-url, --ado-project, --dry-run, --only, or --exclude"
+                    );
+                }
+                let resolved_config = resolved_config
+                    .as_deref()
+                    .context("--prepare-custom-agent-output requires --resolved-config")?;
+                let count = execute::prepare_custom_agent_output(
+                    &safe_output_dir,
+                    resolved_config,
+                    &output_path,
+                )
+                .await?;
+                println!(
+                    "Prepared {count} Agent-output item(s) at {}",
+                    output_path.display()
+                );
+            } else {
+                run_execute(RunExecuteOptions {
+                    source,
+                    resolved_config,
+                    safe_output_dir,
+                    output_dir,
+                    ado_org_url,
+                    ado_project,
+                    dry_run,
+                    filter: execute::ToolFilter { only, exclude },
+                })
+                .await?;
+            }
         }
         Commands::Init {
             path,
@@ -1423,32 +1618,20 @@ async fn main() -> Result<()> {
             .await?;
         }
         Commands::ExportGateSchema { output } => {
-            write_generated_artifact(
-                output.as_deref(),
-                &compile::filter_ir::generate_gate_spec_schema(),
-                "gate schema",
-            )?;
+            let schema = compile::filter_ir::generate_gate_spec_schema();
+            write_or_print(&schema, output)?;
         }
         Commands::ExportFactCatalog { output } => {
-            write_generated_artifact(
-                output.as_deref(),
-                &compile::filter_ir::generate_fact_catalog(),
-                "fact catalog",
-            )?;
+            let catalog = compile::filter_ir::generate_fact_catalog();
+            write_or_print(&catalog, output)?;
         }
         Commands::ExportAdoProxyCatalogSchema { output } => {
-            write_generated_artifact(
-                output.as_deref(),
-                &ado_proxy::catalog::generate_catalog_schema(),
-                "ado-proxy catalog schema",
-            )?;
+            let schema = ado_proxy::catalog::generate_catalog_schema();
+            write_or_print(&schema, output)?;
         }
         Commands::ExportAdoProxyCatalog { output } => {
-            write_generated_artifact(
-                output.as_deref(),
-                &ado_proxy::catalog::generate_catalog_json(),
-                "ado-proxy catalog",
-            )?;
+            let catalog = ado_proxy::catalog::generate_catalog_json();
+            write_or_print(&catalog, output)?;
         }
         Commands::Inspect { source, json } => {
             inspect::dispatch_inspect(inspect::InspectOptions {

@@ -10,7 +10,7 @@ describe("renderSourceMarkdown", () => {
   it("emits front matter with inline-JSON safe-outputs config", () => {
     const md = renderSourceMarkdown({
       tool: "comment-on-work-item",
-      config: { target: "*", max: 1 },
+      safeOutputs: { "comment-on-work-item": { target: "*", max: 1 } },
     });
     expect(md).toContain('name: "executor-e2e: comment-on-work-item"');
     expect(md).toContain("target: standalone");
@@ -24,11 +24,24 @@ describe("renderSourceMarkdown", () => {
   it("emits a repos block when adoRepo is provided", () => {
     const md = renderSourceMarkdown({
       tool: "add-pr-comment",
-      config: { "allowed-repositories": ["agent-definitions"] },
+      safeOutputs: { "add-pr-comment": { "allowed-repositories": ["agent-definitions"] } },
       adoRepo: "agent-definitions",
     });
     expect(md).toContain("repos:");
     expect(md).toContain(`  - "agent-definitions=agent-definitions"`);
+  });
+
+  it("emits one safe-outputs key per tool when a scenario stages prior entries", () => {
+    const md = renderSourceMarkdown({
+      tool: "set-github-issue-type",
+      safeOutputs: {
+        "create-github-issue": { "target-repo": "o/r" },
+        "set-github-issue-type": { "target-repo": "o/r" },
+      },
+    });
+    expect(md).toContain('"create-github-issue": {"target-repo":"o/r"}');
+    expect(md).toContain('"set-github-issue-type": {"target-repo":"o/r"}');
+    expect(md.match(/^---$/gm)?.length).toBe(2);
   });
 });
 

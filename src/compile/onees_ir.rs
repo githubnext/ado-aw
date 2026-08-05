@@ -116,6 +116,7 @@ pub fn build_onees_pipeline(
             kind: ONEES_TEMPLATES_REPO_KIND.to_string(),
             name: ONEES_TEMPLATES_REPO_NAME.to_string(),
             r#ref: Some(ONEES_TEMPLATES_REPO_REF.to_string()),
+            endpoint: None,
         },
     );
 

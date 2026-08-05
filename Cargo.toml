@@ -1,6 +1,6 @@
 [package]
 name = "ado-aw"
-version = "0.46.0"
+version = "0.48.0"
 edition = "2024"
 
 [dependencies]
@@ -34,6 +34,7 @@ similar = "3.1.0"
 sha2 = "0.11.0"
 indexmap = "2"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+semver = "1.0.28"
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["blocking"] }

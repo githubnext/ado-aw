@@ -41,6 +41,11 @@ variables:
   EFFECTIVE_EXECUTOR_E2E_ADO_REPO: $[ coalesce(variables['EXECUTOR_E2E_ADO_REPO'], 'agent-definitions') ]
   EFFECTIVE_E2E_QUEUE_PIPELINE_ID: $[ coalesce(variables['E2E_QUEUE_PIPELINE_ID'], '') ]
   EFFECTIVE_E2E_WIKI_NAME: $[ coalesce(variables['E2E_WIKI_NAME'], '') ]
+  # GitHub issue scenarios: optional scratch-repo override and forced issue-type
+  # name. Both empty by default so the scenarios skip gracefully rather than
+  # filing scratch issues into an unintended repository.
+  EFFECTIVE_EXECUTOR_E2E_SCENARIO_ISSUE_REPO: $[ coalesce(variables['EXECUTOR_E2E_SCENARIO_ISSUE_REPO'], '') ]
+  EFFECTIVE_E2E_GITHUB_ISSUE_TYPE: $[ coalesce(variables['E2E_GITHUB_ISSUE_TYPE'], '') ]
   # Internal sparse crates.io mirror (Azure Artifacts). Declared in the cargo
   # config below so CargoAuthenticate@0 can attach credentials, and reused as
   # RustInstaller's crates.io override so the two never drift.
@@ -138,3 +143,9 @@ steps:
       # Optional-precondition scenarios (skipped when unset):
       E2E_QUEUE_PIPELINE_ID: $(EFFECTIVE_E2E_QUEUE_PIPELINE_ID)
       E2E_WIKI_NAME: $(EFFECTIVE_E2E_WIKI_NAME)
+      # GitHub issue scenarios. They reuse EXECUTOR_E2E_GITHUB_TOKEN above,
+      # which must carry Issues:write on the scratch repo. When
+      # EXECUTOR_E2E_SCENARIO_ISSUE_REPO is unset they fall back to
+      # EXECUTOR_E2E_ISSUE_REPO, and skip when neither is set.
+      EXECUTOR_E2E_SCENARIO_ISSUE_REPO: $(EFFECTIVE_EXECUTOR_E2E_SCENARIO_ISSUE_REPO)
+      E2E_GITHUB_ISSUE_TYPE: $(EFFECTIVE_E2E_GITHUB_ISSUE_TYPE)

@@ -37,7 +37,6 @@
  *
  * Test-harness module; not shipped in `ado-script.zip`.
  */
-import type { FixtureName } from "./config.js";
 import { sleep as defaultSleep } from "./process.js";
 
 /** What a queued build looks like once polled — kept narrow (a subset of `AdoRest.BuildSummary`) so tests never need a full AdoRest fake. */
@@ -55,13 +54,24 @@ export interface FixtureBuildClient {
   getBuild(buildId: number): Promise<PolledBuild>;
   cancelBuild(buildId: number): Promise<void>;
   buildUrl(buildId: number): string;
+  /** Best-effort run labelling; a tagging failure never fails the case. */
+  addBuildTags(buildId: number, tags: readonly string[]): Promise<void>;
 }
 
 export interface FixtureBuildRequest {
-  name: FixtureName;
+  caseId: string;
+  /** Credential lane this case runs in. Several cases legitimately share one lane. */
+  lane: string;
+  /**
+   * The *lane's* registered definition id — deliberately NOT unique per
+   * request. Cases are told apart by `sourceBranch`, which carries the case
+   * id, so the identity check in `describeMismatch` stays exact.
+   */
   definitionId: number;
   sourceBranch: string;
   sourceVersion: string;
+  /** Tags applied to the queued run so it is identifiable in a shared lane's history. */
+  tags?: readonly string[];
 }
 
 export type FixtureBuildStatus =
@@ -72,7 +82,8 @@ export type FixtureBuildStatus =
   | "queue-failed";
 
 export interface FixtureBuildResult {
-  name: FixtureName;
+  caseId: string;
+  lane: string;
   definitionId: number;
   buildId?: number;
   url?: string;
@@ -81,11 +92,11 @@ export interface FixtureBuildResult {
   message?: string;
   durationMs: number;
   /**
-   * Whether this fixture's terminal state was positively confirmed.
+   * Whether this case's terminal state was positively confirmed.
    * `false` means the harness could not prove ADO actually stopped this
    * build — callers must treat this as "possibly still running" and never
-   * delete the candidate ref. For `queue-failed`, `false` also covers the
-   * case where the `queueBuild` request itself may have been accepted by
+   * delete that case's candidate ref. For `queue-failed`, `false` also covers
+   * the case where the `queueBuild` request itself may have been accepted by
    * ADO despite the client observing an error (ambiguous network/timeout
    * failures) — the harness never assumes "no response" means "no build".
    */
@@ -275,7 +286,8 @@ export async function runFixtures(
   const cancelGraceMs = opts.cancelGraceMs ?? Math.max(opts.pollMs * 6, 60_000);
 
   const results: FixtureBuildResult[] = requests.map((r) => ({
-    name: r.name,
+    caseId: r.caseId,
+    lane: r.lane,
     definitionId: r.definitionId,
     status: "queue-failed",
     durationMs: 0,
@@ -308,7 +320,17 @@ export async function runFixtures(
           url: client.buildUrl(build.id),
           status: "queue-failed", // overwritten once polling resolves
         };
-        opts.log(`[${req.name}] queued build #${build.id} on ${req.sourceBranch}`);
+        opts.log(`[${req.caseId}] queued build #${build.id} on ${req.sourceBranch} (lane ${req.lane})`);
+        if (req.tags && req.tags.length > 0) {
+          // Purely cosmetic: every case in a lane shares one definition, so
+          // tags are how a run is identified in the lane's history. A tagging
+          // failure must never fail an otherwise-good case.
+          try {
+            await client.addBuildTags(build.id, req.tags);
+          } catch (err) {
+            opts.log(`[${req.caseId}] WARNING: could not tag build #${build.id}: ${errMessage(err)}`);
+          }
+        }
       } catch (err) {
         abort.signal();
         // A queueBuild error is ambiguous — ADO may have accepted the
@@ -323,7 +345,7 @@ export async function runFixtures(
           durationMs: Date.now() - start,
           terminalProven: false,
         };
-        opts.log(`[${req.name}] queue FAILED: ${errMessage(err)}`);
+        opts.log(`[${req.caseId}] queue FAILED: ${errMessage(err)}`);
       }
     }),
   );
@@ -360,7 +382,7 @@ export async function runFixtures(
           durationMs: Date.now() - q.start,
           terminalProven: outcome.terminalProven,
         };
-        opts.log(`[${req.name}] build #${q.buildId} -> ${outcome.status}${outcome.result ? ` (${outcome.result})` : ""}`);
+        opts.log(`[${req.caseId}] build #${q.buildId} -> ${outcome.status}${outcome.result ? ` (${outcome.result})` : ""}`);
       } catch (err) {
         // pollOne itself is designed never to throw — this is a defensive
         // backstop only. Treat as unproven, never as a confirmed stop.
@@ -372,7 +394,7 @@ export async function runFixtures(
           durationMs: Date.now() - q.start,
           terminalProven: false,
         };
-        opts.log(`[${req.name}] poll FAILED: ${errMessage(err)}`);
+        opts.log(`[${req.caseId}] poll FAILED: ${errMessage(err)}`);
       }
     }
   };

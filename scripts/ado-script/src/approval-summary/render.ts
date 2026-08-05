@@ -133,10 +133,17 @@ const TOOL_SPECS: Record<string, ToolSpec> = {
       { label: "Link type", key: "link_type" },
     ],
   },
-  "create-issue": {
-    title: "Create issue",
+  "create-github-issue": {
+    title: "Create GitHub issue",
     fields: [{ label: "Title", key: "title" }],
     body: "body",
+  },
+  "set-github-issue-type": {
+    title: "Set GitHub issue type",
+    fields: [
+      { label: "Issue", key: "issue_number" },
+      { label: "Type", key: "issue_type" },
+    ],
   },
   "create-wiki-page": {
     title: "Create wiki page",

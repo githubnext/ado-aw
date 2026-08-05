@@ -80,8 +80,8 @@ safe-outputs:
 
 ## What gets reported
 
-- **Pipeline failure** — when the Agent, Detection, or SafeOutputs job
-  fails.
+- **Pipeline failure** — when the Agent, Detection, SafeOutputs, reviewed
+  SafeOutputs, or any custom safe-output job fails.
 - **Noop** — when the agent produced noop safe outputs.
 - **Missing tool** — when the agent reported missing tools.
 - **Missing data** — when the agent reported missing data.
@@ -89,9 +89,9 @@ safe-outputs:
 ## How it works
 
 The job downloads the `safe_outputs` artifact, reads
-`safe-outputs-executed.ndjson`, checks upstream Agent / Detection /
-SafeOutputs job results, and then files or comments on Azure DevOps
-work items using `SYSTEM_ACCESSTOKEN`.
+`safe-outputs-executed.ndjson`, checks all upstream canonical and custom
+safe-output job results, and then files or comments on Azure DevOps work items
+using `SYSTEM_ACCESSTOKEN`.
 
 Per-tool config is passed from the compiler to `conclusion.js` as
 individual flat env vars per field (e.g. `AW_NOOP_TITLE_PREFIX`,

@@ -1,6 +1,8 @@
 /**
- * Markdown front-matter transform: pins a fixture's `supply-chain:` block to
- * the compiler candidate produced by the current orchestrator run.
+ * Markdown front-matter transform applied to a smoke case before it is
+ * compiled: pins the `supply-chain:` block to the compiler candidate produced
+ * by the current orchestrator run (candidate mode only), and always strips the
+ * `on:` trigger block.
  *
  * Parses only the *first* `---` YAML front-matter block (YAML 1.2, via the
  * `yaml` package) and preserves the markdown body byte-for-byte — the
@@ -8,7 +10,7 @@
  *
  * Test-harness module; not shipped in `ado-script.zip`.
  */
-import { Document, parseDocument, isMap } from "yaml";
+import { Document, parseDocument } from "yaml";
 
 /** The literal fields injected under `supply-chain.pipeline-artifact:`. */
 export interface PipelineArtifactValues {
@@ -48,58 +50,71 @@ function parseFrontMatter(yamlText: string): Document {
 }
 
 /**
- * Inject `supply-chain.pipeline-artifact` (literal project/definition-id/run-
- * id/artifact) into a fixture's markdown source.
+ * Prepare a smoke case's markdown source for staging. *
+ * Two transforms, both fail-closed:
  *
- * Fails closed:
- *   - throws if `supply-chain.feed` or `supply-chain.pipeline-artifact` is
- *     already present (this transform must never silently override an
- *     existing binary source),
- *   - preserves `supply-chain.registry` untouched when present,
- *   - preserves the markdown body byte-for-byte,
- *   - removes only `on.schedule` (and `on` entirely once it has no
- *     remaining keys) so a staged candidate never self-schedules.
+ *  1. In `candidate` mode, inject `supply-chain.pipeline-artifact` (literal
+ *     project/definition-id/run-id/artifact) so the compiled pipeline sources
+ *     every binary from this run's own artifact. In `released` mode this is
+ *     skipped entirely, leaving the compiled output pointing at public release
+ *     assets so release packaging is exercised.
+ *  2. In BOTH modes, remove the entire `on:` block.
+ *
+ * Stripping all of `on:` (not just `on.schedule`) is load-bearing. Every case
+ * in a lane is staged to the SAME `.smoke/pipeline.yml` path against the SAME
+ * lane definition, so a case declaring `on.pr` or `on.schedule` would compile a
+ * real trigger and its ref push would queue the lane in addition to the
+ * API-queued run.
+ *
+ * `on:` is the complete declaration of when a pipeline runs, so removing it
+ * makes the compiler emit an explicit `trigger: none` / `pr: none` — a
+ * manual / API-queued-only pipeline, which is exactly what a lane needs.
+ * `assertNoTriggers` verifies that on the staged bytes rather than trusting it.
+ *
+ * Also fails closed if `supply-chain.feed` or `supply-chain.pipeline-artifact`
+ * is already present (this transform must never silently override an existing
+ * binary source), preserves `supply-chain.registry` untouched when present,
+ * and preserves the markdown body byte-for-byte.
  */
-export function injectPipelineArtifact(
+export function prepareCaseSource(
   markdown: string,
-  values: PipelineArtifactValues,
+  values: PipelineArtifactValues | undefined,
 ): string {
   const { yamlText, body } = splitFrontMatter(markdown);
   const doc = parseFrontMatter(yamlText);
 
-  if (doc.hasIn(["supply-chain", "feed"])) {
-    throw new Error(
-      "fixture already defines supply-chain.feed; refusing to override with a pinned pipeline-artifact source",
-    );
-  }
-  if (doc.hasIn(["supply-chain", "pipeline-artifact"])) {
-    throw new Error(
-      "fixture already defines supply-chain.pipeline-artifact; refusing to override",
+  if (values !== undefined) {
+    if (doc.hasIn(["supply-chain", "feed"])) {
+      throw new Error(
+        "case already defines supply-chain.feed; refusing to override with a pinned pipeline-artifact source",
+      );
+    }
+    if (doc.hasIn(["supply-chain", "pipeline-artifact"])) {
+      throw new Error(
+        "case already defines supply-chain.pipeline-artifact; refusing to override",
+      );
+    }
+
+    // setIn creates any missing intermediate maps (e.g. a wholly absent
+    // `supply-chain:` key), and only touches this one nested key — any sibling
+    // `supply-chain.registry` is left exactly as authored.
+    doc.setIn(
+      ["supply-chain", "pipeline-artifact"],
+      doc.createNode({
+        project: values.project,
+        "definition-id": values.definitionId,
+        "run-id": values.runId,
+        artifact: values.artifact,
+      }),
     );
   }
 
-  // setIn creates any missing intermediate maps (e.g. a wholly absent
-  // `supply-chain:` key), and only touches this one nested key — any sibling
-  // `supply-chain.registry` is left exactly as authored.
-  doc.setIn(
-    ["supply-chain", "pipeline-artifact"],
-    doc.createNode({
-      project: values.project,
-      "definition-id": values.definitionId,
-      "run-id": values.runId,
-      artifact: values.artifact,
-    }),
-  );
-
-  if (doc.hasIn(["on", "schedule"])) {
-    doc.deleteIn(["on", "schedule"]);
-  }
-  const on = doc.get("on", true);
-  if (isMap(on) && on.items.length === 0) {
-    doc.delete("on");
-  }
+  // The orchestrator owns scheduling and queueing for every case, so no staged
+  // case may carry a trigger of any kind.
+  doc.delete("on");
 
   const rendered = doc.toString({ lineWidth: 0 });
   const frontMatter = rendered.endsWith("\n") ? rendered : `${rendered}\n`;
   return `---\n${frontMatter}---\n${body}`;
 }
+

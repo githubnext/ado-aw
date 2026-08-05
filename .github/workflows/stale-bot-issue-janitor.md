@@ -104,10 +104,16 @@ Do **not** touch `[aw] …` issues that are neither `… failed` nor
 `… hit AI credits rate limit` unless they are exact-title duplicates of each
 other (≥2 with an identical title) — and even then never the protect-list ones.
 
-## Family B — superseded recompile-fixture chore issues
+## Family B — superseded recompile-fixture chore issues (historical backlog)
 
-The `recompile-safe-output-fixtures` workflow sometimes files an issue (a
-PR-creation fallback) titled
+The `recompile-safe-output-fixtures` workflow **has been retired**: smoke
+sources are now recompiled at run time by the smoke lanes and no `*.lock.yml`
+is committed under `tests/safe-outputs/`, so nothing files these any more. This
+family therefore only drains an existing backlog — expect it to find nothing on
+most runs.
+
+While it existed, that workflow sometimes filed an issue (a PR-creation
+fallback) titled
 `chore(workflows): recompile safe-output fixtures with ado-aw v<version>`, one per
 ado-aw release. Only the **newest ado-aw version** is relevant; older ones are
 superseded.

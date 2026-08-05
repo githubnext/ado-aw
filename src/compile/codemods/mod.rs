@@ -43,9 +43,18 @@ mod m0003_flatten_work_item_config;
 mod m0004_legacy_path_markers;
 #[path = "0005_drop_build_attachment_allowed_build_ids.rs"]
 mod m0005_drop_build_attachment_allowed_build_ids;
+#[path = "0006_explicit_push_trigger.rs"]
+mod m0006_explicit_push_trigger;
+#[path = "0007_promote_debug_create_github_issue.rs"]
+mod m0007_promote_debug_create_github_issue;
 
 #[allow(unused_imports)] // Re-exported for future codemods; only `take_key` is in-tree use.
 pub use helpers::{ConflictPolicy, insert_no_overwrite, rename_key, take_key};
+
+/// Cutover version for the `explicit_push_trigger` codemod, re-exported so
+/// integration tests can pin their fixtures to the same threshold.
+#[cfg(test)]
+pub(crate) use m0006_explicit_push_trigger::INTRODUCED_IN as EXPLICIT_PUSH_TRIGGER_INTRODUCED_IN;
 
 /// Forward-compatible context passed to every codemod.
 ///
@@ -57,13 +66,43 @@ pub struct CodemodContext {
     /// (e.g. `"0.30.0"`). Codemods can compare this against their
     /// `introduced_in` to decide when a default has changed.
     pub compiler_version: &'static str,
+    /// Semantic version of the `ado-aw` binary that produced the
+    /// **source's** committed `.lock.yml`, read from its
+    /// `# @ado-aw … version=…` header by the caller.
+    ///
+    /// This is the only provenance a codemod has for how old a source
+    /// is. [`compiler_version`](Self::compiler_version) cannot serve
+    /// that purpose: it is the *running* binary, so it is always at or
+    /// above any released threshold and says nothing about the file.
+    ///
+    /// `None` means "no committed lock file, or no version in its
+    /// header" — treat the source as newly authored. Codemods that
+    /// migrate a *changed default* (rather than a renamed key) MUST
+    /// gate on this, or they will keep rewriting sources that were
+    /// authored against the new default.
+    ///
+    /// The caller performs the read; codemods stay pure.
+    pub source_compiler_version: Option<String>,
 }
 
 impl CodemodContext {
-    /// Build a context using the compile-time package version.
+    /// Build a context using the compile-time package version, with no
+    /// source provenance. Equivalent to [`Self::for_source`] with `None`.
+    ///
+    /// Test-only: production always flows through [`apply_codemods_with`],
+    /// which threads the source's recorded version through
+    /// [`Self::for_source`].
+    #[cfg(test)]
     pub fn current() -> Self {
+        Self::for_source(None)
+    }
+
+    /// Build a context carrying the version that produced the source's
+    /// existing compiled output, if one is known.
+    pub fn for_source(source_compiler_version: Option<String>) -> Self {
         Self {
             compiler_version: env!("CARGO_PKG_VERSION"),
+            source_compiler_version,
         }
     }
 }
@@ -111,6 +150,8 @@ pub static CODEMODS: &[&Codemod] = &[
     &m0003_flatten_work_item_config::CODEMOD,
     &m0004_legacy_path_markers::CODEMOD,
     &m0005_drop_build_attachment_allowed_build_ids::CODEMOD,
+    &m0006_explicit_push_trigger::CODEMOD,
+    &m0007_promote_debug_create_github_issue::CODEMOD,
 ];
 
 /// Result of running the codemod registry on a single front-matter
@@ -152,19 +193,25 @@ impl CodemodReport {
 /// Apply the registered codemods to `fm`.
 ///
 /// Equivalent to [`apply_codemods_with`] called with the global
-/// [`CODEMODS`] registry.
+/// [`CODEMODS`] registry and no source provenance.
 #[allow(dead_code)]
 pub fn apply_codemods(fm: &mut Mapping) -> Result<CodemodReport> {
-    apply_codemods_with(fm, CODEMODS)
+    apply_codemods_with(fm, CODEMODS, None)
 }
 
 /// Apply an explicit codemod registry. Used by tests with a stub
 /// registry; production code calls [`apply_codemods`].
+///
+/// `source_compiler_version` is the version recorded in the source's
+/// existing `.lock.yml` header, or `None` when there is no committed
+/// output to read it from. See
+/// [`CodemodContext::source_compiler_version`].
 pub(crate) fn apply_codemods_with(
     fm: &mut Mapping,
     registry: &[&'static Codemod],
+    source_compiler_version: Option<&str>,
 ) -> Result<CodemodReport> {
-    let ctx = CodemodContext::current();
+    let ctx = CodemodContext::for_source(source_compiler_version.map(str::to_string));
     let mut applied: Vec<AppliedCodemod> = Vec::new();
     for c in registry {
         let changed = (c.apply)(fm, &ctx).with_context(|| format!("codemod {} failed", c.id))?;
@@ -283,7 +330,7 @@ mod tests {
     #[test]
     fn empty_registry_produces_empty_report() {
         let mut m: Mapping = serde_yaml::from_str("name: x\n").unwrap();
-        let report = apply_codemods_with(&mut m, &[]).unwrap();
+        let report = apply_codemods_with(&mut m, &[], None).unwrap();
         assert!(!report.changed());
         // `changed()` is `!applied.is_empty()`, so the above already covers
         // the applied list. Verify the mapping itself was not touched.
@@ -298,7 +345,7 @@ mod tests {
     fn all_no_op_codemods_produce_empty_report() {
         let mut m: Mapping = serde_yaml::from_str("name: x\n").unwrap();
         let registry: &[&'static Codemod] = &[&TEST_CODEMOD_NOOP];
-        let report = apply_codemods_with(&mut m, registry).unwrap();
+        let report = apply_codemods_with(&mut m, registry, None).unwrap();
         assert!(
             report.applied_ids().is_empty(),
             "noop codemod must not appear in applied list, got: {:?}",
@@ -315,7 +362,7 @@ mod tests {
     fn matching_codemod_appears_in_report() {
         let mut m: Mapping = serde_yaml::from_str("a: 1\n").unwrap();
         let registry: &[&'static Codemod] = &[&TEST_CODEMOD_RENAME];
-        let report = apply_codemods_with(&mut m, registry).unwrap();
+        let report = apply_codemods_with(&mut m, registry, None).unwrap();
         assert!(report.changed());
         assert_eq!(report.applied_ids(), vec!["test_rename_a_to_b"]);
         assert!(!m.contains_key(Value::String("a".into())));
@@ -328,7 +375,7 @@ mod tests {
         // not appear in the applied list.
         let mut m: Mapping = serde_yaml::from_str("name: x\n").unwrap();
         let registry: &[&'static Codemod] = &[&TEST_CODEMOD_RENAME];
-        let report = apply_codemods_with(&mut m, registry).unwrap();
+        let report = apply_codemods_with(&mut m, registry, None).unwrap();
         assert!(
             report.applied_ids().is_empty(),
             "non-matching codemod must not appear in applied list, got: {:?}",
@@ -341,7 +388,7 @@ mod tests {
         let mut m: Mapping = serde_yaml::from_str("a: 1\n").unwrap();
         let registry: &[&'static Codemod] =
             &[&TEST_CODEMOD_NOOP, &TEST_CODEMOD_RENAME, &TEST_CODEMOD_NOOP];
-        let report = apply_codemods_with(&mut m, registry).unwrap();
+        let report = apply_codemods_with(&mut m, registry, None).unwrap();
         assert_eq!(report.applied_ids(), vec!["test_rename_a_to_b"]);
     }
 
@@ -349,7 +396,7 @@ mod tests {
     fn codemod_failure_carries_id_in_context() {
         let mut m: Mapping = serde_yaml::from_str("a: 1\n").unwrap();
         let registry: &[&'static Codemod] = &[&TEST_CODEMOD_FAIL];
-        let err = apply_codemods_with(&mut m, registry).unwrap_err();
+        let err = apply_codemods_with(&mut m, registry, None).unwrap_err();
         let chain = format!("{:#}", err);
         assert!(
             chain.contains("codemod test_fail failed"),
@@ -367,10 +414,10 @@ mod tests {
     fn idempotent_codemod_runs_safely_twice() {
         let registry: &[&'static Codemod] = &[&TEST_CODEMOD_RENAME];
         let mut m: Mapping = serde_yaml::from_str("a: 1\n").unwrap();
-        let report1 = apply_codemods_with(&mut m, registry).unwrap();
+        let report1 = apply_codemods_with(&mut m, registry, None).unwrap();
         assert!(report1.changed());
         let snapshot = m.clone();
-        let report2 = apply_codemods_with(&mut m, registry).unwrap();
+        let report2 = apply_codemods_with(&mut m, registry, None).unwrap();
         assert!(
             !report2.changed(),
             "second run on already-migrated mapping must be a no-op"

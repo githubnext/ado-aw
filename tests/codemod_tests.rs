@@ -132,6 +132,28 @@ fn compile_migrates_legacy_workspace_marker_in_steps() {
     );
 }
 
+#[test]
+fn compile_migrates_debug_create_issue_to_public_safe_output() {
+    let dir = fresh_temp_dir();
+    let original = "---\nname: issue-migration\ndescription: d\nado-aw-debug:\n  skip-integrity: true\n  create-issue:\n    target-repo: octo/repo\n---\nbody\n";
+    let source = write_source(dir.path(), original);
+    let output = run_compile(&source);
+    assert!(
+        output.status.success(),
+        "compile should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let after = fs::read_to_string(&source).expect("re-read source");
+    assert!(after.contains("ado-aw-debug:\n  skip-integrity: true"));
+    assert!(after.contains("safe-outputs:"));
+    assert!(after.contains("github-token: $(ADO_AW_DEBUG_GITHUB_TOKEN)"));
+    assert!(after.contains("create-github-issue:"));
+    assert_eq!(after.matches("create-issue:").count(), 0);
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("promote_debug_create_github_issue")
+    );
+}
+
 // ─── Healthy compile (no codemods needed) ──────────────────────────────────
 
 #[test]
@@ -297,6 +319,50 @@ fn test_integrity_check_inlined_imports_true_fails_on_body_edit() {
     assert!(
         String::from_utf8_lossy(&check_output.stderr).contains("Integrity check failed"),
         "inlined body edits should fail with the integrity-check error"
+    );
+}
+
+#[test]
+fn test_integrity_check_resolves_imports_and_passes() {
+    // Regression: `ado-aw check` must resolve `imports:` the same way `compile`
+    // does. Before the shared resolve-and-merge helper, `check` skipped import
+    // resolution entirely, so a freshly-compiled import-using workflow reported
+    // false "drift" (missing imported tools + body). A local import needs no
+    // cache/network, so this exercises the merge deterministically.
+    let dir = fresh_git_temp_dir();
+    fs::write(
+        dir.path().join("component.md"),
+        "---\ntools:\n  edit: true\n---\nImported guidance line.\n",
+    )
+    .expect("write component");
+    let source = write_source(
+        dir.path(),
+        "---\nname: check-imports-agent\ndescription: check resolves imports\nimports:\n  - component.md\n---\nConsumer body.\n",
+    );
+
+    let compile_output = run_compile(&source);
+    assert!(
+        compile_output.status.success(),
+        "compile should succeed: {}",
+        String::from_utf8_lossy(&compile_output.stderr)
+    );
+    let lock = source.with_extension("lock.yml");
+    assert!(lock.exists(), "expected lock file at {}", lock.display());
+
+    // The imported tool + inlined imported body must be present in the lock.
+    let lock_content = fs::read_to_string(&lock).expect("read lock");
+    assert!(
+        lock_content.contains("Imported guidance line."),
+        "compiled lock should inline the imported body"
+    );
+
+    // check must PASS on the freshly compiled, unedited import-using workflow.
+    let check_output = run_check(&lock);
+    assert!(
+        check_output.status.success(),
+        "check must resolve imports and pass on a fresh compile: stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&check_output.stdout),
+        String::from_utf8_lossy(&check_output.stderr)
     );
 }
 

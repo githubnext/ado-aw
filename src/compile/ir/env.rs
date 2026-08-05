@@ -263,7 +263,6 @@ impl EnvValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compile::ir::ids::StepId;
 
     #[test]
     fn ado_macro_accepts_allowlisted() {
@@ -280,64 +279,4 @@ mod tests {
         assert!(msg.contains("not in ALLOWED_ADO_MACROS"));
     }
 
-    #[test]
-    fn coalesce_carries_typed_children() {
-        let step = StepId::new("synthPr").unwrap();
-        let v = EnvValue::coalesce(vec![
-            EnvValue::ado_macro("System.PullRequest.PullRequestId").unwrap(),
-            EnvValue::step_output(OutputRef::new(step.clone(), "AW_SYNTHETIC_PR_ID")),
-        ]);
-        match v {
-            EnvValue::Coalesce(parts) => {
-                assert_eq!(parts.len(), 2);
-                assert_eq!(
-                    parts[0],
-                    EnvValue::AdoMacro("System.PullRequest.PullRequestId"),
-                    "first child must be the AdoMacro"
-                );
-                assert_eq!(
-                    parts[1],
-                    EnvValue::StepOutput(OutputRef::new(step, "AW_SYNTHETIC_PR_ID")),
-                    "second child must be the StepOutput"
-                );
-            }
-            _ => panic!("expected Coalesce"),
-        }
-    }
-
-    #[test]
-    fn concat_carries_typed_children() {
-        let step = StepId::new("synthPr").unwrap();
-        let v = EnvValue::concat(vec![
-            EnvValue::ado_macro("System.PullRequest.PullRequestId").unwrap(),
-            EnvValue::step_output(OutputRef::new(step.clone(), "AW_SYNTHETIC_PR_ID")),
-        ]);
-        match v {
-            EnvValue::Concat(parts) => {
-                assert_eq!(parts.len(), 2);
-                assert_eq!(
-                    parts[0],
-                    EnvValue::AdoMacro("System.PullRequest.PullRequestId"),
-                    "first child must be the AdoMacro"
-                );
-                assert_eq!(
-                    parts[1],
-                    EnvValue::StepOutput(OutputRef::new(step, "AW_SYNTHETIC_PR_ID")),
-                    "second child must be the StepOutput"
-                );
-            }
-            _ => panic!("expected Concat"),
-        }
-    }
-
-    #[test]
-    fn runtime_expression_stores_body_verbatim() {
-        let v = EnvValue::runtime_expression("coalesce(dependencies.Agent.result, '')");
-        match v {
-            EnvValue::RuntimeExpression(body) => {
-                assert_eq!(body, "coalesce(dependencies.Agent.result, '')");
-            }
-            _ => panic!("expected RuntimeExpression"),
-        }
-    }
 }

@@ -48,7 +48,7 @@ export function loadIssueEnv(env: NodeJS.ProcessEnv = process.env): IssueEnv {
     }
   }
   return {
-    token: env.TRIGGER_E2E_GITHUB_TOKEN?.trim() || env.ADO_AW_DEBUG_GITHUB_TOKEN?.trim(),
+    token: env.TRIGGER_E2E_GITHUB_TOKEN?.trim() || env.ADO_AW_GITHUB_TOKEN?.trim(),
     repo: cleanVar(env.TRIGGER_E2E_ISSUE_REPO) || DEFAULT_REPO,
     labels,
     buildId: env.BUILD_BUILDID?.trim(),

@@ -67,10 +67,11 @@ export async function runScenario<S>(
     // Guard the auxiliary scenario methods too: a harness-level bug in any of
     // these must record a failed result and let the rest of the suite run,
     // not propagate out of runScenario and abort runAll early.
-    let config, entry, files, extraEnv;
+    let config, entry, files, extraEnv, priorEntries;
     try {
       config = scenario.config(ctx, state);
       entry = await scenario.ndjson(ctx, state);
+      priorEntries = scenario.priorEntries ? await scenario.priorEntries(ctx, state) : undefined;
       files = scenario.files ? await scenario.files(ctx, state) : undefined;
       extraEnv = scenario.env ? await scenario.env(ctx, state) : undefined;
     } catch (err) {
@@ -85,6 +86,7 @@ export async function runScenario<S>(
         tool,
         config,
         entry,
+        priorEntries,
         adoRepo: scenario.targetsAdoRepo ? ctx.adoRepo : undefined,
         orgUrl: ctx.orgUrl,
         project: ctx.project,
@@ -96,6 +98,27 @@ export async function runScenario<S>(
     } catch (err) {
       // e.g. the ado-aw execute child timed out or failed to spawn.
       return finish({ ok: false, phase: "execute", message: errMessage(err) });
+    }
+
+    // Prior entries are prerequisites, not the thing under test: surface a
+    // broken one as its own execute-phase failure so it can never be mistaken
+    // for an assertion failure in the primary tool.
+    for (const prior of priorEntries ?? []) {
+      const priorRecord = result.records.find((r) => r.name === prior.tool.replaceAll("-", "_"));
+      if (!priorRecord) {
+        return finish({
+          ok: false,
+          phase: "execute",
+          message: `prior entry '${prior.tool}' produced no executed record`,
+        });
+      }
+      if (priorRecord.status !== "succeeded") {
+        return finish({
+          ok: false,
+          phase: "execute",
+          message: `prior entry '${prior.tool}' reported status='${priorRecord.status}': ${priorRecord.error ?? "no error message"}`,
+        });
+      }
     }
 
     if (!result.record) {
@@ -125,7 +148,7 @@ export async function runScenario<S>(
 
     // ---- assert ----
     try {
-      await scenario.assert(ctx, state, result.record);
+      await scenario.assert(ctx, state, result.record, result.records);
     } catch (err) {
       return finish({ ok: false, phase: "assert", message: errMessage(err) });
     }

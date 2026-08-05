@@ -323,6 +323,7 @@ repos:
     checkout: false
   - name: owner/github-repo
     type: github
+    endpoint: github-templates
   - name: local-repo
 ---
 "#,
