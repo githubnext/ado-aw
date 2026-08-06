@@ -483,11 +483,17 @@ fn count_args(args: &[String], flags: &[&str]) -> Result<usize> {
     for (index, arg) in args.iter().enumerate() {
         for flag in flags {
             if arg == flag {
-                if args.get(index + 1).is_none() {
+                if args
+                    .get(index + 1)
+                    .is_none_or(|value| value.is_empty() || value.starts_with('-'))
+                {
                     bail!("container runtime argument `{flag}` requires a value");
                 }
                 count += 1;
-            } else if arg.starts_with(&format!("{flag}=")) {
+            } else if let Some(value) = arg.strip_prefix(&format!("{flag}=")) {
+                if value.is_empty() {
+                    bail!("container runtime argument `{flag}` requires a value");
+                }
                 count += 1;
             }
         }
@@ -550,6 +556,16 @@ mod tests {
         assert!(
             ContainerRuntimeConfig::builder()
                 .extra_args(&["--network".to_string()])
+                .build()
+                .is_err()
+        );
+        assert!(
+            ContainerRuntimeConfig::builder()
+                .extra_args(&[
+                    "--network".to_string(),
+                    "--user".to_string(),
+                    "1000".to_string(),
+                ])
                 .build()
                 .is_err()
         );
