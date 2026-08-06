@@ -191,7 +191,6 @@ impl CompilerExtension for AzureDevOpsExtension {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compile::extensions::MountMode;
     use crate::compile::parse_markdown;
 
     #[test]
@@ -325,12 +324,12 @@ mod tests {
             mounts.iter().any(|m| {
                 m.source() == ADO_MCP_HOST_NODE_MODULES
                     && m.destination() == ADO_MCP_NODE_MODULES
-                    && m.mode() == MountMode::ReadOnly
+                    && m.is_read_only()
             }),
             "{mounts:?}"
         );
         assert!(
-            mounts.iter().all(|m| m.mode() == MountMode::ReadOnly),
+            mounts.iter().all(Mount::is_read_only),
             "{mounts:?}"
         );
         assert!(

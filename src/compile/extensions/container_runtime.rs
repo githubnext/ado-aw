@@ -60,8 +60,9 @@ impl Mount {
         &self.destination
     }
 
-    pub fn mode(&self) -> MountMode {
-        self.mode
+    #[cfg(test)]
+    pub fn is_read_only(&self) -> bool {
+        self.mode == MountMode::ReadOnly
     }
 
     fn render(&self) -> String {
@@ -209,6 +210,7 @@ impl ContainerRuntimeConfig {
         ContainerRuntimeBuilder::default()
     }
 
+    #[cfg(test)]
     pub fn mounts(&self) -> &[Mount] {
         &self.mounts
     }

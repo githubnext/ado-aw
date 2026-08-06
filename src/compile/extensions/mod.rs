@@ -24,7 +24,7 @@ use super::types::FrontMatter;
 
 mod container_runtime;
 pub use container_runtime::{
-    AddHost, ContainerRuntimeConfig, ContainerUser, Mount, MountMode, Network, Tmpfs,
+    AddHost, ContainerRuntimeConfig, ContainerUser, Mount, Network, Tmpfs,
 };
 
 // ──────────────────────────────────────────────────────────────────────
