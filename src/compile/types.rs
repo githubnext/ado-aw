@@ -2847,9 +2847,9 @@ impl AdoReadCapability {
 
     /// Every capability an author may name in front matter.
     ///
-    /// Consumed by the drift guard that keeps this enum aligned with the
-    /// catalog; the policy-document emitter will be its second caller.
-    #[allow(dead_code)]
+    /// Test-only drift guards consume this list to keep the front-matter enum
+    /// aligned with the authoritative runtime catalog.
+    #[cfg(test)]
     pub const ALL: &'static [Self] = &[
         Self::Core,
         Self::Repositories,

@@ -1784,9 +1784,6 @@ pub const ADO_MCP_CA_MOUNT: &str = "/etc/ado-proxy/ca.pem";
 /// Bash that derives the Azure DevOps organization name from
 /// `$(System.CollectionUri)` into `$ADO_PROXY_ORGANIZATION`.
 ///
-/// `indent` is the leading whitespace each emitted line needs, so the same
-/// helper can be dropped into differently-indented bodies.
-///
 /// One implementation on purpose, because the two it replaced were both wrong
 /// for a form the other handled. `engine.rs` stripped a literal
 /// `https://dev.azure.com/` prefix, a no-op for `https://myorg.visualstudio.com/`
@@ -1799,22 +1796,21 @@ pub const ADO_MCP_CA_MOUNT: &str = "/etc/ado-proxy/ca.pem";
 /// is. Getting this wrong is not cosmetic — in a policy document a wrong
 /// organization matches nothing, denying every request in a way that reads as
 /// a deliberate policy decision.
-pub fn resolve_ado_organization_bash(indent: &str) -> String {
-    format!(
-        "{indent}# $(System.CollectionUri) is expanded by ADO before bash runs. Two\n\
-         {indent}# shapes are in use: \"https://dev.azure.com/myorg/\" (organization in\n\
-         {indent}# the path) and the legacy \"https://myorg.visualstudio.com/\"\n\
-         {indent}# (organization in the host). Handle both — a fixed-prefix strip or a\n\
-         {indent}# bare last-segment rule is silently wrong for one of them.\n\
-         {indent}ADO_PROXY_COLLECTION=\"$(System.CollectionUri)\"\n\
-         {indent}ADO_PROXY_ORGANIZATION=$(printf '%s' \"$ADO_PROXY_COLLECTION\" \\\n\
-         {indent}  | sed -e 's#^https\\?://##' -e 's#/*$##' \\\n\
-         {indent}  | awk -F/ '{{ if (NF>1) print $NF; else {{ sub(/\\..*$/, \"\", $1); print $1 }} }}')\n\
-         {indent}if [ -z \"$ADO_PROXY_ORGANIZATION\" ]; then\n\
-         {indent}  echo \"##vso[task.complete result=Failed]cannot determine the Azure DevOps organization from System.CollectionUri\"\n\
-         {indent}  exit 1\n\
-         {indent}fi\n"
-    )
+pub fn resolve_ado_organization_bash() -> String {
+    "# $(System.CollectionUri) is expanded by ADO before bash runs. Two\n\
+     # shapes are in use: \"https://dev.azure.com/myorg/\" (organization in\n\
+     # the path) and the legacy \"https://myorg.visualstudio.com/\"\n\
+     # (organization in the host). Handle both — a fixed-prefix strip or a\n\
+     # bare last-segment rule is silently wrong for one of them.\n\
+     ADO_PROXY_COLLECTION=\"$(System.CollectionUri)\"\n\
+     ADO_PROXY_ORGANIZATION=$(printf '%s' \"$ADO_PROXY_COLLECTION\" \\\n\
+       | sed -e 's#^https\\?://##' -e 's#/*$##' \\\n\
+       | awk -F/ '{ if (NF>1) print $NF; else { sub(/\\..*$/, \"\", $1); print $1 } }')\n\
+     if [ -z \"$ADO_PROXY_ORGANIZATION\" ]; then\n\
+       echo \"##vso[task.complete result=Failed]cannot determine the Azure DevOps organization from System.CollectionUri\"\n\
+       exit 1\n\
+     fi\n"
+        .to_string()
 }
 
 /// Whether this workflow routes Azure DevOps access through the policy engine.
@@ -5930,7 +5926,7 @@ safe-outputs:
         // `https://myorg.visualstudio.com/`, while a bare last-path-segment
         // rule returns `myorg.visualstudio.com` for that same URL. Measured
         // against both shapes plus an on-prem collection.
-        let script = resolve_ado_organization_bash("");
+        let script = resolve_ado_organization_bash();
         assert!(
             !script.contains("#https://dev.azure.com/"),
             "must not strip a fixed prefix: {script}"
@@ -5950,14 +5946,14 @@ safe-outputs:
     }
 
     #[test]
-    fn resolve_ado_organization_indents_every_line() {
-        let script = resolve_ado_organization_bash("    ");
-        for line in script.lines().filter(|line| !line.is_empty()) {
-            assert!(
-                line.starts_with("    "),
-                "every line must carry the requested indent: {line:?}"
-            );
-        }
+    fn resolve_ado_organization_has_no_yaml_layout_concerns() {
+        let script = resolve_ado_organization_bash();
+        assert!(script.starts_with("# $(System.CollectionUri)"));
+        assert!(
+            script
+                .lines()
+                .any(|line| line.starts_with("ADO_PROXY_COLLECTION="))
+        );
     }
 
     #[test]

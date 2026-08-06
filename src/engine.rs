@@ -1105,7 +1105,10 @@ fn copilot_install_steps(
                 // previous local implementation stripped a literal
                 // `https://dev.azure.com/` prefix, which is a no-op for a
                 // `*.visualstudio.com` or on-prem collection URL.
-                let resolve = crate::compile::resolve_ado_organization_bash("    ");
+                let resolve = crate::compile::resolve_ado_organization_bash()
+                    .lines()
+                    .map(|line| format!("    {line}\n"))
+                    .collect::<String>();
                 let step = format!(
                     "\
 - bash: |

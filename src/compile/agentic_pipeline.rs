@@ -4381,7 +4381,7 @@ fn start_ado_proxy_step(front_matter: &FrontMatter) -> BashStep {
          echo \"ado-proxy is ready at $ADO_PROXY_IP\"\n\
          docker logs --tail 1 {ADO_PROXY_CONTAINER_NAME} 2>&1 || true\n\
          echo \"##vso[task.setvariable variable=ADO_PROXY_IP]$ADO_PROXY_IP\"\n",
-        org_resolve = common::resolve_ado_organization_bash("         "),
+        org_resolve = common::resolve_ado_organization_bash(),
         ado_proxy_path = paths::ADO_PROXY_PATH,
         ca_host_path = ADO_PROXY_PUBLIC_CA_HOST_PATH,
         az_wrapper_dir = AZ_WRAPPER_DIR,
