@@ -31,9 +31,8 @@ pub enum Step {
     Publish(PublishStep),
     /// Escape hatch for **user-authored** YAML that the IR does not
     /// model: arbitrary `setup_steps:` / `teardown_steps:` /
-    /// `prepare_steps:` / engine `install_steps` content lifted
-    /// verbatim from the agent's front matter or from
-    /// [`crate::engine::Engine::install_steps`]. Producers live in
+    /// `prepare_steps:` content lifted verbatim from the agent's front matter.
+    /// Producers live in
     /// [`crate::compile::agentic_pipeline`] (search there for
     /// `Step::RawYaml`); compiler-generated steps must use the typed
     /// variants instead — see the header comment of

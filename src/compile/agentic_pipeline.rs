@@ -268,17 +268,17 @@ pub(crate) fn build_pipeline_context(
         "/tmp/awf-tools/threat-analysis-prompt.md",
         None,
     )?;
-    let engine_install_steps_yaml =
+    let engine_install_steps =
         ctx.engine
             .install_steps(&front_matter.engine, &front_matter.target, ctx.ado_org())?;
-    let detection_engine_install_steps_yaml = if threat_detection.is_enabled() {
+    let detection_engine_install_steps = if threat_detection.is_enabled() {
         detection_engine.install_steps(
             &detection_engine_config,
             &front_matter.target,
             ctx.ado_org(),
         )?
     } else {
-        String::new()
+        Vec::new()
     };
     let engine_log_dir = ctx.engine.log_dir().to_string();
 
@@ -439,8 +439,8 @@ pub(crate) fn build_pipeline_context(
         trigger_repo_directory: trigger_repo_directory.clone(),
         self_repository_name,
         compiler_version: compiler_version.clone(),
-        engine_install_steps_yaml,
-        detection_engine_install_steps_yaml,
+        engine_install_steps,
+        detection_engine_install_steps,
         engine_run,
         engine_run_detection,
         detection_engine_config,
@@ -683,13 +683,8 @@ pub(crate) struct StandaloneCtx {
     /// compile warning) when no ADO context is available.
     pub(crate) self_repository_name: EnvValue,
     pub(crate) compiler_version: String,
-    /// Engine install steps as a YAML string (`Engine::install_steps`
-    /// returns YAML today). Lowered through `Step::RawYaml` because
-    /// it is opaque user-authored-shaped content from the engine
-    /// impl. A future `Engine::install_steps_typed` would lift this
-    /// to typed steps.
-    pub(crate) engine_install_steps_yaml: String,
-    pub(crate) detection_engine_install_steps_yaml: String,
+    pub(crate) engine_install_steps: Vec<Step>,
+    pub(crate) detection_engine_install_steps: Vec<Step>,
     pub(crate) engine_run: String,
     pub(crate) engine_run_detection: String,
     pub(crate) detection_engine_config: EngineConfig,
@@ -1077,10 +1072,8 @@ fn build_agent_job(
     // 3. acquire ADO read token (AzureCLI@2 task) — only when configured.
     push_raw_yaml_if_nonempty(&mut steps, &cfg.acquire_read_token)?;
 
-    // 4. engine install steps (Copilot CLI install). YAML string from
-    //    `Engine::install_steps`; lowered through `Step::RawYaml`
-    //    until a typed `Engine::install_steps_typed` lands.
-    push_raw_yaml_if_nonempty(&mut steps, &cfg.engine_install_steps_yaml)?;
+    // 4. engine install steps (Copilot CLI install).
+    steps.extend(cfg.engine_install_steps.iter().cloned());
 
     // 5. Download agentic pipeline compiler
     //    Hoist one NuGetAuthenticate@1 for the whole job when the feed mirror
@@ -1406,7 +1399,7 @@ fn build_detection_job(
     )));
     if cfg.threat_detection.is_enabled() {
         // Detection gets its own effective engine install/config path.
-        push_raw_yaml_if_nonempty(&mut steps, &cfg.detection_engine_install_steps_yaml)?;
+        steps.extend(cfg.detection_engine_install_steps.iter().cloned());
         if let Some(auth) = feed_auth_step(front_matter.supply_chain()) {
             steps.push(auth);
         }
@@ -5054,8 +5047,7 @@ fn push_raw_yaml_if_nonempty(steps: &mut Vec<Step>, yaml: &str) -> Result<()> {
     if yaml.trim().is_empty() {
         return Ok(());
     }
-    // The body may contain one or more top-level `- ...` items (e.g.
-    // engine_install_steps_yaml is two steps: install + version output).
+    // The body may contain one or more top-level `- ...` items.
     // Split them through serde_yaml so each item lands as a separate
     // Step::RawYaml that lower_raw_yaml can parse individually — this
     // gives us a real YAML parse instead of relying on blank-line
@@ -5227,8 +5219,8 @@ mod tests {
             trigger_repo_directory: "$(Build.SourcesDirectory)".to_string(),
             self_repository_name: EnvValue::literal("test-repo"),
             compiler_version: "0.0.0-test".to_string(),
-            engine_install_steps_yaml: String::new(),
-            detection_engine_install_steps_yaml: String::new(),
+            engine_install_steps: Vec::new(),
+            detection_engine_install_steps: Vec::new(),
             engine_run: "echo agent".to_string(),
             engine_run_detection: "echo detection".to_string(),
             detection_engine_config: EngineConfig::default(),
@@ -6279,8 +6271,8 @@ safe-outputs:
             ),
             self_repository_name: EnvValue::literal("test-repo"),
             compiler_version: "0.0.0-test".to_string(),
-            engine_install_steps_yaml: String::new(),
-            detection_engine_install_steps_yaml: String::new(),
+            engine_install_steps: Vec::new(),
+            detection_engine_install_steps: Vec::new(),
             engine_run: String::new(),
             engine_run_detection: String::new(),
             detection_engine_config,
