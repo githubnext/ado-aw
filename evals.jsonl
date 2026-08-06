@@ -1,2 +1,2 @@
-{"id":"review_submitted","question":"Did the agent submit a pull request review?","answer":"YES","model":"small","timestamp":"2026-08-03T13:35:57.473Z","runid":"30818079641"}
-{"id":"findings_concrete","question":"Does the agent output describe specific security concerns tied to the pull request diff rather than generic security advice?","answer":"YES","model":"small","timestamp":"2026-08-03T13:35:57.473Z","runid":"30818079641"}
+{"id":"review_submitted","question":"Did the agent submit a pull request review?","answer":"YES","model":"evals","timestamp":"2026-08-06T07:54:04.599Z","runid":"31082246223"}
+{"id":"findings_concrete","question":"Does the agent output describe specific security concerns tied to the pull request diff rather than generic security advice?","answer":"YES","model":"evals","timestamp":"2026-08-06T07:54:04.599Z","runid":"31082246223"}
