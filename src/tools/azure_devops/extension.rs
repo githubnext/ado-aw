@@ -2,7 +2,8 @@
 
 use crate::ado_proxy::catalog::ORGANIZATION_HOST;
 use crate::compile::extensions::{
-    CompileContext, CompilerExtension, Declarations, ExtensionPhase, McpgServerConfig,
+    AddHost, CompileContext, CompilerExtension, ContainerRuntimeConfig, Declarations,
+    ExtensionPhase, McpgServerConfig, Mount, Network,
 };
 use crate::compile::types::AzureDevOpsToolConfig;
 use crate::compile::{
@@ -122,23 +123,24 @@ impl CompilerExtension for AzureDevOpsExtension {
         // Mount the pre-installed package and the *public* CA certificate.
         // The CA private key is never mounted anywhere; it is destroyed by the
         // step that starts the engine.
-        let mounts = Some(vec![
-            format!("{ADO_MCP_HOST_NODE_MODULES}:{ADO_MCP_NODE_MODULES}:ro"),
-            format!("{ADO_PROXY_PUBLIC_CA_HOST_PATH}:{ADO_MCP_CA_MOUNT}:ro"),
-        ]);
-
         // Join the engine's network and redirect the Azure DevOps host at it.
         // `--add-host` is what makes the redirection total: it catches both
         // `node:https` and global `fetch`, so the MCP's raw `fetch()` call
         // sites cannot slip past it the way proxy environment variables would.
         // `ADO_PROXY_IP` is resolved at pipeline time and substituted into the
         // MCPG config by the step that starts the engine.
-        let args = Some(vec![
-            "--network".to_string(),
-            ADO_PROXY_NETWORK_NAME.to_string(),
-            "--add-host".to_string(),
-            format!("{ORGANIZATION_HOST}:${{ADO_PROXY_IP}}"),
-        ]);
+        let runtime = ContainerRuntimeConfig::builder()
+            .mount(Mount::read_only(
+                ADO_MCP_HOST_NODE_MODULES,
+                ADO_MCP_NODE_MODULES,
+            )?)
+            .mount(Mount::read_only(
+                ADO_PROXY_PUBLIC_CA_HOST_PATH,
+                ADO_MCP_CA_MOUNT,
+            )?)
+            .network(Network::named(ADO_PROXY_NETWORK_NAME)?)
+            .add_host(AddHost::new(ORGANIZATION_HOST, "${ADO_PROXY_IP}")?)
+            .build()?;
 
         let mcpg_servers = vec![(
             ADO_MCP_SERVER_NAME.to_string(),
@@ -147,8 +149,7 @@ impl CompilerExtension for AzureDevOpsExtension {
                 container: Some(ADO_MCP_IMAGE.to_string()),
                 entrypoint: Some(ADO_MCP_ENTRYPOINT.to_string()),
                 entrypoint_args: Some(entrypoint_args),
-                mounts,
-                args,
+                runtime,
                 url: None,
                 headers: None,
                 env,
@@ -190,6 +191,7 @@ impl CompilerExtension for AzureDevOpsExtension {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compile::extensions::MountMode;
     use crate::compile::parse_markdown;
 
     #[test]
@@ -282,7 +284,7 @@ mod tests {
         let ctx = CompileContext::for_test(&fm);
         let decl = AzureDevOpsExtension::new(cfg).declarations(&ctx).unwrap();
         let (_, config) = &decl.mcpg_servers[0];
-        let args = config.args.as_ref().expect("docker args set");
+        let args = config.runtime.args();
 
         // Host networking would put the MCP on the runner's own stack, where
         // it could reach Azure DevOps directly and bypass the policy entirely.
@@ -296,6 +298,15 @@ mod tests {
                 .any(|a| a == &format!("{ORGANIZATION_HOST}:${{ADO_PROXY_IP}}")),
             "the Azure DevOps host must resolve to the engine: {args:?}"
         );
+        assert_eq!(
+            args,
+            [
+                "--network",
+                ADO_PROXY_NETWORK_NAME,
+                "--add-host",
+                &format!("{ORGANIZATION_HOST}:${{ADO_PROXY_IP}}"),
+            ]
+        );
     }
 
     #[test]
@@ -304,30 +315,49 @@ mod tests {
         let ctx = CompileContext::for_test(&fm);
         let decl = AzureDevOpsExtension::new(cfg).declarations(&ctx).unwrap();
         let (_, config) = &decl.mcpg_servers[0];
-        let mounts = config.mounts.as_ref().expect("mounts set");
+        let mounts = config.runtime.mounts();
+        assert_eq!(mounts.len(), 2, "only package tree and public CA are allowed");
 
         // Node resolves dependencies by walking upward from the importing
         // file, so this path is load-bearing: mounted elsewhere, the MCP's own
         // imports fail with ERR_MODULE_NOT_FOUND.
         assert!(
-            mounts
-                .iter()
-                .any(|m| m == &format!("{ADO_MCP_HOST_NODE_MODULES}:{ADO_MCP_NODE_MODULES}:ro")),
+            mounts.iter().any(|m| {
+                m.source() == ADO_MCP_HOST_NODE_MODULES
+                    && m.destination() == ADO_MCP_NODE_MODULES
+                    && m.mode() == MountMode::ReadOnly
+            }),
             "{mounts:?}"
         );
-        assert!(mounts.iter().all(|m| m.ends_with(":ro")), "{mounts:?}");
         assert!(
-            mounts.iter().any(|m| m.contains(ADO_MCP_CA_MOUNT)),
+            mounts.iter().all(|m| m.mode() == MountMode::ReadOnly),
+            "{mounts:?}"
+        );
+        assert!(
+            mounts.iter().any(|m| m.destination() == ADO_MCP_CA_MOUNT),
             "the MCP must trust the interception certificate: {mounts:?}"
         );
         assert!(
-            !mounts.iter().any(|m| m.contains(".key")),
-            "the CA private key must never be mounted: {mounts:?}"
+            !mounts.iter().any(|m| {
+                [m.source(), m.destination()].iter().any(|path| {
+                    path.contains(".key")
+                        || path.to_ascii_lowercase().contains("token")
+                        || path.to_ascii_lowercase().contains("credential")
+                })
+            }),
+            "keys and tokens must never be mounted: {mounts:?}"
         );
         let env = config.env.as_ref().unwrap();
         assert_eq!(
             env.get("NODE_EXTRA_CA_CERTS").map(String::as_str),
             Some(ADO_MCP_CA_MOUNT)
+        );
+        assert_eq!(
+            serde_json::to_value(mounts).unwrap(),
+            serde_json::json!([
+                format!("{ADO_MCP_HOST_NODE_MODULES}:{ADO_MCP_NODE_MODULES}:ro"),
+                format!("{ADO_PROXY_PUBLIC_CA_HOST_PATH}:{ADO_MCP_CA_MOUNT}:ro")
+            ])
         );
     }
 

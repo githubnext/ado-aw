@@ -22,6 +22,11 @@ use std::str::FromStr;
 
 use super::types::FrontMatter;
 
+mod container_runtime;
+pub use container_runtime::{
+    AddHost, ContainerRuntimeConfig, ContainerUser, Mount, MountMode, Network, Tmpfs,
+};
+
 // ──────────────────────────────────────────────────────────────────────
 // MCPG types (used by both the trait and standalone compiler)
 // ──────────────────────────────────────────────────────────────────────
@@ -42,12 +47,9 @@ pub struct McpgServerConfig {
     /// Arguments passed to the container entrypoint (for stdio type)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entrypoint_args: Option<Vec<String>>,
-    /// Volume mounts for containerized servers (format: "source:dest:mode")
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mounts: Option<Vec<String>>,
-    /// Additional Docker runtime arguments (inserted before image in `docker run`)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub args: Option<Vec<String>>,
+    /// Typed container runtime settings, flattened to MCPG's `mounts` and `args` arrays.
+    #[serde(flatten)]
+    pub runtime: ContainerRuntimeConfig,
     /// URL for HTTP backends
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
