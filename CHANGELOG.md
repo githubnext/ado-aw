@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.49.0](https://github.com/githubnext/ado-aw/compare/v0.48.0...v0.49.0) (2026-08-06)
+
+
+### ⚠ BREAKING CHANGES
+
+* **compile:** a workflow with no `on:` key now compiles to a manual / API-queued-only pipeline instead of inheriting ADO's implicit "CI on every branch" default. Codemod 0006_explicit_push_trigger migrates affected sources automatically by pinning the legacy behaviour as an explicit `on.push`.
+
+### Features
+
+* **ado-proxy:** add credential-isolated Azure DevOps reads ([#1824](https://github.com/githubnext/ado-aw/issues/1824)) ([c15261b](https://github.com/githubnext/ado-aw/commit/c15261b234391ed96e9a6db6a1cad35d1a262482))
+* **compile:** add on.push trigger and make on: the complete run declaration ([#1786](https://github.com/githubnext/ado-aw/issues/1786)) ([013d897](https://github.com/githubnext/ado-aw/commit/013d897e38f7f335ac39c0077142675c364a4090))
+* **safeoutputs:** add GitHub issue outputs ([#1670](https://github.com/githubnext/ado-aw/issues/1670)) ([18c87dc](https://github.com/githubnext/ado-aw/commit/18c87dc21185de9ea186b8904b131fc064853abe))
+* **smoke:** replace per-case pipelines with lane-based smoke suite ([#1791](https://github.com/githubnext/ado-aw/issues/1791)) ([9d0e442](https://github.com/githubnext/ado-aw/commit/9d0e4428c29d398c47778066fd66c2753158e3b5))
+
+
+### Bug Fixes
+
+* **safeoutputs:** stop dropping GitHub issue tool configs in Stage 3 ([#1804](https://github.com/githubnext/ado-aw/issues/1804)) ([f660667](https://github.com/githubnext/ado-aw/commit/f660667d6ecfb567f328333ba20e23cbfb899b86))
+* **smoke:** audit SELF under the rule matching how the orchestrator is triggered ([#1799](https://github.com/githubnext/ado-aw/issues/1799)) ([0094e40](https://github.com/githubnext/ado-aw/commit/0094e40a4c4a789e5f6e0bc2b7d402dbdf623f59))
+* **smoke:** tag builds via the request body so colon-bearing tags work ([#1801](https://github.com/githubnext/ado-aw/issues/1801)) ([97b46ec](https://github.com/githubnext/ado-aw/commit/97b46ec9cddd9a7eb7b07a3553a28ea0a64faf16))
+* **workflows:** give reviewers the complete PR diff ([#1792](https://github.com/githubnext/ado-aw/issues/1792)) ([d19e021](https://github.com/githubnext/ado-aw/commit/d19e021d854286176976d107a6d1422a1c2c188f))
+* **workflows:** harden reviewer PR-number resolution for /review dispatches ([#1781](https://github.com/githubnext/ado-aw/issues/1781)) ([53890d6](https://github.com/githubnext/ado-aw/commit/53890d653f8f2331fc221e742cf0a5c0ad798a22))
+* **workflows:** remove false committed-bundle reviewer guidance ([#1795](https://github.com/githubnext/ado-aw/issues/1795)) ([6129b92](https://github.com/githubnext/ado-aw/commit/6129b92e56e9ab316ea0637c528fd3496d77586e))
+* **workflows:** resolve PR number from aw_context in /review reviewers ([#1779](https://github.com/githubnext/ado-aw/issues/1779)) ([b8b4a1d](https://github.com/githubnext/ado-aw/commit/b8b4a1dc4b10bbb4454d65d477bf912d34bc4ba5))
+* **workflows:** scope reviewer auto-triggers by changed-file subsets ([#1787](https://github.com/githubnext/ado-aw/issues/1787)) ([08be5ec](https://github.com/githubnext/ado-aw/commit/08be5ec6645644717f2bf2691fd923380cf8d607))
+
 ## [0.48.0](https://github.com/githubnext/ado-aw/compare/v0.47.0...v0.48.0) (2026-07-31)
 
 
