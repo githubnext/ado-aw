@@ -3,6 +3,9 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use crate::compile::extensions::Declarations;
+use crate::compile::ir::step::{BashStep, Step};
+use crate::compile::ir::tasks::nuget_authenticate::NuGetAuthenticate;
+use crate::compile::ir::tasks::nuget_command::{NuGetCommand, NuGetCustom};
 use crate::compile::types::{CompileTarget, EngineConfig, FrontMatter, McpConfig};
 use crate::validate::{
     contains_ado_expression, contains_ado_template_expression, contains_newline,
@@ -389,10 +392,10 @@ impl Engine {
         }
     }
 
-    /// Generate pipeline YAML steps to install the engine binary.
+    /// Generate typed pipeline steps to install the engine binary.
     ///
     /// Uses `engine_config.version()` if set in front matter, otherwise falls back
-    /// to the pinned `COPILOT_CLI_VERSION` constant. Returns an empty string when
+    /// to the pinned `COPILOT_CLI_VERSION` constant. Returns no steps when
     /// `engine.command` is set (the user provides their own binary).
     ///
     /// `ado_org` is the ADO organization name inferred from the git remote at
@@ -403,7 +406,7 @@ impl Engine {
         engine_config: &EngineConfig,
         target: &CompileTarget,
         ado_org: Option<&str>,
-    ) -> Result<String> {
+    ) -> Result<Vec<Step>> {
         match self {
             Engine::Copilot => copilot_install_steps(engine_config, target, ado_org),
         }
@@ -1046,10 +1049,10 @@ fn copilot_install_steps(
     engine_config: &EngineConfig,
     target: &CompileTarget,
     ado_org: Option<&str>,
-) -> Result<String> {
+) -> Result<Vec<Step>> {
     // Custom binary path → skip NuGet install entirely
     if engine_config.command().is_some() {
-        return Ok(String::new());
+        return Ok(Vec::new());
     }
 
     let version = engine_config.version().unwrap_or(COPILOT_CLI_VERSION);
@@ -1093,7 +1096,7 @@ fn copilot_install_steps(
                         org
                     );
                 }
-                (String::new(), org.to_string())
+                (None, org.to_string())
             }
             None => {
                 // Emit a bash step that extracts the org name from the ADO
@@ -1105,50 +1108,48 @@ fn copilot_install_steps(
                 // previous local implementation stripped a literal
                 // `https://dev.azure.com/` prefix, which is a no-op for a
                 // `*.visualstudio.com` or on-prem collection URL.
-                let resolve = crate::compile::resolve_ado_organization_bash()
-                    .lines()
-                    .map(|line| format!("    {line}\n"))
-                    .collect::<String>();
-                let step = format!(
-                    "\
-- bash: |
-    set -eo pipefail
-{resolve}    echo \"##vso[task.setvariable variable=AW_ADO_ORG]$ADO_PROXY_ORGANIZATION\"
-  displayName: \"Resolve ADO organization\"
-
-"
+                let script = format!(
+                    "set -eo pipefail\n{}echo \"##vso[task.setvariable variable=AW_ADO_ORG]$ADO_PROXY_ORGANIZATION\"",
+                    crate::compile::resolve_ado_organization_bash()
                 );
-                (step, "$(AW_ADO_ORG)".to_string())
+                (
+                    Some(Step::Bash(BashStep::new(
+                        "Resolve ADO organization",
+                        script,
+                    ))),
+                    "$(AW_ADO_ORG)".to_string(),
+                )
             }
         };
 
-        return Ok(format!(
-            "\
-{org_resolve_step}- task: NuGetAuthenticate@1
-  displayName: \"Authenticate NuGet Feed\"
-
-- task: NuGetCommand@2
-  displayName: \"Install Copilot CLI\"
-  inputs:
-    command: 'custom'
-    arguments: 'install Microsoft.Copilot.CLI.linux-x64 -Source \"https://pkgs.dev.azure.com/{nuget_org}/_packaging/Guardian1ESPTUpstreamOrgFeed/nuget/v3/index.json\" {version_arg}-OutputDirectory $(Agent.TempDirectory)/tools -ExcludeVersion -NonInteractive'
-
-- bash: |
-    ls -la \"$(Agent.TempDirectory)/tools\"
-    echo \"##vso[task.prependpath]$(Agent.TempDirectory)/tools/Microsoft.Copilot.CLI.linux-x64\"
-
-    # Copy copilot binary to /tmp so it's accessible inside AWF container
-    # (AWF auto-mounts /tmp:/tmp:rw but not Agent.TempDirectory)
-    mkdir -p /tmp/awf-tools
-    cp \"$(Agent.TempDirectory)/tools/Microsoft.Copilot.CLI.linux-x64/copilot\" /tmp/awf-tools/copilot
-    chmod +x /tmp/awf-tools/copilot
-  displayName: \"Add copilot to PATH\"
-
-- bash: |
-    copilot --version
-    copilot -h
-  displayName: \"Output copilot version\""
+        let arguments = format!(
+            "install Microsoft.Copilot.CLI.linux-x64 -Source \"https://pkgs.dev.azure.com/{nuget_org}/_packaging/Guardian1ESPTUpstreamOrgFeed/nuget/v3/index.json\" {version_arg}-OutputDirectory $(Agent.TempDirectory)/tools -ExcludeVersion -NonInteractive"
+        );
+        let mut steps = Vec::with_capacity(if org_resolve_step.is_some() { 5 } else { 4 });
+        steps.extend(org_resolve_step);
+        steps.push(Step::Task(
+            NuGetAuthenticate::new()
+                .with_display_name("Authenticate NuGet Feed")
+                .into_step(),
         ));
+        steps.push(Step::Task(
+            NuGetCommand::custom(NuGetCustom::new(arguments))
+                .with_display_name("Install Copilot CLI")
+                .into_step(),
+        ));
+        steps.push(Step::Bash(BashStep::new(
+            "Add copilot to PATH",
+            "ls -la \"$(Agent.TempDirectory)/tools\"\n\
+             echo \"##vso[task.prependpath]$(Agent.TempDirectory)/tools/Microsoft.Copilot.CLI.linux-x64\"\n\
+             \n\
+             # Copy copilot binary to /tmp so it's accessible inside AWF container\n\
+             # (AWF auto-mounts /tmp:/tmp:rw but not Agent.TempDirectory)\n\
+             mkdir -p /tmp/awf-tools\n\
+             cp \"$(Agent.TempDirectory)/tools/Microsoft.Copilot.CLI.linux-x64/copilot\" /tmp/awf-tools/copilot\n\
+             chmod +x /tmp/awf-tools/copilot",
+        )));
+        steps.push(copilot_version_step());
+        return Ok(steps);
     }
 
     if version == "latest" {
@@ -1171,56 +1172,59 @@ fn normalize_version_tag(version: &str) -> String {
     }
 }
 
-fn copilot_install_from_github_release(base_url: &str, display_name: &str) -> Result<String> {
-    Ok(format!(
-        "\
-- bash: |
-    set -euo pipefail
-    TARBALL_NAME=\"copilot-linux-x64.tar.gz\"
-    BASE_URL=\"{base_url}\"
-    TARBALL_URL=\"$BASE_URL/$TARBALL_NAME\"
-    CHECKSUMS_URL=\"$BASE_URL/SHA256SUMS.txt\"
-    TOOLS_DIR=\"$(Agent.TempDirectory)/tools\"
-    TEMP_DIR=\"$(mktemp -d)\"
-    trap 'rm -rf \"$TEMP_DIR\"' EXIT
-    mkdir -p \"$TOOLS_DIR\" /tmp/awf-tools
+fn copilot_install_from_github_release(base_url: &str, display_name: &str) -> Result<Vec<Step>> {
+    let script = format!(
+        "set -euo pipefail\n\
+         TARBALL_NAME=\"copilot-linux-x64.tar.gz\"\n\
+         BASE_URL=\"{base_url}\"\n\
+         TARBALL_URL=\"$BASE_URL/$TARBALL_NAME\"\n\
+         CHECKSUMS_URL=\"$BASE_URL/SHA256SUMS.txt\"\n\
+         TOOLS_DIR=\"$(Agent.TempDirectory)/tools\"\n\
+         TEMP_DIR=\"$(mktemp -d)\"\n\
+         trap 'rm -rf \"$TEMP_DIR\"' EXIT\n\
+         mkdir -p \"$TOOLS_DIR\" /tmp/awf-tools\n\
+         \n\
+         curl -fsSL --retry 3 --retry-delay 5 -o \"$TEMP_DIR/SHA256SUMS.txt\" \"$CHECKSUMS_URL\"\n\
+         curl -fsSL --retry 3 --retry-delay 5 -o \"$TEMP_DIR/$TARBALL_NAME\" \"$TARBALL_URL\"\n\
+         \n\
+         EXPECTED_CHECKSUM=$(awk -v fname=\"$TARBALL_NAME\" '$2 == fname {{print $1; exit}}' \"$TEMP_DIR/SHA256SUMS.txt\" | tr 'A-F' 'a-f')\n\
+         if [ -z \"$EXPECTED_CHECKSUM\" ]; then\n\
+           echo \"ERROR: failed to resolve expected checksum for $TARBALL_NAME\"\n\
+           exit 1\n\
+         fi\n\
+         \n\
+         if command -v sha256sum > /dev/null 2>&1; then\n\
+           ACTUAL_CHECKSUM=$(sha256sum \"$TEMP_DIR/$TARBALL_NAME\" | awk '{{print $1}}' | tr 'A-F' 'a-f')\n\
+         elif command -v shasum > /dev/null 2>&1; then\n\
+           ACTUAL_CHECKSUM=$(shasum -a 256 \"$TEMP_DIR/$TARBALL_NAME\" | awk '{{print $1}}' | tr 'A-F' 'a-f')\n\
+         else\n\
+           echo \"ERROR: neither sha256sum nor shasum is available\"\n\
+           exit 1\n\
+         fi\n\
+         \n\
+         if [ \"$EXPECTED_CHECKSUM\" != \"$ACTUAL_CHECKSUM\" ]; then\n\
+           echo \"ERROR: checksum verification failed\"\n\
+           echo \"Expected: $EXPECTED_CHECKSUM\"\n\
+           echo \"Actual:   $ACTUAL_CHECKSUM\"\n\
+           exit 1\n\
+         fi\n\
+         \n\
+         tar -xz -C \"$TOOLS_DIR\" -f \"$TEMP_DIR/$TARBALL_NAME\"\n\
+         ls -la \"$TOOLS_DIR\"\n\
+         echo \"##vso[task.prependpath]$TOOLS_DIR\"\n\
+         cp \"$TOOLS_DIR/copilot\" /tmp/awf-tools/copilot\n\
+         chmod +x /tmp/awf-tools/copilot"
+    );
+    Ok(vec![
+        Step::Bash(BashStep::new(display_name, script)),
+        copilot_version_step(),
+    ])
+}
 
-    curl -fsSL --retry 3 --retry-delay 5 -o \"$TEMP_DIR/SHA256SUMS.txt\" \"$CHECKSUMS_URL\"
-    curl -fsSL --retry 3 --retry-delay 5 -o \"$TEMP_DIR/$TARBALL_NAME\" \"$TARBALL_URL\"
-
-    EXPECTED_CHECKSUM=$(awk -v fname=\"$TARBALL_NAME\" '$2 == fname {{print $1; exit}}' \"$TEMP_DIR/SHA256SUMS.txt\" | tr 'A-F' 'a-f')
-    if [ -z \"$EXPECTED_CHECKSUM\" ]; then
-      echo \"ERROR: failed to resolve expected checksum for $TARBALL_NAME\"
-      exit 1
-    fi
-
-    if command -v sha256sum > /dev/null 2>&1; then
-      ACTUAL_CHECKSUM=$(sha256sum \"$TEMP_DIR/$TARBALL_NAME\" | awk '{{print $1}}' | tr 'A-F' 'a-f')
-    elif command -v shasum > /dev/null 2>&1; then
-      ACTUAL_CHECKSUM=$(shasum -a 256 \"$TEMP_DIR/$TARBALL_NAME\" | awk '{{print $1}}' | tr 'A-F' 'a-f')
-    else
-      echo \"ERROR: neither sha256sum nor shasum is available\"
-      exit 1
-    fi
-
-    if [ \"$EXPECTED_CHECKSUM\" != \"$ACTUAL_CHECKSUM\" ]; then
-      echo \"ERROR: checksum verification failed\"
-      echo \"Expected: $EXPECTED_CHECKSUM\"
-      echo \"Actual:   $ACTUAL_CHECKSUM\"
-      exit 1
-    fi
-
-    tar -xz -C \"$TOOLS_DIR\" -f \"$TEMP_DIR/$TARBALL_NAME\"
-    ls -la \"$TOOLS_DIR\"
-    echo \"##vso[task.prependpath]$TOOLS_DIR\"
-    cp \"$TOOLS_DIR/copilot\" /tmp/awf-tools/copilot
-    chmod +x /tmp/awf-tools/copilot
-  displayName: \"{display_name}\"
-
-- bash: |
-    copilot --version
-    copilot -h
-  displayName: \"Output copilot version\""
+fn copilot_version_step() -> Step {
+    Step::Bash(BashStep::new(
+        "Output copilot version",
+        "copilot --version\ncopilot -h",
     ))
 }
 
@@ -1258,6 +1262,7 @@ mod tests {
     };
     use crate::compile::{
         extensions::{CompileContext, CompilerExtension, Declarations, collect_extensions},
+        ir::step::{BashStep, Step, TaskStep},
         parse_markdown,
     };
 
@@ -1268,6 +1273,26 @@ mod tests {
             .iter()
             .map(|ext| ext.declarations(&ctx).unwrap())
             .collect()
+    }
+
+    fn bash_step<'a>(steps: &'a [Step], display_name: &str) -> &'a BashStep {
+        steps
+            .iter()
+            .find_map(|step| match step {
+                Step::Bash(step) if step.display_name == display_name => Some(step),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing bash step '{display_name}'"))
+    }
+
+    fn task_step<'a>(steps: &'a [Step], task: &str) -> &'a TaskStep {
+        steps
+            .iter()
+            .find_map(|step| match step {
+                Step::Task(step) if step.task == task => Some(step),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing task step '{task}'"))
     }
 
     #[test]
@@ -2043,8 +2068,13 @@ mod tests {
         let result = Engine::Copilot
             .install_steps(&fm.engine, &fm.target, None)
             .unwrap();
-        assert!(result.contains("releases/download/v1.0.34"));
-        assert!(result.contains("Install Copilot CLI (v1.0.34)"));
+        assert_eq!(result.len(), 2);
+        assert!(
+            bash_step(&result, "Install Copilot CLI (v1.0.34)")
+                .script
+                .contains("releases/download/v1.0.34")
+        );
+        assert!(result.iter().all(|step| !matches!(step, Step::RawYaml(_))));
     }
 
     #[test]
@@ -2055,8 +2085,11 @@ mod tests {
         let result = Engine::Copilot
             .install_steps(&fm.engine, &fm.target, None)
             .unwrap();
-        assert!(result.contains("releases/download/v1.0.34"));
-        assert!(result.contains("Install Copilot CLI (v1.0.34)"));
+        assert!(
+            bash_step(&result, "Install Copilot CLI (v1.0.34)")
+                .script
+                .contains("releases/download/v1.0.34")
+        );
     }
 
     #[test]
@@ -2069,10 +2102,11 @@ mod tests {
             .install_steps(&fm.engine, &fm.target, None)
             .unwrap();
         assert!(
-            result.contains("releases/latest/download"),
+            bash_step(&result, "Install Copilot CLI (latest)")
+                .script
+                .contains("releases/latest/download"),
             "latest should resolve via latest release URL"
         );
-        assert!(result.contains("Install Copilot CLI (latest)"));
     }
 
     #[test]
@@ -2083,10 +2117,11 @@ mod tests {
         let result = Engine::Copilot
             .install_steps(&fm.engine, &fm.target, Some("myorg"))
             .unwrap();
-        assert!(result.contains("NuGetCommand@2"));
-        assert!(result.contains("Guardian1ESPTUpstreamOrgFeed"));
-        assert!(result.contains("pkgs.dev.azure.com/myorg/"));
-        assert!(!result.contains("-Version latest"));
+        let install = task_step(&result, "NuGetCommand@2");
+        let arguments = install.inputs.get("arguments").unwrap();
+        assert!(arguments.contains("Guardian1ESPTUpstreamOrgFeed"));
+        assert!(arguments.contains("pkgs.dev.azure.com/myorg/"));
+        assert!(!arguments.contains("-Version latest"));
     }
 
     #[test]
@@ -2097,10 +2132,18 @@ mod tests {
         let result = Engine::Copilot
             .install_steps(&fm.engine, &fm.target, Some("myorg"))
             .unwrap();
-        assert!(result.contains("NuGetCommand@2"));
-        assert!(result.contains("Guardian1ESPTUpstreamOrgFeed"));
-        assert!(result.contains("pkgs.dev.azure.com/myorg/"));
-        assert!(result.contains("-Version 1.0.34"));
+        assert_eq!(result.len(), 4);
+        assert_eq!(
+            task_step(&result, "NuGetAuthenticate@1").display_name,
+            "Authenticate NuGet Feed"
+        );
+        let install = task_step(&result, "NuGetCommand@2");
+        let arguments = install.inputs.get("arguments").unwrap();
+        assert_eq!(install.display_name, "Install Copilot CLI");
+        assert!(arguments.contains("Guardian1ESPTUpstreamOrgFeed"));
+        assert!(arguments.contains("pkgs.dev.azure.com/myorg/"));
+        assert!(arguments.contains("-Version 1.0.34"));
+        assert!(result.iter().all(|step| !matches!(step, Step::RawYaml(_))));
     }
 
     #[test]
@@ -2111,8 +2154,12 @@ mod tests {
         let result = Engine::Copilot
             .install_steps(&fm.engine, &fm.target, Some("contoso"))
             .unwrap();
-        assert!(result.contains("pkgs.dev.azure.com/contoso/"));
-        assert!(!result.contains("msazuresphere"));
+        let arguments = task_step(&result, "NuGetCommand@2")
+            .inputs
+            .get("arguments")
+            .unwrap();
+        assert!(arguments.contains("pkgs.dev.azure.com/contoso/"));
+        assert!(!arguments.contains("msazuresphere"));
     }
 
     #[test]
@@ -2123,13 +2170,17 @@ mod tests {
         let result = Engine::Copilot
             .install_steps(&fm.engine, &fm.target, None)
             .unwrap();
-        assert!(result.contains("NuGetCommand@2"));
-        assert!(result.contains("Guardian1ESPTUpstreamOrgFeed"));
+        assert_eq!(result.len(), 5);
+        let arguments = task_step(&result, "NuGetCommand@2")
+            .inputs
+            .get("arguments")
+            .unwrap();
+        assert!(arguments.contains("Guardian1ESPTUpstreamOrgFeed"));
         // Runtime fallback: org extracted from $(System.CollectionUri)
-        assert!(result.contains("$(AW_ADO_ORG)"));
-        assert!(result.contains("$(System.CollectionUri)"));
-        assert!(result.contains("Resolve ADO organization"));
-        assert!(!result.contains("msazuresphere"));
+        assert!(arguments.contains("$(AW_ADO_ORG)"));
+        let resolver = bash_step(&result, "Resolve ADO organization");
+        assert!(resolver.script.contains("$(System.CollectionUri)"));
+        assert!(!arguments.contains("msazuresphere"));
     }
 
     #[test]

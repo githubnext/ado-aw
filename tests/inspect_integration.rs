@@ -81,6 +81,14 @@ fn inspect_json_emits_schema_version_one() {
         stdout.contains("\"graph\":"),
         "expected 'graph' key in JSON output, got:\n{stdout}"
     );
+    assert!(
+        stdout.contains("\"display_name\": \"Install Copilot CLI"),
+        "generated engine install step must be visible in the IR summary, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("\"display_name\": \"Output copilot version\""),
+        "generated engine version step must be visible in the IR summary, got:\n{stdout}"
+    );
 }
 
 #[test]
