@@ -3133,7 +3133,8 @@ impl SupplyChainConfig {
                 anyhow::bail!("supply-chain.pipeline-artifact.run-id must be positive");
             }
         }
-        if self.registry.is_some() && self.registry_connection().is_none() {            anyhow::bail!(
+        if self.registry.is_some() && self.registry_connection().is_none() {
+            anyhow::bail!(
                 "supply-chain.registry requires a service connection: set \
                  `registry.service-connection` or a top-level \
                  `supply-chain.service-connection`. A container registry (ACR) \
@@ -4653,7 +4654,8 @@ imports:
     }
 
     #[test]
-    fn test_supply_chain_feed_only_validates() {        // feed-only: registry is None, so validate() never errors regardless of feed.
+    fn test_supply_chain_feed_only_validates() {
+        // feed-only: registry is None, so validate() never errors regardless of feed.
         let sc = parse_supply_chain("supply-chain:\n  feed: my-feed");
         assert!(sc.validate().is_ok());
         // combined feed + registry-with-connection must also validate OK.
