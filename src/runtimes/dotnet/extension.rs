@@ -87,7 +87,7 @@ impl CompilerExtension for DotnetExtension {
         let effective_feed_url: Option<String> = match self.config.feed_url() {
             Some(url) => Some(url.to_string()),
             None if self.config.config().is_some() => {
-                if ctx.package_feed_url(PackageEcosystem::Dotnet)?.is_some() {
+                if ctx.has_package_feed(PackageEcosystem::Dotnet) {
                     warnings.push(
                         "runtimes.dotnet.config is set, so supply-chain.packages is not \
                          applied to .NET — the checked-in nuget.config owns the package \

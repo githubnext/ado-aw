@@ -198,6 +198,21 @@ impl<'a> CompileContext<'a> {
         Ok(Some(url))
     }
 
+    /// Cheap presence check: is a `supply-chain.packages` block configured
+    /// that opts `ecosystem` in?
+    ///
+    /// Unlike [`Self::package_feed_url`] this performs no organization
+    /// resolution and no URL validation, so it never fails. Use it in
+    /// diagnostic-only paths (e.g. deciding whether to warn that a
+    /// runtime-local `config` takes precedence) where the resolved URL is
+    /// never consumed.
+    pub fn has_package_feed(&self, ecosystem: PackageEcosystem) -> bool {
+        self.front_matter
+            .supply_chain()
+            .and_then(|sc| sc.packages.as_ref())
+            .is_some_and(|packages| packages.applies_to(ecosystem))
+    }
+
     fn ado_context_override() -> Result<Option<AdoContext>> {
         let Some(value) = std::env::var_os(COMPILE_REMOTE_URL_ENV) else {
             return Ok(None);

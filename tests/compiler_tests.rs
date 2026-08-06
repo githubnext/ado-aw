@@ -8056,6 +8056,38 @@ supply-chain:
     );
 }
 
+/// A runtime that owns its own package sources via `config:` defers to that
+/// file, so an unresolvable `supply-chain.packages` org must not be resolved
+/// (and must not fail compilation) on that diagnostic-only path.
+#[test]
+fn test_supply_chain_packages_skipped_for_config_owned_runtime() {
+    let source = r#"---
+name: "Package Feed Config Owned"
+description: "nuget.config owns the sources, no organization is inferable"
+runtimes:
+  dotnet:
+    config: "nuget.config"
+supply-chain:
+  packages: my-feed
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("packages-config-owned", source);
+    assert!(
+        ok,
+        "config-owned runtime must not resolve supply-chain.packages, got: {stderr}"
+    );
+    assert!(
+        !compiled.contains("my-feed"),
+        "the shared feed must not be applied when config: owns the sources"
+    );
+    assert!(
+        stderr.contains("runtimes.dotnet.config is set"),
+        "a warning must explain that supply-chain.packages is skipped, got: {stderr}"
+    );
+}
+
 /// `feed` only (scalar, same-org) mirrors binaries via `$(System.AccessToken)`
 /// — no `nuGetServiceConnections` — and leaves images on GHCR.
 #[test]

@@ -93,7 +93,7 @@ impl CompilerExtension for NodeExtension {
         let effective_feed_url: Option<String> = match self.config.feed_url() {
             Some(url) => Some(url.to_string()),
             None if self.config.config().is_some() => {
-                if ctx.package_feed_url(PackageEcosystem::Node)?.is_some() {
+                if ctx.has_package_feed(PackageEcosystem::Node) {
                     warnings.push(
                         "runtimes.node.config is set, so supply-chain.packages is not \
                          applied to Node — the .npmrc file owns the registry."

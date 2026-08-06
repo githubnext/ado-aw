@@ -92,7 +92,7 @@ impl CompilerExtension for PythonExtension {
         let effective_feed_url: Option<String> = match self.config.feed_url() {
             Some(url) => Some(url.to_string()),
             None if self.config.config().is_some() => {
-                if ctx.package_feed_url(PackageEcosystem::Python)?.is_some() {
+                if ctx.has_package_feed(PackageEcosystem::Python) {
                     warnings.push(
                         "runtimes.python.config is set, so supply-chain.packages is not \
                          applied to Python — the config file owns the package source."
