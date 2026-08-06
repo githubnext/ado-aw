@@ -58,6 +58,12 @@ runtimes:
 | `feed-url` | string | Internal PyPI feed URL. Injects `PIP_INDEX_URL` and `UV_DEFAULT_INDEX` env vars into the agent environment. |
 | `config` | string | Path to a pip/uv config file. Accepted with a warning — the file will not be available inside the AWF agent environment until proxy-auth support lands. |
 
+> **Shared feed:** `feed-url` is optional. When
+> [`supply-chain.packages`](supply-chain.md#shared-package-feed-for-the-runtimes-packages)
+> declares one feed identity, this runtime derives its endpoint from it
+> automatically. An explicit `feed-url` here overrides the shared feed; a
+> `config` file suppresses it.
+
 When enabled, the compiler:
 - Contributes a `UsePythonVersion@0` task to `Declarations::agent_prepare_steps` (runs before AWF)
 - If `feed-url` is set, also injects `PipAuthenticate@1` to authenticate the ADO build service identity for internal feeds
@@ -92,6 +98,12 @@ runtimes:
 | `version` | string | Node.js version to install (e.g., `"22.x"`, `"20.x"`). Passed to `UseNode@1` `version`. Defaults to `"22.x"`. |
 | `feed-url` | string | Internal npm registry URL. Injects `NPM_CONFIG_REGISTRY` env var into the agent environment. |
 | `config` | string | Path to an .npmrc config file. Accepted with a warning — the file will not be available inside the AWF agent environment until proxy-auth support lands. |
+
+> **Shared feed:** `feed-url` is optional. When
+> [`supply-chain.packages`](supply-chain.md#shared-package-feed-for-the-runtimes-packages)
+> declares one feed identity, this runtime derives its endpoint from it
+> automatically. An explicit `feed-url` here overrides the shared feed; a
+> `config` file suppresses it.
 
 When enabled, the compiler:
 - Contributes a `UseNode@1` task to `Declarations::agent_prepare_steps` (runs before AWF)
@@ -136,6 +148,12 @@ runtimes:
 | `version` | string | .NET SDK version to install (e.g., `"8.0.x"`, `"9.0.x"`). Passed to `UseDotNet@2` `version` with `packageType: 'sdk'`. Defaults to `"8.0.x"`. The special value `"global.json"` (case-insensitive) emits `useGlobalJson: true` instead, which discovers and installs every SDK referenced by `global.json` files in the workspace. |
 | `feed-url` | string | Internal NuGet feed URL (typically the v3 `index.json` of an Azure Artifacts feed). When set, the compiler creates a minimal `nuget.config` if none exists and runs `NuGetAuthenticate@1`. |
 | `config` | string | Path to a checked-in `nuget.config` in the repo. When set, the compiler runs `NuGetAuthenticate@1` (which auto-discovers `nuget.config` files in the workspace). Mutually exclusive with `feed-url`. |
+
+> **Shared feed:** `feed-url` is optional. When
+> [`supply-chain.packages`](supply-chain.md#shared-package-feed-for-the-runtimes-packages)
+> declares one feed identity, this runtime derives its endpoint from it
+> automatically. An explicit `feed-url` here overrides the shared feed; a
+> `config` file suppresses it.
 
 **`global.json` precedence.** A `global.json` file in the repo is the canonical
 way to pin the .NET SDK. The compiler enforces a single source of truth:

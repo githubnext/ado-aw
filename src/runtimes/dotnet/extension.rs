@@ -5,6 +5,7 @@ use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations
 use crate::compile::ir::step::{BashStep, Step, TaskStep};
 use crate::compile::ir::tasks::nuget_authenticate::NuGetAuthenticate;
 use crate::compile::ir::tasks::use_dotnet::UseDotNet;
+use crate::compile::types::PackageEcosystem;
 use crate::validate;
 use anyhow::Result;
 
@@ -78,6 +79,27 @@ impl CompilerExtension for DotnetExtension {
             validate::validate_feed_url(feed_url, "runtimes.dotnet.feed-url")?;
         }
 
+        // Effective feed resolution (see docs/supply-chain.md):
+        //   1. runtimes.dotnet.feed-url
+        //   2. runtimes.dotnet.config (user owns nuget.config — global skipped)
+        //   3. supply-chain.packages
+        //   4. public nuget.org
+        let effective_feed_url: Option<String> = match self.config.feed_url() {
+            Some(url) => Some(url.to_string()),
+            None if self.config.config().is_some() => {
+                if ctx.has_package_feed(PackageEcosystem::Dotnet) {
+                    warnings.push(
+                        "runtimes.dotnet.config is set, so supply-chain.packages is not \
+                         applied to .NET — the checked-in nuget.config owns the package \
+                         sources."
+                            .to_string(),
+                    );
+                }
+                None
+            }
+            None => ctx.package_feed_url(PackageEcosystem::Dotnet)?,
+        };
+
         // Validate version string. Skip the injection check for the
         // `global.json` sentinel — it's a literal keyword, not a version.
         if let Some(version) = self.config.version()
@@ -115,8 +137,8 @@ impl CompilerExtension for DotnetExtension {
 
         let mut agent_prepare_steps: Vec<Step> = Vec::with_capacity(3);
         agent_prepare_steps.push(Step::Task(dotnet_install_task_step(&self.config)));
-        if self.config.feed_url().is_some() {
-            agent_prepare_steps.push(Step::Bash(ensure_nuget_config_bash_step(&self.config)));
+        if let Some(feed_url) = &effective_feed_url {
+            agent_prepare_steps.push(Step::Bash(ensure_nuget_config_bash_step(feed_url)));
             agent_prepare_steps.push(Step::Task(nuget_authenticate_task_step()));
         } else if self.config.config().is_some() {
             agent_prepare_steps.push(Step::Task(nuget_authenticate_task_step()));
@@ -174,10 +196,7 @@ fn nuget_authenticate_task_step() -> TaskStep {
 /// Build the typed [`BashStep`] that ensures `nuget.config`. Same
 /// case-variation-aware existence check; same minimal `nuget.config`
 /// content when the file is missing.
-fn ensure_nuget_config_bash_step(config: &DotnetRuntimeConfig) -> BashStep {
-    let feed_url = config
-        .feed_url()
-        .unwrap_or("https://api.nuget.org/v3/index.json");
+fn ensure_nuget_config_bash_step(feed_url: &str) -> BashStep {
     let script = format!(
         "set -eo pipefail\n\
          if [ ! -f nuget.config ] && [ ! -f NuGet.config ] && [ ! -f NuGet.Config ]; then\n  \
@@ -398,5 +417,92 @@ mod tests {
             Step::Task(t) => assert_eq!(t.task, "NuGetAuthenticate@1"),
             other => panic!("expected Step::Task, got {other:?}"),
         }
+    }
+
+    /// A global `supply-chain.packages` feed alone drives the
+    /// ensure-nuget.config + authenticate steps.
+    #[test]
+    fn declarations_uses_global_package_feed() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: x\nruntimes:\n  dotnet: true\nsupply-chain:\n  packages: shared-feed\n---\n",
+        )
+        .unwrap();
+        let ext = DotnetExtension::new(DotnetRuntimeConfig::Enabled(true));
+        let ctx = CompileContext::for_test_with_org(&fm, "myorg");
+        let decl = ext.declarations(&ctx).unwrap();
+        assert_eq!(decl.agent_prepare_steps.len(), 3);
+        match &decl.agent_prepare_steps[1] {
+            Step::Bash(b) => assert!(
+                b.script.contains(
+                    "https://pkgs.dev.azure.com/myorg/_packaging/shared-feed/nuget/v3/index.json"
+                ),
+                "expected derived feed in script: {}",
+                b.script
+            ),
+            other => panic!("expected Step::Bash for ensure-nuget, got {other:?}"),
+        }
+        match &decl.agent_prepare_steps[2] {
+            Step::Task(t) => assert_eq!(t.task, "NuGetAuthenticate@1"),
+            other => panic!("expected NuGetAuthenticate@1, got {other:?}"),
+        }
+    }
+
+    /// An explicit per-runtime `feed-url:` wins over the global feed.
+    #[test]
+    fn declarations_runtime_feed_url_wins_over_global_package_feed() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: x\nruntimes:\n  dotnet:\n    feed-url: 'https://example.invalid/v3/index.json'\nsupply-chain:\n  packages: shared-feed\n---\n",
+        )
+        .unwrap();
+        let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+        let ext = DotnetExtension::new(dotnet.clone());
+        let ctx = CompileContext::for_test_with_org(&fm, "myorg");
+        let decl = ext.declarations(&ctx).unwrap();
+        match &decl.agent_prepare_steps[1] {
+            Step::Bash(b) => {
+                assert!(b.script.contains("https://example.invalid/v3/index.json"));
+                assert!(!b.script.contains("shared-feed"));
+            }
+            other => panic!("expected Step::Bash for ensure-nuget, got {other:?}"),
+        }
+    }
+
+    /// Opting .NET out of the global feed leaves the default output.
+    #[test]
+    fn declarations_respects_global_package_feed_opt_out() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: x\nruntimes:\n  dotnet: true\nsupply-chain:\n  packages:\n    feed: shared-feed\n    dotnet: false\n---\n",
+        )
+        .unwrap();
+        let ext = DotnetExtension::new(DotnetRuntimeConfig::Enabled(true));
+        let ctx = CompileContext::for_test_with_org(&fm, "myorg");
+        let decl = ext.declarations(&ctx).unwrap();
+        assert_eq!(decl.agent_prepare_steps.len(), 1);
+    }
+
+    /// `config:` keeps ownership of the package sources; the global feed
+    /// is skipped with a warning and no ensure step is emitted.
+    #[test]
+    fn declarations_config_skips_global_package_feed_with_warning() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: x\nruntimes:\n  dotnet:\n    config: 'nuget.config'\nsupply-chain:\n  packages: shared-feed\n---\n",
+        )
+        .unwrap();
+        let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+        let ext = DotnetExtension::new(dotnet.clone());
+        let ctx = CompileContext::for_test_with_org(&fm, "myorg");
+        let decl = ext.declarations(&ctx).unwrap();
+        assert_eq!(decl.agent_prepare_steps.len(), 2);
+        match &decl.agent_prepare_steps[1] {
+            Step::Task(t) => assert_eq!(t.task, "NuGetAuthenticate@1"),
+            other => panic!("expected NuGetAuthenticate@1, got {other:?}"),
+        }
+        assert!(
+            decl.warnings
+                .iter()
+                .any(|w| w.contains("supply-chain.packages")),
+            "expected a skip warning, got: {:?}",
+            decl.warnings
+        );
     }
 }

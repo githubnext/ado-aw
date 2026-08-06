@@ -5,6 +5,7 @@ use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations
 use crate::compile::ir::step::{BashStep, Step, TaskStep};
 use crate::compile::ir::tasks::npm_authenticate::NpmAuthenticate;
 use crate::compile::ir::tasks::use_node::UseNode;
+use crate::compile::types::PackageEcosystem;
 use crate::validate;
 use anyhow::Result;
 
@@ -84,6 +85,26 @@ impl CompilerExtension for NodeExtension {
             validate::validate_feed_url(feed_url, "runtimes.node.feed-url")?;
         }
 
+        // Effective feed resolution (see docs/supply-chain.md):
+        //   1. runtimes.node.feed-url
+        //   2. runtimes.node.config (user owns feed config — global skipped)
+        //   3. supply-chain.packages
+        //   4. public npm registry
+        let effective_feed_url: Option<String> = match self.config.feed_url() {
+            Some(url) => Some(url.to_string()),
+            None if self.config.config().is_some() => {
+                if ctx.has_package_feed(PackageEcosystem::Node) {
+                    warnings.push(
+                        "runtimes.node.config is set, so supply-chain.packages is not \
+                         applied to Node — the .npmrc file owns the registry."
+                            .to_string(),
+                    );
+                }
+                None
+            }
+            None => ctx.package_feed_url(PackageEcosystem::Node)?,
+        };
+
         // Validate version string
         if let Some(version) = self.config.version() {
             validate::reject_pipeline_injection(version, "runtimes.node.version")?;
@@ -91,13 +112,15 @@ impl CompilerExtension for NodeExtension {
 
         let mut agent_prepare_steps: Vec<Step> = Vec::with_capacity(3);
         agent_prepare_steps.push(Step::Task(node_install_task_step(&self.config)));
-        if self.config.feed_url().is_some() || self.config.config().is_some() {
-            agent_prepare_steps.push(Step::Bash(ensure_npmrc_bash_step(&self.config)));
+        if effective_feed_url.is_some() || self.config.config().is_some() {
+            agent_prepare_steps.push(Step::Bash(ensure_npmrc_bash_step(
+                effective_feed_url.as_deref(),
+            )));
             agent_prepare_steps.push(Step::Task(npm_authenticate_task_step()));
         }
         let mut agent_env_vars = Vec::new();
-        if let Some(feed_url) = self.config.feed_url() {
-            agent_env_vars.push(("NPM_CONFIG_REGISTRY".to_string(), feed_url.to_string()));
+        if let Some(feed_url) = &effective_feed_url {
+            agent_env_vars.push(("NPM_CONFIG_REGISTRY".to_string(), feed_url.clone()));
         }
         Ok(Declarations {
             agent_prepare_steps,
@@ -141,8 +164,8 @@ fn npm_authenticate_task_step() -> TaskStep {
 /// preserves the legacy semantics: leave any repo-checked-in `.npmrc`
 /// untouched; otherwise create a minimal one pointing at the
 /// configured feed (or the default npmjs registry).
-fn ensure_npmrc_bash_step(config: &NodeRuntimeConfig) -> BashStep {
-    let registry = config.feed_url().unwrap_or("https://registry.npmjs.org/");
+fn ensure_npmrc_bash_step(feed_url: Option<&str>) -> BashStep {
+    let registry = feed_url.unwrap_or("https://registry.npmjs.org/");
     let script = format!(
         "set -eo pipefail\n\
          if [ ! -f .npmrc ]; then\n  \
@@ -290,5 +313,98 @@ mod tests {
             .map(|(k, _)| k.as_str())
             .collect();
         assert!(keys.contains(&"NPM_CONFIG_REGISTRY"));
+    }
+
+    /// A global `supply-chain.packages` feed alone drives the ensure-npmrc
+    /// + authenticate steps and `NPM_CONFIG_REGISTRY`.
+    #[test]
+    fn declarations_uses_global_package_feed() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: x\nruntimes:\n  node: true\nsupply-chain:\n  packages: proj/shared-feed\n---\n",
+        )
+        .unwrap();
+        let ext = NodeExtension::new(NodeRuntimeConfig::Enabled(true));
+        let ctx = CompileContext::for_test_with_org(&fm, "myorg");
+        let decl = ext.declarations(&ctx).unwrap();
+        assert_eq!(decl.agent_prepare_steps.len(), 3);
+        let expected = "https://pkgs.dev.azure.com/myorg/proj/_packaging/shared-feed/npm/registry/";
+        match &decl.agent_prepare_steps[1] {
+            Step::Bash(b) => assert!(
+                b.script.contains(expected),
+                "expected derived feed in script: {}",
+                b.script
+            ),
+            other => panic!("expected Step::Bash for ensure-npmrc, got {other:?}"),
+        }
+        let value = decl
+            .agent_env_vars
+            .iter()
+            .find(|(k, _)| k == "NPM_CONFIG_REGISTRY")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(value, Some(expected));
+    }
+
+    /// An explicit per-runtime `feed-url:` wins over the global feed.
+    #[test]
+    fn declarations_runtime_feed_url_wins_over_global_package_feed() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: x\nruntimes:\n  node:\n    feed-url: 'https://example.invalid/registry/'\nsupply-chain:\n  packages: shared-feed\n---\n",
+        )
+        .unwrap();
+        let node = fm.runtimes.as_ref().unwrap().node.as_ref().unwrap();
+        let ext = NodeExtension::new(node.clone());
+        let ctx = CompileContext::for_test_with_org(&fm, "myorg");
+        let decl = ext.declarations(&ctx).unwrap();
+        let value = decl
+            .agent_env_vars
+            .iter()
+            .find(|(k, _)| k == "NPM_CONFIG_REGISTRY")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(value, Some("https://example.invalid/registry/"));
+    }
+
+    /// Opting Node out of the global feed leaves the default output.
+    #[test]
+    fn declarations_respects_global_package_feed_opt_out() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: x\nruntimes:\n  node: true\nsupply-chain:\n  packages:\n    feed: shared-feed\n    node: false\n---\n",
+        )
+        .unwrap();
+        let ext = NodeExtension::new(NodeRuntimeConfig::Enabled(true));
+        let ctx = CompileContext::for_test_with_org(&fm, "myorg");
+        let decl = ext.declarations(&ctx).unwrap();
+        assert_eq!(decl.agent_prepare_steps.len(), 1);
+        assert!(decl.agent_env_vars.is_empty());
+    }
+
+    /// `config:` keeps ownership of the registry; the global feed is
+    /// skipped with a warning and `.npmrc` falls back to public npm.
+    #[test]
+    fn declarations_config_skips_global_package_feed_with_warning() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: x\nruntimes:\n  node:\n    config: '.npmrc'\nsupply-chain:\n  packages: shared-feed\n---\n",
+        )
+        .unwrap();
+        let node = fm.runtimes.as_ref().unwrap().node.as_ref().unwrap();
+        let ext = NodeExtension::new(node.clone());
+        let ctx = CompileContext::for_test_with_org(&fm, "myorg");
+        let decl = ext.declarations(&ctx).unwrap();
+        assert_eq!(decl.agent_prepare_steps.len(), 3);
+        match &decl.agent_prepare_steps[1] {
+            Step::Bash(b) => assert!(
+                b.script.contains("https://registry.npmjs.org/"),
+                "expected public registry fallback: {}",
+                b.script
+            ),
+            other => panic!("expected Step::Bash for ensure-npmrc, got {other:?}"),
+        }
+        assert!(decl.agent_env_vars.is_empty());
+        assert!(
+            decl.warnings
+                .iter()
+                .any(|w| w.contains("supply-chain.packages")),
+            "expected a skip warning, got: {:?}",
+            decl.warnings
+        );
     }
 }

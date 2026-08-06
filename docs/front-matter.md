@@ -271,6 +271,10 @@ supply-chain:                  # optional internal supply-chain mirror (see docs
     name: myacr.azurecr.io/mirror  # registry host or base path (artifact names kept under it)
     service-connection: acr-conn   # REQUIRED when registry is set (ACR has no System.AccessToken path)
   service-connection: shared-conn  # optional feed/registry fallback; never applies to pipeline-artifact
+  packages:                      # optional shared package feed for runtimes.python/node/dotnet
+    feed: my-proj/my-feed        # feed name or project/feed; scalar `packages: my-feed` shorthand also works
+    # organization: myorg        # optional; defaults to the org inferred from the git remote
+    # python: true               # per-ecosystem opt-out (node:/dotnet: likewise); each defaults to true
 # ado-aw-debug:                 # debug-only knobs; see docs/ado-aw-debug.md
 #   skip-integrity: false       # omit generated pipeline integrity verification
 parameters:                    # optional ADO runtime parameters (surfaced in UI when queuing a run)

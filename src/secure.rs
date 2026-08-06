@@ -34,6 +34,7 @@
 //! - [`HostName`] — a DNS-style hostname.
 //! - [`RegistryRef`] — a container-registry host or base path.
 //! - [`AdoProject`] — an Azure DevOps project name or GUID.
+//! - [`AdoUrlSegment`] — an ADO org/project name safe to embed in a URL.
 //! - [`Version`] — a version string (`1.2.3`, `latest`).
 //!
 //! New safe-output tools that accept paths or identifiers should type those
@@ -362,6 +363,23 @@ validated_string! {
             anyhow::bail!(
                 "{label} '{value}' must be non-empty, at most 256 characters, \
                  and free of quotes and control characters"
+            )
+        }
+    }
+}
+
+validated_string! {
+    /// An Azure DevOps organization or project name that is safe to embed
+    /// directly in a derived feed URL (no percent-encoding is applied).
+    AdoUrlSegment, "name", |value: &str, label: &str| {
+        if validate::is_valid_ado_url_segment(value) {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "{label} '{value}' must be an Azure DevOps organization or \
+                 project name containing only [A-Za-z0-9._-] (no spaces, no \
+                 '/', no leading '.') so it can be embedded in a feed URL \
+                 without escaping"
             )
         }
     }
