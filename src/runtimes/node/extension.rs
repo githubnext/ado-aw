@@ -314,4 +314,97 @@ mod tests {
             .collect();
         assert!(keys.contains(&"NPM_CONFIG_REGISTRY"));
     }
+
+    /// A global `supply-chain.packages` feed alone drives the ensure-npmrc
+    /// + authenticate steps and `NPM_CONFIG_REGISTRY`.
+    #[test]
+    fn declarations_uses_global_package_feed() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: x\nruntimes:\n  node: true\nsupply-chain:\n  packages: proj/shared-feed\n---\n",
+        )
+        .unwrap();
+        let ext = NodeExtension::new(NodeRuntimeConfig::Enabled(true));
+        let ctx = CompileContext::for_test_with_org(&fm, "myorg");
+        let decl = ext.declarations(&ctx).unwrap();
+        assert_eq!(decl.agent_prepare_steps.len(), 3);
+        let expected = "https://pkgs.dev.azure.com/myorg/proj/_packaging/shared-feed/npm/registry/";
+        match &decl.agent_prepare_steps[1] {
+            Step::Bash(b) => assert!(
+                b.script.contains(expected),
+                "expected derived feed in script: {}",
+                b.script
+            ),
+            other => panic!("expected Step::Bash for ensure-npmrc, got {other:?}"),
+        }
+        let value = decl
+            .agent_env_vars
+            .iter()
+            .find(|(k, _)| k == "NPM_CONFIG_REGISTRY")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(value, Some(expected));
+    }
+
+    /// An explicit per-runtime `feed-url:` wins over the global feed.
+    #[test]
+    fn declarations_runtime_feed_url_wins_over_global_package_feed() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: x\nruntimes:\n  node:\n    feed-url: 'https://example.invalid/registry/'\nsupply-chain:\n  packages: shared-feed\n---\n",
+        )
+        .unwrap();
+        let node = fm.runtimes.as_ref().unwrap().node.as_ref().unwrap();
+        let ext = NodeExtension::new(node.clone());
+        let ctx = CompileContext::for_test_with_org(&fm, "myorg");
+        let decl = ext.declarations(&ctx).unwrap();
+        let value = decl
+            .agent_env_vars
+            .iter()
+            .find(|(k, _)| k == "NPM_CONFIG_REGISTRY")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(value, Some("https://example.invalid/registry/"));
+    }
+
+    /// Opting Node out of the global feed leaves the default output.
+    #[test]
+    fn declarations_respects_global_package_feed_opt_out() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: x\nruntimes:\n  node: true\nsupply-chain:\n  packages:\n    feed: shared-feed\n    node: false\n---\n",
+        )
+        .unwrap();
+        let ext = NodeExtension::new(NodeRuntimeConfig::Enabled(true));
+        let ctx = CompileContext::for_test_with_org(&fm, "myorg");
+        let decl = ext.declarations(&ctx).unwrap();
+        assert_eq!(decl.agent_prepare_steps.len(), 1);
+        assert!(decl.agent_env_vars.is_empty());
+    }
+
+    /// `config:` keeps ownership of the registry; the global feed is
+    /// skipped with a warning and `.npmrc` falls back to public npm.
+    #[test]
+    fn declarations_config_skips_global_package_feed_with_warning() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: x\nruntimes:\n  node:\n    config: '.npmrc'\nsupply-chain:\n  packages: shared-feed\n---\n",
+        )
+        .unwrap();
+        let node = fm.runtimes.as_ref().unwrap().node.as_ref().unwrap();
+        let ext = NodeExtension::new(node.clone());
+        let ctx = CompileContext::for_test_with_org(&fm, "myorg");
+        let decl = ext.declarations(&ctx).unwrap();
+        assert_eq!(decl.agent_prepare_steps.len(), 3);
+        match &decl.agent_prepare_steps[1] {
+            Step::Bash(b) => assert!(
+                b.script.contains("https://registry.npmjs.org/"),
+                "expected public registry fallback: {}",
+                b.script
+            ),
+            other => panic!("expected Step::Bash for ensure-npmrc, got {other:?}"),
+        }
+        assert!(decl.agent_env_vars.is_empty());
+        assert!(
+            decl.warnings
+                .iter()
+                .any(|w| w.contains("supply-chain.packages")),
+            "expected a skip warning, got: {:?}",
+            decl.warnings
+        );
+    }
 }

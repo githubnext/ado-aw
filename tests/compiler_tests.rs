@@ -7942,6 +7942,120 @@ fn test_supply_chain_absent_uses_github_and_ghcr() {
     );
 }
 
+/// `supply-chain.packages` supplies one feed identity that all three
+/// language runtimes derive their ecosystem-specific endpoint from.
+#[test]
+fn test_supply_chain_packages_feeds_all_runtimes() {
+    let source = r#"---
+name: "Shared Package Feed"
+description: "one feed identity for python, node and dotnet"
+runtimes:
+  python: true
+  node: true
+  dotnet: true
+supply-chain:
+  packages:
+    feed: my-feed
+    organization: myorg
+    project: my-proj
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("packages-all-runtimes", source);
+    assert!(ok, "shared package feed should compile: {stderr}");
+    let base = "https://pkgs.dev.azure.com/myorg/my-proj/_packaging/my-feed";
+    for expected in [
+        format!("{base}/pypi/simple/"),
+        format!("{base}/npm/registry/"),
+        format!("{base}/nuget/v3/index.json"),
+    ] {
+        assert!(
+            compiled.contains(&expected),
+            "compiled pipeline must carry the derived endpoint {expected}"
+        );
+    }
+    for task in [
+        "- task: PipAuthenticate@1",
+        "- task: npmAuthenticate@0",
+        "- task: NuGetAuthenticate@1",
+    ] {
+        assert!(
+            compiled.contains(task),
+            "{task} must be emitted for the shared package feed"
+        );
+    }
+    for env_var in ["PIP_INDEX_URL", "UV_DEFAULT_INDEX", "NPM_CONFIG_REGISTRY"] {
+        assert!(
+            compiled.contains(env_var),
+            "{env_var} must be injected for the shared package feed"
+        );
+    }
+}
+
+/// A per-runtime `feed-url:` still wins over `supply-chain.packages`, and an
+/// ecosystem can opt out entirely.
+#[test]
+fn test_supply_chain_packages_precedence_and_opt_out() {
+    let source = r#"---
+name: "Package Feed Precedence"
+description: "per-runtime override plus an opt-out"
+runtimes:
+  python:
+    feed-url: "https://pkgs.dev.azure.com/otherorg/_packaging/pinned/pypi/simple/"
+  node: true
+supply-chain:
+  packages:
+    feed: my-feed
+    organization: myorg
+    node: false
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("packages-precedence", source);
+    assert!(ok, "package feed precedence should compile: {stderr}");
+    assert!(
+        compiled.contains("https://pkgs.dev.azure.com/otherorg/_packaging/pinned/pypi/simple/"),
+        "the per-runtime feed-url must win for Python"
+    );
+    assert!(
+        !compiled.contains("_packaging/my-feed/pypi/simple/"),
+        "the shared feed must not also be applied to Python"
+    );
+    assert!(
+        !compiled.contains("_packaging/my-feed/npm/registry/"),
+        "Node opted out of the shared feed"
+    );
+    assert!(
+        !compiled.contains("- task: npmAuthenticate@0"),
+        "an opted-out ecosystem must keep its default (public) configuration"
+    );
+}
+
+/// Without an inferable ADO organization (and no override) the shared feed
+/// fails closed with an actionable message rather than emitting a bad URL.
+#[test]
+fn test_supply_chain_packages_requires_resolvable_organization() {
+    let source = r#"---
+name: "Package Feed No Org"
+description: "no organization override and no ADO remote"
+runtimes:
+  python: true
+supply-chain:
+  packages: my-feed
+---
+
+## Body
+"#;
+    let (ok, _compiled, stderr) = compile_inline_source("packages-no-org", source);
+    assert!(!ok, "compilation must fail when the org cannot be resolved");
+    assert!(
+        stderr.contains("supply-chain.packages"),
+        "error must name the offending front-matter key, got: {stderr}"
+    );
+}
+
 /// `feed` only (scalar, same-org) mirrors binaries via `$(System.AccessToken)`
 /// — no `nuGetServiceConnections` — and leaves images on GHCR.
 #[test]

@@ -289,4 +289,87 @@ mod tests {
         assert!(keys.contains(&"PIP_INDEX_URL"));
         assert!(keys.contains(&"UV_DEFAULT_INDEX"));
     }
+
+    /// A global `supply-chain.packages` feed alone drives the auth step
+    /// and both index env vars, with the URL derived from the ADO org.
+    #[test]
+    fn declarations_uses_global_package_feed() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: x\nruntimes:\n  python: true\nsupply-chain:\n  packages: shared-feed\n---\n",
+        )
+        .unwrap();
+        let ext = PythonExtension::new(PythonRuntimeConfig::Enabled(true));
+        let ctx = CompileContext::for_test_with_org(&fm, "myorg");
+        let decl = ext.declarations(&ctx).unwrap();
+        assert_eq!(decl.agent_prepare_steps.len(), 2);
+        match &decl.agent_prepare_steps[1] {
+            Step::Task(t) => assert_eq!(t.task, "PipAuthenticate@1"),
+            other => panic!("expected PipAuthenticate@1, got {other:?}"),
+        }
+        let expected = "https://pkgs.dev.azure.com/myorg/_packaging/shared-feed/pypi/simple/";
+        for key in ["PIP_INDEX_URL", "UV_DEFAULT_INDEX"] {
+            let value = decl
+                .agent_env_vars
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str());
+            assert_eq!(value, Some(expected), "unexpected value for {key}");
+        }
+    }
+
+    /// An explicit per-runtime `feed-url:` wins over the global feed.
+    #[test]
+    fn declarations_runtime_feed_url_wins_over_global_package_feed() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: x\nruntimes:\n  python:\n    feed-url: 'https://example.invalid/simple/'\nsupply-chain:\n  packages: shared-feed\n---\n",
+        )
+        .unwrap();
+        let python = fm.runtimes.as_ref().unwrap().python.as_ref().unwrap();
+        let ext = PythonExtension::new(python.clone());
+        let ctx = CompileContext::for_test_with_org(&fm, "myorg");
+        let decl = ext.declarations(&ctx).unwrap();
+        let value = decl
+            .agent_env_vars
+            .iter()
+            .find(|(k, _)| k == "PIP_INDEX_URL")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(value, Some("https://example.invalid/simple/"));
+    }
+
+    /// Opting Python out of the global feed leaves the default output.
+    #[test]
+    fn declarations_respects_global_package_feed_opt_out() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: x\nruntimes:\n  python: true\nsupply-chain:\n  packages:\n    feed: shared-feed\n    python: false\n---\n",
+        )
+        .unwrap();
+        let ext = PythonExtension::new(PythonRuntimeConfig::Enabled(true));
+        let ctx = CompileContext::for_test_with_org(&fm, "myorg");
+        let decl = ext.declarations(&ctx).unwrap();
+        assert_eq!(decl.agent_prepare_steps.len(), 1);
+        assert!(decl.agent_env_vars.is_empty());
+    }
+
+    /// `config:` keeps ownership of the package source; the global feed
+    /// is skipped with a warning rather than silently layered on top.
+    #[test]
+    fn declarations_config_skips_global_package_feed_with_warning() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: x\nruntimes:\n  python:\n    config: 'pip.conf'\nsupply-chain:\n  packages: shared-feed\n---\n",
+        )
+        .unwrap();
+        let python = fm.runtimes.as_ref().unwrap().python.as_ref().unwrap();
+        let ext = PythonExtension::new(python.clone());
+        let ctx = CompileContext::for_test_with_org(&fm, "myorg");
+        let decl = ext.declarations(&ctx).unwrap();
+        assert_eq!(decl.agent_prepare_steps.len(), 1);
+        assert!(decl.agent_env_vars.is_empty());
+        assert!(
+            decl.warnings
+                .iter()
+                .any(|w| w.contains("supply-chain.packages")),
+            "expected a skip warning, got: {:?}",
+            decl.warnings
+        );
+    }
 }

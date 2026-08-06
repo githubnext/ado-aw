@@ -418,4 +418,91 @@ mod tests {
             other => panic!("expected Step::Task, got {other:?}"),
         }
     }
+
+    /// A global `supply-chain.packages` feed alone drives the
+    /// ensure-nuget.config + authenticate steps.
+    #[test]
+    fn declarations_uses_global_package_feed() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: x\nruntimes:\n  dotnet: true\nsupply-chain:\n  packages: shared-feed\n---\n",
+        )
+        .unwrap();
+        let ext = DotnetExtension::new(DotnetRuntimeConfig::Enabled(true));
+        let ctx = CompileContext::for_test_with_org(&fm, "myorg");
+        let decl = ext.declarations(&ctx).unwrap();
+        assert_eq!(decl.agent_prepare_steps.len(), 3);
+        match &decl.agent_prepare_steps[1] {
+            Step::Bash(b) => assert!(
+                b.script.contains(
+                    "https://pkgs.dev.azure.com/myorg/_packaging/shared-feed/nuget/v3/index.json"
+                ),
+                "expected derived feed in script: {}",
+                b.script
+            ),
+            other => panic!("expected Step::Bash for ensure-nuget, got {other:?}"),
+        }
+        match &decl.agent_prepare_steps[2] {
+            Step::Task(t) => assert_eq!(t.task, "NuGetAuthenticate@1"),
+            other => panic!("expected NuGetAuthenticate@1, got {other:?}"),
+        }
+    }
+
+    /// An explicit per-runtime `feed-url:` wins over the global feed.
+    #[test]
+    fn declarations_runtime_feed_url_wins_over_global_package_feed() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: x\nruntimes:\n  dotnet:\n    feed-url: 'https://example.invalid/v3/index.json'\nsupply-chain:\n  packages: shared-feed\n---\n",
+        )
+        .unwrap();
+        let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+        let ext = DotnetExtension::new(dotnet.clone());
+        let ctx = CompileContext::for_test_with_org(&fm, "myorg");
+        let decl = ext.declarations(&ctx).unwrap();
+        match &decl.agent_prepare_steps[1] {
+            Step::Bash(b) => {
+                assert!(b.script.contains("https://example.invalid/v3/index.json"));
+                assert!(!b.script.contains("shared-feed"));
+            }
+            other => panic!("expected Step::Bash for ensure-nuget, got {other:?}"),
+        }
+    }
+
+    /// Opting .NET out of the global feed leaves the default output.
+    #[test]
+    fn declarations_respects_global_package_feed_opt_out() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: x\nruntimes:\n  dotnet: true\nsupply-chain:\n  packages:\n    feed: shared-feed\n    dotnet: false\n---\n",
+        )
+        .unwrap();
+        let ext = DotnetExtension::new(DotnetRuntimeConfig::Enabled(true));
+        let ctx = CompileContext::for_test_with_org(&fm, "myorg");
+        let decl = ext.declarations(&ctx).unwrap();
+        assert_eq!(decl.agent_prepare_steps.len(), 1);
+    }
+
+    /// `config:` keeps ownership of the package sources; the global feed
+    /// is skipped with a warning and no ensure step is emitted.
+    #[test]
+    fn declarations_config_skips_global_package_feed_with_warning() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: x\nruntimes:\n  dotnet:\n    config: 'nuget.config'\nsupply-chain:\n  packages: shared-feed\n---\n",
+        )
+        .unwrap();
+        let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
+        let ext = DotnetExtension::new(dotnet.clone());
+        let ctx = CompileContext::for_test_with_org(&fm, "myorg");
+        let decl = ext.declarations(&ctx).unwrap();
+        assert_eq!(decl.agent_prepare_steps.len(), 2);
+        match &decl.agent_prepare_steps[1] {
+            Step::Task(t) => assert_eq!(t.task, "NuGetAuthenticate@1"),
+            other => panic!("expected NuGetAuthenticate@1, got {other:?}"),
+        }
+        assert!(
+            decl.warnings
+                .iter()
+                .any(|w| w.contains("supply-chain.packages")),
+            "expected a skip warning, got: {:?}",
+            decl.warnings
+        );
+    }
 }
