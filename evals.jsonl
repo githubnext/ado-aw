@@ -1,2 +1,2 @@
-{"id":"review_submitted","question":"Did the agent submit a pull request review?","answer":"UNKNOWN","model":"evals","timestamp":"2026-08-06T12:17:32.596Z","runid":"31100138473"}
-{"id":"contract_focused","question":"Does the agent output show findings about ado-aw compiler contracts (schemas, IR, generated artefacts, drift or documentation) rather than generic code style?","answer":"UNKNOWN","model":"evals","timestamp":"2026-08-06T12:17:32.596Z","runid":"31100138473"}
+{"id":"review_submitted","question":"Did the agent submit a pull request review?","answer":"YES","model":"evals","timestamp":"2026-08-06T15:05:21.962Z","runid":"31111873707"}
+{"id":"contract_focused","question":"Does the agent output show findings about ado-aw compiler contracts (schemas, IR, generated artefacts, drift or documentation) rather than generic code style?","answer":"YES","model":"evals","timestamp":"2026-08-06T15:05:21.962Z","runid":"31111873707"}
