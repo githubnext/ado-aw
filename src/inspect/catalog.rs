@@ -5,7 +5,7 @@ use std::fmt;
 
 use serde::Serialize;
 
-use crate::compile::{AWF_VERSION, MCPG_VERSION};
+use crate::compile::{ADO_MCP_VERSION, AWF_VERSION, MCPG_VERSION};
 use crate::engine::{COPILOT_CLI_VERSION, DEFAULT_COPILOT_MODEL};
 use crate::safe_outputs::{ALL_KNOWN_SAFE_OUTPUTS, ALWAYS_ON_TOOLS, DEBUG_ONLY_TOOLS};
 
@@ -42,6 +42,13 @@ pub struct VersionCatalog {
     pub awf: String,
     /// Pinned MCP Gateway version (`compile::common::MCPG_VERSION`).
     pub mcpg: String,
+    /// Pinned Azure DevOps MCP npm package version
+    /// (`compile::common::ADO_MCP_VERSION`).
+    ///
+    /// Fetched on the runner and mounted into a container with no registry
+    /// access of its own, so an unpinned fetch would let the agent's tool
+    /// surface vary between runs.
+    pub ado_mcp: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
@@ -58,6 +65,8 @@ pub struct Catalog {
     pub models: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub versions: Option<VersionCatalog>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ado_proxy: Option<crate::ado_proxy::catalog::Catalog>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,7 +78,7 @@ impl fmt::Display for UnknownCatalogKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "unknown --kind '{}' (expected one of: safe-outputs, runtimes, tools, engines, models, versions)",
+            "unknown --kind '{}' (expected one of: safe-outputs, runtimes, tools, engines, models, versions, ado-proxy)",
             self.kind
         )
     }
@@ -85,6 +94,7 @@ pub enum CatalogKind {
     Engines,
     Models,
     Versions,
+    AdoProxy,
 }
 
 impl CatalogKind {
@@ -96,6 +106,7 @@ impl CatalogKind {
             "engines" => Ok(Self::Engines),
             "models" => Ok(Self::Models),
             "versions" => Ok(Self::Versions),
+            "ado-proxy" => Ok(Self::AdoProxy),
             other => Err(UnknownCatalogKind {
                 kind: other.to_string(),
             }),
@@ -111,6 +122,7 @@ pub fn catalog() -> Catalog {
         engines: engines(),
         models: models(),
         versions: Some(versions()),
+        ado_proxy: Some(crate::ado_proxy::catalog::catalog()),
     }
 }
 
@@ -139,6 +151,10 @@ pub fn catalog_kind(kind: &str) -> Result<Catalog, UnknownCatalogKind> {
         },
         CatalogKind::Versions => Catalog {
             versions: Some(versions()),
+            ..Catalog::default()
+        },
+        CatalogKind::AdoProxy => Catalog {
+            ado_proxy: Some(crate::ado_proxy::catalog::catalog()),
             ..Catalog::default()
         },
     })
@@ -193,6 +209,29 @@ pub fn render_text(catalog: &Catalog) -> String {
         out.push_str(&format!("  copilot-cli {}\n", versions.copilot_cli));
         out.push_str(&format!("  awf {}\n", versions.awf));
         out.push_str(&format!("  mcpg {}\n", versions.mcpg));
+        out.push_str(&format!("  ado-mcp {}\n", versions.ado_mcp));
+        out.push('\n');
+    }
+    if let Some(proxy) = &catalog.ado_proxy {
+        out.push_str("Azure DevOps proxy\n");
+        out.push_str(&format!("  schema: {}\n", proxy.schema_version));
+        out.push_str(&format!(
+            "  runtime: {}\n",
+            if proxy.runtime_available {
+                "available"
+            } else {
+                "policy-schema-only"
+            }
+        ));
+        for operation in &proxy.operations {
+            out.push_str(&format!(
+                "  {} [{} {}]\n",
+                operation.id,
+                operation.method.as_str(),
+                operation.route
+            ));
+        }
+        out.push('\n');
     }
     out.trim_end().to_string()
 }
@@ -202,6 +241,7 @@ fn versions() -> VersionCatalog {
         copilot_cli: COPILOT_CLI_VERSION.to_string(),
         awf: AWF_VERSION.to_string(),
         mcpg: MCPG_VERSION.to_string(),
+        ado_mcp: ADO_MCP_VERSION.to_string(),
     }
 }
 
@@ -411,5 +451,18 @@ mod tests {
         assert_eq!(value["versions"]["copilot_cli"], COPILOT_CLI_VERSION);
         assert_eq!(value["versions"]["awf"], AWF_VERSION);
         assert_eq!(value["versions"]["mcpg"], MCPG_VERSION);
+    }
+
+    #[test]
+    fn ado_proxy_catalog_reports_available_runtime() {
+        let catalog = catalog_kind("ado-proxy").unwrap();
+        let proxy = catalog.ado_proxy.unwrap();
+        assert_eq!(
+            proxy.schema_version,
+            crate::ado_proxy::catalog::CATALOG_SCHEMA_VERSION
+        );
+        assert!(proxy.runtime_available);
+        assert!(!proxy.operations.is_empty());
+        assert!(catalog.safe_outputs.is_empty());
     }
 }

@@ -20,16 +20,33 @@
       "source": "tests/safe-outputs/canary.md"
     },
     {
-      "id": "azure-cli",
+      "id": "ado-proxy",
       "lane": "agentic",
       "kind": "compiled",
-      "modes": ["candidate", "released"],
-      "source": "tests/safe-outputs/azure-cli.md",
+      "modes": ["candidate"],
+      "source": "tests/smoke/ado-proxy.md",
       "assertions": {
         "agentCommand": {
-          "required": ["shell(az", "shell(head"],
-          "forbidden": ["--allow-all-tools", "--allow-all-paths"]
-        }
+          "required": [
+            "--topology-attach \"awmg-mcpg\"",
+            "--topology-attach \"awmg-ado-proxy\""
+          ]
+        },
+        "pipelineText": {
+          "required": [
+            "ado-proxy-injects-the-real-credential",
+            "\"--network\",",
+            "\"ado-aw-proxy-net\",",
+            "displayName: Start ado-proxy policy engine",
+            "displayName: Verify trusted topology peers",
+            "displayName: Stop ado-proxy"
+          ],
+          "forbidden": [
+            "-e ADO_MCP_AUTH_TOKEN=\"$SC_READ_TOKEN\"",
+            "--network host"
+          ]
+        },
+        "requiredBuildTags": ["ado-aw-proxy-{buildId}"]
       }
     },
     {

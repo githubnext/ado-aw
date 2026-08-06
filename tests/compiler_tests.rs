@@ -1950,6 +1950,113 @@ Call the noop tool exactly once.
 
 // ==================== Azure DevOps MCP Integration Tests ====================
 
+fn compile_fixture_text(fixture_name: &str) -> String {
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp directory");
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join(fixture_name);
+    let output_path = temp_dir.path().join(format!("{fixture_name}.lock.yml"));
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            fixture_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+    assert!(
+        output.status.success(),
+        "Compiler failed for {fixture_name}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::read_to_string(output_path).expect("Should read compiled output")
+}
+
+#[test]
+fn permissions_read_enables_proxy_and_wrapped_az_without_mcp() {
+    let compiled = compile_fixture_text("ado-proxy-read-only-agent.md");
+
+    for required in [
+        "displayName: Start ado-proxy policy engine",
+        "displayName: Verify trusted topology peers",
+        "displayName: Install az wrapper (ado-proxy)",
+        "displayName: Detect Azure CLI on host (for AWF mount)",
+        "--topology-attach \"awmg-ado-proxy\"",
+        "--allow-tool \"shell(az)\"",
+    ] {
+        assert!(
+            compiled.contains(required),
+            "permissions.read must enable {required}"
+        );
+    }
+    assert!(
+        !compiled.contains("/app/node_modules/@azure-devops/mcp/dist/index.js"),
+        "tools.azure-devops: false must not add the MCP child"
+    );
+    assert!(
+        !compiled.contains("@azure-devops/mcp@"),
+        "tools.azure-devops: false must not download or stage the MCP package"
+    );
+}
+
+#[test]
+fn no_read_permission_exposes_neither_proxy_nor_az() {
+    let compiled = compile_fixture_text("no-ado-read-agent.md");
+
+    for forbidden in [
+        "ado-proxy policy engine",
+        "awmg-ado-proxy",
+        "Install az wrapper",
+        "Detect Azure CLI on host",
+        "AW_AZ_MOUNTS",
+        "shell(az)",
+    ] {
+        assert!(
+            !compiled.contains(forbidden),
+            "no permissions.read must not expose {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn test_fixture_azure_devops_mcp_requires_read_permission() {
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp directory");
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("azure-devops-mcp-missing-read.md");
+    let output_path = temp_dir.path().join("missing-read.lock.yml");
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            fixture_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "compilation must fail before emitting a proxy with no token source"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("tools.azure-devops requires `permissions.read`"),
+        "error must name the missing front-matter key: {stderr}"
+    );
+    assert!(
+        !output_path.exists(),
+        "a failed validation must not leave a success-shaped pipeline"
+    );
+}
+
 /// Test that the Azure DevOps MCP fixture compiles successfully with no unreplaced markers
 #[test]
 fn test_fixture_azure_devops_mcp_compiled_output() {
@@ -1982,6 +2089,23 @@ fn test_fixture_azure_devops_mcp_compiled_output() {
     );
 
     let compiled = fs::read_to_string(&output_path).expect("Should read compiled output");
+
+    let policy_marker = "cat > \"$PROXY_DIR/policy/policy.json\" <<'ADO_PROXY_POLICY_EOF'\n";
+    let policy_start = compiled
+        .find(policy_marker)
+        .map(|index| index + policy_marker.len())
+        .expect("compiled pipeline must carry an ado-proxy policy document");
+    let policy_tail = &compiled[policy_start..];
+    let policy_end = policy_tail
+        .find("\n      ADO_PROXY_POLICY_EOF")
+        .expect("compiled policy heredoc must terminate");
+    let policy_json = policy_tail[..policy_end]
+        .lines()
+        .map(|line| line.strip_prefix("      ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let policy: serde_json::Value =
+        serde_json::from_str(&policy_json).expect("compiled policy must be valid JSON");
 
     // No unreplaced template markers (except ADO ${{ }} expressions)
     for line in compiled.lines() {
@@ -2021,22 +2145,69 @@ fn test_fixture_azure_devops_mcp_compiled_output() {
         "MCPG config should NOT use command field"
     );
 
-    // Should contain env for ADO_MCP_AUTH_TOKEN (envvar auth for @azure-devops/mcp)
+    // The MCP receives a sentinel, never a credential: the policy engine holds
+    // the only copy and attaches it after a complete allow decision.
     assert!(
         compiled.contains("ADO_MCP_AUTH_TOKEN"),
         "Should reference ADO_MCP_AUTH_TOKEN"
     );
-
-    // Should contain SC_READ_TOKEN (from permissions.read)
     assert!(
-        compiled.contains("SC_READ_TOKEN"),
-        "Should contain SC_READ_TOKEN"
+        compiled.contains("ado-proxy-injects-the-real-credential"),
+        "the MCP's token must be the non-secret sentinel"
     );
 
-    // Should contain the MCPG docker env passthrough (auto-mapped ADO token)
+    // Regression guard for the hole the policy engine closes. `SC_READ_TOKEN`
+    // still appears elsewhere in the pipeline — the engine is given it — but it
+    // must never be projected into the MCP container.
     assert!(
-        compiled.contains("-e ADO_MCP_AUTH_TOKEN=\"$SC_READ_TOKEN\""),
-        "Should auto-map SC_READ_TOKEN to ADO_MCP_AUTH_TOKEN on MCPG Docker run"
+        !compiled.contains("-e ADO_MCP_AUTH_TOKEN=\"$SC_READ_TOKEN\""),
+        "the real Azure DevOps bearer must not reach the MCP container"
+    );
+
+    // Host networking would put the MCP on the runner's stack, where it could
+    // reach Azure DevOps directly and bypass the policy entirely.
+    assert!(
+        compiled.contains("--add-host"),
+        "the MCP must be redirected at the policy engine"
+    );
+    assert!(
+        compiled.contains("\"additional_scopes\": ["),
+        "the object-form read policy must emit its scope tree"
+    );
+    assert!(
+        compiled.contains("\"organization\": \"fabrikam\"")
+            && compiled.contains("\"project\": \"Shared\"")
+            && compiled.contains("\"project_scoped\": true")
+            && compiled.contains("\"shared-api\""),
+        "the explicit cross-organization scope must survive compilation"
+    );
+    assert!(
+        compiled.contains("\"organization\": \"${ADO_PROXY_ORGANIZATION}\"")
+            && compiled.contains("\"project\": \"LocalProject\"")
+            && compiled.contains("\"project_scoped\": false")
+            && compiled.contains("\"implicit-api\""),
+        "the Azure Repos resource must emit a repository-only scope"
+    );
+    assert!(
+        !compiled.contains("\"github-only\""),
+        "a GitHub repository resource must not grant Azure DevOps scope"
+    );
+    assert_eq!(
+        policy["capabilities"],
+        serde_json::json!(["discovery", "core", "repos"]),
+        "only explicitly selected capabilities plus discovery may be emitted"
+    );
+    assert!(
+        compiled.contains("case \" devops repos rest \" in"),
+        "the az wrapper must narrow to the same capability set"
+    );
+    assert!(
+        compiled.contains("**Available** — `az devops`, `az repos`, `az rest`"),
+        "the prompt must advertise the same capability set"
+    );
+    assert!(
+        !compiled.contains("**Available** — `az devops`, `az repos`, `az pipelines`"),
+        "an ungranted capability must not leak into the prompt"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -5833,162 +6004,6 @@ fn test_agent_job_steps_do_not_map_system_access_token() {
     }
 }
 
-/// Always-on Azure CLI extension: every compiled pipeline must include a
-/// host-detection prepare step that conditionally sets the `AW_AZ_MOUNTS`
-/// pipeline variable, and the AWF invocation must reference that
-/// variable so the mounts are added at pipeline time only when az is
-/// present on the runner. Also asserts that Azure auth hosts are in the
-/// allow-list and guards against accidental re-introduction of an
-/// install step.
-#[test]
-fn test_default_pipeline_mounts_az_and_allows_azure_hosts() {
-    let compiled = compile_fixture("minimal-agent.md");
-    assert_valid_yaml(&compiled, "minimal-agent.md");
-
-    // (1) The detection prepare step must be present. It is the only
-    // mechanism by which az gets mounted into AWF, so its presence is
-    // load-bearing for the "always-on az" promise. The displayName is
-    // also part of the compiled YAML and is what operators see in the
-    // ADO log; if it changes the documentation in docs/network.md and
-    // docs/tools.md should be updated too.
-    assert!(
-        compiled.contains("displayName: Detect Azure CLI on host (for AWF mount)"),
-        "compiled YAML must contain the Azure CLI detection prepare step. \
-         Compiled:\n{compiled}"
-    );
-    assert!(
-        compiled.contains("[ -f /usr/bin/az ]"),
-        "detection step must test for /usr/bin/az. Compiled:\n{compiled}"
-    );
-    assert!(
-        compiled.contains("##vso[task.setvariable variable=AW_AZ_MOUNTS]"),
-        "detection step must set the AW_AZ_MOUNTS pipeline variable. \
-         Compiled:\n{compiled}"
-    );
-
-    // (1a) Regression guard: `setvariable` for AW_AZ_MOUNTS must appear
-    // TWICE — once per branch of the if/else. If the missing-az branch
-    // skips the setvariable, ADO leaves the literal `$(AW_AZ_MOUNTS)`
-    // in the AWF bash step, where bash interprets it as a `$(...)`
-    // command substitution, attempts to run a program named
-    // `AW_AZ_MOUNTS`, gets exit 127, and `set -e` kills the pipeline —
-    // the exact failure mode this PR set out to prevent on runners
-    // without azure-cli installed.
-    let setvar_count = compiled
-        .matches("##vso[task.setvariable variable=AW_AZ_MOUNTS]")
-        .count();
-    assert_eq!(
-        setvar_count, 2,
-        "AW_AZ_MOUNTS must be set in BOTH branches of the detection step (got {setvar_count} \
-         occurrences); leaving it unset in the missing-az branch breaks `set -e` in the \
-         AWF invocation. See AzureCliExtension::prepare_steps for the rationale."
-    );
-
-    // (1b) Conditional prompt-append step: when az is detected, the
-    // agent prompt receives an Azure CLI advisory section so the
-    // agent knows az is on PATH, what it's good for, and the auth
-    // model. The step is gated by `condition: ne(variables['AW_AZ_MOUNTS'], '')`
-    // so agents on runners WITHOUT az never see the advisory and
-    // never try to call az.
-    assert!(
-        compiled.contains("displayName: Append Azure CLI prompt"),
-        "compiled YAML must contain the 'Append Azure CLI prompt' step \
-         emitted by AzureCliExtension::prepare_steps. Compiled:\n{compiled}"
-    );
-    assert!(
-        compiled.contains("condition: ne(variables['AW_AZ_MOUNTS'], '')"),
-        "the Azure CLI prompt-append step must carry a condition: \
-         ne(variables['AW_AZ_MOUNTS'], '') so it is skipped when az \
-         is not detected. Compiled:\n{compiled}"
-    );
-    // Proximity check — the condition: must live on the SAME step as
-    // the displayName, otherwise we may have accidentally gated the
-    // wrong step. Find the displayName index, then check the next ~200
-    // chars for the condition line.
-    let display_idx = compiled
-        .find("displayName: Append Azure CLI prompt")
-        .expect("displayName already asserted to be present");
-    let window_end = (display_idx + 300).min(compiled.len());
-    let window = &compiled[display_idx..window_end];
-    assert!(
-        window.contains("condition: ne(variables['AW_AZ_MOUNTS'], '')"),
-        "the condition: line must appear in the same step block as the \
-         'Append Azure CLI prompt' displayName (looked at the 300 \
-         chars after the displayName). Window:\n{window}"
-    );
-    // Anchor strings: lock the load-bearing parts of the advisory.
-    for anchor in [
-        "/usr/bin/az",
-        "az devops",
-        "AZURE_DEVOPS_EXT_PAT",
-        "missing-tool",
-    ] {
-        assert!(
-            compiled.contains(anchor),
-            "compiled YAML must contain advisory anchor `{anchor}`. \
-             Compiled:\n{compiled}"
-        );
-    }
-
-    // (2) The AWF invocation must reference $(AW_AZ_MOUNTS) so the
-    // pipeline-variable value (the two --mount args, or empty) is
-    // word-split into the docker run command at runtime. Unquoted on
-    // purpose — see the safety note in `generate_awf_mounts`.
-    assert!(
-        compiled.contains("$(AW_AZ_MOUNTS) \\"),
-        "AWF invocation must include a `$(AW_AZ_MOUNTS) \\` line so the \
-         pipeline variable expands into --mount args at runtime. \
-         Compiled:\n{compiled}"
-    );
-
-    // (3) Critical guard: we must NOT emit static --mount args for az
-    // paths, because that would crash `docker run` on runners without
-    // azure-cli installed (bind source path does not exist). All az
-    // mounting must go through the runtime-detected pipeline variable.
-    assert!(
-        !compiled.contains(r#"--mount "/opt/az:/opt/az:ro""#),
-        "compiled YAML must NOT contain a static --mount for /opt/az — \
-         that would crash `docker run` on runners without azure-cli. \
-         Mounts must be contributed via the AW_AZ_MOUNTS pipeline \
-         variable. Compiled:\n{compiled}"
-    );
-    assert!(
-        !compiled.contains(r#"--mount "/usr/bin/az:/usr/bin/az:ro""#),
-        "compiled YAML must NOT contain a static --mount for /usr/bin/az — \
-         that would crash `docker run` on runners without azure-cli. \
-         Mounts must be contributed via the AW_AZ_MOUNTS pipeline \
-         variable. Compiled:\n{compiled}"
-    );
-
-    // (4) Azure auth/management hosts must be in --allow-domains.
-    for host in [
-        "login.microsoftonline.com",
-        "management.azure.com",
-        "graph.microsoft.com",
-    ] {
-        assert!(
-            compiled.contains(host),
-            "compiled --allow-domains must contain {host}. Compiled:\n{compiled}"
-        );
-    }
-
-    // (5) Regression guard: we deliberately do NOT install az; the host
-    // is assumed to have azure-cli pre-installed (gh-aw parity). If a
-    // future contributor adds an install step we want the test suite to
-    // catch it so the decision is explicit.
-    assert!(
-        !compiled.contains("Install Azure CLI"),
-        "compiled YAML must not contain an 'Install Azure CLI' step — host is assumed \
-         to have az pre-installed. If you genuinely need an install step, update this \
-         test along with the AzureCliExtension. Compiled:\n{compiled}"
-    );
-    assert!(
-        !compiled.contains("InstallAzureCLIDeb"),
-        "compiled YAML must not reference the Microsoft az apt installer URL — host is \
-         assumed to have az pre-installed. Compiled:\n{compiled}"
-    );
-}
-
 // ─── ado-aw-debug fixture ──────────────────────────────────────────────────
 
 /// Compile the `ado-aw-debug-agent.md` fixture and assert the
@@ -9759,68 +9774,6 @@ fn test_issue_1731_split_checkout_layout_compiles_for_every_target() {
                     "ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)"
                 ),
             "{target}: self-only Stage 3 sibling must use single-checkout layout:\n{compiled}"
-        );
-    }
-}
-
-#[test]
-fn test_azure_cli_smoke_uses_non_blocking_noop_flow() {
-    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("safe-outputs")
-        .join("azure-cli.md");
-    let fixture = fs::read_to_string(fixture_path)
-        .expect("read azure-cli smoke fixture")
-        .replace("\r\n", "\n");
-
-    for contract in [
-        "Capture the combined stdout/stderr",
-        "Invoke exactly one MCP tool: `noop` from the `safeoutputs`",
-        "bash:\n    - az\n    - head",
-        "edit: false",
-        "Do not inspect MCP configuration",
-        "Do not invoke SafeOutputs through",
-        "Actually invoke the MCP tool",
-    ] {
-        assert!(
-            fixture.contains(contract),
-            "Azure CLI smoke must preserve its non-blocking restricted flow; missing contract: {contract}"
-        );
-    }
-    for forbidden in ["report-incomplete", "Do not call `noop`"] {
-        assert!(
-            !fixture.contains(forbidden),
-            "Azure CLI smoke must not fail the candidate lane on unavailable direct auth: {forbidden}"
-        );
-    }
-
-    let (ok, compiled, stderr) = compile_inline_source("azure-cli-smoke-tool-policy", &fixture);
-    assert!(ok, "Azure CLI smoke should compile:\n{stderr}");
-    let document = parse_compiled_yaml(&compiled);
-    assert_job_execution_env_excludes_ado_credentials(
-        &document,
-        "Agent",
-        "=== Running AI agent with AWF",
-        "Azure CLI smoke Agent",
-    );
-    let agent = find_job_mapping_by_display_name(&document, "Agent")
-        .expect("Azure CLI smoke should contain the Agent job");
-    let run_agent = find_bash_step_containing(agent, "=== Running AI agent with AWF")
-        .expect("Azure CLI smoke should contain the Agent execution step");
-    let command = run_agent
-        .get(yaml_key("bash"))
-        .and_then(|value| value.as_str())
-        .expect("Agent execution step should have a bash body");
-    for required in ["shell(az)", "shell(head)"] {
-        assert!(
-            command.contains(required),
-            "Azure CLI Agent command should allow only its required shell command {required}:\n{command}"
-        );
-    }
-    for forbidden in ["--allow-all-tools", "--allow-all-paths"] {
-        assert!(
-            !command.contains(forbidden),
-            "Azure CLI Agent command must not contain {forbidden}:\n{command}"
         );
     }
 }

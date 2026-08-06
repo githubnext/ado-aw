@@ -2,6 +2,7 @@ pub mod ado;
 mod agent_stats;
 mod allowed_hosts;
 mod audit;
+mod ado_proxy;
 mod compile;
 mod configure;
 mod detect;
@@ -583,6 +584,22 @@ enum Commands {
         #[arg(short, long)]
         output: Option<std::path::PathBuf>,
     },
+    /// Export the `ado-proxy` catalog JSON Schema (build-time tool for the
+    /// scripts/ado-script TypeScript workspace).
+    #[command(hide = true)]
+    ExportAdoProxyCatalogSchema {
+        /// Output path; if omitted, prints to stdout.
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
+    },
+    /// Export the `ado-proxy` catalog data JSON — build-time drift guard for
+    /// the `ado-proxy` bundle's committed catalog snapshot.
+    #[command(hide = true)]
+    ExportAdoProxyCatalog {
+        /// Output path; if omitted, prints to stdout.
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
+    },
     /// Inspect an agent source file's typed IR: jobs, stages, steps, outputs, derived `dependsOn`.
     Inspect {
         /// Path to the agent markdown source.
@@ -647,6 +664,8 @@ impl Commands {
             Commands::Trace { .. } => "trace",
             Commands::ExportGateSchema { .. } => "export-gate-schema",
             Commands::ExportFactCatalog { .. } => "export-fact-catalog",
+            Commands::ExportAdoProxyCatalogSchema { .. } => "export-ado-proxy-catalog-schema",
+            Commands::ExportAdoProxyCatalog { .. } => "export-ado-proxy-catalog",
             Commands::Inspect { .. } => "inspect",
             Commands::Graph { .. } => "graph",
             Commands::Whatif { .. } => "whatif",
@@ -1604,6 +1623,14 @@ async fn main() -> Result<()> {
         }
         Commands::ExportFactCatalog { output } => {
             let catalog = compile::filter_ir::generate_fact_catalog();
+            write_or_print(&catalog, output)?;
+        }
+        Commands::ExportAdoProxyCatalogSchema { output } => {
+            let schema = ado_proxy::catalog::generate_catalog_schema();
+            write_or_print(&schema, output)?;
+        }
+        Commands::ExportAdoProxyCatalog { output } => {
+            let catalog = ado_proxy::catalog::generate_catalog_json();
             write_or_print(&catalog, output)?;
         }
         Commands::Inspect { source, json } => {

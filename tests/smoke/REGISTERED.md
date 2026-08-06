@@ -206,7 +206,6 @@ orchestrators, then deleting the retired definitions.
     | case | build | result |
     | --- | ---: | --- |
     | canary | `629523` | succeeded |
-    | azure-cli | `629525` | succeeded |
     | noop-target | `629524` | succeeded |
     | custom-safe-output | `629527` | succeeded |
     | multi-repo | `629526` | succeeded |

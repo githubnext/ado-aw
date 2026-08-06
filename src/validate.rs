@@ -726,6 +726,27 @@ pub fn ensure_path_within_base(candidate: &Path, base: &Path, label: &str) -> Re
     Ok(canonical)
 }
 
+// ── Identifier validators ────────────────────────────────────────────────────
+
+/// Return `true` if `s` is a canonical `8-4-4-4-12` hex GUID (no braces, no
+/// URN prefix, no surrounding whitespace).
+///
+/// Azure DevOps returns GUIDs in this exact shape for project, repository, and
+/// resource-area identifiers. Accepting only the canonical form keeps scope
+/// comparisons a byte-wise (ASCII case-insensitive) match instead of a
+/// normalization problem.
+pub fn is_valid_guid(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    bytes.len() == 36
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                *byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+}
+
 // ── Git reference / commit validators ────────────────────────────────────────
 
 /// Return `true` if `s` is a full 40-character lowercase-or-uppercase hex SHA.

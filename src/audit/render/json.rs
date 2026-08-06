@@ -317,4 +317,36 @@ mod tests {
         keys.sort();
         assert_eq!(keys, vec!["downloaded_files", "metrics", "overview"]);
     }
+
+    #[test]
+    fn ado_proxy_analysis_round_trips_as_optional_public_json() {
+        let original = AuditData {
+            ado_proxy_analysis: Some(AdoProxyAnalysis {
+                schema_version: Some(String::from("ado-aw/ado-proxy-decisions/v1")),
+                total_requests: 2,
+                allow_count: 1,
+                deny_count: 1,
+                reasons: vec![AdoProxyReasonStat {
+                    reason: String::from("out-of-scope"),
+                    decision: String::from("deny"),
+                    count: 1,
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let rendered = render_json_to_string(&original).expect("render proxy analysis");
+        let value: Value = serde_json::from_str(&rendered).expect("parse proxy JSON");
+
+        assert_eq!(
+            value["ado_proxy_analysis"]["schema_version"],
+            "ado-aw/ado-proxy-decisions/v1"
+        );
+        assert_eq!(value["ado_proxy_analysis"]["total_requests"], 2);
+        assert!(value["ado_proxy_analysis"].get("raw_url").is_none());
+
+        let round_tripped: AuditData =
+            serde_json::from_str(&rendered).expect("deserialize proxy analysis");
+        assert_eq!(round_tripped, original);
+    }
 }

@@ -313,7 +313,7 @@ describe("parseManifest", () => {
             },
           ]),
         ),
-      ).toThrow(/must declare agentCommand and\/or requiredBuildTags/);
+      ).toThrow(/must declare agentCommand, pipelineText and\/or requiredBuildTags/);
     });
 
     it("rejects an agentCommand with no snippets", () => {
@@ -331,6 +331,30 @@ describe("parseManifest", () => {
           ]),
         ),
       ).toThrow(/at least one snippet/);
+    });
+
+    it("parses pipelineText assertions", () => {
+      const parsed = parseManifest(
+        cases([
+          {
+            id: "x",
+            lane: "agentic",
+            kind: "compiled",
+            modes: ["candidate", "released"],
+            source: "a.md",
+            assertions: {
+              pipelineText: {
+                required: ["Start ado-proxy"],
+                forbidden: ["$SC_READ_TOKEN"],
+              },
+            },
+          },
+        ]),
+      );
+      expect(parsed.cases[0]?.assertions?.pipelineText).toEqual({
+        required: ["Start ado-proxy"],
+        forbidden: ["$SC_READ_TOKEN"],
+      });
     });
   });
 });

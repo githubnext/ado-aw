@@ -36,9 +36,9 @@ pool:                          # Optional pool configuration
 #     conclusion:
 #       vmImage: ubuntu-22.04
 repos:                           # compact repository declarations (replaces repositories: + checkout:)
-  - my-org/my-repo               # shorthand: alias="my-repo", type=git, ref=refs/heads/main, checkout=true
-  - reponame=my-org/another-repo # shorthand with explicit alias
-  - name: my-org/templates       # object form for full control
+  - MyProject/my-repo               # shorthand: alias="my-repo", type=git, ref=refs/heads/main, checkout=true
+  - reponame=MyProject/another-repo # shorthand with explicit alias
+  - name: octo/templates           # object form for an external repository
     type: github                 # external repo resource type; default is git
     ref: refs/heads/release/2.x
     checkout: false              # declared as resource only, not checked out by the agent
@@ -253,7 +253,16 @@ network:                       # optional network policy (standalone target only
 # variable-groups:              # optional: import ADO Library variable groups (standalone/1es only)
 #   - My Variable Group         # each entry must be the exact ADO Library group name (see "Variable Groups" section)
 permissions:                   # optional ADO access token configuration (see docs/network.md#permissions-ado-access-tokens)
-  read: my-read-arm-connection   # ARM service connection for read-only ADO access (Stage 1 agent)
+  read: my-read-arm-connection   # shorthand: proxy gets the ARM SC token; Agent/MCP/az get no real token
+  # read:                        # object form: narrow capabilities / add cross-org or project scope
+  #   service-connection: my-read-arm-connection
+  #   capabilities: [core, repos] # discovery is always enabled
+  #   allow:                     # additive to current org/project/repo and type: git repos:
+  #     - organization: partner-org # same AAD tenant; cross-tenant needs another credential
+  #       projects:
+  #         - project: Shared
+  #           project-id: 33333333-3333-3333-3333-333333333333 # optional GUID-form calls
+  #           repositories: [shared-api] # empty/omitted => project reads only
   write: my-write-arm-connection # OPTIONAL ARM SC for Stage 3 executor writes.
                                  # Default: executor uses $(System.AccessToken).
                                  # Set this only for cross-org writes or

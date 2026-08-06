@@ -976,7 +976,7 @@ pub async fn resolve_auth(pat: Option<&str>) -> Result<AdoAuth> {
             info!("No PAT provided, trying Azure CLI authentication...");
             match try_azure_cli_token().await {
                 Ok(token) => {
-                    println!("Using Azure CLI authentication (az account get-access-token)");
+                    eprintln!("Using Azure CLI authentication (az account get-access-token)");
                     Ok(AdoAuth::Bearer(token))
                 }
                 Err(e) => {

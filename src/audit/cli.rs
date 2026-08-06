@@ -10,9 +10,10 @@ use crate::ado::{
     resolve_ado_context, resolve_auth,
 };
 use crate::audit::analyzers::{
-    custom_jobs, detection, firewall, jobs, mcp, missing, otel, policy, safe_outputs,
+    ado_proxy, custom_jobs, detection, firewall, jobs, mcp, missing, otel, policy, safe_outputs,
 };
 use crate::audit::cache::{RunSummary, load_run_summary, save_run_summary};
+use crate::audit::find_artifact_dir;
 use crate::audit::findings;
 use crate::audit::model::{AuditData, ErrorInfo, FileInfo, OverviewData};
 use crate::audit::pipeline_graph;
@@ -467,6 +468,27 @@ fn apply_safe_output_analysis(audit: &mut AuditData, result: safe_outputs::SafeO
 
 /// Run analyzers that operate on the `agent_outputs` artifact directory.
 async fn run_agent_output_analyzers(agent_outputs_dir: &Path, audit: &mut AuditData) {
+    let ado_proxy_dir = agent_outputs_dir.join("logs").join("ado-proxy");
+    run_analyzer(
+        audit,
+        "audit::ado_proxy",
+        "ado-proxy analysis failed",
+        ado_proxy::analyze_ado_proxy_logs(&ado_proxy_dir).await,
+        |a, result| {
+            a.ado_proxy_analysis = result.analysis;
+            for message in result.warnings {
+                crate::audit::push_warning_once(
+                    a,
+                    ErrorInfo {
+                        source: String::from("audit::ado_proxy"),
+                        message,
+                        timestamp: None,
+                    },
+                );
+            }
+        },
+    );
+
     let firewall_dir = agent_outputs_dir.join("logs").join("firewall");
     run_analyzer(
         audit,
@@ -951,23 +973,6 @@ async fn collect_files_under(run_dir: &Path, start_dir: &Path) -> Result<Vec<Fil
     Ok(files)
 }
 
-async fn find_artifact_dir(run_dir: &Path, prefix: &str) -> Option<PathBuf> {
-    let mut entries = tokio::fs::read_dir(run_dir).await.ok()?;
-    let mut hits: Vec<(String, PathBuf)> = Vec::new();
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false)
-            && let Some(name) = entry.file_name().to_str()
-            && (name == prefix || name.starts_with(&format!("{}_", prefix)))
-        {
-            hits.push((name.to_string(), entry.path()));
-        }
-    }
-    // Numeric-suffix sort so `agent_outputs_10` outranks
-    // `agent_outputs_9` (lexicographic sort gets this wrong).
-    hits.sort_by(|(a, _), (b, _)| crate::audit::cmp_numeric_suffix(a, b));
-    hits.pop().map(|(_, path)| path)
-}
-
 fn is_authz_error(error: &anyhow::Error) -> bool {
     let message = error.to_string().to_ascii_lowercase();
     message.contains("ado api returned 401") || message.contains("ado api returned 403")
@@ -1017,6 +1022,66 @@ fn render_audit(audit: &AuditData, json: bool) -> Result<()> {
 mod tests {
     use super::*;
     use crate::audit::model::{CustomSafeOutputJobAudit, Finding, JobData, Recommendation};
+
+    #[tokio::test]
+    async fn agent_output_analyzers_load_proxy_logs_from_canonical_path() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let proxy_dir = temp_dir.path().join("logs").join("ado-proxy");
+        tokio::fs::create_dir_all(&proxy_dir)
+            .await
+            .expect("create proxy log directory");
+        tokio::fs::write(
+            proxy_dir.join("ado-proxy-decisions.jsonl"),
+            concat!(
+                "{\"schema\":\"ado-aw/ado-proxy-decisions/v1\"}\n",
+                "{\"ts\":\"2026-01-01T00:00:00Z\",\"request_id\":\"1\",\"host\":\"dev.azure.com\",\"method\":\"GET\",\"operation\":\"core.project.get\",\"decision\":\"allow\",\"stripped_credentials\":[]}\n"
+            ),
+        )
+        .await
+        .expect("write proxy decision log");
+
+        let mut audit = AuditData::default();
+        run_agent_output_analyzers(temp_dir.path(), &mut audit).await;
+
+        let analysis = audit.ado_proxy_analysis.expect("proxy analysis populated");
+        assert_eq!(analysis.total_requests, 1);
+        assert_eq!(analysis.allow_count, 1);
+        assert!(
+            audit
+                .warnings
+                .iter()
+                .all(|warning| warning.source != "audit::ado_proxy")
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_output_analyzers_surface_proxy_parse_warnings_without_raw_lines() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let proxy_dir = temp_dir.path().join("logs").join("ado-proxy");
+        tokio::fs::create_dir_all(&proxy_dir)
+            .await
+            .expect("create proxy log directory");
+        tokio::fs::write(
+            proxy_dir.join("ado-proxy-decisions.jsonl"),
+            concat!(
+                "{\"schema\":\"ado-aw/ado-proxy-decisions/v1\"}\n",
+                "{\"secret\":\"must-not-appear\"}\n"
+            ),
+        )
+        .await
+        .expect("write malformed proxy decision log");
+
+        let mut audit = AuditData::default();
+        run_agent_output_analyzers(temp_dir.path(), &mut audit).await;
+
+        let warning = audit
+            .warnings
+            .iter()
+            .find(|warning| warning.source == "audit::ado_proxy")
+            .expect("proxy warning");
+        assert!(warning.message.contains("1 malformed decision record"));
+        assert!(!warning.message.contains("must-not-appear"));
+    }
 
     #[tokio::test]
     async fn cached_reprocessing_resets_derived_state_and_pass_warnings() {

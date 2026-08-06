@@ -220,6 +220,25 @@ export function assertAgentCommandPolicy(
   }
 }
 
+/** Assert required and forbidden snippets against the complete compiled YAML. */
+export function assertPipelineTextPolicy(
+  yamlText: string,
+  label: string,
+  requiredSnippets: readonly string[],
+  forbiddenSnippets: readonly string[],
+): void {
+  for (const snippet of requiredSnippets) {
+    if (!yamlText.includes(snippet)) {
+      throw new Error(`${label}: compiled pipeline is missing required snippet '${snippet}'`);
+    }
+  }
+  for (const snippet of forbiddenSnippets) {
+    if (yamlText.includes(snippet)) {
+      throw new Error(`${label}: compiled pipeline contains forbidden snippet '${snippet}'`);
+    }
+  }
+}
+
 /**
  * Throws unless every `DownloadPipelineArtifact` "specific run" step in the
  * compiled YAML carries exactly the expected project/pipeline/runId/artifact

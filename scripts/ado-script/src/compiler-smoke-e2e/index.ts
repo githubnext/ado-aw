@@ -32,6 +32,7 @@ import { mkdir } from "node:fs/promises";
 import { AdoRest } from "./ado-rest.js";
 import {
   assertAgentCommandPolicy,
+  assertPipelineTextPolicy,
   assertAdoTokenIsolation,
   assertNoForbiddenReleaseUrls,
   assertNoTriggers,
@@ -167,6 +168,10 @@ async function stageCase(
   const agentCommand = entry.assertions?.agentCommand;
   if (agentCommand) {
     assertAgentCommandPolicy(yamlText, entry.id, agentCommand.required, agentCommand.forbidden);
+  }
+  const pipelineText = entry.assertions?.pipelineText;
+  if (pipelineText) {
+    assertPipelineTextPolicy(yamlText, entry.id, pipelineText.required, pipelineText.forbidden);
   }
 
   // The staged copy is byte-identical to the compiled lock, so the pipeline's

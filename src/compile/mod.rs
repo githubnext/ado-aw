@@ -7,6 +7,7 @@
 //! - **1ES**: Integration with 1ES Pipeline Templates for SDL compliance
 
 mod common;
+pub mod az_wrapper;
 pub(crate) use common::resolve_repos;
 pub(crate) mod ado_bundle;
 pub(crate) mod agentic_pipeline;
@@ -37,14 +38,22 @@ use async_trait::async_trait;
 use log::{debug, info};
 use std::path::{Path, PathBuf};
 
+pub use common::ADO_MCP_CA_MOUNT;
+pub use common::ADO_MCP_ENTRY_SCRIPT;
 pub use common::ADO_MCP_ENTRYPOINT;
+pub use common::ADO_MCP_HOST_NODE_MODULES;
 pub use common::ADO_MCP_IMAGE;
-pub use common::ADO_MCP_PACKAGE;
+pub use common::ADO_MCP_NODE_MODULES;
 pub use common::ADO_MCP_SERVER_NAME;
+pub use common::ADO_MCP_VERSION;
+pub use common::ADO_MCP_TOKEN_SENTINEL;
+pub use common::ADO_PROXY_NETWORK_NAME;
+pub use common::ADO_PROXY_PUBLIC_CA_HOST_PATH;
 pub use common::AWF_VERSION;
 pub use common::HEADER_MARKER;
 pub use common::MCPG_VERSION;
 pub use common::normalize_source_path;
+pub use common::resolve_ado_organization_bash;
 #[allow(unused_imports)]
 pub use common::parse_markdown;
 #[allow(unused_imports)]

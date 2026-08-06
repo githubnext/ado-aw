@@ -64,7 +64,8 @@ During Stage 3 execution, memory files are validated (path safety, extension fil
 
 ### Azure DevOps MCP (`azure-devops:`)
 
-First-class Azure DevOps MCP integration. Auto-configures the ADO MCP container, token mapping, MCPG entry, and network allowlist.
+First-class Azure DevOps MCP integration. Auto-configures the ADO MCP
+container, credential-isolated policy proxy, and MCPG entry.
 
 ```yaml
 # Simple enablement (auto-infers org from git remote)
@@ -80,27 +81,35 @@ tools:
 ```
 
 When enabled, the compiler:
-- Generates a containerized stdio MCP entry (`node:20-slim` + `npx @azure-devops/mcp`) in the MCPG config
-- Injects `ADO_MCP_AUTH_TOKEN` (sourced from `SC_READ_TOKEN`) into the MCP container when `permissions.read` is configured — this authenticates the ADO MCP
-- Adds ADO-specific hosts to the network allowlist
+- Requires `permissions.read` as the trusted proxy's token source
+- Installs the pinned `@azure-devops/mcp` package on the runner and mounts it
+  read-only into an unchanged `node:20-slim` container; the isolated container
+  needs no npm registry access
+- Runs that container on an internal network with `dev.azure.com` redirected
+  to `ado-proxy` and a public interception CA trusted only by that process
+- Gives the MCP a non-secret sentinel in `ADO_MCP_AUTH_TOKEN`; the real token
+  exists only in `ado-proxy`, which strips client credentials and attaches its
+  bearer after an allow decision
 - Auto-infers org from the git remote URL at compile time (overridable via `org:` field)
 - Fails compilation if org cannot be determined (no explicit override and no ADO git remote)
 
-> **Note:** `AZURE_DEVOPS_EXT_PAT` is a separate variable — it is injected by AWF into the agent sandbox for use by `az devops` CLI subcommands (see [Built-in CLIs — Azure CLI](#azure-cli-az) below), not by this extension for the MCP container.
+The generated `az` wrapper similarly carries only a sentinel PAT and routes
+Azure DevOps traffic through the proxy. Catalogued reads (`az devops`,
+`az repos`, `az pipelines`, `az boards`, and `az rest`) work without signing
+in; writes and secret-bearing route families fail closed.
 
-## Built-in CLIs
-
-Two CLI tools are always available to the agent's bash tool without
-opting in. This mirrors gh-aw's "the runner has `gh`" assumption: the
-host is presumed to have each binary pre-installed.
+## Host-provided CLIs
 
 ### Azure CLI (`az`)
 
-Every compiled pipeline adds the Azure auth and management hosts
-(`login.microsoftonline.com`, `login.windows.net`,
-`management.azure.com`, `graph.microsoft.com`, `aka.ms`) to the AWF
-allowlist and emits a *Detect Azure CLI on host* prepare step in the
-Agent job. The compiler does not install `az`.
+Azure CLI is available only when `permissions.read` enables `ado-proxy`.
+Without it, the compiler emits no detection, mount, wrapper, PATH entry, shell
+permission, or Azure CLI-specific host contribution.
+
+With `permissions.read`, the compiler adds the relevant hosts and emits a
+*Detect Azure CLI on host* prepare step in the Agent job. The compiler does not
+install `az`; when the runner provides it, the binary is mounted only behind
+the generated wrapper.
 
 **Runtime detection + graceful degradation.** The detection step does
 two things at pipeline time:
@@ -122,7 +131,7 @@ the two mounts appear; absent → the line collapses to nothing. No
 static `--mount` is emitted for `/opt/az` or `/usr/bin/az`, so the
 pipeline never crashes `docker run` with "bind source path does not
 exist" on runners without `az`. See
-[`docs/network.md`](network.md#always-on-azure-cli-az) for the full
+[`docs/network.md`](network.md#proxy-gated-azure-cli-az) for the full
 design.
 
 **Conditional agent prompt advisory.** When (and only when) `az` is
@@ -140,24 +149,16 @@ preventing "told to use `az`, fails with command not found" loops.
 | 1ES self-hosted pool with `azure-cli` | Same as above                                             |
 | 1ES self-hosted pool *without* `az`   | Pipeline runs; warning in ADO log; `az` is `command not found` inside the sandbox |
 
-**Auth scope (important).** The compiler does not authenticate `az` for
-general use. Two paths are supported:
-
-1. **`az devops *` subcommands** (work items, repos, pipelines, etc.)
-   are automatically authenticated via `AZURE_DEVOPS_EXT_PAT`, which
-   the compiler populates inside AWF whenever `permissions.read` is
-   configured. No extra steps needed.
-2. **General `az` / ARM / Graph commands** (`az account get-access-token`,
-   `az resource ...`, `az ad ...`, etc.) require their own
-   authentication. The agent has no inherited cloud identity; you
-   must `az login` explicitly (e.g. via a federated identity flow you
-   provision yourself) before calling these commands.
+**Auth scope (important).** The compiler exposes the binary but does not
+authenticate direct `az` commands. This includes `az devops`, ARM, and Graph
+subcommands. When configured, use `tools.azure-devops` for authenticated ADO
+reads. Do not run `az login` or inject Azure credentials into the Agent
+sandbox; use SafeOutputs or request a supported tool instead.
 
 A daily smoke pipeline at
 [`tests/safe-outputs/azure-cli.md`](../tests/safe-outputs/azure-cli.md)
-exercises this wiring (calls `az --version` and `az devops project list`
-against the host org) — see its compiled lock file for the exact
-generated YAML.
+exercises binary/subcommand availability without claiming authenticated direct
+ADO access.
 
 ### GitHub CLI (`gh`)
 

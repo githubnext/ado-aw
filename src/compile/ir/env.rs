@@ -171,6 +171,11 @@ pub const ALLOWED_ADO_MACROS: &[&str] = &[
     "System.AccessToken",
     "System.CollectionUri",
     "System.TeamProject",
+    // Project GUID. Azure DevOps clients address a project by name in some
+    // calls and by GUID in others — `az` substitutes whichever it cached — so
+    // the ado-proxy policy document must carry both forms or a GUID-addressed
+    // request to the current project is denied.
+    "System.TeamProjectId",
     "System.DefinitionId",
     // PR-build identifiers — coalesced with synthPr.* outputs on the
     // synthetic-from-CI path.

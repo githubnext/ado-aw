@@ -33,7 +33,9 @@
 //! - [`Identifier`] — an engine agent/model identifier.
 //! - [`HostName`] — a DNS-style hostname.
 //! - [`RegistryRef`] — a container-registry host or base path.
+//! - [`AdoOrganization`] — an Azure DevOps Services organization name.
 //! - [`AdoProject`] — an Azure DevOps project name or GUID.
+//! - [`AdoRepository`] — an Azure DevOps repository name or GUID.
 //! - [`Version`] — a version string (`1.2.3`, `latest`).
 //!
 //! New safe-output tools that accept paths or identifiers should type those
@@ -368,6 +370,27 @@ validated_string! {
 }
 
 validated_string! {
+    /// An Azure DevOps Services organization name.
+    AdoOrganization, "organization", |value: &str, label: &str| {
+        let valid = !value.is_empty()
+            && value.len() <= 64
+            && !value.starts_with('-')
+            && !value.ends_with('-')
+            && value
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-');
+        if valid {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "{label} '{value}' must be 1-64 ASCII alphanumeric or '-' \
+                 characters and must not start or end with '-'"
+            )
+        }
+    }
+}
+
+validated_string! {
     /// An Azure DevOps project name or GUID.
     AdoProject, "project", |value: &str, label: &str| {
         let bytes = value.as_bytes();
@@ -403,6 +426,64 @@ validated_string! {
                 "{label} '{value}' must be an Azure DevOps project name \
                  (1-64 characters, no reserved punctuation, leading '_' or \
                  leading/trailing '.') or a canonical GUID"
+            )
+        }
+    }
+}
+
+validated_string! {
+    /// An Azure DevOps repository name or GUID.
+    AdoRepository, "repository", |value: &str, label: &str| {
+        let bytes = value.as_bytes();
+        let is_guid = bytes.len() == 36
+            && bytes.iter().enumerate().all(|(index, byte)| {
+                if matches!(index, 8 | 13 | 18 | 23) {
+                    *byte == b'-'
+                } else {
+                    byte.is_ascii_hexdigit()
+                }
+            });
+        let invalid_name_char = |c: char| {
+            c.is_control()
+                || matches!(
+                    c,
+                    '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+                        | ';' | '#' | '$' | '{' | '}' | '[' | ']'
+                )
+        };
+        let char_count = value.chars().count();
+        let is_name = char_count > 0
+            && char_count <= 64
+            && value.trim() == value
+            && !value.starts_with('.')
+            && !value.ends_with('.')
+            && !value.chars().any(invalid_name_char);
+
+        if is_guid || is_name {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "{label} '{value}' must be an Azure DevOps repository name \
+                 (1-64 characters, no reserved punctuation or \
+                 leading/trailing '.') or a canonical GUID"
+            )
+        }
+    }
+}
+
+validated_string! {
+    /// A canonical `8-4-4-4-12` hex GUID.
+    ///
+    /// Used by the Azure DevOps policy proxy for project / repository /
+    /// resource-area identifiers, where a scope comparison must be an exact
+    /// match rather than a name lookup. See
+    /// [`crate::validate::is_valid_guid`].
+    Guid, "guid", |value: &str, label: &str| {
+        if validate::is_valid_guid(value) {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "{label} '{value}' must be a canonical 8-4-4-4-12 hex GUID"
             )
         }
     }
@@ -515,6 +596,35 @@ mod tests {
         assert!(AdoProject::parse("bad/project").is_err());
         assert!(AdoProject::parse("bad$(macro)").is_err());
         assert!(AdoProject::parse("x".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn ado_organization_rules() {
+        assert!(AdoOrganization::parse("contoso-dev").is_ok());
+        assert!(AdoOrganization::parse("-contoso").is_err());
+        assert!(AdoOrganization::parse("contoso/other").is_err());
+        assert!(AdoOrganization::parse("x".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn ado_repository_name_or_guid_rules() {
+        assert!(AdoRepository::parse("Repo One").is_ok());
+        assert!(AdoRepository::parse("12345678-1234-1234-1234-1234567890ab").is_ok());
+        assert!(AdoRepository::parse("../repo").is_err());
+        assert!(AdoRepository::parse("bad/repo").is_err());
+        assert!(AdoRepository::parse("bad$(macro)").is_err());
+    }
+
+    #[test]
+    fn guid_accepts_only_the_canonical_form() {
+        assert!(Guid::parse("12345678-1234-1234-1234-1234567890ab").is_ok());
+        assert!(Guid::parse("12345678-1234-1234-1234-1234567890AB").is_ok());
+        assert!(Guid::parse("{12345678-1234-1234-1234-1234567890ab}").is_err());
+        assert!(Guid::parse("urn:uuid:12345678-1234-1234-1234-1234567890ab").is_err());
+        assert!(Guid::parse("12345678123412341234567890ab").is_err());
+        assert!(Guid::parse("12345678-1234-1234-1234-1234567890ag").is_err());
+        assert!(Guid::parse(" 12345678-1234-1234-1234-1234567890ab").is_err());
+        assert!(Guid::parse("").is_err());
     }
 
     #[test]

@@ -442,6 +442,63 @@ mirror of the IR — so the spec contract cannot drift between compiler
 and evaluator. CI enforces this with a `git diff --exit-code` step on
 the codegen output.
 
+## `ado-proxy`: the same contract, applied to policy
+
+`ado-proxy.js` is the credential-isolated Azure DevOps policy proxy. A host
+step mounts it into `node:20-slim`, and AWF attaches that externally launched
+container to its internal network (see
+[`ado-proxy-design.md`](ado-proxy-design.md)). It is the
+one bundle that is a **long-running server** rather than a single-shot step: it
+starts before the agent and is torn down when the agent exits.
+
+Because the compiler *emits* the policy document and the bundle *consumes* it,
+the two must not diverge. The catalog of permitted Azure DevOps operations is
+authored once, in Rust (`src/ado_proxy/catalog.rs`), and everything else is
+generated from it by `npm run codegen`:
+
+| Artefact | Produced by | Guards against |
+|---|---|---|
+| `schema/ado-proxy-catalog.schema.json` | `cargo run -- export-ado-proxy-catalog-schema` | — |
+| `src/shared/ado-proxy-catalog.types.gen.ts` | `json2ts` over that schema | compiling against a stale *shape* |
+| `src/ado-proxy/catalog.gen.json` | `cargo run -- export-ado-proxy-catalog` | a stale *policy* — `catalog-drift.test.ts` re-runs the exporter and fails on any diff |
+
+A third guard runs at execution time: the compiler stamps
+`catalog_version` into the emitted policy document, and the bundle refuses to
+start unless it matches the version compiled into it. A stale mounted policy
+file therefore fails closed instead of silently under-enforcing. The same
+startup check rejects an unrecognized policy key, and a policy whose
+`protected_hosts` omits any catalogued host — either would let a host the
+catalog expects to police take the unchecked byte-tunnel path instead.
+
+This mirrors the `export-gate-schema` / `export-fact-catalog` pattern above.
+
+### Modules inside `ado-proxy.js`
+
+Unlike the single-shot bundles, `ado-proxy` is split by security concern so
+each boundary can be tested in isolation:
+
+| Module | Responsibility |
+|---|---|
+| `config.ts` | Parse argv / env and the mounted policy document. Fail-closed on anything unrecognized, including nested scope keys. |
+| `catalog.ts` | Load the generated snapshot; canonicalize hosts (case, `host:port`, trailing DNS dot) for the protected-set check. |
+| `route.ts` | Normalize the request target and match catalog route templates. Refuses ambiguous encodings rather than rewriting them. |
+| `api-version.ts` | Resolve the API version from both the query string and the `Accept` header, and reject disagreement or an out-of-window value. |
+| `scope.ts` | Build the organization-relative current/additional scope index once at startup, preserving repository-only grants. |
+| `policy.ts` | The allow/deny decision: method, denied family, route, capability, version, query, and scope. |
+| `headers.ts` | Allow-list request and response headers; strip every client credential. |
+| `token.ts` | Hold the one-shot stdin bearer in memory. |
+| `ca.ts` | Parse the versioned stdin material document (CA, per-host leaves, bearer) and publish only the public PEM. |
+| `upstream.ts` | CONNECT through Squid — the sidecar's only route out. |
+| `response.ts` | Bound and filter response bodies; validate organization-addressed reads against the organization-relative scope index. |
+| `log.ts` | The schema-versioned, sanitized JSONL decision stream. |
+| `server.ts` | Wire the two request paths together. |
+
+`proxy.e2e.test.ts` exercises the assembled server against a fake Squid and a
+fake Azure DevOps with a canary bearer, asserting both that an allowed read
+carries the injected credential and that every denial is refused *before* the
+upstream is contacted. It needs `openssl` on `PATH` (CI has it; on Windows the
+test also looks in the Git for Windows toolchain).
+
 ## Runtime stages inside `gate.js`
 
 `gate.js`'s entry point is `src/gate/index.ts`. It runs five stages,

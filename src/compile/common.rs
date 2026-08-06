@@ -11,6 +11,7 @@ use super::types::{
     CheckoutFetchOpts, CompileTarget, FrontMatter, PipelineParameter, PoolConfig, ReposItem,
     Repository, SELF_CHECKOUT_ALIAS,
 };
+use crate::ado_proxy::catalog::Capability;
 use crate::allowed_hosts::{CORE_ALLOWED_HOSTS, mcp_required_hosts};
 use crate::compile::types::McpConfig;
 use crate::ecosystem_domains::{
@@ -43,6 +44,63 @@ pub async fn atomic_write(path: &Path, contents: &str) -> Result<()> {
     tokio::task::spawn_blocking(move || atomic_write_blocking(&path, &owned_contents))
         .await
         .context("atomic_write task panicked")?
+}
+
+#[test]
+fn test_validate_permissions_read_policy_requires_token_source_when_proxied() {
+    let (missing, _) = parse_markdown(
+        "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: contoso\n---\n",
+    )
+    .unwrap();
+
+    let error = validate_permissions_read_policy(&missing)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("tools.azure-devops requires `permissions.read`"),
+        "message must name the missing configuration: {error}"
+    );
+    assert!(
+        error.contains("agent and Azure DevOps MCP receive no real credential"),
+        "message must explain custody rather than asking the author to expose a token: {error}"
+    );
+}
+
+#[test]
+fn test_validate_permissions_read_policy_ignores_explicitly_disabled_tool() {
+    let (disabled, _) = parse_markdown(
+        "---\nname: test\ndescription: test\ntools:\n  azure-devops: false\n---\n",
+    )
+    .unwrap();
+
+    validate_permissions_read_policy(&disabled).unwrap();
+    assert!(!ado_proxy_enabled(&disabled));
+}
+
+#[test]
+fn test_ado_proxy_activation_follows_permissions_read_not_mcp_tool() {
+    for (source, expected) in [
+        ("---\nname: t\ndescription: x\n---\n", false),
+        (
+            "---\nname: t\ndescription: x\ntools:\n  azure-devops: true\n---\n",
+            false,
+        ),
+        (
+            "---\nname: t\ndescription: x\npermissions:\n  read: my-read-sc\n---\n",
+            true,
+        ),
+        (
+            "---\nname: t\ndescription: x\ntools:\n  azure-devops: false\npermissions:\n  read:\n    service-connection: my-read-sc\n    capabilities: [core]\n---\n",
+            true,
+        ),
+    ] {
+        let (front_matter, _) = parse_markdown(source).unwrap();
+        assert_eq!(
+            ado_proxy_enabled(&front_matter),
+            expected,
+            "unexpected activation for:\n{source}"
+        );
+    }
 }
 
 /// Returns the directory in which the atomic tempfile should be created for a
@@ -543,6 +601,77 @@ pub fn validate_front_matter_identity(front_matter: &FrontMatter) -> Result<()> 
     }
 
     Ok(())
+}
+
+/// Longest `timeout-minutes` a proxied workflow may declare.
+///
+/// The engine receives one Azure DevOps bearer on stdin and cannot rotate it,
+/// so a run must not outlive the token. Azure DevOps access tokens are
+/// typically valid for about an hour; 50 minutes leaves headroom for the token
+/// being minted before the Agent job starts and for clock skew.
+///
+/// This is a *compile-time* bound on purpose. Without it the failure surfaces
+/// mid-run as opaque `502`s from the engine — worse than today's behaviour,
+/// because the agent cannot tell an expired credential from a policy denial.
+/// Raising it requires a rotating delivery mechanism, not a bigger number.
+pub const MAX_PROXIED_TIMEOUT_MINUTES: u32 = 50;
+
+/// Reject a `timeout-minutes` that could outlive the proxy's bearer.
+///
+/// Only applies once a workflow opts into the proxied read path; unproxied
+/// workflows are unaffected, since their agent holds no Azure DevOps
+/// credential to expire.
+pub fn validate_proxied_timeout(front_matter: &FrontMatter, timeout_minutes: u32) -> Result<()> {
+    if timeout_minutes <= MAX_PROXIED_TIMEOUT_MINUTES {
+        return Ok(());
+    }
+    let uses_proxy = ado_proxy_enabled(front_matter);
+    if !uses_proxy {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "timeout-minutes: {timeout_minutes} exceeds the maximum of \
+         {MAX_PROXIED_TIMEOUT_MINUTES} for workflows using the credential-isolated Azure \
+         DevOps proxy. The proxy holds a single Azure DevOps token that it cannot renew, so \
+         a longer run would start failing Azure DevOps reads partway through. Lower \
+         timeout-minutes, or split the work across runs."
+    )
+}
+
+/// Validate explicit Stage 1 read-policy options before policy emission.
+///
+/// The object form is now consumed by [`crate::ado_proxy::policy::PolicyDocument`]:
+/// capabilities narrow the operation catalog and `allow:` lowers into the
+/// bundle's organization-relative scope tree. Structural validation remains on
+/// the compile path so a widening produced by omission — such as naming an
+/// organization with no projects — fails before any pipeline is emitted.
+pub fn validate_permissions_read_policy(front_matter: &FrontMatter) -> Result<()> {
+    if ado_mcp_enabled(front_matter)
+        && front_matter
+            .permissions
+            .as_ref()
+            .and_then(|permissions| permissions.read.as_ref())
+            .is_none()
+    {
+        anyhow::bail!(
+            "tools.azure-devops requires `permissions.read` so the trusted ado-proxy \
+             process can acquire an Azure DevOps token. Add either \
+             `permissions:\\n  read: <arm-service-connection>` or the object form \
+             with `service-connection:`. The token is delivered only to the proxy; \
+             the agent and Azure DevOps MCP receive no real credential."
+        );
+    }
+
+    let Some(options) = front_matter
+        .permissions
+        .as_ref()
+        .and_then(|permissions| permissions.read.as_ref())
+        .and_then(crate::compile::types::ReadPermissionConfig::options)
+    else {
+        return Ok(());
+    };
+
+    options.validate()
 }
 
 /// Validate the `variable-groups:` front-matter block (issue #1385).
@@ -1605,13 +1734,221 @@ pub const MCPG_CONTAINER_NAME: &str = MCPG_DOMAIN;
 pub const ADO_MCP_IMAGE: &str = "node:20-slim";
 
 /// Default entrypoint for the Azure DevOps MCP container.
-pub const ADO_MCP_ENTRYPOINT: &str = "npx";
+///
+/// The MCP is launched directly rather than through `npx`: the package is
+/// installed on the runner and mounted in, so the container needs no registry
+/// access and resolves nothing at start time.
+pub const ADO_MCP_ENTRYPOINT: &str = "node";
+
+/// Mount point for the pre-installed Azure DevOps MCP package.
+///
+/// Load-bearing: Node resolves dependencies by walking *upward* from the
+/// importing file, so the tree must sit at `/app/node_modules` for the MCP's
+/// own dependencies to resolve. Mounting it anywhere else fails at import with
+/// `ERR_MODULE_NOT_FOUND` for `@modelcontextprotocol/sdk`.
+pub const ADO_MCP_NODE_MODULES: &str = "/app/node_modules";
+
+/// Entry script of the Azure DevOps MCP package inside the container.
+pub const ADO_MCP_ENTRY_SCRIPT: &str = "/app/node_modules/@azure-devops/mcp/dist/index.js";
+
+/// Where the runner stages the installed MCP package for mounting.
+pub const ADO_MCP_HOST_NODE_MODULES: &str = "/tmp/ado-aw-mcp/node_modules";
+
+/// Non-secret placeholder handed to the MCP in place of an Azure DevOps token.
+///
+/// The MCP authenticates with whatever is in `ADO_MCP_AUTH_TOKEN`, but under
+/// interception it never talks to Azure DevOps directly: the policy engine
+/// strips every client credential and attaches the real bearer only after a
+/// complete allow decision. Passing the real token here would make the proxy
+/// decorative on this path — the MCP could authenticate directly if it ever
+/// reached Azure DevOps by another route, and the credential would sit in a
+/// container the agent can influence through tool calls.
+///
+/// Deliberately self-describing: it shows up in logs and error messages, where
+/// it should read as intentional rather than as a misconfiguration.
+pub const ADO_MCP_TOKEN_SENTINEL: &str = "ado-proxy-injects-the-real-credential";
+
+/// Docker network shared by the policy engine and the Azure DevOps MCP.
+///
+/// Created `--internal`: a normal user-defined bridge has outbound NAT, which
+/// would leave the MCP a direct route to the internet and reduce the engine to
+/// policing only the single hostname the redirect overrides. Internal networks
+/// still route between their own members, so the MCP reaches the engine and
+/// nothing else. The engine keeps its own egress because AWF dual-homes it
+/// onto `awf-net`, where Squid lives.
+pub const ADO_PROXY_NETWORK_NAME: &str = "ado-aw-proxy-net";
+
+/// Path the public interception CA is mounted at inside client containers.
+pub const ADO_MCP_CA_MOUNT: &str = "/etc/ado-proxy/ca.pem";
+
+/// Bash that derives the Azure DevOps organization name from
+/// `$(System.CollectionUri)` into `$ADO_PROXY_ORGANIZATION`.
+///
+/// One implementation on purpose, because the two it replaced were both wrong
+/// for a form the other handled. `engine.rs` stripped a literal
+/// `https://dev.azure.com/` prefix, a no-op for `https://myorg.visualstudio.com/`
+/// that yields the whole URL; taking the last path segment gets `dev.azure.com`
+/// URLs right but returns `myorg.visualstudio.com` for the legacy host form.
+///
+/// Both collection shapes are still issued by Azure DevOps, so this handles
+/// each explicitly: with a path segment after the host, the last segment is
+/// the organization (or collection); with none, the first label of the host
+/// is. Getting this wrong is not cosmetic — in a policy document a wrong
+/// organization matches nothing, denying every request in a way that reads as
+/// a deliberate policy decision.
+pub fn resolve_ado_organization_bash() -> String {
+    "# $(System.CollectionUri) is expanded by ADO before bash runs. Two\n\
+     # shapes are in use: \"https://dev.azure.com/myorg/\" (organization in\n\
+     # the path) and the legacy \"https://myorg.visualstudio.com/\"\n\
+     # (organization in the host). Handle both — a fixed-prefix strip or a\n\
+     # bare last-segment rule is silently wrong for one of them.\n\
+     ADO_PROXY_COLLECTION=\"$(System.CollectionUri)\"\n\
+     ADO_PROXY_ORGANIZATION=$(printf '%s' \"$ADO_PROXY_COLLECTION\" \\\n\
+       | sed -e 's#^https\\?://##' -e 's#/*$##' \\\n\
+       | awk -F/ '{ if (NF>1) print $NF; else { sub(/\\..*$/, \"\", $1); print $1 } }')\n\
+     if [ -z \"$ADO_PROXY_ORGANIZATION\" ]; then\n\
+       echo \"##vso[task.complete result=Failed]cannot determine the Azure DevOps organization from System.CollectionUri\"\n\
+       exit 1\n\
+     fi\n"
+        .to_string()
+}
+
+/// Whether this workflow routes Azure DevOps access through the policy engine.
+///
+/// `permissions.read` is the activation switch and trusted token source. The
+/// pipeline builder and Azure CLI extension must not disagree: a mismatch
+/// would either install a wrapper pointing at an engine that was never started,
+/// or expose host `az` without the policy boundary.
+pub fn ado_proxy_enabled(front_matter: &FrontMatter) -> bool {
+    front_matter
+        .permissions
+        .as_ref()
+        .and_then(|permissions| permissions.read.as_ref())
+        .is_some()
+}
+
+/// Whether the first-party Azure DevOps MCP client is enabled.
+///
+/// This is deliberately narrower than [`ado_proxy_enabled`]: read permission
+/// activates the proxy and wrapped `az`, while `tools.azure-devops` alone
+/// controls MCP package staging and child configuration.
+pub fn ado_mcp_enabled(front_matter: &FrontMatter) -> bool {
+    front_matter
+        .tools
+        .as_ref()
+        .and_then(|tools| tools.azure_devops.as_ref())
+        .is_some_and(crate::compile::types::AzureDevOpsToolConfig::is_enabled)
+}
+
+/// Directory the generated `az` wrapper is installed into inside the sandbox.
+///
+/// Separate from the ado-script bundle directory because it is prepended to
+/// `PATH`: anything placed here shadows a real executable of the same name.
+#[allow(dead_code)]
+pub const AZ_WRAPPER_DIR: &str = "/tmp/ado-aw-lib";
+
+/// Full path of the generated `az` wrapper.
+#[allow(dead_code)]
+pub const AZ_WRAPPER_PATH: &str = "/tmp/ado-aw-lib/az";
+
+/// Path the public interception CA is staged at for the `az` wrapper.
+#[allow(dead_code)]
+pub const AZ_WRAPPER_CA_PATH: &str = "/tmp/ado-aw-lib/ado-proxy-ca.pem";
+
+/// Azure CLI command groups the wrapper permits.
+///
+/// Derived from the capabilities the policy actually grants, so the wrapper
+/// cannot advertise a command group the engine would refuse. Hand-maintaining
+/// this list let `az artifacts` through the wrapper while no catalogued
+/// operation backed it.
+///
+/// `rest` is always present and is deliberately not capability-derived. It is
+/// a general REST escape hatch, and the catalog — not this list — is what
+/// contains it: measured against a live engine, `az rest` completed a
+/// catalogued read, and was refused `403` for both a denied route family and a
+/// `POST`. Excluding it would also be incoherent, since `az devops invoke`
+/// expresses the same arbitrary Azure DevOps REST from inside an allowed
+/// group. It reaches non-Azure-DevOps hosts exactly as before — tunnelled to
+/// Squid, with no credential attached.
+pub fn az_allowed_groups(capabilities: &[Capability]) -> Vec<&'static str> {
+    let mut groups: Vec<&'static str> = Capability::ALL
+        .iter()
+        .filter(|capability| capabilities.contains(capability))
+        .filter_map(|capability| capability.az_command_group())
+        .collect();
+    groups.push("rest");
+    groups
+}
+
+/// Resolve the capabilities the policy engine should enable.
+///
+/// Re-exported from [`crate::ado_proxy::policy`], which owns the rule, so the
+/// `az` wrapper's allow-list and the emitted policy document cannot disagree
+/// about what the agent may read.
+pub use crate::ado_proxy::policy::ado_proxy_capabilities;
+
+/// Runner-side path of the CA certificate the policy engine publishes.
+///
+/// Deliberately inside [`AZ_WRAPPER_DIR`]: AWF mounts `/tmp` into the agent
+/// chroot, so this single published file is what the `az` wrapper reads *and*
+/// what the MCP container mounts. Publishing once removes the possibility of a
+/// client trusting a stale copy. Only the certificate goes here — the matching
+/// private key is destroyed by the step that starts the engine.
+pub const ADO_PROXY_PUBLIC_CA_HOST_PATH: &str = "/tmp/ado-aw-lib/ado-proxy-ca.pem";
 
 /// Default entrypoint args for the Azure DevOps MCP npm package.
 pub const ADO_MCP_PACKAGE: &str = "@azure-devops/mcp";
 
+/// Pinned Azure DevOps MCP package version.
+///
+/// Pinned rather than floating because the package is fetched on the runner
+/// and mounted into a container that has no registry access of its own; an
+/// unpinned fetch would make the agent's tool surface vary run to run.
+pub const ADO_MCP_VERSION: &str = "2.8.1";
+
 /// Reserved MCPG server name for the auto-configured ADO MCP.
 pub const ADO_MCP_SERVER_NAME: &str = "azure-devops";
+
+/// Stable container name for the `ado-proxy` policy engine.
+///
+/// Doubles as the DNS name the agent uses to reach it, matching the MCPG
+/// convention, and is the name passed to AWF's `--topology-attach`.
+#[allow(dead_code)]
+pub const ADO_PROXY_CONTAINER_NAME: &str = "awmg-ado-proxy";
+
+/// Base image for the `ado-proxy` container.
+///
+/// The proxy ships as an `ado-script` bundle that is already downloaded onto
+/// the runner, so it needs no image of its own — it is mounted into the same
+/// stock Node image the ADO MCP uses. That keeps the supply chain unchanged:
+/// no new image to build, publish, pin, or mirror.
+#[allow(dead_code)]
+pub const ADO_PROXY_IMAGE: &str = ADO_MCP_IMAGE;
+
+/// Port `ado-proxy` accepts `CONNECT`-style proxy clients on.
+#[allow(dead_code)]
+pub const ADO_PROXY_LISTEN_PORT: u16 = 11080;
+
+/// Port `ado-proxy` terminates direct TLS on.
+///
+/// Must be 443: clients redirected with `--add-host` believe they are talking
+/// to `dev.azure.com` and will not use a non-default port.
+#[allow(dead_code)]
+pub const ADO_PROXY_TLS_PORT: u16 = 443;
+
+/// AWF's Squid proxy, addressed by IP on the AWF network.
+///
+/// AWF fixes this address as a constant (`SQUID_IP` in its `constants.ts`,
+/// within the `172.30.0.0/24` `awf-net` subnet), so it can be configured
+/// before AWF has started rather than discovered afterwards. Addressing it by
+/// IP rather than by name also sidesteps the embedded-DNS failures AWF itself
+/// works around under gVisor and ARC/DinD.
+///
+/// Routing the proxy's own egress through Squid rather than exempting it from
+/// the firewall follows AWF's own API-proxy sidecar, which is deliberately
+/// given no iptables exemption for the same reason.
+#[allow(dead_code)]
+pub const AWF_SQUID_URL: &str = "http://172.30.0.10:3128";
 
 /// Rewrite a GHCR image reference onto an internal registry when configured.
 ///
@@ -3877,20 +4214,25 @@ mod tests {
         });
         let params = engine_args_for(&fm).unwrap();
         // User-disabled bash must not produce a general bash allow-tool
-        // (shell(:*) / shell(*) / shell(bash)). Always-on extensions
-        // (e.g. Azure CLI) legitimately inject their own narrow
-        // shell(<cmd>) entries via `required_bash_commands()`; those are
-        // expected and should not regress this test.
+        // (shell(:*) / shell(*) / shell(bash)).
         assert!(!params.contains("shell(:*)"));
         assert!(!params.contains("shell(*)"));
         assert!(!params.contains("shell(bash)"));
-        // Sanity-check: the always-on Azure CLI extension still injects
-        // its bash requirement even when user bash is disabled — agents
-        // must be able to call `az` regardless of the user's `bash:`
-        // narrowing decisions.
+        assert!(
+            !params.contains("shell(az)"),
+            "without permissions.read, Azure CLI must not be exposed: {params}"
+        );
+
+        fm.permissions = Some(crate::compile::types::PermissionsConfig {
+            read: Some(crate::compile::types::ReadPermissionConfig::ServiceConnection(
+                crate::secure::ServiceConnection::parse("read-sc").unwrap(),
+            )),
+            write: None,
+        });
+        let params = engine_args_for(&fm).unwrap();
         assert!(
             params.contains("shell(az)"),
-            "always-on Azure CLI extension should still inject shell(az): {params}"
+            "permissions.read must add the wrapped az command even when the user's bash list is empty"
         );
     }
 
@@ -5577,6 +5919,115 @@ safe-outputs:
     }
 
     #[test]
+    fn resolve_ado_organization_handles_every_collection_form() {
+        // Regression guard for the two derivations this replaced, each of
+        // which was silently wrong for a form the other handled: a literal
+        // `https://dev.azure.com/` prefix strip is a no-op for
+        // `https://myorg.visualstudio.com/`, while a bare last-path-segment
+        // rule returns `myorg.visualstudio.com` for that same URL. Measured
+        // against both shapes plus an on-prem collection.
+        let script = resolve_ado_organization_bash();
+        assert!(
+            !script.contains("#https://dev.azure.com/"),
+            "must not strip a fixed prefix: {script}"
+        );
+        assert!(
+            script.contains("if (NF>1) print $NF"),
+            "path form must yield the last segment: {script}"
+        );
+        assert!(
+            script.contains("sub(/\\..*$/, \"\", $1)"),
+            "host form must yield the first host label: {script}"
+        );
+        assert!(
+            script.contains("cannot determine the Azure DevOps organization"),
+            "an empty organization must fail loudly, not match nothing"
+        );
+    }
+
+    #[test]
+    fn resolve_ado_organization_has_no_yaml_layout_concerns() {
+        let script = resolve_ado_organization_bash();
+        assert!(script.starts_with("# $(System.CollectionUri)"));
+        assert!(
+            script
+                .lines()
+                .any(|line| line.starts_with("ADO_PROXY_COLLECTION="))
+        );
+    }
+
+    #[test]
+    fn test_validate_permissions_read_policy_accepts_scalar_and_object() {
+        let (scalar, _) = parse_markdown(
+            "---\nname: test\ndescription: test\npermissions:\n  read: my-read-sc\n---\n",
+        )
+        .unwrap();
+        validate_permissions_read_policy(&scalar).unwrap();
+
+        let (object, _) = parse_markdown(
+            "---\nname: test\ndescription: test\npermissions:\n  read:\n    service-connection: my-read-sc\n    capabilities: [repos]\n---\n",
+        )
+        .unwrap();
+        validate_permissions_read_policy(&object).unwrap();
+    }
+
+    #[test]
+    fn test_validate_permissions_read_policy_rejects_org_without_projects() {
+        let (object, _) = parse_markdown(
+            "---\nname: test\ndescription: test\npermissions:\n  read:\n    \
+             service-connection: my-read-sc\n    allow:\n      - organization: fabrikam\n---\n",
+        )
+        .unwrap();
+
+        let error = validate_permissions_read_policy(&object)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("lists no projects"),
+            "must explain the widening omission: {error}"
+        );
+    }
+
+    /// The proxy holds one non-renewable bearer, so a run must not be able to
+    /// outlive it. Enforced at compile time because the alternative is opaque
+    /// 502s partway through a run.
+    #[test]
+    fn proxied_timeout_is_bounded_by_the_token_lifetime() {
+        for proxied in [
+            "---\nname: t\ndescription: d\npermissions:\n  read: sc\n---\n",
+            "---\nname: t\ndescription: d\npermissions:\n  read:\n    service-connection: sc\n---\n",
+        ] {
+            let (fm, _) = parse_markdown(proxied).unwrap();
+
+            assert!(validate_proxied_timeout(&fm, MAX_PROXIED_TIMEOUT_MINUTES).is_ok());
+
+            let error = validate_proxied_timeout(&fm, MAX_PROXIED_TIMEOUT_MINUTES + 1)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("cannot renew"),
+                "the message must say why, not just that it is too long: {error}"
+            );
+            assert!(
+                error.contains(&MAX_PROXIED_TIMEOUT_MINUTES.to_string()),
+                "the message must name the limit: {error}"
+            );
+        }
+    }
+
+    /// Workflows that do not use the proxy hold no Azure DevOps credential in
+    /// the agent, so there is nothing to expire and no reason to bound them.
+    #[test]
+    fn unproxied_timeout_is_not_bounded() {
+        let source = "---\nname: t\ndescription: d\n---\n";
+        let (fm, _) = parse_markdown(source).unwrap();
+        assert!(
+            validate_proxied_timeout(&fm, MAX_PROXIED_TIMEOUT_MINUTES * 10).is_ok(),
+            "a workflow without the proxy must not be limited: {source}"
+        );
+    }
+
+    #[test]
     fn test_validate_front_matter_identity_rejects_macro_in_description() {
         let mut fm = minimal_front_matter();
         fm.description = "Agent $(System.AccessToken)".to_string();
@@ -6056,22 +6507,29 @@ safe-outputs:
     // ─── generate_awf_mounts ──────────────────────────────────────────────
 
     #[test]
-    fn test_generate_awf_mounts_always_on_az_cli_baseline() {
-        // Even with a minimal front matter, the always-on Azure CLI
-        // extension contributes a `$(AW_AZ_MOUNTS) \` injection line
-        // (no static mounts — those are runtime-detected by the
-        // AzureCli prepare step which sets the pipeline variable).
-        // The "no mounts" name is historical; this test now verifies
-        // the always-on baseline.
+    fn test_generate_awf_mounts_omits_az_without_read_permission() {
         let fm = minimal_front_matter();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let _ctx = crate::compile::extensions::CompileContext::for_test(&fm);
+        let declarations = extension_declarations(&exts, &fm);
+        let result = generate_awf_mounts(&exts, &declarations);
+        assert!(
+            !result.contains("AW_AZ_MOUNTS"),
+            "without permissions.read, no Azure CLI runtime mount hook may be emitted: {result}"
+        );
+    }
+
+    #[test]
+    fn test_generate_awf_mounts_includes_runtime_az_hook_with_read_permission() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: d\npermissions:\n  read: read-sc\n---\n",
+        )
+        .unwrap();
+        let exts = crate::compile::extensions::collect_extensions(&fm);
         let declarations = extension_declarations(&exts, &fm);
         let result = generate_awf_mounts(&exts, &declarations);
         assert!(
             result.contains("$(AW_AZ_MOUNTS) \\"),
-            "always-on Azure CLI injection line $(AW_AZ_MOUNTS) \\ should be present \
-             (so the AzureCli prepare step's pipeline variable expands into runtime mounts): {result}"
+            "permissions.read must emit the conditional host-az mount hook: {result}"
         );
         assert!(
             !result.contains(r#"--mount "/opt/az:/opt/az:ro""#),
@@ -6561,16 +7019,17 @@ safe-outputs:
 
     #[test]
     fn test_generate_mcpg_docker_env_with_permissions_read() {
-        // When ADO tool is enabled with permissions.read, the extension's
-        // required_pipeline_vars should produce the -e flag
+        // `permissions.read` selects the service connection the *engine* uses.
+        // It must not cause the token to be projected into MCPG's own
+        // environment, from where it would reach the MCP container.
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\npermissions:\n  read: my-read-sc\n---\n",
         ).unwrap();
         let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
         let env = generate_mcpg_docker_env(&fm, &declarations);
         assert!(
-            env.contains("-e ADO_MCP_AUTH_TOKEN=\"$SC_READ_TOKEN\""),
-            "Should map ADO token via extension pipeline var"
+            !env.contains("-e ADO_MCP_AUTH_TOKEN=\"$SC_READ_TOKEN\""),
+            "the credential must not be mapped into MCPG: {env}"
         );
     }
 
@@ -6669,6 +7128,9 @@ safe-outputs:
 
     #[test]
     fn test_generate_mcpg_step_env_with_ado_extension() {
+        // The ADO tool no longer contributes any pipeline variable: it used to
+        // map SC_READ_TOKEN into the MCPG step so the MCP could authenticate
+        // directly. Nothing should replace it.
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\n---\n",
         )
@@ -6676,12 +7138,8 @@ safe-outputs:
         let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
         let env = generate_mcpg_step_env(&declarations);
         assert!(
-            env.starts_with("env:\n"),
-            "Should emit full env: block header"
-        );
-        assert!(
-            env.contains("SC_READ_TOKEN: $(SC_READ_TOKEN)"),
-            "Should map SC_READ_TOKEN for ADO extension"
+            !env.contains("SC_READ_TOKEN"),
+            "the ADO tool must not surface the read token to MCPG: {env}"
         );
     }
 
@@ -6743,12 +7201,15 @@ safe-outputs:
         assert_eq!(ado.container.as_deref(), Some(ADO_MCP_IMAGE));
         assert_eq!(ado.entrypoint.as_deref(), Some(ADO_MCP_ENTRYPOINT));
         let args = ado.entrypoint_args.as_ref().unwrap();
-        assert!(args.contains(&"-y".to_string()));
-        assert!(args.contains(&ADO_MCP_PACKAGE.to_string()));
+        assert!(args.contains(&ADO_MCP_ENTRY_SCRIPT.to_string()));
         assert!(args.contains(&"inferred-org".to_string()));
-        // Should have ADO_MCP_AUTH_TOKEN in env (for bearer token via envvar auth)
+        // The token is a sentinel: the engine injects the real bearer only
+        // after a complete allow decision.
         let env = ado.env.as_ref().unwrap();
-        assert!(env.contains_key("ADO_MCP_AUTH_TOKEN"));
+        assert_eq!(
+            env.get("ADO_MCP_AUTH_TOKEN").map(String::as_str),
+            Some(ADO_MCP_TOKEN_SENTINEL)
+        );
     }
 
     #[test]
@@ -6903,6 +7364,11 @@ safe-outputs:
 
     #[test]
     fn test_ado_tool_docker_env_passthrough() {
+        // Regression guard for the hole this proxy closes: the MCP used to be
+        // handed the real Azure DevOps bearer via
+        // `-e ADO_MCP_AUTH_TOKEN="$SC_READ_TOKEN"`. Under interception the
+        // policy engine holds the only copy, so nothing may project a
+        // credential into the MCP container.
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\npermissions:\n  read: my-read-sc\n---\n",
         )
@@ -6910,8 +7376,8 @@ safe-outputs:
         let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
         let env = generate_mcpg_docker_env(&fm, &declarations);
         assert!(
-            env.contains("ADO_MCP_AUTH_TOKEN"),
-            "Should include ADO token passthrough when permissions.read is set"
+            !env.contains("SC_READ_TOKEN"),
+            "the real bearer must never reach the MCP container: {env}"
         );
     }
 
