@@ -2057,6 +2057,30 @@ fn test_fixture_azure_devops_mcp_requires_read_permission() {
     );
 }
 
+#[test]
+fn test_azure_devops_mcp_exact_version_override_reaches_install_step() {
+    let compiled = compile_inline_agent(
+        "ado-mcp-version-override",
+        r#"---
+name: "Azure DevOps MCP version override"
+description: "Tests exact package version code generation"
+tools:
+  azure-devops:
+    org: myorg
+    version: 2.9.0
+permissions:
+  read: my-read-arm-connection
+---
+
+Test.
+"#,
+    );
+
+    assert!(compiled.contains("\"@azure-devops/mcp@2.9.0\""));
+    assert!(compiled.contains("expected 2.9.0"));
+    assert!(!compiled.contains("\"@azure-devops/mcp@2.8.1\""));
+}
+
 /// Test that the Azure DevOps MCP fixture compiles successfully with no unreplaced markers
 #[test]
 fn test_fixture_azure_devops_mcp_compiled_output() {
@@ -2131,6 +2155,11 @@ fn test_fixture_azure_devops_mcp_compiled_output() {
     assert!(
         compiled.contains("node:20-slim"),
         "MCPG config should contain the container image"
+    );
+    assert!(
+        compiled.contains("\"@azure-devops/mcp@2.8.1\"")
+            && compiled.contains("expected 2.8.1"),
+        "the unversioned frontmatter form must use and verify the compiler default"
     );
     assert!(
         compiled.contains("\"entrypoint\""),

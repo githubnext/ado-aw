@@ -176,7 +176,7 @@ Both `--all-repos` and `--source` route through `ado-aw`'s `discover_ado_aw_pipe
 
 - `catalog [--kind <safe-outputs|runtimes|tools|engines|models|versions|ado-proxy>] [--json]` - List the compiler's in-tree registries for scripting or discovery.
   - `--kind <...>` - Restrict output to one category. When omitted, emits every category.
-  - `--kind versions` - Emit the compiler's pinned **semver** versions (`copilot_cli`, `awf`, `mcpg`) as a single source of truth. CI reads these deterministically instead of scraping the Rust source, e.g. `ado-aw catalog --kind versions --json | jq -r '.versions.copilot_cli'`.
+  - `--kind versions` - Emit the compiler's pinned **semver** versions (`copilot_cli`, `awf`, `mcpg`, `ado_mcp`) as a single source of truth. `ado_mcp` is the compiler default; a workflow may override it with `tools.azure-devops.version`. CI reads these defaults deterministically instead of scraping the Rust source, e.g. `ado-aw catalog --kind versions --json | jq -r '.versions.copilot_cli'`.
   - `--kind ado-proxy` - Emit the versioned deny-by-default Stage 1 ADO read-policy catalog and whether its credential-isolated runtime is available.
   - `--json` - Emit the catalog as structured JSON instead of the human-readable report.
 

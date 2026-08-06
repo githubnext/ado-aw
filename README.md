@@ -488,7 +488,8 @@ tools:
 
   # With scoping options
   azure-devops:
-    toolsets: [repos, wit]
+    version: 2.8.1          # Optional exact-semver override
+    toolsets: [repositories, work-items]
     allowed: [wit_get_work_item, repo_list_repos_by_project]
     org: myorg               # Optional — inferred from git remote by default
 

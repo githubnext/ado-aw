@@ -51,7 +51,8 @@ tools:                         # optional tool configuration
   #   allowed-extensions: [.md, .json]
   azure-devops: true           # first-class ADO MCP integration (see docs/tools.md)
   # azure-devops:              # Alternative object format (with scoping)
-  #   toolsets: [repos, wit]
+  #   version: "2.8.1"         # Optional exact-semver override; defaults to compiler pin
+  #   toolsets: [repositories, work-items]
   #   allowed: [wit_get_work_item]
   #   org: myorg
 runtimes:                      # optional runtime configuration (language environments)

@@ -103,6 +103,21 @@ fn test_ado_proxy_activation_follows_permissions_read_not_mcp_tool() {
     }
 }
 
+#[test]
+fn test_ado_mcp_version_uses_override_or_compiler_default() {
+    let (defaulted, _) = parse_markdown(
+        "---\nname: t\ndescription: x\ntools:\n  azure-devops: true\n---\n",
+    )
+    .unwrap();
+    assert_eq!(ado_mcp_version(&defaulted), ADO_MCP_VERSION);
+
+    let (overridden, _) = parse_markdown(
+        "---\nname: t\ndescription: x\ntools:\n  azure-devops:\n    version: 2.9.0\n---\n",
+    )
+    .unwrap();
+    assert_eq!(ado_mcp_version(&overridden), "2.9.0");
+}
+
 /// Returns the directory in which the atomic tempfile should be created for a
 /// write to `path`.  The tempfile must live on the same filesystem as `path`
 /// so that the final `persist()` rename is atomic (EXDEV guard).
@@ -1838,6 +1853,20 @@ pub fn ado_mcp_enabled(front_matter: &FrontMatter) -> bool {
         .as_ref()
         .and_then(|tools| tools.azure_devops.as_ref())
         .is_some_and(crate::compile::types::AzureDevOpsToolConfig::is_enabled)
+}
+
+/// Effective Azure DevOps MCP package version for this workflow.
+///
+/// Workflows may override the compiler pin with an exact semantic version.
+/// The compiler-owned default remains deterministic and is exposed by
+/// `ado-aw catalog --kind versions`.
+pub fn ado_mcp_version(front_matter: &FrontMatter) -> &str {
+    front_matter
+        .tools
+        .as_ref()
+        .and_then(|tools| tools.azure_devops.as_ref())
+        .and_then(crate::compile::types::AzureDevOpsToolConfig::version)
+        .unwrap_or(ADO_MCP_VERSION)
 }
 
 /// Directory the generated `az` wrapper is installed into inside the sandbox.
@@ -7215,7 +7244,7 @@ safe-outputs:
     #[test]
     fn test_ado_tool_with_toolsets() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    toolsets: [repos, wit, core]\n---\n",
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    toolsets: [repositories, work-items, core]\n---\n",
         )
         .unwrap();
         let extensions = collect_extensions(&fm);
@@ -7225,8 +7254,8 @@ safe-outputs:
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         let args = ado.entrypoint_args.as_ref().unwrap();
         assert!(args.contains(&"-d".to_string()));
-        assert!(args.contains(&"repos".to_string()));
-        assert!(args.contains(&"wit".to_string()));
+        assert!(args.contains(&"repositories".to_string()));
+        assert!(args.contains(&"work-items".to_string()));
         assert!(args.contains(&"core".to_string()));
     }
 
@@ -7301,7 +7330,7 @@ safe-outputs:
     #[test]
     fn test_ado_tool_invalid_toolset_fails() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: myorg\n    toolsets: [\"repos\", \"bad toolset\"]\n---\n",
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: myorg\n    toolsets: [\"repositories\", \"bad toolset\"]\n---\n",
         )
         .unwrap();
         let extensions = collect_extensions(&fm);

@@ -3,6 +3,7 @@
 //! This module defines the front matter grammar that is shared across all compile targets.
 
 use crate::sanitize::SanitizeConfig as SanitizeConfigTrait;
+use crate::secure::SemanticVersion;
 use ado_aw_derive::SanitizeConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -1058,7 +1059,8 @@ impl ProviderConfig {
 ///   cache-memory:
 ///     allowed-extensions: [.md, .json]
 ///   azure-devops:
-///     toolsets: [repos, wit]
+///     version: 2.8.1
+///     toolsets: [repositories, work-items]
 ///     allowed: [wit_get_work_item]
 /// ```
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -1163,7 +1165,8 @@ pub struct CacheMemoryOptions {
 ///
 /// # With scoping options
 /// azure-devops:
-///   toolsets: [repos, wit, core]
+///   version: 2.8.1
+///   toolsets: [repositories, work-items, core]
 ///   allowed: [wit_get_work_item, wit_my_work_items]
 ///   org: myorg
 /// ```
@@ -1185,7 +1188,7 @@ impl AzureDevOpsToolConfig {
         }
     }
 
-    /// Get the ADO API toolset groups to enable (e.g., repos, wit, core)
+    /// Get the ADO MCP toolset groups to enable.
     pub fn toolsets(&self) -> &[String] {
         match self {
             AzureDevOpsToolConfig::Enabled(_) => &[],
@@ -1208,6 +1211,16 @@ impl AzureDevOpsToolConfig {
             AzureDevOpsToolConfig::WithOptions(opts) => opts.org.as_deref(),
         }
     }
+
+    /// Get the exact Azure DevOps MCP package version override.
+    pub fn version(&self) -> Option<&str> {
+        match self {
+            AzureDevOpsToolConfig::Enabled(_) => None,
+            AzureDevOpsToolConfig::WithOptions(opts) => {
+                opts.version.as_ref().map(SemanticVersion::as_str)
+            }
+        }
+    }
 }
 
 impl SanitizeConfigTrait for AzureDevOpsToolConfig {
@@ -1222,7 +1235,11 @@ impl SanitizeConfigTrait for AzureDevOpsToolConfig {
 /// Azure DevOps MCP options
 #[derive(Debug, Deserialize, Clone, Default, SanitizeConfig)]
 pub struct AzureDevOpsOptions {
-    /// ADO API toolset groups to enable (e.g., repos, wit, core, work-items)
+    /// Exact Azure DevOps MCP package version override.
+    /// Defaults to the compiler-pinned version.
+    #[serde(default)]
+    pub version: Option<SemanticVersion>,
+    /// ADO MCP toolset groups to enable (e.g., repositories, work-items, core).
     /// Passed as `-d` flags to the ADO MCP entrypoint.
     #[serde(default)]
     pub toolsets: Vec<String>,
@@ -5811,6 +5828,7 @@ Body
         assert!(ado.toolsets().is_empty());
         assert!(ado.allowed().is_empty());
         assert!(ado.org().is_none());
+        assert!(ado.version().is_none());
     }
 
     #[test]
@@ -5820,7 +5838,8 @@ name: "Test"
 description: "Test"
 tools:
   azure-devops:
-    toolsets: [repos, wit, core]
+    version: 2.9.0
+    toolsets: [repositories, work-items, core]
     allowed: [wit_get_work_item, core_list_projects]
     org: myorg
 ---
@@ -5830,9 +5849,10 @@ Body
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
         let ado = fm.tools.as_ref().unwrap().azure_devops.as_ref().unwrap();
         assert!(ado.is_enabled());
-        assert_eq!(ado.toolsets(), &["repos", "wit", "core"]);
+        assert_eq!(ado.toolsets(), &["repositories", "work-items", "core"]);
         assert_eq!(ado.allowed(), &["wit_get_work_item", "core_list_projects"]);
         assert_eq!(ado.org(), Some("myorg"));
+        assert_eq!(ado.version(), Some("2.9.0"));
     }
 
     #[test]
@@ -5842,7 +5862,7 @@ name: "Test"
 description: "Test"
 tools:
   azure-devops:
-    toolsets: [wit]
+    toolsets: [work-items]
 ---
 
 Body
@@ -5850,9 +5870,23 @@ Body
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
         let ado = fm.tools.as_ref().unwrap().azure_devops.as_ref().unwrap();
         assert!(ado.is_enabled());
-        assert_eq!(ado.toolsets(), &["wit"]);
+        assert_eq!(ado.toolsets(), &["work-items"]);
         assert!(ado.allowed().is_empty());
         assert!(ado.org().is_none());
+        assert!(ado.version().is_none());
+    }
+
+    #[test]
+    fn test_azure_devops_version_requires_exact_semver() {
+        for version in ["latest", "next", "^2.8.0", "2.8", "v2.8.1"] {
+            let content = format!(
+                "---\nname: Test\ndescription: Test\ntools:\n  azure-devops:\n    version: {version}\n---\n"
+            );
+            assert!(
+                super::super::common::parse_markdown(&content).is_err(),
+                "{version} must not be accepted as an exact MCP package version"
+            );
+        }
     }
 
     // ─── LeanRuntimeConfig deserialization ──────────────────────────────
@@ -5919,7 +5953,7 @@ tools:
   edit: true
   cache-memory: true
   azure-devops:
-    toolsets: [wit]
+    toolsets: [work-items]
 runtimes:
   lean: true
 ---
