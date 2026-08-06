@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 
-use super::types::FrontMatter;
+use super::types::{FrontMatter, PackageEcosystem};
 
 // ──────────────────────────────────────────────────────────────────────
 // MCPG types (used by both the trait and standalone compiler)
@@ -173,6 +173,29 @@ impl<'a> CompileContext<'a> {
             let org = ctx.org_url.trim_end_matches('/').rsplit('/').next()?;
             if org.is_empty() { None } else { Some(org) }
         })
+    }
+
+    /// Resolve the shared `supply-chain.packages` feed endpoint for
+    /// `ecosystem`, if one is configured and the ecosystem opts in.
+    ///
+    /// Returns `Ok(None)` when no `supply-chain.packages` block is present or
+    /// the ecosystem is switched off; returns `Err` when a feed is configured
+    /// but no organization can be determined (see
+    /// [`PackageFeedConfig::url_for`](crate::compile::types::PackageFeedConfig::url_for)).
+    pub fn package_feed_url(&self, ecosystem: PackageEcosystem) -> Result<Option<String>> {
+        let Some(packages) = self
+            .front_matter
+            .supply_chain()
+            .and_then(|sc| sc.packages.as_ref())
+        else {
+            return Ok(None);
+        };
+        if !packages.applies_to(ecosystem) {
+            return Ok(None);
+        }
+        let url = packages.url_for(ecosystem, self.ado_org())?;
+        crate::validate::validate_feed_url(&url, "supply-chain.packages")?;
+        Ok(Some(url))
     }
 
     fn ado_context_override() -> Result<Option<AdoContext>> {

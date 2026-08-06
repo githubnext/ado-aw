@@ -42,6 +42,17 @@ pub fn is_safe_path_segment(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
+/// Validate that a string is safe to embed as a single Azure DevOps URL
+/// segment (an organization or project name inside a derived feed URL).
+///
+/// Uses the same strict `[A-Za-z0-9._-]` allowlist as
+/// [`is_safe_path_segment`]: no percent-encoding is performed on derived
+/// URLs, so anything requiring escaping (notably spaces) is rejected rather
+/// than silently producing a malformed URL.
+pub fn is_valid_ado_url_segment(s: &str) -> bool {
+    is_safe_path_segment(s)
+}
+
 /// Characters allowed in engine.command paths (absolute path chars only).
 /// Prevents shell injection when the path is embedded in AWF single-quoted commands.
 pub fn is_valid_command_path(s: &str) -> bool {

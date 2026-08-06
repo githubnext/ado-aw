@@ -5,6 +5,7 @@ use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations
 use crate::compile::ir::step::{BashStep, Step, TaskStep};
 use crate::compile::ir::tasks::npm_authenticate::NpmAuthenticate;
 use crate::compile::ir::tasks::use_node::UseNode;
+use crate::compile::types::PackageEcosystem;
 use crate::validate;
 use anyhow::Result;
 
@@ -84,6 +85,26 @@ impl CompilerExtension for NodeExtension {
             validate::validate_feed_url(feed_url, "runtimes.node.feed-url")?;
         }
 
+        // Effective feed resolution (see docs/supply-chain.md):
+        //   1. runtimes.node.feed-url
+        //   2. runtimes.node.config (user owns feed config — global skipped)
+        //   3. supply-chain.packages
+        //   4. public npm registry
+        let effective_feed_url: Option<String> = match self.config.feed_url() {
+            Some(url) => Some(url.to_string()),
+            None if self.config.config().is_some() => {
+                if ctx.package_feed_url(PackageEcosystem::Node)?.is_some() {
+                    warnings.push(
+                        "runtimes.node.config is set, so supply-chain.packages is not \
+                         applied to Node — the .npmrc file owns the registry."
+                            .to_string(),
+                    );
+                }
+                None
+            }
+            None => ctx.package_feed_url(PackageEcosystem::Node)?,
+        };
+
         // Validate version string
         if let Some(version) = self.config.version() {
             validate::reject_pipeline_injection(version, "runtimes.node.version")?;
@@ -91,13 +112,15 @@ impl CompilerExtension for NodeExtension {
 
         let mut agent_prepare_steps: Vec<Step> = Vec::with_capacity(3);
         agent_prepare_steps.push(Step::Task(node_install_task_step(&self.config)));
-        if self.config.feed_url().is_some() || self.config.config().is_some() {
-            agent_prepare_steps.push(Step::Bash(ensure_npmrc_bash_step(&self.config)));
+        if effective_feed_url.is_some() || self.config.config().is_some() {
+            agent_prepare_steps.push(Step::Bash(ensure_npmrc_bash_step(
+                effective_feed_url.as_deref(),
+            )));
             agent_prepare_steps.push(Step::Task(npm_authenticate_task_step()));
         }
         let mut agent_env_vars = Vec::new();
-        if let Some(feed_url) = self.config.feed_url() {
-            agent_env_vars.push(("NPM_CONFIG_REGISTRY".to_string(), feed_url.to_string()));
+        if let Some(feed_url) = &effective_feed_url {
+            agent_env_vars.push(("NPM_CONFIG_REGISTRY".to_string(), feed_url.clone()));
         }
         Ok(Declarations {
             agent_prepare_steps,
@@ -141,8 +164,8 @@ fn npm_authenticate_task_step() -> TaskStep {
 /// preserves the legacy semantics: leave any repo-checked-in `.npmrc`
 /// untouched; otherwise create a minimal one pointing at the
 /// configured feed (or the default npmjs registry).
-fn ensure_npmrc_bash_step(config: &NodeRuntimeConfig) -> BashStep {
-    let registry = config.feed_url().unwrap_or("https://registry.npmjs.org/");
+fn ensure_npmrc_bash_step(feed_url: Option<&str>) -> BashStep {
+    let registry = feed_url.unwrap_or("https://registry.npmjs.org/");
     let script = format!(
         "set -eo pipefail\n\
          if [ ! -f .npmrc ]; then\n  \

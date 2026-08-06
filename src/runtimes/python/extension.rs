@@ -5,6 +5,7 @@ use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations
 use crate::compile::ir::step::{Step, TaskStep};
 use crate::compile::ir::tasks::pip_authenticate::PipAuthenticate;
 use crate::compile::ir::tasks::use_python_version::UsePythonVersion;
+use crate::compile::types::PackageEcosystem;
 use crate::validate;
 use anyhow::Result;
 
@@ -83,6 +84,26 @@ impl CompilerExtension for PythonExtension {
             validate::validate_feed_url(feed_url, "runtimes.python.feed-url")?;
         }
 
+        // Effective feed resolution (see docs/supply-chain.md):
+        //   1. runtimes.python.feed-url
+        //   2. runtimes.python.config (user owns feed config — global skipped)
+        //   3. supply-chain.packages
+        //   4. public PyPI
+        let effective_feed_url: Option<String> = match self.config.feed_url() {
+            Some(url) => Some(url.to_string()),
+            None if self.config.config().is_some() => {
+                if ctx.package_feed_url(PackageEcosystem::Python)?.is_some() {
+                    warnings.push(
+                        "runtimes.python.config is set, so supply-chain.packages is not \
+                         applied to Python — the config file owns the package source."
+                            .to_string(),
+                    );
+                }
+                None
+            }
+            None => ctx.package_feed_url(PackageEcosystem::Python)?,
+        };
+
         // Validate version string
         if let Some(version) = self.config.version() {
             validate::reject_pipeline_injection(version, "runtimes.python.version")?;
@@ -90,13 +111,13 @@ impl CompilerExtension for PythonExtension {
 
         let mut agent_prepare_steps: Vec<Step> = Vec::with_capacity(2);
         agent_prepare_steps.push(Step::Task(python_install_task_step(&self.config)));
-        if self.config.feed_url().is_some() {
+        if effective_feed_url.is_some() {
             agent_prepare_steps.push(Step::Task(pip_authenticate_task_step()));
         }
         let mut agent_env_vars = Vec::new();
-        if let Some(feed_url) = self.config.feed_url() {
-            agent_env_vars.push(("PIP_INDEX_URL".to_string(), feed_url.to_string()));
-            agent_env_vars.push(("UV_DEFAULT_INDEX".to_string(), feed_url.to_string()));
+        if let Some(feed_url) = &effective_feed_url {
+            agent_env_vars.push(("PIP_INDEX_URL".to_string(), feed_url.clone()));
+            agent_env_vars.push(("UV_DEFAULT_INDEX".to_string(), feed_url.clone()));
         }
         Ok(Declarations {
             agent_prepare_steps,

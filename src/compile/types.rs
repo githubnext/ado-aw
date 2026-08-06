@@ -2776,6 +2776,12 @@ pub struct SupplyChainConfig {
     /// images. When omitted images are pulled from GHCR as today.
     #[serde(default)]
     pub registry: Option<RegistryConfig>,
+    /// One internal Azure DevOps Artifacts feed identity that every runtime
+    /// (`python`, `node`, `dotnet`) picks up as its package source, instead
+    /// of repeating a per-ecosystem `feed-url:` on each runtime. Independent
+    /// of `feed` / `pipeline-artifact` / `registry`.
+    #[serde(default)]
+    pub packages: Option<PackageFeedConfig>,
     /// Shared fallback service connection for feed and registry targets. It
     /// never applies to `pipeline-artifact`.
     #[serde(default, rename = "service-connection")]
@@ -2804,6 +2810,203 @@ pub struct RegistryConfig {
     pub name: crate::secure::RegistryRef,
     /// Optional per-target service connection (overrides the top-level one).
     pub service_connection: Option<crate::secure::ServiceConnection>,
+}
+
+/// The package ecosystems that can consume the shared
+/// [`PackageFeedConfig`] feed identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageEcosystem {
+    /// pip / uv (PyPI-compatible simple index).
+    Python,
+    /// npm (registry endpoint).
+    Node,
+    /// NuGet (v3 service index).
+    Dotnet,
+}
+
+impl PackageEcosystem {
+    /// The protocol-specific URL suffix appended after the feed segment.
+    fn url_suffix(self) -> &'static str {
+        match self {
+            PackageEcosystem::Python => "pypi/simple/",
+            PackageEcosystem::Node => "npm/registry/",
+            PackageEcosystem::Dotnet => "nuget/v3/index.json",
+        }
+    }
+}
+
+/// A shared internal package-feed identity for the language runtimes.
+///
+/// Lives under `supply-chain.packages`. Unlike [`FeedConfig`] (which mirrors
+/// the `ado-aw` / `awf` / `ado-script` binaries) this describes the feed that
+/// `pip`, `npm`, and `dotnet` should restore packages from. It carries a feed
+/// *identity* rather than a URL, and the compiler derives the three
+/// protocol-specific endpoints from it — see
+/// [`PackageFeedConfig::url_for`].
+///
+/// Accepts either a bare scalar (the feed reference) or an object.
+#[derive(Debug, Clone)]
+pub struct PackageFeedConfig {
+    /// Feed reference: a bare feed name (org-scoped feed) or `project/feed`
+    /// (project-scoped feed).
+    pub feed: crate::secure::FeedRef,
+    /// Organization override. When omitted the org is inferred from the git
+    /// remote of the repository being compiled.
+    pub organization: Option<crate::secure::AdoUrlSegment>,
+    /// Project override. Mutually exclusive with the `project/feed` form of
+    /// `feed`.
+    pub project: Option<crate::secure::AdoUrlSegment>,
+    /// Whether the Python runtime picks up this feed (default `true`).
+    pub python: bool,
+    /// Whether the Node runtime picks up this feed (default `true`).
+    pub node: bool,
+    /// Whether the .NET runtime picks up this feed (default `true`).
+    pub dotnet: bool,
+}
+
+impl<'de> Deserialize<'de> for PackageFeedConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        fn default_true() -> bool {
+            true
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Obj {
+            feed: crate::secure::FeedRef,
+            #[serde(default)]
+            organization: Option<crate::secure::AdoUrlSegment>,
+            #[serde(default)]
+            project: Option<crate::secure::AdoUrlSegment>,
+            #[serde(default = "default_true")]
+            python: bool,
+            #[serde(default = "default_true")]
+            node: bool,
+            #[serde(default = "default_true")]
+            dotnet: bool,
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Scalar(crate::secure::FeedRef),
+            Obj(Obj),
+        }
+        Ok(match Repr::deserialize(deserializer)? {
+            Repr::Scalar(feed) => PackageFeedConfig {
+                feed,
+                organization: None,
+                project: None,
+                python: true,
+                node: true,
+                dotnet: true,
+            },
+            Repr::Obj(o) => PackageFeedConfig {
+                feed: o.feed,
+                organization: o.organization,
+                project: o.project,
+                python: o.python,
+                node: o.node,
+                dotnet: o.dotnet,
+            },
+        })
+    }
+}
+
+impl PackageFeedConfig {
+    /// Whether `ecosystem` opts into this shared feed.
+    pub fn applies_to(&self, ecosystem: PackageEcosystem) -> bool {
+        match ecosystem {
+            PackageEcosystem::Python => self.python,
+            PackageEcosystem::Node => self.node,
+            PackageEcosystem::Dotnet => self.dotnet,
+        }
+    }
+
+    /// Split `feed` into its optional project prefix and the feed name.
+    fn split_feed(&self) -> (Option<&str>, &str) {
+        match self.feed.as_str().split_once('/') {
+            Some((project, feed)) => (Some(project), feed),
+            None => (None, self.feed.as_str()),
+        }
+    }
+
+    /// The effective project segment, or `None` for an org-scoped feed.
+    ///
+    /// Resolution: the `project/feed` prefix, else the `project:` override.
+    /// The two are mutually exclusive (rejected by [`Self::validate`]).
+    pub fn project_segment(&self) -> Option<&str> {
+        let (prefix, _) = self.split_feed();
+        prefix.or_else(|| self.project.as_deref())
+    }
+
+    /// Derive the endpoint for `ecosystem` under organization `org`.
+    ///
+    /// `org` is used only when no `organization:` override is set. Both the
+    /// derived org and any project segment are embedded verbatim, so both are
+    /// checked against the URL-segment allowlist first — the derived org
+    /// comes from the git remote and is therefore not covered by front-matter
+    /// deserialization.
+    pub fn url_for(&self, ecosystem: PackageEcosystem, org: Option<&str>) -> anyhow::Result<String> {
+        let org = match self.organization.as_deref() {
+            Some(explicit) => explicit,
+            None => org.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "supply-chain.packages: cannot determine the Azure DevOps \
+                     organization for feed '{}'. The compile directory has no \
+                     Azure DevOps git remote — set \
+                     `supply-chain.packages.organization` explicitly.",
+                    self.feed.as_str()
+                )
+            })?,
+        };
+        if !crate::validate::is_valid_ado_url_segment(org) {
+            anyhow::bail!(
+                "supply-chain.packages: organization '{org}' must contain only \
+                 [A-Za-z0-9._-] so it can be embedded in a feed URL without \
+                 escaping. Set `supply-chain.packages.organization` explicitly."
+            );
+        }
+        let (_, feed) = self.split_feed();
+        let scope = match self.project_segment() {
+            Some(project) => format!("{org}/{project}"),
+            None => org.to_string(),
+        };
+        Ok(format!(
+            "https://pkgs.dev.azure.com/{scope}/_packaging/{feed}/{}",
+            ecosystem.url_suffix()
+        ))
+    }
+
+    /// Validate cross-field rules and URL-segment safety.
+    fn validate(&self) -> anyhow::Result<()> {
+        let (prefix, feed) = self.split_feed();
+        if prefix.is_some() && self.project.is_some() {
+            anyhow::bail!(
+                "supply-chain.packages: `project` and the 'project/feed' form of \
+                 `feed` are mutually exclusive. Use one or the other."
+            );
+        }
+        for (label, value) in [
+            (
+                "supply-chain.packages.feed",
+                Some(feed).filter(|v| !v.is_empty()),
+            ),
+            ("supply-chain.packages.feed (project)", prefix),
+        ] {
+            if let Some(value) = value
+                && !crate::validate::is_valid_ado_url_segment(value)
+            {
+                anyhow::bail!(
+                    "{label} '{value}' must contain only [A-Za-z0-9._-] (no \
+                     leading '.') so it can be embedded in a feed URL without \
+                     escaping"
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A pinned Azure DevOps pipeline artifact containing the compiler, AWF, and
@@ -2930,13 +3133,15 @@ impl SupplyChainConfig {
                 anyhow::bail!("supply-chain.pipeline-artifact.run-id must be positive");
             }
         }
-        if self.registry.is_some() && self.registry_connection().is_none() {
-            anyhow::bail!(
+        if self.registry.is_some() && self.registry_connection().is_none() {            anyhow::bail!(
                 "supply-chain.registry requires a service connection: set \
                  `registry.service-connection` or a top-level \
                  `supply-chain.service-connection`. A container registry (ACR) \
                  cannot be accessed with $(System.AccessToken)."
             );
+        }
+        if let Some(packages) = &self.packages {
+            packages.validate()?;
         }
         Ok(())
     }
@@ -4326,9 +4531,129 @@ imports:
         assert!(sc.validate().is_ok());
     }
 
+    // ─── supply-chain.packages (shared runtime feed) ─────────────────────
+
     #[test]
-    fn test_supply_chain_feed_only_validates() {
-        // feed-only: registry is None, so validate() never errors regardless of feed.
+    fn test_packages_scalar_shorthand_is_org_scoped() {
+        let sc = parse_supply_chain("supply-chain:\n  packages: my-feed");
+        let packages = sc.packages.as_ref().unwrap();
+        assert_eq!(packages.feed.as_str(), "my-feed");
+        assert_eq!(packages.project_segment(), None);
+        assert!(packages.applies_to(PackageEcosystem::Python));
+        assert!(packages.applies_to(PackageEcosystem::Node));
+        assert!(packages.applies_to(PackageEcosystem::Dotnet));
+        assert!(sc.validate().is_ok());
+        assert_eq!(
+            packages
+                .url_for(PackageEcosystem::Node, Some("myorg"))
+                .unwrap(),
+            "https://pkgs.dev.azure.com/myorg/_packaging/my-feed/npm/registry/"
+        );
+    }
+
+    #[test]
+    fn test_packages_project_scoped_urls_per_ecosystem() {
+        let sc = parse_supply_chain("supply-chain:\n  packages:\n    feed: my-proj/my-feed");
+        let packages = sc.packages.as_ref().unwrap();
+        assert_eq!(packages.project_segment(), Some("my-proj"));
+        let base = "https://pkgs.dev.azure.com/myorg/my-proj/_packaging/my-feed";
+        for (ecosystem, expected) in [
+            (PackageEcosystem::Python, format!("{base}/pypi/simple/")),
+            (PackageEcosystem::Node, format!("{base}/npm/registry/")),
+            (
+                PackageEcosystem::Dotnet,
+                format!("{base}/nuget/v3/index.json"),
+            ),
+        ] {
+            assert_eq!(packages.url_for(ecosystem, Some("myorg")).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn test_packages_explicit_organization_overrides_inferred_org() {
+        let sc = parse_supply_chain(
+            "supply-chain:\n  packages:\n    feed: my-feed\n    organization: explicit-org\n    project: my-proj",
+        );
+        let packages = sc.packages.as_ref().unwrap();
+        assert!(sc.validate().is_ok());
+        assert_eq!(
+            packages
+                .url_for(PackageEcosystem::Python, Some("inferred-org"))
+                .unwrap(),
+            "https://pkgs.dev.azure.com/explicit-org/my-proj/_packaging/my-feed/pypi/simple/"
+        );
+    }
+
+    #[test]
+    fn test_packages_without_org_fails_with_actionable_message() {
+        let sc = parse_supply_chain("supply-chain:\n  packages: my-feed");
+        let err = sc
+            .packages
+            .as_ref()
+            .unwrap()
+            .url_for(PackageEcosystem::Node, None)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("packages.organization"),
+            "expected an actionable message, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_packages_per_ecosystem_opt_out() {
+        let sc = parse_supply_chain(
+            "supply-chain:\n  packages:\n    feed: my-feed\n    node: false",
+        );
+        let packages = sc.packages.as_ref().unwrap();
+        assert!(!packages.applies_to(PackageEcosystem::Node));
+        assert!(packages.applies_to(PackageEcosystem::Python));
+        assert!(packages.applies_to(PackageEcosystem::Dotnet));
+    }
+
+    #[test]
+    fn test_packages_rejects_project_and_prefixed_feed_conflict() {
+        let sc = parse_supply_chain(
+            "supply-chain:\n  packages:\n    feed: a/my-feed\n    project: b",
+        );
+        let err = sc.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("mutually exclusive"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_packages_rejects_unsafe_url_segments() {
+        // Rejected at deserialization by the FeedRef / AdoUrlSegment newtypes.
+        for yaml in [
+            "supply-chain:\n  packages: has space",
+            "supply-chain:\n  packages:\n    feed: my-feed\n    organization: 'bad org'",
+            "supply-chain:\n  packages:\n    feed: my-feed\n    project: 'a/b'",
+            "supply-chain:\n  packages:\n    feed: my-feed\n    unknown: true",
+        ] {
+            let v: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+            let parsed: Result<SupplyChainConfig, _> =
+                serde_yaml::from_value(v["supply-chain"].clone());
+            assert!(parsed.is_err(), "expected rejection for: {yaml}");
+        }
+        // Rejected by validate(): a leading '.' passes the FeedRef charset
+        // but cannot be embedded in a URL segment.
+        let sc = parse_supply_chain("supply-chain:\n  packages: .hidden-feed");
+        assert!(sc.validate().is_err());
+    }
+
+    #[test]
+    fn test_packages_is_independent_of_other_supply_chain_targets() {
+        let sc = parse_supply_chain(
+            "supply-chain:\n  feed: mirror-feed\n  packages: pkg-feed\n  registry:\n    name: myacr.azurecr.io\n    service-connection: acr-conn",
+        );
+        assert!(sc.validate().is_ok());
+        assert_eq!(sc.feed.as_ref().unwrap().name.as_str(), "mirror-feed");
+        assert_eq!(sc.packages.as_ref().unwrap().feed.as_str(), "pkg-feed");
+    }
+
+    #[test]
+    fn test_supply_chain_feed_only_validates() {        // feed-only: registry is None, so validate() never errors regardless of feed.
         let sc = parse_supply_chain("supply-chain:\n  feed: my-feed");
         assert!(sc.validate().is_ok());
         // combined feed + registry-with-connection must also validate OK.
