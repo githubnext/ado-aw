@@ -2938,7 +2938,7 @@ impl PackageFeedConfig {
     /// The two are mutually exclusive (rejected by [`Self::validate`]).
     pub fn project_segment(&self) -> Option<&str> {
         let (prefix, _) = self.split_feed();
-        prefix.or_else(|| self.project.as_deref())
+        prefix.or(self.project.as_deref())
     }
 
     /// Derive the endpoint for `ecosystem` under organization `org`.

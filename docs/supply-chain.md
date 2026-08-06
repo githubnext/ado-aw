@@ -36,6 +36,8 @@ supply-chain:
     name: myacr.azurecr.io/mirror  # registry host or base path
     service-connection: acr-conn   # required when registry is set
   service-connection: shared-conn  # optional shared fallback for both targets
+  packages:                      # shared package feed for the language runtimes
+    feed: my-proj/my-feed        # feed name or "project/feed"
 ```
 
 | Field | Type | Required | Purpose |
@@ -43,6 +45,7 @@ supply-chain:
 | `feed` | scalar **or** `{ name, service-connection }` | optional | Enables the binary mirror (#1–#3). A bare string is shorthand for `{ name: <string> }`. |
 | `pipeline-artifact` | `{ project, definition-id, run-id, artifact }` | optional | Uses one exact producer run as the complete binary source (#1–#3). Mutually exclusive with `feed`. |
 | `registry` | scalar **or** `{ name, service-connection }` | optional | Enables the image mirror (#4), independently of either binary source. |
+| `packages` | scalar **or** `{ feed, organization, project, python, node, dotnet }` | optional | One shared package-feed identity that the `python`, `node`, and `dotnet` runtimes each restore packages from. Independent of every other key. |
 | `service-connection` | string | optional | Shared fallback connection for `feed` and `registry`; it does not apply to `pipeline-artifact`. |
 
 `feed` and `pipeline-artifact` are mutually exclusive. `registry` is
@@ -225,6 +228,97 @@ passes both `--image-tag <awf-version>` and `--image-registry <registry>`
 directly to the AWF invocation so `--skip-pull` resolves every pre-pulled image
 (including `api-proxy`) under the mirror name instead of GHCR.
 
+## Shared package feed for the runtimes (`packages`)
+
+`feed` / `pipeline-artifact` / `registry` all mirror **ado-aw's own**
+artifacts. `packages` is a different concern: it is the feed that the language
+runtimes restore **your project's** packages from. Without it, every runtime
+needs its own `feed-url:`:
+
+```yaml
+runtimes:
+  python:
+    feed-url: "https://pkgs.dev.azure.com/myorg/my-proj/_packaging/my-feed/pypi/simple/"
+  node:
+    feed-url: "https://pkgs.dev.azure.com/myorg/my-proj/_packaging/my-feed/npm/registry/"
+  dotnet:
+    feed-url: "https://pkgs.dev.azure.com/myorg/my-proj/_packaging/my-feed/nuget/v3/index.json"
+```
+
+An Azure Artifacts feed is multi-protocol, so those three URLs are one feed.
+`supply-chain.packages` declares that feed **identity** once and lets the
+compiler derive each endpoint:
+
+```yaml
+runtimes:
+  python: true
+  node: true
+  dotnet: true
+supply-chain:
+  packages: my-proj/my-feed
+```
+
+`packages` is independent of `feed`, `pipeline-artifact`, and `registry` — set
+it alone or alongside any of them.
+
+### Fields
+
+| Field | Type | Required | Purpose |
+|-------|------|----------|---------|
+| `feed` | string | **yes** | Feed name (org-scoped feed) or `project/feed` (project-scoped feed). |
+| `organization` | string | optional | ADO organization. Defaults to the org inferred from the repository's git remote. |
+| `project` | string | optional | ADO project. Mutually exclusive with the `project/feed` form of `feed`. |
+| `python` / `node` / `dotnet` | bool | optional | Per-ecosystem opt-out; each defaults to `true`. |
+
+A bare scalar is sugar for `{ feed: <string> }`:
+
+```yaml
+supply-chain:
+  packages: my-feed              # same as { feed: my-feed }
+```
+
+### Derived endpoints
+
+For organization `ORG`, optional project `PROJ`, and feed `FEED`:
+
+| Runtime | Derived URL | Applied as |
+|---------|-------------|------------|
+| `python` | `https://pkgs.dev.azure.com/ORG/PROJ/_packaging/FEED/pypi/simple/` | `PIP_INDEX_URL` + `UV_DEFAULT_INDEX` env vars, plus `PipAuthenticate@1` |
+| `node` | `https://pkgs.dev.azure.com/ORG/PROJ/_packaging/FEED/npm/registry/` | `NPM_CONFIG_REGISTRY` env var, plus an ensure-`.npmrc` step and `npmAuthenticate@0` |
+| `dotnet` | `https://pkgs.dev.azure.com/ORG/PROJ/_packaging/FEED/nuget/v3/index.json` | generated `nuget.config` package source, plus `NuGetAuthenticate@1` |
+
+The `/PROJ` segment is omitted for an org-scoped feed (a bare `feed:` with no
+`project:`). The organization and project are embedded verbatim, so both must
+match `[A-Za-z0-9._-]`; anything requiring URL escaping is rejected at compile
+time rather than silently producing a malformed URL. Compilation also fails
+with an actionable message when no organization can be resolved — set
+`organization:` explicitly when compiling outside an Azure DevOps clone.
+
+### Precedence
+
+For each runtime, the effective package source resolves as:
+
+1. `runtimes.<runtime>.feed-url` — an explicit per-runtime URL always wins.
+2. `runtimes.<runtime>.config` — the checked-in config file owns the package
+   source, so `supply-chain.packages` is **not** applied. A compile warning is
+   emitted when both are set.
+3. `supply-chain.packages` (when the ecosystem has not opted out).
+4. The ecosystem's public default (PyPI / npmjs / nuget.org).
+
+### Authentication
+
+No service connection is involved. The runtimes authenticate with the standard
+`PipAuthenticate@1` / `npmAuthenticate@0` / `NuGetAuthenticate@1` tasks under
+the pipeline's build identity, exactly as they do for a per-runtime
+`feed-url:`. Grant that identity the **Feed Reader** role on the feed. This
+matches the same-organization feed story described under
+[Authentication](#authentication) above; cross-organization package feeds are
+not supported by this key — use a per-runtime `feed-url:` plus your own
+authentication step.
+
+`pkgs.dev.azure.com` is already in the agent's default AWF allowlist, so no
+`network:` change is needed for the agent to restore packages from the feed.
+
 ## Examples
 
 Mirror everything, two different connections:
@@ -278,6 +372,20 @@ supply-chain:
   registry:
     name: myacr.azurecr.io
     service-connection: acr-conn
+```
+
+One shared package feed for all three runtimes, with npm left on the public
+registry:
+
+```yaml
+runtimes:
+  python: true
+  node: true
+  dotnet: true
+supply-chain:
+  packages:
+    feed: my-proj/my-feed
+    node: false
 ```
 
 ## Network isolation note
