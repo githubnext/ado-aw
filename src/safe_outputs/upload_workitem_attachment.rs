@@ -107,6 +107,217 @@ impl Default for UploadWorkitemAttachmentConfig {
     }
 }
 
+/// Resolves `file_path` against the workspace, validates it against the
+/// configured extension allowlist/size limit, and reads its contents.
+///
+/// Returns `Ok(Err(result))` (rather than an `Err`) for any *policy*
+/// rejection (bad extension, symlink escape, oversized file, embedded
+/// `##vso[` injection sequence) so callers can surface it as a normal
+/// `ExecutionResult::failure` without treating it as an unexpected error.
+fn validate_and_read_file(
+    ctx: &ExecutionContext,
+    file_path: &str,
+    config: &UploadWorkitemAttachmentConfig,
+) -> anyhow::Result<Result<Vec<u8>, ExecutionResult>> {
+    // Validate file extension against allowed-extensions (if configured)
+    if !config.allowed_extensions.is_empty() {
+        let has_valid_ext = config
+            .allowed_extensions
+            .iter()
+            .any(|ext| file_path.to_lowercase().ends_with(&ext.to_lowercase()));
+        if !has_valid_ext {
+            return Ok(Err(ExecutionResult::failure(format!(
+                "File '{}' has an extension not in the allowed list: {:?}",
+                file_path, config.allowed_extensions
+            ))));
+        }
+    }
+
+    // Resolve file path relative to source_directory
+    let resolved_path = ctx.source_directory.join(file_path);
+    debug!("Resolved file path: {}", resolved_path.display());
+
+    // Canonicalize to resolve symlinks, then verify the path stays within source_directory.
+    let canonical = resolved_path.canonicalize().context(
+        "Failed to canonicalize file path — file may not exist or contains broken symlinks",
+    )?;
+    let canonical_base = ctx
+        .source_directory
+        .canonicalize()
+        .context("Failed to canonicalize source directory")?;
+    if !canonical.starts_with(&canonical_base) {
+        return Ok(Err(ExecutionResult::failure(format!(
+            "File path '{}' resolves outside the workspace (symlink escape)",
+            file_path
+        ))));
+    }
+
+    // Check file size
+    let metadata = std::fs::metadata(&canonical).context("Failed to read file metadata")?;
+    let file_size = metadata.len();
+    debug!("File size: {} bytes", file_size);
+    if file_size > config.max_file_size {
+        return Ok(Err(ExecutionResult::failure(format!(
+            "File size ({} bytes) exceeds maximum allowed size ({} bytes)",
+            file_size, config.max_file_size
+        ))));
+    }
+
+    // Read file bytes
+    let file_bytes = std::fs::read(&canonical).context("Failed to read file contents")?;
+
+    // Check if file is text (valid UTF-8) — if text, scan for ##vso[ command injection.
+    // Binary files (where from_utf8 fails) skip this check intentionally: ADO's attachment
+    // viewer won't execute ##vso[ sequences from binary content. Note that a binary file
+    // with a valid UTF-8 preamble but malformed tail will also skip the scan, but this is
+    // acceptable because the injection risk from binary attachments is negligible.
+    if let Ok(text) = std::str::from_utf8(&file_bytes)
+        && text.contains("##vso[")
+    {
+        return Ok(Err(ExecutionResult::failure(
+            "Uploaded file contains '##vso[' command injection sequence — upload rejected"
+                .to_string(),
+        )));
+    }
+
+    Ok(Ok(file_bytes))
+}
+
+/// Uploads raw file bytes to the ADO attachments endpoint.
+///
+/// Returns `Ok(Err(result))` for a non-success HTTP response so callers can
+/// surface it as a normal `ExecutionResult::failure`.
+async fn upload_attachment_bytes(
+    client: &reqwest::Client,
+    org_url: &str,
+    project: &str,
+    token: &str,
+    filename: &str,
+    file_bytes: Vec<u8>,
+) -> anyhow::Result<Result<String, ExecutionResult>> {
+    // POST {org_url}/{project}/_apis/wit/attachments?fileName={filename}&api-version=7.1
+    let upload_url = format!(
+        "{}/{}/_apis/wit/attachments?fileName={}&api-version=7.1",
+        org_url.trim_end_matches('/'),
+        utf8_percent_encode(project, PATH_SEGMENT),
+        utf8_percent_encode(filename, PATH_SEGMENT),
+    );
+    debug!("Upload URL: {}", upload_url);
+
+    info!("Uploading file '{}' ({} bytes)", filename, file_bytes.len());
+    let upload_response = client
+        .post(&upload_url)
+        .header("Content-Type", "application/octet-stream")
+        .basic_auth("", Some(token))
+        .body(file_bytes)
+        .send()
+        .await
+        .context("Failed to upload attachment to Azure DevOps")?;
+
+    if !upload_response.status().is_success() {
+        let status = upload_response.status();
+        let error_body = upload_response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        return Ok(Err(ExecutionResult::failure(format!(
+            "Failed to upload attachment (HTTP {}): {}",
+            status, error_body
+        ))));
+    }
+
+    let upload_body: serde_json::Value = upload_response
+        .json()
+        .await
+        .context("Failed to parse upload response JSON")?;
+
+    let attachment_url = upload_body
+        .get("url")
+        .and_then(|v| v.as_str())
+        .context("Upload response missing 'url' field")?
+        .to_string();
+    debug!("Attachment URL: {}", attachment_url);
+
+    Ok(Ok(attachment_url))
+}
+
+/// Links an already-uploaded attachment to a work item via a JSON-patch
+/// `AttachedFile` relation, producing the final `ExecutionResult` (success
+/// or failure) for the whole tool call.
+#[allow(clippy::too_many_arguments)]
+async fn link_attachment_to_work_item(
+    client: &reqwest::Client,
+    org_url: &str,
+    project: &str,
+    token: &str,
+    work_item_id: i64,
+    attachment_url: &str,
+    comment: &str,
+    filename: &str,
+    file_path: &str,
+) -> anyhow::Result<ExecutionResult> {
+    // PATCH {org_url}/{project}/_apis/wit/workitems/{work_item_id}?api-version=7.1
+    let link_url = format!(
+        "{}/{}/_apis/wit/workitems/{}?api-version=7.1",
+        org_url.trim_end_matches('/'),
+        utf8_percent_encode(project, PATH_SEGMENT),
+        work_item_id,
+    );
+    debug!("Link URL: {}", link_url);
+
+    let patch_doc = serde_json::json!([{
+        "op": "add",
+        "path": "/relations/-",
+        "value": {
+            "rel": "AttachedFile",
+            "url": attachment_url,
+            "attributes": {
+                "comment": comment,
+            }
+        }
+    }]);
+
+    info!("Linking attachment to work item #{}", work_item_id);
+    let link_response = client
+        .patch(&link_url)
+        .header("Content-Type", "application/json-patch+json")
+        .basic_auth("", Some(token))
+        .json(&patch_doc)
+        .send()
+        .await
+        .context("Failed to link attachment to work item")?;
+
+    if link_response.status().is_success() {
+        info!("Attachment '{}' linked to work item #{}", filename, work_item_id);
+
+        Ok(ExecutionResult::success_with_data(
+            format!("Uploaded '{}' and linked to work item #{}", filename, work_item_id),
+            serde_json::json!({
+                "work_item_id": work_item_id,
+                "file_path": file_path,
+                "attachment_url": attachment_url,
+                "project": project,
+            }),
+        ))
+    } else {
+        let status = link_response.status();
+        let error_body = link_response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+
+        warn!(
+            "Attachment uploaded but linking failed — the attachment at {} is orphaned",
+            attachment_url
+        );
+
+        Ok(ExecutionResult::failure(format!(
+            "Attachment uploaded but failed to link to work item #{} (HTTP {}): {}",
+            work_item_id, status, error_body
+        )))
+    }
+}
+
 #[async_trait::async_trait]
 impl Executor for UploadWorkitemAttachmentResult {
     fn dry_run_summary(&self) -> String {
@@ -145,66 +356,10 @@ impl Executor for UploadWorkitemAttachmentResult {
         debug!("Max file size: {} bytes", config.max_file_size);
         debug!("Allowed extensions: {:?}", config.allowed_extensions);
 
-        // Validate file extension against allowed-extensions (if configured)
-        if !config.allowed_extensions.is_empty() {
-            let has_valid_ext = config
-                .allowed_extensions
-                .iter()
-                .any(|ext| self.file_path.to_lowercase().ends_with(&ext.to_lowercase()));
-            if !has_valid_ext {
-                return Ok(ExecutionResult::failure(format!(
-                    "File '{}' has an extension not in the allowed list: {:?}",
-                    self.file_path, config.allowed_extensions
-                )));
-            }
-        }
-
-        // Resolve file path relative to source_directory
-        let resolved_path = ctx.source_directory.join(&self.file_path);
-        debug!("Resolved file path: {}", resolved_path.display());
-
-        // Canonicalize to resolve symlinks, then verify the path stays within source_directory.
-        let canonical = resolved_path.canonicalize().context(
-            "Failed to canonicalize file path — file may not exist or contains broken symlinks",
-        )?;
-        let canonical_base = ctx
-            .source_directory
-            .canonicalize()
-            .context("Failed to canonicalize source directory")?;
-        if !canonical.starts_with(&canonical_base) {
-            return Ok(ExecutionResult::failure(format!(
-                "File path '{}' resolves outside the workspace (symlink escape)",
-                self.file_path
-            )));
-        }
-
-        // Check file size
-        let metadata = std::fs::metadata(&canonical).context("Failed to read file metadata")?;
-        let file_size = metadata.len();
-        debug!("File size: {} bytes", file_size);
-        if file_size > config.max_file_size {
-            return Ok(ExecutionResult::failure(format!(
-                "File size ({} bytes) exceeds maximum allowed size ({} bytes)",
-                file_size, config.max_file_size
-            )));
-        }
-
-        // Read file bytes
-        let file_bytes = std::fs::read(&canonical).context("Failed to read file contents")?;
-
-        // Check if file is text (valid UTF-8) — if text, scan for ##vso[ command injection.
-        // Binary files (where from_utf8 fails) skip this check intentionally: ADO's attachment
-        // viewer won't execute ##vso[ sequences from binary content. Note that a binary file
-        // with a valid UTF-8 preamble but malformed tail will also skip the scan, but this is
-        // acceptable because the injection risk from binary attachments is negligible.
-        if let Ok(text) = std::str::from_utf8(&file_bytes)
-            && text.contains("##vso[")
-        {
-            return Ok(ExecutionResult::failure(
-                "Uploaded file contains '##vso[' command injection sequence — upload rejected"
-                    .to_string(),
-            ));
-        }
+        let file_bytes = match validate_and_read_file(ctx, &self.file_path, &config)? {
+            Ok(bytes) => bytes,
+            Err(result) => return Ok(result),
+        };
 
         // Extract filename for upload
         let filename = std::path::Path::new(&self.file_path)
@@ -223,117 +378,26 @@ impl Executor for UploadWorkitemAttachmentResult {
 
         let client = reqwest::Client::new();
 
-        // Step 1: Upload file
-        // POST {org_url}/{project}/_apis/wit/attachments?fileName={filename}&api-version=7.1
-        let upload_url = format!(
-            "{}/{}/_apis/wit/attachments?fileName={}&api-version=7.1",
-            org_url.trim_end_matches('/'),
-            utf8_percent_encode(project, PATH_SEGMENT),
-            utf8_percent_encode(filename, PATH_SEGMENT),
-        );
-        debug!("Upload URL: {}", upload_url);
+        let attachment_url =
+            match upload_attachment_bytes(&client, org_url, project, token, filename, file_bytes)
+                .await?
+            {
+                Ok(url) => url,
+                Err(result) => return Ok(result),
+            };
 
-        info!("Uploading file '{}' ({} bytes)", filename, file_size);
-        let upload_response = client
-            .post(&upload_url)
-            .header("Content-Type", "application/octet-stream")
-            .basic_auth("", Some(token))
-            .body(file_bytes)
-            .send()
-            .await
-            .context("Failed to upload attachment to Azure DevOps")?;
-
-        if !upload_response.status().is_success() {
-            let status = upload_response.status();
-            let error_body = upload_response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            return Ok(ExecutionResult::failure(format!(
-                "Failed to upload attachment (HTTP {}): {}",
-                status, error_body
-            )));
-        }
-
-        let upload_body: serde_json::Value = upload_response
-            .json()
-            .await
-            .context("Failed to parse upload response JSON")?;
-
-        let attachment_url = upload_body
-            .get("url")
-            .and_then(|v| v.as_str())
-            .context("Upload response missing 'url' field")?
-            .to_string();
-        debug!("Attachment URL: {}", attachment_url);
-
-        // Step 2: Link attachment to work item
-        // PATCH {org_url}/{project}/_apis/wit/workitems/{work_item_id}?api-version=7.1
-        let link_url = format!(
-            "{}/{}/_apis/wit/workitems/{}?api-version=7.1",
-            org_url.trim_end_matches('/'),
-            utf8_percent_encode(project, PATH_SEGMENT),
+        link_attachment_to_work_item(
+            &client,
+            org_url,
+            project,
+            token,
             self.work_item_id,
-        );
-        debug!("Link URL: {}", link_url);
-
-        let patch_doc = serde_json::json!([{
-            "op": "add",
-            "path": "/relations/-",
-            "value": {
-                "rel": "AttachedFile",
-                "url": attachment_url,
-                "attributes": {
-                    "comment": effective_comment,
-                }
-            }
-        }]);
-
-        info!("Linking attachment to work item #{}", self.work_item_id);
-        let link_response = client
-            .patch(&link_url)
-            .header("Content-Type", "application/json-patch+json")
-            .basic_auth("", Some(token))
-            .json(&patch_doc)
-            .send()
-            .await
-            .context("Failed to link attachment to work item")?;
-
-        if link_response.status().is_success() {
-            info!(
-                "Attachment '{}' linked to work item #{}",
-                filename, self.work_item_id
-            );
-
-            Ok(ExecutionResult::success_with_data(
-                format!(
-                    "Uploaded '{}' and linked to work item #{}",
-                    filename, self.work_item_id
-                ),
-                serde_json::json!({
-                    "work_item_id": self.work_item_id,
-                    "file_path": self.file_path,
-                    "attachment_url": attachment_url,
-                    "project": project,
-                }),
-            ))
-        } else {
-            let status = link_response.status();
-            let error_body = link_response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-
-            warn!(
-                "Attachment uploaded but linking failed — the attachment at {} is orphaned",
-                attachment_url
-            );
-
-            Ok(ExecutionResult::failure(format!(
-                "Attachment uploaded but failed to link to work item #{} (HTTP {}): {}",
-                self.work_item_id, status, error_body
-            )))
-        }
+            &attachment_url,
+            &effective_comment,
+            filename,
+            &self.file_path,
+        )
+        .await
     }
 }
 
