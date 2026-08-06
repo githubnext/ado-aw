@@ -67,7 +67,9 @@ During Stage 3 execution, memory files are validated (path safety, extension fil
 
 ### Azure DevOps MCP (`azure-devops:`)
 
-First-class Azure DevOps MCP integration. Auto-configures the ADO MCP container, token mapping, [MCPG](/ado-aw/reference/mcpg/) entry, and [network allowlist](/ado-aw/reference/network/).
+First-class Azure DevOps MCP integration. Auto-configures the ADO MCP
+container, credential-isolated policy proxy, and
+[MCPG](/ado-aw/reference/mcpg/) entry.
 
 ```yaml
 # Simple enablement (auto-infers org from git remote)
@@ -77,17 +79,22 @@ tools:
 # With scoping options
 tools:
   azure-devops:
-    toolsets: [repos, wit, core]                    # ADO API toolset groups
+    version: 2.8.1                                  # Optional exact-semver override
+    toolsets: [repositories, work-items, core]      # MCP-native toolset groups
     allowed: [wit_get_work_item, core_list_projects] # Explicit tool allow-list
     org: myorg                                       # Optional override (inferred from git remote)
 ```
 
 When enabled, the compiler:
-- Generates a containerized stdio MCP entry (`node:20-slim` + `npx @azure-devops/mcp`) in the [MCPG](/ado-aw/reference/mcpg/) config
-- Auto-maps `AZURE_DEVOPS_EXT_PAT` token passthrough when [`permissions.read`](/ado-aw/reference/network/#permissions-ado-access-tokens) is configured
-- Adds ADO-specific hosts to the [network allowlist](/ado-aw/reference/network/)
+- Requires [`permissions.read`](/ado-aw/reference/network/#permissions-ado-access-tokens) as the trusted proxy's token source
+- Installs `@azure-devops/mcp` at the compiler default or exact `version:` override and mounts it read-only into `node:20-slim`
+- Gives the MCP a non-secret sentinel; the real Azure DevOps token exists only in the policy proxy
 - Auto-infers org from the git remote URL at compile time (overridable via `org:` field)
 - Fails compilation if org cannot be determined (no explicit override and no ADO git remote)
+
+`toolsets` and `allowed` pass through to the selected package version. Use its
+native domain and tool names; ado-aw does not translate or validate that
+upstream contract.
 
 ## Built-in CLIs
 

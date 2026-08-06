@@ -66,7 +66,7 @@ use std::path::Path;
 
 use super::common::PerJobPools;
 use super::common::{
-    self, ADO_BUILD_ID_SUFFIX, ADO_MCP_HOST_NODE_MODULES, ADO_MCP_PACKAGE, ADO_MCP_VERSION,
+    self, ADO_BUILD_ID_SUFFIX, ADO_MCP_HOST_NODE_MODULES, ADO_MCP_PACKAGE,
     ADO_PROXY_CONTAINER_NAME, ADO_PROXY_IMAGE, ADO_PROXY_LISTEN_PORT, ADO_PROXY_NETWORK_NAME,
     ADO_PROXY_PUBLIC_CA_HOST_PATH, ADO_PROXY_TLS_PORT, AWF_SQUID_URL, AWF_VERSION, AZ_WRAPPER_DIR,
     HEADER_MARKER, MCPG_CONTAINER_NAME, MCPG_DOMAIN, MCPG_IMAGE, MCPG_PORT, MCPG_VERSION, image_ref,
@@ -1144,7 +1144,9 @@ fn build_agent_job(
     if ado_proxy_enabled {
         steps.push(Step::Bash(prepare_ado_proxy_network_step()));
         if common::ado_mcp_enabled(front_matter) {
-            steps.push(Step::Bash(prepare_ado_mcp_step()));
+            steps.push(Step::Bash(prepare_ado_mcp_step(
+                common::ado_mcp_version(front_matter),
+            )));
         }
         steps.push(Step::Bash(start_ado_proxy_step(front_matter)));
     }
@@ -4126,7 +4128,7 @@ fn prepare_ado_proxy_network_step() -> BashStep {
 /// read-only into a container that does not. The mount point is load-bearing:
 /// Node resolves dependencies by walking upward from the importing file, so
 /// the tree must land at `/app/node_modules`.
-fn prepare_ado_mcp_step() -> BashStep {
+fn prepare_ado_mcp_step(version: &str) -> BashStep {
     let script = format!(
         "set -euo pipefail\n\
          \n\
@@ -4139,7 +4141,7 @@ fn prepare_ado_mcp_step() -> BashStep {
          cd \"$MCP_STAGE\"\n\
          npm init -y >/dev/null 2>&1\n\
          npm install --omit=dev --no-audit --no-fund --save-exact \\\n  \
-           \"{ADO_MCP_PACKAGE}@{ADO_MCP_VERSION}\"\n\
+           \"{ADO_MCP_PACKAGE}@{version}\"\n\
          \n\
          # Verify the pin actually took. `npm install` resolves a *range* for\n\
          # anything it also has to satisfy transitively, so a matching request\n\
@@ -4147,8 +4149,8 @@ fn prepare_ado_mcp_step() -> BashStep {
          # surface is defined by whatever ends up on disk here.\n\
          MCP_INSTALLED=$(node -p \\\n  \
            \"require('{ADO_MCP_HOST_NODE_MODULES}/{ADO_MCP_PACKAGE}/package.json').version\")\n\
-         if [ \"$MCP_INSTALLED\" != \"{ADO_MCP_VERSION}\" ]; then\n  \
-           echo \"##vso[task.complete result=Failed]Azure DevOps MCP resolved to $MCP_INSTALLED, expected {ADO_MCP_VERSION}\"\n  \
+         if [ \"$MCP_INSTALLED\" != \"{version}\" ]; then\n  \
+           echo \"##vso[task.complete result=Failed]Azure DevOps MCP resolved to $MCP_INSTALLED, expected {version}\"\n  \
            exit 1\n\
          fi\n\
          \n\
@@ -5765,9 +5767,9 @@ safe-outputs:
         assert!(network_script.contains(&format!(
             "docker network create --internal {ADO_PROXY_NETWORK_NAME}"
         )));
-        let script = prepare_ado_mcp_step().script;
+        let script = prepare_ado_mcp_step(common::ADO_MCP_VERSION).script;
         assert!(
-            script.contains(&format!("{ADO_MCP_PACKAGE}@{ADO_MCP_VERSION}")),
+            script.contains(&format!("{ADO_MCP_PACKAGE}@{}", common::ADO_MCP_VERSION)),
             "the MCP package must be pinned, not floating: {script}"
         );
         assert!(
@@ -5777,6 +5779,13 @@ safe-outputs:
         assert!(
             script.contains("$MCP_INSTALLED\" != \"") ,
             "the resolved version must be verified, not just requested: {script}"
+        );
+
+        let override_script = prepare_ado_mcp_step("2.9.0").script;
+        assert!(override_script.contains(&format!("{ADO_MCP_PACKAGE}@2.9.0")));
+        assert!(override_script.contains("expected 2.9.0"));
+        assert!(
+            !override_script.contains(&format!("{ADO_MCP_PACKAGE}@{}", common::ADO_MCP_VERSION))
         );
     }
 

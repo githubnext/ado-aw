@@ -37,6 +37,7 @@
 //! - [`AdoProject`] — an Azure DevOps project name or GUID.
 //! - [`AdoRepository`] — an Azure DevOps repository name or GUID.
 //! - [`Version`] — a version string (`1.2.3`, `latest`).
+//! - [`SemanticVersion`] — an exact semantic version (`1.2.3`, `2.0.0-beta.1`).
 //!
 //! New safe-output tools that accept paths or identifiers should type those
 //! fields with these newtypes instead of raw `String` so the checks are applied
@@ -326,6 +327,20 @@ validated_string! {
 }
 
 validated_string! {
+    /// An exact semantic version (e.g. `1.2.3`, `2.0.0-beta.1`).
+    SemanticVersion, "semantic version", |value: &str, label: &str| {
+        if semver::Version::parse(value).is_ok() {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "{label} '{value}' must be an exact semantic version such as '2.8.1'; \
+                 npm tags and ranges are not allowed"
+            )
+        }
+    }
+}
+
+validated_string! {
     /// An Azure DevOps Artifacts feed reference (`feed` or `project/feed`).
     FeedRef, "feed", |value: &str, label: &str| {
         if validate::is_valid_feed_ref(value) {
@@ -586,6 +601,18 @@ mod tests {
         assert!(ArtifactName::parse(".hidden").is_err());
         assert!(ArtifactName::parse("has space").is_err());
         assert!(ArtifactName::parse("a".repeat(101).as_str()).is_err());
+    }
+
+    #[test]
+    fn semantic_version_requires_an_exact_semver() {
+        assert!(SemanticVersion::parse("2.8.1").is_ok());
+        assert!(SemanticVersion::parse("3.0.0-beta.1").is_ok());
+        assert!(SemanticVersion::parse("latest").is_err());
+        assert!(SemanticVersion::parse("next").is_err());
+        assert!(SemanticVersion::parse("^2.8.0").is_err());
+        assert!(SemanticVersion::parse("2.8").is_err());
+        assert!(SemanticVersion::parse("v2.8.1").is_err());
+        assert!(SemanticVersion::parse("2.8.1; echo bad").is_err());
     }
 
     #[test]

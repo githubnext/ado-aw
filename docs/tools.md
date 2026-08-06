@@ -75,16 +75,18 @@ tools:
 # With scoping options
 tools:
   azure-devops:
-    toolsets: [repos, wit, core]                    # ADO API toolset groups
+    version: 2.8.1                                  # Optional exact-semver override
+    toolsets: [repositories, work-items, core]      # MCP-native toolset groups
     allowed: [wit_get_work_item, core_list_projects] # Explicit tool allow-list
     org: myorg                                       # Optional override (inferred from git remote)
 ```
 
 When enabled, the compiler:
 - Requires `permissions.read` as the trusted proxy's token source
-- Installs the pinned `@azure-devops/mcp` package on the runner and mounts it
-  read-only into an unchanged `node:20-slim` container; the isolated container
-  needs no npm registry access
+- Installs `@azure-devops/mcp` on the runner at the compiler-pinned version
+  (or the exact semantic version set with `version:`) and mounts it read-only
+  into an unchanged `node:20-slim` container; the isolated container needs no
+  npm registry access
 - Runs that container on an internal network with `dev.azure.com` redirected
   to `ado-proxy` and a public interception CA trusted only by that process
 - Gives the MCP a non-secret sentinel in `ADO_MCP_AUTH_TOKEN`; the real token
@@ -92,6 +94,10 @@ When enabled, the compiler:
   bearer after an allow decision
 - Auto-infers org from the git remote URL at compile time (overridable via `org:` field)
 - Fails compilation if org cannot be determined (no explicit override and no ADO git remote)
+
+`toolsets` and `allowed` are passed through to the selected Azure DevOps MCP
+version. Use that package version's native domain and tool names; ado-aw does
+not translate or validate the upstream MCP contract.
 
 The generated `az` wrapper similarly carries only a sentinel PAT and routes
 Azure DevOps traffic through the proxy. Catalogued reads (`az devops`,

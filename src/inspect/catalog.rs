@@ -433,6 +433,7 @@ mod tests {
         assert_eq!(versions.copilot_cli, COPILOT_CLI_VERSION);
         assert_eq!(versions.awf, AWF_VERSION);
         assert_eq!(versions.mcpg, MCPG_VERSION);
+        assert_eq!(versions.ado_mcp, ADO_MCP_VERSION);
         // Only the versions category is populated for --kind versions.
         assert!(catalog.safe_outputs.is_empty());
         assert!(catalog.models.is_empty());
@@ -451,6 +452,7 @@ mod tests {
         assert_eq!(value["versions"]["copilot_cli"], COPILOT_CLI_VERSION);
         assert_eq!(value["versions"]["awf"], AWF_VERSION);
         assert_eq!(value["versions"]["mcpg"], MCPG_VERSION);
+        assert_eq!(value["versions"]["ado_mcp"], ADO_MCP_VERSION);
     }
 
     #[test]
