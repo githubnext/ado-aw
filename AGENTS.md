@@ -164,6 +164,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── url.rs        # Build-reference parsing (bare ID, full ADO URL)
 │   │   ├── analyzers/    # Per-signal analyzers that populate AuditData sections
 │   │   │   ├── mod.rs
+│   │   │   ├── ado_proxy.rs    # Sanitized ado-proxy decision-log + container-lifecycle analysis
 │   │   │   ├── custom_jobs.rs  # Job-level audit correlation for custom safe-output jobs
 │   │   │   ├── detection.rs    # Detection-stage artifact analysis
 │   │   │   ├── firewall.rs     # AWF network log analysis
