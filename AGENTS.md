@@ -395,7 +395,9 @@ index to jump to the right page.
   `check`, `mcp`, `execute`, `secrets`, `enable`, `disable`,
   `remove`, `list`, `status`, `run`, `audit`, `mcp-author`, `trace`,
   `inspect`, `graph`, `whatif`, `lint`, `catalog`; `configure` is a
-  deprecated hidden alias; `export-gate-schema` and `export-fact-catalog` are hidden build-time tools).
+  deprecated hidden alias; `export-gate-schema`, `export-fact-catalog`,
+  `export-ado-proxy-catalog-schema`, and `export-ado-proxy-catalog` are hidden
+  build-time tools).
 - [`docs/agency-plugin.md`](docs/agency-plugin.md) — the Agency / Claude Code
   plugin (`agency/plugins/ado-aw/`): canonical layout, six skills, `mcp-author`
   wiring, the self-contained root marketplace catalogs, `init --agency`
