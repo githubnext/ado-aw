@@ -192,6 +192,12 @@ These commands are not shown in `--help` but are available for contributors work
   - `--output, -o <path>` - Write the catalog to a file instead of stdout. Parent directories are created automatically.
   - Typical use: `cargo run -- export-fact-catalog --output scripts/ado-script/src/trigger-e2e/fact-catalog.gen.json`
 
+- `export-ado-proxy-catalog-schema` - Export the `ado-proxy` catalog JSON Schema (build-time tool for the `scripts/ado-script` TypeScript workspace).
+  - `--output, -o <path>` - Write the schema to a file instead of stdout. Parent directories are created automatically.
+
+- `export-ado-proxy-catalog` - Export the `ado-proxy` catalog data JSON — build-time drift guard for the `ado-proxy` bundle's committed catalog snapshot in `scripts/ado-script/src/ado-proxy/`.
+  - `--output, -o <path>` - Write the catalog to a file instead of stdout. Parent directories are created automatically.
+
 ### Hidden Pipeline-Internal Commands
 
 These commands are started by the pipeline itself (or by AWF on its behalf) and are not part of the authoring surface:
