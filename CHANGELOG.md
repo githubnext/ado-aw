@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.50.0](https://github.com/githubnext/ado-aw/compare/v0.49.0...v0.50.0) (2026-08-08)
+
+
+### Features
+
+* **tools:** allow Azure DevOps MCP version override ([#1843](https://github.com/githubnext/ado-aw/issues/1843)) ([a7247b3](https://github.com/githubnext/ado-aw/commit/a7247b35c9ef10ac838c8ad8be62772a64443893))
+
+
+### Bug Fixes
+
+* **tests:** make enable dry-run test hermetic ([#1848](https://github.com/githubnext/ado-aw/issues/1848)) ([679d1c6](https://github.com/githubnext/ado-aw/commit/679d1c6f1be391dbdf285e6953cbece371c24bdb))
+
 ## [0.49.0](https://github.com/githubnext/ado-aw/compare/v0.48.0...v0.49.0) (2026-08-06)
 
 
