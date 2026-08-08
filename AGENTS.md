@@ -74,6 +74,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── job_ir.rs     # Job target typed-IR builder
 │   │   ├── stage.rs      # Stage-level ADO template compiler (target: stage)
 │   │   ├── stage_ir.rs   # Stage target typed-IR builder
+│   │   ├── az_wrapper.rs # Renders the `az` CLI redirect wrapper installed into the agent sandbox (env-based `HTTPS_PROXY` redirect, not argument rewriting)
 │   │   ├── source_path_guard.rs # Validation guard for untrusted workflow source-path inputs used by audit + mcp_author
 │   │   ├── gitattributes.rs # .gitattributes management for compiled pipelines
 │   │   ├── filter_ir.rs  # Filter expression IR: Fact/Predicate types, lowering, validation, codegen
@@ -164,6 +165,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── url.rs        # Build-reference parsing (bare ID, full ADO URL)
 │   │   ├── analyzers/    # Per-signal analyzers that populate AuditData sections
 │   │   │   ├── mod.rs
+│   │   │   ├── ado_proxy.rs    # ado-proxy request/decision log analysis (AdoProxyAnalysis)
 │   │   │   ├── custom_jobs.rs  # Job-level audit correlation for custom safe-output jobs
 │   │   │   ├── detection.rs    # Detection-stage artifact analysis
 │   │   │   ├── firewall.rs     # AWF network log analysis
@@ -395,7 +397,9 @@ index to jump to the right page.
   `check`, `mcp`, `execute`, `secrets`, `enable`, `disable`,
   `remove`, `list`, `status`, `run`, `audit`, `mcp-author`, `trace`,
   `inspect`, `graph`, `whatif`, `lint`, `catalog`; `configure` is a
-  deprecated hidden alias; `export-gate-schema` and `export-fact-catalog` are hidden build-time tools).
+  deprecated hidden alias; `export-gate-schema`, `export-fact-catalog`,
+  `export-ado-proxy-catalog-schema`, and `export-ado-proxy-catalog` are hidden
+  build-time tools).
 - [`docs/agency-plugin.md`](docs/agency-plugin.md) — the Agency / Claude Code
   plugin (`agency/plugins/ado-aw/`): canonical layout, six skills, `mcp-author`
   wiring, the self-contained root marketplace catalogs, `init --agency`
