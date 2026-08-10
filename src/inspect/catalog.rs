@@ -374,6 +374,7 @@ fn models() -> Vec<String> {
         "gpt-4".to_string(),
         "gpt-4-o-preview".to_string(),
         "gpt-4.1".to_string(),
+        "gpt-41-copilot".to_string(),
         "gpt-4o".to_string(),
         "gpt-4o-mini".to_string(),
         "gpt-5-mini".to_string(),
