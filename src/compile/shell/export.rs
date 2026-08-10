@@ -78,14 +78,29 @@ pub fn export(out_dir: &Path, format: ExportFormat) -> Result<usize> {
         ExportFormat::Files => {
             for (def, script) in scripts.iter().zip(&exported) {
                 let path = out_dir.join(def.export_file_name());
-                let contents = format!("{}{}", provenance_header(script), script.source);
-                std::fs::write(&path, contents)
+                std::fs::write(&path, with_provenance(script))
                     .with_context(|| format!("writing {}", path.display()))?;
             }
         }
     }
 
     Ok(exported.len())
+}
+
+/// Prepend the provenance header, keeping any shebang on line 1.
+///
+/// A `#!` is only honoured as the first line of a file, so a header written
+/// above it would leave the exported script unrunnable — and shellcheck
+/// reports exactly that (SC1128) when the file is checked directly, which is
+/// the whole point of exporting.
+fn with_provenance(script: &ExportedScript) -> String {
+    let header = provenance_header(script);
+    match script.source.split_once('\n') {
+        Some((first, rest)) if first.starts_with("#!") => {
+            format!("{first}\n{header}{rest}")
+        }
+        _ => format!("{header}{}", script.source),
+    }
 }
 
 /// A header that points a reader back at the producing Rust source, so a
@@ -175,6 +190,45 @@ docker rm -f "$PROXY_CONTAINER" 2>/dev/null || true
         assert_eq!(entry["interpreter"], "bash");
         assert_eq!(entry["bindings"][0], "PROXY_CONTAINER");
         assert_eq!(entry["externals"].as_array().expect("array").len(), 0);
+    }
+
+    #[test]
+    fn a_shebang_stays_on_line_one_ahead_of_the_provenance_header() {
+        // A `#!` is only honoured as the first line of a file. Writing the
+        // header above it would make every exported `sh` script unrunnable,
+        // and shellcheck reports it as SC1128 — which defeats the purpose of
+        // exporting the scripts to be checked.
+        let script = ExportedScript {
+            name: "test::WRAPPER".into(),
+            interpreter: "sh",
+            file: "src/test.rs",
+            line: 1,
+            bindings: &[],
+            externals: &[],
+            fragments: &[],
+            source: "#!/bin/sh\nexec az \"$@\"\n".into(),
+        };
+        let out = with_provenance(&script);
+        assert!(out.starts_with("#!/bin/sh\n"), "{out}");
+        assert!(out.contains("# script:      test::WRAPPER"));
+        assert!(out.trim_end().ends_with("exec az \"$@\""), "{out}");
+    }
+
+    #[test]
+    fn a_script_without_a_shebang_gets_the_header_first() {
+        let script = ExportedScript {
+            name: "test::PLAIN".into(),
+            interpreter: "bash",
+            file: "src/test.rs",
+            line: 1,
+            bindings: &[],
+            externals: &[],
+            fragments: &[],
+            source: "echo hi\n".into(),
+        };
+        let out = with_provenance(&script);
+        assert!(out.starts_with("# ado-aw generated export"), "{out}");
+        assert!(out.trim_end().ends_with("echo hi"), "{out}");
     }
 
     #[test]
