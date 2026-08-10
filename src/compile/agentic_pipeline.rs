@@ -6877,11 +6877,25 @@ safe-outputs:
             "the resolved version must be verified, not just requested: {script}"
         );
 
+        // A caller-supplied version must reach the script, and the compiled-in
+        // default must not survive alongside it. The version is a binding now,
+        // so assert on the prelude — that proves the producer supplied it,
+        // where a bare substring would also match the verification message.
         let override_script = prepare_ado_mcp_step("2.9.0").script;
-        assert!(override_script.contains(&format!("{ADO_MCP_PACKAGE}@2.9.0")));
-        assert!(override_script.contains("expected 2.9.0"));
         assert!(
-            !override_script.contains(&format!("{ADO_MCP_PACKAGE}@{}", common::ADO_MCP_VERSION))
+            override_script.contains("MCP_VERSION='2.9.0'"),
+            "the override must be bound: {override_script}"
+        );
+        assert!(
+            !override_script.contains(&format!("MCP_VERSION='{}'", common::ADO_MCP_VERSION)),
+            "the default version must not survive an override: {override_script}"
+        );
+        // The pin and its verification both read the binding, so an override
+        // cannot be applied to one and not the other.
+        assert!(
+            override_script.contains(r#""$MCP_PACKAGE@$MCP_VERSION""#)
+                && override_script.contains("expected $MCP_VERSION"),
+            "install and verification must share one version: {override_script}"
         );
     }
 

@@ -406,6 +406,19 @@ cargo run -- export-bash-scripts --out /tmp/ado-aw-shell --format json
 Writes one `.sh` per registered script with a provenance header naming the
 producing Rust source, for review with ordinary shell tooling.
 
+### The guard
+
+`tests/generated_shell_guard.rs` fails the build if generated shell regresses
+to the old shape: a `BashStep::new` whose *script* argument is built with
+`format!`, an escaped `\n\` continuation inside a `shell_script!` body, or a
+reintroduced `bash()` / `dedent()` helper.
+
+It deliberately does not grep for `\n\` across the codebase. Most such lines
+are Rust markdown and error text — `safe_outputs/create_pull_request.rs` has 38
+of them and no shell at all — so counting them says nothing about how much
+shell is left. The guard checks one unambiguous thing instead, and a test
+proves it distinguishes an inline body from a `format!` display name.
+
 ## Filter IR (`src/compile/filter_ir.rs`)
 
 Trigger filter expressions still use the separate filter IR. It lowers `PrFilters` / `PipelineFilters` into typed checks, validates conflicts, and emits bash consumed by `AdoScriptExtension` declarations. The generated gate steps are now returned as typed IR steps instead of being spliced into YAML templates.

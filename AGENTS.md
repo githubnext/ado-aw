@@ -561,6 +561,11 @@ stays on `.with_env(…, EnvValue::secret(…))`.
 Every variable a body reads must be declared as a `binding` or an `external`.
 Both the render path and a registry-wide test enforce it.
 
+`tests/generated_shell_guard.rs` fails the build if shell regresses to the old
+shape — a `BashStep::new` whose script argument is built with `format!`, an
+escaped continuation inside a `shell_script!` body, or a reintroduced
+`bash()` / `dedent()` helper.
+
 ### Bash step lint
 
 Shell is linted at two levels.
