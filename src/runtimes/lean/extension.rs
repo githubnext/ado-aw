@@ -5,7 +5,32 @@ use crate::compile::extensions::{
     AwfMount, AwfMountMode, CompileContext, CompilerExtension, Declarations, ExtensionPhase,
 };
 use crate::compile::ir::step::{BashStep, Step};
+use crate::compile::shell::ShellScript;
+use crate::shell_script;
 use anyhow::Result;
+
+shell_script! {
+    /// Install Lean 4 via elan into `$HOME/.elan`, and register elan's
+    /// `bin` directory on PATH for subsequent steps.
+    ///
+    /// The AWF chroot only sees `$HOME/.elan` because the runtime's
+    /// `required_awf_mounts()` mounts it read-only; the `PATH` prepend
+    /// makes `lean` and `lake` resolvable inside the sandbox.
+    INSTALL_LEAN {
+        interpreter: Bash,
+        bindings: [TOOLCHAIN],
+        externals: [HOME],
+        fragments: [],
+        body: r###"
+set -eo pipefail
+curl https://elan.lean-lang.org/elan-init.sh -sSf | sh -s -- -y --default-toolchain "$TOOLCHAIN"
+echo "##vso[task.prependpath]$HOME/.elan/bin"
+export PATH="$HOME/.elan/bin:$PATH"
+lean --version || echo "Lean installed via elan"
+lake --version || echo "Lake installed via elan"
+"###,
+    }
+}
 
 /// Lean 4 runtime extension.
 ///
@@ -85,15 +110,9 @@ the toolchain. Lean files use the `.lean` extension.\n"
 /// lowers through `ir::emit` to the canonical pipeline YAML.
 fn lean_install_bash_step(config: &LeanRuntimeConfig) -> BashStep {
     let toolchain = config.toolchain().unwrap_or("stable");
-    let script = format!(
-        "set -eo pipefail\n\
-         curl https://elan.lean-lang.org/elan-init.sh -sSf | sh -s -- -y --default-toolchain {toolchain}\n\
-         echo \"##vso[task.prependpath]$HOME/.elan/bin\"\n\
-         export PATH=\"$HOME/.elan/bin:$PATH\"\n\
-         lean --version || echo \"Lean installed via elan\"\n\
-         lake --version || echo \"Lake installed via elan\"\n"
-    );
-    BashStep::new("Install Lean 4 (elan)", script)
+    ShellScript::new(&INSTALL_LEAN)
+        .text("TOOLCHAIN", toolchain)
+        .into_step("Install Lean 4 (elan)")
 }
 
 #[cfg(test)]
@@ -127,7 +146,8 @@ mod tests {
             Step::Bash(b) => {
                 assert_eq!(b.display_name, "Install Lean 4 (elan)");
                 assert!(b.script.contains("elan-init.sh"));
-                assert!(b.script.contains("--default-toolchain stable"));
+                assert!(b.script.contains("TOOLCHAIN='stable'"));
+                assert!(b.script.contains(r#"--default-toolchain "$TOOLCHAIN""#));
             }
             other => panic!("expected Step::Bash, got {other:?}"),
         }
@@ -155,8 +175,8 @@ mod tests {
         match &decl.agent_prepare_steps[0] {
             Step::Bash(b) => assert!(
                 b.script
-                    .contains("--default-toolchain leanprover/lean4:v4.29.1"),
-                "expected pinned toolchain in script: {}",
+                    .contains("TOOLCHAIN='leanprover/lean4:v4.29.1'"),
+                "expected pinned toolchain in binding prelude: {}",
                 b.script
             ),
             other => panic!("expected Step::Bash, got {other:?}"),

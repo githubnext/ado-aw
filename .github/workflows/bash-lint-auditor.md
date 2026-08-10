@@ -79,12 +79,22 @@ Confirm `shellcheck --version` runs and the version is `>= 0.9`.
 
 ## Step 3 — Baseline the Lint
 
-Run the existing integration test under enforce mode and capture the result:
+Shell is linted at two levels. Run both under enforce mode and capture the results:
 
 ```bash
+# 1. Every registered script, in isolation, straight from the registry.
+ENFORCE_BASH_LINT=1 cargo test --bin ado-aw compile::shell -- --nocapture 2>&1 | tee /tmp/lint-registry.log
+
+# 2. Every bash body that actually reaches the emitted YAML.
 ENFORCE_BASH_LINT=1 cargo test --test bash_lint_tests -- --nocapture 2>&1 | tee /tmp/lint-baseline.log
 echo "exit=$?"
 ```
+
+The registry lint (`src/compile/shell/lint.rs`) proves the shell is *correct*;
+the integration test proves it is *emitted*. Coverage of the first is total by
+construction, so a "no fixture reaches this generator" gap can no longer hide a
+broken script — but it can still hide a script that is never emitted at all,
+which is what the second catches.
 
 There are three possible outcomes; each takes a different path.
 
@@ -100,28 +110,48 @@ When the lint is already green, audit the *quality* of the bash hygiene story. D
 
 ### 4a. Stale disable directives
 
-Find `# shellcheck disable=SCxxxx` directives that no longer fire on the bash body that contains them:
+Find `# shellcheck disable=SCxxxx` directives that no longer fire on the shell body that contains them:
 
 ```bash
-grep -rn "shellcheck disable=" src/data/ src/runtimes/ src/compile/ src/tools/ src/engine.rs 2>/dev/null
+grep -rn "shellcheck disable=" src/data/ src/runtimes/ src/compile/ src/tools/ src/safe_outputs/ src/engine.rs 2>/dev/null
 ```
 
-For each hit, temporarily delete the directive, rerun `cargo test --test bash_lint_tests -- --nocapture` (with `ENFORCE_BASH_LINT=1`), and check whether the test still passes. If the directive is now unnecessary (test still passes), remove it permanently. Restore the source file if the test fails.
+For each hit, temporarily delete the directive, rerun both lint commands from Step 3 (with `ENFORCE_BASH_LINT=1`), and check whether they still pass. If the directive is now unnecessary (both still pass), remove it permanently. Restore the source file if either fails.
 
 ### 4b. Lint exclude-list audit
 
-The lint excludes `SC1090,SC1091` globally (documented in `tests/bash_lint_tests.rs`). Check whether tightening would surface new findings:
+The integration lint keeps a deliberately minimal global exclude list (documented in `tests/bash_lint_tests.rs`). Check whether tightening would surface new findings:
 
 ```bash
 # Probe a stricter rule set
 ENFORCE_BASH_LINT=1 cargo test --test bash_lint_tests 2>&1 | head -50
 ```
 
-If you propose tightening, add a per-line `# shellcheck disable=` comment inside the offending bash body rather than expanding the global exclude list. Keep the exclude list minimal.
+If you propose tightening, add a per-line `# shellcheck disable=` comment inside the offending body rather than expanding the global exclude list. Keep the exclude list minimal.
 
-### 4c. Expand fixture coverage
+### 4c. Unstructured shell
 
-Walk `src/runtimes/`, `src/tools/`, `src/compile/extensions/` and check whether every code path that emits a `- bash: |` step is exercised by some fixture. A generator that the lint never reaches is a generator with no quality story. Add a fixture (or extend an existing one) only if you find a real, currently-unreached generator.
+Generated shell must go through `ShellScript` (`src/compile/shell/`, see the
+*Generated shell scripts* section of `docs/extending.md`), which registers it
+for linting and restricts substitution to a typed, quoted prelude. Shell built
+with `format!` is invisible to the registry lint and reintroduces the escaping
+that made these bodies unreviewable.
+
+Look for shell still being assembled by hand:
+
+```bash
+# `\n\` continuations are the signature of a format!-built shell body
+grep -rn '\\n\\' src/ --include=*.rs | grep -v '^src/compile/shell/'
+```
+
+If you find any, migrate it: move the body into a `shell_script!` const written
+verbatim, and pass each interpolated value as a typed `Binding`. Do one file
+per run — this is a mechanical change but a reviewable diff matters more than
+volume.
+
+### 4d. Expand fixture coverage
+
+Walk `src/runtimes/`, `src/tools/`, `src/compile/extensions/` and check whether every code path that emits a `- bash: |` step is exercised by some fixture. The registry lint already proves each script is *correct*; a fixture proves it is actually *emitted*. Add a fixture (or extend an existing one) only if you find a real, currently-unreached generator.
 
 If none of 4a / 4b / 4c finds anything, **exit cleanly** — use the `noop` safe output with the message "Bash hygiene is current; no actionable findings."
 

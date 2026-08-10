@@ -2114,14 +2114,17 @@ fn test_fixture_azure_devops_mcp_compiled_output() {
 
     let compiled = fs::read_to_string(&output_path).expect("Should read compiled output");
 
-    let policy_marker = "cat > \"$PROXY_DIR/policy/policy.json\" <<'ADO_PROXY_POLICY_EOF'\n";
+    // The policy document is now carried by the `POLICY` binding, which
+    // `Binding::document` renders as a quoted heredoc in the generated
+    // prelude. Nothing expands inside it, so the JSON survives verbatim.
+    let policy_marker = "POLICY=$(cat <<'ADO_AW_SHELL_DOC_EOF'\n";
     let policy_start = compiled
         .find(policy_marker)
         .map(|index| index + policy_marker.len())
         .expect("compiled pipeline must carry an ado-proxy policy document");
     let policy_tail = &compiled[policy_start..];
     let policy_end = policy_tail
-        .find("\n      ADO_PROXY_POLICY_EOF")
+        .find("\n      ADO_AW_SHELL_DOC_EOF")
         .expect("compiled policy heredoc must terminate");
     let policy_json = policy_tail[..policy_end]
         .lines()
@@ -2130,6 +2133,12 @@ fn test_fixture_azure_devops_mcp_compiled_output() {
         .join("\n");
     let policy: serde_json::Value =
         serde_json::from_str(&policy_json).expect("compiled policy must be valid JSON");
+
+    // The document is written to the path the container mounts read-only.
+    assert!(
+        compiled.contains(r#"printf '%s\n' "$POLICY" > "$PROXY_DIR/policy/policy.json""#),
+        "the policy binding must be written to the mounted policy path"
+    );
 
     // No unreplaced template markers (except ADO ${{ }} expressions)
     for line in compiled.lines() {
@@ -2227,7 +2236,8 @@ fn test_fixture_azure_devops_mcp_compiled_output() {
         "only explicitly selected capabilities plus discovery may be emitted"
     );
     assert!(
-        compiled.contains("case \" devops repos rest \" in"),
+        compiled.contains("ALLOWED_GROUPS='devops repos rest'")
+            && compiled.contains(r#"case " $ALLOWED_GROUPS " in"#),
         "the az wrapper must narrow to the same capability set"
     );
     assert!(
@@ -4266,8 +4276,16 @@ fn assert_aw_info_step_present(
         compiled.contains("condition: always()"),
         "{fixture_name}: compiled YAML missing always() condition on aw_info step"
     );
+    // `Agent.TempDirectory` now reaches the script as a binding rather than
+    // being interpolated inline, so assert on both the binding and its use.
+    // That is stronger: it proves the producer supplied the macro, where a
+    // bare substring would also match a comment.
     assert!(
-        compiled.contains("cat >\"$(Agent.TempDirectory)/staging/aw_info.json\" <<'AW_INFO_EOF'"),
+        compiled.contains("AGENT_TEMP='$(Agent.TempDirectory)'"),
+        "{fixture_name}: compiled YAML missing the Agent.TempDirectory binding"
+    );
+    assert!(
+        compiled.contains("cat >\"$AGENT_TEMP/staging/aw_info.json\" <<'AW_INFO_EOF'"),
         "{fixture_name}: compiled YAML missing quoted heredoc aw_info write step"
     );
     // Softer suffix check on the source path: fixtures compile under
@@ -5195,8 +5213,9 @@ fn test_pr_filter_tier1_has_evaluator_gate() {
         "Should include base64-encoded spec"
     );
     assert!(
-        compiled.contains("node '/tmp/ado-aw-scripts/ado-script/gate.js'"),
-        "Should invoke node gate evaluator"
+        compiled.contains("EVALUATOR_PATH='/tmp/ado-aw-scripts/ado-script/gate.js'")
+            && compiled.contains(r#"node "$EVALUATOR_PATH""#),
+        "Should invoke node gate evaluator via its bound path"
     );
     assert!(
         compiled.contains("ado-script.zip"),
@@ -5398,8 +5417,9 @@ fn test_pr_filter_tier2_has_extension_gate() {
         "Tier 2 should include base64-encoded spec"
     );
     assert!(
-        compiled.contains("node '/tmp/ado-aw-scripts/ado-script/gate.js'"),
-        "Tier 2 should invoke node gate evaluator"
+        compiled.contains("EVALUATOR_PATH='/tmp/ado-aw-scripts/ado-script/gate.js'")
+            && compiled.contains(r#"node "$EVALUATOR_PATH""#),
+        "Tier 2 should invoke node gate evaluator via its bound path"
     );
     assert!(compiled.contains("name: prGate"), "Should have prGate step");
 }
@@ -6492,8 +6512,9 @@ fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
     // `ExtensionPhase::System` and thus appears before this step
     // (which runs in `ExtensionPhase::Tool`).
     assert!(
-        compiled.contains("node '/tmp/ado-aw-scripts/ado-script/exec-context-pr.js'"),
-        "v7: prepare step must invoke the exec-context-pr.js bundle"
+        compiled.contains("BUNDLE='/tmp/ado-aw-scripts/ado-script/exec-context-pr.js'")
+            && compiled.contains(r#"node "$BUNDLE""#),
+        "v7: prepare step must invoke the exec-context-pr.js bundle via its bound path"
     );
 
     // v7: all the bash-side specifics (GIT_CONFIG_*, regex validation,

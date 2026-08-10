@@ -34,7 +34,160 @@ use crate::compile::ir::ids::StepId;
 use crate::compile::ir::output::OutputDecl;
 use crate::compile::ir::step::{BashStep, Step};
 use crate::compile::ir::tasks::use_node::UseNode;
+use crate::compile::shell::{Binding, ShellScript};
 use crate::compile::types::{PipelineFilters, PrFilters, SupplyChainConfig};
+use crate::shell_script;
+
+shell_script! {
+    /// Stage the `ado-script` bundle downloaded from an ADO Artifacts feed
+    /// (or a raw `.nupkg`), verify checksums, and unpack it to
+    /// `/tmp/ado-aw-scripts/`.
+    ///
+    /// The find/copy dance handles both delivery shapes: an extracted tree
+    /// (an earlier task already unzipped the nupkg) and a raw `.nupkg` (which
+    /// this step unzips first). The `##vso[task.complete result=Failed]`
+    /// line is load-bearing — without it, a missing archive would leave the
+    /// rest of the pipeline running against a partially-staged bundle.
+    STAGE_ADO_AW_SCRIPTS_FEED {
+        interpreter: Bash,
+        bindings: [],
+        externals: [],
+        fragments: [],
+        body: r###"
+set -eo pipefail
+mkdir -p /tmp/ado-aw-scripts
+STAGING=/tmp/ado-aw-scripts/_pkg
+if [ -z "$(find "$STAGING" -name 'ado-script.zip' -print -quit)" ]; then
+  NUPKG="$(find "$STAGING" -name '*.nupkg' -print -quit)"
+  if [ -n "$NUPKG" ]; then
+    unzip -o "$NUPKG" -d "$STAGING" >/dev/null
+  fi
+fi
+ZIP="$(find "$STAGING" -name 'ado-script.zip' -print -quit)"
+CHK="$(find "$STAGING" -name 'checksums.txt' -print -quit)"
+if [ -z "$ZIP" ] || [ -z "$CHK" ]; then
+  echo "##vso[task.complete result=Failed]ado-script.zip or checksums.txt not found in package"
+  exit 1
+fi
+cp "$ZIP" /tmp/ado-aw-scripts/ado-script.zip
+cp "$CHK" /tmp/ado-aw-scripts/checksums.txt
+cd /tmp/ado-aw-scripts && grep "ado-script.zip" checksums.txt | sha256sum -c -
+unzip -o /tmp/ado-aw-scripts/ado-script.zip -d /tmp/ado-aw-scripts/
+"###,
+    }
+}
+
+shell_script! {
+    /// Download the `ado-script` bundle from GitHub Releases, verify
+    /// checksums, and unpack it to `/tmp/ado-aw-scripts/`.
+    DOWNLOAD_ADO_AW_SCRIPTS_RELEASE {
+        interpreter: Bash,
+        bindings: [RELEASE_BASE_URL, VERSION],
+        externals: [],
+        fragments: [],
+        body: r#"
+set -eo pipefail
+mkdir -p /tmp/ado-aw-scripts
+curl -fsSL "$RELEASE_BASE_URL/v$VERSION/checksums.txt" -o /tmp/ado-aw-scripts/checksums.txt
+curl -fsSL "$RELEASE_BASE_URL/v$VERSION/ado-script.zip" -o /tmp/ado-aw-scripts/ado-script.zip
+cd /tmp/ado-aw-scripts && grep "ado-script.zip" checksums.txt | sha256sum -c -
+unzip -o /tmp/ado-aw-scripts/ado-script.zip -d /tmp/ado-aw-scripts/
+"#,
+    }
+}
+
+shell_script! {
+    /// Resolve `{{#runtime-import}}` markers in the agent prompt file. The
+    /// argv list is dynamically composed by the compiler (see
+    /// `resolver_step_typed`) and spliced as a fragment because each
+    /// `--var "<name>=$(<name>)"` flag embeds an ADO macro expansion that
+    /// must reach `import.js` verbatim.
+    RESOLVE_RUNTIME_IMPORTS {
+        interpreter: Bash,
+        bindings: [IMPORT_EVAL_PATH, BASE],
+        externals: [],
+        fragments: [var_flags],
+        body: r#"
+set -eo pipefail
+node "$IMPORT_EVAL_PATH" /tmp/awf-tools/agent-prompt.md --base "$BASE" \
+# ado-aw:fragment var_flags
+"#,
+    }
+}
+
+shell_script! {
+    /// Mint a GitHub App installation access token via the
+    /// `github-app-token` ado-script bundle. The argv (non-secret inputs)
+    /// is composed by the compiler; the private key stays in the masked
+    /// env (`GH_APP_PRIVATE_KEY`) and never appears on the command line.
+    ///
+    /// The step runs outside the AWF sandbox and reaches `api.github.com`
+    /// (or the configured `--api-url`) over the build-agent pool's normal
+    /// network — no AWF allowlist entry is required.
+    MINT_GITHUB_APP_TOKEN {
+        interpreter: Bash,
+        bindings: [GITHUB_APP_TOKEN_PATH],
+        externals: [],
+        fragments: [args],
+        body: r#"
+set -eo pipefail
+node "$GITHUB_APP_TOKEN_PATH" \
+# ado-aw:fragment args
+"#,
+    }
+}
+
+shell_script! {
+    /// Revoke the minted GitHub App installation token, best-effort. Runs
+    /// with `condition: always()` and `continueOnError: true`; the bundle's
+    /// `revoke` mode always exits 0 (downgrading failures to warnings), so
+    /// no `set -eo pipefail` — aborting the shell early on a non-zero would
+    /// only risk turning a benign revoke hiccup into a timeline error.
+    REVOKE_GITHUB_APP_TOKEN {
+        interpreter: Bash,
+        bindings: [GITHUB_APP_TOKEN_PATH],
+        externals: [],
+        fragments: [args],
+        body: r#"
+node "$GITHUB_APP_TOKEN_PATH" revoke \
+# ado-aw:fragment args
+"#,
+    }
+}
+
+shell_script! {
+    /// Run the `prepare-pr-base` bundle in one of two modes:
+    /// `PatchBase` (Agent-side merge-base recovery) or `TargetWorktree`
+    /// (SafeOutputs-side single-tip fetch). Per-repo argv is dynamic and
+    /// spliced as a fragment.
+    PREPARE_PR_BASE {
+        interpreter: Bash,
+        bindings: [PREPARE_PR_BASE_PATH, MODE],
+        externals: [],
+        fragments: [repo_flags],
+        body: r#"
+set -eo pipefail
+node "$PREPARE_PR_BASE_PATH" --mode "$MODE" \
+# ado-aw:fragment repo_flags
+"#,
+    }
+}
+
+shell_script! {
+    /// The Setup-job synthetic-PR context resolver. Runs the
+    /// `exec-context-pr-synth` bundle; its outputs are declared on the
+    /// step so downstream consumers reach them via `OutputRef`.
+    RESOLVE_SYNTHETIC_PR {
+        interpreter: Bash,
+        bindings: [BUNDLE],
+        externals: [],
+        fragments: [],
+        body: r#"
+set -euo pipefail
+node "$BUNDLE"
+"#,
+    }
+}
 
 pub(crate) const GATE_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/gate.js";
 pub(crate) const IMPORT_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/import.js";
@@ -451,28 +604,8 @@ pub(crate) fn install_and_download_steps_typed(
         // Locate ado-script.zip + checksums.txt within the package staging
         // dir (handling both extracted-tree and raw-.nupkg delivery),
         // verify, then unzip the bundle into /tmp/ado-aw-scripts/.
-        let script = "\
-             set -eo pipefail\n\
-             mkdir -p /tmp/ado-aw-scripts\n\
-             STAGING=/tmp/ado-aw-scripts/_pkg\n\
-             if [ -z \"$(find \"$STAGING\" -name 'ado-script.zip' -print -quit)\" ]; then\n  \
-               NUPKG=\"$(find \"$STAGING\" -name '*.nupkg' -print -quit)\"\n  \
-               if [ -n \"$NUPKG\" ]; then\n    \
-                 unzip -o \"$NUPKG\" -d \"$STAGING\" >/dev/null\n  \
-               fi\n\
-             fi\n\
-             ZIP=\"$(find \"$STAGING\" -name 'ado-script.zip' -print -quit)\"\n\
-             CHK=\"$(find \"$STAGING\" -name 'checksums.txt' -print -quit)\"\n\
-             if [ -z \"$ZIP\" ] || [ -z \"$CHK\" ]; then\n  \
-               echo \"##vso[task.complete result=Failed]ado-script.zip or checksums.txt not found in package\"\n  \
-               exit 1\n\
-             fi\n\
-             cp \"$ZIP\" /tmp/ado-aw-scripts/ado-script.zip\n\
-             cp \"$CHK\" /tmp/ado-aw-scripts/checksums.txt\n\
-             cd /tmp/ado-aw-scripts && grep \"ado-script.zip\" checksums.txt | sha256sum -c -\n\
-             unzip -o /tmp/ado-aw-scripts/ado-script.zip -d /tmp/ado-aw-scripts/\n"
-            .to_string();
-        let mut b = BashStep::new(format!("Stage ado-aw scripts (v{version})"), script)
+        let mut b = ShellScript::new(&STAGE_ADO_AW_SCRIPTS_FEED)
+            .into_step(format!("Stage ado-aw scripts (v{version})"))
             .with_condition(Condition::Succeeded);
         b.timeout = Some(std::time::Duration::from_secs(300));
         return vec![
@@ -484,15 +617,10 @@ pub(crate) fn install_and_download_steps_typed(
     }
 
     let download = {
-        let script = format!(
-            "set -eo pipefail\n\
-             mkdir -p /tmp/ado-aw-scripts\n\
-             curl -fsSL \"{RELEASE_BASE_URL}/v{version}/checksums.txt\" -o /tmp/ado-aw-scripts/checksums.txt\n\
-             curl -fsSL \"{RELEASE_BASE_URL}/v{version}/ado-script.zip\" -o /tmp/ado-aw-scripts/ado-script.zip\n\
-             cd /tmp/ado-aw-scripts && grep \"ado-script.zip\" checksums.txt | sha256sum -c -\n\
-             unzip -o /tmp/ado-aw-scripts/ado-script.zip -d /tmp/ado-aw-scripts/\n"
-        );
-        let mut b = BashStep::new(format!("Download ado-aw scripts (v{version})"), script)
+        let mut b = ShellScript::new(&DOWNLOAD_ADO_AW_SCRIPTS_RELEASE)
+            .text("RELEASE_BASE_URL", RELEASE_BASE_URL)
+            .text("VERSION", version)
+            .into_step(format!("Download ado-aw scripts (v{version})"))
             .with_condition(Condition::Succeeded);
         b.timeout = Some(std::time::Duration::from_secs(300));
         b
@@ -535,12 +663,12 @@ fn resolver_step_typed() -> Step {
         .iter()
         .map(|name| format!(" --var \"{name}=$({name})\""))
         .collect();
-    let script = format!(
-        "set -eo pipefail\n\
-         node '{IMPORT_EVAL_PATH}' /tmp/awf-tools/agent-prompt.md --base \"$(Build.SourcesDirectory)\"{var_flags}\n"
-    );
     Step::Bash(
-        BashStep::new("Resolve runtime imports (agent prompt)", script)
+        ShellScript::new(&RESOLVE_RUNTIME_IMPORTS)
+            .text("IMPORT_EVAL_PATH", IMPORT_EVAL_PATH)
+            .bind("BASE", Binding::ado_macro("Build.SourcesDirectory"))
+            .fragment("var_flags", var_flags)
+            .into_step("Resolve runtime imports (agent prompt)")
             .with_condition(Condition::Succeeded),
     )
 }
@@ -1199,9 +1327,16 @@ mod tests {
             other => panic!("expected download bash step, got {other:?}"),
         }
         match &steps[2] {
+            // The evaluator path is now supplied as a `ShellScript` binding
+            // rather than interpolated into the command, so assert on the
+            // generated prelude: that proves the producer supplied this path,
+            // where a bare `contains` would also pass on a comment.
             Step::Bash(b) => assert!(
                 b.script
-                    .contains("node '/tmp/ado-aw-scripts/ado-script/gate.js'")
+                    .contains(&format!("EVALUATOR_PATH='{GATE_EVAL_PATH}'"))
+                    && b.script.contains(r#"node "$EVALUATOR_PATH""#),
+                "gate step must invoke the bound evaluator path: {}",
+                b.script
             ),
             other => panic!("expected gate bash step, got {other:?}"),
         }
@@ -1785,24 +1920,38 @@ mod tests {
         let Step::Bash(resolver) = &steps[2] else {
             panic!("expected resolver bash step, got {:?}", steps[2]);
         };
+        // The resolver path is now supplied as a `ShellScript` binding rather
+        // than interpolated into the command, so assert on the generated
+        // prelude: that proves the producer supplied this path, where a bare
+        // `contains` would also pass on a comment.
         assert!(
             resolver
                 .script
-                .contains("node '/tmp/ado-aw-scripts/ado-script/import.js'")
+                .contains(&format!("IMPORT_EVAL_PATH='{IMPORT_EVAL_PATH}'"))
+                && resolver.script.contains(r#"node "$IMPORT_EVAL_PATH""#),
+            "resolver must invoke the bound import path: {}",
+            resolver.script
         );
         assert_eq!(
             resolver.display_name,
             "Resolve runtime imports (agent prompt)"
         );
-        // The resolver receives `--base "$(Build.SourcesDirectory)"` so
-        // the compiler-emitted trigger-repo-relative marker path
-        // resolves correctly. Absolute paths in author markers are
-        // rejected by import.js — see its absolute-path guard.
+        // The resolver receives the trigger-repo checkout root as `--base` so
+        // the compiler-emitted trigger-repo-relative marker path resolves
+        // correctly. Absolute paths in author markers are rejected by
+        // import.js — see its absolute-path guard.
+        //
+        // The path is now a `ShellScript` binding rather than a bare
+        // interpolation, so assert on the prelude *and* the use. That also
+        // closes the quoting exposure the old inline form carried: a
+        // single-quoted assignment cannot break argument parsing.
         assert!(
             resolver
                 .script
-                .contains("--base \"$(Build.SourcesDirectory)\""),
-            "resolver step must pass --base so trigger-repo-relative markers resolve correctly"
+                .contains("BASE='$(Build.SourcesDirectory)'")
+                && resolver.script.contains("--base \"$BASE\""),
+            "resolver step must pass --base so trigger-repo-relative markers resolve correctly: {}",
+            resolver.script
         );
         assert!(
             !resolver.script.contains("ADO_AW_IMPORT_BASE"),

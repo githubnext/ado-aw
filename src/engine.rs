@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use crate::compile::extensions::Declarations;
+use crate::compile::shell::{Binding, ShellScript};
 use crate::compile::types::{CompileTarget, EngineConfig, FrontMatter, McpConfig};
+use crate::shell_script;
 use crate::validate::{
     contains_ado_expression, contains_ado_template_expression, contains_newline,
     contains_pipeline_command, is_valid_arg, is_valid_command_path, is_valid_env_var_name,
@@ -1105,18 +1107,15 @@ fn copilot_install_steps(
                 // previous local implementation stripped a literal
                 // `https://dev.azure.com/` prefix, which is a no-op for a
                 // `*.visualstudio.com` or on-prem collection URL.
-                let resolve = crate::compile::resolve_ado_organization_bash()
-                    .lines()
-                    .map(|line| format!("    {line}\n"))
-                    .collect::<String>();
+                let body = ShellScript::new(&RESOLVE_ADO_ORGANIZATION_STEP)
+                    .fragment(
+                        "resolve_org",
+                        crate::compile::resolve_ado_organization_bash(),
+                    )
+                    .render();
+                let indented = indent_bash_body(&body);
                 let step = format!(
-                    "\
-- bash: |
-    set -eo pipefail
-{resolve}    echo \"##vso[task.setvariable variable=AW_ADO_ORG]$ADO_PROXY_ORGANIZATION\"
-  displayName: \"Resolve ADO organization\"
-
-"
+                    "- bash: |\n{indented}  displayName: \"Resolve ADO organization\"\n\n"
                 );
                 (step, "$(AW_ADO_ORG)".to_string())
             }
@@ -1133,21 +1132,14 @@ fn copilot_install_steps(
     command: 'custom'
     arguments: 'install Microsoft.Copilot.CLI.linux-x64 -Source \"https://pkgs.dev.azure.com/{nuget_org}/_packaging/Guardian1ESPTUpstreamOrgFeed/nuget/v3/index.json\" {version_arg}-OutputDirectory $(Agent.TempDirectory)/tools -ExcludeVersion -NonInteractive'
 
-- bash: |
-    ls -la \"$(Agent.TempDirectory)/tools\"
-    echo \"##vso[task.prependpath]$(Agent.TempDirectory)/tools/Microsoft.Copilot.CLI.linux-x64\"
+{add_to_path_step}
 
-    # Copy copilot binary to /tmp so it's accessible inside AWF container
-    # (AWF auto-mounts /tmp:/tmp:rw but not Agent.TempDirectory)
-    mkdir -p /tmp/awf-tools
-    cp \"$(Agent.TempDirectory)/tools/Microsoft.Copilot.CLI.linux-x64/copilot\" /tmp/awf-tools/copilot
-    chmod +x /tmp/awf-tools/copilot
-  displayName: \"Add copilot to PATH\"
-
-- bash: |
-    copilot --version
-    copilot -h
-  displayName: \"Output copilot version\""
+{version_step}",
+            nuget_org = nuget_org,
+            version_arg = version_arg,
+            org_resolve_step = org_resolve_step,
+            add_to_path_step = copilot_add_to_path_onees_step(),
+            version_step = copilot_version_step(),
         ));
     }
 
@@ -1172,56 +1164,186 @@ fn normalize_version_tag(version: &str) -> String {
 }
 
 fn copilot_install_from_github_release(base_url: &str, display_name: &str) -> Result<String> {
+    let install_body = ShellScript::new(&COPILOT_INSTALL_GITHUB_RELEASE)
+        .text("BASE_URL", base_url)
+        .bind("AGENT_TEMP_DIR", Binding::ado_macro("Agent.TempDirectory"))
+        .render();
+    let install_indented = indent_bash_body(&install_body);
+
+    let version_body = copilot_version_step();
     Ok(format!(
-        "\
-- bash: |
-    set -euo pipefail
-    TARBALL_NAME=\"copilot-linux-x64.tar.gz\"
-    BASE_URL=\"{base_url}\"
-    TARBALL_URL=\"$BASE_URL/$TARBALL_NAME\"
-    CHECKSUMS_URL=\"$BASE_URL/SHA256SUMS.txt\"
-    TOOLS_DIR=\"$(Agent.TempDirectory)/tools\"
-    TEMP_DIR=\"$(mktemp -d)\"
-    trap 'rm -rf \"$TEMP_DIR\"' EXIT
-    mkdir -p \"$TOOLS_DIR\" /tmp/awf-tools
-
-    curl -fsSL --retry 3 --retry-delay 5 -o \"$TEMP_DIR/SHA256SUMS.txt\" \"$CHECKSUMS_URL\"
-    curl -fsSL --retry 3 --retry-delay 5 -o \"$TEMP_DIR/$TARBALL_NAME\" \"$TARBALL_URL\"
-
-    EXPECTED_CHECKSUM=$(awk -v fname=\"$TARBALL_NAME\" '$2 == fname {{print $1; exit}}' \"$TEMP_DIR/SHA256SUMS.txt\" | tr 'A-F' 'a-f')
-    if [ -z \"$EXPECTED_CHECKSUM\" ]; then
-      echo \"ERROR: failed to resolve expected checksum for $TARBALL_NAME\"
-      exit 1
-    fi
-
-    if command -v sha256sum > /dev/null 2>&1; then
-      ACTUAL_CHECKSUM=$(sha256sum \"$TEMP_DIR/$TARBALL_NAME\" | awk '{{print $1}}' | tr 'A-F' 'a-f')
-    elif command -v shasum > /dev/null 2>&1; then
-      ACTUAL_CHECKSUM=$(shasum -a 256 \"$TEMP_DIR/$TARBALL_NAME\" | awk '{{print $1}}' | tr 'A-F' 'a-f')
-    else
-      echo \"ERROR: neither sha256sum nor shasum is available\"
-      exit 1
-    fi
-
-    if [ \"$EXPECTED_CHECKSUM\" != \"$ACTUAL_CHECKSUM\" ]; then
-      echo \"ERROR: checksum verification failed\"
-      echo \"Expected: $EXPECTED_CHECKSUM\"
-      echo \"Actual:   $ACTUAL_CHECKSUM\"
-      exit 1
-    fi
-
-    tar -xz -C \"$TOOLS_DIR\" -f \"$TEMP_DIR/$TARBALL_NAME\"
-    ls -la \"$TOOLS_DIR\"
-    echo \"##vso[task.prependpath]$TOOLS_DIR\"
-    cp \"$TOOLS_DIR/copilot\" /tmp/awf-tools/copilot
-    chmod +x /tmp/awf-tools/copilot
-  displayName: \"{display_name}\"
-
-- bash: |
-    copilot --version
-    copilot -h
-  displayName: \"Output copilot version\""
+        "- bash: |\n{install_indented}  displayName: \"{display_name}\"\n\n{version_body}"
     ))
+}
+
+/// Indent every non-empty line of a rendered bash body by four spaces so it
+/// lives inside a `- bash: |` literal block scalar.
+///
+/// The YAML parser strips the common leading indentation, so the shell that
+/// reaches bash is byte-identical to what [`ShellScript::render`] produced —
+/// the wrap is purely a YAML layout concern.
+fn indent_bash_body(body: &str) -> String {
+    body.lines()
+        .map(|line| {
+            if line.is_empty() {
+                "\n".to_string()
+            } else {
+                format!("    {line}\n")
+            }
+        })
+        .collect()
+}
+
+/// Rendered YAML for the "Output copilot version" bash step.
+///
+/// Shared between the 1ES NuGet path and the GitHub-release path — both
+/// install copilot to the current PATH and want a one-line smoke-check that
+/// the binary responds. See [`COPILOT_VERSION`].
+fn copilot_version_step() -> String {
+    let body = ShellScript::new(&COPILOT_VERSION).render();
+    let indented = indent_bash_body(&body);
+    format!("- bash: |\n{indented}  displayName: \"Output copilot version\"")
+}
+
+/// Rendered YAML for the "Add copilot to PATH" bash step on the 1ES / NuGet
+/// install path. Emitted directly after `NuGetCommand@2` installs the copilot
+/// tool package into `$(Agent.TempDirectory)/tools`.
+fn copilot_add_to_path_onees_step() -> String {
+    let body = ShellScript::new(&COPILOT_ADD_TO_PATH_ONEES)
+        .bind("AGENT_TEMP_DIR", Binding::ado_macro("Agent.TempDirectory"))
+        .render();
+    let indented = indent_bash_body(&body);
+    format!("- bash: |\n{indented}  displayName: \"Add copilot to PATH\"")
+}
+
+shell_script! {
+    /// Bash body of the "Resolve ADO organization" step (1ES targets with no
+    /// compile-time org). Splices the shared derivation from
+    /// [`crate::compile::resolve_ado_organization_bash`] via the
+    /// `resolve_org` fragment marker so both this step and the ado-proxy
+    /// policy step can't disagree about what the org is; then re-exports
+    /// the resolved value as the `AW_ADO_ORG` pipeline variable that the
+    /// NuGet feed URL splices in via `$(AW_ADO_ORG)`.
+    RESOLVE_ADO_ORGANIZATION_STEP {
+        interpreter: Bash,
+        bindings: [],
+        externals: [ADO_PROXY_ORGANIZATION],
+        fragments: [resolve_org],
+        body: r###"
+set -eo pipefail
+# ado-aw:fragment resolve_org
+echo "##vso[task.setvariable variable=AW_ADO_ORG]$ADO_PROXY_ORGANIZATION"
+"###,
+    }
+}
+
+shell_script! {
+    /// Bash body of the "Add copilot to PATH" step on the 1ES NuGet path.
+    ///
+    /// After `NuGetCommand@2` unpacks the copilot tool package under
+    /// `$(Agent.TempDirectory)/tools/Microsoft.Copilot.CLI.linux-x64/`, this
+    /// step (a) prepends that directory to the outer PATH so plain `copilot`
+    /// works in later host steps, and (b) copies the binary into
+    /// `/tmp/awf-tools/` so the AWF-sandboxed agent (which auto-mounts
+    /// `/tmp:/tmp:rw` but not `Agent.TempDirectory`) can invoke it.
+    COPILOT_ADD_TO_PATH_ONEES {
+        interpreter: Bash,
+        bindings: [AGENT_TEMP_DIR],
+        externals: [],
+        fragments: [],
+        body: r###"
+ls -la "$AGENT_TEMP_DIR/tools"
+echo "##vso[task.prependpath]$AGENT_TEMP_DIR/tools/Microsoft.Copilot.CLI.linux-x64"
+
+# Copy copilot binary to /tmp so it's accessible inside AWF container
+# (AWF auto-mounts /tmp:/tmp:rw but not Agent.TempDirectory)
+mkdir -p /tmp/awf-tools
+cp "$AGENT_TEMP_DIR/tools/Microsoft.Copilot.CLI.linux-x64/copilot" /tmp/awf-tools/copilot
+chmod +x /tmp/awf-tools/copilot
+"###,
+    }
+}
+
+shell_script! {
+    /// Bash body of the "Output copilot version" smoke step, emitted on every
+    /// install path. `copilot -h` doubles as an unmasked "did the binary
+    /// actually parse its args" probe so a broken install fails visibly next
+    /// to the install step rather than deep inside the AWF invocation.
+    COPILOT_VERSION {
+        interpreter: Bash,
+        bindings: [],
+        externals: [],
+        fragments: [],
+        body: r#"
+copilot --version
+copilot -h
+"#,
+    }
+}
+
+shell_script! {
+    /// Bash body of the "Install Copilot CLI (…)" step on the non-1ES /
+    /// GitHub-release path. Downloads the release tarball, verifies its
+    /// SHA-256 checksum against the published `SHA256SUMS.txt`, extracts
+    /// into `$AGENT_TEMP_DIR/tools`, prepends that directory to PATH and
+    /// stages the binary under `/tmp/awf-tools/` so the AWF-sandboxed
+    /// agent can invoke it.
+    ///
+    /// `BASE_URL` is either `${RELEASES}/latest/download` or
+    /// `${RELEASES}/download/${version_tag}`; the calling code picks the
+    /// shape and passes the concrete URL through.
+    ///
+    /// The checksum check is the point of this step. Fetching the tarball
+    /// without verification against the co-signed checksum manifest would
+    /// let a compromised mirror substitute a malicious binary; failing
+    /// closed here is the boundary.
+    COPILOT_INSTALL_GITHUB_RELEASE {
+        interpreter: Bash,
+        bindings: [BASE_URL, AGENT_TEMP_DIR],
+        externals: [],
+        fragments: [],
+        body: r###"
+set -euo pipefail
+TARBALL_NAME="copilot-linux-x64.tar.gz"
+TARBALL_URL="$BASE_URL/$TARBALL_NAME"
+CHECKSUMS_URL="$BASE_URL/SHA256SUMS.txt"
+TOOLS_DIR="$AGENT_TEMP_DIR/tools"
+TEMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TEMP_DIR"' EXIT
+mkdir -p "$TOOLS_DIR" /tmp/awf-tools
+
+curl -fsSL --retry 3 --retry-delay 5 -o "$TEMP_DIR/SHA256SUMS.txt" "$CHECKSUMS_URL"
+curl -fsSL --retry 3 --retry-delay 5 -o "$TEMP_DIR/$TARBALL_NAME" "$TARBALL_URL"
+
+EXPECTED_CHECKSUM=$(awk -v fname="$TARBALL_NAME" '$2 == fname {print $1; exit}' "$TEMP_DIR/SHA256SUMS.txt" | tr 'A-F' 'a-f')
+if [ -z "$EXPECTED_CHECKSUM" ]; then
+  echo "ERROR: failed to resolve expected checksum for $TARBALL_NAME"
+  exit 1
+fi
+
+if command -v sha256sum > /dev/null 2>&1; then
+  ACTUAL_CHECKSUM=$(sha256sum "$TEMP_DIR/$TARBALL_NAME" | awk '{print $1}' | tr 'A-F' 'a-f')
+elif command -v shasum > /dev/null 2>&1; then
+  ACTUAL_CHECKSUM=$(shasum -a 256 "$TEMP_DIR/$TARBALL_NAME" | awk '{print $1}' | tr 'A-F' 'a-f')
+else
+  echo "ERROR: neither sha256sum nor shasum is available"
+  exit 1
+fi
+
+if [ "$EXPECTED_CHECKSUM" != "$ACTUAL_CHECKSUM" ]; then
+  echo "ERROR: checksum verification failed"
+  echo "Expected: $EXPECTED_CHECKSUM"
+  echo "Actual:   $ACTUAL_CHECKSUM"
+  exit 1
+fi
+
+tar -xz -C "$TOOLS_DIR" -f "$TEMP_DIR/$TARBALL_NAME"
+ls -la "$TOOLS_DIR"
+echo "##vso[task.prependpath]$TOOLS_DIR"
+cp "$TOOLS_DIR/copilot" /tmp/awf-tools/copilot
+chmod +x /tmp/awf-tools/copilot
+"###,
+    }
 }
 
 /// Build the full AWF `--` command string for the Copilot CLI.

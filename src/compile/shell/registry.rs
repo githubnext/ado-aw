@@ -62,6 +62,20 @@ pub struct ShellScriptDef {
     /// Named blocks of shell composed in from elsewhere. The composition
     /// escape hatch — see [`super::ShellScript::fragment`].
     pub fragments: &'static [&'static str],
+    /// Fragments whose content is *another registered script*, resolved
+    /// statically.
+    ///
+    /// This is what lets [`lint_source`](Self::lint_source) shellcheck the
+    /// **composed** script rather than an outline full of markers. That
+    /// matters for two reasons: an outline's bindings are consumed by its
+    /// phases, so linting the outline alone reports every binding as unused
+    /// (SC2034); and splitting a script into phases introduces exactly one
+    /// new risk — a variable one phase sets and another reads — which only a
+    /// composed lint can see.
+    ///
+    /// Every entry must also appear in [`fragments`](Self::fragments); a test
+    /// enforces it.
+    pub phases: &'static [(&'static str, &'static ShellScriptDef)],
     /// The script itself, verbatim, exactly as it will run.
     pub body: &'static str,
     /// Source file, for the export provenance header.
@@ -78,9 +92,10 @@ impl ShellScriptDef {
     /// reads without declaring — which is the bug worth catching — while not
     /// firing for every legitimately-injected value.
     ///
-    /// Fragment markers are left in place: they are ordinary comments, and the
-    /// fragment's own shell is linted where it is produced. Splicing an
-    /// unknown block in here would only produce noise.
+    /// Fragments declared as [`phases`](Self::phases) are spliced, so what
+    /// gets linted is the **composed** script that actually runs. Fragments
+    /// whose text is only known at runtime keep their marker comment; their
+    /// own shell is linted where it is produced.
     pub fn lint_source(&self) -> String {
         let (shebang, body) = super::split_shebang(self.body);
         let mut out = String::with_capacity(self.body.len() + 256);
@@ -90,13 +105,27 @@ impl ShellScriptDef {
         }
         out.push_str("# --- ado-aw lint stubs (not emitted) ---\n");
         for name in self.bindings.iter().chain(self.externals.iter()) {
+            if SHELL_PROVIDED.contains(name) {
+                // The shell itself provides these. Stubbing them is both
+                // unnecessary (shellcheck already treats them as set) and
+                // wrong: assigning PATH trips SC2123, reporting a bug the
+                // real script does not have.
+                continue;
+            }
             // A non-empty stub: an empty one makes `[ -z "$V" ]` branches
             // unreachable to shellcheck's flow analysis.
             out.push_str(name);
             out.push_str("='ado-aw-lint-stub'\n");
         }
         out.push_str("# --- end lint stubs ---\n");
-        out.push_str(&super::dedent(body.trim_start_matches('\n')));
+
+        let body = super::dedent(body.trim_start_matches('\n'));
+        out.push_str(&super::splice_fragments(self, &body, |name| {
+            self.phases
+                .iter()
+                .find(|(fragment, _)| *fragment == name)
+                .map(|(_, phase)| phase.body)
+        }));
         if !out.ends_with('\n') {
             out.push('\n');
         }
@@ -110,6 +139,14 @@ impl ShellScriptDef {
 }
 
 inventory::collect!(ShellScriptDef);
+
+/// Variables the shell or its environment always provides.
+///
+/// A script may legitimately declare one of these as an `external` to
+/// document that it reads it — but the lint must not stub-assign it.
+/// Shellcheck already treats them as set, and assigning some of them is
+/// itself a finding (`PATH=…` trips SC2123).
+const SHELL_PROVIDED: &[&str] = &["PATH", "HOME", "TMPDIR", "PWD", "IFS", "SHELL", "USER", "TERM"];
 
 /// Every registered script, in a stable order (sorted by [`ShellScriptDef::name`]).
 ///
@@ -143,6 +180,25 @@ pub fn all_scripts() -> Vec<&'static ShellScriptDef> {
 ///     }
 /// }
 /// ```
+///
+/// A script assembled from registered phases adds a `phases:` clause naming
+/// the script behind each fragment, so the lint sees the composed result:
+///
+/// ```ignore
+/// shell_script! {
+///     START_ADO_PROXY {
+///         interpreter: Bash,
+///         bindings: [PROXY_CONTAINER],
+///         externals: [],
+///         fragments: [resolve_org, run_container],
+///         phases: [run_container = START_ADO_PROXY_RUN_CONTAINER],
+///         body: r#"
+/// # ado-aw:fragment resolve_org
+/// # ado-aw:fragment run_container
+/// "#,
+///     }
+/// }
+/// ```
 #[macro_export]
 macro_rules! shell_script {
     (
@@ -155,6 +211,29 @@ macro_rules! shell_script {
             body: $body:expr $(,)?
         }
     ) => {
+        $crate::shell_script! {
+            $(#[$meta])*
+            $ident {
+                interpreter: $interpreter,
+                bindings: [$($binding),*],
+                externals: [$($external),*],
+                fragments: [$($fragment),*],
+                phases: [],
+                body: $body,
+            }
+        }
+    };
+    (
+        $(#[$meta:meta])*
+        $ident:ident {
+            interpreter: $interpreter:ident,
+            bindings: [$($binding:ident),* $(,)?],
+            externals: [$($external:ident),* $(,)?],
+            fragments: [$($fragment:ident),* $(,)?],
+            phases: [$($phase:ident = $phase_def:path),* $(,)?],
+            body: $body:expr $(,)?
+        }
+    ) => {
         $(#[$meta])*
         #[allow(dead_code)]
         pub const $ident: $crate::compile::shell::ShellScriptDef =
@@ -164,6 +243,7 @@ macro_rules! shell_script {
                 bindings: &[$(stringify!($binding)),*],
                 externals: &[$(stringify!($external)),*],
                 fragments: &[$(stringify!($fragment)),*],
+                phases: &[$((stringify!($phase), &$phase_def)),*],
                 body: $body,
                 file: file!(),
                 line: line!(),
@@ -176,7 +256,6 @@ macro_rules! shell_script {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shell_script;
 
     shell_script! {
         /// Fixture for registry behaviour.

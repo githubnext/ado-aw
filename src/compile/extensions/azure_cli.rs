@@ -6,6 +6,103 @@ use crate::compile::common::{
 };
 use crate::compile::ir::condition::{Condition, Expr};
 use crate::compile::ir::step::{BashStep, Step};
+use crate::compile::shell::{Binding, ShellScript};
+use crate::shell_script;
+
+shell_script! {
+    /// Detection step: probe the host for azure-cli and export
+    /// `AW_AZ_MOUNTS` for the later AWF invocation.
+    ///
+    /// The two `##vso[task.setvariable variable=AW_AZ_MOUNTS]` lines are
+    /// load-bearing: one branch populates the mount args, the other sets an
+    /// empty value. Leaving it undefined in the missing-az branch would let
+    /// bash misparse `$(AW_AZ_MOUNTS)` later as a command substitution and
+    /// fail the AWF step under `set -e`.
+    DETECT_AZURE_CLI {
+        interpreter: Bash,
+        bindings: [],
+        externals: [],
+        fragments: [],
+        body: r###"
+set -eo pipefail
+if [ -f /usr/bin/az ] && [ -d /opt/az ]; then
+  echo "##vso[task.setvariable variable=AW_AZ_MOUNTS]--mount /opt/az:/opt/az:ro --mount /usr/bin/az:/usr/bin/az:ro"
+  echo "Azure CLI detected on host; mounting /opt/az and /usr/bin/az into AWF sandbox."
+else
+  echo "##vso[task.setvariable variable=AW_AZ_MOUNTS]"
+  echo "##vso[task.logissue type=warning]Azure CLI not detected on this runner (missing /usr/bin/az or /opt/az). The az command will not be available inside the agent sandbox. Install azure-cli on the runner image to enable it."
+fi
+"###,
+    }
+}
+
+shell_script! {
+    /// Install the generated `az` wrapper into `WRAPPER_PATH`.
+    ///
+    /// The wrapper text is spliced as a fragment (not a binding) because it
+    /// legitimately contains the string `AZURE_DEVOPS_EXT_PAT` — a sentinel
+    /// value the wrapper sets so the ado-proxy container can swap it for a
+    /// real credential *out-of-band*. `Binding::document` rejects that string
+    /// by design; a fragment splices verbatim shell that is not, itself, a
+    /// value flowing through the typed channel.
+    ///
+    /// The heredoc delimiter `ADO_AW_AZ_WRAPPER_EOF` is single-quoted so the
+    /// shell writing the file does no expansion; the wrapper reads `$PATH`,
+    /// `$AZ_REAL`, `$@` etc. only when the *installed* file is invoked later.
+    INSTALL_AZ_WRAPPER {
+        interpreter: Bash,
+        bindings: [WRAPPER_DIR, WRAPPER_PATH],
+        externals: [],
+        fragments: [wrapper],
+        body: r#"
+set -eo pipefail
+mkdir -p "$WRAPPER_DIR"
+cat > "$WRAPPER_PATH" << 'ADO_AW_AZ_WRAPPER_EOF'
+# ado-aw:fragment wrapper
+ADO_AW_AZ_WRAPPER_EOF
+chmod 755 "$WRAPPER_PATH"
+echo "az wrapper installed at $WRAPPER_PATH"
+"#,
+    }
+}
+
+shell_script! {
+    /// Append the ado-proxy policy prompt to the agent prompt file.
+    ///
+    /// `PROMPT` is a [`Binding::document`], which routes the potentially
+    /// multi-kilobyte body through a quoted heredoc in the prelude rather
+    /// than an inline unquoted heredoc — the value is data, so it should
+    /// never influence the step's control flow.
+    APPEND_PROXY_POLICY_PROMPT {
+        interpreter: Bash,
+        bindings: [PROMPT_PATH, PROMPT],
+        externals: [],
+        fragments: [],
+        body: r#"
+printf '%s' "$PROMPT" >> "$PROMPT_PATH"
+echo "ado-proxy policy prompt appended"
+"#,
+    }
+}
+
+shell_script! {
+    /// Append the Azure-CLI advisory to the agent prompt file. Same shape
+    /// as [`APPEND_PROXY_POLICY_PROMPT`] but a different message, and
+    /// step-level `condition:` gates on the detection result.
+    APPEND_AZURE_CLI_PROMPT {
+        interpreter: Bash,
+        bindings: [PROMPT_PATH, PROMPT],
+        externals: [],
+        fragments: [],
+        body: r#"
+printf '%s' "$PROMPT" >> "$PROMPT_PATH"
+echo "Azure CLI prompt appended"
+"#,
+    }
+}
+
+/// Path of the agent prompt file every extension appends to.
+const AGENT_PROMPT_PATH: &str = "/tmp/awf-tools/agent-prompt.md";
 
 // ─── Azure CLI (permissions.read-gated, install-free) ────────────────
 
@@ -135,34 +232,21 @@ fn install_az_wrapper_step(capabilities: &[Capability]) -> BashStep {
         ADO_MCP_TOKEN_SENTINEL,
         capabilities,
     );
-    // Indent the body for the heredoc without altering its content.
-    let script = format!(
-        "set -eo pipefail\n\
-         mkdir -p {AZ_WRAPPER_DIR}\n\
-         cat > '{AZ_WRAPPER_PATH}' << 'ADO_AW_AZ_WRAPPER_EOF'\n\
-         {wrapper}\n\
-         ADO_AW_AZ_WRAPPER_EOF\n\
-         chmod 755 '{AZ_WRAPPER_PATH}'\n\
-         echo \"az wrapper installed at {AZ_WRAPPER_PATH}\"\n"
-    );
-    BashStep::new("Install az wrapper (ado-proxy)", script).with_condition(Condition::Ne(
-        Expr::Variable("AW_AZ_MOUNTS".to_string()),
-        Expr::Literal(String::new()),
-    ))
+    ShellScript::new(&INSTALL_AZ_WRAPPER)
+        .text("WRAPPER_DIR", AZ_WRAPPER_DIR)
+        .text("WRAPPER_PATH", AZ_WRAPPER_PATH)
+        .fragment("wrapper", wrapper)
+        .into_step("Install az wrapper (ado-proxy)")
+        .with_condition(Condition::Ne(
+            Expr::Variable("AW_AZ_MOUNTS".to_string()),
+            Expr::Literal(String::new()),
+        ))
 }
 
 /// Detect azure-cli on the host and set the `AW_AZ_MOUNTS` pipeline
 /// variable for the later AWF invocation.
 fn detection_bash_step() -> BashStep {
-    let script = "set -eo pipefail\n\
-        if [ -f /usr/bin/az ] && [ -d /opt/az ]; then\n  \
-          echo \"##vso[task.setvariable variable=AW_AZ_MOUNTS]--mount /opt/az:/opt/az:ro --mount /usr/bin/az:/usr/bin/az:ro\"\n  \
-          echo \"Azure CLI detected on host; mounting /opt/az and /usr/bin/az into AWF sandbox.\"\n\
-        else\n  \
-          echo \"##vso[task.setvariable variable=AW_AZ_MOUNTS]\"\n  \
-          echo \"##vso[task.logissue type=warning]Azure CLI not detected on this runner (missing /usr/bin/az or /opt/az). The az command will not be available inside the agent sandbox. Install azure-cli on the runner image to enable it.\"\n\
-        fi\n";
-    BashStep::new("Detect Azure CLI on host (for AWF mount)", script)
+    ShellScript::new(&DETECT_AZURE_CLI).into_step("Detect Azure CLI on host (for AWF mount)")
 }
 
 /// Explain the effective compiler-owned ADO read policy to the agent.
@@ -225,7 +309,7 @@ fn proxy_policy_prompt_step(
     }
     let scope_list = scope_lines.join("\n");
 
-    let body = format!(
+    let script = format!(
         "\n\
 ---\n\
 \n\
@@ -242,14 +326,10 @@ Requests outside these capabilities or scopes, all writes, and secret-bearing ro
 \n\
 If your task requires a read outside this list, report it as missing data/tooling and name the exact organization, project, repository, and operation that the front matter would need to grant.\n"
     );
-    let script = format!(
-        "cat >> \"/tmp/awf-tools/agent-prompt.md\" << 'ADO_PROXY_POLICY_PROMPT_EOF'\n\
-{body}\
-ADO_PROXY_POLICY_PROMPT_EOF\n\
-\n\
-echo \"ado-proxy policy prompt appended\"\n"
-    );
-    BashStep::new("Append ado-proxy policy prompt", script)
+    ShellScript::new(&APPEND_PROXY_POLICY_PROMPT)
+        .text("PROMPT_PATH", AGENT_PROMPT_PATH)
+        .bind("PROMPT", Binding::document(script))
+        .into_step("Append ado-proxy policy prompt")
 }
 
 /// Append an Azure CLI advisory when the detection step found `az`.
@@ -266,7 +346,7 @@ fn prompt_append_bash_step(capabilities: &[Capability]) -> BashStep {
         .map(|g| format!("`az {g}`"))
         .collect::<Vec<_>>()
         .join(", ");
-    let body = format!(
+    let script = format!(
             "\n\
 ---\n\
 \n\
@@ -282,17 +362,14 @@ Requests outside that boundary are refused by a policy proxy, not by a misconfig
 If a read you need is refused, file a `missing-tool` safe output naming `azure-cli` and the exact command, so the operator can extend the catalog rather than leaving you blocked.\n"
     );
 
-    let script = format!(
-        "cat >> \"/tmp/awf-tools/agent-prompt.md\" << 'AZURE_CLI_PROMPT_EOF'\n\
-{body}\
-AZURE_CLI_PROMPT_EOF\n\
-\n\
-echo \"Azure CLI prompt appended\"\n"
-    );
-    BashStep::new("Append Azure CLI prompt", script).with_condition(Condition::Ne(
-        Expr::Variable("AW_AZ_MOUNTS".to_string()),
-        Expr::Literal(String::new()),
-    ))
+    ShellScript::new(&APPEND_AZURE_CLI_PROMPT)
+        .text("PROMPT_PATH", AGENT_PROMPT_PATH)
+        .bind("PROMPT", Binding::document(script))
+        .into_step("Append Azure CLI prompt")
+        .with_condition(Condition::Ne(
+            Expr::Variable("AW_AZ_MOUNTS".to_string()),
+            Expr::Literal(String::new()),
+        ))
 }
 
 #[cfg(test)]
@@ -395,9 +472,11 @@ mod tests {
     #[test]
     fn the_installed_wrapper_is_executable_and_starts_with_a_shebang() {
         let step = wrapper_step(&fm_proxied()).expect("wrapper step");
-        assert!(step.script.contains(&format!("chmod 755 '{AZ_WRAPPER_PATH}'")));
+        assert!(step.script.contains(r#"chmod 755 "$WRAPPER_PATH""#));
         // The heredoc body must not be indented: a shebang preceded by
         // whitespace is not a shebang, and the file would fail to exec.
+        // The quote is part of the match — the delimiter is quoted, so the
+        // opening line ends `<< 'ADO_AW_AZ_WRAPPER_EOF'`.
         assert!(
             step.script.contains("ADO_AW_AZ_WRAPPER_EOF'\n#!/bin/sh"),
             "the wrapper body must start at column 0: {}",
@@ -700,12 +779,19 @@ repos:
             .map(bash_step)
             .find(|step| step.display_name == "Append Azure CLI prompt")
             .expect("Azure CLI prompt step");
+        // The rendered script uses a bound $PROMPT_PATH variable; the value
+        // is supplied by this file's producer.
         assert!(
             append
                 .script
-                .contains(r#"cat >> "/tmp/awf-tools/agent-prompt.md""#),
-            "prompt-append step must append to /tmp/awf-tools/agent-prompt.md \
+                .contains(r#"'/tmp/awf-tools/agent-prompt.md'"#),
+            "prompt-append step must bind PROMPT_PATH to /tmp/awf-tools/agent-prompt.md \
              (matching wrap_prompt_append). Step:\n{}",
+            append.script
+        );
+        assert!(
+            append.script.contains(r#"printf '%s' "$PROMPT" >> "$PROMPT_PATH""#),
+            "prompt-append body must append the bound $PROMPT to $PROMPT_PATH: {}",
             append.script
         );
     }
@@ -758,8 +844,11 @@ repos:
             .map(bash_step)
             .find(|step| step.display_name == "Append Azure CLI prompt")
             .expect("Azure CLI prompt step");
+        // The migrated form carries the body through Binding::document, whose
+        // canonical heredoc delimiter is ADO_AW_SHELL_DOC_EOF and is always
+        // single-quoted by the binding constructor.
         assert!(
-            append.script.contains("<< 'AZURE_CLI_PROMPT_EOF'"),
+            append.script.contains("<<'ADO_AW_SHELL_DOC_EOF'"),
             "prompt-append heredoc delimiter must be single-quoted to \
              prevent expansion of environment references inside the prompt \
              body. Step:\n{}",

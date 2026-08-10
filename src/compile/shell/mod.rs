@@ -84,7 +84,9 @@ use indexmap::IndexMap;
 
 use super::ir::step::BashStep;
 
+#[allow(unused_imports)]
 pub use bindings::{Binding, BindingKind};
+#[allow(unused_imports)]
 pub use registry::{Interpreter, ShellScriptDef, all_scripts};
 
 /// Opening marker of the generated prelude.
@@ -228,9 +230,20 @@ impl ShellScript {
             // whatever order the producer happened to call `bind` in, so a
             // reordered call site produces no diff.
             for name in self.def.bindings {
+                let rhs = self.bindings[name].rhs();
+                if rhs.contains('$') {
+                    // Single-quoting a `$` is the point, not a mistake. An
+                    // `$(Agent.TempDirectory)` is substituted by Azure DevOps
+                    // *before* bash sees the script, and the quotes then keep
+                    // the substituted text literal so a path containing a
+                    // space or a metacharacter cannot alter the script.
+                    // Expanding it in the shell instead is exactly the bug
+                    // this design prevents.
+                    out.push_str("# shellcheck disable=SC2016\n");
+                }
                 out.push_str(name);
                 out.push('=');
-                out.push_str(self.bindings[name].rhs());
+                out.push_str(rhs);
                 out.push('\n');
             }
             out.push_str(PRELUDE_CLOSE);
@@ -266,13 +279,17 @@ impl ShellScript {
     }
 
     /// The registration this script was built from.
+    #[allow(dead_code)]
     pub fn def(&self) -> &'static ShellScriptDef {
         self.def
     }
 
-    /// The rendered right-hand side bound to `name`, for tests that want to
-    /// assert on the value a producer supplied rather than on a substring of
-    /// the rendered script.
+    /// The binding a producer supplied for `name`.
+    ///
+    /// Lets a test assert on producer intent — `binding("PROXY_CONTAINER")` is
+    /// the value the compiler supplied — rather than on a substring of the
+    /// rendered script, which would also match a comment.
+    #[allow(dead_code)]
     pub fn binding(&self, name: &str) -> Option<&Binding> {
         self.bindings.get(name)
     }
@@ -294,6 +311,10 @@ fn split_shebang(body: &str) -> (Option<&str>, &str) {
 pub(crate) const FRAGMENT_MARKER: &str = "# ado-aw:fragment ";
 
 /// The fragment named by `line`, if it is a marker line.
+///
+/// `splice_fragments` inlines its own scan, so only the registry-wide lint
+/// calls this today — dead in a non-test build.
+#[allow(dead_code)]
 pub(crate) fn fragment_marker(line: &str) -> Option<&str> {
     line.trim_start()
         .strip_prefix(FRAGMENT_MARKER)
@@ -302,7 +323,8 @@ pub(crate) fn fragment_marker(line: &str) -> Option<&str> {
 }
 
 /// Replace each fragment marker in `body` with the text `resolve` returns,
-/// re-indented to the marker's own indentation.
+/// re-indented to the marker's own indentation. A marker whose fragment
+/// `resolve` does not supply is left in place as the comment it already is.
 ///
 /// # Panics
 ///
@@ -311,11 +333,11 @@ pub(crate) fn fragment_marker(line: &str) -> Option<&str> {
 /// was meant to run simply would not.
 #[track_caller]
 fn splice_fragments<'a>(
-    def: &'static ShellScriptDef,
+    def: &ShellScriptDef,
     body: &str,
     resolve: impl Fn(&str) -> Option<&'a str>,
 ) -> String {
-    let mut seen: Vec<&str> = Vec::new();
+    let mut seen: Vec<&'static str> = Vec::new();
     let mut out = String::with_capacity(body.len());
     for line in body.lines() {
         match fragment_marker(line) {
@@ -336,10 +358,15 @@ fn splice_fragments<'a>(
                     def.name
                 );
                 seen.push(declared);
-                let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
                 let Some(shell) = resolve(name) else {
+                    // Not resolvable in this pass (a runtime-supplied fragment
+                    // during linting). Keep the marker: it is a comment, so it
+                    // is inert, and it shows a reader where the splice happens.
+                    out.push_str(line);
+                    out.push('\n');
                     continue;
                 };
+                let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
                 for fragment_line in dedent(shell.trim_matches('\n')).lines() {
                     if fragment_line.is_empty() {
                         out.push('\n');
@@ -449,6 +476,7 @@ echo hello
             bindings: &[],
             externals,
             fragments,
+            phases: &[],
             body,
             file: file!(),
             line: line!(),
@@ -593,6 +621,46 @@ docker inspect -f 'state={{.State.Status}} exit={{.State.ExitCode}}' proxy
     #[should_panic(expected = "is not a declared binding")]
     fn refuses_an_undeclared_binding() {
         ShellScript::new(&TEST_SCRIPT).text("CONTAINR", "typo");
+    }
+
+    #[test]
+    fn an_ado_macro_binding_carries_a_shellcheck_directive() {
+        // SC2016 ("expressions don't expand in single quotes") is exactly the
+        // behaviour an ADO macro binding wants: the macro is substituted
+        // before bash runs, and the quotes keep the substituted text literal.
+        // Without the directive every prelude would fail the bash lint.
+        shell_script! {
+            MACRO_BINDING {
+                interpreter: Bash,
+                bindings: [AGENT_TEMP, PLAIN],
+                externals: [],
+                fragments: [],
+                body: r#"
+echo "$AGENT_TEMP $PLAIN"
+"#,
+            }
+        }
+        let rendered = ShellScript::new(&MACRO_BINDING)
+            .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
+            .text("PLAIN", "no-dollar-here")
+            .render();
+        assert!(
+            rendered.contains(
+                "# shellcheck disable=SC2016\nAGENT_TEMP='$(Agent.TempDirectory)'"
+            ),
+            "an ADO macro binding needs the directive: {rendered}"
+        );
+        // A value with no `$` gets no directive — the suppression is targeted,
+        // not blanket.
+        assert!(
+            rendered.contains("\nPLAIN='no-dollar-here'"),
+            "{rendered}"
+        );
+        assert_eq!(
+            rendered.matches("shellcheck disable=SC2016").count(),
+            1,
+            "only the binding that needs it should carry the directive: {rendered}"
+        );
     }
 
     #[test]

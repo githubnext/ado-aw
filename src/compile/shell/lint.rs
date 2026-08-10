@@ -22,6 +22,8 @@ use std::process::{Command, Stdio};
 use serde::Deserialize;
 
 use super::registry::{ShellScriptDef, all_scripts};
+use super::FRAGMENT_MARKER;
+use super::bindings::is_shell_var_name;
 
 /// One shellcheck JSON finding.
 #[derive(Debug, Deserialize)]
@@ -109,6 +111,80 @@ fn every_registered_script_passes_shellcheck() {
 }
 
 #[test]
+fn every_declared_variable_name_is_a_valid_shell_name() {
+    // A binding is emitted as `NAME=value` in the prelude. A lowercase or
+    // hyphenated name would either produce invalid shell or silently shadow a
+    // convention, and the failure would surface at pipeline runtime rather
+    // than here.
+    let mut problems = String::new();
+    for def in all_scripts() {
+        for name in def.bindings.iter().chain(def.externals.iter()) {
+            if !is_shell_var_name(name) {
+                problems.push_str(&format!(
+                    "  {} declares `{name}`, which is not a SCREAMING_SNAKE shell name ({}:{})\n",
+                    def.name, def.file, def.line
+                ));
+            }
+        }
+    }
+    assert!(problems.is_empty(), "invalid shell variable names:\n{problems}");
+}
+
+#[test]
+fn every_phase_is_also_a_declared_fragment() {
+    // A `phases:` entry that is not in `fragments:` would never be spliced —
+    // the composed lint would silently fall back to linting an outline.
+    let mut problems = String::new();
+    for def in all_scripts() {
+        for (name, _) in def.phases {
+            if !def.fragments.contains(name) {
+                problems.push_str(&format!(
+                    "  {} declares phase `{name}` without declaring it as a fragment ({}:{})\n",
+                    def.name, def.file, def.line
+                ));
+            }
+        }
+    }
+    assert!(problems.is_empty(), "phase declaration drift:\n{problems}");
+}
+
+#[test]
+fn a_composed_script_is_linted_with_its_phases_spliced() {
+    // Guards the mechanism the SC2034-on-every-binding failure exposed: an
+    // outline made only of markers must be linted as the script that runs,
+    // not as the outline.
+    let composed: Vec<&'static ShellScriptDef> = all_scripts()
+        .into_iter()
+        .filter(|def| !def.phases.is_empty())
+        .collect();
+    assert!(
+        !composed.is_empty(),
+        "no script declares phases; if composition was removed, remove this test too"
+    );
+    for def in composed {
+        let source = def.lint_source();
+        for (name, phase) in def.phases {
+            assert!(
+                !source.contains(&format!("{FRAGMENT_MARKER}{name}")),
+                "{}: phase `{name}` was left as a marker instead of being spliced",
+                def.name
+            );
+            let first = phase
+                .body
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty() && !l.starts_with('#'))
+                .unwrap_or_else(|| panic!("{} has no runnable line", phase.name));
+            assert!(
+                source.contains(first),
+                "{}: phase `{name}` body is missing from the composed lint source",
+                def.name
+            );
+        }
+    }
+}
+
+#[test]
 fn every_declared_fragment_has_a_marker_and_vice_versa() {
     // `splice_fragments` enforces this at render time, but only for scripts a
     // test or a compile actually renders. Checking the whole registry
@@ -174,11 +250,25 @@ fn every_registered_script_declares_the_variables_it_reads() {
 ///
 /// Deliberately only SCREAMING_SNAKE names: lowercase locals are the body's
 /// own business, and shell specials (`$1`, `$@`, `$?`) are not names.
+///
+/// Single-quoted spans are skipped. Nothing expands inside `'…'`, so a `$NF`
+/// in an embedded awk program or a `$1` in a sed replacement is not a shell
+/// variable reference. Without this the checker would demand a declaration for
+/// another language's variables and push authors into renaming them, which
+/// distorts the script to satisfy the tool.
 fn referenced_vars(body: &str) -> Vec<String> {
     let mut out = Vec::new();
     let bytes: Vec<char> = body.chars().collect();
     let mut i = 0;
     while i < bytes.len() {
+        if bytes[i] == '\'' {
+            i += 1;
+            while i < bytes.len() && bytes[i] != '\'' {
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
         if bytes[i] != '$' {
             i += 1;
             continue;
@@ -188,7 +278,11 @@ fn referenced_vars(body: &str) -> Vec<String> {
             j += 1;
         }
         let start = j;
-        while j < bytes.len() && (bytes[j].is_ascii_uppercase() || bytes[j] == '_' || (j > start && bytes[j].is_ascii_digit())) {
+        while j < bytes.len()
+            && (bytes[j].is_ascii_uppercase()
+                || bytes[j] == '_'
+                || (j > start && bytes[j].is_ascii_digit()))
+        {
             j += 1;
         }
         if j > start {
@@ -223,6 +317,23 @@ mod tests {
     fn referenced_vars_finds_both_spellings_and_ignores_specials() {
         let vars = referenced_vars(r#"echo "$FOO ${BAR}x $1 $@ $lower $BAZ2""#);
         assert_eq!(vars, vec!["FOO", "BAR", "BAZ2"]);
+    }
+
+    #[test]
+    fn referenced_vars_skips_single_quoted_spans() {
+        // `$NF` belongs to awk, not to the shell — nothing expands inside
+        // '…'. Treating it as a shell variable would force the author to
+        // rename another language's variable to satisfy this checker.
+        let vars = referenced_vars(
+            r#"awk -F/ '{ if (NF>1) print $NF }' <<< "$COLLECTION""#,
+        );
+        assert_eq!(vars, vec!["COLLECTION"]);
+    }
+
+    #[test]
+    fn referenced_vars_resumes_after_a_closing_quote() {
+        let vars = referenced_vars(r#"sed 's/$X/y/' "$REAL""#);
+        assert_eq!(vars, vec!["REAL"]);
     }
 
     #[test]

@@ -32,6 +32,34 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
+use crate::shell_script;
+
+shell_script! {
+    /// Bash body of the PR / pipeline gate step.
+    ///
+    /// The step invokes the bundled `gate.js` evaluator: the evaluator reads
+    /// the base64-encoded `GATE_SPEC` env var and the pipeline / PR fact env
+    /// vars declared by [`Fact::ado_exports`] and emits
+    /// `##vso[task.setvariable variable=SHOULD_RUN;isOutput=true]` — the
+    /// downstream Agent-job condition consumes it as a typed
+    /// `Condition::Eq(Expr::StepOutput(..., "SHOULD_RUN"))`.
+    ///
+    /// The shell body itself is a single `node "$EVALUATOR_PATH"` — every
+    /// value read by the evaluator arrives through the step's typed
+    /// [`crate::compile::ir::env::EnvValue`] `env:` block, not through the
+    /// shell. That is why the body has no externals: the shell layer knows
+    /// nothing about `GATE_SPEC` etc, and only the JS process reads them.
+    GATE_EVALUATOR {
+        interpreter: Bash,
+        bindings: [EVALUATOR_PATH],
+        externals: [],
+        fragments: [],
+        body: r#"
+node "$EVALUATOR_PATH"
+"#,
+    }
+}
+
 // ─── Fact Sources ───────────────────────────────────────────────────────────
 
 /// A typed runtime fact that can be acquired and referenced by predicates.
@@ -1294,7 +1322,9 @@ pub fn build_gate_step_typed(
     let exports = collect_ado_exports(checks)?;
     let pr_synth_active = synthetic_pr_active && matches!(ctx, GateContext::PullRequest);
 
-    let script = format!("node '{evaluator_path}'\n");
+    let script = crate::compile::shell::ShellScript::new(&GATE_EVALUATOR)
+        .text("EVALUATOR_PATH", evaluator_path)
+        .render();
     let mut step = apply_bundle_auth(
         BashStep::new(ctx.display_name(), script)
             .with_id(StepId::new(ctx.step_name())?)

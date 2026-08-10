@@ -5,8 +5,46 @@ use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations
 use crate::compile::ir::step::{BashStep, Step, TaskStep};
 use crate::compile::ir::tasks::nuget_authenticate::NuGetAuthenticate;
 use crate::compile::ir::tasks::use_dotnet::UseDotNet;
+use crate::compile::shell::ShellScript;
+use crate::shell_script;
 use crate::validate;
 use anyhow::Result;
+
+shell_script! {
+    /// Ensure a workspace-level `nuget.config` exists before
+    /// `NuGetAuthenticate@1` runs.
+    ///
+    /// The existence check covers the three case variations NuGet itself
+    /// recognises on case-sensitive filesystems (`nuget.config`,
+    /// `NuGet.config`, `NuGet.Config`); the file is always created with
+    /// the lowercase form, matching the cross-platform convention. The
+    /// heredoc is intentionally unquoted so `$FEED_URL` from the
+    /// generated prelude is substituted; the emitted XML content has no
+    /// other shell metacharacters.
+    ENSURE_NUGET_CONFIG {
+        interpreter: Bash,
+        bindings: [FEED_URL],
+        externals: [],
+        fragments: [],
+        body: r#"
+set -eo pipefail
+if [ ! -f nuget.config ] && [ ! -f NuGet.config ] && [ ! -f NuGet.Config ]; then
+  cat > nuget.config <<EOF
+<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+  <packageSources>
+    <clear />
+    <add key="internal" value="$FEED_URL" />
+  </packageSources>
+</configuration>
+EOF
+  echo "Created nuget.config with source=$FEED_URL"
+else
+  echo 'nuget.config already exists, skipping creation'
+fi
+"#,
+    }
+}
 
 /// .NET runtime extension.
 ///
@@ -178,24 +216,9 @@ fn ensure_nuget_config_bash_step(config: &DotnetRuntimeConfig) -> BashStep {
     let feed_url = config
         .feed_url()
         .unwrap_or("https://api.nuget.org/v3/index.json");
-    let script = format!(
-        "set -eo pipefail\n\
-         if [ ! -f nuget.config ] && [ ! -f NuGet.config ] && [ ! -f NuGet.Config ]; then\n  \
-           cat > nuget.config <<'EOF'\n\
-         <?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
-         <configuration>\n  \
-           <packageSources>\n    \
-             <clear />\n    \
-             <add key=\"internal\" value=\"{feed_url}\" />\n  \
-           </packageSources>\n\
-         </configuration>\n\
-         EOF\n  \
-           echo 'Created nuget.config with source={feed_url}'\n\
-         else\n  \
-           echo 'nuget.config already exists, skipping creation'\n\
-         fi\n"
-    );
-    BashStep::new("Ensure nuget.config exists", script)
+    ShellScript::new(&ENSURE_NUGET_CONFIG)
+        .text("FEED_URL", feed_url)
+        .into_step("Ensure nuget.config exists")
 }
 
 #[cfg(test)]

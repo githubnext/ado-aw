@@ -64,10 +64,53 @@ use crate::compile::ado_bundle::{Bundle, TokenSource, apply_bundle_auth};
 use crate::compile::extensions::ado_script::EXEC_CONTEXT_PR_PATH;
 use crate::compile::ir::condition::{Condition, Expr};
 use crate::compile::ir::env::EnvValue;
-use crate::compile::ir::step::{BashStep, Step};
+use crate::compile::ir::step::Step;
+use crate::compile::shell::ShellScript;
 use crate::compile::types::PrContextConfig;
+use crate::shell_script;
 
 use super::contributor::{ContextContributor, succeeded_and};
+
+shell_script! {
+    /// Invoke the exec-context-pr node bundle unconditionally.
+    ///
+    /// Used on the "real PR" path — the step's own `condition:` gates on
+    /// `Build.Reason == PullRequest`, so no bash-side guard is needed.
+    EXEC_CONTEXT_PR {
+        interpreter: Bash,
+        bindings: [BUNDLE],
+        externals: [],
+        fragments: [],
+        body: r#"
+set -euo pipefail
+node "$BUNDLE"
+"#,
+    }
+}
+
+shell_script! {
+    /// Invoke the exec-context-pr node bundle from a synth-PR-active
+    /// Agent job.
+    ///
+    /// The Agent-job condition can only depend on same-job values, so the
+    /// synth-active path always runs and gates in bash: an empty
+    /// `$AW_PR_ID` means neither a real PR build nor a synth-promoted CI
+    /// build, and the bundle would have nothing to describe.
+    EXEC_CONTEXT_PR_SYNTH {
+        interpreter: Bash,
+        bindings: [BUNDLE],
+        externals: [AW_PR_ID],
+        fragments: [],
+        body: r#"
+set -euo pipefail
+if [ -z "$AW_PR_ID" ]; then
+  echo "[aw-context] No PR identifier resolved (not a PR build and not synth-promoted); skipping exec-context-pr."
+  exit 0
+fi
+node "$BUNDLE"
+"#,
+    }
+}
 
 /// PR-context contributor. Activates when `on.pr` is configured
 /// (unless explicitly disabled via `execution-context.pr.enabled: false`).
@@ -131,28 +174,28 @@ impl ContextContributor for PrContextContributor {
         // which is exactly when this step should skip.
         //
         // Coexists with `prepare_step` until production callers switch.
-        let (prelude, condition) = if self.synthetic_pr_active {
+        let (script, condition) = if self.synthetic_pr_active {
             (
-                "    if [ -z \"$AW_PR_ID\" ]; then\n      echo \"[aw-context] No PR identifier resolved (not a PR build and not synth-promoted); skipping exec-context-pr.\"\n      exit 0\n    fi\n",
+                ShellScript::new(&EXEC_CONTEXT_PR_SYNTH).text("BUNDLE", EXEC_CONTEXT_PR_PATH),
                 Condition::Succeeded,
             )
         } else {
             (
-                "",
+                ShellScript::new(&EXEC_CONTEXT_PR).text("BUNDLE", EXEC_CONTEXT_PR_PATH),
                 succeeded_and(Condition::Eq(
                     Expr::Variable("Build.Reason".to_string()),
                     Expr::Literal("PullRequest".to_string()),
                 )),
             )
         };
-        let script = format!("set -euo pipefail\n{prelude}node '{EXEC_CONTEXT_PR_PATH}'\n");
         // ADO auto-injects predefined System.*/Build.* context vars, so the
         // bundle reads SYSTEM_TEAMPROJECT / BUILD_REPOSITORY_NAME /
         // BUILD_SOURCESDIRECTORY (and, in real-PR mode, SYSTEM_PULLREQUEST_*)
         // directly. Only the non-auto-injected SYSTEM_ACCESSTOKEN bearer and,
         // in synth mode, the hoisted AW_PR_* overrides are projected.
         let mut step = apply_bundle_auth(
-            BashStep::new("Stage PR execution context (aw-context/pr/*)", script)
+            script
+                .into_step("Stage PR execution context (aw-context/pr/*)")
                 .with_condition(condition),
             Bundle::ExecContextPr,
             TokenSource::SystemAccessToken,

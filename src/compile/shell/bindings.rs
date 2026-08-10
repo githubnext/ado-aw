@@ -39,6 +39,11 @@ pub enum BindingKind {
     /// An integer, emitted bare.
     Number,
     /// `true` or `false`, emitted bare.
+    ///
+    /// Retained even while no current script needs it: [`Binding`] is a closed
+    /// vocabulary, and without this a future author would reach for
+    /// `text("true")` — the untyped fallback the whole design exists to avoid.
+    #[allow(dead_code)]
     Bool,
     /// A whitespace-separated word list, single-quoted, intended for
     /// unquoted `for` expansion.
@@ -100,6 +105,9 @@ impl Binding {
 
     /// A boolean, emitted bare as `true` / `false` so `[ "$V" = true ]` reads
     /// naturally.
+    ///
+    /// See [`BindingKind::Bool`] for why this exists ahead of a caller.
+    #[allow(dead_code)]
     pub fn boolean(value: bool) -> Self {
         Self {
             rhs: if value { "true" } else { "false" }.to_string(),
@@ -184,6 +192,9 @@ impl Binding {
     }
 
     /// How this binding was validated.
+    ///
+    /// Used by tests asserting on producer intent rather than rendered text.
+    #[allow(dead_code)]
     pub fn kind(&self) -> BindingKind {
         self.kind
     }
@@ -214,6 +225,10 @@ pub(crate) fn single_quote(value: &str) -> String {
 }
 
 /// A shell variable name the prelude may assign.
+///
+/// Only the registry-wide lint calls this today, so it is dead in a non-test
+/// build.
+#[allow(dead_code)]
 pub(crate) fn is_shell_var_name(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
