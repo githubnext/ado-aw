@@ -3322,16 +3322,63 @@ print("Validated candidate provenance:")
 print(json.dumps(diagnostic, indent=2, sort_keys=True))
 "#;
 
-/// Build the staging script for one payload from a pinned candidate artifact.
+shell_script! {
+    /// Stage a payload out of a provenance-checked candidate pipeline
+    /// artifact: locate exactly one payload, checksum manifest and provenance
+    /// document, copy them into place, verify an *exact* filename checksum
+    /// entry, then validate producer identity before the caller's tail runs.
+    ///
+    /// The exactly-one requirement is load-bearing. A `find` that matched two
+    /// files would otherwise let an attacker who can add a file to the
+    /// artifact decide which one is staged.
+    STAGE_CANDIDATE_ARTIFACT_PAYLOAD {
+        interpreter: Bash,
+        bindings: [STAGING, DEST, PAYLOAD_NAME, PROVENANCE_VALIDATOR, DEFINITION_ID, RUN_ID],
+        externals: [],
+        fragments: [tail],
+        body: r###"
+set -eo pipefail
+mkdir -p "$DEST"
+
+locate_one() {
+  local name="$1"
+  mapfile -d '' -t matches < <(find "$STAGING" -type f -name "$name" -print0)
+  if [ "${#matches[@]}" -ne 1 ]; then
+    echo "##vso[task.complete result=Failed]Expected exactly one $name in candidate artifact, found ${#matches[@]}" >&2
+    exit 1
+  fi
+  printf '%s' "${matches[0]}"
+}
+
+PAYLOAD="$(locate_one "$PAYLOAD_NAME")"
+CHK="$(locate_one checksums.txt)"
+PROVENANCE="$(locate_one provenance.json)"
+cp "$PAYLOAD" "$DEST/$PAYLOAD_NAME"
+cp "$CHK" "$DEST/checksums.txt"
+cp "$PROVENANCE" "$DEST/provenance.json"
+
+echo "Verifying exact checksum entry for $PAYLOAD_NAME..."
+cd "$DEST" || exit 1
+awk -v name="$PAYLOAD_NAME" '
+  { candidate=$2; sub(/^\*/, "", candidate); if (candidate == name) { count++; line=$0 } }
+  END { if (count != 1) exit 1; print line }
+' checksums.txt | sha256sum -c -
+
+python3 -c "$PROVENANCE_VALIDATOR" provenance.json "$DEFINITION_ID" "$RUN_ID"
+# ado-aw:fragment tail
+"###,
+    }
+}
+
+/// Bash body that stages a payload out of a provenance-checked candidate
+/// pipeline artifact, then runs the caller-supplied verify/relocate tail.
 ///
 /// The producer contract is `schema: ado-aw/candidate-artifact/1` with numeric
-/// `producer_definition_id` and `producer_build_id` fields. The script requires
-/// exactly one payload, checksum manifest, and provenance document; verifies an
-/// exact filename checksum entry; and validates producer identity before
-/// running `tail`.
+/// `producer_definition_id` and `producer_build_id` fields.
 ///
-/// SAFETY: shell-interpolated path, payload, and tail arguments must be
-/// compiler-owned constants. Producer IDs are validated positive `u64`s.
+/// Returns the rendered script rather than a step because two callers wrap it
+/// differently — see [`download_compiler_step`] here and
+/// `install_and_download_steps_typed` in `extensions/ado_script.rs`.
 pub(crate) fn stage_candidate_artifact_payload_bash(
     config: &PipelineArtifactConfig,
     staging: &str,
@@ -3339,92 +3386,78 @@ pub(crate) fn stage_candidate_artifact_payload_bash(
     payload: &str,
     tail: &str,
 ) -> String {
-    format!(
-        "set -eo pipefail\n\
-         STAGING=\"{staging}\"\n\
-         DEST=\"{dest_dir}\"\n\
-         PAYLOAD_NAME='{payload}'\n\
-         mkdir -p \"$DEST\"\n\
-         \n\
-         locate_one() {{\n  \
-           local name=\"$1\"\n  \
-           mapfile -d '' -t matches < <(find \"$STAGING\" -type f -name \"$name\" -print0)\n  \
-           if [ \"${{#matches[@]}}\" -ne 1 ]; then\n    \
-             echo \"##vso[task.complete result=Failed]Expected exactly one $name in candidate artifact, found ${{#matches[@]}}\" >&2\n    \
-             exit 1\n  \
-           fi\n  \
-           printf '%s' \"${{matches[0]}}\"\n\
-         }}\n\
-         \n\
-         PAYLOAD=\"$(locate_one \"$PAYLOAD_NAME\")\"\n\
-         CHK=\"$(locate_one checksums.txt)\"\n\
-         PROVENANCE=\"$(locate_one provenance.json)\"\n\
-         cp \"$PAYLOAD\" \"$DEST/$PAYLOAD_NAME\"\n\
-         cp \"$CHK\" \"$DEST/checksums.txt\"\n\
-         cp \"$PROVENANCE\" \"$DEST/provenance.json\"\n\
-         \n\
-         echo \"Verifying exact checksum entry for $PAYLOAD_NAME...\"\n\
-         cd \"$DEST\" || exit 1\n\
-         awk -v name=\"$PAYLOAD_NAME\" '\n  \
-           {{ candidate=$2; sub(/^\\*/, \"\", candidate); if (candidate == name) {{ count++; line=$0 }} }}\n  \
-           END {{ if (count != 1) exit 1; print line }}\n\
-         ' checksums.txt | sha256sum -c -\n\
-         \n\
-         python3 -c '{provenance_validator}' provenance.json {definition_id} {run_id}\n\
-         {tail}",
-        provenance_validator = CANDIDATE_PROVENANCE_VALIDATOR_PY,
-        definition_id = config.definition_id,
-        run_id = config.run_id,
-    )
+    ShellScript::new(&STAGE_CANDIDATE_ARTIFACT_PAYLOAD)
+        .bind("STAGING", Binding::ado_path(staging))
+        .bind("DEST", Binding::ado_path(dest_dir))
+        .text("PAYLOAD_NAME", payload)
+        .bind(
+            "PROVENANCE_VALIDATOR",
+            Binding::document(CANDIDATE_PROVENANCE_VALIDATOR_PY),
+        )
+        .bind("DEFINITION_ID", Binding::number(config.definition_id))
+        .bind("RUN_ID", Binding::number(config.run_id))
+        .fragment("tail", tail)
+        .render()
 }
 
-/// Bash body that locates a payload file inside a `DownloadPackage@1` staging
-/// directory — handling both the extracted-tree and raw-`.nupkg` delivery
-/// shapes — copies it (plus `checksums.txt`) into `dest_dir`, then runs the
-/// caller-supplied verify/relocate tail. `payload` is the artifact file name
-/// (e.g. `ado-aw-linux-x64`); `tail` is appended after the files are staged in
-/// `dest_dir` (the working directory is `dest_dir`).
+shell_script! {
+    /// Locate a payload inside a `DownloadPackage@1` staging directory —
+    /// handling both the extracted-tree and raw-`.nupkg` delivery shapes —
+    /// copy it plus `checksums.txt` into place, verify the checksum, then run
+    /// the caller's tail with `DEST` as the working directory.
+    EXTRACT_PACKAGE_PAYLOAD {
+        interpreter: Bash,
+        bindings: [STAGING, DEST, PAYLOAD_NAME],
+        externals: [],
+        fragments: [tail],
+        body: r###"
+set -eo pipefail
+mkdir -p "$DEST"
+
+# DownloadPackage@1 may deliver an extracted tree or a raw .nupkg;
+# handle both by unzipping any .nupkg when the payload is absent.
+if [ -z "$(find "$STAGING" -name "$PAYLOAD_NAME" -print -quit)" ]; then
+  NUPKG="$(find "$STAGING" -name '*.nupkg' -print -quit)"
+  if [ -n "$NUPKG" ]; then
+    unzip -o "$NUPKG" -d "$STAGING" >/dev/null
+  fi
+fi
+
+BIN="$(find "$STAGING" -name "$PAYLOAD_NAME" -print -quit)"
+CHK="$(find "$STAGING" -name 'checksums.txt' -print -quit)"
+if [ -z "$BIN" ] || [ -z "$CHK" ]; then
+  echo "##vso[task.complete result=Failed]$PAYLOAD_NAME or checksums.txt not found in package"
+  exit 1
+fi
+cp "$BIN" "$DEST/$PAYLOAD_NAME"
+cp "$CHK" "$DEST/checksums.txt"
+
+echo "Verifying checksum..."
+cd "$DEST" || exit 1
+grep "$PAYLOAD_NAME" checksums.txt | sha256sum -c -
+# ado-aw:fragment tail
+"###,
+    }
+}
+
+/// Bash body that stages a payload out of a `DownloadPackage@1` staging
+/// directory and runs the caller-supplied verify/relocate tail.
 ///
-/// SAFETY: every parameter is interpolated verbatim into a `format!()` shell
-/// body with no escaping. All callers MUST pass compile-time-constant,
-/// trusted strings only (today: hardcoded ADO macro paths and literal payload
-/// names). Never pass user/front-matter-controlled data here — doing so would
-/// introduce shell-command injection into the generated pipeline.
+/// `payload` is the artifact file name (e.g. `ado-aw-linux-x64`); `tail` is
+/// appended once the files are staged in `dest_dir`, which is also the working
+/// directory by then.
 fn extract_package_payload_bash(
     staging: &str,
     dest_dir: &str,
     payload: &str,
     tail: &str,
 ) -> String {
-    format!(
-        "set -eo pipefail\n\
-         STAGING=\"{staging}\"\n\
-         DEST=\"{dest_dir}\"\n\
-         mkdir -p \"$DEST\"\n\
-         \n\
-         # DownloadPackage@1 may deliver an extracted tree or a raw .nupkg;\n\
-         # handle both by unzipping any .nupkg when the payload is absent.\n\
-         if [ -z \"$(find \"$STAGING\" -name '{payload}' -print -quit)\" ]; then\n  \
-           NUPKG=\"$(find \"$STAGING\" -name '*.nupkg' -print -quit)\"\n  \
-           if [ -n \"$NUPKG\" ]; then\n    \
-             unzip -o \"$NUPKG\" -d \"$STAGING\" >/dev/null\n  \
-           fi\n\
-         fi\n\
-         \n\
-         BIN=\"$(find \"$STAGING\" -name '{payload}' -print -quit)\"\n\
-         CHK=\"$(find \"$STAGING\" -name 'checksums.txt' -print -quit)\"\n\
-         if [ -z \"$BIN\" ] || [ -z \"$CHK\" ]; then\n  \
-           echo \"##vso[task.complete result=Failed]{payload} or checksums.txt not found in package\"\n  \
-           exit 1\n\
-         fi\n\
-         cp \"$BIN\" \"$DEST/{payload}\"\n\
-         cp \"$CHK\" \"$DEST/checksums.txt\"\n\
-         \n\
-         echo \"Verifying checksum...\"\n\
-         cd \"$DEST\" || exit 1\n\
-         grep \"{payload}\" checksums.txt | sha256sum -c -\n\
-         {tail}"
-    )
+    ShellScript::new(&EXTRACT_PACKAGE_PAYLOAD)
+        .bind("STAGING", Binding::ado_path(staging))
+        .bind("DEST", Binding::ado_path(dest_dir))
+        .text("PAYLOAD_NAME", payload)
+        .fragment("tail", tail)
+        .render()
 }
 
 /// `NuGetAuthenticate@1` step to emit **once per job** when the feed mirror is
@@ -3461,7 +3494,10 @@ fn download_compiler_step(
                 "Download candidate artifact for agentic pipeline compiler",
                 staging,
             )),
-            Step::Bash(bash("Stage candidate agentic pipeline compiler", body)),
+            Step::Bash(BashStep::new(
+                "Stage candidate agentic pipeline compiler",
+                body,
+            )),
         ];
     }
 
@@ -3481,7 +3517,7 @@ fn download_compiler_step(
                 compiler_version,
                 staging,
             )),
-            Step::Bash(bash(
+            Step::Bash(BashStep::new(
                 format!("Stage agentic pipeline compiler (v{compiler_version})"),
                 body,
             )),
@@ -3757,7 +3793,7 @@ fn download_awf_step(supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
                 "Download candidate artifact for AWF",
                 staging,
             )),
-            Step::Bash(bash(
+            Step::Bash(BashStep::new(
                 "Stage candidate AWF (Agentic Workflow Firewall)",
                 body,
             )),
@@ -3781,7 +3817,7 @@ fn download_awf_step(supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
                 AWF_VERSION,
                 staging,
             )),
-            Step::Bash(bash(
+            Step::Bash(BashStep::new(
                 format!("Stage AWF (Agentic Workflow Firewall) v{AWF_VERSION}"),
                 body,
             )),
@@ -5985,55 +6021,6 @@ fn verify_mcp_backends_step() -> BashStep {
 // ─────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────
-
-/// Construct a [`BashStep`] with its script body run through
-/// [`dedent`]. Every compiler-generated bash body in this module is
-/// built by `format!()` with `\n\` continuations whose source
-/// indentation leaks into the emitted YAML; `dedent()` strips it.
-fn bash(name: impl Into<String>, script: impl Into<String>) -> BashStep {
-    BashStep::new(name, dedent(&script.into()))
-}
-
-/// Strip the common leading whitespace from every non-empty line of
-/// `s`, **and** strip trailing whitespace from every line. The
-/// trailing-whitespace strip is critical for block-scalar emission:
-/// serde_yaml falls back to the double-quoted form when a block
-/// scalar contains lines with trailing spaces (because the scalar's
-/// re-parse would lose them), which produces hard-to-read YAML.
-///
-/// Used to clean Rust source-string indentation out of the bash
-/// bodies we hand to [`BashStep::new`]. Without this, the
-/// `\n\`-continuation indent in Rust source ends up inside the
-/// emitted YAML block scalar.
-fn dedent(s: &str) -> String {
-    let min = s
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| l.chars().take_while(|c| *c == ' ').count())
-        .min()
-        .unwrap_or(0);
-    let mut out = String::with_capacity(s.len());
-    let mut first = true;
-    for line in s.lines() {
-        if !first {
-            out.push('\n');
-        }
-        first = false;
-        // Only strip the leading `min` chars when the line actually
-        // has that many leading spaces; otherwise leave it alone
-        // (this avoids mangling interpolated content whose indent is
-        // intentionally lower than the surrounding template indent).
-        let leading_spaces = line.chars().take_while(|c| *c == ' ').count();
-        let strip = leading_spaces.min(min);
-        let stripped_leading = &line[strip..];
-        let stripped = stripped_leading.trim_end_matches([' ', '\t']);
-        out.push_str(stripped);
-    }
-    if s.ends_with('\n') {
-        out.push('\n');
-    }
-    out
-}
 
 /// Classify a single raw env-var value string into a typed [`EnvValue`].
 ///

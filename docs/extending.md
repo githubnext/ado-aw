@@ -338,11 +338,15 @@ contains. Pick the constructor that matches the shape:
 | `Binding::boolean(b)` | `true` / `false` | flags read as `[ "$V" = true ]` |
 | `Binding::words([…])` | `'a b c'` | a list the body expands unquoted in `for` |
 | `Binding::ado_macro("Agent.TempDirectory")` | `'$(Agent.TempDirectory)'` | ADO predefined variables |
+| `Binding::ado_path(p)` | `'$(Pipeline.Workspace)/x'` | a path built around one |
 | `Binding::document(text)` | quoted heredoc | JSON, prompts, certificates |
 
 Each validates its own shape: `words` rejects an entry containing whitespace
 or a glob (the consumer expands it unquoted, so that would silently change the
-list), and `ado_macro` accepts only a well-formed dotted name.
+list), `ado_macro` accepts only a well-formed dotted name, and `ado_path`
+checks every embedded `$(…)` is such a name — so the value can only ever
+expand to a variable Azure DevOps substitutes, never to a command the runner
+executes.
 
 ### Declaring the variable surface
 

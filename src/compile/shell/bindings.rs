@@ -167,6 +167,48 @@ impl Binding {
         }
     }
 
+    /// A path that embeds one or more Azure DevOps predefined variables, e.g.
+    /// `$(Pipeline.Workspace)/agentic-pipeline-compiler`.
+    ///
+    /// [`Binding::ado_macro`] takes a bare variable name; this takes a path
+    /// built around one. Every `$(…)` occurrence is validated as a well-formed
+    /// predefined-variable name, so the only thing the value can expand to is
+    /// a variable Azure DevOps substitutes before bash runs — not a command
+    /// substitution, and not a shell metacharacter. The result is
+    /// single-quoted, so the substituted text stays literal.
+    #[track_caller]
+    pub fn ado_path(value: impl AsRef<str>) -> Self {
+        let value = value.as_ref();
+        assert!(
+            !value.contains('\n') && !value.contains('\r'),
+            "shell binding value must be a single line, got {value:?}"
+        );
+        assert!(
+            !value.contains('`') && !value.contains("${"),
+            "an ADO path must not contain a backtick or `${{`, got {value:?}"
+        );
+        let mut rest = value;
+        while let Some(open) = rest.find("$(") {
+            let after = &rest[open + 2..];
+            let close = after.find(')').unwrap_or_else(|| {
+                panic!("unterminated `$(` in ADO path {value:?}")
+            });
+            let name = &after[..close];
+            assert!(
+                is_ado_macro_name(name),
+                "ADO path {value:?} embeds {name:?}, which is not a dotted \
+                 alphanumeric predefined-variable name; a command substitution \
+                 is not permitted here"
+            );
+            rest = &after[close + 1..];
+        }
+        assert_not_secret(value);
+        Self {
+            rhs: single_quote(value),
+            kind: BindingKind::AdoMacro,
+        }
+    }
+
     /// Bulk text — a JSON document, a prompt, a certificate — assigned through
     /// a quoted heredoc so no expansion occurs and no escaping is needed.
     ///
@@ -337,6 +379,35 @@ mod tests {
     #[should_panic(expected = "credential must not reach the generated prelude")]
     fn ado_macro_refuses_the_access_token() {
         Binding::ado_macro("System.AccessToken");
+    }
+
+    #[test]
+    fn ado_path_accepts_a_macro_with_a_compiler_owned_suffix() {
+        let binding = Binding::ado_path("$(Pipeline.Workspace)/compiler/_pkg");
+        assert_eq!(binding.rhs(), "'$(Pipeline.Workspace)/compiler/_pkg'");
+        assert_eq!(binding.kind(), BindingKind::AdoMacro);
+        // A plain path with no macro is fine too.
+        assert_eq!(Binding::ado_path("/tmp/scripts").rhs(), "'/tmp/scripts'");
+    }
+
+    #[test]
+    #[should_panic(expected = "is not a dotted alphanumeric predefined-variable name")]
+    fn ado_path_refuses_a_command_substitution() {
+        // This is the whole point: `$(…)` in a path must be an ADO variable
+        // Azure DevOps substitutes, never a shell command the runner executes.
+        Binding::ado_path("/tmp/$(rm -rf /)/x");
+    }
+
+    #[test]
+    #[should_panic(expected = "unterminated")]
+    fn ado_path_refuses_an_unterminated_macro() {
+        Binding::ado_path("/tmp/$(Pipeline.Workspace/x");
+    }
+
+    #[test]
+    #[should_panic(expected = "backtick")]
+    fn ado_path_refuses_a_backtick() {
+        Binding::ado_path("/tmp/`id`");
     }
 
     #[test]
