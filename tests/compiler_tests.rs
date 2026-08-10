@@ -10274,3 +10274,189 @@ fn test_template_targets_emit_no_top_level_trigger() {
         );
     }
 }
+
+/// `engine.provider.base-url` must reject a plaintext `http://` literal URL —
+/// the provider endpoint receives the bearer token / API key, so only a
+/// literal `https://` URL (or an ADO `$(VAR)` macro) is accepted. Covers the
+/// `is_valid_provider_base_url` validator's scheme check, which previously
+/// had no direct compile-level test (only the happy path in
+/// `test_byom_provider_env_compiles_and_merges`).
+#[test]
+fn test_provider_base_url_rejects_plaintext_http() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-provider-http-base-url-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = r#"---
+name: "Provider HTTP Base URL Agent"
+description: "Agent with a plaintext http:// provider.base-url"
+engine:
+  id: copilot
+  provider:
+    base-url: http://insecure-foundry.example.com/openai/v1
+    type: azure
+    token:
+      service-connection: my-arm-connection
+---
+
+## Test
+"#;
+
+    let input_path = temp_dir.join("provider-http-base-url.md");
+    let output_path = temp_dir.join("provider-http-base-url.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should reject a plaintext http:// provider.base-url"
+    );
+    // The `ProviderBaseUrl` newtype rejects the value at deserialization time
+    // inside an untagged `EngineConfig` enum, so serde reports the generic
+    // "no variant matched" error rather than the newtype's specific message.
+    // Assert on that generic front-matter parse failure instead.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Failed to parse YAML front matter"),
+        "Error message should report a front matter parse failure for the rejected base-url: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// `engine.provider.token.resource` is shell-interpolated verbatim into the
+/// generated `az account get-access-token --resource '<value>'` mint step, so
+/// the `ProviderResourceUrl` newtype must reject any value carrying shell
+/// metacharacters (e.g. a single quote) that could break out of the quoted
+/// argument. Covers the `is_valid_provider_resource_url` validator, which
+/// previously had no direct compile-level test.
+#[test]
+fn test_provider_token_resource_rejects_shell_metacharacters() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-provider-resource-injection-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = r#"---
+name: "Provider Resource Injection Agent"
+description: "Agent with a shell-metacharacter-bearing provider.token.resource"
+engine:
+  id: copilot
+  provider:
+    base-url: https://my-foundry.cognitiveservices.azure.com/openai/v1
+    type: azure
+    token:
+      service-connection: my-arm-connection
+      resource: "https://evil.example.com'; rm -rf /; echo '"
+---
+
+## Test
+"#;
+
+    let input_path = temp_dir.join("provider-resource-injection.md");
+    let output_path = temp_dir.join("provider-resource-injection.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should reject a provider.token.resource containing shell metacharacters"
+    );
+    // As with the base-url case above, the newtype's specific error message is
+    // swallowed by the untagged `EngineConfig` enum's generic serde error.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Failed to parse YAML front matter"),
+        "Error message should report a front matter parse failure for the rejected resource: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// `engine.provider.base-url` accepts an ADO `$(VAR)` macro form (the concrete
+/// host is unknown at compile time) alongside an explicit `provider.token.resource`
+/// override. Covers the macro-acceptance branch of `is_valid_provider_base_url`
+/// and a non-default `resource` value together — both previously exercised only
+/// implicitly (macro base-url not covered at all; explicit resource override not
+/// covered at all).
+#[test]
+fn test_provider_base_url_macro_and_custom_resource_compile() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-provider-macro-base-url-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = r#"---
+name: "Provider Macro Base URL Agent"
+description: "Agent with a macro provider base-url and custom token resource"
+engine:
+  id: copilot
+  provider:
+    base-url: $(FOUNDRY_BASE_URL)
+    type: azure
+    token:
+      service-connection: my-arm-connection
+      resource: https://custom-cognitiveservices.example.com
+---
+
+## Test
+"#;
+
+    let input_path = temp_dir.join("provider-macro-base-url.md");
+    let output_path = temp_dir.join("provider-macro-base-url.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compilation with macro base-url + custom resource should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+    assert_valid_yaml(&compiled, "provider-macro-base-url.md");
+    assert!(
+        compiled.contains("COPILOT_PROVIDER_BASE_URL: $(FOUNDRY_BASE_URL)"),
+        "macro base-url must be wired verbatim into COPILOT_PROVIDER_BASE_URL: {compiled}"
+    );
+    assert!(
+        compiled.contains("az account get-access-token --resource 'https://custom-cognitiveservices.example.com'"),
+        "custom provider.token.resource must be used in the mint step instead of the default: {compiled}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
