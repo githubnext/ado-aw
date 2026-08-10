@@ -143,14 +143,17 @@ shell_script! {
     /// `revoke` mode always exits 0 (downgrading failures to warnings), so
     /// no `set -eo pipefail` — aborting the shell early on a non-zero would
     /// only risk turning a benign revoke hiccup into a timeline error.
+    ///
+    /// `API_URL` is bound empty when the caller has no `--api-url` override;
+    /// the `${API_URL:+…}` guard emits the flag only when set, so the empty
+    /// case never produces a trailing line-continuation dangling to EOF.
     REVOKE_GITHUB_APP_TOKEN {
         interpreter: Bash,
-        bindings: [GITHUB_APP_TOKEN_PATH],
+        bindings: [GITHUB_APP_TOKEN_PATH, API_URL],
         externals: [],
-        fragments: [args],
+        fragments: [],
         body: r#"
-node "$GITHUB_APP_TOKEN_PATH" revoke \
-# ado-aw:fragment args
+node "$GITHUB_APP_TOKEN_PATH" revoke ${API_URL:+--api-url "$API_URL"}
 "#,
     }
 }
@@ -751,10 +754,10 @@ pub fn github_app_token_step_typed_for(
             .context("serialize GitHub App token permissions")?;
         args.push(format!("--permissions-json {}", sh_single_quote(&json)));
     }
-    let script = format!(
-        "set -eo pipefail\nnode '{GITHUB_APP_TOKEN_PATH}' {}\n",
-        args.join(" ")
-    );
+    let script = ShellScript::new(&MINT_GITHUB_APP_TOKEN)
+        .text("GITHUB_APP_TOKEN_PATH", GITHUB_APP_TOKEN_PATH)
+        .fragment("args", args.join(" "))
+        .render();
     let step = BashStep::new(display_name, script)
         .with_condition(Condition::Succeeded)
         // Only the secret rides in env — masked, never on the command line. Its
@@ -825,11 +828,11 @@ pub fn prepare_pr_base_step_typed(mode: PreparePrBaseMode, repos: &[PreparePrBas
             )
         })
         .collect();
-    let script = format!(
-        "set -eo pipefail\nnode '{PREPARE_PR_BASE_PATH}' --mode {}{}\n",
-        mode.as_arg(),
-        repo_flags,
-    );
+    let script = ShellScript::new(&PREPARE_PR_BASE)
+        .text("PREPARE_PR_BASE_PATH", PREPARE_PR_BASE_PATH)
+        .text("MODE", mode.as_arg())
+        .fragment("repo_flags", repo_flags.trim_start().to_string())
+        .render();
     let step = crate::compile::ado_bundle::apply_bundle_auth(
         BashStep::new(mode.display_name(), script).with_condition(Condition::Succeeded),
         crate::compile::ado_bundle::Bundle::PreparePrBase,
@@ -875,11 +878,10 @@ pub fn github_app_token_revoke_step_typed_for(
     // so aborting the shell early on a non-zero would neither help nor change
     // the outcome — it would only risk turning a benign revoke hiccup into a
     // timeline error.
-    let api_url_arg = match &cfg.api_url {
-        Some(api_url) => format!(" --api-url {}", sh_single_quote(api_url)),
-        None => String::new(),
-    };
-    let script = format!("node '{GITHUB_APP_TOKEN_PATH}' revoke{api_url_arg}\n");
+    let script = ShellScript::new(&REVOKE_GITHUB_APP_TOKEN)
+        .text("GITHUB_APP_TOKEN_PATH", GITHUB_APP_TOKEN_PATH)
+        .text("API_URL", cfg.api_url.as_deref().unwrap_or(""))
+        .render();
     let step = BashStep::new(display_name, script)
         .with_condition(Condition::Always)
         .with_continue_on_error(true)
@@ -900,10 +902,9 @@ pub fn github_app_token_revoke_step_typed_for(
 /// legacy emitter, and the value every consumer must use in its
 /// `OutputRef`.
 pub fn synthetic_pr_step_typed(spec_b64: &str) -> Result<BashStep> {
-    let script = format!(
-        "set -euo pipefail\n\
-         node '{EXEC_CONTEXT_PR_SYNTH_PATH}'\n"
-    );
+    let script = ShellScript::new(&RESOLVE_SYNTHETIC_PR)
+        .text("BUNDLE", EXEC_CONTEXT_PR_SYNTH_PATH)
+        .render();
     let condition = Condition::And(vec![
         Condition::Succeeded,
         Condition::Ne(
@@ -1498,9 +1499,15 @@ mod tests {
             "Mint GitHub App token (Copilot engine auth)"
         );
         assert!(
+            step.script.contains(
+                "GITHUB_APP_TOKEN_PATH='/tmp/ado-aw-scripts/ado-script/github-app-token.js'"
+            ),
+            "the bundle path must be projected through the prelude:\n{}",
             step.script
-                .contains("node '/tmp/ado-aw-scripts/ado-script/github-app-token.js'"),
-            "script must invoke the bundle:\n{}",
+        );
+        assert!(
+            step.script.contains("node \"$GITHUB_APP_TOKEN_PATH\""),
+            "the body must invoke the bundle through the bound path:\n{}",
             step.script
         );
         // Non-secret inputs are single-quoted argv flags (shadow-proof). The
@@ -1704,8 +1711,15 @@ mod tests {
             panic!("expected a bash step");
         };
         assert!(
+            step.script.contains(
+                "GITHUB_APP_TOKEN_PATH='/tmp/ado-aw-scripts/ado-script/github-app-token.js'"
+            ),
+            "the bundle path must be projected through the prelude:\n{}",
             step.script
-                .contains("node '/tmp/ado-aw-scripts/ado-script/github-app-token.js' revoke"),
+        );
+        assert!(
+            step.script
+                .contains("node \"$GITHUB_APP_TOKEN_PATH\" revoke"),
             "revoke step must invoke the bundle in revoke mode:\n{}",
             step.script
         );
@@ -1714,11 +1728,18 @@ mod tests {
             step.env.get("GH_APP_TOKEN"),
             Some(EnvValue::Secret(v)) if v == "GITHUB_APP_TOKEN"
         ));
-        // api-url is an argv flag (non-secret), not an env var.
+        // api-url is projected through the API_URL binding (non-secret prelude),
+        // guarded by ${API_URL:+…} so the empty case never emits the flag.
         assert!(
             step.script
-                .contains("revoke --api-url 'https://ghe.example.com/api/v3'"),
-            "revoke must pass api-url as an argv flag:\n{}",
+                .contains("API_URL='https://ghe.example.com/api/v3'"),
+            "revoke must project the api-url through the prelude:\n{}",
+            step.script
+        );
+        assert!(
+            step.script
+                .contains("revoke ${API_URL:+--api-url \"$API_URL\"}"),
+            "revoke body must guard the --api-url flag with ${{API_URL:+…}}:\n{}",
             step.script
         );
         assert!(!step.env.contains_key("GH_APP_API_URL"));
@@ -1769,19 +1790,29 @@ mod tests {
         };
         assert_eq!(step.display_name, "Prepare create-pull-request patch base");
         assert!(
+            step.script.contains(
+                "PREPARE_PR_BASE_PATH='/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js'"
+            ),
+            "the bundle path must be projected through the prelude:\n{}",
             step.script
-                .contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js'"),
-            "script must invoke the bundle:\n{}",
+        );
+        assert!(
+            step.script.contains("MODE='patch-base'"),
+            "the mode must be projected through the prelude:\n{}",
+            step.script
+        );
+        assert!(
+            step.script.contains("node \"$PREPARE_PR_BASE_PATH\" --mode \"$MODE\""),
+            "the body must invoke the bundle through the bound path and mode:\n{}",
             step.script
         );
         // The repo dir (== MCP server bounding_directory) is a double-quoted argv
         // flag (ADO-macro path convention); its target is a single-quoted literal.
         assert!(
             step.script.contains(
-                "--mode patch-base --repo-dir \"$(Build.SourcesDirectory)\" \
-                 --target-branch 'main'"
+                "--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"
             ),
-            "must emit typed mode/source/target flags:\n{}",
+            "must emit typed source/target flags:\n{}",
             step.script
         );
         // The ADO bearer is projected as a masked secret (bundle uses it for the
@@ -1879,7 +1910,11 @@ mod tests {
             step.display_name,
             "Prepare create-pull-request target worktree ref"
         );
-        assert!(step.script.contains("--mode target-worktree"));
+        assert!(
+            step.script.contains("MODE='target-worktree'"),
+            "the mode must be projected through the prelude:\n{}",
+            step.script
+        );
         assert!(!step.script.contains("--source-ref"));
     }
 
