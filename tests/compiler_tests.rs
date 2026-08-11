@@ -2078,9 +2078,26 @@ Test.
 "#,
     );
 
-    assert!(compiled.contains("\"@azure-devops/mcp@2.9.0\""));
-    assert!(compiled.contains("expected 2.9.0"));
-    assert!(!compiled.contains("\"@azure-devops/mcp@2.8.1\""));
+    // The version is supplied as a `ShellScript` binding rather than
+    // interpolated into the install command, so assert on the generated
+    // prelude — that proves the override reached the producer, where a bare
+    // substring would also match the verification message.
+    assert!(
+        compiled.contains("MCP_PACKAGE='@azure-devops/mcp'")
+            && compiled.contains("MCP_VERSION='2.9.0'"),
+        "the front-matter version override must reach the install step"
+    );
+    // Install and verification read the same binding, so an override cannot
+    // be applied to one and not the other.
+    assert!(
+        compiled.contains("\"$MCP_PACKAGE@$MCP_VERSION\"")
+            && compiled.contains("expected $MCP_VERSION"),
+        "the install and its verification must share one version"
+    );
+    assert!(
+        !compiled.contains("MCP_VERSION='2.8.1'"),
+        "the compiler default must not survive an explicit override"
+    );
 }
 
 /// Test that the Azure DevOps MCP fixture compiles successfully with no unreplaced markers
@@ -2168,8 +2185,9 @@ fn test_fixture_azure_devops_mcp_compiled_output() {
         "MCPG config should contain the container image"
     );
     assert!(
-        compiled.contains("\"@azure-devops/mcp@2.8.1\"")
-            && compiled.contains("expected 2.8.1"),
+        compiled.contains("MCP_PACKAGE='@azure-devops/mcp'")
+            && compiled.contains("MCP_VERSION='2.8.1'")
+            && compiled.contains("expected $MCP_VERSION"),
         "the unversioned frontmatter form must use and verify the compiler default"
     );
     assert!(
