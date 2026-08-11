@@ -201,7 +201,12 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   ├── safe_outputs/     # Safe-output MCP tool implementations (Stage 1 → NDJSON → Stage 3)
 │   │   ├── mod.rs
 │   │   ├── add_build_tag.rs
+│   │   ├── add_github_issue_labels.rs
 │   │   ├── add_pr_comment.rs
+│   │   ├── assign_github_issue_milestone.rs
+│   │   ├── assign_github_issue_to_user.rs
+│   │   ├── close_github_issue.rs
+│   │   ├── comment_on_github_issue.rs
 │   │   ├── comment_on_work_item.rs
 │   │   ├── create_branch.rs
 │   │   ├── create_git_tag.rs
@@ -209,17 +214,25 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── create_pull_request.rs
 │   │   ├── create_wiki_page.rs
 │   │   ├── create_work_item.rs
+│   │   ├── github_api.rs # Shared GitHub REST/GraphQL client, endpoint derivation, pagination, and errors
+│   │   ├── github_issue_common.rs # Shared repository selection, filters, issue/PR policy, and temporary-ID resolution
+│   │   ├── hide_github_issue_comment.rs
+│   │   ├── link_github_sub_issue.rs
 │   │   ├── link_work_items.rs
 │   │   ├── missing_data.rs
 │   │   ├── missing_tool.rs
 │   │   ├── noop.rs
 │   │   ├── queue_build.rs
+│   │   ├── remove_github_issue_labels.rs
 │   │   ├── reply_to_pr_comment.rs
 │   │   ├── report_incomplete.rs
 │   │   ├── resolve_pr_thread.rs
 │   │   ├── result.rs
+│   │   ├── set_github_issue_field.rs
 │   │   ├── set_github_issue_type.rs
 │   │   ├── submit_pr_review.rs
+│   │   ├── unassign_github_issue_from_user.rs
+│   │   ├── update_github_issue.rs
 │   │   ├── update_pr.rs
 │   │   ├── update_wiki_page.rs
 │   │   ├── update_work_item.rs

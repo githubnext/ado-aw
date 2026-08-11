@@ -26,17 +26,33 @@
  * Test-harness module; not shipped in `ado-script.zip`.
  */
 import {
+  addIssueAssignees,
   cleanVar,
   closeIssue,
+  createIssueComment,
   createGitHubIssue,
+  createMilestone,
+  createRepoLabel,
+  deleteIssueComment,
+  deleteMilestone,
+  deleteRepoLabel,
   diagnoseGitHubAuthFailure,
   findOpenIssueByTitle,
+  getAuthenticatedUser,
+  getCommentMinimization,
   getIssue,
+  getIssueFieldValue,
+  getSubIssueParent,
   listOrgIssueTypes,
+  listIssueComments,
+  listRepositoryIssueFields,
   patchIssue,
+  removeIssueAssignees,
   splitRepo,
+  supportsGraphqlField,
+  unlinkSubIssue,
 } from "../github-client.js";
-import type { GitHubClientOptions } from "../github-client.js";
+import type { GitHubClientOptions, GitHubIssueField } from "../github-client.js";
 import type { ExecutedRecord, PriorEntry, Scenario, ScenarioContext } from "../scenario.js";
 import { SkipError } from "../scenario.js";
 import { detBody, numResult, strResult, Teardown } from "./common.js";
@@ -551,10 +567,687 @@ export const createGithubIssueTemporaryIdHandoff: Scenario<HandoffState> = {
       .run(),
 };
 
+// ---------------------------------------------------------------------------
+// GitHub issue mutation family
+// ---------------------------------------------------------------------------
+
+interface MutationIssueState extends GithubIssueEnv {
+  title: string;
+  issueNumber: number;
+  commentId?: number;
+}
+
+async function seedMutationIssue(
+  ctx: ScenarioContext,
+  env: GithubIssueEnv,
+  id: string,
+  labels: string[] = [],
+): Promise<MutationIssueState> {
+  const title = issueTitle(ctx, id);
+  const leftover = await findOpenIssueByTitle(env.gh, title);
+  if (leftover !== undefined) await closeIssue(env.gh, leftover);
+  const url = await createGitHubIssue(env.gh, title, detBody(ctx, id), labels);
+  const match = url.match(/\/(\d+)$/);
+  if (!match) {
+    await closeByNumberOrTitle(env, undefined, title).catch(() => {});
+    throw new Error(`could not parse an issue number out of '${url}'`);
+  }
+  return { ...env, title, issueNumber: Number(match[1]) };
+}
+
+async function setupMutationIssue(
+  ctx: ScenarioContext,
+  id: string,
+  labels: string[] = [],
+): Promise<MutationIssueState> {
+  const env = resolveGithubIssueEnv(id);
+  await requireIssueWrite(env, id);
+  return seedMutationIssue(ctx, env, id, labels);
+}
+
+function mutationConfig(
+  state: GithubIssueEnv,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return { "target-repo": state.repo, ...extra };
+}
+
+async function closeMutationIssue(state: MutationIssueState): Promise<void> {
+  await closeByNumberOrTitle(state, state.issueNumber, state.title);
+}
+
+async function deleteMatchingComments(
+  ctx: ScenarioContext,
+  state: MutationIssueState,
+  marker: string,
+): Promise<void> {
+  const comments = await listIssueComments(state.gh, state.issueNumber);
+  for (const comment of comments) {
+    if (comment.body.includes(detBody(ctx, marker))) {
+      await deleteIssueComment(state.gh, comment.id);
+    }
+  }
+}
+
+async function requireGraphqlFeature(
+  env: GithubIssueEnv,
+  tool: string,
+  fields: readonly [type: string, field: string][],
+): Promise<void> {
+  for (const [type, field] of fields) {
+    if (!(await supportsGraphqlField(env.gh, type, field))) {
+      throw new SkipError(
+        `${tool}: GitHub GraphQL schema does not expose ${type}.${field}; ` +
+          `the required preview feature is unavailable on '${env.repo}'`,
+      );
+    }
+  }
+}
+
+export const commentOnGithubIssue: Scenario<MutationIssueState> = {
+  id: "comment-on-github-issue",
+  tool: "comment-on-github-issue",
+  config: (_ctx, state) => mutationConfig(state),
+  setup: (ctx) => setupMutationIssue(ctx, "comment-on-github-issue"),
+  ndjson: async (ctx, state) => ({
+    issue_number: state.issueNumber,
+    body: detBody(ctx, "comment-on-github-issue-comment"),
+  }),
+  env: async (_ctx, state) => executeEnv(state),
+  assert: async (ctx, state) => {
+    const expected = detBody(ctx, "comment-on-github-issue-comment");
+    const comment = (await listIssueComments(state.gh, state.issueNumber)).find((c) =>
+      c.body.includes(expected),
+    );
+    if (!comment) throw new Error(`issue #${state.issueNumber} has no matching executor comment`);
+    if (!comment.body.includes("<!-- ado-aw")) {
+      throw new Error("executor comment is missing its stable ado-aw trace marker");
+    }
+    state.commentId = comment.id;
+  },
+  cleanup: async (ctx, state) =>
+    new Teardown()
+      .add("delete executor comment", () =>
+        deleteMatchingComments(ctx, state, "comment-on-github-issue-comment"),
+      )
+      .add("close scratch issue", () => closeMutationIssue(state))
+      .run(),
+};
+
+interface HiddenCommentState extends MutationIssueState {
+  commentNodeId: string;
+}
+
+export const hideGithubIssueComment: Scenario<HiddenCommentState> = {
+  id: "hide-github-issue-comment",
+  tool: "hide-github-issue-comment",
+  config: (_ctx, state) => mutationConfig(state, { "allowed-reasons": ["SPAM"] }),
+  setup: async (ctx) => {
+    const id = "hide-github-issue-comment";
+    const env = resolveGithubIssueEnv(id);
+    await requireIssueWrite(env, id);
+    await requireGraphqlFeature(env, id, [["Mutation", "minimizeComment"]]);
+    const state = await seedMutationIssue(ctx, env, id);
+    try {
+      const comment = await createIssueComment(
+        env.gh,
+        state.issueNumber,
+        detBody(ctx, "hide-github-issue-comment-target"),
+      );
+      return { ...state, commentId: comment.id, commentNodeId: comment.nodeId };
+    } catch (err) {
+      await closeMutationIssue(state).catch(() => {});
+      throw err;
+    }
+  },
+  ndjson: async (_ctx, state) => ({
+    comment_id: state.commentId,
+    reason: "spam",
+    repository: state.repo,
+  }),
+  env: async (_ctx, state) => executeEnv(state),
+  assert: async (_ctx, state) => {
+    const minimized = await getCommentMinimization(state.gh, state.commentNodeId);
+    if (!minimized.isMinimized) {
+      throw new Error(`comment ${state.commentId} was not minimized`);
+    }
+  },
+  cleanup: async (_ctx, state) =>
+    new Teardown()
+      .add("delete minimized comment", () => deleteIssueComment(state.gh, state.commentId!))
+      .add("close scratch issue", () => closeMutationIssue(state))
+      .run(),
+};
+
+interface LabelState extends MutationIssueState {
+  label: string;
+}
+
+async function setupLabelScenario(ctx: ScenarioContext, id: string): Promise<LabelState> {
+  const env = resolveGithubIssueEnv(id);
+  await requireIssueWrite(env, id);
+  const suffix = id.includes("remove") ? "remove" : id.includes("blocked") ? "blocked" : "add";
+  const label = `executor-e2e-${ctx.buildId}-${suffix}`;
+  await createRepoLabel(env.gh, label);
+  try {
+    const state = await seedMutationIssue(
+      ctx,
+      env,
+      id,
+      id.includes("remove") ? [label] : [],
+    );
+    return { ...state, label };
+  } catch (err) {
+    await deleteRepoLabel(env.gh, label).catch(() => {});
+    throw err;
+  }
+}
+
+async function cleanupLabelScenario(state: LabelState): Promise<void> {
+  await new Teardown()
+    .add("close scratch issue", () => closeMutationIssue(state))
+    .add("delete scratch label", () => deleteRepoLabel(state.gh, state.label))
+    .run();
+}
+
+export const addGithubIssueLabels: Scenario<LabelState> = {
+  id: "add-github-issue-labels",
+  tool: "add-github-issue-labels",
+  config: (_ctx, state) => mutationConfig(state, { allowed: [state.label], blocked: [] }),
+  setup: (ctx) => setupLabelScenario(ctx, "add-github-issue-labels"),
+  ndjson: async (_ctx, state) => ({ issue_number: state.issueNumber, labels: [state.label] }),
+  env: async (_ctx, state) => executeEnv(state),
+  assert: async (_ctx, state) => {
+    const issue = await getIssue(state.gh, state.issueNumber);
+    if (!issue?.labels.includes(state.label)) {
+      throw new Error(`issue #${state.issueNumber} is missing label '${state.label}'`);
+    }
+  },
+  cleanup: async (_ctx, state) => cleanupLabelScenario(state),
+};
+
+export const removeGithubIssueLabels: Scenario<LabelState> = {
+  id: "remove-github-issue-labels",
+  tool: "remove-github-issue-labels",
+  config: (_ctx, state) => mutationConfig(state, { allowed: [state.label], blocked: [] }),
+  setup: (ctx) => setupLabelScenario(ctx, "remove-github-issue-labels"),
+  ndjson: async (_ctx, state) => ({ issue_number: state.issueNumber, labels: [state.label] }),
+  env: async (_ctx, state) => executeEnv(state),
+  assert: async (_ctx, state) => {
+    const issue = await getIssue(state.gh, state.issueNumber);
+    if (issue?.labels.includes(state.label)) {
+      throw new Error(`issue #${state.issueNumber} still has label '${state.label}'`);
+    }
+  },
+  cleanup: async (_ctx, state) => cleanupLabelScenario(state),
+};
+
+export const closeGithubIssue: Scenario<MutationIssueState> = {
+  id: "close-github-issue",
+  tool: "close-github-issue",
+  config: (_ctx, state) =>
+    mutationConfig(state, {
+      "allow-body": true,
+      "allowed-state-reason": ["not_planned"],
+    }),
+  setup: (ctx) => setupMutationIssue(ctx, "close-github-issue"),
+  ndjson: async (ctx, state) => ({
+    issue_number: state.issueNumber,
+    body: detBody(ctx, "close-github-issue-comment"),
+    state_reason: "not_planned",
+  }),
+  env: async (_ctx, state) => executeEnv(state),
+  assert: async (ctx, state) => {
+    const issue = await getIssue(state.gh, state.issueNumber);
+    if (issue?.state !== "closed") {
+      throw new Error(`issue #${state.issueNumber} state is '${issue?.state ?? "(missing)"}'`);
+    }
+    if (issue.stateReason !== "not_planned") {
+      throw new Error(
+        `issue #${state.issueNumber} state reason is '${issue.stateReason ?? "(none)"}'`,
+      );
+    }
+    const expected = detBody(ctx, "close-github-issue-comment");
+    const comment = (await listIssueComments(state.gh, state.issueNumber)).find((c) =>
+      c.body.includes(expected),
+    );
+    if (!comment) throw new Error("close-github-issue did not add its requested comment");
+    state.commentId = comment.id;
+  },
+  cleanup: async (ctx, state) =>
+    new Teardown()
+      .add("delete close comment", () =>
+        deleteMatchingComments(ctx, state, "close-github-issue-comment"),
+      )
+      .add("close scratch issue", () => closeMutationIssue(state))
+      .run(),
+};
+
+interface UpdateState extends MutationIssueState {
+  updatedTitle: string;
+  updatedBody: string;
+}
+
+export const updateGithubIssue: Scenario<UpdateState> = {
+  id: "update-github-issue",
+  tool: "update-github-issue",
+  config: (_ctx, state) =>
+    mutationConfig(state, { title: true, body: true }),
+  setup: async (ctx) => {
+    const state = await setupMutationIssue(ctx, "update-github-issue");
+    return {
+      ...state,
+      updatedTitle: `${ctx.prefix("update-github-issue")} updated`,
+      updatedBody: detBody(ctx, "update-github-issue-updated"),
+    };
+  },
+  ndjson: async (_ctx, state) => ({
+    issue_number: state.issueNumber,
+    title: state.updatedTitle,
+    body: state.updatedBody,
+    operation: "replace",
+  }),
+  env: async (_ctx, state) => executeEnv(state),
+  assert: async (_ctx, state) => {
+    const issue = await getIssue(state.gh, state.issueNumber);
+    if (issue?.title !== state.updatedTitle) {
+      throw new Error(`issue title is '${issue?.title ?? "(missing)"}', expected '${state.updatedTitle}'`);
+    }
+    if (!issue.body?.includes(state.updatedBody)) {
+      throw new Error("update-github-issue did not replace the issue body");
+    }
+  },
+  cleanup: async (_ctx, state) => closeMutationIssue(state),
+};
+
+interface FieldState extends MutationIssueState {
+  field: GitHubIssueField;
+  value: string;
+}
+
+function fieldValue(field: GitHubIssueField): string | undefined {
+  switch (field.type) {
+    case "IssueFieldText":
+      return "ado-aw executor e2e";
+    case "IssueFieldNumber":
+      return "42";
+    case "IssueFieldDate":
+      return "2030-01-02";
+    case "IssueFieldSingleSelect":
+      return field.options[0]?.name;
+    default:
+      return undefined;
+  }
+}
+
+export const setGithubIssueField: Scenario<FieldState> = {
+  id: "set-github-issue-field",
+  tool: "set-github-issue-field",
+  config: (_ctx, state) => mutationConfig(state, { "allowed-fields": [state.field.name] }),
+  setup: async (ctx) => {
+    const id = "set-github-issue-field";
+    const env = resolveGithubIssueEnv(id);
+    await requireIssueWrite(env, id);
+    await requireGraphqlFeature(env, id, [
+      ["Repository", "issueFields"],
+      ["Issue", "issueFieldValues"],
+      ["Mutation", "setIssueFieldValue"],
+    ]);
+    const field = (await listRepositoryIssueFields(env.gh))
+      .map((candidate) => ({ candidate, value: fieldValue(candidate) }))
+      .find((candidate) => candidate.value !== undefined);
+    if (!field?.value) {
+      throw new SkipError(
+        `${id}: '${env.repo}' exposes no supported text, number, date, or populated single-select issue field`,
+      );
+    }
+    const state = await seedMutationIssue(ctx, env, id);
+    return { ...state, field: field.candidate, value: field.value };
+  },
+  ndjson: async (_ctx, state) => ({
+    issue_number: state.issueNumber,
+    field_name: state.field.name,
+    value: state.value,
+  }),
+  env: async (_ctx, state) => executeEnv(state),
+  assert: async (_ctx, state, record) => {
+    if (strResult(record, "field_name").toLowerCase() !== state.field.name.toLowerCase()) {
+      throw new Error("executor reported a different issue field");
+    }
+    if (strResult(record, "value") !== state.value) {
+      throw new Error("executor reported a different issue field value");
+    }
+    const persisted = await getIssueFieldValue(state.gh, state.issueNumber, state.field.id);
+    if (!persisted) {
+      throw new Error(
+        `issue #${state.issueNumber} has no persisted value for field '${state.field.name}'`,
+      );
+    }
+    if (persisted.fieldName.toLowerCase() !== state.field.name.toLowerCase()) {
+      throw new Error(
+        `persisted issue field is '${persisted.fieldName}', expected '${state.field.name}'`,
+      );
+    }
+    if (persisted.fieldType !== state.field.type) {
+      throw new Error(
+        `persisted issue field type is '${persisted.fieldType}', expected '${state.field.type}'`,
+      );
+    }
+    const expectedValueType = `${state.field.type}Value`;
+    if (persisted.valueType !== expectedValueType) {
+      throw new Error(
+        `persisted issue field value type is '${persisted.valueType}', expected '${expectedValueType}'`,
+      );
+    }
+    const expectedValue = state.field.type === "IssueFieldNumber" ? Number(state.value) : state.value;
+    if (persisted.value !== expectedValue) {
+      throw new Error(
+        `persisted issue field value is ${JSON.stringify(persisted.value)}, expected ${JSON.stringify(expectedValue)}`,
+      );
+    }
+  },
+  cleanup: async (_ctx, state) => closeMutationIssue(state),
+};
+
+interface MilestoneState extends MutationIssueState {
+  milestoneNumber: number;
+  milestoneTitle: string;
+}
+
+export const assignGithubIssueMilestone: Scenario<MilestoneState> = {
+  id: "assign-github-issue-milestone",
+  tool: "assign-github-issue-milestone",
+  config: (_ctx, state) =>
+    mutationConfig(state, { allowed: [state.milestoneTitle], "auto-create": false }),
+  setup: async (ctx) => {
+    const id = "assign-github-issue-milestone";
+    const env = resolveGithubIssueEnv(id);
+    await requireIssueWrite(env, id);
+    const milestoneTitle = ctx.prefix(id);
+    const milestone = await createMilestone(env.gh, milestoneTitle);
+    try {
+      const state = await seedMutationIssue(ctx, env, id);
+      return {
+        ...state,
+        milestoneNumber: milestone.number,
+        milestoneTitle,
+      };
+    } catch (err) {
+      await deleteMilestone(env.gh, milestone.number).catch(() => {});
+      throw err;
+    }
+  },
+  ndjson: async (_ctx, state) => ({
+    issue_number: state.issueNumber,
+    milestone_number: state.milestoneNumber,
+  }),
+  env: async (_ctx, state) => executeEnv(state),
+  assert: async (_ctx, state) => {
+    const issue = await getIssue(state.gh, state.issueNumber);
+    if (issue?.milestone?.number !== state.milestoneNumber) {
+      throw new Error(`issue #${state.issueNumber} was not assigned the scratch milestone`);
+    }
+  },
+  cleanup: async (_ctx, state) =>
+    new Teardown()
+      .add("close scratch issue", () => closeMutationIssue(state))
+      .add("delete scratch milestone", () => deleteMilestone(state.gh, state.milestoneNumber))
+      .run(),
+};
+
+interface AssigneeState extends MutationIssueState {
+  assignee: string;
+}
+
+async function setupAssigneeScenario(
+  ctx: ScenarioContext,
+  id: string,
+  assigned: boolean,
+): Promise<AssigneeState> {
+  const env = resolveGithubIssueEnv(id);
+  await requireIssueWrite(env, id);
+  const assignee = await getAuthenticatedUser(env.gh);
+  const state = await seedMutationIssue(ctx, env, id);
+  if (assigned) {
+    try {
+      await addIssueAssignees(env.gh, state.issueNumber, [assignee]);
+      const issue = await getIssue(env.gh, state.issueNumber);
+      if (!(issue?.assignees ?? []).some((name) => name.toLowerCase() === assignee.toLowerCase())) {
+        throw new SkipError(
+          `${id}: authenticated user '${assignee}' is not assignable to '${env.repo}'`,
+        );
+      }
+    } catch (err) {
+      await closeMutationIssue(state).catch(() => {});
+      throw err;
+    }
+  }
+  return { ...state, assignee };
+}
+
+export const assignGithubIssueToUser: Scenario<AssigneeState> = {
+  id: "assign-github-issue-to-user",
+  tool: "assign-github-issue-to-user",
+  config: (_ctx, state) =>
+    mutationConfig(state, { allowed: [state.assignee], blocked: [], "unassign-first": true }),
+  setup: (ctx) => setupAssigneeScenario(ctx, "assign-github-issue-to-user", false),
+  ndjson: async (_ctx, state) => ({
+    issue_number: state.issueNumber,
+    assignee: state.assignee,
+  }),
+  env: async (_ctx, state) => executeEnv(state),
+  assert: async (_ctx, state) => {
+    const issue = await getIssue(state.gh, state.issueNumber);
+    if (!(issue?.assignees ?? []).some((name) => name.toLowerCase() === state.assignee.toLowerCase())) {
+      throw new Error(`issue #${state.issueNumber} is not assigned to '${state.assignee}'`);
+    }
+  },
+  cleanup: async (_ctx, state) =>
+    new Teardown()
+      .add("remove scratch assignee", () =>
+        removeIssueAssignees(state.gh, state.issueNumber, [state.assignee]),
+      )
+      .add("close scratch issue", () => closeMutationIssue(state))
+      .run(),
+};
+
+export const unassignGithubIssueFromUser: Scenario<AssigneeState> = {
+  id: "unassign-github-issue-from-user",
+  tool: "unassign-github-issue-from-user",
+  config: (_ctx, state) => mutationConfig(state, { allowed: [state.assignee], blocked: [] }),
+  setup: (ctx) => setupAssigneeScenario(ctx, "unassign-github-issue-from-user", true),
+  ndjson: async (_ctx, state) => ({
+    issue_number: state.issueNumber,
+    assignee: state.assignee,
+  }),
+  env: async (_ctx, state) => executeEnv(state),
+  assert: async (_ctx, state) => {
+    const issue = await getIssue(state.gh, state.issueNumber);
+    if ((issue?.assignees ?? []).some((name) => name.toLowerCase() === state.assignee.toLowerCase())) {
+      throw new Error(`issue #${state.issueNumber} is still assigned to '${state.assignee}'`);
+    }
+  },
+  cleanup: async (_ctx, state) => closeMutationIssue(state),
+};
+
+interface SubIssueState extends GithubIssueEnv {
+  parentTitle: string;
+  subTitle: string;
+  parentNumber?: number;
+  subNumber?: number;
+}
+
+const PARENT_TEMPORARY_ID = "#aw_parent";
+const SUB_TEMPORARY_ID = "#aw_sub";
+
+export const linkGithubSubIssue: Scenario<SubIssueState> = {
+  id: "link-github-sub-issue",
+  tool: "link-github-sub-issue",
+  config: (_ctx, state) => mutationConfig(state),
+  setup: async (ctx) => {
+    const id = "link-github-sub-issue";
+    const env = resolveGithubIssueEnv(id);
+    await requireIssueWrite(env, id);
+    await requireGraphqlFeature(env, id, [
+      ["Issue", "parent"],
+      ["Mutation", "addSubIssue"],
+      ["Mutation", "removeSubIssue"],
+    ]);
+    return {
+      ...env,
+      parentTitle: issueTitle(ctx, `${id}-parent`),
+      subTitle: issueTitle(ctx, `${id}-sub`),
+    };
+  },
+  priorEntries: async (ctx, state): Promise<PriorEntry[]> => [
+    {
+      tool: "create-github-issue",
+      config: { "target-repo": state.repo, "require-temporary-id": true },
+      entry: {
+        title: state.parentTitle,
+        body: detBody(ctx, "link-github-sub-issue-parent"),
+        temporary_id: PARENT_TEMPORARY_ID,
+      },
+    },
+    {
+      tool: "create-github-issue",
+      config: { "target-repo": state.repo, "require-temporary-id": true },
+      entry: {
+        title: state.subTitle,
+        body: detBody(ctx, "link-github-sub-issue-sub"),
+        temporary_id: SUB_TEMPORARY_ID,
+      },
+    },
+  ],
+  ndjson: async () => ({
+    parent_issue_number: PARENT_TEMPORARY_ID,
+    sub_issue_number: SUB_TEMPORARY_ID,
+  }),
+  env: async (_ctx, state) => executeEnv(state),
+  assert: async (_ctx, state, _record, records) => {
+    const creates = records.filter((record) => record.name === "create_github_issue");
+    if (creates.length !== 2) {
+      throw new Error(`expected two create-github-issue records, got ${creates.length}`);
+    }
+    state.parentNumber = numResult(creates[0]!, "number");
+    state.subNumber = numResult(creates[1]!, "number");
+    const parent = await getSubIssueParent(state.gh, state.subNumber);
+    if (parent !== state.parentNumber) {
+      throw new Error(
+        `issue #${state.subNumber} parent is ${parent ?? "(none)"}, expected #${state.parentNumber}`,
+      );
+    }
+  },
+  cleanup: async (_ctx, state) =>
+    new Teardown()
+      .add("unlink sub issue", async () => {
+        if (state.parentNumber !== undefined && state.subNumber !== undefined) {
+          await unlinkSubIssue(state.gh, state.parentNumber, state.subNumber);
+        }
+      })
+      .add("close sub issue", () =>
+        closeByNumberOrTitle(state, state.subNumber, state.subTitle),
+      )
+      .add("close parent issue", () =>
+        closeByNumberOrTitle(state, state.parentNumber, state.parentTitle),
+      )
+      .run(),
+};
+
+// Focused fail-closed policy checks. They intentionally exercise the real
+// executor but perform no write when policy is enforced correctly.
+
+export const commentOnGithubIssueRepoDenied: Scenario<MutationIssueState> = {
+  id: "comment-on-github-issue-repo-denied",
+  tool: "comment-on-github-issue",
+  config: (_ctx, state) => mutationConfig(state),
+  setup: (ctx) => setupMutationIssue(ctx, "comment-on-github-issue-repo-denied"),
+  ndjson: async (ctx, state) => ({
+    issue_number: state.issueNumber,
+    repository: "definitely-not/allowed",
+    body: detBody(ctx, "comment-on-github-issue-repo-denied"),
+  }),
+  env: async (_ctx, state) => executeEnv(state),
+  expectedFailure: { error: /repository.*(?:not allowed|denied)|(?:not allowed|denied).*repository/i },
+  assert: async () => {
+    throw new Error("comment-on-github-issue should have rejected the repository");
+  },
+  cleanup: async (_ctx, state) => closeMutationIssue(state),
+};
+
+export const addGithubIssueLabelsBlocked: Scenario<LabelState> = {
+  id: "add-github-issue-labels-blocked",
+  tool: "add-github-issue-labels",
+  config: (_ctx, state) => mutationConfig(state, { allowed: ["*"], blocked: [state.label] }),
+  setup: (ctx) => setupLabelScenario(ctx, "add-github-issue-labels-blocked"),
+  ndjson: async (_ctx, state) => ({ issue_number: state.issueNumber, labels: [state.label] }),
+  env: async (_ctx, state) => executeEnv(state),
+  expectedFailure: { error: /label.*blocked|blocked.*label/i },
+  assert: async () => {
+    throw new Error("add-github-issue-labels should have rejected the blocked label");
+  },
+  cleanup: async (_ctx, state) => cleanupLabelScenario(state),
+};
+
+export const updateGithubIssueFilterDenied: Scenario<MutationIssueState> = {
+  id: "update-github-issue-filter-denied",
+  tool: "update-github-issue",
+  config: (_ctx, state) =>
+    mutationConfig(state, {
+      body: true,
+      "required-title-prefix": "[this-prefix-does-not-match]",
+    }),
+  setup: (ctx) => setupMutationIssue(ctx, "update-github-issue-filter-denied"),
+  ndjson: async (ctx, state) => ({
+    issue_number: state.issueNumber,
+    body: detBody(ctx, "update-github-issue-filter-denied-write"),
+    operation: "replace",
+  }),
+  env: async (_ctx, state) => executeEnv(state),
+  expectedFailure: { error: /title.*prefix|required-title-prefix/i },
+  assert: async () => {
+    throw new Error("update-github-issue should have rejected the title filter");
+  },
+  cleanup: async (_ctx, state) => closeMutationIssue(state),
+};
+
+export const closeGithubIssueStateDenied: Scenario<MutationIssueState> = {
+  id: "close-github-issue-state-denied",
+  tool: "close-github-issue",
+  config: (_ctx, state) =>
+    mutationConfig(state, { "allowed-state-reason": ["completed"] }),
+  setup: (ctx) => setupMutationIssue(ctx, "close-github-issue-state-denied"),
+  ndjson: async (_ctx, state) => ({
+    issue_number: state.issueNumber,
+    state_reason: "not_planned",
+  }),
+  env: async (_ctx, state) => executeEnv(state),
+  expectedFailure: { error: /state.reason.*(?:not allowed|denied)|allowed-state-reason/i },
+  assert: async () => {
+    throw new Error("close-github-issue should have rejected the state reason");
+  },
+  cleanup: async (_ctx, state) => closeMutationIssue(state),
+};
+
 export const githubIssueScenarios: Scenario<unknown>[] = [
   createGithubIssue,
   createGithubIssueLabelDenied,
   setGithubIssueType,
   setGithubIssueTypeClear,
   createGithubIssueTemporaryIdHandoff,
+  commentOnGithubIssue,
+  hideGithubIssueComment,
+  addGithubIssueLabels,
+  removeGithubIssueLabels,
+  closeGithubIssue,
+  updateGithubIssue,
+  setGithubIssueField,
+  assignGithubIssueMilestone,
+  assignGithubIssueToUser,
+  unassignGithubIssueFromUser,
+  linkGithubSubIssue,
+  commentOnGithubIssueRepoDenied,
+  addGithubIssueLabelsBlocked,
+  updateGithubIssueFilterDenied,
+  closeGithubIssueStateDenied,
 ];

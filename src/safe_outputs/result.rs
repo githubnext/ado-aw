@@ -143,6 +143,13 @@ pub struct ExecutionContext {
     /// Pipeline definition name (`BUILD_DEFINITIONNAME`)
     #[allow(dead_code)]
     pub definition_name: Option<String>,
+    /// Stable numeric pipeline definition identity (`SYSTEM_DEFINITIONID`).
+    ///
+    /// GitHub comment tools use this value in hidden markers so older comments
+    /// can be matched to the originating pipeline without relying on mutable
+    /// definition names or agent-authored text.
+    #[allow(dead_code)]
+    pub definition_id: Option<u64>,
     /// Full source ref, e.g. `refs/heads/main` (`BUILD_SOURCEBRANCH`)
     #[allow(dead_code)]
     pub source_branch: Option<String>,
@@ -209,53 +216,37 @@ impl ExecutionContext {
     /// Get typed configuration for a specific tool.
     ///
     /// Deserializes the tool's JSON config from front matter and applies
-    /// [`SanitizeConfig`] to all textual fields before returning. The
-    /// `SanitizeConfig` bound acts as a compile-time forcing function:
-    /// adding a new config struct without implementing the trait won't compile.
+    /// [`SanitizeConfig`] to all textual fields before returning. Missing or
+    /// explicit null configs use the tool default; malformed configured JSON
+    /// returns an error. The `SanitizeConfig` bound acts as a compile-time
+    /// forcing function: adding a new config struct without implementing the
+    /// trait won't compile.
     pub fn get_tool_config<T: serde::de::DeserializeOwned + Default + SanitizeConfig>(
         &self,
         tool_name: &str,
-    ) -> T {
-        let value = self
-            .tool_configs
-            .get(tool_name)
-            .cloned()
-            .map(|mut value| {
+    ) -> anyhow::Result<T> {
+        let mut config = match self.tool_configs.get(tool_name) {
+            None | Some(serde_json::Value::Null) => T::default(),
+            Some(value) => {
+                let mut value = value.clone();
                 // Compiler orchestration metadata, not executor configuration.
                 // Both keys are injected into EVERY tool config by Stage 3
                 // (`main.rs` for `--source`, `compile/custom_tools.rs` for the
                 // `--resolved-config` production path), so a config struct
                 // declared `deny_unknown_fields` fails to deserialize unless
-                // they are stripped first. Because the error is swallowed
-                // below, that manifests as the operator's config being
-                // silently replaced by `Default::default()` rather than as a
-                // visible failure — keep this list in sync with every key the
-                // compiler injects.
+                // they are stripped first. Keep this list in sync with every
+                // key the compiler injects.
                 if let Some(object) = value.as_object_mut() {
                     object.remove("require-approval");
                     object.remove("staged");
                 }
-                value
-            });
-        let mut config: T = value
-            .map(|v| match serde_json::from_value(v) {
-                Ok(config) => config,
-                Err(error) => {
-                    // Never fail silently: a config-shape mismatch here wipes
-                    // every operator-supplied setting for the tool (target
-                    // repos, allowlists, budgets), which is easy to mistake for
-                    // a product bug at runtime.
-                    log::warn!(
-                        "Failed to deserialize config for tool '{tool_name}': {error}. \
-                         Falling back to defaults; operator-supplied settings for this \
-                         tool will NOT be applied."
-                    );
-                    T::default()
-                }
-            })
-            .unwrap_or_default();
+                serde_json::from_value(value).map_err(|error| {
+                    anyhow::anyhow!("failed to deserialize config for tool '{tool_name}': {error}")
+                })?
+            }
+        };
         config.sanitize_config_fields();
-        config
+        Ok(config)
     }
 
     pub fn has_resolved_github_issue(
@@ -385,6 +376,7 @@ impl ExecutionContext {
             build_number: env("BUILD_BUILDNUMBER"),
             build_reason: env("BUILD_REASON"),
             definition_name: env("BUILD_DEFINITIONNAME"),
+            definition_id: env("SYSTEM_DEFINITIONID").and_then(|s| s.parse().ok()),
             source_branch: env("BUILD_SOURCEBRANCH"),
             source_branch_name: env("BUILD_SOURCEBRANCHNAME"),
             source_version: env("BUILD_SOURCEVERSION"),
@@ -975,7 +967,8 @@ mod tests {
             "my-tool".to_string(),
             serde_json::json!({ "value": "##vso[task.setvariable variable=secret]injected" }),
         );
-        let config: TestConfigForSanitization = ctx.get_tool_config("my-tool");
+        let config: TestConfigForSanitization =
+            ctx.get_tool_config("my-tool").expect("config should parse");
         assert!(
             !config.value.contains("##vso[task."),
             "Injected ##vso[ command should be neutralized; got: {}",
@@ -985,6 +978,60 @@ mod tests {
             config.value.contains("`##vso[`"),
             "Pipeline command should be wrapped in backticks; got: {}",
             config.value
+        );
+    }
+
+    #[test]
+    fn test_get_tool_config_missing_and_null_use_defaults() {
+        let missing: TestConfigForSanitization = ExecutionContext::default()
+            .get_tool_config("missing-tool")
+            .expect("missing config should use defaults");
+        assert!(missing.value.is_empty());
+
+        let mut ctx = ExecutionContext::default();
+        ctx.tool_configs
+            .insert("null-tool".to_string(), serde_json::Value::Null);
+        let null: TestConfigForSanitization = ctx
+            .get_tool_config("null-tool")
+            .expect("null config should use defaults");
+        assert!(null.value.is_empty());
+    }
+
+    #[test]
+    fn test_get_tool_config_rejects_malformed_github_config() {
+        let mut ctx = ExecutionContext::default();
+        ctx.tool_configs.insert(
+            "create-github-issue".to_string(),
+            serde_json::json!({ "allowed-labels": "not-an-array" }),
+        );
+
+        let error = ctx
+            .get_tool_config::<crate::safe_outputs::CreateGithubIssueConfig>("create-github-issue")
+            .expect_err("malformed GitHub config must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to deserialize config for tool 'create-github-issue'"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_get_tool_config_rejects_malformed_non_github_config() {
+        let mut ctx = ExecutionContext::default();
+        ctx.tool_configs.insert(
+            "add-build-tag".to_string(),
+            serde_json::json!({ "allow-any-build": "not-a-boolean" }),
+        );
+
+        let error = ctx
+            .get_tool_config::<crate::safe_outputs::AddBuildTagConfig>("add-build-tag")
+            .expect_err("malformed non-GitHub config must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to deserialize config for tool 'add-build-tag'"),
+            "unexpected error: {error}"
         );
     }
 
@@ -1006,6 +1053,7 @@ mod tests {
             ("BUILD_BUILDNUMBER", "20240101.1"),
             ("BUILD_REASON", "Manual"),
             ("BUILD_DEFINITIONNAME", "My Pipeline"),
+            ("SYSTEM_DEFINITIONID", "987"),
             ("BUILD_SOURCEBRANCH", "refs/heads/main"),
             ("BUILD_SOURCEBRANCHNAME", "main"),
             ("BUILD_SOURCEVERSION", "abc1234"),
@@ -1014,6 +1062,7 @@ mod tests {
         assert_eq!(ctx.build_number.as_deref(), Some("20240101.1"));
         assert_eq!(ctx.build_reason.as_deref(), Some("Manual"));
         assert_eq!(ctx.definition_name.as_deref(), Some("My Pipeline"));
+        assert_eq!(ctx.definition_id, Some(987));
         assert_eq!(ctx.source_branch.as_deref(), Some("refs/heads/main"));
         assert_eq!(ctx.source_branch_name.as_deref(), Some("main"));
         assert_eq!(ctx.source_version.as_deref(), Some("abc1234"));
@@ -1023,10 +1072,7 @@ mod tests {
     fn test_from_env_lookup_populates_checkout_directories() {
         let ctx = ExecutionContext::from_env_lookup(env_from(&[
             ("BUILD_SOURCESDIRECTORY", "C:\\agent\\s"),
-            (
-                "ADO_AW_SELF_REPOSITORY_DIRECTORY",
-                "C:\\agent\\s\\ado-aw",
-            ),
+            ("ADO_AW_SELF_REPOSITORY_DIRECTORY", "C:\\agent\\s\\ado-aw"),
         ]));
 
         assert_eq!(
@@ -1060,10 +1106,7 @@ mod tests {
         ]));
 
         assert_eq!(ctx.repository_id.as_deref(), Some("self-id"));
-        assert_eq!(
-            ctx.repository_name.as_deref(),
-            Some("project/self-repo")
-        );
+        assert_eq!(ctx.repository_name.as_deref(), Some("project/self-repo"));
     }
 
     #[test]
@@ -1089,10 +1132,7 @@ mod tests {
         ]));
 
         assert_eq!(ctx.repository_id.as_deref(), Some("build-id"));
-        assert_eq!(
-            ctx.repository_name.as_deref(),
-            Some("project/build-repo")
-        );
+        assert_eq!(ctx.repository_name.as_deref(), Some("project/build-repo"));
     }
 
     #[test]
@@ -1105,6 +1145,18 @@ mod tests {
     fn test_from_env_lookup_build_id_none_when_unset() {
         let ctx = ExecutionContext::from_env_lookup(env_from(&[]));
         assert!(ctx.build_id.is_none());
+    }
+
+    #[test]
+    fn test_from_env_lookup_definition_id_none_for_invalid_or_unset() {
+        let invalid =
+            ExecutionContext::from_env_lookup(env_from(&[("SYSTEM_DEFINITIONID", "invalid")]));
+        assert!(invalid.definition_id.is_none());
+        assert!(
+            ExecutionContext::from_env_lookup(env_from(&[]))
+                .definition_id
+                .is_none()
+        );
     }
 
     #[test]
@@ -1231,14 +1283,11 @@ mod tests {
         }
     }
 
-    /// Regression guard for a silent config wipe.
+    /// Regression guard for compiler-only orchestration keys.
     ///
     /// `CreateGithubIssueConfig` and `SetGithubIssueTypeConfig` are declared
     /// `#[serde(deny_unknown_fields)]`, so the compiler-injected `staged` /
-    /// `require-approval` keys made deserialization fail. `get_tool_config`
-    /// swallowed the error and returned `Default::default()`, silently
-    /// discarding every operator setting (`target-repo`, `allowed-labels`,
-    /// budgets, …) instead of failing visibly.
+    /// `require-approval` keys must be stripped before strict deserialization.
     #[test]
     fn test_get_tool_config_survives_compiler_injected_orchestration_keys() {
         let ctx = ctx_with_injected_keys(
@@ -1252,8 +1301,9 @@ mod tests {
                 "max": 3,
             }),
         );
-        let config: crate::safe_outputs::CreateGithubIssueConfig =
-            ctx.get_tool_config("create-github-issue");
+        let config: crate::safe_outputs::CreateGithubIssueConfig = ctx
+            .get_tool_config("create-github-issue")
+            .expect("compiler-only keys should be stripped");
         assert_eq!(
             config.target_repo.as_deref(),
             Some("octo/scratch"),
@@ -1272,8 +1322,9 @@ mod tests {
             "set-github-issue-type",
             serde_json::json!({ "target-repo": "octo/scratch", "allowed": ["Bug"] }),
         );
-        let config: crate::safe_outputs::SetGithubIssueTypeConfig =
-            ctx.get_tool_config("set-github-issue-type");
+        let config: crate::safe_outputs::SetGithubIssueTypeConfig = ctx
+            .get_tool_config("set-github-issue-type")
+            .expect("compiler-only keys should be stripped");
         assert_eq!(config.target_repo.as_deref(), Some("octo/scratch"));
         // An empty `allowed` list is default-ALLOW, so a silent wipe here fails
         // open — any issue type would be accepted.

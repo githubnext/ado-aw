@@ -139,7 +139,7 @@ impl Executor for QueueBuildResult {
         debug!("ADO org: {}, project: {}", org_url, project);
 
         // Get tool-specific configuration
-        let config: QueueBuildConfig = ctx.get_tool_config("queue-build");
+        let config: QueueBuildConfig = ctx.get_tool_config("queue-build")?;
         debug!("Allowed pipelines: {:?}", config.allowed_pipelines);
         debug!("Allowed branches: {:?}", config.allowed_branches);
         debug!("Allowed parameters: {:?}", config.allowed_parameters);
@@ -357,7 +357,8 @@ mod tests {
         let result: Result<QueueBuildResult, _> = params.try_into();
         let err = result.unwrap_err();
         assert!(
-            err.to_string().contains("reason must be at least 5 characters"),
+            err.to_string()
+                .contains("reason must be at least 5 characters"),
             "unexpected error: {err}"
         );
     }
@@ -373,7 +374,8 @@ mod tests {
         let result: Result<QueueBuildResult, _> = params.try_into();
         let err = result.unwrap_err();
         assert!(
-            err.to_string().contains("branch name must not contain '..'"),
+            err.to_string()
+                .contains("branch name must not contain '..'"),
             "unexpected error: {err}"
         );
     }

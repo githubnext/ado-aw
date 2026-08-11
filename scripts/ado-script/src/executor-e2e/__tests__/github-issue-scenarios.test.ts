@@ -7,25 +7,51 @@ vi.mock("../github-client.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../github-client.js")>();
   return {
     ...actual,
+    addIssueAssignees: vi.fn(async () => {}),
     closeIssue: vi.fn(async () => {}),
+    createIssueComment: vi.fn(async () => ({ id: 12, nodeId: "IC_12", body: "b", user: "u" })),
     createGitHubIssue: vi.fn(async () => "https://github.com/o/r/issues/123"),
+    createMilestone: vi.fn(async () => ({ number: 9, title: "m" })),
+    createRepoLabel: vi.fn(async () => {}),
+    deleteIssueComment: vi.fn(async () => {}),
+    deleteMilestone: vi.fn(async () => {}),
+    deleteRepoLabel: vi.fn(async () => {}),
     diagnoseGitHubAuthFailure: vi.fn(async () => {}),
     findOpenIssueByTitle: vi.fn(async () => undefined),
+    getAuthenticatedUser: vi.fn(async () => "octocat"),
+    getCommentMinimization: vi.fn(async () => ({ isMinimized: true })),
     getIssue: vi.fn(async () => undefined),
+    getIssueFieldValue: vi.fn(async () => undefined),
+    getSubIssueParent: vi.fn(async () => undefined),
+    listIssueComments: vi.fn(async () => []),
     listOrgIssueTypes: vi.fn(async () => []),
+    listRepositoryIssueFields: vi.fn(async () => []),
     patchIssue: vi.fn(async () => ({ ok: false, status: 404, body: "" })),
+    removeIssueAssignees: vi.fn(async () => {}),
+    supportsGraphqlField: vi.fn(async () => true),
   };
 });
 
 const gh = await import("../github-client.js");
 const {
+  addGithubIssueLabels,
+  assignGithubIssueMilestone,
+  assignGithubIssueToUser,
+  closeGithubIssue,
+  commentOnGithubIssue,
   createGithubIssue,
   createGithubIssueLabelDenied,
   createGithubIssueTemporaryIdHandoff,
   githubIssueScenarios,
+  hideGithubIssueComment,
+  linkGithubSubIssue,
   recordForTool,
+  removeGithubIssueLabels,
   resolveGithubIssueEnv,
+  setGithubIssueField,
   setGithubIssueType,
+  unassignGithubIssueFromUser,
+  updateGithubIssue,
 } = await import("../scenarios/github-issue.js");
 
 const TEMPORARY_ID = "#aw_e2e1";
@@ -75,17 +101,23 @@ const goodEnv = {
 
 beforeEach(() => {
   vi.mocked(gh.getIssue).mockReset();
+  vi.mocked(gh.getIssueFieldValue).mockReset();
   vi.mocked(gh.closeIssue).mockReset();
   vi.mocked(gh.findOpenIssueByTitle).mockReset();
   vi.mocked(gh.patchIssue).mockReset();
   vi.mocked(gh.listOrgIssueTypes).mockReset();
+  vi.mocked(gh.listRepositoryIssueFields).mockReset();
   vi.mocked(gh.createGitHubIssue).mockReset();
+  vi.mocked(gh.supportsGraphqlField).mockReset();
   vi.mocked(gh.getIssue).mockResolvedValue(undefined);
+  vi.mocked(gh.getIssueFieldValue).mockResolvedValue(undefined);
   vi.mocked(gh.closeIssue).mockResolvedValue(undefined);
   vi.mocked(gh.findOpenIssueByTitle).mockResolvedValue(undefined);
   vi.mocked(gh.patchIssue).mockResolvedValue({ ok: false, status: 404, body: "" });
   vi.mocked(gh.listOrgIssueTypes).mockResolvedValue([]);
+  vi.mocked(gh.listRepositoryIssueFields).mockResolvedValue([]);
   vi.mocked(gh.createGitHubIssue).mockResolvedValue("https://github.com/o/r/issues/123");
+  vi.mocked(gh.supportsGraphqlField).mockResolvedValue(true);
 });
 
 describe("resolveGithubIssueEnv", () => {
@@ -139,15 +171,30 @@ describe("resolveGithubIssueEnv", () => {
 });
 
 describe("registry", () => {
-  it("registers five GitHub issue scenarios with unique ids", () => {
+  it("registers the complete GitHub issue scenario family with unique ids", () => {
     const ids = githubIssueScenarios.map((s) => s.id ?? s.tool);
-    expect(new Set(ids).size).toBe(5);
+    expect(new Set(ids).size).toBe(20);
     expect(ids).toEqual([
       "create-github-issue",
       "create-github-issue-label-denied",
       "set-github-issue-type",
       "set-github-issue-type-clear",
       "create-github-issue-temporary-id-handoff",
+      "comment-on-github-issue",
+      "hide-github-issue-comment",
+      "add-github-issue-labels",
+      "remove-github-issue-labels",
+      "close-github-issue",
+      "update-github-issue",
+      "set-github-issue-field",
+      "assign-github-issue-milestone",
+      "assign-github-issue-to-user",
+      "unassign-github-issue-from-user",
+      "link-github-sub-issue",
+      "comment-on-github-issue-repo-denied",
+      "add-github-issue-labels-blocked",
+      "update-github-issue-filter-denied",
+      "close-github-issue-state-denied",
     ]);
   });
 
@@ -157,8 +204,187 @@ describe("registry", () => {
     expect(env).toEqual({ ADO_AW_GITHUB_TOKEN: "tok" });
   });
 
+  describe("new GitHub mutation contracts", () => {
+    const base = {
+      repo: REPO,
+      token: "tok",
+      gh: { token: "tok", repo: REPO },
+      title: "scratch",
+      issueNumber: 41,
+    };
+
+    it("registers exactly the signed-off eleven canonical tool names", () => {
+      const names = [
+        commentOnGithubIssue,
+        hideGithubIssueComment,
+        addGithubIssueLabels,
+        removeGithubIssueLabels,
+        closeGithubIssue,
+        updateGithubIssue,
+        setGithubIssueField,
+        assignGithubIssueMilestone,
+        assignGithubIssueToUser,
+        unassignGithubIssueFromUser,
+        linkGithubSubIssue,
+      ].map((scenario) => scenario.tool);
+      expect(names).toEqual([
+        "comment-on-github-issue",
+        "hide-github-issue-comment",
+        "add-github-issue-labels",
+        "remove-github-issue-labels",
+        "close-github-issue",
+        "update-github-issue",
+        "set-github-issue-field",
+        "assign-github-issue-milestone",
+        "assign-github-issue-to-user",
+        "unassign-github-issue-from-user",
+        "link-github-sub-issue",
+      ]);
+    });
+
+    it("uses the signed-off snake_case parameter objects", async () => {
+      expect(await commentOnGithubIssue.ndjson(fakeCtx(), base)).toMatchObject({
+        issue_number: 41,
+        body: expect.any(String),
+      });
+      expect(
+        await hideGithubIssueComment.ndjson(fakeCtx(), {
+          ...base,
+          commentId: 12,
+          commentNodeId: "IC_12",
+        }),
+      ).toEqual({ comment_id: 12, reason: "spam", repository: REPO });
+      expect(
+        await addGithubIssueLabels.ndjson(fakeCtx(), { ...base, label: "e2e-label" }),
+      ).toEqual({ issue_number: 41, labels: ["e2e-label"] });
+      expect(
+        await removeGithubIssueLabels.ndjson(fakeCtx(), { ...base, label: "e2e-label" }),
+      ).toEqual({ issue_number: 41, labels: ["e2e-label"] });
+      expect(await closeGithubIssue.ndjson(fakeCtx(), base)).toMatchObject({
+        issue_number: 41,
+        state_reason: "not_planned",
+      });
+      expect(
+        await updateGithubIssue.ndjson(fakeCtx(), {
+          ...base,
+          updatedTitle: "new title",
+          updatedBody: "new body",
+        }),
+      ).toEqual({
+        issue_number: 41,
+        title: "new title",
+        body: "new body",
+        operation: "replace",
+      });
+      expect(
+        await setGithubIssueField.ndjson(fakeCtx(), {
+          ...base,
+          field: { id: "IF_1", name: "Priority", type: "IssueFieldText", options: [] },
+          value: "high",
+        }),
+      ).toEqual({ issue_number: 41, field_name: "Priority", value: "high" });
+      expect(
+        await assignGithubIssueMilestone.ndjson(fakeCtx(), {
+          ...base,
+          milestoneNumber: 7,
+          milestoneTitle: "m",
+        }),
+      ).toEqual({ issue_number: 41, milestone_number: 7 });
+      expect(
+        await assignGithubIssueToUser.ndjson(fakeCtx(), { ...base, assignee: "octocat" }),
+      ).toEqual({ issue_number: 41, assignee: "octocat" });
+      expect(
+        await unassignGithubIssueFromUser.ndjson(fakeCtx(), { ...base, assignee: "octocat" }),
+      ).toEqual({ issue_number: 41, assignee: "octocat" });
+      expect(
+        await linkGithubSubIssue.ndjson(fakeCtx(), {
+          repo: REPO,
+          token: "tok",
+          gh: { token: "tok", repo: REPO },
+          parentTitle: "parent",
+          subTitle: "sub",
+        }),
+      ).toEqual({
+        parent_issue_number: "#aw_parent",
+        sub_issue_number: "#aw_sub",
+      });
+    });
+
+    it("uses the signed-off kebab-case operator config", () => {
+      expect(
+        hideGithubIssueComment.config(fakeCtx(), {
+          ...base,
+          commentId: 12,
+          commentNodeId: "IC_12",
+        }),
+      ).toMatchObject({ "target-repo": REPO, "allowed-reasons": ["SPAM"] });
+      expect(
+        closeGithubIssue.config(fakeCtx(), base),
+      ).toMatchObject({ "allow-body": true, "allowed-state-reason": ["not_planned"] });
+      expect(
+        updateGithubIssue.config(fakeCtx(), {
+          ...base,
+          updatedTitle: "new",
+          updatedBody: "body",
+        }),
+      ).toMatchObject({ title: true, body: true });
+      expect(
+        setGithubIssueField.config(fakeCtx(), {
+          ...base,
+          field: { id: "IF_1", name: "Priority", type: "IssueFieldText", options: [] },
+          value: "high",
+        }),
+      ).toMatchObject({ "allowed-fields": ["Priority"] });
+      expect(
+        assignGithubIssueMilestone.config(fakeCtx(), {
+          ...base,
+          milestoneNumber: 7,
+          milestoneTitle: "m",
+        }),
+      ).toMatchObject({ allowed: ["m"], "auto-create": false });
+      expect(
+        assignGithubIssueToUser.config(fakeCtx(), { ...base, assignee: "octocat" }),
+      ).toMatchObject({ allowed: ["octocat"], blocked: [], "unassign-first": true });
+    });
+
+    it("stages both parent and child creates before link-github-sub-issue", async () => {
+      const state = {
+        repo: REPO,
+        token: "tok",
+        gh: { token: "tok", repo: REPO },
+        parentTitle: "parent",
+        subTitle: "sub",
+      };
+      const prior = await linkGithubSubIssue.priorEntries!(fakeCtx(), state);
+      expect(prior.map((entry) => entry.entry.temporary_id)).toEqual([
+        "#aw_parent",
+        "#aw_sub",
+      ]);
+      expect(prior.every((entry) => entry.tool === "create-github-issue")).toBe(true);
+      expect(prior.every((entry) => entry.config["require-temporary-id"] === true)).toBe(true);
+    });
+
+    it("skips preview GraphQL scenarios before creating issues when a field is unavailable", async () => {
+      vi.stubEnv("EXECUTOR_E2E_GITHUB_TOKEN", "tok");
+      vi.stubEnv("EXECUTOR_E2E_ISSUE_REPO", REPO);
+      vi.mocked(gh.supportsGraphqlField).mockResolvedValue(false);
+      await expect(hideGithubIssueComment.setup(fakeCtx())).rejects.toThrow(SkipError);
+      expect(gh.createGitHubIssue).not.toHaveBeenCalled();
+      vi.unstubAllEnvs();
+    });
+  });
+
   it("targets the configured repo explicitly rather than relying on resolution", () => {
-    const state = { repo: REPO, token: "tok", gh: { token: "tok", repo: REPO }, title: "t" };
+    const state = {
+      repo: REPO,
+      token: "tok",
+      gh: { token: "tok", repo: REPO },
+      title: "t",
+      label: "label",
+      field: { id: "IF_1", name: "Priority", type: "IssueFieldText", options: [] },
+      milestoneTitle: "milestone",
+      assignee: "octocat",
+    };
     for (const scenario of githubIssueScenarios) {
       const config = scenario.config(fakeCtx(), state as never);
       expect(config["target-repo"]).toBe(REPO);
@@ -335,6 +561,98 @@ describe("set-github-issue-type", () => {
         [],
       ),
     ).rejects.toThrow(/targeted issue #11, expected #10/);
+  });
+});
+
+describe("set-github-issue-field", () => {
+  const field = {
+    id: "IF_1",
+    name: "Estimate",
+    type: "IssueFieldNumber",
+    options: [],
+  };
+  const state = () => ({
+    repo: REPO,
+    token: "tok",
+    gh: { token: "tok", repo: REPO },
+    title: "ado-aw-det-77-set-github-issue-field scratch issue",
+    issueNumber: 123,
+    field,
+    value: "42",
+  });
+  const output = () =>
+    record("set_github_issue_field", {
+      field_name: field.name,
+      value: "42",
+    });
+
+  it("reads GitHub after execution and asserts the persisted field value and type", async () => {
+    const s = state();
+    vi.mocked(gh.getIssueFieldValue).mockResolvedValue({
+      fieldId: field.id,
+      fieldName: field.name,
+      fieldType: field.type,
+      valueType: "IssueFieldNumberValue",
+      value: 42,
+    });
+
+    await expect(
+      setGithubIssueField.assert(fakeCtx(), s, output(), []),
+    ).resolves.toBeUndefined();
+    expect(gh.getIssueFieldValue).toHaveBeenCalledWith(s.gh, s.issueNumber, field.id);
+  });
+
+  it("fails when executor output is healthy but GitHub did not persist the value", async () => {
+    await expect(
+      setGithubIssueField.assert(fakeCtx(), state(), output(), []),
+    ).rejects.toThrow(/has no persisted value/);
+  });
+
+  it("fails when GitHub persisted a different field value type", async () => {
+    vi.mocked(gh.getIssueFieldValue).mockResolvedValue({
+      fieldId: field.id,
+      fieldName: field.name,
+      fieldType: field.type,
+      valueType: "IssueFieldTextValue",
+      value: "42",
+    });
+
+    await expect(
+      setGithubIssueField.assert(fakeCtx(), state(), output(), []),
+    ).rejects.toThrow(/value type is 'IssueFieldTextValue'/);
+  });
+
+  it("fails when GitHub persisted a different value", async () => {
+    vi.mocked(gh.getIssueFieldValue).mockResolvedValue({
+      fieldId: field.id,
+      fieldName: field.name,
+      fieldType: field.type,
+      valueType: "IssueFieldNumberValue",
+      value: 41,
+    });
+
+    await expect(
+      setGithubIssueField.assert(fakeCtx(), state(), output(), []),
+    ).rejects.toThrow(/persisted issue field value is 41, expected 42/);
+  });
+
+  it("closes the deterministic scratch issue during cleanup", async () => {
+    const s = state();
+    await setGithubIssueField.cleanup(fakeCtx(), s);
+    expect(gh.closeIssue).toHaveBeenCalledWith(s.gh, s.issueNumber);
+  });
+
+  it("skips before creating an issue when the read-side preview API is unavailable", async () => {
+    vi.stubEnv("EXECUTOR_E2E_GITHUB_TOKEN", "tok");
+    vi.stubEnv("EXECUTOR_E2E_ISSUE_REPO", REPO);
+    vi.mocked(gh.supportsGraphqlField).mockImplementation(
+      async (_opts, type, name) => !(type === "Issue" && name === "issueFieldValues"),
+    );
+    vi.mocked(gh.listRepositoryIssueFields).mockResolvedValue([field]);
+
+    await expect(setGithubIssueField.setup(fakeCtx())).rejects.toThrow(SkipError);
+    expect(gh.createGitHubIssue).not.toHaveBeenCalled();
+    vi.unstubAllEnvs();
   });
 });
 

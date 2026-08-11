@@ -262,7 +262,7 @@ impl Executor for UpdatePrResult {
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
         debug!("ADO org: {}, project: {}", org_url, project);
 
-        let config: UpdatePrConfig = ctx.get_tool_config("update-pr");
+        let config: UpdatePrConfig = ctx.get_tool_config("update-pr")?;
         debug!("Config: {:?}", config);
 
         // Validate operation against allowed-operations
@@ -1179,5 +1179,4 @@ allowed-votes:
         let config: UpdatePrConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.merge_strategy, "rebase");
     }
-
 }

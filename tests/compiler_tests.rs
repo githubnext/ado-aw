@@ -1662,8 +1662,7 @@ Vote on pull requests.
     ];
 
     for (dir_prefix, test_content, case_desc) in configs {
-        let temp_dir =
-            std::env::temp_dir().join(format!("{}-{}", dir_prefix, std::process::id()));
+        let temp_dir = std::env::temp_dir().join(format!("{}-{}", dir_prefix, std::process::id()));
         fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
         let test_input = temp_dir.join("upr-agent.md");
@@ -2157,8 +2156,7 @@ fn test_fixture_azure_devops_mcp_compiled_output() {
         "MCPG config should contain the container image"
     );
     assert!(
-        compiled.contains("\"@azure-devops/mcp@2.8.1\"")
-            && compiled.contains("expected 2.8.1"),
+        compiled.contains("\"@azure-devops/mcp@2.8.1\"") && compiled.contains("expected 2.8.1"),
         "the unversioned frontmatter form must use and verify the compiler default"
     );
     assert!(
@@ -6075,13 +6073,14 @@ fn test_compile_github_issue_app_fixture_scopes_tokens_by_stage() {
     let compiled = compile_fixture("github-issue-app-agent.md");
     assert_valid_yaml(&compiled, "github-issue-app-agent.md");
     assert!(compiled_has_enabled_tool(&compiled, "create-github-issue"));
-    assert!(compiled_has_enabled_tool(&compiled, "set-github-issue-type"));
+    assert!(compiled_has_enabled_tool(
+        &compiled,
+        "set-github-issue-type"
+    ));
     assert!(compiled.contains("Mint GitHub App token (SafeOutputs)"));
     assert!(compiled.contains("--output-var 'ADO_AW_SAFE_OUTPUTS_GITHUB_APP_TOKEN'"));
     assert!(compiled.contains("--permissions-json '{\"issues\":\"write\"}'"));
-    assert!(compiled.contains(
-        "ADO_AW_GITHUB_TOKEN: $(ADO_AW_SAFE_OUTPUTS_GITHUB_APP_TOKEN)"
-    ));
+    assert!(compiled.contains("ADO_AW_GITHUB_TOKEN: $(ADO_AW_SAFE_OUTPUTS_GITHUB_APP_TOKEN)"));
 
     let agent_start = compiled.find("- job: Agent").expect("Agent job");
     let detection_start = compiled.find("- job: Detection").expect("Detection job");
@@ -6092,11 +6091,51 @@ fn test_compile_github_issue_app_fixture_scopes_tokens_by_stage() {
         &compiled[agent_start..detection_start],
         &compiled[detection_start..safe_outputs_start],
     ] {
-        assert!(block.contains(
-            "--permissions-json '{\"contents\":\"read\",\"issues\":\"read\"}'"
-        ));
+        assert!(block.contains("--permissions-json '{\"contents\":\"read\",\"issues\":\"read\"}'"));
         assert!(!block.contains("ADO_AW_GITHUB_TOKEN"));
     }
+}
+
+#[test]
+fn test_compile_github_app_auth_is_scoped_to_reviewed_variant() {
+    let compiled = compile_inline_agent(
+        "github-app-reviewed-variant",
+        r#"---
+name: "GitHub App Reviewed Variant"
+description: "GitHub App auth is emitted only in the GitHub execution lane"
+engine:
+  id: copilot
+  github-app-token:
+    app-id: 1234567
+    owner: octo-org
+    permissions:
+      issues: read
+safe-outputs:
+  noop:
+    require-approval: false
+  create-github-issue:
+    target-repo: octo-org/reviewed-repo
+    require-approval: true
+---
+
+Create a reviewed GitHub issue.
+"#,
+    );
+    let automatic_start = compiled
+        .find("- job: SafeOutputs\n")
+        .expect("automatic job");
+    let reviewed_start = compiled
+        .find("- job: SafeOutputs_Reviewed")
+        .expect("reviewed job");
+    let automatic = &compiled[automatic_start..reviewed_start];
+    let reviewed = &compiled[reviewed_start..];
+
+    assert!(!automatic.contains("Mint GitHub App token (SafeOutputs)"));
+    assert!(!automatic.contains("ADO_AW_SAFE_OUTPUTS_GITHUB_APP_TOKEN"));
+    assert!(reviewed.contains("Mint GitHub App token (SafeOutputs)"));
+    assert!(reviewed.contains("--repositories 'reviewed-repo'"));
+    assert!(reviewed.contains("--permissions-json '{\"issues\":\"write\"}'"));
+    assert!(reviewed.contains("Revoke GitHub App token (SafeOutputs)"));
 }
 
 /// The example file in `examples/dogfood-failure-reporter.md` must compile
@@ -6442,8 +6481,8 @@ fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
     // IS expected at Agent-job-level `variables:` scope, the documented
     // safe location — that hoist is asserted separately.)
     let parsed = parse_compiled_yaml(&compiled);
-    let agent_job = find_job_mapping(&parsed, "Agent")
-        .expect("compiled YAML must contain the Agent job");
+    let agent_job =
+        find_job_mapping(&parsed, "Agent").expect("compiled YAML must contain the Agent job");
     let stage_step = agent_job
         .get(yaml_key("steps"))
         .and_then(|v| v.as_sequence())
@@ -7399,7 +7438,10 @@ safe-outputs:
 
     assert!(detection.contains("--model detection-model"), "{detection}");
     assert!(detection.contains("--reasoning-effort=low"), "{detection}");
-    assert!(!detection.contains("--reasoning-effort=high"), "{detection}");
+    assert!(
+        !detection.contains("--reasoning-effort=high"),
+        "{detection}"
+    );
     assert!(detection.contains("INHERITED_ENV: agent"), "{detection}");
     assert!(detection.contains("DETECTION_ENV: enabled"), "{detection}");
     assert!(
@@ -7443,9 +7485,7 @@ safe-outputs:
     assert!(!detection.contains("Prepare threat analysis prompt"));
     assert!(detection.contains("name: threatAnalysis"), "{detection}");
     assert!(
-        detection.contains(
-            "##vso[task.setvariable variable=SafeToProcess;isOutput=true]true"
-        ),
+        detection.contains("##vso[task.setvariable variable=SafeToProcess;isOutput=true]true"),
         "{detection}"
     );
     assert!(detection.contains("name: reviewedProposals"), "{detection}");
@@ -7464,8 +7504,7 @@ safe-outputs:
     );
     let safe_outputs = job_block(&compiled, "SafeOutputs");
     assert!(
-        safe_outputs
-            .contains("dependencies.Detection.outputs['threatAnalysis.SafeToProcess']"),
+        safe_outputs.contains("dependencies.Detection.outputs['threatAnalysis.SafeToProcess']"),
         "{safe_outputs}"
     );
 }
@@ -7487,9 +7526,15 @@ safe-outputs:
 "#;
     let (ok, compiled, stderr) =
         compile_inline_source("threat-detection-disabled-invalid-version", source);
-    assert!(ok, "disabled Detection should not resolve install steps: {stderr}");
+    assert!(
+        ok,
+        "disabled Detection should not resolve install steps: {stderr}"
+    );
     let detection = job_block(&compiled, "Detection");
-    assert!(detection.contains("Bypass AI threat analysis"), "{detection}");
+    assert!(
+        detection.contains("Bypass AI threat analysis"),
+        "{detection}"
+    );
     assert!(!detection.contains("bad version"), "{detection}");
 }
 
@@ -7574,7 +7619,10 @@ safe-outputs:
     let detection = job_block(&compiled, "Detection");
     assert!(!agent.contains("detector.example.com"), "{agent}");
     assert!(detection.contains("detector.example.com"), "{detection}");
-    assert!(detection.contains("COPILOT_PROVIDER_BASE_URL"), "{detection}");
+    assert!(
+        detection.contains("COPILOT_PROVIDER_BASE_URL"),
+        "{detection}"
+    );
     assert!(detection.contains("DETECTION_API_KEY"), "{detection}");
     assert!(
         detection.contains("--exclude-env COPILOT_PROVIDER_API_KEY"),
@@ -8368,6 +8416,16 @@ safe-outputs:
         compiled.contains("AW_REVIEWED_TOOLS: create-pull-request"),
         "expected the reviewed tool list passed via env:\n{compiled}"
     );
+    assert!(
+        compiled.contains("AW_GITHUB_REPOSITORY_POLICIES: '{}'")
+            || compiled.contains("AW_GITHUB_REPOSITORY_POLICIES: {}"),
+        "expected an empty trusted repository-policy map:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("AW_CURRENT_REPOSITORY: $(Build.Repository.Name)")
+            && compiled.contains("AW_CURRENT_REPOSITORY_PROVIDER: $(Build.Repository.Provider)"),
+        "expected trusted ADO repository metadata:\n{compiled}"
+    );
 
     // The step lives in the Agent job, not the Detection job.
     let agent_block = job_block(&compiled, "Agent");
@@ -8379,6 +8437,66 @@ safe-outputs:
     assert!(
         !detection_block.contains("Render safe-outputs summary"),
         "summary step must NOT be in the Detection job:\n{detection_block}"
+    );
+}
+
+#[test]
+fn test_safe_outputs_summary_step_embeds_trusted_github_repository_policy() {
+    let source = r#"---
+name: "GitHub Summary Agent"
+description: "Trusted repository summary"
+safe-outputs:
+  create-github-issue:
+    target-repo: octo/default
+    allowed-repos: [octo/other]
+    require-approval: true
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("summary-github-repo", source);
+    assert!(ok, "pipeline should compile: {stderr}");
+    let agent_block = job_block(&compiled, "Agent");
+    assert!(
+        agent_block.contains("AW_GITHUB_REPOSITORY_POLICIES:")
+            && agent_block.contains("create-github-issue")
+            && agent_block.contains("targetRepo")
+            && agent_block.contains("octo/default")
+            && agent_block.contains("allowedRepos")
+            && agent_block.contains("octo/other"),
+        "expected compiler-owned GitHub repository policy:\n{agent_block}"
+    );
+    assert!(
+        agent_block.contains("AW_GITHUB_API_URL: https://api.github.com"),
+        "expected resolved GitHub API URL:\n{agent_block}"
+    );
+}
+
+#[test]
+fn test_safe_outputs_summary_step_preserves_current_repository_fallback() {
+    let source = r#"---
+name: "GitHub Current Repository Summary"
+description: "Runtime current repository fallback"
+safe-outputs:
+  create-github-issue: {}
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("summary-github-current", source);
+    assert!(ok, "pipeline should compile: {stderr}");
+    let agent_block = job_block(&compiled, "Agent");
+    assert!(
+        agent_block.contains("create-github-issue")
+            && agent_block.contains("targetRepo")
+            && agent_block.contains("null")
+            && agent_block.contains("allowedRepos"),
+        "expected a trusted policy with no fixed target:\n{agent_block}"
+    );
+    assert!(
+        agent_block.contains("AW_CURRENT_REPOSITORY: $(Build.Repository.Name)")
+            && agent_block.contains("AW_CURRENT_REPOSITORY_PROVIDER: $(Build.Repository.Provider)"),
+        "expected runtime current-repository fallback inputs:\n{agent_block}"
     );
 }
 
@@ -9414,7 +9532,8 @@ fn test_create_pull_request_safeoutputs_prepare_step_covers_all_checkout_repos()
     );
     let safeoutputs = job_block(&compiled, "SafeOutputs");
     assert!(
-        safeoutputs.contains("--repo-dir \"$(Build.SourcesDirectory)/self\" --target-branch 'main'"),
+        safeoutputs
+            .contains("--repo-dir \"$(Build.SourcesDirectory)/self\" --target-branch 'main'"),
         "self must target the literal default 'main' in the SafeOutputs job:\n{safeoutputs}"
     );
     assert!(
@@ -9528,8 +9647,7 @@ fn test_issue_1731_safeoutputs_checks_out_additional_repos_for_create_pr() {
         "Agent must check out self at its fixed multi-checkout path:\n{agent}"
     );
     assert!(
-        agent.contains("- checkout: build-tools")
-            && agent.contains("path: s/build-tools"),
+        agent.contains("- checkout: build-tools") && agent.contains("path: s/build-tools"),
         "Agent must check out tools at its explicit alias path:\n{agent}"
     );
     assert!(
@@ -9611,13 +9729,11 @@ fn test_issue_1731_safeoutputs_executor_source_path_uses_multi_checkout_layout()
     let safeoutputs = job_block(&compiled, "SafeOutputs");
     // With additional repos, self is pinned to $(Build.SourcesDirectory)/self.
     assert!(
-        safeoutputs
-            .contains("ado-aw execute --source \"$(Build.SourcesDirectory)/self/"),
+        safeoutputs.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/self/"),
         "SafeOutputs executor --source must use the multi-checkout layout path:\n{safeoutputs}"
     );
     assert!(
-        safeoutputs
-            .contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"),
+        safeoutputs.contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"),
         "SafeOutputs must pass the exact self checkout to the executor:\n{safeoutputs}"
     );
     assert!(
@@ -9704,23 +9820,18 @@ fn test_issue_1731_split_approval_additional_checkouts_only_in_pr_variant() {
     );
     assert!(
         auto.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/")
-            && !auto.contains(
-                "ado-aw execute --source \"$(Build.SourcesDirectory)/self/"
-            ),
+            && !auto.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/self/"),
         "self-only SafeOutputs must use its single-checkout source path:\n{auto}"
     );
     assert!(
         auto.contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)")
-            && !auto.contains(
-                "ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"
-            ),
+            && !auto.contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"),
         "self-only SafeOutputs must pass its checkout root as the self repo:\n{auto}"
     );
     assert!(
         reviewed.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/self/")
-            && reviewed.contains(
-                "ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"
-            ),
+            && reviewed
+                .contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"),
         "PR-capable reviewed job must use its multi-checkout self path:\n{reviewed}"
     );
 }
@@ -9751,23 +9862,18 @@ fn test_issue_1731_split_approval_additional_checkouts_in_auto_when_sibling_gate
     );
     assert!(
         auto.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/self/")
-            && auto.contains(
-                "ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"
-            ),
+            && auto.contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"),
         "PR-capable automatic job must use its multi-checkout self path:\n{auto}"
     );
     assert!(
         reviewed.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/")
-            && !reviewed.contains(
-                "ado-aw execute --source \"$(Build.SourcesDirectory)/self/"
-            ),
+            && !reviewed.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/self/"),
         "self-only reviewed job must use its single-checkout source path:\n{reviewed}"
     );
     assert!(
         reviewed.contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)")
-            && !reviewed.contains(
-                "ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"
-            ),
+            && !reviewed
+                .contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"),
         "self-only reviewed job must pass its checkout root as the self repo:\n{reviewed}"
     );
 }
@@ -9799,9 +9905,7 @@ fn test_issue_1731_split_checkout_layout_compiles_for_every_target() {
         );
         assert!(
             compiled.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/")
-                && compiled.contains(
-                    "ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)"
-                ),
+                && compiled.contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)"),
             "{target}: self-only Stage 3 sibling must use single-checkout layout:\n{compiled}"
         );
     }
