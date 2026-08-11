@@ -69,12 +69,11 @@ use super::common::{
     self, ADO_BUILD_ID_SUFFIX, ADO_MCP_HOST_NODE_MODULES, ADO_MCP_PACKAGE,
     ADO_PROXY_CONTAINER_NAME, ADO_PROXY_IMAGE, ADO_PROXY_LISTEN_PORT, ADO_PROXY_NETWORK_NAME,
     ADO_PROXY_PUBLIC_CA_HOST_PATH, ADO_PROXY_TLS_PORT, AWF_SQUID_URL, AWF_VERSION, AZ_WRAPPER_DIR,
-    HEADER_MARKER, MCPG_CONTAINER_NAME, MCPG_DOMAIN, MCPG_IMAGE, MCPG_PORT, MCPG_VERSION, image_ref,
+    HEADER_MARKER, MCPG_CONTAINER_NAME, MCPG_DOMAIN, MCPG_IMAGE, MCPG_PORT, MCPG_VERSION,
+    image_ref,
 };
-use super::extensions::ado_script as paths;
-use crate::ado_proxy::catalog;
-use crate::ado_proxy::policy::PolicyDocument;
 use super::custom_tools::{CustomToolDefinition, collect_custom_tool_definitions};
+use super::extensions::ado_script as paths;
 use super::extensions::{CompileContext, CompilerExtension, Declarations, Extension, McpgConfig};
 use super::ir::condition::{Condition, Expr};
 use super::ir::env::EnvValue;
@@ -101,6 +100,8 @@ use super::types::{
     PipelineArtifactConfig, PrMode, ProviderToken, Repository as RepoCfg, SELF_CHECKOUT_ALIAS,
     SupplyChainConfig, ThreatDetectionConfig,
 };
+use crate::ado_proxy::catalog;
+use crate::ado_proxy::policy::PolicyDocument;
 
 /// The `safe-outputs:` key for the create-pull-request tool. Matches the kebab
 /// name `FrontMatter::create_pr_config`/`partition_safe_outputs_by_approval` use.
@@ -156,6 +157,186 @@ fn copilot_byom_exclude_keys(is_copilot: bool, engine_config: &EngineConfig) -> 
 /// validates the front matter, computes every scalar, fans out
 /// extension declarations, builds the canonical 5-job graph with the
 /// optional `prefix`, and returns the per-target wrap inputs.
+/// Run every shared front-matter validator used by the IR-driven target
+/// compilers. Split out of [`build_pipeline_context`] purely to keep that
+/// function's cognitive complexity manageable — behaviour and error
+/// propagation are unchanged.
+fn validate_pipeline_front_matter(
+    front_matter: &FrontMatter,
+    threat_detection: &crate::compile::types::ThreatDetectionConfig,
+    detection_engine_config: &crate::compile::types::EngineConfig,
+) -> Result<()> {
+    common::validate_front_matter_identity(front_matter)?;
+    common::validate_permissions_read_policy(front_matter)?;
+    if let Some(minutes) = front_matter.engine.timeout_minutes() {
+        common::validate_proxied_timeout(front_matter, minutes)?;
+    }
+    common::validate_variable_groups(front_matter)?;
+    common::validate_safe_outputs_keys(front_matter)?;
+    front_matter.validate_threat_detection_config(threat_detection, detection_engine_config)?;
+    front_matter.validate_require_approval()?;
+    front_matter.validate_staged()?;
+    common::validate_github_issue_outputs_config(front_matter)?;
+    common::validate_comment_target(front_matter)?;
+    common::validate_update_work_item_target(front_matter)?;
+    common::validate_submit_pr_review_events(front_matter)?;
+    common::validate_update_pr_votes(front_matter)?;
+    common::validate_resolve_pr_thread_statuses(front_matter)?;
+    common::validate_ado_aw_debug_config(front_matter)?;
+    if let Some(sc) = front_matter.supply_chain() {
+        sc.validate()?;
+    }
+    Ok(())
+}
+
+/// Collect each extension's compile-time [`Declarations`], surfacing any
+/// warnings to stderr as they are produced. Split out of
+/// [`build_pipeline_context`] purely to keep that function's cognitive
+/// complexity manageable — behaviour and error propagation are unchanged.
+fn collect_extension_declarations(
+    extensions: &[Extension],
+    ctx: &CompileContext<'_>,
+) -> Result<Vec<crate::compile::extensions::Declarations>> {
+    let mut extension_declarations = Vec::with_capacity(extensions.len());
+    for ext in extensions {
+        let decl = ext.declarations(ctx)?;
+        for warning in &decl.warnings {
+            eprintln!("Warning: {}", warning);
+        }
+        extension_declarations.push(decl);
+    }
+    Ok(extension_declarations)
+}
+
+/// Fan out each extension's [`Declarations`] into the Agent job's setup
+/// steps, agent-prepare steps, and agent conditions, appending any prompt
+/// supplement as a raw-YAML step. Split out of [`build_pipeline_context`]
+/// purely to keep that function's cognitive complexity manageable —
+/// behaviour and error propagation are unchanged.
+fn fanout_extension_declarations(
+    extensions: &[Extension],
+    extension_declarations: Vec<crate::compile::extensions::Declarations>,
+) -> Result<(Vec<Step>, Vec<Step>, Vec<Condition>)> {
+    let mut ext_setup_steps: Vec<Step> = Vec::new();
+    let mut ext_agent_prepare: Vec<Step> = Vec::new();
+    let mut ext_agent_conditions: Vec<Condition> = Vec::new();
+    for (ext, decl) in extensions.iter().zip(extension_declarations) {
+        ext_setup_steps.extend(decl.setup_steps);
+        ext_agent_prepare.extend(decl.agent_prepare_steps);
+        ext_agent_conditions.extend(decl.agent_conditions);
+        // Prompt supplements append after the per-extension prepare
+        // steps. `wrap_prompt_append` returns a YAML string for a
+        // `bash: cat >> prompt …` step; emit as `Step::RawYaml`
+        // (typing it would mean recreating the wrap helper as a typed
+        // builder for no concrete benefit — the bash body is fixed).
+        if let Some(prompt) = decl.prompt_supplement {
+            ext_agent_prepare.push(Step::RawYaml(
+                crate::compile::extensions::wrap_prompt_append(&prompt, ext.name())?,
+            ));
+        }
+    }
+    Ok((ext_setup_steps, ext_agent_prepare, ext_agent_conditions))
+}
+
+/// Bundle of engine-derived values computed once per pipeline compile:
+/// prompt invocations, install steps, composed env blocks, and the
+/// Copilot BYOM/BYOK exclusion keys for both the Agent and Detection
+/// engines. Split out of [`build_pipeline_context`] purely to keep that
+/// function's cognitive complexity manageable — behaviour is unchanged.
+struct EngineSetup {
+    compiler_version: String,
+    engine_run: String,
+    engine_run_detection: String,
+    engine_install_steps_yaml: String,
+    detection_engine_install_steps_yaml: String,
+    engine_log_dir: String,
+    engine_env: String,
+    awf_paths: Vec<String>,
+    byom_exclude_keys: Vec<String>,
+    detection_byom_exclude_keys: Vec<String>,
+    detection_engine_env: Vec<(String, String)>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_engine_setup(
+    front_matter: &FrontMatter,
+    extensions: &[Extension],
+    ctx: &CompileContext<'_>,
+    extension_declarations: &[crate::compile::extensions::Declarations],
+    threat_detection: &crate::compile::types::ThreatDetectionConfig,
+    detection_engine_config: &crate::compile::types::EngineConfig,
+) -> Result<EngineSetup> {
+    let compiler_version = env!("CARGO_PKG_VERSION").to_string();
+    let detection_engine = crate::engine::get_engine(detection_engine_config.engine_id())?;
+
+    let engine_run = ctx.engine.invocation(
+        ctx.front_matter,
+        extension_declarations,
+        "/tmp/awf-tools/agent-prompt.md",
+        Some("/tmp/awf-tools/mcp-config.json"),
+    )?;
+    let engine_run_detection = detection_engine.invocation_with_config(
+        detection_engine_config,
+        ctx.front_matter,
+        extension_declarations,
+        "/tmp/awf-tools/threat-analysis-prompt.md",
+        None,
+    )?;
+    let engine_install_steps_yaml =
+        ctx.engine
+            .install_steps(&front_matter.engine, &front_matter.target, ctx.ado_org())?;
+    let detection_engine_install_steps_yaml = if threat_detection.is_enabled() {
+        detection_engine.install_steps(
+            detection_engine_config,
+            &front_matter.target,
+            ctx.ado_org(),
+        )?
+    } else {
+        String::new()
+    };
+    let engine_log_dir = ctx.engine.log_dir().to_string();
+
+    let mut engine_env = ctx.engine.env(&front_matter.engine)?;
+    // BYOM/BYOK credential exclusion is Copilot-specific: gate on the engine type so a
+    // future non-Copilot engine whose env happens to contain a COPILOT_PROVIDER_*
+    // key is never treated as a Copilot provider credential.
+    let is_copilot = matches!(ctx.engine, crate::engine::Engine::Copilot);
+    let byom_exclude_keys = copilot_byom_exclude_keys(is_copilot, &front_matter.engine);
+    let detection_is_copilot = matches!(detection_engine, crate::engine::Engine::Copilot);
+    let detection_byom_exclude_keys =
+        copilot_byom_exclude_keys(detection_is_copilot, detection_engine_config);
+    let detection_engine_env = if detection_is_copilot {
+        crate::engine::copilot_detection_env(detection_engine_config)?
+    } else {
+        Vec::new()
+    };
+    // AWF path env (when extensions declare path prepends)
+    let awf_paths = common::collect_awf_path_prepends(extension_declarations);
+    let has_awf_paths = !awf_paths.is_empty();
+    let awf_path_env = common::generate_awf_path_env(has_awf_paths);
+    if !awf_path_env.is_empty() {
+        engine_env = format!("{engine_env}\n{awf_path_env}");
+    }
+    let agent_env = common::collect_agent_env_vars(extensions, extension_declarations)?;
+    if !agent_env.is_empty() {
+        engine_env = format!("{engine_env}\n{agent_env}");
+    }
+
+    Ok(EngineSetup {
+        compiler_version,
+        engine_run,
+        engine_run_detection,
+        engine_install_steps_yaml,
+        detection_engine_install_steps_yaml,
+        engine_log_dir,
+        engine_env,
+        awf_paths,
+        byom_exclude_keys,
+        detection_byom_exclude_keys,
+        detection_engine_env,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_pipeline_context(
     front_matter: &FrontMatter,
@@ -172,36 +353,9 @@ pub(crate) fn build_pipeline_context(
     let detection_engine_config = front_matter.effective_detection_engine(&threat_detection);
 
     // ─── Validations (reuse all shared validators) ────────────────
-    common::validate_front_matter_identity(front_matter)?;
-    common::validate_permissions_read_policy(front_matter)?;
-    if let Some(minutes) = front_matter.engine.timeout_minutes() {
-        common::validate_proxied_timeout(front_matter, minutes)?;
-    }
-    common::validate_variable_groups(front_matter)?;
-    common::validate_safe_outputs_keys(front_matter)?;
-    front_matter
-        .validate_threat_detection_config(&threat_detection, &detection_engine_config)?;
-    front_matter.validate_require_approval()?;
-    front_matter.validate_staged()?;
-    common::validate_github_issue_outputs_config(front_matter)?;
-    common::validate_comment_target(front_matter)?;
-    common::validate_update_work_item_target(front_matter)?;
-    common::validate_submit_pr_review_events(front_matter)?;
-    common::validate_update_pr_votes(front_matter)?;
-    common::validate_resolve_pr_thread_statuses(front_matter)?;
-    common::validate_ado_aw_debug_config(front_matter)?;
-    if let Some(sc) = front_matter.supply_chain() {
-        sc.validate()?;
-    }
+    validate_pipeline_front_matter(front_matter, &threat_detection, &detection_engine_config)?;
 
-    let mut extension_declarations = Vec::with_capacity(extensions.len());
-    for ext in extensions {
-        let decl = ext.declarations(ctx)?;
-        for warning in &decl.warnings {
-            eprintln!("Warning: {}", warning);
-        }
-        extension_declarations.push(decl);
-    }
+    let extension_declarations = collect_extension_declarations(extensions, ctx)?;
 
     // ─── Scalars ──────────────────────────────────────────────────
     let pipeline_name = format!(
@@ -252,61 +406,27 @@ pub(crate) fn build_pipeline_context(
         front_matter.pool_overrides(),
     )?;
 
-    let compiler_version = env!("CARGO_PKG_VERSION").to_string();
-    let detection_engine = crate::engine::get_engine(detection_engine_config.engine_id())?;
-
-    let engine_run = ctx.engine.invocation(
-        ctx.front_matter,
+    let engine_setup = build_engine_setup(
+        front_matter,
+        extensions,
+        ctx,
         &extension_declarations,
-        "/tmp/awf-tools/agent-prompt.md",
-        Some("/tmp/awf-tools/mcp-config.json"),
-    )?;
-    let engine_run_detection = detection_engine.invocation_with_config(
+        &threat_detection,
         &detection_engine_config,
-        ctx.front_matter,
-        &extension_declarations,
-        "/tmp/awf-tools/threat-analysis-prompt.md",
-        None,
     )?;
-    let engine_install_steps_yaml =
-        ctx.engine
-            .install_steps(&front_matter.engine, &front_matter.target, ctx.ado_org())?;
-    let detection_engine_install_steps_yaml = if threat_detection.is_enabled() {
-        detection_engine.install_steps(
-            &detection_engine_config,
-            &front_matter.target,
-            ctx.ado_org(),
-        )?
-    } else {
-        String::new()
-    };
-    let engine_log_dir = ctx.engine.log_dir().to_string();
-
-    let mut engine_env = ctx.engine.env(&front_matter.engine)?;
-    // BYOM/BYOK credential exclusion is Copilot-specific: gate on the engine type so a
-    // future non-Copilot engine whose env happens to contain a COPILOT_PROVIDER_*
-    // key is never treated as a Copilot provider credential.
-    let is_copilot = matches!(ctx.engine, crate::engine::Engine::Copilot);
-    let byom_exclude_keys = copilot_byom_exclude_keys(is_copilot, &front_matter.engine);
-    let detection_is_copilot = matches!(detection_engine, crate::engine::Engine::Copilot);
-    let detection_byom_exclude_keys =
-        copilot_byom_exclude_keys(detection_is_copilot, &detection_engine_config);
-    let detection_engine_env = if detection_is_copilot {
-        crate::engine::copilot_detection_env(&detection_engine_config)?
-    } else {
-        Vec::new()
-    };
-    // AWF path env (when extensions declare path prepends)
-    let awf_paths = common::collect_awf_path_prepends(&extension_declarations);
-    let has_awf_paths = !awf_paths.is_empty();
-    let awf_path_env = common::generate_awf_path_env(has_awf_paths);
-    if !awf_path_env.is_empty() {
-        engine_env = format!("{engine_env}\n{awf_path_env}");
-    }
-    let agent_env = common::collect_agent_env_vars(extensions, &extension_declarations)?;
-    if !agent_env.is_empty() {
-        engine_env = format!("{engine_env}\n{agent_env}");
-    }
+    let EngineSetup {
+        compiler_version,
+        engine_run,
+        engine_run_detection,
+        engine_install_steps_yaml,
+        detection_engine_install_steps_yaml,
+        engine_log_dir,
+        engine_env,
+        awf_paths,
+        byom_exclude_keys,
+        detection_byom_exclude_keys,
+        detection_engine_env,
+    } = engine_setup;
 
     // AWF mounts + allowlist
     let allowed_domains =
@@ -407,24 +527,8 @@ pub(crate) fn build_pipeline_context(
     let triggers = build_triggers(&front_matter.on_config, front_matter)?;
 
     // ─── Extension declaration fanout ─────────────────────────────
-    let mut ext_setup_steps: Vec<Step> = Vec::new();
-    let mut ext_agent_prepare: Vec<Step> = Vec::new();
-    let mut ext_agent_conditions: Vec<Condition> = Vec::new();
-    for (ext, decl) in extensions.iter().zip(extension_declarations) {
-        ext_setup_steps.extend(decl.setup_steps);
-        ext_agent_prepare.extend(decl.agent_prepare_steps);
-        ext_agent_conditions.extend(decl.agent_conditions);
-        // Prompt supplements append after the per-extension prepare
-        // steps. `wrap_prompt_append` returns a YAML string for a
-        // `bash: cat >> prompt …` step; emit as `Step::RawYaml`
-        // (typing it would mean recreating the wrap helper as a typed
-        // builder for no concrete benefit — the bash body is fixed).
-        if let Some(prompt) = decl.prompt_supplement {
-            ext_agent_prepare.push(Step::RawYaml(
-                crate::compile::extensions::wrap_prompt_append(&prompt, ext.name())?,
-            ));
-        }
-    }
+    let (ext_setup_steps, ext_agent_prepare, ext_agent_conditions) =
+        fanout_extension_declarations(extensions, extension_declarations)?;
 
     // Aggregate config for per-job builders
     let cfg = StandaloneCtx {
@@ -1144,9 +1248,9 @@ fn build_agent_job(
     if ado_proxy_enabled {
         steps.push(Step::Bash(prepare_ado_proxy_network_step()));
         if common::ado_mcp_enabled(front_matter) {
-            steps.push(Step::Bash(prepare_ado_mcp_step(
-                common::ado_mcp_version(front_matter),
-            )));
+            steps.push(Step::Bash(prepare_ado_mcp_step(common::ado_mcp_version(
+                front_matter,
+            ))));
         }
         steps.push(Step::Bash(start_ado_proxy_step(front_matter)));
     }
@@ -1438,7 +1542,9 @@ fn build_detection_job(
             threat_prompt.push_str("\n\n## Additional Instructions\n\n");
             threat_prompt.push_str(&custom_prompt.replace("\r\n", "\n"));
         }
-        steps.push(Step::Bash(prepare_threat_analysis_prompt_step(&threat_prompt)?));
+        steps.push(Step::Bash(prepare_threat_analysis_prompt_step(
+            &threat_prompt,
+        )?));
         steps.push(Step::Bash(setup_compiler_step()));
 
         // Stage auth support before custom pre-steps, but mint credentials only
@@ -1478,7 +1584,9 @@ fn build_detection_job(
         if let Some(app_token) = cfg.detection_engine_config.github_app_token()
             && !app_token.skip_token_revocation
         {
-            steps.push(super::extensions::ado_script::github_app_token_revoke_step_typed(app_token)?);
+            steps.push(
+                super::extensions::ado_script::github_app_token_revoke_step_typed(app_token)?,
+            );
         }
         for user_step in &cfg.threat_detection.post_steps {
             steps.push(Step::RawYaml(step_to_raw_yaml_string(user_step)?));
@@ -1592,10 +1700,7 @@ impl SafeOutputsCheckoutLayout {
             // regardless of what the workflow-wide layout looks like.
             common::generate_trigger_repo_directory(&[])
         };
-        let source_path = format!(
-            "{}/{}",
-            self_repository_directory, cfg.source_relative_path
-        );
+        let source_path = format!("{}/{}", self_repository_directory, cfg.source_relative_path);
 
         Self {
             source_path,
@@ -1608,10 +1713,7 @@ impl SafeOutputsCheckoutLayout {
 impl SafeOutputsVariant {
     /// The default single-job variant: no filter, canonical names. Runs every
     /// configured tool, so it executes `create-pull-request` iff configured.
-    fn default_single(
-        runs_create_pull_request: bool,
-        runs_github_issue_tools: bool,
-    ) -> Self {
+    fn default_single(runs_create_pull_request: bool, runs_github_issue_tools: bool) -> Self {
         Self {
             base: "SafeOutputs",
             display: "SafeOutputs",
@@ -1775,8 +1877,7 @@ fn classify_custom_post_review_dependencies(defs: &mut [CustomSafeOutputJobDef])
         for dependency in &definition.needs {
             anyhow::ensure!(
                 indexes.contains_key(dependency)
-                    || super::custom_tools::CUSTOM_JOB_SYSTEM_NEEDS
-                        .contains(&dependency.as_str()),
+                    || super::custom_tools::CUSTOM_JOB_SYSTEM_NEEDS.contains(&dependency.as_str()),
                 "safe-outputs.jobs.{}.needs references unknown job '{}'",
                 definition.name,
                 dependency
@@ -4039,10 +4140,7 @@ fn execute_safe_outputs_step(
         // no part of it needs separate lowering.
         EnvValue::literal(self_repository_directory),
     );
-    step = step.with_env(
-        "ADO_AW_SELF_REPOSITORY_NAME",
-        self_repository_name.clone(),
-    );
+    step = step.with_env("ADO_AW_SELF_REPOSITORY_NAME", self_repository_name.clone());
     Ok(step)
 }
 
@@ -5401,7 +5499,11 @@ safe-outputs:
 "#,
         );
 
-        assert!(!jobs.iter().any(|job| job.id.as_str() == "SafeOutputs_Reviewed"));
+        assert!(
+            !jobs
+                .iter()
+                .any(|job| job.id.as_str() == "SafeOutputs_Reviewed")
+        );
         let conclusion = job_by_id(&jobs, "Conclusion");
         assert!(
             !conclusion
@@ -5624,7 +5726,10 @@ safe-outputs:
             "%ADO_AW_SAFE_OUTPUT_PROPOSALS%",
         ] {
             assert!(
-                json_value_references_variable(&serde_json::Value::String(value.to_string()), variable),
+                json_value_references_variable(
+                    &serde_json::Value::String(value.to_string()),
+                    variable
+                ),
                 "{value}"
             );
         }
@@ -5757,7 +5862,6 @@ safe-outputs:
         assert!(msg.contains("missing `env:` key"), "got: {msg}");
     }
 
-
     #[test]
     fn the_policy_engine_starts_before_the_mcp_gateway() {
         // The Azure DevOps MCP is redirected at the engine's container
@@ -5777,7 +5881,7 @@ safe-outputs:
             "an unpinned resolve would vary the agent's tool surface between runs"
         );
         assert!(
-            script.contains("$MCP_INSTALLED\" != \"") ,
+            script.contains("$MCP_INSTALLED\" != \""),
             "the resolved version must be verified, not just requested: {script}"
         );
 
@@ -5930,9 +6034,7 @@ safe-outputs:
         let normalize = |script: &str| {
             script
                 .lines()
-                .filter(|line| {
-                    !line.contains("--topology-attach") && !line.contains("NO_PROXY")
-                })
+                .filter(|line| !line.contains("--topology-attach") && !line.contains("NO_PROXY"))
                 .collect::<Vec<_>>()
                 .join("\n")
         };
@@ -5942,7 +6044,6 @@ safe-outputs:
             "no other part of the AWF invocation may shift"
         );
     }
-
 
     /// Front matter for the proxy step tests: the ADO tool enabled with a read
     /// service connection, which is the configuration that turns the engine on.
@@ -5969,8 +6070,8 @@ safe-outputs:
         );
         for private in ["ca.key", "$ADO_PROXY_BEARER", "PROXY_MATERIAL"] {
             for line in script.lines().filter(|line| line.contains(private)) {
-                let container_private_fifo = line.contains("docker exec -i")
-                    && line.contains("/tmp/ado-proxy-material");
+                let container_private_fifo =
+                    line.contains("docker exec -i") && line.contains("/tmp/ado-proxy-material");
                 assert!(
                     !line.contains("/tmp/gh-aw")
                         && (!line.contains("> /tmp") || container_private_fifo),
@@ -5985,9 +6086,9 @@ safe-outputs:
         let step = start_ado_proxy_step(&proxy_fm());
 
         assert!(
-            step.script.contains(
-                "printf '%s' \"$PROXY_MATERIAL\" | docker exec -i awmg-ado-proxy"
-            ) && step.script.contains("cat > /tmp/ado-proxy-material"),
+            step.script
+                .contains("printf '%s' \"$PROXY_MATERIAL\" | docker exec -i awmg-ado-proxy")
+                && step.script.contains("cat > /tmp/ado-proxy-material"),
             "material must stream through the container-private FIFO: {}",
             step.script
         );
@@ -6026,7 +6127,10 @@ safe-outputs:
         let step = verify_trusted_topology_peers_step();
         assert!(step.script.contains(MCPG_CONTAINER_NAME));
         assert!(step.script.contains(ADO_PROXY_CONTAINER_NAME));
-        assert!(step.script.contains("trusted topology peer $PEER is not running"));
+        assert!(
+            step.script
+                .contains("trusted topology peer $PEER is not running")
+        );
         assert!(step.script.contains("docker logs --tail 200"));
         assert!(step.script.contains("public CA is not readable"));
         assert!(step.script.contains(ADO_PROXY_PUBLIC_CA_HOST_PATH));
@@ -6338,8 +6442,7 @@ safe-outputs:
         use std::collections::{BTreeMap, BTreeSet};
 
         use super::super::ir::{
-            Pipeline, PipelineBody, PipelineShape, Resources, Triggers,
-            graph::build_graph,
+            Pipeline, PipelineBody, PipelineShape, Resources, Triggers, graph::build_graph,
         };
 
         let common = concat!(
@@ -6422,9 +6525,11 @@ safe-outputs:
         assert!(disabled_detection.steps.iter().any(|step| {
             matches!(step, Step::Bash(step) if step.display_name == "Bypass AI threat analysis")
         }));
-        assert!(!disabled_detection.steps.iter().any(|step| {
-            matches!(step, Step::RawYaml(raw) if raw.contains("SHOULD_NOT_RUN"))
-        }));
+        assert!(
+            !disabled_detection.steps.iter().any(|step| {
+                matches!(step, Step::RawYaml(raw) if raw.contains("SHOULD_NOT_RUN"))
+            })
+        );
 
         let enabled_detection = enabled_jobs
             .iter()
@@ -6433,7 +6538,10 @@ safe-outputs:
         let reviewed_index = enabled_detection
             .steps
             .iter()
-            .position(|step| step.id().is_some_and(|id| id.as_ref() == "reviewedProposals"))
+            .position(|step| {
+                step.id()
+                    .is_some_and(|id| id.as_ref() == "reviewedProposals")
+            })
             .unwrap();
         let copy_logs_index = enabled_detection
             .steps
