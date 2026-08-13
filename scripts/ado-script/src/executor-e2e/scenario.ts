@@ -31,11 +31,10 @@ export interface ExecutedRecord {
  * the same `ado-aw execute` invocation.
  *
  * This exists because some safe outputs hand state to each other through
- * in-process state that never touches disk. `create-github-issue` registers a
- * `temporary_id` in `ExecutionContext.resolved_github_issues` — an
- * `Arc<Mutex<HashMap<…>>>` — which `set-github-issue-type` then resolves. That
- * handoff is only observable when both entries are lines in the same NDJSON
- * processed by one executor process.
+ * in-process state that never touches disk. For example, create tools register
+ * a `temporary_id` in `ExecutionContext`, which a later mutation tool resolves.
+ * That handoff is only observable when both entries are lines in the same
+ * NDJSON processed by one executor process.
  *
  * That matches production: a SafeOutputs job runs a single `ado-aw execute`
  * over the whole `safe_outputs.ndjson`, processing entries sequentially in file

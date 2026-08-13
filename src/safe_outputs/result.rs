@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use crate::sanitize::{SanitizeConfig, SanitizeContent};
-use crate::secure::GithubTemporaryId;
+use crate::secure::{GithubTemporaryId, WorkItemTemporaryId};
 
 /// Trait for tool results that include a name field
 pub trait ToolResult: Serialize {
@@ -49,6 +49,13 @@ pub trait Validate {
 pub struct ResolvedGithubIssue {
     pub repository: String,
     pub number: u64,
+    pub url: String,
+}
+
+/// An Azure DevOps work item created earlier in the same Stage 3 execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedWorkItem {
+    pub id: u64,
     pub url: String,
 }
 
@@ -178,17 +185,6 @@ pub struct ExecutionContext {
     #[allow(dead_code)]
     pub pull_request_target_branch: Option<String>,
 
-    /// Email of the last git author of the agent source file.
-    ///
-    /// Populated at Stage 3 startup by running `git log -1 --format='%ae'`
-    /// against the agent markdown.  Uses the *author* email (not the
-    /// committer email `%ce`) because squash-merge workflows set the
-    /// committer to a service account (e.g. GitHub's noreply address)
-    /// while the author remains the PR author.  Used as a fallback
-    /// assignee for `create-work-item` when no explicit `assignee` is
-    /// configured.
-    pub agent_last_author: Option<String>,
-
     /// Per-run dedupe set for `upload-pipeline-artifact` when the
     /// `require-unique-names` config is set. Stores `format!("{}/{}",
     /// effective_build_id, final_name)` keys; the executor checks-and-inserts
@@ -203,6 +199,8 @@ pub struct ExecutionContext {
     pub uploaded_pipeline_artifact_keys: Arc<Mutex<HashSet<String>>>,
     /// Temporary GitHub issue IDs resolved by successful `create-github-issue` calls.
     pub resolved_github_issues: Arc<Mutex<HashMap<String, ResolvedGithubIssue>>>,
+    /// Temporary work-item IDs resolved by successful `create-work-item` calls.
+    pub resolved_work_items: Arc<Mutex<HashMap<String, ResolvedWorkItem>>>,
 }
 
 impl ExecutionContext {
@@ -295,6 +293,45 @@ impl ExecutionContext {
             .lock()
             .map_err(|_| anyhow::anyhow!("temporary GitHub issue map lock poisoned"))?;
         Ok(issues.get(&temporary_id.canonical()).cloned())
+    }
+
+    pub fn has_resolved_work_item(
+        &self,
+        temporary_id: &WorkItemTemporaryId,
+    ) -> anyhow::Result<bool> {
+        let work_items = self
+            .resolved_work_items
+            .lock()
+            .map_err(|_| anyhow::anyhow!("temporary work-item map lock poisoned"))?;
+        Ok(work_items.contains_key(&temporary_id.canonical()))
+    }
+
+    pub fn register_resolved_work_item(
+        &self,
+        temporary_id: &WorkItemTemporaryId,
+        work_item: ResolvedWorkItem,
+    ) -> anyhow::Result<()> {
+        let id = temporary_id.canonical();
+        let mut work_items = self
+            .resolved_work_items
+            .lock()
+            .map_err(|_| anyhow::anyhow!("temporary work-item map lock poisoned"))?;
+        if work_items.contains_key(&id) {
+            anyhow::bail!("temporary_id '{id}' was already used in this run");
+        }
+        work_items.insert(id, work_item);
+        Ok(())
+    }
+
+    pub fn resolve_work_item(
+        &self,
+        temporary_id: &WorkItemTemporaryId,
+    ) -> anyhow::Result<Option<ResolvedWorkItem>> {
+        let work_items = self
+            .resolved_work_items
+            .lock()
+            .map_err(|_| anyhow::anyhow!("temporary work-item map lock poisoned"))?;
+        Ok(work_items.get(&temporary_id.canonical()).cloned())
     }
 }
 
@@ -400,12 +437,10 @@ impl ExecutionContext {
             pull_request_source_branch: env("SYSTEM_PULLREQUEST_SOURCEBRANCH"),
             pull_request_target_branch: env("SYSTEM_PULLREQUEST_TARGETBRANCH"),
 
-            // Populated later by run_execute via git log on the source file
-            agent_last_author: None,
-
             // Per-run state for upload-pipeline-artifact dedupe.
             uploaded_pipeline_artifact_keys: Arc::new(Mutex::new(HashSet::new())),
             resolved_github_issues: Arc::new(Mutex::new(HashMap::new())),
+            resolved_work_items: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }

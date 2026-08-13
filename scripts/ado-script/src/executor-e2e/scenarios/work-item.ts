@@ -1,12 +1,47 @@
 /**
- * Work-item safe-output scenarios: create-work-item, update-work-item,
- * comment-on-work-item, link-work-items, upload-workitem-attachment.
+ * Work-item safe-output scenarios: create-work-item, assign-work-item,
+ * update-work-item, comment-on-work-item, link-work-items,
+ * upload-workitem-attachment.
  * Test-harness module; not shipped in `ado-script.zip`.
  */
-import type { ExecutedRecord, Scenario, ScenarioContext } from "../scenario.js";
+import type { ExecutedRecord, PriorEntry, Scenario, ScenarioContext } from "../scenario.js";
+import { SkipError } from "../scenario.js";
 import { detBody, numResult, Teardown } from "./common.js";
 
 const WORK_ITEM_TYPE = "Task";
+const ASSIGN_TEMPORARY_ID = "#aw_wiassign";
+
+function usableEnvValue(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed || /^\$\([^)]+\)$/.test(trimmed)) return undefined;
+  return trimmed;
+}
+
+export function resolveWorkItemAssignee(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const assignee =
+    usableEnvValue(env.E2E_WORK_ITEM_ASSIGNEE) ??
+    usableEnvValue(env.BUILD_REQUESTEDFOREMAIL);
+  if (!assignee) {
+    throw new SkipError(
+      "assign-work-item requires E2E_WORK_ITEM_ASSIGNEE or BUILD_REQUESTEDFOREMAIL",
+    );
+  }
+  if (["agency", "github copilot"].includes(assignee.toLowerCase())) {
+    throw new SkipError(`assign-work-item test identity '${assignee}' is reserved`);
+  }
+  return assignee;
+}
+
+function assignedIdentityValues(value: unknown): string[] {
+  if (typeof value === "string") return [value];
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  const identity = value as Record<string, unknown>;
+  return ["displayName", "uniqueName", "mail"]
+    .map((key) => identity[key])
+    .filter((entry): entry is string => typeof entry === "string");
+}
 
 /** Create a scratch Task work item and return its id. */
 async function makeScratchWorkItem(ctx: ScenarioContext, tool: string): Promise<number> {
@@ -42,6 +77,63 @@ export const createWorkItem: Scenario<{ createdId?: number }> = {
   },
   cleanup: async (ctx, state) => {
     if (state.createdId !== undefined) await ctx.rest.deleteWorkItem(state.createdId);
+  },
+};
+
+export const assignWorkItemTemporaryIdHandoff: Scenario<{
+  assignee: string;
+  title: string;
+  createdId?: number;
+}> = {
+  id: "assign-work-item-temporary-id-handoff",
+  tool: "assign-work-item",
+  config: (_ctx, state) => ({
+    allowed: [state.assignee],
+    max: 1,
+  }),
+  setup: async (ctx) => ({
+    assignee: resolveWorkItemAssignee(),
+    title: ctx.prefix("assign-work-item-temporary-id-handoff"),
+  }),
+  priorEntries: async (ctx, state): Promise<PriorEntry[]> => [
+    {
+      tool: "create-work-item",
+      config: {
+        "work-item-type": WORK_ITEM_TYPE,
+        "include-stats": false,
+        "require-temporary-id": true,
+        max: 1,
+      },
+      entry: {
+        title: state.title,
+        description: detBody(ctx, "assign-work-item-temporary-id-handoff"),
+        tags: [],
+        temporary_id: ASSIGN_TEMPORARY_ID,
+      },
+    },
+  ],
+  ndjson: async (_ctx, state) => ({
+    work_item_id: ASSIGN_TEMPORARY_ID,
+    assignee: state.assignee,
+  }),
+  assert: async (ctx, state, record) => {
+    const id = numResult(record, "id");
+    state.createdId = id;
+    const wi = await ctx.rest.getWorkItem(id);
+    const assignedTo = assignedIdentityValues(wi.fields["System.AssignedTo"]);
+    const matches = assignedTo.some(
+      (value) =>
+        value.localeCompare(state.assignee, undefined, { sensitivity: "accent" }) === 0,
+    );
+    if (!matches) {
+      throw new Error(
+        `work item #${id} was not assigned to '${state.assignee}' (got ${JSON.stringify(assignedTo)})`,
+      );
+    }
+  },
+  cleanup: async (ctx, state) => {
+    const id = state.createdId ?? (await ctx.rest.findWorkItemByTitle(state.title));
+    if (id !== undefined) await ctx.rest.deleteWorkItem(id);
   },
 };
 
@@ -146,6 +238,7 @@ export const uploadWorkitemAttachment: Scenario<{ id: number }> = {
 
 export const workItemScenarios: Scenario<unknown>[] = [
   createWorkItem,
+  assignWorkItemTemporaryIdHandoff,
   updateWorkItem,
   commentOnWorkItem,
   linkWorkItems,

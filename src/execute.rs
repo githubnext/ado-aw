@@ -16,7 +16,8 @@ use tokio::io::AsyncWriteExt;
 
 use crate::ndjson::{self, EXECUTED_NDJSON_FILENAME, SAFE_OUTPUT_FILENAME};
 use crate::safe_outputs::{
-    AddBuildTagResult, AddPrCommentResult, CommentOnWorkItemResult, CreateBranchResult,
+    AddBuildTagResult, AddPrCommentResult, AssignWorkItemResult, CommentOnWorkItemResult,
+    CreateBranchResult,
     CreateGitTagResult, CreateGithubIssueResult, CreatePrResult, CreateWikiPageResult,
     CreateWorkItemResult, ExecutionContext, ExecutionResult, Executor, LinkWorkItemsResult,
     MissingDataResult, MissingToolResult, NoopResult, QueueBuildResult, ReplyToPrCommentResult,
@@ -227,6 +228,7 @@ pub async fn execute_safe_outputs(
     }
     register_budgets!(
         CreateWorkItemResult,
+        AssignWorkItemResult,
         CreatePrResult,
         UpdateWorkItemResult,
         CommentOnWorkItemResult,
@@ -703,6 +705,7 @@ async fn dispatch_work_item_tools(
 ) -> Result<Option<ExecutionResult>> {
     dispatch_executor_tools!(tool_name, entry, ctx, {
         "create-work-item" => CreateWorkItemResult,
+        "assign-work-item" => AssignWorkItemResult,
         "comment-on-work-item" => CommentOnWorkItemResult,
         "update-work-item" => UpdateWorkItemResult,
         "link-work-items" => LinkWorkItemsResult,

@@ -48,7 +48,7 @@ All deterministically-assertable ADO-write safe outputs plus the flagship
 
 - **Signals:** `noop`, `missing-tool`, `missing-data`, `report-incomplete`
   (no ADO write path; assert that the executor emits the expected status)
-- **Work items:** `create-work-item`, `update-work-item`,
+- **Work items:** `create-work-item`, `assign-work-item`, `update-work-item`,
   `comment-on-work-item`, `link-work-items`, `upload-workitem-attachment`
 - **Wiki:** `create-wiki-page`, `update-wiki-page`
 - **PR:** `add-pr-comment`, `reply-to-pr-comment`, `resolve-pr-thread`,
@@ -69,6 +69,17 @@ All deterministically-assertable ADO-write safe outputs plus the flagship
   [GitHub issue scenarios](#github-issue-scenarios) below.
 
 Excluded (out of scope): none of the currently shipped safe outputs.
+
+The `assign-work-item-temporary-id-handoff` scenario stages
+`create-work-item` ahead of `assign-work-item` in one executor invocation,
+resolves the created ID through `#aw_wiassign`, verifies `System.AssignedTo`,
+and deletes the scratch item. It uses `E2E_WORK_ITEM_ASSIGNEE` when configured,
+otherwise `BUILD_REQUESTEDFOREMAIL`; it skips when neither provides an
+assignable identity.
+
+The checked-in pipeline resolves `E2E_WORK_ITEM_ASSIGNEE` from a same-named
+definition/queue-time variable first, then falls back to
+`Build.RequestedForEmail`.
 
 > **Coverage note.** The signal scenarios (`noop`, `missing-tool`,
 > `missing-data`, `report-incomplete`) were previously exercised only by
@@ -229,6 +240,7 @@ export EXECUTOR_E2E_ADO_REPO="agent-definitions"
 # Optional: force a native issue-type name (org-owned repos only)
 # export E2E_GITHUB_ISSUE_TYPE="Bug"
 # export E2E_QUEUE_PIPELINE_ID="<noop-target pipeline id>"
+# export E2E_WORK_ITEM_ASSIGNEE="<ADO user email, UPN, or display name>"
 # Optional timeout tuning (milliseconds) for slow environments:
 # export EXECUTOR_E2E_REST_TIMEOUT_MS=30000     # per ADO REST call (default 30000)
 # export EXECUTOR_E2E_EXECUTE_TIMEOUT_MS=600000 # per `ado-aw execute` run (default 600000)

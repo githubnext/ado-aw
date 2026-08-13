@@ -10,10 +10,14 @@ The front matter supports a `safe-outputs:` field for configuring specific tool 
 safe-outputs:
   create-work-item:
     work-item-type: Task
-    assignee: "user@example.com"
     tags:
       - automated
       - agent-created
+    require-temporary-id: true
+  assign-work-item:
+    target: "*"
+    allowed: ["user@example.com"]
+    blocked: ["svc-*"]
   create-pull-request:
     target-branch: main
     draft: false             # default is true; set false to publish immediately (required for auto-complete)
@@ -639,12 +643,14 @@ Creates an Azure DevOps work item.
 - `title` - A concise title for the work item (required, must be more than 5 characters)
 - `description` - Work item description in markdown format (required, must be more than 30 characters)
 - `tags` - Tags to apply to the work item (optional list; each tag must not contain a semicolon). May be subject to the `allowed-tags` allowlist. Merged with any static `tags` configured in front matter.
+- `temporary_id` - Optional gh-aw-compatible `#aw_...` identifier for later safe outputs in the same run.
 
 **Configuration options (front matter):**
 - `work-item-type` - Work item type (default: "Task")
 - `area-path` - Area path for the work item
 - `iteration-path` - Iteration path for the work item
-- `assignee` - User to assign (email or display name). When omitted, falls back to the email of the last person who committed changes to the agent source markdown file (discovered via `git log` at Stage 3).
+- `assignee` - Static user to assign (email, UPN, or display name). When omitted, the work item is created unassigned.
+- `require-temporary-id` - Require every proposal to include `temporary_id` (default: `false`).
 - `tags` - Static list of tags always applied to the work item (regardless of agent input)
 - `allowed-tags` - Allowlist of tags the agent is permitted to use via the `tags` parameter. If empty, any agent-provided tags are accepted. Supports `*` wildcards anywhere in the pattern (e.g., `"agent-*"` matches `"agent-created"`; `"copilot:repo=org/project/*@main"` matches any repo name).
 - `custom-fields` - Map of custom field reference names to values (e.g., `Custom.MyField: "value"`)
@@ -654,6 +660,51 @@ Creates an Azure DevOps work item.
   - `enabled` - Whether to add an artifact link (default: false)
   - `repository` - Repository name override (defaults to BUILD_REPOSITORY_NAME)
   - `branch` - Branch name to link to (default: "main")
+
+### assign-work-item
+
+Assigns one Azure DevOps identity to a work item. Use this separately from
+`create-work-item` when the agent should choose ownership.
+
+```yaml
+safe-outputs:
+  require-approval: true
+  create-work-item:
+    require-temporary-id: true
+  assign-work-item:
+    target: "*"
+    allowed: [alice@example.com, bob@example.com]
+    blocked: ["svc-*"]
+    max: 3
+```
+
+The agent can create and then assign an item in proposal order:
+
+```json
+{"title":"Investigate build failure","description":"Detailed failure report long enough for validation.","temporary_id":"#aw_bug1"}
+{"work_item_id":"#aw_bug1","assignee":"alice@example.com"}
+```
+
+**Agent parameters:**
+- `work_item_id` - A positive numeric work-item ID or a temporary ID from an earlier successful `create-work-item`.
+- `assignee` - The single ADO identity to assign.
+
+**Configuration options:**
+- `target` - Scope for numeric, pre-existing work-item IDs: `"*"` or one exact positive ID. Temporary IDs created in the current run do not require `target`.
+- `allowed` - Optional case-insensitive exact identity allowlist. Empty/absent permits any identity.
+- `blocked` - Optional case-insensitive wildcard blocklist.
+- `max` - Maximum assignments per run (default: 1).
+
+When both create and assign are configured, they must have the same effective
+`require-approval` setting so temporary-ID state remains in one SafeOutputs
+job. Unresolved, duplicate, reversed, or failed-create references fail before
+assignment.
+
+`Agency` and `GitHub Copilot` are reserved non-assignable identities. They are
+rejected case-insensitively in static `create-work-item.assignee`,
+`assign-work-item.assignee`, and `update-work-item.assignee`; configuration
+cannot override this rule. ADO performs final organization-specific identity
+resolution, so ado-aw does not require an email-shaped value.
 
 ### update-work-item
 Updates an existing Azure DevOps work item. Each field that can be modified requires explicit opt-in via configuration to prevent unintended updates.
@@ -692,6 +743,7 @@ safe-outputs:
 **Note:** The `target` field is required. If omitted, compilation fails with an error. This ensures operators are intentional about which work items agents can update.
 
 **Security note:** Every field that can be modified requires explicit opt-in (`true`) in the front matter configuration. If the `max` limit is exceeded, additional entries are skipped rather than aborting the entire batch.
+The reserved identities `Agency` and `GitHub Copilot` cannot be assigned.
 
 ### create-pull-request
 Creates a pull request with code changes made by the agent. When invoked:

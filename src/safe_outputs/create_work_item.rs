@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::PATH_SEGMENT;
 use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
+use crate::secure::WorkItemTemporaryId;
 use crate::tool_result;
 use ado_aw_derive::SanitizeConfig;
 use anyhow::{Context, ensure};
@@ -26,6 +27,10 @@ pub struct CreateWorkItemParams {
     /// semicolon (ADO uses semicolons as tag separators).
     #[serde(default)]
     pub tags: Vec<String>,
+
+    /// Temporary identifier used by later safe outputs in the same run.
+    #[serde(default)]
+    pub temporary_id: Option<WorkItemTemporaryId>,
 }
 
 impl Validate for CreateWorkItemParams {
@@ -58,6 +63,8 @@ tool_result! {
         /// Agent-provided tags (validated against allowed-tags at execution time)
         #[serde(default)]
         tags: Vec<String>,
+        #[serde(default)]
+        temporary_id: Option<WorkItemTemporaryId>,
     }
 }
 
@@ -109,6 +116,11 @@ pub struct CreateWorkItemConfig {
     /// User to assign the work item to (email or display name)
     #[serde(default)]
     pub assignee: Option<String>,
+
+    /// Require every proposal to include a temporary ID.
+    #[serde(default, rename = "require-temporary-id")]
+    #[sanitize_config(skip)]
+    pub require_temporary_id: bool,
 
     /// Static tags always applied to the work item (regardless of agent input)
     #[serde(default)]
@@ -178,6 +190,7 @@ impl Default for CreateWorkItemConfig {
             area_path: None,
             iteration_path: None,
             assignee: None,
+            require_temporary_id: false,
             tags: Vec::new(),
             allowed_tags: Vec::new(),
             custom_fields: std::collections::HashMap::new(),
@@ -361,10 +374,20 @@ impl Executor for CreateWorkItemResult {
         debug!("Area path: {:?}", config.area_path);
         debug!("Iteration path: {:?}", config.iteration_path);
         debug!("Assignee (config): {:?}", config.assignee);
-        debug!(
-            "Assignee (last author fallback): {:?}",
-            ctx.agent_last_author
-        );
+        if config.require_temporary_id && self.temporary_id.is_none() {
+            return Ok(ExecutionResult::failure(
+                "create-work-item requires temporary_id because \
+                 safe-outputs.create-work-item.require-temporary-id is true",
+            ));
+        }
+        if let Some(temporary_id) = &self.temporary_id
+            && ctx.has_resolved_work_item(temporary_id)?
+        {
+            return Ok(ExecutionResult::failure(format!(
+                "temporary_id '{}' was already used in this run",
+                temporary_id.canonical()
+            )));
+        }
 
         // Validate agent-provided tags against allowed-tags (if configured)
         if !self.tags.is_empty() && !config.allowed_tags.is_empty() {
@@ -422,7 +445,14 @@ impl Executor for CreateWorkItemResult {
         if let Some(iteration_path) = &config.iteration_path {
             patch_doc.push(field_op("System.IterationPath", iteration_path));
         }
-        if let Some(assignee) = config.assignee.as_ref().or(ctx.agent_last_author.as_ref()) {
+        if let Some(assignee) = config.assignee.as_deref() {
+            let assignee = match super::normalize_work_item_assignee(
+                assignee,
+                "safe-outputs.create-work-item.assignee",
+            ) {
+                Ok(assignee) => assignee,
+                Err(error) => return Ok(ExecutionResult::failure(error.to_string())),
+            };
             patch_doc.push(field_op("System.AssignedTo", assignee));
         }
         // Merge static config tags with validated agent-provided tags (dedup, case-insensitive)
@@ -482,7 +512,15 @@ impl Executor for CreateWorkItemResult {
                 .await
                 .context("Failed to parse response JSON")?;
 
-            let work_item_id = body.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+            let Some(work_item_id) = body
+                .get("id")
+                .and_then(|v| v.as_u64())
+                .filter(|id| *id > 0)
+            else {
+                return Ok(ExecutionResult::failure(
+                    "Azure DevOps create-work-item response contained no positive work-item ID",
+                ));
+            };
             let work_item_url = body
                 .get("_links")
                 .and_then(|l| l.get("html"))
@@ -491,6 +529,30 @@ impl Executor for CreateWorkItemResult {
                 .unwrap_or("");
 
             info!("Work item created: #{} - {}", work_item_id, work_item_url);
+
+            if let Some(temporary_id) = &self.temporary_id
+                && let Err(error) = ctx.register_resolved_work_item(
+                    temporary_id,
+                    crate::safe_outputs::ResolvedWorkItem {
+                        id: work_item_id,
+                        url: work_item_url.to_string(),
+                    },
+                )
+            {
+                return Ok(ExecutionResult::failure_with_data(
+                    format!(
+                        "Created work item #{} but failed to register temporary_id '{}': {}",
+                        work_item_id,
+                        temporary_id.canonical(),
+                        crate::sanitize::neutralize_pipeline_commands(&error.to_string())
+                    ),
+                    serde_json::json!({
+                        "id": work_item_id,
+                        "url": work_item_url,
+                        "temporary_id": temporary_id.canonical(),
+                    }),
+                ));
+            }
 
             let message = match &artifact_link_included {
                 Some(link_msg) => format!(
@@ -508,6 +570,7 @@ impl Executor for CreateWorkItemResult {
                     "project": project,
                     "type": config.work_item_type,
                     "artifact_link": artifact_link_included,
+                    "temporary_id": self.temporary_id.as_ref().map(WorkItemTemporaryId::canonical),
                 }),
             ))
         } else {
@@ -541,6 +604,7 @@ mod tests {
         let params: CreateWorkItemParams = serde_json::from_str(json).unwrap();
         assert_eq!(params.title, "Fix bug");
         assert!(params.description.contains("detailed description"));
+        assert!(params.temporary_id.is_none());
     }
 
     #[test]
@@ -549,6 +613,7 @@ mod tests {
             title: "Implement feature".to_string(),
             description: "This is a sufficiently long description for the work item.".to_string(),
             tags: vec![],
+            temporary_id: None,
         };
         let result: CreateWorkItemResult = params.try_into().unwrap();
         assert_eq!(result.name, "create-work-item");
@@ -562,6 +627,7 @@ mod tests {
             title: "Hi".to_string(),
             description: "This is a sufficiently long description for the work item.".to_string(),
             tags: vec![],
+            temporary_id: None,
         };
         let result: Result<CreateWorkItemResult, _> = params.try_into();
         let err = result.unwrap_err().to_string();
@@ -577,6 +643,7 @@ mod tests {
             title: "Valid title here".to_string(),
             description: "Too short".to_string(),
             tags: vec![],
+            temporary_id: None,
         };
         let result: Result<CreateWorkItemResult, _> = params.try_into();
         let err = result.unwrap_err().to_string();
@@ -592,6 +659,7 @@ mod tests {
             title: "Valid title here".to_string(),
             description: "This is a sufficiently long description for the work item.".to_string(),
             tags: vec!["tag-one; tag-two".to_string()],
+            temporary_id: None,
         };
         let result: Result<CreateWorkItemResult, _> = params.try_into();
         let err = result.unwrap_err().to_string();
@@ -607,6 +675,7 @@ mod tests {
             title: "Implement feature".to_string(),
             description: "This is a sufficiently long description for the work item.".to_string(),
             tags: vec!["agent-created".to_string(), "automated".to_string()],
+            temporary_id: None,
         };
         let result: CreateWorkItemResult = params.try_into().unwrap();
         assert_eq!(result.tags, vec!["agent-created", "automated"]);
@@ -619,6 +688,7 @@ mod tests {
             description: "A description that is definitely longer than thirty characters."
                 .to_string(),
             tags: vec![],
+            temporary_id: None,
         };
         let result: CreateWorkItemResult = params.try_into().unwrap();
         let json = serde_json::to_string(&result).unwrap();
@@ -634,6 +704,7 @@ mod tests {
         assert!(config.area_path.is_none());
         assert!(config.iteration_path.is_none());
         assert!(config.assignee.is_none());
+        assert!(!config.require_temporary_id);
         assert!(config.tags.is_empty());
         assert!(config.allowed_tags.is_empty());
         assert!(config.custom_fields.is_empty());

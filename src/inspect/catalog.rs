@@ -274,6 +274,7 @@ fn safe_output_description(name: &str) -> &'static str {
     match name {
         "add-build-tag" => "Parameters for adding a tag to an Azure DevOps build",
         "add-pr-comment" => "Parameters for adding a comment thread on a pull request",
+        "assign-work-item" => "Assigns an Azure DevOps work item to an allowed identity",
         "comment-on-work-item" => "Parameters for commenting on a work item",
         "create-branch" => "Parameters for creating a branch",
         "create-git-tag" => "Parameters for creating a git tag (agent-provided)",

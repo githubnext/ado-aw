@@ -562,6 +562,7 @@ actions, and the executor processes them after threat analysis.
 |------|-------------|
 | `create-pull-request` | Creates a PR from the agent's code changes |
 | `create-work-item` | Creates an ADO work item (Task, Bug, etc.) |
+| `assign-work-item` | Assigns an ADO work item to an agent-selected identity |
 | `comment-on-work-item` | Adds a comment to an existing ADO work item |
 | `update-work-item` | Updates fields on an existing ADO work item |
 | `create-wiki-page` | Creates a new Azure DevOps wiki page |
@@ -623,11 +624,18 @@ safe-outputs:
   create-work-item:
     work-item-type: Bug
     area-path: "MyProject\\MyTeam"
-    assignee: "developer@example.com"
+    require-temporary-id: true
     tags:
       - agent-created
       - needs-triage
+  assign-work-item:
+    target: "*"
+    allowed: ["developer@example.com"]
 ```
+
+An omitted static `create-work-item.assignee` creates the item unassigned.
+Agents can use a `#aw_...` temporary ID to create and then assign the item with
+`assign-work-item`. `Agency` and `GitHub Copilot` are never assignable.
 
 ### Example: GitHub Issue Configuration
 

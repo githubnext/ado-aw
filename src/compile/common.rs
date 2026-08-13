@@ -2093,6 +2093,7 @@ pub fn validate_github_issue_outputs_config(front_matter: &FrontMatter) -> Resul
                 "safe-outputs.create-github-issue.target-repo",
             )?;
         }
+
         if let Some(prefix) = config.title_prefix.as_deref() {
             crate::validate::reject_pipeline_injection(
                 prefix,
@@ -2154,6 +2155,68 @@ pub fn validate_github_issue_outputs_config(front_matter: &FrontMatter) -> Resul
     }
 
     let _ = front_matter.github_safe_outputs_auth()?;
+    Ok(())
+}
+
+pub fn validate_work_item_assignment_outputs_config(front_matter: &FrontMatter) -> Result<()> {
+    if let Some(config) = front_matter.create_work_item_config()?
+        && let Some(assignee) = config.assignee.as_deref()
+    {
+        crate::safe_outputs::normalize_work_item_assignee(
+            assignee,
+            "safe-outputs.create-work-item.assignee",
+        )?;
+    }
+
+    if let Some(config) = front_matter.assign_work_item_config()? {
+        if let Some(target) = &config.target {
+            match target {
+                crate::safe_outputs::TargetConfig::Id(id) if *id > 0 => {}
+                crate::safe_outputs::TargetConfig::Pattern(pattern) if pattern == "*" => {}
+                crate::safe_outputs::TargetConfig::Id(_) => {
+                    anyhow::bail!("safe-outputs.assign-work-item.target must be positive")
+                }
+                crate::safe_outputs::TargetConfig::Pattern(pattern) => anyhow::bail!(
+                    "safe-outputs.assign-work-item.target must be \"*\" or a positive work-item ID, got '{pattern}'"
+                ),
+            }
+        }
+        for assignee in &config.allowed {
+            crate::safe_outputs::normalize_work_item_assignee(
+                assignee,
+                "safe-outputs.assign-work-item.allowed",
+            )?;
+        }
+        for pattern in &config.blocked {
+            anyhow::ensure!(
+                !pattern.trim().is_empty(),
+                "safe-outputs.assign-work-item.blocked entries must not be empty"
+            );
+            crate::validate::reject_pipeline_injection(
+                pattern.trim(),
+                "safe-outputs.assign-work-item.blocked",
+            )?;
+        }
+    }
+
+    if front_matter.safe_outputs.contains_key("create-work-item")
+        && front_matter.safe_outputs.contains_key("assign-work-item")
+    {
+        let create_reviewed = front_matter
+            .tool_requires_approval("create-work-item")
+            .is_some();
+        let assign_reviewed = front_matter
+            .tool_requires_approval("assign-work-item")
+            .is_some();
+        if create_reviewed != assign_reviewed {
+            anyhow::bail!(
+                "safe-outputs.create-work-item and safe-outputs.assign-work-item must have the \
+                 same effective require-approval setting so temporary work-item IDs remain in \
+                 one SafeOutputs job"
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -5024,11 +5087,12 @@ mod tests {
     #[test]
     fn test_generate_enabled_tools_args_with_configured_tools() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n  create-work-item:\n    work-item-type: Task\n---\n"
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n  create-work-item:\n    work-item-type: Task\n  assign-work-item:\n    target: \"*\"\n---\n"
         ).unwrap();
         let args = generate_enabled_tools_args(&fm);
         assert!(args.contains("--enabled-tools create-pull-request"));
         assert!(args.contains("--enabled-tools create-work-item"));
+        assert!(args.contains("--enabled-tools assign-work-item"));
         // Always-on tools should also be included
         assert!(args.contains("--enabled-tools noop"));
         assert!(args.contains("--enabled-tools missing-data"));
@@ -5527,6 +5591,72 @@ safe-outputs:
         let (fm, _) = parse_markdown(yaml).unwrap();
         assert!(validate_ado_aw_debug_config(&fm).is_ok());
         assert!(validate_github_issue_outputs_config(&fm).is_ok());
+    }
+
+    #[test]
+    fn test_validate_accepts_linked_work_item_assignment_tools() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  require-approval: true
+  create-work-item:
+    require-temporary-id: true
+  assign-work-item:
+    target: "*"
+    allowed: [owner@example.com]
+    blocked: ["svc-*"]
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        assert!(validate_work_item_assignment_outputs_config(&fm).is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_mixed_approval_lanes_for_linked_work_item_tools() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  create-work-item:
+    require-approval: true
+  assign-work-item:
+    require-approval: false
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let error = validate_work_item_assignment_outputs_config(&fm)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("same effective require-approval"));
+    }
+
+    #[test]
+    fn test_validate_rejects_reserved_work_item_assignees() {
+        for yaml in [
+            r#"---
+name: test
+description: test
+safe-outputs:
+  create-work-item:
+    assignee: Agency
+---
+"#,
+            r#"---
+name: test
+description: test
+safe-outputs:
+  assign-work-item:
+    allowed: ["GitHub Copilot"]
+---
+"#,
+        ] {
+            let (fm, _) = parse_markdown(yaml).unwrap();
+            let error = validate_work_item_assignment_outputs_config(&fm)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("reserved identity"), "error: {error}");
+        }
     }
 
     #[test]

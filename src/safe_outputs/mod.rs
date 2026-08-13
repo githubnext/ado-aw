@@ -45,7 +45,7 @@ pub const DEBUG_ONLY_TOOLS: &[&str] = &[];
 
 /// Public tools exposed only when explicitly configured in `safe-outputs:`.
 pub const CONFIGURED_ONLY_TOOLS: &[&str] =
-    tool_names![CreateGithubIssueResult, SetGithubIssueTypeResult];
+    tool_names![AssignWorkItemResult, CreateGithubIssueResult, SetGithubIssueTypeResult];
 
 /// All recognised safe-output keys accepted in front matter `safe-outputs:`.
 /// This is the union of write-requiring tool types and diagnostic tool types.
@@ -57,6 +57,7 @@ pub const CONFIGURED_ONLY_TOOLS: &[&str] =
 pub const ALL_KNOWN_SAFE_OUTPUTS: &[&str] = all_safe_output_names![
     // Write-requiring MCP tools
     CreateWorkItemResult,
+    AssignWorkItemResult,
     CommentOnWorkItemResult,
     UpdateWorkItemResult,
     CreatePrResult,
@@ -417,6 +418,25 @@ pub(crate) fn tag_matches_pattern(tag: &str, pattern: &str) -> bool {
     wildcard_match(&pattern.to_ascii_lowercase(), &tag.to_ascii_lowercase())
 }
 
+const NON_ASSIGNABLE_WORK_ITEM_IDENTITIES: &[&str] = &["Agency", "GitHub Copilot"];
+
+/// Normalize and validate an identity before assigning an Azure DevOps work item.
+pub(crate) fn normalize_work_item_assignee(
+    assignee: &str,
+    field_name: &str,
+) -> anyhow::Result<String> {
+    let assignee = assignee.trim();
+    anyhow::ensure!(!assignee.is_empty(), "{field_name} must not be empty");
+    crate::validate::reject_pipeline_injection(assignee, field_name)?;
+    if NON_ASSIGNABLE_WORK_ITEM_IDENTITIES
+        .iter()
+        .any(|blocked| blocked.eq_ignore_ascii_case(assignee))
+    {
+        anyhow::bail!("{field_name} cannot assign the reserved identity '{assignee}'");
+    }
+    Ok(assignee.to_string())
+}
+
 /// Return `true` if `name` is matched by `pattern` (**case-sensitive**).
 ///
 /// Uses [`wildcard_match`] for artifact-name allow-lists where case matters.
@@ -429,6 +449,7 @@ pub(crate) use crate::validate::validate_git_ref_name;
 
 mod add_build_tag;
 mod add_pr_comment;
+mod assign_work_item;
 mod comment_on_work_item;
 mod create_branch;
 mod create_git_tag;
@@ -456,6 +477,7 @@ mod upload_workitem_attachment;
 
 pub use add_build_tag::*;
 pub use add_pr_comment::*;
+pub use assign_work_item::*;
 pub use comment_on_work_item::*;
 pub use create_branch::*;
 pub use create_git_tag::*;
@@ -473,8 +495,8 @@ pub use reply_to_pr_comment::*;
 pub use report_incomplete::*;
 pub use resolve_pr_thread::*;
 pub use result::{
-    ExecutionContext, ExecutionResult, Executor, ResolvedGithubIssue, ToolResult, Validate,
-    anyhow_to_mcp_error, org_from_url,
+    ExecutionContext, ExecutionResult, Executor, ResolvedGithubIssue, ResolvedWorkItem, ToolResult,
+    Validate, anyhow_to_mcp_error, org_from_url,
 };
 pub use set_github_issue_type::*;
 pub use submit_pr_review::*;
@@ -524,6 +546,9 @@ mod tests {
         }
         const {
             assert!(CreateWorkItemResult::REQUIRES_WRITE);
+        }
+        const {
+            assert!(AssignWorkItemResult::REQUIRES_WRITE);
         }
         const {
             assert!(CommentOnWorkItemResult::REQUIRES_WRITE);

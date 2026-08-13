@@ -164,6 +164,30 @@ describe("renderSummary — per-tool detail", () => {
     expect(md).toContain("Body line one");
   });
 
+  it("surfaces work-item temporary IDs and assignment details", () => {
+    const md = renderSummary(
+      parseProposals(
+        ndjson(
+          {
+            name: "create-work-item",
+            title: "Investigate failure",
+            description: "A detailed description for the new work item.",
+            temporary_id: "#aw_bug1",
+          },
+          {
+            name: "assign-work-item",
+            work_item_id: "#aw_bug1",
+            assignee: "owner@example.com",
+          },
+        ),
+      ),
+      new Set(["create-work-item", "assign-work-item"]),
+    );
+    expect(md).toContain("| Temporary ID | \\#aw\\_bug1 |");
+    expect(md).toContain("| Work item | \\#aw\\_bug1 |");
+    expect(md).toContain("| Assignee | owner@example.com |");
+  });
+
   it("falls back to generic scalar fields for an unmapped tool", () => {
     const md = renderSummary(
       parseProposals(

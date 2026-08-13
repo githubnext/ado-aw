@@ -105,13 +105,17 @@ safe-outputs:                  # optional per-tool configuration for safe output
   staged: false               # cooperative preview default; per-tool override supported
   create-work-item:
     work-item-type: Task
-    assignee: "user@example.com"
+    require-temporary-id: true
     tags:
       - automated
       - agent-created
     artifact-link:             # optional: link work item to repository branch
       enabled: true
       branch: main
+  assign-work-item:
+    target: "*"               # required only for numeric pre-existing IDs
+    allowed: ["user@example.com"]
+    blocked: ["svc-*"]
   jobs:                       # custom Agent-callable jobs (see docs/safe-outputs.md)
     send-notification:
       description: Notify release operators.

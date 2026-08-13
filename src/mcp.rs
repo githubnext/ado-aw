@@ -12,6 +12,7 @@ use std::sync::Arc;
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
 use crate::safe_outputs::{
     AddBuildTagParams, AddBuildTagResult, AddPrCommentParams, AddPrCommentResult,
+    AssignWorkItemParams, AssignWorkItemResult,
     CommentOnWorkItemParams, CommentOnWorkItemResult, CreateBranchParams, CreateBranchResult,
     CreateGitTagParams, CreateGitTagResult, CreateGithubIssueParams, CreateGithubIssueResult, CreatePrParams,
     CreatePrResult, CreateWikiPageParams, CreateWikiPageResult, CreateWorkItemParams,
@@ -754,6 +755,24 @@ impl SafeOutputs {
         let result: CreateWorkItemResult = sanitized.try_into()?;
         let _ = self.write_safe_output_file(&result).await;
         info!("Work item queued for creation");
+        Ok(CallToolResult::success(vec![]))
+    }
+
+    #[tool(
+        name = "assign-work-item",
+        description = "Assign an Azure DevOps work item. work_item_id may be a positive numeric ID \
+or a temporary_id from an earlier create-work-item call in the same run."
+    )]
+    async fn assign_work_item(
+        &self,
+        params: Parameters<AssignWorkItemParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!("Tool called: assign-work-item");
+        let mut sanitized = params.0;
+        sanitized.assignee = crate::sanitize::sanitize_config(sanitized.assignee.trim());
+        let result: AssignWorkItemResult = sanitized.try_into()?;
+        let _ = self.write_safe_output_file(&result).await;
+        info!("Work-item assignment queued");
         Ok(CallToolResult::success(vec![]))
     }
 
@@ -2207,8 +2226,27 @@ safe-outputs:
         }
         // Spot check a regular tool is present in the permissive default.
         assert!(tool_names.contains(&"create-work-item".to_string()));
+        assert!(!tool_names.contains(&"assign-work-item".to_string()));
         assert!(!tool_names.contains(&"create-github-issue".to_string()));
         assert!(!tool_names.contains(&"set-github-issue-type".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_assign_work_item_schema_when_explicitly_enabled() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let enabled = vec!["assign-work-item".to_string()];
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled), None)
+            .await
+            .unwrap();
+        let tools = so.tool_router.list_all();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == "assign-work-item")
+            .expect("assign-work-item should be explicitly enabled");
+        let schema = serde_json::to_value(&tool.input_schema).unwrap();
+        let properties = schema["properties"].as_object().unwrap();
+        assert!(properties.contains_key("work_item_id"));
+        assert!(properties.contains_key("assignee"));
     }
 
     #[tokio::test]
