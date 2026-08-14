@@ -4,6 +4,7 @@ import type { ExecutedRecord, ScenarioContext } from "../scenario.js";
 import { SkipError } from "../scenario.js";
 import {
   assignWorkItemTemporaryIdHandoff,
+  createWorkItem,
   resolveWorkItemAssignee,
   workItemScenarios,
 } from "../scenarios/work-item.js";
@@ -48,6 +49,18 @@ describe("resolveWorkItemAssignee", () => {
     ]) {
       expect(() => resolveWorkItemAssignee(env as NodeJS.ProcessEnv)).toThrow(SkipError);
     }
+  });
+
+  it("skips when no identity is configured", () => {
+    expect(() => resolveWorkItemAssignee({})).toThrow(SkipError);
+  });
+});
+
+describe("create-work-item", () => {
+  it("persists the deterministic temporary ID in standalone NDJSON", async () => {
+    await expect(createWorkItem.ndjson(fakeCtx(), {})).resolves.toEqual(
+      expect.objectContaining({ temporary_id: "#aw_wicreate" }),
+    );
   });
 });
 

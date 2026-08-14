@@ -70,12 +70,13 @@ All deterministically-assertable ADO-write safe outputs plus the flagship
 
 Excluded (out of scope): none of the currently shipped safe outputs.
 
-The `assign-work-item-temporary-id-handoff` scenario stages
-`create-work-item` ahead of `assign-work-item` in one executor invocation,
-resolves the created ID through `#aw_wiassign`, verifies `System.AssignedTo`,
-and deletes the scratch item. Because this harness writes internal executor
-NDJSON directly, its explicit ID emulates the value generated and persisted by
-the MCP rather than an agent-supplied parameter. It uses
+The standalone `create-work-item` scenario writes the deterministic internal
+ID `#aw_wicreate`; the `assign-work-item-temporary-id-handoff` scenario stages
+another `create-work-item` ahead of `assign-work-item` in one executor
+invocation and resolves it through `#aw_wiassign`. Both explicit IDs emulate
+the values generated and persisted by the MCP because this harness writes
+internal executor NDJSON directly rather than agent-supplied parameters. The
+handoff verifies `System.AssignedTo` and deletes the scratch item. It uses
 `E2E_WORK_ITEM_ASSIGNEE` when configured,
 otherwise `BUILD_REQUESTEDFOREMAIL`; it skips when neither provides an
 assignable identity.

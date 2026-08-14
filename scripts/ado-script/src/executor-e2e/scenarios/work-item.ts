@@ -6,9 +6,10 @@
  */
 import type { ExecutedRecord, PriorEntry, Scenario, ScenarioContext } from "../scenario.js";
 import { SkipError } from "../scenario.js";
-import { detBody, numResult, Teardown } from "./common.js";
+import { detBody, numResult, strResult, Teardown } from "./common.js";
 
 const WORK_ITEM_TYPE = "Task";
+const CREATE_TEMPORARY_ID = "#aw_wicreate";
 const ASSIGN_TEMPORARY_ID = "#aw_wiassign";
 
 function usableEnvValue(value: string | undefined): string | undefined {
@@ -60,6 +61,7 @@ export const createWorkItem: Scenario<{ createdId?: number }> = {
     title: `${ctx.prefix("create-work-item")}`,
     description: detBody(ctx, "create-work-item"),
     tags: [],
+    temporary_id: CREATE_TEMPORARY_ID,
   }),
   assert: async (ctx, state, record: ExecutedRecord) => {
     // Populate state.createdId BEFORE the fallible title check so cleanup can
@@ -69,10 +71,25 @@ export const createWorkItem: Scenario<{ createdId?: number }> = {
     // (typeof NaN === "number"), leaking as deleteWorkItem(NaN) in cleanup.
     const id = numResult(record, "id");
     state.createdId = id;
+    if (strResult(record, "temporary_id") !== CREATE_TEMPORARY_ID) {
+      throw new Error(
+        `create-work-item reported temporary_id '${strResult(record, "temporary_id")}', expected '${CREATE_TEMPORARY_ID}'`,
+      );
+    }
     const wi = await ctx.rest.getWorkItem(id);
     const title = wi.fields["System.Title"];
     if (title !== ctx.prefix("create-work-item")) {
       throw new Error(`created work item #${id} has unexpected title '${String(title)}'`);
+    }
+    const assignedTo = wi.fields["System.AssignedTo"];
+    const isUnassigned =
+      assignedTo === undefined ||
+      assignedTo === null ||
+      (typeof assignedTo === "string" && assignedTo.trim() === "");
+    if (!isUnassigned) {
+      throw new Error(
+        `created work item #${id} unexpectedly has System.AssignedTo=${JSON.stringify(assignedTo)}`,
+      );
     }
   },
   cleanup: async (ctx, state) => {
