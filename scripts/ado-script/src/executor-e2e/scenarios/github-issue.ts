@@ -1102,7 +1102,7 @@ export const linkGithubSubIssue: Scenario<SubIssueState> = {
   priorEntries: async (ctx, state): Promise<PriorEntry[]> => [
     {
       tool: "create-github-issue",
-      config: { "target-repo": state.repo, "require-temporary-id": true },
+      config: { "target-repo": state.repo, "require-temporary-id": true, max: 2 },
       entry: {
         title: state.parentTitle,
         body: detBody(ctx, "link-github-sub-issue-parent"),
@@ -1111,7 +1111,7 @@ export const linkGithubSubIssue: Scenario<SubIssueState> = {
     },
     {
       tool: "create-github-issue",
-      config: { "target-repo": state.repo, "require-temporary-id": true },
+      config: { "target-repo": state.repo, "require-temporary-id": true, max: 2 },
       entry: {
         title: state.subTitle,
         body: detBody(ctx, "link-github-sub-issue-sub"),
@@ -1168,7 +1168,11 @@ export const commentOnGithubIssueRepoDenied: Scenario<MutationIssueState> = {
     body: detBody(ctx, "comment-on-github-issue-repo-denied"),
   }),
   env: async (_ctx, state) => executeEnv(state),
-  expectedFailure: { error: /repository.*(?:not allowed|denied)|(?:not allowed|denied).*repository/i },
+  expectedFailure: {
+    status: "failed",
+    error:
+      /repository.*(?:not allowed|denied|not an exact target-repo or allowed-repos entry)|(?:not allowed|denied).*repository/i,
+  },
   assert: async () => {
     throw new Error("comment-on-github-issue should have rejected the repository");
   },

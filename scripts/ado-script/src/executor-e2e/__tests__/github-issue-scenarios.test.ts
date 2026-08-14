@@ -39,6 +39,7 @@ const {
   assignGithubIssueToUser,
   closeGithubIssue,
   commentOnGithubIssue,
+  commentOnGithubIssueRepoDenied,
   createGithubIssue,
   createGithubIssueLabelDenied,
   createGithubIssueTemporaryIdHandoff,
@@ -362,6 +363,17 @@ describe("registry", () => {
       ]);
       expect(prior.every((entry) => entry.tool === "create-github-issue")).toBe(true);
       expect(prior.every((entry) => entry.config["require-temporary-id"] === true)).toBe(true);
+      expect(prior.every((entry) => entry.config.max === 2)).toBe(true);
+    });
+
+    it("accepts the executor's precise repository allowlist rejection", () => {
+      const expected = commentOnGithubIssueRepoDenied.expectedFailure!;
+      expect(expected.status).toBe("failed");
+      expect(
+        expected.error.test(
+          "repository 'definitely-not/allowed' is not an exact target-repo or allowed-repos entry: octo/issues",
+        ),
+      ).toBe(true);
     });
 
     it("skips preview GraphQL scenarios before creating issues when a field is unavailable", async () => {
