@@ -18,10 +18,27 @@ use crate::compile::extensions::CompileContext;
 use crate::compile::ado_bundle::{Bundle, TokenSource, apply_bundle_auth};
 use crate::compile::extensions::ado_script::EXEC_CONTEXT_SCHEDULE_PATH;
 use crate::compile::ir::condition::{Condition, Expr};
-use crate::compile::ir::step::{BashStep, Step};
+use crate::compile::ir::step::Step;
+use crate::compile::shell::ShellScript;
 use crate::compile::types::ScheduleContextConfig;
+use crate::shell_script;
 
 use super::contributor::{ContextContributor, succeeded_and};
+
+shell_script! {
+    /// Invoke the exec-context-schedule node bundle. The step's own
+    /// `condition:` gates on `Build.Reason == Schedule`.
+    EXEC_CONTEXT_SCHEDULE {
+        interpreter: Bash,
+        bindings: [BUNDLE],
+        externals: [],
+        fragments: [],
+        body: r#"
+set -euo pipefail
+node "$BUNDLE"
+"#,
+    }
+}
 
 pub(super) struct ScheduleContextContributor {
     config: ScheduleContextConfig,
@@ -57,19 +74,18 @@ impl ContextContributor for ScheduleContextContributor {
         if !self.should_activate(ctx) {
             return Ok(None);
         }
-        let script = format!("set -euo pipefail\nnode '{EXEC_CONTEXT_SCHEDULE_PATH}'\n");
+        let script = ShellScript::new(&EXEC_CONTEXT_SCHEDULE)
+            .bind_text("BUNDLE", EXEC_CONTEXT_SCHEDULE_PATH);
         // ADO auto-injects the predefined System.*/Build.* context variables
         // into the step env, so the bundle reads them directly; only the
         // non-auto-injected SYSTEM_ACCESSTOKEN bearer is projected here.
         let step = apply_bundle_auth(
-            BashStep::new(
-                "Stage schedule execution context (aw-context/schedule/*)",
-                script,
-            )
-            .with_condition(succeeded_and(Condition::Eq(
-                Expr::Variable("Build.Reason".to_string()),
-                Expr::Literal("Schedule".to_string()),
-            ))),
+            script
+                .into_step("Stage schedule execution context (aw-context/schedule/*)")
+                .with_condition(succeeded_and(Condition::Eq(
+                    Expr::Variable("Build.Reason".to_string()),
+                    Expr::Literal("Schedule".to_string()),
+                ))),
             Bundle::ExecContextSchedule,
             TokenSource::SystemAccessToken,
         );

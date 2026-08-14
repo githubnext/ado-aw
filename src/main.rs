@@ -34,6 +34,10 @@ mod update_check;
 pub mod validate;
 mod version;
 
+/// Re-exported so the [`shell_script!`](crate::shell_script) macro can name
+/// `$crate::inventory` from any module without every call site importing it.
+pub use inventory;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
@@ -600,6 +604,20 @@ enum Commands {
         #[arg(short, long)]
         output: Option<std::path::PathBuf>,
     },
+    /// Export every registered shell script the compiler can emit, so the
+    /// generated shell can be reviewed and analysed as ordinary files rather
+    /// than read out of Rust source. Unlike the fixture-driven bash lint this
+    /// reaches *every* script, including ones no pipeline currently emits.
+    #[command(hide = true)]
+    ExportBashScripts {
+        /// Directory to write into; created if it does not exist.
+        #[arg(short, long)]
+        output: std::path::PathBuf,
+        /// `files` writes one `.sh` per script; `json` writes a single
+        /// document carrying the declared binding surface too.
+        #[arg(long, value_enum, default_value_t = compile::shell::export::ExportFormat::Files)]
+        format: compile::shell::export::ExportFormat,
+    },
     /// Inspect an agent source file's typed IR: jobs, stages, steps, outputs, derived `dependsOn`.
     Inspect {
         /// Path to the agent markdown source.
@@ -666,6 +684,7 @@ impl Commands {
             Commands::ExportFactCatalog { .. } => "export-fact-catalog",
             Commands::ExportAdoProxyCatalogSchema { .. } => "export-ado-proxy-catalog-schema",
             Commands::ExportAdoProxyCatalog { .. } => "export-ado-proxy-catalog",
+            Commands::ExportBashScripts { .. } => "export-bash-scripts",
             Commands::Inspect { .. } => "inspect",
             Commands::Graph { .. } => "graph",
             Commands::Whatif { .. } => "whatif",
@@ -1574,6 +1593,10 @@ async fn main() -> Result<()> {
         Commands::ExportAdoProxyCatalog { output } => {
             let catalog = ado_proxy::catalog::generate_catalog_json();
             write_or_print(&catalog, output)?;
+        }
+        Commands::ExportBashScripts { output, format } => {
+            let count = compile::shell::export::export(&output, format)?;
+            println!("Exported {count} shell scripts to {}", output.display());
         }
         Commands::Inspect { source, json } => {
             inspect::dispatch_inspect(inspect::InspectOptions {

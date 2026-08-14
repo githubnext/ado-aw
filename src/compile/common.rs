@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use super::extensions::{
     CompilerExtension, Declarations, McpgConfig, McpgGatewayConfig, McpgServerConfig,
 };
+use super::shell::{Binding, ShellScript};
 use super::types::{
     CheckoutFetchOpts, CompileTarget, FrontMatter, PipelineParameter, PoolConfig, ReposItem,
     Repository, SELF_CHECKOUT_ALIAS,
@@ -17,6 +18,7 @@ use crate::compile::types::McpConfig;
 use crate::ecosystem_domains::{
     get_ecosystem_domains, is_ecosystem_identifier, is_known_ecosystem,
 };
+use crate::shell_script;
 use crate::validate;
 
 /// Atomically write `contents` to `path`.
@@ -1808,21 +1810,52 @@ pub const ADO_MCP_CA_MOUNT: &str = "/etc/ado-proxy/ca.pem";
 /// is. Getting this wrong is not cosmetic — in a policy document a wrong
 /// organization matches nothing, denying every request in a way that reads as
 /// a deliberate policy decision.
+///
+/// # Contract for consumers
+///
+/// This function returns raw shell text (no YAML wrapping). Callers that
+/// splice the text into a larger script must know it assigns two variables:
+/// `ADO_PROXY_COLLECTION` and `ADO_PROXY_ORGANIZATION`. See
+/// [`crate::compile::shell`] for the fragment convention (`# ado-aw:fragment`
+/// marker + `externals:` list) other producers use when embedding this
+/// fragment.
 pub fn resolve_ado_organization_bash() -> String {
-    "# $(System.CollectionUri) is expanded by ADO before bash runs. Two\n\
-     # shapes are in use: \"https://dev.azure.com/myorg/\" (organization in\n\
-     # the path) and the legacy \"https://myorg.visualstudio.com/\"\n\
-     # (organization in the host). Handle both — a fixed-prefix strip or a\n\
-     # bare last-segment rule is silently wrong for one of them.\n\
-     ADO_PROXY_COLLECTION=\"$(System.CollectionUri)\"\n\
-     ADO_PROXY_ORGANIZATION=$(printf '%s' \"$ADO_PROXY_COLLECTION\" \\\n\
-       | sed -e 's#^https\\?://##' -e 's#/*$##' \\\n\
-       | awk -F/ '{ if (NF>1) print $NF; else { sub(/\\..*$/, \"\", $1); print $1 } }')\n\
-     if [ -z \"$ADO_PROXY_ORGANIZATION\" ]; then\n\
-       echo \"##vso[task.complete result=Failed]cannot determine the Azure DevOps organization from System.CollectionUri\"\n\
-       exit 1\n\
-     fi\n"
-        .to_string()
+    ShellScript::new(&RESOLVE_ADO_ORGANIZATION).render()
+}
+
+shell_script! {
+    /// Derive `$ADO_PROXY_ORGANIZATION` from `$(System.CollectionUri)`.
+    ///
+    /// Rendered as a standalone fragment (no bindings, no prelude) so it can
+    /// be spliced verbatim into a larger step body via
+    /// [`ShellScript::fragment`]. Every variable the body reads is assigned
+    /// by the body itself, so no bindings or externals are needed and the
+    /// splice contributes nothing to the parent's declared surface except
+    /// the two variables it assigns.
+    RESOLVE_ADO_ORGANIZATION {
+        interpreter: Bash,
+        bindings: [],
+        externals: [],
+        fragments: [],
+        // Uses r###"..."### so the "##vso[...]" line inside the body cannot
+        // prematurely close the raw string literal (the sequence `"#` would
+        // otherwise terminate an r#"..."# body).
+        body: r###"
+# $(System.CollectionUri) is expanded by ADO before bash runs. Two
+# shapes are in use: "https://dev.azure.com/myorg/" (organization in
+# the path) and the legacy "https://myorg.visualstudio.com/"
+# (organization in the host). Handle both — a fixed-prefix strip or a
+# bare last-segment rule is silently wrong for one of them.
+ADO_PROXY_COLLECTION="$(System.CollectionUri)"
+ADO_PROXY_ORGANIZATION=$(printf '%s' "$ADO_PROXY_COLLECTION" \
+  | sed -e 's#^https\?://##' -e 's#/*$##' \
+  | awk -F/ '{ if (NF>1) print $NF; else { sub(/\..*$/, "", $1); print $1 } }')
+if [ -z "$ADO_PROXY_ORGANIZATION" ]; then
+  echo "##vso[task.complete result=Failed]cannot determine the Azure DevOps organization from System.CollectionUri"
+  exit 1
+fi
+"###,
+    }
 }
 
 /// Whether this workflow routes Azure DevOps access through the policy engine.
@@ -2035,14 +2068,56 @@ pub fn generate_integrity_check(skip: bool) -> String {
         return String::new();
     }
 
-    // Indentation is handled by replace_with_indent at the call site.
-    r#"- bash: |
-    AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
-    chmod +x "$AGENTIC_PIPELINES_PATH"
-    $AGENTIC_PIPELINES_PATH check "{{ pipeline_path }}"
-  workingDirectory: {{ trigger_repo_directory }}
-  displayName: "Verify pipeline integrity""#
-        .to_string()
+    let script = ShellScript::new(&VERIFY_PIPELINE_INTEGRITY)
+        .bind(
+            "PIPELINE_WORKSPACE",
+            Binding::ado_macro("Pipeline.Workspace"),
+        )
+        .render();
+
+    // Indent every body line by 4 spaces to satisfy the `- bash: |` literal
+    // block scalar shape. `workingDirectory:` uses the `{{ trigger_repo_directory }}`
+    // template placeholder resolved by `replace_with_indent` at the call site.
+    let indented: String = script
+        .lines()
+        .map(|line| {
+            if line.is_empty() {
+                "\n".to_string()
+            } else {
+                format!("    {line}\n")
+            }
+        })
+        .collect();
+    format!(
+        "- bash: |\n{indented}  workingDirectory: {{{{ trigger_repo_directory }}}}\n  displayName: \"Verify pipeline integrity\""
+    )
+    .trim_end_matches('\n')
+    .to_string()
+}
+
+shell_script! {
+    /// The bash body of the "Verify pipeline integrity" step: downloads the
+    /// pipelined `ado-aw` binary and re-runs `ado-aw check` against the
+    /// authored source path. Called with `--skip-integrity` returns an empty
+    /// string from [`generate_integrity_check`] and the step is omitted; the
+    /// registered body always describes the enabled case.
+    ///
+    /// `{{ pipeline_path }}` remains a compile-time template placeholder
+    /// resolved by `replace_with_indent` at the call site (it names the
+    /// authored `.md` source path relative to the trigger repo). It is inert
+    /// under shellcheck because it appears only inside a double-quoted string
+    /// argument.
+    VERIFY_PIPELINE_INTEGRITY {
+        interpreter: Bash,
+        bindings: [PIPELINE_WORKSPACE],
+        externals: [],
+        fragments: [],
+        body: r#"
+AGENTIC_PIPELINES_PATH="$PIPELINE_WORKSPACE/agentic-pipeline-compiler/ado-aw"
+chmod +x "$AGENTIC_PIPELINES_PATH"
+"$AGENTIC_PIPELINES_PATH" check "{{ pipeline_path }}"
+"#,
+    }
 }
 
 /// Validate the `ado-aw-debug:` section.
@@ -3544,22 +3619,50 @@ pub fn generate_awf_path_step(awf_paths: &[String]) -> String {
         return String::new();
     }
 
-    let path_lines = awf_paths
-        .iter()
-        .map(|p| format!("    {p}"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let path_lines: String = awf_paths.join("\n");
 
+    let body = ShellScript::new(&GENERATE_GITHUB_PATH)
+        .bind("PATH_LINES", Binding::document(&path_lines))
+        .render();
+
+    // Wrap in a `- bash: |` YAML step. Each body line indented by 4 spaces
+    // so it survives the literal-block scalar shape emitted downstream.
+    let indented: String = body
+        .lines()
+        .map(|line| {
+            if line.is_empty() {
+                "\n".to_string()
+            } else {
+                format!("    {line}\n")
+            }
+        })
+        .collect();
     format!(
-        "\
-- bash: |
-    AWF_PATH_FILE=\"/tmp/awf-tools/ado-path-entries\"
-    cat > \"$AWF_PATH_FILE\" << AWF_PATH_EOF
-{path_lines}
-    AWF_PATH_EOF
-    echo \"##vso[task.setvariable variable=GITHUB_PATH]$AWF_PATH_FILE\"
-  displayName: \"Generate GITHUB_PATH file\""
+        "- bash: |\n{indented}  displayName: \"Generate GITHUB_PATH file\""
     )
+}
+
+shell_script! {
+    /// Bash body of the "Generate GITHUB_PATH file" step.
+    ///
+    /// AWF reads `$GITHUB_PATH` as a file path at startup and merges its
+    /// entries into the chroot PATH. `PATH_LINES` arrives as a
+    /// [`Binding::document`] — a quoted heredoc — because the path list may
+    /// contain multiple lines; the heredoc keeps them literal without any
+    /// per-entry escaping. The rendered file is then advertised to AWF via
+    /// `##vso[task.setvariable]`.
+    GENERATE_GITHUB_PATH {
+        interpreter: Bash,
+        bindings: [PATH_LINES],
+        externals: [],
+        fragments: [],
+        // r###"..."### to protect against the "##vso sequence.
+        body: r###"
+AWF_PATH_FILE="/tmp/awf-tools/ado-path-entries"
+printf '%s\n' "$PATH_LINES" > "$AWF_PATH_FILE"
+echo "##vso[task.setvariable variable=GITHUB_PATH]$AWF_PATH_FILE"
+"###,
+    }
 }
 
 /// Generates the `env:` block entry that passes `GITHUB_PATH` to the AWF
@@ -6940,9 +7043,12 @@ safe-outputs:
             result.contains("displayName"),
             "should be a complete pipeline step"
         );
+        // Paths flow through a `Binding::document` heredoc so multi-line
+        // content stays literal without per-entry escaping — the marker is
+        // the shell module's own document delimiter, not a caller-picked one.
         assert!(
-            result.contains("AWF_PATH_EOF"),
-            "should use heredoc markers"
+            result.contains("ADO_AW_SHELL_DOC_EOF"),
+            "should use the shell::Binding::document heredoc marker: {result}"
         );
     }
 

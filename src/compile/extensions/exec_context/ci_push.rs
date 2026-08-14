@@ -49,10 +49,28 @@ use crate::compile::extensions::CompileContext;
 use crate::compile::ado_bundle::{Bundle, TokenSource, apply_bundle_auth};
 use crate::compile::extensions::ado_script::EXEC_CONTEXT_CI_PUSH_PATH;
 use crate::compile::ir::condition::{Condition, Expr};
-use crate::compile::ir::step::{BashStep, Step};
+use crate::compile::ir::step::Step;
+use crate::compile::shell::ShellScript;
 use crate::compile::types::CiPushContextConfig;
+use crate::shell_script;
 
 use super::contributor::{ContextContributor, succeeded_and};
+
+shell_script! {
+    /// Invoke the exec-context-ci-push node bundle. The step's own
+    /// `condition:` gates on `Build.Reason ∈ {IndividualCI, BatchedCI}`;
+    /// no bash-side guard is needed.
+    EXEC_CONTEXT_CI_PUSH {
+        interpreter: Bash,
+        bindings: [BUNDLE],
+        externals: [],
+        fragments: [],
+        body: r#"
+set -euo pipefail
+node "$BUNDLE"
+"#,
+    }
+}
 
 /// CI-push-context contributor.
 pub(super) struct CiPushContextContributor {
@@ -90,25 +108,24 @@ impl ContextContributor for CiPushContextContributor {
         if !self.should_activate(ctx) {
             return Ok(None);
         }
-        let script = format!("set -euo pipefail\nnode '{EXEC_CONTEXT_CI_PUSH_PATH}'\n");
+        let script = ShellScript::new(&EXEC_CONTEXT_CI_PUSH)
+            .bind_text("BUNDLE", EXEC_CONTEXT_CI_PUSH_PATH);
         // ADO auto-injects the predefined System.*/Build.* context variables
         // into the step env, so the bundle reads them directly; only the
         // non-auto-injected SYSTEM_ACCESSTOKEN bearer is projected here.
         let step = apply_bundle_auth(
-            BashStep::new(
-                "Stage ci-push execution context (aw-context/ci-push/*)",
-                script,
-            )
-            .with_condition(succeeded_and(Condition::Or(vec![
-                Condition::Eq(
-                    Expr::Variable("Build.Reason".to_string()),
-                    Expr::Literal("IndividualCI".to_string()),
-                ),
-                Condition::Eq(
-                    Expr::Variable("Build.Reason".to_string()),
-                    Expr::Literal("BatchedCI".to_string()),
-                ),
-            ]))),
+            script
+                .into_step("Stage ci-push execution context (aw-context/ci-push/*)")
+                .with_condition(succeeded_and(Condition::Or(vec![
+                    Condition::Eq(
+                        Expr::Variable("Build.Reason".to_string()),
+                        Expr::Literal("IndividualCI".to_string()),
+                    ),
+                    Condition::Eq(
+                        Expr::Variable("Build.Reason".to_string()),
+                        Expr::Literal("BatchedCI".to_string()),
+                    ),
+                ]))),
             Bundle::ExecContextCiPush,
             TokenSource::SystemAccessToken,
         );

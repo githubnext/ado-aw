@@ -76,6 +76,12 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── stage_ir.rs   # Stage target typed-IR builder
 │   │   ├── az_wrapper.rs # Renders the `az` CLI redirect wrapper installed into the agent sandbox (env-based `HTTPS_PROXY` redirect, not argument rewriting)
 │   │   ├── source_path_guard.rs # Validation guard for untrusted workflow source-path inputs used by audit + mcp_author
+│   │   ├── shell/        # Typed generation of every shell script the compiler emits (see docs/extending.md "Generated shell scripts")
+│   │   │   ├── mod.rs    # ShellScript: raw-string bodies + a typed shell-quoted binding prelude; `# ado-aw:fragment` splicing; into_step()
+│   │   │   ├── bindings.rs # Binding constructors (text/number/boolean/words/ado_macro/document) — the single injection chokepoint; rejects credentials
+│   │   │   ├── registry.rs # shell_script! macro + `inventory` auto-registration; ShellScriptDef; all_scripts()
+│   │   │   ├── export.rs # `ado-aw export-bash-scripts` — materializes every registered script as reviewable .sh / JSON
+│   │   │   └── lint.rs   # Registry-wide shellcheck + declared-variable-surface guards (reaches scripts no fixture emits)
 │   │   ├── gitattributes.rs # .gitattributes management for compiled pipelines
 │   │   ├── filter_ir.rs  # Filter expression IR: Fact/Predicate types, lowering, validation, codegen
 │   │   ├── pr_filters.rs # PR trigger filter generation (native ADO + gate steps)
@@ -411,8 +417,8 @@ index to jump to the right page.
   `remove`, `list`, `status`, `run`, `audit`, `mcp-author`, `trace`,
   `inspect`, `graph`, `whatif`, `lint`, `catalog`; `configure` is a
   deprecated hidden alias; `export-gate-schema`, `export-fact-catalog`,
-  `export-ado-proxy-catalog-schema`, and `export-ado-proxy-catalog` are hidden
-  build-time tools).
+  `export-ado-proxy-catalog-schema`, `export-ado-proxy-catalog`, and
+  `export-bash-scripts` are hidden build-time tools).
 - [`docs/agency-plugin.md`](docs/agency-plugin.md) — the Agency / Claude Code
   plugin (`agency/plugins/ado-aw/`): canonical layout, six skills, `mcp-author`
   wiring, the self-contained root marketplace catalogs, `init --agency`
@@ -549,24 +555,68 @@ cargo test
 cargo clippy
 ```
 
+### Generated shell
+
+Compiler-generated shell is **not** built with `format!`. Every script is a
+raw-string constant registered with `shell_script!` in the module that
+produces it, with substitution restricted to a typed, shell-quoted prelude —
+see `src/compile/shell/` and the *Generated shell scripts* section of
+[`docs/extending.md`](docs/extending.md).
+
+The body is the shell exactly as it runs: no `\n\` continuations, no doubled
+braces, no escaped quotes. A value reaches a script only as `Binding::text`,
+`::number`, `::boolean`, `::words`, `::ado_macro` or `::document`, all of
+which land in a single position (the right-hand side of a prelude assignment)
+and therefore cannot alter the structure of the script. A credential must
+never become a binding — the prelude is committed to the repository — so it
+stays on `.with_env(…, EnvValue::secret(…))`.
+
+Every variable a body reads must be declared as a `binding` or an `external`.
+Both the render path and a registry-wide test enforce it.
+
+`tests/generated_shell_guard.rs` fails the build if shell regresses to the old
+shape — a `BashStep::new` whose script argument is built with `format!`, an
+escaped continuation inside a `shell_script!` body, or a reintroduced
+`bash()` / `dedent()` helper.
+
 ### Bash step lint
+
+Shell is linted at two levels.
+
+`src/compile/shell/lint.rs` shellchecks **every registered script in
+isolation**, straight from the registry. Coverage is total by construction:
+before this, lint coverage was a function of fixture reachability, so a
+generator no fixture exercised was linted by nothing.
 
 The `tests/bash_lint_tests.rs` integration test compiles a representative set
 of fixtures and runs `shellcheck` against every literal `bash:` body in the
-generated YAML. It catches silent-failure patterns that ADO's "fail on last
-command" default would let through (e.g. `cd "$X"` without `|| exit`, tilde
-inside double quotes, masked-return assignments).
+generated YAML — proving scripts are *emitted*, where the registry lint proves
+they are *correct*. It catches silent-failure patterns that ADO's "fail on
+last command" default would let through (e.g. `cd "$X"` without `|| exit`,
+tilde inside double quotes, masked-return assignments).
 
-The test is skipped if `shellcheck` is not on PATH. Install locally with
+Both are skipped if `shellcheck` is not on PATH. Install locally with
 `brew install shellcheck` (macOS) or `apt-get install -y shellcheck` (Debian
 / Ubuntu); CI installs it in `.github/workflows/rust-tests.yml` and sets
 `ENFORCE_BASH_LINT=1` so a missing shellcheck becomes a hard failure rather
 than a silent skip.
 
-When adding a new bash step, run `cargo test --test bash_lint_tests` and fix
-anything it flags. If a finding is genuinely intentional, add a
-`# shellcheck disable=SCxxxx` comment immediately above the offending line in
-the bash body — shellcheck honours the directive and it's inert at runtime.
+When adding a new shell script, run both and fix anything they flag:
+
+```bash
+ENFORCE_BASH_LINT=1 cargo test --bin ado-aw compile::shell
+ENFORCE_BASH_LINT=1 cargo test --test bash_lint_tests
+```
+
+If a finding is genuinely intentional, add a `# shellcheck disable=SCxxxx`
+comment immediately above the offending line in the body — shellcheck honours
+the directive and it's inert at runtime.
+
+To review the generated shell as ordinary files:
+
+```bash
+cargo run -- export-bash-scripts --out /tmp/ado-aw-shell
+```
 
 ### Markdown-only smoke suite
 

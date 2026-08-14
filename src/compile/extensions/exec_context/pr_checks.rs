@@ -24,10 +24,52 @@ use crate::compile::ado_bundle::{Bundle, TokenSource, apply_bundle_auth};
 use crate::compile::extensions::ado_script::EXEC_CONTEXT_PR_CHECKS_PATH;
 use crate::compile::ir::condition::{Condition, Expr};
 use crate::compile::ir::env::EnvValue;
-use crate::compile::ir::step::{BashStep, Step};
+use crate::compile::ir::step::Step;
+use crate::compile::shell::ShellScript;
 use crate::compile::types::PrChecksContextConfig;
+use crate::shell_script;
 
 use super::contributor::{ContextContributor, succeeded_and};
+
+shell_script! {
+    /// Invoke the exec-context-pr-checks node bundle. Used on the
+    /// "real PR" path — the step's own `condition:` gates on
+    /// `Build.Reason == PullRequest`.
+    EXEC_CONTEXT_PR_CHECKS {
+        interpreter: Bash,
+        bindings: [BUNDLE],
+        externals: [],
+        fragments: [],
+        body: r#"
+set -euo pipefail
+node "$BUNDLE"
+"#,
+    }
+}
+
+shell_script! {
+    /// Invoke the exec-context-pr-checks node bundle from a synth-PR-active
+    /// Agent job.
+    ///
+    /// The Agent-job condition can only depend on same-job values, so the
+    /// synth-active path always runs and gates in bash: an empty
+    /// `$SYSTEM_PULLREQUEST_PULLREQUESTID` (the env value is populated from
+    /// the hoisted AW_PR_ID variable) means no PR to describe.
+    EXEC_CONTEXT_PR_CHECKS_SYNTH {
+        interpreter: Bash,
+        bindings: [BUNDLE],
+        externals: [SYSTEM_PULLREQUEST_PULLREQUESTID],
+        fragments: [],
+        body: r#"
+set -euo pipefail
+if [ -z "$SYSTEM_PULLREQUEST_PULLREQUESTID" ]; then
+  echo "[aw-context] No PR identifier resolved; skipping exec-context-pr-checks."
+  exit 0
+fi
+node "$BUNDLE"
+"#,
+    }
+}
 
 pub(super) struct PrChecksContextContributor {
     config: PrChecksContextConfig,
@@ -81,10 +123,11 @@ impl ContextContributor for PrChecksContextContributor {
         // variable and the step always runs (guarded by a runtime prelude);
         // in real-PR mode the auto-injected SYSTEM_PULLREQUEST_PULLREQUESTID is
         // read directly and the step gates on Build.Reason == PullRequest.
-        let (condition, prelude) = if self.synthetic_pr_active {
+        let (condition, script) = if self.synthetic_pr_active {
             (
                 Condition::Succeeded,
-                "    if [ -z \"$SYSTEM_PULLREQUEST_PULLREQUESTID\" ]; then\n      echo \"[aw-context] No PR identifier resolved; skipping exec-context-pr-checks.\"\n      exit 0\n    fi\n",
+                ShellScript::new(&EXEC_CONTEXT_PR_CHECKS_SYNTH)
+                    .bind_text("BUNDLE", EXEC_CONTEXT_PR_CHECKS_PATH),
             )
         } else {
             (
@@ -92,22 +135,20 @@ impl ContextContributor for PrChecksContextContributor {
                     Expr::Variable("Build.Reason".to_string()),
                     Expr::Literal("PullRequest".to_string()),
                 )),
-                "",
+                ShellScript::new(&EXEC_CONTEXT_PR_CHECKS)
+                    .bind_text("BUNDLE", EXEC_CONTEXT_PR_CHECKS_PATH),
             )
         };
 
-        let script = format!("set -euo pipefail\n{prelude}node '{EXEC_CONTEXT_PR_CHECKS_PATH}'\n");
         // ADO auto-injects predefined System.*/Build.* context vars, so only
         // SYSTEM_ACCESSTOKEN (bearer, not auto-injected) and the mode-dependent
         // PR id are projected. In synth mode the id comes from the hoisted
         // AW_PR_ID job variable; in real-PR mode the auto-injected value is
         // used directly.
         let mut step = apply_bundle_auth(
-            BashStep::new(
-                "Stage PR-checks execution context (aw-context/pr/checks/*)",
-                script,
-            )
-            .with_condition(condition),
+            script
+                .into_step("Stage PR-checks execution context (aw-context/pr/checks/*)")
+                .with_condition(condition),
             Bundle::ExecContextPrChecks,
             TokenSource::SystemAccessToken,
         );
