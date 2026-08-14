@@ -20,52 +20,13 @@ pub enum WorkItemReference {
     Temporary(WorkItemTemporaryId),
 }
 
-impl<'de> Deserialize<'de> for WorkItemReference {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct WorkItemReferenceVisitor;
-
-        impl serde::de::Visitor<'_> for WorkItemReferenceVisitor {
-            type Value = WorkItemReference;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("a positive work-item ID or #aw_ temporary ID")
-            }
-
-            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
-                Ok(WorkItemReference::Number(value))
-            }
-
-            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                u64::try_from(value)
-                    .map(WorkItemReference::Number)
-                    .map_err(|_| E::custom("work_item_id must be positive"))
-            }
-
-            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                if value.chars().all(|c| c.is_ascii_digit()) {
-                    return value
-                        .parse::<u64>()
-                        .map(WorkItemReference::Number)
-                        .map_err(|_| E::custom("quoted work_item_id is outside the u64 range"));
-                }
-                WorkItemTemporaryId::parse(value)
-                    .map(WorkItemReference::Temporary)
-                    .map_err(E::custom)
-            }
-        }
-
-        deserializer.deserialize_any(WorkItemReferenceVisitor)
-    }
-}
+impl_temporary_reference_deserialize!(
+    WorkItemReference,
+    WorkItemTemporaryId,
+    expecting = "a positive work-item ID or #aw_ temporary ID",
+    negative = "work_item_id must be positive",
+    quoted_out_of_range = "quoted work_item_id is outside the u64 range",
+);
 
 #[derive(Deserialize, JsonSchema)]
 pub struct AssignWorkItemParams {

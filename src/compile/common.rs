@@ -2081,21 +2081,45 @@ pub fn validate_ado_aw_debug_config(front_matter: &FrontMatter) -> Result<()> {
     Ok(())
 }
 
+fn require_same_approval_lane(
+    front_matter: &FrontMatter,
+    producer: &str,
+    consumer: &str,
+) -> Result<()> {
+    let producer_reviewed = front_matter.tool_requires_approval(producer).is_some();
+    let consumer_reviewed = front_matter.tool_requires_approval(consumer).is_some();
+    if producer_reviewed == consumer_reviewed {
+        return Ok(());
+    }
+    match producer {
+        "create-github-issue" => anyhow::bail!(
+            "safe-outputs.create-github-issue and safe-outputs.{consumer} must use the same \
+             effective require-approval value when {consumer} accepts temporary issue IDs"
+        ),
+        "create-work-item" => anyhow::bail!(
+            "safe-outputs.create-work-item and safe-outputs.{consumer} must have the same \
+             effective require-approval setting so temporary work-item IDs remain in one \
+             SafeOutputs job"
+        ),
+        _ => anyhow::bail!(
+            "safe-outputs.{producer} and safe-outputs.{consumer} must have the same effective \
+             require-approval setting"
+        ),
+    }
+}
+
 pub fn validate_github_issue_outputs_config(front_matter: &FrontMatter) -> Result<()> {
     let github_tools = front_matter.github_issue_tool_names();
     if front_matter
         .safe_outputs
         .contains_key("create-github-issue")
     {
-        let create_reviewed = front_matter
-            .tool_requires_approval("create-github-issue")
-            .is_some();
         for consumer in crate::compile::types::GITHUB_TEMPORARY_ID_CONSUMERS {
             if front_matter.safe_outputs.contains_key(*consumer) {
-                crate::safe_outputs::validate_temporary_id_approval_compatibility(
+                require_same_approval_lane(
+                    front_matter,
+                    "create-github-issue",
                     consumer,
-                    create_reviewed,
-                    front_matter.tool_requires_approval(consumer).is_some(),
                 )?;
             }
         }
@@ -2281,19 +2305,7 @@ pub fn validate_work_item_assignment_outputs_config(front_matter: &FrontMatter) 
     if front_matter.safe_outputs.contains_key("create-work-item")
         && front_matter.safe_outputs.contains_key("assign-work-item")
     {
-        let create_reviewed = front_matter
-            .tool_requires_approval("create-work-item")
-            .is_some();
-        let assign_reviewed = front_matter
-            .tool_requires_approval("assign-work-item")
-            .is_some();
-        if create_reviewed != assign_reviewed {
-            anyhow::bail!(
-                "safe-outputs.create-work-item and safe-outputs.assign-work-item must have the \
-                 same effective require-approval setting so temporary work-item IDs remain in \
-                 one SafeOutputs job"
-            );
-        }
+        require_same_approval_lane(front_matter, "create-work-item", "assign-work-item")?;
     }
 
     Ok(())

@@ -59,6 +59,22 @@ pub struct ResolvedWorkItem {
     pub url: String,
 }
 
+fn register_resolved_reference<T>(
+    registry: &Mutex<HashMap<String, T>>,
+    id: String,
+    value: T,
+    lock_error: &'static str,
+) -> anyhow::Result<()> {
+    let mut registry = registry
+        .lock()
+        .map_err(|_| anyhow::anyhow!(lock_error))?;
+    if registry.contains_key(&id) {
+        anyhow::bail!("temporary_id '{id}' was already used in this run");
+    }
+    registry.insert(id, value);
+    Ok(())
+}
+
 /// Context provided to executors during Stage 3 execution
 #[derive(Debug, Clone)]
 pub struct ExecutionContext {
@@ -263,16 +279,12 @@ impl ExecutionContext {
         temporary_id: &GithubTemporaryId,
         issue: ResolvedGithubIssue,
     ) -> anyhow::Result<()> {
-        let id = temporary_id.canonical();
-        let mut issues = self
-            .resolved_github_issues
-            .lock()
-            .map_err(|_| anyhow::anyhow!("temporary GitHub issue map lock poisoned"))?;
-        if issues.contains_key(&id) {
-            anyhow::bail!("temporary_id '{id}' was already used in this run");
-        }
-        issues.insert(id, issue);
-        Ok(())
+        register_resolved_reference(
+            &self.resolved_github_issues,
+            temporary_id.canonical(),
+            issue,
+            "temporary GitHub issue map lock poisoned",
+        )
     }
 
     pub fn resolve_github_issue(
@@ -302,16 +314,12 @@ impl ExecutionContext {
         temporary_id: &WorkItemTemporaryId,
         work_item: ResolvedWorkItem,
     ) -> anyhow::Result<()> {
-        let id = temporary_id.canonical();
-        let mut work_items = self
-            .resolved_work_items
-            .lock()
-            .map_err(|_| anyhow::anyhow!("temporary work-item map lock poisoned"))?;
-        if work_items.contains_key(&id) {
-            anyhow::bail!("temporary_id '{id}' was already used in this run");
-        }
-        work_items.insert(id, work_item);
-        Ok(())
+        register_resolved_reference(
+            &self.resolved_work_items,
+            temporary_id.canonical(),
+            work_item,
+            "temporary work-item map lock poisoned",
+        )
     }
 
     pub fn resolve_work_item(

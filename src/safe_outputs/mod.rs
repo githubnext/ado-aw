@@ -470,6 +470,66 @@ pub(crate) fn name_matches_pattern(name: &str, pattern: &str) -> bool {
 /// Re-export of the canonical git ref-name validator (now in [`crate::validate`]).
 pub(crate) use crate::validate::validate_git_ref_name;
 
+macro_rules! impl_temporary_reference_deserialize {
+    (
+        $reference:ident,
+        $temporary:ty,
+        expecting = $expecting:literal,
+        negative = $negative:literal,
+        quoted_out_of_range = $quoted_out_of_range:literal $(,)?
+    ) => {
+        impl<'de> serde::Deserialize<'de> for $reference {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct TemporaryReferenceVisitor;
+
+                impl serde::de::Visitor<'_> for TemporaryReferenceVisitor {
+                    type Value = $reference;
+
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        formatter.write_str($expecting)
+                    }
+
+                    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+                        Ok($reference::Number(value))
+                    }
+
+                    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        u64::try_from(value)
+                            .map($reference::Number)
+                            .map_err(|_| E::custom($negative))
+                    }
+
+                    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        if value.chars().all(|character| character.is_ascii_digit()) {
+                            return value
+                                .parse::<u64>()
+                                .map($reference::Number)
+                                .map_err(|_| E::custom($quoted_out_of_range));
+                        }
+                        <$temporary>::parse(value)
+                            .map($reference::Temporary)
+                            .map_err(E::custom)
+                    }
+                }
+
+                deserializer.deserialize_any(TemporaryReferenceVisitor)
+            }
+        }
+    };
+}
+
 mod add_build_tag;
 mod add_github_issue_labels;
 mod add_pr_comment;
