@@ -21,13 +21,14 @@ use crate::safe_outputs::{
     NoopResult, PIPELINE_ARTIFACT_DEFAULT_MAX_FILE_SIZE, QueueBuildParams, QueueBuildResult,
     ReplyToPrCommentParams, ReplyToPrCommentResult, ReportIncompleteParams, ReportIncompleteResult,
     ResolvePrThreadParams, ResolvePrThreadResult, SetGithubIssueTypeParams, SetGithubIssueTypeResult,
-    SubmitPrReviewParams, SubmitPrReviewResult, ToolResult, UpdatePrParams, UpdatePrResult,
+    SubmitPrReviewParams, SubmitPrReviewResult, ToolResult, UpdatePrParams, UpdatePrResult, Validate,
     UpdateWikiPageParams, UpdateWikiPageResult, UpdateWorkItemParams, UpdateWorkItemResult,
     UploadBuildAttachmentParams,
     UploadBuildAttachmentResult, UploadPipelineArtifactParams, UploadPipelineArtifactResult,
     UploadWorkitemAttachmentParams, UploadWorkitemAttachmentResult, anyhow_to_mcp_error,
 };
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
+use crate::secure::WorkItemTemporaryId;
 
 /// Sanitize a title into a safe branch name slug.
 /// Only allows alphanumeric characters and dashes, collapses multiple dashes,
@@ -209,6 +210,8 @@ pub struct SafeOutputs {
     tool_router: ToolRouter<Self>,
     /// Serializes custom-tool budget inspection and proposal append.
     custom_proposal_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes create-work-item temporary-ID allocation and proposal append.
+    create_work_item_proposal_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Resolve which git directory to use for patch generation.
@@ -496,6 +499,45 @@ impl SafeOutputs {
         Ok(true)
     }
 
+    async fn write_create_work_item_proposal(
+        &self,
+        params: CreateWorkItemParams,
+    ) -> Result<WorkItemTemporaryId, McpError> {
+        const MAX_ID_ATTEMPTS: usize = 16;
+
+        params.validate().map_err(anyhow_to_mcp_error)?;
+        let _guard = self.create_work_item_proposal_lock.lock().await;
+        let existing = self
+            .read_safe_output_file()
+            .await
+            .map_err(anyhow_to_mcp_error)?;
+
+        let temporary_id = (0..MAX_ID_ATTEMPTS)
+            .find_map(|_| {
+                let candidate =
+                    WorkItemTemporaryId::parse(format!("#aw_{}", generate_short_id())).ok()?;
+                let canonical = candidate.canonical();
+                let collision = existing.iter().any(|proposal| {
+                    proposal.get("name").and_then(Value::as_str)
+                        == Some(CreateWorkItemResult::NAME)
+                        && proposal.get("temporary_id").and_then(Value::as_str)
+                            == Some(canonical.as_str())
+                });
+                (!collision).then_some(candidate)
+            })
+            .ok_or_else(|| {
+                anyhow_to_mcp_error(anyhow::anyhow!(
+                    "Failed to allocate a unique create-work-item temporary ID"
+                ))
+            })?;
+
+        let result: CreateWorkItemResult = (params, temporary_id.clone()).try_into()?;
+        self.write_safe_output_file(&result)
+            .await
+            .map_err(anyhow_to_mcp_error)?;
+        Ok(temporary_id)
+    }
+
     #[cfg(test)]
     async fn new(
         bounding_directory: impl Into<PathBuf>,
@@ -575,6 +617,7 @@ impl SafeOutputs {
             output_directory: output_dir,
             tool_router,
             custom_proposal_lock: Arc::new(tokio::sync::Mutex::new(())),
+            create_work_item_proposal_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -740,7 +783,8 @@ impl SafeOutputs {
 
     #[tool(
         name = "create-work-item",
-        description = "Create an azure devops work item"
+        description = "Create an Azure DevOps work item. Returns a generated temporary_id that \
+can be passed as work_item_id to later safe outputs such as assign-work-item."
     )]
     async fn create_work_item(
         &self,
@@ -752,10 +796,16 @@ impl SafeOutputs {
         let mut sanitized = params.0;
         sanitized.title = sanitize_text(&sanitized.title);
         sanitized.description = sanitize_text(&sanitized.description);
-        let result: CreateWorkItemResult = sanitized.try_into()?;
-        let _ = self.write_safe_output_file(&result).await;
-        info!("Work item queued for creation");
-        Ok(CallToolResult::success(vec![]))
+        let temporary_id = self.write_create_work_item_proposal(sanitized).await?;
+        let canonical = temporary_id.canonical();
+        info!("Work item queued for creation as {}", canonical);
+        let mut response = CallToolResult::success(vec![Content::text(format!(
+            "Work item queued for creation. Use temporary ID {canonical} as work_item_id in later safe-output calls."
+        ))]);
+        response.structured_content = Some(serde_json::json!({
+            "temporary_id": canonical,
+        }));
+        Ok(response)
     }
 
     #[tool(
@@ -1630,6 +1680,16 @@ mod tests {
         (safe_outputs, temp_dir)
     }
 
+    fn valid_create_work_item_params(suffix: &str) -> CreateWorkItemParams {
+        CreateWorkItemParams {
+            title: format!("Create work item {suffix}"),
+            description: format!(
+                "A detailed work-item description for proposal {suffix} that is long enough."
+            ),
+            tags: Vec::new(),
+        }
+    }
+
     #[test]
     fn test_resolve_git_dir_for_patch_uses_explicit_self_checkout() {
         let root = tempdir().unwrap();
@@ -1804,6 +1864,72 @@ mod tests {
         assert_eq!(contents.len(), 2);
         assert_eq!(contents[0]["context"], "first");
         assert_eq!(contents[1]["context"], "second");
+    }
+
+    #[tokio::test]
+    async fn create_work_item_returns_and_persists_generated_temporary_id() {
+        let (safe_outputs, _temp_dir) = create_test_safe_outputs().await;
+
+        let response = safe_outputs
+            .create_work_item(Parameters(valid_create_work_item_params("one")))
+            .await
+            .unwrap();
+        let structured = response.structured_content.expect("structured response");
+        let temporary_id = structured["temporary_id"].as_str().unwrap();
+        assert!(WorkItemTemporaryId::parse(temporary_id).is_ok());
+        assert!(
+            serde_json::to_string(&response.content)
+                .unwrap()
+                .contains(temporary_id)
+        );
+
+        let proposals = safe_outputs.read_safe_output_file().await.unwrap();
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0]["name"], "create-work-item");
+        assert_eq!(proposals[0]["temporary_id"], temporary_id);
+    }
+
+    #[tokio::test]
+    async fn concurrent_create_work_item_calls_generate_distinct_ids() {
+        let (safe_outputs, _temp_dir) = create_test_safe_outputs().await;
+        let first = safe_outputs.clone();
+        let second = safe_outputs.clone();
+
+        let (first_response, second_response) = tokio::join!(
+            first.create_work_item(Parameters(valid_create_work_item_params("one"))),
+            second.create_work_item(Parameters(valid_create_work_item_params("two"))),
+        );
+        let first_id = first_response.unwrap().structured_content.unwrap()["temporary_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let second_id = second_response.unwrap().structured_content.unwrap()["temporary_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(first_id, second_id);
+
+        let proposals = safe_outputs.read_safe_output_file().await.unwrap();
+        assert_eq!(proposals.len(), 2);
+        let persisted: std::collections::HashSet<_> = proposals
+            .iter()
+            .filter_map(|proposal| proposal["temporary_id"].as_str())
+            .collect();
+        assert!(persisted.contains(first_id.as_str()));
+        assert!(persisted.contains(second_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn create_work_item_does_not_return_id_when_proposal_cannot_persist() {
+        let (safe_outputs, _temp_dir) = create_test_safe_outputs().await;
+        let path = safe_outputs.safe_output_path();
+        tokio::fs::remove_file(&path).await.unwrap();
+        tokio::fs::create_dir(&path).await.unwrap();
+
+        let result = safe_outputs
+            .create_work_item(Parameters(valid_create_work_item_params("failure")))
+            .await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -2247,6 +2373,23 @@ safe-outputs:
         let properties = schema["properties"].as_object().unwrap();
         assert!(properties.contains_key("work_item_id"));
         assert!(properties.contains_key("assignee"));
+    }
+
+    #[tokio::test]
+    async fn test_create_work_item_schema_does_not_accept_temporary_id() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let enabled = vec!["create-work-item".to_string()];
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled), None)
+            .await
+            .unwrap();
+        let tools = so.tool_router.list_all();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == "create-work-item")
+            .expect("create-work-item should be enabled");
+        let schema = serde_json::to_value(&tool.input_schema).unwrap();
+        let properties = schema["properties"].as_object().unwrap();
+        assert!(!properties.contains_key("temporary_id"));
     }
 
     #[tokio::test]

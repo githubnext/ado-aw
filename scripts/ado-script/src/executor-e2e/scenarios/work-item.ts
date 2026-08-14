@@ -101,10 +101,11 @@ export const assignWorkItemTemporaryIdHandoff: Scenario<{
       config: {
         "work-item-type": WORK_ITEM_TYPE,
         "include-stats": false,
-        "require-temporary-id": true,
         max: 1,
       },
       entry: {
+        // The deterministic harness bypasses MCP, so this emulates the
+        // MCP-generated field persisted in the internal NDJSON proposal.
         title: state.title,
         description: detBody(ctx, "assign-work-item-temporary-id-handoff"),
         tags: [],

@@ -105,7 +105,6 @@ safe-outputs:                  # optional per-tool configuration for safe output
   staged: false               # cooperative preview default; per-tool override supported
   create-work-item:
     work-item-type: Task
-    require-temporary-id: true
     tags:
       - automated
       - agent-created

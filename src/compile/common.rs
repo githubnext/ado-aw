@@ -2159,6 +2159,18 @@ pub fn validate_github_issue_outputs_config(front_matter: &FrontMatter) -> Resul
 }
 
 pub fn validate_work_item_assignment_outputs_config(front_matter: &FrontMatter) -> Result<()> {
+    if front_matter
+        .safe_outputs
+        .get("create-work-item")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|config| config.contains_key("require-temporary-id"))
+    {
+        anyhow::bail!(
+            "safe-outputs.create-work-item.require-temporary-id is not supported; \
+             create-work-item always generates and returns a temporary ID"
+        );
+    }
+
     if let Some(config) = front_matter.create_work_item_config()?
         && let Some(assignee) = config.assignee.as_deref()
     {
@@ -5600,8 +5612,7 @@ name: test
 description: test
 safe-outputs:
   require-approval: true
-  create-work-item:
-    require-temporary-id: true
+  create-work-item: {}
   assign-work-item:
     target: "*"
     allowed: [owner@example.com]
@@ -5610,6 +5621,23 @@ safe-outputs:
 "#;
         let (fm, _) = parse_markdown(yaml).unwrap();
         assert!(validate_work_item_assignment_outputs_config(&fm).is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_create_work_item_require_temporary_id() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  create-work-item:
+    require-temporary-id: true
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let error = validate_work_item_assignment_outputs_config(&fm)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("always generates and returns a temporary ID"));
     }
 
     #[test]

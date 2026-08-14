@@ -385,8 +385,7 @@ mod tests {
         tool_configs.insert(
             "create-work-item".to_string(),
             serde_json::json!({
-                "include-stats": false,
-                "require-temporary-id": true
+                "include-stats": false
             }),
         );
         tool_configs.insert(
@@ -404,14 +403,16 @@ mod tests {
         };
 
         let temporary_id = WorkItemTemporaryId::parse("#aw_task1").unwrap();
-        let mut create: CreateWorkItemResult = CreateWorkItemParams {
-            title: "Create a real task".to_string(),
-            description: "A detailed work-item description that is long enough.".to_string(),
-            tags: Vec::new(),
-            temporary_id: Some(temporary_id.clone()),
-        }
-        .try_into()
-        .unwrap();
+        let mut create: CreateWorkItemResult = (
+            CreateWorkItemParams {
+                title: "Create a real task".to_string(),
+                description: "A detailed work-item description that is long enough.".to_string(),
+                tags: Vec::new(),
+            },
+            temporary_id.clone(),
+        )
+            .try_into()
+            .unwrap();
         let created = create.execute_sanitized(&ctx).await.unwrap();
         assert!(created.success, "create failed: {}", created.message);
         assert_eq!(

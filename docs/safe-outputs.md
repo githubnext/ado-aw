@@ -13,7 +13,6 @@ safe-outputs:
     tags:
       - automated
       - agent-created
-    require-temporary-id: true
   assign-work-item:
     target: "*"
     allowed: ["user@example.com"]
@@ -643,14 +642,16 @@ Creates an Azure DevOps work item.
 - `title` - A concise title for the work item (required, must be more than 5 characters)
 - `description` - Work item description in markdown format (required, must be more than 30 characters)
 - `tags` - Tags to apply to the work item (optional list; each tag must not contain a semicolon). May be subject to the `allowed-tags` allowlist. Merged with any static `tags` configured in front matter.
-- `temporary_id` - Optional gh-aw-compatible `#aw_...` identifier for later safe outputs in the same run.
+
+On success, the MCP tool returns a generated gh-aw-compatible `#aw_...`
+`temporary_id` in both structured output and its text response. Agents do not
+choose this ID; they use the returned value in later safe-output calls.
 
 **Configuration options (front matter):**
 - `work-item-type` - Work item type (default: "Task")
 - `area-path` - Area path for the work item
 - `iteration-path` - Iteration path for the work item
 - `assignee` - Static user to assign (email, UPN, or display name). When omitted, the work item is created unassigned.
-- `require-temporary-id` - Require every proposal to include `temporary_id` (default: `false`).
 - `tags` - Static list of tags always applied to the work item (regardless of agent input)
 - `allowed-tags` - Allowlist of tags the agent is permitted to use via the `tags` parameter. If empty, any agent-provided tags are accepted. Supports `*` wildcards anywhere in the pattern (e.g., `"agent-*"` matches `"agent-created"`; `"copilot:repo=org/project/*@main"` matches any repo name).
 - `custom-fields` - Map of custom field reference names to values (e.g., `Custom.MyField: "value"`)
@@ -669,8 +670,7 @@ Assigns one Azure DevOps identity to a work item. Use this separately from
 ```yaml
 safe-outputs:
   require-approval: true
-  create-work-item:
-    require-temporary-id: true
+  create-work-item: {}
   assign-work-item:
     target: "*"
     allowed: [alice@example.com, bob@example.com]
@@ -678,11 +678,13 @@ safe-outputs:
     max: 3
 ```
 
-The agent can create and then assign an item in proposal order:
+The agent can create and then assign an item in proposal order. The first tool
+call returns the temporary ID used by the second:
 
 ```json
-{"title":"Investigate build failure","description":"Detailed failure report long enough for validation.","temporary_id":"#aw_bug1"}
-{"work_item_id":"#aw_bug1","assignee":"alice@example.com"}
+{"title":"Investigate build failure","description":"Detailed failure report long enough for validation."}
+{"temporary_id":"#aw_a1b2c3d4"}
+{"work_item_id":"#aw_a1b2c3d4","assignee":"alice@example.com"}
 ```
 
 **Agent parameters:**

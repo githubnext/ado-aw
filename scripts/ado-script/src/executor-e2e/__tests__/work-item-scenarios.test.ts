@@ -67,7 +67,6 @@ describe("assign-work-item temporary-ID handoff", () => {
     expect(prior).toEqual([
       expect.objectContaining({
         tool: "create-work-item",
-        config: expect.objectContaining({ "require-temporary-id": true }),
         entry: expect.objectContaining({ temporary_id: "#aw_wiassign" }),
       }),
     ]);

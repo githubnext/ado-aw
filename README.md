@@ -624,7 +624,6 @@ safe-outputs:
   create-work-item:
     work-item-type: Bug
     area-path: "MyProject\\MyTeam"
-    require-temporary-id: true
     tags:
       - agent-created
       - needs-triage
@@ -634,8 +633,9 @@ safe-outputs:
 ```
 
 An omitted static `create-work-item.assignee` creates the item unassigned.
-Agents can use a `#aw_...` temporary ID to create and then assign the item with
-`assign-work-item`. `Agency` and `GitHub Copilot` are never assignable.
+The `create-work-item` MCP tool always returns a generated `#aw_...` temporary
+ID; agents can pass that ID to `assign-work-item`. `Agency` and
+`GitHub Copilot` are never assignable.
 
 ### Example: GitHub Issue Configuration
 
