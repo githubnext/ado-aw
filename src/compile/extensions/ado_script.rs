@@ -650,9 +650,12 @@ pub(crate) fn install_and_download_steps_typed(
 /// (or shell-escape) before adding any user-influenced variable.
 const PROMPT_ADO_VARS: &[&str] = &[
     "Build.BuildId",
+    "Build.Repository.ID",
     "Build.Repository.Name",
     "Build.SourcesDirectory",
     "System.CollectionUri",
+    "System.TeamProject",
+    "System.TeamProjectId",
 ];
 
 /// The resolver step that expands runtime import markers in the agent prompt.
@@ -1998,8 +2001,8 @@ mod tests {
         assert!(
             resolver
                 .script
-                .contains("--var \"Build.BuildId=$(Build.BuildId)\""),
-            "resolver step must pass Build.BuildId as a --var, got: {}",
+                .contains("--var \"Build.Repository.ID=$(Build.Repository.ID)\""),
+            "resolver step must pass Build.Repository.ID as a --var, got: {}",
             resolver.script
         );
         assert!(
@@ -2028,6 +2031,20 @@ mod tests {
                 .script
                 .contains("--var \"System.CollectionUri=$(System.CollectionUri)\""),
             "resolver step must pass System.CollectionUri as a --var, got: {}",
+            resolver.script
+        );
+        assert!(
+            resolver
+                .script
+                .contains("--var \"System.TeamProject=$(System.TeamProject)\""),
+            "resolver step must pass System.TeamProject as a --var, got: {}",
+            resolver.script
+        );
+        assert!(
+            resolver
+                .script
+                .contains("--var \"System.TeamProjectId=$(System.TeamProjectId)\""),
+            "resolver step must pass System.TeamProjectId as a --var, got: {}",
             resolver.script
         );
     }
