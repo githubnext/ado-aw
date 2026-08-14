@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.50.0](https://github.com/githubnext/ado-aw/compare/v0.49.0...v0.50.0) (2026-08-14)
+
+
+### Features
+
+* **safe-outputs:** add explicit work item assignment ([#1901](https://github.com/githubnext/ado-aw/issues/1901)) ([65900b7](https://github.com/githubnext/ado-aw/commit/65900b73d6fb163fb6e4d1c161357daf1c112055))
+* **safeoutputs:** add GitHub issue mutation family ([#1881](https://github.com/githubnext/ado-aw/issues/1881)) ([c5f1982](https://github.com/githubnext/ado-aw/commit/c5f1982493d84c4556fa5510f79254e1684c5af4))
+* **tools:** allow Azure DevOps MCP version override ([#1843](https://github.com/githubnext/ado-aw/issues/1843)) ([a7247b3](https://github.com/githubnext/ado-aw/commit/a7247b35c9ef10ac838c8ad8be62772a64443893))
+
+
+### Bug Fixes
+
+* **tests:** make enable dry-run test hermetic ([#1848](https://github.com/githubnext/ado-aw/issues/1848)) ([679d1c6](https://github.com/githubnext/ado-aw/commit/679d1c6f1be391dbdf285e6953cbece371c24bdb))
+* **workflows:** stage Copilot CLI in agentic runs ([#1908](https://github.com/githubnext/ado-aw/issues/1908)) ([4a36dbc](https://github.com/githubnext/ado-aw/commit/4a36dbc43234fd13e3bf840cd264dfa669894e68))
+
 ## [0.49.0](https://github.com/githubnext/ado-aw/compare/v0.48.0...v0.49.0) (2026-08-06)
 
 
