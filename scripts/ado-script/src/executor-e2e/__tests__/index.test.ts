@@ -36,6 +36,17 @@ describe("scenario registry", () => {
       "set-github-issue-type",
       "set-github-issue-type-clear",
       "create-github-issue-temporary-id-handoff",
+      "comment-on-github-issue",
+      "hide-github-issue-comment",
+      "add-github-issue-labels",
+      "remove-github-issue-labels",
+      "close-github-issue",
+      "update-github-issue",
+      "set-github-issue-field",
+      "assign-github-issue-milestone",
+      "assign-github-issue-to-user",
+      "unassign-github-issue-from-user",
+      "link-github-sub-issue",
     ]) {
       expect(ids).toContain(id);
     }

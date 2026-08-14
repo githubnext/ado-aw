@@ -466,7 +466,7 @@ impl Executor for UpdateWorkItemResult {
             .as_ref()
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
 
-        let config: UpdateWorkItemConfig = ctx.get_tool_config("update-work-item");
+        let config: UpdateWorkItemConfig = ctx.get_tool_config("update-work-item")?;
         debug!(
             "Config: status={}, title={}, body={}, markdown_body={}, target={:?}, title_prefix={:?}, tag_prefix={:?}",
             config.status,
@@ -1148,5 +1148,4 @@ allowed-tags:
             exec_result.message
         );
     }
-
 }

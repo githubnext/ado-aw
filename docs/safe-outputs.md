@@ -421,10 +421,11 @@ provided by Azure Pipelines. Custom component code is trusted privileged code.
 
 ## GitHub issue safe outputs
 
-`create-github-issue` and `set-github-issue-type` call GitHub only from Stage 3, after threat
-detection. The GitHub write credential is never exposed to Agent or Detection.
-The MCP routes are configured-only: GitHub auth by itself does not expose them
-to the agent; each tool appears only when its own front-matter key is present.
+The GitHub-qualified safe outputs call GitHub only from Stage 3, after threat
+detection and any configured manual review. The GitHub write credential is
+never exposed to Agent or Detection. All thirteen routes are
+**configured-only**: authentication alone exposes no GitHub mutation tool; each
+tool appears only when its exact front-matter key is present.
 
 ### Authentication
 
@@ -443,8 +444,10 @@ Set it with:
 ado-aw secrets set ADO_AW_GITHUB_TOKEN <fine-grained-token>
 ```
 
-The token needs **Issues: read and write** on the target repository. To use a
-differently named secret, provide exactly one ADO macro:
+The PAT needs read/write access for every enabled capability: **Issues** for
+issues, **Pull requests** when a tool permits PR targets, and **Discussions**
+when comment minimization permits discussion comments. To use a differently
+named secret, provide exactly one ADO macro:
 
 ```yaml
 safe-outputs:
@@ -485,8 +488,10 @@ safe-outputs:
 ```
 
 Agent and Detection each mint their own explicitly read-only token. SafeOutputs
-mints a separate token scoped to the configured target repository with only
-`issues: write`, then revokes it after execution. Shared credentials are
+mints a separate token scoped to the repositories used by that execution job,
+requests only the required `issues: write`, `pull-requests: write`, and/or
+`discussions: write` permissions, then revokes it after execution. Automatic
+and reviewed jobs derive permissions independently. Shared credentials are
 rejected when the engine permission map is absent or contains a repository
 `write` permission.
 
@@ -512,11 +517,42 @@ variable; it is not the PEM value or a `$(...)` macro. SafeOutputs derives the
 minimum permission request, so arbitrary `github-app.permissions` overrides are
 not accepted here. `github-app` and `github-token` are mutually exclusive.
 
-### Target repository
+### Repository selection
 
-`target-repo` is operator-controlled. It may be omitted only when the ADO build
-source provider is GitHub and `BUILD_REPOSITORY_NAME` is an `owner/repo` slug.
-Azure Repos workflows must set it explicitly.
+Every tool accepts operator-controlled `target-repo` and `allowed-repos`.
+Agent parameters accept optional `repository` where selection is meaningful.
+
+1. An explicit agent `repository` must exactly equal `target-repo` or an entry
+   in `allowed-repos`.
+2. Without an agent selection, `target-repo` is used.
+3. Without either, ado-aw uses `BUILD_REPOSITORY_NAME` only for a GitHub or
+   GitHub Enterprise source build whose name is a valid `owner/repo` slug.
+
+Azure Repos workflows must therefore configure `target-repo`. Repository globs,
+wildcards, and ADO runtime expressions are rejected; `allowed-repos` is an
+exact operator allowlist. PAT auth may target repositories owned by different
+accounts. GitHub App auth requires `target-repo` and every `allowed-repos`
+entry to share one owner because one installation token is minted per job.
+
+`create-github-issue` supports repository selection but has no
+`required-labels` or `required-title-prefix` filter because no target object
+exists yet.
+
+### Mutation filters
+
+Existing-object tools support these shared fail-closed filters:
+
+| Field | Behavior |
+|---|---|
+| `required-labels` | The current target must have **all** listed labels before the first write. |
+| `required-title-prefix` | The current title must start with this exact value before the first write. |
+| `issues` | Permit issue targets (default `true` where the tool has an issue/PR switch). |
+| `pull-requests` | Permit pull-request targets. Defaults to `false` for `comment-on-github-issue` and `add-github-issue-labels`, but `true` for `update-github-issue`; requests `pull-requests: write`. |
+| `discussions` | Permit discussion comments where supported (default `false`; requests `discussions: write`). |
+
+Multi-call operations preflight repository policy, filters, capability
+switches, and requested values before writing, so a denied later value cannot
+leave a partial mutation.
 
 ### Temporary IDs and approval
 
@@ -530,12 +566,16 @@ its real number exists:
 
 The ID format is `#aw_` plus 3-12 ASCII alphanumeric/underscore characters;
 the leading `#` is optional. `create-github-issue` must run first and succeed.
-Duplicate, unresolved, cross-repository, or reversed references fail before an
-API call.
+Every tool whose `issue_number` parameter accepts a number also accepts a
+same-run temporary ID. The ID retains the repository selected at creation; an
+explicit `repository` on a consumer must match it. Duplicate, unresolved,
+cross-repository, or reversed references fail before an API call.
 
-When both tools are configured, they must have the same effective
-`require-approval` setting so they execute in the same SafeOutputs job. A
-section-level gate is the simplest form:
+`create-github-issue` and **every configured temporary-ID consumer** must have
+the same effective `require-approval` setting so they execute in the same
+SafeOutputs process and share the in-memory ID map. Mixing automatic and
+reviewed groups is rejected at compile time. A section-level gate is the
+simplest form:
 
 ```yaml
 safe-outputs:
@@ -547,6 +587,27 @@ safe-outputs:
     target-repo: octo-org/octo-repo
 ```
 
+The `ado-aw-safe-outputs` build-summary tab shows each proposal using the exact
+tool name, repository, target IDs, requested state, labels/users/field values,
+and a sanitized body excerpt. Reviewed GitHub proposals are grouped under
+**Pending approval**; non-gated proposals remain under **Automatic**.
+
+### REST, GraphQL, and GitHub Enterprise
+
+Most mutations use GitHub REST. `hide-github-issue-comment`,
+`close-github-issue` with `duplicate_of`, `set-github-issue-field`, and
+`link-github-sub-issue` require GraphQL; `comment-on-github-issue` also uses
+GraphQL when `hide-older-comments` is enabled. Numeric REST comment IDs are
+resolved to GraphQL node IDs before minimization.
+
+For PAT auth, `github-api-url` selects the REST base. For App auth, use
+`github-app.api-url`. ado-aw derives the corresponding GitHub.com or GHES
+GraphQL endpoint. GitHub Enterprise availability depends on the server version
+and enabled product features, especially issue fields, duplicate marking,
+comment minimization, and sub-issues. Unsupported REST/GraphQL operations fail
+the safe output with the sanitized API status/message; requested mutations are
+never silently skipped.
+
 ## Available Safe Output Tools
 
 ### create-github-issue
@@ -557,6 +618,7 @@ Creates a GitHub issue.
 safe-outputs:
   create-github-issue:
     target-repo: octo-org/octo-repo
+    allowed-repos: [octo-org/other-repo]
     title-prefix: "[agent] "
     labels: [automation]
     allowed-labels: ["agent-*", bug]
@@ -567,6 +629,8 @@ safe-outputs:
 
 - `target-repo` *(optional only for GitHub-backed builds)* - fixed
   `owner/repo` target.
+- `allowed-repos` *(optional, default `[]`)* - exact additional repositories
+  the agent may select with `repository`.
 - `title-prefix` *(optional)* - prepended in Stage 3.
 - `labels` *(optional)* - static labels always applied.
 - `allowed-labels` *(optional)* - allowlist for agent labels. Empty/absent is
@@ -577,7 +641,8 @@ safe-outputs:
 - `max` *(optional, default `1`)* - per-run creation budget.
 
 Agent parameters are `title`, `body`, optional `labels`, optional `assignees`,
-and optional `temporary_id`.
+optional `temporary_id`, and optional `repository`. The body receives the
+stable ado-aw trace footer.
 
 ### set-github-issue-type
 
@@ -604,7 +669,127 @@ safe-outputs:
 - `max` *(optional, default `5`)* - per-run update budget.
 
 Agent parameters are required `issue_number` (positive number or temporary ID)
-and required `issue_type`. Pass `""` to clear the type.
+and required `issue_type`, plus optional `repository`. Pass `""` to clear the
+type. This tool also accepts the shared repository and mutation-filter fields.
+
+### GitHub mutation tool matrix
+
+Every row accepts `max`, `require-approval`, `target-repo`, `allowed-repos`,
+`required-labels`, and `required-title-prefix` unless noted otherwise. Agent
+JSON uses the snake_case parameter names below.
+
+| Tool | Agent parameters | Tool-specific configuration | Default `max` |
+|---|---|---|---:|
+| `comment-on-github-issue` | `issue_number`, `body`, optional `repository` | `hide-older-comments`, `allowed-reasons`, `issues`, `pull-requests`, `footer` | 1 |
+| `hide-github-issue-comment` | `comment_id`, optional `reason`, optional `repository` | `allowed-reasons`, `discussions` | 5 |
+| `add-github-issue-labels` | `issue_number`, `labels`, optional `repository` | `allowed`, `blocked`, `issues`, `pull-requests` | 5 |
+| `remove-github-issue-labels` | `issue_number`, `labels`, optional `repository` | `allowed`, `blocked` | 5 |
+| `close-github-issue` | `issue_number`, optional `body`, `state_reason`, `duplicate_of`, `repository` | `state-reason`, `allowed-state-reason`, `allow-body` | 1 |
+| `update-github-issue` | `issue_number`, one or more of `status`/`title`/`body`/`labels`/`assignees`/`milestone`, optional body `operation`, optional `repository` | `status`, `title`, `body`, `labels`, `assignees`, `milestone`, `allowed-labels`, `footer`, `issues`, `pull-requests` | 1 |
+| `set-github-issue-field` | `issue_number`, `value`, exactly one of `field_name`/`field_node_id`, optional `repository` | `allowed-fields` | 5 |
+| `assign-github-issue-milestone` | `issue_number`, exactly one of `milestone_number`/`milestone_title`, optional `repository` | `allowed`, `auto-create` | 1 |
+| `assign-github-issue-to-user` | `issue_number`, `assignee` or `assignees`, optional `repository` | `allowed`, `blocked`, `unassign-first` | 1 |
+| `unassign-github-issue-from-user` | `issue_number`, `assignee` or `assignees`, optional `repository` | `allowed`, `blocked` | 1 |
+| `link-github-sub-issue` | `parent_issue_number`, `sub_issue_number`, optional `repository` | `parent-required-labels`, `parent-title-prefix`, `sub-required-labels`, `sub-title-prefix` | 5 |
+
+#### Comments and comment minimization
+
+`comment-on-github-issue` posts a comment with a stable hidden ado-aw pipeline
+marker and, by default, a trace footer (`footer: false` disables the visible
+footer). `hide-older-comments: true` first minimizes older comments carrying
+the same pipeline marker **and** authored by the authenticated actor. It never
+trusts agent-authored marker text. `allowed-reasons` restricts minimization
+reasons; supported reasons are `SPAM`, `ABUSE`, `OFF_TOPIC`, `OUTDATED`
+(default), `RESOLVED`, and `LOW_QUALITY`.
+
+`hide-github-issue-comment` accepts either a numeric REST comment ID or a
+GraphQL node ID. It resolves the owning issue, PR, or discussion and applies
+repository/filter policy before calling `minimizeComment`. An omitted `reason`
+uses `OUTDATED`.
+
+#### Labels
+
+Both label tools use gh-aw-compatible glob patterns. `blocked` is evaluated
+first and always wins. When `allowed` is omitted, remaining labels are
+unrestricted; an explicit allowlist narrows them. Removal treats a label that
+is already absent as success.
+
+#### Closing and updating
+
+`close-github-issue` defaults to `completed`; the other state reasons are
+`not_planned` and `duplicate`. Configure a fixed `state-reason`, or
+`allowed-state-reason` to let the agent choose from a bounded set.
+`allow-body` defaults to `true`; when false, no closing comment is posted.
+`duplicate_of` is validated against repository policy before any comment or
+close, then creates the native duplicate relationship. Already-closed targets
+are idempotent success.
+
+`update-github-issue` requires at least one of `status`, `title`, `body`,
+`labels`, `assignees`, or `milestone`. Every mutable field is independently
+disabled by default: the operator must set the matching `status`, `title`,
+`body`, `labels`, `assignees`, or `milestone` configuration flag to `true`.
+For example, enabling all fields explicitly looks like:
+
+```yaml
+safe-outputs:
+  update-github-issue:
+    target-repo: octo-org/octo-repo
+    status: true
+    title: true
+    body: true
+    labels: true
+    assignees: true
+    milestone: true
+    allowed-labels: [bug, "agent-*"]
+```
+
+`allowed-labels` additionally bounds replacement labels when non-empty; an
+empty or omitted allowlist permits any label. Both issue and pull-request
+targets are permitted by default (`issues: true` and `pull-requests: true`).
+Set either switch to `false` to restrict the target kind; at least one must
+remain enabled.
+
+Body `operation` modes are:
+
+- `append` *(default)* - add the new content after the current body, separated
+  by a horizontal rule.
+- `prepend` - add the new content before the current body, separated by a
+  horizontal rule.
+- `replace` - replace the entire current body.
+- `replace-island` - replace only the single ado-aw status island for the
+  current pipeline definition; missing, duplicate, or out-of-order markers
+  fail the update.
+
+Body updates include the standard trace footer by default; set `footer: false`
+to omit it. Status is `open` or `closed`. `labels` and `assignees` replace
+their complete existing lists, and `milestone` selects an existing milestone
+by positive number. All requested changes are preflighted before the first
+write.
+
+#### Fields, milestones, and assignees
+
+`set-github-issue-field` rejects built-in fields and limits repository-defined
+fields with `allowed-fields`. It discovers field metadata, then coerces
+single-select, number, date, or text values. Repository/API versions without
+the issue-field GraphQL feature fail explicitly.
+
+`assign-github-issue-milestone` resolves milestones by number or exact title
+with pagination. `allowed` restricts titles. With `auto-create: true`, a
+missing allowed milestone is created before assignment; otherwise the
+assignment fails without creating it.
+
+Assignment tools accept one `assignee` or an `assignees` list, deduplicate
+usernames, and apply `blocked` before `allowed` glob policy. Setting
+`unassign-first: true` clears existing assignees before adding the approved
+set. Removing an already-absent assignee is idempotent success.
+
+#### Sub-issues
+
+`link-github-sub-issue` requires distinct parent and child issues in the same
+repository. Both targets are resolved and checked against their respective
+label/title filters before the GraphQL mutation. An existing parent
+relationship is handled idempotently; a child already linked to a different
+parent fails without changing either issue.
 
 ### comment-on-work-item
 Adds a comment to an existing Azure DevOps work item. This is the ADO equivalent of gh-aw's `add-comment` tool.
