@@ -621,8 +621,8 @@ pub(crate) fn install_and_download_steps_typed(
 
     let download = {
         let mut b = ShellScript::new(&DOWNLOAD_ADO_AW_SCRIPTS_RELEASE)
-            .text("RELEASE_BASE_URL", RELEASE_BASE_URL)
-            .text("VERSION", version)
+            .bind_text("RELEASE_BASE_URL", RELEASE_BASE_URL)
+            .bind_text("VERSION", version)
             .into_step(format!("Download ado-aw scripts (v{version})"))
             .with_condition(Condition::Succeeded);
         b.timeout = Some(std::time::Duration::from_secs(300));
@@ -668,7 +668,7 @@ fn resolver_step_typed() -> Step {
         .collect();
     Step::Bash(
         ShellScript::new(&RESOLVE_RUNTIME_IMPORTS)
-            .text("IMPORT_EVAL_PATH", IMPORT_EVAL_PATH)
+            .bind_text("IMPORT_EVAL_PATH", IMPORT_EVAL_PATH)
             .bind("BASE", Binding::ado_macro("Build.SourcesDirectory"))
             .fragment("var_flags", var_flags)
             .into_step("Resolve runtime imports (agent prompt)")
@@ -755,7 +755,7 @@ pub fn github_app_token_step_typed_for(
         args.push(format!("--permissions-json {}", sh_single_quote(&json)));
     }
     let script = ShellScript::new(&MINT_GITHUB_APP_TOKEN)
-        .text("GITHUB_APP_TOKEN_PATH", GITHUB_APP_TOKEN_PATH)
+        .bind_text("GITHUB_APP_TOKEN_PATH", GITHUB_APP_TOKEN_PATH)
         .fragment("args", args.join(" "))
         .render();
     let step = BashStep::new(display_name, script)
@@ -829,8 +829,8 @@ pub fn prepare_pr_base_step_typed(mode: PreparePrBaseMode, repos: &[PreparePrBas
         })
         .collect();
     let script = ShellScript::new(&PREPARE_PR_BASE)
-        .text("PREPARE_PR_BASE_PATH", PREPARE_PR_BASE_PATH)
-        .text("MODE", mode.as_arg())
+        .bind_text("PREPARE_PR_BASE_PATH", PREPARE_PR_BASE_PATH)
+        .bind_text("MODE", mode.as_arg())
         .fragment("repo_flags", repo_flags.trim_start().to_string())
         .render();
     let step = crate::compile::ado_bundle::apply_bundle_auth(
@@ -879,8 +879,8 @@ pub fn github_app_token_revoke_step_typed_for(
     // the outcome — it would only risk turning a benign revoke hiccup into a
     // timeline error.
     let script = ShellScript::new(&REVOKE_GITHUB_APP_TOKEN)
-        .text("GITHUB_APP_TOKEN_PATH", GITHUB_APP_TOKEN_PATH)
-        .text("API_URL", cfg.api_url.as_deref().unwrap_or(""))
+        .bind_text("GITHUB_APP_TOKEN_PATH", GITHUB_APP_TOKEN_PATH)
+        .bind_text("API_URL", cfg.api_url.as_deref().unwrap_or(""))
         .render();
     let step = BashStep::new(display_name, script)
         .with_condition(Condition::Always)
@@ -903,7 +903,7 @@ pub fn github_app_token_revoke_step_typed_for(
 /// `OutputRef`.
 pub fn synthetic_pr_step_typed(spec_b64: &str) -> Result<BashStep> {
     let script = ShellScript::new(&RESOLVE_SYNTHETIC_PR)
-        .text("BUNDLE", EXEC_CONTEXT_PR_SYNTH_PATH)
+        .bind_text("BUNDLE", EXEC_CONTEXT_PR_SYNTH_PATH)
         .render();
     let condition = Condition::And(vec![
         Condition::Succeeded,

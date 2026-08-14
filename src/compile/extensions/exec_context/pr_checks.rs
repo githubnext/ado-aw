@@ -127,7 +127,7 @@ impl ContextContributor for PrChecksContextContributor {
             (
                 Condition::Succeeded,
                 ShellScript::new(&EXEC_CONTEXT_PR_CHECKS_SYNTH)
-                    .text("BUNDLE", EXEC_CONTEXT_PR_CHECKS_PATH),
+                    .bind_text("BUNDLE", EXEC_CONTEXT_PR_CHECKS_PATH),
             )
         } else {
             (
@@ -136,7 +136,7 @@ impl ContextContributor for PrChecksContextContributor {
                     Expr::Literal("PullRequest".to_string()),
                 )),
                 ShellScript::new(&EXEC_CONTEXT_PR_CHECKS)
-                    .text("BUNDLE", EXEC_CONTEXT_PR_CHECKS_PATH),
+                    .bind_text("BUNDLE", EXEC_CONTEXT_PR_CHECKS_PATH),
             )
         };
 

@@ -174,7 +174,7 @@ impl ContextContributor for WorkitemContextContributor {
             (
                 Condition::Succeeded,
                 ShellScript::new(&EXEC_CONTEXT_WORKITEM_SYNTH)
-                    .text("BUNDLE", EXEC_CONTEXT_WORKITEM_PATH),
+                    .bind_text("BUNDLE", EXEC_CONTEXT_WORKITEM_PATH),
             )
         } else {
             (
@@ -183,7 +183,7 @@ impl ContextContributor for WorkitemContextContributor {
                     Expr::Literal("PullRequest".to_string()),
                 )),
                 ShellScript::new(&EXEC_CONTEXT_WORKITEM)
-                    .text("BUNDLE", EXEC_CONTEXT_WORKITEM_PATH),
+                    .bind_text("BUNDLE", EXEC_CONTEXT_WORKITEM_PATH),
             )
         };
 

@@ -176,12 +176,13 @@ impl ContextContributor for PrContextContributor {
         // Coexists with `prepare_step` until production callers switch.
         let (script, condition) = if self.synthetic_pr_active {
             (
-                ShellScript::new(&EXEC_CONTEXT_PR_SYNTH).text("BUNDLE", EXEC_CONTEXT_PR_PATH),
+                ShellScript::new(&EXEC_CONTEXT_PR_SYNTH)
+                    .bind_text("BUNDLE", EXEC_CONTEXT_PR_PATH),
                 Condition::Succeeded,
             )
         } else {
             (
-                ShellScript::new(&EXEC_CONTEXT_PR).text("BUNDLE", EXEC_CONTEXT_PR_PATH),
+                ShellScript::new(&EXEC_CONTEXT_PR).bind_text("BUNDLE", EXEC_CONTEXT_PR_PATH),
                 succeeded_and(Condition::Eq(
                     Expr::Variable("Build.Reason".to_string()),
                     Expr::Literal("PullRequest".to_string()),

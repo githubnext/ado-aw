@@ -111,7 +111,7 @@ the toolchain. Lean files use the `.lean` extension.\n"
 fn lean_install_bash_step(config: &LeanRuntimeConfig) -> BashStep {
     let toolchain = config.toolchain().unwrap_or("stable");
     ShellScript::new(&INSTALL_LEAN)
-        .text("TOOLCHAIN", toolchain)
+        .bind_text("TOOLCHAIN", toolchain)
         .into_step("Install Lean 4 (elan)")
 }
 

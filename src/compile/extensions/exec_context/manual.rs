@@ -159,7 +159,8 @@ impl ContextContributor for ManualContextContributor {
             return Ok(None);
         }
 
-        let script = ShellScript::new(&EXEC_CONTEXT_MANUAL).text("BUNDLE", EXEC_CONTEXT_MANUAL_PATH);
+        let script = ShellScript::new(&EXEC_CONTEXT_MANUAL)
+            .bind_text("BUNDLE", EXEC_CONTEXT_MANUAL_PATH);
         // BUILD_SOURCESDIRECTORY is auto-injected by ADO, so it is not
         // re-projected. BUILD_REQUESTEDFOR / BUILD_REQUESTEDFOREMAIL are
         // retained (identity vars behind the opt-in email hygiene gate — the

@@ -1323,7 +1323,7 @@ pub fn build_gate_step_typed(
     let pr_synth_active = synthetic_pr_active && matches!(ctx, GateContext::PullRequest);
 
     let script = crate::compile::shell::ShellScript::new(&GATE_EVALUATOR)
-        .text("EVALUATOR_PATH", evaluator_path)
+        .bind_text("EVALUATOR_PATH", evaluator_path)
         .render();
     let mut step = apply_bundle_auth(
         BashStep::new(ctx.display_name(), script)

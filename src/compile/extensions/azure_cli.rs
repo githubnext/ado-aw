@@ -233,8 +233,8 @@ fn install_az_wrapper_step(capabilities: &[Capability]) -> BashStep {
         capabilities,
     );
     ShellScript::new(&INSTALL_AZ_WRAPPER)
-        .text("WRAPPER_DIR", AZ_WRAPPER_DIR)
-        .text("WRAPPER_PATH", AZ_WRAPPER_PATH)
+        .bind_text("WRAPPER_DIR", AZ_WRAPPER_DIR)
+        .bind_text("WRAPPER_PATH", AZ_WRAPPER_PATH)
         .fragment("wrapper", wrapper)
         .into_step("Install az wrapper (ado-proxy)")
         .with_condition(Condition::Ne(
@@ -327,7 +327,7 @@ Requests outside these capabilities or scopes, all writes, and secret-bearing ro
 If your task requires a read outside this list, report it as missing data/tooling and name the exact organization, project, repository, and operation that the front matter would need to grant.\n"
     );
     ShellScript::new(&APPEND_PROXY_POLICY_PROMPT)
-        .text("PROMPT_PATH", AGENT_PROMPT_PATH)
+        .bind_text("PROMPT_PATH", AGENT_PROMPT_PATH)
         .bind("PROMPT", Binding::document(script))
         .into_step("Append ado-proxy policy prompt")
 }
@@ -363,7 +363,7 @@ If a read you need is refused, file a `missing-tool` safe output naming `azure-c
     );
 
     ShellScript::new(&APPEND_AZURE_CLI_PROMPT)
-        .text("PROMPT_PATH", AGENT_PROMPT_PATH)
+        .bind_text("PROMPT_PATH", AGENT_PROMPT_PATH)
         .bind("PROMPT", Binding::document(script))
         .into_step("Append Azure CLI prompt")
         .with_condition(Condition::Ne(

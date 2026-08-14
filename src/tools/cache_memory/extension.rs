@@ -151,7 +151,7 @@ fn download_previous_memory_task_step() -> TaskStep {
 /// when `clearMemory=false`.
 fn restore_previous_memory_bash_step() -> BashStep {
     let mut b = ShellScript::new(&RESTORE_AGENT_MEMORY)
-        .text("MEMORY_DIR", STAGING_MEMORY_DIR)
+        .bind_text("MEMORY_DIR", STAGING_MEMORY_DIR)
         .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
         .into_step("Restore previous agent memory")
         .with_condition(Condition::Custom(
@@ -165,7 +165,7 @@ fn restore_previous_memory_bash_step() -> BashStep {
 /// when the operator forces a fresh run via `clearMemory=true`.
 fn initialize_empty_memory_bash_step() -> BashStep {
     ShellScript::new(&INIT_AGENT_MEMORY)
-        .text("MEMORY_DIR", STAGING_MEMORY_DIR)
+        .bind_text("MEMORY_DIR", STAGING_MEMORY_DIR)
         .into_step("Initialize empty agent memory (clearMemory=true)")
         .with_condition(Condition::Custom(
             "eq(${{ parameters.clearMemory }}, true)".to_string(),

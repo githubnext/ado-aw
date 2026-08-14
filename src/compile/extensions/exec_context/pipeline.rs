@@ -104,7 +104,8 @@ impl ContextContributor for PipelineContextContributor {
         if !self.should_activate(ctx) {
             return Ok(None);
         }
-        let script = ShellScript::new(&EXEC_CONTEXT_PIPELINE).text("BUNDLE", EXEC_CONTEXT_PIPELINE_PATH);
+        let script = ShellScript::new(&EXEC_CONTEXT_PIPELINE)
+            .bind_text("BUNDLE", EXEC_CONTEXT_PIPELINE_PATH);
         // ADO auto-injects every predefined System.*/Build.* variable into the
         // step env (SCREAMING_SNAKE form), so the bundle reads
         // SYSTEM_COLLECTIONURI / BUILD_SOURCESDIRECTORY / BUILD_TRIGGEREDBY_*

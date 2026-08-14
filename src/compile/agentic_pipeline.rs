@@ -2121,9 +2121,9 @@ fn write_custom_runtime_config_step(
     let encoded = STANDARD.encode(json.as_bytes());
     let filename = agent_temp_filename(config_path);
     Ok(ShellScript::new(&WRITE_CUSTOM_RUNTIME_CONFIG)
-        .text("ENCODED", encoded)
+        .bind_text("ENCODED", encoded)
         .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
-        .text("CONFIG_FILENAME", filename)
+        .bind_text("CONFIG_FILENAME", filename)
         .into_step("Write custom job runtime config"))
 }
 
@@ -2153,8 +2153,8 @@ fn prepare_custom_agent_output_step(config_path: &str, output_path: &str) -> Bas
             Binding::ado_macro("Pipeline.Workspace"),
         )
         .bind("BUILD_ID", Binding::ado_macro("Build.BuildId"))
-        .text("CONFIG_FILENAME", agent_temp_filename(config_path))
-        .text("OUTPUT_FILENAME", agent_temp_filename(output_path))
+        .bind_text("CONFIG_FILENAME", agent_temp_filename(config_path))
+        .bind_text("OUTPUT_FILENAME", agent_temp_filename(output_path))
         .into_step("Prepare custom Agent output")
 }
 
@@ -2755,7 +2755,7 @@ fn build_conclusion_job(
 
     let conclusion_path = super::extensions::ado_script::CONCLUSION_PATH;
     let mut conclusion_step = ShellScript::new(&REPORT_CONCLUSION)
-        .text("CONCLUSION_PATH", conclusion_path)
+        .bind_text("CONCLUSION_PATH", conclusion_path)
         .into_step("Report pipeline conclusion");
     conclusion_step = conclusion_step.with_condition(Condition::Always);
     // The Conclusion job's contract is "always runs, never fails": it exists to
@@ -3389,7 +3389,7 @@ pub(crate) fn stage_candidate_artifact_payload_bash(
     ShellScript::new(&STAGE_CANDIDATE_ARTIFACT_PAYLOAD)
         .bind("STAGING", Binding::ado_path(staging))
         .bind("DEST", Binding::ado_path(dest_dir))
-        .text("PAYLOAD_NAME", payload)
+        .bind_text("PAYLOAD_NAME", payload)
         .bind(
             "PROVENANCE_VALIDATOR",
             Binding::document(CANDIDATE_PROVENANCE_VALIDATOR_PY),
@@ -3455,7 +3455,7 @@ fn extract_package_payload_bash(
     ShellScript::new(&EXTRACT_PACKAGE_PAYLOAD)
         .bind("STAGING", Binding::ado_path(staging))
         .bind("DEST", Binding::ado_path(dest_dir))
-        .text("PAYLOAD_NAME", payload)
+        .bind_text("PAYLOAD_NAME", payload)
         .fragment("tail", tail)
         .render()
 }
@@ -3526,7 +3526,7 @@ fn download_compiler_step(
 
     vec![Step::Bash(
         ShellScript::new(&DOWNLOAD_COMPILER_FROM_RELEASES)
-            .text("COMPILER_VERSION", compiler_version)
+            .bind_text("COMPILER_VERSION", compiler_version)
             .bind(
                 "PIPELINE_WORKSPACE",
                 Binding::ado_macro("Pipeline.Workspace"),
@@ -3693,7 +3693,7 @@ fn prepare_mcpg_config_step(
     Ok(ShellScript::new(&PREPARE_MCPG_CONFIG)
         .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
         .bind("MCPG_PORT", Binding::number(MCPG_PORT.into()))
-        .text("MCPG_DOMAIN", MCPG_DOMAIN)
+        .bind_text("MCPG_DOMAIN", MCPG_DOMAIN)
         .fragment("mcpg_config_heredoc", mcpg_config_heredoc)
         .fragment("custom_tools_block", custom_tools_fragment)
         .into_step("Prepare MCPG config"))
@@ -3826,7 +3826,7 @@ fn download_awf_step(supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
 
     vec![Step::Bash(
         ShellScript::new(&DOWNLOAD_AWF_FROM_RELEASES)
-            .text("AWF_VERSION", AWF_VERSION)
+            .bind_text("AWF_VERSION", AWF_VERSION)
             .bind(
                 "PIPELINE_WORKSPACE",
                 Binding::ado_macro("Pipeline.Workspace"),
@@ -3882,9 +3882,9 @@ fn prepull_images_step(include_mcpg: bool, supply_chain: Option<&SupplyChainConf
     }
     steps.push(Step::Bash(
         ShellScript::new(&PREPULL_IMAGES)
-            .text("SQUID_IMAGE", &squid)
-            .text("AGENT_IMAGE", &agent)
-            .text("API_PROXY_IMAGE", &api_proxy)
+            .bind_text("SQUID_IMAGE", &squid)
+            .bind_text("AGENT_IMAGE", &agent)
+            .bind_text("API_PROXY_IMAGE", &api_proxy)
             .fragment("mcpg_pull", mcpg_pull)
             .into_step(display),
     ));
@@ -4065,10 +4065,10 @@ fn start_mcpg_step(
 
     use super::ir::env::EnvValue;
     let mut step = ShellScript::new(&START_MCPG)
-        .text("MCPG_CONTAINER", MCPG_CONTAINER_NAME)
-        .text("MCPG_IMAGE", &mcpg_image_v)
+        .bind_text("MCPG_CONTAINER", MCPG_CONTAINER_NAME)
+        .bind_text("MCPG_IMAGE", &mcpg_image_v)
         .bind("MCPG_PORT", Binding::number(MCPG_PORT.into()))
-        .text("MCPG_DOMAIN", MCPG_DOMAIN)
+        .bind_text("MCPG_DOMAIN", MCPG_DOMAIN)
         .fragment("debug_flag", debug_flag)
         .fragment("docker_env_lines", docker_env_lines)
         .into_step("Start MCP Gateway (MCPG)")
@@ -4314,7 +4314,7 @@ fn run_agent_step(
             "PIPELINE_WORKSPACE",
             Binding::ado_macro("Pipeline.Workspace"),
         )
-        .text("ALLOWED_DOMAINS", allowed_domains)
+        .bind_text("ALLOWED_DOMAINS", allowed_domains)
         .fragment("topology_attach", topology_attach_block)
         .fragment("image_flags", image_flags_line)
         .fragment("exclude_env", exclude_env_line)
@@ -4394,7 +4394,7 @@ fn execute_safe_outputs_step(
     // `filter_args` is either empty or a leading-space-prefixed run of
     // `--only <tool>` / `--exclude <tool>` flags appended to the command.
     let mut script = ShellScript::new(&EXECUTE_SAFE_OUTPUTS)
-        .text("FILTER_ARGS", filter_args.trim())
+        .bind_text("FILTER_ARGS", filter_args.trim())
         .into_step("Execute safe outputs (Stage 3)");
     script.working_directory = Some(self_repository_directory.to_string());
     // Path externals reach bash through ADO env expansion, which is the
@@ -4502,7 +4502,7 @@ fn safe_outputs_summary_step(reviewed: &[String]) -> BashStep {
     use super::ir::env::EnvValue;
     let approval_summary_path = super::extensions::ado_script::APPROVAL_SUMMARY_PATH;
     ShellScript::new(&SAFE_OUTPUTS_SUMMARY)
-        .text("APPROVAL_SUMMARY_PATH", approval_summary_path)
+        .bind_text("APPROVAL_SUMMARY_PATH", approval_summary_path)
         .into_step("Render safe-outputs summary")
         .with_env(
             "AW_SAFE_OUTPUTS_NDJSON",
@@ -4547,7 +4547,7 @@ fi
 /// Prepare the isolated Docker network shared by the proxy and optional MCP.
 fn prepare_ado_proxy_network_step() -> BashStep {
     ShellScript::new(&PREPARE_ADO_PROXY_NETWORK)
-        .text("PROXY_NETWORK", ADO_PROXY_NETWORK_NAME)
+        .bind_text("PROXY_NETWORK", ADO_PROXY_NETWORK_NAME)
         .into_step("Prepare ado-proxy network")
 }
 
@@ -4606,9 +4606,9 @@ echo "Azure DevOps MCP $MCP_INSTALLED staged at $MCP_HOST_NODE_MODULES"
 /// the tree must land at `/app/node_modules`.
 fn prepare_ado_mcp_step(version: &str) -> BashStep {
     ShellScript::new(&PREPARE_ADO_MCP)
-        .text("MCP_HOST_NODE_MODULES", ADO_MCP_HOST_NODE_MODULES)
-        .text("MCP_PACKAGE", ADO_MCP_PACKAGE)
-        .text("MCP_VERSION", version)
+        .bind_text("MCP_HOST_NODE_MODULES", ADO_MCP_HOST_NODE_MODULES)
+        .bind_text("MCP_PACKAGE", ADO_MCP_PACKAGE)
+        .bind_text("MCP_VERSION", version)
         .into_step("Prepare Azure DevOps MCP")
 }
 
@@ -4629,7 +4629,7 @@ docker network rm "$PROXY_NETWORK" 2>/dev/null || true
 /// Remove the network created for the policy engine and its clients.
 fn teardown_ado_proxy_network_step() -> BashStep {
     ShellScript::new(&TEARDOWN_ADO_PROXY_NETWORK)
-        .text("PROXY_NETWORK", ADO_PROXY_NETWORK_NAME)
+        .bind_text("PROXY_NETWORK", ADO_PROXY_NETWORK_NAME)
         .into_step("Remove ado-proxy network")
         .with_condition(Condition::Always)
 }
@@ -4652,7 +4652,7 @@ echo "MCPG and stdio child containers stopped"
 
 fn stop_mcpg_step() -> BashStep {
     ShellScript::new(&STOP_MCPG)
-        .text("MCPG_CONTAINER", MCPG_CONTAINER_NAME)
+        .bind_text("MCPG_CONTAINER", MCPG_CONTAINER_NAME)
         .into_step("Stop MCPG")
         .with_condition(Condition::Always)
 }
@@ -4691,12 +4691,12 @@ fn start_ado_proxy_step(front_matter: &FrontMatter) -> BashStep {
     let hosts: Vec<&str> = catalog::catalog().protected_hosts.to_vec();
 
     ShellScript::new(&START_ADO_PROXY)
-        .text("PROXY_CONTAINER", ADO_PROXY_CONTAINER_NAME)
-        .text("PROXY_IMAGE", ADO_PROXY_IMAGE)
-        .text("PROXY_NETWORK", ADO_PROXY_NETWORK_NAME)
-        .text("PROXY_SCRIPT_PATH", paths::ADO_PROXY_PATH)
-        .text("AZ_WRAPPER_DIR", AZ_WRAPPER_DIR)
-        .text("CA_HOST_PATH", ADO_PROXY_PUBLIC_CA_HOST_PATH)
+        .bind_text("PROXY_CONTAINER", ADO_PROXY_CONTAINER_NAME)
+        .bind_text("PROXY_IMAGE", ADO_PROXY_IMAGE)
+        .bind_text("PROXY_NETWORK", ADO_PROXY_NETWORK_NAME)
+        .bind_text("PROXY_SCRIPT_PATH", paths::ADO_PROXY_PATH)
+        .bind_text("AZ_WRAPPER_DIR", AZ_WRAPPER_DIR)
+        .bind_text("CA_HOST_PATH", ADO_PROXY_PUBLIC_CA_HOST_PATH)
         .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
         .bind(
             "ADO_PROXY_PROJECT",
@@ -5200,7 +5200,7 @@ shell_script! {
 /// keeps that change to the wiring alone.
 fn stop_ado_proxy_step() -> BashStep {
     ShellScript::new(&STOP_ADO_PROXY)
-        .text("PROXY_CONTAINER", ADO_PROXY_CONTAINER_NAME)
+        .bind_text("PROXY_CONTAINER", ADO_PROXY_CONTAINER_NAME)
         .into_step("Stop ado-proxy")
         .with_condition(Condition::Always)
 }
@@ -5247,9 +5247,9 @@ echo "ado-proxy stopped"
 /// "No such container" error into an actionable startup/lifecycle failure.
 fn verify_trusted_topology_peers_step() -> BashStep {
     ShellScript::new(&VERIFY_TRUSTED_TOPOLOGY_PEERS)
-        .text("MCPG_CONTAINER", MCPG_CONTAINER_NAME)
-        .text("PROXY_CONTAINER", ADO_PROXY_CONTAINER_NAME)
-        .text("CA_HOST_PATH", ADO_PROXY_PUBLIC_CA_HOST_PATH)
+        .bind_text("MCPG_CONTAINER", MCPG_CONTAINER_NAME)
+        .bind_text("PROXY_CONTAINER", ADO_PROXY_CONTAINER_NAME)
+        .bind_text("CA_HOST_PATH", ADO_PROXY_PUBLIC_CA_HOST_PATH)
         .into_step("Verify trusted topology peers")
 }
 
@@ -5625,7 +5625,7 @@ fn run_threat_analysis_step(
             "PIPELINE_WORKSPACE",
             Binding::ado_macro("Pipeline.Workspace"),
         )
-        .text("ALLOWED_DOMAINS", allowed_domains)
+        .bind_text("ALLOWED_DOMAINS", allowed_domains)
         .fragment("image_flags", image_flags_line)
         .fragment("exclude_env", exclude_env_line)
         .fragment("engine_run_detection", engine_run_detection_line)
@@ -5866,7 +5866,7 @@ fn detect_reviewed_proposals_step(working_directory: &str, reviewed: &[String]) 
     // are safe to embed directly in a jq/grep alternation.
     let alternation = reviewed.join("|");
     ShellScript::new(&DETECT_REVIEWED_PROPOSALS)
-        .text("ALTERNATION", alternation)
+        .bind_text("ALTERNATION", alternation)
         .into_step("Detect reviewed proposals")
         .with_id(
             StepId::new("reviewedProposals")

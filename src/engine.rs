@@ -1165,7 +1165,7 @@ fn normalize_version_tag(version: &str) -> String {
 
 fn copilot_install_from_github_release(base_url: &str, display_name: &str) -> Result<String> {
     let install_body = ShellScript::new(&COPILOT_INSTALL_GITHUB_RELEASE)
-        .text("BASE_URL", base_url)
+        .bind_text("BASE_URL", base_url)
         .bind("AGENT_TEMP_DIR", Binding::ado_macro("Agent.TempDirectory"))
         .render();
     let install_indented = indent_bash_body(&install_body);

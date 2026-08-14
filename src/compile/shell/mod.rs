@@ -139,7 +139,7 @@ impl ShellScript {
     /// Bind a declared variable to a literal string. Shorthand for
     /// `bind(name, Binding::text(value))`, which is the common case.
     #[track_caller]
-    pub fn text(self, name: &str, value: impl AsRef<str>) -> Self {
+    pub fn bind_text(self, name: &str, value: impl AsRef<str>) -> Self {
         self.bind(name, Binding::text(value))
     }
 
@@ -485,7 +485,7 @@ echo hello
 
     fn built() -> ShellScript {
         ShellScript::new(&TEST_SCRIPT)
-            .text("CONTAINER", "awmg-ado-proxy")
+            .bind_text("CONTAINER", "awmg-ado-proxy")
             .bind("PORT", Binding::number(11080))
             .fragment("resolve_org", "ORG=example")
     }
@@ -587,7 +587,7 @@ docker inspect -f 'state={{.State.Status}} exit={{.State.ExitCode}}' proxy
         // Reordering `bind` calls must not produce a diff in generated YAML.
         let reordered = ShellScript::new(&TEST_SCRIPT)
             .bind("PORT", Binding::number(11080))
-            .text("CONTAINER", "awmg-ado-proxy")
+            .bind_text("CONTAINER", "awmg-ado-proxy")
             .fragment("resolve_org", "ORG=example");
         assert_eq!(reordered.render(), built().render());
     }
@@ -603,7 +603,7 @@ docker inspect -f 'state={{.State.Status}} exit={{.State.ExitCode}}' proxy
     #[should_panic(expected = "declared bindings were never bound: [\"PORT\"]")]
     fn refuses_to_render_with_a_binding_missing() {
         ShellScript::new(&TEST_SCRIPT)
-            .text("CONTAINER", "c")
+            .bind_text("CONTAINER", "c")
             .fragment("resolve_org", "ORG=example")
             .render();
     }
@@ -612,7 +612,7 @@ docker inspect -f 'state={{.State.Status}} exit={{.State.ExitCode}}' proxy
     #[should_panic(expected = "declared fragments were never supplied")]
     fn refuses_to_render_with_a_fragment_missing() {
         ShellScript::new(&TEST_SCRIPT)
-            .text("CONTAINER", "c")
+            .bind_text("CONTAINER", "c")
             .bind("PORT", Binding::number(1))
             .render();
     }
@@ -620,7 +620,7 @@ docker inspect -f 'state={{.State.Status}} exit={{.State.ExitCode}}' proxy
     #[test]
     #[should_panic(expected = "is not a declared binding")]
     fn refuses_an_undeclared_binding() {
-        ShellScript::new(&TEST_SCRIPT).text("CONTAINR", "typo");
+        ShellScript::new(&TEST_SCRIPT).bind_text("CONTAINR", "typo");
     }
 
     #[test]
@@ -642,7 +642,7 @@ echo "$AGENT_TEMP $PLAIN"
         }
         let rendered = ShellScript::new(&MACRO_BINDING)
             .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
-            .text("PLAIN", "no-dollar-here")
+            .bind_text("PLAIN", "no-dollar-here")
             .render();
         assert!(
             rendered.contains(
@@ -677,7 +677,9 @@ exec "$TARGET" "$@"
 "#,
             }
         }
-        let rendered = ShellScript::new(&WRAPPER).text("TARGET", "/usr/bin/az").render();
+        let rendered = ShellScript::new(&WRAPPER)
+            .bind_text("TARGET", "/usr/bin/az")
+            .render();
         assert_eq!(
             rendered,
             concat!(

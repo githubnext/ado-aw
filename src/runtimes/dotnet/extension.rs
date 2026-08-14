@@ -217,7 +217,7 @@ fn ensure_nuget_config_bash_step(config: &DotnetRuntimeConfig) -> BashStep {
         .feed_url()
         .unwrap_or("https://api.nuget.org/v3/index.json");
     ShellScript::new(&ENSURE_NUGET_CONFIG)
-        .text("FEED_URL", feed_url)
+        .bind_text("FEED_URL", feed_url)
         .into_step("Ensure nuget.config exists")
 }
 

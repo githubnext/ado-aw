@@ -69,7 +69,8 @@ impl ContextContributor for RepoContextContributor {
         if !self.should_activate(ctx) {
             return Ok(None);
         }
-        let script = ShellScript::new(&EXEC_CONTEXT_REPO).text("BUNDLE", EXEC_CONTEXT_REPO_PATH);
+        let script =
+            ShellScript::new(&EXEC_CONTEXT_REPO).bind_text("BUNDLE", EXEC_CONTEXT_REPO_PATH);
         // ADO auto-injects BUILD_SOURCESDIRECTORY / BUILD_SOURCEVERSION /
         // BUILD_SOURCEBRANCH into the step env, so the git-only bundle reads
         // them directly; only the compile-time AW_REPO_CONVENTIONS toggle is a

@@ -74,7 +74,8 @@ impl ContextContributor for ScheduleContextContributor {
         if !self.should_activate(ctx) {
             return Ok(None);
         }
-        let script = ShellScript::new(&EXEC_CONTEXT_SCHEDULE).text("BUNDLE", EXEC_CONTEXT_SCHEDULE_PATH);
+        let script = ShellScript::new(&EXEC_CONTEXT_SCHEDULE)
+            .bind_text("BUNDLE", EXEC_CONTEXT_SCHEDULE_PATH);
         // ADO auto-injects the predefined System.*/Build.* context variables
         // into the step env, so the bundle reads them directly; only the
         // non-auto-injected SYSTEM_ACCESSTOKEN bearer is projected here.

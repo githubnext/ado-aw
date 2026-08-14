@@ -167,12 +167,12 @@ pub(crate) fn az_wrapper_script(
 
     ShellScript::new(&AZ_WRAPPER)
         .bind("ALLOWED_GROUPS", Binding::words(groups.iter().copied()))
-        .text("ALLOWED_DISPLAY", allowed_display)
-        .text("ENGINE_HOST", engine_host)
+        .bind_text("ALLOWED_DISPLAY", allowed_display)
+        .bind_text("ENGINE_HOST", engine_host)
         .bind("ENGINE_PORT", Binding::number(connect_port as u64))
-        .text("CA_PATH", AZ_WRAPPER_CA_PATH)
-        .text("SENTINEL", sentinel)
-        .text("WRAPPER_DIR", AZ_WRAPPER_DIR)
+        .bind_text("CA_PATH", AZ_WRAPPER_CA_PATH)
+        .bind_text("SENTINEL", sentinel)
+        .bind_text("WRAPPER_DIR", AZ_WRAPPER_DIR)
 }
 
 /// Render the wrapper script.

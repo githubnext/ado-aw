@@ -172,7 +172,7 @@ fn npm_authenticate_task_step() -> TaskStep {
 fn ensure_npmrc_bash_step(config: &NodeRuntimeConfig) -> BashStep {
     let registry = config.feed_url().unwrap_or("https://registry.npmjs.org/");
     ShellScript::new(&ENSURE_NPMRC)
-        .text("REGISTRY", registry)
+        .bind_text("REGISTRY", registry)
         .into_step("Ensure .npmrc exists")
 }
 

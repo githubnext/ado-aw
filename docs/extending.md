@@ -317,7 +317,7 @@ docker rm -f "$PROXY_CONTAINER" 2>/dev/null || true
 }
 
 ShellScript::new(&STOP_ADO_PROXY)
-    .text("PROXY_CONTAINER", ADO_PROXY_CONTAINER_NAME)
+    .bind_text("PROXY_CONTAINER", ADO_PROXY_CONTAINER_NAME)
     .into_step("Stop ado-proxy")
 ```
 
@@ -368,7 +368,7 @@ which Azure DevOps masks in logs.
 
 ```rust
 ShellScript::new(&START_ADO_PROXY)
-    .text("PROXY_CONTAINER", ADO_PROXY_CONTAINER_NAME)
+    .bind_text("PROXY_CONTAINER", ADO_PROXY_CONTAINER_NAME)
     .into_step("Start ado-proxy policy engine")
     .with_env("ADO_PROXY_BEARER", EnvValue::secret("SC_READ_TOKEN"))
 ```

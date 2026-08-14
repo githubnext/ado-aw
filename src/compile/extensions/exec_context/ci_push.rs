@@ -108,7 +108,8 @@ impl ContextContributor for CiPushContextContributor {
         if !self.should_activate(ctx) {
             return Ok(None);
         }
-        let script = ShellScript::new(&EXEC_CONTEXT_CI_PUSH).text("BUNDLE", EXEC_CONTEXT_CI_PUSH_PATH);
+        let script = ShellScript::new(&EXEC_CONTEXT_CI_PUSH)
+            .bind_text("BUNDLE", EXEC_CONTEXT_CI_PUSH_PATH);
         // ADO auto-injects the predefined System.*/Build.* context variables
         // into the step env, so the bundle reads them directly; only the
         // non-auto-injected SYSTEM_ACCESSTOKEN bearer is projected here.
