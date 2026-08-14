@@ -17,16 +17,17 @@ use tokio::io::AsyncWriteExt;
 use crate::ndjson::{self, EXECUTED_NDJSON_FILENAME, SAFE_OUTPUT_FILENAME};
 use crate::safe_outputs::{
     AddBuildTagResult, AddGithubIssueLabelsResult, AddPrCommentResult,
-    AssignGithubIssueMilestoneResult, AssignGithubIssueToUserResult, CloseGithubIssueResult,
-    CommentOnGithubIssueResult, CommentOnWorkItemResult, CreateBranchResult, CreateGitTagResult,
-    CreateGithubIssueResult, CreatePrResult, CreateWikiPageResult, CreateWorkItemResult,
-    ExecutionContext, ExecutionResult, Executor, HideGithubIssueCommentResult,
-    LinkGithubSubIssueResult, LinkWorkItemsResult, MissingDataResult, MissingToolResult,
-    NoopResult, QueueBuildResult, RemoveGithubIssueLabelsResult, ReplyToPrCommentResult,
-    ReportIncompleteResult, ResolvePrThreadResult, SetGithubIssueFieldResult,
-    SetGithubIssueTypeResult, SubmitPrReviewResult, ToolResult, UnassignGithubIssueFromUserResult,
-    UpdateGithubIssueResult, UpdatePrResult, UpdateWikiPageResult, UpdateWorkItemResult,
-    UploadBuildAttachmentResult, UploadPipelineArtifactResult, UploadWorkitemAttachmentResult,
+    AssignGithubIssueMilestoneResult, AssignGithubIssueToUserResult, AssignWorkItemResult,
+    CloseGithubIssueResult, CommentOnGithubIssueResult, CommentOnWorkItemResult,
+    CreateBranchResult, CreateGitTagResult, CreateGithubIssueResult, CreatePrResult,
+    CreateWikiPageResult, CreateWorkItemResult, ExecutionContext, ExecutionResult, Executor,
+    HideGithubIssueCommentResult, LinkGithubSubIssueResult, LinkWorkItemsResult, MissingDataResult,
+    MissingToolResult, NoopResult, QueueBuildResult, RemoveGithubIssueLabelsResult,
+    ReplyToPrCommentResult, ReportIncompleteResult, ResolvePrThreadResult,
+    SetGithubIssueFieldResult, SetGithubIssueTypeResult, SubmitPrReviewResult, ToolResult,
+    UnassignGithubIssueFromUserResult, UpdateGithubIssueResult, UpdatePrResult,
+    UpdateWikiPageResult, UpdateWorkItemResult, UploadBuildAttachmentResult,
+    UploadPipelineArtifactResult, UploadWorkitemAttachmentResult,
 };
 use crate::sanitize::neutralize_pipeline_commands;
 
@@ -232,6 +233,7 @@ pub async fn execute_safe_outputs(
     }
     register_budgets!(
         CreateWorkItemResult,
+        AssignWorkItemResult,
         CreatePrResult,
         UpdateWorkItemResult,
         CommentOnWorkItemResult,
@@ -252,6 +254,17 @@ pub async fn execute_safe_outputs(
         ResolvePrThreadResult,
         CreateGithubIssueResult,
         SetGithubIssueTypeResult,
+        CommentOnGithubIssueResult,
+        HideGithubIssueCommentResult,
+        AddGithubIssueLabelsResult,
+        RemoveGithubIssueLabelsResult,
+        CloseGithubIssueResult,
+        UpdateGithubIssueResult,
+        SetGithubIssueFieldResult,
+        AssignGithubIssueMilestoneResult,
+        AssignGithubIssueToUserResult,
+        UnassignGithubIssueFromUserResult,
+        LinkGithubSubIssueResult,
     );
 
     let mut results = Vec::new();
@@ -708,6 +721,7 @@ async fn dispatch_work_item_tools(
 ) -> Result<Option<ExecutionResult>> {
     dispatch_executor_tools!(tool_name, entry, ctx, {
         "create-work-item" => CreateWorkItemResult,
+        "assign-work-item" => AssignWorkItemResult,
         "comment-on-work-item" => CommentOnWorkItemResult,
         "update-work-item" => UpdateWorkItemResult,
         "link-work-items" => LinkWorkItemsResult,
@@ -1032,6 +1046,7 @@ mod tests {
                     "name": "create-work-item",
                     "title": "SENSITIVE-WORK-ITEM",
                     "description": "confidential remediation plan",
+                    "temporary_id": "#aw_secret1",
                 }),
                 serde_json::json!({"name": "send-notification", "title": "Outage"}),
             ),
@@ -1218,7 +1233,8 @@ mod tests {
         let entry = serde_json::json!({
             "name": "create-work-item",
             "title": "Test work item",
-            "description": "A description that is definitely longer than thirty characters."
+            "description": "A description that is definitely longer than thirty characters.",
+            "temporary_id": "#aw_context1"
         });
 
         // Context without required fields
@@ -1456,6 +1472,20 @@ mod tests {
             err.contains("Failed to parse create-work-item"),
             "err: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_execute_create_work_item_requires_internal_temporary_id() {
+        let entry = serde_json::json!({
+            "name": "create-work-item",
+            "title": "Fix a real bug",
+            "description": "A description that is definitely longer than thirty characters."
+        });
+        let error = execute_safe_output(&entry, &ExecutionContext::default())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("missing field `temporary_id`"), "{error}");
     }
 
     #[tokio::test]
@@ -2028,11 +2058,11 @@ mod tests {
         let safe_output_path = temp_dir.path().join(SAFE_OUTPUT_FILENAME);
 
         // Write 3 create-work-item entries + 1 noop; max set to 2
-        let ndjson = r#"{"name":"create-work-item","title":"First item","description":"A description that is definitely longer than thirty characters."}
-{"name":"create-work-item","title":"Second item","description":"A description that is definitely longer than thirty characters."}
-{"name":"create-work-item","title":"Third item","description":"A description that is definitely longer than thirty characters."}
+        let ndjson = r##"{"name":"create-work-item","title":"First item","description":"A description that is definitely longer than thirty characters.","temporary_id":"#aw_budget1"}
+{"name":"create-work-item","title":"Second item","description":"A description that is definitely longer than thirty characters.","temporary_id":"#aw_budget2"}
+{"name":"create-work-item","title":"Third item","description":"A description that is definitely longer than thirty characters.","temporary_id":"#aw_budget3"}
 {"name":"noop","context":"still runs"}
-"#;
+"##;
         tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
 
         let mut tool_configs = HashMap::new();
@@ -2099,12 +2129,12 @@ mod tests {
         let safe_output_path = temp_dir.path().join(SAFE_OUTPUT_FILENAME);
 
         // Mix of tools: each has max=1 (default), so only the first of each type should pass budget
-        let ndjson = r#"{"name":"create-work-item","title":"WI 1","description":"A description that is definitely longer than thirty characters."}
-{"name":"create-work-item","title":"WI 2","description":"A description that is definitely longer than thirty characters."}
+        let ndjson = r##"{"name":"create-work-item","title":"WI 1","description":"A description that is definitely longer than thirty characters.","temporary_id":"#aw_mixed1"}
+{"name":"create-work-item","title":"WI 2","description":"A description that is definitely longer than thirty characters.","temporary_id":"#aw_mixed2"}
 {"name":"create-wiki-page","path":"/Page1","content":"Some valid wiki content here."}
 {"name":"create-wiki-page","path":"/Page2","content":"Some valid wiki content here."}
 {"name":"noop","context":"always runs"}
-"#;
+"##;
         tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
 
         let ctx = ExecutionContext {
@@ -2154,7 +2184,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let safe_output_path = temp_dir.path().join(SAFE_OUTPUT_FILENAME);
 
-        let ndjson = r#"{"name":"create-work-item","title":"Test work item title","description":"This is a test description that is long enough to pass validation checks"}"#;
+        let ndjson = r##"{"name":"create-work-item","title":"Test work item title","description":"This is a test description that is long enough to pass validation checks","temporary_id":"#aw_dryrun1"}"##;
         tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
 
         let ctx = ExecutionContext {
@@ -2184,7 +2214,8 @@ mod tests {
         let entry = serde_json::json!({
             "name": "create-work-item",
             "title": "Test work item title",
-            "description": "This is a test description that is long enough to pass validation checks"
+            "description": "This is a test description that is long enough to pass validation checks",
+            "temporary_id": "#aw_staged1"
         });
         let ctx = ExecutionContext {
             tool_configs: HashMap::from([(
@@ -2205,7 +2236,7 @@ mod tests {
         let safe_output_path = temp_dir.path().join(SAFE_OUTPUT_FILENAME);
 
         let ndjson = [
-            r#"{"name":"create-work-item","title":"Test work item title","description":"This is a test description that is long enough to pass validation checks"}"#,
+            r##"{"name":"create-work-item","title":"Test work item title","description":"This is a test description that is long enough to pass validation checks","temporary_id":"#aw_multi1"}"##,
             r#"{"name":"noop","context":"nothing to do"}"#,
         ]
         .join("\n");
@@ -2239,7 +2270,8 @@ mod tests {
         let entry = serde_json::json!({
             "name": "create-work-item",
             "title": "Test work item",
-            "description": "A description that is definitely longer than thirty characters."
+            "description": "A description that is definitely longer than thirty characters.",
+            "temporary_id": "#aw_normal1"
         });
 
         let ctx = ExecutionContext {
@@ -2273,7 +2305,8 @@ mod tests {
         let entry = serde_json::json!({
             "name": "create-work-item",
             "title": "Test work item",
-            "description": "A description that is definitely longer than thirty characters."
+            "description": "A description that is definitely longer than thirty characters.",
+            "temporary_id": "#aw_dryctx1"
         });
 
         let ctx = ExecutionContext {

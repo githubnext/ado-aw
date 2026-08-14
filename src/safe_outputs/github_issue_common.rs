@@ -3,7 +3,7 @@
 
 use anyhow::ensure;
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::HashSet;
 use std::fmt;
 use std::sync::OnceLock;
@@ -38,52 +38,13 @@ impl fmt::Display for GithubIssueNumber {
     }
 }
 
-impl<'de> Deserialize<'de> for GithubIssueNumber {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct IssueNumberVisitor;
-
-        impl serde::de::Visitor<'_> for IssueNumberVisitor {
-            type Value = GithubIssueNumber;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a positive issue number or #aw_ temporary issue ID")
-            }
-
-            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
-                Ok(GithubIssueNumber::Number(value))
-            }
-
-            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                u64::try_from(value)
-                    .map(GithubIssueNumber::Number)
-                    .map_err(|_| E::custom("issue number must be positive"))
-            }
-
-            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                if value.chars().all(|character| character.is_ascii_digit()) {
-                    return value
-                        .parse::<u64>()
-                        .map(GithubIssueNumber::Number)
-                        .map_err(|_| E::custom("quoted issue number is outside the u64 range"));
-                }
-                GithubTemporaryId::parse(value)
-                    .map(GithubIssueNumber::Temporary)
-                    .map_err(E::custom)
-            }
-        }
-
-        deserializer.deserialize_any(IssueNumberVisitor)
-    }
-}
+impl_temporary_reference_deserialize!(
+    GithubIssueNumber,
+    GithubTemporaryId,
+    expecting = "a positive issue number or #aw_ temporary issue ID",
+    negative = "issue number must be positive",
+    quoted_out_of_range = "quoted issue number is outside the u64 range",
+);
 
 /// Borrowed repository policy shared by creation and mutation tools.
 #[derive(Debug, Clone, Copy)]
@@ -536,20 +497,6 @@ pub fn github_app_repository_names<'a>(
     Ok(names)
 }
 
-/// Enforce the same-job approval invariant for temporary issue IDs.
-pub fn validate_temporary_id_approval_compatibility(
-    consumer_name: &str,
-    create_requires_approval: bool,
-    consumer_requires_approval: bool,
-) -> anyhow::Result<()> {
-    ensure!(
-        create_requires_approval == consumer_requires_approval,
-        "safe-outputs.create-github-issue and safe-outputs.{consumer_name} must use the same \
-         effective require-approval value when {consumer_name} accepts temporary issue IDs"
-    );
-    Ok(())
-}
-
 /// Stable hidden marker used to identify comments from one ADO pipeline definition.
 pub fn github_pipeline_comment_marker(ctx: &ExecutionContext) -> anyhow::Result<String> {
     let definition_id = ctx.definition_id.ok_or_else(|| {
@@ -928,12 +875,6 @@ mod tests {
             github_app_repository_names("octo", repositories).unwrap(),
             vec!["One".to_string(), "two".to_string()]
         );
-    }
-
-    #[test]
-    fn approval_compatibility_requires_equal_variants() {
-        assert!(validate_temporary_id_approval_compatibility("consumer", true, true).is_ok());
-        assert!(validate_temporary_id_approval_compatibility("consumer", true, false).is_err());
     }
 
     #[test]

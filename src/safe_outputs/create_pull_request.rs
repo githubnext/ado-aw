@@ -3205,6 +3205,9 @@ index 0000000..abcdefg
             resolved_github_issues: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            resolved_work_items: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             triggered_by_build_id: None,
             triggered_by_definition_name: None,
             triggered_by_build_number: None,
@@ -3219,7 +3222,6 @@ index 0000000..abcdefg
             uploaded_pipeline_artifact_keys: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashSet::new(),
             )),
-            agent_last_author: None,
         };
         let outcome = result.execute_impl(&ctx).await.unwrap();
         assert!(!outcome.success);

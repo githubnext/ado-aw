@@ -2152,6 +2152,18 @@ impl FrontMatter {
         self.typed_safe_output_config("create-github-issue")
     }
 
+    pub fn create_work_item_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::CreateWorkItemConfig>> {
+        self.typed_safe_output_config("create-work-item")
+    }
+
+    pub fn assign_work_item_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::AssignWorkItemConfig>> {
+        self.typed_safe_output_config("assign-work-item")
+    }
+
     pub fn set_github_issue_type_config(
         &self,
     ) -> anyhow::Result<Option<crate::safe_outputs::SetGithubIssueTypeConfig>> {

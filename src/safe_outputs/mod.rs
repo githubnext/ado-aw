@@ -45,6 +45,7 @@ pub const DEBUG_ONLY_TOOLS: &[&str] = &[];
 
 /// Public tools exposed only when explicitly configured in `safe-outputs:`.
 pub const CONFIGURED_ONLY_TOOLS: &[&str] = tool_names![
+    AssignWorkItemResult,
     CreateGithubIssueResult,
     SetGithubIssueTypeResult,
     CommentOnGithubIssueResult,
@@ -70,6 +71,7 @@ pub const CONFIGURED_ONLY_TOOLS: &[&str] = tool_names![
 pub const ALL_KNOWN_SAFE_OUTPUTS: &[&str] = all_safe_output_names![
     // Write-requiring MCP tools
     CreateWorkItemResult,
+    AssignWorkItemResult,
     CommentOnWorkItemResult,
     UpdateWorkItemResult,
     CreatePrResult,
@@ -439,6 +441,25 @@ pub(crate) fn tag_matches_pattern(tag: &str, pattern: &str) -> bool {
     wildcard_match(&pattern.to_ascii_lowercase(), &tag.to_ascii_lowercase())
 }
 
+const NON_ASSIGNABLE_WORK_ITEM_IDENTITIES: &[&str] = &["Agency", "GitHub Copilot"];
+
+/// Normalize and validate an identity before assigning an Azure DevOps work item.
+pub(crate) fn normalize_work_item_assignee(
+    assignee: &str,
+    field_name: &str,
+) -> anyhow::Result<String> {
+    let assignee = assignee.trim();
+    anyhow::ensure!(!assignee.is_empty(), "{field_name} must not be empty");
+    crate::validate::reject_pipeline_injection(assignee, field_name)?;
+    if NON_ASSIGNABLE_WORK_ITEM_IDENTITIES
+        .iter()
+        .any(|blocked| blocked.eq_ignore_ascii_case(assignee))
+    {
+        anyhow::bail!("{field_name} cannot assign the reserved identity '{assignee}'");
+    }
+    Ok(assignee.to_string())
+}
+
 /// Return `true` if `name` is matched by `pattern` (**case-sensitive**).
 ///
 /// Uses [`wildcard_match`] for artifact-name allow-lists where case matters.
@@ -449,9 +470,70 @@ pub(crate) fn name_matches_pattern(name: &str, pattern: &str) -> bool {
 /// Re-export of the canonical git ref-name validator (now in [`crate::validate`]).
 pub(crate) use crate::validate::validate_git_ref_name;
 
+macro_rules! impl_temporary_reference_deserialize {
+    (
+        $reference:ident,
+        $temporary:ty,
+        expecting = $expecting:literal,
+        negative = $negative:literal,
+        quoted_out_of_range = $quoted_out_of_range:literal $(,)?
+    ) => {
+        impl<'de> serde::Deserialize<'de> for $reference {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct TemporaryReferenceVisitor;
+
+                impl serde::de::Visitor<'_> for TemporaryReferenceVisitor {
+                    type Value = $reference;
+
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        formatter.write_str($expecting)
+                    }
+
+                    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+                        Ok($reference::Number(value))
+                    }
+
+                    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        u64::try_from(value)
+                            .map($reference::Number)
+                            .map_err(|_| E::custom($negative))
+                    }
+
+                    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        if value.chars().all(|character| character.is_ascii_digit()) {
+                            return value
+                                .parse::<u64>()
+                                .map($reference::Number)
+                                .map_err(|_| E::custom($quoted_out_of_range));
+                        }
+                        <$temporary>::parse(value)
+                            .map($reference::Temporary)
+                            .map_err(E::custom)
+                    }
+                }
+
+                deserializer.deserialize_any(TemporaryReferenceVisitor)
+            }
+        }
+    };
+}
+
 mod add_build_tag;
 mod add_github_issue_labels;
 mod add_pr_comment;
+mod assign_work_item;
 mod assign_github_issue_milestone;
 mod assign_github_issue_to_user;
 mod close_github_issue;
@@ -492,6 +574,7 @@ mod upload_workitem_attachment;
 pub use add_build_tag::*;
 pub use add_github_issue_labels::*;
 pub use add_pr_comment::*;
+pub use assign_work_item::*;
 pub use assign_github_issue_milestone::*;
 pub use assign_github_issue_to_user::*;
 pub use close_github_issue::*;
@@ -517,8 +600,8 @@ pub use reply_to_pr_comment::*;
 pub use report_incomplete::*;
 pub use resolve_pr_thread::*;
 pub use result::{
-    ExecutionContext, ExecutionResult, Executor, ResolvedGithubIssue, ToolResult, Validate,
-    anyhow_to_mcp_error, org_from_url,
+    ExecutionContext, ExecutionResult, Executor, ResolvedGithubIssue, ResolvedWorkItem, ToolResult,
+    Validate, anyhow_to_mcp_error, org_from_url,
 };
 pub use set_github_issue_field::*;
 pub use set_github_issue_type::*;
@@ -571,6 +654,9 @@ mod tests {
         }
         const {
             assert!(CreateWorkItemResult::REQUIRES_WRITE);
+        }
+        const {
+            assert!(AssignWorkItemResult::REQUIRES_WRITE);
         }
         const {
             assert!(CommentOnWorkItemResult::REQUIRES_WRITE);

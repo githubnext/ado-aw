@@ -183,6 +183,7 @@ pub(crate) fn build_pipeline_context(
     front_matter.validate_require_approval()?;
     front_matter.validate_staged()?;
     common::validate_github_issue_outputs_config(front_matter)?;
+    common::validate_work_item_assignment_outputs_config(front_matter)?;
     common::validate_comment_target(front_matter)?;
     common::validate_update_work_item_target(front_matter)?;
     common::validate_submit_pr_review_events(front_matter)?;

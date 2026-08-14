@@ -131,8 +131,18 @@ const TOOL_SPECS: Record<string, ToolSpec> = {
   },
   "create-work-item": {
     title: "Create work item",
-    fields: [{ label: "Title", key: "title" }],
+    fields: [
+      { label: "Title", key: "title" },
+      { label: "Temporary ID", key: "temporary_id" },
+    ],
     body: "description",
+  },
+  "assign-work-item": {
+    title: "Assign work item",
+    fields: [
+      { label: "Work item", key: "work_item_id" },
+      { label: "Assignee", key: "assignee" },
+    ],
   },
   "update-work-item": {
     title: "Update work item",
