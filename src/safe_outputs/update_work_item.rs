@@ -67,6 +67,9 @@ impl Validate for UpdateWorkItemParams {
                 );
             }
         }
+        if let Some(assignee) = &self.assignee {
+            super::normalize_work_item_assignee(assignee, "update-work-item.assignee")?;
+        }
         Ok(())
     }
 }
@@ -95,7 +98,11 @@ impl SanitizeContent for UpdateWorkItemResult {
         self.state = self.state.as_deref().map(sanitize_config);
         self.area_path = self.area_path.as_deref().map(sanitize_config);
         self.iteration_path = self.iteration_path.as_deref().map(sanitize_config);
-        self.assignee = self.assignee.as_deref().map(sanitize_config);
+        self.assignee = self
+            .assignee
+            .as_deref()
+            .map(str::trim)
+            .map(sanitize_config);
         self.tags = self
             .tags
             .as_ref()
@@ -466,7 +473,7 @@ impl Executor for UpdateWorkItemResult {
             .as_ref()
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
 
-        let config: UpdateWorkItemConfig = ctx.get_tool_config("update-work-item");
+        let config: UpdateWorkItemConfig = ctx.get_tool_config("update-work-item")?;
         debug!(
             "Config: status={}, title={}, body={}, markdown_body={}, target={:?}, title_prefix={:?}, tag_prefix={:?}",
             config.status,
@@ -491,6 +498,12 @@ impl Executor for UpdateWorkItemResult {
         }
         if let Some(result) = check_field_permissions(self, &config) {
             return Ok(result);
+        }
+        if let Some(assignee) = self.assignee.as_deref()
+            && let Err(error) =
+                super::normalize_work_item_assignee(assignee, "update-work-item.assignee")
+        {
+            return Ok(ExecutionResult::failure(error.to_string()));
         }
 
         // Validate agent-provided tags against allowed-tags (if configured)
@@ -708,6 +721,25 @@ mod tests {
             result.tags,
             Some(vec!["automated".to_string(), "agent".to_string()])
         );
+    }
+
+    #[test]
+    fn test_params_rejects_reserved_assignee_identity() {
+        for assignee in ["Agency", " github copilot "] {
+            let params = UpdateWorkItemParams {
+                id: 42,
+                title: None,
+                body: None,
+                state: None,
+                area_path: None,
+                iteration_path: None,
+                assignee: Some(assignee.to_string()),
+                tags: None,
+            };
+            let error = <UpdateWorkItemResult as TryFrom<UpdateWorkItemParams>>::try_from(params)
+                .unwrap_err();
+            assert!(error.to_string().contains("reserved identity"));
+        }
     }
 
     #[test]
@@ -1148,5 +1180,4 @@ allowed-tags:
             exec_result.message
         );
     }
-
 }

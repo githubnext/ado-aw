@@ -69,14 +69,11 @@ use super::common::{
     self, ADO_BUILD_ID_SUFFIX, ADO_MCP_HOST_NODE_MODULES, ADO_MCP_PACKAGE,
     ADO_PROXY_CONTAINER_NAME, ADO_PROXY_IMAGE, ADO_PROXY_LISTEN_PORT, ADO_PROXY_NETWORK_NAME,
     ADO_PROXY_PUBLIC_CA_HOST_PATH, ADO_PROXY_TLS_PORT, AWF_SQUID_URL, AWF_VERSION, AZ_WRAPPER_DIR,
-    HEADER_MARKER, MCPG_CONTAINER_NAME, MCPG_DOMAIN, MCPG_IMAGE, MCPG_PORT, MCPG_VERSION, image_ref,
+    HEADER_MARKER, MCPG_CONTAINER_NAME, MCPG_DOMAIN, MCPG_IMAGE, MCPG_PORT, MCPG_VERSION,
+    image_ref,
 };
-use super::extensions::ado_script as paths;
-use super::shell::{Binding, ShellScript};
-use crate::ado_proxy::catalog;
-use crate::ado_proxy::policy::PolicyDocument;
-use crate::shell_script;
 use super::custom_tools::{CustomToolDefinition, collect_custom_tool_definitions};
+use super::extensions::ado_script as paths;
 use super::extensions::{CompileContext, CompilerExtension, Declarations, Extension, McpgConfig};
 use super::ir::condition::{Condition, Expr};
 use super::ir::env::EnvValue;
@@ -98,17 +95,20 @@ use super::ir::{
     CiTrigger, Parameter, ParameterDefault, ParameterKind, PipelineResource, PipelineVar,
     PrTrigger, RepositoryResource, Resources, Schedule, Triggers,
 };
+use super::shell::{Binding, ShellScript};
 use super::types::{
     ApprovalConfig, ApprovalOnTimeout, CheckoutFetchOpts, EngineConfig, FrontMatter, OnConfig,
     PipelineArtifactConfig, PrMode, ProviderToken, Repository as RepoCfg, SELF_CHECKOUT_ALIAS,
     SupplyChainConfig, ThreatDetectionConfig,
 };
+use crate::ado_proxy::catalog;
+use crate::ado_proxy::policy::PolicyDocument;
+use crate::shell_script;
 
 /// The `safe-outputs:` key for the create-pull-request tool. Matches the kebab
 /// name `FrontMatter::create_pr_config`/`partition_safe_outputs_by_approval` use.
 const CREATE_PULL_REQUEST_TOOL: &str = "create-pull-request";
 const CUSTOM_PROPOSALS_STEP_ID: &str = "customProposals";
-const GITHUB_ISSUE_TOOLS: &[&str] = &["create-github-issue", "set-github-issue-type"];
 
 /// Built pipeline context — the result of running every validation,
 /// scalar computation, extension declaration fanout, and canonical-
@@ -181,11 +181,11 @@ pub(crate) fn build_pipeline_context(
     }
     common::validate_variable_groups(front_matter)?;
     common::validate_safe_outputs_keys(front_matter)?;
-    front_matter
-        .validate_threat_detection_config(&threat_detection, &detection_engine_config)?;
+    front_matter.validate_threat_detection_config(&threat_detection, &detection_engine_config)?;
     front_matter.validate_require_approval()?;
     front_matter.validate_staged()?;
     common::validate_github_issue_outputs_config(front_matter)?;
+    common::validate_work_item_assignment_outputs_config(front_matter)?;
     common::validate_comment_target(front_matter)?;
     common::validate_update_work_item_target(front_matter)?;
     common::validate_submit_pr_review_events(front_matter)?;
@@ -574,10 +574,17 @@ pub(crate) fn build_canonical_jobs(
     let create_pr_configured = front_matter.create_pr_config().is_some();
     let create_pr_reviewed = reviewed.iter().any(|t| t == CREATE_PULL_REQUEST_TOOL);
     let safeoutputs_waits_for_review = !reviewed.is_empty() && auto.is_empty();
-    let github_issue_tools_configured = front_matter.has_github_issue_outputs();
-    let github_issue_tools_reviewed = reviewed
+    let github_issue_tools_configured = front_matter.github_issue_tool_names();
+    let github_issue_tools_reviewed: Vec<String> = github_issue_tools_configured
         .iter()
-        .any(|tool| GITHUB_ISSUE_TOOLS.contains(&tool.as_str()));
+        .filter(|tool| reviewed.contains(tool))
+        .cloned()
+        .collect();
+    let github_issue_tools_automatic: Vec<String> = github_issue_tools_configured
+        .iter()
+        .filter(|tool| !reviewed.contains(tool))
+        .cloned()
+        .collect();
     if reviewed.is_empty() || auto.is_empty() {
         jobs.push(build_safeoutputs_job(
             front_matter,
@@ -597,7 +604,7 @@ pub(crate) fn build_canonical_jobs(
             &SafeOutputsVariant::automatic(
                 &reviewed,
                 create_pr_configured && !create_pr_reviewed,
-                github_issue_tools_configured && !github_issue_tools_reviewed,
+                github_issue_tools_automatic,
             )
             .with_excluded_tools(&custom_tool_names),
         )?);
@@ -608,7 +615,7 @@ pub(crate) fn build_canonical_jobs(
             &SafeOutputsVariant::reviewed(
                 &reviewed,
                 create_pr_configured && create_pr_reviewed,
-                github_issue_tools_configured && github_issue_tools_reviewed,
+                github_issue_tools_reviewed,
             ),
         )?);
     }
@@ -1146,9 +1153,9 @@ fn build_agent_job(
     if ado_proxy_enabled {
         steps.push(Step::Bash(prepare_ado_proxy_network_step()));
         if common::ado_mcp_enabled(front_matter) {
-            steps.push(Step::Bash(prepare_ado_mcp_step(
-                common::ado_mcp_version(front_matter),
-            )));
+            steps.push(Step::Bash(prepare_ado_mcp_step(common::ado_mcp_version(
+                front_matter,
+            ))));
         }
         steps.push(Step::Bash(start_ado_proxy_step(front_matter)));
     }
@@ -1256,8 +1263,9 @@ fn build_agent_job(
     if front_matter.has_any_safe_output_tool() {
         let (_, reviewed_summary_tools) = front_matter.partition_safe_outputs_by_approval();
         steps.push(Step::Bash(safe_outputs_summary_step(
+            front_matter,
             &reviewed_summary_tools,
-        )));
+        )?));
     }
 
     // 20. Stop MCPG and SafeOutputs
@@ -1440,7 +1448,9 @@ fn build_detection_job(
             threat_prompt.push_str("\n\n## Additional Instructions\n\n");
             threat_prompt.push_str(&custom_prompt.replace("\r\n", "\n"));
         }
-        steps.push(Step::Bash(prepare_threat_analysis_prompt_step(&threat_prompt)?));
+        steps.push(Step::Bash(prepare_threat_analysis_prompt_step(
+            &threat_prompt,
+        )?));
         steps.push(Step::Bash(setup_compiler_step()));
 
         // Stage auth support before custom pre-steps, but mint credentials only
@@ -1480,7 +1490,9 @@ fn build_detection_job(
         if let Some(app_token) = cfg.detection_engine_config.github_app_token()
             && !app_token.skip_token_revocation
         {
-            steps.push(super::extensions::ado_script::github_app_token_revoke_step_typed(app_token)?);
+            steps.push(
+                super::extensions::ado_script::github_app_token_revoke_step_typed(app_token)?,
+            );
         }
         for user_step in &cfg.threat_detection.post_steps {
             steps.push(Step::RawYaml(step_to_raw_yaml_string(user_step)?));
@@ -1553,7 +1565,7 @@ struct SafeOutputsVariant {
     /// (issue #1453 review). Avoids a wasted Node install + bundle fetch +
     /// prepare step in the variant that will never open a PR.
     runs_create_pull_request: bool,
-    runs_github_issue_tools: bool,
+    github_issue_tools: Vec<String>,
     /// Whether this is the manual-review-gated `SafeOutputs_Reviewed` variant.
     /// Used to select the correct pool override without relying on the job name.
     is_reviewed: bool,
@@ -1594,10 +1606,7 @@ impl SafeOutputsCheckoutLayout {
             // regardless of what the workflow-wide layout looks like.
             common::generate_trigger_repo_directory(&[])
         };
-        let source_path = format!(
-            "{}/{}",
-            self_repository_directory, cfg.source_relative_path
-        );
+        let source_path = format!("{}/{}", self_repository_directory, cfg.source_relative_path);
 
         Self {
             source_path,
@@ -1610,17 +1619,14 @@ impl SafeOutputsCheckoutLayout {
 impl SafeOutputsVariant {
     /// The default single-job variant: no filter, canonical names. Runs every
     /// configured tool, so it executes `create-pull-request` iff configured.
-    fn default_single(
-        runs_create_pull_request: bool,
-        runs_github_issue_tools: bool,
-    ) -> Self {
+    fn default_single(runs_create_pull_request: bool, github_issue_tools: Vec<String>) -> Self {
         Self {
             base: "SafeOutputs",
             display: "SafeOutputs",
             artifact: "safe_outputs",
             filter_args: String::new(),
             runs_create_pull_request,
-            runs_github_issue_tools,
+            github_issue_tools,
             is_reviewed: false,
         }
     }
@@ -1630,7 +1636,7 @@ impl SafeOutputsVariant {
     fn automatic(
         reviewed: &[String],
         runs_create_pull_request: bool,
-        runs_github_issue_tools: bool,
+        github_issue_tools: Vec<String>,
     ) -> Self {
         Self {
             base: "SafeOutputs",
@@ -1638,7 +1644,7 @@ impl SafeOutputsVariant {
             artifact: "safe_outputs",
             filter_args: filter_flags("--exclude", reviewed),
             runs_create_pull_request,
-            runs_github_issue_tools,
+            github_issue_tools,
             is_reviewed: false,
         }
     }
@@ -1648,7 +1654,7 @@ impl SafeOutputsVariant {
     fn reviewed(
         reviewed: &[String],
         runs_create_pull_request: bool,
-        runs_github_issue_tools: bool,
+        github_issue_tools: Vec<String>,
     ) -> Self {
         Self {
             base: "SafeOutputs_Reviewed",
@@ -1656,7 +1662,7 @@ impl SafeOutputsVariant {
             artifact: "safe_outputs_reviewed",
             filter_args: filter_flags("--only", reviewed),
             runs_create_pull_request,
-            runs_github_issue_tools,
+            github_issue_tools,
             is_reviewed: true,
         }
     }
@@ -1777,8 +1783,7 @@ fn classify_custom_post_review_dependencies(defs: &mut [CustomSafeOutputJobDef])
         for dependency in &definition.needs {
             anyhow::ensure!(
                 indexes.contains_key(dependency)
-                    || super::custom_tools::CUSTOM_JOB_SYSTEM_NEEDS
-                        .contains(&dependency.as_str()),
+                    || super::custom_tools::CUSTOM_JOB_SYSTEM_NEEDS.contains(&dependency.as_str()),
                 "safe-outputs.jobs.{}.needs references unknown job '{}'",
                 definition.name,
                 dependency
@@ -2290,8 +2295,8 @@ fn build_safeoutputs_job(
     variant: &SafeOutputsVariant,
 ) -> Result<Job> {
     let layout = SafeOutputsCheckoutLayout::for_variant(front_matter, cfg, variant);
-    let github_auth = if variant.runs_github_issue_tools {
-        front_matter.github_safe_outputs_auth()?
+    let github_auth = if !variant.github_issue_tools.is_empty() {
+        front_matter.github_safe_outputs_auth_for_tools(&variant.github_issue_tools)?
     } else {
         None
     };
@@ -2384,10 +2389,8 @@ fn build_safeoutputs_job(
         ));
     }
     if let Some(app) = github_app {
-        let permissions = std::collections::BTreeMap::from([(
-            "issues".to_string(),
-            crate::compile::types::GithubAppPermissionLevel::Write,
-        )]);
+        let permissions =
+            front_matter.github_app_permissions_for_tools(&variant.github_issue_tools)?;
         steps.push(
             super::extensions::ado_script::github_app_token_step_typed_for(
                 app,
@@ -4498,10 +4501,32 @@ node "$APPROVAL_SUMMARY_PATH" || echo "##vso[task.logissue type=warning]approval
 /// The output base name is namespaced (`ado-aw-safe-outputs.md`) so the
 /// ADO-derived summary-tab title never collides with a consumer/template-target
 /// `task.uploadsummary` tab.
-fn safe_outputs_summary_step(reviewed: &[String]) -> BashStep {
+fn approval_summary_repository_policies(front_matter: &FrontMatter) -> Result<String> {
+    let mut policies = serde_json::Map::new();
+    for tool in front_matter.github_issue_tool_names() {
+        let Some(config) = front_matter.github_issue_compiler_config(&tool)? else {
+            continue;
+        };
+        policies.insert(
+            tool,
+            serde_json::json!({
+                "targetRepo": config.target_repo,
+                "allowedRepos": config.allowed_repos,
+            }),
+        );
+    }
+    Ok(serde_json::Value::Object(policies).to_string())
+}
+
+fn safe_outputs_summary_step(front_matter: &FrontMatter, reviewed: &[String]) -> Result<BashStep> {
     use super::ir::env::EnvValue;
     let approval_summary_path = super::extensions::ado_script::APPROVAL_SUMMARY_PATH;
-    ShellScript::new(&SAFE_OUTPUTS_SUMMARY)
+    let repository_policies = approval_summary_repository_policies(front_matter)?;
+    let github_api_url = front_matter
+        .github_safe_outputs_auth()?
+        .map(|auth| auth.api_url().to_string())
+        .unwrap_or_default();
+    Ok(ShellScript::new(&SAFE_OUTPUTS_SUMMARY)
         .bind_text("APPROVAL_SUMMARY_PATH", approval_summary_path)
         .into_step("Render safe-outputs summary")
         .with_env(
@@ -4513,7 +4538,20 @@ fn safe_outputs_summary_step(reviewed: &[String]) -> BashStep {
             EnvValue::literal("$(Agent.TempDirectory)/ado-aw-safe-outputs.md"),
         )
         .with_env("AW_REVIEWED_TOOLS", EnvValue::literal(reviewed.join("\n")))
-        .with_condition(Condition::Always)
+        .with_env(
+            "AW_GITHUB_REPOSITORY_POLICIES",
+            EnvValue::literal(repository_policies),
+        )
+        .with_env(
+            "AW_CURRENT_REPOSITORY",
+            EnvValue::ado_macro("Build.Repository.Name")?,
+        )
+        .with_env(
+            "AW_CURRENT_REPOSITORY_PROVIDER",
+            EnvValue::ado_macro("Build.Repository.Provider")?,
+        )
+        .with_env("AW_GITHUB_API_URL", EnvValue::literal(github_api_url))
+        .with_condition(Condition::Always))
 }
 
 shell_script! {
@@ -6492,7 +6530,11 @@ safe-outputs:
 "#,
         );
 
-        assert!(!jobs.iter().any(|job| job.id.as_str() == "SafeOutputs_Reviewed"));
+        assert!(
+            !jobs
+                .iter()
+                .any(|job| job.id.as_str() == "SafeOutputs_Reviewed")
+        );
         let conclusion = job_by_id(&jobs, "Conclusion");
         assert!(
             !conclusion
@@ -6715,7 +6757,10 @@ safe-outputs:
             "%ADO_AW_SAFE_OUTPUT_PROPOSALS%",
         ] {
             assert!(
-                json_value_references_variable(&serde_json::Value::String(value.to_string()), variable),
+                json_value_references_variable(
+                    &serde_json::Value::String(value.to_string()),
+                    variable
+                ),
                 "{value}"
             );
         }
@@ -6848,7 +6893,6 @@ safe-outputs:
         assert!(msg.contains("missing `env:` key"), "got: {msg}");
     }
 
-
     #[test]
     fn the_policy_engine_starts_before_the_mcp_gateway() {
         // The Azure DevOps MCP is redirected at the engine's container
@@ -6873,7 +6917,7 @@ safe-outputs:
             "an unpinned resolve would vary the agent's tool surface between runs"
         );
         assert!(
-            script.contains("$MCP_INSTALLED\" != \"") ,
+            script.contains("$MCP_INSTALLED\" != \""),
             "the resolved version must be verified, not just requested: {script}"
         );
 
@@ -7044,9 +7088,7 @@ safe-outputs:
         let normalize = |script: &str| {
             script
                 .lines()
-                .filter(|line| {
-                    !line.contains("--topology-attach") && !line.contains("NO_PROXY")
-                })
+                .filter(|line| !line.contains("--topology-attach") && !line.contains("NO_PROXY"))
                 .collect::<Vec<_>>()
                 .join("\n")
         };
@@ -7056,7 +7098,6 @@ safe-outputs:
             "no other part of the AWF invocation may shift"
         );
     }
-
 
     /// Front matter for the proxy step tests: the ADO tool enabled with a read
     /// service connection, which is the configuration that turns the engine on.
@@ -7089,8 +7130,8 @@ safe-outputs:
         );
         for private in ["ca.key", "$ADO_PROXY_BEARER", "PROXY_MATERIAL"] {
             for line in script.lines().filter(|line| line.contains(private)) {
-                let container_private_fifo = line.contains("docker exec -i")
-                    && line.contains("/tmp/ado-proxy-material");
+                let container_private_fifo =
+                    line.contains("docker exec -i") && line.contains("/tmp/ado-proxy-material");
                 assert!(
                     !line.contains("/tmp/gh-aw")
                         && (!line.contains("> /tmp") || container_private_fifo),
@@ -7154,7 +7195,10 @@ safe-outputs:
         let step = verify_trusted_topology_peers_step();
         assert!(step.script.contains(MCPG_CONTAINER_NAME));
         assert!(step.script.contains(ADO_PROXY_CONTAINER_NAME));
-        assert!(step.script.contains("trusted topology peer $PEER is not running"));
+        assert!(
+            step.script
+                .contains("trusted topology peer $PEER is not running")
+        );
         assert!(step.script.contains("docker logs --tail 200"));
         assert!(step.script.contains("public CA is not readable"));
         assert!(step.script.contains(ADO_PROXY_PUBLIC_CA_HOST_PATH));
@@ -7492,8 +7536,7 @@ safe-outputs:
         use std::collections::{BTreeMap, BTreeSet};
 
         use super::super::ir::{
-            Pipeline, PipelineBody, PipelineShape, Resources, Triggers,
-            graph::build_graph,
+            Pipeline, PipelineBody, PipelineShape, Resources, Triggers, graph::build_graph,
         };
 
         let common = concat!(
@@ -7576,9 +7619,11 @@ safe-outputs:
         assert!(disabled_detection.steps.iter().any(|step| {
             matches!(step, Step::Bash(step) if step.display_name == "Bypass AI threat analysis")
         }));
-        assert!(!disabled_detection.steps.iter().any(|step| {
-            matches!(step, Step::RawYaml(raw) if raw.contains("SHOULD_NOT_RUN"))
-        }));
+        assert!(
+            !disabled_detection.steps.iter().any(|step| {
+                matches!(step, Step::RawYaml(raw) if raw.contains("SHOULD_NOT_RUN"))
+            })
+        );
 
         let enabled_detection = enabled_jobs
             .iter()
@@ -7587,7 +7632,10 @@ safe-outputs:
         let reviewed_index = enabled_detection
             .steps
             .iter()
-            .position(|step| step.id().is_some_and(|id| id.as_ref() == "reviewedProposals"))
+            .position(|step| {
+                step.id()
+                    .is_some_and(|id| id.as_ref() == "reviewedProposals")
+            })
             .unwrap();
         let copy_logs_index = enabled_detection
             .steps

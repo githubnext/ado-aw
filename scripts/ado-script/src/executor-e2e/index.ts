@@ -16,6 +16,7 @@
  *   - EXECUTOR_E2E_GITHUB_TOKEN — scoped PAT for issue filing
  *   - EXECUTOR_E2E_ISSUE_REPO — GitHub repo for issues (default githubnext/ado-aw)
  *   - E2E_QUEUE_PIPELINE_ID / E2E_WIKI_NAME — optional-precondition scenarios
+ *   - E2E_WORK_ITEM_ASSIGNEE — assignable ADO identity (falls back to BUILD_REQUESTEDFOREMAIL)
  *
  * Test-harness module; not shipped in `ado-script.zip`.
  */

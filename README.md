@@ -562,6 +562,7 @@ actions, and the executor processes them after threat analysis.
 |------|-------------|
 | `create-pull-request` | Creates a PR from the agent's code changes |
 | `create-work-item` | Creates an ADO work item (Task, Bug, etc.) |
+| `assign-work-item` | Assigns an ADO work item to an agent-selected identity |
 | `comment-on-work-item` | Adds a comment to an existing ADO work item |
 | `update-work-item` | Updates fields on an existing ADO work item |
 | `create-wiki-page` | Creates a new Azure DevOps wiki page |
@@ -581,6 +582,17 @@ actions, and the executor processes them after threat analysis.
 | `upload-workitem-attachment` | Uploads a workspace file as an attachment to a work item |
 | `create-github-issue` | Creates a GitHub issue (Stage 3 only; needs a separate GitHub write token) |
 | `set-github-issue-type` | Sets or clears a native GitHub Issue Type on an issue |
+| `comment-on-github-issue` | Comments on a GitHub issue or permitted pull request |
+| `hide-github-issue-comment` | Minimizes a GitHub issue, PR, or discussion comment |
+| `add-github-issue-labels` | Adds policy-approved labels to a GitHub issue or permitted PR |
+| `remove-github-issue-labels` | Removes policy-approved labels from a GitHub issue |
+| `close-github-issue` | Closes a GitHub issue, optionally with a comment or duplicate relationship |
+| `update-github-issue` | Updates operator-enabled fields on a GitHub issue or pull request |
+| `set-github-issue-field` | Sets a repository-defined GitHub issue field |
+| `assign-github-issue-milestone` | Assigns an existing or policy-approved new milestone |
+| `assign-github-issue-to-user` | Assigns policy-approved GitHub users |
+| `unassign-github-issue-from-user` | Removes policy-approved GitHub assignees |
+| `link-github-sub-issue` | Links two same-repository GitHub issues as parent and child |
 | `report-incomplete` | Reports that a task could not be completed |
 | `noop` | Reports no action was needed |
 | `missing-data` | Reports required data was unavailable |
@@ -623,33 +635,65 @@ safe-outputs:
   create-work-item:
     work-item-type: Bug
     area-path: "MyProject\\MyTeam"
-    assignee: "developer@example.com"
     tags:
       - agent-created
       - needs-triage
+  assign-work-item:
+    target: "*"
+    allowed: ["developer@example.com"]
 ```
+
+An omitted static `create-work-item.assignee` creates the item unassigned.
+The `create-work-item` MCP tool always returns a generated `#aw_...` temporary
+ID; agents can pass that ID to `assign-work-item`. `Agency` and
+`GitHub Copilot` are never assignable.
 
 ### Example: GitHub Issue Configuration
 
-Unlike every other safe output, `create-github-issue` and `set-github-issue-type`
-write to **GitHub**, not Azure DevOps, and only run in Stage 3 with a dedicated
-GitHub write token — the Agent and Detection stages never see it:
+The thirteen GitHub-qualified issue tools write to **GitHub**, not Azure
+DevOps, and run only in Stage 3 with a dedicated GitHub write token — the Agent
+and Detection stages never see it. Tools are configured-only; auth alone does
+not expose routes.
 
 ```yaml
 safe-outputs:
+  require-approval: true
   create-github-issue:
     target-repo: octo-org/octo-repo   # required unless the ADO build source is that GitHub repo
+    allowed-repos: [octo-org/other-repo]
     allowed-labels: ["agent-*", bug]
     require-temporary-id: true
+  comment-on-github-issue:
+    target-repo: octo-org/octo-repo
+    required-labels: [agent-managed]
+    hide-older-comments: true
+    pull-requests: false
+  add-github-issue-labels:
+    target-repo: octo-org/octo-repo
+    allowed: ["agent-*", bug]
+    blocked: [security]
   set-github-issue-type:
     target-repo: octo-org/octo-repo
     allowed: [Bug, Feature, Task]
 ```
 
 Set the write token once with `ado-aw secrets set ADO_AW_GITHUB_TOKEN <token>`
-(needs **Issues: read and write** on the target repo). See
+(grant Issues, Pull requests, and Discussions write only for enabled
+capabilities), or configure a shared/dedicated GitHub App; App tokens are
+repository-scoped, minimum-permission, and revoked after execution.
+
+An agent may select `repository` only from exact `target-repo` /
+`allowed-repos` values. Existing-object mutations can require all configured
+labels and a title prefix before the first write. Same-run `#aw_...` temporary
+IDs retain their creation repository, and every configured consumer must share
+`create-github-issue`'s effective approval group.
+
+Most operations use REST. Comment minimization, duplicate marking, issue
+fields, and sub-issues require GraphQL and may depend on the GHES version;
+unsupported APIs fail explicitly rather than skipping the requested mutation.
+See
 [the site reference](https://githubnext.github.io/ado-aw/reference/safe-outputs/#github-issue-safe-outputs)
-for GitHub App auth and temporary-ID linkage between the two tools.
+for the complete tool/configuration matrix, defaults, filters, and auth setup.
 
 ### Threat Detection (`threat-detection`)
 

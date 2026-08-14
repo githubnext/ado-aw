@@ -155,7 +155,7 @@ impl Executor for LinkWorkItemsResult {
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
         debug!("ADO org: {}, project: {}", org_url, project);
 
-        let config: LinkWorkItemsConfig = ctx.get_tool_config("link-work-items");
+        let config: LinkWorkItemsConfig = ctx.get_tool_config("link-work-items")?;
         debug!("Allowed link types: {:?}", config.allowed_link_types);
 
         // Validate work item IDs against target scope
@@ -372,7 +372,8 @@ mod tests {
         };
         let err = LinkWorkItemsResult::try_from(params).unwrap_err();
         assert!(
-            err.to_string().contains("source_id and target_id must be different"),
+            err.to_string()
+                .contains("source_id and target_id must be different"),
             "expected error about same ids, got: {err}"
         );
     }

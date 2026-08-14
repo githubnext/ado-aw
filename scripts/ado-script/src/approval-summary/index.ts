@@ -22,6 +22,11 @@
  *                              newline, not comma, because a comma can legally
  *                              appear in a YAML map key — see the Rust
  *                              `safe_outputs_summary_step` doc comment)
+ *   - AW_GITHUB_REPOSITORY_POLICIES compiler-resolved GitHub repository policy
+ *                              JSON keyed by tool name
+ *   - AW_CURRENT_REPOSITORY / AW_CURRENT_REPOSITORY_PROVIDER trusted ADO build
+ *                              metadata used only for GitHub-source fallback
+ *   - AW_GITHUB_API_URL        operator-resolved GitHub API URL
  *
  * Failure policy: best-effort. Any error is logged as a warning and the
  * program exits 0 — rendering the summary must never fail the build or block
@@ -31,7 +36,12 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { logWarning, uploadSummary } from "../shared/vso-logger.js";
-import { parseProposals, renderSummary } from "./render.js";
+import {
+  parseProposals,
+  renderSummary,
+  type GithubRepositoryPolicy,
+  type TrustedRepositoryContext,
+} from "./render.js";
 
 /**
  * Parse the reviewed-tool list (newline-delimited — see the compiler's
@@ -46,6 +56,44 @@ export function parseReviewed(value: string | undefined): Set<string> {
     if (t.length > 0) out.add(t);
   }
   return out;
+}
+
+export function parseRepositoryPolicies(
+  value: string | undefined,
+): Map<string, GithubRepositoryPolicy> {
+  const policies = new Map<string, GithubRepositoryPolicy>();
+  if (!value) return policies;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return policies;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return policies;
+  }
+  for (const [tool, rawPolicy] of Object.entries(parsed)) {
+    if (
+      rawPolicy === null ||
+      typeof rawPolicy !== "object" ||
+      Array.isArray(rawPolicy)
+    ) {
+      continue;
+    }
+    const candidate = rawPolicy as Record<string, unknown>;
+    const targetRepo =
+      typeof candidate.targetRepo === "string"
+        ? candidate.targetRepo
+        : undefined;
+    const allowedRepos = Array.isArray(candidate.allowedRepos)
+      ? candidate.allowedRepos.filter(
+          (repository): repository is string =>
+            typeof repository === "string",
+        )
+      : [];
+    policies.set(tool, { targetRepo, allowedRepos });
+  }
+  return policies;
 }
 
 export function main(env: NodeJS.ProcessEnv = process.env): number {
@@ -77,7 +125,13 @@ export function main(env: NodeJS.ProcessEnv = process.env): number {
   }
 
   const reviewed = parseReviewed(env.AW_REVIEWED_TOOLS);
-  const markdown = renderSummary(proposals, reviewed);
+  const repositoryContext: TrustedRepositoryContext = {
+    policies: parseRepositoryPolicies(env.AW_GITHUB_REPOSITORY_POLICIES),
+    currentRepository: env.AW_CURRENT_REPOSITORY,
+    currentProvider: env.AW_CURRENT_REPOSITORY_PROVIDER,
+    githubApiUrl: env.AW_GITHUB_API_URL,
+  };
+  const markdown = renderSummary(proposals, reviewed, repositoryContext);
   if (markdown.length === 0) {
     return 0;
   }
