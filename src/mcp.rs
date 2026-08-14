@@ -11,21 +11,29 @@ use std::sync::Arc;
 
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
 use crate::safe_outputs::{
-    AddBuildTagParams, AddBuildTagResult, AddPrCommentParams, AddPrCommentResult,
-    AssignWorkItemParams, AssignWorkItemResult,
-    CommentOnWorkItemParams, CommentOnWorkItemResult, CreateBranchParams, CreateBranchResult,
-    CreateGitTagParams, CreateGitTagResult, CreateGithubIssueParams, CreateGithubIssueResult, CreatePrParams,
+    AddBuildTagParams, AddBuildTagResult, AddGithubIssueLabelsParams, AddGithubIssueLabelsResult,
+    AddPrCommentParams, AddPrCommentResult, AssignGithubIssueMilestoneParams,
+    AssignGithubIssueMilestoneResult, AssignGithubIssueToUserParams, AssignGithubIssueToUserResult,
+    AssignWorkItemParams, AssignWorkItemResult, CloseGithubIssueParams, CloseGithubIssueResult,
+    CommentOnGithubIssueParams, CommentOnGithubIssueResult, CommentOnWorkItemParams,
+    CommentOnWorkItemResult, CreateBranchParams, CreateBranchResult, CreateGitTagParams,
+    CreateGitTagResult, CreateGithubIssueParams, CreateGithubIssueResult, CreatePrParams,
     CreatePrResult, CreateWikiPageParams, CreateWikiPageResult, CreateWorkItemParams,
-    CreateWorkItemResult, DEFAULT_MAX_FILE_SIZE, LinkWorkItemsParams, LinkWorkItemsResult,
-    MissingDataParams, MissingDataResult, MissingToolParams, MissingToolResult, NoopParams,
-    NoopResult, PIPELINE_ARTIFACT_DEFAULT_MAX_FILE_SIZE, QueueBuildParams, QueueBuildResult,
-    ReplyToPrCommentParams, ReplyToPrCommentResult, ReportIncompleteParams, ReportIncompleteResult,
-    ResolvePrThreadParams, ResolvePrThreadResult, SetGithubIssueTypeParams, SetGithubIssueTypeResult,
-    SubmitPrReviewParams, SubmitPrReviewResult, ToolResult, UpdatePrParams, UpdatePrResult, Validate,
-    UpdateWikiPageParams, UpdateWikiPageResult, UpdateWorkItemParams, UpdateWorkItemResult,
-    UploadBuildAttachmentParams,
+    CreateWorkItemResult, DEFAULT_MAX_FILE_SIZE, HideGithubIssueCommentParams,
+    HideGithubIssueCommentResult, LinkGithubSubIssueParams, LinkGithubSubIssueResult,
+    LinkWorkItemsParams, LinkWorkItemsResult, MissingDataParams, MissingDataResult,
+    MissingToolParams, MissingToolResult, NoopParams, NoopResult,
+    PIPELINE_ARTIFACT_DEFAULT_MAX_FILE_SIZE, QueueBuildParams, QueueBuildResult,
+    RemoveGithubIssueLabelsParams, RemoveGithubIssueLabelsResult, ReplyToPrCommentParams,
+    ReplyToPrCommentResult, ReportIncompleteParams, ReportIncompleteResult,
+    ResolvePrThreadParams, ResolvePrThreadResult, SetGithubIssueFieldParams,
+    SetGithubIssueFieldResult, SetGithubIssueTypeParams, SetGithubIssueTypeResult,
+    SubmitPrReviewParams, SubmitPrReviewResult, ToolResult, UnassignGithubIssueFromUserParams,
+    UnassignGithubIssueFromUserResult, UpdateGithubIssueParams, UpdateGithubIssueResult,
+    UpdatePrParams, UpdatePrResult, UpdateWikiPageParams, UpdateWikiPageResult,
+    UpdateWorkItemParams, UpdateWorkItemResult, UploadBuildAttachmentParams,
     UploadBuildAttachmentResult, UploadPipelineArtifactParams, UploadPipelineArtifactResult,
-    UploadWorkitemAttachmentParams, UploadWorkitemAttachmentResult, anyhow_to_mcp_error,
+    UploadWorkitemAttachmentParams, UploadWorkitemAttachmentResult, Validate, anyhow_to_mcp_error,
 };
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::secure::WorkItemTemporaryId;
@@ -477,6 +485,17 @@ impl SafeOutputs {
         ndjson::append_to_ndjson_file(&self.safe_output_path(), value).await
     }
 
+    async fn queue_sanitized_output<T>(&self, mut value: T) -> Result<CallToolResult, McpError>
+    where
+        T: ToolResult + SanitizeContent,
+    {
+        value.sanitize_content_fields();
+        self.write_safe_output_file(&value)
+            .await
+            .map_err(anyhow_to_mcp_error)?;
+        Ok(CallToolResult::success(vec![]))
+    }
+
     /// Append a value, but only if we haven't reached the maximum entries for this tool
     async fn write_safe_output_file_with_maximum<T: ToolResult>(
         &self,
@@ -564,8 +583,7 @@ impl SafeOutputs {
     ) -> Result<Self> {
         let bounding_dir = bounding_directory.into();
         let output_dir = output_directory.into();
-        let self_repository_dir =
-            self_repository_directory.unwrap_or_else(|| bounding_dir.clone());
+        let self_repository_dir = self_repository_directory.unwrap_or_else(|| bounding_dir.clone());
         info!(
             "Initializing SafeOutputs MCP server: bounding={}, self={}, output={}",
             bounding_dir.display(),
@@ -843,7 +861,9 @@ allowlist. Set temporary_id when a later safe output must refer to the newly-cre
         sanitized.title = sanitize_text(&sanitized.title);
         sanitized.body = sanitize_text(&sanitized.body);
         let result: CreateGithubIssueResult = sanitized.try_into()?;
-        let _ = self.write_safe_output_file(&result).await;
+        self.write_safe_output_file(&result)
+            .await
+            .map_err(anyhow_to_mcp_error)?;
         info!("Issue queued for creation");
         Ok(CallToolResult::success(vec![]))
     }
@@ -859,9 +879,141 @@ issue_type to clear the current type."
         params: Parameters<SetGithubIssueTypeParams>,
     ) -> Result<CallToolResult, McpError> {
         let result: SetGithubIssueTypeResult = params.0.try_into()?;
-        let _ = self.write_safe_output_file(&result).await;
         info!("Issue type update queued");
-        Ok(CallToolResult::success(vec![]))
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "comment-on-github-issue",
+        description = "Add a Markdown comment to a configured GitHub issue or pull request. \
+issue_number may be a positive number or a temporary_id from create-github-issue."
+    )]
+    async fn comment_on_github_issue(
+        &self,
+        params: Parameters<CommentOnGithubIssueParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: CommentOnGithubIssueResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "hide-github-issue-comment",
+        description = "Minimize a configured GitHub issue, pull-request, or discussion comment."
+    )]
+    async fn hide_github_issue_comment(
+        &self,
+        params: Parameters<HideGithubIssueCommentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: HideGithubIssueCommentResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "add-github-issue-labels",
+        description = "Add operator-permitted labels to a configured GitHub issue or pull request."
+    )]
+    async fn add_github_issue_labels(
+        &self,
+        params: Parameters<AddGithubIssueLabelsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: AddGithubIssueLabelsResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "remove-github-issue-labels",
+        description = "Remove operator-permitted labels from a configured GitHub issue."
+    )]
+    async fn remove_github_issue_labels(
+        &self,
+        params: Parameters<RemoveGithubIssueLabelsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: RemoveGithubIssueLabelsResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "close-github-issue",
+        description = "Close a configured GitHub issue, optionally with a comment or duplicate reference."
+    )]
+    async fn close_github_issue(
+        &self,
+        params: Parameters<CloseGithubIssueParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: CloseGithubIssueResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "update-github-issue",
+        description = "Update operator-enabled fields on a configured GitHub issue or pull request."
+    )]
+    async fn update_github_issue(
+        &self,
+        params: Parameters<UpdateGithubIssueParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: UpdateGithubIssueResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "set-github-issue-field",
+        description = "Set an operator-permitted repository-defined field on a configured GitHub issue."
+    )]
+    async fn set_github_issue_field(
+        &self,
+        params: Parameters<SetGithubIssueFieldParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: SetGithubIssueFieldResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "assign-github-issue-milestone",
+        description = "Assign an operator-permitted milestone to a configured GitHub issue."
+    )]
+    async fn assign_github_issue_milestone(
+        &self,
+        params: Parameters<AssignGithubIssueMilestoneParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: AssignGithubIssueMilestoneResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "assign-github-issue-to-user",
+        description = "Assign operator-permitted GitHub users to a configured issue."
+    )]
+    async fn assign_github_issue_to_user(
+        &self,
+        params: Parameters<AssignGithubIssueToUserParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: AssignGithubIssueToUserResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "unassign-github-issue-from-user",
+        description = "Remove operator-permitted GitHub users from a configured issue."
+    )]
+    async fn unassign_github_issue_from_user(
+        &self,
+        params: Parameters<UnassignGithubIssueFromUserParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: UnassignGithubIssueFromUserResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "link-github-sub-issue",
+        description = "Link two configured GitHub issues as parent and sub-issue."
+    )]
+    async fn link_github_sub_issue(
+        &self,
+        params: Parameters<LinkGithubSubIssueParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: LinkGithubSubIssueResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
     }
 
     #[tool(
@@ -2291,10 +2443,8 @@ safe-outputs:
         );
     }
 
-    /// Asserts that ALL_KNOWN_SAFE_OUTPUTS contains every NON-DEBUG-ONLY tool
-    /// registered in the router. Debug-only tools (e.g. `create-github-issue`) are
-    /// intentionally absent from the list because they're not regular
-    /// safe-outputs.
+    /// Asserts that ALL_KNOWN_SAFE_OUTPUTS contains every non-debug tool
+    /// registered in the router.
     #[tokio::test]
     async fn test_all_known_safe_outputs_covers_router() {
         use crate::safe_outputs::ALL_KNOWN_SAFE_OUTPUTS;
@@ -2343,11 +2493,11 @@ safe-outputs:
             .iter()
             .map(|t| t.name.to_string())
             .collect();
-        for debug_tool in DEBUG_ONLY_TOOLS {
+        for configured_tool in CONFIGURED_ONLY_TOOLS {
             assert!(
-                !tool_names.contains(&debug_tool.to_string()),
-                "Debug-only tool '{}' must NOT be exposed when enabled_tools is None",
-                debug_tool
+                !tool_names.contains(&configured_tool.to_string()),
+                "Configured-only tool '{}' must NOT be exposed when enabled_tools is None",
+                configured_tool
             );
         }
         // Spot check a regular tool is present in the permissive default.
@@ -2355,6 +2505,30 @@ safe-outputs:
         assert!(!tool_names.contains(&"assign-work-item".to_string()));
         assert!(!tool_names.contains(&"create-github-issue".to_string()));
         assert!(!tool_names.contains(&"set-github-issue-type".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_all_configured_only_tools_are_routes() {
+        assert_eq!(CONFIGURED_ONLY_TOOLS.len(), 14);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let enabled: Vec<String> = CONFIGURED_ONLY_TOOLS
+            .iter()
+            .map(|tool| (*tool).to_string())
+            .collect();
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled), None)
+            .await
+            .unwrap();
+        let tools = so.tool_router.list_all();
+        for configured_tool in CONFIGURED_ONLY_TOOLS {
+            let route = tools
+                .iter()
+                .find(|tool| tool.name.as_ref() == *configured_tool)
+                .unwrap_or_else(|| panic!("missing configured-only route {configured_tool}"));
+            assert!(
+                route.input_schema.get("properties").is_some(),
+                "{configured_tool} must expose an MCP input schema"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2390,6 +2564,27 @@ safe-outputs:
         let schema = serde_json::to_value(&tool.input_schema).unwrap();
         let properties = schema["properties"].as_object().unwrap();
         assert!(!properties.contains_key("temporary_id"));
+    }
+
+    #[tokio::test]
+    async fn test_github_queue_propagates_ndjson_write_failures() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let output_path = temp_dir.path().join("output");
+        tokio::fs::create_dir(&output_path).await.unwrap();
+        let enabled = vec!["comment-on-github-issue".to_string()];
+        let so = SafeOutputs::new(temp_dir.path(), &output_path, Some(&enabled), None)
+            .await
+            .unwrap();
+        tokio::fs::remove_dir_all(&output_path).await.unwrap();
+        tokio::fs::write(&output_path, b"occupied").await.unwrap();
+        let result: CommentOnGithubIssueResult = CommentOnGithubIssueParams {
+            issue_number: crate::safe_outputs::GithubIssueNumber::Number(1),
+            body: "A sufficiently long GitHub issue comment.".to_string(),
+            repository: None,
+        }
+        .try_into()
+        .unwrap();
+        assert!(so.queue_sanitized_output(result).await.is_err());
     }
 
     #[tokio::test]

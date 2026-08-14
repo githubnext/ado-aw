@@ -39,6 +39,30 @@ interface ToolSpec {
   fields: FieldSpec[];
   /** Optional field whose (potentially long) value is shown as a body excerpt. */
   body?: string;
+  /** Repository is resolved from compiler-provided policy, never agent text. */
+  githubRepository?: boolean;
+}
+
+export interface GithubRepositoryPolicy {
+  targetRepo?: string;
+  allowedRepos: readonly string[];
+}
+
+export interface TrustedRepositoryContext {
+  policies: ReadonlyMap<string, GithubRepositoryPolicy>;
+  currentRepository?: string;
+  currentProvider?: string;
+  githubApiUrl?: string;
+}
+
+interface RepositoryResolution {
+  value: string;
+  resolved: boolean;
+}
+
+interface TemporaryReference {
+  canonical?: string;
+  invalid: boolean;
 }
 
 /** Maximum characters of a body excerpt before truncation. */
@@ -145,15 +169,134 @@ const TOOL_SPECS: Record<string, ToolSpec> = {
   },
   "create-github-issue": {
     title: "Create GitHub issue",
-    fields: [{ label: "Title", key: "title" }],
+    fields: [
+      { label: "Title", key: "title" },
+      { label: "Repository", key: "repository" },
+      { label: "Temporary ID", key: "temporary_id" },
+    ],
     body: "body",
+    githubRepository: true,
   },
   "set-github-issue-type": {
     title: "Set GitHub issue type",
     fields: [
       { label: "Issue", key: "issue_number" },
       { label: "Type", key: "issue_type" },
+      { label: "Repository", key: "repository" },
     ],
+    githubRepository: true,
+  },
+  "comment-on-github-issue": {
+    title: "Comment on GitHub issue",
+    fields: [
+      { label: "Issue", key: "issue_number" },
+      { label: "Repository", key: "repository" },
+    ],
+    body: "body",
+    githubRepository: true,
+  },
+  "hide-github-issue-comment": {
+    title: "Hide GitHub issue comment",
+    fields: [
+      { label: "Comment", key: "comment_id" },
+      { label: "Reason", key: "reason" },
+      { label: "Repository", key: "repository" },
+    ],
+    githubRepository: true,
+  },
+  "add-github-issue-labels": {
+    title: "Add GitHub issue labels",
+    fields: [
+      { label: "Issue", key: "issue_number" },
+      { label: "Labels", key: "labels" },
+      { label: "Repository", key: "repository" },
+    ],
+    githubRepository: true,
+  },
+  "remove-github-issue-labels": {
+    title: "Remove GitHub issue labels",
+    fields: [
+      { label: "Issue", key: "issue_number" },
+      { label: "Labels", key: "labels" },
+      { label: "Repository", key: "repository" },
+    ],
+    githubRepository: true,
+  },
+  "close-github-issue": {
+    title: "Close GitHub issue",
+    fields: [
+      { label: "Issue", key: "issue_number" },
+      { label: "State reason", key: "state_reason" },
+      { label: "Duplicate of", key: "duplicate_of" },
+      { label: "Repository", key: "repository" },
+    ],
+    body: "body",
+    githubRepository: true,
+  },
+  "update-github-issue": {
+    title: "Update GitHub issue",
+    fields: [
+      { label: "Issue", key: "issue_number" },
+      { label: "Status", key: "status" },
+      { label: "Title", key: "title" },
+      { label: "Operation", key: "operation" },
+      { label: "Labels", key: "labels" },
+      { label: "Assignees", key: "assignees" },
+      { label: "Milestone", key: "milestone" },
+      { label: "Repository", key: "repository" },
+    ],
+    body: "body",
+    githubRepository: true,
+  },
+  "set-github-issue-field": {
+    title: "Set GitHub issue field",
+    fields: [
+      { label: "Issue", key: "issue_number" },
+      { label: "Field", key: "field_name" },
+      { label: "Field node ID", key: "field_node_id" },
+      { label: "Value", key: "value" },
+      { label: "Repository", key: "repository" },
+    ],
+    githubRepository: true,
+  },
+  "assign-github-issue-milestone": {
+    title: "Assign GitHub issue milestone",
+    fields: [
+      { label: "Issue", key: "issue_number" },
+      { label: "Milestone", key: "milestone_title" },
+      { label: "Milestone number", key: "milestone_number" },
+      { label: "Repository", key: "repository" },
+    ],
+    githubRepository: true,
+  },
+  "assign-github-issue-to-user": {
+    title: "Assign GitHub issue to user",
+    fields: [
+      { label: "Issue", key: "issue_number" },
+      { label: "Assignee", key: "assignee" },
+      { label: "Assignees", key: "assignees" },
+      { label: "Repository", key: "repository" },
+    ],
+    githubRepository: true,
+  },
+  "unassign-github-issue-from-user": {
+    title: "Unassign GitHub issue from user",
+    fields: [
+      { label: "Issue", key: "issue_number" },
+      { label: "Assignee", key: "assignee" },
+      { label: "Assignees", key: "assignees" },
+      { label: "Repository", key: "repository" },
+    ],
+    githubRepository: true,
+  },
+  "link-github-sub-issue": {
+    title: "Link GitHub sub-issue",
+    fields: [
+      { label: "Parent issue", key: "parent_issue_number" },
+      { label: "Sub-issue", key: "sub_issue_number" },
+      { label: "Repository", key: "repository" },
+    ],
+    githubRepository: true,
   },
   "create-wiki-page": {
     title: "Create wiki page",
@@ -263,11 +406,356 @@ function genericFields(record: Record<string, unknown>): FieldSpec[] {
       return (
         typeof v === "string" ||
         typeof v === "number" ||
-        typeof v === "boolean"
+        typeof v === "boolean" ||
+        isExplicitEmpty(v)
       );
     })
     .sort()
     .map((k) => ({ label: k, key: k }));
+}
+
+function isExplicitEmpty(value: unknown): boolean {
+  if (value === null) return true;
+  if (typeof value === "string") return value.length === 0;
+  if (Array.isArray(value)) return value.length === 0;
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Object.keys(value as Record<string, unknown>).length === 0
+  );
+}
+
+function emptyValueMarker(value: unknown): string | undefined {
+  if (value === null) return "<null>";
+  if (typeof value === "string" && value.length === 0) return "<empty string>";
+  if (Array.isArray(value) && value.length === 0) return "<empty array>";
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    Object.keys(value as Record<string, unknown>).length === 0
+  ) {
+    return "<empty object>";
+  }
+  return undefined;
+}
+
+function renderInlineValue(value: unknown): string {
+  const marker = emptyValueMarker(value);
+  if (marker !== undefined) return sanitizeInline(marker);
+  const rendered = sanitizeInline(value);
+  return rendered.length > 0 ? rendered : sanitizeInline("<blank value>");
+}
+
+function currentRepository(
+  context: TrustedRepositoryContext,
+): RepositoryResolution {
+  const provider = context.currentProvider?.toLowerCase();
+  const repository = context.currentRepository;
+  const githubEnterpriseConfigured =
+    provider === "githubenterprise" &&
+    context.githubApiUrl !== undefined &&
+    context.githubApiUrl !== "https://api.github.com";
+  if (
+    repository &&
+    !repository.startsWith("$(") &&
+    (provider === "github" || githubEnterpriseConfigured)
+  ) {
+    return { value: repository, resolved: true };
+  }
+  return {
+    value: "<unresolved: configure target-repo for this source>",
+    resolved: false,
+  };
+}
+
+function repositoryFromPolicy(
+  proposal: Proposal,
+  context: TrustedRepositoryContext | undefined,
+): RepositoryResolution {
+  const policy = context?.policies.get(proposal.name);
+  if (!context || !policy) {
+    return {
+      value: "<unresolved: trusted repository policy unavailable>",
+      resolved: false,
+    };
+  }
+
+  const hasRequested = Object.prototype.hasOwnProperty.call(
+    proposal.record,
+    "repository",
+  );
+  const requested = proposal.record.repository;
+  if (hasRequested && requested !== null && requested !== undefined) {
+    if (typeof requested !== "string" || requested.length === 0) {
+      return {
+        value: "<unresolved: invalid requested repository>",
+        resolved: false,
+      };
+    }
+    const configured = [
+      ...(policy.targetRepo ? [policy.targetRepo] : []),
+      ...policy.allowedRepos,
+    ];
+    const matched = configured.find(
+      (repository) => repository.toLowerCase() === requested.toLowerCase(),
+    );
+    if (matched) return { value: matched, resolved: true };
+
+    const current = currentRepository(context);
+    if (
+      !policy.targetRepo &&
+      current.resolved &&
+      current.value.toLowerCase() === requested.toLowerCase()
+    ) {
+      return current;
+    }
+    return {
+      value: "<unresolved: requested repository is outside operator policy>",
+      resolved: false,
+    };
+  }
+
+  if (policy.targetRepo) {
+    return { value: policy.targetRepo, resolved: true };
+  }
+  return currentRepository(context);
+}
+
+function temporaryReference(value: unknown): TemporaryReference | undefined {
+  if (typeof value !== "string") return undefined;
+  const bare = value.startsWith("#") ? value.slice(1) : value;
+  if (!bare.startsWith("aw_")) return undefined;
+  const suffix = bare.slice(3);
+  if (
+    !(suffix.length >= 3 && suffix.length <= 12) ||
+    !/^[A-Za-z0-9_]+$/.test(suffix)
+  ) {
+    return { invalid: true };
+  }
+  return { canonical: `#${bare}`, invalid: false };
+}
+
+function proposalTemporaryReferences(
+  proposal: Proposal,
+): TemporaryReference[] {
+  const keys = ["issue_number"];
+  const references: TemporaryReference[] = [];
+  for (const key of keys) {
+    const reference = temporaryReference(proposal.record[key]);
+    if (reference) references.push(reference);
+  }
+  return references;
+}
+
+function trustedTemporaryRepository(
+  proposal: Proposal,
+  context: TrustedRepositoryContext | undefined,
+  temporaryRepository: string,
+): RepositoryResolution {
+  const policy = context?.policies.get(proposal.name);
+  if (!context || !policy) {
+    return {
+      value: "<unresolved: trusted repository policy unavailable>",
+      resolved: false,
+    };
+  }
+
+  if (
+    Object.prototype.hasOwnProperty.call(proposal.record, "repository") &&
+    proposal.record.repository !== null &&
+    proposal.record.repository !== undefined
+  ) {
+    const requested = proposal.record.repository;
+    if (
+      typeof requested !== "string" ||
+      requested.toLowerCase() !== temporaryRepository.toLowerCase()
+    ) {
+      return {
+        value:
+          "<unresolved: requested repository does not match temporary issue repository>",
+        resolved: false,
+      };
+    }
+  }
+
+  const configured = [
+    ...(policy.targetRepo ? [policy.targetRepo] : []),
+    ...policy.allowedRepos,
+  ];
+  const matched = configured.find(
+    (repository) =>
+      repository.toLowerCase() === temporaryRepository.toLowerCase(),
+  );
+  if (matched) return { value: matched, resolved: true };
+
+  const current = currentRepository(context);
+  if (
+    !policy.targetRepo &&
+    current.resolved &&
+    current.value.toLowerCase() === temporaryRepository.toLowerCase()
+  ) {
+    return current;
+  }
+  return {
+    value: "<unresolved: temporary repository is outside operator policy>",
+    resolved: false,
+  };
+}
+
+function linkIssueReference(
+  value: unknown,
+):
+  | { kind: "numeric" }
+  | { kind: "temporary"; reference: TemporaryReference }
+  | { kind: "invalid" } {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) {
+    return { kind: "numeric" };
+  }
+  if (typeof value === "string" && /^[0-9]+$/.test(value)) {
+    try {
+      const number = BigInt(value);
+      if (number > 0n && number <= 18_446_744_073_709_551_615n) {
+        return { kind: "numeric" };
+      }
+    } catch {
+      return { kind: "invalid" };
+    }
+  }
+  const temporary = temporaryReference(value);
+  if (temporary && !temporary.invalid) {
+    return { kind: "temporary", reference: temporary };
+  }
+  return { kind: "invalid" };
+}
+
+function repositoryFromLinkReferences(
+  proposal: Proposal,
+  context: TrustedRepositoryContext | undefined,
+  repositories: ReadonlyMap<string, string>,
+): RepositoryResolution | undefined {
+  const parent = linkIssueReference(proposal.record.parent_issue_number);
+  const child = linkIssueReference(proposal.record.sub_issue_number);
+  if (parent.kind === "invalid" || child.kind === "invalid") {
+    return {
+      value: "<unresolved: invalid sub-issue link reference>",
+      resolved: false,
+    };
+  }
+
+  const temporaryReferences = [parent, child].filter(
+    (
+      reference,
+    ): reference is { kind: "temporary"; reference: TemporaryReference } =>
+      reference.kind === "temporary",
+  );
+  if (temporaryReferences.length === 0) return undefined;
+
+  const resolved = temporaryReferences.map(({ reference }) =>
+    repositories.get(reference.canonical!),
+  );
+  if (resolved.some((repository) => repository === undefined)) {
+    return {
+      value:
+        "<unresolved: temporary repository not established by a preceding create-github-issue>",
+      resolved: false,
+    };
+  }
+  const temporaryRepository = resolved[0]!;
+  if (
+    resolved.some(
+      (repository) =>
+        repository!.toLowerCase() !== temporaryRepository.toLowerCase(),
+    )
+  ) {
+    return {
+      value:
+        "<unresolved: temporary references resolve to different repositories>",
+      resolved: false,
+    };
+  }
+
+  const trustedTemporary = trustedTemporaryRepository(
+    proposal,
+    context,
+    temporaryRepository,
+  );
+  if (!trustedTemporary.resolved) return trustedTemporary;
+
+  if (temporaryReferences.length === 1) {
+    const numericRepository = repositoryFromPolicy(proposal, context);
+    if (!numericRepository.resolved) return numericRepository;
+    if (
+      numericRepository.value.toLowerCase() !==
+      trustedTemporary.value.toLowerCase()
+    ) {
+      return {
+        value:
+          "<unresolved: numeric and temporary references resolve to different repositories>",
+        resolved: false,
+      };
+    }
+  }
+  return trustedTemporary;
+}
+
+function repositoryFromTemporary(
+  proposal: Proposal,
+  context: TrustedRepositoryContext | undefined,
+  repositories: ReadonlyMap<string, string>,
+): RepositoryResolution | undefined {
+  if (proposal.name === "link-github-sub-issue") {
+    return repositoryFromLinkReferences(proposal, context, repositories);
+  }
+
+  const references = proposalTemporaryReferences(proposal);
+  if (references.length === 0) return undefined;
+  if (references.some((reference) => reference.invalid)) {
+    return {
+      value: "<unresolved: invalid temporary issue reference>",
+      resolved: false,
+    };
+  }
+
+  const resolved = references.map((reference) =>
+    repositories.get(reference.canonical!),
+  );
+  if (resolved.some((repository) => repository === undefined)) {
+    return {
+      value:
+        "<unresolved: temporary repository not established by a preceding create-github-issue>",
+      resolved: false,
+    };
+  }
+  return trustedTemporaryRepository(proposal, context, resolved[0]!);
+}
+
+function buildRepositoryResolutions(
+  proposals: Proposal[],
+  context: TrustedRepositoryContext | undefined,
+): Map<number, RepositoryResolution> {
+  const resolutions = new Map<number, RepositoryResolution>();
+  const temporaryRepositories = new Map<string, string>();
+  const ordered = [...proposals].sort((a, b) => a.index - b.index);
+
+  for (const proposal of ordered) {
+    const resolution =
+      repositoryFromTemporary(proposal, context, temporaryRepositories) ??
+      repositoryFromPolicy(proposal, context);
+    resolutions.set(proposal.index, resolution);
+
+    if (proposal.name !== "create-github-issue" || !resolution.resolved) {
+      continue;
+    }
+    const temporary = temporaryReference(proposal.record.temporary_id);
+    if (
+      temporary?.canonical &&
+      !temporary.invalid &&
+      !temporaryRepositories.has(temporary.canonical)
+    ) {
+      temporaryRepositories.set(temporary.canonical, resolution.value);
+    }
+  }
+  return resolutions;
 }
 
 /**
@@ -352,7 +840,10 @@ function truncate(s: string, max: number): string {
 }
 
 /** Render one proposal as a markdown fragment. */
-function renderProposal(p: Proposal): string {
+function renderProposal(
+  p: Proposal,
+  repositoryResolutions: ReadonlyMap<number, RepositoryResolution>,
+): string {
   const spec = TOOL_SPECS[p.name];
   const title = spec ? spec.title : fallbackTitle(p.name);
   const fields = spec ? spec.fields : genericFields(p.record);
@@ -368,10 +859,19 @@ function renderProposal(p: Proposal): string {
 
   const rows: string[] = [];
   for (const f of fields) {
+    if (f.key === "repository" && spec?.githubRepository) {
+      const repository = repositoryResolutions.get(p.index) ?? {
+        value: "<unresolved: trusted repository policy unavailable>",
+        resolved: false,
+      };
+      rows.push(
+        `| ${sanitizeInline(f.label)} | ${sanitizeInline(repository.value)} |`,
+      );
+      continue;
+    }
+    if (!Object.prototype.hasOwnProperty.call(p.record, f.key)) continue;
     const raw = p.record[f.key];
-    if (raw === null || raw === undefined) continue;
-    const val = sanitizeInline(raw);
-    if (val.length === 0) continue;
+    const val = renderInlineValue(raw);
     rows.push(`| ${sanitizeInline(f.label)} | ${val} |`);
   }
   if (rows.length > 0) {
@@ -382,19 +882,31 @@ function renderProposal(p: Proposal): string {
   }
 
   if (spec?.body) {
-    const body = sanitizeBlock(p.record[spec.body]);
-    if (body.length > 0) {
+    if (Object.prototype.hasOwnProperty.call(p.record, spec.body)) {
+      const rawBody = p.record[spec.body];
+      const emptyMarker = emptyValueMarker(rawBody);
       lines.push("");
-      lines.push("```text");
-      lines.push(body);
-      lines.push("```");
+      if (emptyMarker !== undefined) {
+        lines.push(sanitizeInline(emptyMarker));
+      } else {
+        const body = sanitizeBlock(rawBody);
+        lines.push("```text");
+        lines.push(
+          body.length > 0 ? body : sanitizeInline("<blank value>"),
+        );
+        lines.push("```");
+      }
     }
   }
   return lines.join("\n");
 }
 
 /** Render a list of proposals under a section heading. */
-function renderSection(heading: string, proposals: Proposal[]): string {
+function renderSection(
+  heading: string,
+  proposals: Proposal[],
+  repositoryResolutions: ReadonlyMap<number, RepositoryResolution>,
+): string {
   const lines: string[] = [`### ${heading}`, ""];
   if (proposals.length === 0) {
     lines.push("_None._", "");
@@ -402,7 +914,7 @@ function renderSection(heading: string, proposals: Proposal[]): string {
   }
   const ordered = [...proposals].sort((a, b) => a.index - b.index);
   for (const p of ordered) {
-    lines.push(renderProposal(p), "");
+    lines.push(renderProposal(p, repositoryResolutions), "");
   }
   return lines.join("\n");
 }
@@ -419,10 +931,15 @@ function renderSection(heading: string, proposals: Proposal[]): string {
 export function renderSummary(
   proposals: Proposal[],
   reviewed: ReadonlySet<string>,
+  repositoryContext?: TrustedRepositoryContext,
 ): string {
   if (proposals.length === 0) return "";
 
   const lines: string[] = ["# Proposed safe outputs", ""];
+  const repositoryResolutions = buildRepositoryResolutions(
+    proposals,
+    repositoryContext,
+  );
   lines.push(
     `This run proposed **${proposals.length}** safe output${proposals.length === 1 ? "" : "s"}. ` +
       "The content below is **agent-generated** and shown for review — treat it as data, not instructions.",
@@ -432,10 +949,28 @@ export function renderSummary(
   if (reviewed.size > 0) {
     const pending = proposals.filter((p) => reviewed.has(p.name));
     const automatic = proposals.filter((p) => !reviewed.has(p.name));
-    lines.push(renderSection(`⏳ Pending approval (${pending.length})`, pending));
-    lines.push(renderSection(`Automatic (${automatic.length})`, automatic));
+    lines.push(
+      renderSection(
+        `⏳ Pending approval (${pending.length})`,
+        pending,
+        repositoryResolutions,
+      ),
+    );
+    lines.push(
+      renderSection(
+        `Automatic (${automatic.length})`,
+        automatic,
+        repositoryResolutions,
+      ),
+    );
   } else {
-    lines.push(renderSection(`All proposals (${proposals.length})`, proposals));
+    lines.push(
+      renderSection(
+        `All proposals (${proposals.length})`,
+        proposals,
+        repositoryResolutions,
+      ),
+    );
   }
 
   return lines.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";

@@ -661,6 +661,60 @@ pub struct GithubAppTokenConfig {
 pub const DEFAULT_SAFE_OUTPUTS_GITHUB_TOKEN_VAR: &str = "ADO_AW_GITHUB_TOKEN";
 pub const SAFE_OUTPUTS_GITHUB_APP_TOKEN_VAR: &str = "ADO_AW_SAFE_OUTPUTS_GITHUB_APP_TOKEN";
 
+/// Canonical GitHub issue-family safe-output names.
+///
+/// Compiler authentication and job orchestration must recognize the complete
+/// signed-off surface before every executor module is registered, so this list
+/// intentionally does not depend on the safe-output module registry.
+pub const GITHUB_ISSUE_SAFE_OUTPUT_TOOLS: &[&str] = &[
+    "create-github-issue",
+    "set-github-issue-type",
+    "comment-on-github-issue",
+    "hide-github-issue-comment",
+    "add-github-issue-labels",
+    "remove-github-issue-labels",
+    "close-github-issue",
+    "update-github-issue",
+    "set-github-issue-field",
+    "assign-github-issue-milestone",
+    "assign-github-issue-to-user",
+    "unassign-github-issue-from-user",
+    "link-github-sub-issue",
+];
+
+/// GitHub issue-family tools that can consume a same-run temporary issue ID.
+pub const GITHUB_TEMPORARY_ID_CONSUMERS: &[&str] = &[
+    "set-github-issue-type",
+    "comment-on-github-issue",
+    "add-github-issue-labels",
+    "remove-github-issue-labels",
+    "close-github-issue",
+    "update-github-issue",
+    "set-github-issue-field",
+    "assign-github-issue-milestone",
+    "assign-github-issue-to-user",
+    "unassign-github-issue-from-user",
+    "link-github-sub-issue",
+];
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct GithubIssueCompilerConfig {
+    #[serde(default, rename = "target-repo")]
+    pub(crate) target_repo: Option<String>,
+    #[serde(default, rename = "allowed-repos")]
+    pub(crate) allowed_repos: Vec<String>,
+    #[serde(default, rename = "required-labels")]
+    pub(crate) required_labels: Vec<String>,
+    #[serde(default, rename = "required-title-prefix")]
+    pub(crate) required_title_prefix: Option<String>,
+    #[serde(default)]
+    pub(crate) issues: Option<bool>,
+    #[serde(default, rename = "pull-requests")]
+    pub(crate) pull_requests: Option<bool>,
+    #[serde(default)]
+    pub(crate) discussions: Option<bool>,
+}
+
 #[derive(Debug, Clone)]
 pub enum GithubSafeOutputsAuth {
     Token { variable: String, api_url: String },
@@ -796,16 +850,9 @@ impl GithubAppTokenConfig {
             }
         }
         if let Some(api_url) = &self.api_url {
-            crate::validate::reject_pipeline_injection(
-                api_url,
-                &format!("{path}.api-url"),
-            )?;
+            crate::validate::reject_pipeline_injection(api_url, &format!("{path}.api-url"))?;
             let parsed = url::Url::parse(api_url).map_err(|e| {
-                anyhow::anyhow!(
-                    "{path}.api-url '{}' is not a valid URL: {}",
-                    api_url,
-                    e
-                )
+                anyhow::anyhow!("{path}.api-url '{}' is not a valid URL: {}", api_url, e)
             })?;
             if parsed.scheme() != "https" || parsed.host_str().is_none() {
                 anyhow::bail!(
@@ -2028,10 +2075,7 @@ impl FrontMatter {
 
     /// Resolve the effective Detection engine without mutating the Agent engine
     /// configuration.
-    pub fn effective_detection_engine(
-        &self,
-        config: &ThreatDetectionConfig,
-    ) -> EngineConfig {
+    pub fn effective_detection_engine(&self, config: &ThreatDetectionConfig) -> EngineConfig {
         let mut effective = config
             .engine
             .as_ref()
@@ -2071,9 +2115,12 @@ impl FrontMatter {
         Ok(())
     }
 
-    pub fn has_github_issue_outputs(&self) -> bool {
-        self.safe_outputs.contains_key("create-github-issue")
-            || self.safe_outputs.contains_key("set-github-issue-type")
+    pub fn github_issue_tool_names(&self) -> Vec<String> {
+        GITHUB_ISSUE_SAFE_OUTPUT_TOOLS
+            .iter()
+            .filter(|tool| self.safe_outputs.contains_key(**tool))
+            .map(|tool| (*tool).to_string())
+            .collect()
     }
 
     fn typed_safe_output_config<T>(&self, key: &str) -> anyhow::Result<Option<T>>
@@ -2123,6 +2170,277 @@ impl FrontMatter {
         self.typed_safe_output_config("set-github-issue-type")
     }
 
+    pub fn comment_on_github_issue_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::CommentOnGithubIssueConfig>> {
+        self.typed_safe_output_config("comment-on-github-issue")
+    }
+
+    pub fn hide_github_issue_comment_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::HideGithubIssueCommentConfig>> {
+        self.typed_safe_output_config("hide-github-issue-comment")
+    }
+
+    pub fn add_github_issue_labels_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::AddGithubIssueLabelsConfig>> {
+        self.typed_safe_output_config("add-github-issue-labels")
+    }
+
+    pub fn remove_github_issue_labels_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::RemoveGithubIssueLabelsConfig>> {
+        self.typed_safe_output_config("remove-github-issue-labels")
+    }
+
+    pub fn close_github_issue_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::CloseGithubIssueConfig>> {
+        self.typed_safe_output_config("close-github-issue")
+    }
+
+    pub fn update_github_issue_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::UpdateGithubIssueConfig>> {
+        self.typed_safe_output_config("update-github-issue")
+    }
+
+    pub fn set_github_issue_field_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::SetGithubIssueFieldConfig>> {
+        self.typed_safe_output_config("set-github-issue-field")
+    }
+
+    pub fn assign_github_issue_milestone_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::AssignGithubIssueMilestoneConfig>> {
+        self.typed_safe_output_config("assign-github-issue-milestone")
+    }
+
+    pub fn assign_github_issue_to_user_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::AssignGithubIssueToUserConfig>> {
+        self.typed_safe_output_config("assign-github-issue-to-user")
+    }
+
+    pub fn unassign_github_issue_from_user_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::UnassignGithubIssueFromUserConfig>> {
+        self.typed_safe_output_config("unassign-github-issue-from-user")
+    }
+
+    pub fn link_github_sub_issue_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::LinkGithubSubIssueConfig>> {
+        self.typed_safe_output_config("link-github-sub-issue")
+    }
+
+    pub(crate) fn github_issue_compiler_config(
+        &self,
+        tool: &str,
+    ) -> anyhow::Result<Option<GithubIssueCompilerConfig>> {
+        if !GITHUB_ISSUE_SAFE_OUTPUT_TOOLS.contains(&tool) {
+            return Ok(None);
+        }
+        match tool {
+            "create-github-issue" => {
+                Ok(self
+                    .create_github_issue_config()?
+                    .map(|config| GithubIssueCompilerConfig {
+                        target_repo: config.target_repo,
+                        allowed_repos: config.allowed_repos,
+                        ..Default::default()
+                    }))
+            }
+            "set-github-issue-type" => {
+                Ok(self
+                    .set_github_issue_type_config()?
+                    .map(|config| GithubIssueCompilerConfig {
+                        target_repo: config.target_repo,
+                        allowed_repos: config.allowed_repos,
+                        required_labels: config.required_labels,
+                        required_title_prefix: config.required_title_prefix,
+                        ..Default::default()
+                    }))
+            }
+            "comment-on-github-issue" => {
+                Ok(self
+                    .comment_on_github_issue_config()?
+                    .map(|config| GithubIssueCompilerConfig {
+                        target_repo: config.target_repo,
+                        allowed_repos: config.allowed_repos,
+                        required_labels: config.required_labels,
+                        required_title_prefix: config.required_title_prefix,
+                        issues: Some(config.issues),
+                        pull_requests: Some(config.pull_requests),
+                        ..Default::default()
+                    }))
+            }
+            "hide-github-issue-comment" => {
+                Ok(self.hide_github_issue_comment_config()?.map(|config| {
+                    GithubIssueCompilerConfig {
+                        target_repo: config.target_repo,
+                        allowed_repos: config.allowed_repos,
+                        required_labels: config.required_labels,
+                        required_title_prefix: config.required_title_prefix,
+                        discussions: Some(config.discussions),
+                        ..Default::default()
+                    }
+                }))
+            }
+            "add-github-issue-labels" => {
+                Ok(self
+                    .add_github_issue_labels_config()?
+                    .map(|config| GithubIssueCompilerConfig {
+                        target_repo: config.target_repo,
+                        allowed_repos: config.allowed_repos,
+                        required_labels: config.required_labels,
+                        required_title_prefix: config.required_title_prefix,
+                        issues: Some(config.issues),
+                        pull_requests: Some(config.pull_requests),
+                        ..Default::default()
+                    }))
+            }
+            "remove-github-issue-labels" => {
+                Ok(self.remove_github_issue_labels_config()?.map(|config| {
+                    GithubIssueCompilerConfig {
+                        target_repo: config.target_repo,
+                        allowed_repos: config.allowed_repos,
+                        required_labels: config.required_labels,
+                        required_title_prefix: config.required_title_prefix,
+                        ..Default::default()
+                    }
+                }))
+            }
+            "close-github-issue" => {
+                Ok(self
+                    .close_github_issue_config()?
+                    .map(|config| GithubIssueCompilerConfig {
+                        target_repo: config.target_repo,
+                        allowed_repos: config.allowed_repos,
+                        required_labels: config.required_labels,
+                        required_title_prefix: config.required_title_prefix,
+                        ..Default::default()
+                    }))
+            }
+            "update-github-issue" => {
+                Ok(self
+                    .update_github_issue_config()?
+                    .map(|config| GithubIssueCompilerConfig {
+                        target_repo: config.target_repo,
+                        allowed_repos: config.allowed_repos,
+                        required_labels: config.required_labels,
+                        required_title_prefix: config.required_title_prefix,
+                        issues: Some(config.issues),
+                        pull_requests: Some(config.pull_requests),
+                        ..Default::default()
+                    }))
+            }
+            "set-github-issue-field" => {
+                Ok(self
+                    .set_github_issue_field_config()?
+                    .map(|config| GithubIssueCompilerConfig {
+                        target_repo: config.target_repo,
+                        allowed_repos: config.allowed_repos,
+                        required_labels: config.required_labels,
+                        required_title_prefix: config.required_title_prefix,
+                        ..Default::default()
+                    }))
+            }
+            "assign-github-issue-milestone" => Ok(self
+                .assign_github_issue_milestone_config()?
+                .map(|config| GithubIssueCompilerConfig {
+                    target_repo: config.target_repo,
+                    allowed_repos: config.allowed_repos,
+                    required_labels: config.required_labels,
+                    required_title_prefix: config.required_title_prefix,
+                    ..Default::default()
+                })),
+            "assign-github-issue-to-user" => {
+                Ok(self.assign_github_issue_to_user_config()?.map(|config| {
+                    GithubIssueCompilerConfig {
+                        target_repo: config.target_repo,
+                        allowed_repos: config.allowed_repos,
+                        required_labels: config.required_labels,
+                        required_title_prefix: config.required_title_prefix,
+                        ..Default::default()
+                    }
+                }))
+            }
+            "unassign-github-issue-from-user" => Ok(self
+                .unassign_github_issue_from_user_config()?
+                .map(|config| GithubIssueCompilerConfig {
+                    target_repo: config.target_repo,
+                    allowed_repos: config.allowed_repos,
+                    required_labels: config.required_labels,
+                    required_title_prefix: config.required_title_prefix,
+                    ..Default::default()
+                })),
+            "link-github-sub-issue" => {
+                Ok(self
+                    .link_github_sub_issue_config()?
+                    .map(|config| GithubIssueCompilerConfig {
+                        target_repo: config.target_repo,
+                        allowed_repos: config.allowed_repos,
+                        ..Default::default()
+                    }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    pub(crate) fn github_app_permissions_for_tools(
+        &self,
+        tools: &[String],
+    ) -> anyhow::Result<std::collections::BTreeMap<String, GithubAppPermissionLevel>> {
+        let mut issues = false;
+        let mut pull_requests = false;
+        let mut discussions = false;
+
+        for tool in tools {
+            let Some(config) = self.github_issue_compiler_config(tool)? else {
+                continue;
+            };
+            match tool.as_str() {
+                "comment-on-github-issue" | "add-github-issue-labels" | "update-github-issue" => {
+                    let tool_issues = config.issues.unwrap_or(true);
+                    let tool_pull_requests = config.pull_requests.unwrap_or(false);
+                    if !tool_issues && !tool_pull_requests {
+                        anyhow::bail!(
+                            "safe-outputs.{tool} must enable at least one of `issues` or \
+                             `pull-requests`"
+                        );
+                    }
+                    issues |= tool_issues;
+                    pull_requests |= tool_pull_requests;
+                }
+                "hide-github-issue-comment" => {
+                    issues = true;
+                    pull_requests = true;
+                    discussions |= config.discussions.unwrap_or(false);
+                }
+                "remove-github-issue-labels" => {
+                    issues = true;
+                    pull_requests = true;
+                }
+                _ => issues = true,
+            }
+        }
+
+        let mut permissions = std::collections::BTreeMap::new();
+        if issues {
+            permissions.insert("issues".to_string(), GithubAppPermissionLevel::Write);
+        }
+        if pull_requests {
+            permissions.insert("pull-requests".to_string(), GithubAppPermissionLevel::Write);
+        }
+        if discussions {
+            permissions.insert("discussions".to_string(), GithubAppPermissionLevel::Write);
+        }
+        Ok(permissions)
+    }
+
     fn parse_safe_outputs_github_token(raw: &str) -> anyhow::Result<String> {
         let variable = raw
             .strip_prefix("$(")
@@ -2152,7 +2470,9 @@ impl FrontMatter {
         Ok(variable.to_string())
     }
 
-    fn parse_safe_outputs_github_api_url(raw: Option<&serde_json::Value>) -> anyhow::Result<String> {
+    fn parse_safe_outputs_github_api_url(
+        raw: Option<&serde_json::Value>,
+    ) -> anyhow::Result<String> {
         let Some(raw) = raw else {
             return Ok("https://api.github.com".to_string());
         };
@@ -2182,6 +2502,7 @@ impl FrontMatter {
         &self,
         mut config: GithubAppTokenConfig,
         path: &str,
+        tools: &[String],
     ) -> anyhow::Result<GithubAppTokenConfig> {
         if let Some(api_url) = config.api_url.take() {
             let parsed = url::Url::parse(&api_url)
@@ -2189,79 +2510,35 @@ impl FrontMatter {
             config.api_url = Some(parsed.to_string().trim_end_matches('/').to_string());
         }
         let mut targets = Vec::new();
-        let mut has_implicit_target = false;
-        if self.safe_outputs.contains_key("create-github-issue") {
-            match self
-                .create_github_issue_config()?
-                .and_then(|config| config.target_repo)
-            {
-                Some(target) => targets.push(target),
-                None => has_implicit_target = true,
-            }
+        for tool in tools {
+            let Some(tool_config) = self.github_issue_compiler_config(tool)? else {
+                continue;
+            };
+            let target_repo = tool_config.target_repo.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "safe-outputs.{tool}.target-repo is required with GitHub App auth; \
+                     runtime source-repository fallback cannot be scoped safely"
+                )
+            })?;
+            targets.push(target_repo);
+            targets.extend(tool_config.allowed_repos);
         }
-        if self.safe_outputs.contains_key("set-github-issue-type") {
-            match self
-                .set_github_issue_type_config()?
-                .and_then(|config| config.target_repo)
-            {
-                Some(target)
-                    if !targets
-                        .iter()
-                        .any(|existing| existing.eq_ignore_ascii_case(&target)) =>
-                {
-                    targets.push(target);
-                }
-                Some(_) => {}
-                None => has_implicit_target = true,
-            }
-        }
-        if has_implicit_target && !targets.is_empty() {
-            anyhow::bail!(
-                "GitHub App-backed create-github-issue and set-github-issue-type cannot mix implicit current \
-                 repository targets with explicit target-repo values; configure target-repo \
-                 consistently for both tools"
-            );
-        }
-
-        if targets.is_empty() {
-            if config.repositories.is_empty() {
-                anyhow::bail!(
-                    "{path}.repositories must be set when GitHub issue outputs omit target-repo; \
-                     the compiler cannot safely scope the App token to a runtime repository"
-                );
-            }
-            return Ok(config);
-        }
-
-        let mut repositories = Vec::new();
-        for target in targets {
-            crate::safe_outputs::validate_target_repo(&target)
-                .map_err(|e| anyhow::anyhow!("safe-outputs target-repo: {e}"))?;
-            let (owner, repository) = target
-                .split_once('/')
-                .expect("validated target-repo contains slash");
-            if !owner.eq_ignore_ascii_case(&config.owner) {
-                anyhow::bail!(
-                    "{path}.owner '{}' does not match target repository owner '{}'",
-                    config.owner,
-                    owner
-                );
-            }
-            if !repositories
-                .iter()
-                .any(|existing: &String| existing.eq_ignore_ascii_case(repository))
-            {
-                repositories.push(repository.to_string());
-            }
-        }
-        config.repositories = repositories;
+        config.repositories = crate::safe_outputs::github_app_repository_names(
+            &config.owner,
+            targets.iter().map(String::as_str),
+        )?;
         Ok(config)
     }
 
-    pub fn github_safe_outputs_auth(
+    pub fn github_safe_outputs_auth(&self) -> anyhow::Result<Option<GithubSafeOutputsAuth>> {
+        self.github_safe_outputs_auth_for_tools(&self.github_issue_tool_names())
+    }
+
+    pub(crate) fn github_safe_outputs_auth_for_tools(
         &self,
+        tools: &[String],
     ) -> anyhow::Result<Option<GithubSafeOutputsAuth>> {
-        if !self.has_github_issue_outputs() {
+        if tools.is_empty() {
             return Ok(None);
         }
 
@@ -2281,9 +2558,10 @@ impl FrontMatter {
                      safe-outputs.github-app.api-url for GitHub App auth"
                 );
             }
-            let config: GithubAppTokenConfig = serde_json::from_value(raw.clone()).map_err(|e| {
-                anyhow::anyhow!("safe-outputs.github-app has invalid configuration: {e}")
-            })?;
+            let config: GithubAppTokenConfig =
+                serde_json::from_value(raw.clone()).map_err(|e| {
+                    anyhow::anyhow!("safe-outputs.github-app has invalid configuration: {e}")
+                })?;
             config.validate_for("safe-outputs.github-app")?;
             if !config.permissions.is_empty() {
                 anyhow::bail!(
@@ -2292,7 +2570,7 @@ impl FrontMatter {
                 );
             }
             let config =
-                self.scope_github_app_to_issue_targets(config, "safe-outputs.github-app")?;
+                self.scope_github_app_to_issue_targets(config, "safe-outputs.github-app", tools)?;
             return Ok(Some(GithubSafeOutputsAuth::App { config }));
         }
 
@@ -2333,8 +2611,11 @@ impl FrontMatter {
                      credentials require an explicitly read-only Agent/Detection token"
                 );
             }
-            let config = self
-                .scope_github_app_to_issue_targets(engine_app.clone(), "engine.github-app-token")?;
+            let config = self.scope_github_app_to_issue_targets(
+                engine_app.clone(),
+                "engine.github-app-token",
+                tools,
+            )?;
             return Ok(Some(GithubSafeOutputsAuth::App { config }));
         }
 
@@ -2352,11 +2633,8 @@ impl FrontMatter {
     /// cannot drift.
     ///
     /// On a malformed config (e.g. `target-branches: "not-a-map"`) the compiler
-    /// warns and falls back to defaults — deliberately matching Stage 3's
-    /// `get_tool_config`, which also swallows a deserialization error and uses
-    /// `Default` (`.ok().unwrap_or_default()`). Bailing here would make the two
-    /// paths diverge (compile fails / Stage 3 silently defaults); the warning
-    /// surfaces the mistake without breaking that symmetry.
+    /// warns and falls back to defaults for its prepare step. Stage 3 rejects
+    /// the malformed config before executing the safe output.
     ///
     /// A bare `create-pull-request:` (YAML null) is the standard "enable with
     /// defaults" idiom, so it maps to `CreatePrConfig::default()` silently — it
@@ -2370,7 +2648,8 @@ impl FrontMatter {
                 .unwrap_or_else(|e| {
                     eprintln!(
                         "Warning: could not parse create-pull-request config ({e}); \
-                        using defaults. Stage 3 will do the same — check the \
+                        using defaults for compile-time preparation. Stage 3 will \
+                        reject this config — check the \
                         `create-pull-request:` block (e.g. `target-branches` must be a map)."
                     );
                     crate::safe_outputs::CreatePrConfig::default()
@@ -5325,6 +5604,202 @@ github-app-token:
     }
 
     #[test]
+    fn github_issue_tool_discovery_covers_all_registered_names() {
+        let safe_outputs = GITHUB_ISSUE_SAFE_OUTPUT_TOOLS
+            .iter()
+            .map(|tool| format!("  {tool}: {{}}\n"))
+            .collect::<String>();
+        let source =
+            format!("---\nname: test\ndescription: test\nsafe-outputs:\n{safe_outputs}---\n");
+        let (fm, _) = super::super::common::parse_markdown(&source).unwrap();
+        assert_eq!(
+            fm.github_issue_tool_names(),
+            GITHUB_ISSUE_SAFE_OUTPUT_TOOLS
+                .iter()
+                .map(|tool| (*tool).to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn github_app_scope_is_exact_union_of_target_and_allowed_repositories() {
+        let (fm, _) = super::super::common::parse_markdown(
+            r#"---
+name: test
+description: test
+safe-outputs:
+  github-app:
+    client-id: Iv23liExample
+    owner: octo
+    repositories: [broader]
+  create-github-issue:
+    target-repo: octo/default
+    allowed-repos: [octo/extra]
+  set-github-issue-type:
+    target-repo: octo/second
+    allowed-repos: [OCTO/EXTRA]
+---
+"#,
+        )
+        .unwrap();
+        let auth = fm.github_safe_outputs_auth().unwrap().unwrap();
+        let GithubSafeOutputsAuth::App { config } = auth else {
+            panic!("expected app auth");
+        };
+        assert_eq!(config.repositories, vec!["default", "extra", "second"]);
+    }
+
+    #[test]
+    fn github_app_scope_is_derived_per_safeoutputs_variant() {
+        let (fm, _) = super::super::common::parse_markdown(
+            r#"---
+name: test
+description: test
+safe-outputs:
+  github-app:
+    client-id: Iv23liExample
+    owner: octo
+  create-github-issue:
+    target-repo: octo/automatic
+  set-github-issue-type:
+    target-repo: octo/reviewed
+---
+"#,
+        )
+        .unwrap();
+        let automatic = fm
+            .github_safe_outputs_auth_for_tools(&["create-github-issue".to_string()])
+            .unwrap()
+            .unwrap();
+        let reviewed = fm
+            .github_safe_outputs_auth_for_tools(&["set-github-issue-type".to_string()])
+            .unwrap()
+            .unwrap();
+        let GithubSafeOutputsAuth::App { config: automatic } = automatic else {
+            panic!("expected app auth");
+        };
+        let GithubSafeOutputsAuth::App { config: reviewed } = reviewed else {
+            panic!("expected app auth");
+        };
+        assert_eq!(automatic.repositories, vec!["automatic"]);
+        assert_eq!(reviewed.repositories, vec!["reviewed"]);
+    }
+
+    #[test]
+    fn github_app_rejects_allowed_repository_from_another_owner() {
+        let (fm, _) = super::super::common::parse_markdown(
+            r#"---
+name: test
+description: test
+safe-outputs:
+  github-app:
+    client-id: Iv23liExample
+    owner: octo
+  create-github-issue:
+    target-repo: octo/repo
+    allowed-repos: [other/repo]
+---
+"#,
+        )
+        .unwrap();
+        let error = fm.github_safe_outputs_auth().unwrap_err().to_string();
+        assert!(error.contains("does not belong to App owner"));
+    }
+
+    #[test]
+    fn github_pat_allows_repositories_from_multiple_owners() {
+        let (fm, _) = super::super::common::parse_markdown(
+            r#"---
+name: test
+description: test
+safe-outputs:
+  github-token: $(MULTI_OWNER_TOKEN)
+  create-github-issue:
+    target-repo: octo/repo
+    allowed-repos: [other/repo]
+---
+"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            fm.github_safe_outputs_auth().unwrap(),
+            Some(GithubSafeOutputsAuth::Token { variable, .. })
+                if variable == "MULTI_OWNER_TOKEN"
+        ));
+    }
+
+    #[test]
+    fn github_app_permissions_are_derived_for_selected_variant_tools() {
+        let (fm, _) = super::super::common::parse_markdown(
+            r#"---
+name: test
+description: test
+safe-outputs:
+  comment-on-github-issue:
+    target-repo: octo/repo
+    issues: false
+    pull-requests: true
+  hide-github-issue-comment:
+    target-repo: octo/repo
+    discussions: true
+  update-github-issue:
+    target-repo: octo/repo
+    issues: false
+    pull-requests: true
+  remove-github-issue-labels:
+    target-repo: octo/repo
+---
+"#,
+        )
+        .unwrap();
+
+        let automatic = fm
+            .github_app_permissions_for_tools(&["comment-on-github-issue".to_string()])
+            .unwrap();
+        assert_eq!(
+            automatic,
+            std::collections::BTreeMap::from([(
+                "pull-requests".to_string(),
+                GithubAppPermissionLevel::Write
+            )])
+        );
+
+        let reviewed = fm
+            .github_app_permissions_for_tools(&["hide-github-issue-comment".to_string()])
+            .unwrap();
+        assert_eq!(
+            reviewed,
+            std::collections::BTreeMap::from([
+                ("discussions".to_string(), GithubAppPermissionLevel::Write),
+                ("issues".to_string(), GithubAppPermissionLevel::Write),
+                ("pull-requests".to_string(), GithubAppPermissionLevel::Write),
+            ])
+        );
+
+        let update = fm
+            .github_app_permissions_for_tools(&["update-github-issue".to_string()])
+            .unwrap();
+        assert_eq!(
+            update,
+            std::collections::BTreeMap::from([(
+                "pull-requests".to_string(),
+                GithubAppPermissionLevel::Write
+            )])
+        );
+
+        let remove_labels = fm
+            .github_app_permissions_for_tools(&["remove-github-issue-labels".to_string()])
+            .unwrap();
+        assert_eq!(
+            remove_labels,
+            std::collections::BTreeMap::from([
+                ("issues".to_string(), GithubAppPermissionLevel::Write),
+                ("pull-requests".to_string(), GithubAppPermissionLevel::Write),
+            ])
+        );
+    }
+
+    #[test]
     fn safe_outputs_github_app_accepts_client_id_alias_and_scopes_repo() {
         let (fm, _) = super::super::common::parse_markdown(
             "---\nname: test\ndescription: test\nsafe-outputs:\n  github-app:\n    client-id: Iv23liExample\n    owner: octo\n    repositories: [broader-repo]\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
@@ -5339,13 +5814,13 @@ github-app-token:
     }
 
     #[test]
-    fn github_app_rejects_mixed_implicit_and_explicit_issue_targets() {
+    fn github_app_requires_explicit_target_repo_for_every_issue_tool() {
         let (fm, _) = super::super::common::parse_markdown(
             "---\nname: test\ndescription: test\nsafe-outputs:\n  github-app:\n    client-id: Iv23liExample\n    owner: octo\n    repositories: [repo]\n  create-github-issue: {}\n  set-github-issue-type:\n    target-repo: octo/repo\n---\n",
         )
         .unwrap();
         let error = fm.github_safe_outputs_auth().unwrap_err().to_string();
-        assert!(error.contains("cannot mix implicit current repository targets"));
+        assert!(error.contains("create-github-issue.target-repo is required"));
     }
 
     #[test]
@@ -5623,7 +6098,13 @@ read:
             let parsed: PermissionsConfig = serde_yaml::from_str(&yaml)
                 .unwrap_or_else(|error| panic!("capability {name} must parse: {error}"));
             assert_eq!(
-                parsed.read.as_ref().unwrap().options().unwrap().capabilities,
+                parsed
+                    .read
+                    .as_ref()
+                    .unwrap()
+                    .options()
+                    .unwrap()
+                    .capabilities,
                 vec![*capability],
                 "front-matter name for {name} does not round-trip"
             );
@@ -6393,9 +6874,7 @@ Body
         assert_eq!(ci.allowed_labels, vec!["agent-*".to_string()]);
         assert_eq!(ci.assignees, vec!["jamesdevine".to_string()]);
         assert_eq!(
-            fm.safe_outputs
-                .get("github-token")
-                .and_then(|v| v.as_str()),
+            fm.safe_outputs.get("github-token").and_then(|v| v.as_str()),
             Some("$(ADO_AW_DEBUG_GITHUB_TOKEN)")
         );
     }

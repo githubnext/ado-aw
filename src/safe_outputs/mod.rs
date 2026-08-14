@@ -44,8 +44,22 @@ pub const SAFE_OUTPUT_CONFIG_KEYS: &[&str] = &[
 pub const DEBUG_ONLY_TOOLS: &[&str] = &[];
 
 /// Public tools exposed only when explicitly configured in `safe-outputs:`.
-pub const CONFIGURED_ONLY_TOOLS: &[&str] =
-    tool_names![AssignWorkItemResult, CreateGithubIssueResult, SetGithubIssueTypeResult];
+pub const CONFIGURED_ONLY_TOOLS: &[&str] = tool_names![
+    AssignWorkItemResult,
+    CreateGithubIssueResult,
+    SetGithubIssueTypeResult,
+    CommentOnGithubIssueResult,
+    HideGithubIssueCommentResult,
+    AddGithubIssueLabelsResult,
+    RemoveGithubIssueLabelsResult,
+    CloseGithubIssueResult,
+    UpdateGithubIssueResult,
+    SetGithubIssueFieldResult,
+    AssignGithubIssueMilestoneResult,
+    AssignGithubIssueToUserResult,
+    UnassignGithubIssueFromUserResult,
+    LinkGithubSubIssueResult,
+];
 
 /// All recognised safe-output keys accepted in front matter `safe-outputs:`.
 /// This is the union of write-requiring tool types and diagnostic tool types.
@@ -78,6 +92,17 @@ pub const ALL_KNOWN_SAFE_OUTPUTS: &[&str] = all_safe_output_names![
     ResolvePrThreadResult,
     CreateGithubIssueResult,
     SetGithubIssueTypeResult,
+    CommentOnGithubIssueResult,
+    HideGithubIssueCommentResult,
+    AddGithubIssueLabelsResult,
+    RemoveGithubIssueLabelsResult,
+    CloseGithubIssueResult,
+    UpdateGithubIssueResult,
+    SetGithubIssueFieldResult,
+    AssignGithubIssueMilestoneResult,
+    AssignGithubIssueToUserResult,
+    UnassignGithubIssueFromUserResult,
+    LinkGithubSubIssueResult,
     // Always-on diagnostics
     NoopResult,
     MissingDataResult,
@@ -192,9 +217,7 @@ pub(crate) fn lookup_allowed_repository_alias<'a>(
     input: &str,
     allowed_repositories: &'a std::collections::HashMap<String, String>,
 ) -> Option<&'a String> {
-    fn unique_alias<'a>(
-        mut matches: impl Iterator<Item = &'a String>,
-    ) -> Option<&'a String> {
+    fn unique_alias<'a>(mut matches: impl Iterator<Item = &'a String>) -> Option<&'a String> {
         let first = matches.next()?;
         if matches.next().is_some() {
             return None;
@@ -448,8 +471,13 @@ pub(crate) fn name_matches_pattern(name: &str, pattern: &str) -> bool {
 pub(crate) use crate::validate::validate_git_ref_name;
 
 mod add_build_tag;
+mod add_github_issue_labels;
 mod add_pr_comment;
 mod assign_work_item;
+mod assign_github_issue_milestone;
+mod assign_github_issue_to_user;
+mod close_github_issue;
+mod comment_on_github_issue;
 mod comment_on_work_item;
 mod create_branch;
 mod create_git_tag;
@@ -457,17 +485,25 @@ mod create_github_issue;
 mod create_pull_request;
 mod create_wiki_page;
 mod create_work_item;
+mod github_api;
+mod github_issue_common;
+mod hide_github_issue_comment;
+mod link_github_sub_issue;
 mod link_work_items;
 mod missing_data;
 mod missing_tool;
 mod noop;
 mod queue_build;
+mod remove_github_issue_labels;
 mod reply_to_pr_comment;
 mod report_incomplete;
 mod resolve_pr_thread;
 mod result;
+mod set_github_issue_field;
 mod set_github_issue_type;
 mod submit_pr_review;
+mod unassign_github_issue_from_user;
+mod update_github_issue;
 mod update_pr;
 mod update_wiki_page;
 mod update_work_item;
@@ -476,21 +512,30 @@ mod upload_pipeline_artifact;
 mod upload_workitem_attachment;
 
 pub use add_build_tag::*;
+pub use add_github_issue_labels::*;
 pub use add_pr_comment::*;
 pub use assign_work_item::*;
+pub use assign_github_issue_milestone::*;
+pub use assign_github_issue_to_user::*;
+pub use close_github_issue::*;
+pub use comment_on_github_issue::*;
 pub use comment_on_work_item::*;
 pub use create_branch::*;
 pub use create_git_tag::*;
-pub(crate) use create_github_issue::validate_target_repo;
 pub use create_github_issue::*;
 pub use create_pull_request::*;
 pub use create_wiki_page::*;
 pub use create_work_item::*;
+pub use github_api::*;
+pub use github_issue_common::*;
+pub use hide_github_issue_comment::*;
+pub use link_github_sub_issue::*;
 pub use link_work_items::*;
 pub use missing_data::*;
 pub use missing_tool::*;
 pub use noop::*;
 pub use queue_build::*;
+pub use remove_github_issue_labels::*;
 pub use reply_to_pr_comment::*;
 pub use report_incomplete::*;
 pub use resolve_pr_thread::*;
@@ -498,8 +543,11 @@ pub use result::{
     ExecutionContext, ExecutionResult, Executor, ResolvedGithubIssue, ResolvedWorkItem, ToolResult,
     Validate, anyhow_to_mcp_error, org_from_url,
 };
+pub use set_github_issue_field::*;
 pub use set_github_issue_type::*;
 pub use submit_pr_review::*;
+pub use unassign_github_issue_from_user::*;
+pub use update_github_issue::*;
 pub use update_pr::*;
 pub use update_wiki_page::*;
 pub use update_work_item::*;

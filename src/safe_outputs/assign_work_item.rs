@@ -174,7 +174,7 @@ impl Executor for AssignWorkItemResult {
             ));
         }
 
-        let config: AssignWorkItemConfig = ctx.get_tool_config("assign-work-item");
+        let config: AssignWorkItemConfig = ctx.get_tool_config("assign-work-item")?;
         let assignee = match check_identity_policy(&self.assignee, &config) {
             Ok(assignee) => assignee,
             Err(error) => return Ok(ExecutionResult::failure(error.to_string())),

@@ -302,7 +302,7 @@ impl Executor for UploadBuildAttachmentResult {
             effective_build_id, self.artifact_name, self.file_path
         );
 
-        let config: UploadBuildAttachmentConfig = ctx.get_tool_config("upload-build-attachment");
+        let config: UploadBuildAttachmentConfig = ctx.get_tool_config("upload-build-attachment")?;
         debug!("Max file size: {} bytes", config.max_file_size);
         debug!("Allowed extensions: {:?}", config.allowed_extensions);
         debug!(
@@ -512,7 +512,10 @@ impl Executor for UploadBuildAttachmentResult {
             "SYSTEM_JOBID is not set — required to attach to the current build (build attachments \
              are written to the current job's timeline record)",
         )?;
-        debug!("ADO org: {}, project: {} ({})", org_url, project, project_id);
+        debug!(
+            "ADO org: {}, project: {} ({})",
+            org_url, project, project_id
+        );
 
         // Build the DistributedTask timeline-attachment URL. This is the write
         // side of a build attachment — the object is read back via the Build ▸
@@ -928,6 +931,7 @@ attachment-type: "agent-artifact"
             build_number: None,
             build_reason: None,
             definition_name: None,
+            definition_id: None,
             source_branch: None,
             source_branch_name: None,
             source_version: None,
@@ -1055,8 +1059,7 @@ attachment-type: "agent-artifact"
     async fn test_executor_fails_when_plan_id_missing() {
         // SHA-256 of b"hello" so the non-dry-run integrity check passes and we
         // reach the timeline-coordinate resolution.
-        const HELLO_SHA: &str =
-            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        const HELLO_SHA: &str = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
         let dir = tempfile::tempdir().unwrap();
         let staged = "upload-build-attachment-agent-report-0badf00d.txt";
         std::fs::write(dir.path().join(staged), b"hello").unwrap();
@@ -1091,8 +1094,7 @@ attachment-type: "agent-artifact"
     async fn test_executor_fails_when_project_id_missing() {
         // SHA-256 of b"hello" so the integrity check passes and we reach the
         // scope-identifier resolution.
-        const HELLO_SHA: &str =
-            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        const HELLO_SHA: &str = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
         let dir = tempfile::tempdir().unwrap();
         let staged = "upload-build-attachment-agent-report-1badf00d.txt";
         std::fs::write(dir.path().join(staged), b"hello").unwrap();

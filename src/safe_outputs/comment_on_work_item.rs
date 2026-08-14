@@ -259,7 +259,7 @@ impl Executor for CommentOnWorkItemResult {
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
         debug!("ADO org: {}, project: {}", org_url, project);
 
-        let config: CommentOnWorkItemConfig = ctx.get_tool_config("comment-on-work-item");
+        let config: CommentOnWorkItemConfig = ctx.get_tool_config("comment-on-work-item")?;
         debug!("Target: {:?}", config.target);
 
         let target = match &config.target {

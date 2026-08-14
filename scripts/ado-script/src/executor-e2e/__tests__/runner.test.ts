@@ -269,4 +269,49 @@ fs.writeFileSync(path.join(out, "safe-outputs-executed.ndjson"), JSON.stringify(
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it("requires one executed record for each repeated prior tool occurrence", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ado-aw-runner-prior-repeat-"));
+    try {
+      const bin = join(dir, "drop-second-prior.js");
+      await writeFile(
+        bin,
+        `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+const out = process.argv[process.argv.indexOf("--safe-output-dir") + 1];
+fs.writeFileSync(path.join(out, "safe-outputs-executed.ndjson"), [
+  { name: "create_github_issue", status: "succeeded", result: { number: 1 } },
+  { name: "link_github_sub_issue", status: "succeeded", result: {} },
+].map(JSON.stringify).join("\\n") + "\\n");
+`,
+        { encoding: "utf8", mode: 0o755 },
+      );
+      const scenario: Scenario<unknown> = {
+        id: "repeated-prior",
+        tool: "link-github-sub-issue",
+        config: () => ({ "target-repo": "o/r" }),
+        setup: async () => ({}),
+        priorEntries: async () => [
+          { tool: "create-github-issue", config: {}, entry: { temporary_id: "#aw_parent" } },
+          { tool: "create-github-issue", config: {}, entry: { temporary_id: "#aw_sub" } },
+        ],
+        ndjson: async () => ({
+          parent_issue_number: "#aw_parent",
+          sub_issue_number: "#aw_sub",
+        }),
+        assert: async () => {},
+        cleanup: async () => {},
+      };
+      const res = await runScenario(
+        { ...fakeCtx(), adoAwBin: bin, workDir: dir },
+        scenario,
+      );
+      expect(res.ok).toBe(false);
+      expect(res.phase).toBe("execute");
+      expect(res.message).toContain("occurrence 2");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });

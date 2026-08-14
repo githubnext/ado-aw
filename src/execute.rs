@@ -16,14 +16,17 @@ use tokio::io::AsyncWriteExt;
 
 use crate::ndjson::{self, EXECUTED_NDJSON_FILENAME, SAFE_OUTPUT_FILENAME};
 use crate::safe_outputs::{
-    AddBuildTagResult, AddPrCommentResult, AssignWorkItemResult, CommentOnWorkItemResult,
-    CreateBranchResult,
-    CreateGitTagResult, CreateGithubIssueResult, CreatePrResult, CreateWikiPageResult,
-    CreateWorkItemResult, ExecutionContext, ExecutionResult, Executor, LinkWorkItemsResult,
-    MissingDataResult, MissingToolResult, NoopResult, QueueBuildResult, ReplyToPrCommentResult,
-    ReportIncompleteResult, ResolvePrThreadResult, SetGithubIssueTypeResult, SubmitPrReviewResult,
-    ToolResult,
-    UpdatePrResult, UpdateWikiPageResult, UpdateWorkItemResult, UploadBuildAttachmentResult,
+    AddBuildTagResult, AddGithubIssueLabelsResult, AddPrCommentResult,
+    AssignGithubIssueMilestoneResult, AssignGithubIssueToUserResult, AssignWorkItemResult,
+    CloseGithubIssueResult, CommentOnGithubIssueResult, CommentOnWorkItemResult,
+    CreateBranchResult, CreateGitTagResult, CreateGithubIssueResult, CreatePrResult,
+    CreateWikiPageResult, CreateWorkItemResult, ExecutionContext, ExecutionResult, Executor,
+    HideGithubIssueCommentResult, LinkGithubSubIssueResult, LinkWorkItemsResult, MissingDataResult,
+    MissingToolResult, NoopResult, QueueBuildResult, RemoveGithubIssueLabelsResult,
+    ReplyToPrCommentResult, ReportIncompleteResult, ResolvePrThreadResult,
+    SetGithubIssueFieldResult, SetGithubIssueTypeResult, SubmitPrReviewResult, ToolResult,
+    UnassignGithubIssueFromUserResult, UpdateGithubIssueResult, UpdatePrResult,
+    UpdateWikiPageResult, UpdateWorkItemResult, UploadBuildAttachmentResult,
     UploadPipelineArtifactResult, UploadWorkitemAttachmentResult,
 };
 use crate::sanitize::neutralize_pipeline_commands;
@@ -131,7 +134,9 @@ pub async fn prepare_custom_agent_output(
             &definition.input_schema,
             sanitized.as_object().cloned(),
         )
-        .with_context(|| format!("Sanitized custom safe-output item '{name}' is no longer valid"))?;
+        .with_context(|| {
+            format!("Sanitized custom safe-output item '{name}' is no longer valid")
+        })?;
         let count = custom_counts.entry(name.clone()).or_default();
         *count += 1;
         anyhow::ensure!(
@@ -249,6 +254,17 @@ pub async fn execute_safe_outputs(
         ResolvePrThreadResult,
         CreateGithubIssueResult,
         SetGithubIssueTypeResult,
+        CommentOnGithubIssueResult,
+        HideGithubIssueCommentResult,
+        AddGithubIssueLabelsResult,
+        RemoveGithubIssueLabelsResult,
+        CloseGithubIssueResult,
+        UpdateGithubIssueResult,
+        SetGithubIssueFieldResult,
+        AssignGithubIssueMilestoneResult,
+        AssignGithubIssueToUserResult,
+        UnassignGithubIssueFromUserResult,
+        LinkGithubSubIssueResult,
     );
 
     let mut results = Vec::new();
@@ -756,6 +772,17 @@ async fn dispatch_github_tools(
     dispatch_executor_tools!(tool_name, entry, ctx, {
         "create-github-issue" => CreateGithubIssueResult,
         "set-github-issue-type" => SetGithubIssueTypeResult,
+        "comment-on-github-issue" => CommentOnGithubIssueResult,
+        "hide-github-issue-comment" => HideGithubIssueCommentResult,
+        "add-github-issue-labels" => AddGithubIssueLabelsResult,
+        "remove-github-issue-labels" => RemoveGithubIssueLabelsResult,
+        "close-github-issue" => CloseGithubIssueResult,
+        "update-github-issue" => UpdateGithubIssueResult,
+        "set-github-issue-field" => SetGithubIssueFieldResult,
+        "assign-github-issue-milestone" => AssignGithubIssueMilestoneResult,
+        "assign-github-issue-to-user" => AssignGithubIssueToUserResult,
+        "unassign-github-issue-from-user" => UnassignGithubIssueFromUserResult,
+        "link-github-sub-issue" => LinkGithubSubIssueResult,
     })
 }
 
@@ -774,6 +801,22 @@ fn resolve_max(ctx: &ExecutionContext, tool_name: &str, default_max: u32) -> usi
 /// Called before sanitization, so all string values are stripped of control characters
 /// and ADO pipeline commands are neutralized to prevent log injection via stdout.
 fn extract_entry_context(entry: &Value) -> String {
+    if let Some(issue) = entry.get("issue_number") {
+        return format!(" (GitHub issue {})", safe_json_identifier(issue));
+    }
+    if let (Some(parent), Some(sub_issue)) = (
+        entry.get("parent_issue_number"),
+        entry.get("sub_issue_number"),
+    ) {
+        return format!(
+            " (GitHub issue {} -> {})",
+            safe_json_identifier(parent),
+            safe_json_identifier(sub_issue)
+        );
+    }
+    if let Some(comment) = entry.get("comment_id") {
+        return format!(" (GitHub comment {})", safe_json_identifier(comment));
+    }
     if let Some(id) = entry.get("id").and_then(|v| v.as_u64()) {
         return format!(" (work item #{})", id);
     }
@@ -800,6 +843,18 @@ fn extract_entry_context(entry: &Value) -> String {
         return format!(" (path: {})", clean);
     }
     String::new()
+}
+
+fn safe_json_identifier(value: &Value) -> String {
+    let raw = value
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| value.to_string());
+    let clean: String = raw
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect();
+    neutralize_pipeline_commands(&clean)
 }
 
 /// Returns `Some(result)` when the budget for `tool_name` is exhausted so the caller can push the
@@ -1063,10 +1118,7 @@ mod tests {
         assert!(!rendered.contains("##vso[task"), "{rendered}");
         assert!(!rendered.contains("##[error]"), "{rendered}");
         // External-system payload text is preserved verbatim.
-        assert_eq!(
-            value["keep"],
-            "https://notify.example/@team <b>hello</b>"
-        );
+        assert_eq!(value["keep"], "https://notify.example/@team <b>hello</b>");
         assert_eq!(value["nested"]["`##[`error]key"][0], "normal");
     }
 
@@ -1416,7 +1468,10 @@ mod tests {
 
         let result = execute_safe_output(&entry, &ctx).await;
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Failed to parse create-work-item"), "err: {err}");
+        assert!(
+            err.contains("Failed to parse create-work-item"),
+            "err: {err}"
+        );
     }
 
     #[tokio::test]
@@ -1451,7 +1506,10 @@ mod tests {
 
         let result = execute_safe_output(&entry, &ctx).await;
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Failed to parse update-wiki-page"), "err: {err}");
+        assert!(
+            err.contains("Failed to parse update-wiki-page"),
+            "err: {err}"
+        );
     }
 
     #[tokio::test]
@@ -1498,7 +1556,10 @@ mod tests {
 
         let result = execute_safe_output(&entry, &ctx).await;
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Failed to parse create-wiki-page"), "err: {err}");
+        assert!(
+            err.contains("Failed to parse create-wiki-page"),
+            "err: {err}"
+        );
     }
 
     #[tokio::test]
@@ -1509,7 +1570,10 @@ mod tests {
 
         let result = execute_safe_output(&entry, &ctx).await;
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Failed to parse upload-pipeline-artifact"), "err: {err}");
+        assert!(
+            err.contains("Failed to parse upload-pipeline-artifact"),
+            "err: {err}"
+        );
     }
 
     #[tokio::test]
@@ -1556,7 +1620,10 @@ mod tests {
 
         let result = execute_safe_output(&entry, &ctx).await;
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Failed to parse comment-on-work-item"), "err: {err}");
+        assert!(
+            err.contains("Failed to parse comment-on-work-item"),
+            "err: {err}"
+        );
     }
 
     #[tokio::test]
@@ -1567,7 +1634,10 @@ mod tests {
 
         let result = execute_safe_output(&entry, &ctx).await;
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Failed to parse upload-workitem-attachment"), "err: {err}");
+        assert!(
+            err.contains("Failed to parse upload-workitem-attachment"),
+            "err: {err}"
+        );
     }
 
     #[tokio::test]

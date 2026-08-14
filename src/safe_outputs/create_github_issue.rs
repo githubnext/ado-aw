@@ -5,24 +5,25 @@
 //! [`ExecutionContext::github_token`]; Agent and Detection never see it.
 //!
 //! Notable design points:
-//! * `target-repo` is operator-only — the agent never supplies it and cannot
-//!   redirect issues to a different repo.
+//! * Agent repository selection is bounded by exact operator-configured
+//!   `target-repo` and `allowed-repos` entries.
 //! * Labels are merged from a static operator-configured list and an
 //!   agent-supplied list. Agent labels are validated against `allowed-labels`
 //!   (wildcard-aware via [`crate::safe_outputs::tag_matches_pattern`]).
 //! * Assignees are merged the same way without an allowlist gate (out of
 //!   scope for v1).
 
-use anyhow::{Context, ensure};
+use anyhow::ensure;
 use log::{debug, info};
-use percent_encoding::utf8_percent_encode;
-use regex_lite::Regex;
+use reqwest::Method;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
 
-use super::PATH_SEGMENT;
-use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::safe_outputs::{
+    ExecutionContext, ExecutionResult, Executor, GithubClient, GithubRepositoryPolicy, Validate,
+    build_github_trace_footer, merge_github_values, resolve_github_repository,
+    validate_github_repository,
+};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::secure::GithubTemporaryId;
 use crate::tool_result;
@@ -47,6 +48,11 @@ pub struct CreateGithubIssueParams {
     #[serde(default)]
     pub assignees: Vec<String>,
 
+    /// Optional target repository. Must exactly match `target-repo` or an
+    /// `allowed-repos` entry.
+    #[serde(default)]
+    pub repository: Option<String>,
+
     /// Temporary identifier used by later safe outputs in the same run.
     #[serde(default)]
     pub temporary_id: Option<GithubTemporaryId>,
@@ -70,6 +76,9 @@ impl Validate for CreateGithubIssueParams {
             ensure!(!assignee.is_empty(), "assignee must not be empty");
             reject_pipeline_injection(assignee, "create-github-issue.assignee")?;
         }
+        if let Some(repository) = self.repository.as_deref() {
+            validate_github_repository(repository)?;
+        }
         Ok(())
     }
 }
@@ -87,6 +96,8 @@ tool_result! {
         #[serde(default)]
         assignees: Vec<String>,
         #[serde(default)]
+        repository: Option<String>,
+        #[serde(default)]
         temporary_id: Option<GithubTemporaryId>,
     }
 }
@@ -101,6 +112,10 @@ impl SanitizeContent for CreateGithubIssueResult {
         for assignee in &mut self.assignees {
             *assignee = assignee.chars().filter(|c| !c.is_control()).collect();
         }
+        self.repository = self
+            .repository
+            .as_deref()
+            .map(crate::sanitize::sanitize_config);
     }
 }
 
@@ -112,6 +127,10 @@ pub struct CreateGithubIssueConfig {
     /// resolves the current repository only for GitHub-backed ADO builds.
     #[serde(default, rename = "target-repo")]
     pub target_repo: Option<String>,
+
+    /// Additional exact repositories the agent may select.
+    #[serde(default, rename = "allowed-repos")]
+    pub allowed_repos: Vec<String>,
 
     /// Optional prefix prepended to every agent-supplied title (e.g.
     /// `"[pipeline-failure] "`).
@@ -145,124 +164,6 @@ pub struct CreateGithubIssueConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[sanitize_config(skip)]
     pub max: Option<u32>,
-}
-
-/// Compiled regex for `target-repo` validation.
-///
-/// GitHub repo references take the form `owner/repo`. Owner segments
-/// (logins of users or organisations) admit alphanumerics and hyphens
-/// and must not start or end with a hyphen. Repository segments admit
-/// alphanumerics, hyphens, dots, and underscores and must not be `.`
-/// or `..`. We intentionally reject underscores and dots in the owner
-/// because GitHub does too.
-fn target_repo_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/[A-Za-z0-9._-]+$")
-            .expect("target_repo regex is well-formed")
-    })
-}
-
-/// Validate that `target-repo` is shaped like `owner/repo`.
-pub(crate) fn validate_target_repo(target_repo: &str) -> anyhow::Result<()> {
-    ensure!(
-        !target_repo.is_empty(),
-        "target-repo is required (expected 'owner/repo')"
-    );
-    ensure!(
-        target_repo_regex().is_match(target_repo),
-        "target-repo '{}' is not in 'owner/repo' format \
-         (owner: alphanumerics/hyphens; repo: alphanumerics/dots/hyphens/underscores)",
-        target_repo
-    );
-    if let Some((_owner, repo)) = target_repo.split_once('/') {
-        ensure!(
-            repo != "." && repo != "..",
-            "target-repo repo segment must not be '.' or '..'"
-        );
-    }
-    Ok(())
-}
-
-pub(crate) fn resolve_target_repo(
-    configured: Option<&str>,
-    ctx: &ExecutionContext,
-) -> Result<String, ExecutionResult> {
-    let target = if let Some(target) = configured {
-        target.to_string()
-    } else {
-        let provider = ctx.repository_provider.as_deref().unwrap_or_default();
-        if !provider.eq_ignore_ascii_case("github")
-            && !provider.eq_ignore_ascii_case("githubenterprise")
-        {
-            return Err(ExecutionResult::failure(
-                "target-repo is required when the Azure DevOps pipeline source is not GitHub",
-            ));
-        }
-        if provider.eq_ignore_ascii_case("githubenterprise")
-            && ctx.github_api_url.eq_ignore_ascii_case("https://api.github.com")
-        {
-            return Err(ExecutionResult::failure(
-                "safe-outputs.github-api-url or GitHub App api-url is required for a \
-                 GitHub Enterprise source",
-            ));
-        }
-        match ctx.repository_name.clone() {
-            Some(name) => name,
-            None => {
-                return Err(ExecutionResult::failure(
-                    "BUILD_REPOSITORY_NAME is not set; configure target-repo explicitly",
-                ));
-            }
-        }
-    };
-    validate_target_repo(&target).map_err(|e| ExecutionResult::failure(e.to_string()))?;
-    Ok(target)
-}
-
-/// Build the auto-appended traceability footer.
-///
-/// Embeds a stable `<!-- ado-aw -->` marker so future tooling can locate
-/// generated content without reflowing the body.
-fn build_footer(ctx: &ExecutionContext) -> String {
-    let mut lines: Vec<String> = Vec::new();
-    lines.push("<!-- ado-aw -->".to_string());
-    lines.push("---".to_string());
-    if let Some(name) = ctx.definition_name.as_ref() {
-        lines.push(format!("Pipeline: `{name}`"));
-    }
-    if let Some(build_id) = ctx.build_id {
-        if let (Some(org_url), Some(project)) = (ctx.ado_org_url.as_ref(), ctx.ado_project.as_ref())
-        {
-            let url = format!(
-                "{}/{}/_build/results?buildId={}",
-                org_url.trim_end_matches('/'),
-                project,
-                build_id
-            );
-            lines.push(format!("Run: <{url}>"));
-        } else {
-            lines.push(format!("Build: {build_id}"));
-        }
-    }
-    if let Some(reason) = ctx.build_reason.as_ref() {
-        lines.push(format!("Trigger: `{reason}`"));
-    }
-    lines.join("\n")
-}
-
-/// Merge static + agent-supplied strings (case-insensitive dedupe).
-fn merge_dedup_strings(static_items: &[String], agent_items: &[String]) -> Vec<String> {
-    let mut all = static_items.to_vec();
-    for item in agent_items {
-        if !all
-            .iter()
-            .any(|existing| existing.eq_ignore_ascii_case(item))
-        {
-            all.push(item.clone());
-        }
-    }
-    all
 }
 
 /// Sentinel pattern in `allowed-labels` that opts out of the default-deny
@@ -304,14 +205,18 @@ impl Executor for CreateGithubIssueResult {
             }
         };
 
-        let config: CreateGithubIssueConfig = ctx.get_tool_config("create-github-issue");
+        let config: CreateGithubIssueConfig = ctx.get_tool_config("create-github-issue")?;
         if config.require_temporary_id && self.temporary_id.is_none() {
             return Ok(ExecutionResult::failure(
                 "create-github-issue requires temporary_id because \
                  safe-outputs.create-github-issue.require-temporary-id is true",
             ));
         }
-        let target_repo = match resolve_target_repo(config.target_repo.as_deref(), ctx) {
+        let target_repo = match resolve_github_repository(
+            self.repository.as_deref(),
+            GithubRepositoryPolicy::new(config.target_repo.as_deref(), &config.allowed_repos),
+            ctx,
+        ) {
             Ok(target) => target,
             Err(result) => return Ok(result),
         };
@@ -382,21 +287,12 @@ impl Executor for CreateGithubIssueResult {
                 final_title.len()
             )));
         }
-        let body_with_footer = format!("{}\n\n{}", self.body, build_footer(ctx));
-        let all_labels = merge_dedup_strings(&config.labels, &self.labels);
-        let all_assignees = merge_dedup_strings(&config.assignees, &self.assignees);
+        let body_with_footer = format!("{}\n\n{}", self.body, build_github_trace_footer(ctx));
+        let all_labels = merge_github_values(&config.labels, &self.labels);
+        let all_assignees = merge_github_values(&config.assignees, &self.assignees);
 
-        // Split target-repo only after validation.
-        let (owner, repo) = target_repo
-            .split_once('/')
-            .context("target-repo must be 'owner/repo'")?;
-
-        let url = format!(
-            "{}/repos/{}/{}/issues",
-            ctx.github_api_url.trim_end_matches('/'),
-            utf8_percent_encode(owner, PATH_SEGMENT),
-            utf8_percent_encode(repo, PATH_SEGMENT),
-        );
+        let client = GithubClient::new(&ctx.github_api_url, token)?;
+        let url = client.issues_url(&target_repo)?;
         debug!("POSTing to {}", url);
 
         let payload = serde_json::json!({
@@ -406,25 +302,13 @@ impl Executor for CreateGithubIssueResult {
             "assignees": all_assignees,
         });
 
-        let user_agent = format!("ado-aw/{}", env!("CARGO_PKG_VERSION"));
-        let client = reqwest::Client::new();
-        let response = client
-            .post(&url)
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .header("User-Agent", user_agent)
-            .bearer_auth(token)
-            .json(&payload)
-            .send()
-            .await
-            .context("Failed to send request to GitHub API")?;
+        let response = client.send(Method::POST, url, Some(&payload)).await?;
 
-        let status = response.status();
+        let status = response.status;
         if status.is_success() {
             let body: serde_json::Value = response
-                .json()
-                .await
-                .context("Failed to parse GitHub API response")?;
+                .json("Failed to parse GitHub API response")
+                .map_err(anyhow::Error::new)?;
             let Some(number) = body
                 .get("number")
                 .and_then(|v| v.as_u64())
@@ -479,15 +363,10 @@ impl Executor for CreateGithubIssueResult {
                 }),
             ))
         } else {
-            let body_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "<unable to read response body>".to_string());
-            Ok(ExecutionResult::failure(format!(
-                "Failed to file GitHub issue (HTTP {}): {}",
-                status,
-                crate::sanitize::neutralize_pipeline_commands(&body_text)
-            )))
+            let error = response
+                .require_success("Failed to file GitHub issue")
+                .expect_err("non-success response must produce an API error");
+            Ok(ExecutionResult::failure(error.to_string()))
         }
     }
 }
@@ -495,7 +374,7 @@ impl Executor for CreateGithubIssueResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safe_outputs::ToolResult;
+    use crate::safe_outputs::{ToolResult, resolve_target_repo, validate_target_repo};
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -520,6 +399,7 @@ mod tests {
             body: "The agent step failed during stage 1 with a network timeout.".to_string(),
             labels: vec![],
             assignees: vec![],
+            repository: None,
             temporary_id: None,
         }
     }
@@ -566,6 +446,15 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_rejects_malformed_repository() {
+        let params = CreateGithubIssueParams {
+            repository: Some("octo/$(TOKEN)".to_string()),
+            ..valid_params()
+        };
+        assert!(params.validate().is_err());
+    }
+
+    #[test]
     fn test_sanitize_strips_control_chars() {
         let mut result = CreateGithubIssueResult {
             name: "create-github-issue".to_string(),
@@ -573,6 +462,7 @@ mod tests {
             body: "body\u{0008}with\u{0001}ctl chars (more than 30 characters total)".to_string(),
             labels: vec!["la\u{0007}bel".to_string()],
             assignees: vec!["jo\u{0008}hn".to_string()],
+            repository: Some("octo/repo".to_string()),
             temporary_id: None,
         };
         result.sanitize_content_fields();
@@ -591,6 +481,7 @@ mod tests {
             body: "anything".to_string(),
             labels: vec![],
             assignees: vec![],
+            repository: None,
             temporary_id: None,
         };
         assert_eq!(
@@ -697,16 +588,11 @@ mod tests {
         );
     }
 
-    /// `ExecutionContext::get_tool_config` deserializes with
-    /// `.ok().unwrap_or_default()`, so a config that fails to deserialize
-    /// silently becomes `Default` — i.e. `target_repo: None`, which resolves to
-    /// the *current* repository. That is why `target-repo` stays a plain
-    /// `String` validated by `validate_target_repo()` at each call site rather
-    /// than a `secure.rs` newtype validated at deserialization time: a newtype
-    /// would turn a malformed value into a silent redirect instead of a loud
-    /// failure. `test_execute_fails_when_target_repo_invalid` covers the plain
-    /// rejection; this pins the *no silent redirect* half, with a usable
-    /// current repository deliberately present in the context.
+    /// Config shape errors fail during strict deserialization, while the
+    /// repository slug itself is validated before any request is sent.
+    /// `test_execute_fails_when_target_repo_invalid` covers the plain
+    /// rejection; this pins the *no redirect* half, with a usable current
+    /// repository deliberately present in the context.
     #[tokio::test]
     async fn malformed_target_repo_does_not_redirect_to_current_repository() {
         let mut ctx = ctx_with_config(
@@ -733,7 +619,7 @@ mod tests {
 
     #[test]
     fn test_merge_dedup_strings_dedupes_case_insensitively() {
-        let merged = merge_dedup_strings(
+        let merged = merge_github_values(
             &["bug".into(), "Triage".into()],
             &["BUG".into(), "fresh".into()],
         );
@@ -954,6 +840,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_repository_must_be_an_exact_allowed_repo() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/repos/octo/allowed/issues"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "number": 12,
+                "html_url": "https://github.example/octo/allowed/issues/12"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut ctx = ctx_with_config(
+            serde_json::json!({
+                "target-repo": "octo/default",
+                "allowed-repos": ["octo/allowed"]
+            }),
+            Some("token".to_string()),
+        );
+        ctx.github_api_url = server.uri();
+        let mut params = valid_params();
+        params.repository = Some("OCTO/ALLOWED".to_string());
+        let mut result: CreateGithubIssueResult = params.try_into().unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(execution.success, "create failed: {}", execution.message);
+        assert_eq!(
+            execution
+                .data
+                .as_ref()
+                .and_then(|data| data["target_repo"].as_str()),
+            Some("octo/allowed")
+        );
+    }
+
+    #[tokio::test]
+    async fn denied_agent_repository_fails_before_http() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        let mut ctx = ctx_with_config(
+            serde_json::json!({
+                "target-repo": "octo/default",
+                "allowed-repos": ["octo/allowed"]
+            }),
+            Some("token".to_string()),
+        );
+        ctx.github_api_url = server.uri();
+        let mut params = valid_params();
+        params.repository = Some("octo/denied".to_string());
+        let mut result: CreateGithubIssueResult = params.try_into().unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!execution.success);
+        assert!(execution.message.contains("not an exact"));
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn test_execute_neutralizes_pipeline_command_in_label_error() {
         // Even though Validate would reject this label up front, Stage 3
         // deserialises directly from NDJSON — so a forged payload could
@@ -966,6 +911,7 @@ mod tests {
             body: "This is a sufficiently long body for the issue parameters.".to_string(),
             labels: vec!["##vso[task.complete]".to_string()],
             assignees: vec![],
+            repository: None,
             temporary_id: None,
         };
         let ctx = ctx_with_config(
@@ -1003,6 +949,7 @@ mod tests {
     fn test_config_round_trips_kebab_case() {
         let yaml = r#"
 target-repo: githubnext/ado-aw
+allowed-repos: [githubnext/other]
 title-prefix: "[bug] "
 labels: [a]
 allowed-labels: ["agent-*"]
@@ -1010,6 +957,7 @@ assignees: [u1]
 "#;
         let cfg: CreateGithubIssueConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.target_repo.as_deref(), Some("githubnext/ado-aw"));
+        assert_eq!(cfg.allowed_repos, vec!["githubnext/other".to_string()]);
         assert_eq!(cfg.title_prefix.as_deref(), Some("[bug] "));
         assert_eq!(cfg.labels, vec!["a".to_string()]);
         assert_eq!(cfg.allowed_labels, vec!["agent-*".to_string()]);
@@ -1039,7 +987,7 @@ unexpected: oops
             build_reason: Some("Manual".to_string()),
             ..Default::default()
         };
-        let footer = build_footer(&ctx);
+        let footer = build_github_trace_footer(&ctx);
         assert!(footer.contains("<!-- ado-aw -->"));
         assert!(footer.contains("buildId=42"));
         assert!(footer.contains("dogfood"));

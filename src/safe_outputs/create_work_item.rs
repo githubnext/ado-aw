@@ -286,17 +286,15 @@ async fn maybe_build_artifact_link_op(
 
     let repo_id = match repo_id {
         Some(id) => id,
-        None => {
-            match resolve_repository_id(client, org_url, project, token, repo_name).await {
-                Ok(id) => id,
-                Err(e) => {
-                    return Err(ExecutionResult::failure(format!(
-                        "Failed to resolve repository '{}': {}",
-                        repo_name, e
-                    )));
-                }
+        None => match resolve_repository_id(client, org_url, project, token, repo_name).await {
+            Ok(id) => id,
+            Err(e) => {
+                return Err(ExecutionResult::failure(format!(
+                    "Failed to resolve repository '{}': {}",
+                    repo_name, e
+                )));
             }
-        }
+        },
     };
 
     let op = artifact_link_op(project, &repo_id, &config.branch);
@@ -383,7 +381,7 @@ impl Executor for CreateWorkItemResult {
         debug!("ADO org: {}, project: {}", org_url, project);
 
         // Get tool-specific configuration
-        let config: CreateWorkItemConfig = ctx.get_tool_config("create-work-item");
+        let config: CreateWorkItemConfig = ctx.get_tool_config("create-work-item")?;
         debug!("Work item type: {}", config.work_item_type);
         debug!("Area path: {:?}", config.area_path);
         debug!("Iteration path: {:?}", config.iteration_path);

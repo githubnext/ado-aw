@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { main, parseReviewed } from "../index.js";
+import { main, parseRepositoryPolicies, parseReviewed } from "../index.js";
 
 const dirs: string[] = [];
 function freshDir(): string {
@@ -20,6 +20,29 @@ describe("parseReviewed", () => {
   it("splits a newline-delimited list, trims, and drops empties", () => {
     const set = parseReviewed(" create-pull-request \n \n add-pr-comment ");
     expect([...set].sort()).toEqual(["add-pr-comment", "create-pull-request"]);
+  });
+
+  describe("parseRepositoryPolicies", () => {
+    it("accepts compiler policy JSON and ignores malformed entries", () => {
+      const policies = parseRepositoryPolicies(
+        JSON.stringify({
+          "create-github-issue": {
+            targetRepo: "octo/default",
+            allowedRepos: ["octo/other", 7],
+          },
+          bad: "agent text",
+        }),
+      );
+      expect(policies.get("create-github-issue")).toEqual({
+        targetRepo: "octo/default",
+        allowedRepos: ["octo/other"],
+      });
+      expect(policies.has("bad")).toBe(false);
+    });
+
+    it("fails closed for invalid JSON", () => {
+      expect(parseRepositoryPolicies("{ hostile").size).toBe(0);
+    });
   });
 
   it("does not split on commas (a comma may appear in a YAML map key)", () => {

@@ -68,10 +68,9 @@ fn test_validate_permissions_read_policy_requires_token_source_when_proxied() {
 
 #[test]
 fn test_validate_permissions_read_policy_ignores_explicitly_disabled_tool() {
-    let (disabled, _) = parse_markdown(
-        "---\nname: test\ndescription: test\ntools:\n  azure-devops: false\n---\n",
-    )
-    .unwrap();
+    let (disabled, _) =
+        parse_markdown("---\nname: test\ndescription: test\ntools:\n  azure-devops: false\n---\n")
+            .unwrap();
 
     validate_permissions_read_policy(&disabled).unwrap();
     assert!(!ado_proxy_enabled(&disabled));
@@ -105,10 +104,9 @@ fn test_ado_proxy_activation_follows_permissions_read_not_mcp_tool() {
 
 #[test]
 fn test_ado_mcp_version_uses_override_or_compiler_default() {
-    let (defaulted, _) = parse_markdown(
-        "---\nname: t\ndescription: x\ntools:\n  azure-devops: true\n---\n",
-    )
-    .unwrap();
+    let (defaulted, _) =
+        parse_markdown("---\nname: t\ndescription: x\ntools:\n  azure-devops: true\n---\n")
+            .unwrap();
     assert_eq!(ado_mcp_version(&defaulted), ADO_MCP_VERSION);
 
     let (overridden, _) = parse_markdown(
@@ -326,8 +324,9 @@ pub(crate) fn parse_markdown_detailed_with_registry(
     };
 
     // Stage 2: run the codemod registry against the untyped mapping.
-    let report = super::codemods::apply_codemods_with(&mut mapping, registry, source_compiler_version)
-        .context("Failed to apply codemods")?;
+    let report =
+        super::codemods::apply_codemods_with(&mut mapping, registry, source_compiler_version)
+            .context("Failed to apply codemods")?;
 
     // Stage 3: deserialize the (possibly modified) mapping into the
     // typed FrontMatter. Errors here mean either the user wrote an
@@ -1253,9 +1252,7 @@ fn resolve_effective_workspace(
             let ws = ws.as_str();
             match ws {
                 "root" => Ok(("root".to_string(), false)),
-                "repo" | "self" if has_additional_checkouts => {
-                    Ok(("repo".to_string(), false))
-                }
+                "repo" | "self" if has_additional_checkouts => Ok(("repo".to_string(), false)),
                 "repo" | "self" => Ok(("root".to_string(), true)),
                 alias => {
                     // Defense in depth: even though aliases are constrained
@@ -2085,15 +2082,109 @@ pub fn validate_ado_aw_debug_config(front_matter: &FrontMatter) -> Result<()> {
 }
 
 pub fn validate_github_issue_outputs_config(front_matter: &FrontMatter) -> Result<()> {
-    if let Some(config) = front_matter.create_github_issue_config()? {
-        if let Some(target_repo) = config.target_repo.as_deref() {
-            crate::safe_outputs::validate_target_repo(target_repo)?;
-            crate::validate::reject_pipeline_injection(
-                target_repo,
-                "safe-outputs.create-github-issue.target-repo",
-            )?;
+    let github_tools = front_matter.github_issue_tool_names();
+    if front_matter
+        .safe_outputs
+        .contains_key("create-github-issue")
+    {
+        let create_reviewed = front_matter
+            .tool_requires_approval("create-github-issue")
+            .is_some();
+        for consumer in crate::compile::types::GITHUB_TEMPORARY_ID_CONSUMERS {
+            if front_matter.safe_outputs.contains_key(*consumer) {
+                crate::safe_outputs::validate_temporary_id_approval_compatibility(
+                    consumer,
+                    create_reviewed,
+                    front_matter.tool_requires_approval(consumer).is_some(),
+                )?;
+            }
         }
+    }
 
+    for tool in &github_tools {
+        let Some(config) = front_matter.github_issue_compiler_config(tool)? else {
+            continue;
+        };
+        crate::safe_outputs::configured_github_repositories(
+            crate::safe_outputs::GithubRepositoryPolicy::new(
+                config.target_repo.as_deref(),
+                &config.allowed_repos,
+            ),
+        )
+        .map_err(|error| {
+            anyhow::anyhow!("safe-outputs.{tool} has invalid repository policy: {error}")
+        })?;
+        if tool != "create-github-issue" {
+            crate::safe_outputs::validate_github_mutation_filter_config(
+                crate::safe_outputs::GithubMutationFilters {
+                    required_labels: &config.required_labels,
+                    required_title_prefix: config.required_title_prefix.as_deref(),
+                },
+            )
+            .map_err(|error| {
+                anyhow::anyhow!("safe-outputs.{tool} has invalid mutation filters: {error}")
+            })?;
+        }
+        match tool.as_str() {
+            "comment-on-github-issue" => {
+                if let Some(config) = front_matter.comment_on_github_issue_config()? {
+                    crate::safe_outputs::validate_comment_on_github_issue_config(&config)?;
+                }
+            }
+            "hide-github-issue-comment" => {
+                if let Some(config) = front_matter.hide_github_issue_comment_config()? {
+                    crate::safe_outputs::validate_hide_github_issue_comment_config(&config)?;
+                }
+            }
+            "add-github-issue-labels" => {
+                if let Some(config) = front_matter.add_github_issue_labels_config()? {
+                    crate::safe_outputs::validate_add_github_issue_labels_config(&config)?;
+                }
+            }
+            "remove-github-issue-labels" => {
+                if let Some(config) = front_matter.remove_github_issue_labels_config()? {
+                    crate::safe_outputs::validate_remove_github_issue_labels_config(&config)?;
+                }
+            }
+            "close-github-issue" => {
+                if let Some(config) = front_matter.close_github_issue_config()? {
+                    crate::safe_outputs::validate_close_github_issue_config(&config)?;
+                }
+            }
+            "update-github-issue" => {
+                if let Some(config) = front_matter.update_github_issue_config()? {
+                    crate::safe_outputs::validate_update_github_issue_config(&config)?;
+                }
+            }
+            "set-github-issue-field" => {
+                if let Some(config) = front_matter.set_github_issue_field_config()? {
+                    crate::safe_outputs::validate_set_github_issue_field_config(&config)?;
+                }
+            }
+            "assign-github-issue-milestone" => {
+                if let Some(config) = front_matter.assign_github_issue_milestone_config()? {
+                    crate::safe_outputs::validate_assign_github_issue_milestone_config(&config)?;
+                }
+            }
+            "assign-github-issue-to-user" => {
+                if let Some(config) = front_matter.assign_github_issue_to_user_config()? {
+                    crate::safe_outputs::validate_assign_github_issue_to_user_config(&config)?;
+                }
+            }
+            "unassign-github-issue-from-user" => {
+                if let Some(config) = front_matter.unassign_github_issue_from_user_config()? {
+                    crate::safe_outputs::validate_unassign_github_issue_from_user_config(&config)?;
+                }
+            }
+            "link-github-sub-issue" => {
+                if let Some(config) = front_matter.link_github_sub_issue_config()? {
+                    crate::safe_outputs::validate_link_github_sub_issue_config(&config)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(config) = front_matter.create_github_issue_config()? {
         if let Some(prefix) = config.title_prefix.as_deref() {
             crate::validate::reject_pipeline_injection(
                 prefix,
@@ -2121,13 +2212,6 @@ pub fn validate_github_issue_outputs_config(front_matter: &FrontMatter) -> Resul
     }
 
     if let Some(config) = front_matter.set_github_issue_type_config()? {
-        if let Some(target_repo) = config.target_repo.as_deref() {
-            crate::safe_outputs::validate_target_repo(target_repo)?;
-            crate::validate::reject_pipeline_injection(
-                target_repo,
-                "safe-outputs.set-github-issue-type.target-repo",
-            )?;
-        }
         for issue_type in &config.allowed {
             crate::validate::reject_pipeline_injection(
                 issue_type,
@@ -2136,24 +2220,7 @@ pub fn validate_github_issue_outputs_config(front_matter: &FrontMatter) -> Resul
         }
     }
 
-    if front_matter.safe_outputs.contains_key("create-github-issue")
-        && front_matter.safe_outputs.contains_key("set-github-issue-type")
-    {
-        let create_reviewed = front_matter
-            .tool_requires_approval("create-github-issue")
-            .is_some();
-        let type_reviewed = front_matter
-            .tool_requires_approval("set-github-issue-type")
-            .is_some();
-        if create_reviewed != type_reviewed {
-            anyhow::bail!(
-                "safe-outputs.create-github-issue and safe-outputs.set-github-issue-type must have the \
-                 same effective require-approval setting so temporary issue IDs remain in \
-                 one SafeOutputs job"
-            );
-        }
-    }
-
+    let _ = front_matter.github_app_permissions_for_tools(&github_tools)?;
     let _ = front_matter.github_safe_outputs_auth()?;
     Ok(())
 }
@@ -4328,9 +4395,11 @@ mod tests {
         );
 
         fm.permissions = Some(crate::compile::types::PermissionsConfig {
-            read: Some(crate::compile::types::ReadPermissionConfig::ServiceConnection(
-                crate::secure::ServiceConnection::parse("read-sc").unwrap(),
-            )),
+            read: Some(
+                crate::compile::types::ReadPermissionConfig::ServiceConnection(
+                    crate::secure::ServiceConnection::parse("read-sc").unwrap(),
+                ),
+            ),
             write: None,
         });
         let params = engine_args_for(&fm).unwrap();
@@ -5241,6 +5310,21 @@ safe-outputs:
     }
 
     #[test]
+    fn test_generate_enabled_tools_args_supports_all_github_issue_tools() {
+        for tool in crate::compile::types::GITHUB_ISSUE_SAFE_OUTPUT_TOOLS {
+            let yaml = format!(
+                "---\nname: test\ndescription: test\nsafe-outputs:\n  {tool}:\n    target-repo: githubnext/ado-aw\n---\n"
+            );
+            let (fm, _) = parse_markdown(&yaml).unwrap();
+            let args = generate_enabled_tools_args(&fm);
+            assert!(
+                args.contains(&format!("--enabled-tools {tool}")),
+                "configured GitHub tool {tool} missing from enabled-tools args: {args}"
+            );
+        }
+    }
+
+    #[test]
     fn test_generate_enabled_tools_args_create_github_issue_plus_other_output() {
         let yaml = r#"---
 name: test
@@ -5257,7 +5341,10 @@ safe-outputs:
         assert!(args.contains("--enabled-tools create-pull-request"));
         assert!(args.contains("--enabled-tools create-github-issue"));
         // No duplicate
-        assert_eq!(args.matches("--enabled-tools create-github-issue").count(), 1);
+        assert_eq!(
+            args.matches("--enabled-tools create-github-issue").count(),
+            1
+        );
     }
 
     #[test]
@@ -5337,6 +5424,42 @@ safe-outputs:
     }
 
     #[test]
+    fn test_validate_github_issue_outputs_rejects_non_exact_allowed_repo() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  create-github-issue:
+    target-repo: githubnext/ado-aw
+    allowed-repos: ["githubnext/*"]
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let error = validate_github_issue_outputs_config(&fm)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("allowed") || error.contains("owner/repo"));
+    }
+
+    #[test]
+    fn test_validate_github_issue_outputs_rejects_bad_mutation_filter() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  set-github-issue-type:
+    target-repo: githubnext/ado-aw
+    required-title-prefix: "$(UNSAFE)"
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let error = validate_github_issue_outputs_config(&fm)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("mutation filters"));
+    }
+
+    #[test]
     fn test_validate_github_issue_outputs_rejects_pipeline_injection_in_label() {
         let yaml = r###"---
 name: test
@@ -5367,6 +5490,23 @@ safe-outputs:
         let (fm, _) = parse_markdown(yaml).unwrap();
         let result = validate_github_issue_outputs_config(&fm);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_github_issue_outputs_rejects_unknown_fields_for_all_tools() {
+        for tool in crate::compile::types::GITHUB_ISSUE_SAFE_OUTPUT_TOOLS {
+            let yaml = format!(
+                "---\nname: test\ndescription: test\nsafe-outputs:\n  {tool}:\n    target-repo: githubnext/ado-aw\n    unexpected-option: true\n---\n"
+            );
+            let (fm, _) = parse_markdown(&yaml).unwrap();
+            let error = validate_github_issue_outputs_config(&fm)
+                .expect_err("unknown GitHub tool config fields must fail compilation")
+                .to_string();
+            assert!(
+                error.contains(tool) && error.contains("unknown field"),
+                "unexpected strict-config error for {tool}: {error}"
+            );
+        }
     }
 
     #[test]
@@ -5706,6 +5846,34 @@ safe-outputs:
             .unwrap_err()
             .to_string();
         assert!(error.contains("same effective require-approval"));
+    }
+
+    #[test]
+    fn test_validate_rejects_mixed_approval_for_every_temporary_id_consumer() {
+        for consumer in crate::compile::types::GITHUB_TEMPORARY_ID_CONSUMERS {
+            let yaml = format!(
+                r#"---
+name: test
+description: test
+safe-outputs:
+  create-github-issue:
+    target-repo: githubnext/ado-aw
+    require-approval: true
+  {consumer}:
+    target-repo: githubnext/ado-aw
+    require-approval: false
+---
+"#
+            );
+            let (fm, _) = parse_markdown(&yaml).unwrap();
+            let error = validate_github_issue_outputs_config(&fm)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(consumer) && error.contains("same"),
+                "unexpected error for {consumer}: {error}"
+            );
+        }
     }
 
     #[test]
@@ -6707,10 +6875,9 @@ safe-outputs:
 
     #[test]
     fn test_generate_awf_mounts_includes_runtime_az_hook_with_read_permission() {
-        let (fm, _) = parse_markdown(
-            "---\nname: t\ndescription: d\npermissions:\n  read: read-sc\n---\n",
-        )
-        .unwrap();
+        let (fm, _) =
+            parse_markdown("---\nname: t\ndescription: d\npermissions:\n  read: read-sc\n---\n")
+                .unwrap();
         let exts = crate::compile::extensions::collect_extensions(&fm);
         let declarations = extension_declarations(&exts, &fm);
         let result = generate_awf_mounts(&exts, &declarations);
@@ -6922,11 +7089,10 @@ safe-outputs:
         );
         assert!(
             entrypoint_args.windows(2).any(|args| {
-                args
-                    == [
-                        "--self-repository-directory".to_string(),
-                        "$(Build.SourcesDirectory)".to_string(),
-                    ]
+                args == [
+                    "--self-repository-directory".to_string(),
+                    "$(Build.SourcesDirectory)".to_string(),
+                ]
             }),
             "SafeOutputs should receive the exact self checkout: {entrypoint_args:?}"
         );
@@ -6942,8 +7108,7 @@ safe-outputs:
 
         assert!(
             so.mounts.as_ref().unwrap().iter().any(|mount| {
-                mount
-                    == "$(Build.SourcesDirectory)/self:$(Build.SourcesDirectory)/self:rw"
+                mount == "$(Build.SourcesDirectory)/self:$(Build.SourcesDirectory)/self:rw"
             }),
             "self checkout must be mounted when it is outside the selected workspace"
         );
@@ -8012,10 +8177,7 @@ safe-outputs:
             ReposItem::Shorthand("other-org/tools".to_string()),
         ];
         let err = lower_repos(&items).unwrap_err();
-        assert!(
-            err.to_string().contains("case-insensitively"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("case-insensitively"), "{err}");
     }
 
     #[test]
