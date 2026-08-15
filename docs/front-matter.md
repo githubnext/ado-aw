@@ -271,6 +271,10 @@ permissions:                   # optional ADO access token configuration (see do
                                  # Default: executor uses $(System.AccessToken).
                                  # Set this only for cross-org writes or
                                  # named-identity attribution.
+# permissions-required:         # abstract capability requirements for imported components
+#   read: true                  # only valid on components; unioned across imports and consumer;
+#   write: true                 # consumer must satisfy `read: true` with a concrete `permissions.read`
+                                 # connection (see docs/imports.md#permissions-required)
 supply-chain:                  # optional internal supply-chain mirror (see docs/supply-chain.md)
   feed:                          # mirror binaries (compiler, AWF, ado-script) from an ADO Artifacts feed
     name: my-project/my-feed     # feed name or project/feed; scalar `feed: my-feed` shorthand also works
