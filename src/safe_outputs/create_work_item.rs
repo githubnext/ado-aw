@@ -884,6 +884,69 @@ custom-fields:
     }
 
     #[test]
+    fn test_config_sanitizes_all_string_fields() {
+        let custom_field = AdoWorkItemFieldRef::parse("Custom.Value").unwrap();
+        let mut custom_fields = std::collections::HashMap::new();
+        custom_fields.insert(
+            custom_field.clone(),
+            "custom##vso[task.setvariable]".to_string(),
+        );
+        let mut config = CreateWorkItemConfig {
+            work_item_type: "Task##vso[task.setvariable]".to_string(),
+            description_field: Some(AdoWorkItemFieldRef::parse("Custom.Body").unwrap()),
+            area_path: Some("area\u{8}##[error]".to_string()),
+            iteration_path: Some("iteration##[section]".to_string()),
+            assignee: Some("assignee##vso[task.logissue]".to_string()),
+            tags: vec!["tag##[warning]".to_string()],
+            allowed_tags: vec!["allowed##vso[task.complete]".to_string()],
+            custom_fields,
+            artifact_link: ArtifactLinkConfig {
+                enabled: true,
+                repository: Some("repo##[debug]".to_string()),
+                branch: "branch##vso[build.addbuildtag]".to_string(),
+            },
+            include_stats: true,
+        };
+
+        crate::sanitize::SanitizeConfig::sanitize_config_fields(&mut config);
+
+        assert_eq!(
+            config.work_item_type,
+            sanitize_config("Task##vso[task.setvariable]")
+        );
+        assert_eq!(config.description_field.as_deref(), Some("Custom.Body"));
+        assert_eq!(
+            config.area_path.as_deref(),
+            Some(sanitize_config("area\u{8}##[error]").as_str())
+        );
+        assert_eq!(
+            config.iteration_path.as_deref(),
+            Some(sanitize_config("iteration##[section]").as_str())
+        );
+        assert_eq!(
+            config.assignee.as_deref(),
+            Some(sanitize_config("assignee##vso[task.logissue]").as_str())
+        );
+        assert_eq!(config.tags, vec![sanitize_config("tag##[warning]")]);
+        assert_eq!(
+            config.allowed_tags,
+            vec![sanitize_config("allowed##vso[task.complete]")]
+        );
+        assert_eq!(
+            config.custom_fields.get(&custom_field),
+            Some(&sanitize_config("custom##vso[task.setvariable]"))
+        );
+        assert_eq!(
+            config.artifact_link.repository.as_deref(),
+            Some(sanitize_config("repo##[debug]").as_str())
+        );
+        assert_eq!(
+            config.artifact_link.branch,
+            sanitize_config("branch##vso[build.addbuildtag]")
+        );
+    }
+
+    #[test]
     fn test_config_partial_deserialize_uses_defaults() {
         let yaml = r#"
 tags:
@@ -966,6 +1029,40 @@ tags:
             error,
             "custom-fields field 'Microsoft.VSTS.TCM.ReproSteps' duplicates default description-field field 'Microsoft.VSTS.TCM.ReproSteps'"
         );
+    }
+
+    #[test]
+    fn test_patch_field_validation_rejects_custom_field_builtin_collisions() {
+        let cases = [
+            ("area-path", "System.AreaPath", false),
+            ("iteration-path", "System.IterationPath", false),
+            ("assignee", "System.AssignedTo", false),
+            ("tags", "System.Tags", true),
+        ];
+
+        for (label, field, has_tags) in cases {
+            let mut config = CreateWorkItemConfig::default();
+            match label {
+                "area-path" => config.area_path = Some("Project\\Area".to_string()),
+                "iteration-path" => config.iteration_path = Some("Project\\Iteration".to_string()),
+                "assignee" => config.assignee = Some("user@example.test".to_string()),
+                "tags" => config.tags = vec!["configured".to_string()],
+                _ => unreachable!("test case labels are exhaustive"),
+            }
+            config.custom_fields.insert(
+                AdoWorkItemFieldRef::parse(field).unwrap(),
+                "overridden built-in field".to_string(),
+            );
+
+            let error = validate_patch_fields(&config, description_field_for(&config), has_tags)
+                .unwrap_err()
+                .to_string();
+
+            assert_eq!(
+                error,
+                format!("custom-fields field '{field}' duplicates {label} field '{field}'")
+            );
+        }
     }
 
     #[test]

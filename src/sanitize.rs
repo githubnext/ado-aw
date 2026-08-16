@@ -407,6 +407,11 @@ fn strip_dangerous_html_tags(input: &str) -> String {
                     index = end + 1;
                     continue;
                 }
+                if tag[1..].contains('<') {
+                    output.push('<');
+                    index += '<'.len_utf8();
+                    continue;
+                }
             } else {
                 output.push_str("&lt;");
                 index += '<'.len_utf8();
@@ -424,15 +429,19 @@ fn strip_dangerous_html_tags(input: &str) -> String {
 
 fn html_tag_end(input: &str, start: usize) -> Option<usize> {
     let mut quote = None;
+    let mut last_non_ws = None;
     for (offset, ch) in input[start + 1..].char_indices() {
         if let Some(quoted_by) = quote {
             if ch == quoted_by {
                 quote = None;
             }
-        } else if ch == '"' || ch == '\'' {
+        } else if (ch == '"' || ch == '\'') && last_non_ws == Some('=') {
             quote = Some(ch);
         } else if ch == '>' {
             return Some(start + 1 + offset);
+        }
+        if quote.is_none() && !ch.is_whitespace() {
+            last_non_ws = Some(ch);
         }
     }
     None
@@ -468,6 +477,7 @@ fn is_dangerous_html_tag(tag: &str) -> bool {
             | "link"
             | "svg"
             | "math"
+            | "style"
     )
 }
 
@@ -826,6 +836,22 @@ mod tests {
     }
 
     #[test]
+    fn test_sanitize_markdown_strips_dangerous_tags_embedded_in_attribute_values() {
+        let output = sanitize_markdown(r#"<div title="><script>alert(1)</script>">safe</div>"#);
+
+        assert_eq!(output, r#"<div title=">alert(1)">safe</div>"#);
+        assert!(!output.contains("<script"));
+    }
+
+    #[test]
+    fn test_sanitize_markdown_strips_style_tags() {
+        let output = sanitize_markdown("<style>body{display:none}</style><p>safe</p>");
+
+        assert_eq!(output, "body{display:none}<p>safe</p>");
+        assert!(!output.contains("<style"));
+    }
+
+    #[test]
     fn test_sanitize_markdown_strips_event_handler_attrs_in_tags() {
         let output = sanitize_markdown(
             r#"<h2 onclick="alert(1)">Hi</h2><a href="https://example.test" onmouseover='x'>link</a><img src=x onerror=doWork(1)>"#,
@@ -847,6 +873,15 @@ mod tests {
         let output = sanitize_markdown(r#"prose onclick="kept""#);
 
         assert_eq!(output, r#"prose onclick="kept""#);
+    }
+
+    #[test]
+    fn test_sanitize_markdown_strips_event_handler_attrs_with_quote_in_unquoted_value() {
+        let output = sanitize_markdown(r#"<img src="safe.png" data-x=a"b onerror=alert(1)>"#);
+
+        assert_eq!(output, r#"<img src="safe.png" data-x=a"b >"#);
+        assert!(!output.contains("onerror"));
+        assert!(!output.contains("alert"));
     }
 
     #[test]
