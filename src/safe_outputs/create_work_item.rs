@@ -12,7 +12,6 @@ use crate::safe_outputs::{
 use crate::sanitize::sanitize_markdown;
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::secure::{AdoWorkItemFieldRef, WorkItemTemporaryId};
-use crate::validate::validate_ado_work_item_field_ref;
 use ado_aw_derive::SanitizeConfig;
 use anyhow::{Context, ensure};
 
@@ -121,7 +120,7 @@ impl SanitizeContent for CreateWorkItemResult {
 ///       repository: "my-repo-name"  # optional, defaults to current repo
 ///       branch: "main"              # optional, defaults to "main"
 /// ```
-#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateWorkItemConfig {
     /// Work item type (default: "Task")
     #[serde(default = "default_work_item_type", rename = "work-item-type")]
@@ -131,7 +130,6 @@ pub struct CreateWorkItemConfig {
     /// Defaults to System.Description, except Bug work items default to
     /// Microsoft.VSTS.TCM.ReproSteps.
     #[serde(default, rename = "description-field")]
-    #[sanitize_config(skip)]
     pub description_field: Option<AdoWorkItemFieldRef>,
 
     /// Area path for the work item
@@ -160,12 +158,10 @@ pub struct CreateWorkItemConfig {
     /// Additional custom fields as key-value pairs
     /// Keys should be the full field reference name (e.g., "Custom.MyField")
     #[serde(default, rename = "custom-fields")]
-    #[sanitize_config(sanitize_keys)]
-    pub custom_fields: std::collections::HashMap<String, String>,
+    pub custom_fields: std::collections::HashMap<AdoWorkItemFieldRef, String>,
 
     /// Artifact link configuration for GitHub Copilot integration
     #[serde(default, rename = "artifact-link")]
-    #[sanitize_config(nested)]
     pub artifact_link: ArtifactLinkConfig,
 
     /// Whether to include agent execution stats in the output (default: true).
@@ -174,6 +170,25 @@ pub struct CreateWorkItemConfig {
         rename = "include-stats"
     )]
     pub include_stats: bool,
+}
+
+impl crate::sanitize::SanitizeConfig for CreateWorkItemConfig {
+    fn sanitize_config_fields(&mut self) {
+        self.work_item_type = sanitize_config(&self.work_item_type);
+        self.area_path = self.area_path.as_deref().map(sanitize_config);
+        self.iteration_path = self.iteration_path.as_deref().map(sanitize_config);
+        self.assignee = self.assignee.as_deref().map(sanitize_config);
+        self.tags = self.tags.iter().map(|tag| sanitize_config(tag)).collect();
+        self.allowed_tags = self
+            .allowed_tags
+            .iter()
+            .map(|tag| sanitize_config(tag))
+            .collect();
+        for value in self.custom_fields.values_mut() {
+            *value = sanitize_config(value);
+        }
+        crate::sanitize::SanitizeConfig::sanitize_config_fields(&mut self.artifact_link);
+    }
 }
 
 /// Configuration for artifact links (repository linking for GitHub Copilot)
@@ -296,10 +311,13 @@ fn validate_patch_fields(
         validate_unique_patch_field(&mut fields, "tags", "System.Tags")?;
     }
 
-    let mut custom_fields: Vec<_> = config.custom_fields.keys().map(String::as_str).collect();
+    let mut custom_fields: Vec<_> = config
+        .custom_fields
+        .keys()
+        .map(AdoWorkItemFieldRef::as_str)
+        .collect();
     custom_fields.sort_unstable();
     for field in custom_fields {
-        validate_ado_work_item_field_ref(field, "safe-outputs.create-work-item.custom-fields key")?;
         validate_unique_patch_field(&mut fields, "custom-fields", field)?;
     }
 
@@ -853,7 +871,9 @@ custom-fields:
         assert_eq!(config.tags, vec!["agent-created", "automated"]);
         assert_eq!(config.allowed_tags, vec!["agent-*", "review"]);
         assert_eq!(
-            config.custom_fields.get("Custom.Priority"),
+            config
+                .custom_fields
+                .get(&AdoWorkItemFieldRef::parse("Custom.Priority").unwrap()),
             Some(&"High".to_string())
         );
     }
@@ -906,7 +926,10 @@ tags:
         let mut config = CreateWorkItemConfig::default();
         config
             .custom_fields
-            .insert("System.Title".to_string(), "overridden title".to_string());
+            .insert(
+                AdoWorkItemFieldRef::parse("System.Title").unwrap(),
+                "overridden title".to_string(),
+            );
         let error = validate_patch_fields(&config, description_field_for(&config), false)
             .unwrap_err()
             .to_string();
@@ -921,7 +944,7 @@ tags:
             ..Default::default()
         };
         config.custom_fields.insert(
-            "Microsoft.VSTS.TCM.ReproSteps".to_string(),
+            AdoWorkItemFieldRef::parse("Microsoft.VSTS.TCM.ReproSteps").unwrap(),
             "overridden body".to_string(),
         );
         let error = validate_patch_fields(&config, description_field_for(&config), false)
@@ -934,16 +957,17 @@ tags:
     }
 
     #[test]
-    fn test_patch_field_validation_rejects_invalid_custom_field_ref() {
-        let mut config = CreateWorkItemConfig::default();
-        config
-            .custom_fields
-            .insert("System/Title".to_string(), "bad field".to_string());
-        let error = validate_patch_fields(&config, description_field_for(&config), false)
-            .unwrap_err()
-            .to_string();
+    fn test_config_rejects_invalid_custom_field_ref() {
+        let error = serde_yaml::from_str::<CreateWorkItemConfig>(
+            r#"
+custom-fields:
+  System/Title: bad field
+"#,
+        )
+        .unwrap_err()
+        .to_string();
 
-        assert!(error.contains("safe-outputs.create-work-item.custom-fields key"));
+        assert!(error.contains("work item field"));
     }
 
     #[test]
