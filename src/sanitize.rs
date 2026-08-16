@@ -257,18 +257,18 @@ static RE_SLASH_CMD: LazyLock<regex_lite::Regex> =
     LazyLock::new(|| regex_lite::Regex::new(r"(?m)^(/[a-zA-Z][\w-]*)").unwrap());
 static RE_DANGEROUS_HTML_TAG: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
     regex_lite::Regex::new(
-        r"(?i)</?\s*(script|iframe|object|embed|form|input|button|textarea|select|option|base|meta|link|svg|math)\b[^>]*>",
+        r#"(?i)</?\s*(script|iframe|object|embed|form|input|button|textarea|select|option|base|meta|link|svg|math)\b([^>"']|"[^"]*"|'[^']*')*>"#,
     )
     .unwrap()
 });
 static RE_EVENT_HANDLER_ATTR_DQ: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
-    regex_lite::Regex::new(r#"(?i)(^|[<\s])on[a-z][a-z0-9_-]*\s*=\s*"[^"]*""#).unwrap()
+    regex_lite::Regex::new(r#"(?i)([<\s])on[a-z][a-z0-9_-]*\s*=\s*"[^"]*""#).unwrap()
 });
 static RE_EVENT_HANDLER_ATTR_SQ: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
-    regex_lite::Regex::new(r#"(?i)(^|[<\s])on[a-z][a-z0-9_-]*\s*=\s*'[^']*'"#).unwrap()
+    regex_lite::Regex::new(r#"(?i)([<\s])on[a-z][a-z0-9_-]*\s*=\s*'[^']*'"#).unwrap()
 });
 static RE_EVENT_HANDLER_ATTR_BARE: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
-    regex_lite::Regex::new(r#"(?i)(^|[<\s])on[a-z][a-z0-9_-]*\s*=\s*[^\s"'=<>`]*"#).unwrap()
+    regex_lite::Regex::new(r#"(?i)([<\s])on[a-z][a-z0-9_-]*\s*=\s*[^\s"'=<>`]*"#).unwrap()
 });
 
 /// Neutralize bot command patterns and Azure DevOps work item link syntax.
@@ -698,7 +698,7 @@ mod tests {
 
     #[test]
     fn test_sanitize_markdown_neutralizes_active_html() {
-        let input = r#"<h2 onclick="alert(1)">Hi</h2><script>alert(1)</script><svg onload=alert(1)></svg><form action="https://evil.test"></form><a href="javascript:alert(1)" onmouseover='x'>link</a><img src=x onerror=>"#;
+        let input = r#"<h2 onclick="alert(1)">Hi</h2><script data-x="a>b">alert(1)</script><svg onload=alert(1)></svg><form action="https://evil.test"></form><a href="javascript:alert(1)" onmouseover='x'>link</a><img src=x onerror=>"#;
         let output = sanitize_markdown(input);
 
         assert!(output.contains("<h2 "));
