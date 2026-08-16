@@ -345,7 +345,14 @@ fn escape_html_fragment(input: &str) -> String {
 }
 
 fn neutralize_dangerous_html(input: &str) -> String {
-    let s = strip_dangerous_html_tags(input);
+    let mut s = input.to_string();
+    loop {
+        let stripped = strip_dangerous_html_tags(&s);
+        if stripped == s {
+            break;
+        }
+        s = stripped;
+    }
     strip_event_handler_attrs_in_tags(&s)
 }
 
@@ -798,27 +805,62 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_markdown_neutralizes_active_html() {
-        let input = r#"<h2 onclick="alert(1)">Hi</h2><script data-x="a>b">alert(1)</script><svg onload=alert(1)></svg><form action="https://evil.test"></form><a href="javascript:alert(1)" onmouseover='x'>link</a><img src=x onerror=doWork(1)> prose onclick="kept"<script src=x"#;
-        let output = sanitize_markdown(input);
+    fn test_sanitize_markdown_strips_dangerous_tags() {
+        let output = sanitize_markdown(
+            r#"<script data-x="a>b">alert(1)</script><svg onload=alert(1)></svg><form action="https://evil.test"></form>"#,
+        );
 
-        assert!(output.contains("<h2 "));
-        assert!(output.contains(">Hi</h2>"));
-        assert!(output.contains(r#"<a href="(redacted)alert(1)" "#));
-        assert!(output.contains(">link</a>"));
-        assert!(output.contains("<img src=x "));
-        assert!(output.contains(r#"prose onclick="kept""#));
-        assert!(output.contains("&lt;script src=x"));
         assert!(!output.contains("<script"));
-        assert!(!output.contains("<script src"));
         assert!(!output.contains("data-x"));
         assert!(!output.contains("a>b"));
         assert!(!output.contains("<svg"));
         assert!(!output.contains("<form"));
+    }
+
+    #[test]
+    fn test_sanitize_markdown_strips_nested_dangerous_tags_to_fixed_point() {
+        let output = sanitize_markdown("<scr<script>ipt>alert(1)</scr</script>ipt>");
+
+        assert_eq!(output, "alert(1)");
+        assert!(!output.contains("<script"));
+    }
+
+    #[test]
+    fn test_sanitize_markdown_strips_event_handler_attrs_in_tags() {
+        let output = sanitize_markdown(
+            r#"<h2 onclick="alert(1)">Hi</h2><a href="https://example.test" onmouseover='x'>link</a><img src=x onerror=doWork(1)>"#,
+        );
+
+        assert!(output.contains("<h2 "));
+        assert!(output.contains(">Hi</h2>"));
+        assert!(output.contains(r#"<a href="https://example.test" "#));
+        assert!(output.contains(">link</a>"));
+        assert!(output.contains("<img src=x "));
         assert!(!output.contains("<h2 onclick"));
         assert!(!output.contains("onmouseover"));
         assert!(!output.contains("onerror"));
         assert!(!output.contains("doWork"));
+    }
+
+    #[test]
+    fn test_sanitize_markdown_preserves_event_handler_text_outside_tags() {
+        let output = sanitize_markdown(r#"prose onclick="kept""#);
+
+        assert_eq!(output, r#"prose onclick="kept""#);
+    }
+
+    #[test]
+    fn test_sanitize_markdown_escapes_unclosed_dangerous_tag() {
+        let output = sanitize_markdown("<script src=x");
+
+        assert_eq!(output, "&lt;script src=x");
+    }
+
+    #[test]
+    fn test_sanitize_markdown_redacts_dangerous_url_protocols_in_html() {
+        let output = sanitize_markdown(r#"<a href="javascript:alert(1)">link</a>"#);
+
+        assert_eq!(output, r#"<a href="(redacted)alert(1)">link</a>"#);
         assert!(!output.contains("javascript:"));
     }
 

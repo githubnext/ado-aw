@@ -12,6 +12,7 @@ use crate::safe_outputs::{
 use crate::sanitize::sanitize_markdown;
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::secure::{AdoWorkItemFieldRef, WorkItemTemporaryId};
+use crate::validate::validate_ado_work_item_field_ref;
 use ado_aw_derive::SanitizeConfig;
 use anyhow::{Context, ensure};
 
@@ -255,6 +256,54 @@ fn field_op(field: &str, value: impl Into<String>) -> serde_json::Value {
     })
 }
 
+fn validate_unique_patch_field<'a>(
+    fields: &mut Vec<(&'static str, &'a str)>,
+    label: &'static str,
+    field: &'a str,
+) -> anyhow::Result<()> {
+    if let Some((existing_label, existing_field)) = fields
+        .iter()
+        .find(|(_, existing_field)| existing_field.eq_ignore_ascii_case(field))
+    {
+        anyhow::bail!(
+            "{label} field '{field}' duplicates {existing_label} field '{existing_field}'"
+        );
+    }
+
+    fields.push((label, field));
+    Ok(())
+}
+
+fn validate_patch_fields(
+    config: &CreateWorkItemConfig,
+    description_field: &str,
+    has_tags: bool,
+) -> anyhow::Result<()> {
+    let mut fields = Vec::new();
+    validate_unique_patch_field(&mut fields, "title", "System.Title")?;
+    validate_unique_patch_field(&mut fields, "description-field", description_field)?;
+
+    if config.area_path.is_some() {
+        validate_unique_patch_field(&mut fields, "area-path", "System.AreaPath")?;
+    }
+    if config.iteration_path.is_some() {
+        validate_unique_patch_field(&mut fields, "iteration-path", "System.IterationPath")?;
+    }
+    if config.assignee.is_some() {
+        validate_unique_patch_field(&mut fields, "assignee", "System.AssignedTo")?;
+    }
+    if has_tags {
+        validate_unique_patch_field(&mut fields, "tags", "System.Tags")?;
+    }
+
+    for field in config.custom_fields.keys() {
+        validate_ado_work_item_field_ref(field, "safe-outputs.create-work-item.custom-fields key")?;
+        validate_unique_patch_field(&mut fields, "custom-fields", field)?;
+    }
+
+    Ok(())
+}
+
 /// Build an artifact link relation patch operation
 fn artifact_link_op(project: &str, repository_id: &str, branch: &str) -> serde_json::Value {
     // Azure DevOps artifact link URL format for Git branch refs:
@@ -456,10 +505,21 @@ impl Executor for CreateWorkItemResult {
         );
         debug!("API URL: {}", url);
 
+        let mut all_tags = config.tags.clone();
+        for tag in &self.tags {
+            if !all_tags.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
+                all_tags.push(tag.clone());
+            }
+        }
+
         // Build the patch document for work item creation
         let description_with_stats =
             crate::agent_stats::append_stats_to_body(&self.description, ctx, config.include_stats);
         let description_field = description_field_for(&config);
+        if let Err(error) = validate_patch_fields(&config, description_field, !all_tags.is_empty())
+        {
+            return Ok(ExecutionResult::failure(error.to_string()));
+        }
         let mut patch_doc = vec![
             field_op("System.Title", &self.title),
             field_op(description_field, &description_with_stats),
@@ -489,12 +549,6 @@ impl Executor for CreateWorkItemResult {
             patch_doc.push(field_op("System.AssignedTo", assignee));
         }
         // Merge static config tags with validated agent-provided tags (dedup, case-insensitive)
-        let mut all_tags = config.tags.clone();
-        for tag in &self.tags {
-            if !all_tags.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
-                all_tags.push(tag.clone());
-            }
-        }
         if !all_tags.is_empty() {
             patch_doc.push(field_op("System.Tags", all_tags.join("; ")));
         }
@@ -835,6 +889,62 @@ tags:
     }
 
     #[test]
+    fn test_patch_field_validation_rejects_description_field_title_collision() {
+        let mut config = CreateWorkItemConfig::default();
+        config.description_field = Some(AdoWorkItemFieldRef::parse("System.Title").unwrap());
+        let error = validate_patch_fields(&config, description_field_for(&config), false)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("description-field field 'System.Title' duplicates title field"));
+    }
+
+    #[test]
+    fn test_patch_field_validation_rejects_custom_field_title_collision() {
+        let mut config = CreateWorkItemConfig::default();
+        config
+            .custom_fields
+            .insert("System.Title".to_string(), "overridden title".to_string());
+        let error = validate_patch_fields(&config, description_field_for(&config), false)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("custom-fields field 'System.Title' duplicates title field"));
+    }
+
+    #[test]
+    fn test_patch_field_validation_rejects_custom_field_description_collision() {
+        let mut config = CreateWorkItemConfig {
+            work_item_type: "Bug".to_string(),
+            ..Default::default()
+        };
+        config.custom_fields.insert(
+            "Microsoft.VSTS.TCM.ReproSteps".to_string(),
+            "overridden body".to_string(),
+        );
+        let error = validate_patch_fields(&config, description_field_for(&config), false)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains(
+            "custom-fields field 'Microsoft.VSTS.TCM.ReproSteps' duplicates description-field field"
+        ));
+    }
+
+    #[test]
+    fn test_patch_field_validation_rejects_invalid_custom_field_ref() {
+        let mut config = CreateWorkItemConfig::default();
+        config
+            .custom_fields
+            .insert("System/Title".to_string(), "bad field".to_string());
+        let error = validate_patch_fields(&config, description_field_for(&config), false)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("safe-outputs.create-work-item.custom-fields key"));
+    }
+
+    #[test]
     fn test_result_sanitization_preserves_description_html() {
         let mut result = CreateWorkItemResult {
             name: CreateWorkItemResult::NAME.to_string(),
@@ -911,5 +1021,46 @@ tags:
         let execution = result.execute_sanitized(&ctx).await.unwrap();
 
         assert!(execution.success, "{}", execution.message);
+    }
+
+    #[tokio::test]
+    async fn test_execute_rejects_duplicate_description_custom_field() {
+        use std::collections::HashMap;
+
+        let ctx = ExecutionContext {
+            ado_org_url: Some("https://example.test".to_string()),
+            ado_project: Some("Project".to_string()),
+            access_token: Some("token".to_string()),
+            tool_configs: HashMap::from([(
+                "create-work-item".to_string(),
+                serde_json::json!({
+                    "work-item-type": "Bug",
+                    "custom-fields": {
+                        "Microsoft.VSTS.TCM.ReproSteps": "overridden body"
+                    },
+                    "include-stats": false
+                }),
+            )]),
+            ..Default::default()
+        };
+        let mut result = CreateWorkItemResult {
+            name: CreateWorkItemResult::NAME.to_string(),
+            title: "Bug with duplicate body".to_string(),
+            description: "This description is long enough to pass MCP parameter validation."
+                .to_string(),
+            tags: Vec::new(),
+            temporary_id: WorkItemTemporaryId::parse("#aw_test1").unwrap(),
+        };
+
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+
+        assert!(!execution.success);
+        assert!(
+            execution.message.contains(
+                "custom-fields field 'Microsoft.VSTS.TCM.ReproSteps' duplicates description-field field"
+            ),
+            "{}",
+            execution.message
+        );
     }
 }
