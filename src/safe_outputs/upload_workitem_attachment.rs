@@ -405,6 +405,103 @@ mod tests {
             execution.message
         );
     }
+
+    #[tokio::test]
+    async fn resolved_temporary_id_uploads_to_the_created_work_item() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let attachment_url = format!("{}/Project/_apis/wit/attachments/abc", server.uri());
+        Mock::given(method("POST"))
+            .and(path("/Project/_apis/wit/attachments"))
+            .and(query_param("fileName", "report.txt"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "url": attachment_url.clone() })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/Project/_apis/wit/workitems/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": 42 })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let source_directory = tempfile::tempdir().unwrap();
+        std::fs::write(source_directory.path().join("report.txt"), "report body").unwrap();
+
+        let mut tool_configs = std::collections::HashMap::new();
+        tool_configs.insert(
+            "upload-workitem-attachment".to_string(),
+            serde_json::json!({}),
+        );
+        let ctx = ExecutionContext {
+            tool_configs,
+            ado_org_url: Some(server.uri()),
+            ado_project: Some("Project".to_string()),
+            access_token: Some("token".to_string()),
+            source_directory: source_directory.path().to_path_buf(),
+            ..Default::default()
+        };
+        let temporary_id = WorkItemTemporaryId::parse("#aw_created1").unwrap();
+        ctx.register_resolved_work_item(
+            &temporary_id,
+            crate::safe_outputs::ResolvedWorkItem {
+                id: 42,
+                url: "https://example.test/items/42".to_string(),
+            },
+        )
+        .unwrap();
+        let mut result: UploadWorkitemAttachmentResult = UploadWorkitemAttachmentParams {
+            work_item_id: WorkItemReference::Temporary(temporary_id),
+            file_path: "report.txt".to_string(),
+            comment: None,
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(execution.success, "upload failed: {}", execution.message);
+        assert_eq!(
+            execution
+                .data
+                .as_ref()
+                .and_then(|data| data["work_item_id"].as_i64()),
+            Some(42)
+        );
+    }
+
+    #[tokio::test]
+    async fn out_of_range_work_item_id_fails_before_http() {
+        let mut tool_configs = std::collections::HashMap::new();
+        tool_configs.insert(
+            "upload-workitem-attachment".to_string(),
+            serde_json::json!({}),
+        );
+        let ctx = ExecutionContext {
+            tool_configs,
+            ado_org_url: Some("https://dev.azure.com/org".to_string()),
+            ado_project: Some("project".to_string()),
+            access_token: Some("token".to_string()),
+            ..Default::default()
+        };
+        let mut result: UploadWorkitemAttachmentResult = UploadWorkitemAttachmentParams {
+            work_item_id: WorkItemReference::Number(u64::MAX),
+            file_path: "output/report.pdf".to_string(),
+            comment: None,
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!execution.success);
+        assert!(
+            execution.message.contains("is out of range"),
+            "unexpected message: {}",
+            execution.message
+        );
+    }
     use super::*;
 
     #[test]

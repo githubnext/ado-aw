@@ -376,7 +376,9 @@ impl Executor for CommentOnWorkItemResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safe_outputs::{ResolvedWorkItem, ToolResult};
+    use crate::safe_outputs::{
+        CreateWorkItemParams, CreateWorkItemResult, ResolvedWorkItem, ToolResult,
+    };
     use crate::secure::WorkItemTemporaryId;
 
     #[test]
@@ -517,6 +519,149 @@ mod tests {
         assert!(
             error.contains("AZURE_DEVOPS_ORG_URL not set"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_then_comment_resolves_temporary_id() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/Project/_apis/wit/workitems/$Task"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 42,
+                "_links": { "html": { "href": "https://example.test/items/42" } }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/Project/_apis/wit/workItems/42/comments"))
+            .and(body_json(serde_json::json!({
+                "text": "This is a comment on the created work item."
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 7,
+                "url": "https://example.test/items/42/comments/7"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut tool_configs = std::collections::HashMap::new();
+        tool_configs.insert(
+            "create-work-item".to_string(),
+            serde_json::json!({"include-stats": false}),
+        );
+        // No `target` configured: a temporary ID resolved from this run's create
+        // must still be accepted, because the create is scoped by its own config.
+        tool_configs.insert(
+            "comment-on-work-item".to_string(),
+            serde_json::json!({"include-stats": false}),
+        );
+        let ctx = ExecutionContext {
+            ado_org_url: Some(server.uri()),
+            ado_project: Some("Project".to_string()),
+            access_token: Some("token".to_string()),
+            tool_configs,
+            ..Default::default()
+        };
+
+        let temporary_id = WorkItemTemporaryId::parse("#aw_task1").unwrap();
+        let mut create: CreateWorkItemResult = (
+            CreateWorkItemParams {
+                title: "Create a real task".to_string(),
+                description: "A detailed work-item description that is long enough.".to_string(),
+                tags: Vec::new(),
+            },
+            temporary_id.clone(),
+        )
+            .try_into()
+            .unwrap();
+        let created = create.execute_sanitized(&ctx).await.unwrap();
+        assert!(created.success, "create failed: {}", created.message);
+
+        let mut comment: CommentOnWorkItemResult = CommentOnWorkItemParams {
+            work_item_id: WorkItemReference::Temporary(temporary_id),
+            body: "This is a comment on the created work item.".to_string(),
+        }
+        .try_into()
+        .unwrap();
+        let commented = comment.execute_sanitized(&ctx).await.unwrap();
+        assert!(commented.success, "comment failed: {}", commented.message);
+        assert_eq!(
+            commented
+                .data
+                .as_ref()
+                .and_then(|data| data["work_item_id"].as_i64()),
+            Some(42)
+        );
+        assert_eq!(
+            commented
+                .data
+                .as_ref()
+                .and_then(|data| data["comment_id"].as_i64()),
+            Some(7)
+        );
+    }
+
+    #[tokio::test]
+    async fn out_of_range_numeric_id_fails_before_http() {
+        let mut tool_configs = std::collections::HashMap::new();
+        tool_configs.insert(
+            "comment-on-work-item".to_string(),
+            serde_json::json!({"target": "*"}),
+        );
+        let ctx = ExecutionContext {
+            tool_configs,
+            ..Default::default()
+        };
+        let mut result: CommentOnWorkItemResult = CommentOnWorkItemParams {
+            work_item_id: WorkItemReference::Number(u64::MAX),
+            body: "This is a comment on the work item.".to_string(),
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!execution.success);
+        assert!(
+            execution.message.contains("is out of range"),
+            "unexpected message: {}",
+            execution.message
+        );
+    }
+
+    #[tokio::test]
+    async fn out_of_range_resolved_temporary_id_fails_before_http() {
+        let mut tool_configs = std::collections::HashMap::new();
+        tool_configs.insert("comment-on-work-item".to_string(), serde_json::json!({}));
+        let ctx = ExecutionContext {
+            tool_configs,
+            ..Default::default()
+        };
+        let temporary_id = WorkItemTemporaryId::parse("#aw_created2").unwrap();
+        ctx.register_resolved_work_item(
+            &temporary_id,
+            ResolvedWorkItem {
+                id: u64::MAX,
+                url: "https://example.invalid/huge".to_string(),
+            },
+        )
+        .unwrap();
+        let mut result: CommentOnWorkItemResult = CommentOnWorkItemParams {
+            work_item_id: WorkItemReference::Temporary(temporary_id),
+            body: "This is a comment on the created work item.".to_string(),
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!execution.success);
+        assert!(
+            execution.message.contains("is out of range"),
+            "unexpected message: {}",
+            execution.message
         );
     }
 

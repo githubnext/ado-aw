@@ -436,6 +436,141 @@ mod tests {
             execution.message
         );
     }
+
+    #[tokio::test]
+    async fn resolved_temporary_ids_link_without_target() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let target_url = format!("{}/Project/_apis/wit/workitems/43", server.uri());
+        Mock::given(method("PATCH"))
+            .and(path("/Project/_apis/wit/workitems/42"))
+            .and(body_json(serde_json::json!([{
+                "op": "add",
+                "path": "/relations/-",
+                "value": {
+                    "rel": "System.LinkTypes.Related",
+                    "url": target_url,
+                }
+            }])))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": 42 })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut tool_configs = std::collections::HashMap::new();
+        // No `target` configured: both ends resolve to work items created in
+        // this run, so the target policy does not apply.
+        tool_configs.insert("link-work-items".to_string(), serde_json::json!({}));
+        let ctx = ExecutionContext {
+            tool_configs,
+            ado_org_url: Some(server.uri()),
+            ado_project: Some("Project".to_string()),
+            access_token: Some("token".to_string()),
+            ..Default::default()
+        };
+        let source_temporary = WorkItemTemporaryId::parse("#aw_source1").unwrap();
+        let target_temporary = WorkItemTemporaryId::parse("#aw_target1").unwrap();
+        ctx.register_resolved_work_item(
+            &source_temporary,
+            ResolvedWorkItem {
+                id: 42,
+                url: "https://example.test/items/42".to_string(),
+            },
+        )
+        .unwrap();
+        ctx.register_resolved_work_item(
+            &target_temporary,
+            ResolvedWorkItem {
+                id: 43,
+                url: "https://example.test/items/43".to_string(),
+            },
+        )
+        .unwrap();
+        let mut result: LinkWorkItemsResult = LinkWorkItemsParams {
+            source_id: WorkItemReference::Temporary(source_temporary),
+            target_id: WorkItemReference::Temporary(target_temporary),
+            link_type: "related".to_string(),
+            comment: None,
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(execution.success, "link failed: {}", execution.message);
+        assert_eq!(
+            execution
+                .data
+                .as_ref()
+                .and_then(|data| data["source_id"].as_i64()),
+            Some(42)
+        );
+        assert_eq!(
+            execution
+                .data
+                .as_ref()
+                .and_then(|data| data["target_id"].as_i64()),
+            Some(43)
+        );
+    }
+
+    #[tokio::test]
+    async fn out_of_range_ids_fail_before_http() {
+        let mut tool_configs = std::collections::HashMap::new();
+        tool_configs.insert(
+            "link-work-items".to_string(),
+            serde_json::json!({"target": "*"}),
+        );
+        let ctx = ExecutionContext {
+            tool_configs,
+            ado_org_url: Some("https://dev.azure.com/org".to_string()),
+            ado_project: Some("project".to_string()),
+            access_token: Some("token".to_string()),
+            ..Default::default()
+        };
+        let temporary_id = WorkItemTemporaryId::parse("#aw_created2").unwrap();
+        ctx.register_resolved_work_item(
+            &temporary_id,
+            ResolvedWorkItem {
+                id: u64::MAX,
+                url: "https://example.invalid/huge".to_string(),
+            },
+        )
+        .unwrap();
+        // Resolved temporary ID out of range.
+        let mut result: LinkWorkItemsResult = LinkWorkItemsParams {
+            source_id: WorkItemReference::Temporary(temporary_id),
+            target_id: WorkItemReference::Number(200),
+            link_type: "related".to_string(),
+            comment: None,
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!execution.success);
+        assert!(
+            execution.message.contains("is out of range"),
+            "unexpected message: {}",
+            execution.message
+        );
+
+        // Numeric ID out of range.
+        let mut result: LinkWorkItemsResult = LinkWorkItemsParams {
+            source_id: WorkItemReference::Number(100),
+            target_id: WorkItemReference::Number(u64::MAX),
+            link_type: "related".to_string(),
+            comment: None,
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!execution.success);
+        assert!(
+            execution.message.contains("is out of range"),
+            "unexpected message: {}",
+            execution.message
+        );
+    }
     use super::*;
 
     #[test]

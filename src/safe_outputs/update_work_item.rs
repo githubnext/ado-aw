@@ -660,6 +660,70 @@ mod tests {
             execution.message
         );
     }
+
+    #[tokio::test]
+    async fn resolved_temporary_id_updates_the_created_work_item() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/Project/_apis/wit/workitems/42"))
+            .and(body_json(serde_json::json!([{
+                "op": "replace",
+                "path": "/fields/System.State",
+                "value": "Active"
+            }])))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 42,
+                "_links": { "html": { "href": "https://example.test/items/42" } }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut tool_configs = std::collections::HashMap::new();
+        // No `target` configured: the update must still be allowed because the
+        // temporary ID resolves to a work item created in this run.
+        tool_configs.insert(
+            "update-work-item".to_string(),
+            serde_json::json!({"status": true}),
+        );
+        let ctx = ExecutionContext {
+            tool_configs,
+            ado_org_url: Some(server.uri()),
+            ado_project: Some("Project".to_string()),
+            access_token: Some("token".to_string()),
+            ..Default::default()
+        };
+        let temporary_id = WorkItemTemporaryId::parse("#aw_created1").unwrap();
+        ctx.register_resolved_work_item(
+            &temporary_id,
+            crate::safe_outputs::ResolvedWorkItem {
+                id: 42,
+                url: "https://example.test/items/42".to_string(),
+            },
+        )
+        .unwrap();
+        let mut result: UpdateWorkItemResult = UpdateWorkItemParams {
+            id: WorkItemReference::Temporary(temporary_id),
+            title: None,
+            body: None,
+            state: Some("Active".to_string()),
+            area_path: None,
+            iteration_path: None,
+            assignee: None,
+            tags: None,
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(execution.success, "update failed: {}", execution.message);
+        assert_eq!(
+            execution.data.as_ref().and_then(|data| data["id"].as_u64()),
+            Some(42)
+        );
+    }
     use super::*;
     use crate::safe_outputs::ToolResult;
 
