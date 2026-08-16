@@ -836,7 +836,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_markdown_strips_dangerous_tags_embedded_in_attribute_values() {
+    fn test_sanitize_markdown_strips_dangerous_tags_folded_into_attribute_span() {
         let output = sanitize_markdown(r#"<div title="><script>alert(1)</script>">safe</div>"#);
 
         assert_eq!(output, r#"<div title=">alert(1)">safe</div>"#);
