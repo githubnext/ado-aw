@@ -918,7 +918,10 @@ tags:
             .unwrap_err()
             .to_string();
 
-        assert!(error.contains("description-field field 'System.Title' duplicates title field"));
+        assert_eq!(
+            error,
+            "description-field field 'System.Title' duplicates title field 'System.Title'"
+        );
     }
 
     #[test]
@@ -934,7 +937,10 @@ tags:
             .unwrap_err()
             .to_string();
 
-        assert!(error.contains("custom-fields field 'System.Title' duplicates title field"));
+        assert_eq!(
+            error,
+            "custom-fields field 'System.Title' duplicates title field 'System.Title'"
+        );
     }
 
     #[test]
@@ -951,9 +957,10 @@ tags:
             .unwrap_err()
             .to_string();
 
-        assert!(error.contains(
-            "custom-fields field 'Microsoft.VSTS.TCM.ReproSteps' duplicates description-field field"
-        ));
+        assert_eq!(
+            error,
+            "custom-fields field 'Microsoft.VSTS.TCM.ReproSteps' duplicates description-field field 'Microsoft.VSTS.TCM.ReproSteps'"
+        );
     }
 
     #[test]
