@@ -795,10 +795,10 @@ relationship is handled idempotently; a child already linked to a different
 parent fails without changing either issue.
 
 ### comment-on-work-item
-Adds a comment to an existing Azure DevOps work item. This is the ADO equivalent of gh-aw's `add-comment` tool.
+Adds a comment to an Azure DevOps work item. This is the ADO equivalent of gh-aw's `add-comment` tool.
 
 **Agent parameters:**
-- `work_item_id` - The work item ID to comment on (required, must be positive)
+- `work_item_id` - A positive numeric work-item ID, or a temporary ID (`#aw_...`) returned by an earlier `create-work-item` call in the same run (required)
 - `body` - Comment text in markdown format (required, must be at least 10 characters)
 
 **Configuration options (front matter):**
@@ -819,6 +819,19 @@ safe-outputs:
 ```
 
 **Note:** The `target` field is required. If omitted, compilation fails with an error. This ensures operators are intentional about which work items agents can comment on.
+
+Temporary IDs are resolved at Stage 3 against the `create-work-item` proposals
+that already succeeded in the same SafeOutputs job, so they do not need
+`target`. A temporary ID that cannot be traced to such a create is rejected
+before any request is sent. When both tools are configured they must have the
+same effective `require-approval` setting, so temporary-ID state stays within a
+single SafeOutputs job.
+
+```json
+{"title":"Investigate build failure","description":"Detailed failure report long enough for validation."}
+{"temporary_id":"#aw_a1b2c3d4"}
+{"work_item_id":"#aw_a1b2c3d4","body":"Root cause analysis for the failure above."}
+```
 
 ### create-work-item
 Creates an Azure DevOps work item.

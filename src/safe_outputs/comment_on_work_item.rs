@@ -6,7 +6,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
-use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::safe_outputs::{
+    ExecutionContext, ExecutionResult, Executor, Validate, WorkItemReference,
+};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
 use ado_aw_derive::SanitizeConfig;
@@ -15,8 +17,9 @@ use anyhow::{Context, ensure};
 /// Parameters for commenting on a work item
 #[derive(Deserialize, JsonSchema)]
 pub struct CommentOnWorkItemParams {
-    /// The work item ID to comment on
-    pub work_item_id: i64,
+    /// Positive Azure DevOps work-item ID to comment on, or a temporary ID
+    /// from an earlier `create-work-item` call in the same run.
+    pub work_item_id: WorkItemReference,
 
     /// Comment text in markdown format. Ensure adequate content > 10 characters.
     pub body: String,
@@ -24,7 +27,9 @@ pub struct CommentOnWorkItemParams {
 
 impl Validate for CommentOnWorkItemParams {
     fn validate(&self) -> anyhow::Result<()> {
-        ensure!(self.work_item_id > 0, "work_item_id must be positive");
+        if let WorkItemReference::Number(id) = self.work_item_id {
+            ensure!(id > 0, "work_item_id must be positive");
+        }
         ensure!(self.body.len() >= 10, "body must be at least 10 characters");
         Ok(())
     }
@@ -36,7 +41,7 @@ tool_result! {
     params = CommentOnWorkItemParams,
     /// Result of commenting on a work item
     pub struct CommentOnWorkItemResult {
-        work_item_id: i64,
+        work_item_id: WorkItemReference,
         body: String,
     }
 }
@@ -230,12 +235,12 @@ async fn get_work_item_area_path(
 #[async_trait::async_trait]
 impl Executor for CommentOnWorkItemResult {
     fn dry_run_summary(&self) -> String {
-        format!("comment on work item #{}", self.work_item_id)
+        format!("comment on work item {}", self.work_item_id)
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!(
-            "Commenting on work item #{}: {} chars",
+            "Commenting on work item {}: {} chars",
             self.work_item_id,
             self.body.len()
         );
@@ -244,6 +249,35 @@ impl Executor for CommentOnWorkItemResult {
             self.work_item_id,
             self.body.len()
         );
+
+        let config: CommentOnWorkItemConfig = ctx.get_tool_config("comment-on-work-item")?;
+        debug!("Target: {:?}", config.target);
+
+        // Temporary IDs are resolved against the creates that already ran in
+        // this SafeOutputs job. An ID that cannot be traced to such a create is
+        // rejected before any HTTP call so the comment never lands on an
+        // unrelated work item.
+        let resolved_temporary = match &self.work_item_id {
+            WorkItemReference::Temporary(temporary_id) => {
+                let Some(work_item) = ctx.resolve_work_item(temporary_id)? else {
+                    return Ok(ExecutionResult::failure(format!(
+                        "temporary work-item ID '{}' has not been resolved; create-work-item must \
+                         succeed earlier in the same SafeOutputs job",
+                        temporary_id.canonical()
+                    )));
+                };
+                match i64::try_from(work_item.id) {
+                    Ok(id) => Some(id),
+                    Err(_) => {
+                        return Ok(ExecutionResult::failure(format!(
+                            "resolved work item ID {} is out of range",
+                            work_item.id
+                        )));
+                    }
+                }
+            }
+            WorkItemReference::Number(_) => None,
+        };
 
         let org_url = ctx
             .ado_org_url
@@ -259,29 +293,39 @@ impl Executor for CommentOnWorkItemResult {
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
         debug!("ADO org: {}, project: {}", org_url, project);
 
-        let config: CommentOnWorkItemConfig = ctx.get_tool_config("comment-on-work-item")?;
-        debug!("Target: {:?}", config.target);
-
-        let target = match &config.target {
-            Some(t) => t,
-            None => {
-                return Ok(ExecutionResult::failure(
-                    "comment-on-work-item target is not configured. \
-                     This is required to scope which work items the agent can comment on."
-                        .to_string(),
-                ));
-            }
-        };
-
         let client = reqwest::Client::new();
 
-        // Validate work item ID against target policy
-        if let Some(rejection_msg) =
-            validate_target_policy(target, &client, org_url, project, token, self.work_item_id)
-                .await?
-        {
-            return Ok(ExecutionResult::failure(rejection_msg));
-        }
+        // Work items created in this run are already scoped by the
+        // create-work-item configuration, so they do not need `target`.
+        let work_item_id = match resolved_temporary {
+            Some(work_item_id) => work_item_id,
+            None => {
+                let WorkItemReference::Number(work_item_id) = self.work_item_id else {
+                    unreachable!("temporary references are resolved above");
+                };
+                let Ok(work_item_id) = i64::try_from(work_item_id) else {
+                    return Ok(ExecutionResult::failure(format!(
+                        "work_item_id {work_item_id} is out of range"
+                    )));
+                };
+                let Some(target) = &config.target else {
+                    return Ok(ExecutionResult::failure(
+                        "comment-on-work-item target is not configured. \
+                         This is required to scope which work items the agent can comment on."
+                            .to_string(),
+                    ));
+                };
+
+                // Validate work item ID against target policy
+                if let Some(rejection_msg) =
+                    validate_target_policy(target, &client, org_url, project, token, work_item_id)
+                        .await?
+                {
+                    return Ok(ExecutionResult::failure(rejection_msg));
+                }
+                work_item_id
+            }
+        };
 
         // Build the Azure DevOps REST API URL for adding a comment
         // POST https://dev.azure.com/{org}/{project}/_apis/wit/workItems/{id}/comments?api-version=7.1-preview.4
@@ -289,7 +333,7 @@ impl Executor for CommentOnWorkItemResult {
             "{}/{}/_apis/wit/workItems/{}/comments?api-version=7.1-preview.4",
             org_url.trim_end_matches('/'),
             utf8_percent_encode(project, PATH_SEGMENT),
-            self.work_item_id,
+            work_item_id,
         );
         debug!("API URL: {}", url);
 
@@ -299,7 +343,7 @@ impl Executor for CommentOnWorkItemResult {
             "text": body_with_stats,
         });
 
-        info!("Sending comment to work item #{}", self.work_item_id);
+        info!("Sending comment to work item #{}", work_item_id);
         let response = client
             .post(&url)
             .header("Content-Type", "application/json")
@@ -320,17 +364,17 @@ impl Executor for CommentOnWorkItemResult {
 
             info!(
                 "Comment added to work item #{}: comment #{}",
-                self.work_item_id, comment_id
+                work_item_id, comment_id
             );
 
             Ok(ExecutionResult::success_with_data(
                 format!(
                     "Added comment #{} to work item #{}",
-                    comment_id, self.work_item_id
+                    comment_id, work_item_id
                 ),
                 serde_json::json!({
                     "comment_id": comment_id,
-                    "work_item_id": self.work_item_id,
+                    "work_item_id": work_item_id,
                     "url": comment_url,
                     "project": project,
                 }),
@@ -344,7 +388,7 @@ impl Executor for CommentOnWorkItemResult {
 
             Ok(ExecutionResult::failure(format!(
                 "Failed to add comment to work item #{} (HTTP {}): {}",
-                self.work_item_id, status, error_body
+                work_item_id, status, error_body
             )))
         }
     }
@@ -353,7 +397,8 @@ impl Executor for CommentOnWorkItemResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safe_outputs::ToolResult;
+    use crate::safe_outputs::{ResolvedWorkItem, ToolResult};
+    use crate::secure::WorkItemTemporaryId;
 
     #[test]
     fn test_result_has_correct_name() {
@@ -364,26 +409,26 @@ mod tests {
     fn test_params_deserializes() {
         let json = r#"{"work_item_id": 12345, "body": "This is a comment on the work item."}"#;
         let params: CommentOnWorkItemParams = serde_json::from_str(json).unwrap();
-        assert_eq!(params.work_item_id, 12345);
+        assert_eq!(params.work_item_id, WorkItemReference::Number(12345));
         assert_eq!(params.body, "This is a comment on the work item.");
     }
 
     #[test]
     fn test_params_converts_to_result() {
         let params = CommentOnWorkItemParams {
-            work_item_id: 42,
+            work_item_id: WorkItemReference::Number(42),
             body: "This is a test comment with enough characters.".to_string(),
         };
         let result: CommentOnWorkItemResult = params.try_into().unwrap();
         assert_eq!(result.name, "comment-on-work-item");
-        assert_eq!(result.work_item_id, 42);
+        assert_eq!(result.work_item_id, WorkItemReference::Number(42));
         assert!(result.body.contains("test comment"));
     }
 
     #[test]
     fn test_validation_rejects_zero_work_item_id() {
         let params = CommentOnWorkItemParams {
-            work_item_id: 0,
+            work_item_id: WorkItemReference::Number(0),
             body: "This is a valid comment body text.".to_string(),
         };
         let result: Result<CommentOnWorkItemResult, _> = params.try_into();
@@ -395,23 +440,111 @@ mod tests {
     }
 
     #[test]
-    fn test_validation_rejects_negative_work_item_id() {
-        let params = CommentOnWorkItemParams {
-            work_item_id: -5,
-            body: "This is a valid comment body text.".to_string(),
-        };
-        let result: Result<CommentOnWorkItemResult, _> = params.try_into();
-        let err = result.unwrap_err().to_string();
+    fn test_negative_work_item_id_is_rejected_at_deserialization() {
+        let error = serde_json::from_value::<CommentOnWorkItemParams>(serde_json::json!({
+            "work_item_id": -5,
+            "body": "This is a valid comment body text."
+        }))
+        .err()
+        .expect("negative work_item_id must be rejected")
+        .to_string();
         assert!(
-            err.contains("work_item_id must be positive"),
-            "unexpected error: {err}"
+            error.contains("work_item_id must be positive"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_temporary_work_item_id_deserializes() {
+        let params: CommentOnWorkItemParams = serde_json::from_value(serde_json::json!({
+            "work_item_id": "#aw_acd847a0",
+            "body": "This is a comment on the created work item."
+        }))
+        .unwrap();
+        assert_eq!(
+            params.work_item_id,
+            WorkItemReference::Temporary(WorkItemTemporaryId::parse("#aw_acd847a0").unwrap())
+        );
+    }
+
+    #[test]
+    fn test_quoted_numeric_work_item_id_deserializes_as_number() {
+        let params: CommentOnWorkItemParams = serde_json::from_value(serde_json::json!({
+            "work_item_id": "42",
+            "body": "This is a comment on the work item."
+        }))
+        .unwrap();
+        assert_eq!(params.work_item_id, WorkItemReference::Number(42));
+    }
+
+    #[tokio::test]
+    async fn unresolved_temporary_id_fails_before_http() {
+        let mut tool_configs = std::collections::HashMap::new();
+        tool_configs.insert(
+            "comment-on-work-item".to_string(),
+            serde_json::json!({"target": "*"}),
+        );
+        let ctx = ExecutionContext {
+            tool_configs,
+            ..Default::default()
+        };
+        let mut result: CommentOnWorkItemResult = CommentOnWorkItemParams {
+            work_item_id: WorkItemReference::Temporary(
+                WorkItemTemporaryId::parse("#aw_missing").unwrap(),
+            ),
+            body: "This is a comment on the created work item.".to_string(),
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!execution.success);
+        assert!(
+            execution.message.contains("has not been resolved"),
+            "unexpected message: {}",
+            execution.message
+        );
+    }
+
+    #[tokio::test]
+    async fn resolved_temporary_id_does_not_require_target() {
+        let mut tool_configs = std::collections::HashMap::new();
+        tool_configs.insert("comment-on-work-item".to_string(), serde_json::json!({}));
+        let ctx = ExecutionContext {
+            tool_configs,
+            ..Default::default()
+        };
+        let temporary_id = WorkItemTemporaryId::parse("#aw_created1").unwrap();
+        ctx.register_resolved_work_item(
+            &temporary_id,
+            ResolvedWorkItem {
+                id: 4242,
+                url: "https://example.invalid/4242".to_string(),
+            },
+        )
+        .unwrap();
+        let mut result: CommentOnWorkItemResult = CommentOnWorkItemParams {
+            work_item_id: WorkItemReference::Temporary(temporary_id),
+            body: "This is a comment on the created work item.".to_string(),
+        }
+        .try_into()
+        .unwrap();
+        // Resolution succeeds, so execution proceeds past policy and fails only
+        // because no ADO environment is configured in the test.
+        let error = result
+            .execute_sanitized(&ctx)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("AZURE_DEVOPS_ORG_URL not set"),
+            "unexpected error: {error}"
         );
     }
 
     #[test]
     fn test_validation_rejects_short_body() {
         let params = CommentOnWorkItemParams {
-            work_item_id: 42,
+            work_item_id: WorkItemReference::Number(42),
             body: "Too short".to_string(),
         };
         let result: Result<CommentOnWorkItemResult, _> = params.try_into();
@@ -425,7 +558,7 @@ mod tests {
     #[test]
     fn test_result_serializes_correctly() {
         let params = CommentOnWorkItemParams {
-            work_item_id: 42,
+            work_item_id: WorkItemReference::Number(42),
             body: "A comment body that is definitely longer than ten characters.".to_string(),
         };
         let result: CommentOnWorkItemResult = params.try_into().unwrap();

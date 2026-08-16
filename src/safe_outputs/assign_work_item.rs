@@ -20,6 +20,17 @@ pub enum WorkItemReference {
     Temporary(WorkItemTemporaryId),
 }
 
+impl std::fmt::Display for WorkItemReference {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WorkItemReference::Number(id) => write!(formatter, "#{id}"),
+            WorkItemReference::Temporary(temporary_id) => {
+                formatter.write_str(&temporary_id.canonical())
+            }
+        }
+    }
+}
+
 impl_temporary_reference_deserialize!(
     WorkItemReference,
     WorkItemTemporaryId,
@@ -121,11 +132,10 @@ fn check_identity_policy(assignee: &str, config: &AssignWorkItemConfig) -> anyho
 #[async_trait::async_trait]
 impl Executor for AssignWorkItemResult {
     fn dry_run_summary(&self) -> String {
-        let target = match &self.work_item_id {
-            WorkItemReference::Number(id) => format!("#{id}"),
-            WorkItemReference::Temporary(id) => id.canonical(),
-        };
-        format!("assign work item {target} to '{}'", self.assignee)
+        format!(
+            "assign work item {} to '{}'",
+            self.work_item_id, self.assignee
+        )
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {

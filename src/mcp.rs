@@ -802,7 +802,8 @@ impl SafeOutputs {
     #[tool(
         name = "create-work-item",
         description = "Create an Azure DevOps work item. Returns a generated temporary_id that \
-can be passed as work_item_id to later safe outputs such as assign-work-item."
+can be passed as work_item_id to later safe outputs such as assign-work-item and \
+comment-on-work-item."
     )]
     async fn create_work_item(
         &self,
@@ -1018,17 +1019,17 @@ issue_number may be a positive number or a temporary_id from create-github-issue
 
     #[tool(
         name = "comment-on-work-item",
-        description = "Add a comment to an existing Azure DevOps work item. \
-Provide the work item ID and the comment body in markdown. The comment will be \
-posted during safe output processing. Target restrictions may apply based on \
-pipeline configuration."
+        description = "Add a comment to an Azure DevOps work item. work_item_id may be a \
+positive numeric ID or a temporary_id from an earlier create-work-item call in the same run. \
+Provide the comment body in markdown. The comment will be posted during safe output \
+processing. Target restrictions may apply based on pipeline configuration."
     )]
     async fn comment_on_work_item(
         &self,
         params: Parameters<CommentOnWorkItemParams>,
     ) -> Result<CallToolResult, McpError> {
         info!(
-            "Tool called: comment-on-work-item - work item #{}",
+            "Tool called: comment-on-work-item - work item {}",
             params.0.work_item_id
         );
         debug!("Body length: {} chars", params.0.body.len());
@@ -1039,9 +1040,9 @@ pipeline configuration."
         self.write_safe_output_file(&result).await.map_err(|e| {
             anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
         })?;
-        info!("Comment queued for work item #{}", result.work_item_id);
+        info!("Comment queued for work item {}", result.work_item_id);
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Comment queued for work item #{}. The comment will be posted during safe output processing.",
+            "Comment queued for work item {}. The comment will be posted during safe output processing.",
             result.work_item_id
         ))]))
     }
