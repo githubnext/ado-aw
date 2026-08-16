@@ -11,7 +11,7 @@ use crate::safe_outputs::{
 };
 use crate::sanitize::sanitize_markdown;
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
-use crate::secure::WorkItemTemporaryId;
+use crate::secure::{AdoWorkItemFieldRef, WorkItemTemporaryId};
 use ado_aw_derive::SanitizeConfig;
 use anyhow::{Context, ensure};
 
@@ -130,7 +130,8 @@ pub struct CreateWorkItemConfig {
     /// Defaults to System.Description, except Bug work items default to
     /// Microsoft.VSTS.TCM.ReproSteps.
     #[serde(default, rename = "description-field")]
-    pub description_field: Option<String>,
+    #[sanitize_config(skip)]
+    pub description_field: Option<AdoWorkItemFieldRef>,
 
     /// Area path for the work item
     #[serde(default, rename = "area-path")]
@@ -240,8 +241,8 @@ fn default_description_field_for(work_item_type: &str) -> &'static str {
 fn description_field_for(config: &CreateWorkItemConfig) -> &str {
     config
         .description_field
-        .as_deref()
-        .filter(|field| !field.trim().is_empty())
+        .as_ref()
+        .map(AdoWorkItemFieldRef::as_str)
         .unwrap_or_else(|| default_description_field_for(&config.work_item_type))
 }
 
@@ -789,7 +790,7 @@ custom-fields:
 "#;
         let config: CreateWorkItemConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.work_item_type, "Bug");
-        assert_eq!(config.description_field, Some("Custom.Body".to_string()));
+        assert_eq!(config.description_field.as_deref(), Some("Custom.Body"));
         assert_eq!(description_field_for(&config), "Custom.Body");
         assert_eq!(config.area_path, Some("MyProject\\MyTeam".to_string()));
         assert_eq!(config.assignee, Some("user@example.com".to_string()));
@@ -822,6 +823,15 @@ tags:
             description_field_for(&config),
             "Microsoft.VSTS.TCM.ReproSteps"
         );
+    }
+
+    #[test]
+    fn test_config_rejects_invalid_description_field() {
+        let error =
+            serde_yaml::from_str::<CreateWorkItemConfig>("description-field: System/Description\n")
+                .unwrap_err();
+
+        assert!(error.to_string().contains("work item field"));
     }
 
     #[test]
