@@ -206,7 +206,7 @@ safe-outputs:
 
 **Note:** The `target` field is required. If omitted, compilation fails with an error. This ensures operators are intentional about which work items agents can comment on.
 
-Temporary IDs are resolved at Stage 3 against the `create-work-item` proposals that already succeeded in the same SafeOutputs job, so they do not need `target`. A temporary ID that cannot be traced to such a create is rejected before any request is sent. When both tools are configured they must have the same effective `require-approval` setting.
+`target` scopes numeric, pre-existing work-item IDs only, and is still required in front matter. Temporary IDs are resolved at Stage 3 against the `create-work-item` proposals that already succeeded in the same SafeOutputs job — that create is scoped by its own configuration — so they are not checked against `target`. A temporary ID that cannot be traced to such a create is rejected before any request is sent. When both tools are configured they must have the same effective `require-approval` setting.
 
 ### create-work-item
 Creates an Azure DevOps work item.
