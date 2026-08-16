@@ -66,6 +66,10 @@ impl Validate for LinkWorkItemsParams {
         if let WorkItemReference::Number(target_id) = self.target_id {
             ensure!(target_id > 0, "target_id must be positive");
         }
+        // Catches the literally identical case only. A temporary ID and a
+        // numeric ID that name the same work item are indistinguishable until
+        // Stage 3 resolution, so `execute_impl` repeats this check on the
+        // resolved IDs.
         ensure!(
             self.source_id != self.target_id,
             "source_id and target_id must be different"
