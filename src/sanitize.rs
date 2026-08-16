@@ -255,12 +255,6 @@ static RE_AB_LINK: LazyLock<regex_lite::Regex> =
     LazyLock::new(|| regex_lite::Regex::new(r"\bAB#(\d+)").unwrap());
 static RE_SLASH_CMD: LazyLock<regex_lite::Regex> =
     LazyLock::new(|| regex_lite::Regex::new(r"(?m)^(/[a-zA-Z][\w-]*)").unwrap());
-static RE_DANGEROUS_HTML_TAG: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
-    regex_lite::Regex::new(
-        r#"(?i)</?\s*(script|iframe|object|embed|form|input|button|textarea|select|option|base|meta|link|svg|math)\b([^>"']|"[^"]*"|'[^']*')*>"#,
-    )
-    .unwrap()
-});
 static RE_EVENT_HANDLER_ATTR_DQ: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
     regex_lite::Regex::new(r#"(?i)([<\s])on[a-z][a-z0-9_-]*\s*=\s*"[^"]*""#).unwrap()
 });
@@ -351,7 +345,7 @@ fn escape_html_fragment(input: &str) -> String {
 }
 
 fn neutralize_dangerous_html(input: &str) -> String {
-    let s = RE_DANGEROUS_HTML_TAG.replace_all(input, "").to_string();
+    let s = strip_dangerous_html_tags(input);
     let s = RE_EVENT_HANDLER_ATTR_DQ
         .replace_all(&s, |caps: &regex_lite::Captures| caps[1].to_string())
         .to_string();
@@ -361,6 +355,79 @@ fn neutralize_dangerous_html(input: &str) -> String {
     RE_EVENT_HANDLER_ATTR_BARE
         .replace_all(&s, |caps: &regex_lite::Captures| caps[1].to_string())
         .to_string()
+}
+
+fn strip_dangerous_html_tags(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0;
+
+    while index < input.len() {
+        let rest = &input[index..];
+        if rest.starts_with('<')
+            && let Some(end) = html_tag_end(input, index)
+        {
+            let tag = &input[index..=end];
+            if is_dangerous_html_tag(tag) {
+                index = end + 1;
+                continue;
+            }
+        }
+
+        let ch = rest.chars().next().expect("index is within input");
+        output.push(ch);
+        index += ch.len_utf8();
+    }
+
+    output
+}
+
+fn html_tag_end(input: &str, start: usize) -> Option<usize> {
+    let mut quote = None;
+    for (offset, ch) in input[start + 1..].char_indices() {
+        if let Some(quoted_by) = quote {
+            if ch == quoted_by {
+                quote = None;
+            }
+        } else if ch == '"' || ch == '\'' {
+            quote = Some(ch);
+        } else if ch == '>' {
+            return Some(start + 1 + offset);
+        }
+    }
+    None
+}
+
+fn is_dangerous_html_tag(tag: &str) -> bool {
+    let mut chars = tag.chars();
+    if chars.next() != Some('<') {
+        return false;
+    }
+
+    let rest = chars.as_str().trim_start();
+    let rest = rest.strip_prefix('/').unwrap_or(rest).trim_start();
+    let name: String = rest
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric())
+        .collect();
+
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "script"
+            | "iframe"
+            | "object"
+            | "embed"
+            | "form"
+            | "input"
+            | "button"
+            | "textarea"
+            | "select"
+            | "option"
+            | "base"
+            | "meta"
+            | "link"
+            | "svg"
+            | "math"
+    )
 }
 
 fn markdown_protected_ranges(input: &str) -> Vec<Range<usize>> {
@@ -698,7 +765,7 @@ mod tests {
 
     #[test]
     fn test_sanitize_markdown_neutralizes_active_html() {
-        let input = r#"<h2 onclick="alert(1)">Hi</h2><script data-x="a>b">alert(1)</script><svg onload=alert(1)></svg><form action="https://evil.test"></form><a href="javascript:alert(1)" onmouseover='x'>link</a><img src=x onerror=>"#;
+        let input = r#"<h2 onclick="alert(1)">Hi</h2><script data-x="a>b">alert(1)</script><svg onload=alert(1)></svg><form action="https://evil.test"></form><a href="javascript:alert(1)" onmouseover='x'>link</a><img src=x onerror=doWork(1)>"#;
         let output = sanitize_markdown(input);
 
         assert!(output.contains("<h2 "));
@@ -707,11 +774,14 @@ mod tests {
         assert!(output.contains(">link</a>"));
         assert!(output.contains("<img src=x "));
         assert!(!output.contains("<script"));
+        assert!(!output.contains("data-x"));
+        assert!(!output.contains("a>b"));
         assert!(!output.contains("<svg"));
         assert!(!output.contains("<form"));
         assert!(!output.contains("onclick"));
         assert!(!output.contains("onmouseover"));
         assert!(!output.contains("onerror"));
+        assert!(!output.contains("doWork"));
         assert!(!output.contains("javascript:"));
     }
 
