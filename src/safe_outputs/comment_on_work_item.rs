@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
 use crate::safe_outputs::{
-    ExecutionContext, ExecutionResult, Executor, Validate, WorkItemReference,
+    ExecutionContext, ExecutionResult, Executor, Validate, WorkItemReference, WorkItemResolution,
 };
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
@@ -257,26 +257,17 @@ impl Executor for CommentOnWorkItemResult {
         // this SafeOutputs job. An ID that cannot be traced to such a create is
         // rejected before any HTTP call so the comment never lands on an
         // unrelated work item.
-        let resolved_temporary = match &self.work_item_id {
-            WorkItemReference::Temporary(temporary_id) => {
-                let Some(work_item) = ctx.resolve_work_item(temporary_id)? else {
-                    return Ok(ExecutionResult::failure(format!(
-                        "temporary work-item ID '{}' has not been resolved; create-work-item must \
-                         succeed earlier in the same SafeOutputs job",
-                        temporary_id.canonical()
-                    )));
-                };
-                match i64::try_from(work_item.id) {
-                    Ok(id) => Some(id),
-                    Err(_) => {
-                        return Ok(ExecutionResult::failure(format!(
-                            "resolved work item ID {} is out of range",
-                            work_item.id
-                        )));
-                    }
-                }
+        let (work_item_id, target_policy_applies) = match self.work_item_id.resolve(ctx)? {
+            WorkItemResolution::Unresolved(message) => {
+                return Ok(ExecutionResult::failure(message));
             }
-            WorkItemReference::Number(_) => None,
+            WorkItemResolution::SameRun(id) => (id, false),
+            WorkItemResolution::Numeric(id) => (id, true),
+        };
+        let Ok(work_item_id) = i64::try_from(work_item_id) else {
+            return Ok(ExecutionResult::failure(format!(
+                "work item ID {work_item_id} is out of range"
+            )));
         };
 
         let org_url = ctx
@@ -297,35 +288,23 @@ impl Executor for CommentOnWorkItemResult {
 
         // Work items created in this run are already scoped by the
         // create-work-item configuration, so they do not need `target`.
-        let work_item_id = match resolved_temporary {
-            Some(work_item_id) => work_item_id,
-            None => {
-                let WorkItemReference::Number(work_item_id) = self.work_item_id else {
-                    unreachable!("temporary references are resolved above");
-                };
-                let Ok(work_item_id) = i64::try_from(work_item_id) else {
-                    return Ok(ExecutionResult::failure(format!(
-                        "work_item_id {work_item_id} is out of range"
-                    )));
-                };
-                let Some(target) = &config.target else {
-                    return Ok(ExecutionResult::failure(
-                        "comment-on-work-item target is not configured. \
-                         This is required to scope which work items the agent can comment on."
-                            .to_string(),
-                    ));
-                };
+        if target_policy_applies {
+            let Some(target) = &config.target else {
+                return Ok(ExecutionResult::failure(
+                    "comment-on-work-item target is not configured. \
+                     This is required to scope which work items the agent can comment on."
+                        .to_string(),
+                ));
+            };
 
-                // Validate work item ID against target policy
-                if let Some(rejection_msg) =
-                    validate_target_policy(target, &client, org_url, project, token, work_item_id)
-                        .await?
-                {
-                    return Ok(ExecutionResult::failure(rejection_msg));
-                }
-                work_item_id
+            // Validate work item ID against target policy
+            if let Some(rejection_msg) =
+                validate_target_policy(target, &client, org_url, project, token, work_item_id)
+                    .await?
+            {
+                return Ok(ExecutionResult::failure(rejection_msg));
             }
-        };
+        }
 
         // Build the Azure DevOps REST API URL for adding a comment
         // POST https://dev.azure.com/{org}/{project}/_apis/wit/workItems/{id}/comments?api-version=7.1-preview.4

@@ -20,6 +20,42 @@ pub enum WorkItemReference {
     Temporary(WorkItemTemporaryId),
 }
 
+/// Outcome of resolving a [`WorkItemReference`] against the current run.
+pub enum WorkItemResolution {
+    /// A numeric ID the agent supplied. The consuming tool's `target` policy
+    /// applies, because nothing in this run vouches for the work item.
+    Numeric(u64),
+    /// A temporary ID traced to a `create-work-item` that already succeeded in
+    /// this SafeOutputs job. That create is scoped by its own configuration, so
+    /// the consuming tool's `target` policy does not apply.
+    SameRun(u64),
+    /// A temporary ID no create in this run produced. The consuming tool must
+    /// fail with this message rather than guess at a numeric ID.
+    Unresolved(String),
+}
+
+impl WorkItemReference {
+    /// Resolve this reference to a concrete Azure DevOps work-item ID.
+    ///
+    /// Temporary IDs are only ever resolved from the same-run create map, so a
+    /// consumer can never write to a work item the agent was not given.
+    pub fn resolve(&self, ctx: &ExecutionContext) -> anyhow::Result<WorkItemResolution> {
+        Ok(match self {
+            WorkItemReference::Number(id) => WorkItemResolution::Numeric(*id),
+            WorkItemReference::Temporary(temporary_id) => {
+                match ctx.resolve_work_item(temporary_id)? {
+                    Some(work_item) => WorkItemResolution::SameRun(work_item.id),
+                    None => WorkItemResolution::Unresolved(format!(
+                        "temporary work-item ID '{}' has not been resolved; create-work-item must \
+                     succeed earlier in the same SafeOutputs job",
+                        temporary_id.canonical()
+                    )),
+                }
+            }
+        })
+    }
+}
+
 impl std::fmt::Display for WorkItemReference {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -150,22 +186,16 @@ impl Executor for AssignWorkItemResult {
             Ok(assignee) => assignee,
             Err(error) => return Ok(ExecutionResult::failure(error.to_string())),
         };
-        let id = match &self.work_item_id {
-            WorkItemReference::Number(id) => {
-                if let Some(failure) = check_numeric_target(*id, config.target.as_ref()) {
+        let id = match self.work_item_id.resolve(ctx)? {
+            WorkItemResolution::Numeric(id) => {
+                if let Some(failure) = check_numeric_target(id, config.target.as_ref()) {
                     return Ok(failure);
                 }
-                *id
+                id
             }
-            WorkItemReference::Temporary(temporary_id) => {
-                let Some(work_item) = ctx.resolve_work_item(temporary_id)? else {
-                    return Ok(ExecutionResult::failure(format!(
-                        "temporary work-item ID '{}' has not been resolved; create-work-item must \
-                         succeed earlier in the same SafeOutputs job",
-                        temporary_id.canonical()
-                    )));
-                };
-                work_item.id
+            WorkItemResolution::SameRun(id) => id,
+            WorkItemResolution::Unresolved(message) => {
+                return Ok(ExecutionResult::failure(message));
             }
         };
 

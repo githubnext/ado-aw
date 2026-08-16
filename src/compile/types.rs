@@ -683,7 +683,13 @@ pub const GITHUB_ISSUE_SAFE_OUTPUT_TOOLS: &[&str] = &[
 ];
 
 /// Work-item tools that can consume a same-run temporary work-item ID.
-pub const WORK_ITEM_TEMPORARY_ID_CONSUMERS: &[&str] = &["assign-work-item", "comment-on-work-item"];
+pub const WORK_ITEM_TEMPORARY_ID_CONSUMERS: &[&str] = &[
+    "assign-work-item",
+    "comment-on-work-item",
+    "update-work-item",
+    "link-work-items",
+    "upload-workitem-attachment",
+];
 
 /// GitHub issue-family tools that can consume a same-run temporary issue ID.
 pub const GITHUB_TEMPORARY_ID_CONSUMERS: &[&str] = &[

@@ -235,7 +235,7 @@ Creates an Azure DevOps work item.
 Updates an existing Azure DevOps work item. Each field that can be modified requires explicit opt-in via configuration to prevent unintended updates.
 
 **Agent parameters:**
-- `id` - Work item ID to update (required, must be a positive integer)
+- `id` - Work item ID to update (required) - a positive numeric ID, or a temporary ID (`#aw_...`) returned by an earlier `create-work-item` call in the same run
 - `title` - New title for the work item (optional, requires `title: true` in config)
 - `body` - New description in markdown format (optional, requires `body: true` in config)
 - `state` - New state (e.g., `"Active"`, `"Resolved"`, `"Closed"`; optional, requires `status: true` in config)
@@ -739,8 +739,8 @@ safe-outputs:
 Links two Azure DevOps work items together.
 
 **Agent parameters:**
-- `source_id` - Source work item ID (required, must be positive)
-- `target_id` - Target work item ID (required, must differ from source)
+- `source_id` - Source work item ID (required) - a positive numeric ID, or a temporary ID (`#aw_...`) returned by an earlier `create-work-item` call in the same run
+- `target_id` - Target work item ID (required, must differ from source) - a positive numeric ID, or a temporary ID (`#aw_...`) returned by an earlier `create-work-item` call in the same run
 - `link_type` - Relationship type: `parent`, `child`, `related`, `predecessor`, `successor`, `duplicate`, `duplicate-of` (required)
 - `comment` *(optional)* - Description of the relationship
 
@@ -832,7 +832,7 @@ safe-outputs:
 Uploads a workspace file as an attachment to an Azure DevOps work item.
 
 **Agent parameters:**
-- `work_item_id` - Work item ID to attach the file to (required, must be positive)
+- `work_item_id` - Work item ID to attach the file to (required) - a positive numeric ID, or a temporary ID (`#aw_...`) returned by an earlier `create-work-item` call in the same run
 - `file_path` - Relative path to the file in the workspace (no directory traversal)
 - `comment` *(optional)* - Description of the attachment (at least 3 characters)
 
