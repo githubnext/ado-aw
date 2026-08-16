@@ -346,8 +346,38 @@ fn escape_html_fragment(input: &str) -> String {
 
 fn neutralize_dangerous_html(input: &str) -> String {
     let s = strip_dangerous_html_tags(input);
+    strip_event_handler_attrs_in_tags(&s)
+}
+
+fn strip_event_handler_attrs_in_tags(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0;
+
+    while index < input.len() {
+        let rest = &input[index..];
+        if rest.starts_with('<') {
+            if let Some(end) = html_tag_end(input, index) {
+                output.push_str(&strip_event_handler_attrs(&input[index..=end]));
+                index = end + 1;
+                continue;
+            }
+
+            output.push_str("&lt;");
+            index += '<'.len_utf8();
+            continue;
+        }
+
+        let ch = rest.chars().next().expect("index is within input");
+        output.push(ch);
+        index += ch.len_utf8();
+    }
+
+    output
+}
+
+fn strip_event_handler_attrs(tag: &str) -> String {
     let s = RE_EVENT_HANDLER_ATTR_DQ
-        .replace_all(&s, |caps: &regex_lite::Captures| caps[1].to_string())
+        .replace_all(tag, |caps: &regex_lite::Captures| caps[1].to_string())
         .to_string();
     let s = RE_EVENT_HANDLER_ATTR_SQ
         .replace_all(&s, |caps: &regex_lite::Captures| caps[1].to_string())
@@ -363,12 +393,18 @@ fn strip_dangerous_html_tags(input: &str) -> String {
 
     while index < input.len() {
         let rest = &input[index..];
-        if rest.starts_with('<')
-            && let Some(end) = html_tag_end(input, index)
-        {
-            let tag = &input[index..=end];
-            if is_dangerous_html_tag(tag) {
-                index = end + 1;
+        if rest.starts_with('<') {
+            if let Some(end) = html_tag_end(input, index) {
+                let tag = &input[index..=end];
+                if is_dangerous_html_tag(tag) {
+                    index = end + 1;
+                    continue;
+                }
+            } else if is_dangerous_html_tag(rest) {
+                break;
+            } else {
+                output.push_str("&lt;");
+                index += '<'.len_utf8();
                 continue;
             }
         }
@@ -765,7 +801,7 @@ mod tests {
 
     #[test]
     fn test_sanitize_markdown_neutralizes_active_html() {
-        let input = r#"<h2 onclick="alert(1)">Hi</h2><script data-x="a>b">alert(1)</script><svg onload=alert(1)></svg><form action="https://evil.test"></form><a href="javascript:alert(1)" onmouseover='x'>link</a><img src=x onerror=doWork(1)>"#;
+        let input = r#"<h2 onclick="alert(1)">Hi</h2><script data-x="a>b">alert(1)</script><svg onload=alert(1)></svg><form action="https://evil.test"></form><a href="javascript:alert(1)" onmouseover='x'>link</a><img src=x onerror=doWork(1)> prose onclick="kept"<script src=x"#;
         let output = sanitize_markdown(input);
 
         assert!(output.contains("<h2 "));
@@ -773,12 +809,14 @@ mod tests {
         assert!(output.contains(r#"<a href="(redacted)alert(1)" "#));
         assert!(output.contains(">link</a>"));
         assert!(output.contains("<img src=x "));
+        assert!(output.contains(r#"prose onclick="kept""#));
         assert!(!output.contains("<script"));
+        assert!(!output.contains("<script src"));
         assert!(!output.contains("data-x"));
         assert!(!output.contains("a>b"));
         assert!(!output.contains("<svg"));
         assert!(!output.contains("<form"));
-        assert!(!output.contains("onclick"));
+        assert!(!output.contains("<h2 onclick"));
         assert!(!output.contains("onmouseover"));
         assert!(!output.contains("onerror"));
         assert!(!output.contains("doWork"));
