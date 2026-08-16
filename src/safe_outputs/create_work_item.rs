@@ -321,7 +321,7 @@ fn validate_patch_fields(
         .keys()
         .map(AdoWorkItemFieldRef::as_str)
         .collect();
-    custom_fields.sort_unstable();
+    custom_fields.sort_unstable_by(|a, b| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()));
     for field in custom_fields {
         validate_unique_patch_field(&mut fields, "custom-fields", field)?;
     }
@@ -530,6 +530,7 @@ impl Executor for CreateWorkItemResult {
         );
         debug!("API URL: {}", url);
 
+        let description_field = description_field_for(&config);
         let mut all_tags = config.tags.clone();
         for tag in &self.tags {
             if !all_tags.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
@@ -540,7 +541,6 @@ impl Executor for CreateWorkItemResult {
         // Build the patch document for work item creation
         let description_with_stats =
             crate::agent_stats::append_stats_to_body(&self.description, ctx, config.include_stats);
-        let description_field = description_field_for(&config);
         if let Err(error) = validate_patch_fields(&config, description_field, !all_tags.is_empty())
         {
             return Ok(ExecutionResult::failure(error.to_string()));
