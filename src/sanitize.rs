@@ -345,6 +345,10 @@ fn escape_html_fragment(input: &str) -> String {
 }
 
 fn neutralize_dangerous_html(input: &str) -> String {
+    apply_outside_markdown_protected_ranges(input, neutralize_dangerous_html_fragment)
+}
+
+fn neutralize_dangerous_html_fragment(input: &str) -> String {
     let mut s = input.to_string();
     loop {
         let stripped = strip_dangerous_html_tags(&s);
@@ -354,6 +358,26 @@ fn neutralize_dangerous_html(input: &str) -> String {
         s = stripped;
     }
     strip_event_handler_attrs_in_tags(&s)
+}
+
+fn apply_outside_markdown_protected_ranges(
+    input: &str,
+    mut transform: impl FnMut(&str) -> String,
+) -> String {
+    let protected = markdown_protected_ranges(input);
+    if protected.is_empty() {
+        return transform(input);
+    }
+
+    let mut result = String::with_capacity(input.len());
+    let mut cursor = 0;
+    for range in protected {
+        result.push_str(&transform(&input[cursor..range.start]));
+        result.push_str(&input[range.start..range.end]);
+        cursor = range.end;
+    }
+    result.push_str(&transform(&input[cursor..]));
+    result
 }
 
 fn strip_event_handler_attrs_in_tags(input: &str) -> String {
@@ -825,6 +849,16 @@ mod tests {
         assert!(!output.contains("a>b"));
         assert!(!output.contains("<svg"));
         assert!(!output.contains("<form"));
+    }
+
+    #[test]
+    fn test_sanitize_markdown_preserves_dangerous_html_in_fenced_code_blocks() {
+        let input = "```html\n<script>alert(1)</script>\n<img src=x onerror=evil()>\n```\n<script>tail</script><img src=x onerror=evil()>";
+
+        assert_eq!(
+            sanitize_markdown(input),
+            "```html\n<script>alert(1)</script>\n<img src=x onerror=evil()>\n```\ntail<img src=x >"
+        );
     }
 
     #[test]
