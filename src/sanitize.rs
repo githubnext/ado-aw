@@ -72,14 +72,15 @@ pub fn sanitize(input: &str) -> String {
     s
 }
 
-/// Sanitize untrusted Markdown content while preserving inline HTML for renderers
-/// that accept it natively.
+/// Sanitize untrusted Markdown content while preserving ordinary inline HTML for
+/// renderers that accept it natively.
 pub(crate) fn sanitize_markdown(input: &str) -> String {
     let mut s = remove_control_characters(input);
     s = neutralize_pipeline_commands(&s);
     s = neutralize_mentions(&s);
     s = neutralize_bot_triggers(&s);
     s = remove_xml_comments(&s);
+    s = neutralize_dangerous_html(&s);
     s = sanitize_url_protocols(&s);
     s = enforce_content_limits(&s);
     debug!(
@@ -254,6 +255,16 @@ static RE_AB_LINK: LazyLock<regex_lite::Regex> =
     LazyLock::new(|| regex_lite::Regex::new(r"\bAB#(\d+)").unwrap());
 static RE_SLASH_CMD: LazyLock<regex_lite::Regex> =
     LazyLock::new(|| regex_lite::Regex::new(r"(?m)^(/[a-zA-Z][\w-]*)").unwrap());
+static RE_DANGEROUS_HTML_TAG: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
+    regex_lite::Regex::new(r"(?i)</?\s*(script|iframe|object|embed)\b[^>]*>").unwrap()
+});
+static RE_EVENT_HANDLER_ATTR_DQ: LazyLock<regex_lite::Regex> =
+    LazyLock::new(|| regex_lite::Regex::new(r#"(?i)\s+on[a-z][a-z0-9_-]*\s*=\s*"[^"]*""#).unwrap());
+static RE_EVENT_HANDLER_ATTR_SQ: LazyLock<regex_lite::Regex> =
+    LazyLock::new(|| regex_lite::Regex::new(r#"(?i)\s+on[a-z][a-z0-9_-]*\s*=\s*'[^']*'"#).unwrap());
+static RE_EVENT_HANDLER_ATTR_BARE: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
+    regex_lite::Regex::new(r#"(?i)\s+on[a-z][a-z0-9_-]*\s*=\s*[^\s"'=<>`]+"#).unwrap()
+});
 
 /// Neutralize bot command patterns and Azure DevOps work item link syntax.
 fn neutralize_bot_triggers(input: &str) -> String {
@@ -332,6 +343,13 @@ fn escape_html_fragment(input: &str) -> String {
     }
     result.push_str(rest);
     result
+}
+
+fn neutralize_dangerous_html(input: &str) -> String {
+    let s = RE_DANGEROUS_HTML_TAG.replace_all(input, "").to_string();
+    let s = RE_EVENT_HANDLER_ATTR_DQ.replace_all(&s, "").to_string();
+    let s = RE_EVENT_HANDLER_ATTR_SQ.replace_all(&s, "").to_string();
+    RE_EVENT_HANDLER_ATTR_BARE.replace_all(&s, "").to_string()
 }
 
 fn markdown_protected_ranges(input: &str) -> Vec<Range<usize>> {
@@ -667,6 +685,21 @@ mod tests {
         assert_eq!(sanitize_markdown(input), input);
     }
 
+    #[test]
+    fn test_sanitize_markdown_neutralizes_active_html() {
+        let input = r#"<h2 onclick="alert(1)">Hi</h2><script>alert(1)</script><a href="javascript:alert(1)" onmouseover='x'>link</a><img src=x onerror=alert(1)>"#;
+        let output = sanitize_markdown(input);
+
+        assert!(output.contains("<h2>Hi</h2>"));
+        assert!(output.contains(r#"<a href="(redacted)alert(1)">link</a>"#));
+        assert!(output.contains("<img src=x>"));
+        assert!(!output.contains("<script"));
+        assert!(!output.contains("onclick"));
+        assert!(!output.contains("onmouseover"));
+        assert!(!output.contains("onerror"));
+        assert!(!output.contains("javascript:"));
+    }
+
     // IS-07b: URL protocol sanitization
     #[test]
     fn test_strip_javascript_protocol() {
@@ -873,8 +906,7 @@ mod tests {
 
     #[test]
     fn test_sanitize_custom_payload_neutralizes_commands_and_controls() {
-        let input =
-            "first\x00\x1b[31m\n##vso[task.setvariable variable=X]owned\n##[error]failed";
+        let input = "first\x00\x1b[31m\n##vso[task.setvariable variable=X]owned\n##[error]failed";
         let result = sanitize_custom_payload(input);
         assert!(!result.contains('\0'));
         assert!(!result.contains('\x1b'));
