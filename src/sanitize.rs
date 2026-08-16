@@ -400,8 +400,6 @@ fn strip_dangerous_html_tags(input: &str) -> String {
                     index = end + 1;
                     continue;
                 }
-            } else if is_dangerous_html_tag(rest) {
-                break;
             } else {
                 output.push_str("&lt;");
                 index += '<'.len_utf8();
@@ -810,6 +808,7 @@ mod tests {
         assert!(output.contains(">link</a>"));
         assert!(output.contains("<img src=x "));
         assert!(output.contains(r#"prose onclick="kept""#));
+        assert!(output.contains("&lt;script src=x"));
         assert!(!output.contains("<script"));
         assert!(!output.contains("<script src"));
         assert!(!output.contains("data-x"));
