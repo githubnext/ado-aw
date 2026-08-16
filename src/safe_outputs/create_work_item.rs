@@ -296,7 +296,12 @@ fn validate_patch_fields(
 ) -> anyhow::Result<()> {
     let mut fields = Vec::new();
     validate_unique_patch_field(&mut fields, "title", "System.Title")?;
-    validate_unique_patch_field(&mut fields, "description-field", description_field)?;
+    let description_label = if config.description_field.is_some() {
+        "description-field"
+    } else {
+        "default description-field"
+    };
+    validate_unique_patch_field(&mut fields, description_label, description_field)?;
 
     if config.area_path.is_some() {
         validate_unique_patch_field(&mut fields, "area-path", "System.AreaPath")?;
@@ -959,7 +964,7 @@ tags:
 
         assert_eq!(
             error,
-            "custom-fields field 'Microsoft.VSTS.TCM.ReproSteps' duplicates description-field field 'Microsoft.VSTS.TCM.ReproSteps'"
+            "custom-fields field 'Microsoft.VSTS.TCM.ReproSteps' duplicates default description-field field 'Microsoft.VSTS.TCM.ReproSteps'"
         );
     }
 
@@ -1090,7 +1095,7 @@ custom-fields:
         assert!(!execution.success);
         assert!(
             execution.message.contains(
-                "custom-fields field 'Microsoft.VSTS.TCM.ReproSteps' duplicates description-field field"
+                "custom-fields field 'Microsoft.VSTS.TCM.ReproSteps' duplicates default description-field field"
             ),
             "{}",
             execution.message
