@@ -443,6 +443,8 @@ mod tests {
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
+        // The relation URL is derived from the resolved numeric ID, not from the
+        // URL the create recorded, so it points at the mock server.
         let target_url = format!("{}/Project/_apis/wit/workitems/43", server.uri());
         Mock::given(method("PATCH"))
             .and(path("/Project/_apis/wit/workitems/42"))
