@@ -296,7 +296,9 @@ fn validate_patch_fields(
         validate_unique_patch_field(&mut fields, "tags", "System.Tags")?;
     }
 
-    for field in config.custom_fields.keys() {
+    let mut custom_fields: Vec<_> = config.custom_fields.keys().map(String::as_str).collect();
+    custom_fields.sort_unstable();
+    for field in custom_fields {
         validate_ado_work_item_field_ref(field, "safe-outputs.create-work-item.custom-fields key")?;
         validate_unique_patch_field(&mut fields, "custom-fields", field)?;
     }
