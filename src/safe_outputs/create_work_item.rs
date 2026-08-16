@@ -178,12 +178,12 @@ impl crate::sanitize::SanitizeConfig for CreateWorkItemConfig {
         self.area_path = self.area_path.as_deref().map(sanitize_config);
         self.iteration_path = self.iteration_path.as_deref().map(sanitize_config);
         self.assignee = self.assignee.as_deref().map(sanitize_config);
-        self.tags = self.tags.iter().map(|tag| sanitize_config(tag)).collect();
-        self.allowed_tags = self
-            .allowed_tags
-            .iter()
-            .map(|tag| sanitize_config(tag))
-            .collect();
+        for tag in &mut self.tags {
+            *tag = sanitize_config(tag.as_str());
+        }
+        for tag in &mut self.allowed_tags {
+            *tag = sanitize_config(tag.as_str());
+        }
         for value in self.custom_fields.values_mut() {
             *value = sanitize_config(value);
         }
