@@ -12,3 +12,5 @@
 {"id":"test_focused","question":"Does the agent output show that the findings are about test quality rather than production code quality?","answer":"YES","model":"evals","timestamp":"2026-08-16T09:04:43.236Z","runid":"31937715068"}
 {"id":"review_submitted","question":"Did the agent submit a pull request review?","answer":"YES","model":"evals","timestamp":"2026-08-16T09:06:16.841Z","runid":"31937775200"}
 {"id":"test_focused","question":"Does the agent output show that the findings are about test quality rather than production code quality?","answer":"YES","model":"evals","timestamp":"2026-08-16T09:06:16.841Z","runid":"31937775200"}
+{"id":"review_submitted","question":"Did the agent submit a pull request review?","answer":"YES","model":"evals","timestamp":"2026-08-16T16:53:20.814Z","runid":"31959625591"}
+{"id":"test_focused","question":"Does the agent output show that the findings are about test quality rather than production code quality?","answer":"YES","model":"evals","timestamp":"2026-08-16T16:53:20.814Z","runid":"31959625591"}
