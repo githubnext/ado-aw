@@ -6,7 +6,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
-use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::safe_outputs::{
+    ExecutionContext, ExecutionResult, Executor, Validate, WorkItemReference, WorkItemResolution,
+};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
 use ado_aw_derive::SanitizeConfig;
@@ -15,8 +17,9 @@ use anyhow::{Context, ensure};
 /// Parameters for updating a work item
 #[derive(Deserialize, JsonSchema)]
 pub struct UpdateWorkItemParams {
-    /// ID of the work item to update
-    pub id: u64,
+    /// Positive ID of the work item to update, or a temporary ID from an
+    /// earlier `create-work-item` call in the same run.
+    pub id: WorkItemReference,
 
     /// New title for the work item (only if enabled in the safe-outputs configuration)
     pub title: Option<String>,
@@ -42,7 +45,9 @@ pub struct UpdateWorkItemParams {
 
 impl Validate for UpdateWorkItemParams {
     fn validate(&self) -> anyhow::Result<()> {
-        ensure!(self.id > 0, "Work item ID must be a positive integer");
+        if let WorkItemReference::Number(id) = self.id {
+            ensure!(id > 0, "Work item ID must be a positive integer");
+        }
         ensure!(
             self.title.is_some()
                 || self.body.is_some()
@@ -80,7 +85,7 @@ tool_result! {
     params = UpdateWorkItemParams,
     /// Result of updating a work item
     pub struct UpdateWorkItemResult {
-        id: u64,
+        id: WorkItemReference,
         title: Option<String>,
         body: Option<String>,
         state: Option<String>,
@@ -98,11 +103,7 @@ impl SanitizeContent for UpdateWorkItemResult {
         self.state = self.state.as_deref().map(sanitize_config);
         self.area_path = self.area_path.as_deref().map(sanitize_config);
         self.iteration_path = self.iteration_path.as_deref().map(sanitize_config);
-        self.assignee = self
-            .assignee
-            .as_deref()
-            .map(str::trim)
-            .map(sanitize_config);
+        self.assignee = self.assignee.as_deref().map(str::trim).map(sanitize_config);
         self.tags = self
             .tags
             .as_ref()
@@ -443,12 +444,23 @@ async fn fetch_work_item(
 #[async_trait::async_trait]
 impl Executor for UpdateWorkItemResult {
     fn dry_run_summary(&self) -> String {
-        format!("update work item #{}", self.id)
+        format!("update work item {}", self.id)
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
-        info!("Updating work item #{}", self.id);
+        info!("Updating work item {}", self.id);
         debug!("update-work-item: id={}", self.id);
+
+        // Temporary IDs resolve only against creates that already succeeded in
+        // this SafeOutputs job, so an update can never land on an unrelated
+        // work item.
+        let (id, target_policy_applies) = match self.id.resolve(ctx)? {
+            WorkItemResolution::Unresolved(message) => {
+                return Ok(ExecutionResult::failure(message));
+            }
+            WorkItemResolution::SameRun(id) => (id, false),
+            WorkItemResolution::Numeric(id) => (id, true),
+        };
         debug!(
             "Fields: title={:?}, body_len={:?}, state={:?}, area={:?}, iter={:?}, assignee={:?}, tags={:?}",
             self.title,
@@ -485,16 +497,20 @@ impl Executor for UpdateWorkItemResult {
             config.tag_prefix,
         );
 
-        // Validate target and field-permission guards; return early on first failure
-        if config.target.is_none() {
-            return Ok(ExecutionResult::failure(
-                "update-work-item target is not configured. \
-                 This is required to scope which work items the agent can update."
-                    .to_string(),
-            ));
-        }
-        if let Some(result) = check_target_config(self.id, &config) {
-            return Ok(result);
+        // Validate target and field-permission guards; return early on first
+        // failure. Work items created in this run are already scoped by the
+        // create-work-item configuration, so they do not need `target`.
+        if target_policy_applies {
+            if config.target.is_none() {
+                return Ok(ExecutionResult::failure(
+                    "update-work-item target is not configured. \
+                     This is required to scope which work items the agent can update."
+                        .to_string(),
+                ));
+            }
+            if let Some(result) = check_target_config(id, &config) {
+                return Ok(result);
+            }
         }
         if let Some(result) = check_field_permissions(self, &config) {
             return Ok(result);
@@ -535,7 +551,7 @@ impl Executor for UpdateWorkItemResult {
 
         // Enforce title-prefix / tag-prefix guards (requires a GET if either is set)
         if let Some(result) =
-            check_prefix_guards(&client, org_url, project, token, self.id, &config).await?
+            check_prefix_guards(&client, org_url, project, token, id, &config).await?
         {
             return Ok(result);
         }
@@ -546,7 +562,7 @@ impl Executor for UpdateWorkItemResult {
             "{}/{}/_apis/wit/workitems/{}?api-version=7.0",
             org_url.trim_end_matches('/'),
             utf8_percent_encode(project, PATH_SEGMENT),
-            self.id,
+            id,
         );
         debug!("PATCH URL: {}", url);
 
@@ -571,11 +587,11 @@ impl Executor for UpdateWorkItemResult {
                 .and_then(|h| h.as_str())
                 .unwrap_or("");
 
-            info!("Work item #{} updated successfully", self.id);
+            info!("Work item #{} updated successfully", id);
             Ok(ExecutionResult::success_with_data(
-                format!("Updated work item #{}", self.id),
+                format!("Updated work item #{}", id),
                 serde_json::json!({
-                    "id": self.id,
+                    "id": id,
                     "url": work_item_url,
                 }),
             ))
@@ -587,7 +603,7 @@ impl Executor for UpdateWorkItemResult {
                 .unwrap_or_else(|_| "Unknown error".to_string());
             Ok(ExecutionResult::failure(format!(
                 "Failed to update work item #{} (HTTP {}): {}",
-                self.id, status, error_body
+                id, status, error_body
             )))
         }
     }
@@ -595,6 +611,119 @@ impl Executor for UpdateWorkItemResult {
 
 #[cfg(test)]
 mod tests {
+    use crate::secure::WorkItemTemporaryId;
+
+    #[test]
+    fn temporary_id_deserializes() {
+        let params: UpdateWorkItemParams = serde_json::from_value(serde_json::json!({
+            "id": "#aw_created1",
+            "state": "Active"
+        }))
+        .unwrap();
+        assert_eq!(
+            params.id,
+            WorkItemReference::Temporary(WorkItemTemporaryId::parse("#aw_created1").unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn unresolved_temporary_id_fails_before_http() {
+        let mut tool_configs = std::collections::HashMap::new();
+        tool_configs.insert(
+            "update-work-item".to_string(),
+            serde_json::json!({"target": "*", "status": true}),
+        );
+        let ctx = ExecutionContext {
+            tool_configs,
+            ado_org_url: Some("https://dev.azure.com/org".to_string()),
+            ado_project: Some("project".to_string()),
+            access_token: Some("token".to_string()),
+            ..Default::default()
+        };
+        let mut result: UpdateWorkItemResult = UpdateWorkItemParams {
+            id: WorkItemReference::Temporary(WorkItemTemporaryId::parse("#aw_missing").unwrap()),
+            title: None,
+            body: None,
+            state: Some("Active".to_string()),
+            area_path: None,
+            iteration_path: None,
+            assignee: None,
+            tags: None,
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!execution.success);
+        assert!(
+            execution.message.contains("has not been resolved"),
+            "unexpected message: {}",
+            execution.message
+        );
+    }
+
+    #[tokio::test]
+    async fn resolved_temporary_id_updates_the_created_work_item() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/Project/_apis/wit/workitems/42"))
+            .and(body_json(serde_json::json!([{
+                "op": "replace",
+                "path": "/fields/System.State",
+                "value": "Active"
+            }])))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 42,
+                "_links": { "html": { "href": "https://example.test/items/42" } }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut tool_configs = std::collections::HashMap::new();
+        // No `target` configured: the update must still be allowed because the
+        // temporary ID resolves to a work item created in this run.
+        tool_configs.insert(
+            "update-work-item".to_string(),
+            serde_json::json!({"status": true}),
+        );
+        let ctx = ExecutionContext {
+            tool_configs,
+            ado_org_url: Some(server.uri()),
+            ado_project: Some("Project".to_string()),
+            access_token: Some("token".to_string()),
+            ..Default::default()
+        };
+        let temporary_id = WorkItemTemporaryId::parse("#aw_created1").unwrap();
+        ctx.register_resolved_work_item(
+            &temporary_id,
+            crate::safe_outputs::ResolvedWorkItem {
+                id: 42,
+                url: "https://example.test/items/42".to_string(),
+            },
+        )
+        .unwrap();
+        let mut result: UpdateWorkItemResult = UpdateWorkItemParams {
+            id: WorkItemReference::Temporary(temporary_id),
+            title: None,
+            body: None,
+            state: Some("Active".to_string()),
+            area_path: None,
+            iteration_path: None,
+            assignee: None,
+            tags: None,
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(execution.success, "update failed: {}", execution.message);
+        assert_eq!(
+            execution.data.as_ref().and_then(|data| data["id"].as_u64()),
+            Some(42)
+        );
+    }
     use super::*;
     use crate::safe_outputs::ToolResult;
 
@@ -606,7 +735,7 @@ mod tests {
     #[test]
     fn test_params_validates_requires_positive_id() {
         let params = UpdateWorkItemParams {
-            id: 0,
+            id: WorkItemReference::Number(0),
             title: Some("New title".to_string()),
             body: None,
             state: None,
@@ -626,7 +755,7 @@ mod tests {
     #[test]
     fn test_params_validates_requires_at_least_one_field() {
         let params = UpdateWorkItemParams {
-            id: 42,
+            id: WorkItemReference::Number(42),
             title: None,
             body: None,
             state: None,
@@ -646,7 +775,7 @@ mod tests {
     #[test]
     fn test_params_validates_title_length() {
         let params = UpdateWorkItemParams {
-            id: 42,
+            id: WorkItemReference::Number(42),
             title: Some("x".repeat(256)),
             body: None,
             state: None,
@@ -666,7 +795,7 @@ mod tests {
     #[test]
     fn test_params_valid_title_only() {
         let params = UpdateWorkItemParams {
-            id: 42,
+            id: WorkItemReference::Number(42),
             title: Some("Valid new title".to_string()),
             body: None,
             state: None,
@@ -678,14 +807,14 @@ mod tests {
         let result: Result<UpdateWorkItemResult, _> = params.try_into();
         assert!(result.is_ok());
         let result = result.unwrap();
-        assert_eq!(result.id, 42);
+        assert_eq!(result.id, WorkItemReference::Number(42));
         assert_eq!(result.title, Some("Valid new title".to_string()));
     }
 
     #[test]
     fn test_params_valid_state_only() {
         let params = UpdateWorkItemParams {
-            id: 123,
+            id: WorkItemReference::Number(123),
             title: None,
             body: None,
             state: Some("Resolved".to_string()),
@@ -697,7 +826,7 @@ mod tests {
         let result: Result<UpdateWorkItemResult, _> = params.try_into();
         assert!(result.is_ok());
         let result = result.unwrap();
-        assert_eq!(result.id, 123);
+        assert_eq!(result.id, WorkItemReference::Number(123));
         assert_eq!(result.state, Some("Resolved".to_string()));
         assert!(result.title.is_none());
     }
@@ -705,7 +834,7 @@ mod tests {
     #[test]
     fn test_params_valid_tags() {
         let params = UpdateWorkItemParams {
-            id: 42,
+            id: WorkItemReference::Number(42),
             title: None,
             body: None,
             state: None,
@@ -727,7 +856,7 @@ mod tests {
     fn test_params_rejects_reserved_assignee_identity() {
         for assignee in ["Agency", " github copilot "] {
             let params = UpdateWorkItemParams {
-                id: 42,
+                id: WorkItemReference::Number(42),
                 title: None,
                 body: None,
                 state: None,
@@ -745,7 +874,7 @@ mod tests {
     #[test]
     fn test_result_serializes_correctly() {
         let params = UpdateWorkItemParams {
-            id: 99,
+            id: WorkItemReference::Number(99),
             title: Some("Test title".to_string()),
             body: None,
             state: Some("Active".to_string()),
@@ -835,7 +964,7 @@ target: 42
         use std::path::PathBuf;
 
         let params = UpdateWorkItemParams {
-            id: 42,
+            id: WorkItemReference::Number(42),
             title: Some("New title".to_string()),
             body: None,
             state: None,
@@ -878,7 +1007,7 @@ target: 42
         use std::path::PathBuf;
 
         let params = UpdateWorkItemParams {
-            id: 42,
+            id: WorkItemReference::Number(42),
             title: Some("New title".to_string()),
             body: None,
             state: None,
@@ -930,7 +1059,7 @@ target: 42
         use std::path::PathBuf;
 
         let params = UpdateWorkItemParams {
-            id: 42,
+            id: WorkItemReference::Number(42),
             title: Some("New title".to_string()),
             body: None,
             state: None,
@@ -983,7 +1112,7 @@ target: 42
         use std::path::PathBuf;
 
         let params = UpdateWorkItemParams {
-            id: 42,
+            id: WorkItemReference::Number(42),
             title: None,
             body: None,
             state: Some("Resolved".to_string()),
@@ -1031,7 +1160,7 @@ target: 42
     #[test]
     fn test_sanitize_fields() {
         let params = UpdateWorkItemParams {
-            id: 1,
+            id: WorkItemReference::Number(1),
             title: Some("Hello @user".to_string()),
             body: Some("Description with <script>alert(1)</script>".to_string()),
             state: None,
@@ -1099,7 +1228,7 @@ target: 42
     fn test_params_rejects_tag_with_semicolon() {
         // A tag containing a semicolon would inject additional ADO tags — reject it
         let params = UpdateWorkItemParams {
-            id: 42,
+            id: WorkItemReference::Number(42),
             title: None,
             body: None,
             state: None,
@@ -1137,7 +1266,7 @@ allowed-tags:
         use std::path::PathBuf;
 
         let params = UpdateWorkItemParams {
-            id: 42,
+            id: WorkItemReference::Number(42),
             title: None,
             body: None,
             state: None,

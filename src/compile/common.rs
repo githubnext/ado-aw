@@ -2377,10 +2377,12 @@ pub fn validate_work_item_assignment_outputs_config(front_matter: &FrontMatter) 
         }
     }
 
-    if front_matter.safe_outputs.contains_key("create-work-item")
-        && front_matter.safe_outputs.contains_key("assign-work-item")
-    {
-        require_same_approval_lane(front_matter, "create-work-item", "assign-work-item")?;
+    if front_matter.safe_outputs.contains_key("create-work-item") {
+        for consumer in crate::compile::types::WORK_ITEM_TEMPORARY_ID_CONSUMERS {
+            if front_matter.safe_outputs.contains_key(*consumer) {
+                require_same_approval_lane(front_matter, "create-work-item", consumer)?;
+            }
+        }
     }
 
     Ok(())
@@ -5912,6 +5914,29 @@ safe-outputs:
             .unwrap_err()
             .to_string();
         assert!(error.contains("same effective require-approval"));
+    }
+
+    #[test]
+    fn test_validate_rejects_mixed_approval_lanes_for_create_and_comment_work_item() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  create-work-item:
+    require-approval: true
+  comment-on-work-item:
+    target: "*"
+    require-approval: false
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let error = validate_work_item_assignment_outputs_config(&fm)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("same effective require-approval"),
+            "error: {error}"
+        );
     }
 
     #[test]
