@@ -256,14 +256,19 @@ static RE_AB_LINK: LazyLock<regex_lite::Regex> =
 static RE_SLASH_CMD: LazyLock<regex_lite::Regex> =
     LazyLock::new(|| regex_lite::Regex::new(r"(?m)^(/[a-zA-Z][\w-]*)").unwrap());
 static RE_DANGEROUS_HTML_TAG: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
-    regex_lite::Regex::new(r"(?i)</?\s*(script|iframe|object|embed)\b[^>]*>").unwrap()
+    regex_lite::Regex::new(
+        r"(?i)</?\s*(script|iframe|object|embed|form|input|button|textarea|select|option|base|meta|link|svg|math)\b[^>]*>",
+    )
+    .unwrap()
 });
-static RE_EVENT_HANDLER_ATTR_DQ: LazyLock<regex_lite::Regex> =
-    LazyLock::new(|| regex_lite::Regex::new(r#"(?i)\s+on[a-z][a-z0-9_-]*\s*=\s*"[^"]*""#).unwrap());
-static RE_EVENT_HANDLER_ATTR_SQ: LazyLock<regex_lite::Regex> =
-    LazyLock::new(|| regex_lite::Regex::new(r#"(?i)\s+on[a-z][a-z0-9_-]*\s*=\s*'[^']*'"#).unwrap());
+static RE_EVENT_HANDLER_ATTR_DQ: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
+    regex_lite::Regex::new(r#"(?i)(^|[<\s])on[a-z][a-z0-9_-]*\s*=\s*"[^"]*""#).unwrap()
+});
+static RE_EVENT_HANDLER_ATTR_SQ: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
+    regex_lite::Regex::new(r#"(?i)(^|[<\s])on[a-z][a-z0-9_-]*\s*=\s*'[^']*'"#).unwrap()
+});
 static RE_EVENT_HANDLER_ATTR_BARE: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
-    regex_lite::Regex::new(r#"(?i)\s+on[a-z][a-z0-9_-]*\s*=\s*[^\s"'=<>`]+"#).unwrap()
+    regex_lite::Regex::new(r#"(?i)(^|[<\s])on[a-z][a-z0-9_-]*\s*=\s*[^\s"'=<>`]*"#).unwrap()
 });
 
 /// Neutralize bot command patterns and Azure DevOps work item link syntax.
@@ -347,9 +352,15 @@ fn escape_html_fragment(input: &str) -> String {
 
 fn neutralize_dangerous_html(input: &str) -> String {
     let s = RE_DANGEROUS_HTML_TAG.replace_all(input, "").to_string();
-    let s = RE_EVENT_HANDLER_ATTR_DQ.replace_all(&s, "").to_string();
-    let s = RE_EVENT_HANDLER_ATTR_SQ.replace_all(&s, "").to_string();
-    RE_EVENT_HANDLER_ATTR_BARE.replace_all(&s, "").to_string()
+    let s = RE_EVENT_HANDLER_ATTR_DQ
+        .replace_all(&s, |caps: &regex_lite::Captures| caps[1].to_string())
+        .to_string();
+    let s = RE_EVENT_HANDLER_ATTR_SQ
+        .replace_all(&s, |caps: &regex_lite::Captures| caps[1].to_string())
+        .to_string();
+    RE_EVENT_HANDLER_ATTR_BARE
+        .replace_all(&s, |caps: &regex_lite::Captures| caps[1].to_string())
+        .to_string()
 }
 
 fn markdown_protected_ranges(input: &str) -> Vec<Range<usize>> {
@@ -687,13 +698,17 @@ mod tests {
 
     #[test]
     fn test_sanitize_markdown_neutralizes_active_html() {
-        let input = r#"<h2 onclick="alert(1)">Hi</h2><script>alert(1)</script><a href="javascript:alert(1)" onmouseover='x'>link</a><img src=x onerror=alert(1)>"#;
+        let input = r#"<h2 onclick="alert(1)">Hi</h2><script>alert(1)</script><svg onload=alert(1)></svg><form action="https://evil.test"></form><a href="javascript:alert(1)" onmouseover='x'>link</a><img src=x onerror=>"#;
         let output = sanitize_markdown(input);
 
-        assert!(output.contains("<h2>Hi</h2>"));
-        assert!(output.contains(r#"<a href="(redacted)alert(1)">link</a>"#));
-        assert!(output.contains("<img src=x>"));
+        assert!(output.contains("<h2 "));
+        assert!(output.contains(">Hi</h2>"));
+        assert!(output.contains(r#"<a href="(redacted)alert(1)" "#));
+        assert!(output.contains(">link</a>"));
+        assert!(output.contains("<img src=x "));
         assert!(!output.contains("<script"));
+        assert!(!output.contains("<svg"));
+        assert!(!output.contains("<form"));
         assert!(!output.contains("onclick"));
         assert!(!output.contains("onmouseover"));
         assert!(!output.contains("onerror"));
