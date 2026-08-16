@@ -72,6 +72,24 @@ pub fn sanitize(input: &str) -> String {
     s
 }
 
+/// Sanitize untrusted Markdown content while preserving inline HTML for renderers
+/// that accept it natively.
+pub(crate) fn sanitize_markdown(input: &str) -> String {
+    let mut s = remove_control_characters(input);
+    s = neutralize_pipeline_commands(&s);
+    s = neutralize_mentions(&s);
+    s = neutralize_bot_triggers(&s);
+    s = remove_xml_comments(&s);
+    s = sanitize_url_protocols(&s);
+    s = enforce_content_limits(&s);
+    debug!(
+        "Sanitized markdown content: {} -> {} bytes",
+        input.len(),
+        s.len()
+    );
+    s
+}
+
 /// Sanitize operator-controlled configuration values.
 ///
 /// Applies a subset of the full pipeline appropriate for config identifiers:
@@ -641,6 +659,12 @@ mod tests {
     #[test]
     fn test_remove_unclosed_xml_comment() {
         assert_eq!(remove_xml_comments("before<!-- no end"), "before");
+    }
+
+    #[test]
+    fn test_sanitize_markdown_preserves_html_tags() {
+        let input = "<h2>Hi</h2><p>x &lt;string&gt; y</p>";
+        assert_eq!(sanitize_markdown(input), input);
     }
 
     // IS-07b: URL protocol sanitization

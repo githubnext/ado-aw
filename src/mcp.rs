@@ -35,7 +35,7 @@ use crate::safe_outputs::{
     UploadBuildAttachmentResult, UploadPipelineArtifactParams, UploadPipelineArtifactResult,
     UploadWorkitemAttachmentParams, UploadWorkitemAttachmentResult, Validate, anyhow_to_mcp_error,
 };
-use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_markdown};
 use crate::secure::WorkItemTemporaryId;
 
 /// Sanitize a title into a safe branch name slug.
@@ -813,7 +813,7 @@ can be passed as work_item_id to later safe outputs such as assign-work-item."
         // Sanitize untrusted agent-provided text fields (IS-01)
         let mut sanitized = params.0;
         sanitized.title = sanitize_text(&sanitized.title);
-        sanitized.description = sanitize_text(&sanitized.description);
+        sanitized.description = sanitize_markdown(&sanitized.description);
         let temporary_id = self.write_create_work_item_proposal(sanitized).await?;
         let canonical = temporary_id.canonical();
         info!("Work item queued for creation as {}", canonical);
@@ -2039,6 +2039,27 @@ mod tests {
         assert_eq!(proposals.len(), 1);
         assert_eq!(proposals[0]["name"], "create-work-item");
         assert_eq!(proposals[0]["temporary_id"], temporary_id);
+    }
+
+    #[tokio::test]
+    async fn create_work_item_preserves_html_description_in_proposal() {
+        let (safe_outputs, _temp_dir) = create_test_safe_outputs().await;
+        let params = CreateWorkItemParams {
+            title: "Create work item with body".to_string(),
+            description: "<h2>Hi</h2><p>x &lt;string&gt; y</p>".to_string(),
+            tags: Vec::new(),
+        };
+
+        safe_outputs
+            .create_work_item(Parameters(params))
+            .await
+            .unwrap();
+
+        let proposals = safe_outputs.read_safe_output_file().await.unwrap();
+        assert_eq!(
+            proposals[0]["description"],
+            "<h2>Hi</h2><p>x &lt;string&gt; y</p>"
+        );
     }
 
     #[tokio::test]

@@ -9,6 +9,7 @@ use super::PATH_SEGMENT;
 use crate::safe_outputs::{
     ExecutionContext, ExecutionResult, Executor, ToolResult, Validate, anyhow_to_mcp_error,
 };
+use crate::sanitize::sanitize_markdown;
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::secure::WorkItemTemporaryId;
 use ado_aw_derive::SanitizeConfig;
@@ -91,7 +92,7 @@ impl TryFrom<(CreateWorkItemParams, WorkItemTemporaryId)> for CreateWorkItemResu
 impl SanitizeContent for CreateWorkItemResult {
     fn sanitize_content_fields(&mut self) {
         self.title = sanitize_text(&self.title);
-        self.description = sanitize_text(&self.description);
+        self.description = sanitize_markdown(&self.description);
         for tag in &mut self.tags {
             *tag = sanitize_config(tag);
         }
@@ -124,6 +125,12 @@ pub struct CreateWorkItemConfig {
     /// Work item type (default: "Task")
     #[serde(default = "default_work_item_type", rename = "work-item-type")]
     pub work_item_type: String,
+
+    /// Field reference name that receives the agent-provided description.
+    /// Defaults to System.Description, except Bug work items default to
+    /// Microsoft.VSTS.TCM.ReproSteps.
+    #[serde(default, rename = "description-field")]
+    pub description_field: Option<String>,
 
     /// Area path for the work item
     #[serde(default, rename = "area-path")]
@@ -202,6 +209,7 @@ impl Default for CreateWorkItemConfig {
     fn default() -> Self {
         Self {
             work_item_type: default_work_item_type(),
+            description_field: None,
             area_path: None,
             iteration_path: None,
             assignee: None,
@@ -216,6 +224,25 @@ impl Default for CreateWorkItemConfig {
 
 fn default_work_item_type() -> String {
     "Task".to_string()
+}
+
+const SYSTEM_DESCRIPTION_FIELD: &str = "System.Description";
+const BUG_REPRO_STEPS_FIELD: &str = "Microsoft.VSTS.TCM.ReproSteps";
+
+fn default_description_field_for(work_item_type: &str) -> &'static str {
+    if work_item_type.eq_ignore_ascii_case("Bug") {
+        BUG_REPRO_STEPS_FIELD
+    } else {
+        SYSTEM_DESCRIPTION_FIELD
+    }
+}
+
+fn description_field_for(config: &CreateWorkItemConfig) -> &str {
+    config
+        .description_field
+        .as_deref()
+        .filter(|field| !field.trim().is_empty())
+        .unwrap_or_else(|| default_description_field_for(&config.work_item_type))
 }
 
 /// Build a field patch operation for work item creation
@@ -431,13 +458,14 @@ impl Executor for CreateWorkItemResult {
         // Build the patch document for work item creation
         let description_with_stats =
             crate::agent_stats::append_stats_to_body(&self.description, ctx, config.include_stats);
+        let description_field = description_field_for(&config);
         let mut patch_doc = vec![
             field_op("System.Title", &self.title),
-            field_op("System.Description", &description_with_stats),
+            field_op(description_field, &description_with_stats),
             // Tell Azure DevOps the description is markdown
             serde_json::json!({
                 "op": "add",
-                "path": "/multilineFieldsFormat/System.Description",
+                "path": format!("/multilineFieldsFormat/{description_field}"),
                 "value": "Markdown"
             }),
         ];
@@ -734,6 +762,7 @@ mod tests {
     fn test_config_defaults() {
         let config = CreateWorkItemConfig::default();
         assert_eq!(config.work_item_type, "Task");
+        assert_eq!(description_field_for(&config), "System.Description");
         assert!(config.area_path.is_none());
         assert!(config.iteration_path.is_none());
         assert!(config.assignee.is_none());
@@ -746,6 +775,7 @@ mod tests {
     fn test_config_deserializes_from_yaml() {
         let yaml = r#"
 work-item-type: Bug
+description-field: Custom.Body
 area-path: "MyProject\\MyTeam"
 assignee: "user@example.com"
 tags:
@@ -759,6 +789,8 @@ custom-fields:
 "#;
         let config: CreateWorkItemConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.work_item_type, "Bug");
+        assert_eq!(config.description_field, Some("Custom.Body".to_string()));
+        assert_eq!(description_field_for(&config), "Custom.Body");
         assert_eq!(config.area_path, Some("MyProject\\MyTeam".to_string()));
         assert_eq!(config.assignee, Some("user@example.com".to_string()));
         assert_eq!(config.tags, vec!["agent-created", "automated"]);
@@ -777,8 +809,97 @@ tags:
 "#;
         let config: CreateWorkItemConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.work_item_type, "Task"); // default
+        assert_eq!(description_field_for(&config), "System.Description");
         assert!(config.area_path.is_none()); // default
         assert_eq!(config.tags, vec!["my-tag"]);
         assert!(config.allowed_tags.is_empty()); // default
+    }
+
+    #[test]
+    fn test_bug_defaults_description_field_to_repro_steps() {
+        let config: CreateWorkItemConfig = serde_yaml::from_str("work-item-type: Bug\n").unwrap();
+        assert_eq!(
+            description_field_for(&config),
+            "Microsoft.VSTS.TCM.ReproSteps"
+        );
+    }
+
+    #[test]
+    fn test_result_sanitization_preserves_description_html() {
+        let mut result = CreateWorkItemResult {
+            name: CreateWorkItemResult::NAME.to_string(),
+            title: "Test work item".to_string(),
+            description: "<h2>Hi</h2><p>x &lt;string&gt; y</p>".to_string(),
+            tags: Vec::new(),
+            temporary_id: WorkItemTemporaryId::parse("#aw_test1").unwrap(),
+        };
+
+        result.sanitize_content_fields();
+
+        assert_eq!(result.description, "<h2>Hi</h2><p>x &lt;string&gt; y</p>");
+    }
+
+    #[tokio::test]
+    async fn test_execute_bug_uses_repro_steps_and_preserves_html() {
+        use std::collections::HashMap;
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let expected_patch = serde_json::json!([
+            {
+                "op": "add",
+                "path": "/fields/System.Title",
+                "value": "Bug with visible body"
+            },
+            {
+                "op": "add",
+                "path": "/fields/Microsoft.VSTS.TCM.ReproSteps",
+                "value": "<h2>Hi</h2><p>x &lt;string&gt; y</p>"
+            },
+            {
+                "op": "add",
+                "path": "/multilineFieldsFormat/Microsoft.VSTS.TCM.ReproSteps",
+                "value": "Markdown"
+            }
+        ]);
+        Mock::given(method("POST"))
+            .and(path("/Project/_apis/wit/workitems/$Bug"))
+            .and(body_json(expected_patch))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 42,
+                "_links": {
+                    "html": {
+                        "href": "https://example.test/workitems/42"
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let ctx = ExecutionContext {
+            ado_org_url: Some(server.uri()),
+            ado_project: Some("Project".to_string()),
+            access_token: Some("token".to_string()),
+            tool_configs: HashMap::from([(
+                "create-work-item".to_string(),
+                serde_json::json!({
+                    "work-item-type": "Bug",
+                    "include-stats": false
+                }),
+            )]),
+            ..Default::default()
+        };
+        let mut result = CreateWorkItemResult {
+            name: CreateWorkItemResult::NAME.to_string(),
+            title: "Bug with visible body".to_string(),
+            description: "<h2>Hi</h2><p>x &lt;string&gt; y</p>".to_string(),
+            tags: Vec::new(),
+            temporary_id: WorkItemTemporaryId::parse("#aw_test1").unwrap(),
+        };
+
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+
+        assert!(execution.success, "{}", execution.message);
     }
 }
