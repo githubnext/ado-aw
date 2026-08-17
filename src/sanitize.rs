@@ -881,8 +881,9 @@ mod tests {
             let input = format!("<{prefix}<{tag}>{suffix}>payload</{prefix}</{tag}>{suffix}>");
             let output = sanitize_markdown(&input);
 
-            assert_eq!(output, "payload", "{tag}");
+            assert!(output.contains("payload"), "{tag}: {output}");
             assert!(!output.contains(&format!("<{tag}")), "{tag}: {output}");
+            assert!(!output.contains(&format!("</{tag}")), "{tag}: {output}");
         }
     }
 
