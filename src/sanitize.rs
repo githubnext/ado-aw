@@ -886,6 +886,9 @@ mod tests {
         ] {
             let split = tag.len() / 2;
             let (prefix, suffix) = tag.split_at(split);
+            // The inner dangerous tag is removed first; the surrounding
+            // prefix/suffix then fold back into the original tag name, which
+            // the fixed-point pass must also remove.
             let input =
                 format!("<{prefix}<{tag}></{tag}>{suffix}>payload</{prefix}</{tag}>{suffix}>");
             let output = sanitize_markdown(&input);
