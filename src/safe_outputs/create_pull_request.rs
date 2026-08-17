@@ -588,6 +588,600 @@ impl Drop for WorktreeGuard {
     }
 }
 
+/// ADO connection details resolved from the [`ExecutionContext`].
+struct AdoConnection<'a> {
+    org_url: &'a str,
+    project: &'a str,
+    token: &'a str,
+}
+
+impl CreatePrResult {
+    /// Resolve `self.repository` to a canonical alias and the underlying ADO repository ID.
+    ///
+    /// Returns `Err(ExecutionResult)` when the repository is not in the allowed list.
+    fn resolve_repo_id(
+        &self,
+        ctx: &ExecutionContext,
+    ) -> anyhow::Result<Result<(String, String), ExecutionResult>> {
+        debug!(
+            "Validating repository '{}' against allowed list",
+            self.repository
+        );
+        let repository_alias =
+            crate::safe_outputs::canonical_repository_alias(&self.repository, ctx).or_else(|| {
+                ctx.allowed_repositories
+                    .is_empty()
+                    .then(|| "self".to_string())
+            });
+        let Some(repository_alias) = repository_alias else {
+            warn!(
+                "Repository '{}' not in allowed list: {:?}",
+                self.repository,
+                ctx.allowed_repositories.keys().collect::<Vec<_>>()
+            );
+            return Ok(Err(ExecutionResult::failure(format!(
+                "Repository '{}' is not in the allowed list. Allowed: self, {}",
+                self.repository,
+                ctx.allowed_repositories
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))));
+        };
+        let repo_id = if repository_alias == "self" {
+            // "self" or a name match against the pipeline's own repository
+            debug!("Using 'self' repository (matched '{}')", self.repository);
+            ctx.repository_id
+                .as_ref()
+                .or(ctx.repository_name.as_ref())
+                .context("Repository ID not configured for 'self'")?
+                .clone()
+        } else if let Some(ado_repo_name) = ctx.allowed_repositories.get(&repository_alias) {
+            debug!(
+                "Repository '{}' resolved through alias '{}' to '{}'",
+                self.repository, repository_alias, ado_repo_name
+            );
+            ado_repo_name.clone()
+        } else {
+            // Unreachable: `repository_alias` is either "self" (handled above)
+            // or a key produced by iterating `ctx.allowed_repositories`, so the
+            // lookup cannot miss. Kept as a fail-closed guard in case the
+            // canonicalization and the map ever drift apart.
+            debug_assert!(
+                false,
+                "canonical alias '{repository_alias}' is absent from allowed_repositories"
+            );
+            return Ok(Err(ExecutionResult::failure(format!(
+                "Repository alias '{}' has no configured repository",
+                repository_alias
+            ))));
+        };
+        debug!("Resolved repository ID: {}", repo_id);
+        Ok(Ok((repository_alias, repo_id)))
+    }
+
+    /// Read, hash-verify, and security-validate the patch file, returning its
+    /// content and the `--exclude` args to apply during `git am`/`git apply`.
+    async fn read_and_validate_patch(
+        &self,
+        ctx: &ExecutionContext,
+        config: &CreatePrConfig,
+    ) -> anyhow::Result<Result<(String, Vec<String>), ExecutionResult>> {
+        let patch_path = ctx.working_directory.join(&self.patch_file);
+        if !patch_path.exists() {
+            return Ok(Err(ExecutionResult::failure(format!(
+                "Patch file not found: {}",
+                self.patch_file
+            ))));
+        }
+
+        // Security: Enforce patch file size limit
+        let metadata = tokio::fs::metadata(&patch_path)
+            .await
+            .context("Failed to get patch file metadata")?;
+        if metadata.len() > MAX_PATCH_SIZE_BYTES {
+            return Ok(Err(ExecutionResult::failure(format!(
+                "Patch file exceeds maximum size of {} bytes (got {} bytes)",
+                MAX_PATCH_SIZE_BYTES,
+                metadata.len()
+            ))));
+        }
+
+        // Read patch content for validation
+        debug!("Reading patch file content");
+        let patch_content = tokio::fs::read_to_string(&patch_path)
+            .await
+            .context("Failed to read patch file")?;
+        debug!("Patch content size: {} bytes", patch_content.len());
+
+        // SHA-256 integrity check: verify the patch file hasn't been tampered
+        // with between Stage 1 and Stage 3.
+        let live_hash = crate::hash::sha256_hex(patch_content.as_bytes());
+        if live_hash != self.patch_sha256 {
+            return Ok(Err(ExecutionResult::failure(format!(
+                "Patch file SHA-256 mismatch: expected {}, got {} — \
+                 the file may have been tampered with between stages",
+                self.patch_sha256, live_hash
+            ))));
+        }
+        debug!("Patch file SHA-256 verified: {}", live_hash);
+
+        // Excluded files are handled via --exclude flags on git am / git apply,
+        // which filters them at the git level rather than post-processing patch content.
+        // This is the same approach used by gh-aw (via :(exclude) pathspecs).
+        // Note: Exclusion happens during patch application (before the protection check).
+        // If a protected file matches an excluded-files pattern, it is silently dropped
+        // from the patch rather than triggering a protection error.
+        let exclude_args: Vec<String> = config
+            .excluded_files
+            .iter()
+            .map(|p| format!("--exclude={}", p))
+            .collect();
+        if !exclude_args.is_empty() {
+            debug!(
+                "Will apply {} excluded-files patterns via --exclude flags",
+                exclude_args.len()
+            );
+        }
+
+        // Security: Validate patch paths before applying
+        debug!("Validating patch paths for security");
+        if let Err(e) = validate_patch_paths(&patch_content) {
+            warn!("Patch path validation failed: {}", e);
+            return Ok(Err(ExecutionResult::failure(format!(
+                "Patch validation failed: {}",
+                e
+            ))));
+        }
+        debug!("Patch path validation passed");
+
+        // Extract file paths from patch for validation.
+        // Filter out excluded files before the protection check — if a protected file
+        // matches an excluded-files pattern, it will be excluded from the patch by
+        // git am/apply --exclude and should not trigger a protection error.
+        let patch_paths: Vec<String> = extract_paths_from_patch(&patch_content)
+            .into_iter()
+            .filter(|p| {
+                !config
+                    .excluded_files
+                    .iter()
+                    .any(|pat| glob_match_simple(pat, p))
+            })
+            .collect();
+
+        // Security: File protection check
+        if config.protected_files != ProtectedFiles::Allowed {
+            let protected = find_protected_files(&patch_paths);
+            if !protected.is_empty() {
+                warn!(
+                    "Patch modifies {} protected file(s): {:?}",
+                    protected.len(),
+                    protected
+                );
+                return Ok(Err(ExecutionResult::failure(format!(
+                    "Patch modifies protected files (set protected-files: allowed to override): {}",
+                    protected.join(", ")
+                ))));
+            }
+        }
+
+        // Security: Max files per PR check (count diff blocks, not paths, to avoid
+        // double-counting renames which appear in both --- and +++ lines)
+        let file_count = count_patch_files(&patch_content);
+        if file_count > config.max_files {
+            warn!(
+                "Patch contains {} files, exceeding max of {}",
+                file_count, config.max_files
+            );
+            return Ok(Err(ExecutionResult::failure(format!(
+                "Patch contains {} files, exceeding maximum of {} files per PR",
+                file_count, config.max_files
+            ))));
+        }
+
+        Ok(Ok((patch_content, exclude_args)))
+    }
+
+    /// Create a worktree at `target_branch`, checkout `source_branch`, apply the
+    /// patch, and collect the resulting file changes for the ADO push payload.
+    #[allow(clippy::too_many_arguments)]
+    async fn setup_worktree_and_collect_changes(
+        &self,
+        repository_alias: &str,
+        ctx: &ExecutionContext,
+        target_branch: &str,
+        source_branch: &str,
+        patch_path: &std::path::Path,
+        exclude_args: &[String],
+    ) -> anyhow::Result<Result<(Vec<serde_json::Value>, Vec<String>), ExecutionResult>> {
+        let repo_git_dir =
+            crate::safe_outputs::resolve_repository_checkout_dir(repository_alias, ctx)?;
+        debug!("Git repository directory: {}", repo_git_dir.display());
+
+        // Verify this is a git repository
+        debug!("Verifying git repository");
+        let git_check = Command::new("git")
+            .args(["rev-parse", "--git-dir"])
+            .current_dir(&repo_git_dir)
+            .output()
+            .await
+            .context("Failed to verify git repository")?;
+
+        if !git_check.status.success() {
+            warn!("Not a git repository: {}", repo_git_dir.display());
+            return Ok(Err(ExecutionResult::failure(format!(
+                "Not a git repository: {}",
+                repo_git_dir.display()
+            ))));
+        }
+        debug!("Git repository verified");
+
+        // Create a temporary directory for the worktree
+        let temp_dir = tempfile::tempdir().context("Failed to create temp directory")?;
+        let worktree_path = temp_dir.path().join("worktree");
+        debug!("Creating worktree at: {}", worktree_path.display());
+
+        // Create a worktree at the target branch
+        let worktree_output = Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                &worktree_path.to_string_lossy(),
+                &format!("origin/{}", target_branch),
+            ])
+            .current_dir(&repo_git_dir)
+            .output()
+            .await
+            .context("Failed to create git worktree")?;
+
+        if !worktree_output.status.success() {
+            debug!(
+                "Worktree creation with origin/ prefix failed, trying without: {}",
+                String::from_utf8_lossy(&worktree_output.stderr)
+            );
+            // Try with just the branch name if origin/ prefix fails
+            let worktree_output = Command::new("git")
+                .args([
+                    "worktree",
+                    "add",
+                    &worktree_path.to_string_lossy(),
+                    target_branch,
+                ])
+                .current_dir(&repo_git_dir)
+                .output()
+                .await
+                .context("Failed to create git worktree")?;
+
+            if !worktree_output.status.success() {
+                warn!(
+                    "Failed to create worktree: {}",
+                    String::from_utf8_lossy(&worktree_output.stderr)
+                );
+                return Ok(Err(ExecutionResult::failure(format!(
+                    "Failed to create worktree: {}",
+                    String::from_utf8_lossy(&worktree_output.stderr)
+                ))));
+            }
+        }
+        debug!("Worktree created successfully");
+
+        // Ensure worktree cleanup on exit
+        let _worktree_guard = WorktreeGuard {
+            repo_dir: repo_git_dir.clone(),
+            worktree_path: worktree_path.clone(),
+        };
+
+        // Create and checkout a local branch in the worktree for patch application.
+        // Note: this local branch name may differ from the final remote branch name
+        // if a collision is detected later — the ADO push is REST-only, so the local
+        // branch name is not used for the remote ref.
+        debug!("Creating source branch: {}", source_branch);
+        let checkout_output = Command::new("git")
+            .args(["checkout", "-b", source_branch])
+            .current_dir(&worktree_path)
+            .output()
+            .await
+            .context("Failed to create source branch")?;
+
+        if !checkout_output.status.success() {
+            warn!(
+                "Failed to create source branch: {}",
+                String::from_utf8_lossy(&checkout_output.stderr)
+            );
+            return Ok(Err(ExecutionResult::failure(format!(
+                "Failed to create source branch: {}",
+                String::from_utf8_lossy(&checkout_output.stderr)
+            ))));
+        }
+        debug!("Source branch created");
+
+        // Record the worktree HEAD before applying the patch so we can diff against
+        // it later. For multi-commit patches, git am creates N commits and diff-tree HEAD
+        // alone only shows the last commit's changes — we need base_sha..HEAD.
+        let base_sha_output = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&worktree_path)
+            .output()
+            .await
+            .context("Failed to get worktree HEAD SHA")?;
+        let base_sha = String::from_utf8_lossy(&base_sha_output.stdout)
+            .trim()
+            .to_string();
+        debug!("Worktree base SHA before patch: {}", base_sha);
+
+        // Apply the patch. Strategy depends on whether excluded-files are configured:
+        // - Without exclusions: prefer git am --3way (preserves commit metadata)
+        //   with git apply --3way as fallback
+        // - With exclusions: use git apply --3way directly (git am does not support
+        //   --exclude flags; git apply does)
+        let patch_committed =
+            match apply_patch_to_worktree(&worktree_path, patch_path, exclude_args).await? {
+                Ok(committed) => committed,
+                Err(result) => return Ok(Err(result)),
+            };
+
+        // Collect changed files. The method depends on how the patch was applied:
+        // - git am: changes are committed → use git diff-tree to compare base_sha..HEAD
+        //   (covers all commits in multi-commit patches, not just the last one)
+        // - git apply: changes are in working tree → use git status --porcelain
+        debug!("Getting list of changed files");
+        let (status_str, use_diff_tree) = if patch_committed {
+            let diff_tree_output = Command::new("git")
+                .args(["diff-tree", "-r", "--name-status", &base_sha, "HEAD"])
+                .current_dir(&worktree_path)
+                .output()
+                .await
+                .context("Failed to run git diff-tree")?;
+
+            if !diff_tree_output.status.success() {
+                warn!(
+                    "Failed to get diff-tree: {}",
+                    String::from_utf8_lossy(&diff_tree_output.stderr)
+                );
+                return Ok(Err(ExecutionResult::failure(format!(
+                    "Failed to get diff-tree: {}",
+                    String::from_utf8_lossy(&diff_tree_output.stderr)
+                ))));
+            }
+            (
+                String::from_utf8_lossy(&diff_tree_output.stdout).to_string(),
+                true,
+            )
+        } else {
+            let status_output = Command::new("git")
+                .args(["status", "--porcelain"])
+                .current_dir(&worktree_path)
+                .output()
+                .await
+                .context("Failed to run git status")?;
+
+            if !status_output.status.success() {
+                warn!(
+                    "Failed to get git status: {}",
+                    String::from_utf8_lossy(&status_output.stderr)
+                );
+                return Ok(Err(ExecutionResult::failure(format!(
+                    "Failed to get git status: {}",
+                    String::from_utf8_lossy(&status_output.stderr)
+                ))));
+            }
+            (
+                String::from_utf8_lossy(&status_output.stdout).to_string(),
+                false,
+            )
+        };
+
+        debug!("Change detection output:\n{}", status_str);
+        let (changes, skipped_symlinks) = if use_diff_tree {
+            collect_changes_from_diff_tree(&worktree_path, &status_str).await?
+        } else {
+            collect_changes_from_worktree(&worktree_path, &status_str).await?
+        };
+        debug!("Collected {} file changes for push", changes.len());
+        if !skipped_symlinks.is_empty() {
+            warn!(
+                "Skipped {} symlink(s) when collecting PR file changes: {}",
+                skipped_symlinks.len(),
+                skipped_symlinks.join(", ")
+            );
+        }
+
+        Ok(Ok((changes, skipped_symlinks)))
+    }
+
+    /// Resolve the base commit to push against: prefer the SHA recorded at
+    /// patch-generation time (Stage 1), falling back to querying the ADO refs API.
+    async fn resolve_base_commit(
+        &self,
+        client: &reqwest::Client,
+        ado: &AdoConnection<'_>,
+        repo_id: &str,
+        target_branch: &str,
+    ) -> anyhow::Result<Result<String, ExecutionResult>> {
+        if let Some(ref recorded) = self.base_commit {
+            // Validate SHA format before trusting Stage 1 data
+            if recorded.len() != 40 || !recorded.chars().all(|c| c.is_ascii_hexdigit()) {
+                anyhow::bail!(
+                    "Invalid base_commit SHA from Stage 1 NDJSON: {:?}",
+                    recorded
+                );
+            }
+            info!("Using recorded base_commit from Stage 1: {}", recorded);
+            return Ok(Ok(recorded.clone()));
+        }
+
+        debug!("No recorded base_commit — resolving from ADO refs API");
+        let refs_url = format!(
+            "{}{}/_apis/git/repositories/{}/refs?filter=heads/{}&api-version=7.1",
+            ado.org_url, ado.project, repo_id, target_branch
+        );
+        debug!("Refs URL: {}", refs_url);
+
+        let refs_response = client
+            .get(&refs_url)
+            .basic_auth("", Some(ado.token))
+            .send()
+            .await
+            .context("Failed to get target branch ref")?;
+
+        if !refs_response.status().is_success() {
+            let status = refs_response.status();
+            let body = refs_response.text().await.unwrap_or_default();
+            warn!("Failed to get target branch ref: {} - {}", status, body);
+            return Ok(Err(ExecutionResult::failure(format!(
+                "Failed to get target branch ref: {} - {}",
+                status, body
+            ))));
+        }
+
+        let refs_data: serde_json::Value = refs_response.json().await?;
+        let resolved = refs_data["value"][0]["objectId"]
+            .as_str()
+            .context("Could not find target branch commit")?;
+        Ok(Ok(resolved.to_string()))
+    }
+
+    /// Rename `source_branch`/`source_ref` (up to 3 attempts) if the branch already
+    /// exists in ADO, to avoid TOCTOU collisions from retries or previous runs.
+    async fn ensure_unique_source_branch(
+        &self,
+        client: &reqwest::Client,
+        ado: &AdoConnection<'_>,
+        repo_id: &str,
+        mut source_branch: String,
+        mut source_ref: String,
+    ) -> anyhow::Result<(String, String)> {
+        for attempt in 0..3 {
+            let check_ref_url = format!(
+                "{}{}/_apis/git/repositories/{}/refs?filter=heads/{}&api-version=7.1",
+                ado.org_url, ado.project, repo_id, source_branch
+            );
+            debug!(
+                "Checking if source branch exists (attempt {}): {}",
+                attempt + 1,
+                check_ref_url
+            );
+
+            let check_ref_response = client
+                .get(&check_ref_url)
+                .basic_auth("", Some(ado.token))
+                .send()
+                .await
+                .context("Failed to check source branch existence")?;
+
+            if check_ref_response.status().is_success() {
+                let check_data: serde_json::Value = check_ref_response.json().await?;
+                let refs = check_data["value"].as_array();
+                if refs.is_some_and(|r| !r.is_empty()) {
+                    warn!(
+                        "Branch '{}' already exists, generating new suffix (attempt {})",
+                        source_branch,
+                        attempt + 1
+                    );
+                    source_branch = rename_branch_suffix(&source_branch, &random_branch_suffix());
+                    source_ref = format!("refs/heads/{}", source_branch);
+                    info!("Renamed source branch to '{}'", source_branch);
+                    continue;
+                }
+            }
+            break;
+        }
+        Ok((source_branch, source_ref))
+    }
+
+    /// Build the ADO create-pull-request JSON body (title, description, work items, labels).
+    fn build_pr_body(
+        &self,
+        config: &CreatePrConfig,
+        effective_title: &str,
+        description_final: &str,
+        source_ref: &str,
+        target_ref: &str,
+    ) -> Result<serde_json::Value, ExecutionResult> {
+        let mut pr_body = serde_json::json!({
+            "sourceRefName": source_ref,
+            "targetRefName": target_ref,
+            "title": effective_title,
+            "description": description_final,
+            "isDraft": config.draft,
+        });
+
+        // Add work item links if configured
+        if !config.work_items.is_empty() {
+            debug!("Linking {} work items", config.work_items.len());
+            pr_body["workItemRefs"] = serde_json::json!(
+                config
+                    .work_items
+                    .iter()
+                    .map(|id| serde_json::json!({"id": id}))
+                    .collect::<Vec<_>>()
+            );
+        }
+
+        // Validate and add labels (merge operator labels + validated agent labels)
+        let all_labels = validate_and_build_labels(config, &self.agent_labels)?;
+
+        if !all_labels.is_empty() {
+            debug!("Adding {} labels", all_labels.len());
+            pr_body["labels"] = serde_json::json!(
+                all_labels
+                    .iter()
+                    .map(|l| serde_json::json!({"name": l}))
+                    .collect::<Vec<_>>()
+            );
+        }
+
+        Ok(pr_body)
+    }
+
+    /// Build the recovery `ExecutionResult` when PR creation fails but the
+    /// branch was already pushed and `fallback-record-branch` is enabled.
+    fn build_fallback_failure_result(
+        &self,
+        status: reqwest::StatusCode,
+        body: &str,
+        source_branch: &str,
+        target_branch: &str,
+    ) -> ExecutionResult {
+        let fallback_description = format!(
+            "## Pull Request Creation Failed\n\n\
+            A pull request could not be created automatically.\n\n\
+            **Branch:** `{}`\n\
+            **Target:** `{}`\n\
+            **Repository:** `{}`\n\n\
+            **Error:** {} - {}\n\n\
+            ### Original PR Description\n\n\
+            {}\n\n\
+            ---\n\
+            *To create the PR manually, merge branch `{}` into `{}`.*",
+            source_branch,
+            target_branch,
+            self.repository,
+            status,
+            sanitize_text(truncate_error_body(body, 500)),
+            sanitize_text(&self.description),
+            source_branch,
+            target_branch
+        );
+        ExecutionResult::failure_with_data(
+            format!(
+                "Failed to create pull request: {} - {}. Branch '{}' was pushed — create the PR manually.",
+                status,
+                sanitize_text(truncate_error_body(body, 500)),
+                source_branch,
+            ),
+            serde_json::json!({
+                "fallback": "branch-recorded",
+                "branch": source_branch,
+                "target_branch": target_branch,
+                "repository": self.repository,
+                "description": fallback_description
+            }),
+        )
+    }
+}
+
 #[async_trait::async_trait]
 impl Executor for CreatePrResult {
     fn dry_run_summary(&self) -> String {
@@ -635,62 +1229,10 @@ impl Executor for CreatePrResult {
             )));
         }
 
-        // Validate repository against allowed list
-        debug!(
-            "Validating repository '{}' against allowed list",
-            self.repository
-        );
-        let repository_alias =
-            crate::safe_outputs::canonical_repository_alias(&self.repository, ctx).or_else(|| {
-                ctx.allowed_repositories
-                    .is_empty()
-                    .then(|| "self".to_string())
-            });
-        let Some(repository_alias) = repository_alias else {
-            warn!(
-                "Repository '{}' not in allowed list: {:?}",
-                self.repository,
-                ctx.allowed_repositories.keys().collect::<Vec<_>>()
-            );
-            return Ok(ExecutionResult::failure(format!(
-                "Repository '{}' is not in the allowed list. Allowed: self, {}",
-                self.repository,
-                ctx.allowed_repositories
-                    .keys()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )));
+        let (repository_alias, repo_id) = match self.resolve_repo_id(ctx)? {
+            Ok(pair) => pair,
+            Err(result) => return Ok(result),
         };
-        let repo_id = if repository_alias == "self" {
-            // "self" or a name match against the pipeline's own repository
-            debug!("Using 'self' repository (matched '{}')", self.repository);
-            ctx.repository_id
-                .as_ref()
-                .or(ctx.repository_name.as_ref())
-                .context("Repository ID not configured for 'self'")?
-                .clone()
-        } else if let Some(ado_repo_name) = ctx.allowed_repositories.get(&repository_alias) {
-            debug!(
-                "Repository '{}' resolved through alias '{}' to '{}'",
-                self.repository, repository_alias, ado_repo_name
-            );
-            ado_repo_name.clone()
-        } else {
-            // Unreachable: `repository_alias` is either "self" (handled above)
-            // or a key produced by iterating `ctx.allowed_repositories`, so the
-            // lookup cannot miss. Kept as a fail-closed guard in case the
-            // canonicalization and the map ever drift apart.
-            debug_assert!(
-                false,
-                "canonical alias '{repository_alias}' is absent from allowed_repositories"
-            );
-            return Ok(ExecutionResult::failure(format!(
-                "Repository alias '{}' has no configured repository",
-                repository_alias
-            )));
-        };
-        debug!("Resolved repository ID: {}", repo_id);
 
         // Get ADO configuration
         let org_url = ctx
@@ -713,119 +1255,19 @@ impl Executor for CreatePrResult {
             "ADO org: {}, organization: {}, project: {}",
             org_url, organization, project
         );
+        let ado = AdoConnection {
+            org_url,
+            project,
+            token,
+        };
 
         // Validate and read the patch file
         let patch_path = ctx.working_directory.join(&self.patch_file);
-        if !patch_path.exists() {
-            return Ok(ExecutionResult::failure(format!(
-                "Patch file not found: {}",
-                self.patch_file
-            )));
-        }
-
-        // Security: Enforce patch file size limit
-        let metadata = tokio::fs::metadata(&patch_path)
-            .await
-            .context("Failed to get patch file metadata")?;
-        if metadata.len() > MAX_PATCH_SIZE_BYTES {
-            return Ok(ExecutionResult::failure(format!(
-                "Patch file exceeds maximum size of {} bytes (got {} bytes)",
-                MAX_PATCH_SIZE_BYTES,
-                metadata.len()
-            )));
-        }
-
-        // Read patch content for validation
-        debug!("Reading patch file content");
-        let patch_content = tokio::fs::read_to_string(&patch_path)
-            .await
-            .context("Failed to read patch file")?;
-        debug!("Patch content size: {} bytes", patch_content.len());
-
-        // SHA-256 integrity check: verify the patch file hasn't been tampered
-        // with between Stage 1 and Stage 3.
-        let live_hash = crate::hash::sha256_hex(patch_content.as_bytes());
-        if live_hash != self.patch_sha256 {
-            return Ok(ExecutionResult::failure(format!(
-                "Patch file SHA-256 mismatch: expected {}, got {} — \
-                 the file may have been tampered with between stages",
-                self.patch_sha256, live_hash
-            )));
-        }
-        debug!("Patch file SHA-256 verified: {}", live_hash);
-
-        // Excluded files are handled via --exclude flags on git am / git apply,
-        // which filters them at the git level rather than post-processing patch content.
-        // This is the same approach used by gh-aw (via :(exclude) pathspecs).
-        // Note: Exclusion happens during patch application (before the protection check).
-        // If a protected file matches an excluded-files pattern, it is silently dropped
-        // from the patch rather than triggering a protection error.
-        let exclude_args: Vec<String> = config
-            .excluded_files
-            .iter()
-            .map(|p| format!("--exclude={}", p))
-            .collect();
-        if !exclude_args.is_empty() {
-            debug!(
-                "Will apply {} excluded-files patterns via --exclude flags",
-                exclude_args.len()
-            );
-        }
-
-        // Security: Validate patch paths before applying
-        debug!("Validating patch paths for security");
-        if let Err(e) = validate_patch_paths(&patch_content) {
-            warn!("Patch path validation failed: {}", e);
-            return Ok(ExecutionResult::failure(format!(
-                "Patch validation failed: {}",
-                e
-            )));
-        }
-        debug!("Patch path validation passed");
-
-        // Extract file paths from patch for validation.
-        // Filter out excluded files before the protection check — if a protected file
-        // matches an excluded-files pattern, it will be excluded from the patch by
-        // git am/apply --exclude and should not trigger a protection error.
-        let patch_paths: Vec<String> = extract_paths_from_patch(&patch_content)
-            .into_iter()
-            .filter(|p| {
-                !config
-                    .excluded_files
-                    .iter()
-                    .any(|pat| glob_match_simple(pat, p))
-            })
-            .collect();
-
-        // Security: File protection check
-        if config.protected_files != ProtectedFiles::Allowed {
-            let protected = find_protected_files(&patch_paths);
-            if !protected.is_empty() {
-                warn!(
-                    "Patch modifies {} protected file(s): {:?}",
-                    protected.len(),
-                    protected
-                );
-                return Ok(ExecutionResult::failure(format!(
-                    "Patch modifies protected files (set protected-files: allowed to override): {}",
-                    protected.join(", ")
-                )));
-            }
-        }
-
-        // Security: Max files per PR check (count diff blocks, not paths, to avoid
-        // double-counting renames which appear in both --- and +++ lines)
-        let file_count = count_patch_files(&patch_content);
-        if file_count > config.max_files {
-            warn!(
-                "Patch contains {} files, exceeding max of {}",
-                file_count, config.max_files
-            );
-            return Ok(ExecutionResult::failure(format!(
-                "Patch contains {} files, exceeding maximum of {} files per PR",
-                file_count, config.max_files
-            )));
-        }
+        let (_patch_content, exclude_args) =
+            match self.read_and_validate_patch(ctx, &config).await? {
+                Ok(pair) => pair,
+                Err(result) => return Ok(result),
+            };
 
         // Resolve the target (base) branch for THIS repo. In a multi-checkout
         // ("meta repo") setup the target can differ per repo (explicit
@@ -841,197 +1283,20 @@ impl Executor for CreatePrResult {
         let target_ref = format!("refs/heads/{}", target_branch);
         debug!("Source ref: {}, Target ref: {}", source_ref, target_ref);
 
-        let repo_git_dir =
-            crate::safe_outputs::resolve_repository_checkout_dir(&repository_alias, ctx)?;
-        debug!("Git repository directory: {}", repo_git_dir.display());
-
-        // Verify this is a git repository
-        debug!("Verifying git repository");
-        let git_check = Command::new("git")
-            .args(["rev-parse", "--git-dir"])
-            .current_dir(&repo_git_dir)
-            .output()
-            .await
-            .context("Failed to verify git repository")?;
-
-        if !git_check.status.success() {
-            warn!("Not a git repository: {}", repo_git_dir.display());
-            return Ok(ExecutionResult::failure(format!(
-                "Not a git repository: {}",
-                repo_git_dir.display()
-            )));
-        }
-        debug!("Git repository verified");
-
-        // Create a temporary directory for the worktree
-        let temp_dir = tempfile::tempdir().context("Failed to create temp directory")?;
-        let worktree_path = temp_dir.path().join("worktree");
-        debug!("Creating worktree at: {}", worktree_path.display());
-
-        // Create a worktree at the target branch
-        let worktree_output = Command::new("git")
-            .args([
-                "worktree",
-                "add",
-                &worktree_path.to_string_lossy(),
-                &format!("origin/{}", target_branch),
-            ])
-            .current_dir(&repo_git_dir)
-            .output()
-            .await
-            .context("Failed to create git worktree")?;
-
-        if !worktree_output.status.success() {
-            debug!(
-                "Worktree creation with origin/ prefix failed, trying without: {}",
-                String::from_utf8_lossy(&worktree_output.stderr)
-            );
-            // Try with just the branch name if origin/ prefix fails
-            let worktree_output = Command::new("git")
-                .args([
-                    "worktree",
-                    "add",
-                    &worktree_path.to_string_lossy(),
-                    target_branch,
-                ])
-                .current_dir(&repo_git_dir)
-                .output()
-                .await
-                .context("Failed to create git worktree")?;
-
-            if !worktree_output.status.success() {
-                warn!(
-                    "Failed to create worktree: {}",
-                    String::from_utf8_lossy(&worktree_output.stderr)
-                );
-                return Ok(ExecutionResult::failure(format!(
-                    "Failed to create worktree: {}",
-                    String::from_utf8_lossy(&worktree_output.stderr)
-                )));
-            }
-        }
-        debug!("Worktree created successfully");
-
-        // Ensure worktree cleanup on exit
-        let _worktree_guard = WorktreeGuard {
-            repo_dir: repo_git_dir.clone(),
-            worktree_path: worktree_path.clone(),
-        };
-
-        // Create and checkout a local branch in the worktree for patch application.
-        // Note: this local branch name may differ from the final remote branch name
-        // if a collision is detected later — the ADO push is REST-only, so the local
-        // branch name is not used for the remote ref.
-        debug!("Creating source branch: {}", source_branch);
-        let checkout_output = Command::new("git")
-            .args(["checkout", "-b", &source_branch])
-            .current_dir(&worktree_path)
-            .output()
-            .await
-            .context("Failed to create source branch")?;
-
-        if !checkout_output.status.success() {
-            warn!(
-                "Failed to create source branch: {}",
-                String::from_utf8_lossy(&checkout_output.stderr)
-            );
-            return Ok(ExecutionResult::failure(format!(
-                "Failed to create source branch: {}",
-                String::from_utf8_lossy(&checkout_output.stderr)
-            )));
-        }
-        debug!("Source branch created");
-
-        // Record the worktree HEAD before applying the patch so we can diff against
-        // it later. For multi-commit patches, git am creates N commits and diff-tree HEAD
-        // alone only shows the last commit's changes — we need base_sha..HEAD.
-        let base_sha_output = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&worktree_path)
-            .output()
-            .await
-            .context("Failed to get worktree HEAD SHA")?;
-        let base_sha = String::from_utf8_lossy(&base_sha_output.stdout)
-            .trim()
-            .to_string();
-        debug!("Worktree base SHA before patch: {}", base_sha);
-
-        // Apply the patch. Strategy depends on whether excluded-files are configured:
-        // - Without exclusions: prefer git am --3way (preserves commit metadata)
-        //   with git apply --3way as fallback
-        // - With exclusions: use git apply --3way directly (git am does not support
-        //   --exclude flags; git apply does)
-        let patch_committed =
-            match apply_patch_to_worktree(&worktree_path, &patch_path, &exclude_args).await? {
-                Ok(committed) => committed,
-                Err(result) => return Ok(result),
-            };
-
-        // Collect changed files. The method depends on how the patch was applied:
-        // - git am: changes are committed → use git diff-tree to compare base_sha..HEAD
-        //   (covers all commits in multi-commit patches, not just the last one)
-        // - git apply: changes are in working tree → use git status --porcelain
-        debug!("Getting list of changed files");
-        let (status_str, use_diff_tree) = if patch_committed {
-            let diff_tree_output = Command::new("git")
-                .args(["diff-tree", "-r", "--name-status", &base_sha, "HEAD"])
-                .current_dir(&worktree_path)
-                .output()
-                .await
-                .context("Failed to run git diff-tree")?;
-
-            if !diff_tree_output.status.success() {
-                warn!(
-                    "Failed to get diff-tree: {}",
-                    String::from_utf8_lossy(&diff_tree_output.stderr)
-                );
-                return Ok(ExecutionResult::failure(format!(
-                    "Failed to get diff-tree: {}",
-                    String::from_utf8_lossy(&diff_tree_output.stderr)
-                )));
-            }
-            (
-                String::from_utf8_lossy(&diff_tree_output.stdout).to_string(),
-                true,
+        let (changes, skipped_symlinks) = match self
+            .setup_worktree_and_collect_changes(
+                &repository_alias,
+                ctx,
+                target_branch,
+                &source_branch,
+                &patch_path,
+                &exclude_args,
             )
-        } else {
-            let status_output = Command::new("git")
-                .args(["status", "--porcelain"])
-                .current_dir(&worktree_path)
-                .output()
-                .await
-                .context("Failed to run git status")?;
-
-            if !status_output.status.success() {
-                warn!(
-                    "Failed to get git status: {}",
-                    String::from_utf8_lossy(&status_output.stderr)
-                );
-                return Ok(ExecutionResult::failure(format!(
-                    "Failed to get git status: {}",
-                    String::from_utf8_lossy(&status_output.stderr)
-                )));
-            }
-            (
-                String::from_utf8_lossy(&status_output.stdout).to_string(),
-                false,
-            )
+            .await?
+        {
+            Ok(pair) => pair,
+            Err(result) => return Ok(result),
         };
-
-        debug!("Change detection output:\n{}", status_str);
-        let (changes, skipped_symlinks) = if use_diff_tree {
-            collect_changes_from_diff_tree(&worktree_path, &status_str).await?
-        } else {
-            collect_changes_from_worktree(&worktree_path, &status_str).await?
-        };
-        debug!("Collected {} file changes for push", changes.len());
-        if !skipped_symlinks.is_empty() {
-            warn!(
-                "Skipped {} symlink(s) when collecting PR file changes: {}",
-                skipped_symlinks.len(),
-                skipped_symlinks.join(", ")
-            );
-        }
 
         if changes.is_empty() {
             return Ok(handle_no_changes(&config, &skipped_symlinks));
@@ -1040,56 +1305,19 @@ impl Executor for CreatePrResult {
         // Use ADO REST API to create branch and push changes
         let client = reqwest::Client::new();
 
-        // Get the target branch ref to find the base commit
-        debug!("Getting target branch ref from ADO");
-        let refs_url = format!(
-            "{}{}/_apis/git/repositories/{}/refs?filter=heads/{}&api-version=7.1",
-            org_url, project, repo_id, target_branch
-        );
-        debug!("Refs URL: {}", refs_url);
-
         // Resolve the base commit for the push.
         // Prefer the merge-base SHA recorded at patch generation time (Stage 1) so the
         // patch is applied against the exact commit it was created from.  Fall back to
         // querying the ADO refs API when the field is absent (backward compat with old
         // NDJSON entries).
-        let base_commit: String = if let Some(ref recorded) = self.base_commit {
-            // Validate SHA format before trusting Stage 1 data
-            if recorded.len() != 40 || !recorded.chars().all(|c| c.is_ascii_hexdigit()) {
-                anyhow::bail!(
-                    "Invalid base_commit SHA from Stage 1 NDJSON: {:?}",
-                    recorded
-                );
-            }
-            info!("Using recorded base_commit from Stage 1: {}", recorded);
-            recorded.clone()
-        } else {
-            debug!("No recorded base_commit — resolving from ADO refs API");
-            let refs_response = client
-                .get(&refs_url)
-                .basic_auth("", Some(token))
-                .send()
-                .await
-                .context("Failed to get target branch ref")?;
-
-            if !refs_response.status().is_success() {
-                let status = refs_response.status();
-                let body = refs_response.text().await.unwrap_or_default();
-                warn!("Failed to get target branch ref: {} - {}", status, body);
-                return Ok(ExecutionResult::failure(format!(
-                    "Failed to get target branch ref: {} - {}",
-                    status, body
-                )));
-            }
-
-            let refs_data: serde_json::Value = refs_response.json().await?;
-            let resolved = refs_data["value"][0]["objectId"]
-                .as_str()
-                .context("Could not find target branch commit")?;
-            resolved.to_string()
+        let base_commit = match self
+            .resolve_base_commit(&client, &ado, &repo_id, target_branch)
+            .await?
+        {
+            Ok(commit) => commit,
+            Err(result) => return Ok(result),
         };
         debug!("Base commit: {}", base_commit);
-
         info!(
             "Base commit for target branch '{}': {}",
             target_branch, base_commit
@@ -1097,41 +1325,9 @@ impl Executor for CreatePrResult {
 
         // Check if the source branch already exists (e.g. from a retry or previous run).
         // Retry with new random suffixes up to 3 times.
-        for attempt in 0..3 {
-            let check_ref_url = format!(
-                "{}{}/_apis/git/repositories/{}/refs?filter=heads/{}&api-version=7.1",
-                org_url, project, repo_id, source_branch
-            );
-            debug!(
-                "Checking if source branch exists (attempt {}): {}",
-                attempt + 1,
-                check_ref_url
-            );
-
-            let check_ref_response = client
-                .get(&check_ref_url)
-                .basic_auth("", Some(token))
-                .send()
-                .await
-                .context("Failed to check source branch existence")?;
-
-            if check_ref_response.status().is_success() {
-                let check_data: serde_json::Value = check_ref_response.json().await?;
-                let refs = check_data["value"].as_array();
-                if refs.is_some_and(|r| !r.is_empty()) {
-                    warn!(
-                        "Branch '{}' already exists, generating new suffix (attempt {})",
-                        source_branch,
-                        attempt + 1
-                    );
-                    source_branch = rename_branch_suffix(&source_branch, &random_branch_suffix());
-                    source_ref = format!("refs/heads/{}", source_branch);
-                    info!("Renamed source branch to '{}'", source_branch);
-                    continue;
-                }
-            }
-            break;
-        }
+        (source_branch, source_ref) = self
+            .ensure_unique_source_branch(&client, &ado, &repo_id, source_branch, source_ref)
+            .await?;
 
         // Push changes via ADO API (this creates the branch and commits in one call)
         info!("Pushing changes to ADO");
@@ -1182,41 +1378,16 @@ impl Executor for CreatePrResult {
         );
         debug!("PR URL: {}", pr_url);
 
-        let mut pr_body = serde_json::json!({
-            "sourceRefName": source_ref,
-            "targetRefName": target_ref,
-            "title": effective_title,
-            "description": description_final,
-            "isDraft": config.draft,
-        });
-
-        // Add work item links if configured
-        if !config.work_items.is_empty() {
-            debug!("Linking {} work items", config.work_items.len());
-            pr_body["workItemRefs"] = serde_json::json!(
-                config
-                    .work_items
-                    .iter()
-                    .map(|id| serde_json::json!({"id": id}))
-                    .collect::<Vec<_>>()
-            );
-        }
-
-        // Validate and add labels (merge operator labels + validated agent labels)
-        let all_labels = match validate_and_build_labels(&config, &self.agent_labels) {
-            Ok(labels) => labels,
+        let pr_body = match self.build_pr_body(
+            &config,
+            &effective_title,
+            &description_final,
+            &source_ref,
+            &target_ref,
+        ) {
+            Ok(body) => body,
             Err(result) => return Ok(result),
         };
-
-        if !all_labels.is_empty() {
-            debug!("Adding {} labels", all_labels.len());
-            pr_body["labels"] = serde_json::json!(
-                all_labels
-                    .iter()
-                    .map(|l| serde_json::json!({"name": l}))
-                    .collect::<Vec<_>>()
-            );
-        }
 
         let pr_response = client
             .post(&pr_url)
@@ -1234,40 +1405,11 @@ impl Executor for CreatePrResult {
             // Record branch info for manual recovery if enabled
             if config.fallback_record_branch {
                 info!("PR creation failed, recording branch info for manual recovery");
-                let fallback_description = format!(
-                    "## Pull Request Creation Failed\n\n\
-                    A pull request could not be created automatically.\n\n\
-                    **Branch:** `{}`\n\
-                    **Target:** `{}`\n\
-                    **Repository:** `{}`\n\n\
-                    **Error:** {} - {}\n\n\
-                    ### Original PR Description\n\n\
-                    {}\n\n\
-                    ---\n\
-                    *To create the PR manually, merge branch `{}` into `{}`.*",
-                    source_branch,
-                    target_branch,
-                    self.repository,
+                return Ok(self.build_fallback_failure_result(
                     status,
-                    sanitize_text(truncate_error_body(&body, 500)),
-                    sanitize_text(&self.description),
-                    source_branch,
-                    target_branch
-                );
-                return Ok(ExecutionResult::failure_with_data(
-                    format!(
-                        "Failed to create pull request: {} - {}. Branch '{}' was pushed — create the PR manually.",
-                        status,
-                        sanitize_text(truncate_error_body(&body, 500)),
-                        source_branch,
-                    ),
-                    serde_json::json!({
-                        "fallback": "branch-recorded",
-                        "branch": source_branch,
-                        "target_branch": target_branch,
-                        "repository": self.repository,
-                        "description": fallback_description
-                    }),
+                    &body,
+                    &source_branch,
+                    target_branch,
                 ));
             }
 
