@@ -886,7 +886,8 @@ mod tests {
         ] {
             let split = tag.len() / 2;
             let (prefix, suffix) = tag.split_at(split);
-            let input = format!("<{prefix}<{tag}>{suffix}>payload</{prefix}</{tag}>{suffix}>");
+            let input =
+                format!("<{prefix}<{tag}></{tag}>{suffix}>payload</{prefix}</{tag}>{suffix}>");
             let output = sanitize_markdown(&input);
 
             assert!(output.contains("payload"), "{tag}: {output}");
