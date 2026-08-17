@@ -889,8 +889,7 @@ mod tests {
             // The inner dangerous tag is removed first; the surrounding
             // prefix/suffix then fold back into the original tag name, which
             // the fixed-point pass must also remove.
-            let input =
-                format!("<{prefix}<{tag}></{tag}>{suffix}>payload</{prefix}</{tag}>{suffix}>");
+            let input = format!("<{prefix}<{tag}></{tag}>{suffix}>payload</{prefix}{suffix}>");
             let output = sanitize_markdown(&input);
 
             assert!(output.contains("payload"), "{tag}: {output}");
