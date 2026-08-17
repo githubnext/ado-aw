@@ -316,17 +316,24 @@ fn validate_patch_fields(
         validate_unique_patch_field(&mut fields, "tags", "System.Tags")?;
     }
 
-    let mut custom_fields: Vec<_> = config
-        .custom_fields
-        .keys()
-        .map(AdoWorkItemFieldRef::as_str)
-        .collect();
-    custom_fields.sort_unstable_by(|a, b| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()));
-    for field in custom_fields {
+    for (field, _) in sorted_custom_fields(&config.custom_fields) {
         validate_unique_patch_field(&mut fields, "custom-fields", field)?;
     }
 
     Ok(())
+}
+
+fn sorted_custom_fields(
+    custom_fields: &std::collections::HashMap<AdoWorkItemFieldRef, String>,
+) -> Vec<(&str, &str)> {
+    let mut custom_fields: Vec<_> = custom_fields
+        .iter()
+        .map(|(field, value)| (field.as_str(), value.as_str()))
+        .collect();
+    custom_fields.sort_unstable_by(|(a, _), (b, _)| {
+        a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase())
+    });
+    custom_fields
 }
 
 /// Build an artifact link relation patch operation
@@ -579,7 +586,7 @@ impl Executor for CreateWorkItemResult {
         }
 
         // Add any custom fields
-        for (field, value) in &config.custom_fields {
+        for (field, value) in sorted_custom_fields(&config.custom_fields) {
             patch_doc.push(field_op(field, value));
         }
 
@@ -1032,6 +1039,23 @@ tags:
     }
 
     #[test]
+    fn test_patch_field_validation_rejects_custom_field_default_system_description_collision() {
+        let mut config = CreateWorkItemConfig::default();
+        config.custom_fields.insert(
+            AdoWorkItemFieldRef::parse("System.Description").unwrap(),
+            "overridden body".to_string(),
+        );
+        let error = validate_patch_fields(&config, description_field_for(&config), false)
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(
+            error,
+            "custom-fields field 'System.Description' duplicates default description-field field 'System.Description'"
+        );
+    }
+
+    #[test]
     fn test_patch_field_validation_rejects_custom_field_builtin_collisions() {
         let cases = [
             ("area-path", "System.AreaPath", false),
@@ -1063,6 +1087,24 @@ tags:
                 format!("custom-fields field '{field}' duplicates {label} field '{field}'")
             );
         }
+    }
+
+    #[test]
+    fn test_sorted_custom_fields_orders_case_insensitively() {
+        let mut custom_fields = std::collections::HashMap::new();
+        custom_fields.insert(
+            AdoWorkItemFieldRef::parse("Custom.Zeta").unwrap(),
+            "last".to_string(),
+        );
+        custom_fields.insert(
+            AdoWorkItemFieldRef::parse("Custom.alpha").unwrap(),
+            "first".to_string(),
+        );
+
+        assert_eq!(
+            sorted_custom_fields(&custom_fields),
+            vec![("Custom.alpha", "first"), ("Custom.Zeta", "last")]
+        );
     }
 
     #[test]

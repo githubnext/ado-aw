@@ -80,6 +80,7 @@ pub(crate) fn sanitize_markdown(input: &str) -> String {
     s = neutralize_mentions(&s);
     s = neutralize_bot_triggers(&s);
     s = remove_xml_comments(&s);
+    s = enforce_content_limits(&s);
     s = neutralize_dangerous_html(&s);
     s = sanitize_url_protocols(&s);
     s = enforce_content_limits(&s);
@@ -256,13 +257,13 @@ static RE_AB_LINK: LazyLock<regex_lite::Regex> =
 static RE_SLASH_CMD: LazyLock<regex_lite::Regex> =
     LazyLock::new(|| regex_lite::Regex::new(r"(?m)^(/[a-zA-Z][\w-]*)").unwrap());
 static RE_EVENT_HANDLER_ATTR_DQ: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
-    regex_lite::Regex::new(r#"(?i)([<\s])on[a-z][a-z0-9_-]*\s*=\s*"[^"]*""#).unwrap()
+    regex_lite::Regex::new(r#"(?i)([<\s/])on[a-z][a-z0-9_-]*\s*=\s*"[^"]*""#).unwrap()
 });
 static RE_EVENT_HANDLER_ATTR_SQ: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
-    regex_lite::Regex::new(r#"(?i)([<\s])on[a-z][a-z0-9_-]*\s*=\s*'[^']*'"#).unwrap()
+    regex_lite::Regex::new(r#"(?i)([<\s/])on[a-z][a-z0-9_-]*\s*=\s*'[^']*'"#).unwrap()
 });
 static RE_EVENT_HANDLER_ATTR_BARE: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
-    regex_lite::Regex::new(r#"(?i)([<\s])on[a-z][a-z0-9_-]*\s*=\s*[^\s"'=<>`]*"#).unwrap()
+    regex_lite::Regex::new(r#"(?i)([<\s/])on[a-z][a-z0-9_-]*\s*=\s*[^\s"'=<>`]*"#).unwrap()
 });
 
 /// Neutralize bot command patterns and Azure DevOps work item link syntax.
@@ -870,6 +871,22 @@ mod tests {
     }
 
     #[test]
+    fn test_sanitize_markdown_strips_folded_dangerous_tags_to_fixed_point() {
+        for tag in [
+            "iframe", "object", "embed", "form", "input", "button", "textarea", "select", "option",
+            "base", "meta", "link", "svg", "math", "style",
+        ] {
+            let split = tag.len() / 2;
+            let (prefix, suffix) = tag.split_at(split);
+            let input = format!("<{prefix}<{tag}>{suffix}>payload</{prefix}</{tag}>{suffix}>");
+            let output = sanitize_markdown(&input);
+
+            assert_eq!(output, "payload", "{tag}");
+            assert!(!output.contains(&format!("<{tag}")), "{tag}: {output}");
+        }
+    }
+
+    #[test]
     fn test_sanitize_markdown_strips_dangerous_tags_folded_into_attribute_span() {
         let output = sanitize_markdown(r#"<div title="><script>alert(1)</script>">safe</div>"#);
 
@@ -900,6 +917,17 @@ mod tests {
         assert!(!output.contains("onmouseover"));
         assert!(!output.contains("onerror"));
         assert!(!output.contains("doWork"));
+    }
+
+    #[test]
+    fn test_sanitize_markdown_strips_slash_separated_event_handler_attrs() {
+        let output = sanitize_markdown(r#"<img/onerror=alert(1)><a/onmouseover="evil()">link</a>"#);
+
+        assert_eq!(output, r#"<img/><a/>link</a>"#);
+        assert!(!output.contains("onerror"));
+        assert!(!output.contains("onmouseover"));
+        assert!(!output.contains("alert"));
+        assert!(!output.contains("evil"));
     }
 
     #[test]
