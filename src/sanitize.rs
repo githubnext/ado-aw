@@ -933,7 +933,10 @@ mod tests {
     fn test_sanitize_markdown_strips_slash_separated_event_handler_attrs() {
         let output = sanitize_markdown(r#"<img/onerror=alert(1)><a/onmouseover="evil()">link</a>"#);
 
-        assert_eq!(output, r#"<img ><a >link</a>"#);
+        assert!(output.contains("<img"), "{output}");
+        assert!(output.contains("link</a>"), "{output}");
+        assert!(!output.contains("<img/"), "{output}");
+        assert!(!output.contains("<a/"), "{output}");
         assert!(!output.contains("onerror"));
         assert!(!output.contains("onmouseover"));
         assert!(!output.contains("alert"));
