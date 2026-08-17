@@ -420,11 +420,7 @@ fn strip_event_handler_attrs(tag: &str) -> String {
 }
 
 fn event_handler_attr_replacement(caps: &regex_lite::Captures<'_>) -> String {
-    if &caps[1] == "/" {
-        " ".to_string()
-    } else {
-        caps[1].to_string()
-    }
+    caps[1].replace('/', " ")
 }
 
 fn strip_dangerous_html_tags(input: &str) -> String {
