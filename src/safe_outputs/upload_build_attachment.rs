@@ -925,6 +925,7 @@ attachment-type: "agent-artifact"
             github_api_url: "https://api.github.com".to_string(),
             allowed_repositories: std::collections::HashMap::new(),
             repo_refs: std::collections::HashMap::new(),
+            cross_organization_repositories: std::collections::HashSet::new(),
             agent_stats: None,
             dry_run,
             build_id: Some(1234),

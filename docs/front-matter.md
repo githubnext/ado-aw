@@ -554,6 +554,13 @@ Aliases must be unique case-insensitively because they become checkout
 directory names on Windows agents. `root`, `repo`, and `self` are reserved in
 every casing; `self` is the compiler-owned path for the pipeline repository.
 
+> **Cross-organization `type: git` repositories.** A `type: git` entry with an
+> `endpoint:` set (used for a repository outside the pipeline's own Azure
+> DevOps organization) checks out correctly, but `create-pull-request` cannot
+> yet target it: Stage 3 composes every ADO Git REST call from the pipeline's
+> own organization/project. See the limitation note under
+> [`create-pull-request`](safe-outputs.md#create-pull-request).
+
 ### Tuning checkout fetch behavior (`fetch-depth` / `fetch-tags`)
 
 On large monorepos the checkout step can dominate the run. Azure DevOps can

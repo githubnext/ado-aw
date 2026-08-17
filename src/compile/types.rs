@@ -2668,6 +2668,26 @@ impl FrontMatter {
         })
     }
 
+    /// Checked-out repo aliases whose `repos:` entry is `type: git` with an
+    /// `endpoint:` set — the documented signal that the repository lives in a
+    /// **different** Azure DevOps organization than the pipeline (same-org
+    /// Azure Repos `git` entries never need an `endpoint:`, per the `repos:`
+    /// field reference in `docs/front-matter.md`). Stage 3 composes every ADO
+    /// Git REST call from the pipeline's own organization/project, so these
+    /// aliases cannot yet be targeted by repo-write safe outputs like
+    /// `create-pull-request`.
+    pub fn checkout_cross_organization_repo_aliases(&self) -> std::collections::HashSet<String> {
+        self.repositories
+            .iter()
+            .filter(|r| {
+                r.repo_type == "git"
+                    && r.endpoint.is_some()
+                    && self.checkout.iter().any(|a| a == &r.repository)
+            })
+            .map(|r| r.repository.clone())
+            .collect()
+    }
+
     /// Map each checked-out repo alias to its `repos: ref`, for resolving a
     /// per-repo create-pull-request target branch. `self` is intentionally
     /// absent (its ref is the runtime trigger branch, not a static `repos:` ref).
@@ -7323,6 +7343,61 @@ Body
 "#;
         let (fm, _) = super::super::common::parse_markdown(absent).unwrap();
         assert!(fm.create_pr_config().is_none());
+    }
+
+    #[test]
+    fn test_checkout_cross_organization_repo_aliases_flags_endpoint_git_repos() {
+        let content = r#"---
+name: "Cross-org Agent"
+description: "x"
+repos:
+  - One/azlocal-overlay
+  - name: AzureForOperatorsIndustry/nc-api-testing
+    ref: refs/heads/main
+    endpoint: afoi-x-org-pipeline
+  - name: AzureForOperatorsIndustry/nc-resource-testing
+    ref: refs/heads/main
+    endpoint: afoi-x-org-pipeline
+    checkout: false
+safe-outputs:
+  create-pull-request:
+---
+
+Body
+"#;
+        let (mut fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let (repos, checkout, checkout_fetch) = super::super::common::resolve_repos(&fm).unwrap();
+        fm.repositories = repos;
+        fm.checkout = checkout;
+        fm.checkout_fetch = checkout_fetch;
+
+        let cross_org = fm.checkout_cross_organization_repo_aliases();
+        // Only checked-out aliases participate; `nc-resource-testing` opts out
+        // of checkout, so it must not appear even though it has an `endpoint:`.
+        assert_eq!(
+            cross_org,
+            std::collections::HashSet::from(["nc-api-testing".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_checkout_cross_organization_repo_aliases_empty_for_same_org_repos() {
+        let content = r#"---
+name: "Same-org Agent"
+description: "x"
+repos:
+  - One/azlocal-overlay
+---
+
+Body
+"#;
+        let (mut fm, _) = super::super::common::parse_markdown(content).unwrap();
+        let (repos, checkout, checkout_fetch) = super::super::common::resolve_repos(&fm).unwrap();
+        fm.repositories = repos;
+        fm.checkout = checkout;
+        fm.checkout_fetch = checkout_fetch;
+
+        assert!(fm.checkout_cross_organization_repo_aliases().is_empty());
     }
 
     #[test]

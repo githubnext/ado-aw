@@ -819,6 +819,19 @@ struct ResolvedExecutionConfig {
 struct ResolvedExecutionRepository {
     repository: String,
     name: String,
+    /// ADO repository resource type (`"git"`, `"github"`, …). Defaults to
+    /// `"git"` for resolved-config JSON emitted before this field existed.
+    #[serde(default = "default_resolved_repo_type", rename = "type")]
+    repo_type: String,
+    /// Service connection name, when set. Present alongside `type: git` only
+    /// for a repository in a different Azure DevOps organization — see
+    /// `FrontMatter::checkout_cross_organization_repo_aliases`.
+    #[serde(default)]
+    endpoint: Option<String>,
+}
+
+fn default_resolved_repo_type() -> String {
+    "git".to_string()
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -868,6 +881,18 @@ async fn build_execution_context_from_resolved(
                 .map(|repository| (alias.clone(), repository.name.clone()))
         })
         .collect();
+    let cross_organization_repositories = config
+        .checkout
+        .iter()
+        .filter(|alias| {
+            config.repositories.iter().any(|repository| {
+                &repository.repository == *alias
+                    && repository.repo_type == "git"
+                    && repository.endpoint.is_some()
+            })
+        })
+        .cloned()
+        .collect();
 
     let mut ctx = crate::safe_outputs::ExecutionContext::default();
     if let Some(url) = ado_org_url {
@@ -881,6 +906,7 @@ async fn build_execution_context_from_resolved(
     ctx.tool_configs = config.tool_configs.clone();
     ctx.allowed_repositories = allowed_repositories;
     ctx.repo_refs = config.repo_refs.clone();
+    ctx.cross_organization_repositories = cross_organization_repositories;
     ctx.dry_run = dry_run;
 
     let otel_path = safe_output_dir.join(agent_stats::OTEL_FILENAME);
@@ -1082,6 +1108,8 @@ async fn build_execution_context(
     // the same helper the compiler uses at build time, so the two paths cannot
     // diverge.
     ctx.repo_refs = front_matter.checkout_repo_refs();
+    ctx.cross_organization_repositories =
+        front_matter.checkout_cross_organization_repo_aliases();
     ctx.dry_run = dry_run;
 
     // Load agent stats from OTel JSONL if available

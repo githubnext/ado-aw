@@ -224,6 +224,33 @@ async fn compile_pipeline_inner(
     // Validate checkout list against repositories
     common::validate_checkout_list(&front_matter.repositories, &front_matter.checkout)?;
 
+    // Cross-organization `create-pull-request` advisory (warning-only): a
+    // `repos:` alias whose `type: git` entry sets `endpoint:` lives in a
+    // different Azure DevOps organization than the pipeline. Stage 3 composes
+    // every ADO Git REST call from the pipeline's own organization/project, so
+    // `create-pull-request` cannot yet target such an alias — surface this at
+    // compile time rather than as a confusing runtime 404 (see issue #1934).
+    if front_matter.safe_outputs.contains_key("create-pull-request") {
+        let cross_org_aliases = front_matter.checkout_cross_organization_repo_aliases();
+        if !cross_org_aliases.is_empty() {
+            let mut aliases: Vec<&String> = cross_org_aliases.iter().collect();
+            aliases.sort();
+            let aliases = aliases
+                .iter()
+                .map(|a| a.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            eprintln!(
+                "Warning: create-pull-request is enabled and repos: checks out {aliases} from \
+                 another Azure DevOps organization (a `type: git` entry with `endpoint:` set). \
+                 create-pull-request cannot yet target a cross-organization repository — it \
+                 composes every Git API call against this pipeline's own organization and \
+                 project, so a call against {aliases} will fail at runtime even though checkout \
+                 succeeds."
+            );
+        }
+    }
+
     // Checkout-aware path-layout advisories (warning-only): surface
     // hand-written paths that won't exist under the resolved checkout
     // layout, plus deprecated directory markers left in the agent body.

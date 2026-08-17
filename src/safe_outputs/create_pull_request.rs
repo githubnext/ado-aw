@@ -493,6 +493,33 @@ pub(crate) fn short_branch(git_ref: &str) -> &str {
         .unwrap_or(git_ref)
 }
 
+/// Returns a clear failure result when `repository` resolves to a checkout
+/// alias flagged as cross-organization (`ctx.cross_organization_repositories`).
+///
+/// `create-pull-request` composes every Git REST call from the pipeline's own
+/// `ado_org_url`/`ado_project`, so a `repos:` alias checked out from another
+/// Azure DevOps organization via an `endpoint:` service connection cannot be
+/// targeted correctly today — the request would silently resolve against the
+/// wrong organization (a 404, not a permissions error). Rejecting this
+/// up front, before any network call, replaces that confusing failure with an
+/// actionable one and lets `--dry-run` catch it too (issue #1934).
+fn reject_cross_organization_repository(
+    repository: &str,
+    ctx: &ExecutionContext,
+) -> Option<ExecutionResult> {
+    let alias = crate::safe_outputs::canonical_repository_alias(repository, ctx)?;
+    if !ctx.cross_organization_repositories.contains(&alias) {
+        return None;
+    }
+    Some(ExecutionResult::failure(format!(
+        "Repository '{repository}' (checkout alias '{alias}') is checked out from another \
+         Azure DevOps organization via a `repos:` `endpoint:` service connection. \
+         create-pull-request cannot yet target a cross-organization repository — it composes \
+         every Git API call against this pipeline's own organization and project. See \
+         docs/safe-outputs.md for details."
+    )))
+}
+
 impl CreatePrConfig {
     /// Resolve the target (base) branch for a PR against `repo_alias`
     /// (`"self"` or a `checkout:` alias). Shared by the compiler (to deepen the
@@ -592,6 +619,27 @@ impl Drop for WorktreeGuard {
 impl Executor for CreatePrResult {
     fn dry_run_summary(&self) -> String {
         format!("create PR: '{}' in repo '{}'", self.title, self.repository)
+    }
+
+    /// Rejects a cross-organization repository alias before the default
+    /// dry-run short-circuit, so `--dry-run` surfaces the same failure a real
+    /// run would hit instead of reporting a false "would execute" success
+    /// (issue #1934).
+    async fn execute_sanitized(
+        &mut self,
+        ctx: &ExecutionContext,
+    ) -> anyhow::Result<ExecutionResult> {
+        self.sanitize_content_fields();
+        if let Some(failure) = reject_cross_organization_repository(&self.repository, ctx) {
+            return Ok(failure);
+        }
+        if ctx.dry_run {
+            return Ok(ExecutionResult::success(format!(
+                "[DRY-RUN] Would execute: {}",
+                self.dry_run_summary()
+            )));
+        }
+        self.execute_impl(ctx).await
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
@@ -2599,6 +2647,79 @@ mod tests {
         assert_eq!(short_branch("refs/heads/"), "refs/heads/");
     }
 
+    fn cross_org_ctx() -> ExecutionContext {
+        ExecutionContext {
+            allowed_repositories: std::collections::HashMap::from([
+                ("cross-org-repo".to_string(), "OtherProj/cross-org-repo".to_string()),
+                ("same-org-repo".to_string(), "Proj/same-org-repo".to_string()),
+            ]),
+            cross_organization_repositories: std::collections::HashSet::from([
+                "cross-org-repo".to_string(),
+            ]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_reject_cross_organization_repository_flags_cross_org_alias() {
+        let ctx = cross_org_ctx();
+        let result = reject_cross_organization_repository("cross-org-repo", &ctx);
+        assert!(result.is_some());
+        let result = result.unwrap();
+        assert!(!result.success);
+        assert!(
+            result.message.contains("cross-organization"),
+            "message should explain the cross-organization limitation: {}",
+            result.message
+        );
+    }
+
+    #[test]
+    fn test_reject_cross_organization_repository_allows_same_org_alias() {
+        let ctx = cross_org_ctx();
+        assert!(reject_cross_organization_repository("same-org-repo", &ctx).is_none());
+        assert!(reject_cross_organization_repository("self", &ctx).is_none());
+    }
+
+    #[test]
+    fn test_reject_cross_organization_repository_matches_by_trailing_name() {
+        let ctx = cross_org_ctx();
+        // Matches through `lookup_allowed_repository_alias`'s trailing-name fallback.
+        assert!(reject_cross_organization_repository("cross-org-repo", &ctx).is_some());
+        assert!(
+            reject_cross_organization_repository("OtherProj/cross-org-repo", &ctx).is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dry_run_surfaces_cross_organization_rejection() {
+        let mut ctx = cross_org_ctx();
+        ctx.dry_run = true;
+
+        let mut result = CreatePrResult {
+            name: CreatePrResult::NAME.to_string(),
+            title: "Fix bug in parser".to_string(),
+            description: "This PR fixes a critical bug in the parser module.".to_string(),
+            source_branch: "agent/fix".to_string(),
+            patch_file: "patch.diff".to_string(),
+            repository: "cross-org-repo".to_string(),
+            agent_labels: vec![],
+            base_commit: None,
+            patch_sha256: "deadbeef".to_string(),
+        };
+
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(
+            !execution.success,
+            "dry-run must not report success for a cross-organization repository"
+        );
+        assert!(
+            execution.message.contains("cross-organization"),
+            "dry-run message should explain the limitation: {}",
+            execution.message
+        );
+    }
+
     #[test]
     fn test_target_branches_sanitizes_both_keys_and_values() {
         use crate::sanitize::SanitizeConfig;
@@ -3192,6 +3313,7 @@ index 0000000..abcdefg
             github_api_url: "https://api.github.com".to_string(),
             allowed_repositories: std::collections::HashMap::new(),
             repo_refs: std::collections::HashMap::new(),
+            cross_organization_repositories: std::collections::HashSet::new(),
             agent_stats: None,
             dry_run: false,
             build_id: None,

@@ -131,6 +131,14 @@ pub struct ExecutionContext {
     /// ref (full `refs/heads/…` or short). `self` is absent (its ref is the
     /// runtime trigger branch, not a static `repos:` ref).
     pub repo_refs: HashMap<String, String>,
+    /// Checkout aliases (keys of [`Self::allowed_repositories`]) whose
+    /// `repos:` entry is `type: git` with an `endpoint:` set — the documented
+    /// signal that the repository lives in a **different** Azure DevOps
+    /// organization than the pipeline. Every ADO Git REST call this executor
+    /// makes is composed from [`Self::ado_org_url`]/[`Self::ado_project`], so
+    /// a repository-write safe output must reject these aliases rather than
+    /// silently target the wrong organization (see issue #1934).
+    pub cross_organization_repositories: HashSet<String>,
     /// Agent execution statistics parsed from OTel JSONL
     pub agent_stats: Option<crate::agent_stats::AgentStats>,
     /// When true, executors validate inputs but skip network calls
@@ -409,6 +417,7 @@ impl ExecutionContext {
             repository_provider: env("BUILD_REPOSITORY_PROVIDER"),
             allowed_repositories: HashMap::new(),
             repo_refs: HashMap::new(),
+            cross_organization_repositories: HashSet::new(),
             agent_stats: None,
             dry_run: false,
 
