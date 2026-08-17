@@ -409,14 +409,22 @@ fn strip_event_handler_attrs_in_tags(input: &str) -> String {
 
 fn strip_event_handler_attrs(tag: &str) -> String {
     let s = RE_EVENT_HANDLER_ATTR_DQ
-        .replace_all(tag, |caps: &regex_lite::Captures| caps[1].to_string())
+        .replace_all(tag, event_handler_attr_replacement)
         .to_string();
     let s = RE_EVENT_HANDLER_ATTR_SQ
-        .replace_all(&s, |caps: &regex_lite::Captures| caps[1].to_string())
+        .replace_all(&s, event_handler_attr_replacement)
         .to_string();
     RE_EVENT_HANDLER_ATTR_BARE
-        .replace_all(&s, |caps: &regex_lite::Captures| caps[1].to_string())
+        .replace_all(&s, event_handler_attr_replacement)
         .to_string()
+}
+
+fn event_handler_attr_replacement(caps: &regex_lite::Captures) -> String {
+    if &caps[1] == "/" {
+        " ".to_string()
+    } else {
+        caps[1].to_string()
+    }
 }
 
 fn strip_dangerous_html_tags(input: &str) -> String {
@@ -924,7 +932,7 @@ mod tests {
     fn test_sanitize_markdown_strips_slash_separated_event_handler_attrs() {
         let output = sanitize_markdown(r#"<img/onerror=alert(1)><a/onmouseover="evil()">link</a>"#);
 
-        assert_eq!(output, r#"<img/><a/>link</a>"#);
+        assert_eq!(output, r#"<img ><a >link</a>"#);
         assert!(!output.contains("onerror"));
         assert!(!output.contains("onmouseover"));
         assert!(!output.contains("alert"));
