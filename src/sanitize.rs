@@ -419,7 +419,7 @@ fn strip_event_handler_attrs(tag: &str) -> String {
         .to_string()
 }
 
-fn event_handler_attr_replacement(caps: &regex_lite::Captures) -> String {
+fn event_handler_attr_replacement(caps: &regex_lite::Captures<'_>) -> String {
     if &caps[1] == "/" {
         " ".to_string()
     } else {
