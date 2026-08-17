@@ -8155,6 +8155,88 @@ supply-chain:
     );
 }
 
+/// `supply-chain.registry` with characters outside the validated allowlist
+/// (e.g. embedded whitespace or a shell-injection attempt) must be rejected
+/// at compile time rather than silently reaching the generated YAML —
+/// `RegistryRef::parse` / `is_valid_registry_ref` is the enforcement point.
+#[test]
+fn test_supply_chain_registry_invalid_chars_fails() {
+    let source = r#"---
+name: "Bad Registry Chars"
+description: "registry containing disallowed characters"
+supply-chain:
+  registry:
+    name: "myacr.azurecr.io; rm -rf /"
+    service-connection: acr-conn
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("bad-registry-chars", source);
+    assert!(
+        !ok,
+        "registry name with disallowed characters must fail to compile: {compiled}"
+    );
+    assert!(
+        !stderr.is_empty(),
+        "compile failure must surface a diagnostic message"
+    );
+}
+
+/// `supply-chain.service-connection` containing a double quote (control for
+/// downstream YAML/task-input injection) must be rejected at compile time —
+/// `ServiceConnection::parse` / `is_valid_service_connection` is the
+/// enforcement point.
+#[test]
+fn test_supply_chain_service_connection_invalid_chars_fails() {
+    let source = r#"---
+name: "Bad Connection"
+description: "service connection containing a quote"
+supply-chain:
+  feed: my-internal-feed
+  service-connection: "acr\"conn"
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("bad-service-connection", source);
+    assert!(
+        !ok,
+        "service-connection with a quote character must fail to compile: {compiled}"
+    );
+    assert!(
+        stderr.contains("service-connection") || stderr.contains("service_connection"),
+        "error must reference the invalid service-connection field: {stderr}"
+    );
+}
+
+/// `supply-chain.feed` with a path-traversal segment (`..`) must be rejected
+/// at compile time — `FeedRef::parse` / `is_valid_feed_ref` is the
+/// enforcement point, and this is a security-relevant guard against feed
+/// path escapes reaching the generated NuGetAuthenticate/DownloadPackage
+/// steps.
+#[test]
+fn test_supply_chain_feed_path_traversal_fails() {
+    let source = r#"---
+name: "Bad Feed"
+description: "feed containing a path traversal segment"
+supply-chain:
+  feed: "../escape-feed"
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("bad-feed-traversal", source);
+    assert!(
+        !ok,
+        "feed with a '..' path-traversal segment must fail to compile: {compiled}"
+    );
+    assert!(
+        !stderr.is_empty(),
+        "compile failure must surface a diagnostic message"
+    );
+}
+
 /// A top-level `service-connection` is used as the fallback for both targets
 /// when neither declares its own.
 #[test]
