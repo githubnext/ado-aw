@@ -239,6 +239,7 @@ pub trait CompilerExtension {
 - `awf_mounts: Vec<AwfMount>`
 - `awf_path_prepends: Vec<String>`
 - `agent_env_vars: Vec<(String, String)>`
+- `agent_conditions: Vec<Condition>`
 - `warnings: Vec<String>`
 
 Extension phases are `System`, `Runtime`, and `Tool`. The compiler sorts extensions by phase before merging declarations, so internal system plumbing lands first, runtime installs land before user tools, and tool extensions can assume requested runtimes are available.
@@ -250,7 +251,12 @@ Always-on extensions are collected in `collect_extensions()` before user-configu
 - `SafeOutputsExtension`
 - `AdoScriptExtension`
 - `ExecContextExtension`
-- `AzureCliExtension`
+
+`AzureCliExtension` is **not** always-on: it is pushed only when
+`permissions.read` is configured (`ado_proxy_enabled()`), since the pinned AWF
+agent image has no built-in `az` and the extension is the only path that
+mounts the credential-isolated wrapper. See
+[`docs/network.md`](network.md#proxy-gated-azure-cli-az) for the gating rationale.
 
 ## Lowering and emission
 
