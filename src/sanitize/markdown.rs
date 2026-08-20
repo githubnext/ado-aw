@@ -271,8 +271,10 @@ fn regions(input: &str) -> Vec<Region> {
 /// Find the literal destination text inside the element's source range.
 ///
 /// `dest_url` is the parser's decoded destination, so it does not always appear
-/// verbatim in the source (percent/entity/backslash escapes). Callers fall back
-/// to redacting the whole element when it cannot be located.
+/// verbatim in the source (percent/entity/backslash escapes). When it cannot be
+/// located the caller degrades safely: a denied scheme redacts the whole
+/// element, and an allowed destination is simply not marked protected, so it
+/// flows through the HTML allowlist like ordinary text.
 fn locate_destination(input: &str, span: &Range<usize>, dest_url: &str) -> Option<Range<usize>> {
     if dest_url.is_empty() {
         return None;
@@ -522,6 +524,16 @@ mod tests {
     fn removes_html_comments_including_unclosed() {
         assert_eq!(sanitize_markdown("a<!-- <script>x</script> -->b"), "ab");
         assert_eq!(sanitize_markdown("a<!-- unterminated"), "a");
+    }
+
+    #[test]
+    fn redacts_encoded_denied_scheme_in_markdown_link() {
+        // The parser decodes the destination, so the literal source text does
+        // not match; the whole element is redacted rather than passed through.
+        let output = sanitize_markdown("[x](javascript&#58;alert&#40;1&#41;)");
+
+        assert!(!output.contains("javascript"), "{output}");
+        assert!(output.contains("(redacted)"), "{output}");
     }
 
     #[test]
