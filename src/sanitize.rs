@@ -16,7 +16,8 @@
 //!   identifiers like area paths, wiki names, or assignee emails.
 
 use log::debug;
-use std::ops::Range;
+
+pub(crate) mod markdown;
 
 /// Trait for types that contain untrusted agent-generated text fields.
 ///
@@ -72,17 +73,21 @@ pub fn sanitize(input: &str) -> String {
     s
 }
 
-/// Sanitize untrusted Markdown content while preserving ordinary inline HTML for
-/// renderers that accept it natively.
+/// Sanitize untrusted Markdown content that Azure DevOps renders as Markdown.
+///
+/// Transport sanitization (control characters, pipeline commands, XML
+/// comments, content caps) applies to the whole document. Mention/bot-trigger
+/// neutralization and the HTML allowlist apply only outside Markdown code
+/// spans and code fences — see [`markdown`] for the HTML and URL policy.
 pub(crate) fn sanitize_markdown(input: &str) -> String {
     let mut s = remove_control_characters(input);
     s = neutralize_pipeline_commands(&s);
-    s = neutralize_mentions(&s);
-    s = neutralize_bot_triggers(&s);
     s = remove_xml_comments(&s);
     s = enforce_content_limits(&s);
-    s = neutralize_dangerous_html(&s);
-    s = sanitize_url_protocols(&s);
+    s = markdown::sanitize_markdown_html(&s, |text| {
+        let text = neutralize_mentions(text);
+        neutralize_bot_triggers(&text)
+    });
     s = enforce_content_limits(&s);
     debug!(
         "Sanitized markdown content: {} -> {} bytes",
@@ -256,15 +261,6 @@ static RE_AB_LINK: LazyLock<regex_lite::Regex> =
     LazyLock::new(|| regex_lite::Regex::new(r"\bAB#(\d+)").unwrap());
 static RE_SLASH_CMD: LazyLock<regex_lite::Regex> =
     LazyLock::new(|| regex_lite::Regex::new(r"(?m)^(/[a-zA-Z][\w-]*)").unwrap());
-static RE_EVENT_HANDLER_ATTR_DQ: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
-    regex_lite::Regex::new(r#"(?i)([<\s/])on[a-z][a-z0-9_-]*\s*=\s*"[^"]*""#).unwrap()
-});
-static RE_EVENT_HANDLER_ATTR_SQ: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
-    regex_lite::Regex::new(r#"(?i)([<\s/])on[a-z][a-z0-9_-]*\s*=\s*'[^']*'"#).unwrap()
-});
-static RE_EVENT_HANDLER_ATTR_BARE: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
-    regex_lite::Regex::new(r#"(?i)([<\s/])on[a-z][a-z0-9_-]*\s*=\s*[^\s"'=<>`]*"#).unwrap()
-});
 
 /// Neutralize bot command patterns and Azure DevOps work item link syntax.
 fn neutralize_bot_triggers(input: &str) -> String {
@@ -307,7 +303,7 @@ fn remove_xml_comments(input: &str) -> String {
 
 /// Convert HTML/XML tags to safe HTML entities (IS-06).
 fn escape_html_tags(input: &str) -> String {
-    let protected = markdown_protected_ranges(input);
+    let protected = markdown::code_ranges(input);
     if protected.is_empty() {
         return escape_html_fragment(input);
     }
@@ -343,324 +339,6 @@ fn escape_html_fragment(input: &str) -> String {
     }
     result.push_str(rest);
     result
-}
-
-fn neutralize_dangerous_html(input: &str) -> String {
-    apply_outside_markdown_protected_ranges(input, neutralize_dangerous_html_fragment)
-}
-
-fn neutralize_dangerous_html_fragment(input: &str) -> String {
-    let mut s = input.to_string();
-    loop {
-        let stripped = strip_dangerous_html_tags(&s);
-        if stripped == s {
-            break;
-        }
-        s = stripped;
-    }
-    strip_event_handler_attrs_in_tags(&s)
-}
-
-fn apply_outside_markdown_protected_ranges(
-    input: &str,
-    mut transform: impl FnMut(&str) -> String,
-) -> String {
-    let protected = markdown_protected_ranges(input);
-    if protected.is_empty() {
-        return transform(input);
-    }
-
-    let mut result = String::with_capacity(input.len());
-    let mut cursor = 0;
-    for range in protected {
-        result.push_str(&transform(&input[cursor..range.start]));
-        result.push_str(&input[range.start..range.end]);
-        cursor = range.end;
-    }
-    result.push_str(&transform(&input[cursor..]));
-    result
-}
-
-fn strip_event_handler_attrs_in_tags(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    let mut index = 0;
-
-    while index < input.len() {
-        let rest = &input[index..];
-        if rest.starts_with('<') {
-            if let Some(end) = html_tag_end(input, index) {
-                output.push_str(&strip_event_handler_attrs(&input[index..=end]));
-                index = end + 1;
-                continue;
-            }
-
-            output.push_str("&lt;");
-            index += '<'.len_utf8();
-            continue;
-        }
-
-        let ch = rest.chars().next().expect("index is within input");
-        output.push(ch);
-        index += ch.len_utf8();
-    }
-
-    output
-}
-
-fn strip_event_handler_attrs(tag: &str) -> String {
-    let s = RE_EVENT_HANDLER_ATTR_DQ
-        .replace_all(tag, event_handler_attr_replacement)
-        .to_string();
-    let s = RE_EVENT_HANDLER_ATTR_SQ
-        .replace_all(&s, event_handler_attr_replacement)
-        .to_string();
-    RE_EVENT_HANDLER_ATTR_BARE
-        .replace_all(&s, event_handler_attr_replacement)
-        .to_string()
-}
-
-fn event_handler_attr_replacement(caps: &regex_lite::Captures<'_>) -> String {
-    caps[1].replace('/', " ")
-}
-
-fn strip_dangerous_html_tags(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    let mut index = 0;
-
-    while index < input.len() {
-        let rest = &input[index..];
-        if rest.starts_with('<') {
-            if let Some(end) = html_tag_end(input, index) {
-                let tag = &input[index..=end];
-                if is_dangerous_html_tag(tag) {
-                    index = end + 1;
-                    continue;
-                }
-                if tag[1..].contains('<') {
-                    output.push('<');
-                    index += '<'.len_utf8();
-                    continue;
-                }
-            } else {
-                output.push_str("&lt;");
-                index += '<'.len_utf8();
-                continue;
-            }
-        }
-
-        let ch = rest.chars().next().expect("index is within input");
-        output.push(ch);
-        index += ch.len_utf8();
-    }
-
-    output
-}
-
-fn html_tag_end(input: &str, start: usize) -> Option<usize> {
-    let mut quote = None;
-    let mut last_non_ws = None;
-    for (offset, ch) in input[start + 1..].char_indices() {
-        if let Some(quoted_by) = quote {
-            if ch == quoted_by {
-                quote = None;
-            }
-        } else if (ch == '"' || ch == '\'') && last_non_ws == Some('=') {
-            quote = Some(ch);
-        } else if ch == '>' {
-            return Some(start + 1 + offset);
-        }
-        if quote.is_none() && !ch.is_whitespace() {
-            last_non_ws = Some(ch);
-        }
-    }
-    None
-}
-
-fn is_dangerous_html_tag(tag: &str) -> bool {
-    let mut chars = tag.chars();
-    if chars.next() != Some('<') {
-        return false;
-    }
-
-    let rest = chars.as_str().trim_start();
-    let rest = rest.strip_prefix('/').unwrap_or(rest).trim_start();
-    let name: String = rest
-        .chars()
-        .take_while(|ch| ch.is_ascii_alphanumeric())
-        .collect();
-
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "script"
-            | "iframe"
-            | "object"
-            | "embed"
-            | "form"
-            | "input"
-            | "button"
-            | "textarea"
-            | "select"
-            | "option"
-            | "base"
-            | "meta"
-            | "link"
-            | "svg"
-            | "math"
-            | "style"
-    )
-}
-
-fn markdown_protected_ranges(input: &str) -> Vec<Range<usize>> {
-    let fence_ranges = fenced_code_ranges(input);
-    let mut ranges = Vec::new();
-    let mut cursor = 0;
-
-    for fence in &fence_ranges {
-        if cursor < fence.start {
-            collect_inline_code_ranges(input, cursor, fence.start, &mut ranges);
-        }
-        ranges.push(fence.clone());
-        cursor = fence.end;
-    }
-
-    if cursor < input.len() {
-        collect_inline_code_ranges(input, cursor, input.len(), &mut ranges);
-    }
-
-    ranges
-}
-
-fn fenced_code_ranges(input: &str) -> Vec<Range<usize>> {
-    let mut ranges = Vec::new();
-    let mut line_start = 0;
-
-    while line_start < input.len() {
-        let (line_end, next_line_start) = line_bounds(input, line_start);
-        let line = &input[line_start..line_end];
-
-        if let Some((marker, count)) = parse_fence_opener(line)
-            && let Some(block_end) = find_matching_fence_end(input, next_line_start, marker, count)
-        {
-            ranges.push(line_start..block_end);
-            line_start = block_end;
-            continue;
-        }
-
-        line_start = next_line_start;
-    }
-
-    ranges
-}
-
-fn collect_inline_code_ranges(
-    input: &str,
-    start: usize,
-    end: usize,
-    ranges: &mut Vec<Range<usize>>,
-) {
-    let bytes = input.as_bytes();
-    let mut i = start;
-
-    while i < end {
-        if bytes[i] != b'`' {
-            i += 1;
-            continue;
-        }
-
-        let tick_count = count_repeated_byte(bytes, i, end, b'`');
-        // Be intentionally conservative here: we only preserve single-line inline code spans.
-        // CommonMark allows a code span to wrap a newline, but treating unmatched backticks as
-        // ordinary text keeps escaping active in ambiguous multi-line cases.
-        let inline_code_boundary = input[i..end]
-            .find('\n')
-            .map(|offset| i + offset)
-            .unwrap_or(end);
-        let mut cursor = i + tick_count;
-        let mut matched_end = None;
-
-        while cursor < inline_code_boundary {
-            if bytes[cursor] == b'`' {
-                let candidate_count =
-                    count_repeated_byte(bytes, cursor, inline_code_boundary, b'`');
-                if candidate_count == tick_count {
-                    matched_end = Some(cursor + candidate_count);
-                    break;
-                }
-                cursor += candidate_count;
-            } else {
-                cursor += 1;
-            }
-        }
-
-        if let Some(span_end) = matched_end {
-            ranges.push(i..span_end);
-            i = span_end;
-        } else {
-            i += tick_count;
-        }
-    }
-}
-
-fn line_bounds(input: &str, line_start: usize) -> (usize, usize) {
-    let line_end = input[line_start..]
-        .find('\n')
-        .map(|offset| line_start + offset)
-        .unwrap_or(input.len());
-    let next_line_start = if line_end < input.len() {
-        line_end + 1
-    } else {
-        input.len()
-    };
-    (line_end, next_line_start)
-}
-
-fn parse_fence_opener(line: &str) -> Option<(u8, usize)> {
-    let indent = line.bytes().take_while(|b| *b == b' ').count();
-    if indent > 3 {
-        return None;
-    }
-
-    let rest = &line.as_bytes()[indent..];
-    let marker = *rest.first()?;
-    if marker != b'`' && marker != b'~' {
-        return None;
-    }
-
-    let count = rest.iter().take_while(|&&b| b == marker).count();
-    (count >= 3).then_some((marker, count))
-}
-
-fn find_matching_fence_end(
-    input: &str,
-    mut line_start: usize,
-    marker: u8,
-    min_count: usize,
-) -> Option<usize> {
-    while line_start < input.len() {
-        let (line_end, next_line_start) = line_bounds(input, line_start);
-        let line = &input[line_start..line_end];
-        let indent = line.bytes().take_while(|b| *b == b' ').count();
-
-        if indent <= 3 {
-            let rest = &line.as_bytes()[indent..];
-            let count = rest.iter().take_while(|&&b| b == marker).count();
-            if count >= min_count && rest[count..].iter().all(|b| matches!(b, b' ' | b'\t')) {
-                return Some(next_line_start);
-            }
-        }
-
-        line_start = next_line_start;
-    }
-
-    None
-}
-
-fn count_repeated_byte(bytes: &[u8], start: usize, end: usize, byte: u8) -> usize {
-    let mut count = 0;
-    while start + count < end && bytes[start + count] == byte {
-        count += 1;
-    }
-    count
 }
 
 // ── IS-07b: URL protocol sanitization ──────────────────────────────────────
@@ -838,7 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_markdown_preserves_html_tags() {
+    fn test_sanitize_markdown_preserves_allowlisted_html_tags() {
         let input = "<h2>Hi</h2><p>x &lt;string&gt; y</p>";
         assert_eq!(sanitize_markdown(input), input);
     }
@@ -849,11 +527,11 @@ mod tests {
             r#"<script data-x="a>b">alert(1)</script><svg onload=alert(1)></svg><form action="https://evil.test"></form>"#,
         );
 
-        assert!(!output.contains("<script"));
-        assert!(!output.contains("data-x"));
-        assert!(!output.contains("a>b"));
-        assert!(!output.contains("<svg"));
-        assert!(!output.contains("<form"));
+        assert!(!output.contains("<script"), "{output}");
+        assert!(!output.contains("data-x"), "{output}");
+        assert!(!output.contains("alert(1)"), "{output}");
+        assert!(!output.contains("<svg"), "{output}");
+        assert!(!output.contains("<form"), "{output}");
     }
 
     #[test]
@@ -862,29 +540,28 @@ mod tests {
 
         assert_eq!(
             sanitize_markdown(input),
-            "```html\n<script>alert(1)</script>\n<img src=x onerror=evil()>\n```\ntail<img src=x >"
+            "```html\n<script>alert(1)</script>\n<img src=x onerror=evil()>\n```\n<img src=\"x\">"
         );
     }
 
     #[test]
-    fn test_sanitize_markdown_strips_nested_dangerous_tags_to_fixed_point() {
+    fn test_sanitize_markdown_strips_nested_dangerous_tags() {
         let output = sanitize_markdown("<scr<script>ipt>alert(1)</scr</script>ipt>");
 
-        assert_eq!(output, "alert(1)");
-        assert!(!output.contains("<script"));
+        assert!(!output.contains("<script"), "{output}");
+        assert!(!output.contains("<scr"), "{output}");
     }
 
     #[test]
-    fn test_sanitize_markdown_strips_folded_dangerous_tags_to_fixed_point() {
+    fn test_sanitize_markdown_strips_folded_dangerous_tags() {
         for tag in [
             "iframe", "object", "embed", "form", "input", "button", "textarea", "select", "option",
             "base", "meta", "link", "svg", "math", "style",
         ] {
             let split = tag.len() / 2;
             let (prefix, suffix) = tag.split_at(split);
-            // The inner dangerous tag is removed first; the surrounding
-            // prefix/suffix then fold back into the original tag name, which
-            // the fixed-point pass must also remove.
+            // Folding a tag name around another tag used to defeat the
+            // blocklist; an allowlist drops every unrecognised tag instead.
             let input = format!("<{prefix}<{tag}></{tag}>{suffix}>payload</{prefix}{suffix}>");
             let output = sanitize_markdown(&input);
 
@@ -898,16 +575,15 @@ mod tests {
     fn test_sanitize_markdown_strips_dangerous_tags_folded_into_attribute_span() {
         let output = sanitize_markdown(r#"<div title="><script>alert(1)</script>">safe</div>"#);
 
-        assert_eq!(output, r#"<div title=">alert(1)">safe</div>"#);
-        assert!(!output.contains("<script"));
+        assert!(output.contains("safe</div>"), "{output}");
+        assert!(!output.contains("<script"), "{output}");
     }
 
     #[test]
-    fn test_sanitize_markdown_strips_style_tags() {
+    fn test_sanitize_markdown_strips_style_tags_and_their_content() {
         let output = sanitize_markdown("<style>body{display:none}</style><p>safe</p>");
 
-        assert_eq!(output, "body{display:none}<p>safe</p>");
-        assert!(!output.contains("<style"));
+        assert_eq!(output, "<p>safe</p>");
     }
 
     #[test]
@@ -916,15 +592,16 @@ mod tests {
             r#"<h2 onclick="alert(1)">Hi</h2><a href="https://example.test" onmouseover='x'>link</a><img src=x onerror=doWork(1)>"#,
         );
 
-        assert!(output.contains("<h2 "));
-        assert!(output.contains(">Hi</h2>"));
-        assert!(output.contains(r#"<a href="https://example.test" "#));
-        assert!(output.contains(">link</a>"));
-        assert!(output.contains("<img src=x "));
-        assert!(!output.contains("<h2 onclick"));
-        assert!(!output.contains("onmouseover"));
-        assert!(!output.contains("onerror"));
-        assert!(!output.contains("doWork"));
+        assert!(output.contains("<h2>Hi</h2>"), "{output}");
+        assert!(
+            output.contains(r#"<a href="https://example.test">link</a>"#),
+            "{output}"
+        );
+        assert!(output.contains(r#"<img src="x">"#), "{output}");
+        assert!(!output.contains("onclick"), "{output}");
+        assert!(!output.contains("onmouseover"), "{output}");
+        assert!(!output.contains("onerror"), "{output}");
+        assert!(!output.contains("doWork"), "{output}");
     }
 
     #[test]
@@ -932,12 +609,10 @@ mod tests {
         let output = sanitize_markdown(r#"<img/onerror=alert(1)><a/onmouseover="evil()">link</a>"#);
 
         assert!(output.contains("link</a>"), "{output}");
-        assert!(!output.contains("<img/"), "{output}");
-        assert!(!output.contains("<a/"), "{output}");
-        assert!(!output.contains("onerror"));
-        assert!(!output.contains("onmouseover"));
-        assert!(!output.contains("alert"));
-        assert!(!output.contains("evil"));
+        assert!(!output.contains("onerror"), "{output}");
+        assert!(!output.contains("onmouseover"), "{output}");
+        assert!(!output.contains("alert"), "{output}");
+        assert!(!output.contains("evil"), "{output}");
     }
 
     #[test]
@@ -951,24 +626,21 @@ mod tests {
     fn test_sanitize_markdown_strips_event_handler_attrs_with_quote_in_unquoted_value() {
         let output = sanitize_markdown(r#"<img src="safe.png" data-x=a"b onerror=alert(1)>"#);
 
-        assert_eq!(output, r#"<img src="safe.png" data-x=a"b >"#);
-        assert!(!output.contains("onerror"));
-        assert!(!output.contains("alert"));
+        assert_eq!(output, r#"<img src="safe.png">"#);
     }
 
     #[test]
-    fn test_sanitize_markdown_escapes_unclosed_dangerous_tag() {
+    fn test_sanitize_markdown_drops_unclosed_dangerous_tag() {
         let output = sanitize_markdown("<script src=x");
 
-        assert_eq!(output, "&lt;script src=x");
+        assert!(!output.contains("script"), "{output}");
     }
 
     #[test]
-    fn test_sanitize_markdown_redacts_dangerous_url_protocols_in_html() {
+    fn test_sanitize_markdown_drops_dangerous_url_protocols_in_html() {
         let output = sanitize_markdown(r#"<a href="javascript:alert(1)">link</a>"#);
 
-        assert_eq!(output, r#"<a href="(redacted)alert(1)">link</a>"#);
-        assert!(!output.contains("javascript:"));
+        assert_eq!(output, "<a>link</a>");
     }
 
     // IS-07b: URL protocol sanitization

@@ -7,10 +7,38 @@
 import type { ExecutedRecord, PriorEntry, Scenario, ScenarioContext } from "../scenario.js";
 import { SkipError } from "../scenario.js";
 import { detBody, numResult, strResult, Teardown } from "./common.js";
+import renderingCorpus from "./markdown-rendering-corpus.json" with { type: "json" };
 
 const WORK_ITEM_TYPE = "Task";
 const CREATE_TEMPORARY_ID = "#aw_wicreate";
 const ASSIGN_TEMPORARY_ID = "#aw_wiassign";
+
+/**
+ * Rendering-fidelity corpus shared with the Rust golden test in
+ * `src/sanitize/markdown.rs` (which `include_str!`s the same JSON). The Rust
+ * test proves the sanitizer produces `RENDERING_EXPECTED`; these scenarios
+ * prove Azure DevOps stores it back byte-for-byte, so the two together pin
+ * what a human actually sees in a work item.
+ */
+const RENDERING_INPUT = renderingCorpus.input.join("\n");
+const RENDERING_EXPECTED = renderingCorpus.expected.join("\n");
+
+/**
+ * Constructs the sanitizer must never let reach a rendered work item.
+ * Compared case-insensitively, so a folded `<SCRIPT >` is covered too.
+ */
+const DENIED_CONSTRUCTS = ["<script", "onerror=", "<iframe"];
+
+/**
+ * Fenced-code lines that must survive verbatim. They contain the same
+ * constructs as `DENIED_CONSTRUCTS`, so an over-eager "strip it everywhere"
+ * regression fails here rather than silently mangling documentation.
+ */
+const FENCED_VERBATIM = [
+  '<script>alert("fenced code is verbatim")</script>',
+  '<a href="javascript:alert(1)">fenced javascript link</a>',
+];
+
 
 function usableEnvValue(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
@@ -254,8 +282,160 @@ export const uploadWorkitemAttachment: Scenario<{ id: number }> = {
   cleanup: async (ctx, state) => ctx.rest.deleteWorkItem(state.id),
 };
 
+/** Strip fenced code blocks so denied constructs are only checked in prose. */
+function outsideFencedCode(text: string): string {
+  const lines = text.split("\n");
+  const kept: string[] = [];
+  let inFence = false;
+  for (const line of lines) {
+    const trimmed = line.trimStart();
+    if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
+      inFence = !inFence;
+      continue;
+    }
+    if (!inFence) kept.push(line);
+  }
+  return kept.join("\n");
+}
+
+/** First line that differs, to make a golden mismatch debuggable. */
+function firstDifference(actual: string, expected: string): string {
+  const a = actual.split("\n");
+  const e = expected.split("\n");
+  for (let i = 0; i < Math.max(a.length, e.length); i++) {
+    if (a[i] !== e[i]) {
+      return `line ${i + 1}: expected ${JSON.stringify(e[i])}, got ${JSON.stringify(a[i])}`;
+    }
+  }
+  return "no line differs (trailing content mismatch)";
+}
+
+/**
+ * Build a rendering-fidelity scenario for one description field.
+ *
+ * `create-work-item` is the only safe output whose body goes through the
+ * Markdown sanitizer, and it writes either `System.Description` (default) or
+ * `Microsoft.VSTS.TCM.ReproSteps` (Bug) with a
+ * `/multilineFieldsFormat/<field>` = `Markdown` patch. One scenario per field
+ * therefore covers every path a sanitizer change can break.
+ */
+function renderingScenario(options: {
+  readonly id: string;
+  readonly workItemType: string;
+  readonly descriptionField: string;
+}): Scenario<{ title: string; createdId?: number }> {
+  const { id: scenarioId, workItemType, descriptionField } = options;
+  return {
+    id: scenarioId,
+    tool: "create-work-item",
+    config: () => ({
+      "work-item-type": workItemType,
+      max: 1,
+      // Appended agent stats would change the stored text and defeat the
+      // byte-for-byte golden comparison.
+      "include-stats": false,
+    }),
+    setup: async (ctx) => {
+      if (!(await ctx.rest.workItemTypeExists(workItemType))) {
+        throw new SkipError(`project does not define the '${workItemType}' work item type`);
+      }
+      return { title: ctx.prefix(scenarioId) };
+    },
+    ndjson: async (_ctx, state) => ({
+      title: state.title,
+      description: RENDERING_INPUT,
+      tags: [],
+      temporary_id: CREATE_TEMPORARY_ID,
+    }),
+    assert: async (ctx, state, record: ExecutedRecord) => {
+      // Record the id before any fallible check so cleanup can still delete it.
+      const id = numResult(record, "id");
+      state.createdId = id;
+
+      const wi = await ctx.rest.getWorkItem(id);
+      const stored = wi.fields[descriptionField];
+      if (typeof stored !== "string") {
+        throw new Error(
+          `work item #${id} has no string '${descriptionField}' (got ${JSON.stringify(stored)})`,
+        );
+      }
+
+      // 1. Security: denied constructs must not survive in prose, while their
+      //    fenced-code twins must survive untouched. Checked before the golden
+      //    so a leak is reported as a leak rather than as a generic mismatch.
+      const prose = outsideFencedCode(stored).toLowerCase();
+      for (const construct of DENIED_CONSTRUCTS) {
+        if (prose.includes(construct.toLowerCase())) {
+          throw new Error(
+            `work item #${id} '${descriptionField}' still contains '${construct}' outside code`,
+          );
+        }
+      }
+      if (prose.includes("javascript:")) {
+        throw new Error(
+          `work item #${id} '${descriptionField}' still contains a javascript: URL outside code`,
+        );
+      }
+      for (const line of FENCED_VERBATIM) {
+        if (!stored.includes(line)) {
+          throw new Error(
+            `work item #${id} '${descriptionField}' lost fenced code line ${JSON.stringify(line)}`,
+          );
+        }
+      }
+
+      // 2. Format: stored as Markdown, otherwise the body renders as literal
+      //    text. Not every organization surfaces this on read — when it is
+      //    absent the executor-side patch is pinned by the Rust unit tests in
+      //    src/safe_outputs/create_work_item.rs instead.
+      const format = wi.multilineFieldsFormat?.[descriptionField];
+      if (format === undefined) {
+        ctx.log(
+          `[${scenarioId}] note: ADO did not surface multilineFieldsFormat for ` +
+            `'${descriptionField}'; format is covered by the executor unit tests`,
+        );
+      } else if (format !== "Markdown") {
+        throw new Error(
+          `work item #${id} stores '${descriptionField}' as ${JSON.stringify(format)}, expected "Markdown"`,
+        );
+      }
+
+      // 3. Golden round-trip: what ADO stored must equal what the sanitizer
+      //    produced, byte for byte. This is the decisive check — any change in
+      //    what the allowlist keeps, drops or rewrites moves the golden, as
+      //    does ADO normalising the payload on the way in.
+      if (stored !== RENDERING_EXPECTED) {
+        throw new Error(
+          `work item #${id} '${descriptionField}' does not match the sanitized golden ` +
+            `(${firstDifference(stored, RENDERING_EXPECTED)})`,
+        );
+      }
+    },
+    cleanup: async (ctx, state) => {
+      const id = state.createdId ?? (await ctx.rest.findWorkItemByTitle(state.title));
+      if (id !== undefined) await ctx.rest.deleteWorkItem(id);
+    },
+  };
+}
+
+/** Task / `System.Description` rendering fidelity. */
+export const createWorkItemRendering = renderingScenario({
+  id: "create-work-item-rendering",
+  workItemType: WORK_ITEM_TYPE,
+  descriptionField: "System.Description",
+});
+
+/** Bug / `Microsoft.VSTS.TCM.ReproSteps` rendering fidelity. */
+export const createBugWorkItemRendering = renderingScenario({
+  id: "create-work-item-rendering-bug",
+  workItemType: "Bug",
+  descriptionField: "Microsoft.VSTS.TCM.ReproSteps",
+});
+
 export const workItemScenarios: Scenario<unknown>[] = [
   createWorkItem,
+  createWorkItemRendering,
+  createBugWorkItemRendering,
   assignWorkItemTemporaryIdHandoff,
   updateWorkItem,
   commentOnWorkItem,
