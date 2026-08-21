@@ -265,8 +265,18 @@ The policy is:
   `fixes #123` and `AB#123` are wrapped in backticks so they cannot notify
   people or link work items.
 
-A bare `<` in prose is stored as `&lt;`, which Markdown renders as `<`; that is
-what stops dropped markup from being re-parsed.
+Text that only looks like markup is escaped rather than deleted: `Vec<String>`
+in prose is stored as `Vec&lt;String&gt;`, which Markdown renders as the author
+wrote it, and that escaping is also what stops dropped markup from being
+re-parsed. Markup a browser really would parse as a tag still goes to the
+allowlist and is dropped there, so a dangerous payload never reappears as
+visible text.
+
+Cleaning normalizes HTML, so a few inputs come back rendering the same but
+written differently: `\r\n` becomes `\n`, `<br />` becomes `<br>`, a table gains
+an implied `<tbody>`, a mid-line `>` is stored as `&gt;`, and the content of a
+removed raw-text element such as `<noscript>` is escaped rather than kept as
+markup.
 
 ### Executor authentication
 

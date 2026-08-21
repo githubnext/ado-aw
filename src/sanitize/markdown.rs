@@ -19,6 +19,25 @@
 //! needed another special case. Allowlisting is closed by construction: anything
 //! the parser does not recognise as an allowed tag is dropped, and anything that
 //! is not an allowed URL scheme is removed.
+//!
+//! # Assumption
+//!
+//! Content inside a protected range is copied through **verbatim**, so this
+//! module assumes Azure DevOps agrees with [`pulldown_cmark`] about where a
+//! code span, code fence or autolink starts and ends. If the two ever disagree,
+//! markup inside what this module believes is code reaches the renderer
+//! unfiltered. Everything that is *not* code — including a link destination
+//! containing `<` or `>` — is deliberately routed through the allowlist so the
+//! assumption stays confined to code.
+//!
+//! # Known rendering differences
+//!
+//! Cleaning normalises HTML, so a few inputs come back rendering the same but
+//! written differently: `\r\n` becomes `\n`, void elements are rewritten
+//! (`<br />` → `<br>`), an implied `<tbody>` is inserted into a table, a `>` in
+//! the middle of a line is stored as `&gt;`, the leading newline inside a
+//! `<pre>` is dropped, and the content of a raw-text element the allowlist
+//! removes (such as `<noscript>`) is escaped rather than kept as markup.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -85,6 +104,241 @@ const ALLOWED_TAGS: &[&str] = &[
 /// `vbscript:`, …) is denied because it is not on this list.
 const ALLOWED_URL_SCHEMES: &[&str] = &["http", "https", "mailto"];
 
+/// Element names a parser really would treat as a tag.
+///
+/// This is *not* a permission list — [`ALLOWED_TAGS`] is. It only decides
+/// whether `<name …>` is markup (hand it to the allowlist, which drops or
+/// cleans it) or prose (escape it, so `Vec<String>` survives). It therefore has
+/// to include the dangerous names too: escaping `<svg onload=alert(1)>` would
+/// turn a dropped payload into visible text.
+const KNOWN_TAGS: &[&str] = &[
+    // HTML
+    "a",
+    "abbr",
+    "acronym",
+    "address",
+    "applet",
+    "area",
+    "article",
+    "aside",
+    "audio",
+    "b",
+    "base",
+    "basefont",
+    "bdi",
+    "bdo",
+    "bgsound",
+    "big",
+    "blink",
+    "blockquote",
+    "body",
+    "br",
+    "button",
+    "canvas",
+    "caption",
+    "center",
+    "cite",
+    "code",
+    "col",
+    "colgroup",
+    "data",
+    "datalist",
+    "dd",
+    "del",
+    "details",
+    "dfn",
+    "dialog",
+    "dir",
+    "div",
+    "dl",
+    "dt",
+    "em",
+    "embed",
+    "fieldset",
+    "figcaption",
+    "figure",
+    "font",
+    "footer",
+    "form",
+    "frame",
+    "frameset",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "head",
+    "header",
+    "hgroup",
+    "hr",
+    "html",
+    "i",
+    "iframe",
+    "image",
+    "img",
+    "input",
+    "ins",
+    "isindex",
+    "kbd",
+    "keygen",
+    "label",
+    "legend",
+    "li",
+    "link",
+    "listing",
+    "main",
+    "map",
+    "mark",
+    "marquee",
+    "menu",
+    "menuitem",
+    "meta",
+    "meter",
+    "nav",
+    "nobr",
+    "noembed",
+    "noframes",
+    "noscript",
+    "object",
+    "ol",
+    "optgroup",
+    "option",
+    "output",
+    "p",
+    "param",
+    "picture",
+    "plaintext",
+    "pre",
+    "progress",
+    "q",
+    "rb",
+    "rp",
+    "rt",
+    "rtc",
+    "ruby",
+    "s",
+    "samp",
+    "script",
+    "search",
+    "section",
+    "select",
+    "slot",
+    "small",
+    "source",
+    "spacer",
+    "span",
+    "strike",
+    "strong",
+    "style",
+    "sub",
+    "summary",
+    "sup",
+    "table",
+    "tbody",
+    "td",
+    "template",
+    "textarea",
+    "tfoot",
+    "th",
+    "thead",
+    "time",
+    "title",
+    "tr",
+    "track",
+    "tt",
+    "u",
+    "ul",
+    "var",
+    "video",
+    "wbr",
+    "xmp",
+    // SVG and MathML names that browsers parse as foreign markup
+    "animate",
+    "animatemotion",
+    "animatetransform",
+    "circle",
+    "clippath",
+    "defs",
+    "desc",
+    "ellipse",
+    "feimage",
+    "filter",
+    "foreignobject",
+    "g",
+    "line",
+    "linegradient",
+    "maction",
+    "malignmark",
+    "math",
+    "menclose",
+    "merror",
+    "mfenced",
+    "mfrac",
+    "mglyph",
+    "mi",
+    "mn",
+    "mo",
+    "mpath",
+    "mroot",
+    "mrow",
+    "ms",
+    "mspace",
+    "msqrt",
+    "mstyle",
+    "msub",
+    "msubsup",
+    "msup",
+    "mtable",
+    "mtd",
+    "mtext",
+    "mtr",
+    "munder",
+    "munderover",
+    "path",
+    "polygon",
+    "polyline",
+    "rect",
+    "semantics",
+    "set",
+    "svg",
+    "switch",
+    "symbol",
+    "text",
+    "textpath",
+    "tspan",
+    "use",
+];
+
+/// Valueless attributes a real tag can carry. No attribute the allowlist keeps
+/// is valueless, so anything else without a value means the `<` was prose.
+const BOOLEAN_ATTRIBUTES: &[&str] = &[
+    "allowfullscreen",
+    "async",
+    "autofocus",
+    "autoplay",
+    "checked",
+    "controls",
+    "default",
+    "defer",
+    "disabled",
+    "hidden",
+    "inert",
+    "ismap",
+    "itemscope",
+    "loop",
+    "multiple",
+    "muted",
+    "nomodule",
+    "novalidate",
+    "open",
+    "playsinline",
+    "readonly",
+    "required",
+    "reversed",
+    "selected",
+];
+
 static CLEANER: LazyLock<Builder<'static>> = LazyLock::new(|| {
     let mut builder = Builder::empty();
     builder
@@ -112,17 +366,37 @@ fn tag_attributes() -> HashMap<&'static str, HashSet<&'static str>> {
     attributes
 }
 
+/// Private-use characters that stand in for content the HTML allowlist must not
+/// see. They are stripped from the input first, so nothing an author writes can
+/// forge one.
+const PLACEHOLDER_OPEN: char = '\u{E000}';
+const PLACEHOLDER_CLOSE: char = '\u{E001}';
+/// Stands in for a line-leading blockquote marker while the allowlist runs, so
+/// a `>` the author wrote as markup survives and a `&gt;` the author wrote as
+/// text is never promoted to markup.
+const BLOCKQUOTE_MARKER: char = '\u{E002}';
+
+const SENTINELS: [char; 3] = [PLACEHOLDER_OPEN, PLACEHOLDER_CLOSE, BLOCKQUOTE_MARKER];
+
 /// Apply the HTML allowlist and URL scheme policy to `input`, leaving Markdown
 /// code spans, code fences and autolinks untouched.
 ///
 /// `transform_text` is applied to every non-protected source range before the
 /// HTML allowlist runs, so caller-owned text transformations (mentions, bot
 /// triggers) also skip code.
+///
+/// Protected and redacted ranges are swapped for placeholders and the document
+/// is cleaned in a **single** pass, so inline HTML that spans a code span
+/// (`<b>bold `code` more</b>`) is not rebalanced around the code span.
 pub(super) fn sanitize_markdown_html(
     input: &str,
     mut transform_text: impl FnMut(&str) -> String,
 ) -> String {
-    let mut result = String::with_capacity(input.len());
+    let input = strip_sentinels(input);
+    let input = input.as_ref();
+
+    let mut assembled = String::with_capacity(input.len());
+    let mut verbatim: Vec<&str> = Vec::new();
     let mut cursor = 0;
 
     for region in regions(input) {
@@ -132,15 +406,273 @@ pub(super) fn sanitize_markdown_html(
             // outer one already covered this range.
             continue;
         }
-        result.push_str(&clean_html(&transform_text(&input[cursor..range.start])));
-        match region {
-            Region::Protected(_) => result.push_str(&input[range.clone()]),
-            Region::Redact(_) => result.push_str(REDACTED),
-        }
+        assembled.push_str(&transform_text(&input[cursor..range.start]));
+        let text = match region {
+            Region::Protected(_) => &input[range.clone()],
+            Region::Redact(_) => REDACTED,
+        };
+        assembled.push(PLACEHOLDER_OPEN);
+        assembled.push_str(&verbatim.len().to_string());
+        assembled.push(PLACEHOLDER_CLOSE);
+        verbatim.push(text);
         cursor = range.end;
     }
+    assembled.push_str(&transform_text(&input[cursor..]));
 
-    result.push_str(&clean_html(&transform_text(&input[cursor..])));
+    let assembled = escape_non_tag_markup(&assembled);
+    let assembled = mark_blockquotes(&assembled);
+
+    restore(&clean_html(&assembled), &verbatim)
+}
+
+fn strip_sentinels(input: &str) -> std::borrow::Cow<'_, str> {
+    if input.contains(SENTINELS) {
+        std::borrow::Cow::Owned(input.replace(SENTINELS, ""))
+    } else {
+        std::borrow::Cow::Borrowed(input)
+    }
+}
+
+/// Replace every line-leading blockquote marker with [`BLOCKQUOTE_MARKER`].
+///
+/// The allowlist escapes `>` in text, and an escaped marker at the start of a
+/// line no longer opens a blockquote. Recording the markers *before* cleaning
+/// is what keeps the restore honest: only a `>` the author actually wrote as
+/// markup comes back.
+///
+/// Runs after [`escape_non_tag_markup`], so every remaining `<` really does
+/// open a tag: a `>` that closes a tag written across two lines is left alone
+/// instead of being mistaken for a blockquote marker.
+fn mark_blockquotes(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut in_tag = false;
+
+    for line in input.split_inclusive('\n') {
+        let mut rest = line;
+        if !in_tag {
+            loop {
+                let indent = rest.len() - rest.trim_start_matches(' ').len();
+                if indent > 3 {
+                    break;
+                }
+                let Some(after) = rest[indent..].strip_prefix('>') else {
+                    break;
+                };
+                result.push_str(&rest[..indent]);
+                result.push(BLOCKQUOTE_MARKER);
+                rest = after;
+            }
+        }
+
+        for character in rest.chars() {
+            match character {
+                '<' => in_tag = true,
+                '>' => in_tag = false,
+                _ => {}
+            }
+        }
+        result.push_str(rest);
+    }
+
+    result
+}
+
+/// Escape every `<` that does not start something an HTML parser would treat as
+/// a tag, so text that merely looks like markup survives as text.
+///
+/// The allowlist *deletes* markup it does not recognise, which would silently
+/// eat `Vec<String>` out of a description. Escaping first means unknown markup
+/// degrades to `&lt;`, while anything a browser really would parse as a tag
+/// still reaches the allowlist and is dropped or cleaned there.
+fn escape_non_tag_markup(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut rest = input;
+
+    while let Some(offset) = rest.find('<') {
+        result.push_str(&rest[..offset]);
+        if starts_html_tag(&rest[offset + 1..]) {
+            result.push('<');
+        } else {
+            result.push_str("&lt;");
+        }
+        rest = &rest[offset + 1..];
+    }
+    result.push_str(rest);
+    result
+}
+
+/// How far past a `<` the tag test looks. Every `<` in the document is tested,
+/// so an unbounded scan would be quadratic on input made of nothing but `<`.
+/// A start tag longer than this is treated as markup and handed to the
+/// allowlist, which is the same thing that happens to an unterminated tag.
+const TAG_SCAN_LIMIT: usize = 256;
+
+/// Whether the text following a `<` is markup rather than prose.
+///
+/// True for comments, doctypes and processing instructions (all removed by the
+/// allowlist), and for a start or end tag whose name is a real HTML, SVG or
+/// MathML element written with plausible attribute syntax. Bare attributes are
+/// the discriminator that keeps `if a<b and b>c` prose: no allowed attribute is
+/// valueless, so a valueless attribute that is not a known boolean attribute
+/// means the author was not writing a tag.
+fn starts_html_tag(rest: &str) -> bool {
+    let rest = bounded(rest);
+    if rest.starts_with('!') || rest.starts_with('?') {
+        return true;
+    }
+
+    let (closing, rest) = match rest.strip_prefix('/') {
+        Some(rest) => (true, rest),
+        None => (false, rest),
+    };
+
+    let name_len = rest
+        .find(|c: char| c.is_whitespace() || c == '/' || c == '>')
+        .unwrap_or(rest.len());
+    let name = &rest[..name_len];
+    if !name
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
+        || !KNOWN_TAGS.contains(&name.to_ascii_lowercase().as_str())
+    {
+        return false;
+    }
+
+    let rest = &rest[name_len..];
+    if closing {
+        // `</b>`; anything else after the name is not how an end tag is written.
+        return rest.trim_start().starts_with('>') || rest.trim().is_empty();
+    }
+    plausible_attributes(rest)
+}
+
+/// The first [`TAG_SCAN_LIMIT`] bytes of `input`, cut on a character boundary.
+fn bounded(input: &str) -> &str {
+    let mut end = input.len().min(TAG_SCAN_LIMIT);
+    while !input.is_char_boundary(end) {
+        end -= 1;
+    }
+    &input[..end]
+}
+
+/// Whether the remainder of a start tag is written as plausible attributes.
+///
+/// An unterminated tag (`<script src=x`) is left to the allowlist, which drops
+/// it — escaping it instead would resurrect the payload as visible text.
+fn plausible_attributes(rest: &str) -> bool {
+    let mut rest = rest.trim_start();
+
+    loop {
+        rest = rest.trim_start_matches(['/', ' ', '\t', '\n', '\r']);
+        if rest.is_empty() {
+            return true;
+        }
+        if rest.starts_with('>') {
+            return true;
+        }
+
+        let name_len = rest
+            .find(|c: char| c.is_whitespace() || c == '=' || c == '/' || c == '>')
+            .unwrap_or(rest.len());
+        let name = &rest[..name_len];
+        if name.is_empty() {
+            return false;
+        }
+        rest = rest[name_len..].trim_start();
+
+        let Some(value) = rest.strip_prefix('=') else {
+            if !BOOLEAN_ATTRIBUTES.contains(&name.to_ascii_lowercase().as_str()) {
+                return false;
+            }
+            continue;
+        };
+
+        let value = value.trim_start();
+        rest = match value.chars().next() {
+            Some(quote @ ('"' | '\'')) => match value[1..].find(quote) {
+                Some(end) => &value[1 + end + 1..],
+                // An unterminated quoted value swallows the rest of the input;
+                // the allowlist drops the whole tag.
+                None => return true,
+            },
+            _ => {
+                let end = value
+                    .find(|c: char| c.is_whitespace() || c == '>')
+                    .unwrap_or(value.len());
+                &value[end..]
+            }
+        };
+    }
+}
+
+/// Put back everything the allowlist was not allowed to see, and undo the one
+/// piece of text escaping that changes how Markdown renders.
+fn restore(cleaned: &str, verbatim: &[&str]) -> String {
+    let restored = unescape_ampersands(cleaned).replace(BLOCKQUOTE_MARKER, ">");
+
+    let mut result = String::with_capacity(restored.len());
+    let mut rest = restored.as_str();
+
+    while let Some(offset) = rest.find(PLACEHOLDER_OPEN) {
+        result.push_str(&rest[..offset]);
+        let after = &rest[offset + PLACEHOLDER_OPEN.len_utf8()..];
+        let Some(end) = after.find(PLACEHOLDER_CLOSE) else {
+            // The allowlist truncated the placeholder, so its content is gone
+            // with the markup that contained it.
+            rest = after;
+            continue;
+        };
+        if let Some(text) = after[..end]
+            .parse::<usize>()
+            .ok()
+            .and_then(|index| verbatim.get(index))
+        {
+            result.push_str(text);
+        }
+        rest = &after[end + PLACEHOLDER_CLOSE.len_utf8()..];
+    }
+    result.push_str(rest);
+    result
+}
+
+/// Undo `&` escaping in text so prose (`R&D`) and bare URLs
+/// (`https://example.test/x?a=1&b=2`, which Azure DevOps autolinks) keep the
+/// character the author wrote.
+///
+/// `&lt;` must stay escaped — that is what stops a dropped tag being re-parsed
+/// as markup — and escaping inside a tag is left alone, so an attribute value
+/// can never be decoded into a different URL than the one the allowlist
+/// approved.
+fn unescape_ampersands(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut in_tag = false;
+
+    let mut rest = input;
+    while let Some(offset) = rest.find(['<', '>', '&']) {
+        result.push_str(&rest[..offset]);
+        match &rest[offset..offset + 1] {
+            "<" => {
+                in_tag = true;
+                result.push('<');
+                rest = &rest[offset + 1..];
+            }
+            ">" => {
+                in_tag = false;
+                result.push('>');
+                rest = &rest[offset + 1..];
+            }
+            _ if !in_tag && rest[offset..].starts_with("&amp;") => {
+                result.push('&');
+                rest = &rest[offset + "&amp;".len()..];
+            }
+            _ => {
+                result.push('&');
+                rest = &rest[offset + 1..];
+            }
+        }
+    }
+    result.push_str(rest);
     result
 }
 
@@ -225,7 +757,7 @@ fn regions(input: &str) -> Vec<Region> {
                         skip_until = range.end;
                         regions.push(Region::Protected(range));
                     } else if let Some(destination) =
-                        locate_destination(input, &range, &dest_url, INLINE_LABEL_END)
+                        protectable_destination(input, &range, &dest_url, INLINE_LABEL_END)
                     {
                         // A destination is a URL, not prose: text transforms
                         // such as @mention wrapping must not rewrite it.
@@ -244,7 +776,12 @@ fn regions(input: &str) -> Vec<Region> {
                     | LinkType::Shortcut
                     | LinkType::ShortcutUnknown => {}
                     _ => {
-                        skip_until = range.end;
+                        // Only the destination is redacted, so nested elements
+                        // (`[![alt](vbscript:inner)](vbscript:outer)`) keep
+                        // being walked and have their own destinations checked.
+                        // When the destination cannot be located the whole
+                        // element is redacted instead, and the overlapping
+                        // nested regions are dropped while rebuilding.
                         regions.push(Region::Redact(
                             locate_destination(input, &range, &dest_url, INLINE_LABEL_END)
                                 .unwrap_or(range),
@@ -257,17 +794,21 @@ fn regions(input: &str) -> Vec<Region> {
     }
 
     for (_, definition) in iter.reference_definitions().iter() {
-        let Some(range) = locate_destination(
+        if scheme_allowed(&definition.dest) {
+            if let Some(range) = protectable_destination(
+                input,
+                &definition.span,
+                &definition.dest,
+                DEFINITION_LABEL_END,
+            ) {
+                regions.push(Region::Protected(range));
+            }
+        } else if let Some(range) = locate_destination(
             input,
             &definition.span,
             &definition.dest,
             DEFINITION_LABEL_END,
-        ) else {
-            continue;
-        };
-        if scheme_allowed(&definition.dest) {
-            regions.push(Region::Protected(range));
-        } else {
+        ) {
             regions.push(Region::Redact(range));
         }
     }
@@ -282,6 +823,36 @@ const INLINE_LABEL_END: &str = "](";
 /// Label terminator that a destination follows in a `[label]: dest` reference
 /// definition.
 const DEFINITION_LABEL_END: &str = "]:";
+
+/// Find a destination that may be copied through verbatim.
+///
+/// Protected ranges bypass the HTML allowlist, so a destination is only
+/// eligible when it cannot itself carry markup: a destination containing `<`
+/// or `>` falls through to the allowlist, which escapes it. That keeps the
+/// module's guarantee (nothing outside the tag allowlist reaches the output)
+/// true even when the renderer's idea of where a destination ends differs from
+/// [`pulldown_cmark`]'s.
+///
+/// A destination wrapped in pointy brackets (`[a](<https://example.test/a b>)`)
+/// keeps the brackets inside the protected range, so a destination containing
+/// spaces is not broken by escaping the delimiters.
+fn protectable_destination(
+    input: &str,
+    span: &Range<usize>,
+    dest_url: &str,
+    label_end: &str,
+) -> Option<Range<usize>> {
+    let range = locate_destination(input, span, dest_url, label_end)?;
+    let destination = input.get(range.clone())?;
+    if destination.contains('<') || destination.contains('>') {
+        return None;
+    }
+
+    if input[..range.start].ends_with('<') && input[range.end..].starts_with('>') {
+        return Some(range.start - 1..range.end + 1);
+    }
+    Some(range)
+}
 
 /// Find the literal destination text inside the element's source range.
 ///
@@ -338,46 +909,7 @@ fn clean_html(input: &str) -> String {
     if input.is_empty() {
         return String::new();
     }
-    let cleaned = CLEANER.clean(input).to_string();
-    restore_markdown_text(&cleaned)
-}
-
-/// Undo the one piece of HTML text escaping that changes how Markdown renders.
-///
-/// The serializer escapes `<`, `>` and `&` in text nodes. `&lt;` must stay
-/// escaped — that is what stops a dropped tag from being re-parsed as markup —
-/// and an escaped `&`/`>` in the middle of a line renders identically to the
-/// raw character. A leading `>` is different: it opens a blockquote, so it is
-/// restored at the start of every line.
-fn restore_markdown_text(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
-    for line in input.split_inclusive('\n') {
-        result.push_str(&restore_blockquote_markers(line));
-    }
-    result
-}
-
-fn restore_blockquote_markers(line: &str) -> String {
-    let mut rest = line;
-    let mut prefix = String::new();
-
-    loop {
-        let indent = rest.len() - rest.trim_start_matches(' ').len();
-        if indent > 3 {
-            break;
-        }
-        let Some(after) = rest[indent..].strip_prefix("&gt;") else {
-            break;
-        };
-        prefix.push_str(&rest[..indent]);
-        prefix.push('>');
-        rest = after;
-    }
-
-    if prefix.is_empty() {
-        return line.to_string();
-    }
-    prefix + rest
+    CLEANER.clean(input).to_string()
 }
 
 /// Shared work-item rendering-fidelity corpus.
@@ -640,6 +1172,152 @@ mod tests {
         let output = sanitize_markdown("a\x1b[31mb\x00c");
 
         assert_eq!(output, "abc");
+    }
+
+    #[test]
+    fn redacts_nested_denied_destinations() {
+        // The outer element is not skipped wholesale, so the inner image's
+        // destination is checked too.
+        assert_eq!(
+            sanitize_markdown("[![x](vbscript:inner)](vbscript:outer)"),
+            "[![x]((redacted))]((redacted))"
+        );
+
+        let output =
+            sanitize_markdown("[![x](data:text/html,<script>alert(1)</script>)](javascript:o)");
+
+        assert!(!output.contains("data:"), "{output}");
+        assert!(!output.contains("<script"), "{output}");
+    }
+
+    #[test]
+    fn cleans_markup_smuggled_into_an_allowed_destination() {
+        // A destination carrying `<` or `>` is never copied through verbatim,
+        // so the tag allowlist still sees every byte of it.
+        let output = sanitize_markdown("[x](https://e.test/a<img/onerror=alert(1)>)");
+
+        assert!(!output.contains("onerror"), "{output}");
+
+        let output = sanitize_markdown("[r]: https://e.test/<script>\n");
+
+        assert!(!output.contains("<script"), "{output}");
+    }
+
+    #[test]
+    fn preserves_pointy_bracket_destination_with_spaces() {
+        let input = "[a](<https://example.test/a b>)";
+        assert_eq!(sanitize_markdown(input), input);
+    }
+
+    #[test]
+    fn escapes_text_that_only_looks_like_a_tag() {
+        // Unknown markup degrades to an entity instead of being deleted, so a
+        // description keeps the author's text.
+        assert_eq!(
+            sanitize_markdown("Fix `Vec<String>` and Vec<String> and Map<K,V>"),
+            "Fix `Vec<String>` and Vec&lt;String&gt; and Map&lt;K,V&gt;"
+        );
+        assert_eq!(sanitize_markdown("<tag>"), "&lt;tag&gt;");
+        assert_eq!(
+            sanitize_markdown("<www.example.test>"),
+            "&lt;www.example.test&gt;"
+        );
+    }
+
+    #[test]
+    fn escapes_prose_that_parses_as_a_tag_with_bare_attributes() {
+        // `<b and b>` is a valid start tag to an HTML parser, which would
+        // delete the text between the angle brackets.
+        assert_eq!(
+            sanitize_markdown("if a<b and b>c then"),
+            "if a&lt;b and b&gt;c then"
+        );
+    }
+
+    #[test]
+    fn preserves_boolean_attributes_on_real_tags() {
+        // A valueless attribute that a tag really can carry stays markup; the
+        // allowlist drops the attribute itself.
+        assert_eq!(
+            sanitize_markdown("<details open>text</details>"),
+            "<details>text</details>"
+        );
+    }
+
+    #[test]
+    fn does_not_promote_author_escaped_text_to_a_blockquote() {
+        let input = "&gt; not quoted\n";
+        assert_eq!(sanitize_markdown(input), input);
+    }
+
+    #[test]
+    fn does_not_steal_the_close_of_a_tag_written_across_lines() {
+        // A `>` on its own line closes the tag above it; treating it as a
+        // blockquote marker would leave an unterminated tag and delete the text
+        // that follows.
+        assert_eq!(sanitize_markdown("<b\n>text</b>\n"), "<b>text</b>\n");
+    }
+
+    #[test]
+    fn preserves_inline_html_spanning_a_code_span() {
+        // The document is cleaned in one pass, so the open tag is not closed at
+        // the code span boundary.
+        let input = "<b>bold `code` more</b>";
+        assert_eq!(sanitize_markdown(input), input);
+    }
+
+    #[test]
+    fn preserves_ampersands_in_prose_and_bare_urls() {
+        let input = "https://example.test/x?a=1&b=2 and R&D";
+        assert_eq!(sanitize_markdown(input), input);
+    }
+
+    #[test]
+    fn keeps_attribute_entities_escaped() {
+        // Decoding `&amp;` inside an attribute could turn an approved URL into
+        // a denied one, so escaping is only undone in text.
+        let input = r#"<a href="&amp;#106;avascript:alert(1)">x</a>"#;
+        assert_eq!(sanitize_markdown(input), input);
+    }
+
+    #[test]
+    fn tag_test_is_bounded_on_adversarial_input() {
+        // Every `<` is tested, so the scan is capped: an input made of nothing
+        // but `<` must stay linear rather than rescanning the document each
+        // time.
+        let start = std::time::Instant::now();
+        let output = sanitize_markdown(&"<b x=1 ".repeat(50_000));
+
+        assert!(!output.contains('<'), "unterminated tags are dropped");
+        assert!(start.elapsed().as_secs() < 10, "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn is_idempotent() {
+        for input in [
+            "[![x](vbscript:inner)](vbscript:outer)",
+            "Fix `Vec<String>` and Vec<String>",
+            "if a<b and b>c then",
+            "> quote\n> > nested\n",
+            "&gt; not quoted\n",
+            "https://example.test/x?a=1&b=2 and R&D",
+            "<b>bold `code` more</b>",
+            &rendering_corpus::input(),
+        ] {
+            let once = sanitize_markdown(input);
+
+            assert_eq!(sanitize_markdown(&once), once, "input: {input:?}");
+        }
+    }
+
+    #[test]
+    fn ignores_forged_internal_sentinels() {
+        // The private-use characters that stand in for protected content are
+        // stripped from the input, so they cannot be used to smuggle text past
+        // the allowlist or to forge a blockquote.
+        let output = sanitize_markdown("a\u{E000}0\u{E001}b\u{E002}> c");
+
+        assert_eq!(output, "a0b&gt; c");
     }
 
     #[test]
