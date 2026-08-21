@@ -224,7 +224,9 @@ fn regions(input: &str) -> Vec<Region> {
                         // HTML allowlist, which would parse it as a bogus tag.
                         skip_until = range.end;
                         regions.push(Region::Protected(range));
-                    } else if let Some(destination) = locate_destination(input, &range, &dest_url) {
+                    } else if let Some(destination) =
+                        locate_destination(input, &range, &dest_url, INLINE_LABEL_END)
+                    {
                         // A destination is a URL, not prose: text transforms
                         // such as @mention wrapping must not rewrite it.
                         regions.push(Region::Protected(destination));
@@ -244,7 +246,8 @@ fn regions(input: &str) -> Vec<Region> {
                     _ => {
                         skip_until = range.end;
                         regions.push(Region::Redact(
-                            locate_destination(input, &range, &dest_url).unwrap_or(range),
+                            locate_destination(input, &range, &dest_url, INLINE_LABEL_END)
+                                .unwrap_or(range),
                         ));
                     }
                 }
@@ -254,7 +257,12 @@ fn regions(input: &str) -> Vec<Region> {
     }
 
     for (_, definition) in iter.reference_definitions().iter() {
-        let Some(range) = locate_destination(input, &definition.span, &definition.dest) else {
+        let Some(range) = locate_destination(
+            input,
+            &definition.span,
+            &definition.dest,
+            DEFINITION_LABEL_END,
+        ) else {
             continue;
         };
         if scheme_allowed(&definition.dest) {
@@ -268,19 +276,42 @@ fn regions(input: &str) -> Vec<Region> {
     regions
 }
 
+/// Label terminator that a destination follows in `[label](dest)` links and
+/// `![alt](src)` images.
+const INLINE_LABEL_END: &str = "](";
+/// Label terminator that a destination follows in a `[label]: dest` reference
+/// definition.
+const DEFINITION_LABEL_END: &str = "]:";
+
 /// Find the literal destination text inside the element's source range.
+///
+/// The search starts *after* the label terminator, because in every syntax that
+/// has a label the destination follows it. Searching the whole span instead
+/// matches the label whenever it repeats the destination text — for
+/// `[javascript:alert(1)](javascript:alert(1))` that redacts the inert label
+/// and leaves the live destination untouched.
 ///
 /// `dest_url` is the parser's decoded destination, so it does not always appear
 /// verbatim in the source (percent/entity/backslash escapes). When it cannot be
 /// located the caller degrades safely: a denied scheme redacts the whole
 /// element, and an allowed destination is simply not marked protected, so it
 /// flows through the HTML allowlist like ordinary text.
-fn locate_destination(input: &str, span: &Range<usize>, dest_url: &str) -> Option<Range<usize>> {
+fn locate_destination(
+    input: &str,
+    span: &Range<usize>,
+    dest_url: &str,
+    label_end: &str,
+) -> Option<Range<usize>> {
     if dest_url.is_empty() {
         return None;
     }
     let source = input.get(span.clone())?;
-    let offset = source.find(dest_url)?;
+    // An autolink (`<https://example.test>`) has no label, so the whole span is
+    // the destination and the search starts at the beginning.
+    let search_from = source
+        .rfind(label_end)
+        .map_or(0, |offset| offset + label_end.len());
+    let offset = search_from + source.get(search_from..)?.find(dest_url)?;
     let start = span.start + offset;
     Some(start..start + dest_url.len())
 }
@@ -425,6 +456,40 @@ mod tests {
         assert!(!output.contains("javascript:"), "{output}");
         assert!(output.contains("(redacted)"), "{output}");
         assert!(output.contains("click me"), "{output}");
+    }
+
+    #[test]
+    fn redacts_destination_when_the_label_repeats_it() {
+        // The destination follows the label, so locating it must not stop at
+        // the first matching bytes — otherwise the label is redacted and the
+        // live destination survives.
+        let output = sanitize_markdown("[javascript:alert(1)](javascript:alert(1))");
+
+        assert_eq!(output, "[javascript:alert(1)]((redacted))", "{output}");
+    }
+
+    #[test]
+    fn redacts_reference_definition_when_the_label_repeats_it() {
+        let output = sanitize_markdown(
+            "See [x][vbscript:msgbox(1)].\n\n[vbscript:msgbox(1)]: vbscript:msgbox(1)\n",
+        );
+
+        assert_eq!(
+            output, "See [x][vbscript:msgbox(1)].\n\n[vbscript:msgbox(1)]: (redacted)\n",
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn protects_allowed_destination_when_the_label_repeats_it() {
+        let input = "[https://example.test/@user](https://example.test/@user)";
+
+        // The label is prose and gets mention neutralization; the destination
+        // is a URL and must be left alone.
+        assert_eq!(
+            sanitize_markdown(input),
+            "[https://example.test/`@user`](https://example.test/@user)"
+        );
     }
 
     #[test]
