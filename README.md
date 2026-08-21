@@ -507,6 +507,23 @@ tools:
 > [`docs/parameters.md`](docs/parameters.md) for the full runtime-parameters
 > reference.
 
+### Built-in CLIs (always available)
+
+Two CLI binaries are available to the agent's bash tool without any `tools:`
+opt-in — the compiler assumes the host runner has them pre-installed:
+
+- **`az`** (Azure CLI) — every compiled pipeline adds the Azure auth hosts to
+  the network allowlist and detects `az` on the runner at pipeline time. If
+  found, it's mounted into the sandbox and the agent gets an advisory prompt
+  explaining how to use it; if missing, the pipeline still runs (with a
+  yellow ADO warning) and the agent is never told to use `az`. `az devops *`
+  subcommands are auto-authenticated via the pipeline's read token whenever
+  `permissions.read` is configured; general `az`/ARM/Graph commands need
+  their own `az login` flow. See [`docs/tools.md`](docs/tools.md#azure-cli-az)
+  for the detection and mounting details.
+- **`gh`** (GitHub CLI) — wired to the same read-only `GITHUB_TOKEN` used by
+  the GitHub MCP integration, so `gh` commands run from bash share that auth.
+
 ### Custom MCP Servers (via `mcp-servers:`)
 
 For external or third-party MCPs, use the `mcp-servers:` field. Each entry is
