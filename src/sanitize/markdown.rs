@@ -1314,10 +1314,18 @@ mod tests {
     fn ignores_forged_internal_sentinels() {
         // The private-use characters that stand in for protected content are
         // stripped from the input, so they cannot be used to smuggle text past
-        // the allowlist or to forge a blockquote.
-        let output = sanitize_markdown("a\u{E000}0\u{E001}b\u{E002}> c");
+        // the allowlist or to forge a blockquote. The forged placeholder is
+        // gone (`0` is left as the ordinary text it was), and the `>` is
+        // treated as the mid-line text it now is, which the allowlist stores
+        // escaped.
+        assert_eq!(
+            sanitize_markdown("a\u{E000}0\u{E001}b\u{E002}> c"),
+            "a0b&gt; c"
+        );
 
-        assert_eq!(output, "a0b&gt; c");
+        // A forged blockquote sentinel cannot move a `>` to the start of a
+        // line either: the marker only comes back where the author wrote one.
+        assert_eq!(sanitize_markdown("\u{E002}quoted?\n"), "quoted?\n");
     }
 
     #[test]
