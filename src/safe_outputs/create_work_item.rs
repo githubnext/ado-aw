@@ -987,8 +987,10 @@ tags:
 
     #[test]
     fn test_patch_field_validation_rejects_description_field_title_collision() {
-        let mut config = CreateWorkItemConfig::default();
-        config.description_field = Some(AdoWorkItemFieldRef::parse("System.Title").unwrap());
+        let config = CreateWorkItemConfig {
+            description_field: Some(AdoWorkItemFieldRef::parse("System.Title").unwrap()),
+            ..Default::default()
+        };
         let error = validate_patch_fields(&config, description_field_for(&config), false)
             .unwrap_err()
             .to_string();
