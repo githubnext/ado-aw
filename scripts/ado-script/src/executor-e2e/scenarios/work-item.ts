@@ -23,8 +23,10 @@ const ASSIGN_TEMPORARY_ID = "#aw_wiassign";
 const RENDERING_INPUT = renderingCorpus.input.join("\n");
 const RENDERING_EXPECTED = renderingCorpus.expected.join("\n");
 
-/** Constructs the sanitizer must never let reach a rendered work item. */
-/** Compared case-insensitively, so a folded `<SCRIPT >` is covered too. */
+/**
+ * Constructs the sanitizer must never let reach a rendered work item.
+ * Compared case-insensitively, so a folded `<SCRIPT >` is covered too.
+ */
 const DENIED_CONSTRUCTS = ["<script", "onerror=", "<iframe"];
 
 /**
@@ -286,7 +288,8 @@ function outsideFencedCode(text: string): string {
   const kept: string[] = [];
   let inFence = false;
   for (const line of lines) {
-    if (line.trimStart().startsWith("```")) {
+    const trimmed = line.trimStart();
+    if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
       inFence = !inFence;
       continue;
     }
