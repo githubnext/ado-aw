@@ -17,7 +17,7 @@
 
 use log::debug;
 
-mod markdown;
+pub(crate) mod markdown;
 
 /// Trait for types that contain untrusted agent-generated text fields.
 ///

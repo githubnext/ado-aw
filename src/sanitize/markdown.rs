@@ -349,8 +349,42 @@ fn restore_blockquote_markers(line: &str) -> String {
     prefix + rest
 }
 
+/// Shared work-item rendering-fidelity corpus.
+///
+/// The same JSON is imported by the `create-work-item-rendering` executor E2E
+/// scenarios, so the fast local golden and the against-ADO assertion can never
+/// disagree about what a human is supposed to see in a work item.
+#[cfg(test)]
+pub(crate) mod rendering_corpus {
+    const CORPUS: &str = include_str!(
+        "../../scripts/ado-script/src/executor-e2e/scenarios/markdown-rendering-corpus.json"
+    );
+
+    fn lines(key: &str) -> String {
+        let corpus: serde_json::Value = serde_json::from_str(CORPUS).expect("corpus is valid JSON");
+        corpus[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("corpus key '{key}' is not an array"))
+            .iter()
+            .map(|line| line.as_str().expect("corpus line is not a string"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The unsanitized Markdown an agent proposes.
+    pub(crate) fn input() -> String {
+        lines("input")
+    }
+
+    /// The sanitized Markdown that must be stored in the work item.
+    pub(crate) fn expected() -> String {
+        lines("expected")
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::rendering_corpus;
     use crate::sanitize::sanitize_markdown;
 
     #[test]
@@ -541,5 +575,19 @@ mod tests {
         let output = sanitize_markdown("a\x1b[31mb\x00c");
 
         assert_eq!(output, "abc");
+    }
+
+    #[test]
+    fn work_item_rendering_corpus_matches_golden() {
+        let actual = sanitize_markdown(&rendering_corpus::input());
+
+        assert_eq!(
+            actual,
+            rendering_corpus::expected(),
+            "sanitized rendering corpus changed; \
+             update `expected` in markdown-rendering-corpus.json only when the \
+             new rendering is intentional (it is asserted byte-for-byte against \
+             a real work item by the executor E2E suite)"
+        );
     }
 }

@@ -2,9 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ExecutedRecord, ScenarioContext } from "../scenario.js";
 import { SkipError } from "../scenario.js";
+import renderingCorpus from "../scenarios/markdown-rendering-corpus.json" with { type: "json" };
 import {
   assignWorkItemTemporaryIdHandoff,
+  createBugWorkItemRendering,
   createWorkItem,
+  createWorkItemRendering,
   resolveWorkItemAssignee,
   workItemScenarios,
 } from "../scenarios/work-item.js";
@@ -139,5 +142,143 @@ describe("assign-work-item temporary-ID handoff", () => {
     await assignWorkItemTemporaryIdHandoff.cleanup(ctx, state);
     expect(findWorkItemByTitle).toHaveBeenCalledWith(state.title);
     expect(deleteWorkItem).toHaveBeenCalledWith(42);
+  });
+});
+
+describe("create-work-item rendering fidelity", () => {
+  const expected = renderingCorpus.expected.join("\n");
+
+  function renderingCtx(
+    payload: {
+      id: number;
+      fields: Record<string, unknown>;
+      multilineFieldsFormat?: Record<string, unknown>;
+    },
+    typeExists = true,
+  ): ScenarioContext {
+    return {
+      ...fakeCtx(),
+      rest: {
+        getWorkItem: vi.fn(async () => payload),
+        workItemTypeExists: vi.fn(async () => typeExists),
+      } as unknown as ScenarioContext["rest"],
+    };
+  }
+
+  const record: ExecutedRecord = {
+    name: "create_work_item",
+    status: "succeeded",
+    result: { id: 42 },
+  };
+
+  it("registers both description-field scenarios", () => {
+    const ids = workItemScenarios.map((scenario) => scenario.id ?? scenario.tool);
+    expect(ids).toContain("create-work-item-rendering");
+    expect(ids).toContain("create-work-item-rendering-bug");
+  });
+
+  it("proposes the raw (unsanitized) corpus so the executor does the sanitizing", async () => {
+    const entry = await createWorkItemRendering.ndjson(fakeCtx(), {
+      title: "ado-aw-det-77-create-work-item-rendering",
+    });
+    expect(entry.description).toBe(renderingCorpus.input.join("\n"));
+    expect(createWorkItemRendering.config(fakeCtx(), { title: "t" })).toMatchObject({
+      "work-item-type": "Task",
+      "include-stats": false,
+    });
+    expect(createBugWorkItemRendering.config(fakeCtx(), { title: "t" })).toMatchObject({
+      "work-item-type": "Bug",
+    });
+  });
+
+  it("skips when the project does not define the work item type", async () => {
+    await expect(
+      createBugWorkItemRendering.setup(renderingCtx({ id: 42, fields: {} }, false)),
+    ).rejects.toThrow(SkipError);
+  });
+
+  it("accepts a work item whose description round-trips the golden", async () => {
+    const state: { title: string; createdId?: number } = { title: "t" };
+    await createWorkItemRendering.assert(
+      renderingCtx({
+        id: 42,
+        fields: { "System.Description": expected },
+        multilineFieldsFormat: { "System.Description": "Markdown" },
+      }),
+      state,
+      record,
+      [record],
+    );
+    expect(state.createdId).toBe(42);
+  });
+
+  it("records the created id before failing a golden mismatch", async () => {
+    const state: { title: string; createdId?: number } = { title: "t" };
+    await expect(
+      createWorkItemRendering.assert(
+        // Security-clean but not byte-identical: only the golden catches it.
+        renderingCtx({
+          id: 42,
+          fields: { "System.Description": expected.replace("**bold**", "bold") },
+        }),
+        state,
+        record,
+        [record],
+      ),
+    ).rejects.toThrow(/does not match the sanitized golden/);
+    expect(state.createdId).toBe(42);
+  });
+
+  it("fails when the field is not stored as Markdown", async () => {
+    await expect(
+      createWorkItemRendering.assert(
+        renderingCtx({
+          id: 42,
+          fields: { "System.Description": expected },
+          multilineFieldsFormat: { "System.Description": "Html" },
+        }),
+        { title: "t" },
+        record,
+        [record],
+      ),
+    ).rejects.toThrow(/expected "Markdown"/);
+  });
+
+  it("fails when a denied construct survives outside fenced code", async () => {
+    const leaked = `${expected}\n<script>alert(1)</script>`;
+    await expect(
+      createWorkItemRendering.assert(
+        renderingCtx({ id: 42, fields: { "System.Description": leaked } }),
+        { title: "t" },
+        record,
+        [record],
+      ),
+    ).rejects.toThrow(/still contains '<script' outside code/);
+  });
+
+  it("fails when fenced code was mangled", async () => {
+    const mangled = expected.replace(
+      '<script>alert("fenced code is verbatim")</script>',
+      "",
+    );
+    await expect(
+      createWorkItemRendering.assert(
+        renderingCtx({ id: 42, fields: { "System.Description": mangled } }),
+        { title: "t" },
+        record,
+        [record],
+      ),
+    ).rejects.toThrow(/lost fenced code line/);
+  });
+
+  it("asserts the Bug repro-steps field", async () => {
+    await expect(
+      createBugWorkItemRendering.assert(
+        renderingCtx({ id: 42, fields: { "System.Description": expected } }),
+        { title: "t" },
+        record,
+        [record],
+      ),
+    ).rejects.toThrow(/has no string 'Microsoft\.VSTS\.TCM\.ReproSteps'/);
   });
 });
