@@ -1151,6 +1151,209 @@ fn print_execution_summary(results: &[crate::safe_outputs::ExecutionResult]) {
     );
 }
 
+/// Arguments for the `execute` subcommand, gathered here so that the
+/// dispatch logic can live in a standalone helper rather than inline in
+/// `main`'s match arm.
+struct ExecuteCommandArgs {
+    source: Option<PathBuf>,
+    safe_output_dir: PathBuf,
+    output_dir: Option<PathBuf>,
+    ado_org_url: Option<String>,
+    ado_project: Option<String>,
+    dry_run: bool,
+    only: Vec<String>,
+    exclude: Vec<String>,
+    resolved_config: Option<PathBuf>,
+    prepare_custom_agent_output: Option<PathBuf>,
+}
+
+/// Dispatches the `execute` subcommand: either materializes the aggregate
+/// Agent-output file (`--prepare-custom-agent-output`) or runs the normal
+/// Stage 3 safe-output execution path.
+async fn dispatch_execute_command(args: ExecuteCommandArgs) -> Result<()> {
+    let ExecuteCommandArgs {
+        source,
+        safe_output_dir,
+        output_dir,
+        ado_org_url,
+        ado_project,
+        dry_run,
+        only,
+        exclude,
+        resolved_config,
+        prepare_custom_agent_output,
+    } = args;
+
+    if let Some(output_path) = prepare_custom_agent_output {
+        if output_dir.is_some()
+            || ado_org_url.is_some()
+            || ado_project.is_some()
+            || !only.is_empty()
+            || !exclude.is_empty()
+            || dry_run
+        {
+            anyhow::bail!(
+                "--prepare-custom-agent-output cannot be combined with --output-dir, \
+                 --ado-org-url, --ado-project, --dry-run, --only, or --exclude"
+            );
+        }
+        let resolved_config = resolved_config
+            .as_deref()
+            .context("--prepare-custom-agent-output requires --resolved-config")?;
+        let count =
+            execute::prepare_custom_agent_output(&safe_output_dir, resolved_config, &output_path)
+                .await?;
+        println!(
+            "Prepared {count} Agent-output item(s) at {}",
+            output_path.display()
+        );
+    } else {
+        run_execute(RunExecuteOptions {
+            source,
+            resolved_config,
+            safe_output_dir,
+            output_dir,
+            ado_org_url,
+            ado_project,
+            dry_run,
+            filter: execute::ToolFilter { only, exclude },
+        })
+        .await?;
+    }
+    Ok(())
+}
+
+/// Dispatches the `secrets` subcommand group (`set`/`list`/`delete`).
+async fn dispatch_secrets_command(action: SecretsCmd) -> Result<()> {
+    match action {
+        SecretsCmd::Set {
+            name,
+            value,
+            path,
+            org,
+            project,
+            pat,
+            allow_override,
+            value_stdin,
+            dry_run,
+            definition_ids,
+            all_repos,
+            source,
+            include_disabled,
+        } => {
+            secrets::run_set(secrets::SetOptions {
+                name: &name,
+                value: value.as_deref(),
+                org: org.as_deref(),
+                project: project.as_deref(),
+                pat: pat.as_deref(),
+                path: path.as_deref(),
+                allow_override,
+                value_stdin,
+                dry_run,
+                definition_ids: definition_ids.as_deref(),
+                all_repos,
+                source: source.as_deref(),
+                include_disabled,
+            })
+            .await?;
+        }
+        SecretsCmd::List {
+            path,
+            org,
+            project,
+            pat,
+            json,
+            definition_ids,
+            all_repos,
+            source,
+            include_disabled,
+        } => {
+            secrets::run_list(secrets::ListOptions {
+                org: org.as_deref(),
+                project: project.as_deref(),
+                pat: pat.as_deref(),
+                path: path.as_deref(),
+                json,
+                definition_ids: definition_ids.as_deref(),
+                all_repos,
+                source: source.as_deref(),
+                include_disabled,
+            })
+            .await?;
+        }
+        SecretsCmd::Delete {
+            name,
+            path,
+            org,
+            project,
+            pat,
+            dry_run,
+            definition_ids,
+            all_repos,
+            source,
+            include_disabled,
+        } => {
+            secrets::run_delete(secrets::DeleteOptions {
+                name: &name,
+                org: org.as_deref(),
+                project: project.as_deref(),
+                pat: pat.as_deref(),
+                path: path.as_deref(),
+                dry_run,
+                definition_ids: definition_ids.as_deref(),
+                all_repos,
+                source: source.as_deref(),
+                include_disabled,
+            })
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Dispatches the `graph` subcommand group (`dump`/`deps`/`outputs`).
+async fn dispatch_graph_command(subcommand: GraphCmd) -> Result<()> {
+    match subcommand {
+        GraphCmd::Dump { source, format } => {
+            inspect::dispatch_graph(inspect::GraphOptions {
+                source: &source,
+                format,
+            })
+            .await?;
+        }
+        GraphCmd::Deps {
+            source,
+            step,
+            direction,
+            json,
+        } => {
+            inspect::dispatch_graph_deps(inspect::GraphDepsOptions {
+                source: &source,
+                step: &step,
+                direction,
+                json,
+            })
+            .await?;
+        }
+        GraphCmd::Outputs {
+            source,
+            producer,
+            consumer,
+            json,
+        } => {
+            inspect::dispatch_graph_outputs(inspect::GraphOutputsOptions {
+                source: &source,
+                producer: producer.as_deref(),
+                consumer: consumer.as_deref(),
+                json,
+            })
+            .await?;
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -1251,45 +1454,19 @@ async fn main() -> Result<()> {
             resolved_config,
             prepare_custom_agent_output,
         } => {
-            if let Some(output_path) = prepare_custom_agent_output {
-                if output_dir.is_some()
-                    || ado_org_url.is_some()
-                    || ado_project.is_some()
-                    || !only.is_empty()
-                    || !exclude.is_empty()
-                    || dry_run
-                {
-                    anyhow::bail!(
-                        "--prepare-custom-agent-output cannot be combined with --output-dir, \
-                         --ado-org-url, --ado-project, --dry-run, --only, or --exclude"
-                    );
-                }
-                let resolved_config = resolved_config
-                    .as_deref()
-                    .context("--prepare-custom-agent-output requires --resolved-config")?;
-                let count = execute::prepare_custom_agent_output(
-                    &safe_output_dir,
-                    resolved_config,
-                    &output_path,
-                )
-                .await?;
-                println!(
-                    "Prepared {count} Agent-output item(s) at {}",
-                    output_path.display()
-                );
-            } else {
-                run_execute(RunExecuteOptions {
-                    source,
-                    resolved_config,
-                    safe_output_dir,
-                    output_dir,
-                    ado_org_url,
-                    ado_project,
-                    dry_run,
-                    filter: execute::ToolFilter { only, exclude },
-                })
-                .await?;
-            }
+            dispatch_execute_command(ExecuteCommandArgs {
+                source,
+                safe_output_dir,
+                output_dir,
+                ado_org_url,
+                ado_project,
+                dry_run,
+                only,
+                exclude,
+                resolved_config,
+                prepare_custom_agent_output,
+            })
+            .await?;
         }
         Commands::Init {
             path,
@@ -1325,90 +1502,9 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
-        Commands::Secrets { action } => match action {
-            SecretsCmd::Set {
-                name,
-                value,
-                path,
-                org,
-                project,
-                pat,
-                allow_override,
-                value_stdin,
-                dry_run,
-                definition_ids,
-                all_repos,
-                source,
-                include_disabled,
-            } => {
-                secrets::run_set(secrets::SetOptions {
-                    name: &name,
-                    value: value.as_deref(),
-                    org: org.as_deref(),
-                    project: project.as_deref(),
-                    pat: pat.as_deref(),
-                    path: path.as_deref(),
-                    allow_override,
-                    value_stdin,
-                    dry_run,
-                    definition_ids: definition_ids.as_deref(),
-                    all_repos,
-                    source: source.as_deref(),
-                    include_disabled,
-                })
-                .await?;
-            }
-            SecretsCmd::List {
-                path,
-                org,
-                project,
-                pat,
-                json,
-                definition_ids,
-                all_repos,
-                source,
-                include_disabled,
-            } => {
-                secrets::run_list(secrets::ListOptions {
-                    org: org.as_deref(),
-                    project: project.as_deref(),
-                    pat: pat.as_deref(),
-                    path: path.as_deref(),
-                    json,
-                    definition_ids: definition_ids.as_deref(),
-                    all_repos,
-                    source: source.as_deref(),
-                    include_disabled,
-                })
-                .await?;
-            }
-            SecretsCmd::Delete {
-                name,
-                path,
-                org,
-                project,
-                pat,
-                dry_run,
-                definition_ids,
-                all_repos,
-                source,
-                include_disabled,
-            } => {
-                secrets::run_delete(secrets::DeleteOptions {
-                    name: &name,
-                    org: org.as_deref(),
-                    project: project.as_deref(),
-                    pat: pat.as_deref(),
-                    path: path.as_deref(),
-                    dry_run,
-                    definition_ids: definition_ids.as_deref(),
-                    all_repos,
-                    source: source.as_deref(),
-                    include_disabled,
-                })
-                .await?;
-            }
-        },
+        Commands::Secrets { action } => {
+            dispatch_secrets_command(action).await?;
+        }
         Commands::Enable {
             path,
             org,
@@ -1605,43 +1701,9 @@ async fn main() -> Result<()> {
             })
             .await?;
         }
-        Commands::Graph { subcommand } => match subcommand {
-            GraphCmd::Dump { source, format } => {
-                inspect::dispatch_graph(inspect::GraphOptions {
-                    source: &source,
-                    format,
-                })
-                .await?;
-            }
-            GraphCmd::Deps {
-                source,
-                step,
-                direction,
-                json,
-            } => {
-                inspect::dispatch_graph_deps(inspect::GraphDepsOptions {
-                    source: &source,
-                    step: &step,
-                    direction,
-                    json,
-                })
-                .await?;
-            }
-            GraphCmd::Outputs {
-                source,
-                producer,
-                consumer,
-                json,
-            } => {
-                inspect::dispatch_graph_outputs(inspect::GraphOutputsOptions {
-                    source: &source,
-                    producer: producer.as_deref(),
-                    consumer: consumer.as_deref(),
-                    json,
-                })
-                .await?;
-            }
-        },
+        Commands::Graph { subcommand } => {
+            dispatch_graph_command(subcommand).await?;
+        }
         Commands::Whatif { source, fail, json } => {
             inspect::dispatch_whatif(inspect::WhatIfOptions {
                 source: &source,
