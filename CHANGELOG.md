@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.50.1](https://github.com/githubnext/ado-aw/compare/v0.50.0...v0.50.1) (2026-08-21)
+
+
+### Bug Fixes
+
+* **safe-outputs:** accept create-work-item temporary IDs in comment-on-work-item ([#1925](https://github.com/githubnext/ado-aw/issues/1925)) ([30ba3db](https://github.com/githubnext/ado-aw/commit/30ba3db6d11189e48937327930a5aa01b33b938f))
+* **safe-outputs:** make create-work-item body field configurable ([#1926](https://github.com/githubnext/ado-aw/issues/1926)) ([9ef8855](https://github.com/githubnext/ado-aw/commit/9ef88556dd74d9becb3d331985b6ebf1abf4dd29))
+* **workflows:** wait for rust-critic/ts-critic sub-agent results ([#1973](https://github.com/githubnext/ado-aw/issues/1973)) ([01ec634](https://github.com/githubnext/ado-aw/commit/01ec634ae9629b21894ef318090b6a5927b9a101))
+
 ## [0.50.0](https://github.com/githubnext/ado-aw/compare/v0.49.0...v0.50.0) (2026-08-14)
 
 
