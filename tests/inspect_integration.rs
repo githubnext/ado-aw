@@ -174,6 +174,138 @@ fn graph_rejects_unknown_format() {
     );
 }
 
+/// `graph deps --json` on the canonical canary pipeline traverses
+/// downstream from the `Agent` job and must include both `Detection` and
+/// `SafeOutputs`, which both declare a dependency edge onto `Agent`. This
+/// exercises `dispatch_graph_deps` / `graph_deps::analyze` end-to-end via
+/// the CLI, which previously had no integration coverage at all (only
+/// `graph dump` and `inspect` were tested here).
+#[test]
+fn graph_deps_json_downstream_includes_dependent_jobs() {
+    let (_workspace, src) = fixture_copy("canary.md");
+    let out = Command::new(binary_path())
+        .arg("graph")
+        .arg("deps")
+        .arg(&src)
+        .arg("Agent")
+        .arg("--direction")
+        .arg("downstream")
+        .arg("--json")
+        .output()
+        .expect("run ado-aw graph deps --direction downstream --json");
+    assert!(
+        out.status.success(),
+        "graph deps --direction downstream --json exited non-zero. stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("graph deps --json must emit valid JSON");
+    assert_eq!(json["step"], "Agent");
+    assert_eq!(json["direction"], "downstream");
+    let jobs = json["transitive_jobs"]
+        .as_array()
+        .expect("expected a 'transitive_jobs' array in the deps report");
+    let job_names: Vec<&str> = jobs
+        .iter()
+        .filter_map(|v| v["job"].as_str())
+        .collect();
+    assert!(
+        job_names.contains(&"Detection"),
+        "expected Detection among downstream jobs of Agent, got: {job_names:?}"
+    );
+    assert!(
+        job_names.contains(&"SafeOutputs"),
+        "expected SafeOutputs among downstream jobs of Agent, got: {job_names:?}"
+    );
+}
+
+/// `graph deps` on a step id absent from the graph must fail with a
+/// descriptive error rather than panicking or silently returning an empty
+/// report — this is the primary error path of `graph_deps::analyze`.
+#[test]
+fn graph_deps_rejects_unknown_step() {
+    let (_workspace, src) = fixture_copy("canary.md");
+    let out = Command::new(binary_path())
+        .arg("graph")
+        .arg("deps")
+        .arg(&src)
+        .arg("DoesNotExist")
+        .output()
+        .expect("run ado-aw graph deps DoesNotExist");
+    assert!(
+        !out.status.success(),
+        "graph deps on an unknown step id should fail"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("DoesNotExist") && stderr.contains("not found"),
+        "expected a 'step not found' error mentioning the missing id, got:\n{stderr}"
+    );
+}
+
+/// `graph outputs` on the canonical canary pipeline lists the
+/// `threatAnalysis` producer's `SafeToProcess` output and its consumers.
+/// This is the only coverage of `dispatch_graph_outputs` /
+/// `graph_outputs::analyze` via the CLI; previously untested here.
+#[test]
+fn graph_outputs_lists_producer_and_consumers() {
+    let (_workspace, src) = fixture_copy("canary.md");
+    let out = Command::new(binary_path())
+        .arg("graph")
+        .arg("outputs")
+        .arg(&src)
+        .output()
+        .expect("run ado-aw graph outputs");
+    assert!(
+        out.status.success(),
+        "graph outputs exited non-zero. stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("SafeToProcess"),
+        "expected the SafeToProcess output to be listed, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("threatAnalysis"),
+        "expected the threatAnalysis producer step to be listed, got:\n{stdout}"
+    );
+}
+
+/// `graph outputs --producer <id>` filters to only outputs declared by
+/// that step, and `--consumer <id>` filters to outputs read by that
+/// consumer. Combining an unmatched filter with a real fixture must yield
+/// an empty (but successful) result rather than an error.
+#[test]
+fn graph_outputs_producer_filter_excludes_unmatched_producer() {
+    let (_workspace, src) = fixture_copy("canary.md");
+    let out = Command::new(binary_path())
+        .arg("graph")
+        .arg("outputs")
+        .arg(&src)
+        .arg("--producer")
+        .arg("doesNotProduceAnything")
+        .arg("--json")
+        .output()
+        .expect("run ado-aw graph outputs --producer doesNotProduceAnything --json");
+    assert!(
+        out.status.success(),
+        "graph outputs with a non-matching producer filter should still succeed. stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("graph outputs --json must emit valid JSON");
+    let edges = json
+        .as_array()
+        .expect("expected the outputs report to be a JSON array of edges");
+    assert!(
+        edges.is_empty(),
+        "expected no edges for an unmatched producer filter, got: {edges:?}"
+    );
+}
+
 fn fixture_path(relative: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
