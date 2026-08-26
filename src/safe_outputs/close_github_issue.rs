@@ -360,6 +360,199 @@ impl CloseGithubIssueResult {
         };
         resolve_github_issue_target(&issue_number, repository.as_deref(), policy, ctx)
     }
+
+    /// Resolves and validates the `duplicate_of` target, if set, returning the data needed
+    /// to mark the issue as a duplicate after closing.
+    async fn resolve_canonical_duplicate(
+        &self,
+        target: &crate::safe_outputs::ResolvedGithubIssueTarget,
+        metadata: &crate::safe_outputs::GithubTargetMetadata,
+        policy: GithubRepositoryPolicy<'_>,
+        ctx: &ExecutionContext,
+        client: &GithubClient,
+    ) -> anyhow::Result<Result<Option<DuplicateCanonical>, ExecutionResult>> {
+        let Some(duplicate_of) = &self.duplicate_of else {
+            return Ok(Ok(None));
+        };
+        let duplicate_target =
+            match self.resolve_duplicate(duplicate_of, &target.repository, policy, ctx)? {
+                Ok(target) => target,
+                Err(result) => return Ok(Err(result)),
+            };
+        if duplicate_target
+            .repository
+            .eq_ignore_ascii_case(&target.repository)
+            && duplicate_target.number == target.number
+        {
+            return Ok(Err(ExecutionResult::failure(
+                "duplicate_of cannot reference the issue being closed",
+            )));
+        }
+        let duplicate_metadata = match client
+            .get_issue(&duplicate_target.repository, duplicate_target.number)
+            .await?
+        {
+            Ok(metadata) => metadata,
+            Err(error) => return Ok(Err(ExecutionResult::failure(error.to_string()))),
+        };
+        if let Err(result) = validate_github_target_capability(
+            &duplicate_metadata,
+            GithubTargetCapabilities::ISSUES_ONLY,
+        ) {
+            return Ok(Err(result));
+        }
+        let Some(duplicate_node_id) = metadata.node_id.clone() else {
+            return Ok(Err(ExecutionResult::failure(format!(
+                "GitHub issue {}#{} has no GraphQL node ID",
+                target.repository, target.number
+            ))));
+        };
+        let Some(canonical_node_id) = duplicate_metadata.node_id else {
+            return Ok(Err(ExecutionResult::failure(format!(
+                "Canonical GitHub issue {}#{} has no GraphQL node ID",
+                duplicate_target.repository, duplicate_target.number
+            ))));
+        };
+        Ok(Ok(Some(DuplicateCanonical {
+            repository: duplicate_target.repository,
+            number: duplicate_target.number,
+            duplicate_node_id,
+            canonical_node_id,
+        })))
+    }
+}
+
+/// Resolved `duplicate_of` target plus the GraphQL node IDs needed to mark the
+/// closed issue as a duplicate.
+struct DuplicateCanonical {
+    repository: String,
+    number: u64,
+    duplicate_node_id: String,
+    canonical_node_id: String,
+}
+
+/// Posts the optional closing comment. No-op when the issue is already closed,
+/// the comment was omitted by policy, or no body was provided.
+async fn post_closing_comment(
+    client: &GithubClient,
+    target_repository: &str,
+    target_number: u64,
+    already_closed: bool,
+    comment_omitted: bool,
+    body: Option<&str>,
+) -> anyhow::Result<Result<(), ExecutionResult>> {
+    if already_closed || comment_omitted {
+        return Ok(Ok(()));
+    }
+    let Some(body) = body else {
+        return Ok(Ok(()));
+    };
+    let response = client
+        .send(
+            Method::POST,
+            client.issue_comments_url(target_repository, target_number)?,
+            Some(&serde_json::json!({ "body": body })),
+        )
+        .await?;
+    if !response.is_success() {
+        let error = response
+            .require_success("Failed to add GitHub issue closing comment")
+            .expect_err("non-success response must produce an API error");
+        return Ok(Err(ExecutionResult::failure(error.to_string())));
+    }
+    Ok(Ok(()))
+}
+
+/// Sends the state-change PATCH that actually closes the issue. No-op if already closed.
+async fn close_issue(
+    client: &GithubClient,
+    target_repository: &str,
+    target_number: u64,
+    already_closed: bool,
+    state_reason: GithubIssueStateReason,
+) -> anyhow::Result<Result<(), ExecutionResult>> {
+    if already_closed {
+        return Ok(Ok(()));
+    }
+    debug!(
+        "Closing GitHub issue {}#{} as {}",
+        target_repository, target_number, state_reason
+    );
+    let response = client
+        .send(
+            Method::PATCH,
+            client.issue_url(target_repository, target_number)?,
+            Some(&serde_json::json!({
+                "state": "closed",
+                "state_reason": state_reason.as_str(),
+            })),
+        )
+        .await?;
+    if !response.is_success() {
+        let error = response
+            .require_success("Failed to close GitHub issue")
+            .expect_err("non-success response must produce an API error");
+        return Ok(Err(ExecutionResult::failure(error.to_string())));
+    }
+    Ok(Ok(()))
+}
+
+/// Marks the closed issue as a duplicate of `canonical` via the GraphQL `markAsDuplicate`
+/// mutation, folding any failure into an `ExecutionResult` that still reports the issue
+/// as closed.
+async fn mark_as_duplicate(
+    client: &GithubClient,
+    target_repository: &str,
+    target_number: u64,
+    already_closed: bool,
+    canonical: &DuplicateCanonical,
+) -> anyhow::Result<Result<(), ExecutionResult>> {
+    let failure_data = |message: String| {
+        ExecutionResult::failure_with_data(
+            message,
+            serde_json::json!({
+                "number": target_number,
+                "target_repo": target_repository,
+                "closed": true,
+                "already_closed": already_closed,
+                "duplicate_of": format!("{}#{}", canonical.repository, canonical.number),
+            }),
+        )
+    };
+    let data = match client
+        .graphql(
+            "Failed to mark GitHub issue as duplicate",
+            r#"mutation MarkAsDuplicate($duplicateId: ID!, $canonicalId: ID!) {
+  markAsDuplicate(input: { duplicateId: $duplicateId, canonicalId: $canonicalId }) {
+    duplicate { ... on Issue { id number } }
+  }
+}"#,
+            serde_json::json!({
+                "duplicateId": canonical.duplicate_node_id,
+                "canonicalId": canonical.canonical_node_id,
+            }),
+        )
+        .await?
+    {
+        Ok(data) => data,
+        Err(error) => {
+            return Ok(Err(failure_data(format!(
+                "Closed GitHub issue {target_repository}#{target_number} but failed to create \
+                 duplicate relationship: {error}"
+            ))));
+        }
+    };
+    if data
+        .pointer("/markAsDuplicate/duplicate/id")
+        .and_then(serde_json::Value::as_str)
+        .is_none()
+    {
+        return Ok(Err(failure_data(format!(
+            "Closed GitHub issue {target_repository}#{target_number} but GitHub returned no \
+             duplicate relationship"
+        ))));
+    }
+    Ok(Ok(()))
 }
 
 #[async_trait::async_trait]
@@ -427,54 +620,13 @@ impl Executor for CloseGithubIssueResult {
             return Ok(result);
         }
 
-        let mut canonical = None;
-        if let Some(duplicate_of) = &self.duplicate_of {
-            let duplicate_target =
-                match self.resolve_duplicate(duplicate_of, &target.repository, policy, ctx)? {
-                    Ok(target) => target,
-                    Err(result) => return Ok(result),
-                };
-            if duplicate_target
-                .repository
-                .eq_ignore_ascii_case(&target.repository)
-                && duplicate_target.number == target.number
-            {
-                return Ok(ExecutionResult::failure(
-                    "duplicate_of cannot reference the issue being closed",
-                ));
-            }
-            let duplicate_metadata = match client
-                .get_issue(&duplicate_target.repository, duplicate_target.number)
-                .await?
-            {
-                Ok(metadata) => metadata,
-                Err(error) => return Ok(ExecutionResult::failure(error.to_string())),
-            };
-            if let Err(result) = validate_github_target_capability(
-                &duplicate_metadata,
-                GithubTargetCapabilities::ISSUES_ONLY,
-            ) {
-                return Ok(result);
-            }
-            let Some(duplicate_node_id) = metadata.node_id.clone() else {
-                return Ok(ExecutionResult::failure(format!(
-                    "GitHub issue {}#{} has no GraphQL node ID",
-                    target.repository, target.number
-                )));
-            };
-            let Some(canonical_node_id) = duplicate_metadata.node_id else {
-                return Ok(ExecutionResult::failure(format!(
-                    "Canonical GitHub issue {}#{} has no GraphQL node ID",
-                    duplicate_target.repository, duplicate_target.number
-                )));
-            };
-            canonical = Some((
-                duplicate_target.repository,
-                duplicate_target.number,
-                duplicate_node_id,
-                canonical_node_id,
-            ));
-        }
+        let canonical = match self
+            .resolve_canonical_duplicate(&target, &metadata, policy, ctx, &client)
+            .await?
+        {
+            Ok(canonical) => canonical,
+            Err(result) => return Ok(result),
+        };
 
         let already_closed = metadata.state.eq_ignore_ascii_case("closed");
         if already_closed && canonical.is_none() {
@@ -492,103 +644,58 @@ impl Executor for CloseGithubIssueResult {
             ));
         }
 
-        if !already_closed
-            && !comment_omitted
-            && let Some(body) = self.body.as_deref()
+        if let Err(result) = post_closing_comment(
+            &client,
+            &target.repository,
+            target.number,
+            already_closed,
+            comment_omitted,
+            self.body.as_deref(),
+        )
+        .await?
         {
-            let response = client
-                .send(
-                    Method::POST,
-                    client.issue_comments_url(&target.repository, target.number)?,
-                    Some(&serde_json::json!({ "body": body })),
-                )
-                .await?;
-            if !response.is_success() {
-                let error = response
-                    .require_success("Failed to add GitHub issue closing comment")
-                    .expect_err("non-success response must produce an API error");
-                return Ok(ExecutionResult::failure(error.to_string()));
-            }
+            return Ok(result);
         }
 
-        if !already_closed {
-            debug!(
-                "Closing GitHub issue {}#{} as {}",
-                target.repository, target.number, state_reason
-            );
-            let response = client
-                .send(
-                    Method::PATCH,
-                    client.issue_url(&target.repository, target.number)?,
-                    Some(&serde_json::json!({
-                        "state": "closed",
-                        "state_reason": state_reason.as_str(),
-                    })),
-                )
-                .await?;
-            if !response.is_success() {
-                let error = response
-                    .require_success("Failed to close GitHub issue")
-                    .expect_err("non-success response must produce an API error");
-                return Ok(ExecutionResult::failure(error.to_string()));
-            }
+        if let Err(result) = close_issue(
+            &client,
+            &target.repository,
+            target.number,
+            already_closed,
+            state_reason,
+        )
+        .await?
+        {
+            return Ok(result);
         }
 
-        if let Some((canonical_repo, canonical_number, duplicate_id, canonical_id)) = canonical {
-            let data = match client
-                .graphql(
-                    "Failed to mark GitHub issue as duplicate",
-                    r#"mutation MarkAsDuplicate($duplicateId: ID!, $canonicalId: ID!) {
-  markAsDuplicate(input: { duplicateId: $duplicateId, canonicalId: $canonicalId }) {
-    duplicate { ... on Issue { id number } }
-  }
-}"#,
-                    serde_json::json!({
-                        "duplicateId": duplicate_id,
-                        "canonicalId": canonical_id,
-                    }),
-                )
-                .await?
-            {
-                Ok(data) => data,
-                Err(error) => {
-                    return Ok(ExecutionResult::failure_with_data(
-                        format!(
-                            "Closed GitHub issue {}#{} but failed to create duplicate \
-                             relationship: {}",
-                            target.repository, target.number, error
-                        ),
-                        serde_json::json!({
-                            "number": target.number,
-                            "target_repo": target.repository,
-                            "closed": true,
-                            "already_closed": already_closed,
-                            "duplicate_of": format!("{canonical_repo}#{canonical_number}"),
-                        }),
-                    ));
-                }
-            };
-            if data
-                .pointer("/markAsDuplicate/duplicate/id")
-                .and_then(serde_json::Value::as_str)
-                .is_none()
-            {
-                return Ok(ExecutionResult::failure_with_data(
-                    format!(
-                        "Closed GitHub issue {}#{} but GitHub returned no duplicate relationship",
-                        target.repository, target.number
-                    ),
-                    serde_json::json!({
-                        "number": target.number,
-                        "target_repo": target.repository,
-                        "closed": true,
-                        "already_closed": already_closed,
-                        "duplicate_of": format!("{canonical_repo}#{canonical_number}"),
-                    }),
-                ));
-            }
+        if let Some(canonical) = &canonical
+            && let Err(result) = mark_as_duplicate(
+                &client,
+                &target.repository,
+                target.number,
+                already_closed,
+                canonical,
+            )
+            .await?
+        {
+            return Ok(result);
         }
 
+        Ok(self.build_success_result(&target, already_closed, state_reason, comment_omitted))
+    }
+}
+
+impl CloseGithubIssueResult {
+    /// Builds the final success `ExecutionResult` after the issue has been closed
+    /// (or was already closed) and any duplicate relationship applied.
+    fn build_success_result(
+        &self,
+        target: &crate::safe_outputs::ResolvedGithubIssueTarget,
+        already_closed: bool,
+        state_reason: GithubIssueStateReason,
+        comment_omitted: bool,
+    ) -> ExecutionResult {
         let action = if already_closed {
             "Confirmed duplicate relationship for already-closed"
         } else {
@@ -607,7 +714,7 @@ impl Executor for CloseGithubIssueResult {
         } else {
             message
         };
-        Ok(ExecutionResult::success_with_data(
+        ExecutionResult::success_with_data(
             message,
             serde_json::json!({
                 "number": target.number,
@@ -619,7 +726,7 @@ impl Executor for CloseGithubIssueResult {
                     GithubDuplicateReference::display_sanitized
                 ),
             }),
-        ))
+        )
     }
 }
 
