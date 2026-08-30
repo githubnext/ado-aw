@@ -209,6 +209,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── add_build_tag.rs
 │   │   ├── add_github_issue_labels.rs
 │   │   ├── add_pr_comment.rs
+│   │   ├── assign_work_item.rs
 │   │   ├── assign_github_issue_milestone.rs
 │   │   ├── assign_github_issue_to_user.rs
 │   │   ├── close_github_issue.rs
