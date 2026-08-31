@@ -335,3 +335,102 @@ fn lint_reports_invalid_task_input_as_warning_finding() {
         "task-input-invalid must be a warning, got:\n{stdout}"
     );
 }
+
+/// `ado-aw whatif --fail <job>` classifies downstream jobs as
+/// `skipped` or `runs_anyway` based on their rendered ADO conditions.
+/// The canary fixture's `Conclusion` job carries an
+/// `always()`-style condition, so it must be reported as
+/// `runs_anyway` while `Detection`/`SafeOutputs` (default
+/// `succeeded()`) are `skipped`.
+#[test]
+fn whatif_classifies_downstream_jobs_by_condition() {
+    let (_workspace, src) = fixture_copy("canary.md");
+    let out = Command::new(binary_path())
+        .arg("whatif")
+        .arg(&src)
+        .arg("--fail")
+        .arg("Agent")
+        .output()
+        .expect("run ado-aw whatif");
+    assert!(
+        out.status.success(),
+        "whatif exited non-zero. stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Conclusion (runs_anyway)"),
+        "expected Conclusion classified as runs_anyway, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Detection (skipped)"),
+        "expected Detection classified as skipped, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("SafeOutputs (skipped)"),
+        "expected SafeOutputs classified as skipped, got:\n{stdout}"
+    );
+}
+
+/// `ado-aw whatif --json` emits a structured report with the failing
+/// node and per-job classification, matching the public
+/// `WhatIfReport`/`DownstreamJob` schema consumed by
+/// `mcp-author`/other tooling.
+#[test]
+fn whatif_json_emits_structured_report() {
+    let (_workspace, src) = fixture_copy("canary.md");
+    let out = Command::new(binary_path())
+        .arg("whatif")
+        .arg(&src)
+        .arg("--fail")
+        .arg("Agent")
+        .arg("--json")
+        .output()
+        .expect("run ado-aw whatif --json");
+    assert!(
+        out.status.success(),
+        "whatif --json exited non-zero. stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("\"kind\": \"job\""),
+        "expected failing_node.kind = job, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("\"id\": \"Agent\""),
+        "expected failing_node.id = Agent, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("\"classification\": \"runs_anyway\""),
+        "expected at least one runs_anyway classification, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("\"classification\": \"skipped\""),
+        "expected at least one skipped classification, got:\n{stdout}"
+    );
+}
+
+/// `ado-aw whatif --fail <unknown-id>` must fail with a clear,
+/// non-panicking error naming the unresolved id rather than
+/// succeeding silently or producing an empty report.
+#[test]
+fn whatif_unknown_fail_id_errors() {
+    let (_workspace, src) = fixture_copy("canary.md");
+    let out = Command::new(binary_path())
+        .arg("whatif")
+        .arg(&src)
+        .arg("--fail")
+        .arg("NoSuchJobOrStep")
+        .output()
+        .expect("run ado-aw whatif with unknown --fail id");
+    assert!(
+        !out.status.success(),
+        "whatif must fail for an unknown --fail id"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unknown step or job 'NoSuchJobOrStep'"),
+        "expected unknown-id error message, got:\n{stderr}"
+    );
+}
