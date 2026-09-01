@@ -197,20 +197,23 @@ describe("create-work-item rendering fidelity", () => {
     ).rejects.toThrow(SkipError);
   });
 
-  it("accepts a work item whose description matches ADO normalization", async () => {
-    const state: { title: string; createdId?: number } = { title: "t" };
-    await createWorkItemRendering.assert(
-      renderingCtx({
-        id: 42,
-        fields: { "System.Description": adoExpected },
-        multilineFieldsFormat: { "System.Description": "markdown" },
-      }),
-      state,
-      record,
-      [record],
-    );
-    expect(state.createdId).toBe(42);
-  });
+  it.each(["Markdown", "markdown"])(
+    "accepts the work-item Markdown format with %s casing",
+    async (format) => {
+      const state: { title: string; createdId?: number } = { title: "t" };
+      await createWorkItemRendering.assert(
+        renderingCtx({
+          id: 42,
+          fields: { "System.Description": adoExpected },
+          multilineFieldsFormat: { "System.Description": format },
+        }),
+        state,
+        record,
+        [record],
+      );
+      expect(state.createdId).toBe(42);
+    },
+  );
 
   it("records the created id before failing an ADO golden mismatch", async () => {
     const state: { title: string; createdId?: number } = { title: "t" };
@@ -244,16 +247,23 @@ describe("create-work-item rendering fidelity", () => {
     ).rejects.toThrow(/expected "Markdown"/);
   });
 
-  it("fails when a denied construct survives ADO storage", async () => {
-    const leaked = `${adoExpected}\n<script>alert(1)</script>`;
+  it.each([
+    ["script", "<script>alert(1)</script>", /still contains '<script'/],
+    ["event handler", '<img src="x" onerror="alert(1)">', /still contains 'onerror='/],
+    ["iframe", '<iframe src="https://example.test"></iframe>', /still contains '<iframe'/],
+    ["javascript URL", "[click](javascript:alert(1))", /still contains a javascript: URL/],
+  ])("fails when a denied %s survives ADO storage", async (_name, leaked, error) => {
     await expect(
       createWorkItemRendering.assert(
-        renderingCtx({ id: 42, fields: { "System.Description": leaked } }),
+        renderingCtx({
+          id: 42,
+          fields: { "System.Description": `${adoExpected}\n${leaked}` },
+        }),
         { title: "t" },
         record,
         [record],
       ),
-    ).rejects.toThrow(/still contains '<script'/);
+    ).rejects.toThrow(error);
   });
 
   it("asserts the Bug repro-steps field", async () => {
