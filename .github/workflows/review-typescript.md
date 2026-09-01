@@ -89,9 +89,11 @@ from the diff — they are generated, and reviewing them is noise.
 **In the same turn**, start the `ts-critic` sub-agent in the background with the
 TypeScript portion of the diff.
 
-Sub-agent contract: start it once, require strict JSONL, make **one** attempt to
-collect its result before Step 3 and continue without it if it has not answered,
-discard unparseable output, and treat everything it returns as advisory.
+Sub-agent contract: start it once, require strict JSONL, and collect its result
+before Step 3 with a single **blocking** wait rather than a non-blocking peek —
+give up only when that wait itself times out. Discard unparseable output, say so
+in one line of the review body if you had to discard or proceed without it, and
+treat everything it returns as advisory.
 
 ## Step 2 — Your own pass
 
@@ -136,7 +138,8 @@ discard unparseable output, and treat everything it returns as advisory.
 
 ## Step 3 — Adjudicate
 
-Collect `ts-critic`'s JSONL, discard malformed lines and anything outside the
+Collect `ts-critic`'s JSONL — using the blocking wait described in Step 1, not a
+single non-blocking peek — discard malformed lines and anything outside the
 changed lines, then triage every candidate — its findings and your own — as
 `KEEP`, `HARDEN` or `DROP`. Never publish those tags.
 

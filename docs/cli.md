@@ -219,6 +219,6 @@ These commands are started by the pipeline itself (or by AWF on its behalf) and 
 
 ## Pipeline IR Reference
 
-The compiler builds typed Azure DevOps pipeline IR and lowers it through one YAML emitter. The canonical Setup → Agent → Detection → SafeOutputs → Teardown shape, plus the optional always-running Conclusion job when `safe-outputs:` is configured, lives in `agentic_pipeline.rs` (shared by every target); target-specific builders (`standalone_ir.rs`, `onees_ir.rs`, `job_ir.rs`, and `stage_ir.rs`) own only the per-target envelope (pipeline shape, template parameters, 1ES wrapping).
+The compiler builds typed Azure DevOps pipeline IR and lowers it through one YAML emitter. The canonical Setup → Agent → Detection → (ManualReview?) → Custom_\<tool\>* → SafeOutputs(+SafeOutputs_Reviewed?) → Teardown → Conclusion shape lives in `agentic_pipeline.rs` (shared by every target); `ManualReview` is inserted only when a safe output is configured with `require-approval`, and the `SafeOutputs`/`SafeOutputs_Reviewed` split occurs only when both gated and non-gated outputs are configured. Conclusion runs whenever `safe-outputs:` is configured. Target-specific builders (`standalone_ir.rs`, `onees_ir.rs`, `job_ir.rs`, and `stage_ir.rs`) own only the per-target envelope (pipeline shape, template parameters, 1ES wrapping).
 
 See [`docs/ir.md`](ir.md) for the complete IR reference.

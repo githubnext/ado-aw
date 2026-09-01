@@ -2711,6 +2711,180 @@ fn build_teardown_job(
     Ok(Some(job))
 }
 
+/// Apply a single per-tool config (`noop` / `missing-tool` / `missing-data`)
+/// to the Conclusion step as flat `AW_<TOOL>_*` env vars (gh-aw pattern).
+/// Each field gets its own env var — avoids JSON-in-env-var corruption in ADO.
+fn apply_conclusion_tool_config_env(
+    mut conclusion_step: BashStep,
+    front_matter: &FrontMatter,
+    tool_key: &str,
+) -> BashStep {
+    let Some(tool_config) = front_matter.safe_outputs.get(tool_key) else {
+        return conclusion_step;
+    };
+    let env_prefix = format!("AW_{}", tool_key.to_uppercase().replace('-', "_"));
+
+    // Tool disabled entirely (e.g. noop: false)
+    if tool_config.is_boolean() {
+        if tool_config.as_bool() == Some(false) {
+            conclusion_step = conclusion_step.with_env(
+                format!("{env_prefix}_REPORT_AS_WORK_ITEM"),
+                EnvValue::Literal("false".to_string()),
+            );
+        }
+        return conclusion_step;
+    }
+
+    let Some(obj) = tool_config.as_object() else {
+        return conclusion_step;
+    };
+
+    // report-as-work-item: accept both YAML bool and string forms.
+    // serde_json::Value::to_string() on String("false") would emit
+    // "\"false\"" (JSON-encoded with quotes), which the TypeScript
+    // readBooleanEnv would reject and default to true — silently
+    // inverting the opt-out. Use as_bool()/as_str() instead.
+    if let Some(v) = obj.get("report-as-work-item") {
+        let bool_str = v
+            .as_bool()
+            .map(|b| b.to_string())
+            .or_else(|| v.as_str().map(|s| s.to_string()));
+        if let Some(s) = bool_str {
+            conclusion_step = conclusion_step.with_env(
+                format!("{env_prefix}_REPORT_AS_WORK_ITEM"),
+                EnvValue::Literal(s),
+            );
+        }
+    }
+    if let Some(v) = obj.get("title-prefix").and_then(|v| v.as_str()) {
+        conclusion_step = conclusion_step.with_env(
+            format!("{env_prefix}_TITLE_PREFIX"),
+            EnvValue::Literal(crate::sanitize::sanitize(v)),
+        );
+    }
+    if let Some(v) = obj.get("work-item-type").and_then(|v| v.as_str()) {
+        conclusion_step = conclusion_step.with_env(
+            format!("{env_prefix}_WORK_ITEM_TYPE"),
+            EnvValue::Literal(crate::sanitize::sanitize(v)),
+        );
+    }
+    if let Some(v) = obj.get("area-path").and_then(|v| v.as_str()) {
+        conclusion_step = conclusion_step.with_env(
+            format!("{env_prefix}_AREA_PATH"),
+            EnvValue::Literal(crate::sanitize::sanitize(v)),
+        );
+    }
+    if let Some(v) = obj.get("iteration-path").and_then(|v| v.as_str()) {
+        conclusion_step = conclusion_step.with_env(
+            format!("{env_prefix}_ITERATION_PATH"),
+            EnvValue::Literal(crate::sanitize::sanitize(v)),
+        );
+    }
+    if let Some(tags) = obj.get("tags").and_then(|v| v.as_array()) {
+        let tags_json = serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string());
+        conclusion_step =
+            conclusion_step.with_env(format!("{env_prefix}_TAGS"), EnvValue::Literal(tags_json));
+    }
+    conclusion_step
+}
+
+/// Hoist upstream job results (Agent/Detection/SafeOutputs[/_Reviewed]/custom
+/// jobs) into job-level variables and wire them onto the Conclusion step as
+/// `$(name)` macro env vars.
+///
+/// ADO only evaluates `$[...]` runtime expressions inside `variables:` and
+/// `condition:` — NOT in step env blocks — so results are hoisted to job
+/// variables here and consumed as `$(name)` macros in the step env.
+fn hoist_conclusion_job_results(
+    mut conclusion_step: BashStep,
+    prefix: &JobPrefix<'_>,
+    custom_defs: &[CustomSafeOutputJobDef],
+    has_reviewed_job: bool,
+) -> Result<(Vec<JobVariable>, BashStep)> {
+    let agent_id = prefix.id("Agent")?;
+    let detection_id = prefix.id("Detection")?;
+    let safeoutputs_id = prefix.id("SafeOutputs")?;
+    let reviewed_id = prefix.id("SafeOutputs_Reviewed")?;
+
+    // In the mixed manual-review split both a SafeOutputs (automatic) and a
+    // SafeOutputs_Reviewed (gated) job exist. Surface the reviewed job's result
+    // too so a reviewer rejection (which fails SafeOutputs_Reviewed) is reported
+    // instead of silently lost.
+    let mut conclusion_variables = vec![
+        // EnvValue::Literal deliberately carries a raw `$[...]` runtime expression:
+        // ADO evaluates `$[...]` only in `variables:`/`condition:`, so the value is
+        // hoisted here and consumed as a `$(name)` macro in the step env below
+        // (not EnvValue::AdoMacro — the lower.rs guard rejects pre-wrapped macros).
+        JobVariable {
+            name: "AW_AGENT_RESULT".to_string(),
+            value: EnvValue::Literal(format!("$[dependencies.{}.result]", agent_id.as_str())),
+        },
+        JobVariable {
+            name: "AW_DETECTION_RESULT".to_string(),
+            value: EnvValue::Literal(format!("$[dependencies.{}.result]", detection_id.as_str())),
+        },
+        JobVariable {
+            name: "AW_SAFEOUTPUTS_RESULT".to_string(),
+            value: EnvValue::Literal(format!(
+                "$[dependencies.{}.result]",
+                safeoutputs_id.as_str()
+            )),
+        },
+    ];
+    if has_reviewed_job {
+        conclusion_variables.push(JobVariable {
+            name: "AW_SAFEOUTPUTS_REVIEWED_RESULT".to_string(),
+            value: EnvValue::Literal(format!("$[dependencies.{}.result]", reviewed_id.as_str())),
+        });
+    }
+    for (index, def) in custom_defs.iter().enumerate() {
+        let result_name = format!("AW_CUSTOM_JOB_{index}_RESULT");
+        conclusion_variables.push(JobVariable {
+            name: result_name,
+            value: EnvValue::Literal(format!("$[dependencies.{}.result]", def.job_id.as_str())),
+        });
+    }
+
+    conclusion_step = conclusion_step
+        .with_env(
+            "AW_AGENT_RESULT",
+            EnvValue::PipelineVar("AW_AGENT_RESULT".to_string()),
+        )
+        .with_env(
+            "AW_DETECTION_RESULT",
+            EnvValue::PipelineVar("AW_DETECTION_RESULT".to_string()),
+        )
+        .with_env(
+            "AW_SAFEOUTPUTS_RESULT",
+            EnvValue::PipelineVar("AW_SAFEOUTPUTS_RESULT".to_string()),
+        );
+    if has_reviewed_job {
+        conclusion_step = conclusion_step.with_env(
+            "AW_SAFEOUTPUTS_REVIEWED_RESULT",
+            EnvValue::PipelineVar("AW_SAFEOUTPUTS_REVIEWED_RESULT".to_string()),
+        );
+    }
+    if !custom_defs.is_empty() {
+        conclusion_step = conclusion_step.with_env(
+            "AW_CUSTOM_JOB_COUNT",
+            EnvValue::Literal(custom_defs.len().to_string()),
+        );
+        for (index, def) in custom_defs.iter().enumerate() {
+            conclusion_step = conclusion_step
+                .with_env(
+                    format!("AW_CUSTOM_JOB_{index}_NAME"),
+                    EnvValue::Literal(format!("Custom safe output: {}", def.name)),
+                )
+                .with_env(
+                    format!("AW_CUSTOM_JOB_{index}_RESULT"),
+                    EnvValue::PipelineVar(format!("AW_CUSTOM_JOB_{index}_RESULT")),
+                );
+        }
+    }
+
+    Ok((conclusion_variables, conclusion_step))
+}
+
 fn build_conclusion_job(
     front_matter: &FrontMatter,
     cfg: &StandaloneCtx,
@@ -2815,156 +2989,20 @@ fn build_conclusion_job(
     // defaults (type: Task, no area/iteration path). The global
     // report-failure-as-work-item toggle controls whether it files at all.
     for tool_key in &["noop", "missing-tool", "missing-data"] {
-        if let Some(tool_config) = front_matter.safe_outputs.get(*tool_key) {
-            let env_prefix = format!("AW_{}", tool_key.to_uppercase().replace('-', "_"));
-
-            // Tool disabled entirely (e.g. noop: false)
-            if tool_config.is_boolean() {
-                if tool_config.as_bool() == Some(false) {
-                    conclusion_step = conclusion_step.with_env(
-                        format!("{env_prefix}_REPORT_AS_WORK_ITEM"),
-                        EnvValue::Literal("false".to_string()),
-                    );
-                }
-                continue;
-            }
-
-            if let Some(obj) = tool_config.as_object() {
-                // report-as-work-item: accept both YAML bool and string forms.
-                // serde_json::Value::to_string() on String("false") would emit
-                // "\"false\"" (JSON-encoded with quotes), which the TypeScript
-                // readBooleanEnv would reject and default to true — silently
-                // inverting the opt-out. Use as_bool()/as_str() instead.
-                if let Some(v) = obj.get("report-as-work-item") {
-                    let bool_str = v
-                        .as_bool()
-                        .map(|b| b.to_string())
-                        .or_else(|| v.as_str().map(|s| s.to_string()));
-                    if let Some(s) = bool_str {
-                        conclusion_step = conclusion_step.with_env(
-                            format!("{env_prefix}_REPORT_AS_WORK_ITEM"),
-                            EnvValue::Literal(s),
-                        );
-                    }
-                }
-                if let Some(v) = obj.get("title-prefix").and_then(|v| v.as_str()) {
-                    conclusion_step = conclusion_step.with_env(
-                        format!("{env_prefix}_TITLE_PREFIX"),
-                        EnvValue::Literal(crate::sanitize::sanitize(v)),
-                    );
-                }
-                if let Some(v) = obj.get("work-item-type").and_then(|v| v.as_str()) {
-                    conclusion_step = conclusion_step.with_env(
-                        format!("{env_prefix}_WORK_ITEM_TYPE"),
-                        EnvValue::Literal(crate::sanitize::sanitize(v)),
-                    );
-                }
-                if let Some(v) = obj.get("area-path").and_then(|v| v.as_str()) {
-                    conclusion_step = conclusion_step.with_env(
-                        format!("{env_prefix}_AREA_PATH"),
-                        EnvValue::Literal(crate::sanitize::sanitize(v)),
-                    );
-                }
-                if let Some(v) = obj.get("iteration-path").and_then(|v| v.as_str()) {
-                    conclusion_step = conclusion_step.with_env(
-                        format!("{env_prefix}_ITERATION_PATH"),
-                        EnvValue::Literal(crate::sanitize::sanitize(v)),
-                    );
-                }
-                if let Some(tags) = obj.get("tags").and_then(|v| v.as_array()) {
-                    let tags_json =
-                        serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string());
-                    conclusion_step = conclusion_step
-                        .with_env(format!("{env_prefix}_TAGS"), EnvValue::Literal(tags_json));
-                }
-            }
-        }
+        conclusion_step =
+            apply_conclusion_tool_config_env(conclusion_step, front_matter, tool_key);
     }
 
     // Pass upstream job results via job-level variables hoist.
     // ADO only evaluates $[...] runtime expressions inside `variables:` and
     // `condition:` — NOT in step env blocks. We hoist to job variables and
     // reference them as $(name) macros in the step env.
-    let agent_id = prefix.id("Agent")?;
-    let detection_id = prefix.id("Detection")?;
-    let safeoutputs_id = prefix.id("SafeOutputs")?;
-    let reviewed_id = prefix.id("SafeOutputs_Reviewed")?;
-
-    // In the mixed manual-review split both a SafeOutputs (automatic) and a
-    // SafeOutputs_Reviewed (gated) job exist. Surface the reviewed job's result
-    // too so a reviewer rejection (which fails SafeOutputs_Reviewed) is reported
-    // instead of silently lost.
-    let mut conclusion_variables = vec![
-        // EnvValue::Literal deliberately carries a raw `$[...]` runtime expression:
-        // ADO evaluates `$[...]` only in `variables:`/`condition:`, so the value is
-        // hoisted here and consumed as a `$(name)` macro in the step env below
-        // (not EnvValue::AdoMacro — the lower.rs guard rejects pre-wrapped macros).
-        JobVariable {
-            name: "AW_AGENT_RESULT".to_string(),
-            value: EnvValue::Literal(format!("$[dependencies.{}.result]", agent_id.as_str())),
-        },
-        JobVariable {
-            name: "AW_DETECTION_RESULT".to_string(),
-            value: EnvValue::Literal(format!("$[dependencies.{}.result]", detection_id.as_str())),
-        },
-        JobVariable {
-            name: "AW_SAFEOUTPUTS_RESULT".to_string(),
-            value: EnvValue::Literal(format!(
-                "$[dependencies.{}.result]",
-                safeoutputs_id.as_str()
-            )),
-        },
-    ];
-    if has_reviewed_job {
-        conclusion_variables.push(JobVariable {
-            name: "AW_SAFEOUTPUTS_REVIEWED_RESULT".to_string(),
-            value: EnvValue::Literal(format!("$[dependencies.{}.result]", reviewed_id.as_str())),
-        });
-    }
-    for (index, def) in custom_defs.iter().enumerate() {
-        let result_name = format!("AW_CUSTOM_JOB_{index}_RESULT");
-        conclusion_variables.push(JobVariable {
-            name: result_name,
-            value: EnvValue::Literal(format!("$[dependencies.{}.result]", def.job_id.as_str())),
-        });
-    }
-
-    conclusion_step = conclusion_step
-        .with_env(
-            "AW_AGENT_RESULT",
-            EnvValue::PipelineVar("AW_AGENT_RESULT".to_string()),
-        )
-        .with_env(
-            "AW_DETECTION_RESULT",
-            EnvValue::PipelineVar("AW_DETECTION_RESULT".to_string()),
-        )
-        .with_env(
-            "AW_SAFEOUTPUTS_RESULT",
-            EnvValue::PipelineVar("AW_SAFEOUTPUTS_RESULT".to_string()),
-        );
-    if has_reviewed_job {
-        conclusion_step = conclusion_step.with_env(
-            "AW_SAFEOUTPUTS_REVIEWED_RESULT",
-            EnvValue::PipelineVar("AW_SAFEOUTPUTS_REVIEWED_RESULT".to_string()),
-        );
-    }
-    if !custom_defs.is_empty() {
-        conclusion_step = conclusion_step.with_env(
-            "AW_CUSTOM_JOB_COUNT",
-            EnvValue::Literal(custom_defs.len().to_string()),
-        );
-        for (index, def) in custom_defs.iter().enumerate() {
-            conclusion_step = conclusion_step
-                .with_env(
-                    format!("AW_CUSTOM_JOB_{index}_NAME"),
-                    EnvValue::Literal(format!("Custom safe output: {}", def.name)),
-                )
-                .with_env(
-                    format!("AW_CUSTOM_JOB_{index}_RESULT"),
-                    EnvValue::PipelineVar(format!("AW_CUSTOM_JOB_{index}_RESULT")),
-                );
-        }
-    }
+    let (conclusion_variables, conclusion_step) = hoist_conclusion_job_results(
+        conclusion_step,
+        prefix,
+        custom_defs,
+        has_reviewed_job,
+    )?;
 
     steps.push(Step::Bash(conclusion_step));
 

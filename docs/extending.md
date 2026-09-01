@@ -9,7 +9,7 @@ ado-aw compiles agent markdown into Azure DevOps YAML through the typed pipeline
 When extending the compiler:
 
 1. **New CLI commands**: add variants to the `Commands` enum in `src/main.rs`, implement dispatch, and add parsing/behavior tests.
-2. **New compile targets**: build a typed `Pipeline` IR in a target wrapper module under `src/compile/` (use existing `standalone_ir.rs`, `onees_ir.rs`, `job_ir.rs`, and `stage_ir.rs` as references). The canonical Setup → Agent → Detection → SafeOutputs → Teardown shape, plus the optional Conclusion job, lives in `src/compile/agentic_pipeline.rs` and is reused by every target — wrappers only set the per-target `PipelineShape` and lift the shared `BuiltPipelineContext` into the right envelope.
+2. **New compile targets**: build a typed `Pipeline` IR in a target wrapper module under `src/compile/` (use existing `standalone_ir.rs`, `onees_ir.rs`, `job_ir.rs`, and `stage_ir.rs` as references). The canonical Setup → Agent → Detection → (ManualReview?) → Custom_\<tool\>* → SafeOutputs(+SafeOutputs_Reviewed?) → Teardown → Conclusion shape lives in `src/compile/agentic_pipeline.rs` and is reused by every target — wrappers only set the per-target `PipelineShape` and lift the shared `BuiltPipelineContext` into the right envelope.
 3. **New front matter fields**: add fields to `FrontMatter` or nested config types in `src/compile/types.rs`. Breaking changes require a codemod under `src/compile/codemods/`; see [`docs/codemods.md`](codemods.md).
 4. **New compiler extensions**: implement `name()` and `phase()`; override `declarations()` (which defaults to `Ok(Declarations::default())`) when the extension contributes steps, hosts, tools, or other signals.
 5. **New safe-output tools**: add to `src/safe_outputs/`, implement the safe-output data model and executor, and register it in MCP and Stage 3 execution wiring.
@@ -66,7 +66,13 @@ System extensions run first, runtimes run before tools, and definition order is 
 - `SafeOutputsExtension` — SafeOutputs MCP plumbing.
 - `AdoScriptExtension` — gate evaluator, runtime-import resolver, and synthetic PR helpers.
 - `ExecContextExtension` — `aw-context/` precompute contributors.
-- `AzureCliExtension` — Azure CLI mounts, allowlist entries, and PATH setup.
+
+`AzureCliExtension` (Azure CLI mounts, allowlist entries, and PATH setup) is
+**conditionally** pushed after the always-on list, only when `permissions.read`
+is configured (`ado_proxy_enabled()`). The pinned AWF agent image ships no
+built-in `az`, so omitting `permissions.read` makes the command unavailable
+rather than exposing an unproxied fallback — see
+[`docs/network.md`](network.md#proxy-gated-azure-cli-az).
 
 User-configured runtimes and tools are appended after those always-on extensions, then sorted by phase.
 
