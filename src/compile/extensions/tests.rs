@@ -344,7 +344,7 @@ fn test_ado_mcpg_servers_with_inferred_org() {
     );
     // Host networking would put the MCP on the runner's own stack, where it
     // could reach Azure DevOps directly and bypass the policy entirely.
-    let args = servers[0].1.args.as_ref().expect("args should be set");
+    let args = servers[0].1.runtime.args();
     assert!(!args.contains(&"host".to_string()), "{args:?}");
     assert!(args.contains(&"--add-host".to_string()), "{args:?}");
 }

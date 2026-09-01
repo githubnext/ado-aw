@@ -5,7 +5,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use super::extensions::{
-    CompilerExtension, Declarations, McpgConfig, McpgGatewayConfig, McpgServerConfig,
+    CompilerExtension, ContainerRuntimeConfig, ContainerUser, Declarations, McpgConfig,
+    McpgGatewayConfig, McpgServerConfig, Mount, Network, Tmpfs,
 };
 use super::shell::{Binding, ShellScript};
 use super::types::{
@@ -3030,19 +3031,25 @@ fn validate_stdio_mcp(name: &str, container: &str, opts: &crate::compile::types:
 fn build_stdio_mcpg_server(
     container: &str,
     opts: &crate::compile::types::McpOptions,
-) -> McpgServerConfig {
-    McpgServerConfig {
+) -> Result<McpgServerConfig> {
+    let mut runtime = ContainerRuntimeConfig::builder().extra_args(&opts.args);
+    for mount in &opts.mounts {
+        runtime = runtime.mount(
+            Mount::try_from(mount.as_str())
+                .with_context(|| format!("invalid container mount `{mount}`"))?,
+        );
+    }
+    Ok(McpgServerConfig {
         server_type: "stdio".to_string(),
         container: Some(container.to_string()),
         entrypoint: opts.entrypoint.clone(),
         entrypoint_args: nonempty_vec(&opts.entrypoint_args),
-        mounts: nonempty_vec(&opts.mounts),
-        args: nonempty_vec(&opts.args),
+        runtime: runtime.build()?,
         url: None,
         headers: None,
         env: nonempty_map(&opts.env),
         tools: nonempty_vec(&opts.allowed),
-    }
+    })
 }
 
 /// Build an HTTP `McpgServerConfig` from a URL-based MCP options block.
@@ -3052,8 +3059,7 @@ fn build_http_mcpg_server(url: &str, opts: &crate::compile::types::McpOptions) -
         container: None,
         entrypoint: None,
         entrypoint_args: None,
-        mounts: None,
-        args: None,
+        runtime: ContainerRuntimeConfig::default(),
         url: Some(url.to_string()),
         headers: nonempty_map(&opts.headers),
         env: None,
@@ -3122,7 +3128,11 @@ fn try_add_user_mcp(
 
     if let Some(container) = &opts.container {
         validate_stdio_mcp(name, container, opts);
-        servers.insert(name.to_string(), build_stdio_mcpg_server(container, opts));
+        servers.insert(
+            name.to_string(),
+            build_stdio_mcpg_server(container, opts)
+                .with_context(|| format!("invalid runtime configuration for MCP `{name}`"))?,
+        );
     } else if let Some(url) = &opts.url {
         // HTTP-based MCP (remote server)
         for w in validate::validate_mcp_url(url, name) {
@@ -3199,18 +3209,33 @@ pub fn generate_mcpg_config(
         "/safeoutputs".to_string(),
         working_directory.clone(),
     ]);
-    let mut safeoutputs_mounts = vec![
-        "/tmp/awf-tools/ado-aw:/usr/local/bin/ado-aw:ro".to_string(),
-        format!("{working_directory}:{working_directory}:rw"),
-    ];
+    let mut safeoutputs_runtime = ContainerRuntimeConfig::builder()
+        .mount(Mount::read_only(
+            "/tmp/awf-tools/ado-aw",
+            "/usr/local/bin/ado-aw",
+        )?)
+        .mount(Mount::read_write(
+            working_directory.clone(),
+            working_directory.clone(),
+        )?)
+        .network(Network::None)
+        .user(ContainerUser::new("${MCP_RUNNER_UID}:${MCP_RUNNER_GID}")?)
+        .cap_drop_all()
+        .no_new_privileges()
+        .read_only()
+        .tmpfs(Tmpfs::new("/tmp", "rw,nosuid,nodev,noexec")?)
+        .pids_limit(256)
+        .working_directory(working_directory.clone());
     if trigger_repo_directory != working_directory
         && !trigger_repo_directory.starts_with(&format!("{working_directory}/"))
     {
-        safeoutputs_mounts.push(format!(
-            "{trigger_repo_directory}:{trigger_repo_directory}:rw"
-        ));
+        safeoutputs_runtime = safeoutputs_runtime.mount(Mount::read_write(
+            trigger_repo_directory.clone(),
+            trigger_repo_directory,
+        )?);
     }
-    safeoutputs_mounts.push("/tmp/awf-tools/staging:/safeoutputs:rw".to_string());
+    safeoutputs_runtime =
+        safeoutputs_runtime.mount(Mount::read_write("/tmp/awf-tools/staging", "/safeoutputs")?);
     mcp_servers.insert(
         "safeoutputs".to_string(),
         McpgServerConfig {
@@ -3218,24 +3243,7 @@ pub fn generate_mcpg_config(
             container: Some(safeoutputs_image),
             entrypoint: Some("/usr/local/bin/ado-aw".to_string()),
             entrypoint_args: Some(safeoutputs_entrypoint_args),
-            mounts: Some(safeoutputs_mounts),
-            args: Some(vec![
-                "--network".to_string(),
-                "none".to_string(),
-                "--user".to_string(),
-                "${MCP_RUNNER_UID}:${MCP_RUNNER_GID}".to_string(),
-                "--cap-drop".to_string(),
-                "ALL".to_string(),
-                "--security-opt".to_string(),
-                "no-new-privileges".to_string(),
-                "--read-only".to_string(),
-                "--tmpfs".to_string(),
-                "/tmp:rw,nosuid,nodev,noexec".to_string(),
-                "--pids-limit".to_string(),
-                "256".to_string(),
-                "-w".to_string(),
-                working_directory,
-            ]),
+            runtime: safeoutputs_runtime.build()?,
             url: None,
             headers: None,
             env: Some(std::collections::BTreeMap::from([(
@@ -7215,12 +7223,70 @@ safe-outputs:
     }
 
     #[test]
+    fn test_generate_mcpg_config_preserves_user_runtime_arrays() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers.insert(
+            "my-tool".to_string(),
+            McpConfig::WithOptions(Box::new(McpOptions {
+                container: Some("python:3.12-slim".to_string()),
+                mounts: vec![
+                    "/host/read:/container/read:ro".to_string(),
+                    "/host/write:/container/write:rw".to_string(),
+                ],
+                args: vec![
+                    "--label".to_string(),
+                    "purpose=test".to_string(),
+                    "--network=bridge".to_string(),
+                ],
+                ..Default::default()
+            })),
+        );
+
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
+        let server = serde_json::to_value(config.mcp_servers.get("my-tool").unwrap()).unwrap();
+        assert_eq!(
+            server.get("mounts").unwrap(),
+            &serde_json::json!([
+                "/host/read:/container/read:ro",
+                "/host/write:/container/write:rw"
+            ])
+        );
+        assert_eq!(
+            server.get("args").unwrap(),
+            &serde_json::json!(["--label", "purpose=test", "--network=bridge"])
+        );
+    }
+
+    #[test]
+    fn test_generate_mcpg_config_rejects_conflicting_user_runtime_settings() {
+        let mut fm = minimal_front_matter();
+        fm.mcp_servers.insert(
+            "my-tool".to_string(),
+            McpConfig::WithOptions(Box::new(McpOptions {
+                container: Some("python:3.12-slim".to_string()),
+                args: vec![
+                    "--user".to_string(),
+                    "1000".to_string(),
+                    "--user=1001".to_string(),
+                ],
+                ..Default::default()
+            })),
+        );
+
+        let error = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap_err();
+        assert!(
+            error.to_string().contains("invalid runtime configuration"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
     fn test_generate_mcpg_config_safeoutputs_runtime_placeholders() {
         let fm = minimal_front_matter();
         let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         let so = config.mcp_servers.get("safeoutputs").unwrap();
 
-        let args = so.args.as_ref().unwrap();
+        let args = so.runtime.args();
         assert!(
             args.contains(&"${MCP_RUNNER_UID}:${MCP_RUNNER_GID}".to_string()),
             "SafeOutputs should run as the runtime ADO agent UID/GID: {args:?}"
@@ -7250,8 +7316,9 @@ safe-outputs:
         let so = config.mcp_servers.get("safeoutputs").unwrap();
 
         assert!(
-            so.mounts.as_ref().unwrap().iter().any(|mount| {
-                mount == "$(Build.SourcesDirectory)/self:$(Build.SourcesDirectory)/self:rw"
+            so.runtime.mounts().iter().any(|mount| {
+                mount.source() == "$(Build.SourcesDirectory)/self"
+                    && mount.destination() == "$(Build.SourcesDirectory)/self"
             }),
             "self checkout must be mounted when it is outside the selected workspace"
         );
@@ -7311,29 +7378,46 @@ safe-outputs:
         assert_eq!(so.entrypoint.as_deref(), Some("/usr/local/bin/ado-aw"));
         assert!(so.url.is_none(), "stdio backend should have no URL");
         assert!(so.headers.is_none(), "stdio backend should need no bearer");
-        let args = so.args.as_ref().unwrap();
-        for required in [
-            "none",
-            "ALL",
-            "no-new-privileges",
-            "--read-only",
-            "/tmp:rw,nosuid,nodev,noexec",
-        ] {
-            assert!(
-                args.iter().any(|arg| arg == required),
-                "SafeOutputs hardening args should contain {required}: {args:?}"
-            );
-        }
-        let mounts = so.mounts.as_ref().unwrap();
+        assert_eq!(
+            so.runtime.args(),
+            [
+                "--network",
+                "none",
+                "--user",
+                "${MCP_RUNNER_UID}:${MCP_RUNNER_GID}",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+                "--read-only",
+                "--tmpfs",
+                "/tmp:rw,nosuid,nodev,noexec",
+                "--pids-limit",
+                "256",
+                "-w",
+                "$(Build.SourcesDirectory)",
+            ]
+        );
+        let mounts = so.runtime.mounts();
         assert!(
             mounts
                 .iter()
-                .any(|mount| mount == "/tmp/awf-tools/ado-aw:/usr/local/bin/ado-aw:ro")
+                .any(|mount| mount.source() == "/tmp/awf-tools/ado-aw"
+                    && mount.destination() == "/usr/local/bin/ado-aw")
         );
         assert!(
             mounts
                 .iter()
-                .any(|mount| mount == "/tmp/awf-tools/staging:/safeoutputs:rw")
+                .any(|mount| mount.source() == "/tmp/awf-tools/staging"
+                    && mount.destination() == "/safeoutputs")
+        );
+        assert_eq!(
+            serde_json::to_value(mounts).unwrap(),
+            serde_json::json!([
+                "/tmp/awf-tools/ado-aw:/usr/local/bin/ado-aw:ro",
+                "$(Build.SourcesDirectory):$(Build.SourcesDirectory):rw",
+                "/tmp/awf-tools/staging:/safeoutputs:rw"
+            ])
         );
     }
 
@@ -7492,8 +7576,8 @@ safe-outputs:
         let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         let srv = config.mcp_servers.get("data-tool").unwrap();
         assert_eq!(
-            srv.mounts.as_ref().unwrap(),
-            &vec!["/host/data:/app/data:ro"]
+            serde_json::to_value(srv.runtime.mounts()).unwrap(),
+            serde_json::json!(["/host/data:/app/data:ro"])
         );
     }
 
