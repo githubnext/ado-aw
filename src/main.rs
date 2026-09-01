@@ -1151,6 +1151,72 @@ fn print_execution_summary(results: &[crate::safe_outputs::ExecutionResult]) {
     );
 }
 
+struct ExecuteCommandArgs {
+    source: Option<PathBuf>,
+    safe_output_dir: PathBuf,
+    output_dir: Option<PathBuf>,
+    ado_org_url: Option<String>,
+    ado_project: Option<String>,
+    dry_run: bool,
+    only: Vec<String>,
+    exclude: Vec<String>,
+    resolved_config: Option<PathBuf>,
+    prepare_custom_agent_output: Option<PathBuf>,
+}
+
+async fn dispatch_execute_command(args: ExecuteCommandArgs) -> Result<()> {
+    let ExecuteCommandArgs {
+        source,
+        safe_output_dir,
+        output_dir,
+        ado_org_url,
+        ado_project,
+        dry_run,
+        only,
+        exclude,
+        resolved_config,
+        prepare_custom_agent_output,
+    } = args;
+
+    if let Some(output_path) = prepare_custom_agent_output {
+        if output_dir.is_some()
+            || ado_org_url.is_some()
+            || ado_project.is_some()
+            || !only.is_empty()
+            || !exclude.is_empty()
+            || dry_run
+        {
+            anyhow::bail!(
+                "--prepare-custom-agent-output cannot be combined with --output-dir, \
+                 --ado-org-url, --ado-project, --dry-run, --only, or --exclude"
+            );
+        }
+        let resolved_config = resolved_config
+            .as_deref()
+            .context("--prepare-custom-agent-output requires --resolved-config")?;
+        let count =
+            execute::prepare_custom_agent_output(&safe_output_dir, resolved_config, &output_path)
+                .await?;
+        println!(
+            "Prepared {count} Agent-output item(s) at {}",
+            output_path.display()
+        );
+    } else {
+        run_execute(RunExecuteOptions {
+            source,
+            resolved_config,
+            safe_output_dir,
+            output_dir,
+            ado_org_url,
+            ado_project,
+            dry_run,
+            filter: execute::ToolFilter { only, exclude },
+        })
+        .await?;
+    }
+    Ok(())
+}
+
 async fn dispatch_secrets_command(action: SecretsCmd) -> Result<()> {
     match action {
         SecretsCmd::Set {
@@ -1643,45 +1709,19 @@ async fn main() -> Result<()> {
             resolved_config,
             prepare_custom_agent_output,
         } => {
-            if let Some(output_path) = prepare_custom_agent_output {
-                if output_dir.is_some()
-                    || ado_org_url.is_some()
-                    || ado_project.is_some()
-                    || !only.is_empty()
-                    || !exclude.is_empty()
-                    || dry_run
-                {
-                    anyhow::bail!(
-                        "--prepare-custom-agent-output cannot be combined with --output-dir, \
-                         --ado-org-url, --ado-project, --dry-run, --only, or --exclude"
-                    );
-                }
-                let resolved_config = resolved_config
-                    .as_deref()
-                    .context("--prepare-custom-agent-output requires --resolved-config")?;
-                let count = execute::prepare_custom_agent_output(
-                    &safe_output_dir,
-                    resolved_config,
-                    &output_path,
-                )
-                .await?;
-                println!(
-                    "Prepared {count} Agent-output item(s) at {}",
-                    output_path.display()
-                );
-            } else {
-                run_execute(RunExecuteOptions {
-                    source,
-                    resolved_config,
-                    safe_output_dir,
-                    output_dir,
-                    ado_org_url,
-                    ado_project,
-                    dry_run,
-                    filter: execute::ToolFilter { only, exclude },
-                })
-                .await?;
-            }
+            dispatch_execute_command(ExecuteCommandArgs {
+                source,
+                safe_output_dir,
+                output_dir,
+                ado_org_url,
+                ado_project,
+                dry_run,
+                only,
+                exclude,
+                resolved_config,
+                prepare_custom_agent_output,
+            })
+            .await?;
         }
         Commands::Init {
             path,
