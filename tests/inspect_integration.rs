@@ -174,6 +174,138 @@ fn graph_rejects_unknown_format() {
     );
 }
 
+/// `graph deps --json` on the canonical canary pipeline traverses
+/// downstream from the `Agent` job and must include both `Detection` and
+/// `SafeOutputs`, which both declare a dependency edge onto `Agent`. This
+/// exercises `dispatch_graph_deps` / `graph_deps::analyze` end-to-end via
+/// the CLI, which previously had no integration coverage at all (only
+/// `graph dump` and `inspect` were tested here).
+#[test]
+fn graph_deps_json_downstream_includes_dependent_jobs() {
+    let (_workspace, src) = fixture_copy("canary.md");
+    let out = Command::new(binary_path())
+        .arg("graph")
+        .arg("deps")
+        .arg(&src)
+        .arg("Agent")
+        .arg("--direction")
+        .arg("downstream")
+        .arg("--json")
+        .output()
+        .expect("run ado-aw graph deps --direction downstream --json");
+    assert!(
+        out.status.success(),
+        "graph deps --direction downstream --json exited non-zero. stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("graph deps --json must emit valid JSON");
+    assert_eq!(json["step"], "Agent");
+    assert_eq!(json["direction"], "downstream");
+    let jobs = json["transitive_jobs"]
+        .as_array()
+        .expect("expected a 'transitive_jobs' array in the deps report");
+    let job_names: Vec<&str> = jobs
+        .iter()
+        .filter_map(|v| v["job"].as_str())
+        .collect();
+    assert!(
+        job_names.contains(&"Detection"),
+        "expected Detection among downstream jobs of Agent, got: {job_names:?}"
+    );
+    assert!(
+        job_names.contains(&"SafeOutputs"),
+        "expected SafeOutputs among downstream jobs of Agent, got: {job_names:?}"
+    );
+}
+
+/// `graph deps` on a step id absent from the graph must fail with a
+/// descriptive error rather than panicking or silently returning an empty
+/// report — this is the primary error path of `graph_deps::analyze`.
+#[test]
+fn graph_deps_rejects_unknown_step() {
+    let (_workspace, src) = fixture_copy("canary.md");
+    let out = Command::new(binary_path())
+        .arg("graph")
+        .arg("deps")
+        .arg(&src)
+        .arg("DoesNotExist")
+        .output()
+        .expect("run ado-aw graph deps DoesNotExist");
+    assert!(
+        !out.status.success(),
+        "graph deps on an unknown step id should fail"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("DoesNotExist") && stderr.contains("not found"),
+        "expected a 'step not found' error mentioning the missing id, got:\n{stderr}"
+    );
+}
+
+/// `graph outputs` on the canonical canary pipeline lists the
+/// `threatAnalysis` producer's `SafeToProcess` output and its consumers.
+/// This is the only coverage of `dispatch_graph_outputs` /
+/// `graph_outputs::analyze` via the CLI; previously untested here.
+#[test]
+fn graph_outputs_lists_producer_and_consumers() {
+    let (_workspace, src) = fixture_copy("canary.md");
+    let out = Command::new(binary_path())
+        .arg("graph")
+        .arg("outputs")
+        .arg(&src)
+        .output()
+        .expect("run ado-aw graph outputs");
+    assert!(
+        out.status.success(),
+        "graph outputs exited non-zero. stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("SafeToProcess"),
+        "expected the SafeToProcess output to be listed, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("threatAnalysis"),
+        "expected the threatAnalysis producer step to be listed, got:\n{stdout}"
+    );
+}
+
+/// `graph outputs --producer <id>` filters to only outputs declared by
+/// that step, and `--consumer <id>` filters to outputs read by that
+/// consumer. Combining an unmatched filter with a real fixture must yield
+/// an empty (but successful) result rather than an error.
+#[test]
+fn graph_outputs_producer_filter_excludes_unmatched_producer() {
+    let (_workspace, src) = fixture_copy("canary.md");
+    let out = Command::new(binary_path())
+        .arg("graph")
+        .arg("outputs")
+        .arg(&src)
+        .arg("--producer")
+        .arg("doesNotProduceAnything")
+        .arg("--json")
+        .output()
+        .expect("run ado-aw graph outputs --producer doesNotProduceAnything --json");
+    assert!(
+        out.status.success(),
+        "graph outputs with a non-matching producer filter should still succeed. stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("graph outputs --json must emit valid JSON");
+    let edges = json
+        .as_array()
+        .expect("expected the outputs report to be a JSON array of edges");
+    assert!(
+        edges.is_empty(),
+        "expected no edges for an unmatched producer filter, got: {edges:?}"
+    );
+}
+
 fn fixture_path(relative: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -333,5 +465,104 @@ fn lint_reports_invalid_task_input_as_warning_finding() {
     assert!(
         stdout.contains("\"severity\": \"warning\""),
         "task-input-invalid must be a warning, got:\n{stdout}"
+    );
+}
+
+/// `ado-aw whatif --fail <job>` classifies downstream jobs as
+/// `skipped` or `runs_anyway` based on their rendered ADO conditions.
+/// The canary fixture's `Conclusion` job carries an
+/// `always()`-style condition, so it must be reported as
+/// `runs_anyway` while `Detection`/`SafeOutputs` (default
+/// `succeeded()`) are `skipped`.
+#[test]
+fn whatif_classifies_downstream_jobs_by_condition() {
+    let (_workspace, src) = fixture_copy("canary.md");
+    let out = Command::new(binary_path())
+        .arg("whatif")
+        .arg(&src)
+        .arg("--fail")
+        .arg("Agent")
+        .output()
+        .expect("run ado-aw whatif");
+    assert!(
+        out.status.success(),
+        "whatif exited non-zero. stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Conclusion (runs_anyway)"),
+        "expected Conclusion classified as runs_anyway, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Detection (skipped)"),
+        "expected Detection classified as skipped, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("SafeOutputs (skipped)"),
+        "expected SafeOutputs classified as skipped, got:\n{stdout}"
+    );
+}
+
+/// `ado-aw whatif --json` emits a structured report with the failing
+/// node and per-job classification, matching the public
+/// `WhatIfReport`/`DownstreamJob` schema consumed by
+/// `mcp-author`/other tooling.
+#[test]
+fn whatif_json_emits_structured_report() {
+    let (_workspace, src) = fixture_copy("canary.md");
+    let out = Command::new(binary_path())
+        .arg("whatif")
+        .arg(&src)
+        .arg("--fail")
+        .arg("Agent")
+        .arg("--json")
+        .output()
+        .expect("run ado-aw whatif --json");
+    assert!(
+        out.status.success(),
+        "whatif --json exited non-zero. stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("\"kind\": \"job\""),
+        "expected failing_node.kind = job, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("\"id\": \"Agent\""),
+        "expected failing_node.id = Agent, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("\"classification\": \"runs_anyway\""),
+        "expected at least one runs_anyway classification, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("\"classification\": \"skipped\""),
+        "expected at least one skipped classification, got:\n{stdout}"
+    );
+}
+
+/// `ado-aw whatif --fail <unknown-id>` must fail with a clear,
+/// non-panicking error naming the unresolved id rather than
+/// succeeding silently or producing an empty report.
+#[test]
+fn whatif_unknown_fail_id_errors() {
+    let (_workspace, src) = fixture_copy("canary.md");
+    let out = Command::new(binary_path())
+        .arg("whatif")
+        .arg(&src)
+        .arg("--fail")
+        .arg("NoSuchJobOrStep")
+        .output()
+        .expect("run ado-aw whatif with unknown --fail id");
+    assert!(
+        !out.status.success(),
+        "whatif must fail for an unknown --fail id"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unknown step or job 'NoSuchJobOrStep'"),
+        "expected unknown-id error message, got:\n{stderr}"
     );
 }

@@ -50,13 +50,30 @@ use crate::compile::extensions::CompileContext;
 use crate::compile::extensions::ado_script::EXEC_CONTEXT_MANUAL_PATH;
 use crate::compile::ir::condition::{Condition, Expr};
 use crate::compile::ir::env::EnvValue;
-use crate::compile::ir::step::{BashStep, Step};
+use crate::compile::ir::step::Step;
+use crate::compile::shell::ShellScript;
 use crate::compile::types::ManualContextConfig;
+use crate::shell_script;
 
 #[cfg(test)]
 use crate::compile::types::FrontMatter;
 
 use super::contributor::{ContextContributor, succeeded_and};
+
+shell_script! {
+    /// Invoke the exec-context-manual node bundle. The step's own
+    /// `condition:` gates on `Build.Reason == Manual`.
+    EXEC_CONTEXT_MANUAL {
+        interpreter: Bash,
+        bindings: [BUNDLE],
+        externals: [],
+        fragments: [],
+        body: r#"
+set -euo pipefail
+node "$BUNDLE"
+"#,
+    }
+}
 
 /// Manual-context contributor.
 pub(super) struct ManualContextContributor {
@@ -142,24 +159,23 @@ impl ContextContributor for ManualContextContributor {
             return Ok(None);
         }
 
-        let script = format!("set -euo pipefail\nnode '{EXEC_CONTEXT_MANUAL_PATH}'\n");
+        let script = ShellScript::new(&EXEC_CONTEXT_MANUAL)
+            .bind_text("BUNDLE", EXEC_CONTEXT_MANUAL_PATH);
         // BUILD_SOURCESDIRECTORY is auto-injected by ADO, so it is not
         // re-projected. BUILD_REQUESTEDFOR / BUILD_REQUESTEDFOREMAIL are
         // retained (identity vars behind the opt-in email hygiene gate — the
         // projection makes the intent explicit at the call site). Manual has
         // no bearer (BundleAuth::None).
-        let mut step = BashStep::new(
-            "Stage manual execution context (aw-context/manual/*)",
-            script,
-        )
-        .with_condition(succeeded_and(Condition::Eq(
-            Expr::Variable("Build.Reason".to_string()),
-            Expr::Literal("Manual".to_string()),
-        )))
-        .with_env(
-            "BUILD_REQUESTEDFOR",
-            EnvValue::ado_macro("Build.RequestedFor")?,
-        );
+        let mut step = script
+            .into_step("Stage manual execution context (aw-context/manual/*)")
+            .with_condition(succeeded_and(Condition::Eq(
+                Expr::Variable("Build.Reason".to_string()),
+                Expr::Literal("Manual".to_string()),
+            )))
+            .with_env(
+                "BUILD_REQUESTEDFOR",
+                EnvValue::ado_macro("Build.RequestedFor")?,
+            );
 
         // Email is opt-in for hygiene — see ManualContextConfig docs.
         if self.config.include_email_resolved() {

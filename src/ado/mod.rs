@@ -976,7 +976,7 @@ pub async fn resolve_auth(pat: Option<&str>) -> Result<AdoAuth> {
             info!("No PAT provided, trying Azure CLI authentication...");
             match try_azure_cli_token().await {
                 Ok(token) => {
-                    println!("Using Azure CLI authentication (az account get-access-token)");
+                    eprintln!("Using Azure CLI authentication (az account get-access-token)");
                     Ok(AdoAuth::Bearer(token))
                 }
                 Err(e) => {
@@ -2116,6 +2116,30 @@ pub async fn download_build_artifact(
         )
     })?;
 
+    let repeated_root = (0..archive.len()).try_fold(true, |all_match, index| {
+        let entry = archive.by_index(index).with_context(|| {
+            format!(
+                "Failed to read zip entry {} from build artifact '{}'",
+                index, artifact.name
+            )
+        })?;
+        let entry_name = entry.name().to_string();
+        let relative_path = entry.enclosed_name().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Refusing to extract unsafe path '{}' from build artifact '{}'",
+                entry_name,
+                artifact.name
+            )
+        })?;
+        Ok::<_, anyhow::Error>(
+            all_match
+                && relative_path
+                    .components()
+                    .next()
+                    .is_some_and(|component| component.as_os_str() == artifact.name.as_str()),
+        )
+    })?;
+
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).with_context(|| {
             format!(
@@ -2134,7 +2158,14 @@ pub async fn download_build_artifact(
                     artifact.name
                 )
             })?;
-        let output_path = artifact_dir.join(&relative_path);
+        let relative_path = if repeated_root {
+            relative_path
+                .strip_prefix(&artifact.name)
+                .expect("repeated artifact root was validated")
+        } else {
+            relative_path.as_path()
+        };
+        let output_path = artifact_dir.join(relative_path);
 
         if entry.is_dir() {
             std::fs::create_dir_all(&output_path).with_context(|| {

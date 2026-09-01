@@ -7,15 +7,18 @@ use std::path::{Path, PathBuf};
 use super::extensions::{
     CompilerExtension, Declarations, McpgConfig, McpgGatewayConfig, McpgServerConfig,
 };
+use super::shell::{Binding, ShellScript};
 use super::types::{
     CheckoutFetchOpts, CompileTarget, FrontMatter, PipelineParameter, PoolConfig, ReposItem,
     Repository, SELF_CHECKOUT_ALIAS,
 };
+use crate::ado_proxy::catalog::Capability;
 use crate::allowed_hosts::{CORE_ALLOWED_HOSTS, mcp_required_hosts};
 use crate::compile::types::McpConfig;
 use crate::ecosystem_domains::{
     get_ecosystem_domains, is_ecosystem_identifier, is_known_ecosystem,
 };
+use crate::shell_script;
 use crate::validate;
 
 /// Atomically write `contents` to `path`.
@@ -43,6 +46,76 @@ pub async fn atomic_write(path: &Path, contents: &str) -> Result<()> {
     tokio::task::spawn_blocking(move || atomic_write_blocking(&path, &owned_contents))
         .await
         .context("atomic_write task panicked")?
+}
+
+#[test]
+fn test_validate_permissions_read_policy_requires_token_source_when_proxied() {
+    let (missing, _) = parse_markdown(
+        "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: contoso\n---\n",
+    )
+    .unwrap();
+
+    let error = validate_permissions_read_policy(&missing)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("tools.azure-devops requires `permissions.read`"),
+        "message must name the missing configuration: {error}"
+    );
+    assert!(
+        error.contains("agent and Azure DevOps MCP receive no real credential"),
+        "message must explain custody rather than asking the author to expose a token: {error}"
+    );
+}
+
+#[test]
+fn test_validate_permissions_read_policy_ignores_explicitly_disabled_tool() {
+    let (disabled, _) =
+        parse_markdown("---\nname: test\ndescription: test\ntools:\n  azure-devops: false\n---\n")
+            .unwrap();
+
+    validate_permissions_read_policy(&disabled).unwrap();
+    assert!(!ado_proxy_enabled(&disabled));
+}
+
+#[test]
+fn test_ado_proxy_activation_follows_permissions_read_not_mcp_tool() {
+    for (source, expected) in [
+        ("---\nname: t\ndescription: x\n---\n", false),
+        (
+            "---\nname: t\ndescription: x\ntools:\n  azure-devops: true\n---\n",
+            false,
+        ),
+        (
+            "---\nname: t\ndescription: x\npermissions:\n  read: my-read-sc\n---\n",
+            true,
+        ),
+        (
+            "---\nname: t\ndescription: x\ntools:\n  azure-devops: false\npermissions:\n  read:\n    service-connection: my-read-sc\n    capabilities: [core]\n---\n",
+            true,
+        ),
+    ] {
+        let (front_matter, _) = parse_markdown(source).unwrap();
+        assert_eq!(
+            ado_proxy_enabled(&front_matter),
+            expected,
+            "unexpected activation for:\n{source}"
+        );
+    }
+}
+
+#[test]
+fn test_ado_mcp_version_uses_override_or_compiler_default() {
+    let (defaulted, _) =
+        parse_markdown("---\nname: t\ndescription: x\ntools:\n  azure-devops: true\n---\n")
+            .unwrap();
+    assert_eq!(ado_mcp_version(&defaulted), ADO_MCP_VERSION);
+
+    let (overridden, _) = parse_markdown(
+        "---\nname: t\ndescription: x\ntools:\n  azure-devops:\n    version: 2.9.0\n---\n",
+    )
+    .unwrap();
+    assert_eq!(ado_mcp_version(&overridden), "2.9.0");
 }
 
 /// Returns the directory in which the atomic tempfile should be created for a
@@ -253,8 +326,9 @@ pub(crate) fn parse_markdown_detailed_with_registry(
     };
 
     // Stage 2: run the codemod registry against the untyped mapping.
-    let report = super::codemods::apply_codemods_with(&mut mapping, registry, source_compiler_version)
-        .context("Failed to apply codemods")?;
+    let report =
+        super::codemods::apply_codemods_with(&mut mapping, registry, source_compiler_version)
+            .context("Failed to apply codemods")?;
 
     // Stage 3: deserialize the (possibly modified) mapping into the
     // typed FrontMatter. Errors here mean either the user wrote an
@@ -543,6 +617,77 @@ pub fn validate_front_matter_identity(front_matter: &FrontMatter) -> Result<()> 
     }
 
     Ok(())
+}
+
+/// Longest `timeout-minutes` a proxied workflow may declare.
+///
+/// The engine receives one Azure DevOps bearer on stdin and cannot rotate it,
+/// so a run must not outlive the token. Azure DevOps access tokens are
+/// typically valid for about an hour; 50 minutes leaves headroom for the token
+/// being minted before the Agent job starts and for clock skew.
+///
+/// This is a *compile-time* bound on purpose. Without it the failure surfaces
+/// mid-run as opaque `502`s from the engine — worse than today's behaviour,
+/// because the agent cannot tell an expired credential from a policy denial.
+/// Raising it requires a rotating delivery mechanism, not a bigger number.
+pub const MAX_PROXIED_TIMEOUT_MINUTES: u32 = 50;
+
+/// Reject a `timeout-minutes` that could outlive the proxy's bearer.
+///
+/// Only applies once a workflow opts into the proxied read path; unproxied
+/// workflows are unaffected, since their agent holds no Azure DevOps
+/// credential to expire.
+pub fn validate_proxied_timeout(front_matter: &FrontMatter, timeout_minutes: u32) -> Result<()> {
+    if timeout_minutes <= MAX_PROXIED_TIMEOUT_MINUTES {
+        return Ok(());
+    }
+    let uses_proxy = ado_proxy_enabled(front_matter);
+    if !uses_proxy {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "timeout-minutes: {timeout_minutes} exceeds the maximum of \
+         {MAX_PROXIED_TIMEOUT_MINUTES} for workflows using the credential-isolated Azure \
+         DevOps proxy. The proxy holds a single Azure DevOps token that it cannot renew, so \
+         a longer run would start failing Azure DevOps reads partway through. Lower \
+         timeout-minutes, or split the work across runs."
+    )
+}
+
+/// Validate explicit Stage 1 read-policy options before policy emission.
+///
+/// The object form is now consumed by [`crate::ado_proxy::policy::PolicyDocument`]:
+/// capabilities narrow the operation catalog and `allow:` lowers into the
+/// bundle's organization-relative scope tree. Structural validation remains on
+/// the compile path so a widening produced by omission — such as naming an
+/// organization with no projects — fails before any pipeline is emitted.
+pub fn validate_permissions_read_policy(front_matter: &FrontMatter) -> Result<()> {
+    if ado_mcp_enabled(front_matter)
+        && front_matter
+            .permissions
+            .as_ref()
+            .and_then(|permissions| permissions.read.as_ref())
+            .is_none()
+    {
+        anyhow::bail!(
+            "tools.azure-devops requires `permissions.read` so the trusted ado-proxy \
+             process can acquire an Azure DevOps token. Add either \
+             `permissions:\\n  read: <arm-service-connection>` or the object form \
+             with `service-connection:`. The token is delivered only to the proxy; \
+             the agent and Azure DevOps MCP receive no real credential."
+        );
+    }
+
+    let Some(options) = front_matter
+        .permissions
+        .as_ref()
+        .and_then(|permissions| permissions.read.as_ref())
+        .and_then(crate::compile::types::ReadPermissionConfig::options)
+    else {
+        return Ok(());
+    };
+
+    options.validate()
 }
 
 /// Validate the `variable-groups:` front-matter block (issue #1385).
@@ -1109,9 +1254,7 @@ fn resolve_effective_workspace(
             let ws = ws.as_str();
             match ws {
                 "root" => Ok(("root".to_string(), false)),
-                "repo" | "self" if has_additional_checkouts => {
-                    Ok(("repo".to_string(), false))
-                }
+                "repo" | "self" if has_additional_checkouts => Ok(("repo".to_string(), false)),
                 "repo" | "self" => Ok(("root".to_string(), true)),
                 alias => {
                     // Defense in depth: even though aliases are constrained
@@ -1605,13 +1748,266 @@ pub const MCPG_CONTAINER_NAME: &str = MCPG_DOMAIN;
 pub const ADO_MCP_IMAGE: &str = "node:20-slim";
 
 /// Default entrypoint for the Azure DevOps MCP container.
-pub const ADO_MCP_ENTRYPOINT: &str = "npx";
+///
+/// The MCP is launched directly rather than through `npx`: the package is
+/// installed on the runner and mounted in, so the container needs no registry
+/// access and resolves nothing at start time.
+pub const ADO_MCP_ENTRYPOINT: &str = "node";
+
+/// Mount point for the pre-installed Azure DevOps MCP package.
+///
+/// Load-bearing: Node resolves dependencies by walking *upward* from the
+/// importing file, so the tree must sit at `/app/node_modules` for the MCP's
+/// own dependencies to resolve. Mounting it anywhere else fails at import with
+/// `ERR_MODULE_NOT_FOUND` for `@modelcontextprotocol/sdk`.
+pub const ADO_MCP_NODE_MODULES: &str = "/app/node_modules";
+
+/// Entry script of the Azure DevOps MCP package inside the container.
+pub const ADO_MCP_ENTRY_SCRIPT: &str = "/app/node_modules/@azure-devops/mcp/dist/index.js";
+
+/// Where the runner stages the installed MCP package for mounting.
+pub const ADO_MCP_HOST_NODE_MODULES: &str = "/tmp/ado-aw-mcp/node_modules";
+
+/// Non-secret placeholder handed to the MCP in place of an Azure DevOps token.
+///
+/// The MCP authenticates with whatever is in `ADO_MCP_AUTH_TOKEN`, but under
+/// interception it never talks to Azure DevOps directly: the policy engine
+/// strips every client credential and attaches the real bearer only after a
+/// complete allow decision. Passing the real token here would make the proxy
+/// decorative on this path — the MCP could authenticate directly if it ever
+/// reached Azure DevOps by another route, and the credential would sit in a
+/// container the agent can influence through tool calls.
+///
+/// Deliberately self-describing: it shows up in logs and error messages, where
+/// it should read as intentional rather than as a misconfiguration.
+pub const ADO_MCP_TOKEN_SENTINEL: &str = "ado-proxy-injects-the-real-credential";
+
+/// Docker network shared by the policy engine and the Azure DevOps MCP.
+///
+/// Created `--internal`: a normal user-defined bridge has outbound NAT, which
+/// would leave the MCP a direct route to the internet and reduce the engine to
+/// policing only the single hostname the redirect overrides. Internal networks
+/// still route between their own members, so the MCP reaches the engine and
+/// nothing else. The engine keeps its own egress because AWF dual-homes it
+/// onto `awf-net`, where Squid lives.
+pub const ADO_PROXY_NETWORK_NAME: &str = "ado-aw-proxy-net";
+
+/// Path the public interception CA is mounted at inside client containers.
+pub const ADO_MCP_CA_MOUNT: &str = "/etc/ado-proxy/ca.pem";
+
+/// Bash that derives the Azure DevOps organization name from
+/// `$(System.CollectionUri)` into `$ADO_PROXY_ORGANIZATION`.
+///
+/// One implementation on purpose, because the two it replaced were both wrong
+/// for a form the other handled. `engine.rs` stripped a literal
+/// `https://dev.azure.com/` prefix, a no-op for `https://myorg.visualstudio.com/`
+/// that yields the whole URL; taking the last path segment gets `dev.azure.com`
+/// URLs right but returns `myorg.visualstudio.com` for the legacy host form.
+///
+/// Both collection shapes are still issued by Azure DevOps, so this handles
+/// each explicitly: with a path segment after the host, the last segment is
+/// the organization (or collection); with none, the first label of the host
+/// is. Getting this wrong is not cosmetic — in a policy document a wrong
+/// organization matches nothing, denying every request in a way that reads as
+/// a deliberate policy decision.
+///
+/// # Contract for consumers
+///
+/// This function returns raw shell text (no YAML wrapping). Callers that
+/// splice the text into a larger script must know it assigns two variables:
+/// `ADO_PROXY_COLLECTION` and `ADO_PROXY_ORGANIZATION`. See
+/// [`crate::compile::shell`] for the fragment convention (`# ado-aw:fragment`
+/// marker + `externals:` list) other producers use when embedding this
+/// fragment.
+pub fn resolve_ado_organization_bash() -> String {
+    ShellScript::new(&RESOLVE_ADO_ORGANIZATION).render()
+}
+
+shell_script! {
+    /// Derive `$ADO_PROXY_ORGANIZATION` from `$(System.CollectionUri)`.
+    ///
+    /// Rendered as a standalone fragment (no bindings, no prelude) so it can
+    /// be spliced verbatim into a larger step body via
+    /// [`ShellScript::fragment`]. Every variable the body reads is assigned
+    /// by the body itself, so no bindings or externals are needed and the
+    /// splice contributes nothing to the parent's declared surface except
+    /// the two variables it assigns.
+    RESOLVE_ADO_ORGANIZATION {
+        interpreter: Bash,
+        bindings: [],
+        externals: [],
+        fragments: [],
+        // Uses r###"..."### so the "##vso[...]" line inside the body cannot
+        // prematurely close the raw string literal (the sequence `"#` would
+        // otherwise terminate an r#"..."# body).
+        body: r###"
+# $(System.CollectionUri) is expanded by ADO before bash runs. Two
+# shapes are in use: "https://dev.azure.com/myorg/" (organization in
+# the path) and the legacy "https://myorg.visualstudio.com/"
+# (organization in the host). Handle both — a fixed-prefix strip or a
+# bare last-segment rule is silently wrong for one of them.
+ADO_PROXY_COLLECTION="$(System.CollectionUri)"
+ADO_PROXY_ORGANIZATION=$(printf '%s' "$ADO_PROXY_COLLECTION" \
+  | sed -e 's#^https\?://##' -e 's#/*$##' \
+  | awk -F/ '{ if (NF>1) print $NF; else { sub(/\..*$/, "", $1); print $1 } }')
+if [ -z "$ADO_PROXY_ORGANIZATION" ]; then
+  echo "##vso[task.complete result=Failed]cannot determine the Azure DevOps organization from System.CollectionUri"
+  exit 1
+fi
+"###,
+    }
+}
+
+/// Whether this workflow routes Azure DevOps access through the policy engine.
+///
+/// `permissions.read` is the activation switch and trusted token source. The
+/// pipeline builder and Azure CLI extension must not disagree: a mismatch
+/// would either install a wrapper pointing at an engine that was never started,
+/// or expose host `az` without the policy boundary.
+pub fn ado_proxy_enabled(front_matter: &FrontMatter) -> bool {
+    front_matter
+        .permissions
+        .as_ref()
+        .and_then(|permissions| permissions.read.as_ref())
+        .is_some()
+}
+
+/// Whether the first-party Azure DevOps MCP client is enabled.
+///
+/// This is deliberately narrower than [`ado_proxy_enabled`]: read permission
+/// activates the proxy and wrapped `az`, while `tools.azure-devops` alone
+/// controls MCP package staging and child configuration.
+pub fn ado_mcp_enabled(front_matter: &FrontMatter) -> bool {
+    front_matter
+        .tools
+        .as_ref()
+        .and_then(|tools| tools.azure_devops.as_ref())
+        .is_some_and(crate::compile::types::AzureDevOpsToolConfig::is_enabled)
+}
+
+/// Effective Azure DevOps MCP package version for this workflow.
+///
+/// Workflows may override the compiler pin with an exact semantic version.
+/// The compiler-owned default remains deterministic and is exposed by
+/// `ado-aw catalog --kind versions`.
+pub fn ado_mcp_version(front_matter: &FrontMatter) -> &str {
+    front_matter
+        .tools
+        .as_ref()
+        .and_then(|tools| tools.azure_devops.as_ref())
+        .and_then(crate::compile::types::AzureDevOpsToolConfig::version)
+        .unwrap_or(ADO_MCP_VERSION)
+}
+
+/// Directory the generated `az` wrapper is installed into inside the sandbox.
+///
+/// Separate from the ado-script bundle directory because it is prepended to
+/// `PATH`: anything placed here shadows a real executable of the same name.
+#[allow(dead_code)]
+pub const AZ_WRAPPER_DIR: &str = "/tmp/ado-aw-lib";
+
+/// Full path of the generated `az` wrapper.
+#[allow(dead_code)]
+pub const AZ_WRAPPER_PATH: &str = "/tmp/ado-aw-lib/az";
+
+/// Path the public interception CA is staged at for the `az` wrapper.
+#[allow(dead_code)]
+pub const AZ_WRAPPER_CA_PATH: &str = "/tmp/ado-aw-lib/ado-proxy-ca.pem";
+
+/// Azure CLI command groups the wrapper permits.
+///
+/// Derived from the capabilities the policy actually grants, so the wrapper
+/// cannot advertise a command group the engine would refuse. Hand-maintaining
+/// this list let `az artifacts` through the wrapper while no catalogued
+/// operation backed it.
+///
+/// `rest` is always present and is deliberately not capability-derived. It is
+/// a general REST escape hatch, and the catalog — not this list — is what
+/// contains it: measured against a live engine, `az rest` completed a
+/// catalogued read, and was refused `403` for both a denied route family and a
+/// `POST`. Excluding it would also be incoherent, since `az devops invoke`
+/// expresses the same arbitrary Azure DevOps REST from inside an allowed
+/// group. It reaches non-Azure-DevOps hosts exactly as before — tunnelled to
+/// Squid, with no credential attached.
+pub fn az_allowed_groups(capabilities: &[Capability]) -> Vec<&'static str> {
+    let mut groups: Vec<&'static str> = Capability::ALL
+        .iter()
+        .filter(|capability| capabilities.contains(capability))
+        .filter_map(|capability| capability.az_command_group())
+        .collect();
+    groups.push("rest");
+    groups
+}
+
+/// Resolve the capabilities the policy engine should enable.
+///
+/// Re-exported from [`crate::ado_proxy::policy`], which owns the rule, so the
+/// `az` wrapper's allow-list and the emitted policy document cannot disagree
+/// about what the agent may read.
+pub use crate::ado_proxy::policy::ado_proxy_capabilities;
+
+/// Runner-side path of the CA certificate the policy engine publishes.
+///
+/// Deliberately inside [`AZ_WRAPPER_DIR`]: AWF mounts `/tmp` into the agent
+/// chroot, so this single published file is what the `az` wrapper reads *and*
+/// what the MCP container mounts. Publishing once removes the possibility of a
+/// client trusting a stale copy. Only the certificate goes here — the matching
+/// private key is destroyed by the step that starts the engine.
+pub const ADO_PROXY_PUBLIC_CA_HOST_PATH: &str = "/tmp/ado-aw-lib/ado-proxy-ca.pem";
 
 /// Default entrypoint args for the Azure DevOps MCP npm package.
 pub const ADO_MCP_PACKAGE: &str = "@azure-devops/mcp";
 
+/// Pinned Azure DevOps MCP package version.
+///
+/// Pinned rather than floating because the package is fetched on the runner
+/// and mounted into a container that has no registry access of its own; an
+/// unpinned fetch would make the agent's tool surface vary run to run.
+pub const ADO_MCP_VERSION: &str = "2.8.1";
+
 /// Reserved MCPG server name for the auto-configured ADO MCP.
 pub const ADO_MCP_SERVER_NAME: &str = "azure-devops";
+
+/// Stable container name for the `ado-proxy` policy engine.
+///
+/// Doubles as the DNS name the agent uses to reach it, matching the MCPG
+/// convention, and is the name passed to AWF's `--topology-attach`.
+#[allow(dead_code)]
+pub const ADO_PROXY_CONTAINER_NAME: &str = "awmg-ado-proxy";
+
+/// Base image for the `ado-proxy` container.
+///
+/// The proxy ships as an `ado-script` bundle that is already downloaded onto
+/// the runner, so it needs no image of its own — it is mounted into the same
+/// stock Node image the ADO MCP uses. That keeps the supply chain unchanged:
+/// no new image to build, publish, pin, or mirror.
+#[allow(dead_code)]
+pub const ADO_PROXY_IMAGE: &str = ADO_MCP_IMAGE;
+
+/// Port `ado-proxy` accepts `CONNECT`-style proxy clients on.
+#[allow(dead_code)]
+pub const ADO_PROXY_LISTEN_PORT: u16 = 11080;
+
+/// Port `ado-proxy` terminates direct TLS on.
+///
+/// Must be 443: clients redirected with `--add-host` believe they are talking
+/// to `dev.azure.com` and will not use a non-default port.
+#[allow(dead_code)]
+pub const ADO_PROXY_TLS_PORT: u16 = 443;
+
+/// AWF's Squid proxy, addressed by IP on the AWF network.
+///
+/// AWF fixes this address as a constant (`SQUID_IP` in its `constants.ts`,
+/// within the `172.30.0.0/24` `awf-net` subnet), so it can be configured
+/// before AWF has started rather than discovered afterwards. Addressing it by
+/// IP rather than by name also sidesteps the embedded-DNS failures AWF itself
+/// works around under gVisor and ARC/DinD.
+///
+/// Routing the proxy's own egress through Squid rather than exempting it from
+/// the firewall follows AWF's own API-proxy sidecar, which is deliberately
+/// given no iptables exemption for the same reason.
+#[allow(dead_code)]
+pub const AWF_SQUID_URL: &str = "http://172.30.0.10:3128";
 
 /// Rewrite a GHCR image reference onto an internal registry when configured.
 ///
@@ -1672,14 +2068,56 @@ pub fn generate_integrity_check(skip: bool) -> String {
         return String::new();
     }
 
-    // Indentation is handled by replace_with_indent at the call site.
-    r#"- bash: |
-    AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
-    chmod +x "$AGENTIC_PIPELINES_PATH"
-    $AGENTIC_PIPELINES_PATH check "{{ pipeline_path }}"
-  workingDirectory: {{ trigger_repo_directory }}
-  displayName: "Verify pipeline integrity""#
-        .to_string()
+    let script = ShellScript::new(&VERIFY_PIPELINE_INTEGRITY)
+        .bind(
+            "PIPELINE_WORKSPACE",
+            Binding::ado_macro("Pipeline.Workspace"),
+        )
+        .render();
+
+    // Indent every body line by 4 spaces to satisfy the `- bash: |` literal
+    // block scalar shape. `workingDirectory:` uses the `{{ trigger_repo_directory }}`
+    // template placeholder resolved by `replace_with_indent` at the call site.
+    let indented: String = script
+        .lines()
+        .map(|line| {
+            if line.is_empty() {
+                "\n".to_string()
+            } else {
+                format!("    {line}\n")
+            }
+        })
+        .collect();
+    format!(
+        "- bash: |\n{indented}  workingDirectory: {{{{ trigger_repo_directory }}}}\n  displayName: \"Verify pipeline integrity\""
+    )
+    .trim_end_matches('\n')
+    .to_string()
+}
+
+shell_script! {
+    /// The bash body of the "Verify pipeline integrity" step: downloads the
+    /// pipelined `ado-aw` binary and re-runs `ado-aw check` against the
+    /// authored source path. Called with `--skip-integrity` returns an empty
+    /// string from [`generate_integrity_check`] and the step is omitted; the
+    /// registered body always describes the enabled case.
+    ///
+    /// `{{ pipeline_path }}` remains a compile-time template placeholder
+    /// resolved by `replace_with_indent` at the call site (it names the
+    /// authored `.md` source path relative to the trigger repo). It is inert
+    /// under shellcheck because it appears only inside a double-quoted string
+    /// argument.
+    VERIFY_PIPELINE_INTEGRITY {
+        interpreter: Bash,
+        bindings: [PIPELINE_WORKSPACE],
+        externals: [],
+        fragments: [],
+        body: r#"
+AGENTIC_PIPELINES_PATH="$PIPELINE_WORKSPACE/agentic-pipeline-compiler/ado-aw"
+chmod +x "$AGENTIC_PIPELINES_PATH"
+"$AGENTIC_PIPELINES_PATH" check "{{ pipeline_path }}"
+"#,
+    }
 }
 
 /// Validate the `ado-aw-debug:` section.
@@ -1718,15 +2156,134 @@ pub fn validate_ado_aw_debug_config(front_matter: &FrontMatter) -> Result<()> {
     Ok(())
 }
 
+fn require_same_approval_lane(
+    front_matter: &FrontMatter,
+    producer: &str,
+    consumer: &str,
+) -> Result<()> {
+    let producer_reviewed = front_matter.tool_requires_approval(producer).is_some();
+    let consumer_reviewed = front_matter.tool_requires_approval(consumer).is_some();
+    if producer_reviewed == consumer_reviewed {
+        return Ok(());
+    }
+    match producer {
+        "create-github-issue" => anyhow::bail!(
+            "safe-outputs.create-github-issue and safe-outputs.{consumer} must use the same \
+             effective require-approval value when {consumer} accepts temporary issue IDs"
+        ),
+        "create-work-item" => anyhow::bail!(
+            "safe-outputs.create-work-item and safe-outputs.{consumer} must have the same \
+             effective require-approval setting so temporary work-item IDs remain in one \
+             SafeOutputs job"
+        ),
+        _ => anyhow::bail!(
+            "safe-outputs.{producer} and safe-outputs.{consumer} must have the same effective \
+             require-approval setting"
+        ),
+    }
+}
+
 pub fn validate_github_issue_outputs_config(front_matter: &FrontMatter) -> Result<()> {
-    if let Some(config) = front_matter.create_github_issue_config()? {
-        if let Some(target_repo) = config.target_repo.as_deref() {
-            crate::safe_outputs::validate_target_repo(target_repo)?;
-            crate::validate::reject_pipeline_injection(
-                target_repo,
-                "safe-outputs.create-github-issue.target-repo",
-            )?;
+    let github_tools = front_matter.github_issue_tool_names();
+    if front_matter
+        .safe_outputs
+        .contains_key("create-github-issue")
+    {
+        for consumer in crate::compile::types::GITHUB_TEMPORARY_ID_CONSUMERS {
+            if front_matter.safe_outputs.contains_key(*consumer) {
+                require_same_approval_lane(
+                    front_matter,
+                    "create-github-issue",
+                    consumer,
+                )?;
+            }
         }
+    }
+
+    for tool in &github_tools {
+        let Some(config) = front_matter.github_issue_compiler_config(tool)? else {
+            continue;
+        };
+        crate::safe_outputs::configured_github_repositories(
+            crate::safe_outputs::GithubRepositoryPolicy::new(
+                config.target_repo.as_deref(),
+                &config.allowed_repos,
+            ),
+        )
+        .map_err(|error| {
+            anyhow::anyhow!("safe-outputs.{tool} has invalid repository policy: {error}")
+        })?;
+        if tool != "create-github-issue" {
+            crate::safe_outputs::validate_github_mutation_filter_config(
+                crate::safe_outputs::GithubMutationFilters {
+                    required_labels: &config.required_labels,
+                    required_title_prefix: config.required_title_prefix.as_deref(),
+                },
+            )
+            .map_err(|error| {
+                anyhow::anyhow!("safe-outputs.{tool} has invalid mutation filters: {error}")
+            })?;
+        }
+        match tool.as_str() {
+            "comment-on-github-issue" => {
+                if let Some(config) = front_matter.comment_on_github_issue_config()? {
+                    crate::safe_outputs::validate_comment_on_github_issue_config(&config)?;
+                }
+            }
+            "hide-github-issue-comment" => {
+                if let Some(config) = front_matter.hide_github_issue_comment_config()? {
+                    crate::safe_outputs::validate_hide_github_issue_comment_config(&config)?;
+                }
+            }
+            "add-github-issue-labels" => {
+                if let Some(config) = front_matter.add_github_issue_labels_config()? {
+                    crate::safe_outputs::validate_add_github_issue_labels_config(&config)?;
+                }
+            }
+            "remove-github-issue-labels" => {
+                if let Some(config) = front_matter.remove_github_issue_labels_config()? {
+                    crate::safe_outputs::validate_remove_github_issue_labels_config(&config)?;
+                }
+            }
+            "close-github-issue" => {
+                if let Some(config) = front_matter.close_github_issue_config()? {
+                    crate::safe_outputs::validate_close_github_issue_config(&config)?;
+                }
+            }
+            "update-github-issue" => {
+                if let Some(config) = front_matter.update_github_issue_config()? {
+                    crate::safe_outputs::validate_update_github_issue_config(&config)?;
+                }
+            }
+            "set-github-issue-field" => {
+                if let Some(config) = front_matter.set_github_issue_field_config()? {
+                    crate::safe_outputs::validate_set_github_issue_field_config(&config)?;
+                }
+            }
+            "assign-github-issue-milestone" => {
+                if let Some(config) = front_matter.assign_github_issue_milestone_config()? {
+                    crate::safe_outputs::validate_assign_github_issue_milestone_config(&config)?;
+                }
+            }
+            "assign-github-issue-to-user" => {
+                if let Some(config) = front_matter.assign_github_issue_to_user_config()? {
+                    crate::safe_outputs::validate_assign_github_issue_to_user_config(&config)?;
+                }
+            }
+            "unassign-github-issue-from-user" => {
+                if let Some(config) = front_matter.unassign_github_issue_from_user_config()? {
+                    crate::safe_outputs::validate_unassign_github_issue_from_user_config(&config)?;
+                }
+            }
+            "link-github-sub-issue" => {
+                if let Some(config) = front_matter.link_github_sub_issue_config()? {
+                    crate::safe_outputs::validate_link_github_sub_issue_config(&config)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(config) = front_matter.create_github_issue_config()? {
         if let Some(prefix) = config.title_prefix.as_deref() {
             crate::validate::reject_pipeline_injection(
                 prefix,
@@ -1754,13 +2311,6 @@ pub fn validate_github_issue_outputs_config(front_matter: &FrontMatter) -> Resul
     }
 
     if let Some(config) = front_matter.set_github_issue_type_config()? {
-        if let Some(target_repo) = config.target_repo.as_deref() {
-            crate::safe_outputs::validate_target_repo(target_repo)?;
-            crate::validate::reject_pipeline_injection(
-                target_repo,
-                "safe-outputs.set-github-issue-type.target-repo",
-            )?;
-        }
         for issue_type in &config.allowed {
             crate::validate::reject_pipeline_injection(
                 issue_type,
@@ -1769,25 +2319,72 @@ pub fn validate_github_issue_outputs_config(front_matter: &FrontMatter) -> Resul
         }
     }
 
-    if front_matter.safe_outputs.contains_key("create-github-issue")
-        && front_matter.safe_outputs.contains_key("set-github-issue-type")
+    let _ = front_matter.github_app_permissions_for_tools(&github_tools)?;
+    let _ = front_matter.github_safe_outputs_auth()?;
+    Ok(())
+}
+
+pub fn validate_work_item_assignment_outputs_config(front_matter: &FrontMatter) -> Result<()> {
+    if front_matter
+        .safe_outputs
+        .get("create-work-item")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|config| config.contains_key("require-temporary-id"))
     {
-        let create_reviewed = front_matter
-            .tool_requires_approval("create-github-issue")
-            .is_some();
-        let type_reviewed = front_matter
-            .tool_requires_approval("set-github-issue-type")
-            .is_some();
-        if create_reviewed != type_reviewed {
-            anyhow::bail!(
-                "safe-outputs.create-github-issue and safe-outputs.set-github-issue-type must have the \
-                 same effective require-approval setting so temporary issue IDs remain in \
-                 one SafeOutputs job"
+        anyhow::bail!(
+            "safe-outputs.create-work-item.require-temporary-id is not supported; \
+             create-work-item always generates and returns a temporary ID"
+        );
+    }
+
+    if let Some(config) = front_matter.create_work_item_config()?
+        && let Some(assignee) = config.assignee.as_deref()
+    {
+        crate::safe_outputs::normalize_work_item_assignee(
+            assignee,
+            "safe-outputs.create-work-item.assignee",
+        )?;
+    }
+
+    if let Some(config) = front_matter.assign_work_item_config()? {
+        if let Some(target) = &config.target {
+            match target {
+                crate::safe_outputs::TargetConfig::Id(id) if *id > 0 => {}
+                crate::safe_outputs::TargetConfig::Pattern(pattern) if pattern == "*" => {}
+                crate::safe_outputs::TargetConfig::Id(_) => {
+                    anyhow::bail!("safe-outputs.assign-work-item.target must be positive")
+                }
+                crate::safe_outputs::TargetConfig::Pattern(pattern) => anyhow::bail!(
+                    "safe-outputs.assign-work-item.target must be \"*\" or a positive work-item ID, got '{pattern}'"
+                ),
+            }
+        }
+        for assignee in &config.allowed {
+            crate::safe_outputs::normalize_work_item_assignee(
+                assignee,
+                "safe-outputs.assign-work-item.allowed",
+            )?;
+        }
+        for pattern in &config.blocked {
+            anyhow::ensure!(
+                !pattern.trim().is_empty(),
+                "safe-outputs.assign-work-item.blocked entries must not be empty"
             );
+            crate::validate::reject_pipeline_injection(
+                pattern.trim(),
+                "safe-outputs.assign-work-item.blocked",
+            )?;
         }
     }
 
-    let _ = front_matter.github_safe_outputs_auth()?;
+    if front_matter.safe_outputs.contains_key("create-work-item") {
+        for consumer in crate::compile::types::WORK_ITEM_TEMPORARY_ID_CONSUMERS {
+            if front_matter.safe_outputs.contains_key(*consumer) {
+                require_same_approval_lane(front_matter, "create-work-item", consumer)?;
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -3024,22 +3621,50 @@ pub fn generate_awf_path_step(awf_paths: &[String]) -> String {
         return String::new();
     }
 
-    let path_lines = awf_paths
-        .iter()
-        .map(|p| format!("    {p}"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let path_lines: String = awf_paths.join("\n");
 
+    let body = ShellScript::new(&GENERATE_GITHUB_PATH)
+        .bind("PATH_LINES", Binding::document(&path_lines))
+        .render();
+
+    // Wrap in a `- bash: |` YAML step. Each body line indented by 4 spaces
+    // so it survives the literal-block scalar shape emitted downstream.
+    let indented: String = body
+        .lines()
+        .map(|line| {
+            if line.is_empty() {
+                "\n".to_string()
+            } else {
+                format!("    {line}\n")
+            }
+        })
+        .collect();
     format!(
-        "\
-- bash: |
-    AWF_PATH_FILE=\"/tmp/awf-tools/ado-path-entries\"
-    cat > \"$AWF_PATH_FILE\" << AWF_PATH_EOF
-{path_lines}
-    AWF_PATH_EOF
-    echo \"##vso[task.setvariable variable=GITHUB_PATH]$AWF_PATH_FILE\"
-  displayName: \"Generate GITHUB_PATH file\""
+        "- bash: |\n{indented}  displayName: \"Generate GITHUB_PATH file\""
     )
+}
+
+shell_script! {
+    /// Bash body of the "Generate GITHUB_PATH file" step.
+    ///
+    /// AWF reads `$GITHUB_PATH` as a file path at startup and merges its
+    /// entries into the chroot PATH. `PATH_LINES` arrives as a
+    /// [`Binding::document`] — a quoted heredoc — because the path list may
+    /// contain multiple lines; the heredoc keeps them literal without any
+    /// per-entry escaping. The rendered file is then advertised to AWF via
+    /// `##vso[task.setvariable]`.
+    GENERATE_GITHUB_PATH {
+        interpreter: Bash,
+        bindings: [PATH_LINES],
+        externals: [],
+        fragments: [],
+        // r###"..."### to protect against the "##vso sequence.
+        body: r###"
+AWF_PATH_FILE="/tmp/awf-tools/ado-path-entries"
+printf '%s\n' "$PATH_LINES" > "$AWF_PATH_FILE"
+echo "##vso[task.setvariable variable=GITHUB_PATH]$AWF_PATH_FILE"
+"###,
+    }
 }
 
 /// Generates the `env:` block entry that passes `GITHUB_PATH` to the AWF
@@ -3877,20 +4502,27 @@ mod tests {
         });
         let params = engine_args_for(&fm).unwrap();
         // User-disabled bash must not produce a general bash allow-tool
-        // (shell(:*) / shell(*) / shell(bash)). Always-on extensions
-        // (e.g. Azure CLI) legitimately inject their own narrow
-        // shell(<cmd>) entries via `required_bash_commands()`; those are
-        // expected and should not regress this test.
+        // (shell(:*) / shell(*) / shell(bash)).
         assert!(!params.contains("shell(:*)"));
         assert!(!params.contains("shell(*)"));
         assert!(!params.contains("shell(bash)"));
-        // Sanity-check: the always-on Azure CLI extension still injects
-        // its bash requirement even when user bash is disabled — agents
-        // must be able to call `az` regardless of the user's `bash:`
-        // narrowing decisions.
+        assert!(
+            !params.contains("shell(az)"),
+            "without permissions.read, Azure CLI must not be exposed: {params}"
+        );
+
+        fm.permissions = Some(crate::compile::types::PermissionsConfig {
+            read: Some(
+                crate::compile::types::ReadPermissionConfig::ServiceConnection(
+                    crate::secure::ServiceConnection::parse("read-sc").unwrap(),
+                ),
+            ),
+            write: None,
+        });
+        let params = engine_args_for(&fm).unwrap();
         assert!(
             params.contains("shell(az)"),
-            "always-on Azure CLI extension should still inject shell(az): {params}"
+            "permissions.read must add the wrapped az command even when the user's bash list is empty"
         );
     }
 
@@ -4653,11 +5285,12 @@ mod tests {
     #[test]
     fn test_generate_enabled_tools_args_with_configured_tools() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n  create-work-item:\n    work-item-type: Task\n---\n"
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n  create-work-item:\n    work-item-type: Task\n  assign-work-item:\n    target: \"*\"\n---\n"
         ).unwrap();
         let args = generate_enabled_tools_args(&fm);
         assert!(args.contains("--enabled-tools create-pull-request"));
         assert!(args.contains("--enabled-tools create-work-item"));
+        assert!(args.contains("--enabled-tools assign-work-item"));
         // Always-on tools should also be included
         assert!(args.contains("--enabled-tools noop"));
         assert!(args.contains("--enabled-tools missing-data"));
@@ -4794,6 +5427,21 @@ safe-outputs:
     }
 
     #[test]
+    fn test_generate_enabled_tools_args_supports_all_github_issue_tools() {
+        for tool in crate::compile::types::GITHUB_ISSUE_SAFE_OUTPUT_TOOLS {
+            let yaml = format!(
+                "---\nname: test\ndescription: test\nsafe-outputs:\n  {tool}:\n    target-repo: githubnext/ado-aw\n---\n"
+            );
+            let (fm, _) = parse_markdown(&yaml).unwrap();
+            let args = generate_enabled_tools_args(&fm);
+            assert!(
+                args.contains(&format!("--enabled-tools {tool}")),
+                "configured GitHub tool {tool} missing from enabled-tools args: {args}"
+            );
+        }
+    }
+
+    #[test]
     fn test_generate_enabled_tools_args_create_github_issue_plus_other_output() {
         let yaml = r#"---
 name: test
@@ -4810,7 +5458,10 @@ safe-outputs:
         assert!(args.contains("--enabled-tools create-pull-request"));
         assert!(args.contains("--enabled-tools create-github-issue"));
         // No duplicate
-        assert_eq!(args.matches("--enabled-tools create-github-issue").count(), 1);
+        assert_eq!(
+            args.matches("--enabled-tools create-github-issue").count(),
+            1
+        );
     }
 
     #[test]
@@ -4890,6 +5541,42 @@ safe-outputs:
     }
 
     #[test]
+    fn test_validate_github_issue_outputs_rejects_non_exact_allowed_repo() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  create-github-issue:
+    target-repo: githubnext/ado-aw
+    allowed-repos: ["githubnext/*"]
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let error = validate_github_issue_outputs_config(&fm)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("allowed") || error.contains("owner/repo"));
+    }
+
+    #[test]
+    fn test_validate_github_issue_outputs_rejects_bad_mutation_filter() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  set-github-issue-type:
+    target-repo: githubnext/ado-aw
+    required-title-prefix: "$(UNSAFE)"
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let error = validate_github_issue_outputs_config(&fm)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("mutation filters"));
+    }
+
+    #[test]
     fn test_validate_github_issue_outputs_rejects_pipeline_injection_in_label() {
         let yaml = r###"---
 name: test
@@ -4920,6 +5607,23 @@ safe-outputs:
         let (fm, _) = parse_markdown(yaml).unwrap();
         let result = validate_github_issue_outputs_config(&fm);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_github_issue_outputs_rejects_unknown_fields_for_all_tools() {
+        for tool in crate::compile::types::GITHUB_ISSUE_SAFE_OUTPUT_TOOLS {
+            let yaml = format!(
+                "---\nname: test\ndescription: test\nsafe-outputs:\n  {tool}:\n    target-repo: githubnext/ado-aw\n    unexpected-option: true\n---\n"
+            );
+            let (fm, _) = parse_markdown(&yaml).unwrap();
+            let error = validate_github_issue_outputs_config(&fm)
+                .expect_err("unknown GitHub tool config fields must fail compilation")
+                .to_string();
+            assert!(
+                error.contains(tool) && error.contains("unknown field"),
+                "unexpected strict-config error for {tool}: {error}"
+            );
+        }
     }
 
     #[test]
@@ -5159,6 +5863,111 @@ safe-outputs:
     }
 
     #[test]
+    fn test_validate_accepts_linked_work_item_assignment_tools() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  require-approval: true
+  create-work-item: {}
+  assign-work-item:
+    target: "*"
+    allowed: [owner@example.com]
+    blocked: ["svc-*"]
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        assert!(validate_work_item_assignment_outputs_config(&fm).is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_create_work_item_require_temporary_id() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  create-work-item:
+    require-temporary-id: true
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let error = validate_work_item_assignment_outputs_config(&fm)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("always generates and returns a temporary ID"));
+    }
+
+    #[test]
+    fn test_validate_rejects_mixed_approval_lanes_for_linked_work_item_tools() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  create-work-item:
+    require-approval: true
+  assign-work-item:
+    require-approval: false
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let error = validate_work_item_assignment_outputs_config(&fm)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("same effective require-approval"));
+    }
+
+    #[test]
+    fn test_validate_rejects_mixed_approval_lanes_for_create_and_comment_work_item() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  create-work-item:
+    require-approval: true
+  comment-on-work-item:
+    target: "*"
+    require-approval: false
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let error = validate_work_item_assignment_outputs_config(&fm)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("same effective require-approval"),
+            "error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_reserved_work_item_assignees() {
+        for yaml in [
+            r#"---
+name: test
+description: test
+safe-outputs:
+  create-work-item:
+    assignee: Agency
+---
+"#,
+            r#"---
+name: test
+description: test
+safe-outputs:
+  assign-work-item:
+    allowed: ["GitHub Copilot"]
+---
+"#,
+        ] {
+            let (fm, _) = parse_markdown(yaml).unwrap();
+            let error = validate_work_item_assignment_outputs_config(&fm)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("reserved identity"), "error: {error}");
+        }
+    }
+
+    #[test]
     fn test_validate_rejects_mixed_approval_lanes_for_linked_issue_tools() {
         let yaml = r#"---
 name: test
@@ -5177,6 +5986,34 @@ safe-outputs:
             .unwrap_err()
             .to_string();
         assert!(error.contains("same effective require-approval"));
+    }
+
+    #[test]
+    fn test_validate_rejects_mixed_approval_for_every_temporary_id_consumer() {
+        for consumer in crate::compile::types::GITHUB_TEMPORARY_ID_CONSUMERS {
+            let yaml = format!(
+                r#"---
+name: test
+description: test
+safe-outputs:
+  create-github-issue:
+    target-repo: githubnext/ado-aw
+    require-approval: true
+  {consumer}:
+    target-repo: githubnext/ado-aw
+    require-approval: false
+---
+"#
+            );
+            let (fm, _) = parse_markdown(&yaml).unwrap();
+            let error = validate_github_issue_outputs_config(&fm)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(consumer) && error.contains("same"),
+                "unexpected error for {consumer}: {error}"
+            );
+        }
     }
 
     #[test]
@@ -5574,6 +6411,115 @@ safe-outputs:
         let result = validate_front_matter_identity(&fm);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("ADO expression"));
+    }
+
+    #[test]
+    fn resolve_ado_organization_handles_every_collection_form() {
+        // Regression guard for the two derivations this replaced, each of
+        // which was silently wrong for a form the other handled: a literal
+        // `https://dev.azure.com/` prefix strip is a no-op for
+        // `https://myorg.visualstudio.com/`, while a bare last-path-segment
+        // rule returns `myorg.visualstudio.com` for that same URL. Measured
+        // against both shapes plus an on-prem collection.
+        let script = resolve_ado_organization_bash();
+        assert!(
+            !script.contains("#https://dev.azure.com/"),
+            "must not strip a fixed prefix: {script}"
+        );
+        assert!(
+            script.contains("if (NF>1) print $NF"),
+            "path form must yield the last segment: {script}"
+        );
+        assert!(
+            script.contains("sub(/\\..*$/, \"\", $1)"),
+            "host form must yield the first host label: {script}"
+        );
+        assert!(
+            script.contains("cannot determine the Azure DevOps organization"),
+            "an empty organization must fail loudly, not match nothing"
+        );
+    }
+
+    #[test]
+    fn resolve_ado_organization_has_no_yaml_layout_concerns() {
+        let script = resolve_ado_organization_bash();
+        assert!(script.starts_with("# $(System.CollectionUri)"));
+        assert!(
+            script
+                .lines()
+                .any(|line| line.starts_with("ADO_PROXY_COLLECTION="))
+        );
+    }
+
+    #[test]
+    fn test_validate_permissions_read_policy_accepts_scalar_and_object() {
+        let (scalar, _) = parse_markdown(
+            "---\nname: test\ndescription: test\npermissions:\n  read: my-read-sc\n---\n",
+        )
+        .unwrap();
+        validate_permissions_read_policy(&scalar).unwrap();
+
+        let (object, _) = parse_markdown(
+            "---\nname: test\ndescription: test\npermissions:\n  read:\n    service-connection: my-read-sc\n    capabilities: [repos]\n---\n",
+        )
+        .unwrap();
+        validate_permissions_read_policy(&object).unwrap();
+    }
+
+    #[test]
+    fn test_validate_permissions_read_policy_rejects_org_without_projects() {
+        let (object, _) = parse_markdown(
+            "---\nname: test\ndescription: test\npermissions:\n  read:\n    \
+             service-connection: my-read-sc\n    allow:\n      - organization: fabrikam\n---\n",
+        )
+        .unwrap();
+
+        let error = validate_permissions_read_policy(&object)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("lists no projects"),
+            "must explain the widening omission: {error}"
+        );
+    }
+
+    /// The proxy holds one non-renewable bearer, so a run must not be able to
+    /// outlive it. Enforced at compile time because the alternative is opaque
+    /// 502s partway through a run.
+    #[test]
+    fn proxied_timeout_is_bounded_by_the_token_lifetime() {
+        for proxied in [
+            "---\nname: t\ndescription: d\npermissions:\n  read: sc\n---\n",
+            "---\nname: t\ndescription: d\npermissions:\n  read:\n    service-connection: sc\n---\n",
+        ] {
+            let (fm, _) = parse_markdown(proxied).unwrap();
+
+            assert!(validate_proxied_timeout(&fm, MAX_PROXIED_TIMEOUT_MINUTES).is_ok());
+
+            let error = validate_proxied_timeout(&fm, MAX_PROXIED_TIMEOUT_MINUTES + 1)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("cannot renew"),
+                "the message must say why, not just that it is too long: {error}"
+            );
+            assert!(
+                error.contains(&MAX_PROXIED_TIMEOUT_MINUTES.to_string()),
+                "the message must name the limit: {error}"
+            );
+        }
+    }
+
+    /// Workflows that do not use the proxy hold no Azure DevOps credential in
+    /// the agent, so there is nothing to expire and no reason to bound them.
+    #[test]
+    fn unproxied_timeout_is_not_bounded() {
+        let source = "---\nname: t\ndescription: d\n---\n";
+        let (fm, _) = parse_markdown(source).unwrap();
+        assert!(
+            validate_proxied_timeout(&fm, MAX_PROXIED_TIMEOUT_MINUTES * 10).is_ok(),
+            "a workflow without the proxy must not be limited: {source}"
+        );
     }
 
     #[test]
@@ -6056,22 +7002,28 @@ safe-outputs:
     // ─── generate_awf_mounts ──────────────────────────────────────────────
 
     #[test]
-    fn test_generate_awf_mounts_always_on_az_cli_baseline() {
-        // Even with a minimal front matter, the always-on Azure CLI
-        // extension contributes a `$(AW_AZ_MOUNTS) \` injection line
-        // (no static mounts — those are runtime-detected by the
-        // AzureCli prepare step which sets the pipeline variable).
-        // The "no mounts" name is historical; this test now verifies
-        // the always-on baseline.
+    fn test_generate_awf_mounts_omits_az_without_read_permission() {
         let fm = minimal_front_matter();
         let exts = crate::compile::extensions::collect_extensions(&fm);
-        let _ctx = crate::compile::extensions::CompileContext::for_test(&fm);
+        let declarations = extension_declarations(&exts, &fm);
+        let result = generate_awf_mounts(&exts, &declarations);
+        assert!(
+            !result.contains("AW_AZ_MOUNTS"),
+            "without permissions.read, no Azure CLI runtime mount hook may be emitted: {result}"
+        );
+    }
+
+    #[test]
+    fn test_generate_awf_mounts_includes_runtime_az_hook_with_read_permission() {
+        let (fm, _) =
+            parse_markdown("---\nname: t\ndescription: d\npermissions:\n  read: read-sc\n---\n")
+                .unwrap();
+        let exts = crate::compile::extensions::collect_extensions(&fm);
         let declarations = extension_declarations(&exts, &fm);
         let result = generate_awf_mounts(&exts, &declarations);
         assert!(
             result.contains("$(AW_AZ_MOUNTS) \\"),
-            "always-on Azure CLI injection line $(AW_AZ_MOUNTS) \\ should be present \
-             (so the AzureCli prepare step's pipeline variable expands into runtime mounts): {result}"
+            "permissions.read must emit the conditional host-az mount hook: {result}"
         );
         assert!(
             !result.contains(r#"--mount "/opt/az:/opt/az:ro""#),
@@ -6116,9 +7068,12 @@ safe-outputs:
             result.contains("displayName"),
             "should be a complete pipeline step"
         );
+        // Paths flow through a `Binding::document` heredoc so multi-line
+        // content stays literal without per-entry escaping — the marker is
+        // the shell module's own document delimiter, not a caller-picked one.
         assert!(
-            result.contains("AWF_PATH_EOF"),
-            "should use heredoc markers"
+            result.contains("ADO_AW_SHELL_DOC_EOF"),
+            "should use the shell::Binding::document heredoc marker: {result}"
         );
     }
 
@@ -6277,11 +7232,10 @@ safe-outputs:
         );
         assert!(
             entrypoint_args.windows(2).any(|args| {
-                args
-                    == [
-                        "--self-repository-directory".to_string(),
-                        "$(Build.SourcesDirectory)".to_string(),
-                    ]
+                args == [
+                    "--self-repository-directory".to_string(),
+                    "$(Build.SourcesDirectory)".to_string(),
+                ]
             }),
             "SafeOutputs should receive the exact self checkout: {entrypoint_args:?}"
         );
@@ -6297,8 +7251,7 @@ safe-outputs:
 
         assert!(
             so.mounts.as_ref().unwrap().iter().any(|mount| {
-                mount
-                    == "$(Build.SourcesDirectory)/self:$(Build.SourcesDirectory)/self:rw"
+                mount == "$(Build.SourcesDirectory)/self:$(Build.SourcesDirectory)/self:rw"
             }),
             "self checkout must be mounted when it is outside the selected workspace"
         );
@@ -6561,16 +7514,17 @@ safe-outputs:
 
     #[test]
     fn test_generate_mcpg_docker_env_with_permissions_read() {
-        // When ADO tool is enabled with permissions.read, the extension's
-        // required_pipeline_vars should produce the -e flag
+        // `permissions.read` selects the service connection the *engine* uses.
+        // It must not cause the token to be projected into MCPG's own
+        // environment, from where it would reach the MCP container.
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\npermissions:\n  read: my-read-sc\n---\n",
         ).unwrap();
         let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
         let env = generate_mcpg_docker_env(&fm, &declarations);
         assert!(
-            env.contains("-e ADO_MCP_AUTH_TOKEN=\"$SC_READ_TOKEN\""),
-            "Should map ADO token via extension pipeline var"
+            !env.contains("-e ADO_MCP_AUTH_TOKEN=\"$SC_READ_TOKEN\""),
+            "the credential must not be mapped into MCPG: {env}"
         );
     }
 
@@ -6669,6 +7623,9 @@ safe-outputs:
 
     #[test]
     fn test_generate_mcpg_step_env_with_ado_extension() {
+        // The ADO tool no longer contributes any pipeline variable: it used to
+        // map SC_READ_TOKEN into the MCPG step so the MCP could authenticate
+        // directly. Nothing should replace it.
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\n---\n",
         )
@@ -6676,12 +7633,8 @@ safe-outputs:
         let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
         let env = generate_mcpg_step_env(&declarations);
         assert!(
-            env.starts_with("env:\n"),
-            "Should emit full env: block header"
-        );
-        assert!(
-            env.contains("SC_READ_TOKEN: $(SC_READ_TOKEN)"),
-            "Should map SC_READ_TOKEN for ADO extension"
+            !env.contains("SC_READ_TOKEN"),
+            "the ADO tool must not surface the read token to MCPG: {env}"
         );
     }
 
@@ -6743,18 +7696,21 @@ safe-outputs:
         assert_eq!(ado.container.as_deref(), Some(ADO_MCP_IMAGE));
         assert_eq!(ado.entrypoint.as_deref(), Some(ADO_MCP_ENTRYPOINT));
         let args = ado.entrypoint_args.as_ref().unwrap();
-        assert!(args.contains(&"-y".to_string()));
-        assert!(args.contains(&ADO_MCP_PACKAGE.to_string()));
+        assert!(args.contains(&ADO_MCP_ENTRY_SCRIPT.to_string()));
         assert!(args.contains(&"inferred-org".to_string()));
-        // Should have ADO_MCP_AUTH_TOKEN in env (for bearer token via envvar auth)
+        // The token is a sentinel: the engine injects the real bearer only
+        // after a complete allow decision.
         let env = ado.env.as_ref().unwrap();
-        assert!(env.contains_key("ADO_MCP_AUTH_TOKEN"));
+        assert_eq!(
+            env.get("ADO_MCP_AUTH_TOKEN").map(String::as_str),
+            Some(ADO_MCP_TOKEN_SENTINEL)
+        );
     }
 
     #[test]
     fn test_ado_tool_with_toolsets() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    toolsets: [repos, wit, core]\n---\n",
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    toolsets: [repositories, work-items, core]\n---\n",
         )
         .unwrap();
         let extensions = collect_extensions(&fm);
@@ -6764,8 +7720,8 @@ safe-outputs:
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         let args = ado.entrypoint_args.as_ref().unwrap();
         assert!(args.contains(&"-d".to_string()));
-        assert!(args.contains(&"repos".to_string()));
-        assert!(args.contains(&"wit".to_string()));
+        assert!(args.contains(&"repositories".to_string()));
+        assert!(args.contains(&"work-items".to_string()));
         assert!(args.contains(&"core".to_string()));
     }
 
@@ -6840,7 +7796,7 @@ safe-outputs:
     #[test]
     fn test_ado_tool_invalid_toolset_fails() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: myorg\n    toolsets: [\"repos\", \"bad toolset\"]\n---\n",
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: myorg\n    toolsets: [\"repositories\", \"bad toolset\"]\n---\n",
         )
         .unwrap();
         let extensions = collect_extensions(&fm);
@@ -6903,6 +7859,11 @@ safe-outputs:
 
     #[test]
     fn test_ado_tool_docker_env_passthrough() {
+        // Regression guard for the hole this proxy closes: the MCP used to be
+        // handed the real Azure DevOps bearer via
+        // `-e ADO_MCP_AUTH_TOKEN="$SC_READ_TOKEN"`. Under interception the
+        // policy engine holds the only copy, so nothing may project a
+        // credential into the MCP container.
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\npermissions:\n  read: my-read-sc\n---\n",
         )
@@ -6910,8 +7871,8 @@ safe-outputs:
         let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
         let env = generate_mcpg_docker_env(&fm, &declarations);
         assert!(
-            env.contains("ADO_MCP_AUTH_TOKEN"),
-            "Should include ADO token passthrough when permissions.read is set"
+            !env.contains("SC_READ_TOKEN"),
+            "the real bearer must never reach the MCP container: {env}"
         );
     }
 
@@ -7359,10 +8320,7 @@ safe-outputs:
             ReposItem::Shorthand("other-org/tools".to_string()),
         ];
         let err = lower_repos(&items).unwrap_err();
-        assert!(
-            err.to_string().contains("case-insensitively"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("case-insensitively"), "{err}");
     }
 
     #[test]

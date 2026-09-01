@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use serde::Serialize;
 
-use crate::audit::model::{AuditData, JobData};
+use crate::audit::model::{AdoProxyEventSummary, AdoProxyReasonStat, AuditData, JobData};
 use crate::compile::ir::summary::StepLocationEntry;
 use crate::inspect::graph_deps::{self, GraphDepsDirection, StepDependency};
 
@@ -14,7 +14,25 @@ pub struct TraceReport {
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub failing_jobs: Vec<TraceJobReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub ado_proxy: Option<TraceAdoProxySummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub step: Option<TraceStepReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TraceAdoProxySummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub healthy_before_teardown: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_before_teardown: Option<String>,
+    pub total_requests: u64,
+    pub allow_count: u64,
+    pub deny_count: u64,
+    pub error_count: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub top_reasons: Vec<AdoProxyReasonStat>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub recent_problem_events: Vec<AdoProxyEventSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -72,10 +90,30 @@ pub fn build_trace_report(audit: &AuditData, step: Option<&str>) -> TraceReport 
         .collect();
 
     let step_report = step.and_then(|step_id| build_step_report(audit, step_id));
+    let ado_proxy = audit.ado_proxy_analysis.as_ref().map(|analysis| {
+        let recent_start = analysis.recent_problem_events.len().saturating_sub(5);
+        TraceAdoProxySummary {
+            healthy_before_teardown: analysis
+                .lifecycle
+                .as_ref()
+                .map(|lifecycle| lifecycle.healthy_before_teardown),
+            state_before_teardown: analysis
+                .lifecycle
+                .as_ref()
+                .and_then(|lifecycle| lifecycle.state_before_teardown.clone()),
+            total_requests: analysis.total_requests,
+            allow_count: analysis.allow_count,
+            deny_count: analysis.deny_count,
+            error_count: analysis.error_count,
+            top_reasons: analysis.reasons.iter().take(5).cloned().collect(),
+            recent_problem_events: analysis.recent_problem_events[recent_start..].to_vec(),
+        }
+    });
 
     TraceReport {
         build_id: audit.overview.build_id,
         failing_jobs,
+        ado_proxy,
         step: step_report,
     }
 }
@@ -99,6 +137,53 @@ pub fn render_text(
     } else {
         for job in &report.failing_jobs {
             render_job_report(job, &mut out);
+        }
+    }
+
+    if let Some(proxy) = &report.ado_proxy {
+        out.push('\n');
+        out.push_str("ADO proxy diagnostics\n");
+        if let Some(healthy) = proxy.healthy_before_teardown {
+            out.push_str(&format!(
+                "  lifecycle: {}",
+                if healthy { "healthy" } else { "unhealthy" }
+            ));
+            if let Some(state) = proxy.state_before_teardown.as_deref() {
+                out.push_str(&format!(" (state before teardown: {state})"));
+            }
+            out.push('\n');
+        }
+        out.push_str(&format!(
+            "  requests: {} total, {} allowed, {} denied, {} errors\n",
+            proxy.total_requests, proxy.allow_count, proxy.deny_count, proxy.error_count
+        ));
+        if !proxy.top_reasons.is_empty() {
+            out.push_str(&format!(
+                "  top reasons: {}\n",
+                proxy
+                    .top_reasons
+                    .iter()
+                    .map(|reason| {
+                        format!("{}/{} ({})", reason.decision, reason.reason, reason.count)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        for event in &proxy.recent_problem_events {
+            out.push_str(&format!(
+                "  - {} {} {} {} [{}]{}\n",
+                event.timestamp.as_deref().unwrap_or("(unknown time)"),
+                event.method.as_deref().unwrap_or("(unknown method)"),
+                event.host.as_deref().unwrap_or("(unknown host)"),
+                event.operation.as_deref().unwrap_or("(unmatched)"),
+                event.reason.as_deref().unwrap_or(&event.decision),
+                event
+                    .detail
+                    .as_deref()
+                    .map(|detail| format!(": {detail}"))
+                    .unwrap_or_default()
+            ));
         }
     }
 
@@ -344,7 +429,10 @@ fn job_status(job: &JobData) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audit::model::{AuditData, OverviewData};
+    use crate::audit::model::{
+        AdoProxyAnalysis, AdoProxyEventSummary, AdoProxyLifecycle, AdoProxyReasonStat, AuditData,
+        OverviewData,
+    };
 
     #[test]
     fn build_trace_report_shapes_failed_job_chain_without_network() {
@@ -393,5 +481,74 @@ mod tests {
             report.failing_jobs[0].downstream[1].classification,
             "expected to skip"
         );
+    }
+
+    #[test]
+    fn trace_projects_bounded_run_level_proxy_diagnostics() {
+        let reasons = (0..7)
+            .map(|index| AdoProxyReasonStat {
+                reason: format!("reason-{index}"),
+                decision: String::from("deny"),
+                count: 7 - index,
+            })
+            .collect();
+        let events = (0..7)
+            .map(|index| AdoProxyEventSummary {
+                request_id: Some(index.to_string()),
+                method: Some(String::from("GET")),
+                operation: Some(String::from("core.project.get")),
+                decision: String::from("deny"),
+                reason: Some(String::from("out-of-scope")),
+                ..Default::default()
+            })
+            .collect();
+        let audit = AuditData {
+            overview: OverviewData {
+                build_id: 42,
+                ..Default::default()
+            },
+            ado_proxy_analysis: Some(AdoProxyAnalysis {
+                lifecycle: Some(AdoProxyLifecycle {
+                    state_before_teardown: Some(String::from("running")),
+                    healthy_before_teardown: true,
+                    ..Default::default()
+                }),
+                total_requests: 10,
+                allow_count: 3,
+                deny_count: 7,
+                reasons,
+                recent_problem_events: events,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let report = build_trace_report(&audit, None);
+        let proxy = report.ado_proxy.as_ref().expect("proxy trace summary");
+        assert_eq!(proxy.top_reasons.len(), 5);
+        assert_eq!(proxy.recent_problem_events.len(), 5);
+        assert_eq!(
+            proxy.recent_problem_events[0].request_id.as_deref(),
+            Some("2")
+        );
+
+        let rendered = render_text(&audit, &report, None);
+        assert!(rendered.contains("ADO proxy diagnostics"));
+        assert!(rendered.contains("10 total, 3 allowed, 7 denied, 0 errors"));
+    }
+
+    #[test]
+    fn trace_omits_proxy_section_when_analysis_is_absent() {
+        let audit = AuditData {
+            overview: OverviewData {
+                build_id: 42,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let report = build_trace_report(&audit, None);
+
+        assert!(report.ado_proxy.is_none());
+        assert!(!render_text(&audit, &report, None).contains("ADO proxy diagnostics"));
     }
 }

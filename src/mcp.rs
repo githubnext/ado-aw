@@ -11,22 +11,32 @@ use std::sync::Arc;
 
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
 use crate::safe_outputs::{
-    AddBuildTagParams, AddBuildTagResult, AddPrCommentParams, AddPrCommentResult,
-    CommentOnWorkItemParams, CommentOnWorkItemResult, CreateBranchParams, CreateBranchResult,
-    CreateGitTagParams, CreateGitTagResult, CreateGithubIssueParams, CreateGithubIssueResult, CreatePrParams,
+    AddBuildTagParams, AddBuildTagResult, AddGithubIssueLabelsParams, AddGithubIssueLabelsResult,
+    AddPrCommentParams, AddPrCommentResult, AssignGithubIssueMilestoneParams,
+    AssignGithubIssueMilestoneResult, AssignGithubIssueToUserParams, AssignGithubIssueToUserResult,
+    AssignWorkItemParams, AssignWorkItemResult, CloseGithubIssueParams, CloseGithubIssueResult,
+    CommentOnGithubIssueParams, CommentOnGithubIssueResult, CommentOnWorkItemParams,
+    CommentOnWorkItemResult, CreateBranchParams, CreateBranchResult, CreateGitTagParams,
+    CreateGitTagResult, CreateGithubIssueParams, CreateGithubIssueResult, CreatePrParams,
     CreatePrResult, CreateWikiPageParams, CreateWikiPageResult, CreateWorkItemParams,
-    CreateWorkItemResult, DEFAULT_MAX_FILE_SIZE, LinkWorkItemsParams, LinkWorkItemsResult,
-    MissingDataParams, MissingDataResult, MissingToolParams, MissingToolResult, NoopParams,
-    NoopResult, PIPELINE_ARTIFACT_DEFAULT_MAX_FILE_SIZE, QueueBuildParams, QueueBuildResult,
-    ReplyToPrCommentParams, ReplyToPrCommentResult, ReportIncompleteParams, ReportIncompleteResult,
-    ResolvePrThreadParams, ResolvePrThreadResult, SetGithubIssueTypeParams, SetGithubIssueTypeResult,
-    SubmitPrReviewParams, SubmitPrReviewResult, ToolResult, UpdatePrParams, UpdatePrResult,
-    UpdateWikiPageParams, UpdateWikiPageResult, UpdateWorkItemParams, UpdateWorkItemResult,
-    UploadBuildAttachmentParams,
+    CreateWorkItemResult, DEFAULT_MAX_FILE_SIZE, HideGithubIssueCommentParams,
+    HideGithubIssueCommentResult, LinkGithubSubIssueParams, LinkGithubSubIssueResult,
+    LinkWorkItemsParams, LinkWorkItemsResult, MissingDataParams, MissingDataResult,
+    MissingToolParams, MissingToolResult, NoopParams, NoopResult,
+    PIPELINE_ARTIFACT_DEFAULT_MAX_FILE_SIZE, QueueBuildParams, QueueBuildResult,
+    RemoveGithubIssueLabelsParams, RemoveGithubIssueLabelsResult, ReplyToPrCommentParams,
+    ReplyToPrCommentResult, ReportIncompleteParams, ReportIncompleteResult,
+    ResolvePrThreadParams, ResolvePrThreadResult, SetGithubIssueFieldParams,
+    SetGithubIssueFieldResult, SetGithubIssueTypeParams, SetGithubIssueTypeResult,
+    SubmitPrReviewParams, SubmitPrReviewResult, ToolResult, UnassignGithubIssueFromUserParams,
+    UnassignGithubIssueFromUserResult, UpdateGithubIssueParams, UpdateGithubIssueResult,
+    UpdatePrParams, UpdatePrResult, UpdateWikiPageParams, UpdateWikiPageResult,
+    UpdateWorkItemParams, UpdateWorkItemResult, UploadBuildAttachmentParams,
     UploadBuildAttachmentResult, UploadPipelineArtifactParams, UploadPipelineArtifactResult,
-    UploadWorkitemAttachmentParams, UploadWorkitemAttachmentResult, anyhow_to_mcp_error,
+    UploadWorkitemAttachmentParams, UploadWorkitemAttachmentResult, Validate, anyhow_to_mcp_error,
 };
-use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
+use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_markdown};
+use crate::secure::WorkItemTemporaryId;
 
 /// Sanitize a title into a safe branch name slug.
 /// Only allows alphanumeric characters and dashes, collapses multiple dashes,
@@ -208,6 +218,8 @@ pub struct SafeOutputs {
     tool_router: ToolRouter<Self>,
     /// Serializes custom-tool budget inspection and proposal append.
     custom_proposal_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes create-work-item temporary-ID allocation and proposal append.
+    create_work_item_proposal_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Resolve which git directory to use for patch generation.
@@ -473,6 +485,17 @@ impl SafeOutputs {
         ndjson::append_to_ndjson_file(&self.safe_output_path(), value).await
     }
 
+    async fn queue_sanitized_output<T>(&self, mut value: T) -> Result<CallToolResult, McpError>
+    where
+        T: ToolResult + SanitizeContent,
+    {
+        value.sanitize_content_fields();
+        self.write_safe_output_file(&value)
+            .await
+            .map_err(anyhow_to_mcp_error)?;
+        Ok(CallToolResult::success(vec![]))
+    }
+
     /// Append a value, but only if we haven't reached the maximum entries for this tool
     async fn write_safe_output_file_with_maximum<T: ToolResult>(
         &self,
@@ -493,6 +516,45 @@ impl SafeOutputs {
 
         self.write_safe_output_file(value).await?;
         Ok(true)
+    }
+
+    async fn write_create_work_item_proposal(
+        &self,
+        params: CreateWorkItemParams,
+    ) -> Result<WorkItemTemporaryId, McpError> {
+        const MAX_ID_ATTEMPTS: usize = 16;
+
+        params.validate().map_err(anyhow_to_mcp_error)?;
+        let _guard = self.create_work_item_proposal_lock.lock().await;
+        let existing = self
+            .read_safe_output_file()
+            .await
+            .map_err(anyhow_to_mcp_error)?;
+
+        let temporary_id = (0..MAX_ID_ATTEMPTS)
+            .find_map(|_| {
+                let candidate =
+                    WorkItemTemporaryId::parse(format!("#aw_{}", generate_short_id())).ok()?;
+                let canonical = candidate.canonical();
+                let collision = existing.iter().any(|proposal| {
+                    proposal.get("name").and_then(Value::as_str)
+                        == Some(CreateWorkItemResult::NAME)
+                        && proposal.get("temporary_id").and_then(Value::as_str)
+                            == Some(canonical.as_str())
+                });
+                (!collision).then_some(candidate)
+            })
+            .ok_or_else(|| {
+                anyhow_to_mcp_error(anyhow::anyhow!(
+                    "Failed to allocate a unique create-work-item temporary ID"
+                ))
+            })?;
+
+        let result: CreateWorkItemResult = (params, temporary_id.clone()).try_into()?;
+        self.write_safe_output_file(&result)
+            .await
+            .map_err(anyhow_to_mcp_error)?;
+        Ok(temporary_id)
     }
 
     #[cfg(test)]
@@ -521,8 +583,7 @@ impl SafeOutputs {
     ) -> Result<Self> {
         let bounding_dir = bounding_directory.into();
         let output_dir = output_directory.into();
-        let self_repository_dir =
-            self_repository_directory.unwrap_or_else(|| bounding_dir.clone());
+        let self_repository_dir = self_repository_directory.unwrap_or_else(|| bounding_dir.clone());
         info!(
             "Initializing SafeOutputs MCP server: bounding={}, self={}, output={}",
             bounding_dir.display(),
@@ -574,6 +635,7 @@ impl SafeOutputs {
             output_directory: output_dir,
             tool_router,
             custom_proposal_lock: Arc::new(tokio::sync::Mutex::new(())),
+            create_work_item_proposal_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -739,7 +801,9 @@ impl SafeOutputs {
 
     #[tool(
         name = "create-work-item",
-        description = "Create an azure devops work item"
+        description = "Create an Azure DevOps work item. Returns a generated temporary_id that \
+can be passed as work_item_id to later safe outputs such as assign-work-item, \
+comment-on-work-item, update-work-item, link-work-items and upload-workitem-attachment."
     )]
     async fn create_work_item(
         &self,
@@ -750,10 +814,34 @@ impl SafeOutputs {
         // Sanitize untrusted agent-provided text fields (IS-01)
         let mut sanitized = params.0;
         sanitized.title = sanitize_text(&sanitized.title);
-        sanitized.description = sanitize_text(&sanitized.description);
-        let result: CreateWorkItemResult = sanitized.try_into()?;
+        sanitized.description = sanitize_markdown(&sanitized.description);
+        let temporary_id = self.write_create_work_item_proposal(sanitized).await?;
+        let canonical = temporary_id.canonical();
+        info!("Work item queued for creation as {}", canonical);
+        let mut response = CallToolResult::success(vec![Content::text(format!(
+            "Work item queued for creation. Use temporary ID {canonical} as work_item_id in later safe-output calls."
+        ))]);
+        response.structured_content = Some(serde_json::json!({
+            "temporary_id": canonical,
+        }));
+        Ok(response)
+    }
+
+    #[tool(
+        name = "assign-work-item",
+        description = "Assign an Azure DevOps work item. work_item_id may be a positive numeric ID \
+or a temporary_id from an earlier create-work-item call in the same run."
+    )]
+    async fn assign_work_item(
+        &self,
+        params: Parameters<AssignWorkItemParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!("Tool called: assign-work-item");
+        let mut sanitized = params.0;
+        sanitized.assignee = crate::sanitize::sanitize_config(sanitized.assignee.trim());
+        let result: AssignWorkItemResult = sanitized.try_into()?;
         let _ = self.write_safe_output_file(&result).await;
-        info!("Work item queued for creation");
+        info!("Work-item assignment queued");
         Ok(CallToolResult::success(vec![]))
     }
 
@@ -774,7 +862,9 @@ allowlist. Set temporary_id when a later safe output must refer to the newly-cre
         sanitized.title = sanitize_text(&sanitized.title);
         sanitized.body = sanitize_text(&sanitized.body);
         let result: CreateGithubIssueResult = sanitized.try_into()?;
-        let _ = self.write_safe_output_file(&result).await;
+        self.write_safe_output_file(&result)
+            .await
+            .map_err(anyhow_to_mcp_error)?;
         info!("Issue queued for creation");
         Ok(CallToolResult::success(vec![]))
     }
@@ -790,24 +880,156 @@ issue_type to clear the current type."
         params: Parameters<SetGithubIssueTypeParams>,
     ) -> Result<CallToolResult, McpError> {
         let result: SetGithubIssueTypeResult = params.0.try_into()?;
-        let _ = self.write_safe_output_file(&result).await;
         info!("Issue type update queued");
-        Ok(CallToolResult::success(vec![]))
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "comment-on-github-issue",
+        description = "Add a Markdown comment to a configured GitHub issue or pull request. \
+issue_number may be a positive number or a temporary_id from create-github-issue."
+    )]
+    async fn comment_on_github_issue(
+        &self,
+        params: Parameters<CommentOnGithubIssueParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: CommentOnGithubIssueResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "hide-github-issue-comment",
+        description = "Minimize a configured GitHub issue, pull-request, or discussion comment."
+    )]
+    async fn hide_github_issue_comment(
+        &self,
+        params: Parameters<HideGithubIssueCommentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: HideGithubIssueCommentResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "add-github-issue-labels",
+        description = "Add operator-permitted labels to a configured GitHub issue or pull request."
+    )]
+    async fn add_github_issue_labels(
+        &self,
+        params: Parameters<AddGithubIssueLabelsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: AddGithubIssueLabelsResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "remove-github-issue-labels",
+        description = "Remove operator-permitted labels from a configured GitHub issue."
+    )]
+    async fn remove_github_issue_labels(
+        &self,
+        params: Parameters<RemoveGithubIssueLabelsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: RemoveGithubIssueLabelsResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "close-github-issue",
+        description = "Close a configured GitHub issue, optionally with a comment or duplicate reference."
+    )]
+    async fn close_github_issue(
+        &self,
+        params: Parameters<CloseGithubIssueParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: CloseGithubIssueResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "update-github-issue",
+        description = "Update operator-enabled fields on a configured GitHub issue or pull request."
+    )]
+    async fn update_github_issue(
+        &self,
+        params: Parameters<UpdateGithubIssueParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: UpdateGithubIssueResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "set-github-issue-field",
+        description = "Set an operator-permitted repository-defined field on a configured GitHub issue."
+    )]
+    async fn set_github_issue_field(
+        &self,
+        params: Parameters<SetGithubIssueFieldParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: SetGithubIssueFieldResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "assign-github-issue-milestone",
+        description = "Assign an operator-permitted milestone to a configured GitHub issue."
+    )]
+    async fn assign_github_issue_milestone(
+        &self,
+        params: Parameters<AssignGithubIssueMilestoneParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: AssignGithubIssueMilestoneResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "assign-github-issue-to-user",
+        description = "Assign operator-permitted GitHub users to a configured issue."
+    )]
+    async fn assign_github_issue_to_user(
+        &self,
+        params: Parameters<AssignGithubIssueToUserParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: AssignGithubIssueToUserResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "unassign-github-issue-from-user",
+        description = "Remove operator-permitted GitHub users from a configured issue."
+    )]
+    async fn unassign_github_issue_from_user(
+        &self,
+        params: Parameters<UnassignGithubIssueFromUserParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: UnassignGithubIssueFromUserResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "link-github-sub-issue",
+        description = "Link two configured GitHub issues as parent and sub-issue."
+    )]
+    async fn link_github_sub_issue(
+        &self,
+        params: Parameters<LinkGithubSubIssueParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: LinkGithubSubIssueResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
     }
 
     #[tool(
         name = "comment-on-work-item",
-        description = "Add a comment to an existing Azure DevOps work item. \
-Provide the work item ID and the comment body in markdown. The comment will be \
-posted during safe output processing. Target restrictions may apply based on \
-pipeline configuration."
+        description = "Add a comment to an Azure DevOps work item. work_item_id may be a \
+positive numeric ID or a temporary_id from an earlier create-work-item call in the same run. \
+Provide the comment body in markdown. The comment will be posted during safe output \
+processing. Target restrictions may apply based on pipeline configuration."
     )]
     async fn comment_on_work_item(
         &self,
         params: Parameters<CommentOnWorkItemParams>,
     ) -> Result<CallToolResult, McpError> {
         info!(
-            "Tool called: comment-on-work-item - work item #{}",
+            "Tool called: comment-on-work-item - work item {}",
             params.0.work_item_id
         );
         debug!("Body length: {} chars", params.0.body.len());
@@ -818,9 +1040,9 @@ pipeline configuration."
         self.write_safe_output_file(&result).await.map_err(|e| {
             anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
         })?;
-        info!("Comment queued for work item #{}", result.work_item_id);
+        info!("Comment queued for work item {}", result.work_item_id);
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Comment queued for work item #{}. The comment will be posted during safe output processing.",
+            "Comment queued for work item {}. The comment will be posted during safe output processing.",
             result.work_item_id
         ))]))
     }
@@ -830,8 +1052,9 @@ pipeline configuration."
         description = "Update an existing Azure DevOps work item. Only fields explicitly enabled \
 in the pipeline configuration (safe-outputs.update-work-item) may be changed. Updates may be \
 further restricted by target (only a specific work item ID) or title-prefix (only work items \
-whose current title starts with a configured prefix). Provide the work item ID and only the \
-fields you want to update."
+whose current title starts with a configured prefix). id may be a positive numeric ID or a \
+temporary_id from an earlier create-work-item call in the same run. Provide the work item ID \
+and only the fields you want to update."
     )]
     async fn update_work_item(
         &self,
@@ -1035,7 +1258,8 @@ The comment will be posted during safe output processing."
         name = "link-work-items",
         description = "Create a relationship link between two Azure DevOps work items. \
 Supported link types: parent, child, related, predecessor, successor, duplicate, duplicate-of. \
-The link will be created during safe output processing."
+source_id and target_id may each be a positive numeric ID or a temporary_id from an earlier \
+create-work-item call in the same run. The link will be created during safe output processing."
     )]
     async fn link_work_items(
         &self,
@@ -1176,8 +1400,10 @@ Changes will be applied during safe output processing."
 
     #[tool(
         name = "upload-workitem-attachment",
-        description = "Upload a file attachment to an Azure DevOps work item. The file will be \
-uploaded and linked during safe output processing. File size and type restrictions may apply."
+        description = "Upload a file attachment to an Azure DevOps work item. work_item_id may be \
+a positive numeric ID or a temporary_id from an earlier create-work-item call in the same run. \
+The file will be uploaded and linked during safe output processing. File size and type \
+restrictions may apply."
     )]
     async fn upload_workitem_attachment(
         &self,
@@ -1611,6 +1837,16 @@ mod tests {
         (safe_outputs, temp_dir)
     }
 
+    fn valid_create_work_item_params(suffix: &str) -> CreateWorkItemParams {
+        CreateWorkItemParams {
+            title: format!("Create work item {suffix}"),
+            description: format!(
+                "A detailed work-item description for proposal {suffix} that is long enough."
+            ),
+            tags: Vec::new(),
+        }
+    }
+
     #[test]
     fn test_resolve_git_dir_for_patch_uses_explicit_self_checkout() {
         let root = tempdir().unwrap();
@@ -1785,6 +2021,93 @@ mod tests {
         assert_eq!(contents.len(), 2);
         assert_eq!(contents[0]["context"], "first");
         assert_eq!(contents[1]["context"], "second");
+    }
+
+    #[tokio::test]
+    async fn create_work_item_returns_and_persists_generated_temporary_id() {
+        let (safe_outputs, _temp_dir) = create_test_safe_outputs().await;
+
+        let response = safe_outputs
+            .create_work_item(Parameters(valid_create_work_item_params("one")))
+            .await
+            .unwrap();
+        let structured = response.structured_content.expect("structured response");
+        let temporary_id = structured["temporary_id"].as_str().unwrap();
+        assert!(WorkItemTemporaryId::parse(temporary_id).is_ok());
+        assert!(
+            serde_json::to_string(&response.content)
+                .unwrap()
+                .contains(temporary_id)
+        );
+
+        let proposals = safe_outputs.read_safe_output_file().await.unwrap();
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0]["name"], "create-work-item");
+        assert_eq!(proposals[0]["temporary_id"], temporary_id);
+    }
+
+    #[tokio::test]
+    async fn create_work_item_preserves_html_description_in_proposal() {
+        let (safe_outputs, _temp_dir) = create_test_safe_outputs().await;
+        let params = CreateWorkItemParams {
+            title: "Create work item with body".to_string(),
+            description: "<h2>Hi</h2><p>x &lt;string&gt; y</p>".to_string(),
+            tags: Vec::new(),
+        };
+
+        safe_outputs
+            .create_work_item(Parameters(params))
+            .await
+            .unwrap();
+
+        let proposals = safe_outputs.read_safe_output_file().await.unwrap();
+        assert_eq!(
+            proposals[0]["description"],
+            "<h2>Hi</h2><p>x &lt;string&gt; y</p>"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_create_work_item_calls_generate_distinct_ids() {
+        let (safe_outputs, _temp_dir) = create_test_safe_outputs().await;
+        let first = safe_outputs.clone();
+        let second = safe_outputs.clone();
+
+        let (first_response, second_response) = tokio::join!(
+            first.create_work_item(Parameters(valid_create_work_item_params("one"))),
+            second.create_work_item(Parameters(valid_create_work_item_params("two"))),
+        );
+        let first_id = first_response.unwrap().structured_content.unwrap()["temporary_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let second_id = second_response.unwrap().structured_content.unwrap()["temporary_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(first_id, second_id);
+
+        let proposals = safe_outputs.read_safe_output_file().await.unwrap();
+        assert_eq!(proposals.len(), 2);
+        let persisted: std::collections::HashSet<_> = proposals
+            .iter()
+            .filter_map(|proposal| proposal["temporary_id"].as_str())
+            .collect();
+        assert!(persisted.contains(first_id.as_str()));
+        assert!(persisted.contains(second_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn create_work_item_does_not_return_id_when_proposal_cannot_persist() {
+        let (safe_outputs, _temp_dir) = create_test_safe_outputs().await;
+        let path = safe_outputs.safe_output_path();
+        tokio::fs::remove_file(&path).await.unwrap();
+        tokio::fs::create_dir(&path).await.unwrap();
+
+        let result = safe_outputs
+            .create_work_item(Parameters(valid_create_work_item_params("failure")))
+            .await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -2146,10 +2469,8 @@ safe-outputs:
         );
     }
 
-    /// Asserts that ALL_KNOWN_SAFE_OUTPUTS contains every NON-DEBUG-ONLY tool
-    /// registered in the router. Debug-only tools (e.g. `create-github-issue`) are
-    /// intentionally absent from the list because they're not regular
-    /// safe-outputs.
+    /// Asserts that ALL_KNOWN_SAFE_OUTPUTS contains every non-debug tool
+    /// registered in the router.
     #[tokio::test]
     async fn test_all_known_safe_outputs_covers_router() {
         use crate::safe_outputs::ALL_KNOWN_SAFE_OUTPUTS;
@@ -2198,17 +2519,98 @@ safe-outputs:
             .iter()
             .map(|t| t.name.to_string())
             .collect();
-        for debug_tool in DEBUG_ONLY_TOOLS {
+        for configured_tool in CONFIGURED_ONLY_TOOLS {
             assert!(
-                !tool_names.contains(&debug_tool.to_string()),
-                "Debug-only tool '{}' must NOT be exposed when enabled_tools is None",
-                debug_tool
+                !tool_names.contains(&configured_tool.to_string()),
+                "Configured-only tool '{}' must NOT be exposed when enabled_tools is None",
+                configured_tool
             );
         }
         // Spot check a regular tool is present in the permissive default.
         assert!(tool_names.contains(&"create-work-item".to_string()));
+        assert!(!tool_names.contains(&"assign-work-item".to_string()));
         assert!(!tool_names.contains(&"create-github-issue".to_string()));
         assert!(!tool_names.contains(&"set-github-issue-type".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_all_configured_only_tools_are_routes() {
+        assert_eq!(CONFIGURED_ONLY_TOOLS.len(), 14);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let enabled: Vec<String> = CONFIGURED_ONLY_TOOLS
+            .iter()
+            .map(|tool| (*tool).to_string())
+            .collect();
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled), None)
+            .await
+            .unwrap();
+        let tools = so.tool_router.list_all();
+        for configured_tool in CONFIGURED_ONLY_TOOLS {
+            let route = tools
+                .iter()
+                .find(|tool| tool.name.as_ref() == *configured_tool)
+                .unwrap_or_else(|| panic!("missing configured-only route {configured_tool}"));
+            assert!(
+                route.input_schema.get("properties").is_some(),
+                "{configured_tool} must expose an MCP input schema"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_assign_work_item_schema_when_explicitly_enabled() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let enabled = vec!["assign-work-item".to_string()];
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled), None)
+            .await
+            .unwrap();
+        let tools = so.tool_router.list_all();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == "assign-work-item")
+            .expect("assign-work-item should be explicitly enabled");
+        let schema = serde_json::to_value(&tool.input_schema).unwrap();
+        let properties = schema["properties"].as_object().unwrap();
+        assert!(properties.contains_key("work_item_id"));
+        assert!(properties.contains_key("assignee"));
+    }
+
+    #[tokio::test]
+    async fn test_create_work_item_schema_does_not_accept_temporary_id() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let enabled = vec!["create-work-item".to_string()];
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled), None)
+            .await
+            .unwrap();
+        let tools = so.tool_router.list_all();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == "create-work-item")
+            .expect("create-work-item should be enabled");
+        let schema = serde_json::to_value(&tool.input_schema).unwrap();
+        let properties = schema["properties"].as_object().unwrap();
+        assert!(!properties.contains_key("temporary_id"));
+    }
+
+    #[tokio::test]
+    async fn test_github_queue_propagates_ndjson_write_failures() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let output_path = temp_dir.path().join("output");
+        tokio::fs::create_dir(&output_path).await.unwrap();
+        let enabled = vec!["comment-on-github-issue".to_string()];
+        let so = SafeOutputs::new(temp_dir.path(), &output_path, Some(&enabled), None)
+            .await
+            .unwrap();
+        tokio::fs::remove_dir_all(&output_path).await.unwrap();
+        tokio::fs::write(&output_path, b"occupied").await.unwrap();
+        let result: CommentOnGithubIssueResult = CommentOnGithubIssueParams {
+            issue_number: crate::safe_outputs::GithubIssueNumber::Number(1),
+            body: "A sufficiently long GitHub issue comment.".to_string(),
+            repository: None,
+        }
+        .try_into()
+        .unwrap();
+        assert!(so.queue_sanitized_output(result).await.is_err());
     }
 
     #[tokio::test]

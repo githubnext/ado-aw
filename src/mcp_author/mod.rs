@@ -101,7 +101,8 @@ struct WhatIfParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct CatalogParams {
-    /// Optional category: safe-outputs, runtimes, tools, engines, models, or versions.
+    /// Optional category: safe-outputs, runtimes, tools, engines, models,
+    /// versions, or ado-proxy.
     kind: Option<String>,
 }
 
@@ -301,7 +302,7 @@ impl AuthorMcp {
 
     #[tool(
         name = "catalog",
-        description = "List supported safe-outputs, runtimes, tools, engines, models, and pinned versions."
+        description = "List supported safe-outputs, runtimes, tools, engines, models, pinned versions, and the Azure DevOps proxy policy catalog."
     )]
     async fn catalog(&self, params: Parameters<CatalogParams>) -> Result<CallToolResult, McpError> {
         let catalog = inspect::build_catalog(params.0.kind.as_deref()).map_err(to_mcp_error)?;

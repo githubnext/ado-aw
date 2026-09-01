@@ -15,6 +15,7 @@ approval-summary.js
 conclusion.js
 github-app-token.js
 prepare-pr-base.js
+ado-proxy.js
 schema
 *.tsbuildinfo
 test-bin

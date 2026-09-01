@@ -31,9 +31,11 @@ repository. The pipeline yaml references the agent.
 Every compiled pipeline runs as three sequential jobs:
 
 1. **Agent (Stage 1)** — runs the AI agent inside an AWF network-isolated
-   sandbox with a read-only ADO token. The agent produces *safe-output
-   proposals* (e.g. "create this PR", "comment on this work item") rather than
-   acting directly.
+   sandbox. When configured, a trusted `ado-proxy` process holds the Stage 1
+   ADO credential and injects it only after a scoped read-policy decision; the
+   raw token is not injected into the Agent, MCPG, MCP container, or wrapped
+   `az`. The agent produces *safe-output proposals* (e.g. "create this PR",
+   "comment on this work item") rather than acting directly.
 2. **Detection (Stage 2)** — by default, a separate agent inspects Stage 1's
    proposals for prompt injection, secret leaks, and other threats. Authors can
    configure or explicitly disable AI analysis under
@@ -72,7 +74,14 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── job_ir.rs     # Job target typed-IR builder
 │   │   ├── stage.rs      # Stage-level ADO template compiler (target: stage)
 │   │   ├── stage_ir.rs   # Stage target typed-IR builder
+│   │   ├── az_wrapper.rs # Renders the `az` CLI redirect wrapper installed into the agent sandbox (env-based `HTTPS_PROXY` redirect, not argument rewriting)
 │   │   ├── source_path_guard.rs # Validation guard for untrusted workflow source-path inputs used by audit + mcp_author
+│   │   ├── shell/        # Typed generation of every shell script the compiler emits (see docs/extending.md "Generated shell scripts")
+│   │   │   ├── mod.rs    # ShellScript: raw-string bodies + a typed shell-quoted binding prelude; `# ado-aw:fragment` splicing; into_step()
+│   │   │   ├── bindings.rs # Binding constructors (text/number/boolean/words/ado_macro/document) — the single injection chokepoint; rejects credentials
+│   │   │   ├── registry.rs # shell_script! macro + `inventory` auto-registration; ShellScriptDef; all_scripts()
+│   │   │   ├── export.rs # `ado-aw export-bash-scripts` — materializes every registered script as reviewable .sh / JSON
+│   │   │   └── lint.rs   # Registry-wide shellcheck + declared-variable-surface guards (reaches scripts no fixture emits)
 │   │   ├── gitattributes.rs # .gitattributes management for compiled pipelines
 │   │   ├── filter_ir.rs  # Filter expression IR: Fact/Predicate types, lowering, validation, codegen
 │   │   ├── pr_filters.rs # PR trigger filter generation (native ADO + gate steps)
@@ -100,7 +109,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   │   │   ├── repo.rs   # RepoContextContributor — repository identity / remote facts
 │   │   │   │   ├── schedule.rs # ScheduleContextContributor — scheduled-run context facts
 │   │   │   │   └── workitem.rs # WorkItemContextContributor — linked work-item context facts
-│   │   │   ├── azure_cli.rs # Always-on Azure CLI extension (runtime detection, AWF mounts, az allowlist)
+│   │   │   ├── azure_cli.rs # permissions.read-gated Azure CLI extension (runtime detection, wrapper, AWF mounts, az policy prompt)
 │   │   │   └── tests.rs  # Extension integration tests
 │   │   ├── codemods/     # Front-matter codemods (one file per transformation)
 │   │   │   ├── mod.rs    # Codemod struct, CODEMODS registry, runner
@@ -148,6 +157,10 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   ├── ado/              # Shared Azure DevOps REST helpers (auth, list/match/PATCH/POST)
 │   │   ├── mod.rs        # Shared ADO REST helpers used by all lifecycle commands (`enable`, `disable`, `list`, `status`, `run`, `remove`, `secrets`)
 │   │   └── discovery.rs  # Project-scope pipeline discovery (`--all-repos` / `--source` flags)
+│   ├── ado_proxy/        # Authoritative Stage 1 ADO proxy policy (runtime ships as the `ado-proxy` ado-script bundle; see docs/ado-proxy-design.md)
+│   │   ├── mod.rs        # Module entry; why the runtime is TypeScript; the compiler/sidecar anti-divergence contract
+│   │   ├── catalog.rs    # Versioned deny-by-default read-operation catalog (surfaced by `ado-aw catalog --kind ado-proxy`; exported to the bundle as schema + committed snapshot)
+│   │   └── policy.rs     # Compiler-owned policy document: runtime scope placeholders, capability lowering, explicit cross-org/project scopes, and implicit repository-only grants from type: git repos:
 │   ├── audit/            # `ado-aw audit` command — downloads pipeline artifacts and runs analyzers
 │   │   ├── mod.rs        # Module entry; declares submodules; re-exports `model::*` and CLI helpers
 │   │   ├── cli.rs        # CLI entry point for the `audit` subcommand
@@ -158,6 +171,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── url.rs        # Build-reference parsing (bare ID, full ADO URL)
 │   │   ├── analyzers/    # Per-signal analyzers that populate AuditData sections
 │   │   │   ├── mod.rs
+│   │   │   ├── ado_proxy.rs    # ado-proxy request/decision log analysis (AdoProxyAnalysis)
 │   │   │   ├── custom_jobs.rs  # Job-level audit correlation for custom safe-output jobs
 │   │   │   ├── detection.rs    # Detection-stage artifact analysis
 │   │   │   ├── firewall.rs     # AWF network log analysis
@@ -193,7 +207,13 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   ├── safe_outputs/     # Safe-output MCP tool implementations (Stage 1 → NDJSON → Stage 3)
 │   │   ├── mod.rs
 │   │   ├── add_build_tag.rs
+│   │   ├── add_github_issue_labels.rs
 │   │   ├── add_pr_comment.rs
+│   │   ├── assign_github_issue_milestone.rs
+│   │   ├── assign_github_issue_to_user.rs
+│   │   ├── assign_work_item.rs
+│   │   ├── close_github_issue.rs
+│   │   ├── comment_on_github_issue.rs
 │   │   ├── comment_on_work_item.rs
 │   │   ├── create_branch.rs
 │   │   ├── create_git_tag.rs
@@ -201,17 +221,25 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── create_pull_request.rs
 │   │   ├── create_wiki_page.rs
 │   │   ├── create_work_item.rs
+│   │   ├── github_api.rs # Shared GitHub REST/GraphQL client, endpoint derivation, pagination, and errors
+│   │   ├── github_issue_common.rs # Shared repository selection, filters, issue/PR policy, and temporary-ID resolution
+│   │   ├── hide_github_issue_comment.rs
+│   │   ├── link_github_sub_issue.rs
 │   │   ├── link_work_items.rs
 │   │   ├── missing_data.rs
 │   │   ├── missing_tool.rs
 │   │   ├── noop.rs
 │   │   ├── queue_build.rs
+│   │   ├── remove_github_issue_labels.rs
 │   │   ├── reply_to_pr_comment.rs
 │   │   ├── report_incomplete.rs
 │   │   ├── resolve_pr_thread.rs
 │   │   ├── result.rs
+│   │   ├── set_github_issue_field.rs
 │   │   ├── set_github_issue_type.rs
 │   │   ├── submit_pr_review.rs
+│   │   ├── unassign_github_issue_from_user.rs
+│   │   ├── update_github_issue.rs
 │   │   ├── update_pr.rs
 │   │   ├── update_wiki_page.rs
 │   │   ├── update_work_item.rs
@@ -288,6 +316,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │           ├── executor-e2e/ # Stage 3 safe-output E2E test harness (not a bundle; runs deterministic scenarios against a real ADO project and files a GitHub issue on failure)
 │           ├── compiler-smoke-e2e/ # Smoke E2E orchestrator (not a bundle): stages each case in `tests/smoke/cases.json` to the fixed `.smoke/pipeline.yml` path on its own per-case `ado-aw-mirror` ref, queues it against its credential *lane* definition, and asserts they go green. Two modes via `SMOKE_COMPILER_SOURCE`: `candidate` (compiler built from this commit, pinned pipeline-artifact) and `released` (latest release asset, release URLs required). Built to `test-bin/` by `build:compiler-smoke-e2e`, listed in `NON_BUNDLE_DIRS`.
 │           ├── prepare-pr-base/ # create-pull-request preparer (bundled to prepare-pr-base.js): Agent mode uses ADO diff metadata + bounded dual-ref fallback to make the merge-base reachable; SafeOutputs mode fetches only the target worktree tip
+│           ├── ado-proxy/ # Credential-isolated ADO policy proxy (bundled to ado-proxy.js). The pipeline mounts it into node:20-slim and starts it before AWF; AWF attaches the trusted container via --topology-attach. scope.ts builds the organization-relative current/additional scope index; catalog.gen.json + ../shared/ado-proxy-catalog.types.gen.ts are generated from Rust by export-ado-proxy-catalog{,-schema} and drift-guarded; a catalog_version mismatch fails closed at startup.
 │           ├── trigger-e2e/ # Test-only gate-spec / trigger-evaluation harness (not a bundle): mirrors Rust `Fact::ALL` in `gate-spec.ts`; `fact-catalog.gen.json` is generated by `export-fact-catalog` and drift-guarded by CI
 │           └── shared/   # Shared modules across bundles (auth, ado-client, env-facts, types.gen.ts)
 ├── tests/                # Integration tests and fixtures
@@ -388,7 +417,9 @@ index to jump to the right page.
   `check`, `mcp`, `execute`, `secrets`, `enable`, `disable`,
   `remove`, `list`, `status`, `run`, `audit`, `mcp-author`, `trace`,
   `inspect`, `graph`, `whatif`, `lint`, `catalog`; `configure` is a
-  deprecated hidden alias; `export-gate-schema` and `export-fact-catalog` are hidden build-time tools).
+  deprecated hidden alias; `export-gate-schema`, `export-fact-catalog`,
+  `export-ado-proxy-catalog-schema`, `export-ado-proxy-catalog`, and
+  `export-bash-scripts` are hidden build-time tools).
 - [`docs/agency-plugin.md`](docs/agency-plugin.md) — the Agency / Claude Code
   plugin (`agency/plugins/ado-aw/`): canonical layout, six skills, `mcp-author`
   wiring, the self-contained root marketplace catalogs, `init --agency`
@@ -407,6 +438,9 @@ index to jump to the right page.
   allowed domains, ecosystem identifiers, blocking, repository-resource
   `endpoint:` service connections, and ADO `permissions:` service-connection
   model.
+- [`docs/ado-proxy-design.md`](docs/ado-proxy-design.md) —
+  security contract and implementation design for credential-isolated
+  Stage 1 Azure DevOps HTTP access.
 - [`docs/extending.md`](docs/extending.md) — adding new CLI commands, compile
   targets, front-matter fields, typed IR extensions, safe-output tools,
   first-class tools, and runtimes; the `CompilerExtension` trait.
@@ -482,6 +516,16 @@ Following the gh-aw security model:
    agent pool's normal network, so they do **not** need entries in the AWF
    allowlist. Air-gapping the build agent itself from GitHub/GHCR is the agent
    pool's network policy, not AWF.
+   **Contributor warning — AWF's chroot makes runner `/tmp` agent-readable.**
+   The agent's root is the host's `/host` bind mount, and AWF mounts the same
+   runner `/tmp` at both `/tmp` and `/host/tmp` (`agent-service.ts`). Therefore
+   anything a host pipeline step writes under runner `/tmp` is visible inside
+   the agent sandbox. Never stage bearer tokens, CA private keys, WIF
+   assertions, service-connection material, or other credentials there and
+   assume deletion will make the exchange safe. This trap has caused repeated
+   incorrect designs in credential-bearing work. Stream private material over
+   stdin or use a container-private volume; publish only intentionally public
+   files (for example the interception CA certificate) under `/tmp`.
 3. **Tool Allow-listing**: Agents have access to a limited, controlled set of
    tools — see [`docs/tools.md`](docs/tools.md) and
    [`docs/mcp.md`](docs/mcp.md).
@@ -512,24 +556,68 @@ cargo test
 cargo clippy
 ```
 
+### Generated shell
+
+Compiler-generated shell is **not** built with `format!`. Every script is a
+raw-string constant registered with `shell_script!` in the module that
+produces it, with substitution restricted to a typed, shell-quoted prelude —
+see `src/compile/shell/` and the *Generated shell scripts* section of
+[`docs/extending.md`](docs/extending.md).
+
+The body is the shell exactly as it runs: no `\n\` continuations, no doubled
+braces, no escaped quotes. A value reaches a script only as `Binding::text`,
+`::number`, `::boolean`, `::words`, `::ado_macro` or `::document`, all of
+which land in a single position (the right-hand side of a prelude assignment)
+and therefore cannot alter the structure of the script. A credential must
+never become a binding — the prelude is committed to the repository — so it
+stays on `.with_env(…, EnvValue::secret(…))`.
+
+Every variable a body reads must be declared as a `binding` or an `external`.
+Both the render path and a registry-wide test enforce it.
+
+`tests/generated_shell_guard.rs` fails the build if shell regresses to the old
+shape — a `BashStep::new` whose script argument is built with `format!`, an
+escaped continuation inside a `shell_script!` body, or a reintroduced
+`bash()` / `dedent()` helper.
+
 ### Bash step lint
+
+Shell is linted at two levels.
+
+`src/compile/shell/lint.rs` shellchecks **every registered script in
+isolation**, straight from the registry. Coverage is total by construction:
+before this, lint coverage was a function of fixture reachability, so a
+generator no fixture exercised was linted by nothing.
 
 The `tests/bash_lint_tests.rs` integration test compiles a representative set
 of fixtures and runs `shellcheck` against every literal `bash:` body in the
-generated YAML. It catches silent-failure patterns that ADO's "fail on last
-command" default would let through (e.g. `cd "$X"` without `|| exit`, tilde
-inside double quotes, masked-return assignments).
+generated YAML — proving scripts are *emitted*, where the registry lint proves
+they are *correct*. It catches silent-failure patterns that ADO's "fail on
+last command" default would let through (e.g. `cd "$X"` without `|| exit`,
+tilde inside double quotes, masked-return assignments).
 
-The test is skipped if `shellcheck` is not on PATH. Install locally with
+Both are skipped if `shellcheck` is not on PATH. Install locally with
 `brew install shellcheck` (macOS) or `apt-get install -y shellcheck` (Debian
 / Ubuntu); CI installs it in `.github/workflows/rust-tests.yml` and sets
 `ENFORCE_BASH_LINT=1` so a missing shellcheck becomes a hard failure rather
 than a silent skip.
 
-When adding a new bash step, run `cargo test --test bash_lint_tests` and fix
-anything it flags. If a finding is genuinely intentional, add a
-`# shellcheck disable=SCxxxx` comment immediately above the offending line in
-the bash body — shellcheck honours the directive and it's inert at runtime.
+When adding a new shell script, run both and fix anything they flag:
+
+```bash
+ENFORCE_BASH_LINT=1 cargo test --bin ado-aw compile::shell
+ENFORCE_BASH_LINT=1 cargo test --test bash_lint_tests
+```
+
+If a finding is genuinely intentional, add a `# shellcheck disable=SCxxxx`
+comment immediately above the offending line in the body — shellcheck honours
+the directive and it's inert at runtime.
+
+To review the generated shell as ordinary files:
+
+```bash
+cargo run -- export-bash-scripts --out /tmp/ado-aw-shell
+```
 
 ### Markdown-only smoke suite
 

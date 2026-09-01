@@ -70,7 +70,11 @@ env:
   STATIC_CONFIG: "some-value"     # Literal value embedded in config
 ```
 
-When `permissions.read` is configured, the compiler automatically maps `SC_READ_TOKEN` → `AZURE_DEVOPS_EXT_PAT` on the MCPG container, so agents can access ADO APIs without manual wiring.
+The first-party `tools.azure-devops` integration is deliberately different:
+it gives the MCP a non-secret sentinel in `ADO_MCP_AUTH_TOKEN`. The real
+`SC_READ_TOKEN` is delivered only to `ado-proxy` over stdin and is injected
+into an upstream request only after policy allows it. This behavior does not
+apply to arbitrary user-defined `mcp-servers:` entries.
 
 ## Example: Azure DevOps MCP with Authentication
 

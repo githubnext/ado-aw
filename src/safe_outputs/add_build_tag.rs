@@ -120,7 +120,7 @@ impl Executor for AddBuildTagResult {
         debug!("ADO org: {}, project: {}", org_url, project);
 
         // 2. Get tool-specific configuration
-        let config: AddBuildTagConfig = ctx.get_tool_config("add-build-tag");
+        let config: AddBuildTagConfig = ctx.get_tool_config("add-build-tag")?;
         debug!("Config: {:?}", config);
 
         // 2b. Scope check: by default only the current build can be tagged.

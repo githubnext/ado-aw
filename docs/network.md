@@ -49,11 +49,24 @@ The following domains are always allowed via `CORE_ALLOWED_HOSTS` in `allowed_ho
 | `rt.services.visualstudio.com` | Visual Studio runtime telemetry |
 | `config.edge.skype.com` | Configuration |
 
-The always-on Azure CLI extension additionally contributes `aka.ms` (Microsoft's link shortener, used by `az` subcommand metadata) to the AWF allowlist. See [Always-on Azure CLI (`az`)](#always-on-azure-cli-az) below.
+When `permissions.read` enables credential-isolated Azure DevOps reads, the
+Azure CLI extension additionally contributes `aka.ms` (Microsoft's link
+shortener, used by `az` subcommand metadata). See
+[Proxy-gated Azure CLI (`az`)](#proxy-gated-azure-cli-az) below.
 
-## Always-on Azure CLI (`az`)
+## Proxy-gated Azure CLI (`az`)
 
-Every compiled pipeline emits a small *Detect Azure CLI on host* prepare step that runs early in the Agent job. The always-on Azure CLI extension also adds `aka.ms` to the AWF allowlist (the auth and management hosts it declares are already present in `CORE_ALLOWED_HOSTS` above). This mirrors gh-aw's "assume `gh` is on the runner" model: agents can call `az` from their bash tool without opting in — *when the runner has it*.
+`permissions.read` is both the trusted `ado-proxy` token source and the
+activation gate for wrapped `az`. With no read permission, the compiler emits
+no Azure CLI detection, mount, PATH entry, shell permission, prompt, or proxy
+topology. The pinned AWF agent image contains no built-in `az`, so the command
+is absent rather than available unproxied.
+
+When `permissions.read` is present, the compiler emits a small *Detect Azure
+CLI on host* prepare step early in the Agent job. If the runner has Azure CLI,
+the real binary is mounted only behind the generated wrapper and running
+proxy. The extension also adds `aka.ms`; its other declared hosts already
+exist in `CORE_ALLOWED_HOSTS`.
 
 ### Runtime detection and graceful degradation
 
@@ -92,9 +105,11 @@ When (and only when) `AW_AZ_MOUNTS` is non-empty, a follow-up
 *Append Azure CLI prompt* step appends an Azure CLI advisory section
 to `/tmp/awf-tools/agent-prompt.md`. The agent reads the prompt on
 startup and learns that `az` is on PATH, what it's good for
-(`az devops` autoauthed via `$AZURE_DEVOPS_EXT_PAT`, ARM and Graph
-requiring separate auth), and the fallback path (`missing-tool`
-safe output naming `azure-cli`).
+(catalogued Azure DevOps reads through `az devops`, `az repos`, `az pipelines`,
+`az boards`, and `az rest`), what is deliberately unavailable (writes, secrets,
+ARM, and Graph), and the fallback path (`missing-tool` safe output naming
+`azure-cli`). The advisory tells the agent not to sign in: the wrapper carries
+only a sentinel and the proxy owns the real credential.
 
 The step is gated by `condition: ne(variables['AW_AZ_MOUNTS'], '')`,
 which reuses the same pipeline variable the detection step writes.
@@ -224,9 +239,12 @@ See [`imports:`](imports.md) for the ADO-first compile-time `repository` and
 
 ## Permissions (ADO Access Tokens)
 
-ADO does not support fine-grained permissions — there are two access levels:
-blanket read and blanket write. The executor (Stage 3) always has a
-write-capable token; what changes is its *source* and *attribution*:
+The ARM service-connection scope does not determine what its identity may do in
+Azure DevOps. `permissions.read` and `permissions.write` describe intended
+pipeline roles and token placement; operators must separately grant each
+underlying identity the minimum Azure DevOps permissions. The executor
+(Stage 3) always has a write-capable token; what changes is its *source* and
+*attribution*:
 
 | Source                              | When                                          | Identity                                        |
 | ----------------------------------- | --------------------------------------------- | ----------------------------------------------- |
@@ -258,7 +276,7 @@ Operators can scope further per-pipeline by editing the build definition's
 
 ```yaml
 permissions:
-  read: my-read-arm-connection    # Stage 1 agent — read-only ADO access
+  read: my-read-arm-connection    # trusted ado-proxy token source
   # write: my-write-arm-connection  # Optional — see below
 ```
 
@@ -278,9 +296,49 @@ agents. Set `permissions.write` only when you need:
 
 ### Security Model
 
-- **`permissions.read`**: Mints a read-only ADO-scoped token given to the
-  agent inside the AWF sandbox (Stage 1). The agent can query ADO APIs but
-  cannot write.
+- **`permissions.read`**: Mints an ADO-audience token for the trusted
+  `ado-proxy` process when `tools.azure-devops` is enabled. The raw token is
+  not injected into the Agent, Azure CLI, MCPG, or Azure DevOps MCP container.
+  The proxy attaches it only after a deny-by-default catalog and scope check.
+
+  The scalar form enables all read capabilities for the implicit current
+  organization/project/repository scope:
+
+  ```yaml
+  permissions:
+    read: my-read-sc
+  ```
+
+  The **object form** narrows capabilities and adds explicit scopes:
+
+  ```yaml
+  permissions:
+    read:
+      service-connection: my-read-sc
+      capabilities: [core, repos]        # discovery is always on
+      allow:                             # beyond the current org/project/repo
+        - organization: other-org
+          projects:
+            - project: Other Project
+              project-id: 33333333-3333-3333-3333-333333333333 # optional
+              repositories: [other-repo] # omit for project-scoped reads only
+  ```
+
+  `allow:` is additive to the current scope. It is organization-relative: a
+  project granted in one organization does not match the same project name in
+  another. `project-id` is optional; without it, name-form calls work and a
+  client using a cached GUID fails closed.
+
+  Azure Repos `type: git` entries under `repos:` also grant API reads for that
+  repository, including `checkout: false`. This is repository-only: declaring
+  `Project/repo` does **not** grant work-item, build, or pipeline reads for
+  `Project`. Non-ADO repository types grant nothing.
+
+  Cross-organization reads use the same ADO-audience token and therefore work
+  only where the service-connection identity has access in the same AAD
+  tenant. Cross-tenant reads require another credential and are unsupported.
+  An organization entry with no `projects` is rejected because omission must
+  never grant an entire organization.
 - **`permissions.write` (optional)**: Mints a write-capable ADO-scoped token
   used **only** by the executor in Stage 3 (`SafeOutputs` job). Overrides
   the default `$(System.AccessToken)` for write operations. Never exposed
@@ -292,7 +350,7 @@ agents. Set `permissions.write` only when you need:
 ### Examples
 
 ```yaml
-# Default: agent can read ADO, executor writes via $(System.AccessToken).
+# Scoped MCP and wrapped-az reads work through ado-proxy; executor writes via $(System.AccessToken).
 permissions:
   read: my-read-sc
 

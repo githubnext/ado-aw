@@ -199,11 +199,11 @@ fn test_compiled_output_no_unreplaced_markers() {
         "Compiled output should reference GitHub Releases for AWF"
     );
     assert!(
-        compiled.contains("AWF_VERSION=\"0.27.32\""),
+        compiled.contains("AWF_VERSION='0.27.32'"),
         "Compiled output should download the AWF version that provides strict topology isolation"
     );
     assert!(
-        !compiled.contains("AWF_VERSION=\"0.27.9\""),
+        !compiled.contains("AWF_VERSION='0.27.9'"),
         "Compiled output must not fall back to the legacy host-access AWF version"
     );
 
@@ -249,9 +249,11 @@ fn test_compiled_output_no_unreplaced_markers() {
         "Generated AWF invocations must not use legacy host security"
     );
     assert!(
-        compiled.contains("--name awmg-mcpg")
+        compiled.contains("MCPG_CONTAINER='awmg-mcpg'")
+            && compiled.contains(r#"--name "$MCPG_CONTAINER""#)
             && compiled.contains("--network bridge")
-            && compiled.contains("-p 127.0.0.1:8080:8080"),
+            && compiled.contains("MCPG_PORT=8080")
+            && compiled.contains(r#"-p "127.0.0.1:$MCPG_PORT:$MCPG_PORT""#),
         "MCPG must use the stable bridge-network topology"
     );
     for line in compiled
@@ -1662,8 +1664,7 @@ Vote on pull requests.
     ];
 
     for (dir_prefix, test_content, case_desc) in configs {
-        let temp_dir =
-            std::env::temp_dir().join(format!("{}-{}", dir_prefix, std::process::id()));
+        let temp_dir = std::env::temp_dir().join(format!("{}-{}", dir_prefix, std::process::id()));
         fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
         let test_input = temp_dir.join("upr-agent.md");
@@ -1950,6 +1951,154 @@ Call the noop tool exactly once.
 
 // ==================== Azure DevOps MCP Integration Tests ====================
 
+fn compile_fixture_text(fixture_name: &str) -> String {
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp directory");
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join(fixture_name);
+    let output_path = temp_dir.path().join(format!("{fixture_name}.lock.yml"));
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            fixture_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+    assert!(
+        output.status.success(),
+        "Compiler failed for {fixture_name}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::read_to_string(output_path).expect("Should read compiled output")
+}
+
+#[test]
+fn permissions_read_enables_proxy_and_wrapped_az_without_mcp() {
+    let compiled = compile_fixture_text("ado-proxy-read-only-agent.md");
+
+    for required in [
+        "displayName: Start ado-proxy policy engine",
+        "displayName: Verify trusted topology peers",
+        "displayName: Install az wrapper (ado-proxy)",
+        "displayName: Detect Azure CLI on host (for AWF mount)",
+        "--topology-attach \"awmg-ado-proxy\"",
+        "--allow-tool \"shell(az)\"",
+    ] {
+        assert!(
+            compiled.contains(required),
+            "permissions.read must enable {required}"
+        );
+    }
+    assert!(
+        !compiled.contains("/app/node_modules/@azure-devops/mcp/dist/index.js"),
+        "tools.azure-devops: false must not add the MCP child"
+    );
+    assert!(
+        !compiled.contains("@azure-devops/mcp@"),
+        "tools.azure-devops: false must not download or stage the MCP package"
+    );
+}
+
+#[test]
+fn no_read_permission_exposes_neither_proxy_nor_az() {
+    let compiled = compile_fixture_text("no-ado-read-agent.md");
+
+    for forbidden in [
+        "ado-proxy policy engine",
+        "awmg-ado-proxy",
+        "Install az wrapper",
+        "Detect Azure CLI on host",
+        "AW_AZ_MOUNTS",
+        "shell(az)",
+    ] {
+        assert!(
+            !compiled.contains(forbidden),
+            "no permissions.read must not expose {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn test_fixture_azure_devops_mcp_requires_read_permission() {
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp directory");
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("azure-devops-mcp-missing-read.md");
+    let output_path = temp_dir.path().join("missing-read.lock.yml");
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            fixture_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "compilation must fail before emitting a proxy with no token source"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("tools.azure-devops requires `permissions.read`"),
+        "error must name the missing front-matter key: {stderr}"
+    );
+    assert!(
+        !output_path.exists(),
+        "a failed validation must not leave a success-shaped pipeline"
+    );
+}
+
+#[test]
+fn test_azure_devops_mcp_exact_version_override_reaches_install_step() {
+    let compiled = compile_inline_agent(
+        "ado-mcp-version-override",
+        r#"---
+name: "Azure DevOps MCP version override"
+description: "Tests exact package version code generation"
+tools:
+  azure-devops:
+    org: myorg
+    version: 2.9.0
+permissions:
+  read: my-read-arm-connection
+---
+
+Test.
+"#,
+    );
+
+    // The version is supplied as a `ShellScript` binding rather than
+    // interpolated into the install command, so assert on the generated
+    // prelude — that proves the override reached the producer, where a bare
+    // substring would also match the verification message.
+    assert!(
+        compiled.contains("MCP_PACKAGE='@azure-devops/mcp'")
+            && compiled.contains("MCP_VERSION='2.9.0'"),
+        "the front-matter version override must reach the install step"
+    );
+    // Install and verification read the same binding, so an override cannot
+    // be applied to one and not the other.
+    assert!(
+        compiled.contains("\"$MCP_PACKAGE@$MCP_VERSION\"")
+            && compiled.contains("expected $MCP_VERSION"),
+        "the install and its verification must share one version"
+    );
+    assert!(
+        !compiled.contains("MCP_VERSION='2.8.1'"),
+        "the compiler default must not survive an explicit override"
+    );
+}
+
 /// Test that the Azure DevOps MCP fixture compiles successfully with no unreplaced markers
 #[test]
 fn test_fixture_azure_devops_mcp_compiled_output() {
@@ -1983,6 +2132,32 @@ fn test_fixture_azure_devops_mcp_compiled_output() {
 
     let compiled = fs::read_to_string(&output_path).expect("Should read compiled output");
 
+    // The policy document is now carried by the `POLICY` binding, which
+    // `Binding::document` renders as a quoted heredoc in the generated
+    // prelude. Nothing expands inside it, so the JSON survives verbatim.
+    let policy_marker = "POLICY=$(cat <<'ADO_AW_SHELL_DOC_EOF'\n";
+    let policy_start = compiled
+        .find(policy_marker)
+        .map(|index| index + policy_marker.len())
+        .expect("compiled pipeline must carry an ado-proxy policy document");
+    let policy_tail = &compiled[policy_start..];
+    let policy_end = policy_tail
+        .find("\n      ADO_AW_SHELL_DOC_EOF")
+        .expect("compiled policy heredoc must terminate");
+    let policy_json = policy_tail[..policy_end]
+        .lines()
+        .map(|line| line.strip_prefix("      ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let policy: serde_json::Value =
+        serde_json::from_str(&policy_json).expect("compiled policy must be valid JSON");
+
+    // The document is written to the path the container mounts read-only.
+    assert!(
+        compiled.contains(r#"printf '%s\n' "$POLICY" > "$PROXY_DIR/policy/policy.json""#),
+        "the policy binding must be written to the mounted policy path"
+    );
+
     // No unreplaced template markers (except ADO ${{ }} expressions)
     for line in compiled.lines() {
         let stripped = line.replace("${{", "");
@@ -2009,6 +2184,12 @@ fn test_fixture_azure_devops_mcp_compiled_output() {
         "MCPG config should contain the container image"
     );
     assert!(
+        compiled.contains("MCP_PACKAGE='@azure-devops/mcp'")
+            && compiled.contains("MCP_VERSION='2.8.1'")
+            && compiled.contains("expected $MCP_VERSION"),
+        "the unversioned frontmatter form must use and verify the compiler default"
+    );
+    assert!(
         compiled.contains("\"entrypoint\""),
         "MCPG config should have entrypoint field"
     );
@@ -2021,22 +2202,70 @@ fn test_fixture_azure_devops_mcp_compiled_output() {
         "MCPG config should NOT use command field"
     );
 
-    // Should contain env for ADO_MCP_AUTH_TOKEN (envvar auth for @azure-devops/mcp)
+    // The MCP receives a sentinel, never a credential: the policy engine holds
+    // the only copy and attaches it after a complete allow decision.
     assert!(
         compiled.contains("ADO_MCP_AUTH_TOKEN"),
         "Should reference ADO_MCP_AUTH_TOKEN"
     );
-
-    // Should contain SC_READ_TOKEN (from permissions.read)
     assert!(
-        compiled.contains("SC_READ_TOKEN"),
-        "Should contain SC_READ_TOKEN"
+        compiled.contains("ado-proxy-injects-the-real-credential"),
+        "the MCP's token must be the non-secret sentinel"
     );
 
-    // Should contain the MCPG docker env passthrough (auto-mapped ADO token)
+    // Regression guard for the hole the policy engine closes. `SC_READ_TOKEN`
+    // still appears elsewhere in the pipeline — the engine is given it — but it
+    // must never be projected into the MCP container.
     assert!(
-        compiled.contains("-e ADO_MCP_AUTH_TOKEN=\"$SC_READ_TOKEN\""),
-        "Should auto-map SC_READ_TOKEN to ADO_MCP_AUTH_TOKEN on MCPG Docker run"
+        !compiled.contains("-e ADO_MCP_AUTH_TOKEN=\"$SC_READ_TOKEN\""),
+        "the real Azure DevOps bearer must not reach the MCP container"
+    );
+
+    // Host networking would put the MCP on the runner's stack, where it could
+    // reach Azure DevOps directly and bypass the policy entirely.
+    assert!(
+        compiled.contains("--add-host"),
+        "the MCP must be redirected at the policy engine"
+    );
+    assert!(
+        compiled.contains("\"additional_scopes\": ["),
+        "the object-form read policy must emit its scope tree"
+    );
+    assert!(
+        compiled.contains("\"organization\": \"fabrikam\"")
+            && compiled.contains("\"project\": \"Shared\"")
+            && compiled.contains("\"project_scoped\": true")
+            && compiled.contains("\"shared-api\""),
+        "the explicit cross-organization scope must survive compilation"
+    );
+    assert!(
+        compiled.contains("\"organization\": \"${ADO_PROXY_ORGANIZATION}\"")
+            && compiled.contains("\"project\": \"LocalProject\"")
+            && compiled.contains("\"project_scoped\": false")
+            && compiled.contains("\"implicit-api\""),
+        "the Azure Repos resource must emit a repository-only scope"
+    );
+    assert!(
+        !compiled.contains("\"github-only\""),
+        "a GitHub repository resource must not grant Azure DevOps scope"
+    );
+    assert_eq!(
+        policy["capabilities"],
+        serde_json::json!(["discovery", "core", "repos"]),
+        "only explicitly selected capabilities plus discovery may be emitted"
+    );
+    assert!(
+        compiled.contains("ALLOWED_GROUPS='devops repos rest'")
+            && compiled.contains(r#"case " $ALLOWED_GROUPS " in"#),
+        "the az wrapper must narrow to the same capability set"
+    );
+    assert!(
+        compiled.contains("**Available** — `az devops`, `az repos`, `az rest`"),
+        "the prompt must advertise the same capability set"
+    );
+    assert!(
+        !compiled.contains("**Available** — `az devops`, `az repos`, `az pipelines`"),
+        "an ungranted capability must not leak into the prompt"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -4066,8 +4295,16 @@ fn assert_aw_info_step_present(
         compiled.contains("condition: always()"),
         "{fixture_name}: compiled YAML missing always() condition on aw_info step"
     );
+    // `Agent.TempDirectory` now reaches the script as a binding rather than
+    // being interpolated inline, so assert on both the binding and its use.
+    // That is stronger: it proves the producer supplied the macro, where a
+    // bare substring would also match a comment.
     assert!(
-        compiled.contains("cat >\"$(Agent.TempDirectory)/staging/aw_info.json\" <<'AW_INFO_EOF'"),
+        compiled.contains("AGENT_TEMP='$(Agent.TempDirectory)'"),
+        "{fixture_name}: compiled YAML missing the Agent.TempDirectory binding"
+    );
+    assert!(
+        compiled.contains("cat >\"$AGENT_TEMP/staging/aw_info.json\" <<'AW_INFO_EOF'"),
         "{fixture_name}: compiled YAML missing quoted heredoc aw_info write step"
     );
     // Softer suffix check on the source path: fixtures compile under
@@ -4995,8 +5232,9 @@ fn test_pr_filter_tier1_has_evaluator_gate() {
         "Should include base64-encoded spec"
     );
     assert!(
-        compiled.contains("node '/tmp/ado-aw-scripts/ado-script/gate.js'"),
-        "Should invoke node gate evaluator"
+        compiled.contains("EVALUATOR_PATH='/tmp/ado-aw-scripts/ado-script/gate.js'")
+            && compiled.contains(r#"node "$EVALUATOR_PATH""#),
+        "Should invoke node gate evaluator via its bound path"
     );
     assert!(
         compiled.contains("ado-script.zip"),
@@ -5198,8 +5436,9 @@ fn test_pr_filter_tier2_has_extension_gate() {
         "Tier 2 should include base64-encoded spec"
     );
     assert!(
-        compiled.contains("node '/tmp/ado-aw-scripts/ado-script/gate.js'"),
-        "Tier 2 should invoke node gate evaluator"
+        compiled.contains("EVALUATOR_PATH='/tmp/ado-aw-scripts/ado-script/gate.js'")
+            && compiled.contains(r#"node "$EVALUATOR_PATH""#),
+        "Tier 2 should invoke node gate evaluator via its bound path"
     );
     assert!(compiled.contains("name: prGate"), "Should have prGate step");
 }
@@ -5676,8 +5915,13 @@ fn test_byom_provider_env_compiles_and_merges() {
     // the exact version selected by --image-tag.
     assert_eq!(
         compiled
-            .matches("docker pull ghcr.io/github/gh-aw-firewall/api-proxy:")
+            .matches("API_PROXY_IMAGE='ghcr.io/github/gh-aw-firewall/api-proxy:")
             .count(),
+        2,
+        "BYOK must bind the api-proxy image in both the Agent and Detection jobs: {compiled}"
+    );
+    assert_eq!(
+        compiled.matches(r#"docker pull "$API_PROXY_IMAGE""#).count(),
         2,
         "BYOK must pre-pull the api-proxy container image in both the Agent and Detection jobs: {compiled}"
     );
@@ -5760,8 +6004,13 @@ fn test_non_byom_agent_uses_always_on_api_proxy() {
     );
     assert_eq!(
         compiled
-            .matches("docker pull ghcr.io/github/gh-aw-firewall/api-proxy:")
+            .matches("API_PROXY_IMAGE='ghcr.io/github/gh-aw-firewall/api-proxy:")
             .count(),
+        2,
+        "Agent and Detection must bind the api-proxy image for pre-pull: {compiled}"
+    );
+    assert_eq!(
+        compiled.matches(r#"docker pull "$API_PROXY_IMAGE""#).count(),
         2,
         "Agent and Detection must pre-pull the always-on api-proxy image: {compiled}"
     );
@@ -5833,162 +6082,6 @@ fn test_agent_job_steps_do_not_map_system_access_token() {
     }
 }
 
-/// Always-on Azure CLI extension: every compiled pipeline must include a
-/// host-detection prepare step that conditionally sets the `AW_AZ_MOUNTS`
-/// pipeline variable, and the AWF invocation must reference that
-/// variable so the mounts are added at pipeline time only when az is
-/// present on the runner. Also asserts that Azure auth hosts are in the
-/// allow-list and guards against accidental re-introduction of an
-/// install step.
-#[test]
-fn test_default_pipeline_mounts_az_and_allows_azure_hosts() {
-    let compiled = compile_fixture("minimal-agent.md");
-    assert_valid_yaml(&compiled, "minimal-agent.md");
-
-    // (1) The detection prepare step must be present. It is the only
-    // mechanism by which az gets mounted into AWF, so its presence is
-    // load-bearing for the "always-on az" promise. The displayName is
-    // also part of the compiled YAML and is what operators see in the
-    // ADO log; if it changes the documentation in docs/network.md and
-    // docs/tools.md should be updated too.
-    assert!(
-        compiled.contains("displayName: Detect Azure CLI on host (for AWF mount)"),
-        "compiled YAML must contain the Azure CLI detection prepare step. \
-         Compiled:\n{compiled}"
-    );
-    assert!(
-        compiled.contains("[ -f /usr/bin/az ]"),
-        "detection step must test for /usr/bin/az. Compiled:\n{compiled}"
-    );
-    assert!(
-        compiled.contains("##vso[task.setvariable variable=AW_AZ_MOUNTS]"),
-        "detection step must set the AW_AZ_MOUNTS pipeline variable. \
-         Compiled:\n{compiled}"
-    );
-
-    // (1a) Regression guard: `setvariable` for AW_AZ_MOUNTS must appear
-    // TWICE — once per branch of the if/else. If the missing-az branch
-    // skips the setvariable, ADO leaves the literal `$(AW_AZ_MOUNTS)`
-    // in the AWF bash step, where bash interprets it as a `$(...)`
-    // command substitution, attempts to run a program named
-    // `AW_AZ_MOUNTS`, gets exit 127, and `set -e` kills the pipeline —
-    // the exact failure mode this PR set out to prevent on runners
-    // without azure-cli installed.
-    let setvar_count = compiled
-        .matches("##vso[task.setvariable variable=AW_AZ_MOUNTS]")
-        .count();
-    assert_eq!(
-        setvar_count, 2,
-        "AW_AZ_MOUNTS must be set in BOTH branches of the detection step (got {setvar_count} \
-         occurrences); leaving it unset in the missing-az branch breaks `set -e` in the \
-         AWF invocation. See AzureCliExtension::prepare_steps for the rationale."
-    );
-
-    // (1b) Conditional prompt-append step: when az is detected, the
-    // agent prompt receives an Azure CLI advisory section so the
-    // agent knows az is on PATH, what it's good for, and the auth
-    // model. The step is gated by `condition: ne(variables['AW_AZ_MOUNTS'], '')`
-    // so agents on runners WITHOUT az never see the advisory and
-    // never try to call az.
-    assert!(
-        compiled.contains("displayName: Append Azure CLI prompt"),
-        "compiled YAML must contain the 'Append Azure CLI prompt' step \
-         emitted by AzureCliExtension::prepare_steps. Compiled:\n{compiled}"
-    );
-    assert!(
-        compiled.contains("condition: ne(variables['AW_AZ_MOUNTS'], '')"),
-        "the Azure CLI prompt-append step must carry a condition: \
-         ne(variables['AW_AZ_MOUNTS'], '') so it is skipped when az \
-         is not detected. Compiled:\n{compiled}"
-    );
-    // Proximity check — the condition: must live on the SAME step as
-    // the displayName, otherwise we may have accidentally gated the
-    // wrong step. Find the displayName index, then check the next ~200
-    // chars for the condition line.
-    let display_idx = compiled
-        .find("displayName: Append Azure CLI prompt")
-        .expect("displayName already asserted to be present");
-    let window_end = (display_idx + 300).min(compiled.len());
-    let window = &compiled[display_idx..window_end];
-    assert!(
-        window.contains("condition: ne(variables['AW_AZ_MOUNTS'], '')"),
-        "the condition: line must appear in the same step block as the \
-         'Append Azure CLI prompt' displayName (looked at the 300 \
-         chars after the displayName). Window:\n{window}"
-    );
-    // Anchor strings: lock the load-bearing parts of the advisory.
-    for anchor in [
-        "/usr/bin/az",
-        "az devops",
-        "AZURE_DEVOPS_EXT_PAT",
-        "missing-tool",
-    ] {
-        assert!(
-            compiled.contains(anchor),
-            "compiled YAML must contain advisory anchor `{anchor}`. \
-             Compiled:\n{compiled}"
-        );
-    }
-
-    // (2) The AWF invocation must reference $(AW_AZ_MOUNTS) so the
-    // pipeline-variable value (the two --mount args, or empty) is
-    // word-split into the docker run command at runtime. Unquoted on
-    // purpose — see the safety note in `generate_awf_mounts`.
-    assert!(
-        compiled.contains("$(AW_AZ_MOUNTS) \\"),
-        "AWF invocation must include a `$(AW_AZ_MOUNTS) \\` line so the \
-         pipeline variable expands into --mount args at runtime. \
-         Compiled:\n{compiled}"
-    );
-
-    // (3) Critical guard: we must NOT emit static --mount args for az
-    // paths, because that would crash `docker run` on runners without
-    // azure-cli installed (bind source path does not exist). All az
-    // mounting must go through the runtime-detected pipeline variable.
-    assert!(
-        !compiled.contains(r#"--mount "/opt/az:/opt/az:ro""#),
-        "compiled YAML must NOT contain a static --mount for /opt/az — \
-         that would crash `docker run` on runners without azure-cli. \
-         Mounts must be contributed via the AW_AZ_MOUNTS pipeline \
-         variable. Compiled:\n{compiled}"
-    );
-    assert!(
-        !compiled.contains(r#"--mount "/usr/bin/az:/usr/bin/az:ro""#),
-        "compiled YAML must NOT contain a static --mount for /usr/bin/az — \
-         that would crash `docker run` on runners without azure-cli. \
-         Mounts must be contributed via the AW_AZ_MOUNTS pipeline \
-         variable. Compiled:\n{compiled}"
-    );
-
-    // (4) Azure auth/management hosts must be in --allow-domains.
-    for host in [
-        "login.microsoftonline.com",
-        "management.azure.com",
-        "graph.microsoft.com",
-    ] {
-        assert!(
-            compiled.contains(host),
-            "compiled --allow-domains must contain {host}. Compiled:\n{compiled}"
-        );
-    }
-
-    // (5) Regression guard: we deliberately do NOT install az; the host
-    // is assumed to have azure-cli pre-installed (gh-aw parity). If a
-    // future contributor adds an install step we want the test suite to
-    // catch it so the decision is explicit.
-    assert!(
-        !compiled.contains("Install Azure CLI"),
-        "compiled YAML must not contain an 'Install Azure CLI' step — host is assumed \
-         to have az pre-installed. If you genuinely need an install step, update this \
-         test along with the AzureCliExtension. Compiled:\n{compiled}"
-    );
-    assert!(
-        !compiled.contains("InstallAzureCLIDeb"),
-        "compiled YAML must not reference the Microsoft az apt installer URL — host is \
-         assumed to have az pre-installed. Compiled:\n{compiled}"
-    );
-}
-
 // ─── ado-aw-debug fixture ──────────────────────────────────────────────────
 
 /// Compile the `ado-aw-debug-agent.md` fixture and assert the
@@ -6031,13 +6124,14 @@ fn test_compile_github_issue_app_fixture_scopes_tokens_by_stage() {
     let compiled = compile_fixture("github-issue-app-agent.md");
     assert_valid_yaml(&compiled, "github-issue-app-agent.md");
     assert!(compiled_has_enabled_tool(&compiled, "create-github-issue"));
-    assert!(compiled_has_enabled_tool(&compiled, "set-github-issue-type"));
+    assert!(compiled_has_enabled_tool(
+        &compiled,
+        "set-github-issue-type"
+    ));
     assert!(compiled.contains("Mint GitHub App token (SafeOutputs)"));
     assert!(compiled.contains("--output-var 'ADO_AW_SAFE_OUTPUTS_GITHUB_APP_TOKEN'"));
     assert!(compiled.contains("--permissions-json '{\"issues\":\"write\"}'"));
-    assert!(compiled.contains(
-        "ADO_AW_GITHUB_TOKEN: $(ADO_AW_SAFE_OUTPUTS_GITHUB_APP_TOKEN)"
-    ));
+    assert!(compiled.contains("ADO_AW_GITHUB_TOKEN: $(ADO_AW_SAFE_OUTPUTS_GITHUB_APP_TOKEN)"));
 
     let agent_start = compiled.find("- job: Agent").expect("Agent job");
     let detection_start = compiled.find("- job: Detection").expect("Detection job");
@@ -6048,11 +6142,51 @@ fn test_compile_github_issue_app_fixture_scopes_tokens_by_stage() {
         &compiled[agent_start..detection_start],
         &compiled[detection_start..safe_outputs_start],
     ] {
-        assert!(block.contains(
-            "--permissions-json '{\"contents\":\"read\",\"issues\":\"read\"}'"
-        ));
+        assert!(block.contains("--permissions-json '{\"contents\":\"read\",\"issues\":\"read\"}'"));
         assert!(!block.contains("ADO_AW_GITHUB_TOKEN"));
     }
+}
+
+#[test]
+fn test_compile_github_app_auth_is_scoped_to_reviewed_variant() {
+    let compiled = compile_inline_agent(
+        "github-app-reviewed-variant",
+        r#"---
+name: "GitHub App Reviewed Variant"
+description: "GitHub App auth is emitted only in the GitHub execution lane"
+engine:
+  id: copilot
+  github-app-token:
+    app-id: 1234567
+    owner: octo-org
+    permissions:
+      issues: read
+safe-outputs:
+  noop:
+    require-approval: false
+  create-github-issue:
+    target-repo: octo-org/reviewed-repo
+    require-approval: true
+---
+
+Create a reviewed GitHub issue.
+"#,
+    );
+    let automatic_start = compiled
+        .find("- job: SafeOutputs\n")
+        .expect("automatic job");
+    let reviewed_start = compiled
+        .find("- job: SafeOutputs_Reviewed")
+        .expect("reviewed job");
+    let automatic = &compiled[automatic_start..reviewed_start];
+    let reviewed = &compiled[reviewed_start..];
+
+    assert!(!automatic.contains("Mint GitHub App token (SafeOutputs)"));
+    assert!(!automatic.contains("ADO_AW_SAFE_OUTPUTS_GITHUB_APP_TOKEN"));
+    assert!(reviewed.contains("Mint GitHub App token (SafeOutputs)"));
+    assert!(reviewed.contains("--repositories 'reviewed-repo'"));
+    assert!(reviewed.contains("--permissions-json '{\"issues\":\"write\"}'"));
+    assert!(reviewed.contains("Revoke GitHub App token (SafeOutputs)"));
 }
 
 /// The example file in `examples/dogfood-failure-reporter.md` must compile
@@ -6398,8 +6532,8 @@ fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
     // IS expected at Agent-job-level `variables:` scope, the documented
     // safe location — that hoist is asserted separately.)
     let parsed = parse_compiled_yaml(&compiled);
-    let agent_job = find_job_mapping(&parsed, "Agent")
-        .expect("compiled YAML must contain the Agent job");
+    let agent_job =
+        find_job_mapping(&parsed, "Agent").expect("compiled YAML must contain the Agent job");
     let stage_step = agent_job
         .get(yaml_key("steps"))
         .and_then(|v| v.as_sequence())
@@ -6448,8 +6582,9 @@ fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
     // `ExtensionPhase::System` and thus appears before this step
     // (which runs in `ExtensionPhase::Tool`).
     assert!(
-        compiled.contains("node '/tmp/ado-aw-scripts/ado-script/exec-context-pr.js'"),
-        "v7: prepare step must invoke the exec-context-pr.js bundle"
+        compiled.contains("BUNDLE='/tmp/ado-aw-scripts/ado-script/exec-context-pr.js'")
+            && compiled.contains(r#"node "$BUNDLE""#),
+        "v7: prepare step must invoke the exec-context-pr.js bundle via its bound path"
     );
 
     // v7: all the bash-side specifics (GIT_CONFIG_*, regex validation,
@@ -7355,7 +7490,10 @@ safe-outputs:
 
     assert!(detection.contains("--model detection-model"), "{detection}");
     assert!(detection.contains("--reasoning-effort=low"), "{detection}");
-    assert!(!detection.contains("--reasoning-effort=high"), "{detection}");
+    assert!(
+        !detection.contains("--reasoning-effort=high"),
+        "{detection}"
+    );
     assert!(detection.contains("INHERITED_ENV: agent"), "{detection}");
     assert!(detection.contains("DETECTION_ENV: enabled"), "{detection}");
     assert!(
@@ -7399,9 +7537,7 @@ safe-outputs:
     assert!(!detection.contains("Prepare threat analysis prompt"));
     assert!(detection.contains("name: threatAnalysis"), "{detection}");
     assert!(
-        detection.contains(
-            "##vso[task.setvariable variable=SafeToProcess;isOutput=true]true"
-        ),
+        detection.contains("##vso[task.setvariable variable=SafeToProcess;isOutput=true]true"),
         "{detection}"
     );
     assert!(detection.contains("name: reviewedProposals"), "{detection}");
@@ -7420,8 +7556,7 @@ safe-outputs:
     );
     let safe_outputs = job_block(&compiled, "SafeOutputs");
     assert!(
-        safe_outputs
-            .contains("dependencies.Detection.outputs['threatAnalysis.SafeToProcess']"),
+        safe_outputs.contains("dependencies.Detection.outputs['threatAnalysis.SafeToProcess']"),
         "{safe_outputs}"
     );
 }
@@ -7443,9 +7578,15 @@ safe-outputs:
 "#;
     let (ok, compiled, stderr) =
         compile_inline_source("threat-detection-disabled-invalid-version", source);
-    assert!(ok, "disabled Detection should not resolve install steps: {stderr}");
+    assert!(
+        ok,
+        "disabled Detection should not resolve install steps: {stderr}"
+    );
     let detection = job_block(&compiled, "Detection");
-    assert!(detection.contains("Bypass AI threat analysis"), "{detection}");
+    assert!(
+        detection.contains("Bypass AI threat analysis"),
+        "{detection}"
+    );
     assert!(!detection.contains("bad version"), "{detection}");
 }
 
@@ -7530,7 +7671,10 @@ safe-outputs:
     let detection = job_block(&compiled, "Detection");
     assert!(!agent.contains("detector.example.com"), "{agent}");
     assert!(detection.contains("detector.example.com"), "{detection}");
-    assert!(detection.contains("COPILOT_PROVIDER_BASE_URL"), "{detection}");
+    assert!(
+        detection.contains("COPILOT_PROVIDER_BASE_URL"),
+        "{detection}"
+    );
     assert!(detection.contains("DETECTION_API_KEY"), "{detection}");
     assert!(
         detection.contains("--exclude-env COPILOT_PROVIDER_API_KEY"),
@@ -7778,9 +7922,16 @@ supply-chain:
     assert!(ok, "pipeline-artifact + registry should compile: {stderr}");
     assert!(compiled.contains("source: specific"));
     assert!(compiled.contains("runId: '630001'"));
-    assert!(compiled.contains("docker pull myacr.azurecr.io/candidate/squid:"));
+    assert!(
+        compiled.contains("SQUID_IMAGE='myacr.azurecr.io/candidate/squid:")
+            && compiled.contains(r#"docker pull "$SQUID_IMAGE""#),
+        "AWF squid image must be bound from the internal registry: {compiled}"
+    );
     assert!(compiled.contains("azureSubscription: acr-conn"));
-    assert!(!compiled.contains("docker pull ghcr.io"));
+    assert!(
+        !compiled.contains("_IMAGE='ghcr.io"),
+        "no image binding should point at ghcr.io in registry mode: {compiled}"
+    );
     assert!(!compiled.contains("DownloadPackage@1"));
     assert!(!compiled.contains("NuGetAuthenticate@1"));
     assert!(!compiled.contains("github.com/githubnext/ado-aw/releases"));
@@ -7878,12 +8029,14 @@ fn test_supply_chain_full_reroutes_all_artifacts() {
         "ACR login must be emitted before docker pull in registry mode"
     );
     assert!(
-        compiled.contains("docker pull myacr.azurecr.io/oss-mirror/squid:"),
-        "AWF images must be pulled from the internal registry base path (artifact name only)"
+        compiled.contains("SQUID_IMAGE='myacr.azurecr.io/oss-mirror/squid:")
+            && compiled.contains(r#"docker pull "$SQUID_IMAGE""#),
+        "AWF squid image must be bound from the internal registry base path (artifact name only): {compiled}"
     );
     assert!(
-        compiled.contains("docker pull myacr.azurecr.io/oss-mirror/api-proxy:"),
-        "the always-on api-proxy must be pulled from the internal registry"
+        compiled.contains("API_PROXY_IMAGE='myacr.azurecr.io/oss-mirror/api-proxy:")
+            && compiled.contains(r#"docker pull "$API_PROXY_IMAGE""#),
+        "the always-on api-proxy must be bound from the internal registry"
     );
     assert!(
         compiled.contains("myacr.azurecr.io/oss-mirror/gh-aw-mcpg:"),
@@ -7999,6 +8152,88 @@ supply-chain:
     assert!(
         stderr.contains("supply-chain.registry requires a service connection"),
         "error must explain the missing registry connection: {stderr}"
+    );
+}
+
+/// `supply-chain.registry` with characters outside the validated allowlist
+/// (e.g. embedded whitespace or a shell-injection attempt) must be rejected
+/// at compile time rather than silently reaching the generated YAML —
+/// `RegistryRef::parse` / `is_valid_registry_ref` is the enforcement point.
+#[test]
+fn test_supply_chain_registry_invalid_chars_fails() {
+    let source = r#"---
+name: "Bad Registry Chars"
+description: "registry containing disallowed characters"
+supply-chain:
+  registry:
+    name: "myacr.azurecr.io; rm -rf /"
+    service-connection: acr-conn
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("bad-registry-chars", source);
+    assert!(
+        !ok,
+        "registry name with disallowed characters must fail to compile: {compiled}"
+    );
+    assert!(
+        !stderr.is_empty(),
+        "compile failure must surface a diagnostic message"
+    );
+}
+
+/// `supply-chain.service-connection` containing a double quote (control for
+/// downstream YAML/task-input injection) must be rejected at compile time —
+/// `ServiceConnection::parse` / `is_valid_service_connection` is the
+/// enforcement point.
+#[test]
+fn test_supply_chain_service_connection_invalid_chars_fails() {
+    let source = r#"---
+name: "Bad Connection"
+description: "service connection containing a quote"
+supply-chain:
+  feed: my-internal-feed
+  service-connection: "acr\"conn"
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("bad-service-connection", source);
+    assert!(
+        !ok,
+        "service-connection with a quote character must fail to compile: {compiled}"
+    );
+    assert!(
+        stderr.contains("service-connection") || stderr.contains("service_connection"),
+        "error must reference the invalid service-connection field: {stderr}"
+    );
+}
+
+/// `supply-chain.feed` with a path-traversal segment (`..`) must be rejected
+/// at compile time — `FeedRef::parse` / `is_valid_feed_ref` is the
+/// enforcement point, and this is a security-relevant guard against feed
+/// path escapes reaching the generated NuGetAuthenticate/DownloadPackage
+/// steps.
+#[test]
+fn test_supply_chain_feed_path_traversal_fails() {
+    let source = r#"---
+name: "Bad Feed"
+description: "feed containing a path traversal segment"
+supply-chain:
+  feed: "../escape-feed"
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("bad-feed-traversal", source);
+    assert!(
+        !ok,
+        "feed with a '..' path-traversal segment must fail to compile: {compiled}"
+    );
+    assert!(
+        !stderr.is_empty(),
+        "compile failure must surface a diagnostic message"
     );
 }
 
@@ -8324,6 +8559,16 @@ safe-outputs:
         compiled.contains("AW_REVIEWED_TOOLS: create-pull-request"),
         "expected the reviewed tool list passed via env:\n{compiled}"
     );
+    assert!(
+        compiled.contains("AW_GITHUB_REPOSITORY_POLICIES: '{}'")
+            || compiled.contains("AW_GITHUB_REPOSITORY_POLICIES: {}"),
+        "expected an empty trusted repository-policy map:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("AW_CURRENT_REPOSITORY: $(Build.Repository.Name)")
+            && compiled.contains("AW_CURRENT_REPOSITORY_PROVIDER: $(Build.Repository.Provider)"),
+        "expected trusted ADO repository metadata:\n{compiled}"
+    );
 
     // The step lives in the Agent job, not the Detection job.
     let agent_block = job_block(&compiled, "Agent");
@@ -8335,6 +8580,66 @@ safe-outputs:
     assert!(
         !detection_block.contains("Render safe-outputs summary"),
         "summary step must NOT be in the Detection job:\n{detection_block}"
+    );
+}
+
+#[test]
+fn test_safe_outputs_summary_step_embeds_trusted_github_repository_policy() {
+    let source = r#"---
+name: "GitHub Summary Agent"
+description: "Trusted repository summary"
+safe-outputs:
+  create-github-issue:
+    target-repo: octo/default
+    allowed-repos: [octo/other]
+    require-approval: true
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("summary-github-repo", source);
+    assert!(ok, "pipeline should compile: {stderr}");
+    let agent_block = job_block(&compiled, "Agent");
+    assert!(
+        agent_block.contains("AW_GITHUB_REPOSITORY_POLICIES:")
+            && agent_block.contains("create-github-issue")
+            && agent_block.contains("targetRepo")
+            && agent_block.contains("octo/default")
+            && agent_block.contains("allowedRepos")
+            && agent_block.contains("octo/other"),
+        "expected compiler-owned GitHub repository policy:\n{agent_block}"
+    );
+    assert!(
+        agent_block.contains("AW_GITHUB_API_URL: https://api.github.com"),
+        "expected resolved GitHub API URL:\n{agent_block}"
+    );
+}
+
+#[test]
+fn test_safe_outputs_summary_step_preserves_current_repository_fallback() {
+    let source = r#"---
+name: "GitHub Current Repository Summary"
+description: "Runtime current repository fallback"
+safe-outputs:
+  create-github-issue: {}
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("summary-github-current", source);
+    assert!(ok, "pipeline should compile: {stderr}");
+    let agent_block = job_block(&compiled, "Agent");
+    assert!(
+        agent_block.contains("create-github-issue")
+            && agent_block.contains("targetRepo")
+            && agent_block.contains("null")
+            && agent_block.contains("allowedRepos"),
+        "expected a trusted policy with no fixed target:\n{agent_block}"
+    );
+    assert!(
+        agent_block.contains("AW_CURRENT_REPOSITORY: $(Build.Repository.Name)")
+            && agent_block.contains("AW_CURRENT_REPOSITORY_PROVIDER: $(Build.Repository.Provider)"),
+        "expected runtime current-repository fallback inputs:\n{agent_block}"
     );
 }
 
@@ -8808,17 +9113,28 @@ engine:
 /// nowhere else, for a given compiled pipeline.
 fn assert_github_app_token_wiring(compiled: &str) {
     // Total bundle invocations = mint (Agent + Detection) + revoke
-    // (Agent + Detection) = 4. Revoke invocations carry the ` revoke` arg.
+    // (Agent + Detection) = 4. Both mint and revoke read the bundle path
+    // through the bound `$GITHUB_APP_TOKEN_PATH`; only revoke follows it
+    // with the literal `revoke` word.
     let total_bundle = compiled
-        .matches("node '/tmp/ado-aw-scripts/ado-script/github-app-token.js'")
+        .matches("node \"$GITHUB_APP_TOKEN_PATH\"")
         .count();
     let revoke_hits = compiled
-        .matches("node '/tmp/ado-aw-scripts/ado-script/github-app-token.js' revoke")
+        .matches("node \"$GITHUB_APP_TOKEN_PATH\" revoke")
         .count();
     let mint_hits = total_bundle - revoke_hits;
     assert_eq!(
         mint_hits, 2,
         "expected the mint step in exactly Agent + Detection, found {mint_hits}:\n{compiled}"
+    );
+    // The bundle path is projected through the prelude in every mint/revoke
+    // step (Agent + Detection = 4 preludes).
+    let path_bindings = compiled
+        .matches("GITHUB_APP_TOKEN_PATH='/tmp/ado-aw-scripts/ado-script/github-app-token.js'")
+        .count();
+    assert_eq!(
+        path_bindings, 4,
+        "expected the bundle path bound in every mint + revoke prelude, found {path_bindings}:\n{compiled}"
     );
     let mint_display = compiled
         .matches("Mint GitHub App token (Copilot engine auth)")
@@ -8928,17 +9244,17 @@ fn test_github_app_token_skip_revocation() {
     // Mint step still present in Agent + Detection.
     assert_eq!(
         compiled
-            .matches("node '/tmp/ado-aw-scripts/ado-script/github-app-token.js'")
+            .matches("node \"$GITHUB_APP_TOKEN_PATH\"")
             .count()
             - compiled
-                .matches("node '/tmp/ado-aw-scripts/ado-script/github-app-token.js' revoke")
+                .matches("node \"$GITHUB_APP_TOKEN_PATH\" revoke")
                 .count(),
         2,
         "mint step must still be present:\n{compiled}"
     );
     // ...but no revoke step.
     assert!(
-        !compiled.contains("github-app-token.js' revoke"),
+        !compiled.contains("\"$GITHUB_APP_TOKEN_PATH\" revoke"),
         "skip-token-revocation must suppress the revoke step:\n{compiled}"
     );
 }
@@ -8983,14 +9299,21 @@ fn test_github_app_token_literal_app_id_and_api_url() {
         !compiled.contains("$(GITHUB_APP_PRIVATE_KEY)"),
         "override must replace the default private-key variable:\n{compiled}"
     );
-    // GHES api-url flows into both mint and revoke steps as an argv flag.
-    // Mint: `... --api-url '...'`; revoke: `revoke --api-url '...'`.
-    let api_url_args = compiled
+    // GHES api-url flows into both mint (fragment argv) and revoke (prelude
+    // binding + `${API_URL:+…}` guard) steps in both jobs.
+    let mint_api_url = compiled
         .matches("--api-url 'https://ghe.example.com/api/v3'")
         .count();
     assert_eq!(
-        api_url_args, 4,
-        "api-url must appear as an argv flag in both mint and both revoke steps (2 jobs x 2):\n{compiled}"
+        mint_api_url, 2,
+        "api-url must appear as a mint-step argv fragment in both jobs (Agent + Detection):\n{compiled}"
+    );
+    let revoke_api_url = compiled
+        .matches("API_URL='https://ghe.example.com/api/v3'")
+        .count();
+    assert_eq!(
+        revoke_api_url, 2,
+        "api-url must be projected through the revoke-step prelude in both jobs (Agent + Detection):\n{compiled}"
     );
     assert!(
         !compiled.contains("GH_APP_API_URL:"),
@@ -9205,7 +9528,15 @@ fn test_create_pull_request_emits_prepare_pr_base_step_in_agent() {
     );
     let agent = job_block(&compiled, "Agent");
     assert!(
-        agent.contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js' --mode patch-base --repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
+        agent.contains("PREPARE_PR_BASE_PATH='/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js'"),
+        "Agent job must project the bundle path through the prelude:\n{agent}"
+    );
+    assert!(
+        agent.contains("MODE='patch-base'"),
+        "Agent job must project the patch-base mode through the prelude:\n{agent}"
+    );
+    assert!(
+        agent.contains("--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
         "Agent job must invoke patch-base without shell-expanding the runtime self source ref:\n{agent}"
     );
     assert!(
@@ -9247,7 +9578,15 @@ fn test_create_pull_request_prepare_step_defaults_target_branch() {
     );
     let agent = job_block(&compiled, "Agent");
     assert!(
-        agent.contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js' --mode patch-base --repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
+        agent.contains("PREPARE_PR_BASE_PATH='/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js'"),
+        "bare create-pull-request must project the bundle path through the prelude:\n{agent}"
+    );
+    assert!(
+        agent.contains("MODE='patch-base'"),
+        "bare create-pull-request must project the patch-base mode through the prelude:\n{agent}"
+    );
+    assert!(
+        agent.contains("--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
         "bare create-pull-request must emit the prepare step targeting 'main':\n{agent}"
     );
     // Single `self` checkout ⇒ exactly one --repo-dir (the working directory).
@@ -9333,7 +9672,19 @@ fn test_create_pull_request_emits_prepare_pr_base_step_in_safeoutputs() {
     );
     let safeoutputs = job_block(&compiled, "SafeOutputs");
     assert!(
-        safeoutputs.contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js' --mode target-worktree --repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
+        safeoutputs.contains(
+            "PREPARE_PR_BASE_PATH='/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js'"
+        ),
+        "SafeOutputs job must project the bundle path through the prelude:\n{safeoutputs}"
+    );
+    assert!(
+        safeoutputs.contains("MODE='target-worktree'"),
+        "SafeOutputs job must project the target-worktree mode through the prelude:\n{safeoutputs}"
+    );
+    assert!(
+        safeoutputs.contains(
+            "--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"
+        ),
         "SafeOutputs job must invoke prepare-pr-base with the self dir/target pair:\n{safeoutputs}"
     );
     assert!(
@@ -9370,7 +9721,8 @@ fn test_create_pull_request_safeoutputs_prepare_step_covers_all_checkout_repos()
     );
     let safeoutputs = job_block(&compiled, "SafeOutputs");
     assert!(
-        safeoutputs.contains("--repo-dir \"$(Build.SourcesDirectory)/self\" --target-branch 'main'"),
+        safeoutputs
+            .contains("--repo-dir \"$(Build.SourcesDirectory)/self\" --target-branch 'main'"),
         "self must target the literal default 'main' in the SafeOutputs job:\n{safeoutputs}"
     );
     assert!(
@@ -9484,8 +9836,7 @@ fn test_issue_1731_safeoutputs_checks_out_additional_repos_for_create_pr() {
         "Agent must check out self at its fixed multi-checkout path:\n{agent}"
     );
     assert!(
-        agent.contains("- checkout: build-tools")
-            && agent.contains("path: s/build-tools"),
+        agent.contains("- checkout: build-tools") && agent.contains("path: s/build-tools"),
         "Agent must check out tools at its explicit alias path:\n{agent}"
     );
     assert!(
@@ -9566,14 +9917,17 @@ fn test_issue_1731_safeoutputs_executor_source_path_uses_multi_checkout_layout()
     );
     let safeoutputs = job_block(&compiled, "SafeOutputs");
     // With additional repos, self is pinned to $(Build.SourcesDirectory)/self.
+    // The compiler now passes the source path to the executor through the step
+    // `env:` block (ADO_AW_SOURCE_PATH), which the shell reads as
+    // `--source "$ADO_AW_SOURCE_PATH"`.
     assert!(
-        safeoutputs
-            .contains("ado-aw execute --source \"$(Build.SourcesDirectory)/self/"),
+        safeoutputs.contains("ADO_AW_SOURCE_PATH: $(Build.SourcesDirectory)/self/")
+            && safeoutputs
+                .contains(r#"ado-aw execute --source "$ADO_AW_SOURCE_PATH""#),
         "SafeOutputs executor --source must use the multi-checkout layout path:\n{safeoutputs}"
     );
     assert!(
-        safeoutputs
-            .contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"),
+        safeoutputs.contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"),
         "SafeOutputs must pass the exact self checkout to the executor:\n{safeoutputs}"
     );
     assert!(
@@ -9659,24 +10013,22 @@ fn test_issue_1731_split_approval_additional_checkouts_only_in_pr_variant() {
         "auto SafeOutputs must NOT check out additional repos (it never runs create-pull-request):\n{auto}"
     );
     assert!(
-        auto.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/")
-            && !auto.contains(
-                "ado-aw execute --source \"$(Build.SourcesDirectory)/self/"
-            ),
+        auto.contains("ADO_AW_SOURCE_PATH: $(Build.SourcesDirectory)")
+            && !auto.contains("ADO_AW_SOURCE_PATH: $(Build.SourcesDirectory)/self/")
+            && auto.contains(r#"ado-aw execute --source "$ADO_AW_SOURCE_PATH""#),
         "self-only SafeOutputs must use its single-checkout source path:\n{auto}"
     );
     assert!(
         auto.contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)")
-            && !auto.contains(
-                "ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"
-            ),
+            && !auto.contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"),
         "self-only SafeOutputs must pass its checkout root as the self repo:\n{auto}"
     );
     assert!(
-        reviewed.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/self/")
+        reviewed.contains("ADO_AW_SOURCE_PATH: $(Build.SourcesDirectory)/self/")
             && reviewed.contains(
                 "ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"
-            ),
+            )
+            && reviewed.contains(r#"ado-aw execute --source "$ADO_AW_SOURCE_PATH""#),
         "PR-capable reviewed job must use its multi-checkout self path:\n{reviewed}"
     );
 }
@@ -9706,24 +10058,23 @@ fn test_issue_1731_split_approval_additional_checkouts_in_auto_when_sibling_gate
         "SafeOutputs_Reviewed must NOT check out additional repos when it doesn't run create-pull-request:\n{reviewed}"
     );
     assert!(
-        auto.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/self/")
+        auto.contains("ADO_AW_SOURCE_PATH: $(Build.SourcesDirectory)/self/")
+            && auto.contains(r#"ado-aw execute --source "$ADO_AW_SOURCE_PATH""#)
             && auto.contains(
                 "ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"
             ),
         "PR-capable automatic job must use its multi-checkout self path:\n{auto}"
     );
     assert!(
-        reviewed.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/")
-            && !reviewed.contains(
-                "ado-aw execute --source \"$(Build.SourcesDirectory)/self/"
-            ),
+        reviewed.contains("ADO_AW_SOURCE_PATH: $(Build.SourcesDirectory)")
+            && !reviewed.contains("ADO_AW_SOURCE_PATH: $(Build.SourcesDirectory)/self/")
+            && reviewed.contains(r#"ado-aw execute --source "$ADO_AW_SOURCE_PATH""#),
         "self-only reviewed job must use its single-checkout source path:\n{reviewed}"
     );
     assert!(
         reviewed.contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)")
-            && !reviewed.contains(
-                "ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"
-            ),
+            && !reviewed
+                .contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"),
         "self-only reviewed job must pass its checkout root as the self repo:\n{reviewed}"
     );
 }
@@ -9744,7 +10095,8 @@ fn test_issue_1731_split_checkout_layout_compiles_for_every_target() {
             "{target}: tools must be checked out in Agent and the PR-capable Stage 3 job only:\n{compiled}"
         );
         assert!(
-            compiled.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/self/"),
+            compiled.contains("ADO_AW_SOURCE_PATH: $(Build.SourcesDirectory)/self/")
+                && compiled.contains(r#"ado-aw execute --source "$ADO_AW_SOURCE_PATH""#),
             "{target}: PR-capable Stage 3 source must use multi-checkout layout:\n{compiled}"
         );
         assert!(
@@ -9754,73 +10106,11 @@ fn test_issue_1731_split_checkout_layout_compiles_for_every_target() {
             "{target}: Stage 3 self identity must be compile-time resolved:\n{compiled}"
         );
         assert!(
-            compiled.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/")
+            compiled.contains("ADO_AW_SOURCE_PATH: $(Build.SourcesDirectory)")
                 && compiled.contains(
                     "ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)"
                 ),
             "{target}: self-only Stage 3 sibling must use single-checkout layout:\n{compiled}"
-        );
-    }
-}
-
-#[test]
-fn test_azure_cli_smoke_uses_non_blocking_noop_flow() {
-    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("safe-outputs")
-        .join("azure-cli.md");
-    let fixture = fs::read_to_string(fixture_path)
-        .expect("read azure-cli smoke fixture")
-        .replace("\r\n", "\n");
-
-    for contract in [
-        "Capture the combined stdout/stderr",
-        "Invoke exactly one MCP tool: `noop` from the `safeoutputs`",
-        "bash:\n    - az\n    - head",
-        "edit: false",
-        "Do not inspect MCP configuration",
-        "Do not invoke SafeOutputs through",
-        "Actually invoke the MCP tool",
-    ] {
-        assert!(
-            fixture.contains(contract),
-            "Azure CLI smoke must preserve its non-blocking restricted flow; missing contract: {contract}"
-        );
-    }
-    for forbidden in ["report-incomplete", "Do not call `noop`"] {
-        assert!(
-            !fixture.contains(forbidden),
-            "Azure CLI smoke must not fail the candidate lane on unavailable direct auth: {forbidden}"
-        );
-    }
-
-    let (ok, compiled, stderr) = compile_inline_source("azure-cli-smoke-tool-policy", &fixture);
-    assert!(ok, "Azure CLI smoke should compile:\n{stderr}");
-    let document = parse_compiled_yaml(&compiled);
-    assert_job_execution_env_excludes_ado_credentials(
-        &document,
-        "Agent",
-        "=== Running AI agent with AWF",
-        "Azure CLI smoke Agent",
-    );
-    let agent = find_job_mapping_by_display_name(&document, "Agent")
-        .expect("Azure CLI smoke should contain the Agent job");
-    let run_agent = find_bash_step_containing(agent, "=== Running AI agent with AWF")
-        .expect("Azure CLI smoke should contain the Agent execution step");
-    let command = run_agent
-        .get(yaml_key("bash"))
-        .and_then(|value| value.as_str())
-        .expect("Agent execution step should have a bash body");
-    for required in ["shell(az)", "shell(head)"] {
-        assert!(
-            command.contains(required),
-            "Azure CLI Agent command should allow only its required shell command {required}:\n{command}"
-        );
-    }
-    for forbidden in ["--allow-all-tools", "--allow-all-paths"] {
-        assert!(
-            !command.contains(forbidden),
-            "Azure CLI Agent command must not contain {forbidden}:\n{command}"
         );
     }
 }

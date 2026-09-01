@@ -1,73 +1,21 @@
 //! `set-github-issue-type` safe output.
 
-use anyhow::Context;
 use log::{debug, info};
-use percent_encoding::utf8_percent_encode;
+use reqwest::Method;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::PATH_SEGMENT;
-use super::create_github_issue::{resolve_target_repo, validate_target_repo};
-use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::safe_outputs::{
+    ExecutionContext, ExecutionResult, Executor, GithubClient, GithubIssueNumber,
+    GithubMutationFilters, GithubRepositoryPolicy, GithubTargetCapabilities, Validate,
+    resolve_github_issue_target, validate_github_mutation_filter_config,
+    validate_github_mutation_filters, validate_github_repository,
+    validate_github_target_capability,
+};
 use crate::sanitize::{SanitizeContent, sanitize_config};
-use crate::secure::GithubTemporaryId;
 use crate::tool_result;
 use crate::validate::reject_pipeline_injection;
 use ado_aw_derive::SanitizeConfig;
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-#[serde(untagged)]
-pub enum GithubIssueNumber {
-    Number(u64),
-    Temporary(GithubTemporaryId),
-}
-
-impl<'de> Deserialize<'de> for GithubIssueNumber {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct IssueNumberVisitor;
-
-        impl serde::de::Visitor<'_> for IssueNumberVisitor {
-            type Value = GithubIssueNumber;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("a positive issue number or #aw_ temporary issue ID")
-            }
-
-            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
-                Ok(GithubIssueNumber::Number(value))
-            }
-
-            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                u64::try_from(value)
-                    .map(GithubIssueNumber::Number)
-                    .map_err(|_| E::custom("issue_number must be positive"))
-            }
-
-            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                if value.chars().all(|c| c.is_ascii_digit()) {
-                    return value
-                        .parse::<u64>()
-                        .map(GithubIssueNumber::Number)
-                        .map_err(|_| E::custom("quoted issue_number is outside the u64 range"));
-                }
-                GithubTemporaryId::parse(value)
-                    .map(GithubIssueNumber::Temporary)
-                    .map_err(E::custom)
-            }
-        }
-
-        deserializer.deserialize_any(IssueNumberVisitor)
-    }
-}
 
 #[derive(Deserialize, JsonSchema)]
 pub struct SetGithubIssueTypeParams {
@@ -75,18 +23,23 @@ pub struct SetGithubIssueTypeParams {
     pub issue_number: GithubIssueNumber,
     /// Native issue type name. An empty string clears the type.
     pub issue_type: String,
+    /// Optional target repository. Must exactly match `target-repo` or an
+    /// `allowed-repos` entry.
+    #[serde(default)]
+    pub repository: Option<String>,
 }
 
 impl Validate for SetGithubIssueTypeParams {
     fn validate(&self) -> anyhow::Result<()> {
-        if let GithubIssueNumber::Number(number) = self.issue_number {
-            anyhow::ensure!(number > 0, "issue_number must be positive");
-        }
+        self.issue_number.validate("issue_number")?;
         anyhow::ensure!(
             self.issue_type.len() <= 128,
             "issue_type must be 128 characters or fewer"
         );
         reject_pipeline_injection(&self.issue_type, "set-github-issue-type.issue_type")?;
+        if let Some(repository) = self.repository.as_deref() {
+            validate_github_repository(repository)?;
+        }
         Ok(())
     }
 }
@@ -100,12 +53,18 @@ tool_result! {
     pub struct SetGithubIssueTypeResult {
         issue_number: GithubIssueNumber,
         issue_type: String,
+        #[serde(default)]
+        repository: Option<String>,
     }
 }
 
 impl SanitizeContent for SetGithubIssueTypeResult {
     fn sanitize_content_fields(&mut self) {
         self.issue_type = sanitize_config(&self.issue_type);
+        self.repository = self
+            .repository
+            .as_deref()
+            .map(crate::sanitize::sanitize_config);
     }
 }
 
@@ -114,6 +73,12 @@ impl SanitizeContent for SetGithubIssueTypeResult {
 pub struct SetGithubIssueTypeConfig {
     #[serde(default, rename = "target-repo")]
     pub target_repo: Option<String>,
+    #[serde(default, rename = "allowed-repos")]
+    pub allowed_repos: Vec<String>,
+    #[serde(default, rename = "required-labels")]
+    pub required_labels: Vec<String>,
+    #[serde(default, rename = "required-title-prefix")]
+    pub required_title_prefix: Option<String>,
     #[serde(default)]
     pub allowed: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -151,7 +116,7 @@ impl Executor for SetGithubIssueTypeResult {
                 ));
             }
         };
-        let config: SetGithubIssueTypeConfig = ctx.get_tool_config("set-github-issue-type");
+        let config: SetGithubIssueTypeConfig = ctx.get_tool_config("set-github-issue-type")?;
 
         let resolved_type = if self.issue_type.is_empty() {
             String::new()
@@ -171,79 +136,53 @@ impl Executor for SetGithubIssueTypeResult {
             )));
         };
 
-        let (target_repo, issue_number) = match &self.issue_number {
-            GithubIssueNumber::Number(number) => {
-                let target = match resolve_target_repo(config.target_repo.as_deref(), ctx) {
-                    Ok(target) => target,
-                    Err(result) => return Ok(result),
-                };
-                (target, *number)
-            }
-            GithubIssueNumber::Temporary(temporary_id) => {
-                let Some(issue) = ctx.resolve_github_issue(temporary_id)? else {
-                    return Ok(ExecutionResult::failure(format!(
-                        "temporary issue ID '{}' has not been resolved; create-github-issue must \
-                         succeed earlier in the same SafeOutputs job",
-                        temporary_id.canonical()
-                    )));
-                };
-                if let Some(configured) = config.target_repo.as_deref() {
-                    if let Err(error) = validate_target_repo(configured) {
-                        return Ok(ExecutionResult::failure(error.to_string()));
-                    }
-                    if !configured.eq_ignore_ascii_case(&issue.repository) {
-                        return Ok(ExecutionResult::failure(format!(
-                            "temporary issue ID '{}' resolved to repository '{}', which does \
-                             not match set-github-issue-type.target-repo '{}'",
-                            temporary_id.canonical(),
-                            issue.repository,
-                            configured
-                        )));
-                    }
-                }
-                (issue.repository, issue.number)
-            }
+        let target = match resolve_github_issue_target(
+            &self.issue_number,
+            self.repository.as_deref(),
+            GithubRepositoryPolicy::new(config.target_repo.as_deref(), &config.allowed_repos),
+            ctx,
+        )? {
+            Ok(target) => target,
+            Err(result) => return Ok(result),
         };
 
-        let (owner, repo) = target_repo
-            .split_once('/')
-            .context("target-repo must be 'owner/repo'")?;
-        let url = format!(
-            "{}/repos/{}/{}/issues/{}",
-            ctx.github_api_url.trim_end_matches('/'),
-            utf8_percent_encode(owner, PATH_SEGMENT),
-            utf8_percent_encode(repo, PATH_SEGMENT),
-            issue_number
-        );
+        let client = GithubClient::new(&ctx.github_api_url, token)?;
+        let filters = GithubMutationFilters {
+            required_labels: &config.required_labels,
+            required_title_prefix: config.required_title_prefix.as_deref(),
+        };
+        validate_github_mutation_filter_config(filters)?;
+        let metadata = match client.get_issue(&target.repository, target.number).await? {
+            Ok(metadata) => metadata,
+            Err(error) => return Ok(ExecutionResult::failure(error.to_string())),
+        };
+        if let Err(result) =
+            validate_github_target_capability(&metadata, GithubTargetCapabilities::ISSUES_ONLY)
+        {
+            return Ok(result);
+        }
+        if let Err(result) = validate_github_mutation_filters(&metadata, filters) {
+            return Ok(result);
+        }
+
+        let url = client.issue_url(&target.repository, target.number)?;
         debug!("PATCHing GitHub issue type at {url}");
 
         // gh-aw's set-github-issue-type contract uses an empty string to clear the
         // native type; preserve that wire behavior for front-matter parity.
-        let response = reqwest::Client::new()
-            .patch(&url)
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .header(
-                "User-Agent",
-                format!("ado-aw/{}", env!("CARGO_PKG_VERSION")),
+        let response = client
+            .send(
+                Method::PATCH,
+                url,
+                Some(&serde_json::json!({ "type": resolved_type })),
             )
-            .bearer_auth(token)
-            .json(&serde_json::json!({ "type": resolved_type }))
-            .send()
-            .await
-            .context("Failed to send request to GitHub API")?;
+            .await?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "<unable to read response body>".to_string());
-            return Ok(ExecutionResult::failure(format!(
-                "Failed to set GitHub issue type (HTTP {}): {}",
-                status,
-                crate::sanitize::neutralize_pipeline_commands(&body)
-            )));
+        if !response.is_success() {
+            let error = response
+                .require_success("Failed to set GitHub issue type")
+                .expect_err("non-success response must produce an API error");
+            return Ok(ExecutionResult::failure(error.to_string()));
         }
 
         let action = if resolved_type.is_empty() {
@@ -253,13 +192,16 @@ impl Executor for SetGithubIssueTypeResult {
         };
         info!(
             "{} native type for GitHub issue {}#{}",
-            action, target_repo, issue_number
+            action, target.repository, target.number
         );
         Ok(ExecutionResult::success_with_data(
-            format!("{} issue type for {}#{}", action, target_repo, issue_number),
+            format!(
+                "{} issue type for {}#{}",
+                action, target.repository, target.number
+            ),
             serde_json::json!({
-                "number": issue_number,
-                "target_repo": target_repo,
+                "number": target.number,
+                "target_repo": target.repository,
                 "issue_type": resolved_type,
             }),
         ))
@@ -270,7 +212,31 @@ impl Executor for SetGithubIssueTypeResult {
 mod tests {
     use super::*;
     use crate::safe_outputs::{CreateGithubIssueParams, ToolResult};
+    use crate::secure::GithubTemporaryId;
     use std::collections::HashMap;
+
+    async fn mount_issue_get(server: &wiremock::MockServer, number: u64, pull_request: bool) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let mut body = serde_json::json!({
+            "number": number,
+            "node_id": format!("I_{number}"),
+            "title": "Issue title",
+            "state": "open",
+            "labels": [],
+            "html_url": format!("https://github.example/octo/repo/issues/{number}")
+        });
+        if pull_request {
+            body["pull_request"] = serde_json::json!({});
+        }
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/octo/repo/issues/{number}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .expect(1)
+            .mount(server)
+            .await;
+    }
 
     #[test]
     fn result_name_and_default_budget_match_contract() {
@@ -284,6 +250,7 @@ mod tests {
             SetGithubIssueTypeParams {
                 issue_number: GithubIssueNumber::Number(1),
                 issue_type: "Bug".to_string(),
+                repository: None,
             }
             .validate()
             .is_ok()
@@ -294,6 +261,7 @@ mod tests {
                     GithubTemporaryId::parse("#aw_bug1").unwrap()
                 ),
                 issue_type: String::new(),
+                repository: None,
             }
             .validate()
             .is_ok()
@@ -305,6 +273,18 @@ mod tests {
         let result = SetGithubIssueTypeParams {
             issue_number: GithubIssueNumber::Number(0),
             issue_type: "Bug".to_string(),
+            repository: None,
+        }
+        .validate();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_malformed_repository() {
+        let result = SetGithubIssueTypeParams {
+            issue_number: GithubIssueNumber::Number(1),
+            issue_type: "Bug".to_string(),
+            repository: Some("octo/$(TOKEN)".to_string()),
         }
         .validate();
         assert!(result.is_err());
@@ -317,10 +297,7 @@ mod tests {
             "issue_type": "Bug"
         }))
         .unwrap();
-        assert!(matches!(
-            params.issue_number,
-            GithubIssueNumber::Number(42)
-        ));
+        assert!(matches!(params.issue_number, GithubIssueNumber::Number(42)));
     }
 
     #[tokio::test]
@@ -338,6 +315,7 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
+        mount_issue_get(&server, 42, false).await;
         Mock::given(method("PATCH"))
             .and(path("/repos/octo/repo/issues/42"))
             .and(body_json(serde_json::json!({ "type": "Bug" })))
@@ -373,6 +351,7 @@ mod tests {
             body: "A detailed issue body that is long enough for validation.".to_string(),
             labels: vec![],
             assignees: vec![],
+            repository: None,
             temporary_id: Some(GithubTemporaryId::parse("#aw_bug1").unwrap()),
         }
         .try_into()
@@ -385,6 +364,7 @@ mod tests {
             body: "Another detailed issue body that is long enough for validation.".to_string(),
             labels: vec![],
             assignees: vec![],
+            repository: None,
             temporary_id: Some(GithubTemporaryId::parse("#aw_bug1").unwrap()),
         }
         .try_into()
@@ -398,6 +378,7 @@ mod tests {
                 GithubTemporaryId::parse("aw_bug1").unwrap(),
             ),
             issue_type: "bug".to_string(),
+            repository: None,
         }
         .try_into()
         .unwrap();
@@ -429,6 +410,7 @@ mod tests {
                 GithubTemporaryId::parse("#aw_missing").unwrap(),
             ),
             issue_type: "Bug".to_string(),
+            repository: None,
         }
         .try_into()
         .unwrap();
@@ -446,6 +428,7 @@ mod tests {
         let mut result: SetGithubIssueTypeResult = SetGithubIssueTypeParams {
             issue_number: GithubIssueNumber::Number(1),
             issue_type: "Bug".to_string(),
+            repository: None,
         }
         .try_into()
         .unwrap();
@@ -460,6 +443,7 @@ mod tests {
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
+        mount_issue_get(&server, 7, false).await;
         Mock::given(method("PATCH"))
             .and(path("/repos/octo/repo/issues/7"))
             .and(body_json(serde_json::json!({ "type": "" })))
@@ -484,6 +468,7 @@ mod tests {
         let mut result: SetGithubIssueTypeResult = SetGithubIssueTypeParams {
             issue_number: GithubIssueNumber::Number(7),
             issue_type: String::new(),
+            repository: None,
         }
         .try_into()
         .unwrap();
@@ -503,6 +488,7 @@ mod tests {
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
+        mount_issue_get(&server, 7, false).await;
         Mock::given(method("PATCH"))
             .and(path("/repos/octo/repo/issues/7"))
             .and(body_json(serde_json::json!({ "type": "Epic" })))
@@ -524,6 +510,7 @@ mod tests {
         let mut result: SetGithubIssueTypeResult = SetGithubIssueTypeParams {
             issue_number: GithubIssueNumber::Number(7),
             issue_type: "Epic".to_string(),
+            repository: None,
         }
         .try_into()
         .unwrap();
@@ -559,6 +546,7 @@ mod tests {
         let mut result: SetGithubIssueTypeResult = SetGithubIssueTypeParams {
             issue_number: GithubIssueNumber::Number(7),
             issue_type: "Epic".to_string(),
+            repository: None,
         }
         .try_into()
         .unwrap();
@@ -582,6 +570,7 @@ mod tests {
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
+        mount_issue_get(&server, 7, false).await;
         Mock::given(method("PATCH"))
             .and(path("/repos/octo/repo/issues/7"))
             .and(body_json(serde_json::json!({ "type": "Bug" })))
@@ -606,6 +595,7 @@ mod tests {
         let mut result: SetGithubIssueTypeResult = SetGithubIssueTypeParams {
             issue_number: GithubIssueNumber::Number(7),
             issue_type: "bUg".to_string(),
+            repository: None,
         }
         .try_into()
         .unwrap();
@@ -615,5 +605,159 @@ mod tests {
             "case-insensitive match failed: {}",
             execution.message
         );
+    }
+
+    #[tokio::test]
+    async fn required_filters_preflight_before_type_patch() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/octo/repo/issues/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 7,
+                "node_id": "I_7",
+                "title": "[agent] Fix the build",
+                "state": "open",
+                "labels": [{"name": "bug"}],
+                "html_url": "https://github.example/octo/repo/issues/7"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/repos/octo/repo/issues/7"))
+            .and(body_json(serde_json::json!({ "type": "Bug" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut tool_configs = HashMap::new();
+        tool_configs.insert(
+            "set-github-issue-type".to_string(),
+            serde_json::json!({
+                "target-repo": "octo/default",
+                "allowed-repos": ["octo/repo"],
+                "required-labels": ["BUG"],
+                "required-title-prefix": "[agent]",
+                "allowed": ["Bug"]
+            }),
+        );
+        let ctx = ExecutionContext {
+            github_token: Some("token".to_string()),
+            github_api_url: server.uri(),
+            tool_configs,
+            ..Default::default()
+        };
+        let mut result: SetGithubIssueTypeResult = SetGithubIssueTypeParams {
+            issue_number: GithubIssueNumber::Number(7),
+            issue_type: "bug".to_string(),
+            repository: Some("OCTO/REPO".to_string()),
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(
+            execution.success,
+            "filtered patch failed: {}",
+            execution.message
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_request_target_is_rejected_before_type_patch() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        mount_issue_get(&server, 7, true).await;
+        let mut tool_configs = HashMap::new();
+        tool_configs.insert(
+            "set-github-issue-type".to_string(),
+            serde_json::json!({"target-repo": "octo/repo"}),
+        );
+        let ctx = ExecutionContext {
+            github_token: Some("token".to_string()),
+            github_api_url: server.uri(),
+            tool_configs,
+            ..Default::default()
+        };
+        let mut result: SetGithubIssueTypeResult = SetGithubIssueTypeParams {
+            issue_number: GithubIssueNumber::Number(7),
+            issue_type: "Bug".to_string(),
+            repository: None,
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!execution.success);
+        assert!(execution.message.contains("pull requests"));
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method.as_str(), "GET");
+    }
+
+    #[tokio::test]
+    async fn failed_required_filter_performs_no_patch() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/octo/repo/issues/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 7,
+                "title": "Unexpected title",
+                "state": "open",
+                "labels": [{"name": "bug"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut tool_configs = HashMap::new();
+        tool_configs.insert(
+            "set-github-issue-type".to_string(),
+            serde_json::json!({
+                "target-repo": "octo/repo",
+                "required-title-prefix": "[agent]"
+            }),
+        );
+        let ctx = ExecutionContext {
+            github_token: Some("token".to_string()),
+            github_api_url: server.uri(),
+            tool_configs,
+            ..Default::default()
+        };
+        let mut result: SetGithubIssueTypeResult = SetGithubIssueTypeParams {
+            issue_number: GithubIssueNumber::Number(7),
+            issue_type: "Bug".to_string(),
+            repository: None,
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!execution.success);
+        assert!(execution.message.contains("required-title-prefix"));
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method.as_str(), "GET");
+    }
+
+    #[test]
+    fn config_round_trips_shared_repository_and_filter_fields() {
+        let config: SetGithubIssueTypeConfig = serde_yaml::from_str(
+            r#"
+target-repo: octo/default
+allowed-repos: [octo/other]
+required-labels: [bug, triage]
+required-title-prefix: "[agent]"
+allowed: [Bug]
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.target_repo.as_deref(), Some("octo/default"));
+        assert_eq!(config.allowed_repos, vec!["octo/other".to_string()]);
+        assert_eq!(config.required_labels, vec!["bug", "triage"]);
+        assert_eq!(config.required_title_prefix.as_deref(), Some("[agent]"));
     }
 }

@@ -156,7 +156,7 @@ impl Executor for ResolvePrThreadResult {
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
         debug!("ADO org: {}, project: {}", org_url, project);
 
-        let config: ResolvePrThreadConfig = ctx.get_tool_config("resolve-pr-thread");
+        let config: ResolvePrThreadConfig = ctx.get_tool_config("resolve-pr-thread")?;
         debug!("Config: {:?}", config);
 
         // Validate status against allowed-statuses — REQUIRED.

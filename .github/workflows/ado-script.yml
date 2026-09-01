@@ -6,6 +6,8 @@ on:
       - "scripts/ado-script/**"
       - "src/compile/filter_ir.rs"
       - "src/compile/extensions/ado_script.rs"
+      - "src/ado_proxy/**"
+      - "src/main.rs"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/ado-script.yml"
@@ -20,6 +22,8 @@ on:
       - "scripts/ado-script/**"
       - "src/compile/filter_ir.rs"
       - "src/compile/extensions/ado_script.rs"
+      - "src/ado_proxy/**"
+      - "src/main.rs"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/ado-script.yml"
@@ -54,9 +58,9 @@ jobs:
 
       - name: Verify generated TypeScript is up to date
         run: |
-          if ! git diff --exit-code -- scripts/ado-script/src/shared/types.gen.ts scripts/ado-script/src/trigger-e2e/fact-catalog.gen.json; then
+          if ! git diff --exit-code -- scripts/ado-script/src/shared/types.gen.ts scripts/ado-script/src/trigger-e2e/fact-catalog.gen.json scripts/ado-script/src/shared/ado-proxy-catalog.types.gen.ts scripts/ado-script/src/ado-proxy/catalog.gen.json; then
             echo ""
-            echo "::error::Generated files are out of date with the Rust IR (types.gen.ts and/or fact-catalog.gen.json)."
+            echo "::error::Generated files are out of date with the Rust source (types.gen.ts, fact-catalog.gen.json, and/or the ado-proxy catalog artifacts)."
             echo "Run 'cd scripts/ado-script && npm run codegen' and commit the result."
             exit 1
           fi

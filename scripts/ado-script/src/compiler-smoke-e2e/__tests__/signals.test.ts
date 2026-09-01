@@ -1,8 +1,18 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ResolvedCase } from "../cases.js";
 import type { FixtureBuildResult } from "../runner.js";
-import { verifyCaseSignals } from "../signals.js";
+import { verifyCandidateAudit, verifyCaseSignals } from "../signals.js";
+
+const safeSpawnMock = vi.hoisted(() => vi.fn());
+
+vi.mock("../process.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../process.js")>();
+  return {
+    ...actual,
+    safeSpawn: safeSpawnMock,
+  };
+});
 
 /**
  * Tag requirements are declared per case in the manifest, not hardcoded in
@@ -42,6 +52,10 @@ function result(overrides: Partial<FixtureBuildResult> = {}): FixtureBuildResult
     ...overrides,
   };
 }
+
+beforeEach(() => {
+  safeSpawnMock.mockReset();
+});
 
 describe("verifyCaseSignals", () => {
   it("expands {buildId} and passes when the custom job tag exists", async () => {
@@ -132,5 +146,74 @@ describe("verifyCaseSignals", () => {
     );
     expect(calls).toBe(0);
     expect(outcome.ok).toBe(true);
+  });
+});
+
+describe("verifyCandidateAudit", () => {
+  const options = {
+    adoAwBin: "ado-aw",
+    cwd: "/repo",
+    orgUrl: "https://dev.azure.com/org",
+    project: "project",
+    token: "secret-token",
+    timeoutMs: 5000,
+  };
+
+  it("accepts an audit containing the child build and every artifact family", async () => {
+    safeSpawnMock.mockResolvedValue({
+      status: 0,
+      stdout: JSON.stringify({
+        overview: { build_id: 42 },
+        downloaded_files: [
+          { path: "agent_outputs_42/agent-output.json" },
+          { path: "analyzed_outputs_42/verdict.json" },
+          { path: "safe_outputs\\executed-safe-outputs.ndjson" },
+        ],
+      }),
+      stderr: "",
+      timedOut: false,
+      stdoutTruncated: false,
+      stderrTruncated: false,
+    });
+
+    const canary = result({ caseId: "canary" });
+    const outcome = await verifyCandidateAudit([canary], options);
+
+    expect(outcome).toEqual({ ok: true, results: [canary] });
+    expect(safeSpawnMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cmd: "ado-aw",
+        cwd: "/repo",
+        env: { AZURE_DEVOPS_EXT_PAT: "secret-token" },
+        args: expect.arrayContaining(["audit", "42", "--no-cache"]),
+      }),
+    );
+  });
+
+  it("redacts the token when the audit subprocess fails", async () => {
+    safeSpawnMock.mockResolvedValue({
+      status: 1,
+      stdout: "",
+      stderr: "request failed with secret-token",
+      timedOut: false,
+      stdoutTruncated: false,
+      stderrTruncated: false,
+    });
+
+    const outcome = await verifyCandidateAudit([result({ caseId: "canary" })], options);
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.results[0]?.message).toContain("***");
+    expect(outcome.results[0]?.message).not.toContain("secret-token");
+  });
+
+  it("fails closed without spawning when no successful canary build exists", async () => {
+    const outcome = await verifyCandidateAudit(
+      [result({ caseId: "canary", status: "failed", result: "failed" })],
+      options,
+    );
+
+    expect(outcome.ok).toBe(false);
+    expect(safeSpawnMock).not.toHaveBeenCalled();
   });
 });

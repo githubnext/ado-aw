@@ -3,6 +3,7 @@
 //! This module defines the front matter grammar that is shared across all compile targets.
 
 use crate::sanitize::SanitizeConfig as SanitizeConfigTrait;
+use crate::secure::SemanticVersion;
 use ado_aw_derive::SanitizeConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -660,6 +661,69 @@ pub struct GithubAppTokenConfig {
 pub const DEFAULT_SAFE_OUTPUTS_GITHUB_TOKEN_VAR: &str = "ADO_AW_GITHUB_TOKEN";
 pub const SAFE_OUTPUTS_GITHUB_APP_TOKEN_VAR: &str = "ADO_AW_SAFE_OUTPUTS_GITHUB_APP_TOKEN";
 
+/// Canonical GitHub issue-family safe-output names.
+///
+/// Compiler authentication and job orchestration must recognize the complete
+/// signed-off surface before every executor module is registered, so this list
+/// intentionally does not depend on the safe-output module registry.
+pub const GITHUB_ISSUE_SAFE_OUTPUT_TOOLS: &[&str] = &[
+    "create-github-issue",
+    "set-github-issue-type",
+    "comment-on-github-issue",
+    "hide-github-issue-comment",
+    "add-github-issue-labels",
+    "remove-github-issue-labels",
+    "close-github-issue",
+    "update-github-issue",
+    "set-github-issue-field",
+    "assign-github-issue-milestone",
+    "assign-github-issue-to-user",
+    "unassign-github-issue-from-user",
+    "link-github-sub-issue",
+];
+
+/// Work-item tools that can consume a same-run temporary work-item ID.
+pub const WORK_ITEM_TEMPORARY_ID_CONSUMERS: &[&str] = &[
+    "assign-work-item",
+    "comment-on-work-item",
+    "update-work-item",
+    "link-work-items",
+    "upload-workitem-attachment",
+];
+
+/// GitHub issue-family tools that can consume a same-run temporary issue ID.
+pub const GITHUB_TEMPORARY_ID_CONSUMERS: &[&str] = &[
+    "set-github-issue-type",
+    "comment-on-github-issue",
+    "add-github-issue-labels",
+    "remove-github-issue-labels",
+    "close-github-issue",
+    "update-github-issue",
+    "set-github-issue-field",
+    "assign-github-issue-milestone",
+    "assign-github-issue-to-user",
+    "unassign-github-issue-from-user",
+    "link-github-sub-issue",
+];
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct GithubIssueCompilerConfig {
+    #[serde(default, rename = "target-repo")]
+    pub(crate) target_repo: Option<String>,
+    #[serde(default, rename = "allowed-repos")]
+    pub(crate) allowed_repos: Vec<String>,
+    #[serde(default, rename = "required-labels")]
+    pub(crate) required_labels: Vec<String>,
+    #[serde(default, rename = "required-title-prefix")]
+    pub(crate) required_title_prefix: Option<String>,
+    #[serde(default)]
+    pub(crate) issues: Option<bool>,
+    #[serde(default, rename = "pull-requests")]
+    pub(crate) pull_requests: Option<bool>,
+    #[serde(default)]
+    pub(crate) discussions: Option<bool>,
+}
+
 #[derive(Debug, Clone)]
 pub enum GithubSafeOutputsAuth {
     Token { variable: String, api_url: String },
@@ -795,16 +859,9 @@ impl GithubAppTokenConfig {
             }
         }
         if let Some(api_url) = &self.api_url {
-            crate::validate::reject_pipeline_injection(
-                api_url,
-                &format!("{path}.api-url"),
-            )?;
+            crate::validate::reject_pipeline_injection(api_url, &format!("{path}.api-url"))?;
             let parsed = url::Url::parse(api_url).map_err(|e| {
-                anyhow::anyhow!(
-                    "{path}.api-url '{}' is not a valid URL: {}",
-                    api_url,
-                    e
-                )
+                anyhow::anyhow!("{path}.api-url '{}' is not a valid URL: {}", api_url, e)
             })?;
             if parsed.scheme() != "https" || parsed.host_str().is_none() {
                 anyhow::bail!(
@@ -1058,7 +1115,8 @@ impl ProviderConfig {
 ///   cache-memory:
 ///     allowed-extensions: [.md, .json]
 ///   azure-devops:
-///     toolsets: [repos, wit]
+///     version: 2.8.1
+///     toolsets: [repositories, work-items]
 ///     allowed: [wit_get_work_item]
 /// ```
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -1163,7 +1221,8 @@ pub struct CacheMemoryOptions {
 ///
 /// # With scoping options
 /// azure-devops:
-///   toolsets: [repos, wit, core]
+///   version: 2.8.1
+///   toolsets: [repositories, work-items, core]
 ///   allowed: [wit_get_work_item, wit_my_work_items]
 ///   org: myorg
 /// ```
@@ -1185,7 +1244,7 @@ impl AzureDevOpsToolConfig {
         }
     }
 
-    /// Get the ADO API toolset groups to enable (e.g., repos, wit, core)
+    /// Get the ADO MCP toolset groups to enable.
     pub fn toolsets(&self) -> &[String] {
         match self {
             AzureDevOpsToolConfig::Enabled(_) => &[],
@@ -1208,6 +1267,16 @@ impl AzureDevOpsToolConfig {
             AzureDevOpsToolConfig::WithOptions(opts) => opts.org.as_deref(),
         }
     }
+
+    /// Get the exact Azure DevOps MCP package version override.
+    pub fn version(&self) -> Option<&str> {
+        match self {
+            AzureDevOpsToolConfig::Enabled(_) => None,
+            AzureDevOpsToolConfig::WithOptions(opts) => {
+                opts.version.as_ref().map(SemanticVersion::as_str)
+            }
+        }
+    }
 }
 
 impl SanitizeConfigTrait for AzureDevOpsToolConfig {
@@ -1222,7 +1291,11 @@ impl SanitizeConfigTrait for AzureDevOpsToolConfig {
 /// Azure DevOps MCP options
 #[derive(Debug, Deserialize, Clone, Default, SanitizeConfig)]
 pub struct AzureDevOpsOptions {
-    /// ADO API toolset groups to enable (e.g., repos, wit, core, work-items)
+    /// Exact Azure DevOps MCP package version override.
+    /// Defaults to the compiler-pinned version.
+    #[serde(default)]
+    pub version: Option<SemanticVersion>,
+    /// ADO MCP toolset groups to enable (e.g., repositories, work-items, core).
     /// Passed as `-d` flags to the ADO MCP entrypoint.
     #[serde(default)]
     pub toolsets: Vec<String>,
@@ -1426,11 +1499,11 @@ pub struct FrontMatter {
     pub teardown: Vec<serde_yaml::Value>,
     /// Permissions configuration for ADO access tokens.
     ///
-    /// ADO supports two access levels: blanket read and blanket write.
-    /// Tokens are minted from ARM service connections — System.AccessToken is never used.
+    /// The field names describe the intended pipeline roles. Effective Azure
+    /// DevOps permissions come from the underlying identities' ADO grants.
     ///
-    /// - `read`: MI for Stage 1 (agent) — read-only ADO access
-    /// - `write`: MI for Stage 3 (executor) — write access for safe-outputs, never given to agent
+    /// - `read`: ARM service connection used by the trusted Stage 1 ADO MCP
+    /// - `write`: ARM service connection used by the Stage 3 safe-output executor
     #[serde(default)]
     pub permissions: Option<PermissionsConfig>,
     /// Abstract permissions required by this workflow and its imported
@@ -2011,10 +2084,7 @@ impl FrontMatter {
 
     /// Resolve the effective Detection engine without mutating the Agent engine
     /// configuration.
-    pub fn effective_detection_engine(
-        &self,
-        config: &ThreatDetectionConfig,
-    ) -> EngineConfig {
+    pub fn effective_detection_engine(&self, config: &ThreatDetectionConfig) -> EngineConfig {
         let mut effective = config
             .engine
             .as_ref()
@@ -2054,9 +2124,12 @@ impl FrontMatter {
         Ok(())
     }
 
-    pub fn has_github_issue_outputs(&self) -> bool {
-        self.safe_outputs.contains_key("create-github-issue")
-            || self.safe_outputs.contains_key("set-github-issue-type")
+    pub fn github_issue_tool_names(&self) -> Vec<String> {
+        GITHUB_ISSUE_SAFE_OUTPUT_TOOLS
+            .iter()
+            .filter(|tool| self.safe_outputs.contains_key(**tool))
+            .map(|tool| (*tool).to_string())
+            .collect()
     }
 
     fn typed_safe_output_config<T>(&self, key: &str) -> anyhow::Result<Option<T>>
@@ -2074,6 +2147,7 @@ impl FrontMatter {
         let mut raw = raw.clone();
         if let Some(object) = raw.as_object_mut() {
             object.remove("require-approval");
+            object.remove("staged");
         }
         let mut config: T = serde_json::from_value(raw)
             .map_err(|e| anyhow::anyhow!("safe-outputs.{key} has invalid configuration: {e}"))?;
@@ -2087,10 +2161,293 @@ impl FrontMatter {
         self.typed_safe_output_config("create-github-issue")
     }
 
+    pub fn create_work_item_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::CreateWorkItemConfig>> {
+        self.typed_safe_output_config("create-work-item")
+    }
+
+    pub fn assign_work_item_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::AssignWorkItemConfig>> {
+        self.typed_safe_output_config("assign-work-item")
+    }
+
     pub fn set_github_issue_type_config(
         &self,
     ) -> anyhow::Result<Option<crate::safe_outputs::SetGithubIssueTypeConfig>> {
         self.typed_safe_output_config("set-github-issue-type")
+    }
+
+    pub fn comment_on_github_issue_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::CommentOnGithubIssueConfig>> {
+        self.typed_safe_output_config("comment-on-github-issue")
+    }
+
+    pub fn hide_github_issue_comment_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::HideGithubIssueCommentConfig>> {
+        self.typed_safe_output_config("hide-github-issue-comment")
+    }
+
+    pub fn add_github_issue_labels_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::AddGithubIssueLabelsConfig>> {
+        self.typed_safe_output_config("add-github-issue-labels")
+    }
+
+    pub fn remove_github_issue_labels_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::RemoveGithubIssueLabelsConfig>> {
+        self.typed_safe_output_config("remove-github-issue-labels")
+    }
+
+    pub fn close_github_issue_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::CloseGithubIssueConfig>> {
+        self.typed_safe_output_config("close-github-issue")
+    }
+
+    pub fn update_github_issue_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::UpdateGithubIssueConfig>> {
+        self.typed_safe_output_config("update-github-issue")
+    }
+
+    pub fn set_github_issue_field_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::SetGithubIssueFieldConfig>> {
+        self.typed_safe_output_config("set-github-issue-field")
+    }
+
+    pub fn assign_github_issue_milestone_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::AssignGithubIssueMilestoneConfig>> {
+        self.typed_safe_output_config("assign-github-issue-milestone")
+    }
+
+    pub fn assign_github_issue_to_user_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::AssignGithubIssueToUserConfig>> {
+        self.typed_safe_output_config("assign-github-issue-to-user")
+    }
+
+    pub fn unassign_github_issue_from_user_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::UnassignGithubIssueFromUserConfig>> {
+        self.typed_safe_output_config("unassign-github-issue-from-user")
+    }
+
+    pub fn link_github_sub_issue_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::LinkGithubSubIssueConfig>> {
+        self.typed_safe_output_config("link-github-sub-issue")
+    }
+
+    pub(crate) fn github_issue_compiler_config(
+        &self,
+        tool: &str,
+    ) -> anyhow::Result<Option<GithubIssueCompilerConfig>> {
+        if !GITHUB_ISSUE_SAFE_OUTPUT_TOOLS.contains(&tool) {
+            return Ok(None);
+        }
+        match tool {
+            "create-github-issue" => {
+                Ok(self
+                    .create_github_issue_config()?
+                    .map(|config| GithubIssueCompilerConfig {
+                        target_repo: config.target_repo,
+                        allowed_repos: config.allowed_repos,
+                        ..Default::default()
+                    }))
+            }
+            "set-github-issue-type" => {
+                Ok(self
+                    .set_github_issue_type_config()?
+                    .map(|config| GithubIssueCompilerConfig {
+                        target_repo: config.target_repo,
+                        allowed_repos: config.allowed_repos,
+                        required_labels: config.required_labels,
+                        required_title_prefix: config.required_title_prefix,
+                        ..Default::default()
+                    }))
+            }
+            "comment-on-github-issue" => {
+                Ok(self
+                    .comment_on_github_issue_config()?
+                    .map(|config| GithubIssueCompilerConfig {
+                        target_repo: config.target_repo,
+                        allowed_repos: config.allowed_repos,
+                        required_labels: config.required_labels,
+                        required_title_prefix: config.required_title_prefix,
+                        issues: Some(config.issues),
+                        pull_requests: Some(config.pull_requests),
+                        ..Default::default()
+                    }))
+            }
+            "hide-github-issue-comment" => {
+                Ok(self.hide_github_issue_comment_config()?.map(|config| {
+                    GithubIssueCompilerConfig {
+                        target_repo: config.target_repo,
+                        allowed_repos: config.allowed_repos,
+                        required_labels: config.required_labels,
+                        required_title_prefix: config.required_title_prefix,
+                        discussions: Some(config.discussions),
+                        ..Default::default()
+                    }
+                }))
+            }
+            "add-github-issue-labels" => {
+                Ok(self
+                    .add_github_issue_labels_config()?
+                    .map(|config| GithubIssueCompilerConfig {
+                        target_repo: config.target_repo,
+                        allowed_repos: config.allowed_repos,
+                        required_labels: config.required_labels,
+                        required_title_prefix: config.required_title_prefix,
+                        issues: Some(config.issues),
+                        pull_requests: Some(config.pull_requests),
+                        ..Default::default()
+                    }))
+            }
+            "remove-github-issue-labels" => {
+                Ok(self.remove_github_issue_labels_config()?.map(|config| {
+                    GithubIssueCompilerConfig {
+                        target_repo: config.target_repo,
+                        allowed_repos: config.allowed_repos,
+                        required_labels: config.required_labels,
+                        required_title_prefix: config.required_title_prefix,
+                        ..Default::default()
+                    }
+                }))
+            }
+            "close-github-issue" => {
+                Ok(self
+                    .close_github_issue_config()?
+                    .map(|config| GithubIssueCompilerConfig {
+                        target_repo: config.target_repo,
+                        allowed_repos: config.allowed_repos,
+                        required_labels: config.required_labels,
+                        required_title_prefix: config.required_title_prefix,
+                        ..Default::default()
+                    }))
+            }
+            "update-github-issue" => {
+                Ok(self
+                    .update_github_issue_config()?
+                    .map(|config| GithubIssueCompilerConfig {
+                        target_repo: config.target_repo,
+                        allowed_repos: config.allowed_repos,
+                        required_labels: config.required_labels,
+                        required_title_prefix: config.required_title_prefix,
+                        issues: Some(config.issues),
+                        pull_requests: Some(config.pull_requests),
+                        ..Default::default()
+                    }))
+            }
+            "set-github-issue-field" => {
+                Ok(self
+                    .set_github_issue_field_config()?
+                    .map(|config| GithubIssueCompilerConfig {
+                        target_repo: config.target_repo,
+                        allowed_repos: config.allowed_repos,
+                        required_labels: config.required_labels,
+                        required_title_prefix: config.required_title_prefix,
+                        ..Default::default()
+                    }))
+            }
+            "assign-github-issue-milestone" => Ok(self
+                .assign_github_issue_milestone_config()?
+                .map(|config| GithubIssueCompilerConfig {
+                    target_repo: config.target_repo,
+                    allowed_repos: config.allowed_repos,
+                    required_labels: config.required_labels,
+                    required_title_prefix: config.required_title_prefix,
+                    ..Default::default()
+                })),
+            "assign-github-issue-to-user" => {
+                Ok(self.assign_github_issue_to_user_config()?.map(|config| {
+                    GithubIssueCompilerConfig {
+                        target_repo: config.target_repo,
+                        allowed_repos: config.allowed_repos,
+                        required_labels: config.required_labels,
+                        required_title_prefix: config.required_title_prefix,
+                        ..Default::default()
+                    }
+                }))
+            }
+            "unassign-github-issue-from-user" => Ok(self
+                .unassign_github_issue_from_user_config()?
+                .map(|config| GithubIssueCompilerConfig {
+                    target_repo: config.target_repo,
+                    allowed_repos: config.allowed_repos,
+                    required_labels: config.required_labels,
+                    required_title_prefix: config.required_title_prefix,
+                    ..Default::default()
+                })),
+            "link-github-sub-issue" => {
+                Ok(self
+                    .link_github_sub_issue_config()?
+                    .map(|config| GithubIssueCompilerConfig {
+                        target_repo: config.target_repo,
+                        allowed_repos: config.allowed_repos,
+                        ..Default::default()
+                    }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    pub(crate) fn github_app_permissions_for_tools(
+        &self,
+        tools: &[String],
+    ) -> anyhow::Result<std::collections::BTreeMap<String, GithubAppPermissionLevel>> {
+        let mut issues = false;
+        let mut pull_requests = false;
+        let mut discussions = false;
+
+        for tool in tools {
+            let Some(config) = self.github_issue_compiler_config(tool)? else {
+                continue;
+            };
+            match tool.as_str() {
+                "comment-on-github-issue" | "add-github-issue-labels" | "update-github-issue" => {
+                    let tool_issues = config.issues.unwrap_or(true);
+                    let tool_pull_requests = config.pull_requests.unwrap_or(false);
+                    if !tool_issues && !tool_pull_requests {
+                        anyhow::bail!(
+                            "safe-outputs.{tool} must enable at least one of `issues` or \
+                             `pull-requests`"
+                        );
+                    }
+                    issues |= tool_issues;
+                    pull_requests |= tool_pull_requests;
+                }
+                "hide-github-issue-comment" => {
+                    issues = true;
+                    pull_requests = true;
+                    discussions |= config.discussions.unwrap_or(false);
+                }
+                "remove-github-issue-labels" => {
+                    issues = true;
+                    pull_requests = true;
+                }
+                _ => issues = true,
+            }
+        }
+
+        let mut permissions = std::collections::BTreeMap::new();
+        if issues {
+            permissions.insert("issues".to_string(), GithubAppPermissionLevel::Write);
+        }
+        if pull_requests {
+            permissions.insert("pull-requests".to_string(), GithubAppPermissionLevel::Write);
+        }
+        if discussions {
+            permissions.insert("discussions".to_string(), GithubAppPermissionLevel::Write);
+        }
+        Ok(permissions)
     }
 
     fn parse_safe_outputs_github_token(raw: &str) -> anyhow::Result<String> {
@@ -2122,7 +2479,9 @@ impl FrontMatter {
         Ok(variable.to_string())
     }
 
-    fn parse_safe_outputs_github_api_url(raw: Option<&serde_json::Value>) -> anyhow::Result<String> {
+    fn parse_safe_outputs_github_api_url(
+        raw: Option<&serde_json::Value>,
+    ) -> anyhow::Result<String> {
         let Some(raw) = raw else {
             return Ok("https://api.github.com".to_string());
         };
@@ -2152,6 +2511,7 @@ impl FrontMatter {
         &self,
         mut config: GithubAppTokenConfig,
         path: &str,
+        tools: &[String],
     ) -> anyhow::Result<GithubAppTokenConfig> {
         if let Some(api_url) = config.api_url.take() {
             let parsed = url::Url::parse(&api_url)
@@ -2159,79 +2519,35 @@ impl FrontMatter {
             config.api_url = Some(parsed.to_string().trim_end_matches('/').to_string());
         }
         let mut targets = Vec::new();
-        let mut has_implicit_target = false;
-        if self.safe_outputs.contains_key("create-github-issue") {
-            match self
-                .create_github_issue_config()?
-                .and_then(|config| config.target_repo)
-            {
-                Some(target) => targets.push(target),
-                None => has_implicit_target = true,
-            }
+        for tool in tools {
+            let Some(tool_config) = self.github_issue_compiler_config(tool)? else {
+                continue;
+            };
+            let target_repo = tool_config.target_repo.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "safe-outputs.{tool}.target-repo is required with GitHub App auth; \
+                     runtime source-repository fallback cannot be scoped safely"
+                )
+            })?;
+            targets.push(target_repo);
+            targets.extend(tool_config.allowed_repos);
         }
-        if self.safe_outputs.contains_key("set-github-issue-type") {
-            match self
-                .set_github_issue_type_config()?
-                .and_then(|config| config.target_repo)
-            {
-                Some(target)
-                    if !targets
-                        .iter()
-                        .any(|existing| existing.eq_ignore_ascii_case(&target)) =>
-                {
-                    targets.push(target);
-                }
-                Some(_) => {}
-                None => has_implicit_target = true,
-            }
-        }
-        if has_implicit_target && !targets.is_empty() {
-            anyhow::bail!(
-                "GitHub App-backed create-github-issue and set-github-issue-type cannot mix implicit current \
-                 repository targets with explicit target-repo values; configure target-repo \
-                 consistently for both tools"
-            );
-        }
-
-        if targets.is_empty() {
-            if config.repositories.is_empty() {
-                anyhow::bail!(
-                    "{path}.repositories must be set when GitHub issue outputs omit target-repo; \
-                     the compiler cannot safely scope the App token to a runtime repository"
-                );
-            }
-            return Ok(config);
-        }
-
-        let mut repositories = Vec::new();
-        for target in targets {
-            crate::safe_outputs::validate_target_repo(&target)
-                .map_err(|e| anyhow::anyhow!("safe-outputs target-repo: {e}"))?;
-            let (owner, repository) = target
-                .split_once('/')
-                .expect("validated target-repo contains slash");
-            if !owner.eq_ignore_ascii_case(&config.owner) {
-                anyhow::bail!(
-                    "{path}.owner '{}' does not match target repository owner '{}'",
-                    config.owner,
-                    owner
-                );
-            }
-            if !repositories
-                .iter()
-                .any(|existing: &String| existing.eq_ignore_ascii_case(repository))
-            {
-                repositories.push(repository.to_string());
-            }
-        }
-        config.repositories = repositories;
+        config.repositories = crate::safe_outputs::github_app_repository_names(
+            &config.owner,
+            targets.iter().map(String::as_str),
+        )?;
         Ok(config)
     }
 
-    pub fn github_safe_outputs_auth(
+    pub fn github_safe_outputs_auth(&self) -> anyhow::Result<Option<GithubSafeOutputsAuth>> {
+        self.github_safe_outputs_auth_for_tools(&self.github_issue_tool_names())
+    }
+
+    pub(crate) fn github_safe_outputs_auth_for_tools(
         &self,
+        tools: &[String],
     ) -> anyhow::Result<Option<GithubSafeOutputsAuth>> {
-        if !self.has_github_issue_outputs() {
+        if tools.is_empty() {
             return Ok(None);
         }
 
@@ -2251,9 +2567,10 @@ impl FrontMatter {
                      safe-outputs.github-app.api-url for GitHub App auth"
                 );
             }
-            let config: GithubAppTokenConfig = serde_json::from_value(raw.clone()).map_err(|e| {
-                anyhow::anyhow!("safe-outputs.github-app has invalid configuration: {e}")
-            })?;
+            let config: GithubAppTokenConfig =
+                serde_json::from_value(raw.clone()).map_err(|e| {
+                    anyhow::anyhow!("safe-outputs.github-app has invalid configuration: {e}")
+                })?;
             config.validate_for("safe-outputs.github-app")?;
             if !config.permissions.is_empty() {
                 anyhow::bail!(
@@ -2262,7 +2579,7 @@ impl FrontMatter {
                 );
             }
             let config =
-                self.scope_github_app_to_issue_targets(config, "safe-outputs.github-app")?;
+                self.scope_github_app_to_issue_targets(config, "safe-outputs.github-app", tools)?;
             return Ok(Some(GithubSafeOutputsAuth::App { config }));
         }
 
@@ -2303,8 +2620,11 @@ impl FrontMatter {
                      credentials require an explicitly read-only Agent/Detection token"
                 );
             }
-            let config = self
-                .scope_github_app_to_issue_targets(engine_app.clone(), "engine.github-app-token")?;
+            let config = self.scope_github_app_to_issue_targets(
+                engine_app.clone(),
+                "engine.github-app-token",
+                tools,
+            )?;
             return Ok(Some(GithubSafeOutputsAuth::App { config }));
         }
 
@@ -2322,11 +2642,8 @@ impl FrontMatter {
     /// cannot drift.
     ///
     /// On a malformed config (e.g. `target-branches: "not-a-map"`) the compiler
-    /// warns and falls back to defaults — deliberately matching Stage 3's
-    /// `get_tool_config`, which also swallows a deserialization error and uses
-    /// `Default` (`.ok().unwrap_or_default()`). Bailing here would make the two
-    /// paths diverge (compile fails / Stage 3 silently defaults); the warning
-    /// surfaces the mistake without breaking that symmetry.
+    /// warns and falls back to defaults for its prepare step. Stage 3 rejects
+    /// the malformed config before executing the safe output.
     ///
     /// A bare `create-pull-request:` (YAML null) is the standard "enable with
     /// defaults" idiom, so it maps to `CreatePrConfig::default()` silently — it
@@ -2340,7 +2657,8 @@ impl FrontMatter {
                 .unwrap_or_else(|e| {
                     eprintln!(
                         "Warning: could not parse create-pull-request config ({e}); \
-                        using defaults. Stage 3 will do the same — check the \
+                        using defaults for compile-time preparation. Stage 3 will \
+                        reject this config — check the \
                         `create-pull-request:` block (e.g. `target-branches` must be a map)."
                     );
                     crate::safe_outputs::CreatePrConfig::default()
@@ -2696,9 +3014,9 @@ impl PermissionsRequired {
 
 /// Permissions configuration for ADO access tokens.
 ///
-/// ADO does not support fine-grained permissions. There are two access levels:
-/// blanket read and blanket write, each backed by an ARM service connection
-/// that mints an ADO-scoped token.
+/// `read` and `write` identify intended pipeline roles, not token-enforced
+/// access levels. Azure DevOps authorizes each underlying service-connection
+/// identity independently of its Azure RBAC scope.
 ///
 /// Examples:
 /// ```yaml
@@ -2707,25 +3025,190 @@ impl PermissionsRequired {
 ///   read: my-read-arm-connection
 ///   write: my-write-arm-connection
 ///
-/// # Read-only (agent can query ADO APIs, no write safe-outputs)
+/// # Stage 1 ADO MCP authentication
 /// permissions:
 ///   read: my-read-arm-connection
 ///
-/// # Write-only (safe-outputs can write, agent gets no ADO token)
+/// # Stage 3 override only
 /// permissions:
 ///   write: my-write-arm-connection
 /// ```
 #[derive(Debug, Deserialize, Clone, Default, SanitizeConfig)]
 pub struct PermissionsConfig {
-    /// ARM service connection for read-only ADO access.
-    /// Token is minted and given to the agent in Stage 1 (inside AWF sandbox).
+    /// ARM service connection for the trusted Stage 1 Azure DevOps MCP.
+    /// The raw token is not injected into the Agent process.
     #[serde(default)]
-    pub read: Option<String>,
+    pub read: Option<ReadPermissionConfig>,
     /// ARM service connection for write ADO access.
     /// Token is minted and used only by the executor in Stage 3 (Execution).
     /// This token is never exposed to the agent.
     #[serde(default)]
     pub write: Option<String>,
+}
+
+/// Stage 1 Azure DevOps credential and policy configuration.
+///
+/// The scalar form remains shorthand for a service connection with the
+/// compiler-owned current-organization/project/repository policy. The object
+/// form configures the credential-isolated proxy's capability and scope tree.
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[serde(untagged)]
+pub enum ReadPermissionConfig {
+    /// Backward-compatible service-connection shorthand.
+    ServiceConnection(crate::secure::ServiceConnection),
+    /// Explicit proxy policy configuration.
+    WithOptions(ReadPermissionOptions),
+}
+
+impl ReadPermissionConfig {
+    /// The ARM service connection used to mint the Stage 1 ADO credential.
+    pub fn service_connection(&self) -> &str {
+        match self {
+            Self::ServiceConnection(value) => value.as_str(),
+            Self::WithOptions(options) => options.service_connection.as_str(),
+        }
+    }
+
+    /// Explicit policy options, when object form was used.
+    pub fn options(&self) -> Option<&ReadPermissionOptions> {
+        match self {
+            Self::ServiceConnection(_) => None,
+            Self::WithOptions(options) => Some(options),
+        }
+    }
+}
+
+impl SanitizeConfigTrait for ReadPermissionConfig {
+    fn sanitize_config_fields(&mut self) {
+        // Every string field is a validated newtype checked at deserialization.
+    }
+}
+
+/// Explicit Stage 1 Azure DevOps read-policy options.
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ReadPermissionOptions {
+    /// ARM service connection used by the trusted credential path.
+    #[serde(rename = "service-connection")]
+    pub service_connection: crate::secure::ServiceConnection,
+    /// Optional capability groups. Empty selects the compiler-owned safe
+    /// default catalog.
+    #[serde(default)]
+    pub capabilities: Vec<AdoReadCapability>,
+    /// Additional scopes beyond the implicit current org/project/repository.
+    #[serde(default)]
+    pub allow: Vec<AdoReadOrganizationScope>,
+}
+
+impl ReadPermissionOptions {
+    /// Cross-field rules the schema alone cannot express.
+    ///
+    /// Listing an organization with no projects would grant every project in
+    /// that organization — a large widening produced by *omitting* a key, which
+    /// is exactly the accident this proxy exists to prevent. An author who
+    /// genuinely wants breadth should have to name it.
+    ///
+    /// An empty `repositories` list is deliberately allowed: it grants the
+    /// project-scoped reads without any repository-scoped read, so it narrows
+    /// rather than widens.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for scope in &self.allow {
+            if scope.projects.is_empty() {
+                anyhow::bail!(
+                    "permissions.read.allow entry for organization '{}' lists no projects. \
+                     Name the projects to allow; an empty list would grant every project in \
+                     the organization.",
+                    scope.organization.as_str()
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Coarse catalog groups authors may enable for Stage 1 ADO reads.
+///
+/// This is the **author-facing** subset of [`crate::ado_proxy::catalog::Capability`],
+/// which is authoritative. It is a separate type only because not every catalog
+/// capability is selectable: `discovery` is always on, so offering it as a
+/// toggle would imply an author could turn it off and get a working proxy.
+///
+/// [`AdoReadCapability::to_catalog`] is the single mapping point, and
+/// `front_matter_capabilities_cover_the_catalog` fails if the catalog gains a
+/// selectable capability this enum does not expose — so the two cannot drift
+/// into silently offering authors less than the proxy enforces.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AdoReadCapability {
+    Core,
+    #[serde(rename = "repos")]
+    Repositories,
+    Pipelines,
+    Boards,
+}
+
+impl AdoReadCapability {
+    /// Project onto the authoritative catalog capability.
+    ///
+    /// Exhaustive on purpose: adding a variant here without giving it a catalog
+    /// counterpart is a compile error rather than a policy document the sidecar
+    /// would reject at runtime.
+    pub const fn to_catalog(self) -> crate::ado_proxy::catalog::Capability {
+        use crate::ado_proxy::catalog::Capability;
+        match self {
+            Self::Core => Capability::Core,
+            Self::Repositories => Capability::Repos,
+            Self::Pipelines => Capability::Pipelines,
+            Self::Boards => Capability::Boards,
+        }
+    }
+
+    /// Every capability an author may name in front matter.
+    ///
+    /// Test-only drift guards consume this list to keep the front-matter enum
+    /// aligned with the authoritative runtime catalog.
+    #[cfg(test)]
+    pub const ALL: &'static [Self] = &[
+        Self::Core,
+        Self::Repositories,
+        Self::Pipelines,
+        Self::Boards,
+    ];
+}
+
+/// Explicit Azure DevOps organization scope.
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AdoReadOrganizationScope {
+    pub organization: crate::secure::AdoOrganization,
+    /// Projects to allow within this organization.
+    ///
+    /// Required and non-empty — see [`ReadPermissionOptions::validate`].
+    #[serde(default)]
+    pub projects: Vec<AdoReadProjectScope>,
+}
+
+/// Explicit project and optional repository scope within an organization.
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AdoReadProjectScope {
+    pub project: crate::secure::AdoProject,
+    /// Optional Azure DevOps project GUID.
+    ///
+    /// Additional scopes are known only from front matter, not from a runtime
+    /// discovery call. Clients — especially `az` — may address a project by a
+    /// cached GUID rather than by name, so authors can provide the GUID to make
+    /// both forms resolve. Without it, name-form requests still work and a
+    /// GUID-form request fails closed.
+    #[serde(default, rename = "project-id")]
+    pub project_id: Option<crate::secure::Guid>,
+    /// Repositories to allow within this project.
+    ///
+    /// May be omitted. Unlike an organization with no projects, this is not a
+    /// silent widening: it grants the project-scoped reads (pipelines, builds,
+    /// work items) without granting any repository-scoped read.
+    #[serde(default)]
+    pub repositories: Vec<crate::secure::AdoRepository>,
 }
 
 /// Debug-only configuration block.
@@ -2975,7 +3458,10 @@ fn default_ref() -> String {
 /// Object form for a `repos:` entry.
 #[derive(Debug, Deserialize, Clone)]
 pub struct RepoEntry {
-    /// Full repo name in the form `org/repo` (maps to ADO `name:`).
+    /// Full Azure Repos name in the form `project/repo` (maps to ADO `name:`).
+    ///
+    /// Other repository resource types may use a different provider-specific
+    /// shape; only `type: git` participates in ado-proxy scope derivation.
     pub name: String,
     /// Optional alias (maps to ADO `repository:`). Defaults to the last segment of `name`.
     #[serde(default)]
@@ -3045,7 +3531,7 @@ impl CheckoutFetchOpts {
 /// A single item in the `repos:` list — either a string shorthand or an object.
 #[derive(Debug, Clone)]
 pub enum ReposItem {
-    /// String shorthand: `"org/repo"` or `"alias=org/repo"`.
+    /// String shorthand: `"project/repo"` or `"alias=project/repo"`.
     Shorthand(String),
     /// Full object form with explicit fields.
     Full(RepoEntry),
@@ -4230,7 +4716,9 @@ imports:
             write: true,
         };
         let concrete = PermissionsConfig {
-            read: Some("read-connection".to_string()),
+            read: Some(ReadPermissionConfig::ServiceConnection(
+                crate::secure::ServiceConnection::parse("read-connection").unwrap(),
+            )),
             write: None,
         };
         assert!(required.missing_from(Some(&concrete)).is_empty());
@@ -4248,7 +4736,9 @@ imports:
         assert!(
             required
                 .validate_against(Some(&PermissionsConfig {
-                    read: Some("read".to_string()),
+                    read: Some(ReadPermissionConfig::ServiceConnection(
+                        crate::secure::ServiceConnection::parse("read").unwrap(),
+                    )),
                     write: Some("write".to_string()),
                 }))
                 .is_ok()
@@ -5123,6 +5613,202 @@ github-app-token:
     }
 
     #[test]
+    fn github_issue_tool_discovery_covers_all_registered_names() {
+        let safe_outputs = GITHUB_ISSUE_SAFE_OUTPUT_TOOLS
+            .iter()
+            .map(|tool| format!("  {tool}: {{}}\n"))
+            .collect::<String>();
+        let source =
+            format!("---\nname: test\ndescription: test\nsafe-outputs:\n{safe_outputs}---\n");
+        let (fm, _) = super::super::common::parse_markdown(&source).unwrap();
+        assert_eq!(
+            fm.github_issue_tool_names(),
+            GITHUB_ISSUE_SAFE_OUTPUT_TOOLS
+                .iter()
+                .map(|tool| (*tool).to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn github_app_scope_is_exact_union_of_target_and_allowed_repositories() {
+        let (fm, _) = super::super::common::parse_markdown(
+            r#"---
+name: test
+description: test
+safe-outputs:
+  github-app:
+    client-id: Iv23liExample
+    owner: octo
+    repositories: [broader]
+  create-github-issue:
+    target-repo: octo/default
+    allowed-repos: [octo/extra]
+  set-github-issue-type:
+    target-repo: octo/second
+    allowed-repos: [OCTO/EXTRA]
+---
+"#,
+        )
+        .unwrap();
+        let auth = fm.github_safe_outputs_auth().unwrap().unwrap();
+        let GithubSafeOutputsAuth::App { config } = auth else {
+            panic!("expected app auth");
+        };
+        assert_eq!(config.repositories, vec!["default", "extra", "second"]);
+    }
+
+    #[test]
+    fn github_app_scope_is_derived_per_safeoutputs_variant() {
+        let (fm, _) = super::super::common::parse_markdown(
+            r#"---
+name: test
+description: test
+safe-outputs:
+  github-app:
+    client-id: Iv23liExample
+    owner: octo
+  create-github-issue:
+    target-repo: octo/automatic
+  set-github-issue-type:
+    target-repo: octo/reviewed
+---
+"#,
+        )
+        .unwrap();
+        let automatic = fm
+            .github_safe_outputs_auth_for_tools(&["create-github-issue".to_string()])
+            .unwrap()
+            .unwrap();
+        let reviewed = fm
+            .github_safe_outputs_auth_for_tools(&["set-github-issue-type".to_string()])
+            .unwrap()
+            .unwrap();
+        let GithubSafeOutputsAuth::App { config: automatic } = automatic else {
+            panic!("expected app auth");
+        };
+        let GithubSafeOutputsAuth::App { config: reviewed } = reviewed else {
+            panic!("expected app auth");
+        };
+        assert_eq!(automatic.repositories, vec!["automatic"]);
+        assert_eq!(reviewed.repositories, vec!["reviewed"]);
+    }
+
+    #[test]
+    fn github_app_rejects_allowed_repository_from_another_owner() {
+        let (fm, _) = super::super::common::parse_markdown(
+            r#"---
+name: test
+description: test
+safe-outputs:
+  github-app:
+    client-id: Iv23liExample
+    owner: octo
+  create-github-issue:
+    target-repo: octo/repo
+    allowed-repos: [other/repo]
+---
+"#,
+        )
+        .unwrap();
+        let error = fm.github_safe_outputs_auth().unwrap_err().to_string();
+        assert!(error.contains("does not belong to App owner"));
+    }
+
+    #[test]
+    fn github_pat_allows_repositories_from_multiple_owners() {
+        let (fm, _) = super::super::common::parse_markdown(
+            r#"---
+name: test
+description: test
+safe-outputs:
+  github-token: $(MULTI_OWNER_TOKEN)
+  create-github-issue:
+    target-repo: octo/repo
+    allowed-repos: [other/repo]
+---
+"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            fm.github_safe_outputs_auth().unwrap(),
+            Some(GithubSafeOutputsAuth::Token { variable, .. })
+                if variable == "MULTI_OWNER_TOKEN"
+        ));
+    }
+
+    #[test]
+    fn github_app_permissions_are_derived_for_selected_variant_tools() {
+        let (fm, _) = super::super::common::parse_markdown(
+            r#"---
+name: test
+description: test
+safe-outputs:
+  comment-on-github-issue:
+    target-repo: octo/repo
+    issues: false
+    pull-requests: true
+  hide-github-issue-comment:
+    target-repo: octo/repo
+    discussions: true
+  update-github-issue:
+    target-repo: octo/repo
+    issues: false
+    pull-requests: true
+  remove-github-issue-labels:
+    target-repo: octo/repo
+---
+"#,
+        )
+        .unwrap();
+
+        let automatic = fm
+            .github_app_permissions_for_tools(&["comment-on-github-issue".to_string()])
+            .unwrap();
+        assert_eq!(
+            automatic,
+            std::collections::BTreeMap::from([(
+                "pull-requests".to_string(),
+                GithubAppPermissionLevel::Write
+            )])
+        );
+
+        let reviewed = fm
+            .github_app_permissions_for_tools(&["hide-github-issue-comment".to_string()])
+            .unwrap();
+        assert_eq!(
+            reviewed,
+            std::collections::BTreeMap::from([
+                ("discussions".to_string(), GithubAppPermissionLevel::Write),
+                ("issues".to_string(), GithubAppPermissionLevel::Write),
+                ("pull-requests".to_string(), GithubAppPermissionLevel::Write),
+            ])
+        );
+
+        let update = fm
+            .github_app_permissions_for_tools(&["update-github-issue".to_string()])
+            .unwrap();
+        assert_eq!(
+            update,
+            std::collections::BTreeMap::from([(
+                "pull-requests".to_string(),
+                GithubAppPermissionLevel::Write
+            )])
+        );
+
+        let remove_labels = fm
+            .github_app_permissions_for_tools(&["remove-github-issue-labels".to_string()])
+            .unwrap();
+        assert_eq!(
+            remove_labels,
+            std::collections::BTreeMap::from([
+                ("issues".to_string(), GithubAppPermissionLevel::Write),
+                ("pull-requests".to_string(), GithubAppPermissionLevel::Write),
+            ])
+        );
+    }
+
+    #[test]
     fn safe_outputs_github_app_accepts_client_id_alias_and_scopes_repo() {
         let (fm, _) = super::super::common::parse_markdown(
             "---\nname: test\ndescription: test\nsafe-outputs:\n  github-app:\n    client-id: Iv23liExample\n    owner: octo\n    repositories: [broader-repo]\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
@@ -5137,13 +5823,13 @@ github-app-token:
     }
 
     #[test]
-    fn github_app_rejects_mixed_implicit_and_explicit_issue_targets() {
+    fn github_app_requires_explicit_target_repo_for_every_issue_tool() {
         let (fm, _) = super::super::common::parse_markdown(
             "---\nname: test\ndescription: test\nsafe-outputs:\n  github-app:\n    client-id: Iv23liExample\n    owner: octo\n    repositories: [repo]\n  create-github-issue: {}\n  set-github-issue-type:\n    target-repo: octo/repo\n---\n",
         )
         .unwrap();
         let error = fm.github_safe_outputs_auth().unwrap_err().to_string();
-        assert!(error.contains("cannot mix implicit current repository targets"));
+        assert!(error.contains("create-github-issue.target-repo is required"));
     }
 
     #[test]
@@ -5298,7 +5984,12 @@ github-app-token:
     fn test_permissions_both_fields() {
         let yaml = "read: my-read-sc\nwrite: my-write-sc";
         let pc: PermissionsConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(pc.read.as_deref(), Some("my-read-sc"));
+        assert_eq!(
+            pc.read
+                .as_ref()
+                .map(ReadPermissionConfig::service_connection),
+            Some("my-read-sc")
+        );
         assert_eq!(pc.write.as_deref(), Some("my-write-sc"));
     }
 
@@ -5306,8 +5997,164 @@ github-app-token:
     fn test_permissions_read_only() {
         let yaml = "read: my-read-sc";
         let pc: PermissionsConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(pc.read.as_deref(), Some("my-read-sc"));
+        assert_eq!(
+            pc.read
+                .as_ref()
+                .map(ReadPermissionConfig::service_connection),
+            Some("my-read-sc")
+        );
         assert!(pc.write.is_none());
+    }
+
+    #[test]
+    fn test_permissions_read_object_form() {
+        let yaml = r#"
+read:
+  service-connection: my-read-sc
+  capabilities: [core, repos, pipelines, boards]
+  allow:
+    - organization: other-org
+      projects:
+        - project: Other Project
+          project-id: 11111111-1111-1111-1111-111111111111
+          repositories: [Repo One, 01234567-89ab-cdef-0123-456789abcdef]
+"#;
+        let pc: PermissionsConfig = serde_yaml::from_str(yaml).unwrap();
+        let read = pc.read.as_ref().unwrap();
+        assert_eq!(read.service_connection(), "my-read-sc");
+        let options = read.options().unwrap();
+        assert_eq!(
+            options.capabilities,
+            vec![
+                AdoReadCapability::Core,
+                AdoReadCapability::Repositories,
+                AdoReadCapability::Pipelines,
+                AdoReadCapability::Boards,
+            ]
+        );
+        assert_eq!(options.allow[0].organization.as_str(), "other-org");
+        assert_eq!(
+            options.allow[0].projects[0].project.as_str(),
+            "Other Project"
+        );
+        assert_eq!(
+            options.allow[0].projects[0]
+                .project_id
+                .as_ref()
+                .map(|value| value.as_str()),
+            Some("11111111-1111-1111-1111-111111111111")
+        );
+        assert_eq!(
+            options.allow[0].projects[0].repositories[0].as_str(),
+            "Repo One"
+        );
+    }
+
+    #[test]
+    fn test_permissions_read_object_form_rejects_invalid_scope() {
+        for yaml in [
+            "read:\n  service-connection: sc\n  allow:\n    - organization: 'bad/org'",
+            "read:\n  service-connection: sc\n  allow:\n    - organization: org\n      projects:\n        - project: Project\n          repositories: ['../repo']",
+            "read:\n  service-connection: sc\n  allow:\n    - organization: org\n      projects:\n        - project: Project\n          project-id: not-a-guid",
+            "read:\n  service-connection: sc\n  unknown: value",
+        ] {
+            assert!(
+                serde_yaml::from_str::<PermissionsConfig>(yaml).is_err(),
+                "invalid read policy must fail deserialization:\n{yaml}"
+            );
+        }
+    }
+
+    /// The author-facing capability enum is a hand-written projection of the
+    /// authoritative catalog. Nothing but this test stops the catalog from
+    /// gaining a selectable capability that authors can never enable — the
+    /// proxy would enforce a policy the front matter cannot express.
+    #[test]
+    fn front_matter_capabilities_cover_the_catalog() {
+        use crate::ado_proxy::catalog::Capability;
+
+        let selectable: Vec<Capability> = AdoReadCapability::ALL
+            .iter()
+            .map(|capability| capability.to_catalog())
+            .collect();
+
+        for capability in Capability::ALL {
+            if capability.is_always_on() {
+                assert!(
+                    !selectable.contains(capability),
+                    "{} is always on and must not be offered as a front-matter toggle, \
+                     or authors will believe they can disable it",
+                    capability.as_str()
+                );
+                continue;
+            }
+            assert!(
+                selectable.contains(capability),
+                "catalog capability {} is not reachable from front matter; add it to \
+                 AdoReadCapability so authors can enable what the proxy enforces",
+                capability.as_str()
+            );
+        }
+    }
+
+    /// Guards the wire format in the other direction: the YAML an author writes
+    /// must deserialize to the capability whose name they used.
+    #[test]
+    fn front_matter_capability_names_match_the_catalog() {
+        for capability in AdoReadCapability::ALL {
+            let name = capability.to_catalog().as_str();
+            let yaml = format!("read:\n  service-connection: sc\n  capabilities: ['{name}']");
+            let parsed: PermissionsConfig = serde_yaml::from_str(&yaml)
+                .unwrap_or_else(|error| panic!("capability {name} must parse: {error}"));
+            assert_eq!(
+                parsed
+                    .read
+                    .as_ref()
+                    .unwrap()
+                    .options()
+                    .unwrap()
+                    .capabilities,
+                vec![*capability],
+                "front-matter name for {name} does not round-trip"
+            );
+        }
+    }
+
+    /// The `allow` list must not widen to a whole organization by omission.
+    #[test]
+    fn read_policy_rejects_an_organization_with_no_projects() {
+        let yaml = "read:\n  service-connection: sc\n  allow:\n    - organization: other-org";
+        let parsed: PermissionsConfig = serde_yaml::from_str(yaml).unwrap();
+        let error = parsed
+            .read
+            .as_ref()
+            .unwrap()
+            .options()
+            .unwrap()
+            .validate()
+            .expect_err("an organization with no projects must be rejected");
+        assert!(
+            error.to_string().contains("lists no projects"),
+            "error should name the cause: {error}"
+        );
+    }
+
+    /// A project with no repositories narrows rather than widens, so it stands.
+    #[test]
+    fn read_policy_allows_a_project_without_repositories() {
+        let yaml = "read:\n  service-connection: sc\n  allow:\n    - organization: other-org\n      projects:\n        - project: Other Project";
+        let parsed: PermissionsConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            parsed
+                .read
+                .as_ref()
+                .unwrap()
+                .options()
+                .unwrap()
+                .validate()
+                .is_ok(),
+            "project-scoped reads without repository access must be permitted"
+        );
     }
 
     #[test]
@@ -5343,7 +6190,13 @@ Body
 "#;
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
         let perms = fm.permissions.unwrap();
-        assert_eq!(perms.read.as_deref(), Some("my-read-sc"));
+        assert_eq!(
+            perms
+                .read
+                .as_ref()
+                .map(ReadPermissionConfig::service_connection),
+            Some("my-read-sc")
+        );
         assert_eq!(perms.write.as_deref(), Some("my-write-sc"));
     }
 
@@ -5478,6 +6331,7 @@ Body
         assert!(ado.toolsets().is_empty());
         assert!(ado.allowed().is_empty());
         assert!(ado.org().is_none());
+        assert!(ado.version().is_none());
     }
 
     #[test]
@@ -5487,7 +6341,8 @@ name: "Test"
 description: "Test"
 tools:
   azure-devops:
-    toolsets: [repos, wit, core]
+    version: 2.9.0
+    toolsets: [repositories, work-items, core]
     allowed: [wit_get_work_item, core_list_projects]
     org: myorg
 ---
@@ -5497,9 +6352,10 @@ Body
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
         let ado = fm.tools.as_ref().unwrap().azure_devops.as_ref().unwrap();
         assert!(ado.is_enabled());
-        assert_eq!(ado.toolsets(), &["repos", "wit", "core"]);
+        assert_eq!(ado.toolsets(), &["repositories", "work-items", "core"]);
         assert_eq!(ado.allowed(), &["wit_get_work_item", "core_list_projects"]);
         assert_eq!(ado.org(), Some("myorg"));
+        assert_eq!(ado.version(), Some("2.9.0"));
     }
 
     #[test]
@@ -5509,7 +6365,7 @@ name: "Test"
 description: "Test"
 tools:
   azure-devops:
-    toolsets: [wit]
+    toolsets: [work-items]
 ---
 
 Body
@@ -5517,9 +6373,23 @@ Body
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
         let ado = fm.tools.as_ref().unwrap().azure_devops.as_ref().unwrap();
         assert!(ado.is_enabled());
-        assert_eq!(ado.toolsets(), &["wit"]);
+        assert_eq!(ado.toolsets(), &["work-items"]);
         assert!(ado.allowed().is_empty());
         assert!(ado.org().is_none());
+        assert!(ado.version().is_none());
+    }
+
+    #[test]
+    fn test_azure_devops_version_requires_exact_semver() {
+        for version in ["latest", "next", "^2.8.0", "2.8", "v2.8.1"] {
+            let content = format!(
+                "---\nname: Test\ndescription: Test\ntools:\n  azure-devops:\n    version: {version}\n---\n"
+            );
+            assert!(
+                super::super::common::parse_markdown(&content).is_err(),
+                "{version} must not be accepted as an exact MCP package version"
+            );
+        }
     }
 
     // ─── LeanRuntimeConfig deserialization ──────────────────────────────
@@ -5586,7 +6456,7 @@ tools:
   edit: true
   cache-memory: true
   azure-devops:
-    toolsets: [wit]
+    toolsets: [work-items]
 runtimes:
   lean: true
 ---
@@ -6013,9 +6883,7 @@ Body
         assert_eq!(ci.allowed_labels, vec!["agent-*".to_string()]);
         assert_eq!(ci.assignees, vec!["jamesdevine".to_string()]);
         assert_eq!(
-            fm.safe_outputs
-                .get("github-token")
-                .and_then(|v| v.as_str()),
+            fm.safe_outputs.get("github-token").and_then(|v| v.as_str()),
             Some("$(ADO_AW_DEBUG_GITHUB_TOKEN)")
         );
     }

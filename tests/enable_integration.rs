@@ -94,18 +94,48 @@ async fn enable_dry_run_against_subdirectory_uses_repo_root_relative_yaml_path()
     // `/job-agent.lock.yml` (relative to scan root) instead of the
     // real repo-relative `/tests/fixtures/job-agent.lock.yml`.
     //
-    // Scans `tests/fixtures` because it is the in-repo directory that
-    // still holds committed `*.lock.yml` files; `tests/safe-outputs`
-    // is markdown-only now that both smoke lanes recompile at run time.
-    // Any subdirectory with a compiled pipeline exercises this path.
+    // The scenario is staged in a throwaway git repo rather than run
+    // against this checkout: no in-repo directory holds committed
+    // `ado-aw` `*.lock.yml` files any more (both smoke lanes and the
+    // fixtures recompile at run time), and the ambient git remote of
+    // the checkout is not something a test may depend on. Compiling a
+    // fixture into `pipelines/` inside the temp repo gives us a
+    // subdirectory whose repo-relative path is known exactly.
     //
     // `enable` always calls `list_definitions` (to know which
-    // fixtures already exist) even in --dry-run, so we point at a
+    // pipelines already exist) even in --dry-run, so we point at a
     // wiremock that returns an empty list. The dry-run path then
-    // prints the would-be POST body for every fixture without ever
-    // making a real network call.
+    // prints the would-be POST body without ever making a real
+    // network call.
     use wiremock::matchers::{method, path_regex};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let repo = tempfile::TempDir::new().expect("create temp repo");
+    let repo_path = repo.path();
+    std::process::Command::new("git")
+        .args(["init", "-q", "."])
+        .current_dir(repo_path)
+        .status()
+        .expect("git init");
+    let pipelines_dir = repo_path.join("pipelines");
+    std::fs::create_dir(&pipelines_dir).expect("create pipelines dir");
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/minimal-agent.md"),
+        pipelines_dir.join("minimal-agent.md"),
+    )
+    .expect("copy fixture");
+
+    let compile = std::process::Command::new(binary())
+        .args(["compile", "pipelines/minimal-agent.md"])
+        .current_dir(repo_path)
+        .output()
+        .expect("Failed to run ado-aw compile");
+    assert!(
+        compile.status.success(),
+        "fixture must compile; stdout=\n{}\nstderr=\n{}",
+        String::from_utf8_lossy(&compile.stdout),
+        String::from_utf8_lossy(&compile.stderr)
+    );
 
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -122,6 +152,12 @@ async fn enable_dry_run_against_subdirectory_uses_repo_root_relative_yaml_path()
             "enable",
             "--service-connection",
             "00000000-0000-0000-0000-000000000000",
+            // The temp repo has no git remote, so the GitHub source
+            // identity has to be supplied explicitly. This also keeps
+            // the test independent of the remote of whatever checkout
+            // it runs in.
+            "--repository-name",
+            "githubnext/ado-aw",
             "--project",
             "AgentPlayground",
             "--org",
@@ -129,13 +165,14 @@ async fn enable_dry_run_against_subdirectory_uses_repo_root_relative_yaml_path()
             "--pat",
             "dummy-pat-for-dry-run",
             "--dry-run",
-            "tests/fixtures",
+            "pipelines",
         ])
         // Redirect ADO REST calls at the wiremock; explicit dummy
         // PAT keeps `resolve_auth` off the Azure-CLI / interactive-
         // prompt fallback which CI doesn't support.
         .env("ADO_AW_TEST_ORG_URL", server.uri())
         .env_remove("AZURE_DEVOPS_EXT_PAT")
+        .current_dir(repo_path)
         .output()
         .expect("Failed to run ado-aw enable");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -150,11 +187,11 @@ async fn enable_dry_run_against_subdirectory_uses_repo_root_relative_yaml_path()
         "expected pipeline-discovery line, got:\n{stdout}"
     );
     assert!(
-        stdout.contains("\"yamlFilename\": \"/tests/fixtures/"),
+        stdout.contains("\"yamlFilename\": \"/pipelines/minimal-agent.lock.yml\""),
         "yamlFilename must be repo-root-relative, got:\n{stdout}"
     );
     assert!(
         !stdout.contains("Failed to read source"),
-        "no fixture should fail to read; got:\n{stdout}"
+        "no pipeline should fail to read; got:\n{stdout}"
     );
 }

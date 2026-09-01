@@ -240,7 +240,7 @@ impl Executor for CreateGitTagResult {
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
         debug!("ADO org: {}, project: {}", org_url, project);
 
-        let config: CreateGitTagConfig = ctx.get_tool_config("create-git-tag");
+        let config: CreateGitTagConfig = ctx.get_tool_config("create-git-tag")?;
         debug!("Tag pattern: {:?}", config.tag_pattern);
         debug!("Allowed repositories: {:?}", config.allowed_repositories);
 
@@ -480,10 +480,7 @@ mod tests {
         };
         let result: Result<CreateGitTagResult, _> = params.try_into();
         let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("pipeline command"),
-            "unexpected error: {err}"
-        );
+        assert!(err.contains("pipeline command"), "unexpected error: {err}");
     }
 
     #[test]

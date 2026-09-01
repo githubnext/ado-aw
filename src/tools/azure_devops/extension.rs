@@ -1,11 +1,15 @@
 // ─── Azure DevOps MCP ────────────────────────────────────────────────
 
-use crate::allowed_hosts::mcp_required_hosts;
+use crate::ado_proxy::catalog::ORGANIZATION_HOST;
 use crate::compile::extensions::{
     CompileContext, CompilerExtension, Declarations, ExtensionPhase, McpgServerConfig,
 };
 use crate::compile::types::AzureDevOpsToolConfig;
-use crate::compile::{ADO_MCP_ENTRYPOINT, ADO_MCP_IMAGE, ADO_MCP_PACKAGE, ADO_MCP_SERVER_NAME};
+use crate::compile::{
+    ADO_MCP_CA_MOUNT, ADO_MCP_ENTRY_SCRIPT, ADO_MCP_ENTRYPOINT, ADO_MCP_HOST_NODE_MODULES,
+    ADO_MCP_IMAGE, ADO_MCP_NODE_MODULES, ADO_MCP_SERVER_NAME, ADO_MCP_TOKEN_SENTINEL,
+    ADO_PROXY_NETWORK_NAME, ADO_PROXY_PUBLIC_CA_HOST_PATH,
+};
 use anyhow::Result;
 use std::collections::BTreeMap;
 
@@ -35,16 +39,17 @@ impl CompilerExtension for AzureDevOpsExtension {
     /// Typed-IR view. Azure DevOps MCP contributes only static
     /// signals — no pipeline steps.
     fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
-        let mut hosts: Vec<String> = mcp_required_hosts("ado")
-            .iter()
-            .map(|h| (*h).to_string())
-            .collect();
-        // The ADO MCP runs in a container via `npx -y @azure-devops/mcp`.
-        // npx needs npm registry access to resolve and install the package.
-        hosts.push("node".to_string());
+        // The MCP no longer reaches Azure DevOps itself: it is redirected at
+        // the policy engine, which holds the credential. The engine's own
+        // egress goes through Squid, so the hosts the MCP would otherwise
+        // need are not required here. `node` is likewise gone — the package
+        // is installed on the runner and mounted in, so the container
+        // resolves nothing at start time.
+        let hosts: Vec<String> = Vec::new();
 
-        // Build entrypoint args: npx -y @azure-devops/mcp <org> [-d toolset1 toolset2 ...]
-        let mut entrypoint_args = vec!["-y".to_string(), ADO_MCP_PACKAGE.to_string()];
+        // Launch the package directly. `npx` would need registry access from
+        // inside a container that, by design, can reach nothing but the engine.
+        let mut entrypoint_args = vec![ADO_MCP_ENTRY_SCRIPT.to_string()];
 
         // Org: use explicit override, then inferred from git remote, then fail
         let org = self
@@ -93,21 +98,47 @@ impl CompilerExtension for AzureDevOpsExtension {
         };
 
         // ADO MCP authentication: the @azure-devops/mcp npm package accepts
-        // auth type via CLI arg (-a) and token via env var.
-        // Bearer: `-a envvar` reads ADO_MCP_AUTH_TOKEN (pipeline JWT from ARM)
-        let (auth_flag, token_var) = ("envvar", "ADO_MCP_AUTH_TOKEN");
-        entrypoint_args.extend(["-a".to_string(), auth_flag.to_string()]);
+        // auth type via CLI arg (-a) and token via env var. Under interception
+        // the value is a sentinel — the engine injects the real bearer only
+        // after a complete allow decision.
+        entrypoint_args.extend(["-a".to_string(), "envvar".to_string()]);
 
-        let env = Some(BTreeMap::from([(
-            token_var.to_string(),
-            String::new(), // Passthrough from MCPG process env
-        )]));
+        let env = Some(BTreeMap::from([
+            (
+                "ADO_MCP_AUTH_TOKEN".to_string(),
+                ADO_MCP_TOKEN_SENTINEL.to_string(),
+            ),
+            // Trust is scoped to this container rather than installed
+            // system-wide: it is an availability control, not a security one.
+            // Enforcement comes from routing — Squid denies the protected
+            // hosts, so a client that declines this certificate fails closed
+            // instead of escaping the policy.
+            (
+                "NODE_EXTRA_CA_CERTS".to_string(),
+                ADO_MCP_CA_MOUNT.to_string(),
+            ),
+        ]));
 
-        // --network host: AWF's DOCKER-USER iptables rules block outbound from
-        // containers on Docker's default bridge. Host networking bypasses FORWARD
-        // chain rules so the ADO MCP can reach dev.azure.com.
-        // This matches gh-aw's approach for its built-in agentic-workflows MCP.
-        let args = Some(vec!["--network".to_string(), "host".to_string()]);
+        // Mount the pre-installed package and the *public* CA certificate.
+        // The CA private key is never mounted anywhere; it is destroyed by the
+        // step that starts the engine.
+        let mounts = Some(vec![
+            format!("{ADO_MCP_HOST_NODE_MODULES}:{ADO_MCP_NODE_MODULES}:ro"),
+            format!("{ADO_PROXY_PUBLIC_CA_HOST_PATH}:{ADO_MCP_CA_MOUNT}:ro"),
+        ]);
+
+        // Join the engine's network and redirect the Azure DevOps host at it.
+        // `--add-host` is what makes the redirection total: it catches both
+        // `node:https` and global `fetch`, so the MCP's raw `fetch()` call
+        // sites cannot slip past it the way proxy environment variables would.
+        // `ADO_PROXY_IP` is resolved at pipeline time and substituted into the
+        // MCPG config by the step that starts the engine.
+        let args = Some(vec![
+            "--network".to_string(),
+            ADO_PROXY_NETWORK_NAME.to_string(),
+            "--add-host".to_string(),
+            format!("{ORGANIZATION_HOST}:${{ADO_PROXY_IP}}"),
+        ]);
 
         let mcpg_servers = vec![(
             ADO_MCP_SERVER_NAME.to_string(),
@@ -116,7 +147,7 @@ impl CompilerExtension for AzureDevOpsExtension {
                 container: Some(ADO_MCP_IMAGE.to_string()),
                 entrypoint: Some(ADO_MCP_ENTRYPOINT.to_string()),
                 entrypoint_args: Some(entrypoint_args),
-                mounts: None,
+                mounts,
                 args,
                 url: None,
                 headers: None,
@@ -145,10 +176,11 @@ impl CompilerExtension for AzureDevOpsExtension {
             network_hosts: hosts,
             mcpg_servers,
             copilot_allow_tools: vec![ADO_MCP_SERVER_NAME.to_string()],
-            pipeline_env: vec![crate::compile::extensions::PipelineEnvMapping {
-                container_var: "ADO_MCP_AUTH_TOKEN".to_string(),
-                pipeline_var: "SC_READ_TOKEN".to_string(),
-            }],
+            // Deliberately empty. This previously mapped
+            // ADO_MCP_AUTH_TOKEN -> SC_READ_TOKEN, handing the MCP container a
+            // real Azure DevOps credential. Under interception the engine holds
+            // the only copy; the MCP gets a sentinel.
+            pipeline_env: Vec::new(),
             warnings,
             ..Declarations::default()
         })
@@ -193,11 +225,117 @@ mod tests {
         assert_eq!(config.server_type, "stdio");
         assert_eq!(config.container.as_deref(), Some(ADO_MCP_IMAGE));
 
-        // pipeline_env exposes the ADO_MCP_AUTH_TOKEN passthrough.
-        assert_eq!(decl.pipeline_env.len(), 1);
-        assert_eq!(decl.pipeline_env[0].container_var, "ADO_MCP_AUTH_TOKEN");
+        // The MCP must never receive a real Azure DevOps credential: the
+        // policy engine holds the only copy and injects it after an allow
+        // decision. This is the whole point of routing it through the proxy.
+        assert!(
+            decl.pipeline_env.is_empty(),
+            "no pipeline variable may be projected into the MCP container: {:?}",
+            decl.pipeline_env
+        );
+        let env = config.env.as_ref().expect("env is set");
+        assert_eq!(
+            env.get("ADO_MCP_AUTH_TOKEN").map(String::as_str),
+            Some(ADO_MCP_TOKEN_SENTINEL)
+        );
 
-        // Network hosts include the dev.azure.com domains plus node.
-        assert!(decl.network_hosts.contains(&"node".to_string()));
+        // Nothing is fetched at start time, so the container needs no hosts.
+        assert!(
+            decl.network_hosts.is_empty(),
+            "the MCP reaches only the policy engine: {:?}",
+            decl.network_hosts
+        );
+    }
+
+    fn config_for(markdown: &str) -> (crate::compile::types::FrontMatter, AzureDevOpsToolConfig) {
+        let (fm, _) = parse_markdown(markdown).unwrap();
+        let cfg = fm
+            .tools
+            .as_ref()
+            .and_then(|t| t.azure_devops.as_ref())
+            .cloned()
+            .unwrap();
+        (fm, cfg)
+    }
+
+    const MINIMAL: &str =
+        "---\nname: t\ndescription: x\ntools:\n  azure-devops:\n    org: 'myorg'\n---\n";
+
+    #[test]
+    fn mcp_is_launched_directly_rather_than_resolved_at_start_time() {
+        let (fm, cfg) = config_for(MINIMAL);
+        let ctx = CompileContext::for_test(&fm);
+        let decl = AzureDevOpsExtension::new(cfg).declarations(&ctx).unwrap();
+        let (_, config) = &decl.mcpg_servers[0];
+
+        // `npx` would need registry access from a container that, by design,
+        // can reach nothing but the policy engine.
+        assert_eq!(config.entrypoint.as_deref(), Some("node"));
+        let args = config.entrypoint_args.as_ref().unwrap();
+        assert_eq!(args[0], ADO_MCP_ENTRY_SCRIPT);
+        assert!(!args.iter().any(|a| a == "-y"));
+    }
+
+    #[test]
+    fn mcp_is_redirected_at_the_policy_engine() {
+        let (fm, cfg) = config_for(MINIMAL);
+        let ctx = CompileContext::for_test(&fm);
+        let decl = AzureDevOpsExtension::new(cfg).declarations(&ctx).unwrap();
+        let (_, config) = &decl.mcpg_servers[0];
+        let args = config.args.as_ref().expect("docker args set");
+
+        // Host networking would put the MCP on the runner's own stack, where
+        // it could reach Azure DevOps directly and bypass the policy entirely.
+        assert!(
+            !args.iter().any(|a| a == "host"),
+            "the MCP must not use host networking: {args:?}"
+        );
+        assert!(args.windows(2).any(|w| w == ["--network", ADO_PROXY_NETWORK_NAME]));
+        assert!(
+            args.iter()
+                .any(|a| a == &format!("{ORGANIZATION_HOST}:${{ADO_PROXY_IP}}")),
+            "the Azure DevOps host must resolve to the engine: {args:?}"
+        );
+    }
+
+    #[test]
+    fn mcp_mounts_the_package_and_only_the_public_certificate() {
+        let (fm, cfg) = config_for(MINIMAL);
+        let ctx = CompileContext::for_test(&fm);
+        let decl = AzureDevOpsExtension::new(cfg).declarations(&ctx).unwrap();
+        let (_, config) = &decl.mcpg_servers[0];
+        let mounts = config.mounts.as_ref().expect("mounts set");
+
+        // Node resolves dependencies by walking upward from the importing
+        // file, so this path is load-bearing: mounted elsewhere, the MCP's own
+        // imports fail with ERR_MODULE_NOT_FOUND.
+        assert!(
+            mounts
+                .iter()
+                .any(|m| m == &format!("{ADO_MCP_HOST_NODE_MODULES}:{ADO_MCP_NODE_MODULES}:ro")),
+            "{mounts:?}"
+        );
+        assert!(mounts.iter().all(|m| m.ends_with(":ro")), "{mounts:?}");
+        assert!(
+            mounts.iter().any(|m| m.contains(ADO_MCP_CA_MOUNT)),
+            "the MCP must trust the interception certificate: {mounts:?}"
+        );
+        assert!(
+            !mounts.iter().any(|m| m.contains(".key")),
+            "the CA private key must never be mounted: {mounts:?}"
+        );
+        let env = config.env.as_ref().unwrap();
+        assert_eq!(
+            env.get("NODE_EXTRA_CA_CERTS").map(String::as_str),
+            Some(ADO_MCP_CA_MOUNT)
+        );
+    }
+
+    #[test]
+    fn the_sentinel_is_not_a_credential() {
+        // It appears in logs and error messages, so it must read as
+        // deliberate rather than as a leaked or malformed token.
+        assert!(ADO_MCP_TOKEN_SENTINEL.contains("ado-proxy"));
+        assert!(!ADO_MCP_TOKEN_SENTINEL.is_empty());
     }
 }

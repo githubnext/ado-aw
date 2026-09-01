@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use rmcp::handler::server::wrapper::Parameters;
 
 use super::*;
+use crate::audit::model::{AdoProxyAnalysis, AdoProxyReasonStat, AuditData};
 use crate::compile::ir::summary::{GraphSummary, PipelineSummary};
 use crate::inspect::lint::LintReport;
 
@@ -40,6 +41,32 @@ fn list_tools_contains_expected_author_surface() {
     ] {
         assert!(names.contains(expected), "missing MCP tool {expected}");
     }
+}
+
+#[test]
+fn structured_audit_result_preserves_ado_proxy_analysis() {
+    let result = structured_result(AuditData {
+        ado_proxy_analysis: Some(AdoProxyAnalysis {
+            total_requests: 2,
+            deny_count: 1,
+            reasons: vec![AdoProxyReasonStat {
+                reason: String::from("out-of-scope"),
+                decision: String::from("deny"),
+                count: 1,
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .expect("serialize structured audit result");
+
+    let audit = result
+        .into_typed::<AuditData>()
+        .expect("structured result contains AuditData");
+    assert_eq!(
+        audit.ado_proxy_analysis.expect("proxy analysis").deny_count,
+        1
+    );
 }
 
 #[tokio::test]

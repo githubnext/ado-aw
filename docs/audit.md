@@ -4,7 +4,7 @@ _Part of the [ado-aw documentation](../AGENTS.md)._
 
 ## Overview
 
-`ado-aw audit` audits one Azure DevOps build at a time. It downloads the selected build artifacts, runs the built-in analyzers (firewall, MCP gateway, OTel, safe outputs, detection verdict, build timeline, and missing-tool / missing-data / noop extraction), and renders a structured console report or the raw `AuditData` JSON. The MVP is single-run only; diff mode and cross-run trend reporting are follow-ups.
+`ado-aw audit` audits one Azure DevOps build at a time. It downloads the selected build artifacts, runs the built-in analyzers (ADO proxy, firewall, MCP gateway, OTel, safe outputs, detection verdict, build timeline, and missing-tool / missing-data / noop extraction), and renders a structured console report or the raw `AuditData` JSON. The MVP is single-run only; diff mode and cross-run trend reporting are follow-ups.
 
 ## Usage
 
@@ -53,6 +53,10 @@ URL-encoded project segments are decoded before the ADO context is resolved. `t=
 │   │   ├── aw_info.json              # Runtime engine / agent / source metadata
 │   │   └── otel.jsonl                # Copilot OTel (when emitted)
 │   └── logs/
+│       ├── ado-proxy/                # Sanitized ADO policy decisions + container lifecycle
+│       │   ├── ado-proxy-decisions.jsonl
+│       │   ├── container.log
+│       │   └── container-state.txt
 │       ├── firewall/                 # AWF Squid proxy logs
 │       ├── mcpg/                     # MCP Gateway logs (includes the SafeOutputs stdio child's stdout/stderr)
 │       └── agent-output.txt          # Filtered agent stdout
@@ -85,6 +89,7 @@ Current top-level keys include the following. Optional sections are omitted from
 | `rejected_safe_outputs` | Rollup of rejections by reason / threat flag. |
 | `detection_analysis` | `threat-analysis.json`. |
 | `mcp_server_health` | MCPG logs aggregated per server. |
+| `ado_proxy_analysis` | Sanitized `logs/ado-proxy` decisions and pre-teardown container lifecycle, including operation/reason rollups and bounded recent deny/error events. |
 | `pipeline_graph` | Optional typed-IR `PipelineSummary` rebuilt from local source metadata (`aw_info.json.source`) for graph correlation. |
 | `mcp_tool_usage` | MCPG logs aggregated per `(server, tool)`. |
 | `mcp_failures` | MCPG `tool_error` / `server_error` events. |
@@ -96,6 +101,47 @@ Current top-level keys include the following. Optional sections are omitted from
 | `errors` / `warnings` | Run-level error / warning aggregates. |
 | `tool_usage` | High-level runtime tool-usage rollups derived from telemetry. |
 | `created_items` | Successful `executed` items with extracted id / url / title. |
+
+## ADO proxy diagnostics
+
+Proxy-enabled Agent jobs publish three diagnostic files under
+`agent_outputs_<BuildId>/logs/ado-proxy`. They are part of the existing
+`agent` artifact family, so use `--artifacts agent` to fetch them; there is no
+separate proxy artifact selector.
+
+The decision stream is schema-versioned as
+`ado-aw/ado-proxy-decisions/v1`. Audit reads it strictly and reports:
+
+- allow, deny, and proxy-error totals;
+- per-operation and per-reason counts;
+- upstream status classes, latency, response bytes, and stripped
+  credential-header names;
+- at most 20 recent denied/error request summaries;
+- malformed-record counts without echoing malformed source lines.
+
+The stream contains no raw request path, query value, header value, body,
+credential, or exact upstream status code. Audit likewise does not preserve
+unknown JSON fields or raw log lines.
+
+`container.log` and `container-state.txt` provide readiness and state observed
+immediately before teardown. The audit calls this
+`state_before_teardown`—the file is captured before the pipeline stops the
+container, so it is not a post-stop final state.
+
+Policy denials are diagnostic evidence that the boundary worked; they do not
+change the Azure DevOps build result or increment the audit error count.
+Lifecycle failures, unavailable credentials, upstream failures, and
+out-of-scope response filtering produce elevated findings. Capability/scope
+conflicts produce recommendations to align the prompt with front matter, not
+to widen permissions automatically.
+
+`ado-aw trace` includes a compact run-level proxy summary. MCP-author
+`audit_build` returns the full `ado_proxy_analysis`, while `trace_failure`
+returns the compact trace projection. Proxy events are not attributed to a
+specific job step because the v1 stream has no step identifier.
+
+When testing a newly-built audit analyzer against an already-cached build, pass
+`--no-cache` so the downloaded artifact is reprocessed.
 
 ## Rejected safe-output trace
 

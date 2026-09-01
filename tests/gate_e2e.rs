@@ -18,12 +18,21 @@ fn value_field<'a>(mapping: &'a Mapping, key: &str) -> Option<&'a Value> {
     mapping.get(&key)
 }
 
+/// Locate the compiled gate step and return its `GATE_SPEC` env value.
+///
+/// The step is identified by the evaluator path plus the `node` invocation
+/// that reads it. The path arrives as a `ShellScript` binding in the generated
+/// prelude rather than inline in the command, so matching the bare
+/// `node '<path>'` form would silently find nothing and report the gate as
+/// missing.
 fn find_gate_spec(value: &Value) -> Option<String> {
+    const EVALUATOR_PATH: &str = "/tmp/ado-aw-scripts/ado-script/gate.js";
     match value {
         Value::Mapping(mapping) => {
             let script = string_field(mapping, "bash").or_else(|| string_field(mapping, "script"));
             if script.is_some_and(|script| {
-                script.contains("node '/tmp/ado-aw-scripts/ado-script/gate.js'")
+                script.contains(&format!("EVALUATOR_PATH='{EVALUATOR_PATH}'"))
+                    && script.contains(r#"node "$EVALUATOR_PATH""#)
             }) {
                 let env = value_field(mapping, "env")?.as_mapping()?;
                 return string_field(env, "GATE_SPEC").map(str::to_owned);
@@ -39,10 +48,25 @@ fn find_gate_spec(value: &Value) -> Option<String> {
 fn run_gate(gate_js: &Path, gate_spec: &str, pr_title: &str) -> Output {
     let path = std::env::var_os("PATH").unwrap_or_default();
 
-    Command::new("node")
+    let mut command = Command::new("node");
+    command
         .arg(gate_js)
         .env_clear()
-        .env("PATH", path)
+        .env("PATH", path);
+
+    // Node aborts during initialisation on Windows without `SYSTEMROOT`: its
+    // CSPRNG seeding calls into the OS crypto provider, which is resolved
+    // relative to that variable. The failure is an assertion with no stdout
+    // and a native stack trace, which reads like a gate-logic bug rather than
+    // a missing environment variable. Passing it through keeps `env_clear`'s
+    // intent — the gate must see only the variables set below — while letting
+    // the process start at all.
+    #[cfg(windows)]
+    if let Some(system_root) = std::env::var_os("SYSTEMROOT") {
+        command.env("SYSTEMROOT", system_root);
+    }
+
+    command
         .env("GATE_SPEC", gate_spec)
         .env("ADO_BUILD_REASON", "PullRequest")
         .env("ADO_PR_TITLE", pr_title)

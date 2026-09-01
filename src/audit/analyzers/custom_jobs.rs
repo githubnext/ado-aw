@@ -64,7 +64,6 @@ pub(crate) async fn load_custom_tool_catalog(
     supplied_aw_info: Option<&AwInfo>,
 ) -> anyhow::Result<CustomToolCatalog> {
     let mut catalog = CustomToolCatalog::default();
-    let mut primary_catalog_loaded = false;
 
     if let Some(path) = find_metadata_file(download_root, CUSTOM_TOOLS_FILENAME).await? {
         let contents = tokio::fs::read_to_string(&path)
@@ -87,7 +86,6 @@ pub(crate) async fn load_custom_tool_catalog(
                 )
             })?
         };
-        primary_catalog_loaded = true;
         for config in resolved.custom_tools {
             let tool = config.name.trim();
             if tool.is_empty() {
@@ -117,14 +115,13 @@ pub(crate) async fn load_custom_tool_catalog(
     let disk_aw_info = if supplied_aw_info.is_none() {
         match load_aw_info(download_root).await {
             Ok(value) => value,
-            Err(error) if primary_catalog_loaded => {
+            Err(error) => {
                 warn!("Failed to read optional aw_info.json metadata: {error:#}");
                 catalog
                     .warnings
                     .push(crate::audit::malformed_aw_info_warning());
                 None
             }
-            Err(error) => return Err(error),
         }
     } else {
         None
@@ -200,126 +197,16 @@ pub async fn populate_custom_safe_output_jobs(
     let mut reports = Vec::with_capacity(catalog.entries.len());
 
     for (tool, entry) in catalog.entries {
-        let graph_job_id = graph_job_id_for_tool(audit, &tool);
-        let graph_display_name = graph_job_id
-            .as_deref()
-            .and_then(|job_id| unique_graph_display_name(audit, job_id));
-        let metadata_job_id = entry
-            .metadata
-            .as_ref()
-            .and_then(|metadata| normalize_optional_string(metadata.job_id.clone()));
-        if let (Some(graph_job_id), Some(metadata_job_id)) =
-            (graph_job_id.as_deref(), metadata_job_id.as_deref())
-            && graph_job_id != metadata_job_id
-        {
-            findings.push(Finding {
-                category: String::from("safe_outputs"),
-                severity: Severity::High,
-                title: format!("Custom job metadata identity mismatch for {tool}"),
-                description: format!(
-                    "The typed pipeline graph assigns custom tool '{tool}' to ADO job \
-                     '{graph_job_id}', but the aw_info marker claims '{metadata_job_id}'."
-                ),
-                impact: Some(String::from(
-                    "Untrusted runtime metadata does not match the compiler-derived job identity.",
-                )),
-            });
-        }
-        let expected_job_id = graph_job_id.clone().or(metadata_job_id);
-
-        let metadata_approval_path = entry
-            .metadata
-            .as_ref()
-            .and_then(|metadata| normalize_optional_string(metadata.approval_path.clone()));
-        let graph_approval_path = graph_job_id
-            .as_deref()
-            .and_then(|job_id| approval_path_from_graph(audit, job_id));
-        if graph_job_id.is_some()
-            && metadata_approval_path.is_some()
-            && metadata_approval_path != graph_approval_path
-        {
-            findings.push(Finding {
-                category: String::from("safe_outputs"),
-                severity: Severity::High,
-                title: format!("Custom job metadata approval mismatch for {tool}"),
-                description: format!(
-                    "The typed pipeline graph assigns custom tool '{tool}' to approval path \
-                     '{}', but the aw_info marker claims '{}'.",
-                    graph_approval_path.as_deref().unwrap_or("automatic"),
-                    metadata_approval_path.as_deref().unwrap_or("automatic")
-                ),
-                impact: Some(String::from(
-                    "Untrusted runtime metadata does not match the compiler-derived approval path.",
-                )),
-            });
-        }
-        let graph_is_authoritative = graph_job_id.is_some();
-        let approval_path = if graph_is_authoritative {
-            graph_approval_path
-        } else {
-            metadata_approval_path
-        };
-        if let (Some(component), Some(config_digest)) = (
-            entry.component.as_ref(),
-            entry.config_schema_digest.as_ref(),
-        ) && !component.schema_digest.is_empty()
-            && component.schema_digest != *config_digest
-        {
-            findings.push(Finding {
-                category: String::from("safe_outputs"),
-                severity: Severity::High,
-                title: format!("Custom component provenance mismatch for {tool}"),
-                description: format!(
-                    "The aw_info marker declares schema_digest={} for custom tool '{tool}', but compiler-generated custom-tools.json hashes to {}.",
-                    component.schema_digest, config_digest
-                ),
-                impact: Some(String::from(
-                    "The proposal schema does not match the compile-time provenance recorded for the custom component.",
-                )),
-            });
-        }
-
-        let matches = matching_timeline_jobs(
-            &audit.jobs,
-            &tool,
-            expected_job_id.as_deref(),
-            graph_display_name.as_deref(),
-        );
-        let selected = matches.last().copied();
-
+        let correlation = correlate_tool_with_graph(audit, &tool, &entry, &mut findings);
         let previous_entry = previous.iter().find(|candidate| candidate.tool == tool);
-        let ado_job = selected
-            .map(custom_ado_job_from_timeline)
-            .or_else(|| previous_entry.and_then(|entry| entry.ado_job.clone()));
-        let expected_job_id = expected_job_id
-            .or_else(|| previous_entry.and_then(|entry| entry.expected_job_id.clone()));
-        let staged_requested = entry
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.staged_requested)
-            .or_else(|| previous_entry.and_then(|entry| entry.staged_requested));
-        let component_provenance = entry
-            .component
-            .or_else(|| previous_entry.and_then(|entry| entry.component_provenance.clone()));
-        let proposal_time_acknowledgement = entry.proposal_time_acknowledgement.or_else(|| {
-            previous_entry.and_then(|entry| entry.proposal_time_acknowledgement.clone())
-        });
-
-        reports.push(CustomSafeOutputJobAudit {
-            tool: tool.clone(),
-            proposed_count: proposal_counts.get(&tool).copied().unwrap_or(0),
-            expected_job_id,
-            component_provenance,
-            approval_path: if graph_is_authoritative {
-                approval_path
-            } else {
-                approval_path
-                    .or_else(|| previous_entry.and_then(|entry| entry.approval_path.clone()))
-            },
-            staged_requested,
-            proposal_time_acknowledgement,
-            ado_job,
-        });
+        reports.push(build_report_for_tool(
+            audit,
+            &tool,
+            entry,
+            correlation,
+            &proposal_counts,
+            previous_entry,
+        ));
     }
 
     add_report_findings(audit, &reports, &mut findings);
@@ -331,6 +218,171 @@ pub async fn populate_custom_safe_output_jobs(
         }
     }
     Ok(())
+}
+
+/// Result of correlating a catalog entry with the typed pipeline graph:
+/// the ADO job identity, its display name, and the effective approval path
+/// (graph-derived, falling back to metadata when the graph has no match).
+struct ToolGraphCorrelation {
+    expected_job_id: Option<String>,
+    graph_display_name: Option<String>,
+    approval_path: Option<String>,
+    graph_is_authoritative: bool,
+}
+
+/// Cross-check a catalog entry's `aw_info` metadata against the typed
+/// pipeline graph, pushing High-severity findings on any mismatch, and
+/// return the resolved job/approval identity to use for report building.
+fn correlate_tool_with_graph(
+    audit: &AuditData,
+    tool: &str,
+    entry: &CatalogEntry,
+    findings: &mut Vec<Finding>,
+) -> ToolGraphCorrelation {
+    let graph_job_id = graph_job_id_for_tool(audit, tool);
+    let graph_display_name = graph_job_id
+        .as_deref()
+        .and_then(|job_id| unique_graph_display_name(audit, job_id));
+    let metadata_job_id = entry
+        .metadata
+        .as_ref()
+        .and_then(|metadata| normalize_optional_string(metadata.job_id.clone()));
+    if let (Some(graph_job_id), Some(metadata_job_id)) =
+        (graph_job_id.as_deref(), metadata_job_id.as_deref())
+        && graph_job_id != metadata_job_id
+    {
+        findings.push(Finding {
+            category: String::from("safe_outputs"),
+            severity: Severity::High,
+            title: format!("Custom job metadata identity mismatch for {tool}"),
+            description: format!(
+                "The typed pipeline graph assigns custom tool '{tool}' to ADO job \
+                 '{graph_job_id}', but the aw_info marker claims '{metadata_job_id}'."
+            ),
+            impact: Some(String::from(
+                "Untrusted runtime metadata does not match the compiler-derived job identity.",
+            )),
+        });
+    }
+    let expected_job_id = graph_job_id.clone().or(metadata_job_id);
+
+    let metadata_approval_path = entry
+        .metadata
+        .as_ref()
+        .and_then(|metadata| normalize_optional_string(metadata.approval_path.clone()));
+    let graph_approval_path = graph_job_id
+        .as_deref()
+        .and_then(|job_id| approval_path_from_graph(audit, job_id));
+    if graph_job_id.is_some()
+        && metadata_approval_path.is_some()
+        && metadata_approval_path != graph_approval_path
+    {
+        findings.push(Finding {
+            category: String::from("safe_outputs"),
+            severity: Severity::High,
+            title: format!("Custom job metadata approval mismatch for {tool}"),
+            description: format!(
+                "The typed pipeline graph assigns custom tool '{tool}' to approval path \
+                 '{}', but the aw_info marker claims '{}'.",
+                graph_approval_path.as_deref().unwrap_or("automatic"),
+                metadata_approval_path.as_deref().unwrap_or("automatic")
+            ),
+            impact: Some(String::from(
+                "Untrusted runtime metadata does not match the compiler-derived approval path.",
+            )),
+        });
+    }
+    let graph_is_authoritative = graph_job_id.is_some();
+    let approval_path = if graph_is_authoritative {
+        graph_approval_path
+    } else {
+        metadata_approval_path
+    };
+    if let (Some(component), Some(config_digest)) =
+        (entry.component.as_ref(), entry.config_schema_digest.as_ref())
+        && !component.schema_digest.is_empty()
+        && component.schema_digest != *config_digest
+    {
+        findings.push(Finding {
+            category: String::from("safe_outputs"),
+            severity: Severity::High,
+            title: format!("Custom component provenance mismatch for {tool}"),
+            description: format!(
+                "The aw_info marker declares schema_digest={} for custom tool '{tool}', but compiler-generated custom-tools.json hashes to {}.",
+                component.schema_digest, config_digest
+            ),
+            impact: Some(String::from(
+                "The proposal schema does not match the compile-time provenance recorded for the custom component.",
+            )),
+        });
+    }
+
+    ToolGraphCorrelation {
+        expected_job_id,
+        graph_display_name,
+        approval_path,
+        graph_is_authoritative,
+    }
+}
+
+/// Build the final `CustomSafeOutputJobAudit` report for a tool, merging
+/// the freshly-correlated graph/metadata identity with the matching ADO
+/// timeline job and falling back to the previous run's report for any
+/// field the current artifacts don't supply.
+fn build_report_for_tool(
+    audit: &AuditData,
+    tool: &str,
+    entry: CatalogEntry,
+    correlation: ToolGraphCorrelation,
+    proposal_counts: &BTreeMap<String, u64>,
+    previous_entry: Option<&CustomSafeOutputJobAudit>,
+) -> CustomSafeOutputJobAudit {
+    let ToolGraphCorrelation {
+        expected_job_id,
+        graph_display_name,
+        approval_path,
+        graph_is_authoritative,
+    } = correlation;
+
+    let matches = matching_timeline_jobs(
+        &audit.jobs,
+        tool,
+        expected_job_id.as_deref(),
+        graph_display_name.as_deref(),
+    );
+    let selected = matches.last().copied();
+
+    let ado_job = selected
+        .map(custom_ado_job_from_timeline)
+        .or_else(|| previous_entry.and_then(|entry| entry.ado_job.clone()));
+    let expected_job_id =
+        expected_job_id.or_else(|| previous_entry.and_then(|entry| entry.expected_job_id.clone()));
+    let staged_requested = entry
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.staged_requested)
+        .or_else(|| previous_entry.and_then(|entry| entry.staged_requested));
+    let component_provenance = entry
+        .component
+        .or_else(|| previous_entry.and_then(|entry| entry.component_provenance.clone()));
+    let proposal_time_acknowledgement = entry
+        .proposal_time_acknowledgement
+        .or_else(|| previous_entry.and_then(|entry| entry.proposal_time_acknowledgement.clone()));
+
+    CustomSafeOutputJobAudit {
+        tool: tool.to_string(),
+        proposed_count: proposal_counts.get(tool).copied().unwrap_or(0),
+        expected_job_id,
+        component_provenance,
+        approval_path: if graph_is_authoritative {
+            approval_path
+        } else {
+            approval_path.or_else(|| previous_entry.and_then(|entry| entry.approval_path.clone()))
+        },
+        staged_requested,
+        proposal_time_acknowledgement,
+        ado_job,
+    }
 }
 
 fn discover_custom_proposal_tools(

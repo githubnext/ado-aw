@@ -33,8 +33,12 @@
 //! - [`Identifier`] — an engine agent/model identifier.
 //! - [`HostName`] — a DNS-style hostname.
 //! - [`RegistryRef`] — a container-registry host or base path.
+//! - [`AdoOrganization`] — an Azure DevOps Services organization name.
 //! - [`AdoProject`] — an Azure DevOps project name or GUID.
+//! - [`AdoRepository`] — an Azure DevOps repository name or GUID.
+//! - [`AdoWorkItemFieldRef`] — an Azure DevOps work item field reference name.
 //! - [`Version`] — a version string (`1.2.3`, `latest`).
+//! - [`SemanticVersion`] — an exact semantic version (`1.2.3`, `2.0.0-beta.1`).
 //!
 //! New safe-output tools that accept paths or identifiers should type those
 //! fields with these newtypes instead of raw `String` so the checks are applied
@@ -197,6 +201,11 @@ validated_string! {
 }
 
 validated_string! {
+    /// An Azure DevOps work item field reference name.
+    AdoWorkItemFieldRef, "work item field", validate::validate_ado_work_item_field_ref
+}
+
+validated_string! {
     /// A git ref name obeying `git check-ref-format`.
     GitRefName, "ref", validate::validate_git_ref_name
 }
@@ -265,32 +274,47 @@ validated_string! {
     }
 }
 
+fn validate_temporary_id(value: &str, label: &str) -> anyhow::Result<()> {
+    let bare = value.strip_prefix('#').unwrap_or(value);
+    let Some(suffix) = bare.strip_prefix("aw_") else {
+        anyhow::bail!(
+            "{label} must use `#aw_` followed by 3-12 ASCII alphanumeric/underscore characters"
+        );
+    };
+    if !(3..=12).contains(&suffix.len())
+        || !suffix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        anyhow::bail!(
+            "{label} must use `#aw_` followed by 3-12 ASCII alphanumeric/underscore characters"
+        );
+    }
+    Ok(())
+}
+
 validated_string! {
     /// A temporary GitHub issue identifier used to link safe outputs in one run.
-    ///
-    /// Accepts gh-aw's canonical `#aw_<id>` form and the bare `aw_<id>` alias,
-    /// where `<id>` is 3-12 ASCII alphanumeric/underscore characters.
-    GithubTemporaryId, "temporary_id", |value: &str, label: &str| {
-        let bare = value.strip_prefix('#').unwrap_or(value);
-        let Some(suffix) = bare.strip_prefix("aw_") else {
-            anyhow::bail!(
-                "{label} must use `#aw_` followed by 3-12 ASCII alphanumeric/underscore characters"
-            );
-        };
-        if !(3..=12).contains(&suffix.len())
-            || !suffix
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_')
-        {
-            anyhow::bail!(
-                "{label} must use `#aw_` followed by 3-12 ASCII alphanumeric/underscore characters"
-            );
-        }
-        Ok(())
-    }
+    GithubTemporaryId, "temporary_id", validate_temporary_id
+}
+
+validated_string! {
+    /// A temporary Azure DevOps work-item identifier used to link safe outputs in one run.
+    WorkItemTemporaryId, "temporary_id", validate_temporary_id
 }
 
 impl GithubTemporaryId {
+    /// Canonical map/reference form with the leading `#`.
+    pub fn canonical(&self) -> String {
+        if self.as_str().starts_with('#') {
+            self.as_str().to_string()
+        } else {
+            format!("#{}", self.as_str())
+        }
+    }
+}
+
+impl WorkItemTemporaryId {
     /// Canonical map/reference form with the leading `#`.
     pub fn canonical(&self) -> String {
         if self.as_str().starts_with('#') {
@@ -319,6 +343,20 @@ validated_string! {
             Ok(())
         } else {
             anyhow::bail!("{label} '{value}' must be non-empty and contain only [A-Za-z0-9._-]")
+        }
+    }
+}
+
+validated_string! {
+    /// An exact semantic version (e.g. `1.2.3`, `2.0.0-beta.1`).
+    SemanticVersion, "semantic version", |value: &str, label: &str| {
+        if semver::Version::parse(value).is_ok() {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "{label} '{value}' must be an exact semantic version such as '2.8.1'; \
+                 npm tags and ranges are not allowed"
+            )
         }
     }
 }
@@ -368,6 +406,27 @@ validated_string! {
 }
 
 validated_string! {
+    /// An Azure DevOps Services organization name.
+    AdoOrganization, "organization", |value: &str, label: &str| {
+        let valid = !value.is_empty()
+            && value.len() <= 64
+            && !value.starts_with('-')
+            && !value.ends_with('-')
+            && value
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-');
+        if valid {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "{label} '{value}' must be 1-64 ASCII alphanumeric or '-' \
+                 characters and must not start or end with '-'"
+            )
+        }
+    }
+}
+
+validated_string! {
     /// An Azure DevOps project name or GUID.
     AdoProject, "project", |value: &str, label: &str| {
         let bytes = value.as_bytes();
@@ -403,6 +462,64 @@ validated_string! {
                 "{label} '{value}' must be an Azure DevOps project name \
                  (1-64 characters, no reserved punctuation, leading '_' or \
                  leading/trailing '.') or a canonical GUID"
+            )
+        }
+    }
+}
+
+validated_string! {
+    /// An Azure DevOps repository name or GUID.
+    AdoRepository, "repository", |value: &str, label: &str| {
+        let bytes = value.as_bytes();
+        let is_guid = bytes.len() == 36
+            && bytes.iter().enumerate().all(|(index, byte)| {
+                if matches!(index, 8 | 13 | 18 | 23) {
+                    *byte == b'-'
+                } else {
+                    byte.is_ascii_hexdigit()
+                }
+            });
+        let invalid_name_char = |c: char| {
+            c.is_control()
+                || matches!(
+                    c,
+                    '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+                        | ';' | '#' | '$' | '{' | '}' | '[' | ']'
+                )
+        };
+        let char_count = value.chars().count();
+        let is_name = char_count > 0
+            && char_count <= 64
+            && value.trim() == value
+            && !value.starts_with('.')
+            && !value.ends_with('.')
+            && !value.chars().any(invalid_name_char);
+
+        if is_guid || is_name {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "{label} '{value}' must be an Azure DevOps repository name \
+                 (1-64 characters, no reserved punctuation or \
+                 leading/trailing '.') or a canonical GUID"
+            )
+        }
+    }
+}
+
+validated_string! {
+    /// A canonical `8-4-4-4-12` hex GUID.
+    ///
+    /// Used by the Azure DevOps policy proxy for project / repository /
+    /// resource-area identifiers, where a scope comparison must be an exact
+    /// match rather than a name lookup. See
+    /// [`crate::validate::is_valid_guid`].
+    Guid, "guid", |value: &str, label: &str| {
+        if validate::is_valid_guid(value) {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "{label} '{value}' must be a canonical 8-4-4-4-12 hex GUID"
             )
         }
     }
@@ -508,6 +625,18 @@ mod tests {
     }
 
     #[test]
+    fn semantic_version_requires_an_exact_semver() {
+        assert!(SemanticVersion::parse("2.8.1").is_ok());
+        assert!(SemanticVersion::parse("3.0.0-beta.1").is_ok());
+        assert!(SemanticVersion::parse("latest").is_err());
+        assert!(SemanticVersion::parse("next").is_err());
+        assert!(SemanticVersion::parse("^2.8.0").is_err());
+        assert!(SemanticVersion::parse("2.8").is_err());
+        assert!(SemanticVersion::parse("v2.8.1").is_err());
+        assert!(SemanticVersion::parse("2.8.1; echo bad").is_err());
+    }
+
+    #[test]
     fn ado_project_name_or_guid_rules() {
         assert!(AdoProject::parse("Agent Playground").is_ok());
         assert!(AdoProject::parse("12345678-1234-1234-1234-1234567890ab").is_ok());
@@ -515,6 +644,35 @@ mod tests {
         assert!(AdoProject::parse("bad/project").is_err());
         assert!(AdoProject::parse("bad$(macro)").is_err());
         assert!(AdoProject::parse("x".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn ado_organization_rules() {
+        assert!(AdoOrganization::parse("contoso-dev").is_ok());
+        assert!(AdoOrganization::parse("-contoso").is_err());
+        assert!(AdoOrganization::parse("contoso/other").is_err());
+        assert!(AdoOrganization::parse("x".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn ado_repository_name_or_guid_rules() {
+        assert!(AdoRepository::parse("Repo One").is_ok());
+        assert!(AdoRepository::parse("12345678-1234-1234-1234-1234567890ab").is_ok());
+        assert!(AdoRepository::parse("../repo").is_err());
+        assert!(AdoRepository::parse("bad/repo").is_err());
+        assert!(AdoRepository::parse("bad$(macro)").is_err());
+    }
+
+    #[test]
+    fn guid_accepts_only_the_canonical_form() {
+        assert!(Guid::parse("12345678-1234-1234-1234-1234567890ab").is_ok());
+        assert!(Guid::parse("12345678-1234-1234-1234-1234567890AB").is_ok());
+        assert!(Guid::parse("{12345678-1234-1234-1234-1234567890ab}").is_err());
+        assert!(Guid::parse("urn:uuid:12345678-1234-1234-1234-1234567890ab").is_err());
+        assert!(Guid::parse("12345678123412341234567890ab").is_err());
+        assert!(Guid::parse("12345678-1234-1234-1234-1234567890ag").is_err());
+        assert!(Guid::parse(" 12345678-1234-1234-1234-1234567890ab").is_err());
+        assert!(Guid::parse("").is_err());
     }
 
     #[test]

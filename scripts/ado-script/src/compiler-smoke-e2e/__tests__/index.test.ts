@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import type { FixtureBuildResult } from "../runner.js";
 
 const mockCalls: string[] = [];
 const compiledCasePaths: string[] = [];
@@ -55,10 +56,21 @@ pr: none
 jobs:
   - job: Agent
     steps:
-      - bash: copilot --allow-tool "shell(az)" --allow-tool "shell(head)"
+      - bash: >-
+          copilot --allow-tool "shell(az)" --allow-tool "shell(head)"
+          --topology-attach "awmg-mcpg"
+          --topology-attach "awmg-ado-proxy"
         displayName: Run copilot (AWF network isolated)
         env:
           GITHUB_TOKEN: $(GITHUB_TOKEN)
+      - bash: |
+          echo '"ADO_MCP_AUTH_TOKEN": "ado-proxy-injects-the-real-credential"'
+          echo '"--network", "ado-aw-proxy-net",'
+        displayName: Start ado-proxy policy engine
+      - bash: echo peers running
+        displayName: Verify trusted topology peers
+      - bash: echo stop
+        displayName: Stop ado-proxy
       - task: DownloadPipelineArtifact@2
         inputs:
           targetPath: in
@@ -86,7 +98,13 @@ vi.mock("../ado-rest.js", () => {
           return { name: "ado-aw-candidate" };
         }),
         getBuild: vi.fn(async () => ({ status: "completed", result: "succeeded" })),
-        getBuildTags: vi.fn(async (buildId: number) => [`ado-aw-custom-job-${buildId}`]),
+        // The real manifest has two cases with runtime tag proofs. Returning
+        // both here keeps the generic build-id-only ADO mock independent of
+        // which case is currently being verified.
+        getBuildTags: vi.fn(async (buildId: number) => [
+          `ado-aw-custom-job-${buildId}`,
+          `ado-aw-proxy-${buildId}`,
+        ]),
         queueBuild: vi.fn(async () => ({ id: 1 })),
         cancelBuild: vi.fn(async () => {}),
         addBuildTags: vi.fn(async () => {}),
@@ -148,6 +166,17 @@ vi.mock("../compile-cli.js", () => ({
     return { ok: true, stdout: "", stderr: "" };
   }),
 }));
+
+vi.mock("../signals.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../signals.js")>();
+  return {
+    ...actual,
+    verifyCandidateAudit: vi.fn(async (results: readonly FixtureBuildResult[]) => ({
+      ok: true,
+      results: results.map((result) => ({ ...result })),
+    })),
+  };
+});
 
 vi.mock("../runner.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../runner.js")>();
@@ -238,7 +267,7 @@ describe("smoke-e2e index.main (happy path, candidate mode)", () => {
     // Candidate mode runs exactly the cases the manifest declares for it.
     expect(queuedCaseIds).toEqual([
       "canary",
-      "azure-cli",
+      "ado-proxy",
       "noop-target",
       "custom-safe-output",
       "multi-repo",
@@ -246,7 +275,7 @@ describe("smoke-e2e index.main (happy path, candidate mode)", () => {
     expect(queuedCaseIds).not.toContain("janitor");
     expect(compiledCasePaths).toEqual([
       "tests/safe-outputs/canary.md",
-      "tests/safe-outputs/azure-cli.md",
+      "tests/smoke/ado-proxy.md",
       "tests/safe-outputs/noop-target.md",
       "tests/smoke/custom-safe-output.md",
       "tests/smoke/multi-repo.md",
@@ -264,7 +293,7 @@ describe("smoke-e2e index.main (happy path, candidate mode)", () => {
 
     expect(queuedRequests.map((r) => r.sourceBranch)).toEqual([
       "refs/heads/ado-aw-smoke-candidate/630001/canary",
-      "refs/heads/ado-aw-smoke-candidate/630001/azure-cli",
+      "refs/heads/ado-aw-smoke-candidate/630001/ado-proxy",
       "refs/heads/ado-aw-smoke-candidate/630001/noop-target",
       "refs/heads/ado-aw-smoke-candidate/630001/custom-safe-output",
       "refs/heads/ado-aw-smoke-candidate/630001/multi-repo",
@@ -428,7 +457,7 @@ describe("smoke-e2e index.main (per-case ref retention)", () => {
       "refs/heads/ado-aw-smoke-candidate/630001/custom-safe-output",
       "refs/heads/ado-aw-smoke-candidate/630001/multi-repo",
     ]);
-    expect(deletedRefs).not.toContain("refs/heads/ado-aw-smoke-candidate/630001/azure-cli");
+    expect(deletedRefs).not.toContain("refs/heads/ado-aw-smoke-candidate/630001/ado-proxy");
   });
 
   it("retains every pushed ref when runFixtures throws, because builds may already be queued", async () => {

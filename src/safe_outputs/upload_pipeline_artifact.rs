@@ -393,7 +393,10 @@ fn resolve_staged_file(
             file_size, max_file_size
         ))));
     }
-    Ok(Ok(StagedFileInfo { canonical, file_size }))
+    Ok(Ok(StagedFileInfo {
+        canonical,
+        file_size,
+    }))
 }
 
 /// Extract the required ADO context fields from `ctx`, failing with a clear
@@ -424,7 +427,13 @@ fn resolve_ado_context(ctx: &ExecutionContext) -> anyhow::Result<ArtifactAdoCont
          pipeline artifact; this tool must run inside an Azure DevOps \
          pipeline job",
     )?;
-    Ok(ArtifactAdoContext { org_url, project, project_id, token, container_id })
+    Ok(ArtifactAdoContext {
+        org_url,
+        project,
+        project_id,
+        token,
+        container_id,
+    })
 }
 
 /// Upload the file bytes to the agent's own build container (Step 1).
@@ -599,10 +608,15 @@ impl Executor for UploadPipelineArtifactResult {
             self.file_path,
             self.artifact_name,
             effective_build_id,
-            if self.build_id.is_none() { " (current build)" } else { "" }
+            if self.build_id.is_none() {
+                " (current build)"
+            } else {
+                ""
+            }
         );
 
-        let config: UploadPipelineArtifactConfig = ctx.get_tool_config("upload-pipeline-artifact");
+        let config: UploadPipelineArtifactConfig =
+            ctx.get_tool_config("upload-pipeline-artifact")?;
 
         let final_name = match resolve_final_artifact_name(
             &self.artifact_name,
@@ -632,7 +646,11 @@ impl Executor for UploadPipelineArtifactResult {
                 staged.file_size,
                 final_name,
                 effective_build_id,
-                if self.build_id.is_none() { " (current build)" } else { "" }
+                if self.build_id.is_none() {
+                    " (current build)"
+                } else {
+                    ""
+                }
             )));
         }
 

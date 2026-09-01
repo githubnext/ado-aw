@@ -813,12 +813,17 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
             front_matter.execution_context.clone().unwrap_or_default(),
             front_matter,
         )),
-        // Always-on Azure CLI. Tool phase — mounts host /opt/az and
-        // /usr/bin/az into AWF and adds Azure auth hosts to the
-        // allowlist so the agent can call `az`. No install step is
-        // emitted: host pre-install is assumed (gh-aw parity).
-        Extension::AzureCli(AzureCliExtension),
     ];
+
+    // `permissions.read` is both the trusted token source and the activation
+    // gate for credential-isolated Azure DevOps access. Host `az` must never be
+    // mounted into the sandbox without the proxy and generated wrapper in the
+    // path. The pinned AWF agent image contains no built-in `az`, so omitting
+    // this extension makes the command unavailable rather than exposing an
+    // unproxied fallback.
+    if super::common::ado_proxy_enabled(front_matter) {
+        extensions.push(Extension::AzureCli(AzureCliExtension));
+    }
 
     // ── Runtimes (ExtensionPhase::Runtime) ──
     if let Some(lean) = front_matter.runtimes.as_ref().and_then(|r| r.lean.as_ref())

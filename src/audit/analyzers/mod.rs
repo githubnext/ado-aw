@@ -4,6 +4,7 @@
 //! Each submodule owns one signal: firewall, mcp, otel, safe-outputs,
 //! detection, custom safe-output jobs, missing-tools/data/noops, build timeline.
 
+pub mod ado_proxy;
 pub mod custom_jobs;
 pub mod detection;
 pub mod firewall;

@@ -28,6 +28,7 @@ pub fn render_console(audit: &crate::audit::model::AuditData) -> String {
             render_safe_output_summary_section(audit.safe_output_summary.as_ref()),
             render_rejected_safe_outputs_section(audit.rejected_safe_outputs.as_ref()),
             render_mcp_server_health_section(audit.mcp_server_health.as_ref()),
+            render_ado_proxy_analysis_section(audit.ado_proxy_analysis.as_ref()),
             render_firewall_analysis_section(audit.firewall_analysis.as_ref()),
             render_policy_analysis_section(audit.policy_analysis.as_ref()),
             render_detection_analysis_section(audit.detection_analysis.as_ref()),
@@ -291,6 +292,173 @@ fn render_mcp_server_health_section(health: Option<&model::MCPServerHealth>) -> 
         .collect();
 
     Some(render_lines_section("MCP Server Health", lines, false))
+}
+
+/// Pushes the "lifecycle" summary line(s) for the ADO proxy sidecar, if present.
+fn push_ado_proxy_lifecycle_lines(lines: &mut Vec<String>, lifecycle: &model::AdoProxyLifecycle) {
+    let mut lifecycle_line = format!(
+        "- lifecycle: {} (state before teardown: {}, listening: {})",
+        if lifecycle.healthy_before_teardown {
+            "healthy"
+        } else {
+            "unhealthy"
+        },
+        lifecycle
+            .state_before_teardown
+            .as_deref()
+            .unwrap_or("unknown"),
+        if lifecycle.listening { "yes" } else { "no" },
+    );
+    if let Some(exit_code) = lifecycle.exit_code_before_teardown {
+        lifecycle_line.push_str(&format!(", exit code: {exit_code}"));
+    }
+    lines.push(lifecycle_line);
+    for diagnostic in &lifecycle.diagnostics {
+        lines.push(format!("- lifecycle diagnostic: {diagnostic}"));
+    }
+    if let Some(error) = &lifecycle.docker_error {
+        lines.push(format!("- Docker error: {error}"));
+    }
+}
+
+/// Pushes request-count, latency, byte, and malformed/credential-stripping stat lines.
+fn push_ado_proxy_stats_lines(lines: &mut Vec<String>, analysis: &model::AdoProxyAnalysis) {
+    if analysis.total_requests > 0
+        || analysis.allow_count > 0
+        || analysis.deny_count > 0
+        || analysis.error_count > 0
+    {
+        lines.push(format!(
+            "- requests: {} total, {} allowed, {} denied, {} errors",
+            format_number(analysis.total_requests),
+            format_number(analysis.allow_count),
+            format_number(analysis.deny_count),
+            format_number(analysis.error_count),
+        ));
+    }
+    if let Some(latency) = &analysis.latency {
+        lines.push(format!(
+            "- latency: {} observed, {} ms average, {} ms max",
+            format_number(latency.observed_count),
+            format_float(latency.average_ms),
+            format_number(latency.max_ms),
+        ));
+    }
+    if analysis.response_bytes > 0 {
+        lines.push(format!(
+            "- response bytes: {}",
+            format_number(analysis.response_bytes)
+        ));
+    }
+    if analysis.malformed_record_count > 0 {
+        lines.push(format!(
+            "- malformed records: {}",
+            format_number(analysis.malformed_record_count)
+        ));
+    }
+    if !analysis.upstream_status_classes.is_empty() {
+        lines.push(format!(
+            "- upstream status classes: {}",
+            analysis
+                .upstream_status_classes
+                .iter()
+                .map(|(class, count)| format!("{class}={}", format_number(*count)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !analysis.stripped_credentials.is_empty() {
+        lines.push(format!(
+            "- stripped credential headers: {}",
+            analysis
+                .stripped_credentials
+                .iter()
+                .map(|(header, count)| format!("{header}={}", format_number(*count)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+}
+
+/// Pushes the per-operation request/allow/deny/error breakdown, if any operations were seen.
+fn push_ado_proxy_operations_lines(lines: &mut Vec<String>, analysis: &model::AdoProxyAnalysis) {
+    if analysis.operations.is_empty() {
+        return;
+    }
+    lines.push(String::from("Operations"));
+    lines.extend(analysis.operations.iter().map(|operation| {
+        format!(
+            "- {}  {} requests ({} allow, {} deny, {} error)",
+            operation.operation.as_deref().unwrap_or("(unmatched)"),
+            format_number(operation.request_count),
+            format_number(operation.allow_count),
+            format_number(operation.deny_count),
+            format_number(operation.error_count),
+        )
+    }));
+}
+
+/// Pushes the per-decision/reason breakdown, if any reasons were recorded.
+fn push_ado_proxy_reasons_lines(lines: &mut Vec<String>, analysis: &model::AdoProxyAnalysis) {
+    if analysis.reasons.is_empty() {
+        return;
+    }
+    lines.push(String::from("Reasons"));
+    lines.extend(analysis.reasons.iter().map(|reason| {
+        format!(
+            "- {}/{}  {}",
+            reason.decision,
+            reason.reason,
+            format_number(reason.count)
+        )
+    }));
+}
+
+/// Pushes the recent denied/error request listing, if any were recorded.
+fn push_ado_proxy_recent_problem_events_lines(
+    lines: &mut Vec<String>,
+    analysis: &model::AdoProxyAnalysis,
+) {
+    if analysis.recent_problem_events.is_empty() {
+        return;
+    }
+    lines.push(String::from("Recent denied/error requests"));
+    lines.extend(analysis.recent_problem_events.iter().map(|event| {
+        let mut fields = vec![
+            event.timestamp.as_deref().unwrap_or("(unknown time)"),
+            event.method.as_deref().unwrap_or("(unknown method)"),
+            event.host.as_deref().unwrap_or("(unknown host)"),
+            event.operation.as_deref().unwrap_or("(unmatched)"),
+        ];
+        if let Some(reason) = event.reason.as_deref() {
+            fields.push(reason);
+        }
+        let mut line = format!("- {}", fields.join(" "));
+        if let Some(detail) = event.detail.as_deref() {
+            line.push_str(": ");
+            line.push_str(detail);
+        }
+        line
+    }));
+}
+
+fn render_ado_proxy_analysis_section(analysis: Option<&model::AdoProxyAnalysis>) -> Option<String> {
+    let analysis = analysis?;
+    let mut lines = Vec::new();
+
+    if let Some(schema_version) = analysis.schema_version.as_deref() {
+        lines.push(format!("- schema: {schema_version}"));
+    }
+    if let Some(lifecycle) = &analysis.lifecycle {
+        push_ado_proxy_lifecycle_lines(&mut lines, lifecycle);
+    }
+
+    push_ado_proxy_stats_lines(&mut lines, analysis);
+    push_ado_proxy_operations_lines(&mut lines, analysis);
+    push_ado_proxy_reasons_lines(&mut lines, analysis);
+    push_ado_proxy_recent_problem_events_lines(&mut lines, analysis);
+
+    (!lines.is_empty()).then(|| render_lines_section("ADO Proxy Analysis", lines, false))
 }
 
 fn render_firewall_analysis_section(analysis: Option<&model::FirewallAnalysis>) -> Option<String> {
@@ -1043,14 +1211,16 @@ fn fallback_text<'a>(value: &'a str, fallback: &'a str) -> &'a str {
 mod tests {
     use super::render_console;
     use crate::audit::model::{
-        AgenticAssessment, AuditData, AuditEngineConfig, AwInfo, BehaviorFingerprint,
-        ComponentProvenance, CreatedItemReport, CustomSafeOutputAdoJob, CustomSafeOutputJobAudit,
-        DetectionAnalysis, DetectionThreats, DomainStat, ErrorInfo, FileInfo, Finding,
-        FirewallAnalysis, JobData, MCPFailureReport, MCPServerHealth, MCPServerStats,
-        MCPToolSummary, MCPToolUsageData, MetricsData, MissingDataReport, MissingToolReport,
-        NoopReport, PerformanceMetrics, PolicyAnalysis, PolicyRule, Recommendation,
-        RejectedSafeOutputsRollup, SafeOutputExecution, SafeOutputExecutionItem, SafeOutputStatus,
-        SafeOutputSummary, Severity, TaskDomainInfo, ToolUsageInfo,
+        AdoProxyAnalysis, AdoProxyEventSummary, AdoProxyLatencyStats, AdoProxyLifecycle,
+        AdoProxyOperationStat, AdoProxyReasonStat, AgenticAssessment, AuditData, AuditEngineConfig,
+        AwInfo, BehaviorFingerprint, ComponentProvenance, CreatedItemReport,
+        CustomSafeOutputAdoJob, CustomSafeOutputJobAudit, DetectionAnalysis, DetectionThreats,
+        DomainStat, ErrorInfo, FileInfo, Finding, FirewallAnalysis, JobData, MCPFailureReport,
+        MCPServerHealth, MCPServerStats, MCPToolSummary, MCPToolUsageData, MetricsData,
+        MissingDataReport, MissingToolReport, NoopReport, PerformanceMetrics, PolicyAnalysis,
+        PolicyRule, Recommendation, RejectedSafeOutputsRollup, SafeOutputExecution,
+        SafeOutputExecutionItem, SafeOutputStatus, SafeOutputSummary, Severity, TaskDomainInfo,
+        ToolUsageInfo,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -1063,6 +1233,67 @@ mod tests {
         assert!(out.contains("## Overview"));
         assert!(out.contains("## Metrics"));
         assert_eq!(headings, vec!["## Overview", "## Metrics"]);
+    }
+
+    #[test]
+    fn ado_proxy_analysis_renders_lifecycle_rollups_and_recent_events() {
+        let audit = AuditData {
+            ado_proxy_analysis: Some(AdoProxyAnalysis {
+                schema_version: Some(String::from("ado-aw/ado-proxy-decisions/v1")),
+                lifecycle: Some(AdoProxyLifecycle {
+                    state_before_teardown: Some(String::from("running")),
+                    exit_code_before_teardown: Some(0),
+                    listening: true,
+                    healthy_before_teardown: true,
+                    ..Default::default()
+                }),
+                total_requests: 3,
+                allow_count: 2,
+                deny_count: 1,
+                operations: vec![AdoProxyOperationStat {
+                    operation: Some(String::from("core.project.get")),
+                    request_count: 3,
+                    allow_count: 2,
+                    deny_count: 1,
+                    ..Default::default()
+                }],
+                reasons: vec![AdoProxyReasonStat {
+                    reason: String::from("out-of-scope"),
+                    decision: String::from("deny"),
+                    count: 1,
+                }],
+                latency: Some(AdoProxyLatencyStats {
+                    observed_count: 2,
+                    total_ms: 30,
+                    average_ms: 15.0,
+                    max_ms: 20,
+                }),
+                response_bytes: 1234,
+                stripped_credentials: [("authorization".to_string(), 3)].into(),
+                recent_problem_events: vec![AdoProxyEventSummary {
+                    timestamp: Some(String::from("2026-01-01T00:00:00Z")),
+                    host: Some(String::from("dev.azure.com")),
+                    method: Some(String::from("GET")),
+                    operation: Some(String::from("core.project.get")),
+                    decision: String::from("deny"),
+                    reason: Some(String::from("out-of-scope")),
+                    detail: Some(String::from("project is outside the policy")),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let out = render_console(&audit);
+
+        assert!(out.contains("## ADO Proxy Analysis"));
+        assert!(out.contains("lifecycle: healthy"));
+        assert!(out.contains("3 total, 2 allowed, 1 denied, 0 errors"));
+        assert!(out.contains("15 ms average"));
+        assert!(out.contains("core.project.get  3 requests"));
+        assert!(out.contains("deny/out-of-scope  1"));
+        assert!(out.contains("project is outside the policy"));
     }
 
     #[test]

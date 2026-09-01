@@ -1,0 +1,632 @@
+{
+  "schema_version": "ado-aw/ado-proxy-catalog/v1",
+  "runtime_available": true,
+  "protected_hosts": [
+    "dev.azure.com",
+    "app.vssps.visualstudio.com"
+  ],
+  "operations": [
+    {
+      "id": "discovery.host-options",
+      "capability": "discovery",
+      "method": "OPTIONS",
+      "host": "current-organization",
+      "route": "/{org}/_apis",
+      "api_version": "absent",
+      "scope": "current-organization",
+      "response": "json",
+      "allowed_query": [
+        "allHostTypes"
+      ],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "discovery.sps-host-options",
+      "capability": "discovery",
+      "method": "OPTIONS",
+      "host": "sps-fallback",
+      "route": "/_apis",
+      "api_version": "absent",
+      "scope": "current-organization",
+      "response": "json",
+      "allowed_query": [
+        "allHostTypes"
+      ],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "discovery.area-options",
+      "capability": "discovery",
+      "method": "OPTIONS",
+      "host": "current-organization",
+      "route": "/{org}/_apis/{area}",
+      "api_version": "absent",
+      "scope": "current-organization",
+      "response": "json",
+      "allowed_query": [],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "discovery.resource-areas",
+      "capability": "discovery",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/_apis/resourceareas",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "filter-resource-areas",
+      "response": "filter-resource-areas",
+      "allowed_query": [],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "discovery.sps-resource-area",
+      "capability": "discovery",
+      "method": "GET",
+      "host": "sps-fallback",
+      "route": "/_apis/resourceareas/{areaId}",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "allowed-resource-area",
+      "response": "json",
+      "allowed_query": [],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "discovery.connection-data",
+      "capability": "discovery",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/_apis/connectiondata",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "current-organization",
+      "response": "json",
+      "allowed_query": [
+        "connectOptions",
+        "lastChangeId",
+        "lastChangeId64"
+      ],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "core.project-get",
+      "capability": "core",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/_apis/projects/{project}",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "current-project-path",
+      "response": "json",
+      "allowed_query": [
+        "includeCapabilities",
+        "includeHistory"
+      ],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "core.project-validation-probe",
+      "capability": "core",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/_apis/projects",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "filter-projects-to-current",
+      "response": "filter-projects",
+      "allowed_query": [
+        "stateFilter",
+        "$top",
+        "$skip",
+        "getDefaultTeamImageUrl"
+      ],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "repos.repository-get",
+      "capability": "repos",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/{project}/_apis/git/repositories/{repository}",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "current-repository-path",
+      "response": "json",
+      "allowed_query": [
+        "includeParent"
+      ],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "repos.refs-list",
+      "capability": "repos",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/{project}/_apis/git/repositories/{repository}/refs",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "current-repository-path",
+      "response": "json",
+      "allowed_query": [
+        "filter",
+        "filterContains",
+        "includeLinks",
+        "includeStatuses",
+        "includeMyBranches",
+        "latestStatusesOnly",
+        "peelTags",
+        "$top",
+        "continuationToken"
+      ],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "repos.items-list",
+      "capability": "repos",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/{project}/_apis/git/repositories/{repository}/items",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "current-repository-path",
+      "response": "json",
+      "allowed_query": [
+        "path",
+        "scopePath",
+        "recursionLevel",
+        "includeContentMetadata",
+        "latestProcessedChange",
+        "includeLinks",
+        "versionDescriptor.version",
+        "versionDescriptor.versionType",
+        "versionDescriptor.versionOptions"
+      ],
+      "denied_query": [
+        "download",
+        "$format",
+        "zipForUnix"
+      ],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "repos.commits-list",
+      "capability": "repos",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/{project}/_apis/git/repositories/{repository}/commits",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "current-repository-path",
+      "response": "json",
+      "allowed_query": [
+        "$top",
+        "$skip",
+        "searchCriteria"
+      ],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "repos.commit-get",
+      "capability": "repos",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/{project}/_apis/git/repositories/{repository}/commits/{commitId}",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "current-repository-path",
+      "response": "json",
+      "allowed_query": [
+        "changeCount"
+      ],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "repos.commit-changes",
+      "capability": "repos",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/{project}/_apis/git/repositories/{repository}/commits/{commitId}/changes",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "current-repository-path",
+      "response": "json",
+      "allowed_query": [
+        "top",
+        "skip"
+      ],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "repos.pull-requests-list",
+      "capability": "repos",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/{project}/_apis/git/repositories/{repository}/pullrequests",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "current-repository-path",
+      "response": "json",
+      "allowed_query": [
+        "searchCriteria",
+        "$top",
+        "$skip",
+        "maxCommentLength"
+      ],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "repos.pull-request-get",
+      "capability": "repos",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/{project}/_apis/git/repositories/{repository}/pullrequests/{pullRequestId}",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "current-repository-path",
+      "response": "json",
+      "allowed_query": [
+        "maxCommentLength",
+        "$top",
+        "$skip",
+        "includeCommits",
+        "includeWorkItemRefs"
+      ],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "repos.pull-request-get-by-id",
+      "capability": "repos",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/_apis/git/pullrequests/{pullRequestId}",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "response-current-repository",
+      "response": "validate-project-and-repository",
+      "allowed_query": [
+        "maxCommentLength",
+        "includeCommits",
+        "includeWorkItemRefs"
+      ],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "repos.pull-request-threads",
+      "capability": "repos",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/{project}/_apis/git/repositories/{repository}/pullrequests/{pullRequestId}/threads",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "current-repository-path",
+      "response": "json",
+      "allowed_query": [
+        "$top",
+        "$skip",
+        "iteration",
+        "baseIteration"
+      ],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "repos.pull-request-iterations",
+      "capability": "repos",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/{project}/_apis/git/repositories/{repository}/pullrequests/{pullRequestId}/iterations",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "current-repository-path",
+      "response": "json",
+      "allowed_query": [
+        "includeCommits"
+      ],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "repos.pull-request-reviewers",
+      "capability": "repos",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/{project}/_apis/git/repositories/{repository}/pullrequests/{pullRequestId}/reviewers",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "current-repository-path",
+      "response": "json",
+      "allowed_query": [],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "repos.pull-request-work-items",
+      "capability": "repos",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/{project}/_apis/git/repositories/{repository}/pullrequests/{pullRequestId}/workitems",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "current-repository-path",
+      "response": "json",
+      "allowed_query": [],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "pipelines.definitions-list",
+      "capability": "pipelines",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/{project}/_apis/build/definitions",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "current-project-path",
+      "response": "json",
+      "allowed_query": [
+        "name",
+        "repositoryId",
+        "repositoryType",
+        "$top",
+        "continuationToken",
+        "path"
+      ],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "pipelines.definition-get",
+      "capability": "pipelines",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/{project}/_apis/build/definitions/{definitionId}",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "current-project-path",
+      "response": "json",
+      "allowed_query": [
+        "revision",
+        "propertyFilters",
+        "includeLatestBuilds"
+      ],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "pipelines.builds-list",
+      "capability": "pipelines",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/{project}/_apis/build/builds",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "current-project-path",
+      "response": "json",
+      "allowed_query": [
+        "definitions",
+        "buildNumber",
+        "minTime",
+        "maxTime",
+        "reasonFilter",
+        "statusFilter",
+        "resultFilter",
+        "$top",
+        "continuationToken",
+        "queryOrder",
+        "branchName",
+        "buildIds",
+        "repositoryId",
+        "repositoryType"
+      ],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "pipelines.build-get",
+      "capability": "pipelines",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/{project}/_apis/build/builds/{buildId}",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "current-project-path",
+      "response": "json",
+      "allowed_query": [
+        "propertyFilters"
+      ],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "pipelines.timeline-get",
+      "capability": "pipelines",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/{project}/_apis/build/builds/{buildId}/timeline",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "current-project-path",
+      "response": "json",
+      "allowed_query": [
+        "changeId",
+        "planId"
+      ],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "pipelines.pipeline-list",
+      "capability": "pipelines",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/{project}/_apis/pipelines",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "current-project-path",
+      "response": "json",
+      "allowed_query": [
+        "orderBy",
+        "$top",
+        "continuationToken"
+      ],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "pipelines.pipeline-get",
+      "capability": "pipelines",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/{project}/_apis/pipelines/{pipelineId}",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "current-project-path",
+      "response": "json",
+      "allowed_query": [
+        "pipelineVersion"
+      ],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "pipelines.runs-list",
+      "capability": "pipelines",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/{project}/_apis/pipelines/{pipelineId}/runs",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "current-project-path",
+      "response": "json",
+      "allowed_query": [],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "pipelines.run-get",
+      "capability": "pipelines",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/{project}/_apis/pipelines/{pipelineId}/runs/{runId}",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "current-project-path",
+      "response": "json",
+      "allowed_query": [],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "boards.work-item-get",
+      "capability": "boards",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/{project}/_apis/wit/workitems/{id}",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "current-project-path",
+      "response": "json",
+      "allowed_query": [
+        "fields",
+        "asOf",
+        "$expand"
+      ],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "boards.work-item-get-by-id",
+      "capability": "boards",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/_apis/wit/workitems/{id}",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "response-current-project",
+      "response": "validate-project",
+      "allowed_query": [
+        "fields",
+        "asOf",
+        "$expand"
+      ],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "boards.work-item-comments",
+      "capability": "boards",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/{project}/_apis/wit/workitems/{id}/comments",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "current-project-path",
+      "response": "json",
+      "allowed_query": [
+        "$top",
+        "continuationToken",
+        "includeDeleted",
+        "expand",
+        "order"
+      ],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "boards.work-item-updates",
+      "capability": "boards",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/{project}/_apis/wit/workitems/{id}/updates",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "current-project-path",
+      "response": "json",
+      "allowed_query": [
+        "$top",
+        "$skip"
+      ],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    },
+    {
+      "id": "boards.work-item-revisions",
+      "capability": "boards",
+      "method": "GET",
+      "host": "current-organization",
+      "route": "/{org}/{project}/_apis/wit/workitems/{id}/revisions",
+      "api_version": "5.0..=7.2; preview allowed",
+      "scope": "current-project-path",
+      "response": "json",
+      "allowed_query": [
+        "$top",
+        "$skip",
+        "$expand"
+      ],
+      "denied_query": [],
+      "max_response_bytes": 10485760
+    }
+  ],
+  "denied_route_families": [
+    "/_apis/accesscontrollists",
+    "/_apis/accesscontrolentries",
+    "/_apis/securitynamespaces",
+    "/_apis/permissions",
+    "/_apis/tokens",
+    "/_apis/tokenadmin",
+    "/_apis/delegatedauth",
+    "/_apis/oauth2",
+    "/_apis/serviceendpoint",
+    "/_apis/distributedtask/variablegroups",
+    "/_apis/distributedtask/securefiles",
+    "/_apis/build/builds/{buildId}/oauthtoken",
+    "/_apis/build/builds/{buildId}/artifacts",
+    "/_apis/build/builds/{buildId}/logs",
+    "/_apis/build/builds/{buildId}/attachments",
+    "/_apis/wit/wiql",
+    "/_apis/wit/workitemsbatch",
+    "/_apis/wit/workitems?ids=",
+    "/_apis/git/repositories/{repository}/itemsbatch",
+    "/_apis/git/repositories/{repository}/commitsbatch",
+    "/_apis/git/repositories/{repository}/blobs",
+    "/_apis/git/repositories/{repository}/trees",
+    "/_git/",
+    "/_odata/",
+    "/_apis/search/",
+    "/_apis/customerintelligence/events"
+  ],
+  "api_version_min": [
+    5,
+    0
+  ],
+  "api_version_max": [
+    7,
+    2
+  ]
+}

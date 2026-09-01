@@ -36,9 +36,9 @@ pool:                          # Optional pool configuration
 #     conclusion:
 #       vmImage: ubuntu-22.04
 repos:                           # compact repository declarations (replaces repositories: + checkout:)
-  - my-org/my-repo               # shorthand: alias="my-repo", type=git, ref=refs/heads/main, checkout=true
-  - reponame=my-org/another-repo # shorthand with explicit alias
-  - name: my-org/templates       # object form for full control
+  - MyProject/my-repo               # shorthand: alias="my-repo", type=git, ref=refs/heads/main, checkout=true
+  - reponame=MyProject/another-repo # shorthand with explicit alias
+  - name: octo/templates           # object form for an external repository
     type: github                 # external repo resource type; default is git
     ref: refs/heads/release/2.x
     checkout: false              # declared as resource only, not checked out by the agent
@@ -57,7 +57,8 @@ tools:                         # optional tool configuration
   #   allowed-extensions: [.md, .json]
   azure-devops: true           # first-class ADO MCP integration (see docs/tools.md)
   # azure-devops:              # Alternative object format (with scoping)
-  #   toolsets: [repos, wit]
+  #   version: "2.8.1"         # Optional exact-semver override; defaults to compiler pin
+  #   toolsets: [repositories, work-items]
   #   allowed: [wit_get_work_item]
   #   org: myorg
 runtimes:                      # optional runtime configuration (language environments)
@@ -104,13 +105,17 @@ safe-outputs:                  # optional per-tool configuration for safe output
   staged: false               # cooperative preview default; per-tool override supported
   create-work-item:
     work-item-type: Task
-    assignee: "user@example.com"
+    description-field: System.Description
     tags:
       - automated
       - agent-created
     artifact-link:             # optional: link work item to repository branch
       enabled: true
       branch: main
+  assign-work-item:
+    target: "*"               # required only for numeric pre-existing IDs
+    allowed: ["user@example.com"]
+    blocked: ["svc-*"]
   jobs:                       # custom Agent-callable jobs (see docs/safe-outputs.md)
     send-notification:
       description: Notify release operators.
@@ -253,11 +258,25 @@ network:                       # optional network policy (standalone target only
 # variable-groups:              # optional: import ADO Library variable groups (standalone/1es only)
 #   - My Variable Group         # each entry must be the exact ADO Library group name (see "Variable Groups" section)
 permissions:                   # optional ADO access token configuration (see docs/network.md#permissions-ado-access-tokens)
-  read: my-read-arm-connection   # ARM service connection for read-only ADO access (Stage 1 agent)
+  read: my-read-arm-connection   # shorthand: proxy gets the ARM SC token; Agent/MCP/az get no real token
+  # read:                        # object form: narrow capabilities / add cross-org or project scope
+  #   service-connection: my-read-arm-connection
+  #   capabilities: [core, repos] # discovery is always enabled
+  #   allow:                     # additive to current org/project/repo and type: git repos:
+  #     - organization: partner-org # same AAD tenant; cross-tenant needs another credential
+  #       projects:
+  #         - project: Shared
+  #           project-id: 33333333-3333-3333-3333-333333333333 # optional GUID-form calls
+  #           repositories: [shared-api] # empty/omitted => project reads only
   write: my-write-arm-connection # OPTIONAL ARM SC for Stage 3 executor writes.
                                  # Default: executor uses $(System.AccessToken).
                                  # Set this only for cross-org writes or
                                  # named-identity attribution.
+# permissions-required:          # optional abstract capability requirements (usually set by an
+#   read: true                   # imported component rather than authored directly); see
+#   write: true                  # docs/imports.md#permissions-required. Unioned across all
+#                                 # imports and the consumer; `read: true` must be satisfied by a
+#                                 # concrete `permissions.read` connection above.
 supply-chain:                  # optional internal supply-chain mirror (see docs/supply-chain.md)
   feed:                          # mirror binaries (compiler, AWF, ado-script) from an ADO Artifacts feed
     name: my-project/my-feed     # feed name or project/feed; scalar `feed: my-feed` shorthand also works

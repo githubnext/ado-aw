@@ -5,7 +5,7 @@ use std::fmt;
 
 use serde::Serialize;
 
-use crate::compile::{AWF_VERSION, MCPG_VERSION};
+use crate::compile::{ADO_MCP_VERSION, AWF_VERSION, MCPG_VERSION};
 use crate::engine::{COPILOT_CLI_VERSION, DEFAULT_COPILOT_MODEL};
 use crate::safe_outputs::{ALL_KNOWN_SAFE_OUTPUTS, ALWAYS_ON_TOOLS, DEBUG_ONLY_TOOLS};
 
@@ -42,6 +42,13 @@ pub struct VersionCatalog {
     pub awf: String,
     /// Pinned MCP Gateway version (`compile::common::MCPG_VERSION`).
     pub mcpg: String,
+    /// Pinned Azure DevOps MCP npm package version
+    /// (`compile::common::ADO_MCP_VERSION`).
+    ///
+    /// Fetched on the runner and mounted into a container with no registry
+    /// access of its own, so an unpinned fetch would let the agent's tool
+    /// surface vary between runs.
+    pub ado_mcp: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
@@ -58,6 +65,8 @@ pub struct Catalog {
     pub models: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub versions: Option<VersionCatalog>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ado_proxy: Option<crate::ado_proxy::catalog::Catalog>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,7 +78,7 @@ impl fmt::Display for UnknownCatalogKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "unknown --kind '{}' (expected one of: safe-outputs, runtimes, tools, engines, models, versions)",
+            "unknown --kind '{}' (expected one of: safe-outputs, runtimes, tools, engines, models, versions, ado-proxy)",
             self.kind
         )
     }
@@ -85,6 +94,7 @@ pub enum CatalogKind {
     Engines,
     Models,
     Versions,
+    AdoProxy,
 }
 
 impl CatalogKind {
@@ -96,6 +106,7 @@ impl CatalogKind {
             "engines" => Ok(Self::Engines),
             "models" => Ok(Self::Models),
             "versions" => Ok(Self::Versions),
+            "ado-proxy" => Ok(Self::AdoProxy),
             other => Err(UnknownCatalogKind {
                 kind: other.to_string(),
             }),
@@ -111,6 +122,7 @@ pub fn catalog() -> Catalog {
         engines: engines(),
         models: models(),
         versions: Some(versions()),
+        ado_proxy: Some(crate::ado_proxy::catalog::catalog()),
     }
 }
 
@@ -139,6 +151,10 @@ pub fn catalog_kind(kind: &str) -> Result<Catalog, UnknownCatalogKind> {
         },
         CatalogKind::Versions => Catalog {
             versions: Some(versions()),
+            ..Catalog::default()
+        },
+        CatalogKind::AdoProxy => Catalog {
+            ado_proxy: Some(crate::ado_proxy::catalog::catalog()),
             ..Catalog::default()
         },
     })
@@ -193,6 +209,29 @@ pub fn render_text(catalog: &Catalog) -> String {
         out.push_str(&format!("  copilot-cli {}\n", versions.copilot_cli));
         out.push_str(&format!("  awf {}\n", versions.awf));
         out.push_str(&format!("  mcpg {}\n", versions.mcpg));
+        out.push_str(&format!("  ado-mcp {}\n", versions.ado_mcp));
+        out.push('\n');
+    }
+    if let Some(proxy) = &catalog.ado_proxy {
+        out.push_str("Azure DevOps proxy\n");
+        out.push_str(&format!("  schema: {}\n", proxy.schema_version));
+        out.push_str(&format!(
+            "  runtime: {}\n",
+            if proxy.runtime_available {
+                "available"
+            } else {
+                "policy-schema-only"
+            }
+        ));
+        for operation in &proxy.operations {
+            out.push_str(&format!(
+                "  {} [{} {}]\n",
+                operation.id,
+                operation.method.as_str(),
+                operation.route
+            ));
+        }
+        out.push('\n');
     }
     out.trim_end().to_string()
 }
@@ -202,6 +241,7 @@ fn versions() -> VersionCatalog {
         copilot_cli: COPILOT_CLI_VERSION.to_string(),
         awf: AWF_VERSION.to_string(),
         mcpg: MCPG_VERSION.to_string(),
+        ado_mcp: ADO_MCP_VERSION.to_string(),
     }
 }
 
@@ -234,10 +274,25 @@ fn safe_output_description(name: &str) -> &'static str {
     match name {
         "add-build-tag" => "Parameters for adding a tag to an Azure DevOps build",
         "add-pr-comment" => "Parameters for adding a comment thread on a pull request",
+        "assign-work-item" => "Assigns an Azure DevOps work item to an allowed identity",
         "comment-on-work-item" => "Parameters for commenting on a work item",
         "create-branch" => "Parameters for creating a branch",
         "create-git-tag" => "Parameters for creating a git tag (agent-provided)",
-        "create-github-issue" => "Files a GitHub issue against an operator-configured target repository.",
+        "create-github-issue" => {
+            "Files a GitHub issue against an operator-configured target repository."
+        }
+        "add-github-issue-labels" => "Adds operator-permitted labels to a GitHub issue",
+        "assign-github-issue-milestone" => {
+            "Assigns an operator-permitted milestone to a GitHub issue"
+        }
+        "assign-github-issue-to-user" => "Assigns operator-permitted GitHub users to an issue",
+        "close-github-issue" => "Closes a GitHub issue under configured state-reason policy",
+        "comment-on-github-issue" => "Posts a comment to a configured GitHub issue or pull request",
+        "hide-github-issue-comment" => {
+            "Minimizes a configured GitHub issue, pull-request, or discussion comment"
+        }
+        "link-github-sub-issue" => "Links two GitHub issues as parent and sub-issue",
+        "remove-github-issue-labels" => "Removes operator-permitted labels from a GitHub issue",
         "create-pull-request" => "Parameters for creating a pull request",
         "create-wiki-page" => "Parameters for creating a wiki page (agent-provided)",
         "create-work-item" => "Parameters for creating a work item",
@@ -252,8 +307,13 @@ fn safe_output_description(name: &str) -> &'static str {
         "report-incomplete" => "Parameters for reporting that a task could not be completed",
         "resolve-pr-thread" => "Parameters for resolving or reactivating a PR review thread",
         "set-github-issue-type" => "Sets or clears the native type on a GitHub issue",
+        "set-github-issue-field" => "Sets a repository-defined field on a GitHub issue",
         "submit-pr-review" => "Parameters for submitting a pull request review",
         "update-pr" => "Parameters for updating a pull request",
+        "unassign-github-issue-from-user" => {
+            "Removes operator-permitted GitHub users from an issue"
+        }
+        "update-github-issue" => "Updates operator-enabled fields on a GitHub issue",
         "update-wiki-page" => "Parameters for editing a wiki page (agent-provided)",
         "update-work-item" => "Parameters for updating a work item",
         "upload-build-attachment" => "Parameters for attaching a workspace file to an ADO build.",
@@ -381,6 +441,19 @@ mod tests {
     }
 
     #[test]
+    fn github_safe_outputs_have_catalog_descriptions() {
+        let catalog = catalog_kind("safe-outputs").unwrap();
+        for tool in crate::safe_outputs::CONFIGURED_ONLY_TOOLS {
+            let entry = catalog
+                .safe_outputs
+                .iter()
+                .find(|entry| entry.name == *tool)
+                .unwrap_or_else(|| panic!("safe-outputs catalog missing {tool}"));
+            assert_ne!(entry.description, "(no description)");
+        }
+    }
+
+    #[test]
     fn unknown_inspect_catalog_kind_returns_typed_error() {
         let err = catalog_kind("widgets").unwrap_err();
         assert_eq!(err.kind, "widgets");
@@ -393,6 +466,7 @@ mod tests {
         assert_eq!(versions.copilot_cli, COPILOT_CLI_VERSION);
         assert_eq!(versions.awf, AWF_VERSION);
         assert_eq!(versions.mcpg, MCPG_VERSION);
+        assert_eq!(versions.ado_mcp, ADO_MCP_VERSION);
         // Only the versions category is populated for --kind versions.
         assert!(catalog.safe_outputs.is_empty());
         assert!(catalog.models.is_empty());
@@ -411,5 +485,19 @@ mod tests {
         assert_eq!(value["versions"]["copilot_cli"], COPILOT_CLI_VERSION);
         assert_eq!(value["versions"]["awf"], AWF_VERSION);
         assert_eq!(value["versions"]["mcpg"], MCPG_VERSION);
+        assert_eq!(value["versions"]["ado_mcp"], ADO_MCP_VERSION);
+    }
+
+    #[test]
+    fn ado_proxy_catalog_reports_available_runtime() {
+        let catalog = catalog_kind("ado-proxy").unwrap();
+        let proxy = catalog.ado_proxy.unwrap();
+        assert_eq!(
+            proxy.schema_version,
+            crate::ado_proxy::catalog::CATALOG_SCHEMA_VERSION
+        );
+        assert!(proxy.runtime_available);
+        assert!(!proxy.operations.is_empty());
+        assert!(catalog.safe_outputs.is_empty());
     }
 }

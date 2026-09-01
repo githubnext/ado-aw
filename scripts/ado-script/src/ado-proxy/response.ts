@@ -1,0 +1,270 @@
+/**
+ * Response-side policy.
+ *
+ * Two of the catalog's operations are unavoidably organization-scoped in their
+ * URL — `az repos pr show` and `az boards work-item show` address a pull
+ * request or work item by id alone — so the only place their project and
+ * repository can be checked is the response body. Two more return a *list* of
+ * things the agent is not scoped to see and must be filtered down.
+ *
+ * Filtering happens before a single byte reaches the agent: an out-of-scope
+ * response is replaced by a denial, never truncated or partially forwarded.
+ */
+import { PROTECTED_HOSTS } from "./catalog.js";
+import type { ProxyPolicy } from "./config.js";
+import { ScopeIndex } from "./scope.js";
+import type { Operation, ResponsePolicy } from "../shared/ado-proxy-catalog.types.gen.js";
+
+export type FilterOutcome =
+  | { readonly kind: "forward"; readonly body: Buffer }
+  | { readonly kind: "deny"; readonly detail: string };
+
+function forward(body: Buffer): FilterOutcome {
+  return { kind: "forward", body };
+}
+
+function denyBody(detail: string): FilterOutcome {
+  return { kind: "deny", detail };
+}
+
+function reserialize(value: unknown): FilterOutcome {
+  return forward(Buffer.from(JSON.stringify(value), "utf8"));
+}
+
+function sameIdentifier(left: unknown, right: string | undefined): boolean {
+  return (
+    typeof left === "string" &&
+    right !== undefined &&
+    left.toLowerCase() === right.toLowerCase()
+  );
+}
+
+/**
+ * Whether a project named in a response body is in scope.
+ *
+ * Organization-relative: the project is resolved inside the organization the
+ * request was addressed to, so a project granted in a *different* organization
+ * cannot validate this response.
+ */
+function inScopeProject(
+  value: unknown,
+  scopes: ScopeIndex,
+  organization: string,
+): boolean {
+  return typeof value === "string" && scopes.allowsProject(organization, value);
+}
+
+/**
+ * Whether a repository named in a response body is in scope for its project.
+ *
+ * Checked against the repository grant rather than the project grant, because
+ * a `repos:`-derived scope grants the repository without granting the project.
+ */
+function inScopeRepository(
+  value: unknown,
+  project: unknown,
+  scopes: ScopeIndex,
+  organization: string,
+): boolean {
+  return (
+    typeof value === "string" &&
+    typeof project === "string" &&
+    scopes.allowsRepository(organization, project, value)
+  );
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+/** Extract the `value` array from an Azure DevOps list envelope. */
+function listValues(document: Record<string, unknown>): unknown[] | undefined {
+  return Array.isArray(document.value) ? (document.value as unknown[]) : undefined;
+}
+
+/**
+ * Apply the operation's response policy.
+ *
+ * `json` is the common case and passes the body through unchanged; the body was
+ * already size-bounded by the caller. Everything else either narrows the body
+ * or refuses it.
+ */
+export function filterResponse(
+  operation: Operation,
+  policy: ProxyPolicy,
+  body: Buffer,
+  /**
+   * Origin the client used to reach this proxy, e.g. `https://dev.azure.com`.
+   *
+   * Only the resource-area rewrite needs it: service locations must point back
+   * at whatever origin the client is already talking to, which differs between
+   * the intercepted MCP path and the `az` broker path.
+   */
+  selfOrigin: string,
+  /** Resolved scopes, so response validation agrees with request validation. */
+  scopes: ScopeIndex = ScopeIndex.from(policy),
+  /**
+   * Organization the request was addressed to.
+   *
+   * Response bodies carry a project but not an organization, so it has to come
+   * from the request. Without it the project check could not stay
+   * organization-relative, and a project granted in one organization would
+   * validate a response from another.
+   */
+  organization: string = policy.organization,
+): FilterOutcome {
+  const responsePolicy: ResponsePolicy = operation.response;
+  if (responsePolicy === "json") return forward(body);
+
+  let document: unknown;
+  try {
+    document = JSON.parse(body.toString("utf8"));
+  } catch {
+    // A scope-validated operation whose body cannot be parsed cannot be
+    // validated, so it cannot be forwarded.
+    return denyBody("upstream response was not parseable JSON");
+  }
+
+  const record = asRecord(document);
+  if (record === undefined) {
+    return denyBody("upstream response was not a JSON object");
+  }
+
+  switch (responsePolicy) {
+    case "filter-projects": {
+      const values = listValues(record);
+      if (values === undefined) return denyBody("project list had no value array");
+      const kept = values.filter((entry) => {
+        const project = asRecord(entry);
+        return (
+          project !== undefined &&
+          (inScopeProject(project.name, scopes, organization) ||
+            inScopeProject(project.id, scopes, organization))
+        );
+      });
+      return reserialize({ count: kept.length, value: kept });
+    }
+
+    case "filter-resource-areas": {
+      const values = listValues(record);
+      if (values === undefined) return denyBody("resource area list had no value array");
+      // Rewrite, do not merely filter.
+      //
+      // `az` resolves service locations from this response, and it is the
+      // single point that decides whether it stays on the policy endpoint.
+      // Measured (scripts/sps-probe.mjs): omit the `location` area and `az`
+      // fails outright; return an incomplete list and it falls back to
+      // deployment-level SPS; return the real areas pointing back at the
+      // policy endpoint and it completes without ever contacting SPS.
+      //
+      // Dropping entries whose `locationUrl` is not already a protected host
+      // would empty the list and reintroduce exactly that fallback — the
+      // opposite of the intent. So each URL is rewritten to the origin the
+      // client is already talking to, and only entries that cannot be
+      // rewritten are dropped.
+      const kept: unknown[] = [];
+      for (const value of values) {
+        const area = asRecord(value);
+        if (area === undefined) continue;
+        const rewritten = rewriteLocationUrl(area.locationUrl, selfOrigin);
+        if (rewritten === undefined) continue;
+        kept.push({ ...area, locationUrl: rewritten });
+      }
+      return reserialize({ count: kept.length, value: kept });
+    }
+
+    case "validate-project": {
+      // Work items report their project in `fields["System.TeamProject"]`;
+      // other org-level resources carry a nested `project` object. Accept
+      // either shape, and deny when neither is present — an unvalidatable
+      // response cannot be forwarded.
+      const nested = asRecord(record.project);
+      const fromFields = asRecord(record.fields)?.["System.TeamProject"];
+      const candidates = [nested?.name, nested?.id, fromFields];
+      if (
+        !candidates.some((candidate) => inScopeProject(candidate, scopes, organization))
+      ) {
+        return denyBody("resource belongs to a different project");
+      }
+      return forward(body);
+    }
+
+    case "validate-project-and-repository": {
+      const repository = asRecord(record.repository);
+      if (repository === undefined) {
+        return denyBody("response carried no repository to validate");
+      }
+      const project = asRecord(repository.project);
+      // A `repos:`-derived scope grants the repository without granting the
+      // project, so the repository check is what authorizes this response; the
+      // project is used only to resolve which grant applies.
+      const projectName =
+        typeof project?.name === "string" ? project.name : undefined;
+      const projectId = typeof project?.id === "string" ? project.id : undefined;
+      const projectKey = [projectName, projectId].find(
+        (candidate) =>
+          candidate !== undefined &&
+          (scopes.allowsProject(organization, candidate) ||
+            scopes.allowsRepository(organization, candidate, String(repository.name)) ||
+            scopes.allowsRepository(organization, candidate, String(repository.id))),
+      );
+      if (projectKey === undefined) {
+        return denyBody("resource belongs to a project outside the policy");
+      }
+      if (
+        !inScopeRepository(repository.name, projectKey, scopes, organization) &&
+        !inScopeRepository(repository.id, projectKey, scopes, organization)
+      ) {
+        return denyBody("resource belongs to a repository outside the policy");
+      }
+      return forward(body);
+    }
+
+    default: {
+      // A response policy added in Rust but not implemented here must not
+      // default to forwarding an unvalidated body.
+      const exhaustive: never = responsePolicy;
+      return denyBody(`unimplemented response policy ${String(exhaustive)}`);
+    }
+  }
+}
+
+/**
+ * Point a service `locationUrl` back at the proxy, preserving its path.
+ *
+ * Azure DevOps returns absolute URLs like
+ * `https://dev.azure.com/contoso/` — the host must become the origin the client
+ * is already using, or the client's next request leaves the policed path.
+ * Returns `undefined` for anything unparseable, which the caller drops.
+ */
+export function rewriteLocationUrl(
+  locationUrl: unknown,
+  selfOrigin: string,
+): string | undefined {
+  if (typeof locationUrl !== "string") return undefined;
+  let parsed: URL;
+  let origin: URL;
+  try {
+    parsed = new URL(locationUrl);
+    origin = new URL(selfOrigin);
+  } catch {
+    return undefined;
+  }
+  parsed.protocol = origin.protocol;
+  parsed.host = origin.host;
+  return parsed.toString();
+}
+
+/** True when a discovery `locationUrl` resolves to a protected host. */
+export function isProtectedLocation(locationUrl: unknown): boolean {
+  if (typeof locationUrl !== "string") return false;
+  let host: string;
+  try {
+    host = new URL(locationUrl).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return PROTECTED_HOSTS.some((protectedHost) => protectedHost.toLowerCase() === host);
+}
