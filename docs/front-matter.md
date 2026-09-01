@@ -105,6 +105,7 @@ safe-outputs:                  # optional per-tool configuration for safe output
   staged: false               # cooperative preview default; per-tool override supported
   create-work-item:
     work-item-type: Task
+    description-field: System.Description
     tags:
       - automated
       - agent-created
@@ -271,6 +272,11 @@ permissions:                   # optional ADO access token configuration (see do
                                  # Default: executor uses $(System.AccessToken).
                                  # Set this only for cross-org writes or
                                  # named-identity attribution.
+# permissions-required:          # optional abstract capability requirements (usually set by an
+#   read: true                   # imported component rather than authored directly); see
+#   write: true                  # docs/imports.md#permissions-required. Unioned across all
+#                                 # imports and the consumer; `read: true` must be satisfied by a
+#                                 # concrete `permissions.read` connection above.
 supply-chain:                  # optional internal supply-chain mirror (see docs/supply-chain.md)
   feed:                          # mirror binaries (compiler, AWF, ado-script) from an ADO Artifacts feed
     name: my-project/my-feed     # feed name or project/feed; scalar `feed: my-feed` shorthand also works

@@ -36,6 +36,7 @@
 //! - [`AdoOrganization`] — an Azure DevOps Services organization name.
 //! - [`AdoProject`] — an Azure DevOps project name or GUID.
 //! - [`AdoRepository`] — an Azure DevOps repository name or GUID.
+//! - [`AdoWorkItemFieldRef`] — an Azure DevOps work item field reference name.
 //! - [`Version`] — a version string (`1.2.3`, `latest`).
 //! - [`SemanticVersion`] — an exact semantic version (`1.2.3`, `2.0.0-beta.1`).
 //!
@@ -197,6 +198,11 @@ validated_string! {
             )
         }
     }
+}
+
+validated_string! {
+    /// An Azure DevOps work item field reference name.
+    AdoWorkItemFieldRef, "work item field", validate::validate_ado_work_item_field_ref
 }
 
 validated_string! {

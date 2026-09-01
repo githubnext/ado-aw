@@ -836,11 +836,13 @@ within a single SafeOutputs job.
 ```
 
 ### create-work-item
-Creates an Azure DevOps work item.
+Creates an Azure DevOps work item. The agent-provided description is written as
+Markdown, and the executor sets `multilineFieldsFormat` to `Markdown` for the
+field that receives the body.
 
 **Agent parameters:**
 - `title` - A concise title for the work item (required, must be more than 5 characters)
-- `description` - Work item description in markdown format (required, must be more than 30 characters)
+- `description` - Work item description in Markdown format (required, must be more than 30 characters). Inline HTML is preserved for Azure DevOps to render/sanitize.
 - `tags` - Tags to apply to the work item (optional list; each tag must not contain a semicolon). May be subject to the `allowed-tags` allowlist. Merged with any static `tags` configured in front matter.
 
 On success, the MCP tool returns a generated gh-aw-compatible `#aw_...`
@@ -849,6 +851,7 @@ choose this ID; they use the returned value in later safe-output calls.
 
 **Configuration options (front matter):**
 - `work-item-type` - Work item type (default: "Task")
+- `description-field` - Field reference name that receives the agent-provided description. Defaults to `Microsoft.VSTS.TCM.ReproSteps` for `Bug` work items and `System.Description` for all other work item types.
 - `area-path` - Area path for the work item
 - `iteration-path` - Iteration path for the work item
 - `assignee` - Static user to assign (email, UPN, or display name). When omitted, the work item is created unassigned.

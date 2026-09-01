@@ -747,6 +747,42 @@ pub fn is_valid_guid(s: &str) -> bool {
         })
 }
 
+/// Validate an Azure DevOps work item field reference name.
+///
+/// Field reference names are dot-separated identifier segments such as
+/// `System.Description` or `Microsoft.VSTS.TCM.ReproSteps`. Keeping this strict
+/// also prevents JSON Pointer path corruption when the field reference is used
+/// in JSON Patch paths like `/fields/<ref>`.
+pub fn validate_ado_work_item_field_ref(s: &str, label: &str) -> Result<()> {
+    anyhow::ensure!(!s.is_empty(), "{label} must not be empty");
+
+    let mut segment_count = 0;
+    for segment in s.split('.') {
+        segment_count += 1;
+        anyhow::ensure!(
+            !segment.is_empty(),
+            "{label} must not contain empty '.' segments"
+        );
+
+        let mut chars = segment.chars();
+        let first = chars.next().expect("segment is non-empty");
+        anyhow::ensure!(
+            first.is_ascii_alphabetic(),
+            "{label} segment '{segment}' must start with an ASCII letter"
+        );
+        anyhow::ensure!(
+            chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_'),
+            "{label} segment '{segment}' may only contain ASCII letters, digits, or '_'"
+        );
+    }
+
+    anyhow::ensure!(
+        segment_count >= 2,
+        "{label} must contain at least one '.' separator"
+    );
+    Ok(())
+}
+
 // ── Git reference / commit validators ────────────────────────────────────────
 
 /// Return `true` if `s` is a full 40-character lowercase-or-uppercase hex SHA.
@@ -1304,6 +1340,36 @@ mod tests {
         assert!(ensure_path_within_base(&dir.join("missing"), &dir, "f").is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_validate_ado_work_item_field_ref() {
+        for valid in [
+            "System.Description",
+            "Microsoft.VSTS.TCM.ReproSteps",
+            "Custom.My_Field1",
+        ] {
+            assert!(
+                validate_ado_work_item_field_ref(valid, "field").is_ok(),
+                "{valid}"
+            );
+        }
+
+        for invalid in [
+            "",
+            "System",
+            "System.",
+            ".Description",
+            "System/Description",
+            "System~Description",
+            "System.Description[0]",
+            "1System.Description",
+        ] {
+            assert!(
+                validate_ado_work_item_field_ref(invalid, "field").is_err(),
+                "{invalid}"
+            );
+        }
     }
 
     // ── Git ref / commit validators ────────────────────────────────────

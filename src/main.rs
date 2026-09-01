@@ -1179,6 +1179,464 @@ fn print_execution_summary(results: &[crate::safe_outputs::ExecutionResult]) {
     );
 }
 
+struct ExecuteCommandArgs {
+    source: Option<PathBuf>,
+    safe_output_dir: PathBuf,
+    output_dir: Option<PathBuf>,
+    ado_org_url: Option<String>,
+    ado_project: Option<String>,
+    dry_run: bool,
+    only: Vec<String>,
+    exclude: Vec<String>,
+    resolved_config: Option<PathBuf>,
+    prepare_custom_agent_output: Option<PathBuf>,
+}
+
+async fn dispatch_execute_command(args: ExecuteCommandArgs) -> Result<()> {
+    let ExecuteCommandArgs {
+        source,
+        safe_output_dir,
+        output_dir,
+        ado_org_url,
+        ado_project,
+        dry_run,
+        only,
+        exclude,
+        resolved_config,
+        prepare_custom_agent_output,
+    } = args;
+
+    if let Some(output_path) = prepare_custom_agent_output {
+        if output_dir.is_some()
+            || ado_org_url.is_some()
+            || ado_project.is_some()
+            || !only.is_empty()
+            || !exclude.is_empty()
+            || dry_run
+        {
+            anyhow::bail!(
+                "--prepare-custom-agent-output cannot be combined with --output-dir, \
+                 --ado-org-url, --ado-project, --dry-run, --only, or --exclude"
+            );
+        }
+        let resolved_config = resolved_config
+            .as_deref()
+            .context("--prepare-custom-agent-output requires --resolved-config")?;
+        let count =
+            execute::prepare_custom_agent_output(&safe_output_dir, resolved_config, &output_path)
+                .await?;
+        println!(
+            "Prepared {count} Agent-output item(s) at {}",
+            output_path.display()
+        );
+    } else {
+        run_execute(RunExecuteOptions {
+            source,
+            resolved_config,
+            safe_output_dir,
+            output_dir,
+            ado_org_url,
+            ado_project,
+            dry_run,
+            filter: execute::ToolFilter { only, exclude },
+        })
+        .await?;
+    }
+    Ok(())
+}
+
+async fn dispatch_secrets_command(action: SecretsCmd) -> Result<()> {
+    match action {
+        SecretsCmd::Set {
+            name,
+            value,
+            path,
+            org,
+            project,
+            pat,
+            allow_override,
+            value_stdin,
+            dry_run,
+            definition_ids,
+            all_repos,
+            source,
+            include_disabled,
+        } => {
+            secrets::run_set(secrets::SetOptions {
+                name: &name,
+                value: value.as_deref(),
+                org: org.as_deref(),
+                project: project.as_deref(),
+                pat: pat.as_deref(),
+                path: path.as_deref(),
+                allow_override,
+                value_stdin,
+                dry_run,
+                definition_ids: definition_ids.as_deref(),
+                all_repos,
+                source: source.as_deref(),
+                include_disabled,
+            })
+            .await
+        }
+        SecretsCmd::List {
+            path,
+            org,
+            project,
+            pat,
+            json,
+            definition_ids,
+            all_repos,
+            source,
+            include_disabled,
+        } => {
+            secrets::run_list(secrets::ListOptions {
+                org: org.as_deref(),
+                project: project.as_deref(),
+                pat: pat.as_deref(),
+                path: path.as_deref(),
+                json,
+                definition_ids: definition_ids.as_deref(),
+                all_repos,
+                source: source.as_deref(),
+                include_disabled,
+            })
+            .await
+        }
+        SecretsCmd::Delete {
+            name,
+            path,
+            org,
+            project,
+            pat,
+            dry_run,
+            definition_ids,
+            all_repos,
+            source,
+            include_disabled,
+        } => {
+            secrets::run_delete(secrets::DeleteOptions {
+                name: &name,
+                org: org.as_deref(),
+                project: project.as_deref(),
+                pat: pat.as_deref(),
+                path: path.as_deref(),
+                dry_run,
+                definition_ids: definition_ids.as_deref(),
+                all_repos,
+                source: source.as_deref(),
+                include_disabled,
+            })
+            .await
+        }
+    }
+}
+
+/// Dispatches the lifecycle-management commands (`enable`, `disable`,
+/// `remove`, `list`, `status`, `run`, `audit`, `trace`) that share the same
+/// org/project/pat/path REST-client shape. Extracted from `main()` to keep
+/// its cognitive complexity down; each arm is a thin call-through to the
+/// corresponding module's `run`/`dispatch` entry point.
+#[allow(clippy::too_many_lines)]
+async fn dispatch_lifecycle_command(command: Commands) -> Result<()> {
+    match command {
+        Commands::Enable {
+            path,
+            org,
+            project,
+            pat,
+            folder,
+            default_branch,
+            dry_run,
+            also_set_token,
+            token,
+            service_connection,
+            repository_name,
+        } => {
+            enable::run(enable::EnableOptions {
+                org: org.as_deref(),
+                project: project.as_deref(),
+                pat: pat.as_deref(),
+                path: path.as_deref(),
+                folder: &folder,
+                default_branch: &default_branch,
+                dry_run,
+                also_set_token,
+                token: token.as_deref(),
+                service_connection: service_connection.as_deref(),
+                repository_name: repository_name.as_deref(),
+            })
+            .await
+        }
+        Commands::Disable {
+            path,
+            org,
+            project,
+            pat,
+            paused,
+            dry_run,
+        } => {
+            disable::run(disable::DisableOptions {
+                org: org.as_deref(),
+                project: project.as_deref(),
+                pat: pat.as_deref(),
+                path: path.as_deref(),
+                paused,
+                dry_run,
+            })
+            .await
+        }
+        Commands::Remove {
+            path,
+            org,
+            project,
+            pat,
+            yes,
+            dry_run,
+        } => {
+            remove::run(remove::RemoveOptions {
+                org: org.as_deref(),
+                project: project.as_deref(),
+                pat: pat.as_deref(),
+                path: path.as_deref(),
+                yes,
+                dry_run,
+            })
+            .await
+        }
+        Commands::List {
+            path,
+            org,
+            project,
+            pat,
+            all,
+            json,
+        } => {
+            list::run(list::ListOptions {
+                org: org.as_deref(),
+                project: project.as_deref(),
+                pat: pat.as_deref(),
+                path: path.as_deref(),
+                all,
+                json,
+            })
+            .await
+        }
+        Commands::Status {
+            path,
+            org,
+            project,
+            pat,
+            json,
+        } => {
+            status::run(status::StatusOptions {
+                org: org.as_deref(),
+                project: project.as_deref(),
+                pat: pat.as_deref(),
+                path: path.as_deref(),
+                json,
+            })
+            .await
+        }
+        Commands::Run {
+            path,
+            org,
+            project,
+            pat,
+            branch,
+            parameters,
+            wait,
+            poll_interval,
+            timeout,
+            dry_run,
+        } => {
+            run::dispatch(run::RunOptions {
+                org: org.as_deref(),
+                project: project.as_deref(),
+                pat: pat.as_deref(),
+                path: path.as_deref(),
+                branch: branch.as_deref(),
+                parameters: &parameters,
+                wait,
+                poll_interval_secs: poll_interval,
+                timeout_secs: timeout,
+                dry_run,
+            })
+            .await
+        }
+        Commands::Audit {
+            build_id_or_url,
+            output,
+            json,
+            org,
+            project,
+            pat,
+            artifacts,
+            no_cache,
+        } => {
+            audit::dispatch(audit::AuditOptions {
+                build_id_or_url: &build_id_or_url,
+                output: &output,
+                json,
+                org: org.as_deref(),
+                project: project.as_deref(),
+                pat: pat.as_deref(),
+                artifacts: artifacts.as_deref(),
+                no_cache,
+            })
+            .await
+        }
+        Commands::Trace {
+            build_id_or_url,
+            step,
+            json,
+            org,
+            project,
+            pat,
+        } => {
+            inspect::dispatch_trace(inspect::TraceOptions {
+                build_id_or_url: &build_id_or_url,
+                step: step.as_deref(),
+                json,
+                org: org.as_deref(),
+                project: project.as_deref(),
+                pat: pat.as_deref(),
+                // Default cache root (`${TEMP}/ado-aw/audit`). Keep this
+                // `None` so CLI and MCP invocations share one cache; pass
+                // `Some(Path::new(...))` here only if a future flag adds
+                // a user-configurable override.
+                output: None,
+            })
+            .await
+        }
+        other => unreachable!(
+            "dispatch_lifecycle_command called with non-lifecycle command: {:?}",
+            Commands::command_name(&other)
+        ),
+    }
+}
+
+/// Dispatches the read-only static-analysis commands (`inspect`, `graph`,
+/// `whatif`, `lint`, `catalog`) that operate on a compiled pipeline's typed
+/// IR without touching Azure DevOps. Extracted from `main()` alongside
+/// [`dispatch_lifecycle_command`] to keep its cognitive complexity down.
+async fn dispatch_inspect_group_command(command: Commands) -> Result<()> {
+    match command {
+        Commands::Inspect { source, json } => {
+            inspect::dispatch_inspect(inspect::InspectOptions {
+                source: &source,
+                json,
+            })
+            .await
+        }
+        Commands::Graph { subcommand } => match subcommand {
+            GraphCmd::Dump { source, format } => {
+                inspect::dispatch_graph(inspect::GraphOptions {
+                    source: &source,
+                    format,
+                })
+                .await
+            }
+            GraphCmd::Deps {
+                source,
+                step,
+                direction,
+                json,
+            } => {
+                inspect::dispatch_graph_deps(inspect::GraphDepsOptions {
+                    source: &source,
+                    step: &step,
+                    direction,
+                    json,
+                })
+                .await
+            }
+            GraphCmd::Outputs {
+                source,
+                producer,
+                consumer,
+                json,
+            } => {
+                inspect::dispatch_graph_outputs(inspect::GraphOutputsOptions {
+                    source: &source,
+                    producer: producer.as_deref(),
+                    consumer: consumer.as_deref(),
+                    json,
+                })
+                .await
+            }
+        },
+        Commands::Whatif { source, fail, json } => {
+            inspect::dispatch_whatif(inspect::WhatIfOptions {
+                source: &source,
+                fail: &fail,
+                json,
+            })
+            .await
+        }
+        Commands::Lint { source, json } => {
+            let had_errors = inspect::dispatch_lint(inspect::LintOptions {
+                source: &source,
+                json,
+            })
+            .await?;
+            if had_errors {
+                // Intentional `exit(1)` (not a returned `Err`): mirrors
+                // how `tsc --noEmit` / `eslint` signal lint failure to
+                // CI, so callers can fail a pipeline step on the exit
+                // code without having to parse stderr. The async I/O
+                // resources used by `dispatch_lint` are runtime-managed
+                // and do not leak when we bypass `Drop` here.
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        Commands::Catalog { kind, json } => inspect::dispatch_catalog(inspect::CatalogOptions {
+            kind: kind.as_deref(),
+            json,
+        }),
+        other => unreachable!(
+            "dispatch_inspect_group_command called with non-inspect command: {:?}",
+            Commands::command_name(&other)
+        ),
+    }
+}
+
+/// Dispatches the hidden build-time export commands (`export-gate-schema`,
+/// `export-fact-catalog`, `export-ado-proxy-catalog-schema`,
+/// `export-ado-proxy-catalog`, `export-bash-scripts`). These are all
+/// synchronous "generate and write/print" operations, extracted from
+/// `main()` as a group to keep its cognitive complexity down.
+fn dispatch_export_command(command: Commands) -> Result<()> {
+    match command {
+        Commands::ExportGateSchema { output } => {
+            let schema = compile::filter_ir::generate_gate_spec_schema();
+            write_or_print(&schema, output)
+        }
+        Commands::ExportFactCatalog { output } => {
+            let catalog = compile::filter_ir::generate_fact_catalog();
+            write_or_print(&catalog, output)
+        }
+        Commands::ExportAdoProxyCatalogSchema { output } => {
+            let schema = ado_proxy::catalog::generate_catalog_schema();
+            write_or_print(&schema, output)
+        }
+        Commands::ExportAdoProxyCatalog { output } => {
+            let catalog = ado_proxy::catalog::generate_catalog_json();
+            write_or_print(&catalog, output)
+        }
+        Commands::ExportBashScripts { output, format } => {
+            let count = compile::shell::export::export(&output, format)?;
+            println!("Exported {count} shell scripts to {}", output.display());
+            Ok(())
+        }
+        other => unreachable!(
+            "dispatch_export_command called with non-export command: {:?}",
+            Commands::command_name(&other)
+        ),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -1279,45 +1737,19 @@ async fn main() -> Result<()> {
             resolved_config,
             prepare_custom_agent_output,
         } => {
-            if let Some(output_path) = prepare_custom_agent_output {
-                if output_dir.is_some()
-                    || ado_org_url.is_some()
-                    || ado_project.is_some()
-                    || !only.is_empty()
-                    || !exclude.is_empty()
-                    || dry_run
-                {
-                    anyhow::bail!(
-                        "--prepare-custom-agent-output cannot be combined with --output-dir, \
-                         --ado-org-url, --ado-project, --dry-run, --only, or --exclude"
-                    );
-                }
-                let resolved_config = resolved_config
-                    .as_deref()
-                    .context("--prepare-custom-agent-output requires --resolved-config")?;
-                let count = execute::prepare_custom_agent_output(
-                    &safe_output_dir,
-                    resolved_config,
-                    &output_path,
-                )
-                .await?;
-                println!(
-                    "Prepared {count} Agent-output item(s) at {}",
-                    output_path.display()
-                );
-            } else {
-                run_execute(RunExecuteOptions {
-                    source,
-                    resolved_config,
-                    safe_output_dir,
-                    output_dir,
-                    ado_org_url,
-                    ado_project,
-                    dry_run,
-                    filter: execute::ToolFilter { only, exclude },
-                })
-                .await?;
-            }
+            dispatch_execute_command(ExecuteCommandArgs {
+                source,
+                safe_output_dir,
+                output_dir,
+                ado_org_url,
+                ado_project,
+                dry_run,
+                only,
+                exclude,
+                resolved_config,
+                prepare_custom_agent_output,
+            })
+            .await?;
         }
         Commands::Init {
             path,
@@ -1353,352 +1785,32 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
-        Commands::Secrets { action } => match action {
-            SecretsCmd::Set {
-                name,
-                value,
-                path,
-                org,
-                project,
-                pat,
-                allow_override,
-                value_stdin,
-                dry_run,
-                definition_ids,
-                all_repos,
-                source,
-                include_disabled,
-            } => {
-                secrets::run_set(secrets::SetOptions {
-                    name: &name,
-                    value: value.as_deref(),
-                    org: org.as_deref(),
-                    project: project.as_deref(),
-                    pat: pat.as_deref(),
-                    path: path.as_deref(),
-                    allow_override,
-                    value_stdin,
-                    dry_run,
-                    definition_ids: definition_ids.as_deref(),
-                    all_repos,
-                    source: source.as_deref(),
-                    include_disabled,
-                })
-                .await?;
-            }
-            SecretsCmd::List {
-                path,
-                org,
-                project,
-                pat,
-                json,
-                definition_ids,
-                all_repos,
-                source,
-                include_disabled,
-            } => {
-                secrets::run_list(secrets::ListOptions {
-                    org: org.as_deref(),
-                    project: project.as_deref(),
-                    pat: pat.as_deref(),
-                    path: path.as_deref(),
-                    json,
-                    definition_ids: definition_ids.as_deref(),
-                    all_repos,
-                    source: source.as_deref(),
-                    include_disabled,
-                })
-                .await?;
-            }
-            SecretsCmd::Delete {
-                name,
-                path,
-                org,
-                project,
-                pat,
-                dry_run,
-                definition_ids,
-                all_repos,
-                source,
-                include_disabled,
-            } => {
-                secrets::run_delete(secrets::DeleteOptions {
-                    name: &name,
-                    org: org.as_deref(),
-                    project: project.as_deref(),
-                    pat: pat.as_deref(),
-                    path: path.as_deref(),
-                    dry_run,
-                    definition_ids: definition_ids.as_deref(),
-                    all_repos,
-                    source: source.as_deref(),
-                    include_disabled,
-                })
-                .await?;
-            }
-        },
-        Commands::Enable {
-            path,
-            org,
-            project,
-            pat,
-            folder,
-            default_branch,
-            dry_run,
-            also_set_token,
-            token,
-            service_connection,
-            repository_name,
-        } => {
-            enable::run(enable::EnableOptions {
-                org: org.as_deref(),
-                project: project.as_deref(),
-                pat: pat.as_deref(),
-                path: path.as_deref(),
-                folder: &folder,
-                default_branch: &default_branch,
-                dry_run,
-                also_set_token,
-                token: token.as_deref(),
-                service_connection: service_connection.as_deref(),
-                repository_name: repository_name.as_deref(),
-            })
-            .await?;
+        Commands::Secrets { action } => {
+            dispatch_secrets_command(action).await?;
         }
-        Commands::Disable {
-            path,
-            org,
-            project,
-            pat,
-            paused,
-            dry_run,
-        } => {
-            disable::run(disable::DisableOptions {
-                org: org.as_deref(),
-                project: project.as_deref(),
-                pat: pat.as_deref(),
-                path: path.as_deref(),
-                paused,
-                dry_run,
-            })
-            .await?;
+        command @ (Commands::Enable { .. }
+        | Commands::Disable { .. }
+        | Commands::Remove { .. }
+        | Commands::List { .. }
+        | Commands::Status { .. }
+        | Commands::Run { .. }
+        | Commands::Audit { .. }
+        | Commands::Trace { .. }) => {
+            dispatch_lifecycle_command(command).await?;
         }
-        Commands::Remove {
-            path,
-            org,
-            project,
-            pat,
-            yes,
-            dry_run,
-        } => {
-            remove::run(remove::RemoveOptions {
-                org: org.as_deref(),
-                project: project.as_deref(),
-                pat: pat.as_deref(),
-                path: path.as_deref(),
-                yes,
-                dry_run,
-            })
-            .await?;
+        command @ (Commands::ExportGateSchema { .. }
+        | Commands::ExportFactCatalog { .. }
+        | Commands::ExportAdoProxyCatalogSchema { .. }
+        | Commands::ExportAdoProxyCatalog { .. }
+        | Commands::ExportBashScripts { .. }) => {
+            dispatch_export_command(command)?;
         }
-        Commands::List {
-            path,
-            org,
-            project,
-            pat,
-            all,
-            json,
-        } => {
-            list::run(list::ListOptions {
-                org: org.as_deref(),
-                project: project.as_deref(),
-                pat: pat.as_deref(),
-                path: path.as_deref(),
-                all,
-                json,
-            })
-            .await?;
-        }
-        Commands::Status {
-            path,
-            org,
-            project,
-            pat,
-            json,
-        } => {
-            status::run(status::StatusOptions {
-                org: org.as_deref(),
-                project: project.as_deref(),
-                pat: pat.as_deref(),
-                path: path.as_deref(),
-                json,
-            })
-            .await?;
-        }
-        Commands::Run {
-            path,
-            org,
-            project,
-            pat,
-            branch,
-            parameters,
-            wait,
-            poll_interval,
-            timeout,
-            dry_run,
-        } => {
-            run::dispatch(run::RunOptions {
-                org: org.as_deref(),
-                project: project.as_deref(),
-                pat: pat.as_deref(),
-                path: path.as_deref(),
-                branch: branch.as_deref(),
-                parameters: &parameters,
-                wait,
-                poll_interval_secs: poll_interval,
-                timeout_secs: timeout,
-                dry_run,
-            })
-            .await?;
-        }
-        Commands::Audit {
-            build_id_or_url,
-            output,
-            json,
-            org,
-            project,
-            pat,
-            artifacts,
-            no_cache,
-        } => {
-            audit::dispatch(audit::AuditOptions {
-                build_id_or_url: &build_id_or_url,
-                output: &output,
-                json,
-                org: org.as_deref(),
-                project: project.as_deref(),
-                pat: pat.as_deref(),
-                artifacts: artifacts.as_deref(),
-                no_cache,
-            })
-            .await?;
-        }
-        Commands::Trace {
-            build_id_or_url,
-            step,
-            json,
-            org,
-            project,
-            pat,
-        } => {
-            inspect::dispatch_trace(inspect::TraceOptions {
-                build_id_or_url: &build_id_or_url,
-                step: step.as_deref(),
-                json,
-                org: org.as_deref(),
-                project: project.as_deref(),
-                pat: pat.as_deref(),
-                // Default cache root (`${TEMP}/ado-aw/audit`). Keep this
-                // `None` so CLI and MCP invocations share one cache; pass
-                // `Some(Path::new(...))` here only if a future flag adds
-                // a user-configurable override.
-                output: None,
-            })
-            .await?;
-        }
-        Commands::ExportGateSchema { output } => {
-            let schema = compile::filter_ir::generate_gate_spec_schema();
-            write_or_print(&schema, output)?;
-        }
-        Commands::ExportFactCatalog { output } => {
-            let catalog = compile::filter_ir::generate_fact_catalog();
-            write_or_print(&catalog, output)?;
-        }
-        Commands::ExportAdoProxyCatalogSchema { output } => {
-            let schema = ado_proxy::catalog::generate_catalog_schema();
-            write_or_print(&schema, output)?;
-        }
-        Commands::ExportAdoProxyCatalog { output } => {
-            let catalog = ado_proxy::catalog::generate_catalog_json();
-            write_or_print(&catalog, output)?;
-        }
-        Commands::ExportBashScripts { output, format } => {
-            let count = compile::shell::export::export(&output, format)?;
-            println!("Exported {count} shell scripts to {}", output.display());
-        }
-        Commands::Inspect { source, json } => {
-            inspect::dispatch_inspect(inspect::InspectOptions {
-                source: &source,
-                json,
-            })
-            .await?;
-        }
-        Commands::Graph { subcommand } => match subcommand {
-            GraphCmd::Dump { source, format } => {
-                inspect::dispatch_graph(inspect::GraphOptions {
-                    source: &source,
-                    format,
-                })
-                .await?;
-            }
-            GraphCmd::Deps {
-                source,
-                step,
-                direction,
-                json,
-            } => {
-                inspect::dispatch_graph_deps(inspect::GraphDepsOptions {
-                    source: &source,
-                    step: &step,
-                    direction,
-                    json,
-                })
-                .await?;
-            }
-            GraphCmd::Outputs {
-                source,
-                producer,
-                consumer,
-                json,
-            } => {
-                inspect::dispatch_graph_outputs(inspect::GraphOutputsOptions {
-                    source: &source,
-                    producer: producer.as_deref(),
-                    consumer: consumer.as_deref(),
-                    json,
-                })
-                .await?;
-            }
-        },
-        Commands::Whatif { source, fail, json } => {
-            inspect::dispatch_whatif(inspect::WhatIfOptions {
-                source: &source,
-                fail: &fail,
-                json,
-            })
-            .await?;
-        }
-        Commands::Lint { source, json } => {
-            let had_errors = inspect::dispatch_lint(inspect::LintOptions {
-                source: &source,
-                json,
-            })
-            .await?;
-            if had_errors {
-                // Intentional `exit(1)` (not a returned `Err`): mirrors
-                // how `tsc --noEmit` / `eslint` signal lint failure to
-                // CI, so callers can fail a pipeline step on the exit
-                // code without having to parse stderr. The async I/O
-                // resources used by `dispatch_lint` are runtime-managed
-                // and do not leak when we bypass `Drop` here.
-                std::process::exit(1);
-            }
-        }
-        Commands::Catalog { kind, json } => {
-            inspect::dispatch_catalog(inspect::CatalogOptions {
-                kind: kind.as_deref(),
-                json,
-            })?;
+        command @ (Commands::Inspect { .. }
+        | Commands::Graph { .. }
+        | Commands::Whatif { .. }
+        | Commands::Lint { .. }
+        | Commands::Catalog { .. }) => {
+            dispatch_inspect_group_command(command).await?;
         }
     }
 

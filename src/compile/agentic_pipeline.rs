@@ -158,6 +158,187 @@ fn copilot_byom_exclude_keys(is_copilot: bool, engine_config: &EngineConfig) -> 
 /// validates the front matter, computes every scalar, fans out
 /// extension declarations, builds the canonical 5-job graph with the
 /// optional `prefix`, and returns the per-target wrap inputs.
+/// Run every shared front-matter validator used by the IR-driven target
+/// compilers. Split out of [`build_pipeline_context`] purely to keep that
+/// function's cognitive complexity manageable — behaviour and error
+/// propagation are unchanged.
+fn validate_pipeline_front_matter(
+    front_matter: &FrontMatter,
+    threat_detection: &crate::compile::types::ThreatDetectionConfig,
+    detection_engine_config: &crate::compile::types::EngineConfig,
+) -> Result<()> {
+    common::validate_front_matter_identity(front_matter)?;
+    common::validate_permissions_read_policy(front_matter)?;
+    if let Some(minutes) = front_matter.engine.timeout_minutes() {
+        common::validate_proxied_timeout(front_matter, minutes)?;
+    }
+    common::validate_variable_groups(front_matter)?;
+    common::validate_safe_outputs_keys(front_matter)?;
+    front_matter.validate_threat_detection_config(threat_detection, detection_engine_config)?;
+    front_matter.validate_require_approval()?;
+    front_matter.validate_staged()?;
+    common::validate_github_issue_outputs_config(front_matter)?;
+    common::validate_work_item_assignment_outputs_config(front_matter)?;
+    common::validate_comment_target(front_matter)?;
+    common::validate_update_work_item_target(front_matter)?;
+    common::validate_submit_pr_review_events(front_matter)?;
+    common::validate_update_pr_votes(front_matter)?;
+    common::validate_resolve_pr_thread_statuses(front_matter)?;
+    common::validate_ado_aw_debug_config(front_matter)?;
+    if let Some(sc) = front_matter.supply_chain() {
+        sc.validate()?;
+    }
+    Ok(())
+}
+
+/// Collect each extension's compile-time [`Declarations`], surfacing any
+/// warnings to stderr as they are produced. Split out of
+/// [`build_pipeline_context`] purely to keep that function's cognitive
+/// complexity manageable — behaviour and error propagation are unchanged.
+fn collect_extension_declarations(
+    extensions: &[Extension],
+    ctx: &CompileContext<'_>,
+) -> Result<Vec<crate::compile::extensions::Declarations>> {
+    let mut extension_declarations = Vec::with_capacity(extensions.len());
+    for ext in extensions {
+        let decl = ext.declarations(ctx)?;
+        for warning in &decl.warnings {
+            eprintln!("Warning: {}", warning);
+        }
+        extension_declarations.push(decl);
+    }
+    Ok(extension_declarations)
+}
+
+/// Fan out each extension's [`Declarations`] into the Agent job's setup
+/// steps, agent-prepare steps, and agent conditions, appending any prompt
+/// supplement as a raw-YAML step. Split out of [`build_pipeline_context`]
+/// purely to keep that function's cognitive complexity manageable —
+/// behaviour and error propagation are unchanged.
+fn fanout_extension_declarations(
+    extensions: &[Extension],
+    extension_declarations: Vec<crate::compile::extensions::Declarations>,
+) -> Result<(Vec<Step>, Vec<Step>, Vec<Condition>)> {
+    let mut ext_setup_steps: Vec<Step> = Vec::new();
+    let mut ext_agent_prepare: Vec<Step> = Vec::new();
+    let mut ext_agent_conditions: Vec<Condition> = Vec::new();
+    for (ext, decl) in extensions.iter().zip(extension_declarations) {
+        ext_setup_steps.extend(decl.setup_steps);
+        ext_agent_prepare.extend(decl.agent_prepare_steps);
+        ext_agent_conditions.extend(decl.agent_conditions);
+        // Prompt supplements append after the per-extension prepare
+        // steps. `wrap_prompt_append` returns a YAML string for a
+        // `bash: cat >> prompt …` step; emit as `Step::RawYaml`
+        // (typing it would mean recreating the wrap helper as a typed
+        // builder for no concrete benefit — the bash body is fixed).
+        if let Some(prompt) = decl.prompt_supplement {
+            ext_agent_prepare.push(Step::RawYaml(
+                crate::compile::extensions::wrap_prompt_append(&prompt, ext.name())?,
+            ));
+        }
+    }
+    Ok((ext_setup_steps, ext_agent_prepare, ext_agent_conditions))
+}
+
+/// Bundle of engine-derived values computed once per pipeline compile:
+/// prompt invocations, install steps, composed env blocks, and the
+/// Copilot BYOM/BYOK exclusion keys for both the Agent and Detection
+/// engines. Split out of [`build_pipeline_context`] purely to keep that
+/// function's cognitive complexity manageable — behaviour is unchanged.
+struct EngineSetup {
+    compiler_version: String,
+    engine_run: String,
+    engine_run_detection: String,
+    engine_install_steps_yaml: String,
+    detection_engine_install_steps_yaml: String,
+    engine_log_dir: String,
+    engine_env: String,
+    awf_paths: Vec<String>,
+    byom_exclude_keys: Vec<String>,
+    detection_byom_exclude_keys: Vec<String>,
+    detection_engine_env: Vec<(String, String)>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_engine_setup(
+    front_matter: &FrontMatter,
+    extensions: &[Extension],
+    ctx: &CompileContext<'_>,
+    extension_declarations: &[crate::compile::extensions::Declarations],
+    threat_detection: &crate::compile::types::ThreatDetectionConfig,
+    detection_engine_config: &crate::compile::types::EngineConfig,
+) -> Result<EngineSetup> {
+    let compiler_version = env!("CARGO_PKG_VERSION").to_string();
+    let detection_engine = crate::engine::get_engine(detection_engine_config.engine_id())?;
+
+    let engine_run = ctx.engine.invocation(
+        ctx.front_matter,
+        extension_declarations,
+        "/tmp/awf-tools/agent-prompt.md",
+        Some("/tmp/awf-tools/mcp-config.json"),
+    )?;
+    let engine_run_detection = detection_engine.invocation_with_config(
+        detection_engine_config,
+        ctx.front_matter,
+        extension_declarations,
+        "/tmp/awf-tools/threat-analysis-prompt.md",
+        None,
+    )?;
+    let engine_install_steps_yaml =
+        ctx.engine
+            .install_steps(&front_matter.engine, &front_matter.target, ctx.ado_org())?;
+    let detection_engine_install_steps_yaml = if threat_detection.is_enabled() {
+        detection_engine.install_steps(
+            detection_engine_config,
+            &front_matter.target,
+            ctx.ado_org(),
+        )?
+    } else {
+        String::new()
+    };
+    let engine_log_dir = ctx.engine.log_dir().to_string();
+
+    let mut engine_env = ctx.engine.env(&front_matter.engine)?;
+    // BYOM/BYOK credential exclusion is Copilot-specific: gate on the engine type so a
+    // future non-Copilot engine whose env happens to contain a COPILOT_PROVIDER_*
+    // key is never treated as a Copilot provider credential.
+    let is_copilot = matches!(ctx.engine, crate::engine::Engine::Copilot);
+    let byom_exclude_keys = copilot_byom_exclude_keys(is_copilot, &front_matter.engine);
+    let detection_is_copilot = matches!(detection_engine, crate::engine::Engine::Copilot);
+    let detection_byom_exclude_keys =
+        copilot_byom_exclude_keys(detection_is_copilot, detection_engine_config);
+    let detection_engine_env = if detection_is_copilot {
+        crate::engine::copilot_detection_env(detection_engine_config)?
+    } else {
+        Vec::new()
+    };
+    // AWF path env (when extensions declare path prepends)
+    let awf_paths = common::collect_awf_path_prepends(extension_declarations);
+    let has_awf_paths = !awf_paths.is_empty();
+    let awf_path_env = common::generate_awf_path_env(has_awf_paths);
+    if !awf_path_env.is_empty() {
+        engine_env = format!("{engine_env}\n{awf_path_env}");
+    }
+    let agent_env = common::collect_agent_env_vars(extensions, extension_declarations)?;
+    if !agent_env.is_empty() {
+        engine_env = format!("{engine_env}\n{agent_env}");
+    }
+
+    Ok(EngineSetup {
+        compiler_version,
+        engine_run,
+        engine_run_detection,
+        engine_install_steps_yaml,
+        detection_engine_install_steps_yaml,
+        engine_log_dir,
+        engine_env,
+        awf_paths,
+        byom_exclude_keys,
+        detection_byom_exclude_keys,
+        detection_engine_env,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_pipeline_context(
     front_matter: &FrontMatter,
@@ -174,36 +355,9 @@ pub(crate) fn build_pipeline_context(
     let detection_engine_config = front_matter.effective_detection_engine(&threat_detection);
 
     // ─── Validations (reuse all shared validators) ────────────────
-    common::validate_front_matter_identity(front_matter)?;
-    common::validate_permissions_read_policy(front_matter)?;
-    if let Some(minutes) = front_matter.engine.timeout_minutes() {
-        common::validate_proxied_timeout(front_matter, minutes)?;
-    }
-    common::validate_variable_groups(front_matter)?;
-    common::validate_safe_outputs_keys(front_matter)?;
-    front_matter.validate_threat_detection_config(&threat_detection, &detection_engine_config)?;
-    front_matter.validate_require_approval()?;
-    front_matter.validate_staged()?;
-    common::validate_github_issue_outputs_config(front_matter)?;
-    common::validate_work_item_assignment_outputs_config(front_matter)?;
-    common::validate_comment_target(front_matter)?;
-    common::validate_update_work_item_target(front_matter)?;
-    common::validate_submit_pr_review_events(front_matter)?;
-    common::validate_update_pr_votes(front_matter)?;
-    common::validate_resolve_pr_thread_statuses(front_matter)?;
-    common::validate_ado_aw_debug_config(front_matter)?;
-    if let Some(sc) = front_matter.supply_chain() {
-        sc.validate()?;
-    }
+    validate_pipeline_front_matter(front_matter, &threat_detection, &detection_engine_config)?;
 
-    let mut extension_declarations = Vec::with_capacity(extensions.len());
-    for ext in extensions {
-        let decl = ext.declarations(ctx)?;
-        for warning in &decl.warnings {
-            eprintln!("Warning: {}", warning);
-        }
-        extension_declarations.push(decl);
-    }
+    let extension_declarations = collect_extension_declarations(extensions, ctx)?;
 
     // ─── Scalars ──────────────────────────────────────────────────
     let pipeline_name = format!(
@@ -254,61 +408,27 @@ pub(crate) fn build_pipeline_context(
         front_matter.pool_overrides(),
     )?;
 
-    let compiler_version = env!("CARGO_PKG_VERSION").to_string();
-    let detection_engine = crate::engine::get_engine(detection_engine_config.engine_id())?;
-
-    let engine_run = ctx.engine.invocation(
-        ctx.front_matter,
+    let engine_setup = build_engine_setup(
+        front_matter,
+        extensions,
+        ctx,
         &extension_declarations,
-        "/tmp/awf-tools/agent-prompt.md",
-        Some("/tmp/awf-tools/mcp-config.json"),
-    )?;
-    let engine_run_detection = detection_engine.invocation_with_config(
+        &threat_detection,
         &detection_engine_config,
-        ctx.front_matter,
-        &extension_declarations,
-        "/tmp/awf-tools/threat-analysis-prompt.md",
-        None,
     )?;
-    let engine_install_steps_yaml =
-        ctx.engine
-            .install_steps(&front_matter.engine, &front_matter.target, ctx.ado_org())?;
-    let detection_engine_install_steps_yaml = if threat_detection.is_enabled() {
-        detection_engine.install_steps(
-            &detection_engine_config,
-            &front_matter.target,
-            ctx.ado_org(),
-        )?
-    } else {
-        String::new()
-    };
-    let engine_log_dir = ctx.engine.log_dir().to_string();
-
-    let mut engine_env = ctx.engine.env(&front_matter.engine)?;
-    // BYOM/BYOK credential exclusion is Copilot-specific: gate on the engine type so a
-    // future non-Copilot engine whose env happens to contain a COPILOT_PROVIDER_*
-    // key is never treated as a Copilot provider credential.
-    let is_copilot = matches!(ctx.engine, crate::engine::Engine::Copilot);
-    let byom_exclude_keys = copilot_byom_exclude_keys(is_copilot, &front_matter.engine);
-    let detection_is_copilot = matches!(detection_engine, crate::engine::Engine::Copilot);
-    let detection_byom_exclude_keys =
-        copilot_byom_exclude_keys(detection_is_copilot, &detection_engine_config);
-    let detection_engine_env = if detection_is_copilot {
-        crate::engine::copilot_detection_env(&detection_engine_config)?
-    } else {
-        Vec::new()
-    };
-    // AWF path env (when extensions declare path prepends)
-    let awf_paths = common::collect_awf_path_prepends(&extension_declarations);
-    let has_awf_paths = !awf_paths.is_empty();
-    let awf_path_env = common::generate_awf_path_env(has_awf_paths);
-    if !awf_path_env.is_empty() {
-        engine_env = format!("{engine_env}\n{awf_path_env}");
-    }
-    let agent_env = common::collect_agent_env_vars(extensions, &extension_declarations)?;
-    if !agent_env.is_empty() {
-        engine_env = format!("{engine_env}\n{agent_env}");
-    }
+    let EngineSetup {
+        compiler_version,
+        engine_run,
+        engine_run_detection,
+        engine_install_steps_yaml,
+        detection_engine_install_steps_yaml,
+        engine_log_dir,
+        engine_env,
+        awf_paths,
+        byom_exclude_keys,
+        detection_byom_exclude_keys,
+        detection_engine_env,
+    } = engine_setup;
 
     // AWF mounts + allowlist
     let allowed_domains =
@@ -409,24 +529,8 @@ pub(crate) fn build_pipeline_context(
     let triggers = build_triggers(&front_matter.on_config, front_matter)?;
 
     // ─── Extension declaration fanout ─────────────────────────────
-    let mut ext_setup_steps: Vec<Step> = Vec::new();
-    let mut ext_agent_prepare: Vec<Step> = Vec::new();
-    let mut ext_agent_conditions: Vec<Condition> = Vec::new();
-    for (ext, decl) in extensions.iter().zip(extension_declarations) {
-        ext_setup_steps.extend(decl.setup_steps);
-        ext_agent_prepare.extend(decl.agent_prepare_steps);
-        ext_agent_conditions.extend(decl.agent_conditions);
-        // Prompt supplements append after the per-extension prepare
-        // steps. `wrap_prompt_append` returns a YAML string for a
-        // `bash: cat >> prompt …` step; emit as `Step::RawYaml`
-        // (typing it would mean recreating the wrap helper as a typed
-        // builder for no concrete benefit — the bash body is fixed).
-        if let Some(prompt) = decl.prompt_supplement {
-            ext_agent_prepare.push(Step::RawYaml(
-                crate::compile::extensions::wrap_prompt_append(&prompt, ext.name())?,
-            ));
-        }
-    }
+    let (ext_setup_steps, ext_agent_prepare, ext_agent_conditions) =
+        fanout_extension_declarations(extensions, extension_declarations)?;
 
     // Aggregate config for per-job builders
     let cfg = StandaloneCtx {
@@ -2711,6 +2815,180 @@ fn build_teardown_job(
     Ok(Some(job))
 }
 
+/// Apply a single per-tool config (`noop` / `missing-tool` / `missing-data`)
+/// to the Conclusion step as flat `AW_<TOOL>_*` env vars (gh-aw pattern).
+/// Each field gets its own env var — avoids JSON-in-env-var corruption in ADO.
+fn apply_conclusion_tool_config_env(
+    mut conclusion_step: BashStep,
+    front_matter: &FrontMatter,
+    tool_key: &str,
+) -> BashStep {
+    let Some(tool_config) = front_matter.safe_outputs.get(tool_key) else {
+        return conclusion_step;
+    };
+    let env_prefix = format!("AW_{}", tool_key.to_uppercase().replace('-', "_"));
+
+    // Tool disabled entirely (e.g. noop: false)
+    if tool_config.is_boolean() {
+        if tool_config.as_bool() == Some(false) {
+            conclusion_step = conclusion_step.with_env(
+                format!("{env_prefix}_REPORT_AS_WORK_ITEM"),
+                EnvValue::Literal("false".to_string()),
+            );
+        }
+        return conclusion_step;
+    }
+
+    let Some(obj) = tool_config.as_object() else {
+        return conclusion_step;
+    };
+
+    // report-as-work-item: accept both YAML bool and string forms.
+    // serde_json::Value::to_string() on String("false") would emit
+    // "\"false\"" (JSON-encoded with quotes), which the TypeScript
+    // readBooleanEnv would reject and default to true — silently
+    // inverting the opt-out. Use as_bool()/as_str() instead.
+    if let Some(v) = obj.get("report-as-work-item") {
+        let bool_str = v
+            .as_bool()
+            .map(|b| b.to_string())
+            .or_else(|| v.as_str().map(|s| s.to_string()));
+        if let Some(s) = bool_str {
+            conclusion_step = conclusion_step.with_env(
+                format!("{env_prefix}_REPORT_AS_WORK_ITEM"),
+                EnvValue::Literal(s),
+            );
+        }
+    }
+    if let Some(v) = obj.get("title-prefix").and_then(|v| v.as_str()) {
+        conclusion_step = conclusion_step.with_env(
+            format!("{env_prefix}_TITLE_PREFIX"),
+            EnvValue::Literal(crate::sanitize::sanitize(v)),
+        );
+    }
+    if let Some(v) = obj.get("work-item-type").and_then(|v| v.as_str()) {
+        conclusion_step = conclusion_step.with_env(
+            format!("{env_prefix}_WORK_ITEM_TYPE"),
+            EnvValue::Literal(crate::sanitize::sanitize(v)),
+        );
+    }
+    if let Some(v) = obj.get("area-path").and_then(|v| v.as_str()) {
+        conclusion_step = conclusion_step.with_env(
+            format!("{env_prefix}_AREA_PATH"),
+            EnvValue::Literal(crate::sanitize::sanitize(v)),
+        );
+    }
+    if let Some(v) = obj.get("iteration-path").and_then(|v| v.as_str()) {
+        conclusion_step = conclusion_step.with_env(
+            format!("{env_prefix}_ITERATION_PATH"),
+            EnvValue::Literal(crate::sanitize::sanitize(v)),
+        );
+    }
+    if let Some(tags) = obj.get("tags").and_then(|v| v.as_array()) {
+        let tags_json = serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string());
+        conclusion_step =
+            conclusion_step.with_env(format!("{env_prefix}_TAGS"), EnvValue::Literal(tags_json));
+    }
+    conclusion_step
+}
+
+/// Hoist upstream job results (Agent/Detection/SafeOutputs[/_Reviewed]/custom
+/// jobs) into job-level variables and wire them onto the Conclusion step as
+/// `$(name)` macro env vars.
+///
+/// ADO only evaluates `$[...]` runtime expressions inside `variables:` and
+/// `condition:` — NOT in step env blocks — so results are hoisted to job
+/// variables here and consumed as `$(name)` macros in the step env.
+fn hoist_conclusion_job_results(
+    mut conclusion_step: BashStep,
+    prefix: &JobPrefix<'_>,
+    custom_defs: &[CustomSafeOutputJobDef],
+    has_reviewed_job: bool,
+) -> Result<(Vec<JobVariable>, BashStep)> {
+    let agent_id = prefix.id("Agent")?;
+    let detection_id = prefix.id("Detection")?;
+    let safeoutputs_id = prefix.id("SafeOutputs")?;
+    let reviewed_id = prefix.id("SafeOutputs_Reviewed")?;
+
+    // In the mixed manual-review split both a SafeOutputs (automatic) and a
+    // SafeOutputs_Reviewed (gated) job exist. Surface the reviewed job's result
+    // too so a reviewer rejection (which fails SafeOutputs_Reviewed) is reported
+    // instead of silently lost.
+    let mut conclusion_variables = vec![
+        // EnvValue::Literal deliberately carries a raw `$[...]` runtime expression:
+        // ADO evaluates `$[...]` only in `variables:`/`condition:`, so the value is
+        // hoisted here and consumed as a `$(name)` macro in the step env below
+        // (not EnvValue::AdoMacro — the lower.rs guard rejects pre-wrapped macros).
+        JobVariable {
+            name: "AW_AGENT_RESULT".to_string(),
+            value: EnvValue::Literal(format!("$[dependencies.{}.result]", agent_id.as_str())),
+        },
+        JobVariable {
+            name: "AW_DETECTION_RESULT".to_string(),
+            value: EnvValue::Literal(format!("$[dependencies.{}.result]", detection_id.as_str())),
+        },
+        JobVariable {
+            name: "AW_SAFEOUTPUTS_RESULT".to_string(),
+            value: EnvValue::Literal(format!(
+                "$[dependencies.{}.result]",
+                safeoutputs_id.as_str()
+            )),
+        },
+    ];
+    if has_reviewed_job {
+        conclusion_variables.push(JobVariable {
+            name: "AW_SAFEOUTPUTS_REVIEWED_RESULT".to_string(),
+            value: EnvValue::Literal(format!("$[dependencies.{}.result]", reviewed_id.as_str())),
+        });
+    }
+    for (index, def) in custom_defs.iter().enumerate() {
+        let result_name = format!("AW_CUSTOM_JOB_{index}_RESULT");
+        conclusion_variables.push(JobVariable {
+            name: result_name,
+            value: EnvValue::Literal(format!("$[dependencies.{}.result]", def.job_id.as_str())),
+        });
+    }
+
+    conclusion_step = conclusion_step
+        .with_env(
+            "AW_AGENT_RESULT",
+            EnvValue::PipelineVar("AW_AGENT_RESULT".to_string()),
+        )
+        .with_env(
+            "AW_DETECTION_RESULT",
+            EnvValue::PipelineVar("AW_DETECTION_RESULT".to_string()),
+        )
+        .with_env(
+            "AW_SAFEOUTPUTS_RESULT",
+            EnvValue::PipelineVar("AW_SAFEOUTPUTS_RESULT".to_string()),
+        );
+    if has_reviewed_job {
+        conclusion_step = conclusion_step.with_env(
+            "AW_SAFEOUTPUTS_REVIEWED_RESULT",
+            EnvValue::PipelineVar("AW_SAFEOUTPUTS_REVIEWED_RESULT".to_string()),
+        );
+    }
+    if !custom_defs.is_empty() {
+        conclusion_step = conclusion_step.with_env(
+            "AW_CUSTOM_JOB_COUNT",
+            EnvValue::Literal(custom_defs.len().to_string()),
+        );
+        for (index, def) in custom_defs.iter().enumerate() {
+            conclusion_step = conclusion_step
+                .with_env(
+                    format!("AW_CUSTOM_JOB_{index}_NAME"),
+                    EnvValue::Literal(format!("Custom safe output: {}", def.name)),
+                )
+                .with_env(
+                    format!("AW_CUSTOM_JOB_{index}_RESULT"),
+                    EnvValue::PipelineVar(format!("AW_CUSTOM_JOB_{index}_RESULT")),
+                );
+        }
+    }
+
+    Ok((conclusion_variables, conclusion_step))
+}
+
 fn build_conclusion_job(
     front_matter: &FrontMatter,
     cfg: &StandaloneCtx,
@@ -2815,156 +3093,20 @@ fn build_conclusion_job(
     // defaults (type: Task, no area/iteration path). The global
     // report-failure-as-work-item toggle controls whether it files at all.
     for tool_key in &["noop", "missing-tool", "missing-data"] {
-        if let Some(tool_config) = front_matter.safe_outputs.get(*tool_key) {
-            let env_prefix = format!("AW_{}", tool_key.to_uppercase().replace('-', "_"));
-
-            // Tool disabled entirely (e.g. noop: false)
-            if tool_config.is_boolean() {
-                if tool_config.as_bool() == Some(false) {
-                    conclusion_step = conclusion_step.with_env(
-                        format!("{env_prefix}_REPORT_AS_WORK_ITEM"),
-                        EnvValue::Literal("false".to_string()),
-                    );
-                }
-                continue;
-            }
-
-            if let Some(obj) = tool_config.as_object() {
-                // report-as-work-item: accept both YAML bool and string forms.
-                // serde_json::Value::to_string() on String("false") would emit
-                // "\"false\"" (JSON-encoded with quotes), which the TypeScript
-                // readBooleanEnv would reject and default to true — silently
-                // inverting the opt-out. Use as_bool()/as_str() instead.
-                if let Some(v) = obj.get("report-as-work-item") {
-                    let bool_str = v
-                        .as_bool()
-                        .map(|b| b.to_string())
-                        .or_else(|| v.as_str().map(|s| s.to_string()));
-                    if let Some(s) = bool_str {
-                        conclusion_step = conclusion_step.with_env(
-                            format!("{env_prefix}_REPORT_AS_WORK_ITEM"),
-                            EnvValue::Literal(s),
-                        );
-                    }
-                }
-                if let Some(v) = obj.get("title-prefix").and_then(|v| v.as_str()) {
-                    conclusion_step = conclusion_step.with_env(
-                        format!("{env_prefix}_TITLE_PREFIX"),
-                        EnvValue::Literal(crate::sanitize::sanitize(v)),
-                    );
-                }
-                if let Some(v) = obj.get("work-item-type").and_then(|v| v.as_str()) {
-                    conclusion_step = conclusion_step.with_env(
-                        format!("{env_prefix}_WORK_ITEM_TYPE"),
-                        EnvValue::Literal(crate::sanitize::sanitize(v)),
-                    );
-                }
-                if let Some(v) = obj.get("area-path").and_then(|v| v.as_str()) {
-                    conclusion_step = conclusion_step.with_env(
-                        format!("{env_prefix}_AREA_PATH"),
-                        EnvValue::Literal(crate::sanitize::sanitize(v)),
-                    );
-                }
-                if let Some(v) = obj.get("iteration-path").and_then(|v| v.as_str()) {
-                    conclusion_step = conclusion_step.with_env(
-                        format!("{env_prefix}_ITERATION_PATH"),
-                        EnvValue::Literal(crate::sanitize::sanitize(v)),
-                    );
-                }
-                if let Some(tags) = obj.get("tags").and_then(|v| v.as_array()) {
-                    let tags_json =
-                        serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string());
-                    conclusion_step = conclusion_step
-                        .with_env(format!("{env_prefix}_TAGS"), EnvValue::Literal(tags_json));
-                }
-            }
-        }
+        conclusion_step =
+            apply_conclusion_tool_config_env(conclusion_step, front_matter, tool_key);
     }
 
     // Pass upstream job results via job-level variables hoist.
     // ADO only evaluates $[...] runtime expressions inside `variables:` and
     // `condition:` — NOT in step env blocks. We hoist to job variables and
     // reference them as $(name) macros in the step env.
-    let agent_id = prefix.id("Agent")?;
-    let detection_id = prefix.id("Detection")?;
-    let safeoutputs_id = prefix.id("SafeOutputs")?;
-    let reviewed_id = prefix.id("SafeOutputs_Reviewed")?;
-
-    // In the mixed manual-review split both a SafeOutputs (automatic) and a
-    // SafeOutputs_Reviewed (gated) job exist. Surface the reviewed job's result
-    // too so a reviewer rejection (which fails SafeOutputs_Reviewed) is reported
-    // instead of silently lost.
-    let mut conclusion_variables = vec![
-        // EnvValue::Literal deliberately carries a raw `$[...]` runtime expression:
-        // ADO evaluates `$[...]` only in `variables:`/`condition:`, so the value is
-        // hoisted here and consumed as a `$(name)` macro in the step env below
-        // (not EnvValue::AdoMacro — the lower.rs guard rejects pre-wrapped macros).
-        JobVariable {
-            name: "AW_AGENT_RESULT".to_string(),
-            value: EnvValue::Literal(format!("$[dependencies.{}.result]", agent_id.as_str())),
-        },
-        JobVariable {
-            name: "AW_DETECTION_RESULT".to_string(),
-            value: EnvValue::Literal(format!("$[dependencies.{}.result]", detection_id.as_str())),
-        },
-        JobVariable {
-            name: "AW_SAFEOUTPUTS_RESULT".to_string(),
-            value: EnvValue::Literal(format!(
-                "$[dependencies.{}.result]",
-                safeoutputs_id.as_str()
-            )),
-        },
-    ];
-    if has_reviewed_job {
-        conclusion_variables.push(JobVariable {
-            name: "AW_SAFEOUTPUTS_REVIEWED_RESULT".to_string(),
-            value: EnvValue::Literal(format!("$[dependencies.{}.result]", reviewed_id.as_str())),
-        });
-    }
-    for (index, def) in custom_defs.iter().enumerate() {
-        let result_name = format!("AW_CUSTOM_JOB_{index}_RESULT");
-        conclusion_variables.push(JobVariable {
-            name: result_name,
-            value: EnvValue::Literal(format!("$[dependencies.{}.result]", def.job_id.as_str())),
-        });
-    }
-
-    conclusion_step = conclusion_step
-        .with_env(
-            "AW_AGENT_RESULT",
-            EnvValue::PipelineVar("AW_AGENT_RESULT".to_string()),
-        )
-        .with_env(
-            "AW_DETECTION_RESULT",
-            EnvValue::PipelineVar("AW_DETECTION_RESULT".to_string()),
-        )
-        .with_env(
-            "AW_SAFEOUTPUTS_RESULT",
-            EnvValue::PipelineVar("AW_SAFEOUTPUTS_RESULT".to_string()),
-        );
-    if has_reviewed_job {
-        conclusion_step = conclusion_step.with_env(
-            "AW_SAFEOUTPUTS_REVIEWED_RESULT",
-            EnvValue::PipelineVar("AW_SAFEOUTPUTS_REVIEWED_RESULT".to_string()),
-        );
-    }
-    if !custom_defs.is_empty() {
-        conclusion_step = conclusion_step.with_env(
-            "AW_CUSTOM_JOB_COUNT",
-            EnvValue::Literal(custom_defs.len().to_string()),
-        );
-        for (index, def) in custom_defs.iter().enumerate() {
-            conclusion_step = conclusion_step
-                .with_env(
-                    format!("AW_CUSTOM_JOB_{index}_NAME"),
-                    EnvValue::Literal(format!("Custom safe output: {}", def.name)),
-                )
-                .with_env(
-                    format!("AW_CUSTOM_JOB_{index}_RESULT"),
-                    EnvValue::PipelineVar(format!("AW_CUSTOM_JOB_{index}_RESULT")),
-                );
-        }
-    }
+    let (conclusion_variables, conclusion_step) = hoist_conclusion_job_results(
+        conclusion_step,
+        prefix,
+        custom_defs,
+        has_reviewed_job,
+    )?;
 
     steps.push(Step::Bash(conclusion_step));
 

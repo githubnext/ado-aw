@@ -9,8 +9,9 @@ use super::PATH_SEGMENT;
 use crate::safe_outputs::{
     ExecutionContext, ExecutionResult, Executor, ToolResult, Validate, anyhow_to_mcp_error,
 };
+use crate::sanitize::sanitize_markdown;
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
-use crate::secure::WorkItemTemporaryId;
+use crate::secure::{AdoWorkItemFieldRef, WorkItemTemporaryId};
 use ado_aw_derive::SanitizeConfig;
 use anyhow::{Context, ensure};
 
@@ -91,7 +92,7 @@ impl TryFrom<(CreateWorkItemParams, WorkItemTemporaryId)> for CreateWorkItemResu
 impl SanitizeContent for CreateWorkItemResult {
     fn sanitize_content_fields(&mut self) {
         self.title = sanitize_text(&self.title);
-        self.description = sanitize_text(&self.description);
+        self.description = sanitize_markdown(&self.description);
         for tag in &mut self.tags {
             *tag = sanitize_config(tag);
         }
@@ -119,11 +120,17 @@ impl SanitizeContent for CreateWorkItemResult {
 ///       repository: "my-repo-name"  # optional, defaults to current repo
 ///       branch: "main"              # optional, defaults to "main"
 /// ```
-#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateWorkItemConfig {
     /// Work item type (default: "Task")
     #[serde(default = "default_work_item_type", rename = "work-item-type")]
     pub work_item_type: String,
+
+    /// Field reference name that receives the agent-provided description.
+    /// Defaults to System.Description, except Bug work items default to
+    /// Microsoft.VSTS.TCM.ReproSteps.
+    #[serde(default, rename = "description-field")]
+    pub description_field: Option<AdoWorkItemFieldRef>,
 
     /// Area path for the work item
     #[serde(default, rename = "area-path")]
@@ -151,12 +158,10 @@ pub struct CreateWorkItemConfig {
     /// Additional custom fields as key-value pairs
     /// Keys should be the full field reference name (e.g., "Custom.MyField")
     #[serde(default, rename = "custom-fields")]
-    #[sanitize_config(sanitize_keys)]
-    pub custom_fields: std::collections::HashMap<String, String>,
+    pub custom_fields: std::collections::HashMap<AdoWorkItemFieldRef, String>,
 
     /// Artifact link configuration for GitHub Copilot integration
     #[serde(default, rename = "artifact-link")]
-    #[sanitize_config(nested)]
     pub artifact_link: ArtifactLinkConfig,
 
     /// Whether to include agent execution stats in the output (default: true).
@@ -165,6 +170,25 @@ pub struct CreateWorkItemConfig {
         rename = "include-stats"
     )]
     pub include_stats: bool,
+}
+
+impl crate::sanitize::SanitizeConfig for CreateWorkItemConfig {
+    fn sanitize_config_fields(&mut self) {
+        self.work_item_type = sanitize_config(&self.work_item_type);
+        self.area_path = self.area_path.as_deref().map(sanitize_config);
+        self.iteration_path = self.iteration_path.as_deref().map(sanitize_config);
+        self.assignee = self.assignee.as_deref().map(sanitize_config);
+        for tag in &mut self.tags {
+            *tag = sanitize_config(tag.as_str());
+        }
+        for tag in &mut self.allowed_tags {
+            *tag = sanitize_config(tag.as_str());
+        }
+        for value in self.custom_fields.values_mut() {
+            *value = sanitize_config(value);
+        }
+        crate::sanitize::SanitizeConfig::sanitize_config_fields(&mut self.artifact_link);
+    }
 }
 
 /// Configuration for artifact links (repository linking for GitHub Copilot)
@@ -202,6 +226,7 @@ impl Default for CreateWorkItemConfig {
     fn default() -> Self {
         Self {
             work_item_type: default_work_item_type(),
+            description_field: None,
             area_path: None,
             iteration_path: None,
             assignee: None,
@@ -218,6 +243,25 @@ fn default_work_item_type() -> String {
     "Task".to_string()
 }
 
+const SYSTEM_DESCRIPTION_FIELD: &str = "System.Description";
+const BUG_REPRO_STEPS_FIELD: &str = "Microsoft.VSTS.TCM.ReproSteps";
+
+fn default_description_field_for(work_item_type: &str) -> &'static str {
+    if work_item_type.eq_ignore_ascii_case("Bug") {
+        BUG_REPRO_STEPS_FIELD
+    } else {
+        SYSTEM_DESCRIPTION_FIELD
+    }
+}
+
+fn description_field_for(config: &CreateWorkItemConfig) -> &str {
+    config
+        .description_field
+        .as_ref()
+        .map(AdoWorkItemFieldRef::as_str)
+        .unwrap_or_else(|| default_description_field_for(&config.work_item_type))
+}
+
 /// Build a field patch operation for work item creation
 fn field_op(field: &str, value: impl Into<String>) -> serde_json::Value {
     serde_json::json!({
@@ -225,6 +269,71 @@ fn field_op(field: &str, value: impl Into<String>) -> serde_json::Value {
         "path": format!("/fields/{}", field),
         "value": value.into()
     })
+}
+
+fn validate_unique_patch_field<'a>(
+    fields: &mut Vec<(&'static str, &'a str)>,
+    label: &'static str,
+    field: &'a str,
+) -> anyhow::Result<()> {
+    if let Some((existing_label, existing_field)) = fields
+        .iter()
+        .find(|(_, existing_field)| existing_field.eq_ignore_ascii_case(field))
+    {
+        anyhow::bail!(
+            "{label} field '{field}' duplicates {existing_label} field '{existing_field}'"
+        );
+    }
+
+    fields.push((label, field));
+    Ok(())
+}
+
+fn validate_patch_fields(
+    config: &CreateWorkItemConfig,
+    description_field: &str,
+    has_tags: bool,
+) -> anyhow::Result<()> {
+    let mut fields = Vec::new();
+    validate_unique_patch_field(&mut fields, "title", "System.Title")?;
+    let description_label = if config.description_field.is_some() {
+        "description-field"
+    } else {
+        "default description-field"
+    };
+    validate_unique_patch_field(&mut fields, description_label, description_field)?;
+
+    if config.area_path.is_some() {
+        validate_unique_patch_field(&mut fields, "area-path", "System.AreaPath")?;
+    }
+    if config.iteration_path.is_some() {
+        validate_unique_patch_field(&mut fields, "iteration-path", "System.IterationPath")?;
+    }
+    if config.assignee.is_some() {
+        validate_unique_patch_field(&mut fields, "assignee", "System.AssignedTo")?;
+    }
+    if has_tags {
+        validate_unique_patch_field(&mut fields, "tags", "System.Tags")?;
+    }
+
+    for (field, _) in sorted_custom_fields(&config.custom_fields) {
+        validate_unique_patch_field(&mut fields, "custom-fields", field)?;
+    }
+
+    Ok(())
+}
+
+fn sorted_custom_fields(
+    custom_fields: &std::collections::HashMap<AdoWorkItemFieldRef, String>,
+) -> Vec<(&str, &str)> {
+    let mut custom_fields: Vec<_> = custom_fields
+        .iter()
+        .map(|(field, value)| (field.as_str(), value.as_str()))
+        .collect();
+    custom_fields.sort_unstable_by(|(a, _), (b, _)| {
+        a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase())
+    });
+    custom_fields
 }
 
 /// Build an artifact link relation patch operation
@@ -428,16 +537,28 @@ impl Executor for CreateWorkItemResult {
         );
         debug!("API URL: {}", url);
 
+        let description_field = description_field_for(&config);
+        let mut all_tags = config.tags.clone();
+        for tag in &self.tags {
+            if !all_tags.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
+                all_tags.push(tag.clone());
+            }
+        }
+
         // Build the patch document for work item creation
         let description_with_stats =
             crate::agent_stats::append_stats_to_body(&self.description, ctx, config.include_stats);
+        if let Err(error) = validate_patch_fields(&config, description_field, !all_tags.is_empty())
+        {
+            return Ok(ExecutionResult::failure(error.to_string()));
+        }
         let mut patch_doc = vec![
             field_op("System.Title", &self.title),
-            field_op("System.Description", &description_with_stats),
+            field_op(description_field, &description_with_stats),
             // Tell Azure DevOps the description is markdown
             serde_json::json!({
                 "op": "add",
-                "path": "/multilineFieldsFormat/System.Description",
+                "path": format!("/multilineFieldsFormat/{description_field}"),
                 "value": "Markdown"
             }),
         ];
@@ -460,18 +581,12 @@ impl Executor for CreateWorkItemResult {
             patch_doc.push(field_op("System.AssignedTo", assignee));
         }
         // Merge static config tags with validated agent-provided tags (dedup, case-insensitive)
-        let mut all_tags = config.tags.clone();
-        for tag in &self.tags {
-            if !all_tags.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
-                all_tags.push(tag.clone());
-            }
-        }
         if !all_tags.is_empty() {
             patch_doc.push(field_op("System.Tags", all_tags.join("; ")));
         }
 
         // Add any custom fields
-        for (field, value) in &config.custom_fields {
+        for (field, value) in sorted_custom_fields(&config.custom_fields) {
             patch_doc.push(field_op(field, value));
         }
 
@@ -734,6 +849,7 @@ mod tests {
     fn test_config_defaults() {
         let config = CreateWorkItemConfig::default();
         assert_eq!(config.work_item_type, "Task");
+        assert_eq!(description_field_for(&config), "System.Description");
         assert!(config.area_path.is_none());
         assert!(config.iteration_path.is_none());
         assert!(config.assignee.is_none());
@@ -746,6 +862,7 @@ mod tests {
     fn test_config_deserializes_from_yaml() {
         let yaml = r#"
 work-item-type: Bug
+description-field: Custom.Body
 area-path: "MyProject\\MyTeam"
 assignee: "user@example.com"
 tags:
@@ -759,13 +876,80 @@ custom-fields:
 "#;
         let config: CreateWorkItemConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.work_item_type, "Bug");
+        assert_eq!(config.description_field.as_deref(), Some("Custom.Body"));
+        assert_eq!(description_field_for(&config), "Custom.Body");
         assert_eq!(config.area_path, Some("MyProject\\MyTeam".to_string()));
         assert_eq!(config.assignee, Some("user@example.com".to_string()));
         assert_eq!(config.tags, vec!["agent-created", "automated"]);
         assert_eq!(config.allowed_tags, vec!["agent-*", "review"]);
         assert_eq!(
-            config.custom_fields.get("Custom.Priority"),
+            config
+                .custom_fields
+                .get(&AdoWorkItemFieldRef::parse("Custom.Priority").unwrap()),
             Some(&"High".to_string())
+        );
+    }
+
+    #[test]
+    fn test_config_sanitizes_all_string_fields() {
+        let custom_field = AdoWorkItemFieldRef::parse("Custom.Value").unwrap();
+        let mut custom_fields = std::collections::HashMap::new();
+        custom_fields.insert(
+            custom_field.clone(),
+            "custom##vso[task.setvariable]".to_string(),
+        );
+        let mut config = CreateWorkItemConfig {
+            work_item_type: "Task##vso[task.setvariable]".to_string(),
+            description_field: Some(AdoWorkItemFieldRef::parse("Custom.Body").unwrap()),
+            area_path: Some("area\u{8}##[error]".to_string()),
+            iteration_path: Some("iteration##[section]".to_string()),
+            assignee: Some("assignee##vso[task.logissue]".to_string()),
+            tags: vec!["tag##[warning]".to_string()],
+            allowed_tags: vec!["allowed##vso[task.complete]".to_string()],
+            custom_fields,
+            artifact_link: ArtifactLinkConfig {
+                enabled: true,
+                repository: Some("repo##[debug]".to_string()),
+                branch: "branch##vso[build.addbuildtag]".to_string(),
+            },
+            include_stats: true,
+        };
+
+        crate::sanitize::SanitizeConfig::sanitize_config_fields(&mut config);
+
+        assert_eq!(
+            config.work_item_type,
+            sanitize_config("Task##vso[task.setvariable]")
+        );
+        assert_eq!(config.description_field.as_deref(), Some("Custom.Body"));
+        assert_eq!(
+            config.area_path.as_deref(),
+            Some(sanitize_config("area\u{8}##[error]").as_str())
+        );
+        assert_eq!(
+            config.iteration_path.as_deref(),
+            Some(sanitize_config("iteration##[section]").as_str())
+        );
+        assert_eq!(
+            config.assignee.as_deref(),
+            Some(sanitize_config("assignee##vso[task.logissue]").as_str())
+        );
+        assert_eq!(config.tags, vec![sanitize_config("tag##[warning]")]);
+        assert_eq!(
+            config.allowed_tags,
+            vec![sanitize_config("allowed##vso[task.complete]")]
+        );
+        assert_eq!(
+            config.custom_fields.get(&custom_field),
+            Some(&sanitize_config("custom##vso[task.setvariable]"))
+        );
+        assert_eq!(
+            config.artifact_link.repository.as_deref(),
+            Some(sanitize_config("repo##[debug]").as_str())
+        );
+        assert_eq!(
+            config.artifact_link.branch,
+            sanitize_config("branch##vso[build.addbuildtag]")
         );
     }
 
@@ -777,8 +961,283 @@ tags:
 "#;
         let config: CreateWorkItemConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.work_item_type, "Task"); // default
+        assert_eq!(description_field_for(&config), "System.Description");
         assert!(config.area_path.is_none()); // default
         assert_eq!(config.tags, vec!["my-tag"]);
         assert!(config.allowed_tags.is_empty()); // default
+    }
+
+    #[test]
+    fn test_bug_defaults_description_field_to_repro_steps() {
+        let config: CreateWorkItemConfig = serde_yaml::from_str("work-item-type: Bug\n").unwrap();
+        assert_eq!(
+            description_field_for(&config),
+            "Microsoft.VSTS.TCM.ReproSteps"
+        );
+    }
+
+    #[test]
+    fn test_config_rejects_invalid_description_field() {
+        let error =
+            serde_yaml::from_str::<CreateWorkItemConfig>("description-field: System/Description\n")
+                .unwrap_err();
+
+        assert!(error.to_string().contains("work item field"));
+    }
+
+    #[test]
+    fn test_patch_field_validation_rejects_description_field_title_collision() {
+        let mut config = CreateWorkItemConfig::default();
+        config.description_field = Some(AdoWorkItemFieldRef::parse("System.Title").unwrap());
+        let error = validate_patch_fields(&config, description_field_for(&config), false)
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(
+            error,
+            "description-field field 'System.Title' duplicates title field 'System.Title'"
+        );
+    }
+
+    #[test]
+    fn test_patch_field_validation_rejects_custom_field_title_collision() {
+        let mut config = CreateWorkItemConfig::default();
+        config
+            .custom_fields
+            .insert(
+                AdoWorkItemFieldRef::parse("System.Title").unwrap(),
+                "overridden title".to_string(),
+            );
+        let error = validate_patch_fields(&config, description_field_for(&config), false)
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(
+            error,
+            "custom-fields field 'System.Title' duplicates title field 'System.Title'"
+        );
+    }
+
+    #[test]
+    fn test_patch_field_validation_rejects_custom_field_description_collision() {
+        let mut config = CreateWorkItemConfig {
+            work_item_type: "Bug".to_string(),
+            ..Default::default()
+        };
+        config.custom_fields.insert(
+            AdoWorkItemFieldRef::parse("Microsoft.VSTS.TCM.ReproSteps").unwrap(),
+            "overridden body".to_string(),
+        );
+        let error = validate_patch_fields(&config, description_field_for(&config), false)
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(
+            error,
+            "custom-fields field 'Microsoft.VSTS.TCM.ReproSteps' duplicates default description-field field 'Microsoft.VSTS.TCM.ReproSteps'"
+        );
+    }
+
+    #[test]
+    fn test_patch_field_validation_rejects_custom_field_default_system_description_collision() {
+        let mut config = CreateWorkItemConfig::default();
+        config.custom_fields.insert(
+            AdoWorkItemFieldRef::parse("System.Description").unwrap(),
+            "overridden body".to_string(),
+        );
+        let error = validate_patch_fields(&config, description_field_for(&config), false)
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(
+            error,
+            "custom-fields field 'System.Description' duplicates default description-field field 'System.Description'"
+        );
+    }
+
+    #[test]
+    fn test_patch_field_validation_rejects_custom_field_builtin_collisions() {
+        let cases = [
+            ("area-path", "System.AreaPath", false),
+            ("iteration-path", "System.IterationPath", false),
+            ("assignee", "System.AssignedTo", false),
+            ("tags", "System.Tags", true),
+        ];
+
+        for (label, field, has_tags) in cases {
+            let mut config = CreateWorkItemConfig::default();
+            match label {
+                "area-path" => config.area_path = Some("Project\\Area".to_string()),
+                "iteration-path" => config.iteration_path = Some("Project\\Iteration".to_string()),
+                "assignee" => config.assignee = Some("user@example.test".to_string()),
+                "tags" => config.tags = vec!["configured".to_string()],
+                _ => unreachable!("test case labels are exhaustive"),
+            }
+            config.custom_fields.insert(
+                AdoWorkItemFieldRef::parse(field).unwrap(),
+                "overridden built-in field".to_string(),
+            );
+
+            let error = validate_patch_fields(&config, description_field_for(&config), has_tags)
+                .unwrap_err()
+                .to_string();
+
+            assert_eq!(
+                error,
+                format!("custom-fields field '{field}' duplicates {label} field '{field}'")
+            );
+        }
+    }
+
+    #[test]
+    fn test_sorted_custom_fields_orders_case_insensitively() {
+        let mut custom_fields = std::collections::HashMap::new();
+        custom_fields.insert(
+            AdoWorkItemFieldRef::parse("Custom.Zeta").unwrap(),
+            "last".to_string(),
+        );
+        custom_fields.insert(
+            AdoWorkItemFieldRef::parse("Custom.alpha").unwrap(),
+            "first".to_string(),
+        );
+
+        assert_eq!(
+            sorted_custom_fields(&custom_fields),
+            vec![("Custom.alpha", "first"), ("Custom.Zeta", "last")]
+        );
+    }
+
+    #[test]
+    fn test_config_rejects_invalid_custom_field_ref() {
+        let error = serde_yaml::from_str::<CreateWorkItemConfig>(
+            r#"
+custom-fields:
+  System/Title: bad field
+"#,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("work item field"));
+    }
+
+    #[test]
+    fn test_result_sanitization_preserves_description_html() {
+        let mut result = CreateWorkItemResult {
+            name: CreateWorkItemResult::NAME.to_string(),
+            title: "Test work item".to_string(),
+            description: "<h2>Hi</h2><p>x &lt;string&gt; y</p>".to_string(),
+            tags: Vec::new(),
+            temporary_id: WorkItemTemporaryId::parse("#aw_test1").unwrap(),
+        };
+
+        result.sanitize_content_fields();
+
+        assert_eq!(result.description, "<h2>Hi</h2><p>x &lt;string&gt; y</p>");
+    }
+
+    #[tokio::test]
+    async fn test_execute_bug_uses_repro_steps_and_preserves_html() {
+        use std::collections::HashMap;
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let expected_patch = serde_json::json!([
+            {
+                "op": "add",
+                "path": "/fields/System.Title",
+                "value": "Bug with visible body"
+            },
+            {
+                "op": "add",
+                "path": "/fields/Microsoft.VSTS.TCM.ReproSteps",
+                "value": "<h2>Hi</h2><p>x &lt;string&gt; y</p>"
+            },
+            {
+                "op": "add",
+                "path": "/multilineFieldsFormat/Microsoft.VSTS.TCM.ReproSteps",
+                "value": "Markdown"
+            }
+        ]);
+        Mock::given(method("POST"))
+            .and(path("/Project/_apis/wit/workitems/$Bug"))
+            .and(body_json(expected_patch))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 42,
+                "_links": {
+                    "html": {
+                        "href": "https://example.test/workitems/42"
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let ctx = ExecutionContext {
+            ado_org_url: Some(server.uri()),
+            ado_project: Some("Project".to_string()),
+            access_token: Some("token".to_string()),
+            tool_configs: HashMap::from([(
+                "create-work-item".to_string(),
+                serde_json::json!({
+                    "work-item-type": "Bug",
+                    "include-stats": false
+                }),
+            )]),
+            ..Default::default()
+        };
+        let mut result = CreateWorkItemResult {
+            name: CreateWorkItemResult::NAME.to_string(),
+            title: "Bug with visible body".to_string(),
+            description: "<h2>Hi</h2><p>x &lt;string&gt; y</p>".to_string(),
+            tags: Vec::new(),
+            temporary_id: WorkItemTemporaryId::parse("#aw_test1").unwrap(),
+        };
+
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+
+        assert!(execution.success, "{}", execution.message);
+    }
+
+    #[tokio::test]
+    async fn test_execute_rejects_duplicate_description_custom_field() {
+        use std::collections::HashMap;
+
+        let ctx = ExecutionContext {
+            ado_org_url: Some("https://example.test".to_string()),
+            ado_project: Some("Project".to_string()),
+            access_token: Some("token".to_string()),
+            tool_configs: HashMap::from([(
+                "create-work-item".to_string(),
+                serde_json::json!({
+                    "work-item-type": "Bug",
+                    "custom-fields": {
+                        "Microsoft.VSTS.TCM.ReproSteps": "overridden body"
+                    },
+                    "include-stats": false
+                }),
+            )]),
+            ..Default::default()
+        };
+        let mut result = CreateWorkItemResult {
+            name: CreateWorkItemResult::NAME.to_string(),
+            title: "Bug with duplicate body".to_string(),
+            description: "This description is long enough to pass MCP parameter validation."
+                .to_string(),
+            tags: Vec::new(),
+            temporary_id: WorkItemTemporaryId::parse("#aw_test1").unwrap(),
+        };
+
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+
+        assert!(!execution.success);
+        assert!(
+            execution.message.contains(
+                "custom-fields field 'Microsoft.VSTS.TCM.ReproSteps' duplicates default description-field field"
+            ),
+            "{}",
+            execution.message
+        );
     }
 }
